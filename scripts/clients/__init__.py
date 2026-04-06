@@ -1,0 +1,16 @@
+"""API client modules for external data sources."""
+
+__all__ = ["IBClient", "MenthorQClient", "UWClient"]
+
+
+def __getattr__(name):
+    if name == "IBClient":
+        from clients.ib_client import IBClient
+        return IBClient
+    if name == "MenthorQClient":
+        from clients.menthorq_client import MenthorQClient
+        return MenthorQClient
+    if name == "UWClient":
+        from clients.uw_client import UWClient
+        return UWClient
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

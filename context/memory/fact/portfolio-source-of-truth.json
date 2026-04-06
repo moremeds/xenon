@@ -1,0 +1,12 @@
+{
+  "id": "fact-portfolio-source-of-truth",
+  "key": "portfolio.source-of-truth",
+  "value": "docs/status.md is NOT the source of truth for portfolio state. It is a decision log that goes stale. The ONLY source of truth for current positions is Interactive Brokers via ib_sync.py. data/portfolio.json is also a cache. ALWAYS verify against IB before claiming a position exists or doesn't exist. On Mar 11, EWY was incorrectly reported as an active position because status.md still listed it under Rule Violations \u2014 both legs had been closed the day before.",
+  "confidence": 1.0,
+  "source": "incident-2026-03-11-stale-ewy",
+  "extractedBy": "context-evaluator",
+  "createdAt": "2026-03-11T14:25:31.381654+00:00",
+  "updatedAt": "2026-03-11T14:25:31.381654+00:00",
+  "revisionId": 1,
+  "expiresAt": null
+}

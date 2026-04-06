@@ -1,0 +1,189 @@
+"""Tests for leap_iv_scanner.py and leap_scanner_uw.py — HV calculation, mispricing, delta."""
+import math
+import pytest
+
+from leap_iv_scanner import (
+    calculate_historical_volatility,
+    analyze_mispricing,
+    find_strikes_by_delta,
+    VolatilityData,
+)
+from leap_scanner_uw import (
+    calculate_hv,
+    approximate_delta,
+)
+
+
+# ── calculate_historical_volatility (IB scanner) ────────────────────
+
+class TestCalculateHistoricalVolatility:
+    def test_constant_prices_zero_vol(self):
+        prices = [100.0] * 30
+        hv = calculate_historical_volatility(prices, 20)
+        assert hv == 0.0
+
+    def test_known_series(self):
+        """Increasing 1% daily → known annualized vol."""
+        # Need period+1 prices, so 21+ for period=20
+        # Add some variance: alternate +1% and -1% daily returns
+        import random
+        random.seed(42)
+        prices = [100.0]
+        for _ in range(25):
+            change = 1 + random.uniform(-0.02, 0.02)
+            prices.append(prices[-1] * change)
+        hv = calculate_historical_volatility(prices, 20)
+        # Should have non-zero volatility
+        assert hv > 5
+
+    def test_insufficient_data_returns_zero(self):
+        prices = [100, 101, 102]
+        hv = calculate_historical_volatility(prices, 20)
+        assert hv == 0.0
+
+    def test_two_prices_returns_zero(self):
+        prices = [100, 101]
+        hv = calculate_historical_volatility(prices, 20)
+        assert hv == 0.0
+
+    def test_longer_period_uses_recent(self):
+        # 100 prices, period=20 → uses last 21 prices
+        prices = [100 + i * 0.5 for i in range(100)]
+        hv = calculate_historical_volatility(prices, 20)
+        assert hv > 0
+
+
+# ── calculate_hv (UW scanner) ──────────────────────────────────────
+
+class TestCalculateHvUw:
+    def test_constant_prices_none_like(self):
+        prices = [100.0] * 30
+        hv = calculate_hv(prices, 20)
+        # Zero returns → zero variance → 0.0
+        assert hv == 0.0
+
+    def test_insufficient_data_returns_none(self):
+        prices = [100, 101]
+        hv = calculate_hv(prices, 20)
+        assert hv is None
+
+    def test_valid_series(self):
+        prices = [100 * (1.005 ** i) for i in range(25)]
+        hv = calculate_hv(prices, 20)
+        assert hv is not None
+        assert hv > 0
+
+
+# ── approximate_delta ───────────────────────────────────────────────
+
+class TestApproximateDelta:
+    def test_deep_itm(self):
+        delta = approximate_delta(strike=80, price=100, iv=30, dte=365)
+        assert delta == 0.8
+
+    def test_atm(self):
+        delta = approximate_delta(strike=100, price=100, iv=30, dte=365)
+        assert delta == 0.5
+
+    def test_slightly_otm(self):
+        delta = approximate_delta(strike=110, price=100, iv=30, dte=365)
+        assert delta == 0.35
+
+    def test_far_otm(self):
+        delta = approximate_delta(strike=140, price=100, iv=30, dte=365)
+        assert delta == 0.1
+
+    def test_zero_price(self):
+        delta = approximate_delta(strike=100, price=0, iv=30, dte=365)
+        assert delta == 0.5
+
+    def test_zero_dte(self):
+        delta = approximate_delta(strike=100, price=100, iv=30, dte=0)
+        assert delta == 0.5
+
+
+# ── analyze_mispricing ──────────────────────────────────────────────
+
+class TestAnalyzeMispricing:
+    def _make_vol_data(self, hv_20=40, hv_60=35, hv_252=30):
+        return VolatilityData(
+            ticker="XLK",
+            sector="Technology",
+            current_price=200,
+            hv_20=hv_20,
+            hv_60=hv_60,
+            hv_252=hv_252,
+        )
+
+    def test_hv20_above_iv_mispriced(self):
+        vol = self._make_vol_data(hv_20=45, hv_60=40, hv_252=35)
+        option = {
+            "iv": 25, "strike": 200, "expiry": "20270115",
+            "bid": 10, "ask": 11, "mid": 10.5,
+            "delta": 0.5, "vega": 0.30, "theta": -0.02,
+            "oi": 1000, "volume": 50,
+        }
+        result = analyze_mispricing(option, vol, min_gap=15)
+        assert result.is_mispriced is True
+        assert result.hv_20_gap == 20.0  # 45 - 25
+        assert result.mispricing_score > 0
+
+    def test_hv_below_iv_not_mispriced(self):
+        vol = self._make_vol_data(hv_20=20, hv_60=22, hv_252=25)
+        option = {
+            "iv": 30, "strike": 200, "expiry": "20270115",
+            "bid": 10, "ask": 11, "mid": 10.5,
+            "delta": 0.5, "vega": 0.30, "theta": -0.02,
+            "oi": 1000, "volume": 50,
+        }
+        result = analyze_mispricing(option, vol, min_gap=15)
+        assert result.is_mispriced is False
+        assert result.hv_20_gap < 0
+
+    def test_vega_boost_factor(self):
+        vol = self._make_vol_data(hv_20=50, hv_60=45, hv_252=40)
+        option_low_vega = {
+            "iv": 25, "strike": 200, "expiry": "20270115",
+            "bid": 10, "ask": 11, "mid": 10.5,
+            "delta": 0.5, "vega": 0.10, "theta": -0.02,
+        }
+        option_high_vega = {
+            "iv": 25, "strike": 200, "expiry": "20270115",
+            "bid": 10, "ask": 11, "mid": 10.5,
+            "delta": 0.5, "vega": 0.45, "theta": -0.02,
+        }
+        r_low = analyze_mispricing(option_low_vega, vol, min_gap=15)
+        r_high = analyze_mispricing(option_high_vega, vol, min_gap=15)
+        assert r_high.mispricing_score > r_low.mispricing_score
+
+
+# ── find_strikes_by_delta ───────────────────────────────────────────
+
+class TestFindStrikesByDelta:
+    def test_finds_closest_match(self):
+        options = [
+            {"delta": 0.52, "strike": 100},
+            {"delta": 0.31, "strike": 110},
+            {"delta": 0.19, "strike": 120},
+        ]
+        result = find_strikes_by_delta(options, [0.50, 0.30, 0.20], 100)
+        assert 0.50 in result
+        assert result[0.50]["strike"] == 100
+        assert 0.30 in result
+        assert result[0.30]["strike"] == 110
+
+    def test_no_match_within_threshold(self):
+        options = [
+            {"delta": 0.80, "strike": 80},
+        ]
+        result = find_strikes_by_delta(options, [0.50], 100)
+        assert 0.50 not in result
+
+    def test_none_delta_skipped(self):
+        options = [
+            {"delta": None, "strike": 100},
+            {"delta": 0.49, "strike": 105},
+        ]
+        result = find_strikes_by_delta(options, [0.50], 100)
+        assert 0.50 in result
+        assert result[0.50]["strike"] == 105

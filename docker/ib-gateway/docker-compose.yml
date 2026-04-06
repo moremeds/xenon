@@ -1,0 +1,50 @@
+services:
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway@sha256:22d5bf5e6699b3c28cb806c21e2cc46c6337df3599f758d9ae685ad3aa9eb0d5
+    restart: unless-stopped
+    labels:
+      - "autoheal=true"
+    environment:
+      TWS_USERID: ${TWS_USERID}
+      TWS_PASSWORD_FILE: /run/secrets/ib_password
+      TRADING_MODE: ${TRADING_MODE:-live}
+      READ_ONLY_API: ${READ_ONLY_API:-no}
+      TWOFA_TIMEOUT_ACTION: restart
+      RELOGIN_AFTER_TWOFA_TIMEOUT: "yes"
+      EXISTING_SESSION_DETECTED_ACTION: primary
+      AUTO_RESTART_TIME: "23:58 ET"
+      VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD:-}
+    ports:
+      - "127.0.0.1:${IB_LIVE_PORT:-4001}:4003"
+      - "127.0.0.1:${IB_PAPER_PORT:-4002}:4004"
+    secrets:
+      - ib_password
+    volumes:
+      - ib-gateway-settings:/home/ibgateway/Jts
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/4001'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # Auto-restart unhealthy containers.
+  # Docker's restart: unless-stopped only restarts on exit, not on
+  # unhealthy status. Autoheal watches healthcheck and restarts
+  # containers labeled autoheal=true when they go unhealthy.
+  autoheal:
+    image: willfarrell/autoheal
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: "autoheal"
+      AUTOHEAL_INTERVAL: 30
+      AUTOHEAL_START_PERIOD: 180
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+secrets:
+  ib_password:
+    file: ${IB_PASSWORD_FILE:-./secrets/ib_password.txt}
+
+volumes:
+  ib-gateway-settings:
