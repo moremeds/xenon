@@ -88,6 +88,16 @@ export default function PortfolioByStructure({
         const { ticker, stock, optionsByCategory, agg, last, dayChgPct } = group;
         const hasDelta = agg.netDelta != null;
 
+        // Track whether the card has already rendered its column header row.
+        // Only the first sub-table in a card shows <thead>; subsequent sub-
+        // tables use hideHeader so the card has a single header line.
+        let headerShown = false;
+        const takeHeaderSlot = () => {
+          if (headerShown) return true; // hide
+          headerShown = true;
+          return false; // show
+        };
+
         return (
           <div className="section" key={ticker} data-ticker={ticker}>
             <div className="section-header">
@@ -117,10 +127,11 @@ export default function PortfolioByStructure({
               {stock && (
                 <PositionTable
                   positions={[stock]}
-                  showExpiry={false}
-                  showUnderlying={false}
+                  showExpiry={true}
+                  showUnderlying={true}
                   prices={prices}
                   readonly={readonly}
+                  hideHeader={takeHeaderSlot()}
                 />
               )}
               {Array.from(optionsByCategory.entries()).map(([category, rows]) => {
@@ -189,6 +200,7 @@ export default function PortfolioByStructure({
                               showUnderlying={true}
                               prices={prices}
                               readonly={readonly}
+                              hideHeader={takeHeaderSlot()}
                             />
                           </div>
                         ))}
