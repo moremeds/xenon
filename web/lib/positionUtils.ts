@@ -106,6 +106,62 @@ export function getLastPrice(pos: PortfolioPosition): number | null {
   return mv / (pos.contracts * mult);
 }
 
+/**
+ * Display-time market value: mirrors what `PositionTable` renders for a row.
+ *
+ * Priority:
+ *   Stock  → live WS `last * contracts` when available, else `resolveMarketValue`.
+ *   Option → sign-aware sum of each leg's realtime price (WS or fallback),
+ *            else `resolveMarketValue`.
+ *
+ * Use this (not `resolveMarketValue` alone) when aggregating header totals
+ * that must match the row values beneath them. Returns `null` only if every
+ * source was unavailable.
+ */
+export function getDisplayMarketValue(
+  pos: PortfolioPosition,
+  prices?: Record<string, PriceData>,
+): number | null {
+  if (pos.structure_type === "Stock") {
+    const last = prices?.[pos.ticker]?.last;
+    if (last != null && last > 0) return last * pos.contracts;
+    return resolveMarketValue(pos);
+  }
+  // Options: sign-aware realtime aggregation
+  let rtMv = 0;
+  let allResolved = true;
+  for (const leg of pos.legs) {
+    const key = legPriceKey(pos.ticker, pos.expiry, leg);
+    const lp = key && prices ? prices[key] : null;
+    const current = resolveRealtimePrice(
+      lp,
+      leg.market_price,
+      Boolean(leg.market_price_is_calculated),
+    ).price;
+    if (current == null) {
+      allResolved = false;
+      break;
+    }
+    const sign = leg.direction === "LONG" ? 1 : -1;
+    rtMv += sign * current * leg.contracts * 100;
+  }
+  if (allResolved) return rtMv;
+  return resolveMarketValue(pos);
+}
+
+/**
+ * Display-time total P&L: `getDisplayMarketValue - resolveEntryCost`.
+ * Sign preserved (never `Math.abs`). Returns `null` iff MV is null.
+ */
+export function getDisplayTotalPnl(
+  pos: PortfolioPosition,
+  prices?: Record<string, PriceData>,
+): number | null {
+  const mv = getDisplayMarketValue(pos, prices);
+  if (mv == null) return null;
+  return mv - resolveEntryCost(pos);
+}
+
 export function getLastPriceIsCalculated(pos: PortfolioPosition): boolean {
   if (pos.market_price_is_calculated != null) return pos.market_price_is_calculated;
   if (pos.legs.length === 1) {
