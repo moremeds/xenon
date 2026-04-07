@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { useSyncHook } from "../lib/useSyncHook";
 
 type Payload = {
@@ -22,6 +22,7 @@ function jsonResponse(body: Payload) {
 
 describe("useSyncHook inactive initial load", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -74,5 +75,42 @@ describe("useSyncHook inactive initial load", () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/internals", { method: "POST" });
+  });
+
+  it("retries stale cached data even when polling is inactive", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ scan_time: "", value: 0 }))
+      .mockResolvedValueOnce(jsonResponse({ scan_time: "2026-03-22T09:01:00Z", value: 8 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() =>
+      useSyncHook<Payload>(
+        {
+          endpoint: "/api/internals",
+          hasPost: false,
+          extractTimestamp: (data) => data.scan_time,
+          shouldRetry: (data) => !data.scan_time,
+          retryIntervalMs: 5000,
+          retryMethod: "GET",
+        },
+        false,
+      ),
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(result.current.data?.value).toBe(0);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+      await Promise.resolve();
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/internals", { method: "GET" });
+    expect(result.current.data?.value).toBe(8);
   });
 });

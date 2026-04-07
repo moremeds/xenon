@@ -72,7 +72,7 @@ export function useSyncHook<T>(config: UseSyncConfig<T>, active: boolean): UseSy
       setError(null);
 
       clearRetry();
-      if (active && shouldRetry?.(json) && retryIntervalMs > 0) {
+      if (shouldRetry?.(json) && retryIntervalMs > 0) {
         retryTimeoutRef.current = setTimeout(() => {
           void requestRef.current(retryMethod, true);
         }, retryIntervalMs);
@@ -118,7 +118,7 @@ export function useSyncHook<T>(config: UseSyncConfig<T>, active: boolean): UseSy
         didInitialRead.current = true;
 
         clearRetry();
-        if (active && shouldRetry?.(json) && retryIntervalMs > 0) {
+        if (shouldRetry?.(json) && retryIntervalMs > 0) {
           retryTimeoutRef.current = setTimeout(() => {
             void requestRef.current(retryMethod, true);
           }, retryIntervalMs);
@@ -157,7 +157,6 @@ export function useSyncHook<T>(config: UseSyncConfig<T>, active: boolean): UseSy
         clearInterval(intervalRef.current);
         intervalRef.current = null;
       }
-      clearRetry();
       return;
     }
 
@@ -167,9 +166,18 @@ export function useSyncHook<T>(config: UseSyncConfig<T>, active: boolean): UseSy
 
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
-      clearRetry();
     };
   }, [active, clearRetry, interval, triggerSync]);
+
+  useEffect(() => {
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      clearRetry();
+    };
+  }, [clearRetry]);
 
   const syncNow = useCallback(() => {
     void triggerSync();
