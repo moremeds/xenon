@@ -419,7 +419,22 @@ export default function PositionTable({
 
   return (
     <>
-      <table>
+      <table style={{ tableLayout: "fixed", width: "100%" }}>
+        <colgroup>
+          <col style={{ width: "7%" }} />  {/* Ticker */}
+          <col style={{ width: "14%" }} /> {/* Structure */}
+          <col style={{ width: "4%" }} />  {/* Qty */}
+          <col style={{ width: "7%" }} />  {/* Direction */}
+          {showUnderlying && <col style={{ width: "7%" }} />}
+          <col style={{ width: "7%" }} />  {/* Avg Entry */}
+          <col style={{ width: "7%" }} />  {/* Last Price */}
+          <col style={{ width: "6%" }} />  {/* Day Chg */}
+          <col style={{ width: "7%" }} />  {/* Today P&L */}
+          <col style={{ width: "8%" }} />  {/* Entry Cost */}
+          <col style={{ width: "8%" }} />  {/* Market Value */}
+          <col style={{ width: "11%" }} /> {/* P&L */}
+          {showExpiry && <col style={{ width: "7%" }} />}
+        </colgroup>
         {!hideHeader && (
           <thead>
             <tr>
