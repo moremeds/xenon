@@ -285,10 +285,17 @@ def _format_summary(report: AnalysisReport) -> str:
     )
     flow_assess: list[str] = []
     if ncp is not None and npp is not None:
-        if ncp > 0 and ncp > abs(npp) * 1.5:
-            flow_assess.append("call premium dominant (bullish lean)")
-        elif npp < 0 and abs(npp) > abs(ncp) * 1.5:
-            flow_assess.append("put premium dominant (bearish lean)")
+        # UW net_*_premium = ask-side minus bid-side. Positive call_prem =
+        # call buyers (bullish); negative call_prem = call sellers (bearish).
+        # Positive put_prem = put buyers (bearish/hedging); negative put_prem
+        # = put sellers (bullish — closing hedges or selling premium).
+        # Convert to a directional "bullish_score" so sign drives the label.
+        bullish = (ncp if ncp > 0 else 0) + (-npp if npp < 0 else 0)
+        bearish = (-ncp if ncp < 0 else 0) + (npp if npp > 0 else 0)
+        if bullish > bearish * 1.5:
+            flow_assess.append("call buying / put selling (bullish lean)")
+        elif bearish > bullish * 1.5:
+            flow_assess.append("call selling / put buying (bearish lean)")
         else:
             flow_assess.append("mixed premium")
     if sv_trend and len(sv_trend) >= 2:

@@ -96,11 +96,12 @@ def _deep_mock_client():
     c.get_volatility_stats.return_value = {}
     c.get_volatility_term_structure.return_value = {}
     c.get_greek_exposure.return_value = {}
+    # Real UW shape: {"data": [{date, strike, call_gex, put_gex, ...}]}
     c.get_greek_exposure_by_strike.return_value = {
-        "strikes": [
-            {"strike": 99, "gamma": -1.5},
-            {"strike": 100, "gamma": 2.0},
-            {"strike": 101, "gamma": 1.0},
+        "data": [
+            {"date": "2026-04-07", "strike": "99", "call_gex": "0.5", "put_gex": "-2.0"},
+            {"date": "2026-04-07", "strike": "100", "call_gex": "2.5", "put_gex": "-0.5"},
+            {"date": "2026-04-07", "strike": "101", "call_gex": "1.5", "put_gex": "-0.5"},
         ]
     }
     c.get_flow_alerts.return_value = {"data": []}
