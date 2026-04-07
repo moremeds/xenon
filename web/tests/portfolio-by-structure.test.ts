@@ -241,6 +241,122 @@ describe("buildTickerGroups — lookup + classifier regressions", () => {
   });
 });
 
+describe("buildTickerGroups — virtual combo detection (orphan single legs)", () => {
+  function mkSingle(ticker: string, opts: { type: "Call" | "Put"; dir: "LONG" | "SHORT"; strike: number; expiry?: string; mv?: number; ec?: number }): PortfolioPosition {
+    const structureName = `${opts.dir === "LONG" ? "Long" : "Short"} ${opts.type}`;
+    return {
+      id: nextId(),
+      ticker,
+      structure: `${structureName} $${opts.strike}.0`,
+      structure_type: structureName,
+      risk_profile: opts.dir === "LONG" ? "defined" : "undefined",
+      direction: opts.dir === "LONG" ? "DEBIT" : "CREDIT",
+      contracts: 1,
+      expiry: opts.expiry ?? "2026-05-15",
+      entry_cost: opts.ec ?? (opts.dir === "LONG" ? 100 : -100),
+      market_value: opts.mv ?? (opts.dir === "LONG" ? 120 : -80),
+      legs: [
+        {
+          type: opts.type,
+          direction: opts.dir,
+          strike: opts.strike,
+          contracts: 1,
+          avg_cost: opts.ec ?? (opts.dir === "LONG" ? 100 : -100),
+          entry_cost: opts.ec ?? (opts.dir === "LONG" ? 100 : -100),
+          market_price: null,
+          market_value: opts.mv ?? (opts.dir === "LONG" ? 120 : -80),
+        },
+      ],
+    };
+  }
+
+  it("NVDA Long Put + Short Put same expiry → both reassigned to vertical (user-reported case)", () => {
+    const positions = [
+      mkSingle("NVDA", { type: "Put", dir: "SHORT", strike: 175, mv: -7_538, ec: -9_285 }),
+      mkSingle("NVDA", { type: "Put", dir: "LONG", strike: 170, mv: 3_983, ec: 5_340 }),
+    ];
+    const groups = buildTickerGroups(positions, {});
+    const cats = groups[0].optionsByCategory;
+    expect(cats.get("vertical")?.length).toBe(2);
+    expect(cats.has("single")).toBe(false);
+  });
+
+  it("Bull Call Spread via separate legs: Long Call + Short Call same expiry → vertical", () => {
+    const positions = [
+      mkSingle("SPY", { type: "Call", dir: "LONG", strike: 500 }),
+      mkSingle("SPY", { type: "Call", dir: "SHORT", strike: 520 }),
+    ];
+    expect(buildTickerGroups(positions, {})[0].optionsByCategory.get("vertical")?.length).toBe(2);
+  });
+
+  it("Long Call + Long Put same strike → straddle; different strikes → strangle", () => {
+    const same = [
+      mkSingle("X", { type: "Call", dir: "LONG", strike: 100 }),
+      mkSingle("X", { type: "Put", dir: "LONG", strike: 100 }),
+    ];
+    expect(buildTickerGroups(same, {})[0].optionsByCategory.get("straddle")?.length).toBe(2);
+
+    const diff = [
+      mkSingle("Y", { type: "Call", dir: "LONG", strike: 110 }),
+      mkSingle("Y", { type: "Put", dir: "LONG", strike: 90 }),
+    ];
+    expect(buildTickerGroups(diff, {})[0].optionsByCategory.get("strangle")?.length).toBe(2);
+  });
+
+  it("Long Call + Short Put (risk reversal / synthetic long) → synthetic", () => {
+    const positions = [
+      mkSingle("Z", { type: "Call", dir: "LONG", strike: 100 }),
+      mkSingle("Z", { type: "Put", dir: "SHORT", strike: 100 }),
+    ];
+    expect(buildTickerGroups(positions, {})[0].optionsByCategory.get("synthetic")?.length).toBe(2);
+  });
+
+  it("different expiries do NOT pair (one stays single)", () => {
+    const positions = [
+      mkSingle("A", { type: "Put", dir: "LONG", strike: 100, expiry: "2026-05-15" }),
+      mkSingle("A", { type: "Put", dir: "SHORT", strike: 95, expiry: "2026-06-19" }),
+    ];
+    const cats = buildTickerGroups(positions, {})[0].optionsByCategory;
+    expect(cats.has("vertical")).toBe(false);
+    expect(cats.get("single")?.length).toBe(2);
+  });
+
+  it("odd unpaired leg stays in single (e.g. 3 longs + 1 short → 1 vertical pair + 2 singles)", () => {
+    const positions = [
+      mkSingle("B", { type: "Call", dir: "LONG", strike: 100 }),
+      mkSingle("B", { type: "Call", dir: "LONG", strike: 110 }),
+      mkSingle("B", { type: "Call", dir: "LONG", strike: 120 }),
+      mkSingle("B", { type: "Call", dir: "SHORT", strike: 130 }),
+    ];
+    const cats = buildTickerGroups(positions, {})[0].optionsByCategory;
+    expect(cats.get("vertical")?.length).toBe(2);
+    expect(cats.get("single")?.length).toBe(2);
+  });
+
+  it("pre-classified multi-leg structures (real IB combos) are untouched by virtual-combo detection", () => {
+    // A real IB Bull Call Spread with both legs inside a single position must
+    // NOT trip the orphan detector — it already has structure_type='Bull Call Spread'.
+    const combo: PortfolioPosition = {
+      id: nextId(),
+      ticker: "C",
+      structure: "Bull Call Spread $100/$110",
+      structure_type: "Bull Call Spread",
+      risk_profile: "defined",
+      direction: "DEBIT",
+      contracts: 1,
+      expiry: "2026-05-15",
+      entry_cost: 500,
+      market_value: 700,
+      legs: [
+        { type: "Call", direction: "LONG", strike: 100, contracts: 1, avg_cost: 800, entry_cost: 800, market_price: null, market_value: 1000 },
+        { type: "Call", direction: "SHORT", strike: 110, contracts: 1, avg_cost: -300, entry_cost: -300, market_price: null, market_value: -300 },
+      ],
+    };
+    const groups = buildTickerGroups([combo], {});
+    expect(groups[0].optionsByCategory.get("vertical")?.length).toBe(1);
+  });
+});
+
 describe("buildTickerGroups — netDelta known/unknown", () => {
   it("netDelta is null iff every contributor is unknown", () => {
     // No prices → both legs of the vertical fall back to 0 with known=false
