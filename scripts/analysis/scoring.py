@@ -29,47 +29,134 @@ def score_to_bias(composite: float) -> str:
 
 
 def _score_market_structure(td: TickerData, regime: RegimeState) -> float:
+    """Weight budget: gex_sign ±8 + flip_relative ±6 + call_wall ±5 +
+    put_wall ±5 + gamma_intensity ±4 = ±28 (matches BUCKET_WEIGHTS)."""
     score = 0.0
+
+    # gex_sign tilt (±8)
     if regime.gex_sign == "positive":
-        score += 10
-    elif regime.gex_sign == "negative":
-        score -= 10
-    if regime.gex_flip_relative == "below_price":
         score += 8
-    elif regime.gex_flip_relative == "above_price":
+    elif regime.gex_sign == "negative":
         score -= 8
+
+    # flip relative (±6)
+    if regime.gex_flip_relative == "below_price":
+        score += 6
+    elif regime.gex_flip_relative == "above_price":
+        score -= 6
+
+    # Wall geometry: closer wall = stronger pull. Use distance% from price.
+    # Call wall ABOVE price acts as a ceiling (bearish); intensity scales with
+    # closeness. Put wall BELOW price acts as a floor (bullish).
+    price = td.price
+    if price and price > 0:
+        if td.call_wall_strike and td.call_wall_strike >= price:
+            dist_pct = abs(td.call_wall_strike - price) / price * 100.0
+            # 0% away = -5, 5%+ away = 0
+            score -= max(0.0, 5.0 * (1.0 - min(dist_pct, 5.0) / 5.0))
+        if td.put_wall_strike and td.put_wall_strike <= price:
+            dist_pct = abs(price - td.put_wall_strike) / price * 100.0
+            score += max(0.0, 5.0 * (1.0 - min(dist_pct, 5.0) / 5.0))
+
+    # Gamma per 1% — high intensity reinforces the existing sign tilt (±4)
+    if td.gamma_per_1pct is not None and td.gamma_per_1pct > 0:
+        # log-ish scale: cap at 4
+        intensity = min(4.0, td.gamma_per_1pct / 5.0)
+        if regime.gex_sign == "positive":
+            score += intensity
+        elif regime.gex_sign == "negative":
+            score -= intensity
+
     return max(-28.0, min(28.0, score))
 
 
 def _score_volatility(td: TickerData, vrp: VRPState) -> float:
+    """Weight budget: iv_rank ±8 + vrp_zscore ±8 + rv/iv_ratio ±6 +
+    ts_inverted ±6 = ±28."""
     score = 0.0
-    if vrp.iv_percentile is not None:
-        if vrp.iv_percentile > 75:
-            score -= 6
-        elif vrp.iv_percentile < 30:
-            score += 6
+
+    # IV rank tilt (±8). Prefer iv_rank (deep) over iv_percentile fallback.
+    iv_signal = td.iv_rank if td.iv_rank is not None else vrp.iv_percentile
+    if iv_signal is not None:
+        if iv_signal > 75:
+            score -= 8  # rich vol → fade vol-buying
+        elif iv_signal > 60:
+            score -= 4
+        elif iv_signal < 25:
+            score += 8  # cheap vol → favor long premium
+        elif iv_signal < 40:
+            score += 4
+
+    # VRP z-score (±8)
     if vrp.vrp_zscore is not None:
-        if vrp.vrp_zscore > 1.0:
+        if vrp.vrp_zscore > 1.5:
             score += 8
-        elif vrp.vrp_zscore < 0:
+        elif vrp.vrp_zscore > 0.5:
+            score += 4
+        elif vrp.vrp_zscore < -1.0:
             score -= 8
+        elif vrp.vrp_zscore < 0:
+            score -= 4
+
+    # RV/IV ratio (±6) — RV outpacing IV = vol underpriced (bullish premium)
+    if td.iv is not None and td.rv is not None and td.iv > 0:
+        ratio = td.rv / td.iv
+        if ratio > 1.1:
+            score += 6
+        elif ratio > 1.0:
+            score += 3
+        elif ratio < 0.7:
+            score -= 6
+        elif ratio < 0.85:
+            score -= 3
+
+    # Term structure inverted (±6)
     if vrp.ts_inverted is True:
-        score -= 10
+        score -= 6
+
     return max(-28.0, min(28.0, score))
 
 
 def _score_flow(td: TickerData) -> float:
-    if not td.flow_alerts:
-        return 0.0
-    n = len(td.flow_alerts)
-    score = min(12.0, n * 1.5)
-    if td.pcr is not None:
-        if td.pcr > 1.5:
-            score += 8
-        elif td.pcr > 1.2:
-            score += 4
-        elif td.pcr < 0.5:
+    """Weight budget: net_premium tilt ±12 + short_volume_trend ±6 +
+    alert_count fallback ±6 = ±24."""
+    score = 0.0
+
+    # Net premium tilt (±12) — primary signal when deep enrichment present
+    ncp = td.net_call_premium
+    npp = td.net_put_premium
+    if ncp is not None and npp is not None:
+        total = abs(ncp) + abs(npp)
+        if total > 0:
+            tilt = (ncp - npp) / total  # in [-1, 1]
+            score += max(-12.0, min(12.0, tilt * 12.0))
+
+    # Short volume trend (±6) — rising short ratio = bearish, falling = bullish
+    trend = td.short_volume_trend
+    if trend and len(trend) >= 2:
+        # trend[0] is newest, trend[-1] is oldest (per fetcher contract)
+        delta = trend[0] - trend[-1]
+        if delta > 0.05:
             score -= 6
+        elif delta > 0.02:
+            score -= 3
+        elif delta < -0.05:
+            score += 6
+        elif delta < -0.02:
+            score += 3
+
+    # Alert count fallback (±6) — only when no net_premium signal available
+    if (ncp is None or npp is None) and td.flow_alerts:
+        n = len(td.flow_alerts)
+        base = min(6.0, n * 0.75)
+        if td.pcr is not None:
+            if td.pcr > 1.5:
+                score -= base  # heavy puts
+            elif td.pcr < 0.5:
+                score += base  # heavy calls
+        else:
+            score += base * 0.5  # weak positive bias on activity alone
+
     return max(-24.0, min(24.0, score))
 
 
