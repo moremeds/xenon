@@ -14,11 +14,78 @@ from pathlib import Path
 from typing import Optional
 
 from scripts.analysis.benchmark import load_benchmark_context
-from scripts.analysis.models import AnalysisReport
+from scripts.analysis.models import (
+    AnalysisReport,
+    BucketScores,
+    RegimeState,
+    TickerData,
+    VRPState,
+)
 from scripts.analysis.scoring import score_buckets
 from scripts.analysis.ticker_data import fetch_ticker_data
 from scripts.analysis.vrp import build_vrp_state, classify_regime
 from scripts.clients.uw_client import UWClient
+
+
+def _build_setup_thesis(
+    td: TickerData, vrp: VRPState, regime: RegimeState, scores: BucketScores
+) -> dict:
+    """Deterministic structure-family decision tree (NOT trade emission).
+
+    Returns {bias, regime, structure_family, rationale} — no strikes,
+    credits, or stops. Trade construction requires a chain fetch and
+    routes through the Four Gates in a separate spec.
+    """
+    composite = scores.composite
+    iv_signal = td.iv_rank if td.iv_rank is not None else vrp.iv_percentile
+
+    if regime.regime == "R2":
+        family = "no_trade_R2"
+        rationale = (
+            f"Regime is R2 ({regime.reason}); risk-off — no new structures."
+        )
+    elif (
+        abs(composite) >= 40
+        and vrp.ts_inverted is True
+        and iv_signal is not None
+        and iv_signal > 70
+    ):
+        family = "iron_condor"
+        rationale = (
+            f"Composite {composite:+.0f} with inverted term structure and "
+            f"rich IV ({iv_signal:.0f}); fade vol with a defined-risk premium-collect."
+        )
+    elif abs(composite) >= 40 and iv_signal is not None and iv_signal < 40:
+        family = "debit_vertical"
+        rationale = (
+            f"Directional composite {composite:+.0f} with cheap IV ({iv_signal:.0f}); "
+            f"buy directional convexity with a debit spread."
+        )
+    elif (
+        regime.gex_sign == "positive"
+        and td.call_wall_strike is not None
+        and td.put_wall_strike is not None
+        and -40 < composite < 40
+    ):
+        family = "iron_condor"
+        rationale = (
+            f"Positive GEX with visible walls (put {td.put_wall_strike:.0f} / "
+            f"call {td.call_wall_strike:.0f}) and a mixed composite {composite:+.0f}; "
+            f"range-bound — sell premium between the walls."
+        )
+    else:
+        family = "neutral"
+        rationale = (
+            f"Mixed composite {composite:+.0f} without a clear vol or "
+            f"structural edge; stand aside."
+        )
+
+    return {
+        "bias": scores.bias,
+        "regime": regime.regime,
+        "structure_family": family,
+        "rationale": rationale,
+    }
 
 
 def run_analysis(
@@ -33,7 +100,7 @@ def run_analysis(
         client = UWClient()
 
     try:
-        td = fetch_ticker_data(ticker, client, deep=True)
+        td: TickerData = fetch_ticker_data(ticker, client, deep=True)
         vrp = build_vrp_state(td)
         regime = classify_regime(td, vrp)
         scores = score_buckets(td, vrp, regime, mode="fast" if fast else "full")
@@ -62,7 +129,9 @@ def run_analysis(
                 f"Buckets reweighted due to missing data: {scores.skipped_buckets}"
             )
 
-        return AnalysisReport(
+        setup_thesis = _build_setup_thesis(td, vrp, regime, scores)
+
+        report = AnalysisReport(
             ticker=td.ticker,
             price=td.price,
             fetched_at=td.fetched_at.isoformat(),
@@ -72,7 +141,12 @@ def run_analysis(
             regime=regime,
             scores=scores,
             notes=notes,
+            setup_thesis=setup_thesis,
         )
+        # Stash td on the report instance for the rich formatter (not part
+        # of the dataclass schema; not serialized in --json).
+        object.__setattr__(report, "_ticker_data", td)
+        return report
     finally:
         if owns_client:
             try:
@@ -85,39 +159,169 @@ def _report_to_dict(report: AnalysisReport) -> dict:
     return asdict(report)
 
 
+def _fmt(v, spec: str = ".2f", dash: str = "—") -> str:
+    if v is None:
+        return dash
+    try:
+        return format(v, spec)
+    except (TypeError, ValueError):
+        return str(v)
+
+
 def _format_summary(report: AnalysisReport) -> str:
-    vrp_z = (
-        f"{report.vrp.vrp_zscore:.2f}"
-        if report.vrp.vrp_zscore is not None
-        else "unavailable"
+    td: Optional[TickerData] = getattr(report, "_ticker_data", None)
+    s = report.scores
+    r = report.regime
+    v = report.vrp
+    bench = report.benchmark
+    th = report.setup_thesis or {}
+
+    width = 72
+    lines: list[str] = []
+    bar = "=" * width
+    sub = "-" * width
+
+    # ── Header ────────────────────────────────────────────────────────
+    price_str = f"${_fmt(report.price, '.2f')}"
+    sector = (td.sector if td else None) or "—"
+    sector_etf = bench.sector_etf.ticker if bench.sector_etf else None
+    sector_ctx = ""
+    if sector_etf and bench.sector_etf:
+        etf = bench.sector_etf
+        flip = etf.gex_flip
+        price = etf.price
+        if flip is not None and price is not None:
+            rel = "above flip" if price > flip else "below flip"
+            sector_ctx = f" · {sector_etf} {rel}"
+        else:
+            sector_ctx = f" · {sector_etf}"
+
+    lines.append(bar)
+    lines.append(
+        f"{report.ticker}  |  {s.bias}  ({s.composite:+.0f})  |  Grade {s.grade}"
     )
-    lines = [
-        "=" * 60,
-        f"{report.ticker}  @  ${report.price if report.price is not None else 'N/A'}",
-        f"Fetched: {report.fetched_at}",
-        "-" * 60,
-        f"Bias:        {report.scores.bias}  (composite {report.scores.composite:+.1f})",
-        f"Grade:       {report.scores.grade}  ({report.scores.mode} mode)",
-        f"Regime:      {report.regime.regime}  — {report.regime.reason}",
-        f"VRP z-score: {vrp_z}",
-        f"IV pctl:     {report.vrp.iv_percentile}",
-        "-" * 60,
-        "Buckets:",
-        f"  Market Structure: {report.scores.market_structure:+.1f}",
-        f"  Volatility:       {report.scores.volatility:+.1f}",
-        f"  Flow:             {report.scores.flow:+.1f}",
-        f"  Positioning:      {report.scores.positioning:+.1f}",
-    ]
+    lines.append(f"{price_str}  ·  Sector: {sector}{sector_ctx}")
+    lines.append(f"Regime: {r.regime}  —  {r.reason}")
+    lines.append(sub)
+
+    # ── Market Structure ──────────────────────────────────────────────
+    lines.append(f"Market Structure  ({s.market_structure:+.1f}/28)")
+    flip_val = (report.regime.gex_flip_relative or "—").replace("_", " ")
+    flip_dist = (
+        f"{abs(r.flip_distance_pct):.1f}%" if r.flip_distance_pct is not None else "—"
+    )
+    gex_sign = r.gex_sign or "—"
+    gpp = td.gamma_per_1pct if td else None
+    lines.append(
+        f"  GEX flip: {flip_val} ({flip_dist})  ·  Net γ sign: {gex_sign}"
+        f"  ·  γ per 1%: {_fmt(gpp, ',.0f')}"
+    )
+    cw_strike = td.call_wall_strike if td else None
+    pw_strike = td.put_wall_strike if td else None
+    lines.append(
+        f"  Call wall: {_fmt(cw_strike, '.2f')}  ·  Put wall: {_fmt(pw_strike, '.2f')}"
+    )
+    # Deterministic structure assessment
+    ms_assess: list[str] = []
+    if r.gex_sign == "positive":
+        ms_assess.append("dealers long gamma → mean-reverting tape")
+    elif r.gex_sign == "negative":
+        ms_assess.append("dealers short gamma → trend-amplifying")
+    if r.gex_flip_relative == "below_price":
+        ms_assess.append("flip below price (supportive)")
+    elif r.gex_flip_relative == "above_price":
+        ms_assess.append("flip above price (overhead)")
+    if ms_assess:
+        lines.append(f"  Assessment: {'; '.join(ms_assess)}.")
+    lines.append("")
+
+    # ── Volatility ────────────────────────────────────────────────────
+    lines.append(f"Volatility  ({s.volatility:+.1f}/28)")
+    iv_rank_disp = td.iv_rank if (td and td.iv_rank is not None) else v.iv_percentile
+    iv_lo = td.iv_52w_low if td else None
+    iv_hi = td.iv_52w_high if td else None
+    lines.append(
+        f"  IV rank: {_fmt(iv_rank_disp, '.0f')}  ·  IV: {_fmt(td.iv if td else None, '.1f')}"
+        f"  ·  RV: {_fmt(td.rv if td else None, '.1f')}  ·  VRP z: {_fmt(v.vrp_zscore)}"
+    )
+    lines.append(
+        f"  52w IV range: {_fmt(iv_lo, '.1f')} – {_fmt(iv_hi, '.1f')}"
+        f"  ·  Term structure: {'inverted' if v.ts_inverted else 'normal'}"
+    )
+    vol_assess: list[str] = []
+    if iv_rank_disp is not None:
+        if iv_rank_disp > 70:
+            vol_assess.append("rich IV (sell premium)")
+        elif iv_rank_disp < 30:
+            vol_assess.append("cheap IV (buy premium)")
+        else:
+            vol_assess.append("middling IV")
+    if v.vrp_zscore is not None and v.vrp_zscore > 1.0:
+        vol_assess.append("VRP elevated (vol overpriced)")
+    elif v.vrp_zscore is not None and v.vrp_zscore < 0:
+        vol_assess.append("VRP negative (vol underpriced)")
+    if v.ts_inverted:
+        vol_assess.append("term structure inverted (event/stress)")
+    if vol_assess:
+        lines.append(f"  Assessment: {'; '.join(vol_assess)}.")
+    lines.append("")
+
+    # ── Flow ──────────────────────────────────────────────────────────
+    lines.append(f"Flow  ({s.flow:+.1f}/24)  &  Positioning  ({s.positioning:+.1f}/20)")
+    ncp = td.net_call_premium if td else None
+    npp = td.net_put_premium if td else None
+    nt = (ncp or 0) + (npp or 0) if (ncp is not None and npp is not None) else None
+    lines.append(
+        f"  Net premium  call: {_fmt(ncp, ',.0f')}  ·  put: {_fmt(npp, ',.0f')}"
+        f"  ·  net: {_fmt(nt, ',.0f')}"
+    )
+    sv_ratio = td.short_volume_ratio if td else None
+    sv_trend = td.short_volume_trend if td else None
+    sv_trend_str = (
+        " → ".join(f"{t:.2f}" for t in sv_trend) if sv_trend else "—"
+    )
+    lines.append(
+        f"  Short vol ratio: {_fmt(sv_ratio, '.2f')}  ·  3-day trend: {sv_trend_str}"
+    )
+    flow_assess: list[str] = []
+    if ncp is not None and npp is not None:
+        if ncp > 0 and ncp > abs(npp) * 1.5:
+            flow_assess.append("call premium dominant (bullish lean)")
+        elif npp < 0 and abs(npp) > abs(ncp) * 1.5:
+            flow_assess.append("put premium dominant (bearish lean)")
+        else:
+            flow_assess.append("mixed premium")
+    if sv_trend and len(sv_trend) >= 2:
+        delta = sv_trend[0] - sv_trend[-1]
+        if delta > 0.02:
+            flow_assess.append("short volume rising")
+        elif delta < -0.02:
+            flow_assess.append("short volume easing")
+    if flow_assess:
+        lines.append(f"  Assessment: {'; '.join(flow_assess)}.")
+    lines.append("")
+
+    # ── Setup Thesis ──────────────────────────────────────────────────
+    lines.append("Setup Thesis")
+    lines.append(f"  Bias: {th.get('bias', s.bias)}  ·  Regime: {th.get('regime', r.regime)}")
+    lines.append(f"  Structure family: {th.get('structure_family', '—')}")
+    lines.append(f"  Rationale: {th.get('rationale', '—')}")
+    lines.append(
+        "  NOTE: No strikes/credits/stops — trade construction requires a chain fetch."
+    )
+
     if report.scores.skipped_buckets:
-        lines.append(f"  (skipped: {', '.join(report.scores.skipped_buckets)})")
+        lines.append(sub)
+        lines.append(f"Skipped buckets: {', '.join(report.scores.skipped_buckets)}")
     if report.notes:
-        lines.append("-" * 60)
+        lines.append(sub)
         lines.append("Notes:")
         for n in report.notes:
             lines.append(f"  - {n}")
-    lines.append("=" * 60)
-    lines.append("NOTE: This is a signal summary, not a trade recommendation.")
-    lines.append("=" * 60)
+
+    lines.append(bar)
+    lines.append("Signal summary, not a trade recommendation.")
+    lines.append(bar)
     return "\n".join(lines)
 
 

@@ -45,6 +45,49 @@ def test_run_analysis_handles_missing_vol_stats():
     assert report.scores.reweighted is True
 
 
+def test_run_analysis_populates_setup_thesis():
+    client = _full_client()
+    report = run_analysis("TSLA", client=client)
+    assert report.setup_thesis is not None
+    assert "structure_family" in report.setup_thesis
+    assert "rationale" in report.setup_thesis
+    assert report.setup_thesis["bias"] == report.scores.bias
+
+
+def test_setup_thesis_no_trade_when_regime_R2():
+    """Force vrp.iv_percentile high enough that regime classifies R2 if eligible.
+    Simpler: build the thesis directly via internal helper."""
+    from scripts.uw_analyze import _build_setup_thesis
+    from scripts.analysis.models import TickerData, VRPState, RegimeState, BucketScores
+    from datetime import datetime
+
+    td = TickerData(
+        ticker="X", price=100.0, fetched_at=datetime.now(),
+        gex=None, gex_by_strike=None,
+        iv=None, rv=None, iv_percentile=None, term_structure=None,
+        rr_skew_25d=None, vrp_history=None, flow_alerts=None,
+        net_premium=None, pcr=None, darkpool=None,
+        oi_changes=None, short_interest=None,
+        earnings_date=None, earnings_within_14d=False,
+    )
+    vrp = VRPState(
+        vrp_raw=None, vrp_zscore=None, iv_percentile=None,
+        ts_ratio=None, ts_inverted=None, earnings_within_14d=False,
+        data_freshness="unavailable",
+    )
+    regime = RegimeState(
+        regime="R2", reason="risk-off",
+        gex_sign=None, gex_flip_relative=None, flip_distance_pct=None,
+    )
+    scores = BucketScores(
+        market_structure=0, volatility=0, flow=0, positioning=0,
+        composite=0, grade="C", bias="MIXED", mode="full",
+        reweighted=True, skipped_buckets=[],
+    )
+    thesis = _build_setup_thesis(td, vrp, regime, scores)
+    assert thesis["structure_family"] == "no_trade_R2"
+
+
 def test_run_analysis_reads_sector_from_nested_data():
     """Regression: get_stock_info returns {"data": {"sector": ...}}, not flat."""
     client = _full_client()

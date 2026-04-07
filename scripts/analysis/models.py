@@ -141,3 +141,4 @@ class AnalysisReport:
     regime: RegimeState
     scores: BucketScores
     notes: list[str]
+    setup_thesis: Optional[dict] = None
