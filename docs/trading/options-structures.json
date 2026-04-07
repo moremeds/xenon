@@ -59,7 +59,8 @@
     "name": "Short Call (Naked)",
     "aliases": [
       "Uncovered Call",
-      "Naked Short Call"
+      "Naked Short Call",
+      "Short Call"
     ],
     "category": "single",
     "legs": [
@@ -87,7 +88,8 @@
     "name": "Short Put (Cash-Secured)",
     "aliases": [
       "Naked Short Put",
-      "Cash-Secured Put"
+      "Cash-Secured Put",
+      "Short Put"
     ],
     "category": "single",
     "legs": [
@@ -1488,8 +1490,7 @@
   {
     "name": "Covered Put (Stock + Long Put)",
     "aliases": [
-      "Married Put",
-      "Protective Put"
+      "Married Put"
     ],
     "category": "covered",
     "legs": [

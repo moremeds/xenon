@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { computeExposureDetailed } from "@/lib/exposureBreakdown";
+import { computeExposureDetailed, positionDeltaForHeader } from "@/lib/exposureBreakdown";
 import type { PortfolioData } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 
@@ -117,5 +117,38 @@ describe("Exposure breakdown — short leg delta sign", () => {
     const stockLeg = result.rows[0].legs[0];
     expect(stockLeg.rawDelta).toBe(1);
     expect(stockLeg.legDelta).toBe(1000);
+  });
+});
+
+describe("positionDeltaForHeader — known/unknown signal", () => {
+  it("returns known=true when every leg has usable pricing data", () => {
+    const prices: Record<string, PriceData> = {
+      AAPL: makePriceData({ last: 260 }),
+      "AAPL_20260417_270_C": makePriceData({ last: 6.30, delta: 0.36 }),
+      "AAPL_20260417_290_C": makePriceData({ last: 2.13, delta: 0.08 }),
+    };
+    const pos = SPREAD_POSITION.positions[0];
+    const out = positionDeltaForHeader(pos, prices);
+    expect(out.known).toBe(true);
+    expect(out.signed).toBeCloseTo(2800, 0);
+  });
+
+  it("returns known=false (with partial sum) when any leg lacks quote+spot", () => {
+    // No AAPL spot, no per-leg delta → both legs fall back to the missing branch
+    const out = positionDeltaForHeader(SPREAD_POSITION.positions[0], {});
+    expect(out.known).toBe(false);
+    expect(out.signed).toBe(0); // partial sum (both legs contributed 0)
+  });
+
+  it("preserves sign rules — SHORT Call contributes negative", () => {
+    const prices: Record<string, PriceData> = {
+      AAPL: makePriceData({ last: 260 }),
+      "AAPL_20260417_270_C": makePriceData({ delta: 0.36 }),
+      "AAPL_20260417_290_C": makePriceData({ delta: 0.08 }),
+    };
+    const out = positionDeltaForHeader(SPREAD_POSITION.positions[0], prices);
+    // LONG 0.36*100*100 + SHORT -0.08*100*100 = 3600 - 800 = 2800
+    expect(out.signed).toBeCloseTo(2800, 0);
+    expect(out.known).toBe(true);
   });
 });

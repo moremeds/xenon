@@ -84,6 +84,19 @@ export function getMultiplier(pos: PortfolioPosition): number {
   return pos.structure_type === "Stock" ? 1 : 100;
 }
 
+/**
+ * Per-leg contract multiplier. MUST be used in any loop that walks
+ * `pos.legs`, because multi-leg positions (Covered Call, Protective Put,
+ * Collar, etc.) can mix Stock and option legs — the Stock leg's
+ * `contracts` is a share count (×1), while option legs are ×100.
+ *
+ * Using `getMultiplier(pos)` in a leg loop silently inflates the stock
+ * leg by 100× for any combo structure with a Stock leg.
+ */
+export function legMultiplier(leg: { type: string }): number {
+  return leg.type === "Stock" ? 1 : 100;
+}
+
 export function resolveEntryCost(pos: PortfolioPosition): number {
   if (pos.legs.length > 1) {
     return pos.legs.reduce((s, l) => {
@@ -104,6 +117,62 @@ export function getLastPrice(pos: PortfolioPosition): number | null {
   if (mv == null) return null;
   const mult = getMultiplier(pos);
   return mv / (pos.contracts * mult);
+}
+
+/**
+ * Display-time market value: mirrors what `PositionTable` renders for a row.
+ *
+ * Priority:
+ *   Stock  → live WS `last * contracts` when available, else `resolveMarketValue`.
+ *   Option → sign-aware sum of each leg's realtime price (WS or fallback),
+ *            else `resolveMarketValue`.
+ *
+ * Use this (not `resolveMarketValue` alone) when aggregating header totals
+ * that must match the row values beneath them. Returns `null` only if every
+ * source was unavailable.
+ */
+export function getDisplayMarketValue(
+  pos: PortfolioPosition,
+  prices?: Record<string, PriceData>,
+): number | null {
+  if (pos.structure_type === "Stock") {
+    const last = prices?.[pos.ticker]?.last;
+    if (last != null && last > 0) return last * pos.contracts;
+    return resolveMarketValue(pos);
+  }
+  // Options: sign-aware realtime aggregation (Stock legs in combos use ×1)
+  let rtMv = 0;
+  let allResolved = true;
+  for (const leg of pos.legs) {
+    const key = legPriceKey(pos.ticker, pos.expiry, leg);
+    const lp = key && prices ? prices[key] : null;
+    const current = resolveRealtimePrice(
+      lp,
+      leg.market_price,
+      Boolean(leg.market_price_is_calculated),
+    ).price;
+    if (current == null) {
+      allResolved = false;
+      break;
+    }
+    const sign = leg.direction === "LONG" ? 1 : -1;
+    rtMv += sign * current * leg.contracts * legMultiplier(leg);
+  }
+  if (allResolved) return rtMv;
+  return resolveMarketValue(pos);
+}
+
+/**
+ * Display-time total P&L: `getDisplayMarketValue - resolveEntryCost`.
+ * Sign preserved (never `Math.abs`). Returns `null` iff MV is null.
+ */
+export function getDisplayTotalPnl(
+  pos: PortfolioPosition,
+  prices?: Record<string, PriceData>,
+): number | null {
+  const mv = getDisplayMarketValue(pos, prices);
+  if (mv == null) return null;
+  return mv - resolveEntryCost(pos);
 }
 
 export function getLastPriceIsCalculated(pos: PortfolioPosition): boolean {
@@ -238,7 +307,7 @@ function computeRtMv(pos: PortfolioPosition, prices?: Record<string, PriceData>)
     const current = resolveRealtimePrice(lp, leg.market_price, Boolean(leg.market_price_is_calculated)).price;
     if (current == null) return null;
     const sign = leg.direction === "LONG" ? 1 : -1;
-    rtMv += sign * current * leg.contracts * 100;
+    rtMv += sign * current * leg.contracts * legMultiplier(leg);
   }
   return rtMv;
 }
@@ -272,8 +341,9 @@ export function getOptionDailyChg(pos: PortfolioPosition, prices?: Record<string
     if (current == null) return null;
     const sign = leg.direction === "LONG" ? 1 : -1;
     if (lp?.close != null && lp.close > 0) {
-      wsDailyPnl += sign * (current - lp.close) * leg.contracts * 100;
-      closeValue += sign * lp.close * leg.contracts * 100;
+      const mult = legMultiplier(leg);
+      wsDailyPnl += sign * (current - lp.close) * leg.contracts * mult;
+      closeValue += sign * lp.close * leg.contracts * mult;
       hasClose = true;
     }
   }
@@ -315,7 +385,7 @@ export function getTodayPnlDollars(pos: PortfolioPosition, prices?: Record<strin
     const close = lp?.close;
     if (close != null && close > 0) {
       const sign = leg.direction === "LONG" ? 1 : -1;
-      pnl += sign * (last - close) * leg.contracts * 100;
+      pnl += sign * (last - close) * leg.contracts * legMultiplier(leg);
       hasClose = true;
     }
   }

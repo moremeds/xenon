@@ -15,6 +15,7 @@ import {
   resolveEntryCost,
   getAvgEntry,
   getMultiplier,
+  legMultiplier,
   getLastPrice,
   getLastPriceIsCalculated,
   legPriceKey,
@@ -125,7 +126,7 @@ function getOptionRtMv(pos: PortfolioPosition, prices?: Record<string, PriceData
     const current = resolveRealtimePrice(lp, leg.market_price, Boolean(leg.market_price_is_calculated)).price;
     if (current == null) return null;
     const sign = leg.direction === "LONG" ? 1 : -1;
-    rtMv += sign * current * leg.contracts * 100;
+    rtMv += sign * current * leg.contracts * legMultiplier(leg);
   }
   return rtMv;
 }
@@ -189,7 +190,7 @@ function LegRow({
   const { direction: priceDirection, flashDirection } = usePriceDirection(marketPrice);
 
   // Per-leg P&L: sign-aware (MV - EC)
-  const mult = leg.type === "Stock" ? 1 : 100;
+  const mult = legMultiplier(leg);
   const legMv = marketPrice != null ? marketPrice * leg.contracts * mult : leg.market_value != null ? Math.abs(leg.market_value) : null;
   const legEc = Math.abs(leg.entry_cost);
   const sign = leg.direction === "LONG" ? 1 : -1;
@@ -250,11 +251,12 @@ function PositionRow({ pos, showExpiry = true, showUnderlying = false, realtimeP
       if (current == null) return null;
       priceIsCalculated = priceIsCalculated || resolved.isCalculated;
       const sign = leg.direction === "LONG" ? 1 : -1;
-      rtMv += sign * current * leg.contracts * 100;
+      const mult = legMultiplier(leg);
+      rtMv += sign * current * leg.contracts * mult;
       const close = lp?.close;
       if (close != null && close > 0) {
-        rtDailyPnl += sign * (current - close) * leg.contracts * 100;
-        rtCloseValue += sign * close * leg.contracts * 100;
+        rtDailyPnl += sign * (current - close) * leg.contracts * mult;
+        rtCloseValue += sign * close * leg.contracts * mult;
         hasCloseData = true;
       }
     }
@@ -325,7 +327,7 @@ function PositionRow({ pos, showExpiry = true, showUnderlying = false, realtimeP
           )}
         </td>
         <td>{structureDisplay}</td>
-        <td className="right">{pos.contracts}</td>
+        <td className="right">{Number.isInteger(pos.contracts) ? pos.contracts : pos.contracts.toFixed(2)}</td>
         <td>
           <span className={`pill ${pos.risk_profile === "defined" ? "defined" : pos.risk_profile === "equity" ? "neutral" : "undefined"}`}>
             {pos.direction}
@@ -382,6 +384,7 @@ export default function PositionTable({
   showUnderlying = false,
   prices,
   readonly = false,
+  hideHeader = false,
 }: {
   positions: PortfolioPosition[];
   showExpiry?: boolean;
@@ -393,6 +396,12 @@ export default function PositionTable({
    * readonly=true so a click cannot reach /api/orders/place against IB.
    */
   readonly?: boolean;
+  /**
+   * Suppress the `<thead>` on all-but-the-first instance. Used by
+   * PortfolioByStructure so each ticker card shows one header row even
+   * though it renders several sub-tables (stock + per-category-pair).
+   */
+  hideHeader?: boolean;
 }) {
   const positionExtract = useMemo(() => makePositionExtract(prices), [prices]);
   const { sorted, sort, toggle } = useSort(positions, positionExtract);
@@ -410,24 +419,41 @@ export default function PositionTable({
 
   return (
     <>
-      <table>
-        <thead>
-          <tr>
-            <SortTh<PositionSortKey> label="Ticker" sortKey="ticker" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-            <SortTh<PositionSortKey> label="Structure" sortKey="structure" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-            <SortTh<PositionSortKey> label="Qty" sortKey="qty" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-            <SortTh<PositionSortKey> label="Direction" sortKey="direction" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-            {showUnderlying && <SortTh<PositionSortKey> label="Underlying" sortKey="underlying" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />}
-            <SortTh<PositionSortKey> label="Avg Entry" sortKey="avg_entry" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-            <SortTh<PositionSortKey> label="Last Price" sortKey="last_price" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-            <SortTh<PositionSortKey> label="Day Chg" sortKey="daily_chg" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-            <SortTh<PositionSortKey> label="Today P&L" sortKey="today_pnl" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-            <SortTh<PositionSortKey> label="Entry Cost" sortKey="entry_cost" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-            <SortTh<PositionSortKey> label="Market Value" sortKey="market_value" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-            <SortTh<PositionSortKey> label="P&L" sortKey="pnl" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-            {showExpiry && <SortTh<PositionSortKey> label="Expiry" sortKey="expiry" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />}
-          </tr>
-        </thead>
+      <table style={{ tableLayout: "fixed", width: "100%" }}>
+        <colgroup>
+          <col style={{ width: "7%" }} />  {/* Ticker */}
+          <col style={{ width: "14%" }} /> {/* Structure */}
+          <col style={{ width: "4%" }} />  {/* Qty */}
+          <col style={{ width: "7%" }} />  {/* Direction */}
+          {showUnderlying && <col style={{ width: "7%" }} />}
+          <col style={{ width: "7%" }} />  {/* Avg Entry */}
+          <col style={{ width: "7%" }} />  {/* Last Price */}
+          <col style={{ width: "6%" }} />  {/* Day Chg */}
+          <col style={{ width: "7%" }} />  {/* Today P&L */}
+          <col style={{ width: "8%" }} />  {/* Entry Cost */}
+          <col style={{ width: "8%" }} />  {/* Market Value */}
+          <col style={{ width: "11%" }} /> {/* P&L */}
+          {showExpiry && <col style={{ width: "7%" }} />}
+        </colgroup>
+        {!hideHeader && (
+          <thead>
+            <tr>
+              <SortTh<PositionSortKey> label="Ticker" sortKey="ticker" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
+              <SortTh<PositionSortKey> label="Structure" sortKey="structure" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
+              <SortTh<PositionSortKey> label="Qty" sortKey="qty" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
+              <SortTh<PositionSortKey> label="Direction" sortKey="direction" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
+              {showUnderlying && <SortTh<PositionSortKey> label="Underlying" sortKey="underlying" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />}
+              <SortTh<PositionSortKey> label="Avg Entry" sortKey="avg_entry" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
+              <SortTh<PositionSortKey> label="Last Price" sortKey="last_price" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
+              <SortTh<PositionSortKey> label="Day Chg" sortKey="daily_chg" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
+              <SortTh<PositionSortKey> label="Today P&L" sortKey="today_pnl" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
+              <SortTh<PositionSortKey> label="Entry Cost" sortKey="entry_cost" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
+              <SortTh<PositionSortKey> label="Market Value" sortKey="market_value" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
+              <SortTh<PositionSortKey> label="P&L" sortKey="pnl" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
+              {showExpiry && <SortTh<PositionSortKey> label="Expiry" sortKey="expiry" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />}
+            </tr>
+          </thead>
+        )}
         <tbody>
           {sorted.map((pos) => (
             <PositionRow key={pos.id} pos={pos} showExpiry={showExpiry} showUnderlying={showUnderlying} realtimePrice={prices?.[pos.ticker]} prices={prices} onLegClick={handleLegClick} readonly={readonly} />

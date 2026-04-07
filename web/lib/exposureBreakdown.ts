@@ -58,13 +58,14 @@ function daysToExpiry(expiry: string): number {
 
 /* ─── Per-position delta with leg breakdown ──────────── */
 
-function positionDeltaDetailed(
+export function positionDeltaDetailed(
   pos: PortfolioPosition,
   prices: Record<string, PriceData>,
-): { delta: number; deltaSource: "ib" | "approx"; legs: ExposureBreakdownLeg[] } {
+): { delta: number; deltaSource: "ib" | "approx"; legs: ExposureBreakdownLeg[]; missingLegs: number } {
   let totalDelta = 0;
   let usedIb = false;
   let usedApprox = false;
+  let missingLegs = 0;
   const legs: ExposureBreakdownLeg[] = [];
 
   for (const leg of pos.legs) {
@@ -106,6 +107,7 @@ function positionDeltaDetailed(
     // Fallback: approximate delta
     const spot = prices[pos.ticker]?.last;
     if (!spot || spot <= 0 || !leg.strike) {
+      missingLegs += 1;
       legs.push({
         type: leg.type,
         direction: leg.direction,
@@ -136,7 +138,25 @@ function positionDeltaDetailed(
     delta: totalDelta,
     deltaSource: usedIb ? "ib" : "approx",
     legs,
+    missingLegs,
   };
+}
+
+/**
+ * Header-friendly delta: distinguishes "net zero" from "unknown".
+ *
+ * Returns `{ signed, known }`. `known === false` iff at least one leg in the
+ * position fell back to `0` because its quote + spot path was unresolvable.
+ * The caller (Portfolio By-Structure aggregator) sums `signed` across
+ * contributors and marks the group's netDelta as `null` iff every contributor
+ * came back with `known === false`.
+ */
+export function positionDeltaForHeader(
+  pos: PortfolioPosition,
+  prices?: Record<string, PriceData>,
+): { signed: number | null; known: boolean } {
+  const { delta, missingLegs } = positionDeltaDetailed(pos, prices ?? {});
+  return { signed: delta, known: missingLegs === 0 };
 }
 
 /* ─── Main computation ───────────────────────────────── */
