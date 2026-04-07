@@ -89,6 +89,23 @@ class TickerData:
     # Context
     earnings_date: Optional[date]
     earnings_within_14d: bool
+    # Enrichment (deep fetch only — all default None for back-compat).
+    # Defaults must come after non-defaulted fields above per dataclass rules.
+    iv_rank: Optional[float] = None
+    iv_52w_low: Optional[float] = None
+    iv_52w_high: Optional[float] = None
+    rv_52w_low: Optional[float] = None
+    rv_52w_high: Optional[float] = None
+    net_call_premium: Optional[float] = None
+    net_put_premium: Optional[float] = None
+    short_volume_ratio: Optional[float] = None
+    short_volume_trend: Optional[list[float]] = None
+    call_wall_strike: Optional[float] = None
+    call_wall_gamma: Optional[float] = None
+    put_wall_strike: Optional[float] = None
+    put_wall_gamma: Optional[float] = None
+    gamma_per_1pct: Optional[float] = None
+    sector: Optional[str] = None
 
     def bucket_available(
         self,
