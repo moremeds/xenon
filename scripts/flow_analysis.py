@@ -4,35 +4,30 @@ Analyze dark pool flow for all open portfolio positions.
 Categorizes each position based on whether flow supports or contradicts the trade direction.
 
 Output: JSON to stdout with supports/against/watch/neutral arrays.
+
+Source-agnostic: uses ``utils.portfolio_adapter`` to load IB or Futu positions
+into a common shape. Select with ``--account ib|futu`` (default ``ib``).
 """
+import argparse
 import json
 import sys
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
 from fetch_flow import fetch_flow as fetch_flow_module
 from scanner import analyze_signal
+from utils.portfolio_adapter import group_by_ticker, load_normalized_positions
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
-PORTFOLIO = PROJECT_DIR / "data" / "portfolio.json"
-
-
-def load_portfolio() -> list:
-    """Load open positions from portfolio.json (with checksum verification)."""
-    if not PORTFOLIO.exists():
-        return []
-    try:
-        from utils.atomic_io import verified_load
-        data = verified_load(str(PORTFOLIO))
-    except (ValueError, ImportError):
-        with open(PORTFOLIO) as f:
-            data = json.load(f)
-    return data.get("positions", [])
 
 
 def classify_position(pos: dict, flow_data: dict, analysis: dict) -> dict:
-    """Classify a single position based on flow vs position direction."""
+    """Classify a single position based on flow vs position direction.
+
+    ``pos`` is the dict form of a NormalizedPosition (ticker/direction/structure/qty/raw).
+    """
     ticker = pos["ticker"]
     pos_direction = pos.get("direction", "LONG").upper()
     structure = pos.get("structure", "Unknown")
@@ -125,45 +120,61 @@ def classify_position(pos: dict, flow_data: dict, analysis: dict) -> dict:
     }
 
 
-def run_analysis():
-    """Run flow analysis for all portfolio positions."""
-    positions = load_portfolio()
+def _empty_output(scanned: int = 0, skipped: int = 0, account: str = "ib") -> dict:
+    return {
+        "analysis_time": datetime.now().isoformat(),
+        "account": account,
+        "positions_scanned": scanned,
+        "skipped_unsupported": skipped,
+        "supports": [],
+        "against": [],
+        "watch": [],
+        "neutral": [],
+    }
+
+
+def run_analysis(account: str = "ib"):
+    """Run flow analysis for all portfolio positions for the given account."""
+    loaded = load_normalized_positions(account)  # type: ignore[arg-type]
+    positions = [asdict(p) for p in loaded.positions]
+
     if not positions:
-        output = {
-            "analysis_time": datetime.now().isoformat(),
-            "positions_scanned": 0,
-            "supports": [],
-            "against": [],
-            "watch": [],
-            "neutral": [],
-        }
-        print(json.dumps(output, indent=2))
+        print(json.dumps(_empty_output(0, loaded.skipped_unsupported, account), indent=2))
         return
 
-    print(f"Analyzing flow for {len(positions)} positions...", file=sys.stderr)
+    print(
+        f"Analyzing flow for {len(positions)} positions ({account}, "
+        f"{loaded.skipped_unsupported} skipped)...",
+        file=sys.stderr,
+    )
 
-    results = {"supports": [], "against": [], "watch": [], "neutral": []}
-
-    for i, pos in enumerate(positions, 1):
-        ticker = pos.get("ticker", "")
-        if not ticker:
-            continue
-
-        print(f"  [{i}/{len(positions)}] {ticker}...", file=sys.stderr, end=" ")
-
+    # Per-ticker dedup: fetch flow once per unique symbol.
+    by_ticker = group_by_ticker(loaded.positions)
+    flow_cache: dict = {}
+    analysis_cache: dict = {}
+    for i, ticker in enumerate(sorted(by_ticker.keys()), 1):
+        print(f"  [{i}/{len(by_ticker)}] {ticker}...", file=sys.stderr, end=" ")
         try:
             flow_data = fetch_flow_module(ticker)
             analysis = analyze_signal(flow_data)
         except Exception as e:
             print(f"ERROR: {e}", file=sys.stderr)
-            analysis = {"score": -1, "signal": "ERROR", "direction": "UNKNOWN", "strength": 0, "buy_ratio": None, "sustained_days": 0, "recent_direction": "UNKNOWN", "recent_strength": 0}
+            analysis = {
+                "score": -1, "signal": "ERROR", "direction": "UNKNOWN",
+                "strength": 0, "buy_ratio": None, "sustained_days": 0,
+                "recent_direction": "UNKNOWN", "recent_strength": 0,
+            }
             flow_data = {}
+        flow_cache[ticker] = flow_data
+        analysis_cache[ticker] = analysis
+        print(f"{analysis.get('signal', 'N/A')} ({analysis.get('score', 0)})", file=sys.stderr)
 
-        classified = classify_position(pos, flow_data, analysis)
+    results = {"supports": [], "against": [], "watch": [], "neutral": []}
+    for pos in positions:
+        ticker = pos["ticker"]
+        classified = classify_position(pos, flow_cache.get(ticker, {}), analysis_cache.get(ticker, {}))
         category = classified.pop("category")
         results[category].append(classified)
-
-        print(f"{analysis.get('signal', 'N/A')} ({analysis.get('score', 0)})", file=sys.stderr)
 
     # Sort each category by strength descending
     for cat in results:
@@ -171,12 +182,21 @@ def run_analysis():
 
     output = {
         "analysis_time": datetime.now().isoformat(),
+        "account": account,
         "positions_scanned": len(positions),
+        "skipped_unsupported": loaded.skipped_unsupported,
         **results,
     }
 
     print(json.dumps(output, indent=2))
 
 
+def main():
+    parser = argparse.ArgumentParser(description="Run portfolio flow analysis.")
+    parser.add_argument("--account", choices=["ib", "futu"], default="ib")
+    args = parser.parse_args()
+    run_analysis(args.account)
+
+
 if __name__ == "__main__":
-    run_analysis()
+    main()

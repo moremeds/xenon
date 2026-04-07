@@ -172,7 +172,7 @@ status() {
     echo "Schedule: Every 15 min, 9:30 AM - 4:15 PM ET (converted to local launchd times at install), Mon-Fri"
 
     # Last refresh time for each data file
-    for datafile in scanner.json flow_analysis.json discover.json; do
+    for datafile in scanner.json flow_analysis.ib.json flow_analysis.futu.json discover.json; do
         local filepath="$PROJECT_DIR/data/$datafile"
         if [[ -f "$filepath" ]]; then
             local mtime

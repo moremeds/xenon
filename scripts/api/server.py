@@ -805,12 +805,14 @@ async def discover():
 
 
 @app.post("/flow-analysis")
-async def flow_analysis():
-    """Run portfolio flow analysis (flow_analysis.py)."""
-    result = await run_script("flow_analysis.py", timeout=120)
+async def flow_analysis(account: str = "ib"):
+    """Run portfolio flow analysis (flow_analysis.py) for the given broker account."""
+    if account not in ("ib", "futu"):
+        raise HTTPException(status_code=400, detail=f"Unknown account: {account!r}")
+    result = await run_script("flow_analysis.py", ["--account", account], timeout=120)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
-    _write_cache(DATA_DIR / "flow_analysis.json", result.data)
+    _write_cache(DATA_DIR / f"flow_analysis.{account}.json", result.data)
     return result.data
 
 

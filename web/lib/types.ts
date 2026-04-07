@@ -429,11 +429,19 @@ export type FlowAnalysisPosition = {
 
 export type FlowAnalysisData = {
   analysis_time: string;
+  account?: "ib" | "futu";
   positions_scanned: number;
+  skipped_unsupported?: number;
   supports: FlowAnalysisPosition[];
   against: FlowAnalysisPosition[];
   watch: FlowAnalysisPosition[];
   neutral: FlowAnalysisPosition[];
+  cache_meta?: {
+    last_refresh: string | null;
+    age_seconds: number | null;
+    is_stale: boolean;
+    stale_threshold_seconds: number;
+  };
 };
 
 // Real-time pricing types
