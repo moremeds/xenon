@@ -43,3 +43,12 @@ def test_run_analysis_handles_missing_vol_stats():
     report = run_analysis("TSLA", client=client)
     assert "volatility" in report.scores.skipped_buckets
     assert report.scores.reweighted is True
+
+
+def test_run_analysis_reads_sector_from_nested_data():
+    """Regression: get_stock_info returns {"data": {"sector": ...}}, not flat."""
+    client = _full_client()
+    client.get_stock_info.return_value = {"data": {"sector": "Technology"}}
+    report = run_analysis("TSLA", client=client)
+    # Technology → XLK sector ETF lookup must fire (was broken pre-fix)
+    assert report.benchmark.sector_etf is not None

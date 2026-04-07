@@ -41,7 +41,8 @@ def run_analysis(
         ticker_sector: Optional[str] = None
         try:
             info = client.get_stock_info(td.ticker) or {}
-            ticker_sector = info.get("sector") or info.get("gics_sector")
+            data = info.get("data") or {}
+            ticker_sector = data.get("sector") or data.get("gics_sector")
         except Exception:  # noqa: BLE001
             ticker_sector = None
         benchmark = load_benchmark_context(client, ticker_sector=ticker_sector)
