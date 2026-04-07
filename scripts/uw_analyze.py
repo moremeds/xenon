@@ -94,7 +94,26 @@ def run_analysis(
     fast: bool = False,
     client: Optional[UWClient] = None,
 ) -> AnalysisReport:
-    """Run the full analysis pipeline for a single ticker."""
+    """Run the full analysis pipeline for a single ticker.
+
+    Thin wrapper over `run_analysis_with_data` that drops the TickerData
+    so existing CLI / in-process callers keep their old return shape.
+    """
+    report, _td = run_analysis_with_data(ticker, fast=fast, client=client)
+    return report
+
+
+def run_analysis_with_data(
+    ticker: str,
+    *,
+    fast: bool = False,
+    client: Optional[UWClient] = None,
+) -> tuple[AnalysisReport, TickerData]:
+    """Run the analysis pipeline and also return the underlying TickerData.
+
+    The route layer needs raw TickerData attributes (walls, gamma, IV rank,
+    net premium, gex_by_strike) that are not part of AnalysisReport.
+    """
     owns_client = client is None
     if owns_client:
         client = UWClient()
@@ -141,7 +160,7 @@ def run_analysis(
         # Stash td on the report instance for the rich formatter (not part
         # of the dataclass schema; not serialized in --json).
         object.__setattr__(report, "_ticker_data", td)
-        return report
+        return report, td
     finally:
         if owns_client:
             try:

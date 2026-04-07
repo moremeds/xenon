@@ -279,7 +279,12 @@ def fetch_ticker_data(ticker: str, client, *, deep: bool = False) -> TickerData:
                 pg = _to_float(r.get("put_gex")) or 0.0
                 if strike is None:
                     continue
-                normalized.append({"strike": strike, "gamma": cg + pg})
+                normalized.append({
+                    "strike": strike,
+                    "gamma": cg + pg,
+                    "call_gamma": cg,
+                    "put_gamma": pg,
+                })
             if normalized:
                 gex_by_strike = {"strikes": normalized}
                 # Compute flip on every fetch (deep or not). Filter to ±20%
@@ -337,7 +342,11 @@ def fetch_ticker_data(ticker: str, client, *, deep: bool = False) -> TickerData:
         logger.debug("darkpool window failed for %s: %s", ticker, exc)
 
     # Earnings
-    earnings_date, earnings_within_14d = None, True
+    # Default to None (unknown) — distinct from True/False so callers can
+    # tell the difference between "no earnings data fetched" and "we know
+    # earnings are within 14 days". Critical for market-mode scans where
+    # earnings fetch may fail for foreign/thin tickers.
+    earnings_date, earnings_within_14d = None, None
     try:
         er = client.get_earnings_by_ticker(ticker) or {}
         earnings_date, earnings_within_14d = _parse_next_earnings(er)

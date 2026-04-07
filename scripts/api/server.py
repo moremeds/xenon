@@ -43,6 +43,7 @@ from api.pool_order_manage import pool_cancel_order, pool_modify_order
 from api.auth import verify_clerk_jwt, verify_api_key
 from api.ws_ticket import create_ticket, validate_ticket
 from api.routes.historical import router as historical_router
+from api.routes.uw_analyze import router as uw_analyze_router
 
 # Load .env from project root for Python scripts
 try:
@@ -158,6 +159,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Xenon API", version="1.0.0", lifespan=lifespan)
 app.include_router(historical_router)
+app.include_router(uw_analyze_router)
 
 app.add_middleware(
     CORSMiddleware,

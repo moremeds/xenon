@@ -168,6 +168,7 @@ describe("quickPromptsBySection", () => {
     "regime",
     "cta",
     "ticker-detail",
+    "uw-analyze",
   ];
 
   it("covers all WorkspaceSection keys", () => {
@@ -217,6 +218,7 @@ describe("sectionDescription", () => {
     "regime",
     "cta",
     "ticker-detail",
+    "uw-analyze",
   ];
 
   it("covers all WorkspaceSection keys", () => {
