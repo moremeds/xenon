@@ -127,6 +127,23 @@ export default function PortfolioByStructure({
                 const key = `${activeAccount}:${ticker}:${category}`;
                 const isCollapsed = Boolean(collapsed[key]);
                 const label = CATEGORY_LABELS[category as CategoryKey];
+
+                // Sub-group rows by virtual-pair key. Unpaired positions get
+                // a synthetic key so they render in their own sub-block.
+                const subGroups: Array<{ pairKey: string; label: string | null; positions: PortfolioPosition[] }> = [];
+                const byPair = new Map<string, { label: string | null; positions: PortfolioPosition[] }>();
+                for (const row of rows) {
+                  const pair = group.virtualPairs.get(row.id);
+                  const pairKey = pair?.pairKey ?? `solo-${row.id}`;
+                  let entry = byPair.get(pairKey);
+                  if (!entry) {
+                    entry = { label: pair?.label ?? null, positions: [] };
+                    byPair.set(pairKey, entry);
+                    subGroups.push({ pairKey, label: entry.label, positions: entry.positions });
+                  }
+                  entry.positions.push(row);
+                }
+
                 return (
                   <div key={category} data-category={category}>
                     <button
@@ -157,12 +174,24 @@ export default function PortfolioByStructure({
                     </button>
                     {!isCollapsed && (
                       <div id={`group-${ticker}-${category}`}>
-                        <PositionTable
-                          positions={rows}
-                          showUnderlying={true}
-                          prices={prices}
-                          readonly={readonly}
-                        />
+                        {subGroups.map((sg) => (
+                          <div key={sg.pairKey} data-pair-key={sg.pairKey}>
+                            {sg.label ? (
+                              <div
+                                className="cell-muted"
+                                style={{ fontSize: "11px", padding: "6px 0 2px 18px", letterSpacing: "0.02em" }}
+                              >
+                                {sg.label}
+                              </div>
+                            ) : null}
+                            <PositionTable
+                              positions={sg.positions}
+                              showUnderlying={true}
+                              prices={prices}
+                              readonly={readonly}
+                            />
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>

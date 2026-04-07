@@ -279,6 +279,45 @@ describe("buildTickerGroups — virtual combo detection (orphan single legs)", (
     const cats = groups[0].optionsByCategory;
     expect(cats.get("vertical")?.length).toBe(2);
     expect(cats.has("single")).toBe(false);
+    // Both legs share a pair key + label
+    const verticals = cats.get("vertical")!;
+    const pair0 = groups[0].virtualPairs.get(verticals[0].id);
+    const pair1 = groups[0].virtualPairs.get(verticals[1].id);
+    expect(pair0?.pairKey).toBeTruthy();
+    expect(pair0?.pairKey).toBe(pair1?.pairKey);
+    // Long 170, Short 175 → Bull Put Spread
+    expect(pair0?.label).toMatch(/Bull Put Spread/);
+    expect(pair0?.label).toContain("$170");
+    expect(pair0?.label).toContain("$175");
+  });
+
+  it("two TSLA Put spreads at same expiry → two distinct pair keys (tight-strike matching)", () => {
+    // Simulates two Bull Put Spreads at the same expiry. Pair-by-strike
+    // ensures we don't cross legs of different spreads.
+    const positions = [
+      mkSingle("TSLA", { type: "Put", dir: "LONG", strike: 340 }),
+      mkSingle("TSLA", { type: "Put", dir: "LONG", strike: 360 }),
+      mkSingle("TSLA", { type: "Put", dir: "SHORT", strike: 350 }),
+      mkSingle("TSLA", { type: "Put", dir: "SHORT", strike: 370 }),
+    ];
+    const groups = buildTickerGroups(positions, {});
+    const verticals = groups[0].optionsByCategory.get("vertical")!;
+    expect(verticals.length).toBe(4);
+    // Collect pair keys
+    const pairs = new Set<string>();
+    for (const v of verticals) {
+      const pk = groups[0].virtualPairs.get(v.id)?.pairKey;
+      if (pk) pairs.add(pk);
+    }
+    expect(pairs.size).toBe(2);
+    // Tight matching: L340+S350 and L360+S370 (sorted by strike)
+    const pairLabels = new Set<string>();
+    for (const v of verticals) {
+      const label = groups[0].virtualPairs.get(v.id)?.label;
+      if (label) pairLabels.add(label);
+    }
+    expect(Array.from(pairLabels).some((l) => l.includes("$340") && l.includes("$350"))).toBe(true);
+    expect(Array.from(pairLabels).some((l) => l.includes("$360") && l.includes("$370"))).toBe(true);
   });
 
   it("Bull Call Spread via separate legs: Long Call + Short Call same expiry → vertical", () => {

@@ -35,10 +35,24 @@ import {
   type CategoryKey,
 } from "@/lib/structureCatalog";
 
+export type VirtualPair = {
+  /** Stable identifier shared by every member position of the pair. */
+  pairKey: string;
+  /** Human-readable label, e.g. "Bull Put Spread $340/$350 · 2026-06-18". */
+  label: string;
+};
+
 export type TickerGroup = {
   ticker: string;
   stock: PortfolioPosition | null;
   optionsByCategory: Map<CategoryKey, PortfolioPosition[]>;
+  /**
+   * For positions that were reclassified by virtual-combo detection, maps
+   * position.id → pair metadata. Positions not in this map were either
+   * real pre-classified combos (e.g. IB-grouped Bull Call Spread) or
+   * unpaired single legs.
+   */
+  virtualPairs: Map<number, VirtualPair>;
   agg: {
     mv: number | null;
     entryCost: number;
@@ -80,8 +94,38 @@ type Bucket = {
  * Returns a map from `position.id` to the override category. Positions not
  * in the map fall through to the normal `getStructureCategory` lookup.
  */
-function detectVirtualCombos(options: PortfolioPosition[]): Map<number, CategoryKey> {
-  const overrides = new Map<number, CategoryKey>();
+type ComboDetection = {
+  category: CategoryKey;
+  pair: VirtualPair;
+};
+
+function fmtStrike(n: number | null): string {
+  if (n == null) return "?";
+  return `$${n.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+}
+
+function verticalLabel(
+  type: "Call" | "Put",
+  longStrike: number | null,
+  shortStrike: number | null,
+  expiry: string,
+): string {
+  const ls = longStrike ?? 0;
+  const ss = shortStrike ?? 0;
+  let name: string;
+  if (type === "Put") {
+    name = ls < ss ? "Bull Put Spread" : "Bear Put Spread";
+  } else {
+    name = ls < ss ? "Bull Call Spread" : "Bear Call Spread";
+  }
+  const lo = Math.min(ls, ss);
+  const hi = Math.max(ls, ss);
+  return `${name} ${fmtStrike(lo)}/${fmtStrike(hi)} · ${expiry}`;
+}
+
+function detectVirtualCombos(options: PortfolioPosition[]): Map<number, ComboDetection> {
+  const overrides = new Map<number, ComboDetection>();
+  let pairSeq = 0;
   // Only single-leg option positions are candidates for virtual pairing.
   const candidates = options.filter((p) => {
     if (p.legs.length !== 1) return false;
@@ -96,24 +140,39 @@ function detectVirtualCombos(options: PortfolioPosition[]): Map<number, Category
     byExpiry.set(p.expiry, arr);
   }
 
-  const markPair = (a: PortfolioPosition, b: PortfolioPosition, category: CategoryKey) => {
-    overrides.set(a.id, category);
-    overrides.set(b.id, category);
+  const markPair = (
+    a: PortfolioPosition,
+    b: PortfolioPosition,
+    category: CategoryKey,
+    label: string,
+  ) => {
+    const pairKey = `vp-${++pairSeq}`;
+    const pair: VirtualPair = { pairKey, label };
+    overrides.set(a.id, { category, pair });
+    overrides.set(b.id, { category, pair });
   };
 
-  for (const group of byExpiry.values()) {
+  for (const [expiry, group] of byExpiry.entries()) {
     const available = new Set(group.map((p) => p.id));
-    const byId = new Map(group.map((p) => [p.id, p] as const));
 
-    // Pass 1 — verticals (same type, opposite direction)
+    // Pass 1 — verticals (same type, opposite direction).
+    // Pair by nearest strike so multiple pairs at the same expiry form the
+    // tightest spreads (prevents crossing legs of different spreads).
     for (const type of ["Call", "Put"] as const) {
-      const longs = group.filter((p) => available.has(p.id) && p.legs[0].type === type && p.legs[0].direction === "LONG");
-      const shorts = group.filter((p) => available.has(p.id) && p.legs[0].type === type && p.legs[0].direction === "SHORT");
+      const longs = group
+        .filter((p) => available.has(p.id) && p.legs[0].type === type && p.legs[0].direction === "LONG")
+        .sort((a, b) => (a.legs[0].strike ?? 0) - (b.legs[0].strike ?? 0));
+      const shorts = group
+        .filter((p) => available.has(p.id) && p.legs[0].type === type && p.legs[0].direction === "SHORT")
+        .sort((a, b) => (a.legs[0].strike ?? 0) - (b.legs[0].strike ?? 0));
       const n = Math.min(longs.length, shorts.length);
       for (let i = 0; i < n; i++) {
-        markPair(longs[i], shorts[i], "vertical");
-        available.delete(longs[i].id);
-        available.delete(shorts[i].id);
+        const long = longs[i];
+        const short = shorts[i];
+        const label = verticalLabel(type, long.legs[0].strike, short.legs[0].strike, expiry);
+        markPair(long, short, "vertical", label);
+        available.delete(long.id);
+        available.delete(short.id);
       }
     }
 
@@ -125,32 +184,38 @@ function detectVirtualCombos(options: PortfolioPosition[]): Map<number, Category
       for (let i = 0; i < n; i++) {
         const c = calls[i];
         const p = puts[i];
-        const sameStrike = c.legs[0].strike != null && c.legs[0].strike === p.legs[0].strike;
-        markPair(c, p, sameStrike ? "straddle" : "strangle");
+        const cs = c.legs[0].strike;
+        const ps = p.legs[0].strike;
+        const sameStrike = cs != null && cs === ps;
+        const name = sameStrike
+          ? `${dir === "LONG" ? "Long" : "Short"} Straddle ${fmtStrike(cs)}`
+          : `${dir === "LONG" ? "Long" : "Short"} Strangle ${fmtStrike(Math.min(cs ?? 0, ps ?? 0))}/${fmtStrike(Math.max(cs ?? 0, ps ?? 0))}`;
+        markPair(c, p, sameStrike ? "straddle" : "strangle", `${name} · ${expiry}`);
         available.delete(c.id);
         available.delete(p.id);
       }
     }
 
-    // Pass 3 — synthetic / risk reversal (Long Call + Short Put, or Long Put + Short Call)
+    // Pass 3 — synthetic / risk reversal
+    const buildSynthetic = (longLeg: PortfolioPosition, shortLeg: PortfolioPosition) => {
+      const ls = longLeg.legs[0].strike;
+      const ss = shortLeg.legs[0].strike;
+      const base = ls != null && ls === ss ? "Synthetic" : "Risk Reversal";
+      const label = `${base} ${fmtStrike(ls)}/${fmtStrike(ss)} · ${expiry}`;
+      markPair(longLeg, shortLeg, "synthetic", label);
+      available.delete(longLeg.id);
+      available.delete(shortLeg.id);
+    };
+
     const longCalls = group.filter((p) => available.has(p.id) && p.legs[0].type === "Call" && p.legs[0].direction === "LONG");
     const shortPuts = group.filter((p) => available.has(p.id) && p.legs[0].type === "Put" && p.legs[0].direction === "SHORT");
     let n = Math.min(longCalls.length, shortPuts.length);
-    for (let i = 0; i < n; i++) {
-      markPair(longCalls[i], shortPuts[i], "synthetic");
-      available.delete(longCalls[i].id);
-      available.delete(shortPuts[i].id);
-    }
+    for (let i = 0; i < n; i++) buildSynthetic(longCalls[i], shortPuts[i]);
+
     const longPuts = group.filter((p) => available.has(p.id) && p.legs[0].type === "Put" && p.legs[0].direction === "LONG");
     const shortCalls = group.filter((p) => available.has(p.id) && p.legs[0].type === "Call" && p.legs[0].direction === "SHORT");
     n = Math.min(longPuts.length, shortCalls.length);
-    for (let i = 0; i < n; i++) {
-      markPair(longPuts[i], shortCalls[i], "synthetic");
-      available.delete(longPuts[i].id);
-      available.delete(shortCalls[i].id);
-    }
-
-    void byId;
+    for (let i = 0; i < n; i++) buildSynthetic(longPuts[i], shortCalls[i]);
   }
 
   return overrides;
@@ -206,12 +271,16 @@ export function buildTickerGroups(
     // Virtual-combo detection: pair orphan single-leg options that IB left
     // as separate positions (e.g. Long Put + Short Put same expiry → vertical).
     const combos = detectVirtualCombos(b.options);
+    const virtualPairs = new Map<number, VirtualPair>();
+    for (const [posId, detection] of combos.entries()) {
+      virtualPairs.set(posId, detection.pair);
+    }
 
     // Sub-group options by category, preserving CATEGORY_ORDER
     const byCategory = new Map<CategoryKey, PortfolioPosition[]>();
     for (const pos of b.options) {
       const override = combos.get(pos.id);
-      const category = override ?? getStructureCategory(resolveStructureKey(pos));
+      const category = override?.category ?? getStructureCategory(resolveStructureKey(pos));
       let list = byCategory.get(category);
       if (!list) {
         list = [];
@@ -273,6 +342,7 @@ export function buildTickerGroups(
       ticker: b.ticker,
       stock: b.stock,
       optionsByCategory: orderedByCategory,
+      virtualPairs,
       agg: { mv, entryCost, dayPnl, totalPnl, totalPnlPct, netDelta },
       last,
       dayChgPct,
