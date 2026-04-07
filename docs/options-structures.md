@@ -219,4 +219,25 @@ const structures = result.data as OptionsStructure[];
 
 ---
 
+## Position Structure Classification (`ib_sync.py`)
+
+`detect_structure_type()`:
+
+| Structure | Risk Profile |
+|-----------|-------------|
+| Stock | `equity` |
+| Long Call/Put | `defined` |
+| Short Call/Put | `undefined` |
+| Bull/Bear Spread | `defined` |
+| Synthetic Long/Short | `undefined` |
+| Risk Reversal | `undefined` |
+| Straddle/Strangle (both long) | `defined` |
+| Covered Call | `defined` |
+| **All-long combo** (no shorts, no stock) | **`defined`** |
+| Unrecognized | `complex` → routed to Undefined Risk table |
+
+Tests: `test_covered_call_detection.py` (7), `test_all_long_combo.py` (8), `complex-risk-profile.test.ts` (5).
+
+---
+
 _Generated 2026-03-18 · 58 structures · Xenon Gate 4 — No Naked Shorts_
