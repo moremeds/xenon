@@ -126,12 +126,24 @@ function verticalLabel(
 function detectVirtualCombos(options: PortfolioPosition[]): Map<number, ComboDetection> {
   const overrides = new Map<number, ComboDetection>();
   let pairSeq = 0;
-  // Only single-leg option positions are candidates for virtual pairing.
+  // Only single-leg option positions with a resolvable strike are candidates.
+  // Null strikes would produce "$0" labels and should never be paired.
   const candidates = options.filter((p) => {
     if (p.legs.length !== 1) return false;
-    const t = p.legs[0].type;
-    return t === "Call" || t === "Put";
+    const leg = p.legs[0];
+    if (leg.type !== "Call" && leg.type !== "Put") return false;
+    if (leg.strike == null) return false;
+    return true;
   });
+
+  const byStrike = (a: PortfolioPosition, b: PortfolioPosition) =>
+    (a.legs[0].strike ?? 0) - (b.legs[0].strike ?? 0);
+
+  /** Contract counts must match exactly for a clean pair — otherwise the
+   *  leftover contracts of the larger side would be silently hidden inside a
+   *  virtual combo that doesn't represent their true risk. */
+  const contractsEqual = (a: PortfolioPosition, b: PortfolioPosition) =>
+    a.legs[0].contracts === b.legs[0].contracts;
   // Group by expiry (ticker is already fixed at this point).
   const byExpiry = new Map<string, PortfolioPosition[]>();
   for (const p of candidates) {
@@ -152,70 +164,101 @@ function detectVirtualCombos(options: PortfolioPosition[]): Map<number, ComboDet
     overrides.set(b.id, { category, pair });
   };
 
+  /**
+   * Try to match elements of `sideA` against `sideB` in ascending-strike order.
+   * Each match requires both sides to still be available AND contract counts
+   * to match exactly. Leftovers stay in `available` for the next pass.
+   */
+  const pairSorted = (
+    group: PortfolioPosition[],
+    available: Set<number>,
+    sideAFilter: (p: PortfolioPosition) => boolean,
+    sideBFilter: (p: PortfolioPosition) => boolean,
+    onMatch: (a: PortfolioPosition, b: PortfolioPosition) => void,
+  ) => {
+    const sideA = group.filter((p) => available.has(p.id) && sideAFilter(p)).sort(byStrike);
+    const sideB = group.filter((p) => available.has(p.id) && sideBFilter(p)).sort(byStrike);
+    let i = 0;
+    let j = 0;
+    while (i < sideA.length && j < sideB.length) {
+      const a = sideA[i];
+      const b = sideB[j];
+      if (!available.has(a.id)) { i++; continue; }
+      if (!available.has(b.id)) { j++; continue; }
+      if (!contractsEqual(a, b)) {
+        // Skip the smaller side so the larger one can try the next partner.
+        if (a.legs[0].contracts < b.legs[0].contracts) i++;
+        else j++;
+        continue;
+      }
+      onMatch(a, b);
+      available.delete(a.id);
+      available.delete(b.id);
+      i++;
+      j++;
+    }
+  };
+
   for (const [expiry, group] of byExpiry.entries()) {
     const available = new Set(group.map((p) => p.id));
 
-    // Pass 1 — verticals (same type, opposite direction).
-    // Pair by nearest strike so multiple pairs at the same expiry form the
-    // tightest spreads (prevents crossing legs of different spreads).
+    // Pass 1 — verticals (same type, opposite direction, strike-sorted).
     for (const type of ["Call", "Put"] as const) {
-      const longs = group
-        .filter((p) => available.has(p.id) && p.legs[0].type === type && p.legs[0].direction === "LONG")
-        .sort((a, b) => (a.legs[0].strike ?? 0) - (b.legs[0].strike ?? 0));
-      const shorts = group
-        .filter((p) => available.has(p.id) && p.legs[0].type === type && p.legs[0].direction === "SHORT")
-        .sort((a, b) => (a.legs[0].strike ?? 0) - (b.legs[0].strike ?? 0));
-      const n = Math.min(longs.length, shorts.length);
-      for (let i = 0; i < n; i++) {
-        const long = longs[i];
-        const short = shorts[i];
-        const label = verticalLabel(type, long.legs[0].strike, short.legs[0].strike, expiry);
-        markPair(long, short, "vertical", label);
-        available.delete(long.id);
-        available.delete(short.id);
-      }
+      pairSorted(
+        group,
+        available,
+        (p) => p.legs[0].type === type && p.legs[0].direction === "LONG",
+        (p) => p.legs[0].type === type && p.legs[0].direction === "SHORT",
+        (long, short) => {
+          const label = verticalLabel(type, long.legs[0].strike, short.legs[0].strike, expiry);
+          markPair(long, short, "vertical", label);
+        },
+      );
     }
 
-    // Pass 2 — straddle / strangle (same direction, opposite type)
+    // Pass 2 — straddle / strangle (same direction, opposite type, strike-sorted).
     for (const dir of ["LONG", "SHORT"] as const) {
-      const calls = group.filter((p) => available.has(p.id) && p.legs[0].type === "Call" && p.legs[0].direction === dir);
-      const puts = group.filter((p) => available.has(p.id) && p.legs[0].type === "Put" && p.legs[0].direction === dir);
-      const n = Math.min(calls.length, puts.length);
-      for (let i = 0; i < n; i++) {
-        const c = calls[i];
-        const p = puts[i];
-        const cs = c.legs[0].strike;
-        const ps = p.legs[0].strike;
-        const sameStrike = cs != null && cs === ps;
-        const name = sameStrike
-          ? `${dir === "LONG" ? "Long" : "Short"} Straddle ${fmtStrike(cs)}`
-          : `${dir === "LONG" ? "Long" : "Short"} Strangle ${fmtStrike(Math.min(cs ?? 0, ps ?? 0))}/${fmtStrike(Math.max(cs ?? 0, ps ?? 0))}`;
-        markPair(c, p, sameStrike ? "straddle" : "strangle", `${name} · ${expiry}`);
-        available.delete(c.id);
-        available.delete(p.id);
-      }
+      pairSorted(
+        group,
+        available,
+        (p) => p.legs[0].type === "Call" && p.legs[0].direction === dir,
+        (p) => p.legs[0].type === "Put" && p.legs[0].direction === dir,
+        (c, p) => {
+          const cs = c.legs[0].strike;
+          const ps = p.legs[0].strike;
+          const sameStrike = cs === ps;
+          const lo = Math.min(cs ?? 0, ps ?? 0);
+          const hi = Math.max(cs ?? 0, ps ?? 0);
+          const name = sameStrike
+            ? `${dir === "LONG" ? "Long" : "Short"} Straddle ${fmtStrike(cs)}`
+            : `${dir === "LONG" ? "Long" : "Short"} Strangle ${fmtStrike(lo)}/${fmtStrike(hi)}`;
+          markPair(c, p, sameStrike ? "straddle" : "strangle", `${name} · ${expiry}`);
+        },
+      );
     }
 
-    // Pass 3 — synthetic / risk reversal
+    // Pass 3 — synthetic / risk reversal (strike-sorted)
     const buildSynthetic = (longLeg: PortfolioPosition, shortLeg: PortfolioPosition) => {
       const ls = longLeg.legs[0].strike;
       const ss = shortLeg.legs[0].strike;
-      const base = ls != null && ls === ss ? "Synthetic" : "Risk Reversal";
+      const base = ls === ss ? "Synthetic" : "Risk Reversal";
       const label = `${base} ${fmtStrike(ls)}/${fmtStrike(ss)} · ${expiry}`;
       markPair(longLeg, shortLeg, "synthetic", label);
-      available.delete(longLeg.id);
-      available.delete(shortLeg.id);
     };
-
-    const longCalls = group.filter((p) => available.has(p.id) && p.legs[0].type === "Call" && p.legs[0].direction === "LONG");
-    const shortPuts = group.filter((p) => available.has(p.id) && p.legs[0].type === "Put" && p.legs[0].direction === "SHORT");
-    let n = Math.min(longCalls.length, shortPuts.length);
-    for (let i = 0; i < n; i++) buildSynthetic(longCalls[i], shortPuts[i]);
-
-    const longPuts = group.filter((p) => available.has(p.id) && p.legs[0].type === "Put" && p.legs[0].direction === "LONG");
-    const shortCalls = group.filter((p) => available.has(p.id) && p.legs[0].type === "Call" && p.legs[0].direction === "SHORT");
-    n = Math.min(longPuts.length, shortCalls.length);
-    for (let i = 0; i < n; i++) buildSynthetic(longPuts[i], shortCalls[i]);
+    pairSorted(
+      group,
+      available,
+      (p) => p.legs[0].type === "Call" && p.legs[0].direction === "LONG",
+      (p) => p.legs[0].type === "Put" && p.legs[0].direction === "SHORT",
+      buildSynthetic,
+    );
+    pairSorted(
+      group,
+      available,
+      (p) => p.legs[0].type === "Put" && p.legs[0].direction === "LONG",
+      (p) => p.legs[0].type === "Call" && p.legs[0].direction === "SHORT",
+      buildSynthetic,
+    );
   }
 
   return overrides;
@@ -313,21 +356,33 @@ export function buildTickerGroups(
     const mv = sumOrNull(mvs);
     const totalPnl = sumOrNull(pnls);
     const dayPnl = sumOrNull(dayPnls);
+
+    // Total entry cost across ALL positions (the bankroll side of %).
     const entryCost = allPositions.reduce((s, p) => s + resolveEntryCost(p), 0);
+
+    // Per Codex review: the % denominator must match the numerator's cohort.
+    // If any P&L was null-skipped, the full entry cost would overstate the
+    // denominator → null the percentage instead of publishing a wrong number.
+    const pnlSubsetResolved = pnls.every((v) => v != null);
     const totalPnlPct =
-      totalPnl != null && entryCost !== 0
+      totalPnl != null && pnlSubsetResolved && entryCost !== 0
         ? (totalPnl / Math.abs(entryCost)) * 100
         : null;
 
-    // Net delta: only null iff every contributor came back { known: false }
+    // Net delta: null iff EITHER every contributor was unknown OR any
+    // contributor was unknown (partial sums mislead traders into thinking
+    // the header is precise). Strict policy per Codex review — if any leg
+    // is partial the whole header is `—`.
     let netDeltaSum = 0;
     let anyKnown = false;
+    let allKnown = true;
     for (const p of allPositions) {
       const { signed, known } = positionDeltaForHeader(p, prices);
       if (signed != null) netDeltaSum += signed;
       if (known) anyKnown = true;
+      else allKnown = false;
     }
-    const netDelta = anyKnown ? netDeltaSum : null;
+    const netDelta = anyKnown && allKnown ? netDeltaSum : null;
 
     // Underlying spot + day chg%
     const underlyingLast = prices?.[b.ticker]?.last ?? null;
