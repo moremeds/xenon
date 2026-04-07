@@ -33,7 +33,7 @@ def run_analysis(
         client = UWClient()
 
     try:
-        td = fetch_ticker_data(ticker, client)
+        td = fetch_ticker_data(ticker, client, deep=True)
         vrp = build_vrp_state(td)
         regime = classify_regime(td, vrp)
         scores = score_buckets(td, vrp, regime, mode="fast" if fast else "full")

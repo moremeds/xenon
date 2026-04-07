@@ -12,6 +12,11 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 from scripts.analysis.models import TickerData
+from scripts.analysis.gex import (
+    extract_call_wall,
+    extract_put_wall,
+    compute_gamma_per_1pct,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +71,133 @@ def _parse_next_earnings(raw: dict) -> tuple[Optional[date], bool]:
     return next_date, (next_date - today) <= timedelta(days=14)
 
 
-def fetch_ticker_data(ticker: str, client) -> TickerData:
+def _deep_enrichment(ticker: str, client, *, gex_strikes: list, fallback_price: Optional[float]) -> dict:
+    """Run the 6 deep-mode enrichment endpoints + 3 in-process GEX computations.
+
+    Each endpoint is wrapped in its own try/except so any single failure
+    degrades just that field. Shapes verified by probe on 2026-04-08 — see
+    docs/superpowers/plans/notes/2026-04-08-stock-state-probe.md.
+    """
+    out: dict = {}
+
+    # 1. Live price + sector ──────────────────────────────────────────────
+    price = fallback_price
+    try:
+        state = (client.get_stock_state(ticker) or {}).get("data") or {}
+        if state.get("close") is not None:
+            price = _to_float(state.get("close"))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("stock_state failed for %s: %s", ticker, exc)
+    out["price"] = price
+
+    try:
+        info = (client.get_stock_info(ticker) or {}).get("data") or {}
+        out["sector"] = info.get("sector") or info.get("gics_sector")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("stock_info failed for %s: %s", ticker, exc)
+
+    # 2. Options volume → net_call_premium / net_put_premium ─────────────
+    try:
+        ov = client.get_options_volume(ticker) or {}
+        rows = ov.get("data") if isinstance(ov, dict) else None
+        if isinstance(rows, list) and rows:
+            latest = rows[-1] if isinstance(rows[-1], dict) else rows[0]
+            out["net_call_premium"] = _to_float(latest.get("net_call_premium"))
+            out["net_put_premium"] = _to_float(latest.get("net_put_premium"))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("options_volume failed for %s: %s", ticker, exc)
+
+    # 3. Net premium ticks → augments net_premium dict ───────────────────
+    try:
+        npt = client.get_net_prem_ticks(ticker) or {}
+        ticks = npt.get("data") if isinstance(npt, dict) else None
+        if isinstance(ticks, list) and ticks:
+            agg_call = sum(
+                (_to_float(t.get("net_call_premium")) or 0.0) for t in ticks if isinstance(t, dict)
+            )
+            agg_put = sum(
+                (_to_float(t.get("net_put_premium")) or 0.0) for t in ticks if isinstance(t, dict)
+            )
+            out["net_premium_dict"] = {
+                "net_call_premium": agg_call,
+                "net_put_premium": agg_put,
+                "net_total_premium": agg_call + agg_put,
+                "tick_count": len(ticks),
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("net_prem_ticks failed for %s: %s", ticker, exc)
+
+    # 4. Short volume ratio (note: payload key is "si", not "data") ──────
+    try:
+        sv = client.get_short_volume_ratio(ticker) or {}
+        series = sv.get("si") if isinstance(sv, dict) else None
+        if isinstance(series, list) and series:
+            # Sort newest-first by market_date for deterministic trend
+            sorted_rows = sorted(
+                (r for r in series if isinstance(r, dict) and r.get("market_date")),
+                key=lambda r: r["market_date"],
+                reverse=True,
+            )
+            if sorted_rows:
+                latest_ratio = _to_float(sorted_rows[0].get("short_volume_ratio"))
+                out["short_volume_ratio"] = latest_ratio
+                trend: list[float] = []
+                for r in sorted_rows[:3]:
+                    v = _to_float(r.get("short_volume_ratio"))
+                    if v is not None:
+                        trend.append(v)
+                if trend:
+                    out["short_volume_trend"] = trend
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("short_volume_ratio failed for %s: %s", ticker, exc)
+
+    # 5. IV rank series → latest iv_rank + 52w IV lo/hi (RV not exposed) ─
+    try:
+        ivr = client.get_iv_rank(ticker) or {}
+        series = ivr.get("data") if isinstance(ivr, dict) else None
+        if isinstance(series, list) and series:
+            latest = series[-1] if isinstance(series[-1], dict) else None
+            if latest:
+                out["iv_rank"] = _to_float(latest.get("iv_rank_1y"))
+            iv_vals = [
+                _to_float(r.get("volatility"))
+                for r in series
+                if isinstance(r, dict)
+            ]
+            iv_vals = [v for v in iv_vals if v is not None]
+            if iv_vals:
+                out["iv_52w_low"] = round(min(iv_vals) * 100.0, 4)
+                out["iv_52w_high"] = round(max(iv_vals) * 100.0, 4)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("iv_rank failed for %s: %s", ticker, exc)
+
+    # 6. In-process GEX wall + intensity (no extra HTTP) ─────────────────
+    if gex_strikes:
+        cw = extract_call_wall(gex_strikes)
+        if cw:
+            out["call_wall_strike"] = cw["strike"]
+            out["call_wall_gamma"] = cw["gamma"]
+        pw = extract_put_wall(gex_strikes)
+        if pw:
+            out["put_wall_strike"] = pw["strike"]
+            out["put_wall_gamma"] = pw["gamma"]
+        gp = compute_gamma_per_1pct(gex_strikes, price)
+        if gp is not None:
+            out["gamma_per_1pct"] = gp
+
+    return out
+
+
+def fetch_ticker_data(ticker: str, client, *, deep: bool = False) -> TickerData:
     """Fetch all per-ticker inputs and return a TickerData.
 
     Silent degradation: any individual endpoint failure leaves that field None.
+
+    Args:
+        deep: When True, also fetch the 6 enrichment endpoints used by
+            ``run_analysis()``. Default False keeps the scan path lean —
+            ``uw_scan.py`` runs across the watchlist with a thread pool, so
+            adding 6 HTTP calls per ticker would significantly slow it down.
     """
     ticker = ticker.upper()
     fetched_at = datetime.now()
@@ -202,6 +330,21 @@ def fetch_ticker_data(ticker: str, client) -> TickerData:
         if calls > 0:
             pcr = puts / calls
 
+    # Deep enrichment (only when explicitly requested) ────────────────────
+    enrich: dict = {}
+    if deep:
+        gex_strikes = []
+        if isinstance(gex_by_strike, dict):
+            raw_strikes = gex_by_strike.get("strikes")
+            if isinstance(raw_strikes, list):
+                gex_strikes = raw_strikes
+        enrich = _deep_enrichment(
+            ticker, client, gex_strikes=gex_strikes, fallback_price=price
+        )
+        # Authoritative live price wins over GEX-derived fallback
+        if enrich.get("price") is not None:
+            price = enrich["price"]
+
     return TickerData(
         ticker=ticker,
         price=price,
@@ -215,11 +358,26 @@ def fetch_ticker_data(ticker: str, client) -> TickerData:
         rr_skew_25d=rr_skew_25d,
         vrp_history=vrp_history,
         flow_alerts=flow_alerts,
-        net_premium=None,
+        net_premium=enrich.get("net_premium_dict"),
         pcr=pcr,
         darkpool=darkpool,
         oi_changes=oi_changes,
         short_interest=short_interest,
         earnings_date=earnings_date,
         earnings_within_14d=earnings_within_14d,
+        iv_rank=enrich.get("iv_rank"),
+        iv_52w_low=enrich.get("iv_52w_low"),
+        iv_52w_high=enrich.get("iv_52w_high"),
+        rv_52w_low=enrich.get("rv_52w_low"),
+        rv_52w_high=enrich.get("rv_52w_high"),
+        net_call_premium=enrich.get("net_call_premium"),
+        net_put_premium=enrich.get("net_put_premium"),
+        short_volume_ratio=enrich.get("short_volume_ratio"),
+        short_volume_trend=enrich.get("short_volume_trend"),
+        call_wall_strike=enrich.get("call_wall_strike"),
+        call_wall_gamma=enrich.get("call_wall_gamma"),
+        put_wall_strike=enrich.get("put_wall_strike"),
+        put_wall_gamma=enrich.get("put_wall_gamma"),
+        gamma_per_1pct=enrich.get("gamma_per_1pct"),
+        sector=enrich.get("sector"),
     )

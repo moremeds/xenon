@@ -84,3 +84,131 @@ def test_pcr_none_when_no_calls():
     c = _make_mock_client(flow_alerts=[{"option_type": "put"}])
     td = fetch_ticker_data("TSLA", c)
     assert td.pcr is None
+
+
+# ════════════════════════════════════════════════════════════════════
+# Deep mode (commit 3) — payload normalization for 6 enrichment endpoints
+# ════════════════════════════════════════════════════════════════════
+
+
+def _deep_mock_client():
+    c = MagicMock()
+    c.get_volatility_stats.return_value = {}
+    c.get_volatility_term_structure.return_value = {}
+    c.get_greek_exposure.return_value = {}
+    c.get_greek_exposure_by_strike.return_value = {
+        "strikes": [
+            {"strike": 99, "gamma": -1.5},
+            {"strike": 100, "gamma": 2.0},
+            {"strike": 101, "gamma": 1.0},
+        ]
+    }
+    c.get_flow_alerts.return_value = {"data": []}
+    c.get_darkpool_flow.return_value = {}
+    c.get_earnings_by_ticker.return_value = {"data": []}
+    c.get_short_data.return_value = {}
+    c.get_historical_risk_reversal_skew.return_value = {"data": []}
+    # 6 deep endpoints
+    c.get_stock_state.return_value = {"data": {"close": "100.5"}}
+    c.get_stock_info.return_value = {"data": {"sector": "Technology"}}
+    c.get_options_volume.return_value = {
+        "data": [{"net_call_premium": "5000.0", "net_put_premium": "-2000.0"}]
+    }
+    c.get_net_prem_ticks.return_value = {
+        "data": [
+            {"net_call_premium": "100", "net_put_premium": "-50"},
+            {"net_call_premium": "200", "net_put_premium": "30"},
+        ]
+    }
+    c.get_short_volume_ratio.return_value = {
+        "si": [
+            {"market_date": "2026-04-07", "short_volume_ratio": "0.55"},
+            {"market_date": "2026-04-06", "short_volume_ratio": "0.50"},
+            {"market_date": "2026-04-05", "short_volume_ratio": "0.48"},
+            {"market_date": "2026-04-04", "short_volume_ratio": "0.45"},
+        ]
+    }
+    c.get_iv_rank.return_value = {
+        "data": [
+            {"iv_rank_1y": "30.0", "volatility": "0.20"},
+            {"iv_rank_1y": "45.0", "volatility": "0.25"},
+            {"iv_rank_1y": "60.0", "volatility": "0.18"},
+        ]
+    }
+    return c
+
+
+def test_deep_false_does_not_call_enrichment_endpoints():
+    """Scan-path performance regression — default mode must skip the 6 calls."""
+    c = _deep_mock_client()
+    fetch_ticker_data("TSLA", c, deep=False)
+    c.get_stock_state.assert_not_called()
+    c.get_stock_info.assert_not_called()
+    c.get_options_volume.assert_not_called()
+    c.get_net_prem_ticks.assert_not_called()
+    c.get_short_volume_ratio.assert_not_called()
+    c.get_iv_rank.assert_not_called()
+
+
+def test_deep_true_populates_price_and_sector_from_stock_state_and_info():
+    c = _deep_mock_client()
+    td = fetch_ticker_data("TSLA", c, deep=True)
+    assert td.price == 100.5
+    assert td.sector == "Technology"
+
+
+def test_deep_true_populates_options_volume_net_premiums():
+    c = _deep_mock_client()
+    td = fetch_ticker_data("TSLA", c, deep=True)
+    assert td.net_call_premium == 5000.0
+    assert td.net_put_premium == -2000.0
+
+
+def test_deep_true_aggregates_net_prem_ticks_into_dict():
+    c = _deep_mock_client()
+    td = fetch_ticker_data("TSLA", c, deep=True)
+    assert td.net_premium is not None
+    assert td.net_premium["net_call_premium"] == 300.0  # 100 + 200
+    assert td.net_premium["net_put_premium"] == -20.0   # -50 + 30
+    assert td.net_premium["tick_count"] == 2
+
+
+def test_deep_true_short_volume_ratio_and_3day_trend():
+    c = _deep_mock_client()
+    td = fetch_ticker_data("TSLA", c, deep=True)
+    assert td.short_volume_ratio == 0.55  # newest by market_date
+    assert td.short_volume_trend == [0.55, 0.50, 0.48]  # last 3, newest first
+
+
+def test_deep_true_iv_rank_and_52w_iv_range():
+    c = _deep_mock_client()
+    td = fetch_ticker_data("TSLA", c, deep=True)
+    assert td.iv_rank == 60.0   # latest entry's iv_rank_1y
+    assert td.iv_52w_low == 18.0  # min(0.18,0.20,0.25) * 100
+    assert td.iv_52w_high == 25.0
+
+
+def test_deep_true_extracts_walls_and_gamma_per_1pct_from_strikes():
+    c = _deep_mock_client()
+    td = fetch_ticker_data("TSLA", c, deep=True)
+    # call wall = top positive gamma → strike 100 (gamma 2.0)
+    assert td.call_wall_strike == 100.0
+    assert td.call_wall_gamma == 2.0
+    # put wall = top negative gamma → strike 99 (gamma -1.5)
+    assert td.put_wall_strike == 99.0
+    assert td.put_wall_gamma == -1.5
+    # gamma_per_1pct: at price 100.5 ±1% = [99.495, 101.505] → strikes 100, 101
+    # |2.0| + |1.0| = 3.0
+    assert td.gamma_per_1pct == 3.0
+
+
+def test_deep_true_endpoint_failure_degrades_only_that_field():
+    c = _deep_mock_client()
+    c.get_iv_rank.side_effect = RuntimeError("upstream 500")
+    td = fetch_ticker_data("TSLA", c, deep=True)
+    # iv_rank failed, but the rest still populated
+    assert td.iv_rank is None
+    assert td.iv_52w_low is None
+    assert td.price == 100.5
+    assert td.sector == "Technology"
+    assert td.short_volume_ratio == 0.55
