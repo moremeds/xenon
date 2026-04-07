@@ -31,6 +31,7 @@ import { useBlotter } from "@/lib/useBlotter";
 import { useSort, type SortDirection } from "@/lib/useSort";
 import { useTableFilter } from "@/lib/useTableFilter";
 import TableSearch from "./TableSearch";
+import PortfolioByStructure from "./PortfolioByStructure";
 import { fmtPrice, fmtUsd, legPriceKey } from "@/lib/positionUtils";
 import {
   buildOpenOrderDisplayRows,
@@ -918,6 +919,9 @@ function FlowSections({ activeAccount = "ib" }: { activeAccount?: "ib" | "futu" 
 
 /* ─── Portfolio sections ──────────────────────────────────── */
 
+type PortfolioViewMode = "risk" | "structure";
+const PORTFOLIO_VIEW_KEY = "xenon.portfolio.view";
+
 function PortfolioSections({ portfolio, prices, activeAccount = "ib" }: { portfolio: PortfolioData | null; prices?: Record<string, PriceData>; activeAccount?: "ib" | "futu" }) {
   const positions = portfolio?.positions ?? [];
   const definedPositions = positions.filter((p) => p.risk_profile === "defined");
@@ -928,30 +932,130 @@ function PortfolioSections({ portfolio, prices, activeAccount = "ib" }: { portfo
     (p: PortfolioPosition) => `${p.ticker} ${p.structure} ${p.direction} ${p.expiry}`,
     [],
   );
+  // All four filter hooks declared unconditionally (React rule-of-hooks).
   const definedFilter = useTableFilter(definedPositions, extractPositionSearchText);
   const undefinedFilter = useTableFilter(undefinedPositions, extractPositionSearchText);
   const equityFilter = useTableFilter(equityPositions, extractPositionSearchText);
+  const structureFilter = useTableFilter(positions, extractPositionSearchText);
+
+  // View mode hydration: null until we've read localStorage to avoid SSR flash.
+  const [viewMode, setViewMode] = useState<PortfolioViewMode | null>(null);
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(PORTFOLIO_VIEW_KEY);
+      setViewMode(stored === "risk" || stored === "structure" ? stored : "structure");
+    } catch {
+      setViewMode("structure");
+    }
+  }, []);
+
+  const updateMode = (m: PortfolioViewMode) => {
+    setViewMode(m);
+    try {
+      window.localStorage.setItem(PORTFOLIO_VIEW_KEY, m);
+    } catch {
+      // Safari private mode — ignore.
+    }
+  };
+
+  const toggleHeader = (
+    <div className="section" data-testid="portfolio-view-toggle">
+      <div className="section-header">
+        <div className="section-title">
+          <Circle size={14} />
+          Portfolio
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          {viewMode === "structure" && portfolio ? (
+            <TableSearch
+              query={structureFilter.query}
+              setQuery={structureFilter.setQuery}
+              placeholder="Filter positions..."
+              resultCount={structureFilter.filtered.length}
+              totalCount={positions.length}
+            />
+          ) : null}
+          <div role="tablist" aria-label="Portfolio view" style={{ display: "flex", gap: "4px" }}>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={viewMode === "structure"}
+              disabled={!portfolio}
+              className={`pill ${viewMode === "structure" ? "defined" : "neutral"}`}
+              onClick={() => updateMode("structure")}
+              data-testid="toggle-by-structure"
+            >
+              By Structure
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={viewMode === "risk"}
+              disabled={!portfolio}
+              className={`pill ${viewMode === "risk" ? "defined" : "neutral"}`}
+              onClick={() => updateMode("risk")}
+              data-testid="toggle-by-risk"
+            >
+              By Risk
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 
   if (!portfolio) {
     return (
-      <div className="section">
-        <div className="section-header">
-          <div className="section-title">
-            <Circle size={14} />
-            Portfolio
-            <InfoTooltip text={SECTION_TOOLTIPS["Defined Risk Positions"]} />
+      <>
+        {toggleHeader}
+        <div className="section">
+          <div className="section-header">
+            <div className="section-title">
+              <Circle size={14} />
+              Portfolio
+              <InfoTooltip text={SECTION_TOOLTIPS["Defined Risk Positions"]} />
+            </div>
+            <span className="pill neutral">LOADING</span>
           </div>
-          <span className="pill neutral">LOADING</span>
+          <div className="section-body">
+            <div className="alert-item">Waiting for portfolio data...</div>
+          </div>
         </div>
-        <div className="section-body">
-          <div className="alert-item">Waiting for portfolio data...</div>
+      </>
+    );
+  }
+
+  // Hydration pending — show neutral shell under the header.
+  if (viewMode === null) {
+    return (
+      <>
+        {toggleHeader}
+        <div className="section">
+          <div className="section-body">
+            <div className="alert-item">Loading view…</div>
+          </div>
         </div>
-      </div>
+      </>
+    );
+  }
+
+  if (viewMode === "structure") {
+    return (
+      <>
+        {toggleHeader}
+        <PortfolioByStructure
+          positions={structureFilter.filtered}
+          prices={prices}
+          activeAccount={activeAccount}
+          lastSync={portfolio.last_sync}
+        />
+      </>
     );
   }
 
   return (
     <>
+      {toggleHeader}
       {definedPositions.length > 0 && (
         <div className="section">
           <div className="section-header">
