@@ -71,25 +71,20 @@ def _parse_next_earnings(raw: dict) -> tuple[Optional[date], bool]:
     return next_date, (next_date - today) <= timedelta(days=14)
 
 
-def _deep_enrichment(ticker: str, client, *, gex_strikes: list, fallback_price: Optional[float]) -> dict:
-    """Run the 6 deep-mode enrichment endpoints + 3 in-process GEX computations.
+def _deep_enrichment(ticker: str, client, *, gex_strikes: list, price: Optional[float]) -> dict:
+    """Run the 5 deep-mode enrichment endpoints + 3 in-process GEX computations.
 
     Each endpoint is wrapped in its own try/except so any single failure
     degrades just that field. Shapes verified by probe on 2026-04-08 — see
     docs/superpowers/plans/notes/2026-04-08-stock-state-probe.md.
+
+    Note: price and flip are now computed by the main fetcher (always-on,
+    not deep-only). This function only does the 5 enrichment endpoints +
+    in-process wall/gamma helpers.
     """
     out: dict = {}
 
-    # 1. Live price + sector ──────────────────────────────────────────────
-    price = fallback_price
-    try:
-        state = (client.get_stock_state(ticker) or {}).get("data") or {}
-        if state.get("close") is not None:
-            price = _to_float(state.get("close"))
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("stock_state failed for %s: %s", ticker, exc)
-    out["price"] = price
-
+    # 1. Sector (price already fetched by main fetcher) ──────────────────
     try:
         info = (client.get_stock_info(ticker) or {}).get("data") or {}
         out["sector"] = info.get("sector") or info.get("gics_sector")
@@ -171,34 +166,25 @@ def _deep_enrichment(ticker: str, client, *, gex_strikes: list, fallback_price: 
     except Exception as exc:  # noqa: BLE001
         logger.debug("iv_rank failed for %s: %s", ticker, exc)
 
-    # 6. In-process GEX wall + intensity + flip (no extra HTTP) ─────────
+    # 6. In-process GEX walls + intensity (no extra HTTP) ───────────────
+    # Wrapped in try/except to honor the per-block isolation contract:
+    # a malformed strike row must degrade just these fields, not crash
+    # the whole fetcher.
     if gex_strikes:
-        cw = extract_call_wall(gex_strikes)
-        if cw:
-            out["call_wall_strike"] = cw["strike"]
-            out["call_wall_gamma"] = cw["gamma"]
-        pw = extract_put_wall(gex_strikes)
-        if pw:
-            out["put_wall_strike"] = pw["strike"]
-            out["put_wall_gamma"] = pw["gamma"]
-        gp = compute_gamma_per_1pct(gex_strikes, price)
-        if gp is not None:
-            out["gamma_per_1pct"] = gp
-        # Flip detection: filter to ±20% of authoritative price first.
-        # Far-OTM strikes have noisy gamma signs that produce a meaningless
-        # "first sign change at $4.75" for high-priced names like NVDA.
-        from scripts.analysis.gex import detect_flip_point
-        if price and price > 0:
-            band_lo, band_hi = price * 0.8, price * 1.2
-            flip_input = [
-                s for s in gex_strikes
-                if band_lo <= float(s.get("strike", 0)) <= band_hi
-            ]
-        else:
-            flip_input = gex_strikes
-        flip = detect_flip_point(flip_input)
-        if flip is not None:
-            out["gex_flip"] = flip
+        try:
+            cw = extract_call_wall(gex_strikes)
+            if cw:
+                out["call_wall_strike"] = cw["strike"]
+                out["call_wall_gamma"] = cw["gamma"]
+            pw = extract_put_wall(gex_strikes)
+            if pw:
+                out["put_wall_strike"] = pw["strike"]
+                out["put_wall_gamma"] = pw["gamma"]
+            gp = compute_gamma_per_1pct(gex_strikes, price)
+            if gp is not None:
+                out["gamma_per_1pct"] = gp
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("gex wall computation failed for %s: %s", ticker, exc)
 
     return out
 
@@ -244,12 +230,22 @@ def fetch_ticker_data(ticker: str, client, *, deep: bool = False) -> TickerData:
     except Exception as exc:  # noqa: BLE001
         logger.debug("term_structure failed for %s: %s", ticker, exc)
 
+    # Live price — fetched on EVERY call (deep or not), because td.price is
+    # foundational for the scan path: gex_pinning, wall scoring, and the
+    # flip-relative regime gate all skip when price is None.
+    price = None
+    try:
+        state = (client.get_stock_state(ticker) or {}).get("data") or {}
+        if state.get("close") is not None:
+            price = _to_float(state.get("close"))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("stock_state failed for %s: %s", ticker, exc)
+
     # GEX — both endpoints return {"data": [...rows...]} with separate
     # call/put gamma fields. Normalize into the shapes downstream code reads:
-    #   td.gex          = {"net": float, "flip": float, "price": float|None}
+    #   td.gex          = {"net": float, "flip": float, "raw": dict}
     #   td.gex_by_strike = {"strikes": [{"strike": float, "gamma": float}, ...]}
     gex = gex_by_strike = None
-    price = None
     try:
         gex_resp = client.get_greek_exposure(ticker) or {}
         rows = gex_resp.get("data") if isinstance(gex_resp, dict) else None
@@ -286,16 +282,29 @@ def fetch_ticker_data(ticker: str, client, *, deep: bool = False) -> TickerData:
                 normalized.append({"strike": strike, "gamma": cg + pg})
             if normalized:
                 gex_by_strike = {"strikes": normalized}
-                # Compute and stash flip into the gex envelope so the regime
-                # classifier can use it without re-importing detect_flip_point.
-                # Flip is computed later in _deep_enrichment once we have
-                # the authoritative live price (so we can filter to ±20%
-                # band and avoid noisy deep-OTM sign changes).
-                flip = None
-                if gex is None:
-                    gex = {}
-                if flip is not None:
-                    gex["flip"] = flip
+                # Compute flip on every fetch (deep or not). Filter to ±20%
+                # of price when known to avoid noisy deep-OTM sign changes
+                # on high-priced names like NVDA. Only patch into gex when
+                # gex was actually populated by the legacy endpoint — never
+                # create an empty {} envelope (it would make
+                # bucket_available("market_structure") return True with all
+                # zeros and silently consume 28 weight points).
+                from scripts.analysis.gex import detect_flip_point as _flip
+                if price and price > 0:
+                    band_lo, band_hi = price * 0.8, price * 1.2
+                    flip_input = [s for s in normalized if band_lo <= s["strike"] <= band_hi]
+                else:
+                    flip_input = normalized
+                flip_val = _flip(flip_input)
+                if flip_val is not None:
+                    # Flip alone is signal — create envelope if get_greek_exposure
+                    # failed but strikes succeeded. Never create an empty {}
+                    # with neither net nor flip (that would silently consume
+                    # the market_structure weight budget at score 0).
+                    if gex is None:
+                        gex = {"flip": flip_val}
+                    else:
+                        gex["flip"] = flip_val
     except Exception as exc:  # noqa: BLE001
         logger.debug("greek_exposure_by_strike failed for %s: %s", ticker, exc)
 
@@ -399,18 +408,8 @@ def fetch_ticker_data(ticker: str, client, *, deep: bool = False) -> TickerData:
             if isinstance(raw_strikes, list):
                 gex_strikes = raw_strikes
         enrich = _deep_enrichment(
-            ticker, client, gex_strikes=gex_strikes, fallback_price=price
+            ticker, client, gex_strikes=gex_strikes, price=price
         )
-        # Authoritative live price wins over GEX-derived fallback
-        if enrich.get("price") is not None:
-            price = enrich["price"]
-        # Patch flip into the gex envelope so the regime classifier can find it
-        if enrich.get("gex_flip") is not None:
-            if gex is None:
-                gex = {}
-            else:
-                gex = dict(gex)  # avoid mutating the dict we already constructed
-            gex["flip"] = enrich["gex_flip"]
 
     return TickerData(
         ticker=ticker,

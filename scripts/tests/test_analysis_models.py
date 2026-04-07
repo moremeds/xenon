@@ -65,6 +65,24 @@ def test_ticker_data_bucket_available_rules():
     assert td_empty.bucket_available("positioning") is False
 
 
+def test_bucket_available_flow_with_only_options_volume_fields():
+    """I1 regression — flow availability must reflect the fields _score_flow
+    actually reads. Pre-fix, only `net_premium` (the ticks dict) was checked,
+    so a successful options_volume fetch + failed ticks fetch silently
+    skipped the entire flow bucket."""
+    td = TickerData(
+        ticker="X", price=100.0, fetched_at=datetime.now(),
+        gex=None, gex_by_strike=None,
+        iv=None, rv=None, iv_percentile=None, term_structure=None,
+        rr_skew_25d=None, vrp_history=None,
+        flow_alerts=None, net_premium=None, pcr=None, darkpool=None,
+        oi_changes=None, short_interest=None,
+        earnings_date=None, earnings_within_14d=False,
+        net_call_premium=1000.0, net_put_premium=-500.0,
+    )
+    assert td.bucket_available("flow") is True
+
+
 def test_analysis_report_roundtrip():
     r = AnalysisReport(
         ticker="AAPL", price=180.0, fetched_at="2026-04-07T10:00:00",

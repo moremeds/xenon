@@ -52,6 +52,16 @@ def test_fast_mode_skips_flow_and_positioning():
     assert "positioning" in scores.skipped_buckets
 
 
+def test_fast_mode_grade_never_A_regardless_of_composite():
+    """M1 regression — the explicit fast-mode grade cap was deleted because
+    fast mode skips flow + positioning, leaving available_count <= 2, so
+    _grade() can never return A. Lock that contract here."""
+    td = _td(gex={"net": 1e9}, gex_by_strike={"strikes": []})
+    scores = score_buckets(td, _VRP, _REGIME, mode="fast")
+    assert scores.grade in ("B", "C")
+    assert scores.grade != "A"
+
+
 def test_fast_mode_caps_grade_at_b():
     td = _td(gex={"net": 1e9}, gex_by_strike={"strikes": []})
     scores = score_buckets(td, _VRP, _REGIME, mode="fast")

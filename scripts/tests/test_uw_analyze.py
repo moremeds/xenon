@@ -88,6 +88,17 @@ def test_setup_thesis_no_trade_when_regime_R2():
     assert thesis["structure_family"] == "no_trade_R2"
 
 
+def test_run_analysis_does_not_double_fetch_stock_info():
+    """I2 regression — fetch_ticker_data(deep=True) already calls get_stock_info
+    once for sector. run_analysis must not call it a second time. The full client
+    fixture also has SPY benchmark loading which should not call get_stock_info."""
+    client = _full_client()
+    run_analysis("TSLA", client=client)
+    # _deep_enrichment makes 1 call for the ticker; benchmark loader uses
+    # get_stock_state, not get_stock_info. So total should be exactly 1.
+    assert client.get_stock_info.call_count == 1
+
+
 def test_run_analysis_reads_sector_from_nested_data():
     """Regression: get_stock_info returns {"data": {"sector": ...}}, not flat."""
     client = _full_client()

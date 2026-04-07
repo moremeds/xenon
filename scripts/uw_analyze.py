@@ -105,14 +105,9 @@ def run_analysis(
         regime = classify_regime(td, vrp)
         scores = score_buckets(td, vrp, regime, mode="fast" if fast else "full")
 
-        ticker_sector: Optional[str] = None
-        try:
-            info = client.get_stock_info(td.ticker) or {}
-            data = info.get("data") or {}
-            ticker_sector = data.get("sector") or data.get("gics_sector")
-        except Exception:  # noqa: BLE001
-            ticker_sector = None
-        benchmark = load_benchmark_context(client, ticker_sector=ticker_sector)
+        # Sector is already populated by fetch_ticker_data(deep=True) via
+        # _deep_enrichment step 1 — no need to re-fetch get_stock_info.
+        benchmark = load_benchmark_context(client, ticker_sector=td.sector)
 
         data_freshness = {
             "gex": "live" if td.gex is not None else "unavailable",

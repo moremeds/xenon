@@ -122,7 +122,16 @@ class TickerData:
                 and self.term_structure is not None
             )
         if bucket == "flow":
-            return self.flow_alerts is not None or self.net_premium is not None
+            # Match the fields _score_flow actually reads. Pre-fix this only
+            # checked net_premium (the ticks-aggregated dict), but the scorer
+            # reads net_call_premium / net_put_premium from the SEPARATE
+            # get_options_volume endpoint — split brain on partial fetches.
+            return (
+                self.flow_alerts is not None
+                or self.net_premium is not None
+                or self.net_call_premium is not None
+                or self.net_put_premium is not None
+            )
         if bucket == "positioning":
             # v1 LIMITATION: positioning always unavailable — OI history and
             # short interest scoring are deferred. Bucket is always reweighted out.

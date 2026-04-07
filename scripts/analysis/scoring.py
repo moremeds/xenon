@@ -227,8 +227,8 @@ def score_buckets(
     available_count = sum(1 for name in BUCKET_WEIGHTS if name not in skipped)
     has_confluence = abs(composite) >= 40
     grade = _grade(available_count, has_confluence)
-    if mode == "fast" and grade == "A":
-        grade = "B"
+    # Fast mode skips flow + positioning so available_count is at most 2,
+    # which forces _grade() to return B or C — no explicit cap needed.
 
     return BucketScores(
         market_structure=raw["market_structure"],

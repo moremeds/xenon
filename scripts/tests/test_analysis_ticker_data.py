@@ -140,15 +140,61 @@ def _deep_mock_client():
 
 
 def test_deep_false_does_not_call_enrichment_endpoints():
-    """Scan-path performance regression — default mode must skip the 6 calls."""
+    """Scan-path perf regression — default mode must skip the 5 enrichment
+    endpoints. NOTE: get_stock_state IS called on every fetch (deep or not)
+    because td.price is foundational for downstream signals; that's the
+    only required HTTP call beyond the legacy fetcher set."""
     c = _deep_mock_client()
     fetch_ticker_data("TSLA", c, deep=False)
-    c.get_stock_state.assert_not_called()
     c.get_stock_info.assert_not_called()
     c.get_options_volume.assert_not_called()
     c.get_net_prem_ticks.assert_not_called()
     c.get_short_volume_ratio.assert_not_called()
     c.get_iv_rank.assert_not_called()
+
+
+def test_deep_false_populates_price_from_stock_state():
+    """C1 regression — scan path MUST populate td.price via get_stock_state.
+    Without this, gex_pinning and wall scoring silently no-op on every scan
+    ticker."""
+    c = _deep_mock_client()
+    td = fetch_ticker_data("TSLA", c, deep=False)
+    assert td.price == 100.5
+
+
+def test_deep_false_populates_gex_flip():
+    """C2 regression — scan path MUST populate td.gex['flip'] from strikes.
+    Without this, classify_regime can't compute gex_flip_relative and the
+    market_structure score loses its flip-distance contribution."""
+    c = _deep_mock_client()
+    td = fetch_ticker_data("TSLA", c, deep=False)
+    assert td.gex is not None
+    assert td.gex.get("flip") is not None
+
+
+def test_gex_envelope_never_empty_dict_when_both_endpoints_fail():
+    """C3 regression — never create an empty {} envelope. The leftover stub
+    code used to do `if gex is None: gex = {}` then never populate it,
+    which made bucket_available('market_structure') return True with all-
+    zero scores, silently consuming 28 weight points. Either gex has real
+    signal (net or flip) or it stays None."""
+    c = _deep_mock_client()
+    c.get_greek_exposure.side_effect = RuntimeError("upstream 500")
+    c.get_greek_exposure_by_strike.return_value = {}  # no strikes either
+    td = fetch_ticker_data("TSLA", c, deep=False)
+    assert td.gex is None
+
+
+def test_gex_envelope_flip_only_when_only_strikes_succeed():
+    """When get_greek_exposure raises but strikes succeed, the resulting
+    gex envelope should contain at least the flip — flip alone is signal,
+    and the market_structure scorer will partially contribute."""
+    c = _deep_mock_client()
+    c.get_greek_exposure.side_effect = RuntimeError("upstream 500")
+    td = fetch_ticker_data("TSLA", c, deep=False)
+    assert td.gex is not None
+    assert td.gex.get("flip") is not None
+    assert "net" not in td.gex  # no net signal because endpoint failed
 
 
 def test_deep_true_populates_price_and_sector_from_stock_state_and_info():
