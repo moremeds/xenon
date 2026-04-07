@@ -16,13 +16,13 @@ Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` fi
 3. **Red/green TDD for ALL code.** Failing test → fix → green → refactor. Unit: Vitest, E2E: chrome-cdp/Playwright.
 4. **95% test coverage target.** Every change includes corresponding tests.
 5. **API keys** in `.env` files (see Credentials below). Fallback: `~/.zshrc`.
-6. **Options structure reference:** `docs/options-structures.json` + `docs/options-structures.md` — 58 structures, guard decisions, P&L attribution labels. Use for order entry, structure classification, and naked short guard logic.
+6. **Options structure reference:** `docs/trading/options-structures.json` + `docs/trading/options-structures.md` — 58 structures, guard decisions, P&L attribution labels. Use for order entry, structure classification, and naked short guard logic.
 
 ## Identity
 
 **Xenon** — market structure reconstruction system. Surfaces convex opportunities from dark pool/OTC flow, vol surfaces, cross-asset positioning. Detects institutional positioning, constructs convex options structures, sizes with fractional Kelly. **Flow signal or nothing.**
 
-Brand spec: `brand/CLAUDE.md` + `docs/brand-identity.md`.
+Brand spec: `brand/CLAUDE.md` + `docs/reference/brand-identity.md`.
 
 ## ⛔ Four Gates — Mandatory, Sequential, No Exceptions
 

@@ -11,7 +11,7 @@ Usage:
     python3 scripts/verify_options_oi.py MSFT --expiry 2027-01-15 --min-strike 500
     python3 scripts/verify_options_oi.py MSFT --expiry 2027-01-15 --json
 
-See docs/options-flow-verification.md for full methodology.
+See docs/runbooks/options-flow-verification.md for full methodology.
 """
 
 import argparse

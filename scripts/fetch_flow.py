@@ -4,8 +4,8 @@
 Requires UW_TOKEN environment variable (Unusual Whales API key).
 Set it via: export UW_TOKEN="your-api-key"
 
-API Reference: docs/unusual_whales_api.md
-Full Spec: docs/unusual_whales_api_spec.yaml
+API Reference: docs/reference/unusual_whales_api.md
+Full Spec: docs/reference/unusual_whales_api_spec.yaml
 
 Key endpoints used:
   - GET /api/darkpool/{ticker} - Dark pool trades for a ticker

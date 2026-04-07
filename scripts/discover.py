@@ -10,8 +10,8 @@ Scoring: Normalized 0-100 scale based on edge quality, not dollar size.
 
 Requires UW_TOKEN environment variable.
 
-API Reference: docs/unusual_whales_api.md
-Full Spec: docs/unusual_whales_api_spec.yaml
+API Reference: docs/reference/unusual_whales_api.md
+Full Spec: docs/reference/unusual_whales_api_spec.yaml
 
 Key endpoints used:
   - GET /api/option-trades/flow-alerts - Market-wide or per-ticker flow alerts

@@ -405,7 +405,7 @@ Update the monitor daemon so the installed `--once` launchd path obeys the same 
   - Updated [daemon.py](/Users/joemccann/dev/apps/finance/xenon/scripts/monitor_daemon/daemon.py) so both `run_once()` and `run_loop()` use the same `_handler_can_run_now(...)` gate. Market-hours-only handlers now skip off-hours in both execution modes, while off-hours handlers can still run.
   - Marked [preset_rebalance_handler.py](/Users/joemccann/dev/apps/finance/xenon/scripts/monitor_daemon/handlers/preset_rebalance_handler.py) and [flex_token_check.py](/Users/joemccann/dev/apps/finance/xenon/scripts/monitor_daemon/handlers/flex_token_check.py) as off-hours-allowed handlers.
   - Updated [run.py](/Users/joemccann/dev/apps/finance/xenon/scripts/monitor_daemon/run.py) `list_handlers()` to include `flex_token_check`, so the CLI output matches the actual registry.
-  - Updated [.pi/AGENTS.md](/Users/joemccann/dev/apps/finance/xenon/.pi/AGENTS.md), [README.md](/Users/joemccann/dev/apps/finance/xenon/README.md), and [docs/implement.md](/Users/joemccann/dev/apps/finance/xenon/docs/implement.md) so the docs reflect the real launchd `--once` model and the per-handler market-hours policy.
+  - Updated [.pi/AGENTS.md](/Users/joemccann/dev/apps/finance/xenon/.pi/AGENTS.md), [README.md](/Users/joemccann/dev/apps/finance/xenon/README.md), and [docs/workflows/implement.md](/Users/joemccann/dev/apps/finance/xenon/docs/workflows/implement.md) so the docs reflect the real launchd `--once` model and the per-handler market-hours policy.
 - Regression coverage:
   - Added a default-policy assertion in [test_base_handler.py](/Users/joemccann/dev/apps/finance/xenon/scripts/tests/test_monitor_daemon/test_base_handler.py).
   - Added off-hours scheduling regressions in [test_daemon.py](/Users/joemccann/dev/apps/finance/xenon/scripts/tests/test_monitor_daemon/test_daemon.py) covering:
@@ -482,7 +482,7 @@ Audit `scripts/monitor_daemon/` against the repo's scheduled Python and launchd 
   - Documentation and command surfaces are partially stale:
     - [run.py](/Users/joemccann/dev/apps/finance/xenon/scripts/monitor_daemon/run.py) `list_handlers()` omits `flex_token_check`
     - [.pi/AGENTS.md](/Users/joemccann/dev/apps/finance/xenon/.pi/AGENTS.md) still says the monitor daemon runs “every 60s during market hours,” which does not match the installed `--once` launchd behavior
-    - [.pi/AGENTS.md](/Users/joemccann/dev/apps/finance/xenon/.pi/AGENTS.md), [docs/status.md](/Users/joemccann/dev/apps/finance/xenon/docs/status.md), and [docs/implement.md](/Users/joemccann/dev/apps/finance/xenon/docs/implement.md) still reference standalone `ib_fill_monitor.py` / `exit_order_service.py`
+    - [.pi/AGENTS.md](/Users/joemccann/dev/apps/finance/xenon/.pi/AGENTS.md), [docs/status.md](/Users/joemccann/dev/apps/finance/xenon/docs/status.md), and [docs/workflows/implement.md](/Users/joemccann/dev/apps/finance/xenon/docs/workflows/implement.md) still reference standalone `ib_fill_monitor.py` / `exit_order_service.py`
   - Interpreter handling is inconsistent:
     - The active monitor daemon plist still hardcodes `/usr/bin/python3`, while newer scheduled wrappers resolve or prefer `python3.13`
 - Recommendation:
@@ -1348,7 +1348,7 @@ Take the remaining listed worktree items and turn them into clean individual com
 ### Review
 - Created `f63843a` (`chore: refresh runtime cache artifacts`) for the safe runtime outputs only: [AAOI.json](/Users/joemccann/dev/apps/finance/xenon/data/company_info_cache/AAOI.json), [PLTR.json](/Users/joemccann/dev/apps/finance/xenon/data/company_info_cache/PLTR.json), [cta-sync.json](/Users/joemccann/dev/apps/finance/xenon/data/service_health/cta-sync.json), [option_close_cache.json](/Users/joemccann/dev/apps/finance/xenon/web/data/option_close_cache.json), and [.claude/hooks/dead-code.manifest](/Users/joemccann/dev/apps/finance/xenon/.claude/hooks/dead-code.manifest).
 - Created `2a485d6` (`fix: guard option last price against stale frozen ticks`) for the prior-session option price feature: [ib_tick_handler.js](/Users/joemccann/dev/apps/finance/xenon/scripts/ib_tick_handler.js), [stale-frozen-last.test.ts](/Users/joemccann/dev/apps/finance/xenon/web/tests/stale-frozen-last.test.ts), and [stale-option-last-price.spec.ts](/Users/joemccann/dev/apps/finance/xenon/web/e2e/stale-option-last-price.spec.ts). Verification was green with `npx vitest run web/tests/stale-frozen-last.test.ts` and `cd web && npx playwright test e2e/stale-option-last-price.spec.ts --config playwright.config.ts`. The only code adjustment during validation was fixing the Playwright selector to target the option last-price cell instead of the underlying placeholder cell.
-- Created `a7ad62e` (`docs: add dense telemetry strip guidance`) for the one-line guidance note in [brand-identity.md](/Users/joemccann/dev/apps/finance/xenon/docs/brand-identity.md).
+- Created `a7ad62e` (`docs: add dense telemetry strip guidance`) for the one-line guidance note in [brand-identity.md](/Users/joemccann/dev/apps/finance/xenon/docs/reference/brand-identity.md).
 - Left [playwright.strip.config.ts](/Users/joemccann/dev/apps/finance/xenon/web/playwright.strip.config.ts) out of the commit stack because it targets only `regime-strip-responsive.spec.ts` and is unrelated to the stale frozen option `LAST` feature or the runtime artifact/doc batches.
 
 ## Session: Chain UX, IB Error Handling, Ticker Detail Layout (2026-03-12)
@@ -2053,7 +2053,7 @@ Bootstrap the installed `com.xenon.cta-sync` launch agent into the live user `la
 
 ### Review
 - Added operator-facing definitions for all four relationship states in [README.md](/Users/joemccann/dev/apps/finance/xenon/README.md), alongside the `/regime` terminal capabilities section, so the meaning of `FRAGILE CALM`, `SYSTEMIC PANIC`, `STOCK PICKER'S MARKET`, and `GOLDILOCKS` is visible without reading the code.
-- Added the exact implementation rule to the CRI strategy spec in [docs/strategies.md](/Users/joemccann/dev/apps/finance/xenon/docs/strategies.md): the relationship view classifies the latest RVOL/COR1M point against the rolling 20-session means, not against fixed absolute cutoffs.
+- Added the exact implementation rule to the CRI strategy spec in [docs/trading/strategies.md](/Users/joemccann/dev/apps/finance/xenon/docs/trading/strategies.md): the relationship view classifies the latest RVOL/COR1M point against the rolling 20-session means, not against fixed absolute cutoffs.
 - Verified the docs against the current implementation in [web/lib/regimeRelationships.ts](/Users/joemccann/dev/apps/finance/xenon/web/lib/regimeRelationships.ts), including the live-latest-point override behavior used by `/regime`.
 
 ## Session: Chart System Roadmap Steps 1-4 (2026-03-11)
@@ -2073,7 +2073,7 @@ Bootstrap the installed `com.xenon.cta-sync` launch agent into the live user `la
 - [x] T5 Add/update regression coverage where practical, run targeted verification, and capture review notes
 
 ### Review
-- Published the shared chart contract in [web/lib/chart-system-spec.json](/Users/joemccann/dev/apps/finance/xenon/web/lib/chart-system-spec.json), exposed runtime helpers in [web/lib/chartSystem.ts](/Users/joemccann/dev/apps/finance/xenon/web/lib/chartSystem.ts), and documented the sanctioned families/renderers in [docs/chart-system.md](/Users/joemccann/dev/apps/finance/xenon/docs/chart-system.md).
+- Published the shared chart contract in [web/lib/chart-system-spec.json](/Users/joemccann/dev/apps/finance/xenon/web/lib/chart-system-spec.json), exposed runtime helpers in [web/lib/chartSystem.ts](/Users/joemccann/dev/apps/finance/xenon/web/lib/chartSystem.ts), and documented the sanctioned families/renderers in [docs/reference/chart-system.md](/Users/joemccann/dev/apps/finance/xenon/docs/reference/chart-system.md).
 - Extracted shared runtime chart primitives in [web/components/charts/ChartPanel.tsx](/Users/joemccann/dev/apps/finance/xenon/web/components/charts/ChartPanel.tsx) and [web/components/charts/ChartLegend.tsx](/Users/joemccann/dev/apps/finance/xenon/web/components/charts/ChartLegend.tsx), then adopted them in [web/components/PerformancePanel.tsx](/Users/joemccann/dev/apps/finance/xenon/web/components/PerformancePanel.tsx) and [web/components/CriHistoryChart.tsx](/Users/joemccann/dev/apps/finance/xenon/web/components/CriHistoryChart.tsx), while routing runtime series colors through semantic roles in [web/components/RegimePanel.tsx](/Users/joemccann/dev/apps/finance/xenon/web/components/RegimePanel.tsx) and [web/components/PriceChart.tsx](/Users/joemccann/dev/apps/finance/xenon/web/components/PriceChart.tsx).
 - Converged downstream surfaces on the same contract by wiring [web/lib/og-theme.ts](/Users/joemccann/dev/apps/finance/xenon/web/lib/og-theme.ts), restoring and aligning [web/lib/og-charts.tsx](/Users/joemccann/dev/apps/finance/xenon/web/lib/og-charts.tsx), tightening [web/app/api/menthorq/[command]/image/route.tsx](/Users/joemccann/dev/apps/finance/xenon/web/app/api/menthorq/[command]/image/route.tsx), and keeping [scripts/performance_explainer_report.py](/Users/joemccann/dev/apps/finance/xenon/scripts/performance_explainer_report.py) on the shared family/renderer/semantic-role rules.
 - Added regression coverage in [web/tests/chart-system.test.ts](/Users/joemccann/dev/apps/finance/xenon/web/tests/chart-system.test.ts), [web/tests/chart-runtime-adoption.test.ts](/Users/joemccann/dev/apps/finance/xenon/web/tests/chart-runtime-adoption.test.ts), [web/tests/og-theme-contract.test.ts](/Users/joemccann/dev/apps/finance/xenon/web/tests/og-theme-contract.test.ts), [web/tests/og-chart-contract.test.ts](/Users/joemccann/dev/apps/finance/xenon/web/tests/og-chart-contract.test.ts), [web/tests/og-chart-system.test.ts](/Users/joemccann/dev/apps/finance/xenon/web/tests/og-chart-system.test.ts), [web/tests/menthorq-og-route-contract.test.ts](/Users/joemccann/dev/apps/finance/xenon/web/tests/menthorq-og-route-contract.test.ts), and [scripts/tests/test_performance_explainer_report.py](/Users/joemccann/dev/apps/finance/xenon/scripts/tests/test_performance_explainer_report.py).
@@ -2308,7 +2308,7 @@ Bootstrap the installed `com.xenon.cta-sync` launch agent into the live user `la
 ### Review
 - Updated [scripts/cri_scan.py](/Users/joemccann/dev/apps/finance/xenon/scripts/cri_scan.py) so COR1M history and fallback quote selection now use the official Cboe dashboard feed before Yahoo Finance, while preserving the earlier IB client-id retry path.
 - Added regression coverage in [scripts/tests/test_cri_scan.py](/Users/joemccann/dev/apps/finance/xenon/scripts/tests/test_cri_scan.py) for the new source order and in [web/e2e/regime-rvol-history-live-cache.spec.ts](/Users/joemccann/dev/apps/finance/xenon/web/e2e/regime-rvol-history-live-cache.spec.ts) for the browser-visible “20 RVOL dots from live cache” contract.
-- Updated [README.md](/Users/joemccann/dev/apps/finance/xenon/README.md), [docs/strategies.md](/Users/joemccann/dev/apps/finance/xenon/docs/strategies.md), [.pi/AGENTS.md](/Users/joemccann/dev/apps/finance/xenon/.pi/AGENTS.md), [.pi/prompts/cri-scan.md](/Users/joemccann/dev/apps/finance/xenon/.pi/prompts/cri-scan.md), and [.pi/skills/html-report/SKILL.md](/Users/joemccann/dev/apps/finance/xenon/.pi/skills/html-report/SKILL.md) so the repo now documents the COR1M source order as IB → official Cboe dashboard feed → Yahoo last resort.
+- Updated [README.md](/Users/joemccann/dev/apps/finance/xenon/README.md), [docs/trading/strategies.md](/Users/joemccann/dev/apps/finance/xenon/docs/trading/strategies.md), [.pi/AGENTS.md](/Users/joemccann/dev/apps/finance/xenon/.pi/AGENTS.md), [.pi/prompts/cri-scan.md](/Users/joemccann/dev/apps/finance/xenon/.pi/prompts/cri-scan.md), and [.pi/skills/html-report/SKILL.md](/Users/joemccann/dev/apps/finance/xenon/.pi/skills/html-report/SKILL.md) so the repo now documents the COR1M source order as IB → official Cboe dashboard feed → Yahoo last resort.
 - Confirmed the route-visible cache state is valid now: [data/cri.json](/Users/joemccann/dev/apps/finance/xenon/data/cri.json) has 20 history rows, 20 numeric `realized_vol` values, and 40 cached `spy_closes`; a fresh valid scheduled snapshot was also written at [cri-2026-03-11T13-24.json](/Users/joemccann/dev/apps/finance/xenon/data/cri_scheduled/cri-2026-03-11T13-24.json).
 - Verified the final path with `python3 scripts/cri_scan.py --json > /tmp/cri-refresh.json`, `bash scripts/run_cri_scan.sh`, `pytest scripts/tests/test_cri_scan.py scripts/tests/test_cri_client_id.py -q`, `npx playwright test e2e/regime-rvol-history-live-cache.spec.ts e2e/regime-cor1m-live-route.spec.ts`, `bash -n scripts/run_cri_scan.sh`, and `bash -n scripts/run_data_refresh.sh`.
 
@@ -2381,7 +2381,7 @@ Bootstrap the installed `com.xenon.cta-sync` launch agent into the live user `la
 - [x] T6 Run targeted verification for docs/build/tests/browser behavior, then capture review notes
 
 ### Review
-- Updated the CRI/regime docs in [README.md](/Users/joemccann/dev/apps/finance/xenon/README.md), [docs/strategies.md](/Users/joemccann/dev/apps/finance/xenon/docs/strategies.md), and [docs/status.md](/Users/joemccann/dev/apps/finance/xenon/docs/status.md) to describe the richer CRI cache selection, 20-session RVOL backfill behavior, and the post-close cache refresh path.
+- Updated the CRI/regime docs in [README.md](/Users/joemccann/dev/apps/finance/xenon/README.md), [docs/trading/strategies.md](/Users/joemccann/dev/apps/finance/xenon/docs/trading/strategies.md), and [docs/status.md](/Users/joemccann/dev/apps/finance/xenon/docs/status.md) to describe the richer CRI cache selection, 20-session RVOL backfill behavior, and the post-close cache refresh path.
 - Committed the scoped RVOL/cache/docs checkpoint as `27e78a7` (`fix: restore regime rvol history from cri cache`) without pulling in the unrelated site/worktree changes that were already present in the repo.
 - Added the fullscreen control in [Header.tsx](/Users/joemccann/dev/apps/finance/xenon/web/components/Header.tsx) and [WorkspaceShell.tsx](/Users/joemccann/dev/apps/finance/xenon/web/components/WorkspaceShell.tsx), using `Maximize2` / `Minimize2` icons and a document-level Escape handler that exits fullscreen when the app is expanded.
 - Kept the existing theme button uniquely targetable by moving the new control onto its own `.fullscreen-toggle` class and sharing the button styling in [globals.css](/Users/joemccann/dev/apps/finance/xenon/web/app/globals.css).
@@ -2835,7 +2835,7 @@ Composite key scheme: stock prices keyed by ticker (`"AAPL"`), option prices by 
 - [x] Create `scripts/tests/test_menthorq_cta.py` — 20 tests (cache, find, parsing, trading date, CRI shape)
 - [x] Update `CLAUDE.md` — command, script, cache file references
 - [x] Update `.pi/AGENTS.md` — command, script, data file references
-- [x] Update `docs/strategies.md` — MenthorQ section in Strategy 6
+- [x] Update `docs/trading/strategies.md` — MenthorQ section in Strategy 6
 - [x] Install Playwright + Chromium + httpx
 - [x] Live end-to-end verification — 37 assets, 4 tables, SPX pctl_3m=13 z=-1.56
 
@@ -2848,7 +2848,7 @@ Composite key scheme: stock prices keyed by ticker (`"AAPL"`), option prices by 
 - `scripts/cri_scan.py`
 - `CLAUDE.md`
 - `.pi/AGENTS.md`
-- `docs/strategies.md`
+- `docs/trading/strategies.md`
 - `PROGRESS.md`
 
 ### Review
@@ -2945,7 +2945,7 @@ Composite key scheme: stock prices keyed by ticker (`"AAPL"`), option prices by 
 - Verified the current Phase 1 shape uses standard macOS SSH over the Tailscale network, not Tailscale SSH server mode, because this Mac has the GUI app variant of Tailscale installed.
 - Verified the canonical IBC service surface is the secure machine-local wrapper set in `~/ibc/bin/`; repo automation is documented as a convenience wrapper only.
 - Added `scripts/ibc_remote_control.sh` as a repo-local helper for `check`, `tailscale-status`, `tailscale-login`, `ibc-status`, `ibc-start`, `ibc-stop`, `ibc-restart`, and `remote-help`.
-- Added `docs/ibc-remote-access.md` as the durable markdown reference and linked it to `reports/ibc-remote-control-and-cloud-options-2026-03-10.html`.
+- Added `docs/runbooks/ibc-remote-access.md` as the durable markdown reference and linked it to `reports/ibc-remote-control-and-cloud-options-2026-03-10.html`.
 - Added `tasks/lessons.md` to capture the correction that the secure machine-local `~/ibc/bin/*secure-ibc-service.sh` commands are the canonical service surface.
 - Validation:
   - `./scripts/ibc_remote_control.sh check` confirmed Tailscale is connected, macOS SSH is enabled, and `local.ibc-gateway` is running.
@@ -2976,8 +2976,8 @@ Composite key scheme: stock prices keyed by ticker (`"AAPL"`), option prices by 
 
 ### Review
 - Reworked `README.md` to match the requested structure from the shared review: cleaner summary, badges, explicit Inputs/Processing/Outputs, three-gate framework, strategy matrix, architecture diagram, grouped commands, simplified data-source/testing sections, example workflow, and the Phase 1 remote IBC dependency block.
-- Updated the authoritative IBC docs in `CLAUDE.md`, `docs/implement.md`, and `docs/ib_tws_api.md` so the secure machine-local `~/ibc/bin/*secure-ibc-service.sh` commands are the primary surface and the old `scripts/setup_ibc.sh` flow is clearly legacy.
-- Preserved and linked the Phase 1 remote-access runbook in `docs/ibc-remote-access.md`, including the concrete dependencies required for iPhone control:
+- Updated the authoritative IBC docs in `CLAUDE.md`, `docs/workflows/implement.md`, and `docs/reference/ib_tws_api.md` so the secure machine-local `~/ibc/bin/*secure-ibc-service.sh` commands are the primary surface and the old `scripts/setup_ibc.sh` flow is clearly legacy.
+- Preserved and linked the Phase 1 remote-access runbook in `docs/runbooks/ibc-remote-access.md`, including the concrete dependencies required for iPhone control:
   - `Tailscale.app` on the Mac
   - Tailscale on the iPhone, connected to the same tailnet
   - macOS `Remote Login`
@@ -3007,7 +3007,7 @@ Composite key scheme: stock prices keyed by ticker (`"AAPL"`), option prices by 
 ### Review
 - Reworked `README.md` around a clearer public-facing hierarchy: summary, What Xenon Does, trade validation framework, strategies, architecture, quick start, terminal, grouped commands, project structure, data sources, testing, and services.
 - Preserved the Phase 1 secure local IBC path in the README Services section, including the concrete dependencies for Tailscale, macOS Remote Login, and iPhone SSH clients.
-- Added direct references from the README to the durable markdown runbook `docs/ibc-remote-access.md` and the preserved HTML report `reports/ibc-remote-control-and-cloud-options-2026-03-10.html`.
+- Added direct references from the README to the durable markdown runbook `docs/runbooks/ibc-remote-access.md` and the preserved HTML report `reports/ibc-remote-control-and-cloud-options-2026-03-10.html`.
 - Verification:
   - `rg -n "What Xenon Does|Trade Validation Framework|System Architecture|Quick Start|Xenon Terminal|CLI Commands|Phase 1 Remote IBC Access" README.md`
   - Manual README review against the shared outline confirmed the requested structural sections are present.
@@ -3077,7 +3077,7 @@ Composite key scheme: stock prices keyed by ticker (`"AAPL"`), option prices by 
 - Current completed state:
   - Phase 1 local SSH-over-Tailscale access is working from the iPhone.
   - The secure machine-local `~/ibc/bin/*secure-ibc-service.sh` wrappers are the canonical service surface.
-  - The durable research and reference artifacts already exist in `reports/ibc-remote-control-and-cloud-options-2026-03-10.html` and `docs/ibc-remote-access.md`.
+  - The durable research and reference artifacts already exist in `reports/ibc-remote-control-and-cloud-options-2026-03-10.html` and `docs/runbooks/ibc-remote-access.md`.
 - Remaining delivery is now split cleanly into two tracks:
   - Local track: SSH hardening, private web control plane, operational resilience.
   - Cloud track: private VM proof of concept, burn-in, and cutover decision.

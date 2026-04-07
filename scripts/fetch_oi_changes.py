@@ -15,7 +15,7 @@ Usage:
 This is a REQUIRED part of every evaluation. Flow alerts may miss large trades
 that don't trigger "unusual" filters. OI changes show ALL significant positioning.
 
-See docs/options-flow-verification.md for methodology.
+See docs/runbooks/options-flow-verification.md for methodology.
 """
 
 import argparse

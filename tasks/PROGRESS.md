@@ -176,13 +176,13 @@ Moved MenthorQ credentials from hardcoded defaults to project root `.env` file l
 - Web app reads cached MenthorQ data from `data/menthorq_cache/`, never fetches directly
 
 #### 3. Documentation updates
-**Files**: `CLAUDE.md`, `.pi/AGENTS.md`, `docs/strategies.md`, `README.md`
+**Files**: `CLAUDE.md`, `.pi/AGENTS.md`, `docs/trading/strategies.md`, `README.md`
 
 - Added credentials architecture table to CLAUDE.md
 - Updated README setup section: two `.env` files, Playwright deps
 - Added `menthorq-cta` command and `fetch_menthorq_cta.py` script to all command/script tables
 - Added `data/menthorq_cache/` to data files references
-- Added MenthorQ CTA Positioning section to Strategy 6 in `docs/strategies.md`
+- Added MenthorQ CTA Positioning section to Strategy 6 in `docs/trading/strategies.md`
 
 ### Verified
 - 25/25 new MenthorQ tests pass (including 5 credential security tests)

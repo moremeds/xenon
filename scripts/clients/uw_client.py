@@ -15,8 +15,8 @@ Usage:
     with UWClient() as client:
         info = client.get_stock_info("AAPL")
 
-API Reference : docs/unusual_whales_api.md
-Full OpenAPI  : docs/unusual_whales_api_spec.yaml
+API Reference : docs/reference/unusual_whales_api.md
+Full OpenAPI  : docs/reference/unusual_whales_api_spec.yaml
 """
 
 from __future__ import annotations

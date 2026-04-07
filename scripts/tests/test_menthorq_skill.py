@@ -3,7 +3,7 @@
 Validates:
 - SKILL.md exists with correct frontmatter and required sections
 - commands.json includes all menthorq commands
-- docs/menthorq-prompts.md is referenced and contains expected categories
+- docs/reference/menthorq-prompts.md is referenced and contains expected categories
 """
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ class TestSkillMdSections:
 
     def test_references_prompts_file(self, content):
         assert "menthorq-prompts.md" in content, \
-            "SKILL.md must reference docs/menthorq-prompts.md"
+            "SKILL.md must reference docs/reference/menthorq-prompts.md"
 
     def test_has_quin_screener_section(self, content):
         assert "QUIN" in content, \

@@ -2,7 +2,7 @@
 
 Python pipelines, scanners, clients, commands. Root `CLAUDE.md` is authoritative for policy; `scripts/api/CLAUDE.md` covers FastAPI/IB Gateway infra.
 
-**Reference (not inline):** `docs/architecture.md` (high-throughput, perf), `docs/intraday-interpolation.md` (dark pool), `docs/signal-thresholds.md` (P/C, flow, analyst), `docs/data-files.md` (data/ catalog), `docs/ops.md` (logs), `docs/unusual_whales_api.md` (UW endpoints), `docs/options-structures.md` (structure classification).
+**Reference (not inline):** `docs/architecture/architecture.md` (high-throughput, perf), `docs/trading/intraday-interpolation.md` (dark pool), `docs/trading/signal-thresholds.md` (P/C, flow, analyst), `docs/architecture/data-files.md` (data/ catalog), `docs/runbooks/ops.md` (logs), `docs/reference/unusual_whales_api.md` (UW endpoints), `docs/trading/options-structures.md` (structure classification).
 
 ## Data Source Priority
 
@@ -63,7 +63,7 @@ Python pipelines, scanners, clients, commands. Root `CLAUDE.md` is authoritative
 
 1. Validate ticker → `scripts/fetch_ticker.py`
 1B. Seasonality (context) | 1C. Analyst ratings (context) | 1D. News/catalysts (context)
-2. Dark pool flow → `scripts/fetch_flow.py` (intraday interpolation: `docs/intraday-interpolation.md`)
+2. Dark pool flow → `scripts/fetch_flow.py` (intraday interpolation: `docs/trading/intraday-interpolation.md`)
 3. Options flow → `scripts/fetch_options.py`
 3B. OI changes → `scripts/fetch_oi_changes.py` (REQUIRED)
 4. Edge decision — PASS/FAIL (FAIL = stop)
@@ -76,7 +76,7 @@ Python pipelines, scanners, clients, commands. Root `CLAUDE.md` is authoritative
 - `data/portfolio.json` — open positions, bankroll, exposure
 - `data/trade_log.json` — **append-only** trade journal
 
-Full data catalog: `docs/data-files.md`.
+Full data catalog: `docs/architecture/data-files.md`.
 
 ## Commands
 
@@ -102,4 +102,4 @@ Full data catalog: `docs/data-files.md`.
 | `menthorq-screener [CAT] [SLUG]` | Screener (6 categories, 45 sub-screeners) |
 | `menthorq-forex` | Forex gamma levels + blindspot (14 pairs) |
 | `menthorq-summary [CAT]` | Summary tables (futures: 93 rows, cryptos: 16) |
-| `menthorq-quin [PROMPT]` | QUIN AI screener. Presets: `docs/menthorq-prompts.md` |
+| `menthorq-quin [PROMPT]` | QUIN AI screener. Presets: `docs/reference/menthorq-prompts.md` |

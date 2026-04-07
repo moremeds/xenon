@@ -2,7 +2,7 @@
 
 Brand identity, design tokens, component kit. **Mandatory reference for any UI work.**
 
-Full spec: `docs/brand-identity.md` + `brand/xenon-brand-system.md`. Tokens: `brand/xenon-design-tokens.json`. Tailwind: `brand/xenon-tailwind-theme.ts`. Kit: `/kit` route. Logo: `brand/xenon-app-icon.svg`.
+Full spec: `docs/reference/brand-identity.md` + `brand/xenon-brand-system.md`. Tokens: `brand/xenon-design-tokens.json`. Tailwind: `brand/xenon-tailwind-theme.ts`. Kit: `/kit` route. Logo: `brand/xenon-app-icon.svg`.
 
 **System name:** Xenon (not "Convex Scavenger" in UI).
 

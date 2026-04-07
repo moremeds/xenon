@@ -7,7 +7,7 @@ standardised residual exceeds +2 sigma and the High-Divergence-Risk
 conditions hold, the scanner fires a Risk-Off signal.
 
 Mathematical specification: docs/VCG_institutional_research_note.md
-Strategy spec:              docs/strategies.md (Strategy 5)
+Strategy spec:              docs/trading/strategies.md (Strategy 5)
 
 Data sources (priority order):
   1. Interactive Brokers — Index('VIX','CBOE'), Index('VVIX','CBOE'),
@@ -1017,7 +1017,7 @@ def generate_html_report(
   Model: &Delta;{proxy} = &alpha; + &beta;&#8321;&middot;&Delta;VVIX + &beta;&#8322;&middot;&Delta;VIX + &epsilon;<br>
   OLS window: {OLS_WINDOW}d | Z-score window: {Z_WINDOW}d | RO trigger: VIX &gt; {VIX_FLOOR:.0f}, VCG &gt; {VCG_RO_TRIGGER:.1f}&sigma; | EDR: VIX &gt; {VIX_EDR:.0f}, VCG &gt; {VCG_TRIGGER:.1f}&sigma;<br>
   Data: {"IB (primary)" if True else "Yahoo Finance (fallback)"} | {now}<br>
-  Strategy spec: <code>docs/strategies.md</code> (Strategy 5) | Math: <code>docs/VCG_institutional_research_note.md</code>
+  Strategy spec: <code>docs/trading/strategies.md</code> (Strategy 5) | Math: <code>docs/VCG_institutional_research_note.md</code>
 </div>""")
 
     body = "\n".join(body_parts)

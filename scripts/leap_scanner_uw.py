@@ -8,8 +8,8 @@ for price data when UW fails.
 
 No IB connection required.
 
-API Reference: docs/unusual_whales_api.md
-Full Spec: docs/unusual_whales_api_spec.yaml
+API Reference: docs/reference/unusual_whales_api.md
+Full Spec: docs/reference/unusual_whales_api_spec.yaml
 
 Key endpoints used:
   - GET /api/stock/{ticker}/option-contracts - Options chain with IV

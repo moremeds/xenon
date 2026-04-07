@@ -5,7 +5,7 @@ Scans correlated asset pairs for cross-asset volatility repricing lags.
 Fetches all IV/HV data in parallel, computes divergence metrics, and
 generates an HTML report.
 
-Strategy spec: docs/strategy-garch-convergence.md
+Strategy spec: docs/trading/strategy-garch-convergence.md
 
 Usage:
     # Inline pairs
@@ -667,7 +667,7 @@ def generate_html(
         f'<div class="footer">'
         f"<strong>GARCH Convergence Spread Scan</strong> · {total_tickers} tickers · {len(pairs)} pairs<br>"
         f"Data: Unusual Whales (HV, LEAP IV, IV Rank) · Yahoo Finance (LAST RESORT fallback)<br>"
-        f"Strategy spec: <code>docs/strategy-garch-convergence.md</code> · {now}<br><br>"
+        f"Strategy spec: <code>docs/trading/strategy-garch-convergence.md</code> · {now}<br><br>"
         f"<em>{'No trades recommended.' if actionable == 0 else f'{actionable} actionable pair(s) found.'}</em></div>"
     )
 

@@ -3,8 +3,8 @@
 Scan watchlist for dark pool flow signals.
 Ranks tickers by flow strength and filters for actionable signals.
 
-API Reference: docs/unusual_whales_api.md
-Full Spec: docs/unusual_whales_api_spec.yaml
+API Reference: docs/reference/unusual_whales_api.md
+Full Spec: docs/reference/unusual_whales_api_spec.yaml
 
 Uses fetch_flow.py internally which calls:
   - GET /api/darkpool/{ticker} - Dark pool flow data

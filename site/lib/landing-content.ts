@@ -349,7 +349,7 @@ export const footerColumns = [
     links: [
       { href: "#methodology", label: "Methodology" },
       { href: "https://github.com/joemccann/xenon", label: "Source" },
-      { href: "https://github.com/joemccann/xenon/blob/main/docs/strategies.md", label: "Registry" },
+      { href: "https://github.com/joemccann/xenon/blob/main/docs/trading/strategies.md", label: "Registry" },
     ],
   },
 ];
