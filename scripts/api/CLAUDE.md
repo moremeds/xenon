@@ -1,6 +1,6 @@
 # scripts/api/ — CLAUDE.md
 
-FastAPI bridge between Next.js and IB/UW/MenthorQ. Root `CLAUDE.md` is authoritative for policy. Infrastructure reference (files, ports, gateway modes, auth component map, deployment): `docs/api-infrastructure.md`.
+FastAPI bridge between Next.js and IB/UW/MenthorQ. Root `CLAUDE.md` is authoritative for policy. Infrastructure reference (files, ports, gateway modes, auth component map, deployment): `docs/architecture/api-infrastructure.md`.
 
 ## Core rule
 
@@ -31,7 +31,7 @@ Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xeno
 
 ## Client ID Allocation Rule
 
-On-demand scripts MUST use `client_id="auto"` (range 20-49). Never hardcode — pool holds persistent connections on 0-9. Full range map in `docs/api-infrastructure.md`. Tests: `test_client_id_allocation.py` (17).
+On-demand scripts MUST use `client_id="auto"` (range 20-49). Never hardcode — pool holds persistent connections on 0-9. Full range map in `docs/architecture/api-infrastructure.md`. Tests: `test_client_id_allocation.py` (17).
 
 ## Auth — Security-Relevant Behavior
 
@@ -43,7 +43,7 @@ On-demand scripts MUST use `client_id="auto"` (range 20-49). Never hardcode — 
 
 **Public share routes** (no auth): `/api/regime/share`, `/api/vcg/share`, `/api/internals/share`, `/api/menthorq/cta/share`.
 
-Component map, files, ticket flow: `docs/api-infrastructure.md`.
+Component map, files, ticket flow: `docs/architecture/api-infrastructure.md`.
 
 ## Health Check
 

@@ -7,8 +7,8 @@ Data Source Priority:
   2. Unusual Whales (GET /api/screener/analysts) - Aggregated per-firm consensus, targets, history
   3. Yahoo Finance - ⚠️ ABSOLUTE LAST RESORT (rate limited, unreliable, delayed)
 
-API Reference: docs/unusual_whales_api.md for UW endpoint details
-Full Spec: docs/unusual_whales_api_spec.yaml
+API Reference: docs/reference/unusual_whales_api.md for UW endpoint details
+Full Spec: docs/reference/unusual_whales_api_spec.yaml
 
 Usage:
     python3 scripts/fetch_analyst_ratings.py AAPL MSFT NVDA

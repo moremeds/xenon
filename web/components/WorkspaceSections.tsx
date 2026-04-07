@@ -782,8 +782,8 @@ function FlowTable({ rows, lastColumn }: { rows: FlowAnalysisPosition[]; lastCol
   );
 }
 
-function FlowSections() {
-  const { data, syncing, error, lastSync } = useFlowAnalysis(true);
+function FlowSections({ activeAccount = "ib" }: { activeAccount?: "ib" | "futu" }) {
+  const { data, syncing, error, lastSync } = useFlowAnalysis(activeAccount, true);
 
   const supportsArr = data?.supports ?? [];
   const againstArr = data?.against ?? [];
@@ -901,9 +901,15 @@ function FlowSections() {
 
       <div className="section">
         <div className="report-meta">
-          {lastSync
-            ? `Report Generated: ${new Date(lastSync).toLocaleString()} • Source: UW API • Dark Pool Lookback: 5 Trading Days • ${totalScanned} Positions Scanned`
-            : "Awaiting initial flow analysis..."}
+          {lastSync ? (
+            <>
+              Report Generated: {new Date(lastSync).toLocaleString()} • Broker: {activeAccount.toUpperCase()} • Source: UW API • Dark Pool Lookback: 5 Trading Days • {totalScanned} Positions Scanned
+              {data?.skipped_unsupported ? ` • ${data.skipped_unsupported} skipped (non-US)` : ""}
+              {data?.cache_meta?.is_stale ? " • ⚠ stale cache" : ""}
+            </>
+          ) : (
+            `Awaiting initial flow analysis for ${activeAccount.toUpperCase()}...`
+          )}
         </div>
       </div>
     </>
@@ -2237,7 +2243,7 @@ export default function WorkspaceSections({ section, portfolio, portfolioLastSyn
     case "dashboard":
       return null;
     case "flow-analysis":
-      return <FlowSections />;
+      return <FlowSections key={activeAccount} activeAccount={activeAccount} />;
     case "portfolio":
       return <PortfolioSections portfolio={portfolio ?? null} prices={prices} activeAccount={activeAccount} />;
     case "performance":
@@ -2259,6 +2265,6 @@ export default function WorkspaceSections({ section, portfolio, portfolioLastSyn
         <TickerWorkspace ticker={tickerParam} theme={theme ?? "dark"} />
       ) : null;
     default:
-      return <FlowSections />;
+      return <FlowSections key={activeAccount} activeAccount={activeAccount} />;
   }
 }

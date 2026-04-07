@@ -81,18 +81,27 @@ else
     echo "$(date): scanner.py failed (exit $EXIT_CODE) — keeping existing data/scanner.json"
 fi
 
-# --- flow_analysis.py ---
-echo "$(date): Running flow_analysis.py..."
-"$PYTHON_BIN" scripts/flow_analysis.py > data/flow_analysis.json.tmp 2>/tmp/flow_analysis.err
-EXIT_CODE=$?
-if [ "$EXIT_CODE" -eq 0 ]; then
-    mv data/flow_analysis.json.tmp data/flow_analysis.json
-    FLOW_STATUS="OK"
-    echo "$(date): flow_analysis.py complete (OK)"
-else
-    rm -f data/flow_analysis.json.tmp
-    echo "$(date): flow_analysis.py failed (exit $EXIT_CODE) — keeping existing data/flow_analysis.json"
-fi
+# --- flow_analysis.py (per-account: ib + futu) ---
+FLOW_STATUS="OK"
+for ACCOUNT in ib futu; do
+    # Skip futu cleanly if its source portfolio is missing.
+    if [ "$ACCOUNT" = "futu" ] && [ ! -f data/futu_portfolio.json ]; then
+        echo "$(date): flow_analysis.py --account futu skipped (no data/futu_portfolio.json)"
+        continue
+    fi
+    echo "$(date): Running flow_analysis.py --account $ACCOUNT..."
+    "$PYTHON_BIN" scripts/flow_analysis.py --account "$ACCOUNT" \
+        > "data/flow_analysis.${ACCOUNT}.json.tmp" 2>"/tmp/flow_analysis.${ACCOUNT}.err"
+    EXIT_CODE=$?
+    if [ "$EXIT_CODE" -eq 0 ]; then
+        mv "data/flow_analysis.${ACCOUNT}.json.tmp" "data/flow_analysis.${ACCOUNT}.json"
+        echo "$(date): flow_analysis.py --account $ACCOUNT complete (OK)"
+    else
+        rm -f "data/flow_analysis.${ACCOUNT}.json.tmp"
+        echo "$(date): flow_analysis.py --account $ACCOUNT failed (exit $EXIT_CODE) — keeping existing cache"
+        FLOW_STATUS="FAIL"
+    fi
+done
 
 # --- discover.py ---
 echo "$(date): Running discover.py --min-alerts 1..."

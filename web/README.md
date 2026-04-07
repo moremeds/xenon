@@ -213,7 +213,7 @@ function PriceDisplay() {
 | Route | Method | Description |
 |-------|--------|-------------|
 | `/api/portfolio` | GET, POST | Positions and exposure (GET=read, POST=IB sync). Stale-while-revalidate. **Frontend always does one cached GET; POST sync/polling stops during CLOSED market.** |
-| `/api/performance` | GET, POST | YTD performance metrics (hidden — see `docs/performance-reconstruction.md`) |
+| `/api/performance` | GET, POST | YTD performance metrics (hidden — see `docs/architecture/performance-reconstruction.md`) |
 | `/api/blotter` | GET, POST | Today's fills and closed trades |
 | `/api/journal` | GET | Trade log (append-only) |
 | `/api/journal/sync` | POST | Import new IB trades from reconciliation |
@@ -331,15 +331,15 @@ API specifications, strategy docs, and implementation notes live in the project 
 
 | File | Description |
 |------|-------------|
-| `docs/unusual_whales_api.md` | Unusual Whales API reference |
-| `docs/unusual_whales_api_spec.yaml` | UW OpenAPI spec |
-| `docs/ib_tws_api.md` | Interactive Brokers TWS/Gateway API |
-| `docs/strategies.md` | Trading strategy documentation |
+| `docs/reference/unusual_whales_api.md` | Unusual Whales API reference |
+| `docs/reference/unusual_whales_api_spec.yaml` | UW OpenAPI spec |
+| `docs/reference/ib_tws_api.md` | Interactive Brokers TWS/Gateway API |
+| `docs/trading/strategies.md` | Trading strategy documentation |
 | `docs/status.md` | Current portfolio status and recent evaluations |
-| `docs/plans.md` | Implementation plans |
-| `docs/implement.md` | Implementation notes |
-| `docs/prompt.md` | System prompt reference |
-| `docs/performance-reconstruction.md` | Performance page analysis — TWR approaches tried, why shelved |
+| `docs/workflows/plans.md` | Implementation plans |
+| `docs/workflows/implement.md` | Implementation notes |
+| `docs/workflows/prompt.md` | System prompt reference |
+| `docs/architecture/performance-reconstruction.md` | Performance page analysis — TWR approaches tried, why shelved |
 
 ## Troubleshooting
 

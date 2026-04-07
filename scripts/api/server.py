@@ -805,12 +805,14 @@ async def discover():
 
 
 @app.post("/flow-analysis")
-async def flow_analysis():
-    """Run portfolio flow analysis (flow_analysis.py)."""
-    result = await run_script("flow_analysis.py", timeout=120)
+async def flow_analysis(account: str = "ib"):
+    """Run portfolio flow analysis (flow_analysis.py) for the given broker account."""
+    if account not in ("ib", "futu"):
+        raise HTTPException(status_code=400, detail=f"Unknown account: {account!r}")
+    result = await run_script("flow_analysis.py", ["--account", account], timeout=120)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
-    _write_cache(DATA_DIR / "flow_analysis.json", result.data)
+    _write_cache(DATA_DIR / f"flow_analysis.{account}.json", result.data)
     return result.data
 
 
@@ -1200,6 +1202,49 @@ async def vcg_share():
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     return result.data
+
+
+# ── GEX (Gamma Exposure Levels) ─────────────────────────────────────
+
+_gex_last_scan: float = 0.0
+_gex_scan_lock: Optional[asyncio.Lock] = None
+GEX_COOLDOWN_S = 60
+
+
+@app.post("/gex/share")
+async def gex_share():
+    """Generate GEX X share report (4 cards + preview HTML). Returns output path."""
+    result = await run_script("generate_gex_share.py", ["--json", "--no-open"], timeout=120)
+    if not result.ok:
+        raise HTTPException(status_code=502, detail=result.error)
+    return result.data
+
+
+@app.post("/gex/scan")
+async def gex_scan(ticker: str = "SPX"):
+    """Run GEX scan (gex_scan.py --json --ticker X). 60s cooldown between scans."""
+    global _gex_last_scan, _gex_scan_lock
+    import time as _time
+    if _gex_scan_lock is None:
+        _gex_scan_lock = asyncio.Lock()
+    now = _time.monotonic()
+    if now - _gex_last_scan < GEX_COOLDOWN_S:
+        cached = _read_cache(DATA_DIR / "gex.json")
+        if cached:
+            return cached
+    async with _gex_scan_lock:
+        if _time.monotonic() - _gex_last_scan < GEX_COOLDOWN_S:
+            cached = _read_cache(DATA_DIR / "gex.json")
+            if cached:
+                return cached
+        result = await run_script(
+            "gex_scan.py", ["--json", "--ticker", ticker.upper()], timeout=120
+        )
+        if not result.ok:
+            raise HTTPException(status_code=502, detail=result.error)
+        _write_cache(DATA_DIR / "gex.json", result.data)
+        _gex_last_scan = _time.monotonic()
+        return result.data
 
 
 @app.post("/regime/share")

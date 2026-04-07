@@ -7,7 +7,7 @@ score is HIGH/CRITICAL and the crash trigger conditions hold (SPX below
 100d MA, realized vol > 25%, COR1M > 60), CTAs are forced to deleverage
 — creating predictable selling cascades.
 
-Strategy spec: docs/strategies.md (Strategy 6)
+Strategy spec: docs/trading/strategies.md (Strategy 6)
 
 Data sources (priority order):
   1. Interactive Brokers — Index('VIX','CBOE'), Index('VVIX','CBOE'),
@@ -1363,7 +1363,7 @@ def generate_html_report(
   CTA Model: Exposure = 10% target / Realized Vol | Estimated AUM: $400B<br>
   Crash Trigger: SPX &lt; 100d MA AND 20d RVol &gt; 25% AND COR1M &gt; 60<br>
   Data: IB (primary) | UW for SPY fallback | Cboe dashboard for COR1M fallback | Yahoo Finance last-resort for remaining index gaps | {now}<br>
-  Strategy spec: <code>docs/strategies.md</code> (Strategy 6) |
+  Strategy spec: <code>docs/trading/strategies.md</code> (Strategy 6) |
   <a href="https://chatgpt.com/share/69ab7eee-fe34-8013-b489-7758297da446" style="color:var(--text-muted)">Source: CTA Deleveraging Research</a>
 </div>""")
 

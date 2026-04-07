@@ -40,7 +40,7 @@ Any gate fails → stop. Full enforcement matrix: [`scripts/CLAUDE.md`](scripts/
 | **Volatility-Credit Gap (VCG-R)** | VIX>28 + VCG>2.5σ | HYG puts, bear put spreads | 1–5 days |
 | **Crash Risk Index (CRI)** | CTA deleveraging + COR1M stress | Index puts, tactical hedges | 3–5 days |
 
-Full specs: [`docs/strategies.md`](docs/strategies.md) · VCG math: [`docs/strategy-vcg.md`](docs/strategy-vcg.md).
+Full specs: [`docs/trading/strategies.md`](docs/trading/strategies.md) · VCG math: [`docs/trading/strategy-vcg.md`](docs/trading/strategy-vcg.md).
 
 ## Quick Start
 
@@ -112,7 +112,7 @@ Real-time trading terminal built with **Next.js 16**. Streams IB prices, compute
 
 Authentication via [Clerk](https://clerk.com) — Next.js middleware protects routes, FastAPI validates JWTs, WebSocket uses 30s single-use tickets. Local dev bypasses auth when `CLERK_JWKS_URL` is unset.
 
-Component-level reference: [`docs/web-ui-reference.md`](docs/web-ui-reference.md).
+Component-level reference: [`docs/reference/web-ui-reference.md`](docs/reference/web-ui-reference.md).
 
 ## CLI Commands
 
@@ -145,8 +145,8 @@ IB / UW / MenthorQ / Exa  →  Signal Detection  →  Strategy Evaluation
 - `data/` — runtime artifacts (gitignored)
 - `docs/` — strategy specs, API refs, runbooks ([index](docs/README.md))
 
-High-throughput design, perf optimization, WS relay: [`docs/architecture.md`](docs/architecture.md).
-FastAPI, auth, IB Gateway modes: [`docs/api-infrastructure.md`](docs/api-infrastructure.md).
+High-throughput design, perf optimization, WS relay: [`docs/architecture/architecture.md`](docs/architecture/architecture.md).
+FastAPI, auth, IB Gateway modes: [`docs/architecture/api-infrastructure.md`](docs/architecture/api-infrastructure.md).
 
 ## Data Source Priority (strict)
 
@@ -187,7 +187,7 @@ Prefer `run_pytest_affected.py` over a full repo run. Unit tests mock IB/UW, so 
 
 CTA freshness is an explicit contract: `data/menthorq_cache/health/cta-sync-latest.json` is the machine-readable health record; `/api/menthorq/cta` triggers background sync when stale and exposes `cache_meta` + `sync_health`.
 
-Full ops runbooks: [`docs/ib-connection-troubleshooting.md`](docs/ib-connection-troubleshooting.md), [`docs/ib-gateway-docker.md`](docs/ib-gateway-docker.md), [`docs/ops.md`](docs/ops.md).
+Full ops runbooks: [`docs/runbooks/ib-connection-troubleshooting.md`](docs/runbooks/ib-connection-troubleshooting.md), [`docs/runbooks/ib-gateway-docker.md`](docs/runbooks/ib-gateway-docker.md), [`docs/runbooks/ops.md`](docs/runbooks/ops.md).
 
 ## Glossary
 

@@ -180,16 +180,35 @@ describe("POST /api/discover (via xenonFetch)", () => {
 // =============================================================================
 
 describe("POST /api/flow-analysis (via xenonFetch)", () => {
-  it("returns flow data on success", async () => {
-    const data = { analysis_time: "2026-03-14", positions_scanned: 20, supports: [], against: [] };
+  const ibReq = () => new Request("http://localhost/api/flow-analysis?account=ib", { method: "POST" });
+  const futuReq = () => new Request("http://localhost/api/flow-analysis?account=futu", { method: "POST" });
+
+  it("returns flow data on success and forwards account", async () => {
+    const data = { analysis_time: "2026-03-14", account: "ib", positions_scanned: 20, supports: [], against: [] };
     mockXenonFetch.mockResolvedValue(data);
     mockStatSync.mockReturnValue({ mtime: new Date() });
 
     const { POST } = await import("../app/api/flow-analysis/route");
-    const res = await POST();
+    const res = await POST(ibReq());
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.positions_scanned).toBe(20);
+    expect(mockXenonFetch).toHaveBeenCalledWith("/flow-analysis?account=ib", expect.any(Object));
+  });
+
+  it("forwards futu account to xenonFetch", async () => {
+    mockXenonFetch.mockResolvedValue({ analysis_time: "x", account: "futu", positions_scanned: 23 });
+    mockStatSync.mockReturnValue({ mtime: new Date() });
+
+    const { POST } = await import("../app/api/flow-analysis/route");
+    await POST(futuReq());
+    expect(mockXenonFetch).toHaveBeenCalledWith("/flow-analysis?account=futu", expect.any(Object));
+  });
+
+  it("rejects unknown account with 400", async () => {
+    const { POST } = await import("../app/api/flow-analysis/route");
+    const res = await POST(new Request("http://localhost/api/flow-analysis?account=etrade", { method: "POST" }));
+    expect(res.status).toBe(400);
   });
 
   it("falls back to cache on failure", async () => {
@@ -200,10 +219,44 @@ describe("POST /api/flow-analysis (via xenonFetch)", () => {
     mockStatSync.mockReturnValue({ mtime: new Date(Date.now() - 900_000) });
 
     const { POST } = await import("../app/api/flow-analysis/route");
-    const res = await POST();
+    const res = await POST(ibReq());
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.is_stale).toBe(true);
+  });
+
+  it("returns empty 200 when both xenonFetch and cache fail", async () => {
+    mockXenonFetch.mockRejectedValue(new Error("502"));
+    mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+    mockStatSync.mockImplementation(() => { throw new Error("ENOENT"); });
+
+    const { POST } = await import("../app/api/flow-analysis/route");
+    const res = await POST(futuReq());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.positions_scanned).toBe(0);
+    expect(body.account).toBe("futu");
+    expect(res.headers.get("X-Sync-Warning")).toContain("unavailable");
+  });
+});
+
+describe("GET /api/flow-analysis", () => {
+  it("returns empty 200 when cache file is missing", async () => {
+    mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+    mockStatSync.mockImplementation(() => { throw new Error("ENOENT"); });
+
+    const { GET } = await import("../app/api/flow-analysis/route");
+    const res = await GET(new Request("http://localhost/api/flow-analysis?account=futu"));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.positions_scanned).toBe(0);
+    expect(body.account).toBe("futu");
+  });
+
+  it("rejects unknown account with 400", async () => {
+    const { GET } = await import("../app/api/flow-analysis/route");
+    const res = await GET(new Request("http://localhost/api/flow-analysis?account=etrade"));
+    expect(res.status).toBe(400);
   });
 });
 

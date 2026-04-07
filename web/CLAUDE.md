@@ -1,6 +1,6 @@
 # web/ — CLAUDE.md
 
-Frontend (Next.js App Router) + all user-facing calculations, pricing, share cards. Root `CLAUDE.md` is authoritative for policy. Component-level reference (regime, VCG, reports, share cards, WS state machine, seasonality): `docs/web-ui-reference.md`. Brand spec: `brand/CLAUDE.md`.
+Frontend (Next.js App Router) + all user-facing calculations, pricing, share cards. Root `CLAUDE.md` is authoritative for policy. Component-level reference (regime, VCG, reports, share cards, WS state machine, seasonality): `docs/reference/web-ui-reference.md`. Brand spec: `brand/CLAUDE.md`.
 
 ## ⛔ UI Verification
 

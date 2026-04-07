@@ -6,14 +6,23 @@ import { xenonFetch } from "@/lib/xenonApi";
 
 export const runtime = "nodejs";
 
-const CACHE_PATH = join(process.cwd(), "..", "data", "flow_analysis.json");
 const STALE_THRESHOLD_SECONDS = 600;
+const VALID_ACCOUNTS = new Set(["ib", "futu"]);
 
 interface CacheMeta {
   last_refresh: string | null;
   age_seconds: number | null;
   is_stale: boolean;
   stale_threshold_seconds: number;
+}
+
+function resolveAccount(req: Request): string | null {
+  const account = new URL(req.url).searchParams.get("account") ?? "ib";
+  return VALID_ACCOUNTS.has(account) ? account : null;
+}
+
+function resolveCachePath(account: string): string {
+  return join(process.cwd(), "..", "data", `flow_analysis.${account}.json`);
 }
 
 function buildCacheMeta(filePath: string): CacheMeta {
@@ -36,43 +45,64 @@ function buildCacheMeta(filePath: string): CacheMeta {
   }
 }
 
-export async function GET(): Promise<Response> {
+function emptyPayload(account: string, cache_meta: CacheMeta) {
+  return {
+    analysis_time: "",
+    account,
+    positions_scanned: 0,
+    skipped_unsupported: 0,
+    supports: [],
+    against: [],
+    watch: [],
+    neutral: [],
+    cache_meta,
+  };
+}
+
+export async function GET(req: Request): Promise<Response> {
+  const account = resolveAccount(req);
+  if (!account) {
+    return NextResponse.json({ error: "Unknown account" }, { status: 400 });
+  }
+  const cachePath = resolveCachePath(account);
   try {
-    const raw = await readFile(CACHE_PATH, "utf-8");
+    const raw = await readFile(cachePath, "utf-8");
     const data = JSON.parse(raw);
-    const cache_meta = buildCacheMeta(CACHE_PATH);
+    const cache_meta = buildCacheMeta(cachePath);
     return NextResponse.json({ ...data, cache_meta });
   } catch {
-    const cache_meta = buildCacheMeta(CACHE_PATH);
-    return NextResponse.json({
-      analysis_time: "",
-      positions_scanned: 0,
-      supports: [],
-      against: [],
-      watch: [],
-      neutral: [],
-      cache_meta,
-    });
+    // First-run / missing cache → empty 200, not 502.
+    return NextResponse.json(emptyPayload(account, buildCacheMeta(cachePath)));
   }
 }
 
-export async function POST(): Promise<Response> {
+export async function POST(req: Request): Promise<Response> {
+  const account = resolveAccount(req);
+  if (!account) {
+    return NextResponse.json({ error: "Unknown account" }, { status: 400 });
+  }
+  const cachePath = resolveCachePath(account);
   try {
-    const data = await xenonFetch("/flow-analysis", { method: "POST", timeout: 130_000 });
-    const cache_meta = buildCacheMeta(CACHE_PATH);
+    const data = await xenonFetch(`/flow-analysis?account=${account}`, {
+      method: "POST",
+      timeout: 130_000,
+    });
+    const cache_meta = buildCacheMeta(cachePath);
     return NextResponse.json({ ...data, cache_meta });
   } catch (error) {
-    // Serve cached data on failure
+    // Serve cached data on failure; if cache missing, return empty 200 with warning.
     try {
-      const raw = await readFile(CACHE_PATH, "utf-8");
+      const raw = await readFile(cachePath, "utf-8");
       const cached = JSON.parse(raw);
-      const cache_meta = buildCacheMeta(CACHE_PATH);
+      const cache_meta = buildCacheMeta(cachePath);
       const res = NextResponse.json({ ...cached, cache_meta, is_stale: true });
       res.headers.set("X-Sync-Warning", "Xenon API unavailable - serving cached data");
       return res;
     } catch {
       const message = error instanceof Error ? error.message : "Flow analysis failed";
-      return NextResponse.json({ error: message }, { status: 502 });
+      const res = NextResponse.json(emptyPayload(account, buildCacheMeta(cachePath)));
+      res.headers.set("X-Sync-Warning", `Xenon API unavailable - ${message}`);
+      return res;
     }
   }
 }
