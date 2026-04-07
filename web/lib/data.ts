@@ -32,6 +32,7 @@ export const navItems: WorkspaceNavItem[] = [
   { label: "Orders", route: "orders", href: "/orders", icon: ClipboardList },
   { label: "Scanner", route: "scanner", href: "/scanner", icon: Sparkles },
   { label: "Discover", route: "discover", href: "/discover", icon: Search },
+  { label: "UW Analyse", route: "uw-analyze", href: "/uw-analyze", icon: Sparkles },
   { label: "Journal", route: "journal", href: "/journal", icon: Wrench },
   { label: "Regime", route: "regime", href: "/regime", icon: Shield },
   { label: "CTA", route: "cta", href: "/cta", icon: Activity },
@@ -50,6 +51,7 @@ export const quickPromptsBySection: Record<WorkspaceSection, string[]> = {
   regime: ["cri-scan", "portfolio", "scan --top 12", "help"],
   cta: ["menthorq-cta", "cri-scan", "portfolio", "help"],
   "ticker-detail": ["portfolio", "scan --top 12", "help"],
+  "uw-analyze": ["analyse aapl", "analyse tsla", "analyse spy", "help"],
 };
 
 export const sectionDescription: Record<WorkspaceSection, string> = {
@@ -64,4 +66,5 @@ export const sectionDescription: Record<WorkspaceSection, string> = {
   regime: "Crash Risk Index — real-time CTA deleveraging monitor.",
   cta: "CTA positioning, vol-targeting exposure model and institutional flow.",
   "ticker-detail": "Instrument research surface — company, book, chain, position, orders, news, ratings, seasonality.",
+  "uw-analyze": "Per-ticker UW signal analyse — bias, grade, bucket scores, GEX walls, setup thesis.",
 };

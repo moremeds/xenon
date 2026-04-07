@@ -26,6 +26,7 @@ import { optionKey } from "@/lib/pricesProtocol";
 import { useJournal } from "@/lib/useJournal";
 import { useDiscover } from "@/lib/useDiscover";
 import { useFlowAnalysis } from "@/lib/useFlowAnalysis";
+import { useUwAnalyze } from "@/lib/useUwAnalyze";
 import { useScanner } from "@/lib/useScanner";
 import { useBlotter } from "@/lib/useBlotter";
 import { useSort, type SortDirection } from "@/lib/useSort";
@@ -2342,6 +2343,301 @@ type WorkspaceSectionsProps = {
   activeAccount?: "ib" | "futu";
 };
 
+// =============================================================================
+// UW Analyse — per-ticker signal report (modular-mapping-simon plan)
+// =============================================================================
+
+function fmtNum(v: number | null | undefined, digits = 2, suffix = ""): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return `${v.toFixed(digits)}${suffix}`;
+}
+
+function fmtCompact(v: number | null | undefined): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  const abs = Math.abs(v);
+  if (abs >= 1e9) return `${(v / 1e9).toFixed(1)}B`;
+  if (abs >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
+  if (abs >= 1e3) return `${(v / 1e3).toFixed(1)}K`;
+  return v.toFixed(0);
+}
+
+function fmtPct(v: number | null | undefined, digits = 1): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return `${(v * 100).toFixed(digits)}%`;
+}
+
+function UwAnalyzeSections() {
+  const { loading, data, error, lastRunAt, analyse } = useUwAnalyze();
+  const [ticker, setTicker] = useState("");
+
+  const onSubmit = useCallback(
+    (e: React.FormEvent) => {
+      e.preventDefault();
+      void analyse(ticker);
+    },
+    [analyse, ticker],
+  );
+
+  const report = data?.report;
+  const display = data?.display;
+  const scores = report?.scores;
+  const thesis = report?.setup_thesis;
+  const positioningAvailable =
+    !!scores && !scores.skipped_buckets?.includes("positioning");
+
+  return (
+    <>
+      <div className="section" data-testid="uw-analyze-form">
+        <div className="section-body">
+          <form
+            onSubmit={onSubmit}
+            style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}
+          >
+            <input
+              type="text"
+              value={ticker}
+              onChange={(e) => setTicker(e.target.value)}
+              placeholder="Ticker (e.g. AAPL)"
+              aria-label="ticker"
+              data-testid="uw-analyze-input"
+              style={{
+                fontFamily: "var(--font-mono, monospace)",
+                textTransform: "uppercase",
+                padding: "0.4rem 0.6rem",
+                background: "transparent",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                color: "var(--fg)",
+                minWidth: 160,
+              }}
+            />
+            <button
+              type="submit"
+              disabled={loading || !ticker.trim()}
+              data-testid="uw-analyze-submit"
+              className="pill defined"
+              style={{ cursor: loading ? "wait" : "pointer", padding: "0.4rem 0.9rem" }}
+            >
+              {loading ? "ANALYSING..." : "▶ ANALYSE"}
+            </button>
+            {lastRunAt && (
+              <span className="report-meta" style={{ marginLeft: "auto" }}>
+                last: {new Date(lastRunAt).toLocaleTimeString()}
+              </span>
+            )}
+          </form>
+        </div>
+      </div>
+
+      {error && (
+        <div className="section" data-testid="uw-analyze-error">
+          <div className="section-body">
+            <div className="alert-item bearish">{error}</div>
+          </div>
+        </div>
+      )}
+
+      {!data && !error && !loading && (
+        <div className="section" data-testid="uw-analyze-empty">
+          <div className="section-body">
+            <div className="alert-item">
+              Enter a ticker and click ANALYSE to fetch the UW signal report.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {loading && (
+        <div className="section" data-testid="uw-analyze-loading">
+          <div className="section-body">
+            <div className="alert-item">Fetching UW signal report (8–20s typical)…</div>
+          </div>
+        </div>
+      )}
+
+      {data && report && display && scores && (
+        <>
+          {/* Identity card */}
+          <div className="section" data-testid="uw-analyze-identity">
+            <div className="section-header">
+              <div className="section-title">
+                {report.ticker}
+                {report.price !== null && (
+                  <span style={{ marginLeft: 8 }}>· ${fmtNum(report.price, 2)}</span>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                <span className="pill defined">Bias: {scores.bias}</span>
+                <span className="pill neutral">
+                  Grade {scores.grade} ({fmtNum(scores.composite, 0)})
+                </span>
+              </div>
+            </div>
+            <div className="section-body">
+              <div className="report-meta">
+                Sector {display.sector ?? "—"} · Mode {scores.mode.toUpperCase()} · Fetched{" "}
+                {report.fetched_at}
+              </div>
+              {scores.reweighted && scores.skipped_buckets?.length > 0 && (
+                <div className="alert-item">
+                  ⚠ {scores.skipped_buckets.join(", ")} bucket unavailable — composite reweighted
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Setup Thesis */}
+          {thesis && (
+            <div className="section" data-testid="uw-analyze-thesis">
+              <div className="section-header">
+                <div className="section-title">SETUP THESIS</div>
+              </div>
+              <div className="section-body">
+                <div>
+                  Structure: <strong>{thesis.structure_family}</strong> · Regime:{" "}
+                  <strong>{thesis.regime}</strong> · Bias: <strong>{thesis.bias}</strong>
+                </div>
+                <div className="report-meta" style={{ marginTop: 6 }}>
+                  {thesis.rationale}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 2x2 bucket grid */}
+          <div
+            className="section"
+            data-testid="uw-analyze-buckets"
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: "0.75rem",
+            }}
+          >
+            <div className="section">
+              <div className="section-header">
+                <div className="section-title">
+                  MARKET STRUCTURE {fmtNum(scores.market_structure, 0)}/28
+                </div>
+              </div>
+              <div className="section-body">
+                <div>GEX sign: {(report.regime as { gex_sign?: string })?.gex_sign ?? "—"}</div>
+                <div>
+                  Flip dist:{" "}
+                  {(() => {
+                    const v = (report.regime as { flip_distance_pct?: number | null })
+                      ?.flip_distance_pct;
+                    return v === null || v === undefined ? "—" : `${v.toFixed(1)}%`;
+                  })()}
+                </div>
+                <div>Call wall: {fmtNum(display.call_wall_strike, 2)}</div>
+                <div>Put wall: {fmtNum(display.put_wall_strike, 2)}</div>
+                <div>γ per 1%: ${fmtCompact(display.gamma_per_1pct)}</div>
+              </div>
+            </div>
+
+            <div className="section">
+              <div className="section-header">
+                <div className="section-title">VOLATILITY {fmtNum(scores.volatility, 0)}/28</div>
+              </div>
+              <div className="section-body">
+                <div>IV rank: {fmtNum(display.iv_rank, 0)}</div>
+                <div>IV: {fmtNum(display.iv, 1)}</div>
+                <div>RV: {fmtNum(display.rv, 1)}</div>
+                <div>Term: {display.term_structure_label ?? "—"}</div>
+              </div>
+            </div>
+
+            <div className="section">
+              <div className="section-header">
+                <div className="section-title">FLOW {fmtNum(scores.flow, 0)}/24</div>
+              </div>
+              <div className="section-body">
+                <div>Net call prem: ${fmtCompact(display.net_call_premium)}</div>
+                <div>Net put prem: ${fmtCompact(display.net_put_premium)}</div>
+                <div>Short vol ratio: {fmtNum(display.short_volume_ratio, 2)}</div>
+              </div>
+            </div>
+
+            <div className="section">
+              <div className="section-header">
+                <div className="section-title">
+                  POSITIONING{" "}
+                  {positioningAvailable
+                    ? `${fmtNum(scores.positioning, 0)}/20`
+                    : "— n/a"}
+                </div>
+              </div>
+              <div className="section-body" data-testid="uw-analyze-positioning">
+                {positioningAvailable ? (
+                  <div>{fmtNum(scores.positioning, 0)}/20</div>
+                ) : (
+                  <div className="alert-item">
+                    not available (v1 limitation, bucket reweighted out of composite)
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* GEX by strike */}
+          {display.gex_by_strike && display.gex_by_strike.length > 0 && (
+            <div className="section" data-testid="uw-analyze-gex-table">
+              <div className="section-header">
+                <div className="section-title">GEX BY STRIKE</div>
+              </div>
+              <div className="section-body">
+                <table style={{ width: "100%", fontFamily: "var(--font-mono, monospace)" }}>
+                  <thead>
+                    <tr style={{ textAlign: "right", opacity: 0.7 }}>
+                      <th style={{ textAlign: "left" }}>Strike</th>
+                      <th>Net γ</th>
+                      <th>Call γ</th>
+                      <th>Put γ</th>
+                      <th>vs Spot</th>
+                      <th>Wall</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {display.gex_by_strike.map((row) => (
+                      <tr key={row.strike} style={{ textAlign: "right" }}>
+                        <td style={{ textAlign: "left" }}>{fmtNum(row.strike, 2)}</td>
+                        <td>{fmtCompact(row.net_gamma)}</td>
+                        <td>{fmtCompact(row.call_gamma)}</td>
+                        <td>{fmtCompact(row.put_gamma)}</td>
+                        <td>{fmtPct(row.distance_pct)}</td>
+                        <td>
+                          {row.is_call_wall ? "CALL ▲" : row.is_put_wall ? "PUT ▼" : ""}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Notes */}
+          {report.notes && report.notes.length > 0 && (
+            <div className="section" data-testid="uw-analyze-notes">
+              <div className="section-header">
+                <div className="section-title">NOTES</div>
+              </div>
+              <div className="section-body">
+                {report.notes.map((n, i) => (
+                  <div key={i} className="alert-item">
+                    • {n}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
 export default function WorkspaceSections({ section, portfolio, portfolioLastSync, orders, prices, tickerParam, theme, marketState, activeAccount = "ib" }: WorkspaceSectionsProps) {
   switch (section) {
     case "dashboard":
@@ -2368,6 +2664,8 @@ export default function WorkspaceSections({ section, portfolio, portfolioLastSyn
       return tickerParam ? (
         <TickerWorkspace ticker={tickerParam} theme={theme ?? "dark"} />
       ) : null;
+    case "uw-analyze":
+      return <UwAnalyzeSections />;
     default:
       return <FlowSections key={activeAccount} activeAccount={activeAccount} />;
   }

@@ -82,8 +82,10 @@ Full data catalog: `docs/architecture/data-files.md`.
 
 | Command | Action |
 |---------|--------|
-| `scan` | Watchlist dark pool scan |
+| `scan` | Watchlist dark pool scan (legacy HTML scanner, `scripts/scanner.py`) |
 | `discover` | Market-wide flow for new candidates |
+| `uw-scan` | Tiered UW signal scanner with Type F confluence detection (distinct from `scan`) |
+| `uw-analyze [TICKER]` | Per-ticker deep-dive: VRP state, regime, 4-bucket composite score (chained in-process by `uw-scan --analyze-top N`) |
 | `evaluate [TICKER]` | Full 7-milestone eval |
 | `portfolio` | Positions, exposure, capacity |
 | `journal` | Recent trade log |
