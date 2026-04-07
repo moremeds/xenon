@@ -327,7 +327,7 @@ function PositionRow({ pos, showExpiry = true, showUnderlying = false, realtimeP
           )}
         </td>
         <td>{structureDisplay}</td>
-        <td className="right">{pos.contracts}</td>
+        <td className="right">{Number.isInteger(pos.contracts) ? pos.contracts : pos.contracts.toFixed(2)}</td>
         <td>
           <span className={`pill ${pos.risk_profile === "defined" ? "defined" : pos.risk_profile === "equity" ? "neutral" : "undefined"}`}>
             {pos.direction}
