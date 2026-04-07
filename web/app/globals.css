@@ -399,6 +399,98 @@ body {
   transform: rotate(90deg);
 }
 
+/* ─── Account tab bar (IB ↔ Futu switcher) ─────────────────── */
+
+.account-tab-bar {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0;
+  margin-bottom: 16px;
+}
+
+.account-tab {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-dim);
+  border-bottom: 4px solid var(--border-dim);
+  padding: 12px 16px;
+  margin-right: -1px;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-family: inherit;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.account-tab:last-child {
+  margin-right: 0;
+}
+
+.account-tab:hover {
+  background: var(--bg-hover);
+}
+
+.account-tab-active {
+  background: var(--bg-panel-raised);
+  color: var(--text-primary, #fff);
+  border-bottom-color: var(--signal-core);
+}
+
+.account-tab-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+.account-tab-label {
+  font-weight: 600;
+}
+
+.account-tab-status {
+  font-size: 9px;
+  letter-spacing: 0.06em;
+}
+
+.tab-status-live {
+  color: var(--signal-core);
+}
+
+.tab-status-stale {
+  color: var(--warn);
+}
+
+.tab-status-never {
+  color: var(--neutral);
+}
+
+.tab-status-down {
+  color: var(--fault);
+}
+
+.account-tab-id {
+  font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+}
+
+.account-tab-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+}
+
+.account-tab-metric {
+  font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text-primary, #fff);
+}
+
+/* ─────────────────────────────────────────────────────────── */
+
 .metrics-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -2625,6 +2717,9 @@ tr.leg-row td {
 
 .ticker-link { cursor: pointer; transition: text-decoration 150ms; background: none; border: none; color: inherit; font: inherit; font-weight: 700; padding: 0; text-align: left; }
 .ticker-link:hover { text-decoration: underline; text-underline-offset: 2px; }
+/* Readonly Futu ticker — rendered as <span>, no pointer, muted color, no hover underline. */
+.ticker-link-disabled { cursor: default; color: var(--text-secondary); }
+.ticker-link-disabled:hover { text-decoration: none; }
 
 /* ── Ticker Detail Page ── */
 

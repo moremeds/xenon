@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.radon.monitor-daemon</string>
+    <string>com.xenon.monitor-daemon</string>
     
     <key>ProgramArguments</key>
     <array>
@@ -14,12 +14,12 @@
     </array>
     
     <key>WorkingDirectory</key>
-    <string>/Users/joemccann/dev/apps/finance/radon/scripts</string>
+    <string>/Users/joemccann/dev/apps/finance/xenon/scripts</string>
     
     <key>EnvironmentVariables</key>
     <dict>
         <key>PYTHONPATH</key>
-        <string>/Users/joemccann/dev/apps/finance/radon/scripts</string>
+        <string>/Users/joemccann/dev/apps/finance/xenon/scripts</string>
     </dict>
     
     <!-- Run every 60 seconds (handlers manage their own intervals) -->
@@ -32,10 +32,10 @@
     
     <!-- Logging -->
     <key>StandardOutPath</key>
-    <string>/Users/joemccann/dev/apps/finance/radon/logs/monitor-daemon.out.log</string>
+    <string>/Users/joemccann/dev/apps/finance/xenon/logs/monitor-daemon.out.log</string>
     
     <key>StandardErrorPath</key>
-    <string>/Users/joemccann/dev/apps/finance/radon/logs/monitor-daemon.err.log</string>
+    <string>/Users/joemccann/dev/apps/finance/xenon/logs/monitor-daemon.err.log</string>
     
     <!-- Keep alive during failures -->
     <key>KeepAlive</key>

@@ -26,7 +26,7 @@ def uw_api_get(endpoint: str, params: Optional[Dict[str, Any]] = None, timeout: 
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
-        "User-Agent": "radon/legacy-uw-api",
+        "User-Agent": "xenon/legacy-uw-api",
     }
     try:
         response = requests.get(url, headers=headers, params=params, timeout=timeout)

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readDataFile } from "@tools/data-reader";
 import { OrdersData } from "@tools/schemas/ib-orders";
-import { radonFetch } from "@/lib/radonApi";
+import { xenonFetch } from "@/lib/xenonApi";
 import type { Static } from "@sinclair/typebox";
 
 export const runtime = "nodejs";
@@ -35,7 +35,7 @@ export async function POST(): Promise<Response> {
   try {
     // Coalesce concurrent POSTs
     if (!syncInFlight) {
-      syncInFlight = radonFetch("/orders/refresh", { method: "POST", timeout: 35_000 })
+      syncInFlight = xenonFetch("/orders/refresh", { method: "POST", timeout: 35_000 })
         .then(() => {})
         .finally(() => { syncInFlight = null; });
     }

@@ -1,6 +1,6 @@
-# Radon Brand Identity — Technical Specification Document
+# Xenon Brand Identity — Technical Specification Document
 **Version:** 1.0  
-**Product:** Radon  
+**Product:** Xenon  
 **System Type:** Institutional market structure reconstruction instrument  
 **Brand Thesis:** *Reconstructing market structure from noisy signals.*
 
@@ -8,20 +8,20 @@
 
 ## 1) Visual Evolution — From Dashboard to Instrument
 
-Radon should not read as a retail trading app, a hype-heavy scanner, or a generic fintech dashboard. It should feel like a calibrated instrument used to inspect, decompose, and reconstruct hidden structure from incomplete market data.
+Xenon should not read as a retail trading app, a hype-heavy scanner, or a generic fintech dashboard. It should feel like a calibrated instrument used to inspect, decompose, and reconstruct hidden structure from incomplete market data.
 
 ### Naming migration
-The prior "Radon" naming should be retired in favor of a cleaner instrument hierarchy.
+The prior "Xenon" naming should be retired in favor of a cleaner instrument hierarchy.
 
-| Legacy | New Radon Hierarchy | Role |
+| Legacy | New Xenon Hierarchy | Role |
 |---|---|---|
-| Radon | **Radon Terminal** | Primary operating environment |
-| Scanner | **Radon Flow** | Flow reconstruction and event isolation |
-| Alerts | **Radon Signals** | Signal detection, ranking, and state changes |
-| Exposure View | **Radon Exposure** | Risk and positioning surfaces |
-| Vol View | **Radon Surface** | Volatility surface and dislocation analysis |
-| Regime View | **Radon Structure** | Cross-asset structure and state reconstruction |
-| Watchlists | **Radon Sets** | Saved universes and instrument groups |
+| Xenon | **Xenon Terminal** | Primary operating environment |
+| Scanner | **Xenon Flow** | Flow reconstruction and event isolation |
+| Alerts | **Xenon Signals** | Signal detection, ranking, and state changes |
+| Exposure View | **Xenon Exposure** | Risk and positioning surfaces |
+| Vol View | **Xenon Surface** | Volatility surface and dislocation analysis |
+| Regime View | **Xenon Structure** | Cross-asset structure and state reconstruction |
+| Watchlists | **Xenon Sets** | Saved universes and instrument groups |
 
 ### Container refactor: cards → instrument panels
 Current UI cards should evolve into **modular instrument panels**.
@@ -34,7 +34,7 @@ Current UI cards should evolve into **modular instrument panels**.
 - Corners should be **tight**. Avoid consumer-rounding.
 - Modules should feel **mountable**, as if they could slide into a rack.
 
-| Component | Current Dashboard Treatment | Radon Treatment |
+| Component | Current Dashboard Treatment | Xenon Treatment |
 |---|---|---|
 | Card container | Floating rounded rectangle | Fixed instrument panel |
 | Header | Casual title | Upper-left panel ID + module name |
@@ -50,7 +50,7 @@ Use these sparingly in background layers, loading states, and drill-down transit
 |---|---|---|
 | **Spectral decomposition lines** | Parallel emission-like lines that imply decomposition into components | Loading, factor/signal decomposition |
 | **Circular scanning arcs** | Radar / detector rings suggesting sampling and sweep passes | Discovery states, scan progress, candidate isolation |
-| **Projection geometry** | Angled projection lines inspired by Radon transforms and tomographic sampling | Hero backgrounds, engine overlays, regime reconstruction views |
+| **Projection geometry** | Angled projection lines inspired by Xenon transforms and tomographic sampling | Hero backgrounds, engine overlays, regime reconstruction views |
 
 #### Motif guidance
 - Keep opacity low; motifs are structural, not decorative.
@@ -67,7 +67,7 @@ Use these sparingly in background layers, loading states, and drill-down transit
 - **Display / brand moments:** Söhne
 
 ### Typographic philosophy
-Radon typography should communicate:
+Xenon typography should communicate:
 - exactness
 - calibration
 - legibility under density
@@ -116,9 +116,9 @@ Secondary information should read like instrument telemetry.
 
 ---
 
-## 3) The Radon Spectrum — Color Logic
+## 3) The Xenon Spectrum — Color Logic
 
-Traditional green/red maps too closely to retail P&L and binary gain/loss semantics. Radon should use color to communicate **clarity, dislocation, certainty, state, and severity**.
+Traditional green/red maps too closely to retail P&L and binary gain/loss semantics. Xenon should use color to communicate **clarity, dislocation, certainty, state, and severity**.
 
 ### Core brand palette
 
@@ -131,7 +131,7 @@ Traditional green/red maps too closely to retail P&L and binary gain/loss semant
 | `text.primary` | `#E5F0EA` | Primary text |
 | `text.secondary` | `#94AE9E` | Secondary text |
 | `text.muted` | `#637A6C` | Meta / supporting text |
-| `signal.core` | `#3CB868` | Core Radon discovery layer |
+| `signal.core` | `#3CB868` | Core Xenon discovery layer |
 | `signal.strong` | `#5FD882` | High-confidence signal |
 | `signal.deep` | `#2A8B4F` | Deep data / selected states |
 | `warn` | `#F5A623` | Quality / caution |
@@ -160,7 +160,7 @@ For surface and regime views:
 - **Red/Pink fault** = operational issue, not market P&L
 
 ### Recommended flagship accent
-**Primary Radon signal accent:** `#3CB868`
+**Primary Xenon signal accent:** `#3CB868`
 
 Reason:
 - institutional, authoritative green — reads as infrastructure, not retail
@@ -189,7 +189,7 @@ Contributors need strict rules so the system remains coherent.
 | Dark mode is primary | Light mode is supported, but the system is designed dark-first |
 | Every module has a source | Surfaces should expose source, confidence, and recency when possible |
 
-### Radon grid system
+### Xenon grid system
 A strict grid is required so community-built modules still feel native.
 
 #### Layout foundation
@@ -218,7 +218,7 @@ A strict grid is required so community-built modules still feel native.
 ### Component acceptance rules for contributors
 A contributed component should not be accepted unless it:
 1. uses approved tokens
-2. snaps to the Radon grid
+2. snaps to the Xenon grid
 3. exposes state clearly
 4. supports dark mode first
 5. keeps numerical alignment intact
@@ -316,7 +316,7 @@ Use:
 
 ### Risk/exposure cards → exposure modules
 
-| Current | Radon Revision |
+| Current | Xenon Revision |
 |---|---|
 | Generic KPI card | Exposure module with header rail |
 | Plain label + value | Label + unit + time basis + confidence |
@@ -335,14 +335,14 @@ Use:
 
 ## 7) Brand Voice
 
-Radon’s voice should be:
+Xenon’s voice should be:
 - precise
 - calm
 - scientific
 - unsensational
 - informative under stress
 
-### What Radon should not sound like
+### What Xenon should not sound like
 - hypey
 - trader-bro
 - breathless
@@ -351,7 +351,7 @@ Radon’s voice should be:
 
 ### Alert language examples
 
-| Bad | Radon |
+| Bad | Xenon |
 |---|---|
 | Massive trade alert! | **Structural event detected.** |
 | Huge gamma squeeze incoming | **Convexity concentration elevated.** |
@@ -387,7 +387,7 @@ Examples:
 
 ## 8) Signature Identity Summary
 
-Radon becomes recognizable through the combination of:
+Xenon becomes recognizable through the combination of:
 1. spectral cyan signal logic
 2. graphite instrument panels
 3. mono telemetry styling
@@ -396,7 +396,7 @@ Radon becomes recognizable through the combination of:
 6. scientific, non-hyped language
 
 ### Core line
-**Radon — Reconstructing market structure from noisy signals.**
+**Xenon — Reconstructing market structure from noisy signals.**
 
 ### Alternate lines
 - **Signal from noise.**
@@ -408,7 +408,7 @@ Radon becomes recognizable through the combination of:
 ## 9) Implementation Notes
 
 ### Immediate next moves
-1. Rename product architecture to Radon hierarchy.
+1. Rename product architecture to Xenon hierarchy.
 2. Replace rounded “app cards” with panel shells.
 3. Move all risk metrics into mono-telemetry styles.
 4. Introduce signal clarity color semantics.
@@ -416,7 +416,7 @@ Radon becomes recognizable through the combination of:
    - scan arcs in discovery
    - spectral lines in decomposition
    - projection geometry in structure/regime
-6. Standardize component contributions against the Radon grid.
+6. Standardize component contributions against the Xenon grid.
 
 ### Success criteria
 The redesign is successful if:

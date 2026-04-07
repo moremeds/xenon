@@ -111,8 +111,8 @@ def card_wrap(title: str, body: str, card_n: int, total: int, ds: str) -> str:
     date_str = d.strftime("%b %-d, %Y")
     footer = f"""
     <div class="footer">
-      <div class="footer-brand">radon.run</div>
-      <div class="footer-tag">Analyzed by Radon · {card_n}/{total}</div>
+      <div class="footer-brand"></div>
+      <div class="footer-tag">Analyzed by Xenon · {card_n}/{total}</div>
       <div class="footer-date">{date_str}</div>
     </div>"""
     return f"""<!DOCTYPE html><html lang="en"><head>
@@ -546,7 +546,7 @@ def build_tweet(data: dict, ds: str) -> str:
 
 {cta_note}
 
-Analyzed by Radon · radon.run"""
+Analyzed by Xenon · """
 
 
 # ── Screenshot ────────────────────────────────────────────────────
@@ -613,7 +613,7 @@ body{{background:#07090d;color:#e2e8f0;font-family:'Inter',sans-serif;min-height
 </style>
 </head><body>
 <div class="layout">
-  <div class="intro"><strong>Regime / CRI Report — X Share</strong><br>Tweet text + 4 infographic cards · {ds} · Analyzed by Radon</div>
+  <div class="intro"><strong>Regime / CRI Report — X Share</strong><br>Tweet text + 4 infographic cards · {ds} · Analyzed by Xenon</div>
   <div class="panel">
     <div class="panel-hdr">Tweet Copy</div>
     <div class="tweet-body" id="tweet-text">{tweet_escaped}</div>

@@ -30,7 +30,7 @@ export function FinalCTASection() {
               Initialize Review
             </a>
             <a
-              href="https://github.com/joemccann/radon"
+              href="https://github.com/joemccann/xenon"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex"

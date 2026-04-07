@@ -102,7 +102,7 @@ def choose_port() -> int:
 
 
 def fetch(url: str, accept: str | None = None) -> tuple[int, bytes, dict[str, str]]:
-    headers = {"User-Agent": "radon-seo-audit/1.0"}
+    headers = {"User-Agent": "xenon-seo-audit/1.0"}
     if accept:
         headers["Accept"] = accept
     request = Request(url, headers=headers)
@@ -345,7 +345,7 @@ def audit_site(base_url: str) -> tuple[list[AuditCheck], dict[str, Any]]:
             "Theme color",
             classify(theme_color.lower() == "#0a0f14"),
             theme_color or "Missing",
-            "Expose the Radon canvas color as the browser theme color.",
+            "Expose the Xenon canvas color as the browser theme color.",
         ),
     ]
 
@@ -414,7 +414,7 @@ def render_report(checks: list[AuditCheck], evidence: dict[str, Any], report_pat
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Radon Site SEO Audit</title>
+    <title>Xenon Site SEO Audit</title>
     <style>
       :root {{
         color-scheme: dark;
@@ -550,7 +550,7 @@ def render_report(checks: list[AuditCheck], evidence: dict[str, Any], report_pat
     <div class="wrap">
       <section class="hero">
         <div class="eyebrow">Site Audit</div>
-        <h1>Radon marketing-site SEO audit</h1>
+        <h1>Xenon marketing-site SEO audit</h1>
         <p>Rendered against <strong>{html.escape(evidence["base_url"])}</strong> on {html.escape(generated_at)}. This report checks the live HTML, crawl routes, metadata routes, and manifest instead of only reading source files.</p>
         <div class="meta">
           <div class="card">
@@ -620,7 +620,7 @@ def render_report(checks: list[AuditCheck], evidence: dict[str, Any], report_pat
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Audit the Radon marketing site SEO surface.")
+    parser = argparse.ArgumentParser(description="Audit the Xenon marketing site SEO surface.")
     parser.add_argument("--base-url", help="Audit an existing site instead of starting a local server.")
     parser.add_argument("--port", type=int, help="Local port to use when starting the site.")
     parser.add_argument("--no-build", action="store_true", help="Skip the local production build.")

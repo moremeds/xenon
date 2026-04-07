@@ -10,7 +10,7 @@ type AppError = Error & { digest?: string };
  */
 export default function GlobalError({ error, reset }: { error: AppError; reset: () => void }) {
   useEffect(() => {
-    console.error("[radon] global error boundary:", error);
+    console.error("[xenon] global error boundary:", error);
   }, [error]);
 
   return (
@@ -41,7 +41,7 @@ export default function GlobalError({ error, reset }: { error: AppError; reset: 
             Application Error
           </span>
           <span style={{ fontSize: "12px", textAlign: "center", maxWidth: "420px" }}>
-            Radon Terminal could not render. Reload the page or return after a moment.
+            Xenon Terminal could not render. Reload the page or return after a moment.
           </span>
           {error.digest ? (
             <span style={{ fontSize: "10px", color: "var(--text-muted)" }}>Digest: {error.digest}</span>

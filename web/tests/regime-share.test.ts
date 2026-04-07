@@ -195,7 +195,7 @@ describe("Regime share card content", () => {
     const scriptPath = path.join(PROJECT_ROOT, "scripts", "generate_regime_share.py");
     const content = await readFile(scriptPath, "utf-8");
     expect(content).toContain("build_tweet");
-    expect(content).toContain("radon.run");
+    expect(content).toContain("Analyzed by Xenon");
   });
 
   it("script uses from __future__ import annotations for 3.9 compat", async () => {

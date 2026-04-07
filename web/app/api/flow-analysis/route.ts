@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { readFile } from "fs/promises";
 import { statSync } from "fs";
 import { join } from "path";
-import { radonFetch } from "@/lib/radonApi";
+import { xenonFetch } from "@/lib/xenonApi";
 
 export const runtime = "nodejs";
 
@@ -58,7 +58,7 @@ export async function GET(): Promise<Response> {
 
 export async function POST(): Promise<Response> {
   try {
-    const data = await radonFetch("/flow-analysis", { method: "POST", timeout: 130_000 });
+    const data = await xenonFetch("/flow-analysis", { method: "POST", timeout: 130_000 });
     const cache_meta = buildCacheMeta(CACHE_PATH);
     return NextResponse.json({ ...data, cache_meta });
   } catch (error) {
@@ -68,7 +68,7 @@ export async function POST(): Promise<Response> {
       const cached = JSON.parse(raw);
       const cache_meta = buildCacheMeta(CACHE_PATH);
       const res = NextResponse.json({ ...cached, cache_meta, is_stale: true });
-      res.headers.set("X-Sync-Warning", "Radon API unavailable - serving cached data");
+      res.headers.set("X-Sync-Warning", "Xenon API unavailable - serving cached data");
       return res;
     } catch {
       const message = error instanceof Error ? error.message : "Flow analysis failed";

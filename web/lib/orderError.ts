@@ -5,7 +5,7 @@ export type FormattedOrderError = {
 
 function stripTransportWrappers(message: string): string {
   return message
-    .replace(/^Radon API \d+:\s*/i, "")
+    .replace(/^Xenon API \d+:\s*/i, "")
     .replace(/^IB error \d+:\s*/i, "")
     .replace(/\s+/g, " ")
     .trim();

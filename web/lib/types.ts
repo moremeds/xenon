@@ -153,7 +153,8 @@ export type AccountSummary = {
   maintenance_margin: number;
   excess_liquidity: number;
   buying_power: number;
-  dividends: number;
+  /** Dividends accrued. Nullable because Futu doesn't report this field; IB always does. */
+  dividends: number | null;
   /** TotalCashValue — total cash including unsettled proceeds */
   cash?: number;
   /** InitMarginReq — initial margin requirement */

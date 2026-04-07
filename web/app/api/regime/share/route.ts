@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
-import { radonFetch, RadonApiError } from "@/lib/radonApi";
+import { xenonFetch, XenonApiError } from "@/lib/xenonApi";
 
 export const runtime = "nodejs";
 
@@ -8,10 +8,10 @@ export async function POST(): Promise<Response> {
   try {
     const { getToken } = await auth();
     const token = await getToken() ?? undefined;
-    const data = await radonFetch("/regime/share", { method: "POST", token });
+    const data = await xenonFetch("/regime/share", { method: "POST", token });
     return NextResponse.json(data);
   } catch (err) {
-    if (err instanceof RadonApiError) {
+    if (err instanceof XenonApiError) {
       return NextResponse.json({ error: err.detail }, { status: err.status });
     }
     return NextResponse.json(

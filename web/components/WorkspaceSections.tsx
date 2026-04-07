@@ -912,7 +912,7 @@ function FlowSections() {
 
 /* ─── Portfolio sections ──────────────────────────────────── */
 
-function PortfolioSections({ portfolio, prices }: { portfolio: PortfolioData | null; prices?: Record<string, PriceData> }) {
+function PortfolioSections({ portfolio, prices, activeAccount = "ib" }: { portfolio: PortfolioData | null; prices?: Record<string, PriceData>; activeAccount?: "ib" | "futu" }) {
   const positions = portfolio?.positions ?? [];
   const definedPositions = positions.filter((p) => p.risk_profile === "defined");
   const equityPositions = positions.filter((p) => p.risk_profile === "equity");
@@ -966,7 +966,7 @@ function PortfolioSections({ portfolio, prices }: { portfolio: PortfolioData | n
             </div>
           </div>
           <div className="section-body">
-            <PositionTable positions={definedFilter.filtered} showUnderlying={true} prices={prices} />
+            <PositionTable positions={definedFilter.filtered} showUnderlying={true} prices={prices} readonly={activeAccount === "futu"} />
           </div>
         </div>
       )}
@@ -991,7 +991,7 @@ function PortfolioSections({ portfolio, prices }: { portfolio: PortfolioData | n
             </div>
           </div>
           <div className="section-body">
-            <PositionTable positions={undefinedFilter.filtered} showUnderlying={true} prices={prices} />
+            <PositionTable positions={undefinedFilter.filtered} showUnderlying={true} prices={prices} readonly={activeAccount === "futu"} />
           </div>
         </div>
       )}
@@ -1016,14 +1016,14 @@ function PortfolioSections({ portfolio, prices }: { portfolio: PortfolioData | n
             </div>
           </div>
           <div className="section-body">
-            <PositionTable positions={equityFilter.filtered} showExpiry={false} prices={prices} />
+            <PositionTable positions={equityFilter.filtered} showExpiry={false} prices={prices} readonly={activeAccount === "futu"} />
           </div>
         </div>
       )}
 
       <div className="section">
         <div className="report-meta">
-          Last Sync: {new Date(portfolio.last_sync).toLocaleString()} • Source: IB Gateway
+          Last Sync: {new Date(portfolio.last_sync).toLocaleString()} • Source: {activeAccount === "futu" ? "Futu OpenD" : "IB Gateway"}
         </div>
       </div>
     </>
@@ -2219,16 +2219,27 @@ type WorkspaceSectionsProps = {
   tickerParam?: string;
   theme?: "dark" | "light";
   marketState?: MarketState;
+  /**
+   * Which broker account's data is being rendered. Defaults to "ib" for
+   * backward compat with tests that render WorkspaceSections directly
+   * without supplying this prop.
+   *
+   * When "futu": the portfolio PositionTable instances render in readonly
+   * mode so clicks cannot reach IB order-placement surfaces. Other
+   * sections (blotter, order history) are unaffected — they always show
+   * IB data regardless of the broker tab.
+   */
+  activeAccount?: "ib" | "futu";
 };
 
-export default function WorkspaceSections({ section, portfolio, portfolioLastSync, orders, prices, tickerParam, theme, marketState }: WorkspaceSectionsProps) {
+export default function WorkspaceSections({ section, portfolio, portfolioLastSync, orders, prices, tickerParam, theme, marketState, activeAccount = "ib" }: WorkspaceSectionsProps) {
   switch (section) {
     case "dashboard":
       return null;
     case "flow-analysis":
       return <FlowSections />;
     case "portfolio":
-      return <PortfolioSections portfolio={portfolio ?? null} prices={prices} />;
+      return <PortfolioSections portfolio={portfolio ?? null} prices={prices} activeAccount={activeAccount} />;
     case "performance":
       return <PerformancePanel portfolioLastSync={portfolioLastSync} marketState={marketState} />;
     case "orders":

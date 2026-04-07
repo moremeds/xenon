@@ -2,7 +2,7 @@
 
 ## Problem
 
-Match IB's YTD TWR (Time-Weighted Return) on the Radon `/performance` page. IB shows **-10.56% YTD TWR** as of 2026-03-21. The account grew from $99K to $1.05M due to $225K in cash deposits and $961K in ACATS securities transfers (stocks + options from another brokerage).
+Match IB's YTD TWR (Time-Weighted Return) on the Xenon `/performance` page. IB shows **-10.56% YTD TWR** as of 2026-03-21. The account grew from $99K to $1.05M due to $225K in cash deposits and $961K in ACATS securities transfers (stocks + options from another brokerage).
 
 ## What IB Provides via API
 

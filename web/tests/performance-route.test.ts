@@ -8,8 +8,8 @@ vi.mock("fs/promises", () => ({
   stat: mockStat,
 }));
 
-const mockRadonFetch = vi.fn();
-vi.mock("@/lib/radonApi", () => ({ radonFetch: mockRadonFetch }));
+const mockXenonFetch = vi.fn();
+vi.mock("@/lib/xenonApi", () => ({ xenonFetch: mockXenonFetch }));
 
 describe("/api/performance route", () => {
   beforeEach(() => {
@@ -19,7 +19,7 @@ describe("/api/performance route", () => {
     vi.clearAllMocks();
     mockReadFile.mockReset();
     mockStat.mockReset();
-    mockRadonFetch.mockReset();
+    mockXenonFetch.mockReset();
   });
 
   it("GET returns cached performance data when cache is fresh and aligned with portfolio", async () => {
@@ -49,7 +49,7 @@ describe("/api/performance route", () => {
     expect(res.status).toBe(200);
     expect(body.as_of).toBe("2026-03-13");
         expect(body.summary.sharpe_ratio).toBe(1.2);
-        expect(mockRadonFetch).not.toHaveBeenCalled();
+        expect(mockXenonFetch).not.toHaveBeenCalled();
       });
 
   it("GET returns stale cache + triggers background rebuild when cached performance lags the current portfolio snapshot (SWR)", async () => {
@@ -71,7 +71,7 @@ describe("/api/performance route", () => {
       }
       throw new Error(`unexpected read: ${path}`);
     });
-    mockRadonFetch
+    mockXenonFetch
       .mockResolvedValueOnce({
         last_sync: "2026-03-11T13:37:14Z",
       })
@@ -86,13 +86,13 @@ describe("/api/performance route", () => {
     expect(body.as_of).toBe("2026-03-10");
     expect(body.summary.ending_equity).toBe(1_063_031.86);
     // Should have called portfolio/sync + background trigger
-    expect(mockRadonFetch).toHaveBeenCalledTimes(2);
-    expect(mockRadonFetch).toHaveBeenNthCalledWith(
+    expect(mockXenonFetch).toHaveBeenCalledTimes(2);
+    expect(mockXenonFetch).toHaveBeenNthCalledWith(
       1,
       "/portfolio/sync",
       expect.objectContaining({ method: "POST" }),
     );
-    expect(mockRadonFetch).toHaveBeenNthCalledWith(
+    expect(mockXenonFetch).toHaveBeenNthCalledWith(
       2,
       "/performance/background",
       expect.objectContaining({ method: "POST", timeout: 5_000 }),
@@ -118,7 +118,7 @@ describe("/api/performance route", () => {
       }
       throw new Error(`unexpected read: ${path}`);
     });
-    mockRadonFetch
+    mockXenonFetch
       .mockResolvedValueOnce({
         last_sync: "2026-03-13T20:02:06Z",
       })
@@ -133,12 +133,12 @@ describe("/api/performance route", () => {
     expect(body.as_of).toBe("2026-03-12");
     expect(body.summary.ending_equity).toBe(1_218_410.03);
     // Portfolio sync + background trigger
-    expect(mockRadonFetch).toHaveBeenNthCalledWith(
+    expect(mockXenonFetch).toHaveBeenNthCalledWith(
       1,
       "/portfolio/sync",
       expect.objectContaining({ method: "POST" }),
     );
-    expect(mockRadonFetch).toHaveBeenNthCalledWith(
+    expect(mockXenonFetch).toHaveBeenNthCalledWith(
       2,
       "/performance/background",
       expect.objectContaining({ method: "POST", timeout: 5_000 }),
@@ -164,7 +164,7 @@ describe("/api/performance route", () => {
       }
       throw new Error(`unexpected read: ${path}`);
     });
-    mockRadonFetch.mockRejectedValue(new Error("IB unavailable"));
+    mockXenonFetch.mockRejectedValue(new Error("IB unavailable"));
 
     const { GET } = await import("../app/api/performance/route");
     const res = await GET();
@@ -172,8 +172,8 @@ describe("/api/performance route", () => {
 
     expect(res.status).toBe(200);
     expect(body.as_of).toBe("2026-03-12");
-    expect(mockRadonFetch).toHaveBeenCalledTimes(1);
-    expect(mockRadonFetch).toHaveBeenCalledWith("/portfolio/sync", expect.objectContaining({ method: "POST" }));
+    expect(mockXenonFetch).toHaveBeenCalledTimes(1);
+    expect(mockXenonFetch).toHaveBeenCalledWith("/portfolio/sync", expect.objectContaining({ method: "POST" }));
   });
 
   it("POST runs the API sync and returns generated performance JSON", async () => {
@@ -183,7 +183,7 @@ describe("/api/performance route", () => {
       summary: { sharpe_ratio: 1.84 },
       series: [{ date: "2026-01-02", equity: 1_000_000 }],
     };
-    mockRadonFetch.mockResolvedValue(payload);
+    mockXenonFetch.mockResolvedValue(payload);
 
     const { POST } = await import("../app/api/performance/route");
     const res = await POST();
@@ -191,8 +191,8 @@ describe("/api/performance route", () => {
 
     expect(res.status).toBe(200);
     expect(body.summary.sharpe_ratio).toBe(1.84);
-    expect(mockRadonFetch).toHaveBeenCalledOnce();
-    expect(mockRadonFetch).toHaveBeenCalledWith("/performance", expect.objectContaining({ method: "POST" }));
+    expect(mockXenonFetch).toHaveBeenCalledOnce();
+    expect(mockXenonFetch).toHaveBeenCalledWith("/performance", expect.objectContaining({ method: "POST" }));
   });
 
   // ---- SWR-specific tests ----
@@ -217,7 +217,7 @@ describe("/api/performance route", () => {
       throw new Error(`unexpected read: ${path}`);
     });
     // Background trigger should fire-and-forget
-    mockRadonFetch.mockResolvedValue({ status: "accepted" });
+    mockXenonFetch.mockResolvedValue({ status: "accepted" });
 
     const { GET } = await import("../app/api/performance/route");
     const res = await GET();
@@ -226,7 +226,7 @@ describe("/api/performance route", () => {
     expect(res.status).toBe(200);
     expect(body.summary.sharpe_ratio).toBe(1.2);
     // Should call background endpoint, not the blocking one
-    expect(mockRadonFetch).toHaveBeenCalledWith(
+    expect(mockXenonFetch).toHaveBeenCalledWith(
       "/performance/background",
       expect.objectContaining({ method: "POST", timeout: 5_000 }),
     );
@@ -235,7 +235,7 @@ describe("/api/performance route", () => {
   it("GET cold start: blocks on rebuild when no cache exists", async () => {
     mockStat.mockRejectedValue(new Error("ENOENT"));
     mockReadFile.mockRejectedValue(new Error("ENOENT"));
-    mockRadonFetch.mockResolvedValue({
+    mockXenonFetch.mockResolvedValue({
       as_of: "2026-03-13",
       last_sync: "2026-03-13T16:00:00Z",
       summary: { total_return: 0.18 },
@@ -248,7 +248,7 @@ describe("/api/performance route", () => {
 
     expect(res.status).toBe(200);
     expect(body.summary.total_return).toBe(0.18);
-    expect(mockRadonFetch).toHaveBeenCalledWith(
+    expect(mockXenonFetch).toHaveBeenCalledWith(
       "/performance",
       expect.objectContaining({ method: "POST", timeout: 180_000 }),
     );
@@ -257,7 +257,7 @@ describe("/api/performance route", () => {
   it("GET cold start: returns 502 when rebuild fails and no cache", async () => {
     mockStat.mockRejectedValue(new Error("ENOENT"));
     mockReadFile.mockRejectedValue(new Error("ENOENT"));
-    mockRadonFetch.mockRejectedValue(new Error("FastAPI down"));
+    mockXenonFetch.mockRejectedValue(new Error("FastAPI down"));
 
     const { GET } = await import("../app/api/performance/route");
     const res = await GET();
@@ -283,7 +283,7 @@ describe("/api/performance route", () => {
       }
       throw new Error("not found");
     });
-    mockRadonFetch.mockRejectedValue(new Error("timeout"));
+    mockXenonFetch.mockRejectedValue(new Error("timeout"));
 
     const { GET } = await import("../app/api/performance/route");
     const res = await GET();

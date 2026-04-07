@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readDataFile } from "@tools/data-reader";
 import { OrdersData } from "@tools/schemas/ib-orders";
-import { radonFetch } from "@/lib/radonApi";
+import { xenonFetch } from "@/lib/xenonApi";
 import type { ModifyCancelTarget, ReplaceComboOrder } from "@/lib/orderModify";
 
 export const runtime = "nodejs";
@@ -115,7 +115,7 @@ export async function POST(request: Request): Promise<Response> {
       }
 
       for (const cancelTarget of cancelTargets) {
-        await radonFetch<Record<string, unknown>>("/orders/cancel", {
+        await xenonFetch<Record<string, unknown>>("/orders/cancel", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(cancelTarget),
@@ -123,7 +123,7 @@ export async function POST(request: Request): Promise<Response> {
         });
       }
 
-      const result = await radonFetch<Record<string, unknown>>("/orders/place", {
+      const result = await xenonFetch<Record<string, unknown>>("/orders/place", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(replaceOrder),
@@ -131,7 +131,7 @@ export async function POST(request: Request): Promise<Response> {
       });
 
       try {
-        await radonFetch("/orders/refresh", { method: "POST", timeout: 10_000 });
+        await xenonFetch("/orders/refresh", { method: "POST", timeout: 10_000 });
       } catch {
         // Non-fatal
       }
@@ -167,7 +167,7 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    const result = await radonFetch<Record<string, unknown>>("/orders/modify", {
+    const result = await xenonFetch<Record<string, unknown>>("/orders/modify", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -182,7 +182,7 @@ export async function POST(request: Request): Promise<Response> {
 
     // Refresh orders after modify
     try {
-      await radonFetch("/orders/refresh", { method: "POST", timeout: 10_000 });
+      await xenonFetch("/orders/refresh", { method: "POST", timeout: 10_000 });
     } catch {
       // Non-fatal
     }

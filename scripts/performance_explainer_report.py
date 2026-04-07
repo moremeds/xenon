@@ -885,7 +885,7 @@ def build_html(payload: dict, chart_system: dict) -> str:
 <body>
   <div class="wrap">
     <section class="hero">
-      <div class="eyebrow">Radon Terminal /performance Explainer</div>
+      <div class="eyebrow">Xenon Terminal /performance Explainer</div>
       <h1>Every Rendered Item On The Performance Page</h1>
       <div class="hero-sub">
         This report maps each visible item on <code>/performance</code> to its current value, its exact calculation logic, and its institutional meaning. Values are taken from <code>data/performance.json</code>, which is the cache served by <code>/api/performance</code>.

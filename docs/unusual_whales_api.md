@@ -11,7 +11,7 @@ The `UW_TOKEN` environment variable should contain your API key.
 
 ---
 
-## Core Endpoints for Radon
+## Core Endpoints for Xenon
 
 ### Dark Pool / OTC Flow (Primary Edge Source)
 

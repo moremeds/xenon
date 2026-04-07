@@ -8,6 +8,8 @@ import type { OrdersData, WorkspaceSection } from "@/lib/types";
 import { navItems } from "@/lib/data";
 import { resolveSectionFromPath } from "@/lib/chat";
 import { usePortfolio } from "@/lib/usePortfolio";
+import { useFutuPortfolio } from "@/lib/useFutuPortfolio";
+import { useActiveAccount } from "@/lib/accountContext";
 import { useOrders } from "@/lib/useOrders";
 import { useMarketHours, MarketState } from "@/lib/useMarketHours";
 import { useToast } from "@/lib/useToast";
@@ -20,6 +22,8 @@ import Sidebar from "@/components/Sidebar";
 import Header from "@/components/Header";
 import ChatPanel from "@/components/ChatPanel";
 import MetricCards from "@/components/MetricCards";
+import AccountTabBar, { type AccountTabState } from "@/components/AccountTabBar";
+import { computeFutuStaleness } from "@/lib/futuStaleness";
 import ToastContainer from "@/components/Toast";
 
 const WorkspaceSections = dynamic(() => import("@/components/WorkspaceSections"), {
@@ -45,7 +49,24 @@ export default function WorkspaceShell({ section, tickerParam }: WorkspaceShellP
   const marketState = useMarketHours();
   const isMarketActive = marketState !== MarketState.CLOSED;
 
-  const { data: portfolio, syncing: portfolioSyncing, error: portfolioError, lastSync: portfolioLastSync, syncNow: portfolioSyncNow } = usePortfolio(isMarketActive);
+  const { activeAccount, setActiveAccount } = useActiveAccount();
+
+  // Both accounts stay hot in the background so tab switching is instant.
+  const ibData = usePortfolio(isMarketActive);
+  const futuData = useFutuPortfolio(isMarketActive);
+
+  // The `portfolio` variable the rest of the shell consumes is the
+  // broker-appropriate one. Every downstream component sees a normal
+  // PortfolioData and branches on nothing.
+  const portfolio = activeAccount === "ib" ? ibData.data : futuData.data;
+  const portfolioSyncing =
+    activeAccount === "ib" ? ibData.syncing : futuData.syncing;
+  const portfolioError =
+    activeAccount === "ib" ? ibData.error : futuData.error;
+  const portfolioLastSync =
+    activeAccount === "ib" ? ibData.lastSync : futuData.lastSync;
+  const portfolioSyncNow =
+    activeAccount === "ib" ? ibData.syncNow : futuData.syncNow;
 
   const portfolioSymbols = useMemo(
     () => (portfolio?.positions ?? []).map((p) => p.ticker),
@@ -332,7 +353,7 @@ export default function WorkspaceShell({ section, tickerParam }: WorkspaceShellP
               className="sync-button"
               onClick={syncNow}
               disabled={syncing}
-              title={`Sync ${syncTarget} from IB Gateway`}
+              title={`Sync ${syncTarget} from ${activeAccount === "futu" && !isOrdersPage ? "Futu OpenD" : "IB Gateway"}`}
             >
               <RefreshCw size={14} className={syncing ? "spin" : ""} />
               {syncing ? "Syncing..." : "Sync Now"}
@@ -351,7 +372,39 @@ export default function WorkspaceShell({ section, tickerParam }: WorkspaceShellP
         <div className="content">
           {activeSection === "dashboard" ? <ChatPanel activeSection={activeSection} /> : null}
 
-          {activeSection !== "dashboard" && activeSection !== "ticker-detail" ? <MetricCards portfolio={portfolio} prices={prices} realizedPnl={todayRealizedPnl} executedOrders={executedOrders} section={activeSection} /> : null}
+          {activeSection !== "dashboard" && activeSection !== "ticker-detail" ? (
+            <>
+              <AccountTabBar
+                active={activeAccount}
+                onChange={setActiveAccount}
+                ib={{
+                  label: "IB",
+                  accountId: ibData.data?.account_summary ? "IB Account" : null,
+                  environment: "real",
+                  positionCount: ibData.data?.positions.length ?? 0,
+                  lastSync: ibData.lastSync,
+                  netLiquidation: ibData.data?.account_summary?.net_liquidation ?? null,
+                  status: ibConnected ? "live" : "down",
+                }}
+                futu={{
+                  label: "FUTU",
+                  accountId: futuData.envelope?.account_id ?? null,
+                  environment: "real",
+                  positionCount: futuData.data?.positions.length ?? 0,
+                  lastSync: futuData.lastSync,
+                  netLiquidation:
+                    futuData.data?.account_summary?.net_liquidation ?? null,
+                  status: computeFutuStaleness({
+                    envelope: futuData.envelope,
+                    error: futuData.error,
+                    neverSynced: futuData.neverSynced,
+                    marketOpen: isMarketActive,
+                  }),
+                }}
+              />
+              <MetricCards portfolio={portfolio} prices={prices} realizedPnl={todayRealizedPnl} executedOrders={executedOrders} section={activeSection} />
+            </>
+          ) : null}
 
           {activeSection !== "dashboard" ? (
             <WorkspaceSections
@@ -363,6 +416,7 @@ export default function WorkspaceShell({ section, tickerParam }: WorkspaceShellP
               tickerParam={tickerParam}
               theme={resolvedTheme}
               marketState={marketState}
+              activeAccount={activeAccount}
             />
           ) : null}
         </div>

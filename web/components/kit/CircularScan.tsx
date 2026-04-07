@@ -69,7 +69,7 @@ export function CircularScan({ status = "Standby" }: CircularScanProps) {
               strokeWidth="2"
               style={{
                 transformOrigin: "80px 80px",
-                animation: isScanning ? "radon-scan-rotate 4s linear infinite" : "none",
+                animation: isScanning ? "xenon-scan-rotate 4s linear infinite" : "none",
               }}
             />
 
@@ -79,7 +79,7 @@ export function CircularScan({ status = "Standby" }: CircularScanProps) {
       </div>
 
       <style>{`
-        @keyframes radon-scan-rotate {
+        @keyframes xenon-scan-rotate {
           from { transform: rotate(0deg); }
           to { transform: rotate(360deg); }
         }

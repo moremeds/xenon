@@ -750,7 +750,7 @@ def display_portfolio(account: dict, positions: list, collapsed: list = None):
 def build_account_summary(account: dict, pnl_data: dict) -> dict:
     """Build account_summary dict from account values and PnL data.
 
-    Tag mapping (IB accountValues tags → Radon fields):
+    Tag mapping (IB accountValues tags → Xenon fields):
       net_liquidation  → NetLiquidation
       cash             → TotalCashValue (unsettled + settled)
       settled_cash     → SettledCash (falls back to TotalCashValue if IB omits)

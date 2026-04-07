@@ -47,7 +47,7 @@ mkdir -p data/menthorq_cache logs
 
 resolve_python() {
     local candidate
-    for candidate in "${RADON_PYTHON_BIN:-}" python3.13 python3.9 /usr/bin/python3 python3; do
+    for candidate in "${XENON_PYTHON_BIN:-}" python3.13 python3.9 /usr/bin/python3 python3; do
         [ -n "$candidate" ] || continue
         command -v "$candidate" >/dev/null 2>&1 || continue
         "$candidate" - <<'PY' >/dev/null 2>&1
@@ -68,7 +68,7 @@ if [ -z "$PYTHON_BIN" ]; then
     exit 1
 fi
 
-SOURCE="${RADON_CTA_SYNC_SOURCE:-${CTA_SYNC_TRIGGER:-launchd}}"
+SOURCE="${XENON_CTA_SYNC_SOURCE:-${CTA_SYNC_TRIGGER:-launchd}}"
 
 echo "$(date): Running hardened CTA sync runtime (source=$SOURCE)..."
 "$PYTHON_BIN" scripts/cta_sync_service.py --source "$SOURCE" "$@"

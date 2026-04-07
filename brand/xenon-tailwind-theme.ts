@@ -1,4 +1,4 @@
-export const radonTheme = {
+export const xenonTheme = {
   colors: {
     bg: {
       canvas: "#0a0f14",
@@ -61,4 +61,4 @@ export const radonTheme = {
   },
 };
 
-export default radonTheme;
+export default xenonTheme;

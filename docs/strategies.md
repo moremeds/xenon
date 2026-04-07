@@ -4,7 +4,7 @@
 
 ## Overview
 
-The Radon employs six strategies, each exploiting informational or structural advantages that institutional players leave behind.
+The Xenon employs six strategies, each exploiting informational or structural advantages that institutional players leave behind.
 
 | Strategy | Edge Source | Instrument | Timeframe | Risk Profile |
 |----------|-------------|------------|-----------|--------------|

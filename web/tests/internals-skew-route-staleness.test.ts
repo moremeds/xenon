@@ -8,16 +8,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { isSkewCacheFresh } from "@/lib/internalsSkewCache";
 
-// Mock radonFetch to simulate FastAPI responses
-const mockRadonFetch = vi.fn();
-vi.mock("@/lib/radonApi", () => ({
-  radonFetch: (...args: unknown[]) => mockRadonFetch(...args),
+// Mock xenonFetch to simulate FastAPI responses
+const mockXenonFetch = vi.fn();
+vi.mock("@/lib/xenonApi", () => ({
+  xenonFetch: (...args: unknown[]) => mockXenonFetch(...args),
 }));
 
 // We test the staleness decision logic by simulating the flow:
 // 1. readCachedLongRangeSkewHistory() returns cached data
 // 2. isSkewCacheFresh() decides if cache is recent enough
-// 3. If stale, radonFetch() fetches fresh from FastAPI
+// 3. If stale, xenonFetch() fetches fresh from FastAPI
 
 describe("internals skew route staleness behavior", () => {
   beforeEach(() => {
@@ -64,7 +64,7 @@ describe("internals skew route staleness behavior", () => {
       const cacheLatestDate = "2026-03-18";
       const viewDate = "2026-03-20";
       expect(isSkewCacheFresh(cacheLatestDate, viewDate)).toBe(false);
-      // In the route handler, this would trigger radonFetch("/internals/skew-history")
+      // In the route handler, this would trigger xenonFetch("/internals/skew-history")
     });
 
     it("cache ending March 18, viewed on March 19 → fresh (1 day gap)", () => {

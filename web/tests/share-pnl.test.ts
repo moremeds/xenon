@@ -337,7 +337,7 @@ function buildTweetText(description: string, pnl: number, pnlPct: number | null,
   }
   const pnlStr = parts.join(" ");
   const tagged = cashtagTicker(description);
-  return `💸 ${tagged} ${pnlStr}\n\nExecuted with Radon\n\nhttps://radon.run`;
+  return `💸 ${tagged} ${pnlStr}\n\nExecuted with Xenon`;
 }
 
 // ─── Test fixtures ───────────────────────────────────────────────
@@ -836,7 +836,7 @@ describe("buildTweetText", () => {
     expect(text).toContain("+$6,871.00");
     expect(text).toContain("+20.88%");
     expect(text).toContain("Closed $AAOI Risk Reversal");
-    expect(text).toContain("Executed with Radon");
+    expect(text).toContain("Executed with Xenon");
   });
 
   it("starts with 💸 emoji", () => {
@@ -852,9 +852,9 @@ describe("buildTweetText", () => {
     expect(text).toContain("$88 Put");
   });
 
-  it("adds blank line between 'Executed with Radon' and URL", () => {
+  it("ends with 'Executed with Xenon'", () => {
     const text = buildTweetText("Closed AAOI Risk Reversal", 6871, 20.88, false, true);
-    expect(text).toContain("Executed with Radon\n\nhttps://radon.run");
+    expect(text).toMatch(/Executed with Xenon$/);
   });
 
   it("includes only $ when showPct=false", () => {

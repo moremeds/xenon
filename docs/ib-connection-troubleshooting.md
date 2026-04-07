@@ -1,6 +1,6 @@
 # IB Gateway Connection Troubleshooting
 
-Runbook for diagnosing and resolving IB Gateway connection failures in Radon.
+Runbook for diagnosing and resolving IB Gateway connection failures in Xenon.
 
 ## Quick Diagnostic
 

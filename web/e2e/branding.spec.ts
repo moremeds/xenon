@@ -23,7 +23,7 @@ test.describe('Branding Assets Verification', () => {
     await page.goto('/');
     
     // Check OG Title and Description
-    await expect(page.locator('meta[property="og:title"]')).toHaveAttribute('content', 'Radon Terminal');
+    await expect(page.locator('meta[property="og:title"]')).toHaveAttribute('content', 'Xenon Terminal');
     await expect(page.locator('meta[property="og:description"]')).toHaveAttribute('content', 'Reconstructing market structure from noisy signals.');
     
     // Check OG Images

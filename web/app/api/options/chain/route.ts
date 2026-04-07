@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { radonFetch } from "@/lib/radonApi";
+import { xenonFetch } from "@/lib/xenonApi";
 
 export const runtime = "nodejs";
 
@@ -16,7 +16,7 @@ export async function GET(request: Request): Promise<Response> {
     const params = new URLSearchParams({ symbol });
     if (expiry) params.set("expiry", expiry);
 
-    const data = await radonFetch<Record<string, unknown>>(
+    const data = await xenonFetch<Record<string, unknown>>(
       `/options/chain?${params}`,
       { timeout: 20_000 },
     );

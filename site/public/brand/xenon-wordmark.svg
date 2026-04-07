@@ -16,7 +16,7 @@
   <circle cx="70" cy="70" r="4.5" fill="#e2e8f0"/>
 </g>
 <g transform="translate(290 94)">
-  <text x="0" y="84" fill="#e2e8f0" font-size="92" font-family="Inter, Arial, sans-serif" font-weight="600" letter-spacing="4">RADON</text>
+  <text x="0" y="84" fill="#e2e8f0" font-size="92" font-family="Inter, Arial, sans-serif" font-weight="600" letter-spacing="4">XENON</text>
   <text x="5" y="128" fill="#94a3b8" font-size="24" font-family="IBM Plex Mono, monospace" font-weight="500" letter-spacing="3">RECONSTRUCTING MARKET STRUCTURE</text>
 </g>
 </svg>

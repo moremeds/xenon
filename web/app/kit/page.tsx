@@ -37,7 +37,7 @@ export default function KitPage() {
             color: "var(--text-muted)",
           }}
         >
-          Radon Contributor Kit / Component Spec
+          Xenon Contributor Kit / Component Spec
         </p>
         <button
           onClick={() => setTheme(theme === "dark" ? "light" : "dark")}

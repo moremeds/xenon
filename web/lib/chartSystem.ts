@@ -1,6 +1,6 @@
 import chartSystemSpec from "./chart-system-spec.json";
 
-export const RADON_CHART_SYSTEM = chartSystemSpec;
+export const XENON_CHART_SYSTEM = chartSystemSpec;
 
 export type ChartSeriesRole = keyof typeof chartSystemSpec.seriesRoles;
 export type ChartFamily = keyof typeof chartSystemSpec.families;

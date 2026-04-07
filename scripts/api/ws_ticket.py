@@ -12,7 +12,7 @@ import uuid
 import logging
 from typing import Optional
 
-logger = logging.getLogger("radon.ws_ticket")
+logger = logging.getLogger("xenon.ws_ticket")
 
 _ticket_store: dict[str, dict] = {}
 

@@ -15,7 +15,7 @@
   <circle cx="110" cy="110" r="7" fill="#e2e8f0"/>
 </g>
 <g transform="translate(380 98)">
-  <text x="0" y="110" fill="#e2e8f0" font-size="118" font-family="Inter, Arial, sans-serif" font-weight="600" letter-spacing="6">RADON</text>
+  <text x="0" y="110" fill="#e2e8f0" font-size="118" font-family="Inter, Arial, sans-serif" font-weight="600" letter-spacing="6">XENON</text>
   <text x="4" y="164" fill="#05AD98" font-size="28" font-family="IBM Plex Mono, monospace" font-weight="500" letter-spacing="3">TERMINAL</text>
   <text x="4" y="212" fill="#94a3b8" font-size="24" font-family="IBM Plex Mono, monospace" font-weight="500" letter-spacing="2">RECONSTRUCTING MARKET STRUCTURE FROM NOISY SIGNALS</text>
 </g>

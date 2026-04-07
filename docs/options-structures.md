@@ -219,4 +219,4 @@ const structures = result.data as OptionsStructure[];
 
 ---
 
-_Generated 2026-03-18 · 58 structures · Radon Gate 4 — No Naked Shorts_
+_Generated 2026-03-18 · 58 structures · Xenon Gate 4 — No Naked Shorts_

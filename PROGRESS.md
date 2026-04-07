@@ -20,7 +20,7 @@
 
 4. **VPS Tailscale setup for hybrid dev**
    - New VPS joined tailnet as `ib-gateway` with `tag:ib-gateway`
-   - Tailscale ACL: SSH as `root`, `radon`, `mdw` for `autogroup:admin` → `tag:ib-gateway`
+   - Tailscale ACL: SSH as `root`, `xenon`, `mdw` for `autogroup:admin` → `tag:ib-gateway`
    - Port 4001 ACL: `tag:mdw-client` + `autogroup:admin` → `tag:ib-gateway:4001`
 
 5. **VPS Docker port mapping fix**
@@ -33,13 +33,13 @@
    - Without this, Tailscale connections get `ECONNRESET`
    - Setting persists in Docker volume (`ib-config`)
 
-7. **radon-cloud repo updates**
+7. **xenon-cloud repo updates**
    - `docker-compose.yml`: port mapping `0.0.0.0:4001:4003`
    - `.env.production` + `.env.example`: added `IB_GATEWAY_MODE=cloud`
    - `README.md`: documented env loading flow and gateway mode
    - VPS live `.env`: added `IB_GATEWAY_MODE=cloud`
 
-### Commits (radon)
+### Commits (xenon)
 - `12115a3` — switch IB Gateway default from cloud to local Docker
 - `90d76df` — WS ticket flow: proxy through Next.js, bypass auth for localhost
 - `f5fe7e5` — WS relay: bypass ticket auth for localhost connections
@@ -48,7 +48,7 @@
 - `23cead6` — docs: cloud.sh as default workflow
 - `4ed3c5a` — move scripts to scripts/ directory
 
-### Commits (radon-cloud)
+### Commits (xenon-cloud)
 - `70b1fc5` — add IB_GATEWAY_MODE=cloud to env example
 - `15e125c` — document IB_GATEWAY_MODE and env loading on VPS
 - `6eb76bd` — bind port 4001 to all interfaces for Tailscale
@@ -57,7 +57,7 @@
 ### Key Learnings
 - gnzsnz IB Gateway image uses socat:4003 → Java:4001 internally; external port must map to 4003
 - `jts.ini` `TrustedIPs` doesn't override the GUI "localhost only" checkbox — must use VNC to change it
-- `NEXT_PUBLIC_RADON_API_URL` only matters for ws-ticket; solved by routing through Next.js API proxy
+- `NEXT_PUBLIC_XENON_API_URL` only matters for ws-ticket; solved by routing through Next.js API proxy
 - `verify_clerk_jwt` Depends() runs independently of middleware — both need localhost bypass
 - WS relay needs separate localhost bypass from FastAPI
-- VPS `.env` loaded via systemd `EnvironmentFile=`; root radon `.env` doesn't exist on VPS (gitignored)
+- VPS `.env` loaded via systemd `EnvironmentFile=`; root xenon `.env` doesn't exist on VPS (gitignored)

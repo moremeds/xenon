@@ -1,6 +1,6 @@
 import { test, expect } from "../../web/node_modules/@playwright/test";
 
-test.describe("Radon site branding", () => {
+test.describe("Xenon site branding", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/");
   });
@@ -18,7 +18,7 @@ test.describe("Radon site branding", () => {
 
     // Check SVG icon
     const faviconSvg = page.locator('link[rel="icon"][type="image/svg+xml"]');
-    await expect(faviconSvg).toHaveAttribute("href", "/brand/radon-app-icon.svg");
+    await expect(faviconSvg).toHaveAttribute("href", "/brand/xenon-app-icon.svg");
 
     // Check Apple Touch Icon
     const appleIcon = page.locator('link[rel="apple-touch-icon"]');
@@ -28,7 +28,7 @@ test.describe("Radon site branding", () => {
 
   test("should have correct Open Graph metadata", async ({ page }) => {
     // OG Title and Description (inherited from SEO constants)
-    await expect(page).toHaveTitle(/Radon Terminal/);
+    await expect(page).toHaveTitle(/Xenon Terminal/);
     
     const ogImage = page.locator('meta[property="og:image"]');
     await expect(ogImage).toHaveAttribute("content", /og-image\.png$/);
@@ -37,7 +37,7 @@ test.describe("Radon site branding", () => {
     await expect(twitterImage).toHaveAttribute("content", /og-image\.png$/);
 
     const ogImageAlt = page.locator('meta[property="og:image:alt"]');
-    await expect(ogImageAlt).toHaveAttribute("content", /Radon Terminal marketing card/);
+    await expect(ogImageAlt).toHaveAttribute("content", /Xenon Terminal marketing card/);
   });
 
   test("should have a manifest with correct icons", async ({ page }) => {
@@ -49,7 +49,7 @@ test.describe("Radon site branding", () => {
     expect(response.ok()).toBeTruthy();
     const manifest = await response.json();
 
-    expect(manifest.name).toBe("Radon Terminal");
+    expect(manifest.name).toBe("Xenon Terminal");
     
     const icons = manifest.icons as Array<{ sizes: string }>;
     const sizes = icons.map((icon) => icon.sizes);

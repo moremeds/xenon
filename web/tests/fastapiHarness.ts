@@ -91,9 +91,9 @@ async function stopProcess(child: ChildProcessWithoutNullStreams): Promise<void>
 }
 
 export async function ensureTestFastApi(): Promise<FastApiHarness> {
-  const explicitBaseUrl = process.env.RADON_TEST_FASTAPI_URL ?? process.env.RADON_API_URL;
+  const explicitBaseUrl = process.env.XENON_TEST_FASTAPI_URL ?? process.env.XENON_API_URL;
   if (explicitBaseUrl && await isReusableTestServer(explicitBaseUrl)) {
-    process.env.RADON_API_URL = explicitBaseUrl;
+    process.env.XENON_API_URL = explicitBaseUrl;
     return {
       available: true,
       baseUrl: explicitBaseUrl,
@@ -121,7 +121,7 @@ export async function ensureTestFastApi(): Promise<FastApiHarness> {
       cwd: PROJECT_ROOT,
       env: {
         ...process.env,
-        RADON_API_TEST_MODE: "1",
+        XENON_API_TEST_MODE: "1",
         PYTHONUNBUFFERED: "1",
       },
       stdio: "pipe",
@@ -145,7 +145,7 @@ export async function ensureTestFastApi(): Promise<FastApiHarness> {
     };
   }
 
-  process.env.RADON_API_URL = baseUrl;
+  process.env.XENON_API_URL = baseUrl;
   return {
     available: true,
     baseUrl,

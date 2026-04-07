@@ -11,7 +11,7 @@ export function PortfolioConvexity({
   deviation = "+2.73\u03C3",
   netGamma = "+0.61",
   netVega = "-1.24",
-  signalLayer = "Radon Core",
+  signalLayer = "Xenon Core",
 }: PortfolioConvexityProps) {
   return (
     <div

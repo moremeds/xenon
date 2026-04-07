@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import { radonFetch } from "@/lib/radonApi";
+import { xenonFetch } from "@/lib/xenonApi";
 
 export async function POST() {
   try {
-    const data = await radonFetch<{ ticket: string }>("/ws-ticket", {
+    const data = await xenonFetch<{ ticket: string }>("/ws-ticket", {
       method: "POST",
     });
     return NextResponse.json(data);

@@ -11,7 +11,7 @@ import asyncio
 import logging
 from typing import Optional
 
-logger = logging.getLogger("radon.pool_order_manage")
+logger = logging.getLogger("xenon.pool_order_manage")
 
 
 def _find_trade(client, order_id: int, perm_id: int):

@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mockRadonFetch = vi.fn();
-vi.mock("@/lib/radonApi", () => ({
-  radonFetch: mockRadonFetch,
+const mockXenonFetch = vi.fn();
+vi.mock("@/lib/xenonApi", () => ({
+  xenonFetch: mockXenonFetch,
 }));
 
 const mockReadDataFile = vi.fn();
@@ -17,7 +17,7 @@ vi.mock("@tools/schemas/ib-orders", () => ({
 describe("POST /api/orders/place — signed combo prices", () => {
   beforeEach(() => {
     vi.resetModules();
-    mockRadonFetch.mockReset();
+    mockXenonFetch.mockReset();
     mockReadDataFile.mockReset();
   });
 
@@ -29,7 +29,7 @@ describe("POST /api/orders/place — signed combo prices", () => {
         data: { open_orders: [], executed_orders: [], open_count: 0, executed_count: 0 },
       });
 
-    mockRadonFetch
+    mockXenonFetch
       .mockResolvedValueOnce({
         status: "ok",
         orderId: 12345,
@@ -60,14 +60,14 @@ describe("POST /api/orders/place — signed combo prices", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(mockRadonFetch).toHaveBeenCalledWith(
+    expect(mockXenonFetch).toHaveBeenCalledWith(
       "/orders/place",
       expect.objectContaining({
         method: "POST",
       }),
     );
 
-    const forwarded = JSON.parse(mockRadonFetch.mock.calls[0][1].body as string);
+    const forwarded = JSON.parse(mockXenonFetch.mock.calls[0][1].body as string);
     expect(forwarded.type).toBe("combo");
     expect(forwarded.symbol).toBe("IWM");
     expect(forwarded.limitPrice).toBe(-0.4);

@@ -421,7 +421,7 @@ test.describe("Ticker Search → Detail Page → Chain", () => {
         status: 502,
         contentType: "application/json",
         body: JSON.stringify({
-          error: "Radon API 502: IB error 201: Order rejected - reason:YOUR ORDER IS NOT ACCEPTED. IN ORDER TO OBTAIN THE DESIRED POSITION YOUR PREVIOUS DAY EQUITY WITH LOAN VALUE <E> (644770.54 USD) MUST EXCEED THE INITIAL MARGIN (67243.00 USD).",
+          error: "Xenon API 502: IB error 201: Order rejected - reason:YOUR ORDER IS NOT ACCEPTED. IN ORDER TO OBTAIN THE DESIRED POSITION YOUR PREVIOUS DAY EQUITY WITH LOAN VALUE <E> (644770.54 USD) MUST EXCEED THE INITIAL MARGIN (67243.00 USD).",
         }),
       });
     });
@@ -447,7 +447,7 @@ test.describe("Ticker Search → Detail Page → Chain", () => {
     await expect(error).toContainText("Order rejected by IB: insufficient margin.");
     await expect(error).toContainText("Previous-day equity with loan value is $644,770.54");
     await expect(error).toContainText("initial margin required is $67,243.00");
-    await expect(error).not.toContainText("Radon API 502:");
+    await expect(error).not.toContainText("Xenon API 502:");
     await expect(error).not.toContainText("YOUR ORDER IS NOT ACCEPTED");
   });
 });

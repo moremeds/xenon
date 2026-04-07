@@ -11,7 +11,7 @@ import asyncio
 import logging
 from typing import Dict, Optional
 
-logger = logging.getLogger("radon.ib_pool")
+logger = logging.getLogger("xenon.ib_pool")
 
 # Import path setup — scripts/api/ needs scripts/ on sys.path
 import sys

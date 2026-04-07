@@ -170,7 +170,7 @@ def list_handlers():
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Extensible monitoring daemon for Radon"
+        description="Extensible monitoring daemon for Xenon"
     )
     
     parser.add_argument("--once", action="store_true",

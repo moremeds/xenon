@@ -1,4 +1,4 @@
-# Radon Dependencies
+# Xenon Dependencies
 
 # Interactive Brokers API
 ib_insync>=0.9.86
@@ -24,3 +24,6 @@ pytz>=2024.1
 
 # Browser automation (MenthorQ CTA scraping)
 playwright>=1.48.0
+
+# Futu OpenD SDK (read-only positions + account info)
+futu-api>=9.0.0

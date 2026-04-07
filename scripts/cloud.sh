@@ -31,11 +31,11 @@ log_info "VPS reachable."
 # -- Step 2: Ensure VPS gateway is running -----------------------------------
 
 log_info "Checking VPS IB Gateway..."
-if ssh -o ConnectTimeout=5 ib-gateway "cd /home/radon/radon-cloud && docker compose ps --format json" 2>/dev/null | grep -q '"running"'; then
+if ssh -o ConnectTimeout=5 ib-gateway "cd /home/xenon/xenon-cloud && docker compose ps --format json" 2>/dev/null | grep -q '"running"'; then
   log_info "VPS gateway already running."
 else
   log_info "Starting VPS gateway..."
-  ssh ib-gateway "cd /home/radon/radon-cloud && docker compose up -d" 2>/dev/null
+  ssh ib-gateway "cd /home/xenon/xenon-cloud && docker compose up -d" 2>/dev/null
   log_warn "Approve 2FA on IBKR mobile if this is a cold start."
   log_info "Waiting 30s for gateway to initialize..."
   sleep 30

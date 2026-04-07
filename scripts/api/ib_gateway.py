@@ -19,7 +19,7 @@ import subprocess
 from pathlib import Path
 from typing import Dict
 
-logger = logging.getLogger("radon.ib_gateway")
+logger = logging.getLogger("xenon.ib_gateway")
 
 # ---------------------------------------------------------------------------
 # Configuration

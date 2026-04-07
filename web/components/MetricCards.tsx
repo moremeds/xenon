@@ -140,7 +140,7 @@ function AccountRow({
           onClick={onUnrealizedClick}
         />
         <MetricCard
-          card={{ label: "Dividends", value: fmtExact(acct.dividends), change: "ACCRUED", tone: acct.dividends > 0 ? "positive" : "neutral" }}
+          card={{ label: "Dividends", value: acct.dividends != null ? fmtExact(acct.dividends) : "---", change: "ACCRUED", tone: (acct.dividends ?? 0) > 0 ? "positive" : "neutral" }}
           onClick={onDividendsClick}
         />
       </div>}
@@ -685,7 +685,7 @@ export default function MetricCards({ portfolio, prices, realizedPnl, executedOr
         <AccountMetricModal
           open={dividendsModalOpen}
           title="Accrued Dividends"
-          value={fmtExact(acct.dividends)}
+          value={acct.dividends != null ? fmtExact(acct.dividends) : "---"}
           formula={
             "Dividends = Accrued dividends from dividend-paying positions\n" +
             "Source: Interactive Brokers account_summary (DividendReceivedYear)\n" +

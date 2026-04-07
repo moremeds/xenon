@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { readFile, stat } from "fs/promises";
 import { join } from "path";
 import { isVcgDataStale } from "@/lib/vcgStaleness";
-import { radonFetch } from "@/lib/radonApi";
+import { xenonFetch } from "@/lib/xenonApi";
 import { getRequestId, setCacheResponseHeaders } from "@/lib/apiContracts";
 
 export const runtime = "nodejs";
@@ -77,7 +77,7 @@ function triggerBackgroundScan(): void {
   bgScanInFlight = true;
 
   console.log("[VCG] Background scan triggered via FastAPI");
-  radonFetch<Record<string, unknown>>("/vcg/scan", { method: "POST", timeout: 130_000 })
+  xenonFetch<Record<string, unknown>>("/vcg/scan", { method: "POST", timeout: 130_000 })
     .then(() => { console.log("[VCG] Background scan complete"); })
     .catch((err) => { console.error("[VCG] Background scan failed:", err.message); })
     .finally(() => { bgScanInFlight = false; });

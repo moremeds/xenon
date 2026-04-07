@@ -129,16 +129,16 @@ vi.mock("ws", () => {
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
-// Mock @/lib/radonApi — the NEW dependency for migrated routes
-const mockRadonFetch = vi.fn().mockRejectedValue(new Error("mocked"));
-vi.mock("@/lib/radonApi", () => ({
-  radonFetch: mockRadonFetch,
-  RadonApiError: class extends Error {
+// Mock @/lib/xenonApi — the NEW dependency for migrated routes
+const mockXenonFetch = vi.fn().mockRejectedValue(new Error("mocked"));
+vi.mock("@/lib/xenonApi", () => ({
+  xenonFetch: mockXenonFetch,
+  XenonApiError: class extends Error {
     status: number;
     detail: string;
     constructor(status: number, detail: string) {
-      super(`Radon API ${status}: ${detail}`);
-      this.name = "RadonApiError";
+      super(`Xenon API ${status}: ${detail}`);
+      this.name = "XenonApiError";
       this.status = status;
       this.detail = detail;
     }
@@ -625,7 +625,7 @@ describe("POST /api/previous-close — extended", () => {
 describe("POST /api/orders/cancel — extended", () => {
   beforeEach(() => {
     vi.resetModules();
-    mockRadonFetch.mockReset();
+    mockXenonFetch.mockReset();
     mockReadDataFile.mockReset();
     mockReadDataFile.mockResolvedValue({
       ok: true,
@@ -634,7 +634,7 @@ describe("POST /api/orders/cancel — extended", () => {
   });
 
   it("returns success when cancel succeeds", async () => {
-    mockRadonFetch
+    mockXenonFetch
       .mockResolvedValueOnce({ status: "ok", message: "Order 101 cancelled" })
       .mockResolvedValueOnce({});
 
@@ -654,8 +654,8 @@ describe("POST /api/orders/cancel — extended", () => {
     expect(body.orders).toBeDefined();
   });
 
-  it("returns 500 when cancel fails via radonFetch", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("conn refused"));
+  it("returns 500 when cancel fails via xenonFetch", async () => {
+    mockXenonFetch.mockRejectedValue(new Error("conn refused"));
 
     const { POST } = await import("../app/api/orders/cancel/route");
     const res = await POST(
@@ -672,9 +672,9 @@ describe("POST /api/orders/cancel — extended", () => {
   });
 
   it("preserves upstream 502 detail when FastAPI cancel fails", async () => {
-    const { RadonApiError } = await import("@/lib/radonApi");
-    mockRadonFetch.mockRejectedValue(
-      new RadonApiError(502, "Cancel not confirmed by refreshed IB open orders"),
+    const { XenonApiError } = await import("@/lib/xenonApi");
+    mockXenonFetch.mockRejectedValue(
+      new XenonApiError(502, "Cancel not confirmed by refreshed IB open orders"),
     );
 
     const { POST } = await import("../app/api/orders/cancel/route");
@@ -714,7 +714,7 @@ describe("POST /api/orders/cancel — extended", () => {
 describe("POST /api/orders/modify — extended", () => {
   beforeEach(() => {
     vi.resetModules();
-    mockRadonFetch.mockReset();
+    mockXenonFetch.mockReset();
     mockReadDataFile.mockReset();
     mockReadDataFile.mockResolvedValue({
       ok: true,
@@ -734,7 +734,7 @@ describe("POST /api/orders/modify — extended", () => {
         executed_count: 0,
       },
     });
-    mockRadonFetch
+    mockXenonFetch
       .mockResolvedValueOnce({ status: "ok", message: "Order 101 modified to 5.50" })
       .mockResolvedValueOnce({});
 
@@ -754,8 +754,8 @@ describe("POST /api/orders/modify — extended", () => {
     expect(body.orders).toBeDefined();
   });
 
-  it("returns 500 when modify fails via radonFetch", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("connection timeout"));
+  it("returns 500 when modify fails via xenonFetch", async () => {
+    mockXenonFetch.mockRejectedValue(new Error("connection timeout"));
 
     const { POST } = await import("../app/api/orders/modify/route");
     const res = await POST(
@@ -798,7 +798,7 @@ describe("POST /api/orders/modify — extended", () => {
         executed_count: 0,
       },
     });
-    mockRadonFetch
+    mockXenonFetch
       .mockResolvedValueOnce({ status: "ok", message: "Order 101 quantity modified to 75" })
       .mockResolvedValueOnce({});
 
@@ -812,7 +812,7 @@ describe("POST /api/orders/modify — extended", () => {
     );
     expect(res.status).toBe(200);
 
-    const [path, options] = mockRadonFetch.mock.calls[0];
+    const [path, options] = mockXenonFetch.mock.calls[0];
     expect(path).toBe("/orders/modify");
     expect(JSON.parse(String(options.body))).toMatchObject({ orderId: 101, permId: 0, newQuantity: 75 });
   });
@@ -829,7 +829,7 @@ describe("POST /api/orders/modify — extended", () => {
         executed_count: 0,
       },
     });
-    mockRadonFetch
+    mockXenonFetch
       .mockResolvedValueOnce({ status: "ok", message: "Order modified: $5.7 → $5.55" })
       .mockResolvedValueOnce({});
 
@@ -848,7 +848,7 @@ describe("POST /api/orders/modify — extended", () => {
   });
 
   it("replaces combo orders via cancel then place when replacement payload provided", async () => {
-    mockRadonFetch
+    mockXenonFetch
       .mockResolvedValueOnce({ status: "ok", message: "Order cancelled" })
       .mockResolvedValueOnce({ status: "ok", message: "Order cancelled" })
       .mockResolvedValueOnce({ status: "ok", message: "Replacement placed", orderId: 202, permId: 999 })
@@ -883,19 +883,19 @@ describe("POST /api/orders/modify — extended", () => {
     );
     expect(res.status).toBe(200);
 
-    expect(mockRadonFetch).toHaveBeenCalledTimes(4);
-    expect(mockRadonFetch.mock.calls[0][0]).toBe("/orders/cancel");
-    expect(JSON.parse(String(mockRadonFetch.mock.calls[0][1].body))).toMatchObject({
+    expect(mockXenonFetch).toHaveBeenCalledTimes(4);
+    expect(mockXenonFetch.mock.calls[0][0]).toBe("/orders/cancel");
+    expect(JSON.parse(String(mockXenonFetch.mock.calls[0][1].body))).toMatchObject({
       orderId: 77,
       permId: 653611587,
     });
-    expect(mockRadonFetch.mock.calls[1][0]).toBe("/orders/cancel");
-    expect(JSON.parse(String(mockRadonFetch.mock.calls[1][1].body))).toMatchObject({
+    expect(mockXenonFetch.mock.calls[1][0]).toBe("/orders/cancel");
+    expect(JSON.parse(String(mockXenonFetch.mock.calls[1][1].body))).toMatchObject({
       orderId: 78,
       permId: 653611588,
     });
-    expect(mockRadonFetch.mock.calls[2][0]).toBe("/orders/place");
-    expect(JSON.parse(String(mockRadonFetch.mock.calls[2][1].body))).toMatchObject({
+    expect(mockXenonFetch.mock.calls[2][0]).toBe("/orders/place");
+    expect(JSON.parse(String(mockXenonFetch.mock.calls[2][1].body))).toMatchObject({
       type: "combo",
       symbol: "AAOI",
       action: "SELL",
@@ -931,7 +931,7 @@ describe("POST /api/orders/modify — extended", () => {
 describe("POST /api/orders/place — extended", () => {
   beforeEach(() => {
     vi.resetModules();
-    mockRadonFetch.mockReset();
+    mockXenonFetch.mockReset();
     mockReadDataFile.mockReset();
     mockReadDataFile.mockResolvedValue({
       ok: true,
@@ -940,7 +940,7 @@ describe("POST /api/orders/place — extended", () => {
   });
 
   it("returns success with orderId when placement succeeds", async () => {
-    mockRadonFetch
+    mockXenonFetch
       .mockResolvedValueOnce({
         status: "ok",
         orderId: 12345,
@@ -974,8 +974,8 @@ describe("POST /api/orders/place — extended", () => {
     expect(body.orders).toBeDefined();
   });
 
-  it("returns 500 when radonFetch fails", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("IB Gateway not running"));
+  it("returns 500 when xenonFetch fails", async () => {
+    mockXenonFetch.mockRejectedValue(new Error("IB Gateway not running"));
 
     const { POST } = await import("../app/api/orders/place/route");
     const res = await POST(
@@ -1009,8 +1009,8 @@ describe("POST /api/orders/place — extended", () => {
     expect(res.status).toBe(400);
   });
 
-  it("passes option fields through to radonFetch correctly", async () => {
-    mockRadonFetch
+  it("passes option fields through to xenonFetch correctly", async () => {
+    mockXenonFetch
       .mockResolvedValueOnce({
         status: "ok",
         orderId: 55555,
@@ -1041,8 +1041,8 @@ describe("POST /api/orders/place — extended", () => {
     const body = await res.json();
     expect(body.orderId).toBe(55555);
 
-    // Verify radonFetch was called with order payload containing option fields
-    const [, opts] = mockRadonFetch.mock.calls[0];
+    // Verify xenonFetch was called with order payload containing option fields
+    const [, opts] = mockXenonFetch.mock.calls[0];
     const payload = JSON.parse(opts.body);
     expect(payload.expiry).toBe("20260320");
     expect(payload.strike).toBe(200);
@@ -1071,7 +1071,7 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
 
   beforeEach(() => {
     vi.resetModules();
-    mockRadonFetch.mockReset();
+    mockXenonFetch.mockReset();
     mockReadDataFile.mockReset();
     mockReadDataFile.mockResolvedValue({
       ok: true,
@@ -1080,7 +1080,7 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
   });
 
   it("returns 502 when IB silently cancels the order (Cancelled status)", async () => {
-    mockRadonFetch.mockResolvedValueOnce({
+    mockXenonFetch.mockResolvedValueOnce({
       status: "ok",
       orderId: 12345,
       permId: 67890,
@@ -1102,7 +1102,7 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
   });
 
   it("returns 502 when IB reports ApiCancelled", async () => {
-    mockRadonFetch.mockResolvedValueOnce({
+    mockXenonFetch.mockResolvedValueOnce({
       status: "ok",
       orderId: 12345,
       permId: 67890,
@@ -1123,7 +1123,7 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
   });
 
   it("returns 502 when IB returns Unknown (no ack before disconnect)", async () => {
-    mockRadonFetch.mockResolvedValueOnce({
+    mockXenonFetch.mockResolvedValueOnce({
       status: "ok",
       orderId: 0,
       permId: 0,
@@ -1144,7 +1144,7 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
   });
 
   it("returns 502 when IB returns Inactive", async () => {
-    mockRadonFetch.mockResolvedValueOnce({
+    mockXenonFetch.mockResolvedValueOnce({
       status: "ok",
       orderId: 12345,
       permId: 67890,
@@ -1165,7 +1165,7 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
   });
 
   it("returns 200 when IB accepts the combo order (Submitted)", async () => {
-    mockRadonFetch
+    mockXenonFetch
       .mockResolvedValueOnce({
         status: "ok",
         orderId: 12345,
@@ -1190,7 +1190,7 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
   });
 
   it("returns 200 when IB accepts the combo order (PreSubmitted)", async () => {
-    mockRadonFetch
+    mockXenonFetch
       .mockResolvedValueOnce({
         status: "ok",
         orderId: 12345,
@@ -1211,7 +1211,7 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
   });
 
   it("passes combo legs to FastAPI correctly", async () => {
-    mockRadonFetch
+    mockXenonFetch
       .mockResolvedValueOnce({
         status: "ok",
         orderId: 12345,
@@ -1229,8 +1229,8 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
       }),
     );
 
-    // Verify radonFetch was called with order payload containing combo legs
-    const [, opts] = mockRadonFetch.mock.calls[0];
+    // Verify xenonFetch was called with order payload containing combo legs
+    const [, opts] = mockXenonFetch.mock.calls[0];
     const parsed = JSON.parse(opts.body);
     expect(parsed.type).toBe("combo");
     expect(parsed.symbol).toBe("SPXU");
@@ -1241,7 +1241,7 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
   });
 
   it("passes per-leg limit prices when provided", async () => {
-    mockRadonFetch
+    mockXenonFetch
       .mockResolvedValueOnce({
         status: "ok",
         orderId: 12345,
@@ -1267,7 +1267,7 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
       }),
     );
 
-    const [, opts] = mockRadonFetch.mock.calls[0];
+    const [, opts] = mockXenonFetch.mock.calls[0];
     const parsed = JSON.parse(opts.body);
     expect(parsed.legs[0]).toMatchObject({ limitPrice: 1.75 });
     expect(parsed.legs[1]).toMatchObject({ limitPrice: 0.9 });

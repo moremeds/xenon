@@ -1,10 +1,10 @@
-# Radon Site
+# Xenon Site
 
-Marketing site for Radon, built as a standalone Next.js app in `site/`.
+Marketing site for Xenon, built as a standalone Next.js app in `site/`.
 
 ## What Lives Here
 
-- A standalone, crawlable Next.js App Router marketing site for the Radon brand and product narrative
+- A standalone, crawlable Next.js App Router marketing site for the Xenon brand and product narrative
 - The institutional-terminal landing page under `app/`
 - Reusable section and content primitives under `components/` and `lib/`
 - Site-only deployment and verification helpers under `scripts/`
@@ -22,7 +22,7 @@ The site runs on `http://localhost:3333`.
 For canonical URLs and share metadata, set:
 
 ```bash
-NEXT_PUBLIC_SITE_URL=https://radon.run
+NEXT_PUBLIC_SITE_URL=https://xenon.run
 ```
 
 If the deployed hostname changes, update that value in Vercel so `canonical`, `robots`, `sitemap`, JSON-LD, and social cards all emit the correct absolute URL.
@@ -38,7 +38,7 @@ python3.13 scripts/seo_audit_report.py
 
 `NEXT_DIST_DIR` is supported so local verification can build without colliding with another live Next.js process using the default `.next/` directory.
 
-Standalone browser coverage for the marketing site lives under `site/e2e/` and runs through the shared Playwright harness in [playwright.site.config.ts](/Users/joemccann/dev/apps/finance/radon/web/playwright.site.config.ts):
+Standalone browser coverage for the marketing site lives under `site/e2e/` and runs through the shared Playwright harness in [playwright.site.config.ts](/Users/joemccann/dev/apps/finance/xenon/web/playwright.site.config.ts):
 
 ```bash
 cd web
@@ -56,7 +56,7 @@ cd site
 python3.13 scripts/seo_audit_report.py
 ```
 
-Use `NEXT_PUBLIC_SITE_URL=https://radon.run` in production so canonical URLs, sitemap entries, and Open Graph/Twitter URLs resolve to the public hostname. The script writes an HTML report to `reports/` and opens it unless `--no-open` is passed.
+Use `NEXT_PUBLIC_SITE_URL=https://xenon.run` in production so canonical URLs, sitemap entries, and Open Graph/Twitter URLs resolve to the public hostname. The script writes an HTML report to `reports/` and opens it unless `--no-open` is passed.
 
 ## SEO Surface
 
@@ -91,6 +91,6 @@ The script writes `reports/site-seo-audit-YYYY-MM-DD.html`, checks the homepage 
 
 The Vercel project for the site should use `site/` as its **Root Directory**.
 
-This app includes [vercel.json](/Users/joemccann/dev/apps/finance/radon/site/vercel.json) with an `ignoreCommand` that only allows a deploy to continue when files under `site/` changed. Pushes that only touch `web/`, `scripts/`, `data/`, or other repo paths will skip the site build.
+This app includes [vercel.json](/Users/joemccann/dev/apps/finance/xenon/site/vercel.json) with an `ignoreCommand` that only allows a deploy to continue when files under `site/` changed. Pushes that only touch `web/`, `scripts/`, `data/`, or other repo paths will skip the site build.
 
-The ignore step is implemented by [vercel-ignore-build.mjs](/Users/joemccann/dev/apps/finance/radon/site/scripts/vercel-ignore-build.mjs). It compares the current commit against the previous deployed commit and defaults to **continuing the build** if Vercel cannot determine the diff.
+The ignore step is implemented by [vercel-ignore-build.mjs](/Users/joemccann/dev/apps/finance/xenon/site/scripts/vercel-ignore-build.mjs). It compares the current commit against the previous deployed commit and defaults to **continuing the build** if Vercel cannot determine the diff.

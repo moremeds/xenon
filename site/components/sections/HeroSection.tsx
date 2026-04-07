@@ -14,7 +14,7 @@ export function HeroSection() {
             Strategies, execution, and state reconstruction in one instrument.
           </h1>
           <p className="mt-6 max-w-2xl text-base leading-8 text-secondary md:text-lg">
-            Radon is built for traders and investors who want deployable strategy
+            Xenon is built for traders and investors who want deployable strategy
             logic, explicit execution discipline, and explainable metrics without
             outsourcing conviction to a black box.
           </p>
@@ -32,7 +32,7 @@ export function HeroSection() {
               Review Execution Rail
             </a>
             <a
-              href="https://github.com/joemccann/radon"
+              href="https://github.com/joemccann/xenon"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex"

@@ -76,7 +76,7 @@ def test_run_cta_sync_preserves_literal_env_values(tmp_path: Path) -> None:
 
     env = {
         **os.environ,
-        "RADON_PYTHON_BIN": str(bin_dir / "python3.13"),
+        "XENON_PYTHON_BIN": str(bin_dir / "python3.13"),
     }
     result = subprocess.run(
         ["bash", str(scripts_dir / "run_cta_sync.sh"), "--source", "test"],

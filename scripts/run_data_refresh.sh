@@ -27,7 +27,7 @@ _load_env ".env"
 
 resolve_python() {
     local candidate
-    for candidate in "${RADON_PYTHON_BIN:-}" python3.13 python3.9 /usr/bin/python3 python3; do
+    for candidate in "${XENON_PYTHON_BIN:-}" python3.13 python3.9 /usr/bin/python3 python3; do
         [ -n "$candidate" ] || continue
         command -v "$candidate" >/dev/null 2>&1 || continue
         "$candidate" - <<'PY' >/dev/null 2>&1
@@ -182,7 +182,7 @@ refresh_cri_cache_post_close() {
 }
 
 # --- post-close CRI repair ---
-# CTA sync now runs via the dedicated com.radon.cta-sync launch agent so
+# CTA sync now runs via the dedicated com.xenon.cta-sync launch agent so
 # this wrapper only owns the CRI post-close repair path.
 CURRENT_HOUR_ET=$(TZ=America/New_York date +%H)
 TODAY_ET=$(TZ=America/New_York date +%Y-%m-%d)

@@ -17,7 +17,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-logger = logging.getLogger("radon.historical")
+logger = logging.getLogger("xenon.historical")
 
 router = APIRouter()
 

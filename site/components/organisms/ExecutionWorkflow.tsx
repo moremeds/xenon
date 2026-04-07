@@ -17,7 +17,7 @@ export function ExecutionWorkflow() {
           No hidden handoff between signal and risk.
         </h3>
         <p className="mt-4 text-sm leading-6 text-secondary">
-          Radon carries every position from candidate selection through structure
+          Xenon carries every position from candidate selection through structure
           design, bankroll sizing, execution, and post-trade auditability. Nothing
           falls through the gap between conviction and capital deployment.
         </p>

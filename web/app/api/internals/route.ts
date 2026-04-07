@@ -6,7 +6,7 @@ import { join } from "path";
 import { isCriDataStale } from "@/lib/criStaleness";
 import { selectPreferredCriCandidate, type CriCacheCandidate } from "@/lib/criCache";
 import { backfillRealizedVolHistory, type RegimeHistoryEntry } from "@/lib/regimeHistory";
-import { radonFetch } from "@/lib/radonApi";
+import { xenonFetch } from "@/lib/xenonApi";
 import { isSkewCacheFresh } from "@/lib/internalsSkewCache";
 
 const DATA_DIR = join(process.cwd(), "..", "data");
@@ -322,7 +322,7 @@ async function readLongRangeSkewHistory(): Promise<MenthorqSkewHistoryPoint[]> {
   // 15-min UW cache).  This runs even when the market is closed so that
   // overnight / weekend UW publishes are picked up.
   try {
-    const response = await radonFetch<LongRangeSkewHistoryPayload>("/internals/skew-history", {
+    const response = await xenonFetch<LongRangeSkewHistoryPayload>("/internals/skew-history", {
       method: "GET",
       timeout: 90_000,
     });
@@ -560,7 +560,7 @@ function triggerBackgroundScan(): void {
   bgScanInFlight = true;
 
   console.log("[CRI] Background scan triggered via FastAPI");
-  radonFetch<Record<string, unknown>>("/regime/scan", { method: "POST", timeout: 130_000 })
+  xenonFetch<Record<string, unknown>>("/regime/scan", { method: "POST", timeout: 130_000 })
     .then(async (data) => {
       await mkdir(SCHEDULED_DIR, { recursive: true });
       const ts = new Date().toLocaleString("sv", { timeZone: "America/New_York" })
@@ -597,7 +597,7 @@ export async function GET(): Promise<Response> {
 
 export async function POST(): Promise<Response> {
   try {
-    const rawData = await radonFetch<Record<string, unknown>>("/regime/scan", {
+    const rawData = await xenonFetch<Record<string, unknown>>("/regime/scan", {
       method: "POST",
       timeout: 130_000,
     });

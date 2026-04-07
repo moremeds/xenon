@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 /**
- * Tests for the FastAPI migration — verifies the new radonFetch-based routes
+ * Tests for the FastAPI migration — verifies the new xenonFetch-based routes
  * handle success, failure, and cache fallback correctly.
  *
  * Covers:
@@ -18,16 +18,16 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // Mocks — must be declared before imports (vi.mock is hoisted)
 // ---------------------------------------------------------------------------
 
-// Mock radonFetch — the ONLY external dependency for migrated routes
-const mockRadonFetch = vi.fn();
-vi.mock("@/lib/radonApi", () => ({
-  radonFetch: mockRadonFetch,
-  RadonApiError: class extends Error {
+// Mock xenonFetch — the ONLY external dependency for migrated routes
+const mockXenonFetch = vi.fn();
+vi.mock("@/lib/xenonApi", () => ({
+  xenonFetch: mockXenonFetch,
+  XenonApiError: class extends Error {
     status: number;
     detail: string;
     constructor(status: number, detail: string) {
-      super(`Radon API ${status}: ${detail}`);
-      this.name = "RadonApiError";
+      super(`Xenon API ${status}: ${detail}`);
+      this.name = "XenonApiError";
       this.status = status;
       this.detail = detail;
     }
@@ -85,7 +85,7 @@ function makeRequest(url: string, init?: RequestInit): Request {
 
 beforeEach(() => {
   vi.resetModules();
-  mockRadonFetch.mockReset();
+  mockXenonFetch.mockReset();
   mockReadDataFile.mockReset();
   mockReadFile.mockReset();
   mockWriteFile.mockReset();
@@ -100,10 +100,10 @@ beforeEach(() => {
 // POST /api/scanner — success + cache fallback
 // =============================================================================
 
-describe("POST /api/scanner (via radonFetch)", () => {
+describe("POST /api/scanner (via xenonFetch)", () => {
   it("returns data on success", async () => {
     const scanData = { scan_time: "2026-03-14", tickers_scanned: 30, signals_found: 5, top_signals: [] };
-    mockRadonFetch.mockResolvedValue(scanData);
+    mockXenonFetch.mockResolvedValue(scanData);
     mockStatSync.mockReturnValue({ mtime: new Date() });
 
     const { POST } = await import("../app/api/scanner/route");
@@ -114,8 +114,8 @@ describe("POST /api/scanner (via radonFetch)", () => {
     expect(body.cache_meta).toBeDefined();
   });
 
-  it("falls back to cached data on radonFetch failure", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("Connection refused"));
+  it("falls back to cached data on xenonFetch failure", async () => {
+    mockXenonFetch.mockRejectedValue(new Error("Connection refused"));
     mockReadFile.mockResolvedValue(JSON.stringify({
       scan_time: "2026-03-13", tickers_scanned: 25, signals_found: 3, top_signals: [],
     }));
@@ -131,7 +131,7 @@ describe("POST /api/scanner (via radonFetch)", () => {
   });
 
   it("returns 502 on failure when no cache exists", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("Connection refused"));
+    mockXenonFetch.mockRejectedValue(new Error("Connection refused"));
     mockReadFile.mockRejectedValue(new Error("ENOENT"));
 
     const { POST } = await import("../app/api/scanner/route");
@@ -146,10 +146,10 @@ describe("POST /api/scanner (via radonFetch)", () => {
 // POST /api/discover — success + cache fallback
 // =============================================================================
 
-describe("POST /api/discover (via radonFetch)", () => {
+describe("POST /api/discover (via xenonFetch)", () => {
   it("returns discovery data on success", async () => {
     const data = { discovery_time: "2026-03-14", candidates_found: 12, candidates: [] };
-    mockRadonFetch.mockResolvedValue(data);
+    mockXenonFetch.mockResolvedValue(data);
     mockStatSync.mockReturnValue({ mtime: new Date() });
 
     const { POST } = await import("../app/api/discover/route");
@@ -160,7 +160,7 @@ describe("POST /api/discover (via radonFetch)", () => {
   });
 
   it("falls back to cache on failure", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("timeout"));
+    mockXenonFetch.mockRejectedValue(new Error("timeout"));
     mockReadFile.mockResolvedValue(JSON.stringify({
       discovery_time: "2026-03-13", candidates_found: 8, candidates: [],
     }));
@@ -179,10 +179,10 @@ describe("POST /api/discover (via radonFetch)", () => {
 // POST /api/flow-analysis — success + cache fallback
 // =============================================================================
 
-describe("POST /api/flow-analysis (via radonFetch)", () => {
+describe("POST /api/flow-analysis (via xenonFetch)", () => {
   it("returns flow data on success", async () => {
     const data = { analysis_time: "2026-03-14", positions_scanned: 20, supports: [], against: [] };
-    mockRadonFetch.mockResolvedValue(data);
+    mockXenonFetch.mockResolvedValue(data);
     mockStatSync.mockReturnValue({ mtime: new Date() });
 
     const { POST } = await import("../app/api/flow-analysis/route");
@@ -193,7 +193,7 @@ describe("POST /api/flow-analysis (via radonFetch)", () => {
   });
 
   it("falls back to cache on failure", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("502"));
+    mockXenonFetch.mockRejectedValue(new Error("502"));
     mockReadFile.mockResolvedValue(JSON.stringify({
       analysis_time: "old", positions_scanned: 10, supports: [], against: [],
     }));
@@ -208,12 +208,12 @@ describe("POST /api/flow-analysis (via radonFetch)", () => {
 });
 
 // =============================================================================
-// GET /api/attribution — via radonFetch
+// GET /api/attribution — via xenonFetch
 // =============================================================================
 
-describe("GET /api/attribution (via radonFetch)", () => {
+describe("GET /api/attribution (via xenonFetch)", () => {
   it("returns attribution data on success", async () => {
-    mockRadonFetch.mockResolvedValue({ total_trades: 39, total_realized_pnl: 126927 });
+    mockXenonFetch.mockResolvedValue({ total_trades: 39, total_realized_pnl: 126927 });
 
     const { GET } = await import("../app/api/attribution/route");
     const res = await GET();
@@ -222,8 +222,8 @@ describe("GET /api/attribution (via radonFetch)", () => {
     expect(body.total_trades).toBe(39);
   });
 
-  it("returns 500 on radonFetch failure", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("Script exited with code 1"));
+  it("returns 500 on xenonFetch failure", async () => {
+    mockXenonFetch.mockRejectedValue(new Error("Script exited with code 1"));
 
     const { GET } = await import("../app/api/attribution/route");
     const res = await GET();
@@ -234,13 +234,13 @@ describe("GET /api/attribution (via radonFetch)", () => {
 });
 
 // =============================================================================
-// POST /api/portfolio — via radonFetch + cache fallback
+// POST /api/portfolio — via xenonFetch + cache fallback
 // =============================================================================
 
-describe("POST /api/portfolio (via radonFetch)", () => {
+describe("POST /api/portfolio (via xenonFetch)", () => {
   it("returns synced data on success", async () => {
     const portfolio = { bankroll: 100000, last_sync: "2026-03-14T14:30:00", positions: [] };
-    mockRadonFetch.mockResolvedValue(portfolio);
+    mockXenonFetch.mockResolvedValue(portfolio);
 
     const { POST } = await import("../app/api/portfolio/route");
     const res = await POST();
@@ -249,8 +249,8 @@ describe("POST /api/portfolio (via radonFetch)", () => {
     expect(body.bankroll).toBe(100000);
   });
 
-  it("falls back to cached portfolio when radonFetch fails", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("IB connection refused"));
+  it("falls back to cached portfolio when xenonFetch fails", async () => {
+    mockXenonFetch.mockRejectedValue(new Error("IB connection refused"));
     const cached = { bankroll: 95000, last_sync: "2026-03-13T16:00:00", positions: [{ ticker: "AAPL" }] };
     mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
 
@@ -263,7 +263,7 @@ describe("POST /api/portfolio (via radonFetch)", () => {
   });
 
   it("returns 502 when sync fails and no cache exists", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("connection refused"));
+    mockXenonFetch.mockRejectedValue(new Error("connection refused"));
     mockReadDataFile.mockResolvedValue({ ok: false, error: "not found" });
 
     const { POST } = await import("../app/api/portfolio/route");
@@ -301,13 +301,13 @@ describe("GET /api/portfolio (stale-while-revalidate)", () => {
 });
 
 // =============================================================================
-// POST /api/orders — via radonFetch + cache fallback
+// POST /api/orders — via xenonFetch + cache fallback
 // =============================================================================
 
-describe("POST /api/orders (via radonFetch)", () => {
+describe("POST /api/orders (via xenonFetch)", () => {
   it("returns refreshed orders on success", async () => {
     const orders = { last_sync: "2026-03-14", open_orders: [], executed_orders: [], open_count: 0, executed_count: 0 };
-    mockRadonFetch.mockResolvedValue(orders);
+    mockXenonFetch.mockResolvedValue(orders);
     mockReadDataFile.mockResolvedValue({ ok: true, data: orders });
 
     const { POST } = await import("../app/api/orders/route");
@@ -318,7 +318,7 @@ describe("POST /api/orders (via radonFetch)", () => {
   });
 
   it("falls back to cached orders when sync fails", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("timeout"));
+    mockXenonFetch.mockRejectedValue(new Error("timeout"));
     const cached = { last_sync: "2026-03-13", open_orders: [{ orderId: 1 }], executed_orders: [], open_count: 1, executed_count: 0 };
     mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
 
@@ -331,7 +331,7 @@ describe("POST /api/orders (via radonFetch)", () => {
   });
 
   it("returns 502 when sync fails and no cache", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("timeout"));
+    mockXenonFetch.mockRejectedValue(new Error("timeout"));
     mockReadDataFile.mockResolvedValue({ ok: true, data: { last_sync: "", open_orders: [], executed_orders: [], open_count: 0, executed_count: 0 } });
 
     const { POST } = await import("../app/api/orders/route");
@@ -344,7 +344,7 @@ describe("POST /api/orders (via radonFetch)", () => {
 // POST /api/orders/cancel — input validation preserved
 // =============================================================================
 
-describe("POST /api/orders/cancel (via radonFetch)", () => {
+describe("POST /api/orders/cancel (via xenonFetch)", () => {
   it("returns 400 when both orderId and permId are missing", async () => {
     const { POST } = await import("../app/api/orders/cancel/route");
     const req = makeRequest("http://localhost/api/orders/cancel", {
@@ -359,7 +359,7 @@ describe("POST /api/orders/cancel (via radonFetch)", () => {
   });
 
   it("succeeds when orderId is provided", async () => {
-    mockRadonFetch
+    mockXenonFetch
       .mockResolvedValueOnce({ status: "ok", message: "Cancelled" })  // cancel
       .mockResolvedValueOnce({});  // refresh
     mockReadDataFile.mockResolvedValue({ ok: true, data: { open_orders: [], executed_orders: [] } });
@@ -381,7 +381,7 @@ describe("POST /api/orders/cancel (via radonFetch)", () => {
 // POST /api/orders/modify — input validation preserved
 // =============================================================================
 
-describe("POST /api/orders/modify (via radonFetch)", () => {
+describe("POST /api/orders/modify (via xenonFetch)", () => {
   it("returns 400 when both orderId and permId are missing", async () => {
     const { POST } = await import("../app/api/orders/modify/route");
     const req = makeRequest("http://localhost/api/orders/modify", {
@@ -433,7 +433,7 @@ describe("POST /api/orders/modify (via radonFetch)", () => {
 // POST /api/orders/place — input validation + IB rejection detection
 // =============================================================================
 
-describe("POST /api/orders/place (via radonFetch)", () => {
+describe("POST /api/orders/place (via xenonFetch)", () => {
   it("returns 400 when symbol is missing", async () => {
     const { POST } = await import("../app/api/orders/place/route");
     const req = makeRequest("http://localhost/api/orders/place", {
@@ -446,7 +446,7 @@ describe("POST /api/orders/place (via radonFetch)", () => {
   });
 
   it("detects IB silent rejection (Cancelled status)", async () => {
-    mockRadonFetch.mockResolvedValueOnce({
+    mockXenonFetch.mockResolvedValueOnce({
       status: "ok",
       orderId: 42,
       permId: 9999,
@@ -467,7 +467,7 @@ describe("POST /api/orders/place (via radonFetch)", () => {
   });
 
   it("detects IB silent rejection (Unknown status)", async () => {
-    mockRadonFetch.mockResolvedValueOnce({
+    mockXenonFetch.mockResolvedValueOnce({
       status: "ok",
       orderId: 42,
       permId: 9999,
@@ -487,7 +487,7 @@ describe("POST /api/orders/place (via radonFetch)", () => {
   });
 
   it("succeeds with valid stock order", async () => {
-    mockRadonFetch
+    mockXenonFetch
       .mockResolvedValueOnce({
         status: "ok",
         orderId: 42,
@@ -512,7 +512,7 @@ describe("POST /api/orders/place (via radonFetch)", () => {
   });
 
   it("normalizes CALL/PUT combo legs to C/P for FastAPI payload", async () => {
-    mockRadonFetch
+    mockXenonFetch
       .mockResolvedValueOnce({
         status: "ok",
         orderId: 99,
@@ -559,7 +559,7 @@ describe("POST /api/orders/place (via radonFetch)", () => {
     const res = await POST(req);
     expect(res.status).toBe(200);
 
-    const placeCall = mockRadonFetch.mock.calls.find((c) => c[0] === "/orders/place");
+    const placeCall = mockXenonFetch.mock.calls.find((c) => c[0] === "/orders/place");
     expect(placeCall).toBeDefined();
     const payload = JSON.parse((placeCall![1] as { body: string }).body) as {
       legs: { right: string; symbol?: string }[];
@@ -571,13 +571,13 @@ describe("POST /api/orders/place (via radonFetch)", () => {
 });
 
 // =============================================================================
-// POST /api/blotter — via radonFetch
+// POST /api/blotter — via xenonFetch
 // =============================================================================
 
-describe("POST /api/blotter (via radonFetch)", () => {
+describe("POST /api/blotter (via xenonFetch)", () => {
   it("returns blotter data on success", async () => {
     const data = { as_of: "2026-03-14", summary: { closed_trades: 5 }, closed_trades: [], open_trades: [] };
-    mockRadonFetch.mockResolvedValue(data);
+    mockXenonFetch.mockResolvedValue(data);
 
     const { POST } = await import("../app/api/blotter/route");
     const res = await POST();
@@ -587,7 +587,7 @@ describe("POST /api/blotter (via radonFetch)", () => {
   });
 
   it("falls back to cached blotter on failure", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("Flex query timed out"));
+    mockXenonFetch.mockRejectedValue(new Error("Flex query timed out"));
     mockReadFile.mockResolvedValue(JSON.stringify({
       as_of: "2026-03-13",
       summary: { closed_trades: 2 },
@@ -619,7 +619,7 @@ describe("POST /api/blotter (via radonFetch)", () => {
   });
 
   it("returns 502 on failure when cache unavailable", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("Flex query timed out"));
+    mockXenonFetch.mockRejectedValue(new Error("Flex query timed out"));
     mockReadFile.mockRejectedValue(new Error("ENOENT"));
 
     const { POST } = await import("../app/api/blotter/route");
@@ -631,10 +631,10 @@ describe("POST /api/blotter (via radonFetch)", () => {
 });
 
 // =============================================================================
-// GET /api/options/chain — via radonFetch
+// GET /api/options/chain — via xenonFetch
 // =============================================================================
 
-describe("GET /api/options/chain (via radonFetch)", () => {
+describe("GET /api/options/chain (via xenonFetch)", () => {
   it("returns 400 when symbol is missing", async () => {
     const { GET } = await import("../app/api/options/chain/route");
     const req = makeRequest("http://localhost/api/options/chain");
@@ -645,7 +645,7 @@ describe("GET /api/options/chain (via radonFetch)", () => {
   });
 
   it("returns chain data on success", async () => {
-    mockRadonFetch.mockResolvedValue({ symbol: "AAPL", expirations: ["2026-04-17"], calls: [], puts: [] });
+    mockXenonFetch.mockResolvedValue({ symbol: "AAPL", expirations: ["2026-04-17"], calls: [], puts: [] });
 
     const { GET } = await import("../app/api/options/chain/route");
     const req = makeRequest("http://localhost/api/options/chain?symbol=AAPL");
@@ -656,13 +656,13 @@ describe("GET /api/options/chain (via radonFetch)", () => {
   });
 
   it("passes expiry parameter when provided", async () => {
-    mockRadonFetch.mockResolvedValue({ symbol: "AAPL", calls: [], puts: [] });
+    mockXenonFetch.mockResolvedValue({ symbol: "AAPL", calls: [], puts: [] });
 
     const { GET } = await import("../app/api/options/chain/route");
     const req = makeRequest("http://localhost/api/options/chain?symbol=AAPL&expiry=2026-04-17");
     await GET(req);
 
-    expect(mockRadonFetch).toHaveBeenCalledWith(
+    expect(mockXenonFetch).toHaveBeenCalledWith(
       expect.stringContaining("expiry=2026-04-17"),
       expect.any(Object),
     );
@@ -670,10 +670,10 @@ describe("GET /api/options/chain (via radonFetch)", () => {
 });
 
 // =============================================================================
-// GET /api/options/expirations — via radonFetch
+// GET /api/options/expirations — via xenonFetch
 // =============================================================================
 
-describe("GET /api/options/expirations (via radonFetch)", () => {
+describe("GET /api/options/expirations (via xenonFetch)", () => {
   it("returns 400 when symbol is missing", async () => {
     const { GET } = await import("../app/api/options/expirations/route");
     const req = makeRequest("http://localhost/api/options/expirations");
@@ -684,7 +684,7 @@ describe("GET /api/options/expirations (via radonFetch)", () => {
   });
 
   it("returns expirations on success", async () => {
-    mockRadonFetch.mockResolvedValue({ symbol: "GOOG", expirations: ["2026-04-17", "2026-05-15"] });
+    mockXenonFetch.mockResolvedValue({ symbol: "GOOG", expirations: ["2026-04-17", "2026-05-15"] });
 
     const { GET } = await import("../app/api/options/expirations/route");
     const req = makeRequest("http://localhost/api/options/expirations?symbol=GOOG");
@@ -696,7 +696,7 @@ describe("GET /api/options/expirations (via radonFetch)", () => {
   });
 
   it("returns 502 when FastAPI is down", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("Connection refused"));
+    mockXenonFetch.mockRejectedValue(new Error("Connection refused"));
 
     const { GET } = await import("../app/api/options/expirations/route");
     const req = makeRequest("http://localhost/api/options/expirations?symbol=GOOG");

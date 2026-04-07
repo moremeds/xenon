@@ -13,8 +13,8 @@ vi.mock("fs/promises", () => ({ stat: mockStat }));
 const mockReadDataFile = vi.fn();
 vi.mock("@tools/data-reader", () => ({ readDataFile: mockReadDataFile }));
 
-const mockRadonFetch = vi.fn();
-vi.mock("@/lib/radonApi", () => ({ radonFetch: mockRadonFetch }));
+const mockXenonFetch = vi.fn();
+vi.mock("@/lib/xenonApi", () => ({ xenonFetch: mockXenonFetch }));
 
 function makePortfolio(lastSync: string) {
   return {
@@ -51,7 +51,7 @@ describe("POST /api/portfolio — sync failure fallback", () => {
 
   it("returns cached portfolio data with 200 when ibSync fails", async () => {
     const cached = makePortfolio("2026-03-13T14:00:00Z");
-    mockRadonFetch.mockRejectedValue(new Error("Connect call failed"));
+    mockXenonFetch.mockRejectedValue(new Error("Connect call failed"));
     mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
 
     const { POST } = await import("../app/api/portfolio/route");
@@ -61,12 +61,12 @@ describe("POST /api/portfolio — sync failure fallback", () => {
     expect(response.status).toBe(200);
     expect(body.last_sync).toBe("2026-03-13T14:00:00Z");
     expect(body.positions).toEqual([]);
-    expect(mockRadonFetch).toHaveBeenCalledWith("/portfolio/sync", expect.objectContaining({ method: "POST" }));
+    expect(mockXenonFetch).toHaveBeenCalledWith("/portfolio/sync", expect.objectContaining({ method: "POST" }));
   });
 
   it("sets X-Sync-Warning header when falling back to cached data", async () => {
     const cached = makePortfolio("2026-03-13T14:00:00Z");
-    mockRadonFetch.mockRejectedValue(new Error("Connect call failed"));
+    mockXenonFetch.mockRejectedValue(new Error("Connect call failed"));
     mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
 
     const { POST } = await import("../app/api/portfolio/route");
@@ -76,7 +76,7 @@ describe("POST /api/portfolio — sync failure fallback", () => {
   });
 
   it("returns 502 only when sync fails AND no cached data exists", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("Connect call failed"));
+    mockXenonFetch.mockRejectedValue(new Error("Connect call failed"));
     mockReadDataFile.mockResolvedValue({ ok: false, error: "File not found" });
 
     const { POST } = await import("../app/api/portfolio/route");
@@ -87,7 +87,7 @@ describe("POST /api/portfolio — sync failure fallback", () => {
 
   it("returns cached portfolio data with 200 when sync succeeds", async () => {
     const synced = makePortfolio("2026-03-13T15:00:00Z");
-    mockRadonFetch.mockResolvedValue(synced);
+    mockXenonFetch.mockResolvedValue(synced);
     mockReadDataFile.mockResolvedValue({ ok: true, data: synced });
 
     const { POST } = await import("../app/api/portfolio/route");
@@ -109,7 +109,7 @@ describe("POST /api/orders — sync failure fallback", () => {
 
   it("returns cached orders data with 200 when ibOrders sync fails", async () => {
     const cached = makeOrders("2026-03-13T14:00:00Z");
-    mockRadonFetch.mockRejectedValue(new Error("Connect call failed"));
+    mockXenonFetch.mockRejectedValue(new Error("Connect call failed"));
     mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
 
     const { POST } = await import("../app/api/orders/route");
@@ -119,12 +119,12 @@ describe("POST /api/orders — sync failure fallback", () => {
     expect(response.status).toBe(200);
     expect(body.last_sync).toBe("2026-03-13T14:00:00Z");
     expect(body.open_orders).toEqual([]);
-    expect(mockRadonFetch).toHaveBeenCalledWith("/orders/refresh", expect.objectContaining({ method: "POST" }));
+    expect(mockXenonFetch).toHaveBeenCalledWith("/orders/refresh", expect.objectContaining({ method: "POST" }));
   });
 
   it("sets X-Sync-Warning header when falling back to cached orders", async () => {
     const cached = makeOrders("2026-03-13T14:00:00Z");
-    mockRadonFetch.mockRejectedValue(new Error("Connect call failed"));
+    mockXenonFetch.mockRejectedValue(new Error("Connect call failed"));
     mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
 
     const { POST } = await import("../app/api/orders/route");
@@ -134,7 +134,7 @@ describe("POST /api/orders — sync failure fallback", () => {
   });
 
   it("returns 502 only when sync fails AND no cached orders exist", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("Connect call failed"));
+    mockXenonFetch.mockRejectedValue(new Error("Connect call failed"));
     mockReadDataFile.mockResolvedValue({ ok: false, error: "File not found" });
 
     const { POST } = await import("../app/api/orders/route");
@@ -145,7 +145,7 @@ describe("POST /api/orders — sync failure fallback", () => {
 
   it("returns orders data with 200 when sync succeeds", async () => {
     const cached = makeOrders("2026-03-13T15:00:00Z");
-    mockRadonFetch.mockResolvedValue({ ok: true });
+    mockXenonFetch.mockResolvedValue({ ok: true });
     mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
 
     const { POST } = await import("../app/api/orders/route");

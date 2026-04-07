@@ -19,7 +19,7 @@ import xml.etree.ElementTree as ET
 
 
 DEFAULT_AUDIT_URL = "http://127.0.0.1:3333"
-DEFAULT_EXPECTED_SITE_URL = "https://radon.run"
+DEFAULT_EXPECTED_SITE_URL = "https://"
 REPORT_DIR = Path("reports")
 BUILD_ROUTE_MAP = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -140,7 +140,7 @@ def normalize_url(url: str) -> str:
 
 
 def fetch(url: str) -> FetchResult:
-    req = Request(url, headers={"User-Agent": "RadonSiteSeoAudit/1.0"})
+    req = Request(url, headers={"User-Agent": "XenonSiteSeoAudit/1.0"})
     try:
         with urlopen(req, timeout=20) as response:
             return FetchResult(
@@ -485,7 +485,7 @@ def render_report(
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Radon Site SEO Audit</title>
+    <title>Xenon Site SEO Audit</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
       :root {{
@@ -638,7 +638,7 @@ def render_report(
     <div class="wrap">
       <section class="header">
         <div class="eyebrow">Site SEO Audit</div>
-        <h1>Live crawlability, metadata, and share-surface verification for the Radon marketing site.</h1>
+        <h1>Live crawlability, metadata, and share-surface verification for the Xenon marketing site.</h1>
         <p>
           Audited <strong>{escape(audit_url)}</strong> against the expected production host
           <strong>{escape(expected_site_url)}</strong> on {escape(generated_at)}.

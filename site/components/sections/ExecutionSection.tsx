@@ -10,7 +10,7 @@ export function ExecutionSection() {
           Signal is only the start. Execution has to survive contact with risk.
         </h2>
         <p className="mt-5 text-base leading-7 text-secondary">
-          Radon connects candidate selection to structure design, bankroll sizing,
+          Xenon connects candidate selection to structure design, bankroll sizing,
           execution, and post-trade measurement. The message is simple: no hidden
           break between conviction and capital deployment.
         </p>

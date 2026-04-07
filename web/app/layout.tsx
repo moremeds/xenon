@@ -5,7 +5,7 @@ import Providers from "@/components/Providers";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Radon Terminal",
+  title: "Xenon Terminal",
   description: "Market structure reconstruction instrument. Surfaces convex opportunities from institutional flow, volatility surfaces, and cross-asset positioning.",
   icons: {
     icon: [
@@ -16,20 +16,20 @@ export const metadata: Metadata = {
     apple: "/icons/apple-touch-icon.png",
   },
   openGraph: {
-    title: "Radon Terminal",
+    title: "Xenon Terminal",
     description: "Reconstructing market structure from noisy signals.",
     images: [
       {
         url: "/images/hero-og.png",
         width: 1200,
         height: 630,
-        alt: "Radon Terminal - Market Structure Reconstruction",
+        alt: "Xenon Terminal - Market Structure Reconstruction",
       },
       {
         url: "/images/markov-og.png",
         width: 1200,
         height: 630,
-        alt: "Radon Terminal - Markov State Reconstruction",
+        alt: "Xenon Terminal - Markov State Reconstruction",
       },
     ],
   },

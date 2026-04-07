@@ -13,7 +13,7 @@
 
 set -e
 
-SERVICE_NAME="com.radon.exit-order-service"
+SERVICE_NAME="com.xenon.exit-order-service"
 PLIST_SOURCE="$(dirname "$0")/../config/${SERVICE_NAME}.plist"
 PLIST_DEST="$HOME/Library/LaunchAgents/${SERVICE_NAME}.plist"
 LOG_DIR="$(dirname "$0")/../logs"

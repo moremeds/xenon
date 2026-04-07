@@ -1,7 +1,7 @@
-# Radon
+# Xenon
 
 <p align="center">
-  <img src=".github/hero.png" alt="Radon - Reconstructing Market Structure" width="900" />
+  <img src=".github/hero.png" alt="Xenon - Reconstructing Market Structure" width="900" />
 </p>
 
 <p align="center">
@@ -12,7 +12,7 @@
 
 **Reconstructing market structure from institutional signals.**
 
-Radon is a market-structure reconstruction system that detects institutional positioning and turns it into convex options trades using dark pool flow, volatility signals, and cross-asset positioning data.
+Xenon is a market-structure reconstruction system that detects institutional positioning and turns it into convex options trades using dark pool flow, volatility signals, and cross-asset positioning data.
 
 - Detects hidden positioning through dark pool, options flow, and cross-asset signals
 - Evaluates every trade through a strict three-gate framework
@@ -22,9 +22,9 @@ Radon is a market-structure reconstruction system that detects institutional pos
 
 ---
 
-## What Radon Does
+## What Xenon Does
 
-Radon reconstructs market structure from multiple institutional signals and converts that information into executable trade ideas, risk reports, and portfolio decisions.
+Xenon reconstructs market structure from multiple institutional signals and converts that information into executable trade ideas, risk reports, and portfolio decisions.
 
 **Inputs**
 
@@ -107,7 +107,7 @@ Exa / Research ---------/                                  v
                                                    Execution / Monitoring
                                                             |
                                                             v
-                                                       Radon Terminal
+                                                       Xenon Terminal
 ```
 
 At a high level:
@@ -129,8 +129,8 @@ At a high level:
 **Install and run**
 
 ```bash
-git clone https://github.com/joemccann/radon.git
-cd radon
+git clone https://github.com/joemccann/xenon.git
+cd xenon
 pip install -r requirements.txt
 cd web && npm install && cd ..
 ```
@@ -206,9 +206,9 @@ playwright install chromium
 
 [Interactive Brokers](https://ibkr.com/referral/joseph5632) connects on port `4001` (Gateway) or `7497` (TWS). No broker API key is required, but a Gateway instance must be reachable before live workflows. See the IB Gateway section below for cloud, Docker, and local setup options.
 
-## Radon Terminal
+## Xenon Terminal
 
-Radon includes a real-time trading terminal built with **Next.js 16**. It streams [Interactive Brokers](https://ibkr.com/referral/joseph5632) prices, computes live greeks, visualizes portfolio exposures, and serves as the operator interface for scans, evaluation, and monitoring.
+Xenon includes a real-time trading terminal built with **Next.js 16**. It streams [Interactive Brokers](https://ibkr.com/referral/joseph5632) prices, computes live greeks, visualizes portfolio exposures, and serves as the operator interface for scans, evaluation, and monitoring.
 
 ```bash
 cd web
@@ -220,7 +220,7 @@ Visit `http://localhost:3000`.
 
 ### Authentication
 
-Radon uses [Clerk](https://clerk.com) for authentication. All Next.js routes are protected by Clerk middleware (public share routes are exempt). The FastAPI backend validates Clerk JWTs on every request. WebSocket connections use a short-lived ticket flow (30s TTL, single-use) to avoid passing JWTs in URLs. When Clerk is not configured (`CLERK_JWKS_URL` unset), auth is bypassed for local development.
+Xenon uses [Clerk](https://clerk.com) for authentication. All Next.js routes are protected by Clerk middleware (public share routes are exempt). The FastAPI backend validates Clerk JWTs on every request. WebSocket connections use a short-lived ticket flow (30s TTL, single-use) to avoid passing JWTs in URLs. When Clerk is not configured (`CLERK_JWKS_URL` unset), auth is bypassed for local development.
 
 **Key capabilities**
 
@@ -263,9 +263,9 @@ npm run dev
 
 Set `NEXT_PUBLIC_SITE_URL` in the site environment so `canonical`, JSON-LD, `robots.txt`, and `sitemap.xml` all reference the production hostname correctly.
 
-For Vercel, the project should use `site/` as the Root Directory. The site app includes an ignored-build step in [site/vercel.json](/Users/joemccann/dev/apps/finance/radon/site/vercel.json) so pushes only trigger a site deploy when files under `site/` changed.
+For Vercel, the project should use `site/` as the Root Directory. The site app includes an ignored-build step in [site/vercel.json](/Users/joemccann/dev/apps/finance/xenon/site/vercel.json) so pushes only trigger a site deploy when files under `site/` changed.
 
-The marketing app is intentionally separate from `web/`: it carries the Radon landing-page narrative and its own deployment guardrails. To verify the site locally without colliding with another live Next.js process:
+The marketing app is intentionally separate from `web/`: it carries the Xenon landing-page narrative and its own deployment guardrails. To verify the site locally without colliding with another live Next.js process:
 
 ```bash
 cd site
@@ -290,7 +290,7 @@ If local port binding is unavailable, build the static site and point the audit 
 2. Run `evaluate NVDA` to execute the full seven-milestone validation flow.
 3. If edge passes, design a convex structure and size it with Kelly constraints.
 4. Send or stage the trade through [Interactive Brokers](https://ibkr.com/referral/joseph5632).
-5. Monitor the position in the Radon Terminal and portfolio report.
+5. Monitor the position in the Xenon Terminal and portfolio report.
 
 ## CLI Commands
 
@@ -339,7 +339,7 @@ If local port binding is unavailable, build the static site and point the audit 
 ## Project Structure
 
 ```text
-radon/
+xenon/
 ├── scripts/              # Python scanners, evaluators, broker integrations
 │   ├── clients/          # Broker and data-provider adapters
 │   ├── monitor_daemon/   # Background fill/exit/rebalance daemon
@@ -351,7 +351,7 @@ radon/
 ├── docs/                 # Strategy and implementation documentation
 │   └── autoresearch/     # Benchmark results and optimization notes
 ├── tasks/                # Plans, progress reports, and task tracking
-├── brand/                # Radon design system and tokens
+├── brand/                # Xenon design system and tokens
 ├── data/                 # Runtime data and generated artifacts
 ├── config/               # launchd and service configuration
 ├── logs/                 # Daemon logs (auto-rotated, gitignored)
@@ -377,7 +377,7 @@ Auxiliary sources:
 
 ## Testing
 
-Radon includes Python, frontend, and end-to-end test coverage.
+Xenon includes Python, frontend, and end-to-end test coverage.
 
 - **Python**: `pytest` for scanners, evaluation logic, utilities, and adapters
 - **Frontend**: `Vitest` for web logic
@@ -398,7 +398,7 @@ Unit tests use mocked API calls where possible, so most development work does no
 Order-route integration coverage now includes a dedicated FastAPI test harness:
 
 - `web/tests/order-e2e.test.ts` boots an isolated test-mode FastAPI instance through `web/tests/fastapiHarness.ts`
-- the harness sets `RADON_API_TEST_MODE=1`, points `RADON_API_URL` at the isolated server, and never reuses the live broker-backed `localhost:8321` process unless that server explicitly reports `test_mode: true`
+- the harness sets `XENON_API_TEST_MODE=1`, points `XENON_API_URL` at the isolated server, and never reuses the live broker-backed `localhost:8321` process unless that server explicitly reports `test_mode: true`
 - test mode disables IB Gateway / pool startup and stubs order placement, modify, cancel, and refresh endpoints so the Vitest suite does not touch an active IBC or IB session
 
 ## Services

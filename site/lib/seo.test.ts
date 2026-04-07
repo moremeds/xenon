@@ -65,7 +65,7 @@ describe("site SEO contract", () => {
 
     expect(manifest()).toMatchObject({
       name: SITE_NAME,
-      short_name: "Radon",
+      short_name: "Xenon",
       description: SITE_DESCRIPTION,
       start_url: "/",
       display: "standalone",

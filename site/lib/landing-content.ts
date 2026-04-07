@@ -271,7 +271,7 @@ export const executionItems: ExecutionItem[] = [
 
 export const surfaceItems: SurfaceItem[] = [
   {
-    name: "Radon Flow",
+    name: "Xenon Flow",
     headline: "Detect non-random positioning before the lit move becomes obvious.",
     metrics: [
       { label: "Signal Classes", value: "3" },
@@ -285,7 +285,7 @@ export const surfaceItems: SurfaceItem[] = [
     ],
   },
   {
-    name: "Radon Performance",
+    name: "Xenon Performance",
     headline: "Reconstruct the YTD equity curve and tie it back to current net liquidation.",
     metrics: [
       { label: "Metrics", value: "Institutional" },
@@ -298,7 +298,7 @@ export const surfaceItems: SurfaceItem[] = [
     ],
   },
   {
-    name: "Radon Structure",
+    name: "Xenon Structure",
     headline: "Track regime pressure, implied correlation, and portfolio-level stress context.",
     metrics: [
       { label: "COR1M", value: "Integrated" },
@@ -348,8 +348,8 @@ export const footerColumns = [
     title: "Protocol",
     links: [
       { href: "#methodology", label: "Methodology" },
-      { href: "https://github.com/joemccann/radon", label: "Source" },
-      { href: "https://github.com/joemccann/radon/blob/main/docs/strategies.md", label: "Registry" },
+      { href: "https://github.com/joemccann/xenon", label: "Source" },
+      { href: "https://github.com/joemccann/xenon/blob/main/docs/strategies.md", label: "Registry" },
     ],
   },
 ];

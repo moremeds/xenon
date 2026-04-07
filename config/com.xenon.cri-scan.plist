@@ -3,16 +3,16 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.radon.cri-scan</string>
+    <string>com.xenon.cri-scan</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/joemccann/dev/apps/finance/radon/scripts/run_cri_scan.sh</string>
+        <string>/Users/joemccann/dev/apps/finance/xenon/scripts/run_cri_scan.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/joemccann/dev/apps/finance/radon</string>
+    <string>/Users/joemccann/dev/apps/finance/xenon</string>
 
     <key>StartCalendarInterval</key>
     <array>
@@ -1344,10 +1344,10 @@
     <false/>
 
     <key>StandardOutPath</key>
-    <string>/Users/joemccann/dev/apps/finance/radon/logs/cri-scan.out.log</string>
+    <string>/Users/joemccann/dev/apps/finance/xenon/logs/cri-scan.out.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/joemccann/dev/apps/finance/radon/logs/cri-scan.err.log</string>
+    <string>/Users/joemccann/dev/apps/finance/xenon/logs/cri-scan.err.log</string>
 
     <key>ProcessType</key>
     <string>Background</string>

@@ -266,7 +266,7 @@ function triggerBackgroundSync(expectedDate: string): void {
     ["scripts/run_cta_sync.sh", "--target-date", expectedDate],
     {
       cwd: PROJECT_ROOT,
-      env: { ...process.env, RADON_CTA_SYNC_SOURCE: "api" },
+      env: { ...process.env, XENON_CTA_SYNC_SOURCE: "api" },
       detached: true,
       stdio: "ignore",
     },

@@ -29,7 +29,7 @@ log_info ".env → IB_GATEWAY_HOST=127.0.0.1, IB_GATEWAY_MODE=docker"
 # -- Step 2: Stop VPS gateway ------------------------------------------------
 
 log_info "Stopping IB Gateway on Hetzner..."
-if ssh -o ConnectTimeout=5 ib-gateway "cd /home/radon/radon-cloud && docker compose down" 2>/dev/null; then
+if ssh -o ConnectTimeout=5 ib-gateway "cd /home/xenon/xenon-cloud && docker compose down" 2>/dev/null; then
   log_info "VPS gateway stopped."
 else
   log_warn "Could not reach VPS (offline or already stopped). Continuing."

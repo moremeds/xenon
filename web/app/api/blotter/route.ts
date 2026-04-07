@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readFile } from "fs/promises";
 import { join } from "path";
-import { radonFetch } from "@/lib/radonApi";
+import { xenonFetch } from "@/lib/xenonApi";
 
 export const runtime = "nodejs";
 
@@ -24,7 +24,7 @@ export async function GET(): Promise<Response> {
 
 export async function POST(): Promise<Response> {
   try {
-    const data = await radonFetch("/blotter", { method: "POST", timeout: 130_000 });
+    const data = await xenonFetch("/blotter", { method: "POST", timeout: 130_000 });
     return NextResponse.json(data);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Blotter sync failed";

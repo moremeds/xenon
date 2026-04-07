@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readDataFile } from "@tools/data-reader";
 import { OrdersData } from "@tools/schemas/ib-orders";
-import { RadonApiError, radonFetch } from "@/lib/radonApi";
+import { XenonApiError, xenonFetch } from "@/lib/xenonApi";
 
 export const runtime = "nodejs";
 
@@ -23,7 +23,7 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    const result = await radonFetch<Record<string, unknown>>("/orders/cancel", {
+    const result = await xenonFetch<Record<string, unknown>>("/orders/cancel", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ orderId, permId }),
@@ -32,7 +32,7 @@ export async function POST(request: Request): Promise<Response> {
 
     // Refresh orders after cancel
     try {
-      await radonFetch("/orders/refresh", { method: "POST", timeout: 10_000 });
+      await xenonFetch("/orders/refresh", { method: "POST", timeout: 10_000 });
     } catch {
       // Non-fatal
     }
@@ -44,7 +44,7 @@ export async function POST(request: Request): Promise<Response> {
       orders: ordersResult.ok ? ordersResult.data : null,
     });
   } catch (error) {
-    if (error instanceof RadonApiError) {
+    if (error instanceof XenonApiError) {
       return NextResponse.json({ error: error.detail }, { status: error.status });
     }
     const message = error instanceof Error ? error.message : "Cancel failed";

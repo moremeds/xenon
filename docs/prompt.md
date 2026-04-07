@@ -1,4 +1,4 @@
-# Radon - Spec & Deliverables
+# Xenon - Spec & Deliverables
 
 ## Goal
 Autonomous options trading via convex, edge-driven bets sized by fractional Kelly criterion.

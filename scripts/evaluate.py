@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified evaluation script for Radon.
+"""Unified evaluation script for Xenon.
 
 Runs all 7 evaluation milestones:
   M1  — Ticker validation

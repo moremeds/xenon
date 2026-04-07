@@ -1,16 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mockRadonFetch = vi.fn();
+const mockXenonFetch = vi.fn();
 const mockReadDataFile = vi.fn();
 
-vi.mock("@/lib/radonApi", () => ({
-  radonFetch: mockRadonFetch,
-  RadonApiError: class extends Error {
+vi.mock("@/lib/xenonApi", () => ({
+  xenonFetch: mockXenonFetch,
+  XenonApiError: class extends Error {
     status: number;
     detail: string;
     constructor(status: number, detail: string) {
-      super(`Radon API ${status}: ${detail}`);
-      this.name = "RadonApiError";
+      super(`Xenon API ${status}: ${detail}`);
+      this.name = "XenonApiError";
       this.status = status;
       this.detail = detail;
     }
@@ -28,15 +28,15 @@ vi.mock("@tools/schemas/ib-orders", () => ({
 describe("POST /api/orders/place upstream error propagation", () => {
   beforeEach(() => {
     vi.resetModules();
-    mockRadonFetch.mockReset();
+    mockXenonFetch.mockReset();
     mockReadDataFile.mockReset();
     mockReadDataFile.mockResolvedValue({ ok: true, data: { positions: [] } });
   });
 
-  it("preserves upstream status and detail instead of wrapping with RadonApiError text", async () => {
-    const { RadonApiError } = await import("@/lib/radonApi");
-    mockRadonFetch.mockRejectedValueOnce(
-      new RadonApiError(
+  it("preserves upstream status and detail instead of wrapping with XenonApiError text", async () => {
+    const { XenonApiError } = await import("@/lib/xenonApi");
+    mockXenonFetch.mockRejectedValueOnce(
+      new XenonApiError(
         502,
         "IB error 201: Order rejected - reason:YOUR ORDER IS NOT ACCEPTED.",
       ),
@@ -60,6 +60,6 @@ describe("POST /api/orders/place upstream error propagation", () => {
     expect(res.status).toBe(502);
     const body = await res.json();
     expect(body.error).toBe("IB error 201: Order rejected - reason:YOUR ORDER IS NOT ACCEPTED.");
-    expect(body.error).not.toContain("Radon API 502:");
+    expect(body.error).not.toContain("Xenon API 502:");
   });
 });

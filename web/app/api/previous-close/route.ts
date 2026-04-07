@@ -20,12 +20,12 @@ function cacheKey(symbol: string): string {
 /* ── IB source (via WebSocket snapshot) ─────────────────── */
 
 const IB_WS_URL = process.env.IB_REALTIME_WS_URL || "ws://localhost:8765";
-const RADON_API = process.env.RADON_API_URL || "http://localhost:8321";
+const XENON_API = process.env.XENON_API_URL || "http://localhost:8321";
 
 async function buildWsUrl(token: string | null): Promise<string> {
   if (!token) return IB_WS_URL;
   try {
-    const res = await fetch(`${RADON_API}/ws-ticket`, {
+    const res = await fetch(`${XENON_API}/ws-ticket`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     });

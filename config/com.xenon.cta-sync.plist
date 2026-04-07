@@ -3,16 +3,16 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.radon.cta-sync</string>
+    <string>com.xenon.cta-sync</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/joemccann/dev/apps/finance/radon/scripts/run_cta_sync.sh</string>
+        <string>/Users/joemccann/dev/apps/finance/xenon/scripts/run_cta_sync.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/joemccann/dev/apps/finance/radon</string>
+    <string>/Users/joemccann/dev/apps/finance/xenon</string>
 
     <key>StartCalendarInterval</key>
     <array>
@@ -104,10 +104,10 @@
     <false/>
 
     <key>StandardOutPath</key>
-    <string>/Users/joemccann/dev/apps/finance/radon/logs/cta-sync.out.log</string>
+    <string>/Users/joemccann/dev/apps/finance/xenon/logs/cta-sync.out.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/joemccann/dev/apps/finance/radon/logs/cta-sync.err.log</string>
+    <string>/Users/joemccann/dev/apps/finance/xenon/logs/cta-sync.err.log</string>
 
     <key>ProcessType</key>
     <string>Background</string>

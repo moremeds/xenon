@@ -226,7 +226,7 @@ function LegRow({
 
 /* ─── Position row ─────────────────────────────────────── */
 
-function PositionRow({ pos, showExpiry = true, showUnderlying = false, realtimePrice, prices, onLegClick }: { pos: PortfolioPosition; showExpiry?: boolean; showUnderlying?: boolean; realtimePrice?: PriceData | null; prices?: Record<string, PriceData>; onLegClick?: (leg: PortfolioLeg, pos: PortfolioPosition) => void }) {
+function PositionRow({ pos, showExpiry = true, showUnderlying = false, realtimePrice, prices, onLegClick, readonly = false }: { pos: PortfolioPosition; showExpiry?: boolean; showUnderlying?: boolean; realtimePrice?: PriceData | null; prices?: Record<string, PriceData>; onLegClick?: (leg: PortfolioLeg, pos: PortfolioPosition) => void; readonly?: boolean }) {
   const [legsExpanded, setLegsExpanded] = useState(false);
   const hasMultipleLegs = pos.legs.length > 1;
 
@@ -310,7 +310,7 @@ function PositionRow({ pos, showExpiry = true, showUnderlying = false, realtimeP
         <td>
           {hasMultipleLegs ? (
             <span className="ticker-with-chevron">
-              <TickerLink ticker={pos.ticker} positionId={pos.id} />
+              <TickerLink ticker={pos.ticker} positionId={pos.id} disabled={readonly} />
               <button
                 className="leg-toggle-btn"
                 onClick={() => setLegsExpanded((v) => !v)}
@@ -321,7 +321,7 @@ function PositionRow({ pos, showExpiry = true, showUnderlying = false, realtimeP
               </button>
             </span>
           ) : (
-            <TickerLink ticker={pos.ticker} positionId={pos.id} />
+            <TickerLink ticker={pos.ticker} positionId={pos.id} disabled={readonly} />
           )}
         </td>
         <td>{structureDisplay}</td>
@@ -366,7 +366,7 @@ function PositionRow({ pos, showExpiry = true, showUnderlying = false, realtimeP
             showExpiry={showExpiry}
             showUnderlying={showUnderlying}
             realtimeLegPrice={key && prices ? prices[key] : null}
-            onLegClick={onLegClick ? (l) => onLegClick(l, pos) : undefined}
+            onLegClick={readonly || !onLegClick ? undefined : (l) => onLegClick(l, pos)}
           />
         );
       })}
@@ -376,7 +376,24 @@ function PositionRow({ pos, showExpiry = true, showUnderlying = false, realtimeP
 
 /* ─── Position table ───────────────────────────────────── */
 
-export default function PositionTable({ positions, showExpiry = true, showUnderlying = false, prices }: { positions: PortfolioPosition[]; showExpiry?: boolean; showUnderlying?: boolean; prices?: Record<string, PriceData> }) {
+export default function PositionTable({
+  positions,
+  showExpiry = true,
+  showUnderlying = false,
+  prices,
+  readonly = false,
+}: {
+  positions: PortfolioPosition[];
+  showExpiry?: boolean;
+  showUnderlying?: boolean;
+  prices?: Record<string, PriceData>;
+  /**
+   * When true, blocks all navigation and order-entry affordances.
+   * Load-bearing safety control (tribunal T7): Futu positions render with
+   * readonly=true so a click cannot reach /api/orders/place against IB.
+   */
+  readonly?: boolean;
+}) {
   const positionExtract = useMemo(() => makePositionExtract(prices), [prices]);
   const { sorted, sort, toggle } = useSort(positions, positionExtract);
 
@@ -384,8 +401,12 @@ export default function PositionTable({ positions, showExpiry = true, showUnderl
   const [activeInstrument, setActiveInstrument] = useState<{ leg: PortfolioLeg; ticker: string; expiry: string } | null>(null);
 
   const handleLegClick = useCallback((leg: PortfolioLeg, pos: PortfolioPosition) => {
+    // Readonly tables (Futu tab) must never open the instrument detail
+    // modal, which contains a full IB order ticket. Belt + suspenders: the
+    // modal render is also gated on !readonly below.
+    if (readonly) return;
     setActiveInstrument({ leg, ticker: pos.ticker, expiry: pos.expiry });
-  }, []);
+  }, [readonly]);
 
   return (
     <>
@@ -409,12 +430,12 @@ export default function PositionTable({ positions, showExpiry = true, showUnderl
         </thead>
         <tbody>
           {sorted.map((pos) => (
-            <PositionRow key={pos.id} pos={pos} showExpiry={showExpiry} showUnderlying={showUnderlying} realtimePrice={prices?.[pos.ticker]} prices={prices} onLegClick={handleLegClick} />
+            <PositionRow key={pos.id} pos={pos} showExpiry={showExpiry} showUnderlying={showUnderlying} realtimePrice={prices?.[pos.ticker]} prices={prices} onLegClick={handleLegClick} readonly={readonly} />
           ))}
         </tbody>
       </table>
 
-      {activeInstrument && prices && (
+      {!readonly && activeInstrument && prices && (
         <InstrumentDetailModal
           leg={activeInstrument.leg}
           ticker={activeInstrument.ticker}

@@ -2,7 +2,7 @@
 """Portfolio Performance Attribution Engine.
 
 Decomposes trade P&L into actionable dimensions:
-- By strategy (6 Radon strategies + unclassified)
+- By strategy (6 Xenon strategies + unclassified)
 - By edge type (dark pool, IV mispricing, thesis, none)
 - By ticker
 - By risk profile (defined vs undefined)

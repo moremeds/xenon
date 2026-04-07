@@ -1,4 +1,4 @@
-# Radon Web
+# Xenon Web
 
 Next.js dashboard with real-time IB pricing and Claude-powered conversational interface.
 

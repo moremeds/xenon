@@ -318,7 +318,7 @@ def run_cta_sync(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run CTA sync with health tracking")
     parser.add_argument("--target-date", dest="target_date", help="Override target date (YYYY-MM-DD)")
-    parser.add_argument("--source", default=os.environ.get("RADON_CTA_SYNC_SOURCE"))
+    parser.add_argument("--source", default=os.environ.get("XENON_CTA_SYNC_SOURCE"))
     parser.add_argument("--force", action="store_true", help="Force re-fetch even when cache exists")
 
     # Backward-compatible CLI knobs from the earlier wrapper path.

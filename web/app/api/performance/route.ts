@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { readFile, stat } from "fs/promises";
 import { join } from "path";
 import { isPerformanceBehindPortfolioSync, isPortfolioBehindCurrentEtSession } from "@/lib/performanceFreshness";
-import { radonFetch } from "@/lib/radonApi";
+import { xenonFetch } from "@/lib/xenonApi";
 import { getRequestId, setNoStoreResponseHeaders } from "@/lib/apiContracts";
 
 export const runtime = "nodejs";
@@ -55,7 +55,7 @@ function isCacheBehindPortfolio(
  * 5s timeout, swallow all errors — caller already returned cached data.
  */
 function triggerBackgroundRebuild(): void {
-  radonFetch("/performance/background", { method: "POST", timeout: 5_000 }).catch(() => {});
+  xenonFetch("/performance/background", { method: "POST", timeout: 5_000 }).catch(() => {});
 }
 
 export async function GET(): Promise<Response> {
@@ -71,7 +71,7 @@ export async function GET(): Promise<Response> {
 
   if (isPortfolioBehindCurrentEtSession(portfolioLastSync)) {
     try {
-      const refreshed = await radonFetch<Record<string, unknown>>("/portfolio/sync", {
+      const refreshed = await xenonFetch<Record<string, unknown>>("/portfolio/sync", {
         method: "POST",
         timeout: 35_000,
       });
@@ -99,7 +99,7 @@ export async function GET(): Promise<Response> {
 
   // Cold start: no cache at all — must block on full rebuild
   try {
-    const data = await radonFetch("/performance", { method: "POST", timeout: 180_000 });
+    const data = await xenonFetch("/performance", { method: "POST", timeout: 180_000 });
     return setNoStoreResponseHeaders(NextResponse.json(data), requestId);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to generate performance metrics";
@@ -113,7 +113,7 @@ export async function GET(): Promise<Response> {
 export async function POST(): Promise<Response> {
   const requestId = getRequestId();
   try {
-    const data = await radonFetch("/performance", { method: "POST", timeout: 190_000 });
+    const data = await xenonFetch("/performance", { method: "POST", timeout: 190_000 });
     return setNoStoreResponseHeaders(NextResponse.json(data), requestId);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to generate performance metrics";

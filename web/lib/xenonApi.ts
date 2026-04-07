@@ -1,23 +1,23 @@
 /**
- * Radon FastAPI client — minimal fetch helper for Next.js routes.
+ * Xenon FastAPI client — minimal fetch helper for Next.js routes.
  *
  * All POST operations go through FastAPI.
  * Attaches Clerk JWT when available for authenticated requests.
  */
 
-const RADON_API = process.env.RADON_API_URL || "http://localhost:8321";
+const XENON_API = process.env.XENON_API_URL || "http://localhost:8321";
 
-export class RadonApiError extends Error {
+export class XenonApiError extends Error {
   constructor(
     public readonly status: number,
     public readonly detail: string,
   ) {
-    super(`Radon API ${status}: ${detail}`);
-    this.name = "RadonApiError";
+    super(`Xenon API ${status}: ${detail}`);
+    this.name = "XenonApiError";
   }
 }
 
-export async function radonFetch<T = Record<string, unknown>>(
+export async function xenonFetch<T = Record<string, unknown>>(
   path: string,
   opts?: RequestInit & { timeout?: number; token?: string },
 ): Promise<T> {
@@ -26,7 +26,7 @@ export async function radonFetch<T = Record<string, unknown>>(
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
-  const res = await fetch(`${RADON_API}${path}`, {
+  const res = await fetch(`${XENON_API}${path}`, {
     ...fetchOpts,
     headers,
     cache: fetchOpts.cache ?? "no-store",
@@ -40,7 +40,7 @@ export async function radonFetch<T = Record<string, unknown>>(
     } catch {
       detail = await res.text().catch(() => `HTTP ${res.status}`);
     }
-    throw new RadonApiError(res.status, detail);
+    throw new XenonApiError(res.status, detail);
   }
   return res.json();
 }

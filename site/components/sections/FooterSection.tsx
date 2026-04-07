@@ -9,9 +9,9 @@ export function FooterSection() {
       <div className="grid gap-10 lg:grid-cols-[1.2fr_repeat(2,minmax(0,0.7fr))_auto]">
         <div>
           <div className="flex items-center gap-3">
-            <Image src="/brand/radon-monogram.svg" alt="Radon" width={16} height={16} />
+            <Image src="/brand/xenon-monogram.svg" alt="Xenon" width={16} height={16} />
             <span className="font-display text-sm font-semibold uppercase tracking-[0.06em] text-primary">
-              Radon
+              Xenon
             </span>
           </div>
           <p className="mt-4 max-w-xs text-sm leading-6 text-secondary">
@@ -44,7 +44,7 @@ export function FooterSection() {
             Protocol Nominal
           </div>
           <p className="mt-4 font-mono text-[11px] uppercase tracking-[0.16em] text-muted">
-            2026 Radon Terminal
+            2026 Xenon Terminal
           </p>
         </div>
       </div>

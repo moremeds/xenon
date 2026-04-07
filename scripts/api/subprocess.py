@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional
 
-logger = logging.getLogger("radon.subprocess")
+logger = logging.getLogger("xenon.subprocess")
 
 SCRIPTS_DIR = Path(__file__).parent.parent
 PROJECT_ROOT = SCRIPTS_DIR.parent

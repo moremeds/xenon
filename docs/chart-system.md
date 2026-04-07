@@ -1,12 +1,12 @@
-# Radon Chart System
+# Xenon Chart System
 
-This document is the sanctioned chart-family and renderer contract for Radon.
+This document is the sanctioned chart-family and renderer contract for Xenon.
 
-The machine-readable source of truth is [web/lib/chart-system-spec.json](/Users/joemccann/dev/apps/finance/radon/web/lib/chart-system-spec.json). Runtime helpers live in [web/lib/chartSystem.ts](/Users/joemccann/dev/apps/finance/radon/web/lib/chartSystem.ts). Downstream OG/report surfaces consume the same contract via [web/lib/og-theme.ts](/Users/joemccann/dev/apps/finance/radon/web/lib/og-theme.ts), [web/lib/og-charts.tsx](/Users/joemccann/dev/apps/finance/radon/web/lib/og-charts.tsx), and [scripts/performance_explainer_report.py](/Users/joemccann/dev/apps/finance/radon/scripts/performance_explainer_report.py).
+The machine-readable source of truth is [web/lib/chart-system-spec.json](/Users/joemccann/dev/apps/finance/xenon/web/lib/chart-system-spec.json). Runtime helpers live in [web/lib/chartSystem.ts](/Users/joemccann/dev/apps/finance/xenon/web/lib/chartSystem.ts). Downstream OG/report surfaces consume the same contract via [web/lib/og-theme.ts](/Users/joemccann/dev/apps/finance/xenon/web/lib/og-theme.ts), [web/lib/og-charts.tsx](/Users/joemccann/dev/apps/finance/xenon/web/lib/og-charts.tsx), and [scripts/performance_explainer_report.py](/Users/joemccann/dev/apps/finance/xenon/scripts/performance_explainer_report.py).
 
 ## Purpose
 
-Radon does not have "one chart type." It has four sanctioned chart families that share one visual language:
+Xenon does not have "one chart type." It has four sanctioned chart families that share one visual language:
 
 - matte panel surfaces
 - 1px instrument borders
@@ -90,7 +90,7 @@ Reason: runtime React can resolve CSS variables, but OG images and Python-genera
 
 ### Role Usage
 
-- `primary` is the default Radon accent for the main thesis-bearing line or area.
+- `primary` is the default Xenon accent for the main thesis-bearing line or area.
 - `comparison` is reserved for rebased benchmarks, baselines, prior state, or reference overlays.
 - `caution`, `dislocation`, and `extreme` are semantic escalation states, not decorative accents.
 - `fault` is for downside exceptions, feed faults, or explicit adverse conditions.

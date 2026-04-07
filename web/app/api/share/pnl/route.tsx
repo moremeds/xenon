@@ -232,7 +232,7 @@ export async function GET(request: Request) {
             ) : null}
           </div>
 
-          {/* Bottom bar: Radon branding */}
+          {/* Bottom bar: Xenon branding */}
           <div
             style={{
               display: "flex",
@@ -244,7 +244,7 @@ export async function GET(request: Request) {
             }}
           >
             <div style={{ display: "flex", flexDirection: "row", alignItems: "center" }}>
-              {/* Radon icon: concentric circles */}
+              {/* Xenon icon: concentric circles */}
               <div
                 style={{
                   display: "flex",
@@ -281,7 +281,7 @@ export async function GET(request: Request) {
               </div>
               <div style={{ display: "flex", flexDirection: "column" }}>
                 <span style={{ fontSize: "20px", fontWeight: 700, color: OG.text, letterSpacing: "0.12em" }}>
-                  RADON
+                  XENON
                 </span>
                 <span style={{ fontSize: "10px", fontWeight: 500, color: "#05AD98", letterSpacing: "0.15em" }}>
                   TERMINAL
@@ -289,7 +289,7 @@ export async function GET(request: Request) {
               </div>
             </div>
             <span style={{ fontSize: "14px", color: OG.muted, fontWeight: 400 }}>
-              Executed with Radon
+              Executed with Xenon
             </span>
           </div>
         </div>

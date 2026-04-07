@@ -18,10 +18,10 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-PLIST_NAME="com.radon.cta-sync.plist"
+PLIST_NAME="com.xenon.cta-sync.plist"
 PLIST_SRC="$PROJECT_DIR/config/$PLIST_NAME"
 PLIST_DST="$HOME/Library/LaunchAgents/$PLIST_NAME"
-LABEL="com.radon.cta-sync"
+LABEL="com.xenon.cta-sync"
 LOG_DIR="$PROJECT_DIR/logs"
 WRAPPER="$PROJECT_DIR/scripts/run_cta_sync.sh"
 

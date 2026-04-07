@@ -1,5 +1,5 @@
 /**
- * TDD: Account balances completeness — ensures Radon displays all IB Portal values
+ * TDD: Account balances completeness — ensures Xenon displays all IB Portal values
  *
  * IB Portal ground truth fields:
  * - Net Liquidation
@@ -16,7 +16,7 @@
  * - Maintenance Margin
  * - Excess Liquidity
  *
- * Currently missing from Radon AccountSummary:
+ * Currently missing from Xenon AccountSummary:
  * - equity_with_loan
  * - previous_day_ewl
  * - reg_t_equity

@@ -11,7 +11,7 @@ import logging
 
 from fastapi import Request, HTTPException, Depends
 
-logger = logging.getLogger("radon.auth")
+logger = logging.getLogger("xenon.auth")
 
 _jwks_client = None
 _algorithms = ["RS256"]

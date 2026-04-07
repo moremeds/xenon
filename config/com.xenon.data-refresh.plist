@@ -3,16 +3,16 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.radon.data-refresh</string>
+    <string>com.xenon.data-refresh</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/joemccann/dev/apps/finance/radon/scripts/run_data_refresh.sh</string>
+        <string>/Users/joemccann/dev/apps/finance/xenon/scripts/run_data_refresh.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/joemccann/dev/apps/finance/radon</string>
+    <string>/Users/joemccann/dev/apps/finance/xenon</string>
 
     <key>StartCalendarInterval</key>
     <array>
@@ -1144,10 +1144,10 @@
     <false/>
 
     <key>StandardOutPath</key>
-    <string>/Users/joemccann/dev/apps/finance/radon/logs/data-refresh.out.log</string>
+    <string>/Users/joemccann/dev/apps/finance/xenon/logs/data-refresh.out.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/joemccann/dev/apps/finance/radon/logs/data-refresh.err.log</string>
+    <string>/Users/joemccann/dev/apps/finance/xenon/logs/data-refresh.err.log</string>
 
     <key>ProcessType</key>
     <string>Background</string>

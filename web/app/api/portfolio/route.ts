@@ -3,7 +3,7 @@ import { readFile, stat } from "fs/promises";
 import { join } from "path";
 import { readDataFile } from "@tools/data-reader";
 import { PortfolioData } from "@tools/schemas/ib-sync";
-import { radonFetch } from "@/lib/radonApi";
+import { xenonFetch } from "@/lib/xenonApi";
 import {
   getRequestId,
   jsonApiError,
@@ -58,7 +58,7 @@ function triggerBackgroundSync(): void {
   bgSyncInFlight = true;
 
   console.log("[Portfolio] Background sync triggered via FastAPI");
-  radonFetch("/portfolio/background-sync", { method: "POST", timeout: 5_000 })
+  xenonFetch("/portfolio/background-sync", { method: "POST", timeout: 5_000 })
     .then(() => {
       console.log("[Portfolio] Background sync accepted");
     })
@@ -113,7 +113,7 @@ export async function GET(): Promise<Response> {
 export async function POST(): Promise<Response> {
   const requestId = getRequestId();
   try {
-    const data = await radonFetch("/portfolio/sync", { method: "POST", timeout: 35_000 });
+    const data = await xenonFetch("/portfolio/sync", { method: "POST", timeout: 35_000 });
     const tradeLogDates = await loadTradeLogDates();
     const response = NextResponse.json({ ...data, trade_log_dates: tradeLogDates });
     return setNoStoreResponseHeaders(response, requestId);

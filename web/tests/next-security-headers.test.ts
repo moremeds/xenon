@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 describe("next.config.mjs security headers", () => {
-  const saved = { VERCEL: process.env.VERCEL, RADON_ENABLE_HSTS: process.env.RADON_ENABLE_HSTS };
+  const saved = { VERCEL: process.env.VERCEL, XENON_ENABLE_HSTS: process.env.XENON_ENABLE_HSTS };
 
   beforeEach(() => {
     delete process.env.VERCEL;
-    delete process.env.RADON_ENABLE_HSTS;
+    delete process.env.XENON_ENABLE_HSTS;
   });
 
   afterEach(() => {
     process.env.VERCEL = saved.VERCEL;
-    process.env.RADON_ENABLE_HSTS = saved.RADON_ENABLE_HSTS;
+    process.env.XENON_ENABLE_HSTS = saved.XENON_ENABLE_HSTS;
   });
 
   it("applies baseline headers to all paths", async () => {
@@ -41,8 +41,8 @@ describe("next.config.mjs security headers", () => {
     expect(hsts?.value).toContain("max-age=31536000");
   });
 
-  it("adds HSTS when RADON_ENABLE_HSTS=1", async () => {
-    process.env.RADON_ENABLE_HSTS = "1";
+  it("adds HSTS when XENON_ENABLE_HSTS=1", async () => {
+    process.env.XENON_ENABLE_HSTS = "1";
     const { default: config } = await import("../next.config.mjs");
     const rows = await config.headers();
     const headers = rows[0].headers as { key: string; value: string }[];

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 /**
- * Tests for Clerk auth integration in radonFetch and wsTicket.
+ * Tests for Clerk auth integration in xenonFetch and wsTicket.
  *
  * Covers:
  * - Authorization header injection when a token is provided
@@ -9,7 +9,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  * - wsTicket API call shape and error handling
  */
 
-describe("radonFetch with auth token", () => {
+describe("xenonFetch with auth token", () => {
   const mockFetch = vi.fn();
 
   beforeEach(() => {
@@ -27,8 +27,8 @@ describe("radonFetch with auth token", () => {
       }),
     );
 
-    const { radonFetch } = await import("@/lib/radonApi");
-    await radonFetch("/test", { token: "test-jwt-token" });
+    const { xenonFetch } = await import("@/lib/xenonApi");
+    await xenonFetch("/test", { token: "test-jwt-token" });
 
     const [, options] = mockFetch.mock.calls[0];
     const headers = new Headers(options.headers);
@@ -43,8 +43,8 @@ describe("radonFetch with auth token", () => {
       }),
     );
 
-    const { radonFetch } = await import("@/lib/radonApi");
-    await radonFetch("/test");
+    const { xenonFetch } = await import("@/lib/xenonApi");
+    await xenonFetch("/test");
 
     const [, options] = mockFetch.mock.calls[0];
     const headers = new Headers(options.headers);

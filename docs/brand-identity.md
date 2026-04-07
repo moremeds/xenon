@@ -1,8 +1,8 @@
-# Radon Brand Identity — Design System Reference
+# Xenon Brand Identity — Design System Reference
 
 **"Reconstructing market structure from noisy signals."**
 
-This document is the enforced reference for all UI and asset work. The full brand specification lives in `brand/radon-brand-system.md`. Design tokens, Tailwind theme, component kit, terminal mockup, and logo assets live in `brand/`.
+This document is the enforced reference for all UI and asset work. The full brand specification lives in `brand/xenon-brand-system.md`. Design tokens, Tailwind theme, component kit, terminal mockup, and logo assets live in `brand/`.
 
 ---
 
@@ -10,35 +10,35 @@ This document is the enforced reference for all UI and asset work. The full bran
 
 | File | Purpose |
 |------|---------|
-| `brand/radon-brand-system.md` | Full technical specification (9 sections) |
-| `brand/radon-design-tokens.json` | Machine-readable design tokens |
-| `brand/radon-tailwind-theme.ts` | Tailwind CSS theme extension |
-| `brand/radon-component-kit.html` | Live component reference (panels, badges, tables, motifs) |
+| `brand/xenon-brand-system.md` | Full technical specification (9 sections) |
+| `brand/xenon-design-tokens.json` | Machine-readable design tokens |
+| `brand/xenon-tailwind-theme.ts` | Tailwind CSS theme extension |
+| `brand/xenon-component-kit.html` | Live component reference (panels, badges, tables, motifs) |
 | `web/components/kit/` | React component kit (viewable at `/kit` route) |
-| `brand/radon-terminal-mockup.html` | Full terminal layout mockup |
-| `brand/radon-app-icon.svg` | App icon (1024x1024) |
-| `brand/radon-monogram.svg` | Monogram (512x512) |
-| `brand/radon-wordmark.svg` | Wordmark with tagline |
-| `brand/radon-lockup-horizontal.svg` | Horizontal lockup (icon + name + sub-label) |
+| `brand/xenon-terminal-mockup.html` | Full terminal layout mockup |
+| `brand/xenon-app-icon.svg` | App icon (1024x1024) |
+| `brand/xenon-monogram.svg` | Monogram (512x512) |
+| `brand/xenon-wordmark.svg` | Wordmark with tagline |
+| `brand/xenon-lockup-horizontal.svg` | Horizontal lockup (icon + name + sub-label) |
 | `.github/hero.png` | README hero banner |
 
 ---
 
 ## 1. Naming Hierarchy
 
-| Legacy | Radon Name | Role |
+| Legacy | Xenon Name | Role |
 |--------|-----------|------|
-| Radon | **Radon Terminal** | Primary operating environment |
-| Scanner | **Radon Flow** | Flow reconstruction and event isolation |
-| Alerts | **Radon Signals** | Signal detection, ranking, state changes |
-| Exposure View | **Radon Exposure** | Risk and positioning surfaces |
-| Vol View | **Radon Surface** | Volatility surface and dislocation analysis |
-| Regime View | **Radon Structure** | Cross-asset structure and state reconstruction |
-| Watchlists | **Radon Sets** | Saved universes and instrument groups |
+| Xenon | **Xenon Terminal** | Primary operating environment |
+| Scanner | **Xenon Flow** | Flow reconstruction and event isolation |
+| Alerts | **Xenon Signals** | Signal detection, ranking, state changes |
+| Exposure View | **Xenon Exposure** | Risk and positioning surfaces |
+| Vol View | **Xenon Surface** | Volatility surface and dislocation analysis |
+| Regime View | **Xenon Structure** | Cross-asset structure and state reconstruction |
+| Watchlists | **Xenon Sets** | Saved universes and instrument groups |
 
 ---
 
-## 2. Core Palette — The Radon Spectrum
+## 2. Core Palette — The Xenon Spectrum
 
 | Token | Hex | Role |
 |-------|-----|------|
@@ -49,7 +49,7 @@ This document is the enforced reference for all UI and asset work. The full bran
 | `text.primary` | `#e2e8f0` | Primary text |
 | `text.secondary` | `#94a3b8` | Secondary text |
 | `text.muted` | `#475569` | Meta / supporting text |
-| `signal.core` | **`#05AD98`** | **Core Radon discovery layer (flagship accent)** |
+| `signal.core` | **`#05AD98`** | **Core Xenon discovery layer (flagship accent)** |
 | `signal.strong` | `#0FCFB5` | High-confidence signal |
 | `signal.deep` | `#048A7A` | Deep data / selected states |
 | `warn` | `#F5A623` | Quality / caution |
@@ -187,7 +187,7 @@ Use sparingly in background layers, loading states, and drill-down transitions.
 |-------|-------------|-----|
 | **Spectral decomposition lines** | Parallel emission-like lines implying decomposition | Loading, factor/signal decomposition |
 | **Circular scanning arcs** | Radar/detector rings suggesting sampling sweeps | Discovery states, scan progress |
-| **Projection geometry** | Angled projection lines (Radon transform-inspired) | Hero backgrounds, engine overlays, regime views |
+| **Projection geometry** | Angled projection lines (Xenon transform-inspired) | Hero backgrounds, engine overlays, regime views |
 
 **Motif rules:**
 - Keep opacity low — structural, not decorative
@@ -209,11 +209,11 @@ Use sparingly in background layers, loading states, and drill-down transitions.
 
 ## 8. Brand Voice
 
-**Radon's voice is:** precise, calm, scientific, unsensational, informative under stress.
+**Xenon's voice is:** precise, calm, scientific, unsensational, informative under stress.
 
 ### Alert Language
 
-| Bad | Radon |
+| Bad | Xenon |
 |-----|-------|
 | Massive trade alert! | **Structural event detected.** |
 | Huge gamma squeeze incoming | **Convexity concentration elevated.** |
@@ -242,8 +242,8 @@ Use sparingly in background layers, loading states, and drill-down transitions.
 
 A contributed component is rejected unless it:
 
-1. Uses approved design tokens only (see `brand/radon-design-tokens.json`)
-2. Snaps to the Radon grid (8px base, 4px micro)
+1. Uses approved design tokens only (see `brand/xenon-design-tokens.json`)
+2. Snaps to the Xenon grid (8px base, 4px micro)
 3. Exposes state clearly via semantic color
 4. Supports both dark and light themes via CSS variables (dark-first design)
 5. Keeps numerical alignment intact (mono font, right-aligned decimals)

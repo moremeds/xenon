@@ -13,7 +13,7 @@ export function AuditBlock() {
             Open architecture for traders who want to inspect the machine.
           </h3>
           <p className="mt-5 max-w-2xl text-base leading-7 text-secondary">
-            Radon should feel like a calibrated instrument, not a black box asking
+            Xenon should feel like a calibrated instrument, not a black box asking
             for trust. Methodology, source chain, and explainability remain visible
             so the operator can decide how much confidence the system deserves.
           </p>

@@ -69,7 +69,7 @@ After connecting via VNC, configure these settings under **Configure > Settings*
 
 ### API > Precautions
 
-Check **"Bypass Order Precautions for API Orders"**. This prevents IB from rejecting API orders based on precautionary limits (e.g., order size > 75 contracts). Radon's Kelly sizing already enforces position limits at Gate 3.
+Check **"Bypass Order Precautions for API Orders"**. This prevents IB from rejecting API orders based on precautionary limits (e.g., order size > 75 contracts). Xenon's Kelly sizing already enforces position limits at Gate 3.
 
 Without this, you'll get IB error 383: "Size exceeds the Size Limit of N. Restriction is specified in Precautionary Settings."
 
@@ -80,7 +80,7 @@ These should already be set by the Docker image, but verify:
 - **Enable ActiveX and Socket Clients**: checked
 - **Socket port**: 4001 (live) or 4002 (paper)
 - **Allow connections from localhost only**: **unchecked** if using cloud mode (Tailscale remote access). Checked for local-only Docker mode.
-- **Read-Only API**: unchecked (Radon places orders)
+- **Read-Only API**: unchecked (Xenon places orders)
 
 ### Presets (if not bypassing precautions)
 

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 /**
- * Tests for web/lib/radonApi.ts — the fetch helper that ALL migrated routes
+ * Tests for web/lib/xenonApi.ts — the fetch helper that ALL migrated routes
  * depend on for FastAPI communication.
  *
  * Edge cases:
@@ -13,12 +13,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
  * - Network errors (connection refused)
  */
 
-// Mock global fetch before importing radonApi
+// Mock global fetch before importing xenonApi
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch as unknown as typeof fetch;
 
 // Now import — it will use our mocked fetch
-const { radonFetch, RadonApiError } = await import("../lib/radonApi");
+const { xenonFetch, XenonApiError } = await import("../lib/xenonApi");
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -39,11 +39,11 @@ beforeEach(() => {
 // Successful responses
 // =============================================================================
 
-describe("radonFetch — success", () => {
+describe("xenonFetch — success", () => {
   it("returns parsed JSON on 200", async () => {
     mockFetch.mockResolvedValue(jsonResponse({ positions: 20, bankroll: 100000 }));
 
-    const data = await radonFetch<{ positions: number; bankroll: number }>("/portfolio/sync", {
+    const data = await xenonFetch<{ positions: number; bankroll: number }>("/portfolio/sync", {
       method: "POST",
     });
 
@@ -51,10 +51,10 @@ describe("radonFetch — success", () => {
     expect(data.bankroll).toBe(100000);
   });
 
-  it("calls correct URL with RADON_API base", async () => {
+  it("calls correct URL with XENON_API base", async () => {
     mockFetch.mockResolvedValue(jsonResponse({ ok: true }));
 
-    await radonFetch("/health");
+    await xenonFetch("/health");
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const [url] = mockFetch.mock.calls[0];
@@ -64,7 +64,7 @@ describe("radonFetch — success", () => {
   it("passes through request init options", async () => {
     mockFetch.mockResolvedValue(jsonResponse({ status: "ok" }));
 
-    await radonFetch("/orders/place", {
+    await xenonFetch("/orders/place", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ symbol: "AAPL" }),
@@ -80,7 +80,7 @@ describe("radonFetch — success", () => {
   it("returns 202 accepted as success", async () => {
     mockFetch.mockResolvedValue(jsonResponse({ status: "accepted" }, 202));
 
-    const data = await radonFetch("/portfolio/background-sync", { method: "POST" });
+    const data = await xenonFetch("/portfolio/background-sync", { method: "POST" });
     expect(data).toEqual({ status: "accepted" });
   });
 });
@@ -89,30 +89,30 @@ describe("radonFetch — success", () => {
 // Error responses — FastAPI detail format
 // =============================================================================
 
-describe("radonFetch — error handling", () => {
-  it("throws RadonApiError with detail from FastAPI HTTPException", async () => {
+describe("xenonFetch — error handling", () => {
+  it("throws XenonApiError with detail from FastAPI HTTPException", async () => {
     mockFetch.mockResolvedValue(jsonResponse({ detail: "IB pool not connected" }, 503));
 
     try {
-      await radonFetch("/portfolio/sync", { method: "POST" });
+      await xenonFetch("/portfolio/sync", { method: "POST" });
       expect.unreachable("should have thrown");
     } catch (err) {
-      expect(err).toBeInstanceOf(RadonApiError);
-      const e = err as InstanceType<typeof RadonApiError>;
+      expect(err).toBeInstanceOf(XenonApiError);
+      const e = err as InstanceType<typeof XenonApiError>;
       expect(e.status).toBe(503);
       expect(e.detail).toBe("IB pool not connected");
       expect(e.message).toContain("503");
     }
   });
 
-  it("throws RadonApiError with error field from legacy JSON", async () => {
+  it("throws XenonApiError with error field from legacy JSON", async () => {
     mockFetch.mockResolvedValue(jsonResponse({ error: "Scanner failed" }, 502));
 
     try {
-      await radonFetch("/scan", { method: "POST" });
+      await xenonFetch("/scan", { method: "POST" });
       expect.unreachable("should have thrown");
     } catch (err) {
-      const e = err as InstanceType<typeof RadonApiError>;
+      const e = err as InstanceType<typeof XenonApiError>;
       expect(e.status).toBe(502);
       expect(e.detail).toBe("Scanner failed");
     }
@@ -124,10 +124,10 @@ describe("radonFetch — error handling", () => {
     mockFetch.mockResolvedValue(textResponse("Internal Server Error", 500));
 
     try {
-      await radonFetch("/attribution");
+      await xenonFetch("/attribution");
       expect.unreachable("should have thrown");
     } catch (err) {
-      const e = err as InstanceType<typeof RadonApiError>;
+      const e = err as InstanceType<typeof XenonApiError>;
       expect(e.status).toBe(500);
       // Body consumed by failed json() → text() also fails → fallback
       expect(e.detail).toBe("HTTP 500");
@@ -138,10 +138,10 @@ describe("radonFetch — error handling", () => {
     mockFetch.mockResolvedValue(new Response("", { status: 502 }));
 
     try {
-      await radonFetch("/scan", { method: "POST" });
+      await xenonFetch("/scan", { method: "POST" });
       expect.unreachable("should have thrown");
     } catch (err) {
-      const e = err as InstanceType<typeof RadonApiError>;
+      const e = err as InstanceType<typeof XenonApiError>;
       expect(e.status).toBe(502);
     }
   });
@@ -152,10 +152,10 @@ describe("radonFetch — error handling", () => {
     );
 
     try {
-      await radonFetch("/discover", { method: "POST" });
+      await xenonFetch("/discover", { method: "POST" });
       expect.unreachable("should have thrown");
     } catch (err) {
-      const e = err as InstanceType<typeof RadonApiError>;
+      const e = err as InstanceType<typeof XenonApiError>;
       expect(e.status).toBe(400);
       expect(e.detail).toContain("error");
     }
@@ -166,11 +166,11 @@ describe("radonFetch — error handling", () => {
 // Timeout behavior
 // =============================================================================
 
-describe("radonFetch — timeout", () => {
+describe("xenonFetch — timeout", () => {
   it("uses default 30s timeout when none specified", async () => {
     mockFetch.mockResolvedValue(jsonResponse({ ok: true }));
 
-    await radonFetch("/health");
+    await xenonFetch("/health");
 
     const [, opts] = mockFetch.mock.calls[0];
     expect(opts.signal).toBeDefined();
@@ -179,7 +179,7 @@ describe("radonFetch — timeout", () => {
   it("passes custom timeout to AbortSignal", async () => {
     mockFetch.mockResolvedValue(jsonResponse({ ok: true }));
 
-    await radonFetch("/scan", { method: "POST", timeout: 120_000 });
+    await xenonFetch("/scan", { method: "POST", timeout: 120_000 });
 
     const [, opts] = mockFetch.mock.calls[0];
     expect(opts.signal).toBeDefined();
@@ -188,7 +188,7 @@ describe("radonFetch — timeout", () => {
   it("propagates abort error from timed-out fetch", async () => {
     mockFetch.mockRejectedValue(new DOMException("The operation was aborted", "AbortError"));
 
-    await expect(radonFetch("/performance", { method: "POST", timeout: 1 })).rejects.toThrow(
+    await expect(xenonFetch("/performance", { method: "POST", timeout: 1 })).rejects.toThrow(
       "aborted",
     );
   });
@@ -198,16 +198,16 @@ describe("radonFetch — timeout", () => {
 // Network errors
 // =============================================================================
 
-describe("radonFetch — network errors", () => {
+describe("xenonFetch — network errors", () => {
   it("propagates connection refused as raw error", async () => {
     mockFetch.mockRejectedValue(new TypeError("fetch failed"));
 
-    await expect(radonFetch("/health")).rejects.toThrow("fetch failed");
+    await expect(xenonFetch("/health")).rejects.toThrow("fetch failed");
   });
 
   it("propagates DNS resolution failure", async () => {
     mockFetch.mockRejectedValue(new TypeError("getaddrinfo ENOTFOUND localhost"));
 
-    await expect(radonFetch("/health")).rejects.toThrow("ENOTFOUND");
+    await expect(xenonFetch("/health")).rejects.toThrow("ENOTFOUND");
   });
 });

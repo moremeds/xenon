@@ -34,16 +34,16 @@ vi.mock("@tools/wrappers/ib-sync", () => ({
   ibSync: mockIbSync,
 }));
 
-// Mock @/lib/radonApi — the NEW dependency for migrated routes
-const mockRadonFetch = vi.fn().mockRejectedValue(new Error("mocked"));
-vi.mock("@/lib/radonApi", () => ({
-  radonFetch: mockRadonFetch,
-  RadonApiError: class extends Error {
+// Mock @/lib/xenonApi — the NEW dependency for migrated routes
+const mockXenonFetch = vi.fn().mockRejectedValue(new Error("mocked"));
+vi.mock("@/lib/xenonApi", () => ({
+  xenonFetch: mockXenonFetch,
+  XenonApiError: class extends Error {
     status: number;
     detail: string;
     constructor(status: number, detail: string) {
-      super(`Radon API ${status}: ${detail}`);
-      this.name = "RadonApiError";
+      super(`Xenon API ${status}: ${detail}`);
+      this.name = "XenonApiError";
       this.status = status;
       this.detail = detail;
     }
@@ -517,7 +517,7 @@ describe("POST /api/portfolio", () => {
 
   beforeEach(async () => {
     vi.resetModules();
-    mockRadonFetch.mockReset();
+    mockXenonFetch.mockReset();
     mockReadDataFile.mockReset();
     const mod = await import("../app/api/portfolio/route");
     POST = mod.POST;
@@ -537,7 +537,7 @@ describe("POST /api/portfolio", () => {
       undefined_risk_count: 0,
       avg_kelly_optimal: null,
     };
-    mockRadonFetch.mockResolvedValue(mockPortfolio);
+    mockXenonFetch.mockResolvedValue(mockPortfolio);
 
     const res = await POST();
     expect(res.status).toBe(200);
@@ -547,7 +547,7 @@ describe("POST /api/portfolio", () => {
   });
 
   it("returns 502 when sync fails and no cache", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("connection refused"));
+    mockXenonFetch.mockRejectedValue(new Error("connection refused"));
     mockReadDataFile.mockResolvedValue({ ok: false, error: "not found" });
 
     const res = await POST();
@@ -626,14 +626,14 @@ describe("POST /api/orders", () => {
 
   beforeEach(async () => {
     vi.resetModules();
-    mockRadonFetch.mockReset();
+    mockXenonFetch.mockReset();
     mockReadDataFile.mockReset();
     const mod = await import("../app/api/orders/route");
     POST = mod.POST;
   });
 
   it("returns 502 when sync fails and no cache", async () => {
-    mockRadonFetch.mockRejectedValue(new Error("IB gateway timeout"));
+    mockXenonFetch.mockRejectedValue(new Error("IB gateway timeout"));
     mockReadDataFile.mockResolvedValue({
       ok: true,
       data: { last_sync: "", open_orders: [], executed_orders: [], open_count: 0, executed_count: 0 },
@@ -666,7 +666,7 @@ describe("POST /api/orders", () => {
       open_count: 0,
       executed_count: 1,
     };
-    mockRadonFetch.mockResolvedValue(refreshedOrders);
+    mockXenonFetch.mockResolvedValue(refreshedOrders);
     mockReadDataFile.mockResolvedValue({ ok: true, data: refreshedOrders });
 
     const res = await POST();

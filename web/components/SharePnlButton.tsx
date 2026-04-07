@@ -54,7 +54,7 @@ export function buildTweetText(
   if (showPct && pnlPct != null && Number.isFinite(pnlPct)) parts.push(fmtPct(pnlPct));
   const pnlStr = parts.join(" ");
   const tagged = cashtagTicker(description);
-  return `💸 ${tagged} ${pnlStr}\n\nExecuted with Radon\n\nhttps://radon.run`;
+  return `💸 ${tagged} ${pnlStr}\n\nExecuted with Xenon`;
 }
 
 export default function SharePnlButton({ data, size = 13 }: SharePnlButtonProps) {

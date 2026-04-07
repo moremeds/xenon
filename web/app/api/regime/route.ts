@@ -4,7 +4,7 @@ import { join } from "path";
 import { isCriDataStale } from "@/lib/criStaleness";
 import { selectPreferredCriCandidate, type CriCacheCandidate } from "@/lib/criCache";
 import { backfillRealizedVolHistory, type RegimeHistoryEntry } from "@/lib/regimeHistory";
-import { radonFetch } from "@/lib/radonApi";
+import { xenonFetch } from "@/lib/xenonApi";
 import { getRequestId, setCacheResponseHeaders } from "@/lib/apiContracts";
 
 export const runtime = "nodejs";
@@ -227,7 +227,7 @@ function triggerBackgroundScan(): void {
   bgScanInFlight = true;
 
   console.log("[CRI] Background scan triggered via FastAPI");
-  radonFetch<Record<string, unknown>>("/regime/scan", { method: "POST", timeout: 130_000 })
+  xenonFetch<Record<string, unknown>>("/regime/scan", { method: "POST", timeout: 130_000 })
     .then(async (data) => {
       await mkdir(SCHEDULED_DIR, { recursive: true });
       const ts = new Date().toLocaleString("sv", { timeZone: "America/New_York" })
@@ -268,7 +268,7 @@ export async function GET(): Promise<Response> {
 
 export async function POST(): Promise<Response> {
   try {
-    const rawData = await radonFetch<Record<string, unknown>>("/regime/scan", {
+    const rawData = await xenonFetch<Record<string, unknown>>("/regime/scan", {
       method: "POST",
       timeout: 130_000,
     });

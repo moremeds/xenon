@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mockRadonFetch = vi.fn();
-vi.mock("@/lib/radonApi", () => ({
-  radonFetch: mockRadonFetch,
+const mockXenonFetch = vi.fn();
+vi.mock("@/lib/xenonApi", () => ({
+  xenonFetch: mockXenonFetch,
 }));
 
 const mockReadDataFile = vi.fn();
@@ -17,7 +17,7 @@ vi.mock("@tools/schemas/ib-orders", () => ({
 describe("POST /api/orders/place — closing a held long option", () => {
   beforeEach(() => {
     vi.resetModules();
-    mockRadonFetch.mockReset();
+    mockXenonFetch.mockReset();
     mockReadDataFile.mockReset();
   });
 
@@ -45,7 +45,7 @@ describe("POST /api/orders/place — closing a held long option", () => {
         data: { open_orders: [], executed_orders: [], open_count: 0, executed_count: 0 },
       });
 
-    mockRadonFetch
+    mockXenonFetch
       .mockResolvedValueOnce({
         status: "ok",
         orderId: 12345,
@@ -74,7 +74,7 @@ describe("POST /api/orders/place — closing a held long option", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(mockRadonFetch).toHaveBeenCalledWith(
+    expect(mockXenonFetch).toHaveBeenCalledWith(
       "/orders/place",
       expect.objectContaining({
         method: "POST",

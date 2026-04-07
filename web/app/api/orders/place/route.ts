@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readDataFile } from "@tools/data-reader";
 import { OrdersData } from "@tools/schemas/ib-orders";
-import { RadonApiError, radonFetch } from "@/lib/radonApi";
+import { XenonApiError, xenonFetch } from "@/lib/xenonApi";
 import { checkNakedShortRisk } from "@/lib/nakedShortGuard";
 import type { NakedShortPortfolio } from "@/lib/nakedShortGuard";
 import {
@@ -206,7 +206,7 @@ export async function POST(request: Request): Promise<Response> {
         : {}),
     };
 
-    const orderResult = await radonFetch<Record<string, unknown>>("/orders/place", {
+    const orderResult = await xenonFetch<Record<string, unknown>>("/orders/place", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(orderPayload),
@@ -234,7 +234,7 @@ export async function POST(request: Request): Promise<Response> {
 
     // Refresh orders after placement
     try {
-      await radonFetch("/orders/refresh", { method: "POST", timeout: 10_000 });
+      await xenonFetch("/orders/refresh", { method: "POST", timeout: 10_000 });
     } catch {
       // Non-fatal — order was placed, refresh failed
     }
@@ -251,7 +251,7 @@ export async function POST(request: Request): Promise<Response> {
     });
     return setNoStoreResponseHeaders(response, requestId);
   } catch (error) {
-    if (error instanceof RadonApiError) {
+    if (error instanceof XenonApiError) {
       return setNoStoreResponseHeaders(
         jsonApiError({
           message: error.detail,

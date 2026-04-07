@@ -32,7 +32,7 @@ describe("wsTicket local routing", () => {
     expect(url).toBe("/api/ib/ws-ticket");
   });
 
-  it("does not use NEXT_PUBLIC_RADON_API_URL for ws-ticket", async () => {
+  it("does not use NEXT_PUBLIC_XENON_API_URL for ws-ticket", async () => {
     mockFetch.mockResolvedValue(
       new Response(JSON.stringify({ ticket: "ticket-123" }), {
         status: 200,

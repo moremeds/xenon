@@ -605,7 +605,7 @@ def _fetch_yahoo_chart(symbol: str, days: int = 400) -> List[tuple[str, float]]:
         "events": "div,splits",
     })
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?{params}"
-    request = Request(url, headers={"User-Agent": "radon/2.0"})
+    request = Request(url, headers={"User-Agent": "xenon/2.0"})
     with urlopen(request, timeout=15) as response:
         payload = json.loads(response.read().decode("utf-8"))
     result = payload["chart"]["result"][0]

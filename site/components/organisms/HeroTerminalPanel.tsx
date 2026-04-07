@@ -34,7 +34,7 @@ export function HeroTerminalPanel() {
       <div className="relative z-20 border-b border-grid px-5 py-4">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
-            <TelemetryLabel tone="core">Radon Terminal</TelemetryLabel>
+            <TelemetryLabel tone="core">Xenon Terminal</TelemetryLabel>
             <h2 className="mt-3 font-sans text-2xl font-semibold text-primary">
               Strategy state and execution path in one shell.
             </h2>

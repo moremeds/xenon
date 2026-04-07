@@ -18,10 +18,10 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-PLIST_NAME="com.radon.data-refresh.plist"
+PLIST_NAME="com.xenon.data-refresh.plist"
 PLIST_SRC="$PROJECT_DIR/config/$PLIST_NAME"
 PLIST_DST="$HOME/Library/LaunchAgents/$PLIST_NAME"
-LABEL="com.radon.data-refresh"
+LABEL="com.xenon.data-refresh"
 LOG_DIR="$PROJECT_DIR/logs"
 WRAPPER="$PROJECT_DIR/scripts/run_data_refresh.sh"
 

@@ -1,12 +1,12 @@
 import type { Metadata, Viewport } from "next";
 
-export const DEFAULT_SITE_URL = "https://radon.run";
-export const SITE_NAME = "Radon Terminal";
-export const SITE_TITLE = "Radon Terminal | Strategies, Execution, and Market Structure";
+export const DEFAULT_SITE_URL = "";
+export const SITE_NAME = "Xenon Terminal";
+export const SITE_TITLE = "Xenon Terminal | Strategies, Execution, and Market Structure";
 export const SITE_DESCRIPTION =
-  "Radon Terminal is an institutional-grade instrument for strategy discovery, execution discipline, and market-structure reconstruction.";
+  "Xenon Terminal is an institutional-grade instrument for strategy discovery, execution discipline, and market-structure reconstruction.";
 export const SITE_KEYWORDS = [
-  "Radon Terminal",
+  "Xenon Terminal",
   "market structure",
   "options trading",
   "dark pool flow",
@@ -17,9 +17,9 @@ export const SITE_KEYWORDS = [
 ];
 export const SOCIAL_IMAGE_PATH = "/og-image.png";
 export const SOCIAL_IMAGE_ALT =
-  "Radon Terminal marketing card showing strategy discovery, execution discipline, and market-structure reconstruction.";
+  "Xenon Terminal marketing card showing strategy discovery, execution discipline, and market-structure reconstruction.";
 export const APPLE_ICON_PATH = "/apple-touch-icon.png";
-export const GITHUB_URL = "https://github.com/joemccann/radon";
+export const GITHUB_URL = "https://github.com/joemccann/xenon";
 
 function normalizeSiteUrl(value: string): string {
   return value.endsWith("/") ? value.slice(0, -1) : value;
@@ -84,7 +84,7 @@ export const siteMetadata: Metadata = {
     icon: [
       { url: "/favicon-32x32.png", sizes: "32x32", type: "image/png" },
       { url: "/favicon-16x16.png", sizes: "16x16", type: "image/png" },
-      { url: "/brand/radon-app-icon.svg", type: "image/svg+xml" },
+      { url: "/brand/xenon-app-icon.svg", type: "image/svg+xml" },
     ],
     apple: [{ url: APPLE_ICON_PATH, sizes: "180x180", type: "image/png" }],
   },
@@ -110,9 +110,9 @@ export const siteStructuredData = [
   {
     "@context": "https://schema.org",
     "@type": "Organization",
-    name: "Radon",
+    name: "Xenon",
     url: siteUrl,
-    logo: `${siteUrl}/brand/radon-app-icon.svg`,
+    logo: `${siteUrl}/brand/xenon-app-icon.svg`,
     sameAs: [GITHUB_URL],
   },
   {
@@ -126,7 +126,7 @@ export const siteStructuredData = [
     isAccessibleForFree: true,
     publisher: {
       "@type": "Organization",
-      name: "Radon",
+      name: "Xenon",
       url: siteUrl,
     },
   },

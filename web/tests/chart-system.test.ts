@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import chartSystemSpec from "../lib/chart-system-spec.json";
 import {
-  RADON_CHART_SYSTEM,
+  XENON_CHART_SYSTEM,
   chartFamilyLabel,
   chartRendererLabel,
   chartSeriesColor,
@@ -10,9 +10,9 @@ import {
   sanctionedRendererDescription,
 } from "../lib/chartSystem";
 
-describe("radon chart system spec", () => {
+describe("xenon chart system spec", () => {
   test("exports the shared chart-system JSON as the runtime source of truth", () => {
-    expect(RADON_CHART_SYSTEM).toEqual(chartSystemSpec);
+    expect(XENON_CHART_SYSTEM).toEqual(chartSystemSpec);
   });
 
   test("maps semantic series roles to CSS variables with fallbacks", () => {

@@ -8,9 +8,9 @@ export function HeaderShell() {
     <header className="fixed inset-x-0 top-0 z-40 border-b border-grid bg-canvas/95">
       <div className="mx-auto flex h-16 w-full max-w-[1440px] items-center justify-between gap-6 px-4 sm:px-6 lg:px-8">
         <a href="#top" className="flex items-center gap-3">
-          <Image src="/brand/radon-monogram.svg" alt="Radon" width={20} height={20} />
+          <Image src="/brand/xenon-monogram.svg" alt="Xenon" width={20} height={20} />
           <span className="font-display text-lg font-semibold uppercase tracking-[0.06em] text-primary">
-            Radon
+            Xenon
           </span>
         </a>
         <nav aria-label="Primary" className="hidden items-center gap-6 lg:flex">
@@ -27,7 +27,7 @@ export function HeaderShell() {
         <div className="flex items-center gap-3">
           <ThemeToggle />
           <a
-            href="https://github.com/joemccann/radon"
+            href="https://github.com/joemccann/xenon"
             target="_blank"
             rel="noopener noreferrer"
             className="hidden sm:inline-flex"

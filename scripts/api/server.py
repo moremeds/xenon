@@ -1,4 +1,4 @@
-"""Radon FastAPI server — replaces Python shell-outs from Next.js.
+"""Xenon FastAPI server — replaces Python shell-outs from Next.js.
 
 Persistent IB connections, shared UW client, uniform JSON responses.
 Port 8321, no auth for local use.
@@ -52,7 +52,7 @@ try:
 except ImportError:
     pass
 
-logger = logging.getLogger("radon.api")
+logger = logging.getLogger("xenon.api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 # Suppress verbose ib_insync logging (positions, orders at INFO level)
@@ -63,14 +63,48 @@ logging.getLogger("ib_insync.client").setLevel(logging.WARNING)
 # ---------------------------------------------------------------------------
 from clients.uw_client import UWClient
 from clients.uw_client import UWAPIError, UWNotFoundError
+from clients.futu_client import FutuClient
+from clients.futu_exceptions import FutuError, FutuConnectionError
 from ib_insync import Index
+
+# Futu singleton — lazy-initialized on first /futu/sync call so the server
+# boots cleanly even when OpenD is not running. Guarded by an asyncio lock
+# (singleflight) so concurrent HTTP requests collapse to one OpenD roundtrip.
+_futu_client: Optional[FutuClient] = None
+_futu_lock: Optional[asyncio.Lock] = None
+# `None` sentinel (not 0.0) so the first-call cooldown check does not fire.
+# time.monotonic() returns small values near process start, and `now - 0.0`
+# would look "recently synced" and serve stale cache instead of a real fetch.
+_futu_last_sync_monotonic: Optional[float] = None
+FUTU_COOLDOWN_S = 10
+
+
+def _get_futu_lock() -> asyncio.Lock:
+    global _futu_lock
+    if _futu_lock is None:
+        _futu_lock = asyncio.Lock()
+    return _futu_lock
+
+
+def _get_futu_client() -> FutuClient:
+    """Lazy-init the shared FutuClient singleton."""
+    global _futu_client
+    if _futu_client is None:
+        _futu_client = FutuClient(
+            host=os.environ.get("FUTU_OPEND_HOST", "127.0.0.1"),
+            port=int(os.environ.get("FUTU_OPEND_PORT", "11111")),
+            security_firm=os.environ.get("FUTU_SECURITY_FIRM", "FUTUSECURITIES"),
+            trd_env=os.environ.get("FUTU_TRD_ENV", "REAL"),
+            filter_trading_market=os.environ.get("FUTU_MARKET", "US"),
+        )
+    return _futu_client
 
 
 # Shared state
 # ---------------------------------------------------------------------------
 ib_pool: Optional[IBPool] = None
 uw_available: bool = False
-test_mode: bool = os.environ.get("RADON_API_TEST_MODE", "").lower() in {"1", "true", "yes", "on"}
+test_mode: bool = os.environ.get("XENON_API_TEST_MODE", "").lower() in {"1", "true", "yes", "on"}
 test_order_counter: int = 900000
 
 
@@ -88,10 +122,10 @@ async def lifespan(app: FastAPI):
     global ib_pool, uw_available
 
     if test_mode:
-        logger.info("Radon API starting in test mode; IB Gateway and pool startup are disabled")
+        logger.info("Xenon API starting in test mode; IB Gateway and pool startup are disabled")
         uw_available = bool(os.environ.get("UW_TOKEN"))
         yield
-        logger.info("Radon API test mode shut down")
+        logger.info("Xenon API test mode shut down")
         return
 
     # Ensure IB Gateway is running before connecting pool
@@ -114,15 +148,20 @@ async def lifespan(app: FastAPI):
     # Shutdown
     if ib_pool:
         await ib_pool.disconnect_all()
-    logger.info("Radon API shut down")
+    if _futu_client is not None:
+        try:
+            _futu_client.disconnect()
+        except Exception as exc:
+            logger.warning("FutuClient disconnect on shutdown failed: %s", exc)
+    logger.info("Xenon API shut down")
 
 
-app = FastAPI(title="Radon API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Xenon API", version="1.0.0", lifespan=lifespan)
 app.include_router(historical_router)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://.*\.radon\.run|http://localhost:3000|http://127\.0\.0\.1:3000",
+    allow_origin_regex=r"http://localhost:3000|http://127\.0\.0\.1:3000",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -663,6 +702,35 @@ async def _fetch_risk_reversal_history(
 # Health
 # ---------------------------------------------------------------------------
 
+def _compute_futu_health() -> Dict[str, Any]:
+    """Derive the Futu health block from the singleton + cached file.
+
+    Never probes OpenD (tribunal T11) — reachability comes from the last
+    cached sync result, not a TCP probe. Cheap enough to compute per
+    /health call.
+    """
+    cached_path = DATA_DIR / "futu_portfolio.json"
+    last_sync_at: Optional[str] = None
+    last_sync_age_s: Optional[float] = None
+    if cached_path.exists():
+        try:
+            data = json.loads(cached_path.read_text())
+            last_sync_at = data.get("fetched_at")
+            if last_sync_at:
+                from datetime import datetime, timezone
+                dt = datetime.fromisoformat(last_sync_at.replace("Z", "+00:00"))
+                last_sync_age_s = (datetime.now(timezone.utc) - dt).total_seconds()
+        except Exception:
+            pass
+
+    return {
+        "configured": True,  # v1 assumption; cloud branch flips to False
+        "connected": _futu_client is not None and _futu_client.is_connected(),
+        "last_sync_at": last_sync_at,
+        "last_sync_age_s": last_sync_age_s,
+    }
+
+
 @app.get("/health")
 async def health():
     gw = await check_ib_gateway()
@@ -672,6 +740,7 @@ async def health():
         "ib_gateway": gw,
         "ib_pool": ib_pool.status() if ib_pool else {},
         "uw": uw_available,
+        "futu": _compute_futu_health(),
     }
 
 
@@ -980,6 +1049,148 @@ async def vcg_scan():
         _write_cache(DATA_DIR / "vcg.json", result.data)
         _vcg_last_scan = _time.monotonic()
         return result.data
+
+
+def _futu_in_cooldown() -> bool:
+    """True if the last successful sync was less than FUTU_COOLDOWN_S ago.
+
+    Uses a None sentinel for "never synced this process" so the first call
+    after startup always proceeds to a real fetch.
+    """
+    if _futu_last_sync_monotonic is None:
+        return False
+    import time as _time
+    return _time.monotonic() - _futu_last_sync_monotonic < FUTU_COOLDOWN_S
+
+
+def _maybe_preserve_partial_failure(new_result: dict) -> Optional[dict]:
+    """Refuse to overwrite a good snapshot with a degraded one.
+
+    Returns the previous cached file when the new result has warnings AND
+    fewer positions than the cache. Writes a sidecar
+    `data/futu_portfolio.error.json` so the rejected payload is inspectable.
+
+    Returns None when there is nothing to preserve (caller proceeds with
+    the normal save path).
+    """
+    new_warnings = new_result.get("warnings") or []
+    new_count = new_result.get("count", 0)
+    if not new_warnings:
+        return None
+
+    cached_path = DATA_DIR / "futu_portfolio.json"
+    prev = _read_cache(cached_path)
+    if prev is None:
+        return None
+
+    prev_count = prev.get("count", 0)
+    if new_count >= prev_count:
+        return None  # new snapshot isn't degraded
+
+    error_path = DATA_DIR / "futu_portfolio.error.json"
+    try:
+        _write_cache(error_path, new_result)
+    except Exception as exc:
+        logger.warning("Failed to write futu error sidecar: %s", exc)
+    logger.warning(
+        "Futu sync degraded (new=%d, prev=%d, warnings=%d) — preserved prior snapshot",
+        new_count,
+        prev_count,
+        len(new_warnings),
+    )
+    return prev
+
+
+@app.post("/futu/sync")
+async def futu_sync():
+    """Force-fetch Futu positions + account, write data/futu_portfolio.json.
+
+    Patterns:
+    - **Singleflight.** Concurrent callers serialize on an asyncio lock AND
+      share the cached result when inside the cooldown window, so two
+      browser tabs hitting Refresh simultaneously produce exactly one
+      OpenD roundtrip.
+    - **10s cooldown.** Repeat calls within 10s return the cached result.
+    - **Partial-failure preservation (tribunal T15).** If the new snapshot
+      has warnings and fewer positions than the cache, the cache is
+      preserved untouched and a sidecar error file is written.
+    - **Off-loop blocking calls.** The Futu SDK is fully sync; all calls
+      run in the default thread pool executor.
+    """
+    global _futu_last_sync_monotonic
+    import time as _time
+
+    lock = _get_futu_lock()
+
+    # Early cooldown check — avoids lock contention when cache is fresh.
+    if _futu_in_cooldown():
+        cached = _read_cache(DATA_DIR / "futu_portfolio.json")
+        if cached:
+            return {"ok": True, **cached}
+
+    async with lock:
+        # Re-check inside lock — race guard so two tabs inside the lock
+        # window piggyback on the same result.
+        if _futu_in_cooldown():
+            cached = _read_cache(DATA_DIR / "futu_portfolio.json")
+            if cached:
+                return {"ok": True, **cached}
+
+        client = _get_futu_client()
+        loop = asyncio.get_running_loop()
+        try:
+            if not client.is_connected():
+                await loop.run_in_executor(None, client.connect)
+            result = await loop.run_in_executor(
+                None, lambda: client.fetch_portfolio(force=True)
+            )
+        except FutuConnectionError as exc:
+            raise HTTPException(status_code=503, detail=f"Futu OpenD unreachable: {exc}")
+        except FutuError as exc:
+            raise HTTPException(status_code=502, detail=f"Futu error: {exc}")
+
+        # Partial-failure guard: if this snapshot looks worse than the
+        # cache, keep the cache and return it with a warning tag.
+        preserved = _maybe_preserve_partial_failure(result)
+        if preserved is not None:
+            preserved_warnings = list(preserved.get("warnings") or []) + [
+                "partial_failure_preserved",
+            ]
+            return {"ok": True, **preserved, "warnings": preserved_warnings}
+
+        _atomic_save(str(DATA_DIR / "futu_portfolio.json"), result)
+        _futu_last_sync_monotonic = _time.monotonic()
+        return {"ok": True, **result}
+
+
+# Canonical "never synced" envelope — used by /futu/portfolio when no cache
+# file exists yet. HTTP 200 with a failure-shaped body (tribunal T14) so
+# the UI can distinguish "first boot" from "sync failed" without a 404
+# flashing an error state.
+_FUTU_NEVER_SYNCED = {
+    "ok": False,
+    "code": "never_synced",
+    "positions": [],
+    "count": 0,
+    "account_summary": None,
+    "fetched_at": None,
+    "data_as_of": None,
+}
+
+
+@app.get("/futu/portfolio")
+async def futu_portfolio():
+    """Read the cached Futu portfolio snapshot.
+
+    Does not hit OpenD — serves the last written `data/futu_portfolio.json`.
+    Returns HTTP 200 with `{ok:false, code:"never_synced"}` on first boot
+    so the UI can render a "click sync" prompt distinctly from errors.
+    Clients that need fresh data call `POST /futu/sync`.
+    """
+    cached = _read_cache(DATA_DIR / "futu_portfolio.json")
+    if cached is None:
+        return dict(_FUTU_NEVER_SYNCED)
+    return {"ok": True, **cached}
 
 
 @app.post("/vcg/share")
