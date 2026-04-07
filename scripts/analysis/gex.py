@@ -73,6 +73,52 @@ def detect_pinning(
     return None
 
 
+def extract_call_wall(strikes: list[dict]) -> Optional[dict]:
+    """Top *positive*-gamma strike (sign preserved — rank_walls cannot do this)."""
+    candidates = [
+        s for s in strikes if (_gamma(s) or 0.0) > 0 and s.get("strike") is not None
+    ]
+    if not candidates:
+        return None
+    top = max(candidates, key=lambda s: _gamma(s) or 0.0)
+    return {"strike": float(top["strike"]), "gamma": float(_gamma(top) or 0.0)}
+
+
+def extract_put_wall(strikes: list[dict]) -> Optional[dict]:
+    """Top *negative*-gamma strike (sign preserved)."""
+    candidates = [
+        s for s in strikes if (_gamma(s) or 0.0) < 0 and s.get("strike") is not None
+    ]
+    if not candidates:
+        return None
+    top = min(candidates, key=lambda s: _gamma(s) or 0.0)
+    return {"strike": float(top["strike"]), "gamma": float(_gamma(top) or 0.0)}
+
+
+def compute_gamma_per_1pct(
+    strikes: list[dict], price: Optional[float]
+) -> Optional[float]:
+    """Sum of |gamma| across strikes within ±1% of price.
+
+    Approximates dealer hedging intensity for a 1% move. Returns None if price
+    is missing/non-positive or no strikes fall in the band.
+    """
+    if not price or price <= 0:
+        return None
+    band = price * 0.01
+    total = 0.0
+    seen = False
+    for s in strikes:
+        g = _gamma(s)
+        strike = s.get("strike")
+        if g is None or strike is None:
+            continue
+        if abs(float(strike) - price) <= band:
+            total += abs(g)
+            seen = True
+    return total if seen else None
+
+
 def is_opex_week(today: date) -> bool:
     """True if today is within 3 calendar days before the 3rd Friday of the month."""
     first_day = today.replace(day=1)
