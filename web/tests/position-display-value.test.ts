@@ -80,6 +80,57 @@ describe("getDisplayMarketValue", () => {
   });
 });
 
+describe("getDisplayMarketValue — Covered Call (stock + option legs)", () => {
+  // Regression test for the Gemini-1 tribunal finding: a Covered Call's
+  // stock leg must use a ×1 multiplier, not ×100. Previous code inflated
+  // the stock leg by 100× through the `* leg.contracts * 100` formula.
+  const COVERED_CALL: PortfolioPosition = {
+    id: 10,
+    ticker: "TSLA",
+    structure: "Covered Call",
+    structure_type: "Covered Call",
+    risk_profile: "defined",
+    direction: "CREDIT",
+    contracts: 100,
+    expiry: "2026-05-15",
+    entry_cost: 30_000, // 100 shares × $300 − $50 premium credit
+    market_value: 35_200,
+    legs: [
+      { type: "Stock", direction: "LONG", strike: null, contracts: 100, avg_cost: 300, entry_cost: 30_000, market_price: 350, market_value: 35_000 },
+      { type: "Call", direction: "SHORT", strike: 400, contracts: 1, avg_cost: -50, entry_cost: -50, market_price: -2, market_value: -200 },
+    ],
+  };
+
+  it("stock leg uses ×1 multiplier, not ×100 (Gemini-1 regression)", () => {
+    // Note: the option-branch loop doesn't read prices[ticker] for Stock
+    // legs — the per-leg path uses legPriceKey → null → resolveRealtimePrice
+    // falls back to leg.market_price. So this test exercises the leg-level
+    // fallback (stock leg @ $350/share from ib_sync, option leg @ $3).
+    const prices = { TSLA_20260515_400_C: mkPrice({ last: 3 }) };
+    // Correct realtime MV:
+    //   LONG stock  +1 × 350 × 100 ×   1  = +35,000
+    //   SHORT call  −1 ×   3 ×   1 × 100  =    −300
+    //   Total                             = +34,700
+    // Buggy behavior (pre-fix) would have been:
+    //   LONG stock  +1 × 350 × 100 × 100  = +3,500,000 (100× inflation)
+    //   SHORT call  −1 ×   3 ×   1 × 100  =    −300
+    //   Total                             = +3,499,700
+    expect(getDisplayMarketValue(COVERED_CALL, prices)).toBe(34_700);
+  });
+
+  it("falls back to resolveMarketValue when any leg's realtime price is missing", () => {
+    // No prices → option leg's market_price (−2 per contract abs) still
+    // resolves via fallbackPrice branch: let's simulate by providing a
+    // stock price but no option price.
+    const prices = { TSLA: mkPrice({ last: 360 }) };
+    // Option leg market_price = -2 (absolute used as fallback);
+    // resolveRealtimePrice(null, -2, false) → isPositiveNumber(-2) = false → null
+    // → optionsRt loop returns null (bug branch) → falls back to resolveMarketValue
+    // resolveMarketValue multi-leg: LONG 35_000 + SHORT -200 = 34_800
+    expect(getDisplayMarketValue(COVERED_CALL, prices)).toBe(34_800);
+  });
+});
+
 describe("getDisplayTotalPnl", () => {
   it("preserves sign: debit spread with MV > EC is positive", () => {
     const prices = {

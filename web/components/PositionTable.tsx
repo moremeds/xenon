@@ -15,6 +15,7 @@ import {
   resolveEntryCost,
   getAvgEntry,
   getMultiplier,
+  legMultiplier,
   getLastPrice,
   getLastPriceIsCalculated,
   legPriceKey,
@@ -125,7 +126,7 @@ function getOptionRtMv(pos: PortfolioPosition, prices?: Record<string, PriceData
     const current = resolveRealtimePrice(lp, leg.market_price, Boolean(leg.market_price_is_calculated)).price;
     if (current == null) return null;
     const sign = leg.direction === "LONG" ? 1 : -1;
-    rtMv += sign * current * leg.contracts * 100;
+    rtMv += sign * current * leg.contracts * legMultiplier(leg);
   }
   return rtMv;
 }
@@ -189,7 +190,7 @@ function LegRow({
   const { direction: priceDirection, flashDirection } = usePriceDirection(marketPrice);
 
   // Per-leg P&L: sign-aware (MV - EC)
-  const mult = leg.type === "Stock" ? 1 : 100;
+  const mult = legMultiplier(leg);
   const legMv = marketPrice != null ? marketPrice * leg.contracts * mult : leg.market_value != null ? Math.abs(leg.market_value) : null;
   const legEc = Math.abs(leg.entry_cost);
   const sign = leg.direction === "LONG" ? 1 : -1;
@@ -250,11 +251,12 @@ function PositionRow({ pos, showExpiry = true, showUnderlying = false, realtimeP
       if (current == null) return null;
       priceIsCalculated = priceIsCalculated || resolved.isCalculated;
       const sign = leg.direction === "LONG" ? 1 : -1;
-      rtMv += sign * current * leg.contracts * 100;
+      const mult = legMultiplier(leg);
+      rtMv += sign * current * leg.contracts * mult;
       const close = lp?.close;
       if (close != null && close > 0) {
-        rtDailyPnl += sign * (current - close) * leg.contracts * 100;
-        rtCloseValue += sign * close * leg.contracts * 100;
+        rtDailyPnl += sign * (current - close) * leg.contracts * mult;
+        rtCloseValue += sign * close * leg.contracts * mult;
         hasCloseData = true;
       }
     }
