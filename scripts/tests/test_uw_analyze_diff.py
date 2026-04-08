@@ -163,7 +163,28 @@ def test_call_sweep_negative_delta_silent():
 
 
 def test_call_sweep_null_skipped():
-    out = compute_changes(_snap(net_call_premium=None), _snap(net_call_premium=10e6)) == []
+    from api.services.uw_analyze_diff import compute_changes
+
+    prev = {"derived": {"net_call_premium": None}}
+    curr = {"derived": {"net_call_premium": 10_000_000}}
+    out = compute_changes(prev, curr)
+    assert all(c.code != "UNUSUAL_CALL_SWEEP" for c in out)
+
+
+def test_call_sweep_prev_null_skipped():
+    from api.services.uw_analyze_diff import compute_changes
+
+    prev = {"derived": {"net_call_premium": 0}}
+    curr = {"derived": {"net_call_premium": None}}
+    assert all(c.code != "UNUSUAL_CALL_SWEEP" for c in compute_changes(prev, curr))
+
+
+def test_max_pain_zero_spot_skipped():
+    from api.services.uw_analyze_diff import compute_changes
+
+    prev = {"derived": {"max_pain": 100}}
+    curr = {"derived": {"max_pain": 110, "spot": 0}}
+    assert all(c.code != "MAX_PAIN_SHIFT" for c in compute_changes(prev, curr))
 
 
 # ── UNUSUAL_PUT_SWEEP ──────────────────────────────────────────────────────
