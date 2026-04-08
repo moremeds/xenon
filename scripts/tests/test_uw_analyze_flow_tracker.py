@@ -307,3 +307,54 @@ def test_flow_log_corrupt_file_starts_empty(tmp_path):
     log = FlowLog(path=p)
     log.load()
     assert log.all() == []
+
+
+def test_classify_anomaly_closing_volume_spike():
+    from api.services.uw_analyze_flow_tracker import (
+        FlowEvent, FlowInitial, FlowDailyRow, classify_anomaly
+    )
+    ev = FlowEvent(
+        id="x", ticker="AAPL", side="call", strike=100, expiry="2026-09-15",
+        detected_at="2026-04-08T15:50:00+00:00",
+        initial=FlowInitial(premium_usd=7e6, oi=1000, volume=4000, mid=2.5, underlying_price=99),
+    )
+    ev.daily_track.append(FlowDailyRow(
+        date="2026-04-09", oi=950, mid=2.4, underlying_price=99.5,
+        pct_change_premium=-0.04, volume=850,
+    ))
+    reason = classify_anomaly(ev)
+    assert reason and "closing volume" in reason.lower()
+
+
+def test_classify_anomaly_closing_volume_silent_below_threshold():
+    from api.services.uw_analyze_flow_tracker import (
+        FlowEvent, FlowInitial, FlowDailyRow, classify_anomaly
+    )
+    ev = FlowEvent(
+        id="x", ticker="AAPL", side="call", strike=100, expiry="2026-09-15",
+        detected_at="2026-04-08T15:50:00+00:00",
+        initial=FlowInitial(premium_usd=7e6, oi=1000, volume=4000, mid=2.5, underlying_price=99),
+    )
+    ev.daily_track.append(FlowDailyRow(
+        date="2026-04-09", oi=950, mid=2.4, underlying_price=99.5,
+        pct_change_premium=-0.04, volume=500,
+    ))
+    assert classify_anomaly(ev) is None
+
+
+def test_classify_anomaly_closing_volume_dte_guard():
+    from datetime import date, timedelta
+    from api.services.uw_analyze_flow_tracker import (
+        FlowEvent, FlowInitial, FlowDailyRow, classify_anomaly
+    )
+    near_expiry = (date.today() + timedelta(days=2)).isoformat()
+    ev = FlowEvent(
+        id="x", ticker="AAPL", side="call", strike=100, expiry=near_expiry,
+        detected_at="2026-04-08T15:50:00+00:00",
+        initial=FlowInitial(premium_usd=7e6, oi=1000, volume=4000, mid=2.5, underlying_price=99),
+    )
+    ev.daily_track.append(FlowDailyRow(
+        date="2026-04-09", oi=950, mid=2.4, underlying_price=99.5,
+        pct_change_premium=-0.04, volume=900,
+    ))
+    assert classify_anomaly(ev) is None

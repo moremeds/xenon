@@ -172,6 +172,7 @@ async def run_once(
             oi=int(contract_state.get("oi", event.initial.oi)),
             mid=float(contract_state.get("mid", event.initial.mid)),
             underlying_price=float(contract_state.get("underlying_price", event.initial.underlying_price)),
+            volume=int(contract_state.get("volume", 0)),
         )
         stats["events_advanced"] += 1
         if event.status == "anomaly":

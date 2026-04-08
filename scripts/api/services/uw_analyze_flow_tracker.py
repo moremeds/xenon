@@ -64,6 +64,7 @@ class FlowDailyRow:
     mid: float
     underlying_price: float
     pct_change_premium: float
+    volume: int = 0
 
 
 @dataclass
@@ -226,6 +227,7 @@ def advance_daily_track(
     oi: int,
     mid: float,
     underlying_price: float,
+    volume: int = 0,
 ) -> FlowEvent:
     """Append today's reading to the event's daily_track (idempotent on date)."""
     if any(row.date == today for row in event.daily_track):
@@ -240,6 +242,7 @@ def advance_daily_track(
             mid=mid,
             underlying_price=underlying_price,
             pct_change_premium=pct,
+            volume=volume,
         )
     )
     return event
@@ -280,6 +283,13 @@ def classify_anomaly(event: FlowEvent, *, today: Optional[date] = None) -> Optio
             pct = int(oi_drop * 100)
             return f"OI evaporated -{pct}% within {days_since}d"
 
+    # Rule 3: closing volume spike — single day volume > 80% of current OI.
+    # Skipped implicitly by the DTE guard at the top.
+    if latest.oi > 0 and latest.volume > 0:
+        ratio = latest.volume / latest.oi
+        if ratio >= CLOSING_VOLUME_OI_FRAC:
+            return f"closing volume spike: {int(ratio * 100)}% of OI traded in one day"
+
     return None
 
 
@@ -309,9 +319,10 @@ def progress_event(
     oi: int,
     mid: float,
     underlying_price: float,
+    volume: int = 0,
 ) -> FlowEvent:
     """End-to-end one-step progression for the daily cron."""
-    advance_daily_track(event, today=today, oi=oi, mid=mid, underlying_price=underlying_price)
+    advance_daily_track(event, today=today, oi=oi, mid=mid, underlying_price=underlying_price, volume=volume)
     reason = classify_anomaly(event)
     if reason and event.status == "open":
         event.status = "anomaly"
@@ -425,6 +436,7 @@ def _event_from_dict(d: dict) -> FlowEvent:
                 mid=float(r["mid"]),
                 underlying_price=float(r.get("underlying_price", 0)),
                 pct_change_premium=float(r.get("pct_change_premium", 0)),
+                volume=int(r.get("volume", 0)),
             )
             for r in track_rows
         ],
