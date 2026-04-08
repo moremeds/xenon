@@ -217,6 +217,11 @@ async def run_once(
         elif event.status == "closed":
             stats["events_closed"] += 1
         flow_log.replace(event)
+    # Purge closed/expired events past retention. Keeps memory bounded over
+    # months of scanning — the active working set is only open/anomaly.
+    purged = flow_log.purge()
+    if purged:
+        stats["events_purged"] = purged
     flow_log.save()
 
     logger.info("uw_analyze_daily_job run_once stats: %s", stats)

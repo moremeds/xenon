@@ -38,6 +38,8 @@ OI_EVAPORATION_FRAC = 0.50  # 50% drop in oi
 OI_EVAPORATION_DAYS = 3  # within 3 trading days of detection
 CLOSING_VOLUME_OI_FRAC = 0.80  # single-day vol > 80% of OI
 ANOMALY_DTE_GUARD = 3  # skip rules within 3 DTE of expiry
+MAX_DAILY_TRACK_ROWS = 30  # cap per-event daily readings — anomaly classification only reads the latest
+PURGE_AFTER_DAYS = 30  # drop closed/expired events older than this
 
 Side = Literal["call", "put"]
 Status = Literal["open", "closed", "anomaly", "expired"]
@@ -256,6 +258,10 @@ def advance_daily_track(
             volume=volume,
         )
     )
+    # Bound daily_track — classify_anomaly only reads the latest row, so older
+    # rows are pure retention cost. Keeps memory + on-disk JSON predictable.
+    if len(event.daily_track) > MAX_DAILY_TRACK_ROWS:
+        event.daily_track = event.daily_track[-MAX_DAILY_TRACK_ROWS:]
     return event
 
 
@@ -420,6 +426,35 @@ class FlowLog:
     def replace(self, event: FlowEvent) -> None:
         self.load()
         self._events[event.id] = event
+
+    def purge(self, *, older_than_days: int = PURGE_AFTER_DAYS, today: Optional[date] = None) -> int:
+        """Drop closed/expired events whose `closed_at` (or expiry for
+        events that were never formally closed) is older than the cutoff.
+
+        Returns the number of events removed. Called from the daily cron so
+        the in-memory + on-disk flow log doesn't grow unbounded across
+        months of scanning.
+        """
+        self.load()
+        if today is None:
+            today = date.today()
+        cutoff = today - timedelta(days=older_than_days)
+        to_drop: list[str] = []
+        for eid, ev in self._events.items():
+            if ev.status not in ("closed", "expired"):
+                continue
+            ref_iso = ev.closed_at or ev.expiry
+            try:
+                ref_date = date.fromisoformat(ref_iso) if ref_iso else None
+            except ValueError:
+                ref_date = None
+            if ref_date is None or ref_date < cutoff:
+                to_drop.append(eid)
+        for eid in to_drop:
+            self._events.pop(eid, None)
+        if to_drop:
+            logger.info("flow_log purge removed %d events older than %s", len(to_drop), cutoff.isoformat())
+        return len(to_drop)
 
     def save(self) -> None:
         self.load()

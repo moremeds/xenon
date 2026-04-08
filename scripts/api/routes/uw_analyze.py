@@ -28,7 +28,6 @@ from api.services.uw_analyze_candidates import (
 from api.services.uw_analyze_candidates import (
     seed_candidates,
 )
-from api.services.uw_analyze_diff import compute_changes
 from api.services.uw_analyze_flow_tracker import FlowLog, capture_from_changes
 
 logger = logging.getLogger("xenon.uw_analyze")
@@ -383,10 +382,13 @@ async def uw_analyze_portfolio() -> dict:
             flow_alerts = snap.get("flow_alerts") or None
             underlying = (snap.get("derived") or {}).get("spot")
             if flow_alerts and underlying is not None:
-                changes_objs = compute_changes(prev, snap)
+                # `capture_from_changes` accepts dicts or Change objects. Use
+                # the already-materialized list instead of recomputing from
+                # `prev`, which is now a light {ts, derived} stub to save
+                # memory.
                 new_events = capture_from_changes(
                     ticker=ticker,
-                    changes=changes_objs,
+                    changes=change_dicts,
                     flow_alerts=flow_alerts,
                     underlying_price=underlying,
                 )
@@ -452,16 +454,14 @@ async def uw_analyze_refresh(req: RefreshRequest) -> dict:
 
         if did_refresh:
             snap = entry.get("current") or {}
-            prev = entry.get("previous")
             change_dicts = entry.get("materialized_changes") or []
             if change_dicts:
                 flow_alerts = snap.get("flow_alerts") or None
                 underlying = (snap.get("derived") or {}).get("spot")
                 if flow_alerts and underlying is not None:
-                    changes_objs = compute_changes(prev, snap)
                     new_events = capture_from_changes(
                         ticker=ticker,
-                        changes=changes_objs,
+                        changes=change_dicts,
                         flow_alerts=flow_alerts,
                         underlying_price=underlying,
                     )

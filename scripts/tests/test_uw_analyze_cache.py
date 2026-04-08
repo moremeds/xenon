@@ -273,6 +273,11 @@ def test_force_rerun_keeps_sources(tmp_path):
 
 
 def test_previous_rotates_on_force_rerun(tmp_path):
+    """`previous` is a light {ts, derived} stub after memory bounds —
+    the full report is no longer retained (dropping it is ~95% of the
+    per-entry memory win). The derived block is enough for the diff
+    engine and for the UI's `prev_ts` exposure."""
+
     async def go():
         cache = make_cache(tmp_path)
         await cache.get_or_run("nvda", runner=make_runner(report=_report(price=100)))
@@ -280,5 +285,101 @@ def test_previous_rotates_on_force_rerun(tmp_path):
         return cache.get_entry("nvda")
 
     entry = _run(go())
-    assert entry["previous"]["report"]["price"] == 100
+    # Current still holds the full report.
     assert entry["current"]["report"]["price"] == 110
+    # Previous is now light: only ts + derived.
+    prev = entry["previous"]
+    assert isinstance(prev, dict)
+    assert set(prev.keys()) == {"ts", "derived"}
+    assert prev["derived"]["spot"] == 100
+    assert "report" not in prev
+    assert "display" not in prev
+
+
+# ── Memory bounds ──────────────────────────────────────────────────────────
+
+
+def test_entries_evicts_lru_adhoc_first_over_cap(tmp_path):
+    """Exceeding max_entries evicts lowest-tier LRU first (adhoc),
+    protecting portfolio/watchlist."""
+
+    async def go():
+        cache = make_cache(tmp_path, max_entries=3)
+        # Insert 2 portfolio tickers + 3 adhoc — should evict 2 adhoc
+        # (lowest tier) before touching portfolio.
+        await cache.get_or_run("AAA", runner=make_runner(), sources=["portfolio"])
+        await cache.get_or_run("BBB", runner=make_runner(), sources=["portfolio"])
+        await cache.get_or_run("CCC", runner=make_runner(), sources=["adhoc"])
+        await cache.get_or_run("DDD", runner=make_runner(), sources=["adhoc"])
+        await cache.get_or_run("EEE", runner=make_runner(), sources=["adhoc"])
+        return cache
+
+    cache = _run(go())
+    assert len(cache._entries) == 3
+    # Portfolio tickers preserved.
+    assert "AAA" in cache._entries
+    assert "BBB" in cache._entries
+    # Most recent adhoc survives; earlier adhocs evicted.
+    assert "EEE" in cache._entries
+    assert "CCC" not in cache._entries
+    assert "DDD" not in cache._entries
+
+
+def test_materialized_changes_capped(tmp_path, monkeypatch):
+    """Even if the diff engine emits many changes, only the last N are
+    kept on the entry to bound memory."""
+    from api.services import uw_analyze_cache as mod
+
+    # Force the diff engine to emit 25 synthetic changes so we can assert
+    # the cap trims to _MAX_MATERIALIZED_CHANGES (10).
+    class _FakeChange:
+        def __init__(self, i):
+            self.i = i
+
+        def to_dict(self):
+            return {
+                "code": "GEX_FLIP_SIGN",
+                "idx": self.i,
+                "label": f"c{self.i}",
+                "prev": None,
+                "curr": None,
+                "severity": "info",
+            }
+
+    def _fake_compute(prev, curr):
+        if not prev:
+            return []
+        return [_FakeChange(i) for i in range(25)]
+
+    import api.services.uw_analyze_diff as diff_mod
+
+    monkeypatch.setattr(diff_mod, "compute_changes", _fake_compute)
+
+    async def go():
+        cache = make_cache(tmp_path)
+        await cache.get_or_run("nvda", runner=make_runner(report=_report(price=100)))
+        await cache.get_or_run("nvda", runner=make_runner(report=_report(price=110)), force=True)
+        return cache.get_entry("nvda")
+
+    entry = _run(go())
+    mats = entry["materialized_changes"]
+    assert len(mats) == mod._MAX_MATERIALIZED_CHANGES
+    # Trimmed to the *latest* slice — last entry is idx 24.
+    assert mats[-1]["idx"] == 24
+    assert mats[0]["idx"] == 25 - mod._MAX_MATERIALIZED_CHANGES
+
+
+def test_orphan_locks_swept_on_eviction(tmp_path):
+    """When an entry is evicted, its per-ticker lock is swept too."""
+
+    async def go():
+        cache = make_cache(tmp_path, max_entries=2)
+        await cache.get_or_run("AAA", runner=make_runner(), sources=["adhoc"])
+        await cache.get_or_run("BBB", runner=make_runner(), sources=["adhoc"])
+        await cache.get_or_run("CCC", runner=make_runner(), sources=["adhoc"])
+        return cache
+
+    cache = _run(go())
+    assert len(cache._entries) == 2
+    # No orphan lock left for the evicted ticker.
+    assert all(t in cache._entries for t in cache._per_ticker_locks)

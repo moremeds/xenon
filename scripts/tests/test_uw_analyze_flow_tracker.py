@@ -356,6 +356,56 @@ def test_flow_log_corrupt_file_starts_empty(tmp_path):
     assert log.all() == []
 
 
+# ── Memory bounds ──────────────────────────────────────────────────────────
+
+
+def test_daily_track_capped_at_max_rows():
+    """advance_daily_track drops the oldest rows once MAX_DAILY_TRACK_ROWS
+    is exceeded — classify_anomaly only reads the latest row, so retaining
+    more is pure memory cost."""
+    from api.services.uw_analyze_flow_tracker import MAX_DAILY_TRACK_ROWS
+
+    ev = _make_event()
+    # Push 2× the cap worth of days.
+    for i in range(MAX_DAILY_TRACK_ROWS * 2):
+        day = (date.today() + timedelta(days=i)).isoformat()
+        advance_daily_track(ev, today=day, oi=1000 - i, mid=4.5, underlying_price=870.0)
+    assert len(ev.daily_track) == MAX_DAILY_TRACK_ROWS
+    # Latest row preserved.
+    assert ev.daily_track[-1].date == (date.today() + timedelta(days=MAX_DAILY_TRACK_ROWS * 2 - 1)).isoformat()
+
+
+def test_flow_log_purge_removes_old_closed_events(tmp_path):
+    """purge() drops closed/expired events older than the cutoff and leaves
+    recent + still-open events alone."""
+    log = FlowLog(path=tmp_path / "flow.json")
+    # Old closed event
+    old = _make_event(expiry="2025-01-15")
+    old.id = "old"
+    old.status = "closed"
+    old.closed_at = "2025-02-01"
+    # Recent closed event
+    recent = _make_event(expiry=(date.today() + timedelta(days=5)).isoformat())
+    recent.id = "recent"
+    recent.status = "closed"
+    recent.closed_at = (date.today() - timedelta(days=2)).isoformat()
+    # Still open — must survive regardless of age.
+    still_open = _make_event(expiry="2025-03-01")
+    still_open.id = "open"
+    still_open.status = "open"
+
+    log.upsert(old)
+    log.upsert(recent)
+    log.upsert(still_open)
+
+    removed = log.purge(today=date.today())
+    assert removed == 1
+    ids = {e.id for e in log.all()}
+    assert "old" not in ids
+    assert "recent" in ids
+    assert "open" in ids
+
+
 def test_classify_anomaly_closing_volume_spike():
     from api.services.uw_analyze_flow_tracker import FlowDailyRow, FlowEvent, FlowInitial, classify_anomaly
 

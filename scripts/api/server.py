@@ -238,6 +238,19 @@ async def lifespan(app: FastAPI):
                 _futu_client.disconnect()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("FutuClient disconnect on shutdown failed: %s", exc)
+        # Clear long-lived in-memory singletons so `uvicorn --reload` doesn't
+        # double-allocate them on module reimport. Also releases cached report
+        # dicts that would otherwise pin ~100s of MB across a reload cycle.
+        try:
+            from api.routes.uw_analyze import get_flow_log, get_portfolio_cache
+
+            _cache = get_portfolio_cache()
+            _cache._entries.clear()
+            _cache._per_ticker_locks.clear()
+            _flow = get_flow_log()
+            _flow._events.clear()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("uw_analyze singleton clear on shutdown failed: %s", exc)
         logger.info("Xenon API shut down")
 
 

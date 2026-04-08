@@ -27,11 +27,14 @@ import time
 from typing import Any, Dict, Optional
 
 import requests
-from requests.exceptions import ConnectionError as ReqConnectionError, Timeout as ReqTimeout
+from requests.adapters import HTTPAdapter
+from requests.exceptions import ConnectionError as ReqConnectionError
+from requests.exceptions import Timeout as ReqTimeout
 
 # Optional in-memory cache for request deduplication
 try:
-    from utils.uw_cache import get_cached, set_cached, make_key
+    from utils.uw_cache import get_cached, make_key, set_cached
+
     _USE_CACHE = True
 except ImportError:
     _USE_CACHE = False
@@ -41,6 +44,7 @@ logger = logging.getLogger(__name__)
 # ══════════════════════════════════════════════════════════════════════
 # Exception Hierarchy
 # ══════════════════════════════════════════════════════════════════════
+
 
 class UWAPIError(Exception):
     """Base exception for all UW API errors."""
@@ -90,6 +94,7 @@ _DEFAULT_BACKOFF_FACTOR = 1.0  # seconds; exponential backoff multiplier
 # Client
 # ══════════════════════════════════════════════════════════════════════
 
+
 class UWClient:
     """Comprehensive Unusual Whales REST API client.
 
@@ -113,10 +118,7 @@ class UWClient:
     ):
         self._token = token or os.environ.get("UW_TOKEN")
         if not self._token:
-            raise UWAuthError(
-                "UW_TOKEN environment variable is not set. "
-                "Export it via: export UW_TOKEN='your-api-key'"
-            )
+            raise UWAuthError("UW_TOKEN environment variable is not set. Export it via: export UW_TOKEN='your-api-key'")
 
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
@@ -124,6 +126,13 @@ class UWClient:
         self._backoff_factor = backoff_factor
 
         self._session = requests.Session()
+        # Cap the underlying urllib3 connection pool. Without this the pool
+        # defaults to 10 connections per host but keeps buffers alive for
+        # the full process lifetime, contributing to long-term RSS growth
+        # in a long-lived uvicorn worker.
+        _adapter = HTTPAdapter(pool_connections=8, pool_maxsize=16, pool_block=False)
+        self._session.mount("https://", _adapter)
+        self._session.mount("http://", _adapter)
         self._session.headers.update(
             {
                 "Authorization": f"Bearer {self._token}",
@@ -225,7 +234,7 @@ class UWClient:
 
     def _sleep_backoff(self, attempt: int) -> None:
         """Sleep with exponential backoff."""
-        delay = self._backoff_factor * (2 ** attempt)
+        delay = self._backoff_factor * (2**attempt)
         time.sleep(delay)
 
     @staticmethod
@@ -237,7 +246,7 @@ class UWClient:
                 return max(float(retry_after), 1.0)
             except (ValueError, TypeError):
                 pass
-        return 1.0 * (2 ** attempt)
+        return 1.0 * (2**attempt)
 
     @staticmethod
     def _safe_json(resp: requests.Response) -> dict:
