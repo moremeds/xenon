@@ -97,12 +97,18 @@ def derive_from_report(report: dict, display: dict) -> dict:
     }
 
 
-def build_snapshot(ticker: str, report: dict, display: dict) -> dict:
+def build_snapshot(
+    ticker: str,
+    report: dict,
+    display: dict,
+    flow_alerts: Optional[list[dict]] = None,
+) -> dict:
     return {
         "ticker": ticker,
         "ts": _now_iso(),
         "report": report,
         "display": display,
+        "flow_alerts": list(flow_alerts or []),
         "derived": derive_from_report(report, display),
     }
 
@@ -215,16 +221,16 @@ class UwAnalyzeCache:
         self,
         ticker: str,
         *,
-        runner: Callable[[str], Awaitable[tuple[dict, dict]]],
+        runner: Callable[[str], Awaitable[tuple[dict, dict, list[dict]]]],
         force: bool = False,
         sources: Iterable[Source] = (),
     ) -> dict:
         """Return the cached entry for `ticker`, running `runner(ticker)` if
         the snapshot is missing/stale or `force=True`.
 
-        `runner` is an async callable returning `(report_dict, display_dict)`.
-        Injection makes the cache trivially testable without UW or the
-        analyser.
+        `runner` is an async callable returning
+        `(report_dict, display_dict, flow_alerts)`. Injection makes the
+        cache trivially testable without UW or the analyser.
         """
         ticker = ticker.upper()
         self._ensure_loaded()
@@ -242,9 +248,9 @@ class UwAnalyzeCache:
 
             async with self._semaphore:
                 logger.info("uw_analyze_cache running analysis for %s (force=%s)", ticker, force)
-                report, display = await asyncio.wait_for(runner(ticker), timeout=_RUN_TIMEOUT_S)
+                report, display, flow_alerts = await asyncio.wait_for(runner(ticker), timeout=_RUN_TIMEOUT_S)
 
-            new_snapshot = build_snapshot(ticker, report, display)
+            new_snapshot = build_snapshot(ticker, report, display, flow_alerts=flow_alerts)
             prev_snapshot = entry.get("current") if entry else None
             existing_sources = list(entry.get("sources") or []) if entry else []
             merged_sources = sorted(set(existing_sources) | set(sources))

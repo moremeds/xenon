@@ -296,14 +296,18 @@ class RefreshRequest(BaseModel):
     adhoc: bool = False
 
 
-async def _runner(ticker: str) -> tuple[dict, dict]:
+async def _runner(ticker: str) -> tuple[dict, dict, list[dict]]:
     """Adapt scripts.uw_analyze.run_analysis_with_data into the cache's
-    `(report_dict, display_dict)` contract."""
+    `(report_dict, display_dict, flow_alerts)` contract."""
     report, td = await asyncio.wait_for(
         asyncio.to_thread(run_analysis_with_data, ticker),
         timeout=60.0,
     )
-    return _serialize_report(report), _td_to_display(td).model_dump()
+    return (
+        _serialize_report(report),
+        _td_to_display(td).model_dump(),
+        list(td.flow_alerts or []),
+    )
 
 
 def _action_items_from(payload: list[dict]) -> list[dict]:
@@ -377,7 +381,7 @@ async def uw_analyze_portfolio() -> dict:
         change_dicts = [c.to_dict() for c in changes]
 
         # Capture/upsert any sweep events into the flow log
-        flow_alerts = ((snap.get("report") or {}).get("flow_alerts")) or None
+        flow_alerts = snap.get("flow_alerts") or None
         underlying = (snap.get("derived") or {}).get("spot")
         if changes and flow_alerts and underlying is not None:
             new_events = capture_from_changes(

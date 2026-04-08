@@ -58,14 +58,13 @@ def _build_app(tmp_path, fake_runner, *, portfolio=None, watchlist=None):
     return app
 
 
-def _fake_runner(report_overrides=None, display_overrides=None):
+def _fake_runner(report_overrides=None, display_overrides=None, flow_alerts=None):
     async def _r(ticker: str):
         report = {
             "ticker": ticker,
             "price": 100.0,
             "regime": {"gex_sign": "POSITIVE"},
             "scores": {"flow": 5},
-            "flow_alerts": [],
             "fetched_at": "2026-04-08T10:00:00",
             "data_freshness": {},
             "benchmark": {"spy": {}, "sector_etf": None},
@@ -92,7 +91,7 @@ def _fake_runner(report_overrides=None, display_overrides=None):
         }
         if display_overrides:
             display.update(display_overrides)
-        return report, display
+        return report, display, list(flow_alerts or [])
 
     return _r
 
@@ -152,7 +151,6 @@ def test_portfolio_returns_changes_after_force_refresh(tmp_path):
             "price": 100,
             "regime": {"gex_sign": "POSITIVE"},
             "scores": {"flow": 5},
-            "flow_alerts": [],
         }
         display = {
             "iv_rank": 40,
@@ -163,7 +161,22 @@ def test_portfolio_returns_changes_after_force_refresh(tmp_path):
             "call_wall_strike": 110,
             "put_wall_strike": 90,
         }
-        return report, display
+        flow_alerts = (
+            [
+                {
+                    "option_type": "call",
+                    "strike": 105,
+                    "expiration_date": "2026-05-15",
+                    "total_premium": 7_000_000,
+                    "open_interest": 1500,
+                    "volume": 4000,
+                    "mid": 2.50,
+                }
+            ]
+            if state["call_pnl"]
+            else []
+        )
+        return report, display, flow_alerts
 
     app = _build_app(
         tmp_path,

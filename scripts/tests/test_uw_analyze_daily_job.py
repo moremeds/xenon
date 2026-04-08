@@ -102,6 +102,7 @@ def _seed_cache(tmp_path, ticker="NVDA"):
                 "call_wall_strike": 110,
                 "put_wall_strike": 90,
             },
+            [],
         )
 
     _run(cache.get_or_run(ticker, runner=runner, sources=["portfolio"]))

@@ -52,16 +52,17 @@ def make_cache(tmp_path, *, market_open=True, **kw):
     )
 
 
-def make_runner(report=None, display=None, *, calls_record=None, delay=0.0):
+def make_runner(report=None, display=None, *, flow_alerts=None, calls_record=None, delay=0.0):
     report = report or _report()
     display = display or _display()
+    flow_alerts = flow_alerts if flow_alerts is not None else []
 
     async def _runner(ticker: str):
         if calls_record is not None:
             calls_record.append(ticker)
         if delay:
             await asyncio.sleep(delay)
-        return report, display
+        return report, display, flow_alerts
 
     return _runner
 
@@ -88,6 +89,24 @@ def test_build_snapshot_includes_derived_and_ts():
     assert snap["ticker"] == "nvda"
     assert "ts" in snap
     assert snap["derived"]["gex_sign"] == "POSITIVE"
+
+
+def test_build_snapshot_includes_flow_alerts():
+    from api.services.uw_analyze_cache import build_snapshot as _bs
+
+    report = {"price": 100.0, "regime": {"gex_sign": "POSITIVE"}}
+    display = {"max_pain": 99.0}
+    flow_alerts = [
+        {
+            "option_type": "call",
+            "strike": 100,
+            "expiration_date": "2026-05-15",
+            "total_premium": 6_000_000,
+        }
+    ]
+    snap = _bs("AAPL", report, display, flow_alerts=flow_alerts)
+    assert snap["flow_alerts"] == flow_alerts
+    assert snap["derived"]["spot"] == 100.0
 
 
 # ── TTL behaviour ──────────────────────────────────────────────────────────
@@ -179,7 +198,7 @@ def test_semaphore_caps_concurrent_calls(tmp_path):
         peak = max(peak, in_flight)
         await asyncio.sleep(0.05)
         in_flight -= 1
-        return _report(), _display()
+        return _report(), _display(), []
 
     async def go():
         cache = make_cache(tmp_path, max_parallel=2)
