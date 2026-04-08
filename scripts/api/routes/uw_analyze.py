@@ -15,9 +15,12 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
+from analysis.dark_pool_summary import summarize_dark_pool
 from analysis.models import TickerData
+from analysis.options_flow_summary import summarize_options_flow
 from clients.uw_client import UWAPIError, UWNotFoundError
 from fastapi import APIRouter, HTTPException
+from fetch_flow import analyze_darkpool
 from pydantic import BaseModel, Field
 from uw_analyze import run_analysis_with_data
 
@@ -280,17 +283,54 @@ class RefreshRequest(BaseModel):
     adhoc: bool = False
 
 
-async def _runner(ticker: str) -> tuple[dict, dict, list[dict]]:
+def _compute_dark_pool_summary(td: TickerData) -> Optional[dict]:
+    """Build a coarse flow_data dict from TickerData.darkpool and score it.
+
+    uw-analyze concatenates ~5 calendar days of dark-pool prints into a
+    single list (see analysis/ticker_data.py); it does not break them up
+    per day. For /flow-analysis alignment purposes we only need direction,
+    strength, buy_ratio, and the options-conflict verdict — the
+    sustained-day bonuses are OK to leave at zero for this path.
+    """
+    dp = td.darkpool if isinstance(td.darkpool, dict) else None
+    trades = (dp or {}).get("data") or []
+    aggregate = analyze_darkpool(trades)
+    # Synthesize a single-day "daily" so summarize_dark_pool's recent-day
+    # checks degenerate cleanly.
+    daily = [
+        {
+            "flow_direction": aggregate.get("flow_direction"),
+            "flow_strength": aggregate.get("flow_strength", 0),
+            "num_prints": aggregate.get("num_prints", 0),
+        }
+    ]
+    options_flow = summarize_options_flow(list(td.flow_alerts or []))
+    flow_data = {
+        "dark_pool": {"aggregate": aggregate, "daily": daily},
+        "options_flow": options_flow,
+    }
+    return summarize_dark_pool(flow_data)
+
+
+async def _runner(ticker: str) -> tuple[dict, dict, list[dict], Optional[dict], Optional[dict]]:
     """Adapt scripts.uw_analyze.run_analysis_with_data into the cache's
-    `(report_dict, display_dict, flow_alerts)` contract."""
+    ``(report_dict, display_dict, flow_alerts, dark_pool_summary, options_flow_summary)``
+    contract. The last two elements feed the /flow-analysis portfolio
+    classifier so it can answer "does the flow support this position?"
+    without triggering a second UW fetch.
+    """
     report, td = await asyncio.wait_for(
         asyncio.to_thread(run_analysis_with_data, ticker),
         timeout=60.0,
     )
+    dark_pool_summary = _compute_dark_pool_summary(td)
+    options_flow_summary = summarize_options_flow(list(td.flow_alerts or []))
     return (
         _serialize_report(report),
         _td_to_display(td).model_dump(),
         list(td.flow_alerts or []),
+        dark_pool_summary,
+        options_flow_summary,
     )
 
 

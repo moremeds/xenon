@@ -117,7 +117,19 @@ def build_snapshot(
     report: dict,
     display: dict,
     flow_alerts: Optional[list[dict]] = None,
+    dark_pool_summary: Optional[dict] = None,
+    options_flow_summary: Optional[dict] = None,
 ) -> dict:
+    """Construct a cache entry snapshot.
+
+    The ``dark_pool_summary`` and ``options_flow_summary`` keys carry the
+    per-ticker outputs of ``scripts/analysis/dark_pool_summary.summarize_dark_pool``
+    and ``scripts/analysis/options_flow_summary.summarize_options_flow`` so
+    downstream consumers (notably the /flow-analysis portfolio classifier)
+    can read them without rerunning the UW API. They default to ``None``
+    when the caller did not compute them so existing uw-analyze consumers
+    that only read report/display/derived stay unaffected.
+    """
     return {
         "ticker": ticker,
         "ts": _now_iso(),
@@ -125,6 +137,8 @@ def build_snapshot(
         "display": display,
         "flow_alerts": list(flow_alerts or []),
         "derived": derive_from_report(report, display),
+        "dark_pool_summary": dark_pool_summary,
+        "options_flow_summary": options_flow_summary,
     }
 
 
@@ -317,9 +331,27 @@ class UwAnalyzeCache:
 
             async with self._semaphore:
                 logger.info("uw_analyze_cache running analysis for %s (force=%s)", ticker, force)
-                report, display, flow_alerts = await asyncio.wait_for(runner(ticker), timeout=_RUN_TIMEOUT_S)
+                result = await asyncio.wait_for(runner(ticker), timeout=_RUN_TIMEOUT_S)
 
-            new_snapshot = build_snapshot(ticker, report, display, flow_alerts=flow_alerts)
+            # Runners may return a 3-tuple (legacy test runners) or a
+            # 5-tuple carrying dark_pool + options_flow summaries computed
+            # at analysis time so /flow-analysis can read them without a
+            # second UW fetch. Backward-compatible unpacking.
+            if len(result) == 5:
+                report, display, flow_alerts, dark_pool_summary, options_flow_summary = result
+            else:
+                report, display, flow_alerts = result
+                dark_pool_summary = None
+                options_flow_summary = None
+
+            new_snapshot = build_snapshot(
+                ticker,
+                report,
+                display,
+                flow_alerts=flow_alerts,
+                dark_pool_summary=dark_pool_summary,
+                options_flow_summary=options_flow_summary,
+            )
             prev_snapshot = entry.get("current") if entry else None
             existing_sources = list(entry.get("sources") or []) if entry else []
             merged_sources = sorted(set(existing_sources) | set(sources))
