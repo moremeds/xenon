@@ -16,11 +16,10 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
-
 from analysis.models import TickerData
 from clients.uw_client import UWAPIError, UWNotFoundError
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 from uw_analyze import run_analysis_with_data
 
 logger = logging.getLogger("xenon.uw_analyze")
@@ -32,6 +31,7 @@ _cache: dict[str, tuple[float, "UwAnalyzeResponse"]] = {}
 
 
 # ── Request / response models ─────────────────────────────────────────────
+
 
 class UwAnalyzeRequest(BaseModel):
     ticker: str
@@ -49,6 +49,7 @@ class GexStrikeRow(BaseModel):
 
 class UwAnalyzeDisplay(BaseModel):
     """UI-facing slice extracted from TickerData. All Optional."""
+
     sector: Optional[str] = None
     iv_rank: Optional[float] = None
     iv: Optional[float] = None
@@ -63,6 +64,7 @@ class UwAnalyzeDisplay(BaseModel):
     term_structure_label: Optional[Literal["normal", "inverted"]] = None
     gex_flip: Optional[float] = None
     gex_by_strike: Optional[list[GexStrikeRow]] = None
+    max_pain: Optional[float] = None
 
 
 class UwAnalyzeResponse(BaseModel):
@@ -72,6 +74,7 @@ class UwAnalyzeResponse(BaseModel):
 
 
 # ── Mappers ───────────────────────────────────────────────────────────────
+
 
 def _coerce_float(v: Any) -> Optional[float]:
     try:
@@ -114,14 +117,10 @@ def _build_gex_rows(td: TickerData) -> Optional[list[GexStrikeRow]]:
         if strike is None:
             continue
         call_g = _coerce_float(
-            r.get("call_gamma")
-            if r.get("call_gamma") is not None
-            else r.get("call_gex") or r.get("calls")
+            r.get("call_gamma") if r.get("call_gamma") is not None else r.get("call_gex") or r.get("calls")
         )
         put_g = _coerce_float(
-            r.get("put_gamma")
-            if r.get("put_gamma") is not None
-            else r.get("put_gex") or r.get("puts")
+            r.get("put_gamma") if r.get("put_gamma") is not None else r.get("put_gex") or r.get("puts")
         )
         net_g = _coerce_float(r.get("gamma"))
         if net_g is None:
@@ -192,6 +191,7 @@ def _td_to_display(td: TickerData) -> UwAnalyzeDisplay:
         term_structure_label=term_label,
         gex_flip=gex_flip,
         gex_by_strike=_build_gex_rows(td),
+        max_pain=td.max_pain,
     )
 
 
@@ -212,6 +212,7 @@ def _serialize_report(report) -> dict[str, Any]:
 
 
 # ── Route ────────────────────────────────────────────────────────────────
+
 
 @router.post("/uw-analyze", response_model=UwAnalyzeResponse)
 async def uw_analyze(req: UwAnalyzeRequest) -> UwAnalyzeResponse:

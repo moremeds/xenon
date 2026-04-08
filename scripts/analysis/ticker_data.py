@@ -5,18 +5,19 @@ normalization step for iv_rank (raw 0..1 float -> 0..100 percentile).
 
 All downstream code uses TickerData.iv_percentile and never touches raw iv_rank.
 """
+
 from __future__ import annotations
 
 import logging
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from scripts.analysis.models import TickerData
 from scripts.analysis.gex import (
+    compute_gamma_per_1pct,
     extract_call_wall,
     extract_put_wall,
-    compute_gamma_per_1pct,
 )
+from scripts.analysis.models import TickerData
 
 logger = logging.getLogger(__name__)
 
@@ -107,12 +108,8 @@ def _deep_enrichment(ticker: str, client, *, gex_strikes: list, price: Optional[
         npt = client.get_net_prem_ticks(ticker) or {}
         ticks = npt.get("data") if isinstance(npt, dict) else None
         if isinstance(ticks, list) and ticks:
-            agg_call = sum(
-                (_to_float(t.get("net_call_premium")) or 0.0) for t in ticks if isinstance(t, dict)
-            )
-            agg_put = sum(
-                (_to_float(t.get("net_put_premium")) or 0.0) for t in ticks if isinstance(t, dict)
-            )
+            agg_call = sum((_to_float(t.get("net_call_premium")) or 0.0) for t in ticks if isinstance(t, dict))
+            agg_put = sum((_to_float(t.get("net_put_premium")) or 0.0) for t in ticks if isinstance(t, dict))
             out["net_premium_dict"] = {
                 "net_call_premium": agg_call,
                 "net_put_premium": agg_put,
@@ -154,11 +151,7 @@ def _deep_enrichment(ticker: str, client, *, gex_strikes: list, price: Optional[
             latest = series[-1] if isinstance(series[-1], dict) else None
             if latest:
                 out["iv_rank"] = _to_float(latest.get("iv_rank_1y"))
-            iv_vals = [
-                _to_float(r.get("volatility"))
-                for r in series
-                if isinstance(r, dict)
-            ]
+            iv_vals = [_to_float(r.get("volatility")) for r in series if isinstance(r, dict)]
             iv_vals = [v for v in iv_vals if v is not None]
             if iv_vals:
                 out["iv_52w_low"] = round(min(iv_vals) * 100.0, 4)
@@ -279,12 +272,14 @@ def fetch_ticker_data(ticker: str, client, *, deep: bool = False) -> TickerData:
                 pg = _to_float(r.get("put_gex")) or 0.0
                 if strike is None:
                     continue
-                normalized.append({
-                    "strike": strike,
-                    "gamma": cg + pg,
-                    "call_gamma": cg,
-                    "put_gamma": pg,
-                })
+                normalized.append(
+                    {
+                        "strike": strike,
+                        "gamma": cg + pg,
+                        "call_gamma": cg,
+                        "put_gamma": pg,
+                    }
+                )
             if normalized:
                 gex_by_strike = {"strikes": normalized}
                 # Compute flip on every fetch (deep or not). Filter to ±20%
@@ -295,6 +290,7 @@ def fetch_ticker_data(ticker: str, client, *, deep: bool = False) -> TickerData:
                 # bucket_available("market_structure") return True with all
                 # zeros and silently consume 28 weight points).
                 from scripts.analysis.gex import detect_flip_point as _flip
+
                 if price and price > 0:
                     band_lo, band_hi = price * 0.8, price * 1.2
                     flip_input = [s for s in normalized if band_lo <= s["strike"] <= band_hi]
@@ -398,13 +394,40 @@ def fetch_ticker_data(ticker: str, client, *, deep: bool = False) -> TickerData:
     # OI changes - v1 does not use historical OI (Short Squeeze / OI Buildup deferred).
     oi_changes = None
 
+    # Max pain - nearest-expiry strike where total option holders lose the most.
+    # Used by uw-analyze portfolio diff (MAX_PAIN_SHIFT change rule). Optional;
+    # falls back to None on any failure.
+    max_pain: Optional[float] = None
+    try:
+        mp_resp = client.get_max_pain(ticker) or {}
+        rows = mp_resp.get("data") if isinstance(mp_resp, dict) else None
+        if isinstance(rows, list) and rows:
+            # Pick the soonest expiry with a numeric max_pain.
+            today_str = date.today().isoformat()
+            best: Optional[tuple[str, float]] = None
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                exp = r.get("expiry") or r.get("expiration_date")
+                mp = _to_float(r.get("max_pain"))
+                if exp is None or mp is None:
+                    continue
+                if exp < today_str:
+                    continue
+                if best is None or exp < best[0]:
+                    best = (exp, mp)
+            if best:
+                max_pain = best[1]
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("max_pain failed for %s: %s", ticker, exc)
+
     # PCR - derived from flow_alerts call/put counts (no extra fetch).
     pcr: Optional[float] = None
     if flow_alerts:
-        calls = sum(1 for a in flow_alerts if str(a.get("option_type", "")).lower() == "call"
-                    or a.get("is_call") is True)
-        puts = sum(1 for a in flow_alerts if str(a.get("option_type", "")).lower() == "put"
-                   or a.get("is_put") is True)
+        calls = sum(
+            1 for a in flow_alerts if str(a.get("option_type", "")).lower() == "call" or a.get("is_call") is True
+        )
+        puts = sum(1 for a in flow_alerts if str(a.get("option_type", "")).lower() == "put" or a.get("is_put") is True)
         if calls > 0:
             pcr = puts / calls
 
@@ -416,9 +439,7 @@ def fetch_ticker_data(ticker: str, client, *, deep: bool = False) -> TickerData:
             raw_strikes = gex_by_strike.get("strikes")
             if isinstance(raw_strikes, list):
                 gex_strikes = raw_strikes
-        enrich = _deep_enrichment(
-            ticker, client, gex_strikes=gex_strikes, price=price
-        )
+        enrich = _deep_enrichment(ticker, client, gex_strikes=gex_strikes, price=price)
 
     return TickerData(
         ticker=ticker,
@@ -455,4 +476,5 @@ def fetch_ticker_data(ticker: str, client, *, deep: bool = False) -> TickerData:
         put_wall_gamma=enrich.get("put_wall_gamma"),
         gamma_per_1pct=enrich.get("gamma_per_1pct"),
         sector=enrich.get("sector"),
+        max_pain=max_pain,
     )
