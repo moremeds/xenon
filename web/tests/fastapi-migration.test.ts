@@ -35,7 +35,9 @@ vi.mock("@/lib/xenonApi", () => ({
 }));
 
 // Mock @tools/data-reader for routes that read cached files
-const mockReadDataFile = vi.fn().mockResolvedValue({ ok: false, error: "not found" });
+const mockReadDataFile = vi
+  .fn()
+  .mockResolvedValue({ ok: false, error: "not found" });
 vi.mock("@tools/data-reader", () => ({
   readDataFile: mockReadDataFile,
 }));
@@ -47,7 +49,9 @@ vi.mock("@tools/schemas/ib-sync", () => ({ PortfolioData: {} }));
 // Mock fs/promises for routes that read/write cache files
 const mockReadFile = vi.fn();
 const mockWriteFile = vi.fn().mockResolvedValue(undefined);
-const mockStat = vi.fn().mockResolvedValue({ mtimeMs: Date.now() - 5_000, mtime: new Date() });
+const mockStat = vi
+  .fn()
+  .mockResolvedValue({ mtimeMs: Date.now() - 5_000, mtime: new Date() });
 const mockStatSync = vi.fn().mockReturnValue({ mtime: new Date() });
 vi.mock("fs/promises", () => ({
   readFile: mockReadFile,
@@ -92,7 +96,10 @@ beforeEach(() => {
   mockStat.mockReset();
   mockStatSync.mockReset();
   // Default: fresh stat so no background sync triggers
-  mockStat.mockResolvedValue({ mtimeMs: Date.now() - 5_000, mtime: new Date() });
+  mockStat.mockResolvedValue({
+    mtimeMs: Date.now() - 5_000,
+    mtime: new Date(),
+  });
   mockStatSync.mockReturnValue({ mtime: new Date() });
 });
 
@@ -102,7 +109,12 @@ beforeEach(() => {
 
 describe("POST /api/scanner (via xenonFetch)", () => {
   it("returns data on success", async () => {
-    const scanData = { scan_time: "2026-03-14", tickers_scanned: 30, signals_found: 5, top_signals: [] };
+    const scanData = {
+      scan_time: "2026-03-14",
+      tickers_scanned: 30,
+      signals_found: 5,
+      top_signals: [],
+    };
     mockXenonFetch.mockResolvedValue(scanData);
     mockStatSync.mockReturnValue({ mtime: new Date() });
 
@@ -116,9 +128,14 @@ describe("POST /api/scanner (via xenonFetch)", () => {
 
   it("falls back to cached data on xenonFetch failure", async () => {
     mockXenonFetch.mockRejectedValue(new Error("Connection refused"));
-    mockReadFile.mockResolvedValue(JSON.stringify({
-      scan_time: "2026-03-13", tickers_scanned: 25, signals_found: 3, top_signals: [],
-    }));
+    mockReadFile.mockResolvedValue(
+      JSON.stringify({
+        scan_time: "2026-03-13",
+        tickers_scanned: 25,
+        signals_found: 3,
+        top_signals: [],
+      }),
+    );
     mockStatSync.mockReturnValue({ mtime: new Date(Date.now() - 900_000) });
 
     const { POST } = await import("../app/api/scanner/route");
@@ -148,7 +165,11 @@ describe("POST /api/scanner (via xenonFetch)", () => {
 
 describe("POST /api/discover (via xenonFetch)", () => {
   it("returns discovery data on success", async () => {
-    const data = { discovery_time: "2026-03-14", candidates_found: 12, candidates: [] };
+    const data = {
+      discovery_time: "2026-03-14",
+      candidates_found: 12,
+      candidates: [],
+    };
     mockXenonFetch.mockResolvedValue(data);
     mockStatSync.mockReturnValue({ mtime: new Date() });
 
@@ -161,9 +182,13 @@ describe("POST /api/discover (via xenonFetch)", () => {
 
   it("falls back to cache on failure", async () => {
     mockXenonFetch.mockRejectedValue(new Error("timeout"));
-    mockReadFile.mockResolvedValue(JSON.stringify({
-      discovery_time: "2026-03-13", candidates_found: 8, candidates: [],
-    }));
+    mockReadFile.mockResolvedValue(
+      JSON.stringify({
+        discovery_time: "2026-03-13",
+        candidates_found: 8,
+        candidates: [],
+      }),
+    );
     mockStatSync.mockReturnValue({ mtime: new Date(Date.now() - 900_000) });
 
     const { POST } = await import("../app/api/discover/route");
@@ -180,11 +205,23 @@ describe("POST /api/discover (via xenonFetch)", () => {
 // =============================================================================
 
 describe("POST /api/flow-analysis (via xenonFetch)", () => {
-  const ibReq = () => new Request("http://localhost/api/flow-analysis?account=ib", { method: "POST" });
-  const futuReq = () => new Request("http://localhost/api/flow-analysis?account=futu", { method: "POST" });
+  const ibReq = () =>
+    new Request("http://localhost/api/flow-analysis?account=ib", {
+      method: "POST",
+    });
+  const futuReq = () =>
+    new Request("http://localhost/api/flow-analysis?account=futu", {
+      method: "POST",
+    });
 
   it("returns flow data on success and forwards account", async () => {
-    const data = { analysis_time: "2026-03-14", account: "ib", positions_scanned: 20, supports: [], against: [] };
+    const data = {
+      analysis_time: "2026-03-14",
+      account: "ib",
+      positions_scanned: 20,
+      supports: [],
+      against: [],
+    };
     mockXenonFetch.mockResolvedValue(data);
     mockStatSync.mockReturnValue({ mtime: new Date() });
 
@@ -193,42 +230,59 @@ describe("POST /api/flow-analysis (via xenonFetch)", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.positions_scanned).toBe(20);
-    expect(mockXenonFetch).toHaveBeenCalledWith("/flow-analysis?account=ib", expect.any(Object));
+    expect(mockXenonFetch).toHaveBeenCalledWith(
+      "/flow-analysis?account=ib",
+      expect.any(Object),
+    );
   });
 
   it("forwards futu account to xenonFetch", async () => {
-    mockXenonFetch.mockResolvedValue({ analysis_time: "x", account: "futu", positions_scanned: 23 });
+    mockXenonFetch.mockResolvedValue({
+      analysis_time: "x",
+      account: "futu",
+      positions_scanned: 23,
+    });
     mockStatSync.mockReturnValue({ mtime: new Date() });
 
     const { POST } = await import("../app/api/flow-analysis/route");
     await POST(futuReq());
-    expect(mockXenonFetch).toHaveBeenCalledWith("/flow-analysis?account=futu", expect.any(Object));
+    expect(mockXenonFetch).toHaveBeenCalledWith(
+      "/flow-analysis?account=futu",
+      expect.any(Object),
+    );
   });
 
   it("rejects unknown account with 400", async () => {
     const { POST } = await import("../app/api/flow-analysis/route");
-    const res = await POST(new Request("http://localhost/api/flow-analysis?account=etrade", { method: "POST" }));
+    const res = await POST(
+      new Request("http://localhost/api/flow-analysis?account=etrade", {
+        method: "POST",
+      }),
+    );
     expect(res.status).toBe(400);
   });
 
-  it("falls back to cache on failure", async () => {
+  it("returns empty 200 with warning header when xenonFetch fails", async () => {
+    // Post-overhaul: no disk cache fallback; the route returns an empty
+    // payload with an X-Sync-Warning header so the UI shows a stale notice.
     mockXenonFetch.mockRejectedValue(new Error("502"));
-    mockReadFile.mockResolvedValue(JSON.stringify({
-      analysis_time: "old", positions_scanned: 10, supports: [], against: [],
-    }));
-    mockStatSync.mockReturnValue({ mtime: new Date(Date.now() - 900_000) });
 
     const { POST } = await import("../app/api/flow-analysis/route");
     const res = await POST(ibReq());
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.is_stale).toBe(true);
+    expect(body.positions_scanned).toBe(0);
+    expect(res.headers.get("X-Sync-Warning")).toContain("unavailable");
   });
 
   it("returns empty 200 when both xenonFetch and cache fail", async () => {
     mockXenonFetch.mockRejectedValue(new Error("502"));
-    mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
-    mockStatSync.mockImplementation(() => { throw new Error("ENOENT"); });
+    mockReadFile.mockRejectedValue(
+      Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+    );
+    mockStatSync.mockImplementation(() => {
+      throw new Error("ENOENT");
+    });
 
     const { POST } = await import("../app/api/flow-analysis/route");
     const res = await POST(futuReq());
@@ -242,11 +296,17 @@ describe("POST /api/flow-analysis (via xenonFetch)", () => {
 
 describe("GET /api/flow-analysis", () => {
   it("returns empty 200 when cache file is missing", async () => {
-    mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
-    mockStatSync.mockImplementation(() => { throw new Error("ENOENT"); });
+    mockReadFile.mockRejectedValue(
+      Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+    );
+    mockStatSync.mockImplementation(() => {
+      throw new Error("ENOENT");
+    });
 
     const { GET } = await import("../app/api/flow-analysis/route");
-    const res = await GET(new Request("http://localhost/api/flow-analysis?account=futu"));
+    const res = await GET(
+      new Request("http://localhost/api/flow-analysis?account=futu"),
+    );
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.positions_scanned).toBe(0);
@@ -255,7 +315,9 @@ describe("GET /api/flow-analysis", () => {
 
   it("rejects unknown account with 400", async () => {
     const { GET } = await import("../app/api/flow-analysis/route");
-    const res = await GET(new Request("http://localhost/api/flow-analysis?account=etrade"));
+    const res = await GET(
+      new Request("http://localhost/api/flow-analysis?account=etrade"),
+    );
     expect(res.status).toBe(400);
   });
 });
@@ -266,7 +328,10 @@ describe("GET /api/flow-analysis", () => {
 
 describe("GET /api/attribution (via xenonFetch)", () => {
   it("returns attribution data on success", async () => {
-    mockXenonFetch.mockResolvedValue({ total_trades: 39, total_realized_pnl: 126927 });
+    mockXenonFetch.mockResolvedValue({
+      total_trades: 39,
+      total_realized_pnl: 126927,
+    });
 
     const { GET } = await import("../app/api/attribution/route");
     const res = await GET();
@@ -292,7 +357,11 @@ describe("GET /api/attribution (via xenonFetch)", () => {
 
 describe("POST /api/portfolio (via xenonFetch)", () => {
   it("returns synced data on success", async () => {
-    const portfolio = { bankroll: 100000, last_sync: "2026-03-14T14:30:00", positions: [] };
+    const portfolio = {
+      bankroll: 100000,
+      last_sync: "2026-03-14T14:30:00",
+      positions: [],
+    };
     mockXenonFetch.mockResolvedValue(portfolio);
 
     const { POST } = await import("../app/api/portfolio/route");
@@ -304,7 +373,11 @@ describe("POST /api/portfolio (via xenonFetch)", () => {
 
   it("falls back to cached portfolio when xenonFetch fails", async () => {
     mockXenonFetch.mockRejectedValue(new Error("IB connection refused"));
-    const cached = { bankroll: 95000, last_sync: "2026-03-13T16:00:00", positions: [{ ticker: "AAPL" }] };
+    const cached = {
+      bankroll: 95000,
+      last_sync: "2026-03-13T16:00:00",
+      positions: [{ ticker: "AAPL" }],
+    };
     mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
 
     const { POST } = await import("../app/api/portfolio/route");
@@ -359,7 +432,13 @@ describe("GET /api/portfolio (stale-while-revalidate)", () => {
 
 describe("POST /api/orders (via xenonFetch)", () => {
   it("returns refreshed orders on success", async () => {
-    const orders = { last_sync: "2026-03-14", open_orders: [], executed_orders: [], open_count: 0, executed_count: 0 };
+    const orders = {
+      last_sync: "2026-03-14",
+      open_orders: [],
+      executed_orders: [],
+      open_count: 0,
+      executed_count: 0,
+    };
     mockXenonFetch.mockResolvedValue(orders);
     mockReadDataFile.mockResolvedValue({ ok: true, data: orders });
 
@@ -372,7 +451,13 @@ describe("POST /api/orders (via xenonFetch)", () => {
 
   it("falls back to cached orders when sync fails", async () => {
     mockXenonFetch.mockRejectedValue(new Error("timeout"));
-    const cached = { last_sync: "2026-03-13", open_orders: [{ orderId: 1 }], executed_orders: [], open_count: 1, executed_count: 0 };
+    const cached = {
+      last_sync: "2026-03-13",
+      open_orders: [{ orderId: 1 }],
+      executed_orders: [],
+      open_count: 1,
+      executed_count: 0,
+    };
     mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
 
     const { POST } = await import("../app/api/orders/route");
@@ -385,7 +470,16 @@ describe("POST /api/orders (via xenonFetch)", () => {
 
   it("returns 502 when sync fails and no cache", async () => {
     mockXenonFetch.mockRejectedValue(new Error("timeout"));
-    mockReadDataFile.mockResolvedValue({ ok: true, data: { last_sync: "", open_orders: [], executed_orders: [], open_count: 0, executed_count: 0 } });
+    mockReadDataFile.mockResolvedValue({
+      ok: true,
+      data: {
+        last_sync: "",
+        open_orders: [],
+        executed_orders: [],
+        open_count: 0,
+        executed_count: 0,
+      },
+    });
 
     const { POST } = await import("../app/api/orders/route");
     const res = await POST();
@@ -413,9 +507,12 @@ describe("POST /api/orders/cancel (via xenonFetch)", () => {
 
   it("succeeds when orderId is provided", async () => {
     mockXenonFetch
-      .mockResolvedValueOnce({ status: "ok", message: "Cancelled" })  // cancel
-      .mockResolvedValueOnce({});  // refresh
-    mockReadDataFile.mockResolvedValue({ ok: true, data: { open_orders: [], executed_orders: [] } });
+      .mockResolvedValueOnce({ status: "ok", message: "Cancelled" }) // cancel
+      .mockResolvedValueOnce({}); // refresh
+    mockReadDataFile.mockResolvedValue({
+      ok: true,
+      data: { open_orders: [], executed_orders: [] },
+    });
 
     const { POST } = await import("../app/api/orders/cancel/route");
     const req = makeRequest("http://localhost/api/orders/cancel", {
@@ -511,7 +608,13 @@ describe("POST /api/orders/place (via xenonFetch)", () => {
     const req = makeRequest("http://localhost/api/orders/place", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "stock", symbol: "AAPL", action: "BUY", quantity: 10, limitPrice: 150 }),
+      body: JSON.stringify({
+        type: "stock",
+        symbol: "AAPL",
+        action: "BUY",
+        quantity: 10,
+        limitPrice: 150,
+      }),
     });
     const res = await POST(req);
     expect(res.status).toBe(502);
@@ -531,7 +634,13 @@ describe("POST /api/orders/place (via xenonFetch)", () => {
     const req = makeRequest("http://localhost/api/orders/place", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "stock", symbol: "AAPL", action: "BUY", quantity: 10, limitPrice: 150 }),
+      body: JSON.stringify({
+        type: "stock",
+        symbol: "AAPL",
+        action: "BUY",
+        quantity: 10,
+        limitPrice: 150,
+      }),
     });
     const res = await POST(req);
     expect(res.status).toBe(502);
@@ -548,14 +657,23 @@ describe("POST /api/orders/place (via xenonFetch)", () => {
         initialStatus: "Submitted",
         message: "BUY 10 AAPL @ $150.00 — Submitted",
       })
-      .mockResolvedValueOnce({});  // orders refresh
-    mockReadDataFile.mockResolvedValue({ ok: true, data: { open_orders: [], executed_orders: [] } });
+      .mockResolvedValueOnce({}); // orders refresh
+    mockReadDataFile.mockResolvedValue({
+      ok: true,
+      data: { open_orders: [], executed_orders: [] },
+    });
 
     const { POST } = await import("../app/api/orders/place/route");
     const req = makeRequest("http://localhost/api/orders/place", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "stock", symbol: "AAPL", action: "BUY", quantity: 10, limitPrice: 150 }),
+      body: JSON.stringify({
+        type: "stock",
+        symbol: "AAPL",
+        action: "BUY",
+        quantity: 10,
+        limitPrice: 150,
+      }),
     });
     const res = await POST(req);
     expect(res.status).toBe(200);
@@ -575,7 +693,10 @@ describe("POST /api/orders/place (via xenonFetch)", () => {
       .mockResolvedValueOnce({});
     mockReadDataFile
       .mockResolvedValueOnce({ ok: true, data: { positions: [] } })
-      .mockResolvedValueOnce({ ok: true, data: { open_orders: [], executed_orders: [] } });
+      .mockResolvedValueOnce({
+        ok: true,
+        data: { open_orders: [], executed_orders: [] },
+      });
 
     const { POST } = await import("../app/api/orders/place/route");
     const req = makeRequest("http://localhost/api/orders/place", {
@@ -612,7 +733,9 @@ describe("POST /api/orders/place (via xenonFetch)", () => {
     const res = await POST(req);
     expect(res.status).toBe(200);
 
-    const placeCall = mockXenonFetch.mock.calls.find((c) => c[0] === "/orders/place");
+    const placeCall = mockXenonFetch.mock.calls.find(
+      (c) => c[0] === "/orders/place",
+    );
     expect(placeCall).toBeDefined();
     const payload = JSON.parse((placeCall![1] as { body: string }).body) as {
       legs: { right: string; symbol?: string }[];
@@ -629,7 +752,12 @@ describe("POST /api/orders/place (via xenonFetch)", () => {
 
 describe("POST /api/blotter (via xenonFetch)", () => {
   it("returns blotter data on success", async () => {
-    const data = { as_of: "2026-03-14", summary: { closed_trades: 5 }, closed_trades: [], open_trades: [] };
+    const data = {
+      as_of: "2026-03-14",
+      summary: { closed_trades: 5 },
+      closed_trades: [],
+      open_trades: [],
+    };
     mockXenonFetch.mockResolvedValue(data);
 
     const { POST } = await import("../app/api/blotter/route");
@@ -641,26 +769,28 @@ describe("POST /api/blotter (via xenonFetch)", () => {
 
   it("falls back to cached blotter on failure", async () => {
     mockXenonFetch.mockRejectedValue(new Error("Flex query timed out"));
-    mockReadFile.mockResolvedValue(JSON.stringify({
-      as_of: "2026-03-13",
-      summary: { closed_trades: 2 },
-      closed_trades: [
-        {
-          symbol: "AAPL",
-          contract_desc: "AAPL 240315C00200000",
-          sec_type: "OPT",
-          is_closed: true,
-          net_quantity: 0,
-          total_commission: 1,
-          realized_pnl: 200,
-          cost_basis: 1000,
-          proceeds: 1200,
-          total_cash_flow: 200,
-          executions: [],
-        },
-      ],
-      open_trades: [],
-    }));
+    mockReadFile.mockResolvedValue(
+      JSON.stringify({
+        as_of: "2026-03-13",
+        summary: { closed_trades: 2 },
+        closed_trades: [
+          {
+            symbol: "AAPL",
+            contract_desc: "AAPL 240315C00200000",
+            sec_type: "OPT",
+            is_closed: true,
+            net_quantity: 0,
+            total_commission: 1,
+            realized_pnl: 200,
+            cost_basis: 1000,
+            proceeds: 1200,
+            total_cash_flow: 200,
+            executions: [],
+          },
+        ],
+        open_trades: [],
+      }),
+    );
 
     const { POST } = await import("../app/api/blotter/route");
     const res = await POST();
@@ -698,7 +828,12 @@ describe("GET /api/options/chain (via xenonFetch)", () => {
   });
 
   it("returns chain data on success", async () => {
-    mockXenonFetch.mockResolvedValue({ symbol: "AAPL", expirations: ["2026-04-17"], calls: [], puts: [] });
+    mockXenonFetch.mockResolvedValue({
+      symbol: "AAPL",
+      expirations: ["2026-04-17"],
+      calls: [],
+      puts: [],
+    });
 
     const { GET } = await import("../app/api/options/chain/route");
     const req = makeRequest("http://localhost/api/options/chain?symbol=AAPL");
@@ -712,7 +847,9 @@ describe("GET /api/options/chain (via xenonFetch)", () => {
     mockXenonFetch.mockResolvedValue({ symbol: "AAPL", calls: [], puts: [] });
 
     const { GET } = await import("../app/api/options/chain/route");
-    const req = makeRequest("http://localhost/api/options/chain?symbol=AAPL&expiry=2026-04-17");
+    const req = makeRequest(
+      "http://localhost/api/options/chain?symbol=AAPL&expiry=2026-04-17",
+    );
     await GET(req);
 
     expect(mockXenonFetch).toHaveBeenCalledWith(
@@ -737,10 +874,15 @@ describe("GET /api/options/expirations (via xenonFetch)", () => {
   });
 
   it("returns expirations on success", async () => {
-    mockXenonFetch.mockResolvedValue({ symbol: "GOOG", expirations: ["2026-04-17", "2026-05-15"] });
+    mockXenonFetch.mockResolvedValue({
+      symbol: "GOOG",
+      expirations: ["2026-04-17", "2026-05-15"],
+    });
 
     const { GET } = await import("../app/api/options/expirations/route");
-    const req = makeRequest("http://localhost/api/options/expirations?symbol=GOOG");
+    const req = makeRequest(
+      "http://localhost/api/options/expirations?symbol=GOOG",
+    );
     const res = await GET(req);
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -752,7 +894,9 @@ describe("GET /api/options/expirations (via xenonFetch)", () => {
     mockXenonFetch.mockRejectedValue(new Error("Connection refused"));
 
     const { GET } = await import("../app/api/options/expirations/route");
-    const req = makeRequest("http://localhost/api/options/expirations?symbol=GOOG");
+    const req = makeRequest(
+      "http://localhost/api/options/expirations?symbol=GOOG",
+    );
     const res = await GET(req);
     expect(res.status).toBe(502);
   });

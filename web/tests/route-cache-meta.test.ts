@@ -87,13 +87,19 @@ async function callPOST(mod: { POST: () => Promise<Response> }) {
 // flow-analysis route
 // ---------------------------------------------------------------------------
 
-describe("GET /api/flow-analysis — cache_meta", () => {
+// Note: /api/flow-analysis no longer reads a stale JSON cache file from disk —
+// it proxies to FastAPI /flow-analysis which reads from the shared uw-analyze
+// LRU cache. cache_meta is now derived from the analysis_time timestamp the
+// backend emits rather than from statSync(mtime). The cache-meta tests that
+// mocked the filesystem were removed as part of the flow-analysis overhaul.
+describe.skip("GET /api/flow-analysis — cache_meta (removed)", () => {
   const validCacheData = JSON.stringify({
     analysis_time: "2026-03-09T14:00:00Z",
     positions_scanned: 5,
     supports: [],
     against: [],
-    watch: [],
+    mixed: [],
+    non_directional: [],
     neutral: [],
   });
 
@@ -106,47 +112,8 @@ describe("GET /api/flow-analysis — cache_meta", () => {
     vi.clearAllMocks();
   });
 
-  it("returns age_seconds ≈ 30 and is_stale: false when file is 30s old", async () => {
-    vi.mocked(fs.statSync).mockReturnValue({
-      mtime: makeMtime(30),
-    } as unknown as fs.Stats);
-
-    const { GET } = await import("../app/api/flow-analysis/route");
-    const body = await callGET({ GET });
-
-    expect(body.cache_meta).toBeDefined();
-    expect(body.cache_meta.last_refresh).not.toBeNull();
-    expect(body.cache_meta.age_seconds).toBeGreaterThanOrEqual(28);
-    expect(body.cache_meta.age_seconds).toBeLessThan(35);
-    expect(body.cache_meta.is_stale).toBe(false);
-    expect(body.cache_meta.stale_threshold_seconds).toBe(STALE_THRESHOLD);
-  });
-
-  it("returns is_stale: true when file is 700s old", async () => {
-    vi.mocked(fs.statSync).mockReturnValue({
-      mtime: makeMtime(700),
-    } as unknown as fs.Stats);
-
-    const { GET } = await import("../app/api/flow-analysis/route");
-    const body = await callGET({ GET });
-
-    expect(body.cache_meta.is_stale).toBe(true);
-    expect(body.cache_meta.age_seconds).toBeGreaterThanOrEqual(695);
-  });
-
-  it("returns last_refresh: null and is_stale: true when file not found (statSync throws)", async () => {
-    vi.mocked(readFile).mockRejectedValue(new Error("ENOENT"));
-    vi.mocked(fs.statSync).mockImplementation(() => {
-      throw new Error("ENOENT: no such file");
-    });
-
-    const { GET } = await import("../app/api/flow-analysis/route");
-    const body = await callGET({ GET });
-
-    expect(body.cache_meta.last_refresh).toBeNull();
-    expect(body.cache_meta.age_seconds).toBeNull();
-    expect(body.cache_meta.is_stale).toBe(true);
-    expect(body.cache_meta.stale_threshold_seconds).toBe(STALE_THRESHOLD);
+  it.skip("removed: file-based cache_meta", async () => {
+    // placeholder — tests live on via FastAPI integration only
   });
 });
 
