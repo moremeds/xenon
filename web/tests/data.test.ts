@@ -149,6 +149,19 @@ describe("navItems", () => {
     const hrefs = navItems.map((n) => n.href);
     expect(new Set(hrefs).size).toBe(hrefs.length);
   });
+
+  it("places uw-analyze directly after flow-analysis", () => {
+    const routes = navItems.map((n) => n.route);
+    const flowIdx = routes.indexOf("flow-analysis");
+    const uwIdx = routes.indexOf("uw-analyze");
+    expect(flowIdx).toBeGreaterThanOrEqual(0);
+    expect(uwIdx).toBe(flowIdx + 1);
+  });
+
+  it("labels the uw-analyze entry as 'UW Analysis'", () => {
+    const uw = navItems.find((n) => n.route === "uw-analyze");
+    expect(uw?.label).toBe("UW Analysis");
+  });
 });
 
 // =============================================================================

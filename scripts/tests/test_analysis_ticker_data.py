@@ -4,9 +4,18 @@ from unittest.mock import MagicMock
 from scripts.analysis.ticker_data import fetch_ticker_data
 
 
-def _make_mock_client(*, vol_stats=None, gex=None, gex_by_strike=None,
-                      term_structure=None, flow_alerts=None, oi_changes=None,
-                      darkpool=None, earnings=None, short_data=None):
+def _make_mock_client(
+    *,
+    vol_stats=None,
+    gex=None,
+    gex_by_strike=None,
+    term_structure=None,
+    flow_alerts=None,
+    oi_changes=None,
+    darkpool=None,
+    earnings=None,
+    short_data=None,
+):
     c = MagicMock()
     c.get_volatility_stats.return_value = vol_stats or {}
     c.get_greek_exposure.return_value = gex or {}
@@ -24,7 +33,7 @@ def test_iv_rank_normalization_raw_float_to_percentile():
     c = _make_mock_client(vol_stats={"iv": "0.28", "rv": "0.21", "iv_rank": "0.65"})
     td = fetch_ticker_data("TSLA", c)
     assert td.iv_percentile == 65.0
-    assert td.iv == 28.0   # also scaled to 0-100
+    assert td.iv == 28.0  # also scaled to 0-100
     assert td.rv == 21.0
 
 
@@ -56,9 +65,11 @@ def test_ticker_data_fetched_at_is_datetime():
 
 def test_vrp_history_populated_when_wrapper_available():
     c = _make_mock_client()
-    c.get_variance_risk_premium = MagicMock(return_value={
-        "data": [{"vrp": 0.1}, {"vrp": 0.2}, {"vrp": 0.3}],
-    })
+    c.get_variance_risk_premium = MagicMock(
+        return_value={
+            "data": [{"vrp": 0.1}, {"vrp": 0.2}, {"vrp": 0.3}],
+        }
+    )
     td = fetch_ticker_data("TSLA", c)
     assert td.vrp_history == [0.1, 0.2, 0.3]
 
@@ -73,9 +84,13 @@ def test_vrp_history_none_when_wrapper_missing():
 
 
 def test_pcr_derived_from_flow_alerts_call_put_counts():
-    c = _make_mock_client(flow_alerts=[
-        {"option_type": "call"}, {"option_type": "call"}, {"option_type": "put"},
-    ])
+    c = _make_mock_client(
+        flow_alerts=[
+            {"option_type": "call"},
+            {"option_type": "call"},
+            {"option_type": "put"},
+        ]
+    )
     td = fetch_ticker_data("TSLA", c)
     assert td.pcr == 0.5  # 1 put / 2 calls
 
@@ -112,9 +127,7 @@ def _deep_mock_client():
     # 6 deep endpoints
     c.get_stock_state.return_value = {"data": {"close": "100.5"}}
     c.get_stock_info.return_value = {"data": {"sector": "Technology"}}
-    c.get_options_volume.return_value = {
-        "data": [{"net_call_premium": "5000.0", "net_put_premium": "-2000.0"}]
-    }
+    c.get_options_volume.return_value = {"data": [{"net_call_premium": "5000.0", "net_put_premium": "-2000.0"}]}
     c.get_net_prem_ticks.return_value = {
         "data": [
             {"net_call_premium": "100", "net_put_premium": "-50"},
@@ -216,7 +229,7 @@ def test_deep_true_aggregates_net_prem_ticks_into_dict():
     td = fetch_ticker_data("TSLA", c, deep=True)
     assert td.net_premium is not None
     assert td.net_premium["net_call_premium"] == 300.0  # 100 + 200
-    assert td.net_premium["net_put_premium"] == -20.0   # -50 + 30
+    assert td.net_premium["net_put_premium"] == -20.0  # -50 + 30
     assert td.net_premium["tick_count"] == 2
 
 
@@ -230,7 +243,7 @@ def test_deep_true_short_volume_ratio_and_3day_trend():
 def test_deep_true_iv_rank_and_52w_iv_range():
     c = _deep_mock_client()
     td = fetch_ticker_data("TSLA", c, deep=True)
-    assert td.iv_rank == 60.0   # latest entry's iv_rank_1y
+    assert td.iv_rank == 60.0  # latest entry's iv_rank_1y
     assert td.iv_52w_low == 18.0  # min(0.18,0.20,0.25) * 100
     assert td.iv_52w_high == 25.0
 
@@ -247,6 +260,31 @@ def test_deep_true_extracts_walls_and_gamma_per_1pct_from_strikes():
     # gamma_per_1pct: at price 100.5 ±1% = [99.495, 101.505] → strikes 100, 101
     # |2.0| + |1.0| = 3.0
     assert td.gamma_per_1pct == 3.0
+
+
+def test_ticker_data_populates_max_pain():
+    """max_pain plumbing regression — td.max_pain must come through from
+    client.get_max_pain, picking the soonest valid expiry."""
+    c = _make_mock_client()
+    c.get_max_pain = MagicMock(
+        return_value={
+            "data": [
+                {"expiry": "2099-12-31", "max_pain": "200.0"},
+                {"expiry": "2099-01-01", "max_pain": "123.45"},
+            ]
+        }
+    )
+    td = fetch_ticker_data("AAPL", c)
+    assert td.max_pain == 123.45
+
+
+def test_ticker_data_max_pain_null_safe():
+    """When client.get_max_pain raises, td.max_pain must degrade to None
+    without blowing up the whole fetch."""
+    c = _make_mock_client()
+    c.get_max_pain = MagicMock(side_effect=RuntimeError("upstream 500"))
+    td = fetch_ticker_data("AAPL", c)
+    assert td.max_pain is None
 
 
 def test_deep_true_endpoint_failure_degrades_only_that_field():

@@ -14,14 +14,14 @@ import hashlib
 import json
 import logging
 import os
-from datetime import datetime, timezone
 import sys
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
-from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -35,19 +35,21 @@ INTERNALS_SKEW_CACHE_TTL_SECONDS = 60 * 15
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from api.ib_pool import IBPool
-from api.subprocess import run_script, run_module, ScriptResult
-from api.ib_gateway import check_ib_gateway, ensure_ib_gateway, restart_ib_gateway, is_docker_mode, is_cloud_mode
 from clients.ib_client import DEFAULT_GATEWAY_PORT
+
+from api.auth import verify_api_key, verify_clerk_jwt
+from api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_mode, is_docker_mode, restart_ib_gateway
+from api.ib_pool import IBPool
 from api.pool_order_manage import pool_cancel_order, pool_modify_order
-from api.auth import verify_clerk_jwt, verify_api_key
-from api.ws_ticket import create_ticket, validate_ticket
 from api.routes.historical import router as historical_router
 from api.routes.uw_analyze import router as uw_analyze_router
+from api.subprocess import ScriptResult, run_module, run_script
+from api.ws_ticket import create_ticket, validate_ticket
 
 # Load .env from project root for Python scripts
 try:
     from dotenv import load_dotenv
+
     load_dotenv(PROJECT_ROOT / ".env")
     load_dotenv(PROJECT_ROOT / "web" / ".env")
 except ImportError:
@@ -62,10 +64,9 @@ logging.getLogger("ib_insync.wrapper").setLevel(logging.WARNING)
 logging.getLogger("ib_insync.client").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
-from clients.uw_client import UWClient
-from clients.uw_client import UWAPIError, UWNotFoundError
 from clients.futu_client import FutuClient
-from clients.futu_exceptions import FutuError, FutuConnectionError
+from clients.futu_exceptions import FutuConnectionError, FutuError
+from clients.uw_client import UWAPIError, UWClient, UWNotFoundError
 from ib_insync import Index
 
 # Futu singleton — lazy-initialized on first /futu/sync call so the server
@@ -144,17 +145,100 @@ async def lifespan(app: FastAPI):
     if not uw_available:
         logger.warning("UW_TOKEN not set — UW-dependent endpoints will fail")
 
-    yield
-
-    # Shutdown
-    if ib_pool:
-        await ib_pool.disconnect_all()
-    if _futu_client is not None:
+    # UW Analyze daily job (15:50 ET) — runs OI snapshot + advances open
+    # unusual-flow events. Background asyncio task; cancelled on shutdown.
+    #
+    # Multi-worker guard: only worker 0 runs the daily job. Under
+    # `uvicorn --workers N`, every worker would otherwise spin up its own
+    # cron loop and fire N× at 15:50 ET. Uvicorn doesn't set a per-worker
+    # env var by default, so we check XENON_DAILY_JOB_WORKER_ID which
+    # operators can set per-worker (default "0" runs; any other value
+    # suppresses). Fall-through for single-worker deployments (no env var).
+    uw_daily_task = None
+    _daily_worker_id = os.environ.get("XENON_DAILY_JOB_WORKER_ID", "0")
+    if _daily_worker_id != "0":
+        logger.info(
+            "uw_analyze_daily_job suppressed on worker_id=%s (multi-worker guard)",
+            _daily_worker_id,
+        )
+    else:
         try:
-            _futu_client.disconnect()
-        except Exception as exc:
-            logger.warning("FutuClient disconnect on shutdown failed: %s", exc)
-    logger.info("Xenon API shut down")
+            from clients.uw_client import UWClient
+
+            from api.routes.uw_analyze import get_flow_log, get_portfolio_cache
+            from api.services.uw_analyze_daily_job import run_loop as uw_daily_run_loop
+
+            _uw_client = UWClient() if uw_available else None
+
+            async def _default_contract_fetcher(*, ticker: str, side: str, strike: float, expiry: str):
+                """Resolve a single OCC contract's current oi/mid/underlying/volume.
+
+                Fetches the full chain for the expiry, finds the matching strike+side row.
+                Returns None on any failure so the caller falls back to expiry-only closeout.
+                """
+                if _uw_client is None:
+                    return None
+                try:
+                    resp = await asyncio.to_thread(_uw_client.get_option_chain, ticker, expiry=expiry)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("default contract_fetcher chain fetch failed for %s: %s", ticker, exc)
+                    return None
+                rows = resp.get("data") if isinstance(resp, dict) else None
+                if not isinstance(rows, list):
+                    return None
+                for r in rows:
+                    if not isinstance(r, dict):
+                        continue
+                    try:
+                        if abs(float(r.get("strike", -1)) - float(strike)) > 1e-6:
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                    key = "call" if side == "call" else "put"
+                    try:
+                        return {
+                            "oi": int(float(r.get(f"{key}_oi") or 0)),
+                            "mid": float(r.get(f"{key}_mid") or r.get(f"{key}_last") or 0.0),
+                            "underlying_price": float(r.get("underlying_price") or 0.0),
+                            "volume": int(float(r.get(f"{key}_volume") or 0)),
+                        }
+                    except (TypeError, ValueError):
+                        return None
+                return None
+
+            uw_daily_task = asyncio.create_task(
+                uw_daily_run_loop(
+                    cache=get_portfolio_cache(),
+                    flow_log=get_flow_log(),
+                    uw_client=_uw_client,
+                    contract_fetcher=_default_contract_fetcher,
+                )
+            )
+            logger.info("uw_analyze_daily_job background task started")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("uw_analyze_daily_job failed to start: %s", exc)
+
+    try:
+        yield
+    finally:
+        # Shutdown — always runs, even if the app raised.
+        if uw_daily_task is not None:
+            uw_daily_task.cancel()
+            try:
+                await uw_daily_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        if ib_pool:
+            try:
+                await ib_pool.disconnect_all()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("ib_pool.disconnect_all failed: %s", exc)
+        if _futu_client is not None:
+            try:
+                _futu_client.disconnect()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("FutuClient disconnect on shutdown failed: %s", exc)
+        logger.info("Xenon API shut down")
 
 
 app = FastAPI(title="Xenon API", version="1.0.0", lifespan=lifespan)
@@ -208,6 +292,7 @@ async def auth_middleware(request: Request, call_next):
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _read_cache(path: Path) -> Optional[dict]:
     """Read a JSON cache file, return None if missing/corrupt."""
     try:
@@ -219,6 +304,7 @@ def _read_cache(path: Path) -> Optional[dict]:
 def _write_cache(path: Path, data: dict) -> None:
     """Write JSON to cache file atomically via temp file + os.replace()."""
     import tempfile
+
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp", prefix=".cache_")
     try:
@@ -236,6 +322,7 @@ def _write_cache(path: Path, data: dict) -> None:
 def _atomic_save(path: str, data: dict) -> str:
     """Use the project's atomic_save for portfolio/orders files."""
     from utils.atomic_io import atomic_save
+
     return atomic_save(path, data)
 
 
@@ -335,7 +422,9 @@ def _pick_preferred_expiry(raw: object, now: Optional[datetime] = None) -> Optio
         return candidates[0]
 
     current = now or datetime.now(timezone.utc)
-    future_candidates = [(expiry, expiry_date) for expiry, expiry_date in parsed if expiry_date.date() >= current.date()]
+    future_candidates = [
+        (expiry, expiry_date) for expiry, expiry_date in parsed if expiry_date.date() >= current.date()
+    ]
     if future_candidates:
         return min(future_candidates, key=lambda item: item[1])[0]
     return max(parsed, key=lambda item: item[1])[0]
@@ -704,6 +793,7 @@ async def _fetch_risk_reversal_history(
 # Health
 # ---------------------------------------------------------------------------
 
+
 def _compute_futu_health() -> Dict[str, Any]:
     """Derive the Futu health block from the singleton + cached file.
 
@@ -720,6 +810,7 @@ def _compute_futu_health() -> Dict[str, Any]:
             last_sync_at = data.get("fetched_at")
             if last_sync_at:
                 from datetime import datetime, timezone
+
                 dt = datetime.fromisoformat(last_sync_at.replace("Z", "+00:00"))
                 last_sync_age_s = (datetime.now(timezone.utc) - dt).total_seconds()
         except Exception:
@@ -784,6 +875,7 @@ async def ib_restart():
 # Phase 1: Stateless UW-only endpoints (subprocess-based)
 # ---------------------------------------------------------------------------
 
+
 @app.post("/scan")
 async def scan():
     """Run watchlist scanner (scanner.py --top 25)."""
@@ -831,6 +923,7 @@ async def attribution():
 # Phase 2: IB file-writer endpoints
 # ---------------------------------------------------------------------------
 
+
 @app.post("/portfolio/sync")
 async def portfolio_sync():
     """Sync portfolio from IB via subprocess.
@@ -845,6 +938,7 @@ async def portfolio_sync():
         raise HTTPException(status_code=502, detail=result.error)
     # ib_sync.py writes to data/portfolio.json; read it back
     from utils.atomic_io import verified_load
+
     try:
         data = verified_load(str(DATA_DIR / "portfolio.json"))
         return data
@@ -896,6 +990,7 @@ async def orders_refresh():
 # Phase 3: IB order operations
 # ---------------------------------------------------------------------------
 
+
 @app.post("/orders/place")
 async def orders_place(request: Request):
     """Place an order via IB (on-demand connection, client_id=26)."""
@@ -912,9 +1007,7 @@ async def orders_place(request: Request):
         }
 
     order_json = json.dumps(body)
-    result = await _run_ib_script_with_recovery(
-        "ib_place_order.py", ["--json", order_json], timeout=15
-    )
+    result = await _run_ib_script_with_recovery("ib_place_order.py", ["--json", order_json], timeout=15)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     if result.data and result.data.get("status") == "error":
@@ -1004,6 +1097,7 @@ async def orders_modify(request: Request):
 # Phase 4: Market data & long-running endpoints (subprocess-based)
 # ---------------------------------------------------------------------------
 
+
 @app.post("/cta/share")
 async def cta_share():
     """Generate CTA X share report (4 cards + preview HTML). Returns output path."""
@@ -1035,6 +1129,7 @@ async def vcg_scan():
     """Run VCG scan (vcg_scan.py --json). 60s cooldown between scans."""
     global _vcg_last_scan, _vcg_scan_lock
     import time as _time
+
     if _vcg_scan_lock is None:
         _vcg_scan_lock = asyncio.Lock()
     now = _time.monotonic()
@@ -1064,6 +1159,7 @@ def _futu_in_cooldown() -> bool:
     if _futu_last_sync_monotonic is None:
         return False
     import time as _time
+
     return _time.monotonic() - _futu_last_sync_monotonic < FUTU_COOLDOWN_S
 
 
@@ -1145,9 +1241,7 @@ async def futu_sync():
         try:
             if not client.is_connected():
                 await loop.run_in_executor(None, client.connect)
-            result = await loop.run_in_executor(
-                None, lambda: client.fetch_portfolio(force=True)
-            )
+            result = await loop.run_in_executor(None, lambda: client.fetch_portfolio(force=True))
         except FutuConnectionError as exc:
             raise HTTPException(status_code=503, detail=f"Futu OpenD unreachable: {exc}")
         except FutuError as exc:
@@ -1227,6 +1321,7 @@ async def gex_scan(ticker: str = "SPX"):
     """Run GEX scan (gex_scan.py --json --ticker X). 60s cooldown between scans."""
     global _gex_last_scan, _gex_scan_lock
     import time as _time
+
     if _gex_scan_lock is None:
         _gex_scan_lock = asyncio.Lock()
     now = _time.monotonic()
@@ -1239,9 +1334,7 @@ async def gex_scan(ticker: str = "SPX"):
             cached = _read_cache(DATA_DIR / "gex.json")
             if cached:
                 return cached
-        result = await run_script(
-            "gex_scan.py", ["--json", "--ticker", ticker.upper()], timeout=120
-        )
+        result = await run_script("gex_scan.py", ["--json", "--ticker", ticker.upper()], timeout=120)
         if not result.ok:
             raise HTTPException(status_code=502, detail=result.error)
         _write_cache(DATA_DIR / "gex.json", result.data)
@@ -1401,9 +1494,7 @@ async def options_chain(symbol: str, expiry: Optional[str] = None):
 @app.get("/options/expirations")
 async def options_expirations(symbol: str):
     """List option expirations for a symbol."""
-    result = await run_script(
-        "ib_option_chain.py", ["--symbol", symbol.upper()], timeout=15
-    )
+    result = await run_script("ib_option_chain.py", ["--symbol", symbol.upper()], timeout=15)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     if result.data and result.data.get("error"):
@@ -1453,9 +1544,7 @@ def _pool_has_any_connection() -> bool:
     return False
 
 
-async def _run_ib_script_with_recovery(
-    script: str, args: list, timeout: float = 30
-) -> ScriptResult:
+async def _run_ib_script_with_recovery(script: str, args: list, timeout: float = 30) -> ScriptResult:
     """Run an IB-dependent script with pre-flight health check and cooldown.
 
     Three layers of fast-fail:
@@ -1471,7 +1560,9 @@ async def _run_ib_script_with_recovery(
         elapsed = now - _ib_last_failure
         logger.debug(
             "Skipping %s — IB cooldown active (%.1fs since last failure, %ds cooldown)",
-            script, elapsed, _IB_SCRIPT_COOLDOWN_SECS,
+            script,
+            elapsed,
+            _IB_SCRIPT_COOLDOWN_SECS,
         )
         return ScriptResult(
             ok=False,
@@ -1488,7 +1579,9 @@ async def _run_ib_script_with_recovery(
             _ib_last_failure = now
             logger.warning(
                 "Skipping %s — Gateway down (port=%s, upstream_dead=%s), pool disconnected",
-                script, port_ok, upstream_dead,
+                script,
+                port_ok,
+                upstream_dead,
             )
             return ScriptResult(
                 ok=False,
@@ -1514,7 +1607,8 @@ async def _run_ib_script_with_recovery(
             # Gateway is healthy — subprocess failed for other reasons
             logger.warning(
                 "Script %s failed but Gateway is healthy — not restarting (cooldown %ds)",
-                script, _IB_SCRIPT_COOLDOWN_SECS,
+                script,
+                _IB_SCRIPT_COOLDOWN_SECS,
             )
             return result
 
@@ -1523,18 +1617,22 @@ async def _run_ib_script_with_recovery(
             mode = "cloud" if is_cloud_mode() else "Docker"
             logger.warning(
                 "IB Gateway unreachable in %s mode (port=%s, upstream_dead=%s) — not restarting (%s handles it)",
-                mode, port_ok, upstream_dead, mode,
+                mode,
+                port_ok,
+                upstream_dead,
+                mode,
             )
-            msg = (
-                f"IB Gateway is not responding ({mode} mode). "
-                + ("Check remote host and Tailscale." if is_cloud_mode()
-                   else "Docker will auto-restart the container. Check IBKR Mobile for 2FA approval.")
+            msg = f"IB Gateway is not responding ({mode} mode). " + (
+                "Check remote host and Tailscale."
+                if is_cloud_mode()
+                else "Docker will auto-restart the container. Check IBKR Mobile for 2FA approval."
             )
             result = ScriptResult(ok=False, error=msg)
         else:
             logger.warning(
                 "IB Gateway unreachable (port=%s, upstream_dead=%s), attempting auto-restart...",
-                port_ok, upstream_dead,
+                port_ok,
+                upstream_dead,
             )
             gw_result = await restart_ib_gateway()
 
@@ -1550,7 +1648,7 @@ async def _run_ib_script_with_recovery(
                 result = ScriptResult(
                     ok=False,
                     error=f"IB Gateway is down and restart failed. {gw_result.get('error', '')}".strip()
-                        + " Check IBKR Mobile for 2FA approval.",
+                    + " Check IBKR Mobile for 2FA approval.",
                 )
 
     return result
@@ -1562,6 +1660,7 @@ async def _run_ib_script_with_recovery(
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
         "scripts.api.server:app",
         host="127.0.0.1",

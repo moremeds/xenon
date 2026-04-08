@@ -3,6 +3,7 @@
 All fields that can legitimately be None due to missing-data degradation
 are typed Optional. See the Missing-data policy in the design doc.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -38,9 +39,7 @@ class BucketScores:
     positioning: float
     composite: float
     grade: Literal["A", "B", "C"]
-    bias: Literal[
-        "STRONGLY_BULLISH", "BULLISH", "MIXED", "BEARISH", "STRONGLY_BEARISH"
-    ]
+    bias: Literal["STRONGLY_BULLISH", "BULLISH", "MIXED", "BEARISH", "STRONGLY_BEARISH"]
     mode: Literal["full", "fast"]
     reweighted: bool
     skipped_buckets: list[str]
@@ -106,21 +105,16 @@ class TickerData:
     put_wall_gamma: Optional[float] = None
     gamma_per_1pct: Optional[float] = None
     sector: Optional[str] = None
+    max_pain: Optional[float] = None
 
     def bucket_available(
         self,
-        bucket: Literal[
-            "market_structure", "volatility", "flow", "positioning"
-        ],
+        bucket: Literal["market_structure", "volatility", "flow", "positioning"],
     ) -> bool:
         if bucket == "market_structure":
             return self.gex is not None and self.gex_by_strike is not None
         if bucket == "volatility":
-            return (
-                self.iv is not None
-                and self.iv_percentile is not None
-                and self.term_structure is not None
-            )
+            return self.iv is not None and self.iv_percentile is not None and self.term_structure is not None
         if bucket == "flow":
             # Match the fields _score_flow actually reads. Pre-fix this only
             # checked net_premium (the ticks-aggregated dict), but the scorer

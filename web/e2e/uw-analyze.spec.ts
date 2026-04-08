@@ -1,137 +1,174 @@
 /**
- * E2E: /uw-analyze page — per-ticker UW signal analyse
+ * E2E: /uw-analyze page — UW Analysis (tiered grid + single detail panel).
  *
- * Verifies (modular-mapping-simon plan, Phase 3):
- *  1. Empty state renders before any analyse run
- *  2. Typing AAPL + Analyse renders identity / thesis / buckets / GEX / notes
- *  3. Positioning bucket renders "n/a" tile (skipped_buckets contains "positioning")
- *  4. Unknown ticker (404) shows error alert
+ * Verifies:
+ *  1. Sidebar labels the page "UW Analysis" and places it directly under
+ *     "Flow Analysis".
+ *  2. Six tier section headers render: MARKET INDICES, COMMODITIES & SAFE
+ *     HAVEN, FIXED INCOME, VOLATILITY, SECTOR ETFS, SINGLE NAMES.
+ *  3. SPY/QQQ/IWM/DIA render in that fixed order inside the market-indices tier.
+ *  4. A row with `changes[]` auto-selects on load and wears the alert border.
+ *  5. Clicking a single-name card swaps the detail panel to that ticker.
+ *  6. Scaffold tiles render before the portfolio resolves.
  */
 
 import { test, expect } from "@playwright/test";
 
-const FIXTURE = {
-  report: {
-    ticker: "AAPL",
-    price: 184.22,
-    fetched_at: "2026-04-08T14:02:11",
-    data_freshness: { gex: "live", volatility: "live", earnings: "live", benchmark_spy: "live" },
-    scores: {
-      market_structure: 24,
-      volatility: 19,
-      flow: 17,
-      positioning: 0,
-      composite: 15,
-      grade: "B",
-      bias: "MIXED",
-      mode: "full",
-      reweighted: true,
-      skipped_buckets: ["positioning"],
+function makeRow(ticker: string, opts: { changes?: unknown[] } = {}) {
+  return {
+    ticker,
+    sources: ["portfolio"],
+    prev_ts: null,
+    changes: opts.changes ?? [],
+    oi_changes: [],
+    unusual_flow_events: [],
+    snapshot: {
+      ticker,
+      ts: "2026-04-08T14:02:11Z",
+      report: {
+        ticker,
+        price: 100,
+        fetched_at: "2026-04-08T14:02:11Z",
+        scores: {
+          bias: "BULLISH",
+          grade: "A",
+          composite: 20,
+          market_structure: 22,
+          volatility: 18,
+          flow: 17,
+          positioning: null,
+          mode: "full",
+          skipped_buckets: ["positioning"],
+          reweighted: true,
+        },
+        regime: { gex_sign: "positive", flip_distance_pct: -0.4 },
+        setup_thesis: {
+          structure_family: "neutral",
+          regime: "R1",
+          bias: "BULLISH",
+          rationale: "demo rationale",
+        },
+        notes: [],
+      },
+      display: {
+        sector: "XLK",
+        iv_rank: 40,
+        iv: 25,
+        rv: 20,
+        call_wall_strike: 110,
+        put_wall_strike: 90,
+        gamma_per_1pct: 1_000_000,
+        net_call_premium: 5_000_000,
+        net_put_premium: -1_000_000,
+        short_volume_ratio: 0.42,
+        short_volume_trend: [0.4, 0.41, 0.42],
+        term_structure_label: "normal",
+        gex_flip: null,
+        gex_by_strike: [],
+        max_pain: 100,
+      },
+      derived: {
+        gex_sign: "POSITIVE",
+        gex_flip_strike: null,
+        max_pain: 100,
+        call_wall: 110,
+        put_wall: 90,
+        iv_rank: 40,
+        net_call_premium: 5_000_000,
+        net_put_premium: -1_000_000,
+        flow_score: 17,
+        spot: 100,
+      },
     },
-    notes: ["positioning bucket unavailable — composite reweighted"],
-    setup_thesis: {
-      bias: "MIXED",
-      regime: "R1",
-      structure_family: "neutral",
-      rationale: "demo rationale",
-    },
-    regime: { gex_sign: "positive", flip_distance_pct: -0.011 },
-  },
-  display: {
-    sector: "XLK",
-    iv_rank: 38,
-    iv: 22,
-    rv: 18.6,
-    call_wall_strike: 190,
-    put_wall_strike: 175,
-    gamma_per_1pct: 42_000_000,
-    net_call_premium: 12_400_000,
-    net_put_premium: -3_100_000,
-    short_volume_ratio: 0.41,
-    short_volume_trend: [0.4, 0.41, 0.42],
-    term_structure_label: "normal",
-    gex_flip: null,
-    gex_by_strike: [
-      { strike: 195, call_gamma: 21.0, put_gamma: -2.6, net_gamma: 18.4, distance_pct: 0.059, is_call_wall: false, is_put_wall: false },
-      { strike: 190, call_gamma: 44.8, put_gamma: -2.7, net_gamma: 42.1, distance_pct: 0.031, is_call_wall: true, is_put_wall: false },
-      { strike: 185, call_gamma: 14.2, put_gamma: -4.5, net_gamma: 9.7, distance_pct: 0.004, is_call_wall: false, is_put_wall: false },
-      { strike: 180, call_gamma: 3.1, put_gamma: -9.4, net_gamma: -6.3, distance_pct: -0.023, is_call_wall: false, is_put_wall: false },
-      { strike: 175, call_gamma: 1.9, put_gamma: -26.7, net_gamma: -24.8, distance_pct: -0.05, is_call_wall: false, is_put_wall: true },
-    ],
-  },
-  generated_at: "2026-04-08T18:00:00Z",
-};
+  };
+}
 
-async function setupMocks(page: import("@playwright/test").Page) {
+async function mockPortfolio(
+  page: import("@playwright/test").Page,
+  rows: ReturnType<typeof makeRow>[],
+): Promise<void> {
   await page.unrouteAll({ behavior: "ignoreErrors" });
-  await page.route("**/api/uw-analyze", async (route) => {
-    const req = route.request();
-    let body: { ticker?: string } = {};
-    try {
-      body = JSON.parse(req.postData() ?? "{}");
-    } catch {
-      body = {};
-    }
-    if (body.ticker?.toUpperCase() === "ZZZZ") {
-      await route.fulfill({
-        status: 404,
-        contentType: "application/json",
-        body: JSON.stringify({ error: "ticker not found: ZZZZ" }),
-      });
-      return;
-    }
+  await page.route("**/api/uw-analyze/portfolio", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify(FIXTURE),
+      body: JSON.stringify({
+        fetched_at: "2026-04-08T14:02:11Z",
+        market_state: "open",
+        ttl_seconds: 120,
+        tickers: rows,
+        action_items: [],
+      }),
     });
   });
-  // Stub the other panels so the page boots cleanly.
-  await page.route("**/api/portfolio", (r) =>
-    r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ positions: [] }) }),
-  );
-  await page.route("**/api/orders", (r) =>
-    r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ open_orders: [], executed_orders: [], open_count: 0, executed_count: 0, last_sync: new Date().toISOString() }) }),
-  );
-  await page.route("**/api/prices", (r) => r.abort());
-  await page.route("**/api/ib-status", (r) =>
-    r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ connected: false }) }),
-  );
 }
 
-test.describe("/uw-analyze", () => {
-  test("nav item exists in sidebar", async ({ page }) => {
-    await setupMocks(page);
+test.describe("UW Analysis page", () => {
+  test("sidebar label + order", async ({ page }) => {
+    await mockPortfolio(page, []);
     await page.goto("/uw-analyze");
-    const nav = page.locator("nav, aside").first();
-    await expect(nav.locator("a[href='/uw-analyze']")).toBeVisible({ timeout: 10_000 });
+    const nav = page.locator("nav");
+    await expect(nav.getByText("UW Analysis")).toBeVisible();
+
+    const labels = await nav.locator("a, button").allTextContents();
+    const flowIdx = labels.findIndex((t) => /Flow Analysis/i.test(t));
+    const uwIdx = labels.findIndex((t) => /UW Analysis/i.test(t));
+    expect(flowIdx).toBeGreaterThanOrEqual(0);
+    expect(uwIdx).toBe(flowIdx + 1);
   });
 
-  test("renders empty state then full report after Analyse", async ({ page }) => {
-    await setupMocks(page);
+  test("renders scaffold tiles before portfolio resolves", async ({ page }) => {
+    await mockPortfolio(page, []);
     await page.goto("/uw-analyze");
-    await expect(page.getByTestId("uw-analyze-empty")).toBeVisible({ timeout: 10_000 });
-
-    await page.getByTestId("uw-analyze-input").fill("AAPL");
-    await page.getByTestId("uw-analyze-submit").click();
-
-    await expect(page.getByTestId("uw-analyze-identity")).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByTestId("uw-analyze-thesis")).toBeVisible();
-    await expect(page.getByTestId("uw-analyze-buckets")).toBeVisible();
-    await expect(page.getByTestId("uw-analyze-gex-table")).toBeVisible();
-    await expect(page.getByTestId("uw-analyze-notes")).toBeVisible();
-
-    // Positioning n/a tile
-    const positioning = page.getByTestId("uw-analyze-positioning");
-    await expect(positioning).toContainText("not available");
+    // Scaffold tiles render immediately for every static-universe ticker.
+    for (const t of [
+      "SPY",
+      "QQQ",
+      "IWM",
+      "DIA",
+      "GLD",
+      "TLT",
+      "UVXY",
+      "XLK",
+      "SMH",
+    ]) {
+      await expect(page.getByTestId(`uw-card-${t}`)).toBeVisible();
+    }
   });
 
-  test("shows error alert on 404 unknown ticker", async ({ page }) => {
-    await setupMocks(page);
+  test("tier grids + auto-select changed ticker + card click swaps detail", async ({
+    page,
+  }) => {
+    await mockPortfolio(page, [
+      makeRow("IWM"),
+      makeRow("QQQ"),
+      makeRow("SPY"),
+      makeRow("GLD"),
+      makeRow("NVDA", {
+        changes: [{ code: "GEX_FLIP_SIGN", severity: "warn" }],
+      }),
+      makeRow("AAPL"),
+    ]);
     await page.goto("/uw-analyze");
-    await page.getByTestId("uw-analyze-input").fill("ZZZZ");
-    await page.getByTestId("uw-analyze-submit").click();
-    await expect(page.getByTestId("uw-analyze-error")).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByTestId("uw-analyze-error")).toContainText("ticker not found");
+
+    const tiers = page.getByTestId("uw-analyze-tiers");
+    await expect(tiers.getByText("MARKET INDICES")).toBeVisible();
+    await expect(tiers.getByText("COMMODITIES & SAFE HAVEN")).toBeVisible();
+    await expect(tiers.getByText("FIXED INCOME")).toBeVisible();
+    await expect(tiers.getByText("VOLATILITY", { exact: true })).toBeVisible();
+    await expect(tiers.getByText("SECTOR ETFS")).toBeVisible();
+    await expect(tiers.getByText("SINGLE NAMES")).toBeVisible();
+
+    // Auto-selected NVDA (the only changed row).
+    const detail = page.getByTestId("uw-detail");
+    await expect(detail).toHaveAttribute("data-ticker", "NVDA");
+    await expect(page.getByTestId("uw-card-NVDA")).toHaveAttribute(
+      "data-alert",
+      "true",
+    );
+
+    // Click AAPL → detail swaps.
+    await page.getByTestId("uw-card-AAPL").click();
+    await expect(detail).toHaveAttribute("data-ticker", "AAPL");
   });
 });

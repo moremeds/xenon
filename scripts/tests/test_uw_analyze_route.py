@@ -11,16 +11,23 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import os
+import subprocess
+import sys
 from datetime import date, datetime
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 os.environ["XENON_TEST_MODE"] = "1"
+os.environ["XENON_API_TEST_MODE"] = "1"
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
+from api.services.uw_analyze_flow_tracker import FlowLog  # noqa: E402
 from analysis.models import (  # noqa: E402
     AnalysisReport,
     BenchmarkContext,
@@ -31,6 +38,10 @@ from analysis.models import (  # noqa: E402
     VRPState,
 )
 from clients.uw_client import UWAPIError, UWNotFoundError  # noqa: E402
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS_DIR = ROOT / "scripts"
 
 
 def _make_fixtures() -> tuple[AnalysisReport, TickerData]:
@@ -141,12 +152,17 @@ def _make_fixtures() -> tuple[AnalysisReport, TickerData]:
 
 
 @pytest.fixture(autouse=True)
-def _clear_cache() -> None:
+def _clear_cache(tmp_path) -> None:
     from api.routes import uw_analyze as route_mod  # noqa: WPS433
 
-    route_mod._cache.clear()
+    route_mod.reset_state_for_tests()
+    route_mod._portfolio_cache = UwAnalyzeCache(
+        cache_path=tmp_path / "uw-analyze-cache.json",
+        market_open_fn=lambda: True,
+    )
+    route_mod._flow_log = FlowLog(path=tmp_path / "uw-analyze-flow.json")
     yield
-    route_mod._cache.clear()
+    route_mod.reset_state_for_tests()
 
 
 @pytest.fixture()
@@ -238,10 +254,26 @@ def test_gex_table_built_from_real_strikes_shape(client: TestClient) -> None:
     assert wall["net_gamma"] == 42.1
 
 
-def test_route_uses_threadpool(client: TestClient) -> None:
-    """Route must call run_analysis_with_data via asyncio.to_thread (non-blocking)."""
-    import asyncio as _aio
+def test_route_imports_with_scripts_only_pythonpath() -> None:
+    """Legacy scripts tests run from scripts/tests with only scripts/ on PYTHONPATH."""
+    code = "from api.routes import uw_analyze; print(uw_analyze.__file__)"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(SCRIPTS_DIR)
 
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=ROOT / "scripts" / "tests",
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_route_uses_threadpool(client: TestClient) -> None:
+    """Runner must call run_analysis_with_data via asyncio.to_thread (non-blocking)."""
     report, td = _make_fixtures()
     calls: list[tuple] = []
 
@@ -253,7 +285,9 @@ def test_route_uses_threadpool(client: TestClient) -> None:
 
     with patch("api.routes.uw_analyze.asyncio.to_thread", side_effect=fake_to_thread), \
          patch("api.routes.uw_analyze.run_analysis_with_data", return_value=(report, td)) as mocked:
-        resp = client.post("/uw-analyze", json={"ticker": "AAPL"})
-        assert resp.status_code == 200
+        report_dict, display_dict, flow_alerts = asyncio.run(route_mod._runner("AAPL"))
         assert len(calls) == 1
         assert calls[0][0] is mocked
+        assert report_dict["ticker"] == "AAPL"
+        assert display_dict["sector"] == "XLK"
+        assert flow_alerts == []
