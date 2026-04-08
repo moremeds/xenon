@@ -194,6 +194,44 @@ def test_portfolio_returns_changes_after_force_refresh(tmp_path):
     assert any(a["code"] == "UNUSUAL_CALL_SWEEP" for a in body["action_items"])
 
 
+def test_portfolio_surfaces_on_demand_oi_changes(monkeypatch, tmp_path):
+    """When oi_baseline is missing, /portfolio fetches OI on-demand and
+    surfaces the changes in both row.oi_changes and action_items."""
+    from api.services import uw_analyze_oi_tracker
+    from api.services.uw_analyze_oi_tracker import OiChange
+
+    async def fake_fetch(client, ticker, spot):
+        return [
+            OiChange(
+                strike=100.0,
+                side="call",
+                prev_oi=500,
+                curr_oi=2000,
+                delta=1500,
+                delta_pct=3.0,
+                label="+1.5K calls @ $100 (+300%)",
+            )
+        ]
+
+    monkeypatch.setattr(uw_analyze_oi_tracker, "fetch_and_diff", fake_fetch)
+
+    import clients.uw_client as uw_client_mod
+
+    monkeypatch.setattr(uw_client_mod, "UWClient", lambda *a, **k: object())
+
+    app = _build_app(
+        tmp_path,
+        _fake_runner(),
+        portfolio={"positions": [{"ticker": "AAPL"}]},
+    )
+    client = TestClient(app)
+    body = client.get("/uw-analyze/portfolio").json()
+    row = next(r for r in body["tickers"] if r["ticker"] == "AAPL")
+    assert row["oi_changes"]
+    assert row["oi_changes"][0]["label"].startswith("+1.5K")
+    assert any(a["code"] == "OI_DELTA" for a in body["action_items"])
+
+
 # ── /refresh ────────────────────────────────────────────────────────────────
 
 

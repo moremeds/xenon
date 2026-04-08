@@ -375,6 +375,24 @@ async def uw_analyze_portfolio() -> dict:
             logger.warning("uw-analyze portfolio: %s failed: %s", ticker, exc)
             continue
 
+        # If the daily cron hasn't yet stamped oi_baseline (e.g. before 15:50 ET
+        # or first boot), fetch on-demand so the dashboard surfaces deltas
+        # immediately. Failures are non-fatal — empty oi_changes is fine.
+        if not entry.get("oi_baseline"):
+            try:
+                from clients.uw_client import UWClient
+
+                from api.services import uw_analyze_oi_tracker
+
+                spot = (entry.get("current") or {}).get("derived", {}).get("spot")
+                oi_changes_ondemand = await uw_analyze_oi_tracker.fetch_and_diff(UWClient(), ticker, spot)
+                entry["oi_baseline"] = {
+                    "data_date": datetime.now(timezone.utc).date().isoformat(),
+                    "changes": [c.to_dict() for c in oi_changes_ondemand],
+                }
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("on-demand oi fetch failed for %s: %s", ticker, exc)
+
         snap = entry.get("current") or {}
         prev = entry.get("previous")
         changes = compute_changes(prev, snap)
