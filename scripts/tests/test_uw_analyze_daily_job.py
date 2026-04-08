@@ -217,3 +217,90 @@ def test_run_once_skips_already_closed_events(tmp_path):
         )
     )
     assert contract_calls == []  # closed events are skipped
+
+
+# ════════════════════════════════════════════════════════════════════
+# run_loop — double-start suppression + test_trigger_now fire-once
+# ════════════════════════════════════════════════════════════════════
+
+
+def test_run_loop_double_start_suppressed(monkeypatch):
+    """Starting run_loop twice should leave _job_running True and skip the
+    second invocation cleanly; finally: must reset _job_running to False
+    after both tasks are cancelled."""
+    from api.services import uw_analyze_daily_job as job
+
+    job._job_running = False
+
+    async def fake_run_once(**kwargs):
+        return {}
+
+    monkeypatch.setattr(job, "run_once", fake_run_once)
+    monkeypatch.setattr(job, "seconds_until_next_trigger", lambda: 0.01)
+
+    async def scenario():
+        t1 = asyncio.create_task(
+            job.run_loop(
+                cache=None,
+                flow_log=None,
+                uw_client=None,
+                test_trigger_now=True,
+            )
+        )
+        await asyncio.sleep(0.05)
+        t2 = asyncio.create_task(
+            job.run_loop(
+                cache=None,
+                flow_log=None,
+                uw_client=None,
+                test_trigger_now=True,
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert job._job_running is True
+
+        t1.cancel()
+        t2.cancel()
+        for t in (t1, t2):
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    _run(scenario())
+    assert job._job_running is False  # cleaned up in finally
+
+
+def test_run_loop_test_trigger_now_fires_run_once(monkeypatch):
+    """With test_trigger_now=True, run_loop should call run_once at least once
+    before entering the long sleep."""
+    from api.services import uw_analyze_daily_job as job
+
+    job._job_running = False
+    fired = {"count": 0}
+
+    async def fake_run_once(**kwargs):
+        fired["count"] += 1
+
+    monkeypatch.setattr(job, "run_once", fake_run_once)
+    monkeypatch.setattr(job, "seconds_until_next_trigger", lambda: 999_999)
+
+    async def scenario():
+        t = asyncio.create_task(
+            job.run_loop(
+                cache=None,
+                flow_log=None,
+                uw_client=None,
+                test_trigger_now=True,
+            )
+        )
+        await asyncio.sleep(0.1)
+        t.cancel()
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    _run(scenario())
+    assert fired["count"] >= 1
+    assert job._job_running is False
