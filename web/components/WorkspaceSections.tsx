@@ -1,6 +1,12 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Bell,
   CheckCircle2,
@@ -19,7 +25,19 @@ import {
   Wrench,
   XCircle,
 } from "lucide-react";
-import type { BlotterTrade, DiscoverCandidate, ExecutedOrder, FlowAnalysisPosition, OpenOrder, OrdersData, PortfolioData, PortfolioPosition, ScannerSignal, TradeEntry, WorkspaceSection } from "@/lib/types";
+import type {
+  BlotterTrade,
+  DiscoverCandidate,
+  ExecutedOrder,
+  FlowAnalysisPosition,
+  OpenOrder,
+  OrdersData,
+  PortfolioData,
+  PortfolioPosition,
+  ScannerSignal,
+  TradeEntry,
+  WorkspaceSection,
+} from "@/lib/types";
 import { useOrderActions } from "@/lib/OrderActionsContext";
 import type { PriceData } from "@/lib/pricesProtocol";
 import { optionKey } from "@/lib/pricesProtocol";
@@ -27,6 +45,11 @@ import { useJournal } from "@/lib/useJournal";
 import { useDiscover } from "@/lib/useDiscover";
 import { useFlowAnalysis } from "@/lib/useFlowAnalysis";
 import { useUwAnalyze } from "@/lib/useUwAnalyze";
+import { useUwPortfolio } from "@/lib/useUwPortfolio";
+import type { UwTickerRow } from "@/lib/uwAnalyzeTypes";
+import GexProfileChart, {
+  uwGexRowsToBuckets,
+} from "@/components/charts/GexProfileChart";
 import { useScanner } from "@/lib/useScanner";
 import { useBlotter } from "@/lib/useBlotter";
 import { useSort, type SortDirection } from "@/lib/useSort";
@@ -83,13 +106,23 @@ export {
 function execOrderDescription(e: ExecutedOrder): string {
   const c = e.contract;
   const isClosing = e.realizedPNL != null;
-  const side = e.side === "BOT"
-    ? (isClosing ? "Short" : "Long")
-    : e.side === "SLD"
-      ? (isClosing ? "Long" : "Short")
-      : e.side;
+  const side =
+    e.side === "BOT"
+      ? isClosing
+        ? "Short"
+        : "Long"
+      : e.side === "SLD"
+        ? isClosing
+          ? "Long"
+          : "Short"
+        : e.side;
   if (c.secType === "OPT" && c.strike != null && c.right && c.expiry) {
-    const right = c.right === "C" || c.right === "CALL" ? "Call" : c.right === "P" || c.right === "PUT" ? "Put" : c.right;
+    const right =
+      c.right === "C" || c.right === "CALL"
+        ? "Call"
+        : c.right === "P" || c.right === "PUT"
+          ? "Put"
+          : c.right;
     return `${side} ${c.symbol} ${c.expiry} ${right} $${c.strike.toFixed(2)}`;
   }
   return `${side} ${c.symbol}`;
@@ -99,9 +132,14 @@ function execOrderShareData(e: ExecutedOrder): SharePnlData {
   return {
     description: execOrderDescription(e),
     pnl: e.realizedPNL ?? 0,
-    pnlPct: e.realizedPNL != null && e.avgPrice != null && e.avgPrice > 0
-      ? (e.realizedPNL / (e.avgPrice * e.quantity * (e.contract.secType === "OPT" ? 100 : 1))) * 100
-      : null,
+    pnlPct:
+      e.realizedPNL != null && e.avgPrice != null && e.avgPrice > 0
+        ? (e.realizedPNL /
+            (e.avgPrice *
+              e.quantity *
+              (e.contract.secType === "OPT" ? 100 : 1))) *
+          100
+        : null,
     commission: e.commission,
     fillPrice: e.avgPrice,
     entryPrice: null,
@@ -129,29 +167,51 @@ function executedOptionContractKey(fill: ExecutedOrder): string | null {
 function resolveOpeningLegBasis(
   group: PositionFillGroup,
   allGroups?: PositionFillGroup[],
-): { entryPrice: number | null; entryNotional: number; entryTime: string | null } {
-  if (!allGroups) return { entryPrice: null, entryNotional: 0, entryTime: null };
+): {
+  entryPrice: number | null;
+  entryNotional: number;
+  entryTime: string | null;
+} {
+  if (!allGroups)
+    return { entryPrice: null, entryNotional: 0, entryTime: null };
 
-  const closeOptFills = group.fills.filter((fill) => fill.contract.secType === "OPT");
-  if (closeOptFills.length === 0) return { entryPrice: null, entryNotional: 0, entryTime: null };
+  const closeOptFills = group.fills.filter(
+    (fill) => fill.contract.secType === "OPT",
+  );
+  if (closeOptFills.length === 0)
+    return { entryPrice: null, entryNotional: 0, entryTime: null };
 
   const requiredByContract = new Map<string, number>();
   for (const fill of closeOptFills) {
     const key = executedOptionContractKey(fill);
     if (!key) continue;
-    requiredByContract.set(key, (requiredByContract.get(key) ?? 0) + Math.abs(fill.quantity));
+    requiredByContract.set(
+      key,
+      (requiredByContract.get(key) ?? 0) + Math.abs(fill.quantity),
+    );
   }
-  if (requiredByContract.size === 0) return { entryPrice: null, entryNotional: 0, entryTime: null };
+  if (requiredByContract.size === 0)
+    return { entryPrice: null, entryNotional: 0, entryTime: null };
 
   const closeTime = Date.parse(group.time);
   const candidateOpenFills = allGroups
-    .filter((candidateGroup) => !candidateGroup.isClosing && candidateGroup.symbol === group.symbol)
-    .flatMap((candidateGroup) => candidateGroup.fills.filter((fill) => fill.contract.secType === "OPT"))
+    .filter(
+      (candidateGroup) =>
+        !candidateGroup.isClosing && candidateGroup.symbol === group.symbol,
+    )
+    .flatMap((candidateGroup) =>
+      candidateGroup.fills.filter((fill) => fill.contract.secType === "OPT"),
+    )
     .filter((fill) => {
       const key = executedOptionContractKey(fill);
       if (!key || !requiredByContract.has(key)) return false;
       const openTime = Date.parse(fill.time);
-      if (!Number.isNaN(closeTime) && !Number.isNaN(openTime) && openTime > closeTime) return false;
+      if (
+        !Number.isNaN(closeTime) &&
+        !Number.isNaN(openTime) &&
+        openTime > closeTime
+      )
+        return false;
       return true;
     })
     .sort((a, b) => {
@@ -179,11 +239,12 @@ function resolveOpeningLegBasis(
     const takeQty = Math.min(remainingQty, Math.abs(fill.quantity));
     if (takeQty <= 0) continue;
 
-    const cashSign = fill.side === "SLD" || fill.side === "SELL"
-      ? 1
-      : fill.side === "BOT" || fill.side === "BUY"
-        ? -1
-        : 0;
+    const cashSign =
+      fill.side === "SLD" || fill.side === "SELL"
+        ? 1
+        : fill.side === "BOT" || fill.side === "BUY"
+          ? -1
+          : 0;
     if (cashSign === 0) continue;
 
     netCash += cashSign * fill.avgPrice * takeQty;
@@ -197,15 +258,22 @@ function resolveOpeningLegBasis(
       } else {
         const fillTime = Date.parse(fill.time);
         const currentEarliest = Date.parse(earliestEntryTime);
-        if (!Number.isNaN(fillTime) && !Number.isNaN(currentEarliest) && fillTime < currentEarliest) {
+        if (
+          !Number.isNaN(fillTime) &&
+          !Number.isNaN(currentEarliest) &&
+          fillTime < currentEarliest
+        ) {
           earliestEntryTime = fill.time;
         }
       }
     }
   }
 
-  const fullyMatched = [...remainingByContract.values()].every((remainingQty) => remainingQty <= 0);
-  if (!fullyMatched || matchedQty <= 0) return { entryPrice: null, entryNotional: 0, entryTime: null };
+  const fullyMatched = [...remainingByContract.values()].every(
+    (remainingQty) => remainingQty <= 0,
+  );
+  if (!fullyMatched || matchedQty <= 0)
+    return { entryPrice: null, entryNotional: 0, entryTime: null };
 
   const comboUnits = Math.max(group.totalQuantity, 1);
   return {
@@ -263,10 +331,18 @@ export function positionGroupShareData(
       // Match by ticker AND structure to avoid picking up a different position
       // on the same underlying (e.g., new PLTR Bull Call Spread vs closed PLTR Long Call).
       // Extract key structure words from the group description for fuzzy matching.
-      const descWords = group.description.replace(/[()$,]/g, " ").toLowerCase().split(/\s+/).filter(Boolean);
+      const descWords = group.description
+        .replace(/[()$,]/g, " ")
+        .toLowerCase()
+        .split(/\s+/)
+        .filter(Boolean);
       const matchingPosition = portfolioPositions.find((p) => {
         if (p.ticker !== group.symbol) return false;
-        const posWords = p.structure.replace(/[()$,]/g, " ").toLowerCase().split(/\s+/).filter(Boolean);
+        const posWords = p.structure
+          .replace(/[()$,]/g, " ")
+          .toLowerCase()
+          .split(/\s+/)
+          .filter(Boolean);
         // At least 2 key words must overlap (e.g., "long" + "call", or "bull" + "spread")
         const overlap = posWords.filter((w) => descWords.includes(w));
         return overlap.length >= 2;
@@ -277,7 +353,10 @@ export function positionGroupShareData(
         // For multi-leg, sum up the leg costs and divide by contracts
         if (matchingPosition.legs.length === 1) {
           entryPrice = matchingPosition.legs[0].avg_cost;
-        } else if (matchingPosition.legs.length > 1 && matchingPosition.contracts > 0) {
+        } else if (
+          matchingPosition.legs.length > 1 &&
+          matchingPosition.contracts > 0
+        ) {
           // Net entry price for combo = sum of (direction-adjusted avg_cost per leg)
           const netCost = matchingPosition.legs.reduce((sum, leg) => {
             const sign = leg.direction === "LONG" ? -1 : 1; // Long = paid, Short = received
@@ -291,7 +370,10 @@ export function positionGroupShareData(
         }
         // Calculate notional for P&L %
         if (entryNotional === 0 && entryPrice != null) {
-          entryNotional = Math.abs(entryPrice) * (matchingPosition.contracts || group.totalQuantity) * 100;
+          entryNotional =
+            Math.abs(entryPrice) *
+            (matchingPosition.contracts || group.totalQuantity) *
+            100;
         }
       }
     }
@@ -305,12 +387,15 @@ export function positionGroupShareData(
       // Derive exit price: BAG netPrice, or weighted avg of OPT fills
       let exitPx = group.netPrice;
       if (exitPx == null && totalQty > 0) {
-        const weightedSum = optFills.reduce((s, f) => s + (f.avgPrice ?? 0) * f.quantity, 0);
+        const weightedSum = optFills.reduce(
+          (s, f) => s + (f.avgPrice ?? 0) * f.quantity,
+          0,
+        );
         exitPx = weightedSum / totalQty;
       }
       if (totalQty > 0 && exitPx != null) {
         const mult = optFills[0]?.contract.secType === "OPT" ? 100 : 1;
-        entryPrice = exitPx - (group.totalPnL / (totalQty * mult));
+        entryPrice = exitPx - group.totalPnL / (totalQty * mult);
         if (entryNotional === 0) {
           entryNotional = Math.abs(entryPrice) * totalQty * mult;
         }
@@ -394,7 +479,9 @@ function groupExecutedOrders(
   const real = fills.filter((f) => f.side !== "CANCELLED");
 
   const isClosingFill = (fill: ExecutedOrder): boolean =>
-    fill.contract.secType === "OPT" && fill.realizedPNL != null && Math.abs(fill.realizedPNL) > 0.01;
+    fill.contract.secType === "OPT" &&
+    fill.realizedPNL != null &&
+    Math.abs(fill.realizedPNL) > 0.01;
 
   type MinuteBucket = {
     symbol: string;
@@ -408,7 +495,13 @@ function groupExecutedOrders(
     const sym = fill.contract.symbol;
     const t = new Date(fill.time);
     // Round time to nearest minute for grouping
-    const bucket = new Date(t.getFullYear(), t.getMonth(), t.getDate(), t.getHours(), t.getMinutes()).toISOString();
+    const bucket = new Date(
+      t.getFullYear(),
+      t.getMonth(),
+      t.getDate(),
+      t.getHours(),
+      t.getMinutes(),
+    ).toISOString();
     const key = `${sym}_${bucket}`;
     const bucketData = byMinute.get(key);
     if (bucketData == null) {
@@ -464,9 +557,10 @@ function groupExecutedOrders(
     const optFills = groupFills.filter((f) => f.contract.secType !== "BAG");
     const sym = groupFills[0].contract.symbol;
     const bagFills = groupFills.filter((f) => f.contract.secType === "BAG");
-    const totalQty = bagFills.length > 0
-      ? bagFills.reduce((sum, f) => sum + f.quantity, 0)
-      : optFills.reduce((sum, f) => sum + f.quantity, 0);
+    const totalQty =
+      bagFills.length > 0
+        ? bagFills.reduce((sum, f) => sum + f.quantity, 0)
+        : optFills.reduce((sum, f) => sum + f.quantity, 0);
 
     // Net price: BAG fill has the combo price, single-leg uses weighted avg
     let netPrice: number | null = null;
@@ -474,11 +568,18 @@ function groupExecutedOrders(
       netPrice = bagFills[0].avgPrice;
     } else if (optFills.length > 0) {
       const totalQty = optFills.reduce((s, f) => s + f.quantity, 0);
-      const weightedSum = optFills.reduce((s, f) => s + (f.avgPrice ?? 0) * f.quantity, 0);
-      netPrice = totalQty > 0 ? Number((weightedSum / totalQty).toFixed(4)) : null;
+      const weightedSum = optFills.reduce(
+        (s, f) => s + (f.avgPrice ?? 0) * f.quantity,
+        0,
+      );
+      netPrice =
+        totalQty > 0 ? Number((weightedSum / totalQty).toFixed(4)) : null;
     }
 
-    const totalCommission = optFills.reduce((sum, f) => sum + (f.commission ?? 0), 0);
+    const totalCommission = optFills.reduce(
+      (sum, f) => sum + (f.commission ?? 0),
+      0,
+    );
     const totalPnL = isClosing
       ? optFills.reduce((sum, f) => sum + (f.realizedPNL ?? 0), 0)
       : null;
@@ -494,7 +595,11 @@ function groupExecutedOrders(
     return {
       id: `${sym}_${Date.parse(groupFills[0].time).toString()}`,
       symbol: sym,
-      description: deriveGroupDescription(groupFills, isClosing, portfolioPositions),
+      description: deriveGroupDescription(
+        groupFills,
+        isClosing,
+        portfolioPositions,
+      ),
       isClosing,
       totalQuantity: totalQty,
       netPrice,
@@ -526,8 +631,12 @@ function groupExecutedOrders(
         if (closeDistances.length > 0 && openDistances.length > 0) {
           // If both have valid distances, pick the nearer side.
           const bagTime = Date.parse(bag.time);
-          const closeDist = closeDistances.map((f) => Math.abs(Date.parse(f.time) - bagTime))[0];
-          const openDist = openDistances.map((f) => Math.abs(Date.parse(f.time) - bagTime))[0];
+          const closeDist = closeDistances.map((f) =>
+            Math.abs(Date.parse(f.time) - bagTime),
+          )[0];
+          const openDist = openDistances.map((f) =>
+            Math.abs(Date.parse(f.time) - bagTime),
+          )[0];
           if (closeDist <= openDist) closeBuckets.push(bag);
           else openBuckets.push(bag);
         } else if (closeDistances.length > 0) {
@@ -541,18 +650,30 @@ function groupExecutedOrders(
       const openGroupFills = [...opens, ...openBuckets];
 
       if (closeGroupFills.length > 0) {
-        result.push({ ...makeGroup(closeGroupFills, true), id: `${nextId()}-close` });
+        result.push({
+          ...makeGroup(closeGroupFills, true),
+          id: `${nextId()}-close`,
+        });
       }
       if (openGroupFills.length > 0) {
-        result.push({ ...makeGroup(openGroupFills, false), id: `${nextId()}-open` });
+        result.push({
+          ...makeGroup(openGroupFills, false),
+          id: `${nextId()}-open`,
+        });
       }
       continue;
     }
 
     if (closes.length > 0) {
-      result.push({ ...makeGroup([...closes, ...bags], true), id: `${nextId()}-close` });
+      result.push({
+        ...makeGroup([...closes, ...bags], true),
+        id: `${nextId()}-close`,
+      });
     } else if (opens.length > 0) {
-      result.push({ ...makeGroup([...opens, ...bags], false), id: `${nextId()}-open` });
+      result.push({
+        ...makeGroup([...opens, ...bags], false),
+        id: `${nextId()}-open`,
+      });
     }
   }
 
@@ -585,8 +706,10 @@ function groupExecutedOrders(
 }
 
 function blotterShareData(t: BlotterTrade): SharePnlData {
-  const lastExec = t.executions.length > 0 ? t.executions[t.executions.length - 1] : null;
-  const pnlPct = t.cost_basis !== 0 ? (t.realized_pnl / Math.abs(t.cost_basis)) * 100 : null;
+  const lastExec =
+    t.executions.length > 0 ? t.executions[t.executions.length - 1] : null;
+  const pnlPct =
+    t.cost_basis !== 0 ? (t.realized_pnl / Math.abs(t.cost_basis)) * 100 : null;
   // Derive per-unit entry/exit from execution prices (weighted average)
   let entryPrice: number | null = null;
   let exitPrice: number | null = null;
@@ -614,19 +737,25 @@ function blotterShareData(t: BlotterTrade): SharePnlData {
     const closeExecs = t.executions.filter((e) => e.side !== firstSide);
     if (openExecs.length > 0 && openExecs[0].time) {
       // Use earliest opening execution time
-      entryTime = openExecs.reduce((earliest, e) => {
-        if (!e.time) return earliest;
-        if (!earliest) return e.time;
-        return Date.parse(e.time) < Date.parse(earliest) ? e.time : earliest;
-      }, null as string | null);
+      entryTime = openExecs.reduce(
+        (earliest, e) => {
+          if (!e.time) return earliest;
+          if (!earliest) return e.time;
+          return Date.parse(e.time) < Date.parse(earliest) ? e.time : earliest;
+        },
+        null as string | null,
+      );
     }
     if (closeExecs.length > 0 && closeExecs[closeExecs.length - 1].time) {
       // Use latest closing execution time
-      exitTime = closeExecs.reduce((latest, e) => {
-        if (!e.time) return latest;
-        if (!latest) return e.time;
-        return Date.parse(e.time) > Date.parse(latest) ? e.time : latest;
-      }, null as string | null);
+      exitTime = closeExecs.reduce(
+        (latest, e) => {
+          if (!e.time) return latest;
+          if (!latest) return e.time;
+          return Date.parse(e.time) > Date.parse(latest) ? e.time : latest;
+        },
+        null as string | null,
+      );
     }
   }
 
@@ -662,12 +791,21 @@ function SortTh<K extends string>({
   className?: string;
 }) {
   const active = activeKey === sortKey;
-  const ariaSort = active ? (direction === "asc" ? "ascending" : "descending") : undefined;
+  const ariaSort = active
+    ? direction === "asc"
+      ? "ascending"
+      : "descending"
+    : undefined;
   return (
     <th
       className={`sortable-th ${className ?? ""} ${active ? "sort-active" : ""}`}
       onClick={() => onToggle(sortKey)}
-      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(sortKey); } }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onToggle(sortKey);
+        }
+      }}
       tabIndex={0}
       role="columnheader"
       aria-sort={ariaSort}
@@ -676,7 +814,11 @@ function SortTh<K extends string>({
         {label}
         <span className="sort-icon">
           {active ? (
-            direction === "asc" ? <ChevronUp size={10} /> : <ChevronDown size={10} />
+            direction === "asc" ? (
+              <ChevronUp size={10} />
+            ) : (
+              <ChevronDown size={10} />
+            )
           ) : (
             <ChevronDown size={10} className="sort-icon-idle" />
           )}
@@ -693,7 +835,9 @@ function usePriceDirection(price: number | null): {
   flashDirection: "up" | "down" | null;
 } {
   const [direction, setDirection] = useState<"up" | "down" | null>(null);
-  const [flashDirection, setFlashDirection] = useState<"up" | "down" | null>(null);
+  const [flashDirection, setFlashDirection] = useState<"up" | "down" | null>(
+    null,
+  );
   const previousPrice = useRef<number | null>(null);
 
   useEffect(() => {
@@ -732,46 +876,110 @@ function usePriceDirection(price: number | null): {
 
 type FlowPosKey = "ticker" | "position" | "flow_label" | "strength" | "note";
 
-const flowPosExtract = (item: FlowAnalysisPosition, key: FlowPosKey): string | number => {
+const flowPosExtract = (
+  item: FlowAnalysisPosition,
+  key: FlowPosKey,
+): string | number => {
   if (key === "strength") return item.strength;
   return item[key];
 };
 
-function FlowSparkline({ ratios }: { ratios?: { date: string; buy_ratio: number | null }[] }) {
-  if (!ratios || ratios.length === 0) return <div className="strength-value">---</div>;
+function FlowSparkline({
+  ratios,
+}: {
+  ratios?: { date: string; buy_ratio: number | null }[];
+}) {
+  if (!ratios || ratios.length === 0)
+    return <div className="strength-value">---</div>;
   const maxH = 28;
   return (
     <div className="flow-sparkline">
       {ratios.map((d, i) => {
         const r = d.buy_ratio;
-        if (r == null) return <div key={i} className="flow-spark-bar neutral" style={{ height: 2 }} />;
+        if (r == null)
+          return (
+            <div
+              key={i}
+              className="flow-spark-bar neutral"
+              style={{ height: 2 }}
+            />
+          );
         const cls = r >= 0.55 ? "accum" : r <= 0.45 ? "distrib" : "neutral";
         const h = Math.max(2, Math.round(r * maxH));
-        return <div key={i} className={`flow-spark-bar ${cls}`} style={{ height: h }} title={`${d.date}: ${Math.round(r * 100)}%`} />;
+        return (
+          <div
+            key={i}
+            className={`flow-spark-bar ${cls}`}
+            style={{ height: h }}
+            title={`${d.date}: ${Math.round(r * 100)}%`}
+          />
+        );
       })}
     </div>
   );
 }
 
-function FlowTable({ rows, lastColumn }: { rows: FlowAnalysisPosition[]; lastColumn: string }) {
+function FlowTable({
+  rows,
+  lastColumn,
+}: {
+  rows: FlowAnalysisPosition[];
+  lastColumn: string;
+}) {
   const { sorted, sort, toggle } = useSort(rows, flowPosExtract);
   return (
     <table>
       <thead>
         <tr>
-          <SortTh<FlowPosKey> label="Ticker" sortKey="ticker" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-          <SortTh<FlowPosKey> label="Position" sortKey="position" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-          <SortTh<FlowPosKey> label="Flow" sortKey="flow_label" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-          <SortTh<FlowPosKey> label="Strength" sortKey="strength" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-          <SortTh<FlowPosKey> label={lastColumn} sortKey="note" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
+          <SortTh<FlowPosKey>
+            label="Ticker"
+            sortKey="ticker"
+            activeKey={sort.key}
+            direction={sort.direction}
+            onToggle={toggle}
+          />
+          <SortTh<FlowPosKey>
+            label="Position"
+            sortKey="position"
+            activeKey={sort.key}
+            direction={sort.direction}
+            onToggle={toggle}
+          />
+          <SortTh<FlowPosKey>
+            label="Flow"
+            sortKey="flow_label"
+            activeKey={sort.key}
+            direction={sort.direction}
+            onToggle={toggle}
+          />
+          <SortTh<FlowPosKey>
+            label="Strength"
+            sortKey="strength"
+            activeKey={sort.key}
+            direction={sort.direction}
+            onToggle={toggle}
+          />
+          <SortTh<FlowPosKey>
+            label={lastColumn}
+            sortKey="note"
+            activeKey={sort.key}
+            direction={sort.direction}
+            onToggle={toggle}
+          />
         </tr>
       </thead>
       <tbody>
         {sorted.map((item) => (
           <tr key={`${item.ticker}-${item.position}`}>
-            <td><TickerLink ticker={item.ticker} /></td>
+            <td>
+              <TickerLink ticker={item.ticker} />
+            </td>
             <td>{item.position}</td>
-            <td><span className={`pill ${item.flow_class}`}>{item.flow_label}</span></td>
+            <td>
+              <span className={`pill ${item.flow_class}`}>
+                {item.flow_label}
+              </span>
+            </td>
             <td>
               <FlowSparkline ratios={item.daily_buy_ratios} />
               <div className="strength-value">{item.strength}</div>
@@ -784,8 +992,15 @@ function FlowTable({ rows, lastColumn }: { rows: FlowAnalysisPosition[]; lastCol
   );
 }
 
-function FlowSections({ activeAccount = "ib" }: { activeAccount?: "ib" | "futu" }) {
-  const { data, syncing, error, lastSync } = useFlowAnalysis(activeAccount, true);
+function FlowSections({
+  activeAccount = "ib",
+}: {
+  activeAccount?: "ib" | "futu";
+}) {
+  const { data, syncing, error, lastSync } = useFlowAnalysis(
+    activeAccount,
+    true,
+  );
 
   const supportsArr = data?.supports ?? [];
   const againstArr = data?.against ?? [];
@@ -806,8 +1021,12 @@ function FlowSections({ activeAccount = "ib" }: { activeAccount?: "ib" | "futu" 
               ACTION ITEMS
             </div>
             {actionItems.map((item) => (
-              <div key={`${item.ticker}-${item.position}`} className="alert-item">
-                <span className="alert-ticker">{item.ticker}</span> — {item.position}: {item.note}
+              <div
+                key={`${item.ticker}-${item.position}`}
+                className="alert-item"
+              >
+                <span className="alert-ticker">{item.ticker}</span> —{" "}
+                {item.position}: {item.note}
               </div>
             ))}
           </div>
@@ -816,7 +1035,9 @@ function FlowSections({ activeAccount = "ib" }: { activeAccount?: "ib" | "futu" 
 
       {error && (
         <div className="section">
-          <div className="section-body"><div className="alert-item bearish">{error}</div></div>
+          <div className="section-body">
+            <div className="alert-item bearish">{error}</div>
+          </div>
         </div>
       )}
 
@@ -827,7 +1048,9 @@ function FlowSections({ activeAccount = "ib" }: { activeAccount?: "ib" | "futu" 
             Flow Supports Position
             <InfoTooltip text={SECTION_TOOLTIPS["Flow Supports Position"]} />
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+          <div
+            style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}
+          >
             {lastSync && (
               <span className="report-meta" style={{ margin: 0 }}>
                 {new Date(lastSync).toLocaleTimeString()}
@@ -842,7 +1065,11 @@ function FlowSections({ activeAccount = "ib" }: { activeAccount?: "ib" | "futu" 
           {supportsArr.length > 0 ? (
             <FlowTable rows={supportsArr} lastColumn="Signal" />
           ) : (
-            <div className="alert-item">{syncing ? "Scanning portfolio flow..." : "No supporting flow detected"}</div>
+            <div className="alert-item">
+              {syncing
+                ? "Scanning portfolio flow..."
+                : "No supporting flow detected"}
+            </div>
           )}
         </div>
       </div>
@@ -905,8 +1132,12 @@ function FlowSections({ activeAccount = "ib" }: { activeAccount?: "ib" | "futu" 
         <div className="report-meta">
           {lastSync ? (
             <>
-              Report Generated: {new Date(lastSync).toLocaleString()} • Broker: {activeAccount.toUpperCase()} • Source: UW API • Dark Pool Lookback: 5 Trading Days • {totalScanned} Positions Scanned
-              {data?.skipped_unsupported ? ` • ${data.skipped_unsupported} skipped (non-US)` : ""}
+              Report Generated: {new Date(lastSync).toLocaleString()} • Broker:{" "}
+              {activeAccount.toUpperCase()} • Source: UW API • Dark Pool
+              Lookback: 5 Trading Days • {totalScanned} Positions Scanned
+              {data?.skipped_unsupported
+                ? ` • ${data.skipped_unsupported} skipped (non-US)`
+                : ""}
               {data?.cache_meta?.is_stale ? " • ⚠ stale cache" : ""}
             </>
           ) : (
@@ -923,20 +1154,42 @@ function FlowSections({ activeAccount = "ib" }: { activeAccount?: "ib" | "futu" 
 type PortfolioViewMode = "risk" | "structure";
 const PORTFOLIO_VIEW_KEY = "xenon.portfolio.view";
 
-function PortfolioSections({ portfolio, prices, activeAccount = "ib" }: { portfolio: PortfolioData | null; prices?: Record<string, PriceData>; activeAccount?: "ib" | "futu" }) {
+function PortfolioSections({
+  portfolio,
+  prices,
+  activeAccount = "ib",
+}: {
+  portfolio: PortfolioData | null;
+  prices?: Record<string, PriceData>;
+  activeAccount?: "ib" | "futu";
+}) {
   const positions = portfolio?.positions ?? [];
-  const definedPositions = positions.filter((p) => p.risk_profile === "defined");
+  const definedPositions = positions.filter(
+    (p) => p.risk_profile === "defined",
+  );
   const equityPositions = positions.filter((p) => p.risk_profile === "equity");
-  const undefinedPositions = positions.filter((p) => p.risk_profile === "undefined" || p.risk_profile === "complex");
+  const undefinedPositions = positions.filter(
+    (p) => p.risk_profile === "undefined" || p.risk_profile === "complex",
+  );
 
   const extractPositionSearchText = useCallback(
-    (p: PortfolioPosition) => `${p.ticker} ${p.structure} ${p.direction} ${p.expiry}`,
+    (p: PortfolioPosition) =>
+      `${p.ticker} ${p.structure} ${p.direction} ${p.expiry}`,
     [],
   );
   // All four filter hooks declared unconditionally (React rule-of-hooks).
-  const definedFilter = useTableFilter(definedPositions, extractPositionSearchText);
-  const undefinedFilter = useTableFilter(undefinedPositions, extractPositionSearchText);
-  const equityFilter = useTableFilter(equityPositions, extractPositionSearchText);
+  const definedFilter = useTableFilter(
+    definedPositions,
+    extractPositionSearchText,
+  );
+  const undefinedFilter = useTableFilter(
+    undefinedPositions,
+    extractPositionSearchText,
+  );
+  const equityFilter = useTableFilter(
+    equityPositions,
+    extractPositionSearchText,
+  );
   const structureFilter = useTableFilter(positions, extractPositionSearchText);
 
   // View mode hydration: null until we've read localStorage to avoid SSR flash.
@@ -944,7 +1197,9 @@ function PortfolioSections({ portfolio, prices, activeAccount = "ib" }: { portfo
   useEffect(() => {
     try {
       const stored = window.localStorage.getItem(PORTFOLIO_VIEW_KEY);
-      setViewMode(stored === "risk" || stored === "structure" ? stored : "structure");
+      setViewMode(
+        stored === "risk" || stored === "structure" ? stored : "structure",
+      );
     } catch {
       setViewMode("structure");
     }
@@ -976,7 +1231,11 @@ function PortfolioSections({ portfolio, prices, activeAccount = "ib" }: { portfo
               totalCount={positions.length}
             />
           ) : null}
-          <div role="tablist" aria-label="Portfolio view" style={{ display: "flex", gap: "4px" }}>
+          <div
+            role="tablist"
+            aria-label="Portfolio view"
+            style={{ display: "flex", gap: "4px" }}
+          >
             <button
               type="button"
               role="tab"
@@ -1073,11 +1332,18 @@ function PortfolioSections({ portfolio, prices, activeAccount = "ib" }: { portfo
                 resultCount={definedFilter.filtered.length}
                 totalCount={definedPositions.length}
               />
-              <span className="pill defined">{definedPositions.length} POSITIONS</span>
+              <span className="pill defined">
+                {definedPositions.length} POSITIONS
+              </span>
             </div>
           </div>
           <div className="section-body">
-            <PositionTable positions={definedFilter.filtered} showUnderlying={true} prices={prices} readonly={activeAccount === "futu"} />
+            <PositionTable
+              positions={definedFilter.filtered}
+              showUnderlying={true}
+              prices={prices}
+              readonly={activeAccount === "futu"}
+            />
           </div>
         </div>
       )}
@@ -1088,7 +1354,9 @@ function PortfolioSections({ portfolio, prices, activeAccount = "ib" }: { portfo
             <div className="section-title">
               <TriangleAlert size={14} />
               Undefined Risk Positions
-              <InfoTooltip text={SECTION_TOOLTIPS["Undefined Risk Positions"]} />
+              <InfoTooltip
+                text={SECTION_TOOLTIPS["Undefined Risk Positions"]}
+              />
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
               <TableSearch
@@ -1098,11 +1366,18 @@ function PortfolioSections({ portfolio, prices, activeAccount = "ib" }: { portfo
                 resultCount={undefinedFilter.filtered.length}
                 totalCount={undefinedPositions.length}
               />
-              <span className="pill undefined">{undefinedPositions.length} POSITIONS</span>
+              <span className="pill undefined">
+                {undefinedPositions.length} POSITIONS
+              </span>
             </div>
           </div>
           <div className="section-body">
-            <PositionTable positions={undefinedFilter.filtered} showUnderlying={true} prices={prices} readonly={activeAccount === "futu"} />
+            <PositionTable
+              positions={undefinedFilter.filtered}
+              showUnderlying={true}
+              prices={prices}
+              readonly={activeAccount === "futu"}
+            />
           </div>
         </div>
       )}
@@ -1123,18 +1398,26 @@ function PortfolioSections({ portfolio, prices, activeAccount = "ib" }: { portfo
                 resultCount={equityFilter.filtered.length}
                 totalCount={equityPositions.length}
               />
-              <span className="pill neutral">{equityPositions.length} POSITIONS</span>
+              <span className="pill neutral">
+                {equityPositions.length} POSITIONS
+              </span>
             </div>
           </div>
           <div className="section-body">
-            <PositionTable positions={equityFilter.filtered} showExpiry={false} prices={prices} readonly={activeAccount === "futu"} />
+            <PositionTable
+              positions={equityFilter.filtered}
+              showExpiry={false}
+              prices={prices}
+              readonly={activeAccount === "futu"}
+            />
           </div>
         </div>
       )}
 
       <div className="section">
         <div className="report-meta">
-          Last Sync: {new Date(portfolio.last_sync).toLocaleString()} • Source: {activeAccount === "futu" ? "Futu OpenD" : "IB Gateway"}
+          Last Sync: {new Date(portfolio.last_sync).toLocaleString()} • Source:{" "}
+          {activeAccount === "futu" ? "Futu OpenD" : "IB Gateway"}
         </div>
       </div>
     </>
@@ -1143,19 +1426,39 @@ function PortfolioSections({ portfolio, prices, activeAccount = "ib" }: { portfo
 
 /* ─── Scanner table ─────────────────────────────────────── */
 
-type ScannerSortKey = "ticker" | "signal" | "direction" | "score" | "strength" | "buy_ratio" | "sustained_days" | "num_prints";
+type ScannerSortKey =
+  | "ticker"
+  | "signal"
+  | "direction"
+  | "score"
+  | "strength"
+  | "buy_ratio"
+  | "sustained_days"
+  | "num_prints";
 
-const scannerSigExtract = (item: ScannerSignal, key: ScannerSortKey): string | number | null => {
+const scannerSigExtract = (
+  item: ScannerSignal,
+  key: ScannerSortKey,
+): string | number | null => {
   switch (key) {
-    case "ticker": return item.ticker;
-    case "signal": return item.signal;
-    case "direction": return item.direction;
-    case "score": return item.score;
-    case "strength": return item.strength;
-    case "buy_ratio": return item.buy_ratio;
-    case "sustained_days": return item.sustained_days;
-    case "num_prints": return item.num_prints;
-    default: return null;
+    case "ticker":
+      return item.ticker;
+    case "signal":
+      return item.signal;
+    case "direction":
+      return item.direction;
+    case "score":
+      return item.score;
+    case "strength":
+      return item.strength;
+    case "buy_ratio":
+      return item.buy_ratio;
+    case "sustained_days":
+      return item.sustained_days;
+    case "num_prints":
+      return item.num_prints;
+    default:
+      return null;
   }
 };
 
@@ -1185,7 +1488,9 @@ function ScannerSections() {
             Scanner Signals
             <InfoTooltip text={SECTION_TOOLTIPS["Scanner Signals"]} />
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+          <div
+            style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}
+          >
             {lastSync && (
               <span className="report-meta" style={{ margin: 0 }}>
                 {new Date(lastSync).toLocaleTimeString()}
@@ -1196,35 +1501,112 @@ function ScannerSections() {
             </span>
           </div>
         </div>
-        {error && <div className="section-body"><div className="alert-item bearish">{error}</div></div>}
+        {error && (
+          <div className="section-body">
+            <div className="alert-item bearish">{error}</div>
+          </div>
+        )}
         {signals.length === 0 && !syncing && !error && (
-          <div className="section-body"><div className="alert-item">No scanner signals. Waiting for initial scan...</div></div>
+          <div className="section-body">
+            <div className="alert-item">
+              No scanner signals. Waiting for initial scan...
+            </div>
+          </div>
         )}
         {signals.length > 0 && (
           <div className="section-body table-wrap">
             <table>
               <thead>
                 <tr>
-                  <SortTh<ScannerSortKey> label="Ticker" sortKey="ticker" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<ScannerSortKey> label="Signal" sortKey="signal" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<ScannerSortKey> label="Direction" sortKey="direction" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<ScannerSortKey> label="Score" sortKey="score" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<ScannerSortKey> label="Strength" sortKey="strength" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<ScannerSortKey> label="Buy Ratio" sortKey="buy_ratio" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<ScannerSortKey> label="Sustained" sortKey="sustained_days" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<ScannerSortKey> label="Prints" sortKey="num_prints" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
+                  <SortTh<ScannerSortKey>
+                    label="Ticker"
+                    sortKey="ticker"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<ScannerSortKey>
+                    label="Signal"
+                    sortKey="signal"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<ScannerSortKey>
+                    label="Direction"
+                    sortKey="direction"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<ScannerSortKey>
+                    label="Score"
+                    sortKey="score"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<ScannerSortKey>
+                    label="Strength"
+                    sortKey="strength"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<ScannerSortKey>
+                    label="Buy Ratio"
+                    sortKey="buy_ratio"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<ScannerSortKey>
+                    label="Sustained"
+                    sortKey="sustained_days"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<ScannerSortKey>
+                    label="Prints"
+                    sortKey="num_prints"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
                 </tr>
               </thead>
               <tbody>
                 {sorted.map((row) => (
                   <tr key={`scanner-${row.ticker}`}>
-                    <td><TickerLink ticker={row.ticker} /></td>
-                    <td><span className={signalClass(row.signal)}>{row.signal}</span></td>
-                    <td><span className={`pill ${dirClass(row.direction)}`}>{row.direction}</span></td>
+                    <td>
+                      <TickerLink ticker={row.ticker} />
+                    </td>
+                    <td>
+                      <span className={signalClass(row.signal)}>
+                        {row.signal}
+                      </span>
+                    </td>
+                    <td>
+                      <span className={`pill ${dirClass(row.direction)}`}>
+                        {row.direction}
+                      </span>
+                    </td>
                     <td className="right">{row.score.toFixed(1)}</td>
                     <td className="right">{row.strength.toFixed(1)}</td>
-                    <td className="right">{row.buy_ratio != null ? `${(row.buy_ratio * 100).toFixed(1)}%` : "—"}</td>
-                    <td className="right">{row.sustained_days > 0 ? `${row.sustained_days}d` : "—"}</td>
+                    <td className="right">
+                      {row.buy_ratio != null
+                        ? `${(row.buy_ratio * 100).toFixed(1)}%`
+                        : "—"}
+                    </td>
+                    <td className="right">
+                      {row.sustained_days > 0 ? `${row.sustained_days}d` : "—"}
+                    </td>
                     <td className="right">{row.num_prints.toLocaleString()}</td>
                   </tr>
                 ))}
@@ -1237,7 +1619,8 @@ function ScannerSections() {
       {lastSync && (
         <div className="section">
           <div className="report-meta">
-            Last Scan: {new Date(lastSync).toLocaleString()} • {data?.tickers_scanned ?? 0} Tickers Scanned
+            Last Scan: {new Date(lastSync).toLocaleString()} •{" "}
+            {data?.tickers_scanned ?? 0} Tickers Scanned
           </div>
         </div>
       )}
@@ -1247,28 +1630,57 @@ function ScannerSections() {
 
 /* ─── Non-table sections ────────────────────────────────── */
 
-type DiscoverSortKey = "ticker" | "score" | "dp_direction" | "dp_strength" | "dp_buy_ratio" | "options_bias" | "alerts" | "total_premium" | "sweeps" | "sector";
+type DiscoverSortKey =
+  | "ticker"
+  | "score"
+  | "dp_direction"
+  | "dp_strength"
+  | "dp_buy_ratio"
+  | "options_bias"
+  | "alerts"
+  | "total_premium"
+  | "sweeps"
+  | "sector";
 
-const discoverExtract = (item: DiscoverCandidate, key: DiscoverSortKey): string | number | null => {
+const discoverExtract = (
+  item: DiscoverCandidate,
+  key: DiscoverSortKey,
+): string | number | null => {
   switch (key) {
-    case "ticker": return item.ticker;
-    case "score": return item.score;
-    case "dp_direction": return item.dp_direction;
-    case "dp_strength": return item.dp_strength;
-    case "dp_buy_ratio": return item.dp_buy_ratio;
-    case "options_bias": return item.options_bias;
-    case "alerts": return item.alerts;
-    case "total_premium": return item.total_premium;
-    case "sweeps": return item.sweeps;
-    case "sector": return item.sector || item.issue_type || "";
-    default: return null;
+    case "ticker":
+      return item.ticker;
+    case "score":
+      return item.score;
+    case "dp_direction":
+      return item.dp_direction;
+    case "dp_strength":
+      return item.dp_strength;
+    case "dp_buy_ratio":
+      return item.dp_buy_ratio;
+    case "options_bias":
+      return item.options_bias;
+    case "alerts":
+      return item.alerts;
+    case "total_premium":
+      return item.total_premium;
+    case "sweeps":
+      return item.sweeps;
+    case "sector":
+      return item.sector || item.issue_type || "";
+    default:
+      return null;
   }
 };
 
 function DiscoverSections() {
   const { data, syncing, error, lastSync } = useDiscover(true);
   const candidates = data?.candidates ?? [];
-  const { sorted, sort, toggle } = useSort<DiscoverCandidate, DiscoverSortKey>(candidates, discoverExtract, "score", "desc");
+  const { sorted, sort, toggle } = useSort<DiscoverCandidate, DiscoverSortKey>(
+    candidates,
+    discoverExtract,
+    "score",
+    "desc",
+  );
 
   const fmtPremium = (v: number) => {
     if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
@@ -1303,7 +1715,9 @@ function DiscoverSections() {
             Discovery Candidates
             <InfoTooltip text={SECTION_TOOLTIPS["Discovery Candidates"]} />
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+          <div
+            style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}
+          >
             {lastSync && (
               <span className="report-meta" style={{ margin: 0 }}>
                 {new Date(lastSync).toLocaleTimeString()}
@@ -1314,42 +1728,132 @@ function DiscoverSections() {
             </span>
           </div>
         </div>
-        {error && <div className="section-body"><div className="alert-item bearish">{error}</div></div>}
+        {error && (
+          <div className="section-body">
+            <div className="alert-item bearish">{error}</div>
+          </div>
+        )}
         {candidates.length === 0 && !syncing && !error && (
-          <div className="section-body"><div className="alert-item">No candidates found. Waiting for initial scan...</div></div>
+          <div className="section-body">
+            <div className="alert-item">
+              No candidates found. Waiting for initial scan...
+            </div>
+          </div>
         )}
         {candidates.length > 0 && (
           <div className="section-body table-wrap">
             <table>
               <thead>
                 <tr>
-                  <SortTh<DiscoverSortKey> label="Ticker" sortKey="ticker" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<DiscoverSortKey> label="Score" sortKey="score" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<DiscoverSortKey> label="DP Direction" sortKey="dp_direction" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<DiscoverSortKey> label="DP Strength" sortKey="dp_strength" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<DiscoverSortKey> label="Buy Ratio" sortKey="dp_buy_ratio" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<DiscoverSortKey> label="Options Bias" sortKey="options_bias" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<DiscoverSortKey> label="Alerts" sortKey="alerts" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<DiscoverSortKey> label="Premium" sortKey="total_premium" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<DiscoverSortKey> label="Sweeps" sortKey="sweeps" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<DiscoverSortKey> label="Sector" sortKey="sector" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
+                  <SortTh<DiscoverSortKey>
+                    label="Ticker"
+                    sortKey="ticker"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<DiscoverSortKey>
+                    label="Score"
+                    sortKey="score"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<DiscoverSortKey>
+                    label="DP Direction"
+                    sortKey="dp_direction"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<DiscoverSortKey>
+                    label="DP Strength"
+                    sortKey="dp_strength"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<DiscoverSortKey>
+                    label="Buy Ratio"
+                    sortKey="dp_buy_ratio"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<DiscoverSortKey>
+                    label="Options Bias"
+                    sortKey="options_bias"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<DiscoverSortKey>
+                    label="Alerts"
+                    sortKey="alerts"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<DiscoverSortKey>
+                    label="Premium"
+                    sortKey="total_premium"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<DiscoverSortKey>
+                    label="Sweeps"
+                    sortKey="sweeps"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<DiscoverSortKey>
+                    label="Sector"
+                    sortKey="sector"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
                 </tr>
               </thead>
               <tbody>
                 {sorted.map((c) => (
                   <tr key={c.ticker}>
-                    <td><TickerLink ticker={c.ticker} /></td>
-                    <td className="right">
-                      <span className={scoreClass(c.score)}>{c.score.toFixed(1)}</span>
+                    <td>
+                      <TickerLink ticker={c.ticker} />
                     </td>
-                    <td><span className={dpClass(c.dp_direction)}>{c.dp_direction}</span></td>
+                    <td className="right">
+                      <span className={scoreClass(c.score)}>
+                        {c.score.toFixed(1)}
+                      </span>
+                    </td>
+                    <td>
+                      <span className={dpClass(c.dp_direction)}>
+                        {c.dp_direction}
+                      </span>
+                    </td>
                     <td className="right">{c.dp_strength.toFixed(1)}</td>
-                    <td className="right">{(c.dp_buy_ratio * 100).toFixed(1)}%</td>
-                    <td><span className={biasClass(c.options_bias)}>{c.options_bias}</span></td>
+                    <td className="right">
+                      {(c.dp_buy_ratio * 100).toFixed(1)}%
+                    </td>
+                    <td>
+                      <span className={biasClass(c.options_bias)}>
+                        {c.options_bias}
+                      </span>
+                    </td>
                     <td className="right">{c.alerts}</td>
                     <td className="right">{fmtPremium(c.total_premium)}</td>
                     <td className="right">{c.sweeps}</td>
-                    <td className="cell-muted">{c.sector || c.issue_type || "—"}</td>
+                    <td className="cell-muted">
+                      {c.sector || c.issue_type || "—"}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -1361,26 +1865,51 @@ function DiscoverSections() {
   );
 }
 
-type JournalSortKey = "id" | "date" | "ticker" | "structure" | "decision" | "qty" | "entry_cost" | "max_risk" | "realized_pnl" | "ror";
+type JournalSortKey =
+  | "id"
+  | "date"
+  | "ticker"
+  | "structure"
+  | "decision"
+  | "qty"
+  | "entry_cost"
+  | "max_risk"
+  | "realized_pnl"
+  | "ror";
 
-const journalSortExtract = (t: TradeEntry, key: JournalSortKey): string | number | null => {
+const journalSortExtract = (
+  t: TradeEntry,
+  key: JournalSortKey,
+): string | number | null => {
   switch (key) {
-    case "id": return t.id;
-    case "date": return t.date;
-    case "ticker": return t.ticker;
-    case "structure": return t.structure;
-    case "decision": return t.decision;
-    case "qty": return t.contracts ?? t.shares ?? t.quantity ?? null;
-    case "entry_cost": return t.total_cost ?? t.entry_cost ?? null;
-    case "max_risk": return t.max_risk ?? null;
-    case "realized_pnl": return t.realized_pnl ?? null;
-    case "ror": return t.return_on_risk ?? null;
-    default: return null;
+    case "id":
+      return t.id;
+    case "date":
+      return t.date;
+    case "ticker":
+      return t.ticker;
+    case "structure":
+      return t.structure;
+    case "decision":
+      return t.decision;
+    case "qty":
+      return t.contracts ?? t.shares ?? t.quantity ?? null;
+    case "entry_cost":
+      return t.total_cost ?? t.entry_cost ?? null;
+    case "max_risk":
+      return t.max_risk ?? null;
+    case "realized_pnl":
+      return t.realized_pnl ?? null;
+    case "ror":
+      return t.return_on_risk ?? null;
+    default:
+      return null;
   }
 };
 
 function JournalSections() {
-  const { data, loading, error, syncWithIB, syncing, lastSyncResult } = useJournal();
+  const { data, loading, error, syncWithIB, syncing, lastSyncResult } =
+    useJournal();
   const [syncError, setSyncError] = useState<string | null>(null);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const trades = useMemo(() => {
@@ -1389,16 +1918,25 @@ function JournalSections() {
   }, [data]);
 
   const extractSearchText = useCallback(
-    (t: TradeEntry) => `${t.ticker} ${t.structure} ${t.decision} ${t.date} ${t.edge_analysis?.edge_type ?? ""}`,
+    (t: TradeEntry) =>
+      `${t.ticker} ${t.structure} ${t.decision} ${t.date} ${t.edge_analysis?.edge_type ?? ""}`,
     [],
   );
-  const { filtered, query, setQuery } = useTableFilter(trades, extractSearchText);
-  const { sorted: sortedTrades, sort, toggle } = useSort(filtered, journalSortExtract, "id" as JournalSortKey, "desc");
+  const { filtered, query, setQuery } = useTableFilter(
+    trades,
+    extractSearchText,
+  );
+  const {
+    sorted: sortedTrades,
+    sort,
+    toggle,
+  } = useSort(filtered, journalSortExtract, "id" as JournalSortKey, "desc");
 
   const toggleExpand = useCallback((id: number) => {
     setExpandedIds((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   }, []);
@@ -1415,7 +1953,10 @@ function JournalSections() {
   const fmtJournalUsd = (v: number | undefined | null) => {
     if (v == null) return "—";
     const abs = Math.abs(v);
-    const formatted = abs >= 1000 ? `$${abs.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}` : `$${abs.toFixed(2)}`;
+    const formatted =
+      abs >= 1000
+        ? `$${abs.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
+        : `$${abs.toFixed(2)}`;
     return v < 0 ? `-${formatted}` : formatted;
   };
 
@@ -1469,27 +2010,106 @@ function JournalSections() {
             <span className="pill defined">{trades.length} TRADES</span>
           </div>
         </div>
-        {error && <div className="section-body"><div className="alert-item bearish">{error}</div></div>}
-        {syncError && <div className="section-body"><div className="alert-item bearish">IB Sync: {syncError}</div></div>}
-        {loading && <div className="section-body p-6"><TableSkeleton rows={4} columns={6} /></div>}
+        {error && (
+          <div className="section-body">
+            <div className="alert-item bearish">{error}</div>
+          </div>
+        )}
+        {syncError && (
+          <div className="section-body">
+            <div className="alert-item bearish">IB Sync: {syncError}</div>
+          </div>
+        )}
+        {loading && (
+          <div className="section-body p-6">
+            <TableSkeleton rows={4} columns={6} />
+          </div>
+        )}
         {!loading && trades.length === 0 && !error && (
-          <div className="section-body"><div className="alert-item">No trades in journal.</div></div>
+          <div className="section-body">
+            <div className="alert-item">No trades in journal.</div>
+          </div>
         )}
         {trades.length > 0 && (
           <div className="section-body table-wrap">
             <table>
               <thead>
                 <tr>
-                  <SortTh<JournalSortKey> label="#" sortKey="id" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<JournalSortKey> label="Date" sortKey="date" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<JournalSortKey> label="Ticker" sortKey="ticker" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<JournalSortKey> label="Structure" sortKey="structure" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<JournalSortKey> label="Status" sortKey="decision" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<JournalSortKey> label="Qty" sortKey="qty" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<JournalSortKey> label="Entry Cost" sortKey="entry_cost" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<JournalSortKey> label="Max Risk" sortKey="max_risk" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<JournalSortKey> label="Realized P&L" sortKey="realized_pnl" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<JournalSortKey> label="RoR" sortKey="ror" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
+                  <SortTh<JournalSortKey>
+                    label="#"
+                    sortKey="id"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<JournalSortKey>
+                    label="Date"
+                    sortKey="date"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<JournalSortKey>
+                    label="Ticker"
+                    sortKey="ticker"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<JournalSortKey>
+                    label="Structure"
+                    sortKey="structure"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<JournalSortKey>
+                    label="Status"
+                    sortKey="decision"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<JournalSortKey>
+                    label="Qty"
+                    sortKey="qty"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<JournalSortKey>
+                    label="Entry Cost"
+                    sortKey="entry_cost"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<JournalSortKey>
+                    label="Max Risk"
+                    sortKey="max_risk"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<JournalSortKey>
+                    label="Realized P&L"
+                    sortKey="realized_pnl"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<JournalSortKey>
+                    label="RoR"
+                    sortKey="ror"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
                   <th>Gates</th>
                   <th>Edge</th>
                 </tr>
@@ -1506,45 +2126,103 @@ function JournalSections() {
                         <td className="cell-muted">{t.id}</td>
                         <td>{t.date}</td>
                         <td>
-                          <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                          <span
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "4px",
+                            }}
+                          >
                             <TickerLink ticker={t.ticker} />
                             {hasLegs && (
                               <button
                                 className="expand-btn"
                                 onClick={() => toggleExpand(t.id)}
-                                title={isExpanded ? "Collapse legs" : "Expand legs"}
+                                title={
+                                  isExpanded ? "Collapse legs" : "Expand legs"
+                                }
                               >
-                                <ChevronDown size={12} style={{ transform: isExpanded ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 150ms ease" }} />
+                                <ChevronDown
+                                  size={12}
+                                  style={{
+                                    transform: isExpanded
+                                      ? "rotate(180deg)"
+                                      : "rotate(0deg)",
+                                    transition: "transform 150ms ease",
+                                  }}
+                                />
                               </button>
                             )}
                           </span>
                         </td>
                         <td>{t.structure}</td>
-                        <td><span className={decisionClass(t.decision)}>{t.decision}</span></td>
+                        <td>
+                          <span className={decisionClass(t.decision)}>
+                            {t.decision}
+                          </span>
+                        </td>
                         <td className="right">{qty ?? "—"}</td>
                         <td className="right">{fmtJournalUsd(cost)}</td>
                         <td className="right">{fmtJournalUsd(t.max_risk)}</td>
-                        <td className="right"><span className={pnlClass(t.realized_pnl)}>{fmtJournalUsd(t.realized_pnl)}{t.return_on_risk != null ? ` (${(t.return_on_risk * 100) >= 0 ? "+" : ""}${(t.return_on_risk * 100).toFixed(1)}%)` : ""}</span></td>
-                        <td className="right">{t.return_on_risk != null ? `${(t.return_on_risk * 100).toFixed(1)}%` : "—"}</td>
-                        <td className="cell-muted">{t.gates_passed?.join(", ") || t.gates_failed?.join(", ") || "—"}</td>
-                        <td className="cell-muted">{t.edge_analysis?.edge_type ?? "—"}</td>
+                        <td className="right">
+                          <span className={pnlClass(t.realized_pnl)}>
+                            {fmtJournalUsd(t.realized_pnl)}
+                            {t.return_on_risk != null
+                              ? ` (${t.return_on_risk * 100 >= 0 ? "+" : ""}${(t.return_on_risk * 100).toFixed(1)}%)`
+                              : ""}
+                          </span>
+                        </td>
+                        <td className="right">
+                          {t.return_on_risk != null
+                            ? `${(t.return_on_risk * 100).toFixed(1)}%`
+                            : "—"}
+                        </td>
+                        <td className="cell-muted">
+                          {t.gates_passed?.join(", ") ||
+                            t.gates_failed?.join(", ") ||
+                            "—"}
+                        </td>
+                        <td className="cell-muted">
+                          {t.edge_analysis?.edge_type ?? "—"}
+                        </td>
                       </tr>
-                      {hasLegs && isExpanded && t.legs!.map((leg, i) => (
-                        <tr key={`${t.id}-leg-${i}`} className="leg-row">
-                          <td />
-                          <td className="cell-muted">{leg.expiry ?? "—"}</td>
-                          <td />
-                          <td className="cell-muted">{leg.type ?? "—"}{leg.strike != null ? ` $${leg.strike}` : ""}</td>
-                          <td />
-                          <td className="right cell-muted">{leg.contracts ?? "—"}</td>
-                          <td className="right cell-muted">{leg.open_price != null ? `$${leg.open_price.toFixed(2)}` : "—"}</td>
-                          <td className="right cell-muted">{leg.close_price != null ? `$${leg.close_price.toFixed(2)}` : "—"}</td>
-                          <td className="right"><span className={pnlClass(leg.leg_pnl)}>{leg.leg_pnl != null ? fmtJournalUsd(leg.leg_pnl) : "—"}</span></td>
-                          <td />
-                          <td />
-                          <td />
-                        </tr>
-                      ))}
+                      {hasLegs &&
+                        isExpanded &&
+                        t.legs!.map((leg, i) => (
+                          <tr key={`${t.id}-leg-${i}`} className="leg-row">
+                            <td />
+                            <td className="cell-muted">{leg.expiry ?? "—"}</td>
+                            <td />
+                            <td className="cell-muted">
+                              {leg.type ?? "—"}
+                              {leg.strike != null ? ` $${leg.strike}` : ""}
+                            </td>
+                            <td />
+                            <td className="right cell-muted">
+                              {leg.contracts ?? "—"}
+                            </td>
+                            <td className="right cell-muted">
+                              {leg.open_price != null
+                                ? `$${leg.open_price.toFixed(2)}`
+                                : "—"}
+                            </td>
+                            <td className="right cell-muted">
+                              {leg.close_price != null
+                                ? `$${leg.close_price.toFixed(2)}`
+                                : "—"}
+                            </td>
+                            <td className="right">
+                              <span className={pnlClass(leg.leg_pnl)}>
+                                {leg.leg_pnl != null
+                                  ? fmtJournalUsd(leg.leg_pnl)
+                                  : "—"}
+                              </span>
+                            </td>
+                            <td />
+                            <td />
+                            <td />
+                          </tr>
+                        ))}
                     </React.Fragment>
                   );
                 })}
@@ -1559,7 +2237,16 @@ function JournalSections() {
 
 /* ─── Orders tables ────────────────────────────────────── */
 
-type OpenOrderKey = "symbol" | "action" | "orderType" | "totalQuantity" | "limitPrice" | "lastPrice" | "status" | "tif" | "actions";
+type OpenOrderKey =
+  | "symbol"
+  | "action"
+  | "orderType"
+  | "totalQuantity"
+  | "limitPrice"
+  | "lastPrice"
+  | "status"
+  | "tif"
+  | "actions";
 
 /** Build the prices-map key for an order's contract (option key for options, symbol for stocks). */
 function orderPriceKey(contract: OpenOrder["contract"]): string | null {
@@ -1571,13 +2258,23 @@ function orderPriceKey(contract: OpenOrder["contract"]): string | null {
     contract.right &&
     contract.expiry
   ) {
-    const right = contract.right === "C" || contract.right === "P"
-      ? contract.right
-      : contract.right === "CALL" ? "C" : contract.right === "PUT" ? "P" : null;
+    const right =
+      contract.right === "C" || contract.right === "P"
+        ? contract.right
+        : contract.right === "CALL"
+          ? "C"
+          : contract.right === "PUT"
+            ? "P"
+            : null;
     if (right) {
       const expiryClean = contract.expiry.replace(/-/g, "");
       if (expiryClean.length === 8) {
-        return optionKey({ symbol: contract.symbol.toUpperCase(), expiry: expiryClean, strike: contract.strike, right });
+        return optionKey({
+          symbol: contract.symbol.toUpperCase(),
+          expiry: expiryClean,
+          strike: contract.strike,
+          right,
+        });
       }
     }
   }
@@ -1601,7 +2298,9 @@ function resolveOrderLastPrice(
 
   // BAG: compute net mid from portfolio legs
   if (order.contract.secType !== "BAG" || !portfolio) return null;
-  const pos = portfolio.positions.find((p) => p.ticker === order.contract.symbol && p.legs.length > 1);
+  const pos = portfolio.positions.find(
+    (p) => p.ticker === order.contract.symbol && p.legs.length > 1,
+  );
   if (!pos) return null;
 
   let netMid = 0;
@@ -1621,23 +2320,36 @@ function makeOpenOrderExtract(
   prices?: Record<string, PriceData>,
   portfolio?: PortfolioData | null,
 ) {
-  return (item: OpenOrderDisplayRow, key: OpenOrderKey): string | number | null => {
+  return (
+    item: OpenOrderDisplayRow,
+    key: OpenOrderKey,
+  ): string | number | null => {
     switch (key) {
       case "symbol": {
         return item.kind === "combo" ? item.symbol : item.order.contract.symbol;
       }
-      case "action": return item.kind === "combo" ? "COMBO" : item.order.action;
-      case "orderType": return item.kind === "combo" ? item.structure : item.order.orderType;
-      case "totalQuantity": return item.kind === "combo" ? item.totalQuantity : item.order.totalQuantity;
-      case "limitPrice": return item.kind === "combo" ? item.limitPrice : item.order.limitPrice;
+      case "action":
+        return item.kind === "combo" ? "COMBO" : item.order.action;
+      case "orderType":
+        return item.kind === "combo" ? item.structure : item.order.orderType;
+      case "totalQuantity":
+        return item.kind === "combo"
+          ? item.totalQuantity
+          : item.order.totalQuantity;
+      case "limitPrice":
+        return item.kind === "combo" ? item.limitPrice : item.order.limitPrice;
       case "lastPrice":
         return item.kind === "combo"
           ? resolveOpenOrderComboPrice(item.orders, prices)
           : resolveOrderLastPrice(item.order, prices, portfolio);
-      case "status": return item.kind === "combo" ? item.status : item.order.status;
-      case "tif": return item.kind === "combo" ? item.tif : item.order.tif;
-      case "actions": return null;
-      default: return null;
+      case "status":
+        return item.kind === "combo" ? item.status : item.order.status;
+      case "tif":
+        return item.kind === "combo" ? item.tif : item.order.tif;
+      case "actions":
+        return null;
+      default:
+        return null;
     }
   };
 }
@@ -1646,26 +2358,58 @@ function makeOpenOrderExtract(
 function OrderPriceCell({ price }: { price: number | null }) {
   const { direction, flashDirection } = usePriceDirection(price);
   return (
-    <td className={`right last-price-cell ${flashDirection ? `last-price-${flashDirection}` : ""}`}>
+    <td
+      className={`right last-price-cell ${flashDirection ? `last-price-${flashDirection}` : ""}`}
+    >
       {price != null ? fmtPrice(price) : "—"}
-      {direction === "up" && <ArrowUp size={11} className="price-trend-icon price-trend-up" aria-label="price up" />}
-      {direction === "down" && <ArrowDown size={11} className="price-trend-icon price-trend-down" aria-label="price down" />}
+      {direction === "up" && (
+        <ArrowUp
+          size={11}
+          className="price-trend-icon price-trend-up"
+          aria-label="price up"
+        />
+      )}
+      {direction === "down" && (
+        <ArrowDown
+          size={11}
+          className="price-trend-icon price-trend-down"
+          aria-label="price down"
+        />
+      )}
     </td>
   );
 }
 
-type ExecOrderKey = "symbol" | "side" | "quantity" | "avgPrice" | "commission" | "realizedPNL" | "time";
+type ExecOrderKey =
+  | "symbol"
+  | "side"
+  | "quantity"
+  | "avgPrice"
+  | "commission"
+  | "realizedPNL"
+  | "time";
 
-const execOrderExtract = (item: ExecutedOrder, key: ExecOrderKey): string | number | null => {
+const execOrderExtract = (
+  item: ExecutedOrder,
+  key: ExecOrderKey,
+): string | number | null => {
   switch (key) {
-    case "symbol": return item.symbol;
-    case "side": return item.side;
-    case "quantity": return item.quantity;
-    case "avgPrice": return item.avgPrice;
-    case "commission": return item.commission;
-    case "realizedPNL": return item.realizedPNL;
-    case "time": return item.time;
-    default: return null;
+    case "symbol":
+      return item.symbol;
+    case "side":
+      return item.side;
+    case "quantity":
+      return item.quantity;
+    case "avgPrice":
+      return item.avgPrice;
+    case "commission":
+      return item.commission;
+    case "realizedPNL":
+      return item.realizedPNL;
+    case "time":
+      return item.time;
+    default:
+      return null;
   }
 };
 
@@ -1678,20 +2422,26 @@ function OrdersSections({
   prices?: Record<string, PriceData>;
   portfolio?: PortfolioData | null;
 }) {
-  const { pendingCancels, pendingModifies, cancelledOrders, requestCancel, requestModify } = useOrderActions();
-  const openOrderExtract = useMemo(() => makeOpenOrderExtract(prices, portfolio), [prices, portfolio]);
+  const {
+    pendingCancels,
+    pendingModifies,
+    cancelledOrders,
+    requestCancel,
+    requestModify,
+  } = useOrderActions();
+  const openOrderExtract = useMemo(
+    () => makeOpenOrderExtract(prices, portfolio),
+    [prices, portfolio],
+  );
   const openOrderRows = useMemo(() => {
     if (!orders) return [];
     return buildOpenOrderDisplayRows(orders.open_orders, portfolio?.positions);
   }, [orders, portfolio?.positions]);
   const openSort = useSort(openOrderRows, openOrderExtract);
-  const extractOpenSearch = useCallback(
-    (row: OpenOrderDisplayRow) => {
-      if (row.kind === "combo") return `${row.symbol} ${row.structure} combo`;
-      return `${row.order.contract.symbol} ${row.order.action} ${row.order.orderType}`;
-    },
-    [],
-  );
+  const extractOpenSearch = useCallback((row: OpenOrderDisplayRow) => {
+    if (row.kind === "combo") return `${row.symbol} ${row.structure} combo`;
+    return `${row.order.contract.symbol} ${row.order.action} ${row.order.orderType}`;
+  }, []);
   const openFilter = useTableFilter(openSort.sorted, extractOpenSearch);
 
   const [cancelTarget, setCancelTarget] = useState<OpenOrder | null>(null);
@@ -1710,29 +2460,35 @@ function OrdersSections({
     setCancelTarget(null);
   }, [cancelTarget, requestCancel]);
 
-  const handleModify = useCallback(async (request: ModifyOrderRequest) => {
-    if (!modifyTarget) return;
-    setActionLoading(true);
-    await requestModify(
-      modifyTarget.requestOrder,
-      modifyTarget.cancelOrders?.length
-        ? { ...request, cancelOrders: modifyTarget.cancelOrders }
-        : request,
-    );
-    setActionLoading(false);
-    setModifyTarget(null);
-  }, [modifyTarget, requestModify]);
-
-  const handleCancelCombo = useCallback(async (comboOrders: OpenOrder[]) => {
-    setActionLoading(true);
-    try {
-      for (const order of comboOrders) {
-        await requestCancel(order);
-      }
-    } finally {
+  const handleModify = useCallback(
+    async (request: ModifyOrderRequest) => {
+      if (!modifyTarget) return;
+      setActionLoading(true);
+      await requestModify(
+        modifyTarget.requestOrder,
+        modifyTarget.cancelOrders?.length
+          ? { ...request, cancelOrders: modifyTarget.cancelOrders }
+          : request,
+      );
       setActionLoading(false);
-    }
-  }, [requestCancel]);
+      setModifyTarget(null);
+    },
+    [modifyTarget, requestModify],
+  );
+
+  const handleCancelCombo = useCallback(
+    async (comboOrders: OpenOrder[]) => {
+      setActionLoading(true);
+      try {
+        for (const order of comboOrders) {
+          await requestCancel(order);
+        }
+      } finally {
+        setActionLoading(false);
+      }
+    },
+    [requestCancel],
+  );
 
   // Merge cancelled orders into executed list for display (dedupe by permId)
   const allExecutedRows = useMemo(() => {
@@ -1744,7 +2500,14 @@ function OrdersSections({
       cancelRows.push({
         execId: `cancelled-${c.permId}`,
         symbol: c.symbol,
-        contract: { conId: null, symbol: c.symbol, secType: "", strike: null, right: null, expiry: null },
+        contract: {
+          conId: null,
+          symbol: c.symbol,
+          secType: "",
+          strike: null,
+          right: null,
+          expiry: null,
+        },
         side: "CANCELLED",
         quantity: c.totalQuantity,
         avgPrice: c.limitPrice,
@@ -1757,7 +2520,12 @@ function OrdersSections({
     return [...cancelRows, ...(orders?.executed_orders ?? [])];
   }, [cancelledOrders, orders?.executed_orders]);
 
-  const execSortWithCancelled = useSort<ExecutedOrder, ExecOrderKey>(allExecutedRows, execOrderExtract, "time", "desc");
+  const execSortWithCancelled = useSort<ExecutedOrder, ExecOrderKey>(
+    allExecutedRows,
+    execOrderExtract,
+    "time",
+    "desc",
+  );
 
   // Group fills into position-level rows
   const positionGroups = useMemo(
@@ -1799,7 +2567,8 @@ function OrdersSections({
     );
   }
 
-  const canModify = (o: OpenOrder) => o.orderType === "LMT" || o.orderType === "STP LMT";
+  const canModify = (o: OpenOrder) =>
+    o.orderType === "LMT" || o.orderType === "STP LMT";
   const execCount = orders.executed_count + cancelledOrders.length;
 
   return (
@@ -1827,7 +2596,13 @@ function OrdersSections({
             <InfoTooltip text={SECTION_TOOLTIPS["Open Orders"]} />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <TableSearch query={openFilter.query} setQuery={openFilter.setQuery} placeholder="Filter orders..." resultCount={openFilter.filtered.length} totalCount={openSort.sorted.length} />
+            <TableSearch
+              query={openFilter.query}
+              setQuery={openFilter.setQuery}
+              placeholder="Filter orders..."
+              resultCount={openFilter.filtered.length}
+              totalCount={openSort.sorted.length}
+            />
             <span className="pill defined">{orders.open_count} ORDERS</span>
           </div>
         </div>
@@ -1838,14 +2613,65 @@ function OrdersSections({
             <table>
               <thead>
                 <tr>
-                  <SortTh<OpenOrderKey> label="Symbol" sortKey="symbol" activeKey={openSort.sort.key} direction={openSort.sort.direction} onToggle={openSort.toggle} />
-                  <SortTh<OpenOrderKey> label="Action" sortKey="action" activeKey={openSort.sort.key} direction={openSort.sort.direction} onToggle={openSort.toggle} />
-                  <SortTh<OpenOrderKey> label="Type" sortKey="orderType" activeKey={openSort.sort.key} direction={openSort.sort.direction} onToggle={openSort.toggle} />
-                  <SortTh<OpenOrderKey> label="Quantity" sortKey="totalQuantity" className="right" activeKey={openSort.sort.key} direction={openSort.sort.direction} onToggle={openSort.toggle} />
-                  <SortTh<OpenOrderKey> label="Limit Price" sortKey="limitPrice" className="right" activeKey={openSort.sort.key} direction={openSort.sort.direction} onToggle={openSort.toggle} />
-                  <SortTh<OpenOrderKey> label="Last Price" sortKey="lastPrice" className="right" activeKey={openSort.sort.key} direction={openSort.sort.direction} onToggle={openSort.toggle} />
-                  <SortTh<OpenOrderKey> label="Status" sortKey="status" activeKey={openSort.sort.key} direction={openSort.sort.direction} onToggle={openSort.toggle} />
-                  <SortTh<OpenOrderKey> label="TIF" sortKey="tif" activeKey={openSort.sort.key} direction={openSort.sort.direction} onToggle={openSort.toggle} />
+                  <SortTh<OpenOrderKey>
+                    label="Symbol"
+                    sortKey="symbol"
+                    activeKey={openSort.sort.key}
+                    direction={openSort.sort.direction}
+                    onToggle={openSort.toggle}
+                  />
+                  <SortTh<OpenOrderKey>
+                    label="Action"
+                    sortKey="action"
+                    activeKey={openSort.sort.key}
+                    direction={openSort.sort.direction}
+                    onToggle={openSort.toggle}
+                  />
+                  <SortTh<OpenOrderKey>
+                    label="Type"
+                    sortKey="orderType"
+                    activeKey={openSort.sort.key}
+                    direction={openSort.sort.direction}
+                    onToggle={openSort.toggle}
+                  />
+                  <SortTh<OpenOrderKey>
+                    label="Quantity"
+                    sortKey="totalQuantity"
+                    className="right"
+                    activeKey={openSort.sort.key}
+                    direction={openSort.sort.direction}
+                    onToggle={openSort.toggle}
+                  />
+                  <SortTh<OpenOrderKey>
+                    label="Limit Price"
+                    sortKey="limitPrice"
+                    className="right"
+                    activeKey={openSort.sort.key}
+                    direction={openSort.sort.direction}
+                    onToggle={openSort.toggle}
+                  />
+                  <SortTh<OpenOrderKey>
+                    label="Last Price"
+                    sortKey="lastPrice"
+                    className="right"
+                    activeKey={openSort.sort.key}
+                    direction={openSort.sort.direction}
+                    onToggle={openSort.toggle}
+                  />
+                  <SortTh<OpenOrderKey>
+                    label="Status"
+                    sortKey="status"
+                    activeKey={openSort.sort.key}
+                    direction={openSort.sort.direction}
+                    onToggle={openSort.toggle}
+                  />
+                  <SortTh<OpenOrderKey>
+                    label="TIF"
+                    sortKey="tif"
+                    activeKey={openSort.sort.key}
+                    direction={openSort.sort.direction}
+                    onToggle={openSort.toggle}
+                  />
                   <th className="actions-th">Actions</th>
                 </tr>
               </thead>
@@ -1854,18 +2680,24 @@ function OrdersSections({
                   if (o.kind === "combo") {
                     const comboCanModify = o.orders.every(canModify);
                     const comboModifyTarget = buildGroupedComboModifyTarget(o);
-                    const isPendingCancel = o.orders.some((order) => pendingCancels.has(order.permId));
-                    const isPendingModify = o.orders.some((order) => pendingModifies.has(order.permId));
+                    const isPendingCancel = o.orders.some((order) =>
+                      pendingCancels.has(order.permId),
+                    );
+                    const isPendingModify = o.orders.some((order) =>
+                      pendingModifies.has(order.permId),
+                    );
                     const isPending = isPendingCancel || isPendingModify;
 
                     return (
                       <tr
                         key={o.id}
-                        className={isPendingCancel
-                          ? "row-pending-cancel"
-                          : isPendingModify
-                            ? "row-pending-modify"
-                            : undefined}
+                        className={
+                          isPendingCancel
+                            ? "row-pending-cancel"
+                            : isPendingModify
+                              ? "row-pending-modify"
+                              : undefined
+                        }
                       >
                         <td>
                           <TickerLink ticker={o.symbol} />
@@ -1879,7 +2711,9 @@ function OrdersSections({
                           >
                             {o.summary}
                           </span>
-                          {isPending && <Loader2 size={12} className="cancel-spinner" />}
+                          {isPending && (
+                            <Loader2 size={12} className="cancel-spinner" />
+                          )}
                         </td>
                         <td>
                           <span className="pill neutral">COMBO</span>
@@ -1887,16 +2721,30 @@ function OrdersSections({
                         <td>{o.structure}</td>
                         <td className="right">{o.totalQuantity}</td>
                         <td className="right">
-                          <span className={isPendingModify ? "status-modifying" : ""}>
-                            {isPendingModify ? "—" : o.limitPrice != null ? fmtPrice(o.limitPrice) : "—"}
+                          <span
+                            className={
+                              isPendingModify ? "status-modifying" : ""
+                            }
+                          >
+                            {isPendingModify
+                              ? "—"
+                              : o.limitPrice != null
+                                ? fmtPrice(o.limitPrice)
+                                : "—"}
                           </span>
                         </td>
-                        <OrderPriceCell price={resolveOpenOrderComboPrice(o.orders, prices)} />
+                        <OrderPriceCell
+                          price={resolveOpenOrderComboPrice(o.orders, prices)}
+                        />
                         <td>
                           {isPendingCancel ? (
-                            <span className="status-cancelling">Cancelling...</span>
+                            <span className="status-cancelling">
+                              Cancelling...
+                            </span>
                           ) : isPendingModify ? (
-                            <span className="status-modifying">Modifying...</span>
+                            <span className="status-modifying">
+                              Modifying...
+                            </span>
                           ) : (
                             o.status
                           )}
@@ -1904,18 +2752,27 @@ function OrdersSections({
                         <td>{o.tif}</td>
                         <td className="actions-cell">
                           {isPending ? (
-                            <span className="cancel-pending-label">PENDING</span>
+                            <span className="cancel-pending-label">
+                              PENDING
+                            </span>
                           ) : (
                             <>
                               <button
                                 className="btn-order-action btn-modify"
                                 disabled={!comboCanModify}
-                                title={comboCanModify ? "Modify combo order" : "Only LMT orders can be modified"}
-                                onClick={() => setModifyTarget({
-                                  modalOrder: comboModifyTarget.modalOrder,
-                                  requestOrder: o.orders[0],
-                                  cancelOrders: comboModifyTarget.cancelOrders,
-                                })}
+                                title={
+                                  comboCanModify
+                                    ? "Modify combo order"
+                                    : "Only LMT orders can be modified"
+                                }
+                                onClick={() =>
+                                  setModifyTarget({
+                                    modalOrder: comboModifyTarget.modalOrder,
+                                    requestOrder: o.orders[0],
+                                    cancelOrders:
+                                      comboModifyTarget.cancelOrders,
+                                  })
+                                }
                               >
                                 MODIFY
                               </button>
@@ -1938,11 +2795,13 @@ function OrdersSections({
                   return (
                     <tr
                       key={`${o.order.orderId}-${o.order.permId}`}
-                      className={isPendingCancel
-                        ? "row-pending-cancel"
-                        : isPendingModify
-                          ? "row-pending-modify"
-                          : undefined}
+                      className={
+                        isPendingCancel
+                          ? "row-pending-cancel"
+                          : isPendingModify
+                            ? "row-pending-modify"
+                            : undefined
+                      }
                     >
                       <td>
                         <TickerLink ticker={o.order.contract.symbol} />
@@ -1958,10 +2817,14 @@ function OrdersSections({
                             {o.summary}
                           </span>
                         ) : null}
-                        {isPending && <Loader2 size={12} className="cancel-spinner" />}
+                        {isPending && (
+                          <Loader2 size={12} className="cancel-spinner" />
+                        )}
                       </td>
                       <td>
-                        <span className={`pill ${o.order.action === "BUY" ? "accum" : "distrib"}`}>
+                        <span
+                          className={`pill ${o.order.action === "BUY" ? "accum" : "distrib"}`}
+                        >
                           {o.order.action}
                         </span>
                       </td>
@@ -1970,14 +2833,24 @@ function OrdersSections({
                       <td className="right">
                         {isPendingModify && o.order.orderType === "STP LMT" ? (
                           <span className="status-modifying">Modifying...</span>
+                        ) : o.order.limitPrice != null ? (
+                          fmtPrice(o.order.limitPrice)
                         ) : (
-                          o.order.limitPrice != null ? fmtPrice(o.order.limitPrice) : "—"
+                          "—"
                         )}
                       </td>
-                      <OrderPriceCell price={resolveOrderLastPrice(o.order, prices, portfolio)} />
+                      <OrderPriceCell
+                        price={resolveOrderLastPrice(
+                          o.order,
+                          prices,
+                          portfolio,
+                        )}
+                      />
                       <td>
                         {isPendingCancel ? (
-                          <span className="status-cancelling">Cancelling...</span>
+                          <span className="status-cancelling">
+                            Cancelling...
+                          </span>
                         ) : isPendingModify ? (
                           <span className="status-modifying">Modifying...</span>
                         ) : (
@@ -1993,11 +2866,17 @@ function OrdersSections({
                             <button
                               className="btn-order-action btn-modify"
                               disabled={!canModify(o.order)}
-                              title={canModify(o.order) ? "Modify limit price" : "Only LMT orders can be modified"}
-                              onClick={() => setModifyTarget({
-                                modalOrder: o.order,
-                                requestOrder: o.order,
-                              })}
+                              title={
+                                canModify(o.order)
+                                  ? "Modify limit price"
+                                  : "Only LMT orders can be modified"
+                              }
+                              onClick={() =>
+                                setModifyTarget({
+                                  modalOrder: o.order,
+                                  requestOrder: o.order,
+                                })
+                              }
                             >
                               MODIFY
                             </button>
@@ -2027,8 +2906,17 @@ function OrdersSections({
             <InfoTooltip text={SECTION_TOOLTIPS["Today's Executed Orders"]} />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <TableSearch query={execFilter.query} setQuery={execFilter.setQuery} placeholder="Filter fills..." resultCount={execFilter.filtered.length} totalCount={positionGroups.length} />
-            <span className="pill neutral">{positionGroups.length} {positionGroups.length === 1 ? "POSITION" : "POSITIONS"}</span>
+            <TableSearch
+              query={execFilter.query}
+              setQuery={execFilter.setQuery}
+              placeholder="Filter fills..."
+              resultCount={execFilter.filtered.length}
+              totalCount={positionGroups.length}
+            />
+            <span className="pill neutral">
+              {positionGroups.length}{" "}
+              {positionGroups.length === 1 ? "POSITION" : "POSITIONS"}
+            </span>
           </div>
         </div>
         <div className="section-body">
@@ -2058,78 +2946,184 @@ function OrdersSections({
                       {/* Position group header row */}
                       <tr
                         className={`exec-group-header ${isCancelled ? "row-cancelled" : ""}`}
-                        style={{ cursor: group.fills.length > 1 ? "pointer" : "default" }}
-                        onClick={() => group.fills.length > 1 && toggleGroup(group.id)}
+                        style={{
+                          cursor:
+                            group.fills.length > 1 ? "pointer" : "default",
+                        }}
+                        onClick={() =>
+                          group.fills.length > 1 && toggleGroup(group.id)
+                        }
                       >
                         <td style={{ width: "24px", textAlign: "center" }}>
-                          {group.fills.length > 1 && (
-                            isExpanded
-                              ? <ChevronDown size={14} style={{ color: "var(--text-secondary)" }} />
-                              : <ChevronRight size={14} style={{ color: "var(--text-secondary)" }} />
-                          )}
+                          {group.fills.length > 1 &&
+                            (isExpanded ? (
+                              <ChevronDown
+                                size={14}
+                                style={{ color: "var(--text-secondary)" }}
+                              />
+                            ) : (
+                              <ChevronRight
+                                size={14}
+                                style={{ color: "var(--text-secondary)" }}
+                              />
+                            ))}
                         </td>
                         <td>
                           <TickerLink ticker={group.symbol} />
-                          <span style={{ marginLeft: "8px", fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-secondary)" }}>
-                            {group.description.replace(/^(Opened|Closed)\s+\w+\s*/, "")}
+                          <span
+                            style={{
+                              marginLeft: "8px",
+                              fontFamily: "var(--font-mono)",
+                              fontSize: "11px",
+                              color: "var(--text-secondary)",
+                            }}
+                          >
+                            {group.description.replace(
+                              /^(Opened|Closed)\s+\w+\s*/,
+                              "",
+                            )}
                           </span>
-                          {isCancelled && <XCircle size={12} className="cancelled-icon" />}
+                          {isCancelled && (
+                            <XCircle size={12} className="cancelled-icon" />
+                          )}
                         </td>
                         <td>
-                          <span className={`pill ${isCancelled ? "cancelled" : group.isClosing ? "distrib" : "accum"}`}>
-                            {isCancelled ? "CANCELLED" : group.isClosing ? "CLOSE" : "OPEN"}
+                          <span
+                            className={`pill ${isCancelled ? "cancelled" : group.isClosing ? "distrib" : "accum"}`}
+                          >
+                            {isCancelled
+                              ? "CANCELLED"
+                              : group.isClosing
+                                ? "CLOSE"
+                                : "OPEN"}
                           </span>
                         </td>
                         <td className="right">{group.totalQuantity}</td>
-                        <td className="right">{group.netPrice != null ? fmtPrice(group.netPrice) : "—"}</td>
-                        <td className="right">{group.totalCommission !== 0 ? fmtPrice(group.totalCommission) : "—"}</td>
-                        <td className={`right ${group.totalPnL != null ? (group.totalPnL >= 0 ? "positive" : "negative") : ""}`}>
-                          {group.totalPnL != null ? (() => {
-                            // Return on Risk: P&L / entry notional. Entry = exit - P&L.
-                            const optFills = group.fills.filter((f) => f.contract.secType === "OPT");
-                            const exitNotional = optFills.reduce((sum, f) => sum + Math.abs((f.avgPrice ?? 0) * f.quantity * 100), 0);
-                            const entryNotional = Math.abs(exitNotional - group.totalPnL);
-                            const pct = entryNotional > 0 ? (group.totalPnL / entryNotional) * 100 : null;
-                            return `${group.totalPnL >= 0 ? "+" : ""}${fmtPrice(group.totalPnL)}${pct != null ? ` (${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%)` : ""}`;
-                          })() : "—"}
+                        <td className="right">
+                          {group.netPrice != null
+                            ? fmtPrice(group.netPrice)
+                            : "—"}
+                        </td>
+                        <td className="right">
+                          {group.totalCommission !== 0
+                            ? fmtPrice(group.totalCommission)
+                            : "—"}
+                        </td>
+                        <td
+                          className={`right ${group.totalPnL != null ? (group.totalPnL >= 0 ? "positive" : "negative") : ""}`}
+                        >
+                          {group.totalPnL != null
+                            ? (() => {
+                                // Return on Risk: P&L / entry notional. Entry = exit - P&L.
+                                const optFills = group.fills.filter(
+                                  (f) => f.contract.secType === "OPT",
+                                );
+                                const exitNotional = optFills.reduce(
+                                  (sum, f) =>
+                                    sum +
+                                    Math.abs(
+                                      (f.avgPrice ?? 0) * f.quantity * 100,
+                                    ),
+                                  0,
+                                );
+                                const entryNotional = Math.abs(
+                                  exitNotional - group.totalPnL,
+                                );
+                                const pct =
+                                  entryNotional > 0
+                                    ? (group.totalPnL / entryNotional) * 100
+                                    : null;
+                                return `${group.totalPnL >= 0 ? "+" : ""}${fmtPrice(group.totalPnL)}${pct != null ? ` (${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%)` : ""}`;
+                              })()
+                            : "—"}
                         </td>
                         <td>{new Date(group.time).toLocaleTimeString()}</td>
                         <td>
                           {group.isClosing && group.totalPnL != null && (
-                            <SharePnlButton data={positionGroupShareData(group, positionGroups, portfolio?.positions, portfolio?.trade_log_dates)} />
+                            <SharePnlButton
+                              data={positionGroupShareData(
+                                group,
+                                positionGroups,
+                                portfolio?.positions,
+                                portfolio?.trade_log_dates,
+                              )}
+                            />
                           )}
                         </td>
                       </tr>
                       {/* Expanded fill detail rows */}
-                      {isExpanded && group.fills.map((e, i) => {
-                        const displaySide = e.side === "BOT" ? "BUY" : e.side === "SLD" ? "SELL" : e.side;
-                        const isBAG = e.contract.secType === "BAG";
-                        return (
-                          <tr key={`${e.execId}-${i}`} className="exec-fill-row">
-                            <td></td>
-                            <td style={{ paddingLeft: "24px" }}>
-                              <span style={{ fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-secondary)" }}>
-                                {isBAG ? `${e.symbol}` : e.symbol}
-                              </span>
-                            </td>
-                            <td>
-                              <span className={`pill ${displaySide === "BUY" ? "accum" : "distrib"}`} style={{ fontSize: "9px" }}>
-                                {displaySide}
-                              </span>
-                            </td>
-                            <td className="right" style={{ color: "var(--text-secondary)" }}>{e.quantity}</td>
-                            <td className="right" style={{ color: "var(--text-secondary)" }}>{e.avgPrice != null ? fmtPrice(e.avgPrice) : "—"}</td>
-                            <td className="right" style={{ color: "var(--text-secondary)" }}>{e.commission != null && e.commission !== 0 ? fmtPrice(e.commission) : "—"}</td>
-                            <td className="right" style={{ color: "var(--text-secondary)" }}>
-                              {e.realizedPNL != null && Math.abs(e.realizedPNL) > 0.01
-                                ? `${e.realizedPNL >= 0 ? "+" : ""}${fmtPrice(e.realizedPNL)}`
-                                : "—"}
-                            </td>
-                            <td style={{ color: "var(--text-secondary)" }}>{new Date(e.time).toLocaleTimeString()}</td>
-                            <td></td>
-                          </tr>
-                        );
-                      })}
+                      {isExpanded &&
+                        group.fills.map((e, i) => {
+                          const displaySide =
+                            e.side === "BOT"
+                              ? "BUY"
+                              : e.side === "SLD"
+                                ? "SELL"
+                                : e.side;
+                          const isBAG = e.contract.secType === "BAG";
+                          return (
+                            <tr
+                              key={`${e.execId}-${i}`}
+                              className="exec-fill-row"
+                            >
+                              <td></td>
+                              <td style={{ paddingLeft: "24px" }}>
+                                <span
+                                  style={{
+                                    fontFamily: "var(--font-mono)",
+                                    fontSize: "11px",
+                                    color: "var(--text-secondary)",
+                                  }}
+                                >
+                                  {isBAG ? `${e.symbol}` : e.symbol}
+                                </span>
+                              </td>
+                              <td>
+                                <span
+                                  className={`pill ${displaySide === "BUY" ? "accum" : "distrib"}`}
+                                  style={{ fontSize: "9px" }}
+                                >
+                                  {displaySide}
+                                </span>
+                              </td>
+                              <td
+                                className="right"
+                                style={{ color: "var(--text-secondary)" }}
+                              >
+                                {e.quantity}
+                              </td>
+                              <td
+                                className="right"
+                                style={{ color: "var(--text-secondary)" }}
+                              >
+                                {e.avgPrice != null
+                                  ? fmtPrice(e.avgPrice)
+                                  : "—"}
+                              </td>
+                              <td
+                                className="right"
+                                style={{ color: "var(--text-secondary)" }}
+                              >
+                                {e.commission != null && e.commission !== 0
+                                  ? fmtPrice(e.commission)
+                                  : "—"}
+                              </td>
+                              <td
+                                className="right"
+                                style={{ color: "var(--text-secondary)" }}
+                              >
+                                {e.realizedPNL != null &&
+                                Math.abs(e.realizedPNL) > 0.01
+                                  ? `${e.realizedPNL >= 0 ? "+" : ""}${fmtPrice(e.realizedPNL)}`
+                                  : "—"}
+                              </td>
+                              <td style={{ color: "var(--text-secondary)" }}>
+                                {new Date(e.time).toLocaleTimeString()}
+                              </td>
+                              <td></td>
+                            </tr>
+                          );
+                        })}
                     </React.Fragment>
                   );
                 })}
@@ -2142,7 +3136,8 @@ function OrdersSections({
       {orders.last_sync && (
         <div className="section">
           <div className="report-meta">
-            Last Sync: {new Date(orders.last_sync).toLocaleString()} • Source: IB Gateway
+            Last Sync: {new Date(orders.last_sync).toLocaleString()} • Source:
+            IB Gateway
           </div>
         </div>
       )}
@@ -2156,26 +3151,50 @@ function OrdersSections({
 
 const BLOTTER_PAGE_SIZE = 15;
 
-type BlotterSortKey = "date" | "symbol" | "contract_desc" | "sec_type" | "status" | "net_quantity" | "total_commission" | "realized_pnl" | "cost_basis" | "proceeds";
+type BlotterSortKey =
+  | "date"
+  | "symbol"
+  | "contract_desc"
+  | "sec_type"
+  | "status"
+  | "net_quantity"
+  | "total_commission"
+  | "realized_pnl"
+  | "cost_basis"
+  | "proceeds";
 
 function getTradeDate(item: BlotterTrade): string {
   if (item.executions.length === 0) return "";
   return item.executions[item.executions.length - 1].time;
 }
 
-const blotterExtract = (item: BlotterTrade, key: BlotterSortKey): string | number | null => {
+const blotterExtract = (
+  item: BlotterTrade,
+  key: BlotterSortKey,
+): string | number | null => {
   switch (key) {
-    case "date": return getTradeDate(item);
-    case "symbol": return item.symbol;
-    case "contract_desc": return item.contract_desc;
-    case "sec_type": return item.sec_type;
-    case "status": return item.is_closed ? "Closed" : "Open";
-    case "net_quantity": return item.total_quantity ?? item.net_quantity;
-    case "total_commission": return item.total_commission;
-    case "realized_pnl": return item.realized_pnl;
-    case "cost_basis": return item.cost_basis;
-    case "proceeds": return item.proceeds;
-    default: return null;
+    case "date":
+      return getTradeDate(item);
+    case "symbol":
+      return item.symbol;
+    case "contract_desc":
+      return item.contract_desc;
+    case "sec_type":
+      return item.sec_type;
+    case "status":
+      return item.is_closed ? "Closed" : "Open";
+    case "net_quantity":
+      return item.total_quantity ?? item.net_quantity;
+    case "total_commission":
+      return item.total_commission;
+    case "realized_pnl":
+      return item.realized_pnl;
+    case "cost_basis":
+      return item.cost_basis;
+    case "proceeds":
+      return item.proceeds;
+    default:
+      return null;
   }
 };
 
@@ -2188,8 +3207,14 @@ export function HistoricalTradesSection() {
     // Merge closed + open trades, sorted by most recent execution date desc
     const merged = [...(data.closed_trades ?? []), ...(data.open_trades ?? [])];
     merged.sort((a, b) => {
-      const aDate = a.executions.length > 0 ? a.executions[a.executions.length - 1].time : "";
-      const bDate = b.executions.length > 0 ? b.executions[b.executions.length - 1].time : "";
+      const aDate =
+        a.executions.length > 0
+          ? a.executions[a.executions.length - 1].time
+          : "";
+      const bDate =
+        b.executions.length > 0
+          ? b.executions[b.executions.length - 1].time
+          : "";
       return bDate.localeCompare(aDate);
     });
     return merged;
@@ -2200,15 +3225,23 @@ export function HistoricalTradesSection() {
     return `${item.symbol} ${item.contract_desc} ${item.sec_type} ${item.is_closed ? "closed" : "open"} ${latestExecTime}`;
   }, []);
 
-  const { filtered, query, setQuery } = useTableFilter(allTrades, extractSearchText);
+  const { filtered, query, setQuery } = useTableFilter(
+    allTrades,
+    extractSearchText,
+  );
   const { sorted, sort, toggle } = useSort(filtered, blotterExtract);
 
   const totalPages = Math.max(1, Math.ceil(sorted.length / BLOTTER_PAGE_SIZE));
   const safePage = Math.min(page, totalPages - 1);
-  const pageRows = sorted.slice(safePage * BLOTTER_PAGE_SIZE, (safePage + 1) * BLOTTER_PAGE_SIZE);
+  const pageRows = sorted.slice(
+    safePage * BLOTTER_PAGE_SIZE,
+    (safePage + 1) * BLOTTER_PAGE_SIZE,
+  );
 
   // Reset page when data changes
-  useEffect(() => { setPage(0); }, [data, query]);
+  useEffect(() => {
+    setPage(0);
+  }, [data, query]);
 
   const totalCount = allTrades.length;
   const hasData = data && (data.as_of || totalCount > 0);
@@ -2223,7 +3256,10 @@ export function HistoricalTradesSection() {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
           {data?.as_of && (
-            <span className="report-meta" style={{ margin: 0, padding: 0, border: "none" }}>
+            <span
+              className="report-meta"
+              style={{ margin: 0, padding: 0, border: "none" }}
+            >
               {new Date(data.as_of).toLocaleDateString()}
             </span>
           )}
@@ -2242,60 +3278,166 @@ export function HistoricalTradesSection() {
             disabled={syncing}
             onClick={() => syncNow()}
           >
-            {syncing ? <><Loader2 size={12} className="spin" /> Syncing...</> : "Refresh"}
+            {syncing ? (
+              <>
+                <Loader2 size={12} className="spin" /> Syncing...
+              </>
+            ) : (
+              "Refresh"
+            )}
           </button>
         </div>
       </div>
       <div className="section-body">
-        {error && <div className="alert-item section-message bearish">{error}</div>}
-        {loading && <div className="p-6"><TableSkeleton rows={5} columns={8} /></div>}
+        {error && (
+          <div className="alert-item section-message bearish">{error}</div>
+        )}
+        {loading && (
+          <div className="p-6">
+            <TableSkeleton rows={5} columns={8} />
+          </div>
+        )}
         {!loading && !hasData && !error && (
-          <div className="alert-item section-message">No historical trades. Click REFRESH to fetch from IB.</div>
+          <div className="alert-item section-message">
+            No historical trades. Click REFRESH to fetch from IB.
+          </div>
         )}
         {!loading && pageRows.length > 0 && (
           <>
             <table>
               <thead>
                 <tr>
-                  <SortTh<BlotterSortKey> label="Date" sortKey="date" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<BlotterSortKey> label="Symbol" sortKey="symbol" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<BlotterSortKey> label="Description" sortKey="contract_desc" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<BlotterSortKey> label="Type" sortKey="sec_type" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<BlotterSortKey> label="Side" sortKey="status" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<BlotterSortKey> label="Qty" sortKey="net_quantity" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<BlotterSortKey> label="Commission" sortKey="total_commission" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<BlotterSortKey> label="Realized P&L" sortKey="realized_pnl" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<BlotterSortKey> label="Cost Basis" sortKey="cost_basis" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
-                  <SortTh<BlotterSortKey> label="Proceeds" sortKey="proceeds" className="right" activeKey={sort.key} direction={sort.direction} onToggle={toggle} />
+                  <SortTh<BlotterSortKey>
+                    label="Date"
+                    sortKey="date"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<BlotterSortKey>
+                    label="Symbol"
+                    sortKey="symbol"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<BlotterSortKey>
+                    label="Description"
+                    sortKey="contract_desc"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<BlotterSortKey>
+                    label="Type"
+                    sortKey="sec_type"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<BlotterSortKey>
+                    label="Side"
+                    sortKey="status"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<BlotterSortKey>
+                    label="Qty"
+                    sortKey="net_quantity"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<BlotterSortKey>
+                    label="Commission"
+                    sortKey="total_commission"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<BlotterSortKey>
+                    label="Realized P&L"
+                    sortKey="realized_pnl"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<BlotterSortKey>
+                    label="Cost Basis"
+                    sortKey="cost_basis"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<BlotterSortKey>
+                    label="Proceeds"
+                    sortKey="proceeds"
+                    className="right"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
                   <th style={{ width: "32px" }}></th>
                 </tr>
               </thead>
               <tbody>
                 {pageRows.map((t, i) => (
                   <tr key={`${t.symbol}-${t.contract_desc}-${i}`}>
-                    <td>{getTradeDate(t) ? new Date(getTradeDate(t)).toLocaleDateString() : "—"}</td>
-                    <td><TickerLink ticker={t.symbol} /></td>
+                    <td>
+                      {getTradeDate(t)
+                        ? new Date(getTradeDate(t)).toLocaleDateString()
+                        : "—"}
+                    </td>
+                    <td>
+                      <TickerLink ticker={t.symbol} />
+                    </td>
                     <td>{t.contract_desc}</td>
                     <td>{t.sec_type}</td>
                     <td>
-                      <span className={`pill ${t.is_closed ? "neutral" : "defined"}`}>
+                      <span
+                        className={`pill ${t.is_closed ? "neutral" : "defined"}`}
+                      >
                         {t.is_closed ? "Closed" : "Open"}
                       </span>
                     </td>
-                    <td className="right">{t.total_quantity ?? t.net_quantity}</td>
-                    <td className="right">{t.total_commission != null ? fmtPrice(t.total_commission) : "---"}</td>
-                    <td className={`right ${(t.realized_pnl ?? 0) >= 0 ? "positive" : "negative"}`}>
+                    <td className="right">
+                      {t.total_quantity ?? t.net_quantity}
+                    </td>
+                    <td className="right">
+                      {t.total_commission != null
+                        ? fmtPrice(t.total_commission)
+                        : "---"}
+                    </td>
+                    <td
+                      className={`right ${(t.realized_pnl ?? 0) >= 0 ? "positive" : "negative"}`}
+                    >
                       {t.realized_pnl != null ? (
                         <>
-                          {t.realized_pnl >= 0 ? "+" : ""}{fmtPrice(t.realized_pnl)}
-                          {t.cost_basis != null && Math.abs(t.cost_basis) > 0 ? ` (${((t.realized_pnl / Math.abs(t.cost_basis)) * 100) >= 0 ? "+" : ""}${((t.realized_pnl / Math.abs(t.cost_basis)) * 100).toFixed(1)}%)` : ""}
+                          {t.realized_pnl >= 0 ? "+" : ""}
+                          {fmtPrice(t.realized_pnl)}
+                          {t.cost_basis != null && Math.abs(t.cost_basis) > 0
+                            ? ` (${(t.realized_pnl / Math.abs(t.cost_basis)) * 100 >= 0 ? "+" : ""}${((t.realized_pnl / Math.abs(t.cost_basis)) * 100).toFixed(1)}%)`
+                            : ""}
                         </>
-                      ) : "---"}
+                      ) : (
+                        "---"
+                      )}
                     </td>
-                    <td className="right">{t.cost_basis != null ? fmtPrice(t.cost_basis) : "---"}</td>
-                    <td className="right">{t.proceeds != null ? fmtPrice(t.proceeds) : "---"}</td>
+                    <td className="right">
+                      {t.cost_basis != null ? fmtPrice(t.cost_basis) : "---"}
+                    </td>
+                    <td className="right">
+                      {t.proceeds != null ? fmtPrice(t.proceeds) : "---"}
+                    </td>
                     <td>
-                      {t.is_closed && <SharePnlButton data={blotterShareData(t)} />}
+                      {t.is_closed && (
+                        <SharePnlButton data={blotterShareData(t)} />
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -2303,11 +3445,19 @@ export function HistoricalTradesSection() {
             </table>
             {totalPages > 1 && (
               <div className="pagination">
-                <button disabled={safePage === 0} onClick={() => setPage(safePage - 1)}>
+                <button
+                  disabled={safePage === 0}
+                  onClick={() => setPage(safePage - 1)}
+                >
                   &larr; Prev
                 </button>
-                <span className="page-info">Page {safePage + 1} of {totalPages}</span>
-                <button disabled={safePage >= totalPages - 1} onClick={() => setPage(safePage + 1)}>
+                <span className="page-info">
+                  Page {safePage + 1} of {totalPages}
+                </span>
+                <button
+                  disabled={safePage >= totalPages - 1}
+                  onClick={() => setPage(safePage + 1)}
+                >
                   Next &rarr;
                 </button>
               </div>
@@ -2367,39 +3517,110 @@ function fmtPct(v: number | null | undefined, digits = 1): string {
 }
 
 function UwAnalyzeSections() {
-  const { loading, data, error, lastRunAt, analyse } = useUwAnalyze();
-  const [ticker, setTicker] = useState("");
-
-  const onSubmit = useCallback(
-    (e: React.FormEvent) => {
-      e.preventDefault();
-      void analyse(ticker);
-    },
-    [analyse, ticker],
+  const {
+    data,
+    loading,
+    error,
+    lastFetchedAt,
+    refreshAll,
+    refreshOne,
+    addAdhoc,
+  } = useUwPortfolio();
+  const [adhocInput, setAdhocInput] = useState("");
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [openOiPanels, setOpenOiPanels] = useState<Record<string, boolean>>({});
+  const [openFlowPanels, setOpenFlowPanels] = useState<Record<string, boolean>>(
+    {},
   );
 
-  const report = data?.report;
-  const display = data?.display;
-  const scores = report?.scores;
-  const thesis = report?.setup_thesis;
-  const positioningAvailable =
-    !!scores && !scores.skipped_buckets?.includes("positioning");
+  // Sort: changed-first (alphabetical), then unchanged (alphabetical).
+  const sortedRows = useMemo(() => {
+    const rows = data?.tickers ?? [];
+    const changed = rows.filter((r) => (r.changes?.length ?? 0) > 0);
+    const unchanged = rows.filter((r) => (r.changes?.length ?? 0) === 0);
+    const byTicker = (a: UwTickerRow, b: UwTickerRow) =>
+      a.ticker.localeCompare(b.ticker);
+    return [...changed.sort(byTicker), ...unchanged.sort(byTicker)];
+  }, [data]);
+
+  // Auto-expand changed rows on first load.
+  useEffect(() => {
+    if (!data?.tickers) return;
+    setExpanded((prev) => {
+      const next = { ...prev };
+      for (const row of data.tickers) {
+        if ((row.changes?.length ?? 0) > 0 && next[row.ticker] === undefined) {
+          next[row.ticker] = true;
+        }
+      }
+      return next;
+    });
+  }, [data]);
+
+  const onAdhocSubmit = useCallback(
+    (e: React.FormEvent) => {
+      e.preventDefault();
+      const t = adhocInput.trim().toUpperCase();
+      if (!t) return;
+      addAdhoc(t);
+      setAdhocInput("");
+    },
+    [adhocInput, addAdhoc],
+  );
+
+  const toggleRow = (ticker: string) =>
+    setExpanded((p) => ({ ...p, [ticker]: !p[ticker] }));
+
+  const changedCount = sortedRows.filter(
+    (r) => (r.changes?.length ?? 0) > 0,
+  ).length;
 
   return (
     <>
-      <div className="section" data-testid="uw-analyze-form">
+      {/* Top strip */}
+      <div className="section" data-testid="uw-analyze-top-strip">
+        <div className="section-header">
+          <div className="section-title">UW ANALYZE</div>
+          <div
+            style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}
+          >
+            <span className="report-meta">
+              {sortedRows.length} underlyings · auto-refresh{" "}
+              {data?.market_state === "open" ? "2m" : "5m"} · {changedCount}{" "}
+              changed
+            </span>
+            <button
+              type="button"
+              className="pill defined"
+              data-testid="uw-analyze-refresh-all"
+              onClick={() => refreshAll()}
+              disabled={loading}
+              style={{
+                cursor: loading ? "wait" : "pointer",
+                padding: "0.35rem 0.8rem",
+              }}
+            >
+              {loading ? "REFRESHING…" : "↻ REFRESH ALL"}
+            </button>
+            {lastFetchedAt && (
+              <span className="report-meta" style={{ margin: 0 }}>
+                {new Date(lastFetchedAt).toLocaleTimeString()}
+              </span>
+            )}
+          </div>
+        </div>
         <div className="section-body">
           <form
-            onSubmit={onSubmit}
-            style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}
+            onSubmit={onAdhocSubmit}
+            style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}
           >
             <input
               type="text"
-              value={ticker}
-              onChange={(e) => setTicker(e.target.value)}
-              placeholder="Ticker (e.g. AAPL)"
-              aria-label="ticker"
-              data-testid="uw-analyze-input"
+              value={adhocInput}
+              onChange={(e) => setAdhocInput(e.target.value)}
+              placeholder="+ ad-hoc ticker"
+              aria-label="ad-hoc ticker"
+              data-testid="uw-analyze-adhoc-input"
               style={{
                 fontFamily: "var(--font-mono, monospace)",
                 textTransform: "uppercase",
@@ -2413,22 +3634,39 @@ function UwAnalyzeSections() {
             />
             <button
               type="submit"
-              disabled={loading || !ticker.trim()}
-              data-testid="uw-analyze-submit"
               className="pill defined"
-              style={{ cursor: loading ? "wait" : "pointer", padding: "0.4rem 0.9rem" }}
+              data-testid="uw-analyze-adhoc-submit"
+              disabled={!adhocInput.trim()}
+              style={{ padding: "0.35rem 0.8rem" }}
             >
-              {loading ? "ANALYSING..." : "▶ ANALYSE"}
+              ANALYSE
             </button>
-            {lastRunAt && (
-              <span className="report-meta" style={{ marginLeft: "auto" }}>
-                last: {new Date(lastRunAt).toLocaleTimeString()}
-              </span>
-            )}
           </form>
         </div>
       </div>
 
+      {/* Action items */}
+      {data?.action_items && data.action_items.length > 0 && (
+        <div className="section">
+          <div className="alert-box">
+            <div className="alert-title">
+              <TriangleAlert size={14} />
+              ACTION ITEMS
+            </div>
+            {data.action_items.map((item, i) => (
+              <div
+                key={`${item.ticker}-${item.code}-${i}`}
+                className="alert-item"
+              >
+                <span className="alert-ticker">{item.ticker}</span> —{" "}
+                {item.label}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Errors */}
       {error && (
         <div className="section" data-testid="uw-analyze-error">
           <div className="section-body">
@@ -2437,219 +3675,407 @@ function UwAnalyzeSections() {
         </div>
       )}
 
-      {!data && !error && !loading && (
+      {/* Empty state */}
+      {!loading && !error && sortedRows.length === 0 && (
         <div className="section" data-testid="uw-analyze-empty">
           <div className="section-body">
             <div className="alert-item">
-              Enter a ticker and click ANALYSE to fetch the UW signal report.
+              No tickers in portfolio or watchlist. Add an ad-hoc ticker above
+              to get started.
             </div>
           </div>
         </div>
       )}
 
-      {loading && (
-        <div className="section" data-testid="uw-analyze-loading">
-          <div className="section-body">
-            <div className="alert-item">Fetching UW signal report (8–20s typical)…</div>
-          </div>
-        </div>
-      )}
+      {/* Per-ticker rows */}
+      {sortedRows.map((row) => {
+        const isOpen = expanded[row.ticker] ?? false;
+        const snap = row.snapshot;
+        const display = snap?.display ?? {};
+        const report =
+          snap?.report ?? ({} as UwTickerRow["snapshot"]["report"]);
+        const derived = snap?.derived;
+        const scores = report.scores;
+        const thesis = report.setup_thesis;
+        const changeBadges = row.changes ?? [];
+        const oiOpen = openOiPanels[row.ticker] ?? false;
+        const flowOpen = openFlowPanels[row.ticker] ?? false;
 
-      {data && report && display && scores && (
-        <>
-          {/* Identity card */}
-          <div className="section" data-testid="uw-analyze-identity">
-            <div className="section-header">
-              <div className="section-title">
-                {report.ticker}
-                {report.price !== null && (
-                  <span style={{ marginLeft: 8 }}>· ${fmtNum(report.price, 2)}</span>
-                )}
-              </div>
-              <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-                <span className="pill defined">Bias: {scores.bias}</span>
-                <span className="pill neutral">
-                  Grade {scores.grade} ({fmtNum(scores.composite, 0)})
-                </span>
-              </div>
-            </div>
-            <div className="section-body">
-              <div className="report-meta">
-                Sector {display.sector ?? "—"} · Mode {scores.mode.toUpperCase()} · Fetched{" "}
-                {report.fetched_at}
-              </div>
-              {scores.reweighted && scores.skipped_buckets?.length > 0 && (
-                <div className="alert-item">
-                  ⚠ {scores.skipped_buckets.join(", ")} bucket unavailable — composite reweighted
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Setup Thesis */}
-          {thesis && (
-            <div className="section" data-testid="uw-analyze-thesis">
-              <div className="section-header">
-                <div className="section-title">SETUP THESIS</div>
-              </div>
-              <div className="section-body">
-                <div>
-                  Structure: <strong>{thesis.structure_family}</strong> · Regime:{" "}
-                  <strong>{thesis.regime}</strong> · Bias: <strong>{thesis.bias}</strong>
-                </div>
-                <div className="report-meta" style={{ marginTop: 6 }}>
-                  {thesis.rationale}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* 2x2 bucket grid */}
+        return (
           <div
             className="section"
-            data-testid="uw-analyze-buckets"
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              gap: "0.75rem",
-            }}
+            key={row.ticker}
+            data-testid={`uw-row-${row.ticker}`}
           >
-            <div className="section">
-              <div className="section-header">
-                <div className="section-title">
-                  MARKET STRUCTURE {fmtNum(scores.market_structure, 0)}/28
-                </div>
-              </div>
-              <div className="section-body">
-                <div>GEX sign: {(report.regime as { gex_sign?: string })?.gex_sign ?? "—"}</div>
-                <div>
-                  Flip dist:{" "}
-                  {(() => {
-                    const v = (report.regime as { flip_distance_pct?: number | null })
-                      ?.flip_distance_pct;
-                    return v === null || v === undefined ? "—" : `${v.toFixed(1)}%`;
-                  })()}
-                </div>
-                <div>Call wall: {fmtNum(display.call_wall_strike, 2)}</div>
-                <div>Put wall: {fmtNum(display.put_wall_strike, 2)}</div>
-                <div>γ per 1%: ${fmtCompact(display.gamma_per_1pct)}</div>
-              </div>
-            </div>
-
-            <div className="section">
-              <div className="section-header">
-                <div className="section-title">VOLATILITY {fmtNum(scores.volatility, 0)}/28</div>
-              </div>
-              <div className="section-body">
-                <div>IV rank: {fmtNum(display.iv_rank, 0)}</div>
-                <div>IV: {fmtNum(display.iv, 1)}</div>
-                <div>RV: {fmtNum(display.rv, 1)}</div>
-                <div>Term: {display.term_structure_label ?? "—"}</div>
-              </div>
-            </div>
-
-            <div className="section">
-              <div className="section-header">
-                <div className="section-title">FLOW {fmtNum(scores.flow, 0)}/24</div>
-              </div>
-              <div className="section-body">
-                <div>Net call prem: ${fmtCompact(display.net_call_premium)}</div>
-                <div>Net put prem: ${fmtCompact(display.net_put_premium)}</div>
-                <div>Short vol ratio: {fmtNum(display.short_volume_ratio, 2)}</div>
-              </div>
-            </div>
-
-            <div className="section">
-              <div className="section-header">
-                <div className="section-title">
-                  POSITIONING{" "}
-                  {positioningAvailable
-                    ? `${fmtNum(scores.positioning, 0)}/20`
-                    : "— n/a"}
-                </div>
-              </div>
-              <div className="section-body" data-testid="uw-analyze-positioning">
-                {positioningAvailable ? (
-                  <div>{fmtNum(scores.positioning, 0)}/20</div>
+            <div
+              className="section-header"
+              onClick={() => toggleRow(row.ticker)}
+              style={{ cursor: "pointer", userSelect: "none" }}
+            >
+              <div
+                className="section-title"
+                style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
+              >
+                {isOpen ? (
+                  <ChevronDown size={14} />
                 ) : (
-                  <div className="alert-item">
-                    not available (v1 limitation, bucket reweighted out of composite)
+                  <ChevronRight size={14} />
+                )}
+                <span>{row.ticker}</span>
+                {report.price != null && (
+                  <span className="report-meta" style={{ margin: 0 }}>
+                    ${fmtNum(report.price, 2)}
+                  </span>
+                )}
+                {changeBadges.length > 0 && (
+                  <span className="pill undefined">CHANGED</span>
+                )}
+                {scores?.bias && (
+                  <span className="pill defined">Bias {scores.bias}</span>
+                )}
+                {scores?.grade && (
+                  <span className="pill neutral">Grade {scores.grade}</span>
+                )}
+              </div>
+              <div
+                style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}
+              >
+                {row.sources.map((s) => (
+                  <span
+                    key={s}
+                    className="pill neutral"
+                    style={{ fontSize: 9 }}
+                  >
+                    {s.toUpperCase()}
+                  </span>
+                ))}
+                <button
+                  type="button"
+                  className="pill defined"
+                  data-testid={`uw-refresh-${row.ticker}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    refreshOne(row.ticker);
+                  }}
+                  style={{ padding: "0.2rem 0.5rem", fontSize: 10 }}
+                >
+                  ↻
+                </button>
+              </div>
+            </div>
+
+            {isOpen && (
+              <div
+                className="section-body"
+                data-testid={`uw-body-${row.ticker}`}
+              >
+                {/* Identity / thesis */}
+                <div className="report-meta" style={{ marginBottom: "0.5rem" }}>
+                  <strong>IDENTITY</strong> · Sector {display.sector ?? "—"}
+                  {scores?.mode && <> · Mode {scores.mode.toUpperCase()}</>}
+                  {display.iv_rank != null && (
+                    <> · IV rank {fmtNum(display.iv_rank, 0)}</>
+                  )}
+                  {report.fetched_at && <> · Fetched {report.fetched_at}</>}
+                </div>
+                {thesis && (
+                  <div
+                    className="report-meta"
+                    style={{ marginBottom: "0.5rem" }}
+                  >
+                    <strong>THESIS</strong> · Structure{" "}
+                    <strong>{thesis.structure_family ?? "—"}</strong> · Regime{" "}
+                    <strong>{thesis.regime ?? "—"}</strong> · Bias{" "}
+                    <strong>{thesis.bias ?? "—"}</strong>
+                    {thesis.rationale && (
+                      <div style={{ marginTop: 4 }}>{thesis.rationale}</div>
+                    )}
+                  </div>
+                )}
+
+                {/* 4-bucket grid */}
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr 1fr",
+                    gap: "0.5rem",
+                    marginTop: "0.75rem",
+                  }}
+                >
+                  <div className="section">
+                    <div className="section-header">
+                      <div className="section-title">
+                        MARKET STRUCTURE{" "}
+                        {scores?.market_structure != null
+                          ? `${fmtNum(scores.market_structure, 0)}/28`
+                          : "—"}
+                      </div>
+                    </div>
+                    <div className="section-body">
+                      <div>GEX sign: {derived?.gex_sign ?? "—"}</div>
+                      <div>
+                        Flip dist:{" "}
+                        {report.regime?.flip_distance_pct != null
+                          ? `${report.regime.flip_distance_pct.toFixed(1)}%`
+                          : "—"}
+                      </div>
+                      <div>
+                        Call wall: {fmtNum(display.call_wall_strike, 2)}
+                      </div>
+                      <div>Put wall: {fmtNum(display.put_wall_strike, 2)}</div>
+                      <div>Max pain: {fmtNum(display.max_pain, 2)}</div>
+                      <div>γ per 1%: ${fmtCompact(display.gamma_per_1pct)}</div>
+                    </div>
+                  </div>
+
+                  <div className="section">
+                    <div className="section-header">
+                      <div className="section-title">
+                        VOLATILITY{" "}
+                        {scores?.volatility != null
+                          ? `${fmtNum(scores.volatility, 0)}/28`
+                          : "—"}
+                      </div>
+                    </div>
+                    <div className="section-body">
+                      <div>IV rank: {fmtNum(display.iv_rank, 0)}</div>
+                      <div>IV: {fmtNum(display.iv, 1)}</div>
+                      <div>RV: {fmtNum(display.rv, 1)}</div>
+                      <div>Term: {display.term_structure_label ?? "—"}</div>
+                    </div>
+                  </div>
+
+                  <div className="section">
+                    <div className="section-header">
+                      <div className="section-title">
+                        FLOW{" "}
+                        {scores?.flow != null
+                          ? `${fmtNum(scores.flow, 0)}/24`
+                          : "—"}
+                      </div>
+                    </div>
+                    <div className="section-body">
+                      <div>
+                        Net call prem: ${fmtCompact(display.net_call_premium)}
+                      </div>
+                      <div>
+                        Net put prem: ${fmtCompact(display.net_put_premium)}
+                      </div>
+                      <div>
+                        Short vol: {fmtNum(display.short_volume_ratio, 2)}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="section">
+                    <div className="section-header">
+                      <div className="section-title">
+                        POSITIONING{" "}
+                        {scores?.positioning != null
+                          ? `${fmtNum(scores.positioning, 0)}/20`
+                          : "— n/a"}
+                      </div>
+                    </div>
+                    <div className="section-body">
+                      {scores?.positioning != null ? (
+                        <div>{fmtNum(scores.positioning, 0)}/20</div>
+                      ) : (
+                        <div className="alert-item">
+                          v1 limitation — bucket reweighted out
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* GEX profile chart */}
+                {display.gex_by_strike && display.gex_by_strike.length > 0 && (
+                  <div style={{ marginTop: "1rem" }}>
+                    <GexProfileChart
+                      profile={uwGexRowsToBuckets(
+                        display.gex_by_strike,
+                        report.price ?? derived?.spot ?? null,
+                        derived?.gex_flip_strike ?? display.gex_flip ?? null,
+                      )}
+                      spot={report.price ?? derived?.spot ?? 0}
+                    />
+                  </div>
+                )}
+
+                {/* OI delta panel — folded */}
+                {row.oi_changes && row.oi_changes.length > 0 && (
+                  <div className="section" style={{ marginTop: "0.75rem" }}>
+                    <div
+                      className="section-header"
+                      onClick={() =>
+                        setOpenOiPanels((p) => ({
+                          ...p,
+                          [row.ticker]: !p[row.ticker],
+                        }))
+                      }
+                      style={{ cursor: "pointer", userSelect: "none" }}
+                    >
+                      <div className="section-title">
+                        {oiOpen ? (
+                          <ChevronDown size={14} />
+                        ) : (
+                          <ChevronRight size={14} />
+                        )}{" "}
+                        OPEN INTEREST DELTA (since prior session)
+                      </div>
+                      <span className="pill undefined">
+                        {row.oi_changes.length} notable
+                      </span>
+                    </div>
+                    {oiOpen && (
+                      <div className="section-body">
+                        {row.oi_changes.map((oc, i) => (
+                          <div
+                            key={`${oc.strike}-${oc.side}-${i}`}
+                            className="alert-item"
+                          >
+                            • {oc.label}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Unusual flow tracker — folded */}
+                {row.unusual_flow_events &&
+                  row.unusual_flow_events.length > 0 && (
+                    <div className="section" style={{ marginTop: "0.75rem" }}>
+                      <div
+                        className="section-header"
+                        onClick={() =>
+                          setOpenFlowPanels((p) => ({
+                            ...p,
+                            [row.ticker]: !p[row.ticker],
+                          }))
+                        }
+                        style={{ cursor: "pointer", userSelect: "none" }}
+                      >
+                        <div className="section-title">
+                          {flowOpen ? (
+                            <ChevronDown size={14} />
+                          ) : (
+                            <ChevronRight size={14} />
+                          )}{" "}
+                          UNUSUAL FLOW TRACKER
+                        </div>
+                        <span className="pill undefined">
+                          {
+                            row.unusual_flow_events.filter(
+                              (e) => e.status === "open",
+                            ).length
+                          }{" "}
+                          OPEN
+                          {row.unusual_flow_events.some(
+                            (e) => e.status === "anomaly",
+                          )
+                            ? ` · ${row.unusual_flow_events.filter((e) => e.status === "anomaly").length} ANOM`
+                            : ""}
+                        </span>
+                      </div>
+                      {flowOpen && (
+                        <div className="section-body">
+                          {row.unusual_flow_events.map((ev) => {
+                            const pillCls =
+                              ev.status === "anomaly"
+                                ? "bearish"
+                                : ev.status === "closed"
+                                  ? "neutral"
+                                  : ev.status === "expired"
+                                    ? "neutral"
+                                    : "defined";
+                            return (
+                              <div key={ev.id} className="alert-item">
+                                <span className={`pill ${pillCls}`}>
+                                  {ev.status.toUpperCase()}
+                                </span>{" "}
+                                ${ev.strike} {ev.side.toUpperCase()} {ev.expiry}
+                                {ev.anomaly_reason && (
+                                  <> — {ev.anomaly_reason}</>
+                                )}
+                                {ev.daily_track &&
+                                  ev.daily_track.length > 0 && (
+                                    <span
+                                      className="report-meta"
+                                      style={{ marginLeft: 8 }}
+                                    >
+                                      mid:{" "}
+                                      {ev.daily_track
+                                        .map((r) => r.mid.toFixed(2))
+                                        .join(" → ")}
+                                    </span>
+                                  )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                {/* Notes */}
+                {report.notes && report.notes.length > 0 && (
+                  <div style={{ marginTop: "0.75rem" }}>
+                    <div className="section-title">NOTES</div>
+                    {report.notes.map((n, i) => (
+                      <div key={i} className="alert-item">
+                        • {n}
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
-            </div>
+            )}
           </div>
-
-          {/* GEX by strike */}
-          {display.gex_by_strike && display.gex_by_strike.length > 0 && (
-            <div className="section" data-testid="uw-analyze-gex-table">
-              <div className="section-header">
-                <div className="section-title">GEX BY STRIKE</div>
-              </div>
-              <div className="section-body">
-                <table style={{ width: "100%", fontFamily: "var(--font-mono, monospace)" }}>
-                  <thead>
-                    <tr style={{ textAlign: "right", opacity: 0.7 }}>
-                      <th style={{ textAlign: "left" }}>Strike</th>
-                      <th>Net γ</th>
-                      <th>Call γ</th>
-                      <th>Put γ</th>
-                      <th>vs Spot</th>
-                      <th>Wall</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {display.gex_by_strike.map((row) => (
-                      <tr key={row.strike} style={{ textAlign: "right" }}>
-                        <td style={{ textAlign: "left" }}>{fmtNum(row.strike, 2)}</td>
-                        <td>{fmtCompact(row.net_gamma)}</td>
-                        <td>{fmtCompact(row.call_gamma)}</td>
-                        <td>{fmtCompact(row.put_gamma)}</td>
-                        <td>{fmtPct(row.distance_pct)}</td>
-                        <td>
-                          {row.is_call_wall ? "CALL ▲" : row.is_put_wall ? "PUT ▼" : ""}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-
-          {/* Notes */}
-          {report.notes && report.notes.length > 0 && (
-            <div className="section" data-testid="uw-analyze-notes">
-              <div className="section-header">
-                <div className="section-title">NOTES</div>
-              </div>
-              <div className="section-body">
-                {report.notes.map((n, i) => (
-                  <div key={i} className="alert-item">
-                    • {n}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </>
-      )}
+        );
+      })}
     </>
   );
 }
-
-export default function WorkspaceSections({ section, portfolio, portfolioLastSync, orders, prices, tickerParam, theme, marketState, activeAccount = "ib" }: WorkspaceSectionsProps) {
+export default function WorkspaceSections({
+  section,
+  portfolio,
+  portfolioLastSync,
+  orders,
+  prices,
+  tickerParam,
+  theme,
+  marketState,
+  activeAccount = "ib",
+}: WorkspaceSectionsProps) {
   switch (section) {
     case "dashboard":
       return null;
     case "flow-analysis":
       return <FlowSections key={activeAccount} activeAccount={activeAccount} />;
     case "portfolio":
-      return <PortfolioSections portfolio={portfolio ?? null} prices={prices} activeAccount={activeAccount} />;
+      return (
+        <PortfolioSections
+          portfolio={portfolio ?? null}
+          prices={prices}
+          activeAccount={activeAccount}
+        />
+      );
     case "performance":
-      return <PerformancePanel portfolioLastSync={portfolioLastSync} marketState={marketState} />;
+      return (
+        <PerformancePanel
+          portfolioLastSync={portfolioLastSync}
+          marketState={marketState}
+        />
+      );
     case "orders":
-      return <OrdersSections orders={orders ?? null} prices={prices} portfolio={portfolio} />;
+      return (
+        <OrdersSections
+          orders={orders ?? null}
+          prices={prices}
+          portfolio={portfolio}
+        />
+      );
     case "scanner":
       return <ScannerSections />;
     case "discover":
