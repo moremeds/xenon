@@ -46,6 +46,39 @@ def test_seed_merges_sources(tmp_path):
     assert out["TSLA"] == ["adhoc"]
 
 
+def test_seed_includes_static_universe(tmp_path):
+    """Static UW-analyze universe is always seeded, with empty sources
+    when a ticker isn't in the portfolio/watchlist/adhoc sets."""
+    port = tmp_path / "p.json"
+    watch = tmp_path / "w.json"
+    _write(port, {"positions": []})
+    _write(watch, {"tickers": []})
+    cand.clear_adhoc()
+
+    out = cand.seed_candidates(portfolio_path=port, watchlist_path=watch)
+    # Every static-universe ticker lands in the seed.
+    for t in cand.UW_ANALYZE_STATIC_UNIVERSE:
+        assert t in out, f"{t} missing from seed"
+        # Static-only tickers carry no source tag (no synthetic "static").
+        assert out[t] == []
+
+
+def test_seed_static_universe_merges_with_portfolio(tmp_path):
+    """When a static-universe ticker is also in portfolio, the source
+    tag is attached without dropping the scaffold presence."""
+    port = tmp_path / "p.json"
+    watch = tmp_path / "w.json"
+    _write(port, {"positions": [{"ticker": "SPY"}, {"ticker": "NVDA"}]})
+    _write(watch, {"tickers": []})
+    cand.clear_adhoc()
+
+    out = cand.seed_candidates(portfolio_path=port, watchlist_path=watch)
+    assert out["SPY"] == ["portfolio"]
+    assert out["NVDA"] == ["portfolio"]
+    # A non-portfolio static ticker remains in the seed with no source.
+    assert out["XLK"] == []
+
+
 def test_adhoc_set_persists_across_calls(tmp_path):
     cand.clear_adhoc()
     cand.add_adhoc("foo")
@@ -59,5 +92,7 @@ def test_seed_dedupes_within_a_source(tmp_path):
     port = tmp_path / "p.json"
     _write(port, {"positions": [{"ticker": "NVDA"}, {"ticker": "NVDA"}, {"ticker": "nvda"}]})
     out = cand.seed_candidates(portfolio_path=port, watchlist_path=tmp_path / "missing.json")
-    assert list(out.keys()) == ["NVDA"]
+    # NVDA is present exactly once with a single "portfolio" source tag
+    # (alongside the static-universe scaffold tickers).
+    assert "NVDA" in out
     assert out["NVDA"] == ["portfolio"]

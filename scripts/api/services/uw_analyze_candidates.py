@@ -27,6 +27,39 @@ _DATA = _SCRIPTS.parent / "data"
 PORTFOLIO_PATH = _DATA / "portfolio.json"
 WATCHLIST_PATH = _DATA / "watchlist.json"
 
+# Static UW-analyze universe — always scanned regardless of portfolio /
+# watchlist contents so the frontend scaffold tiles never stay empty.
+# Mirrors `web/lib/uwTickerTiers.ts::SCAFFOLD_TICKERS`.
+UW_ANALYZE_STATIC_UNIVERSE: frozenset[str] = frozenset(
+    {
+        # Market indices
+        "SPY",
+        "QQQ",
+        "IWM",
+        "DIA",
+        # Commodities & safe haven
+        "GLD",
+        "SLV",
+        # Fixed income
+        "TLT",
+        # Volatility
+        "UVXY",
+        # Sector ETFs
+        "XLK",
+        "XLF",
+        "XLV",
+        "XLP",
+        "XLE",
+        "XLI",
+        "XLB",
+        "XLRE",
+        "XLU",
+        "XLC",
+        "XLY",
+        "SMH",
+    }
+)
+
 # Process-local ad-hoc set; survives across requests but not restarts.
 _adhoc: set[str] = set()
 
@@ -99,6 +132,11 @@ def seed_candidates(
     adhoc = set(_adhoc) | {t.upper() for t in extra_adhoc if t}
 
     out: dict[str, set[str]] = {}
+    # Static universe first — these tickers are always scanned so the
+    # frontend scaffold tiles can fill in. Static-only tickers get an
+    # empty sources list (no synthetic "static" tag).
+    for t in UW_ANALYZE_STATIC_UNIVERSE:
+        out.setdefault(t, set())
     for t in port:
         out.setdefault(t, set()).add("portfolio")
     for t in watch:

@@ -46,7 +46,14 @@ import { useDiscover } from "@/lib/useDiscover";
 import { useFlowAnalysis } from "@/lib/useFlowAnalysis";
 import { useUwAnalyze } from "@/lib/useUwAnalyze";
 import { useUwPortfolio } from "@/lib/useUwPortfolio";
+import {
+  groupByTier,
+  isScaffold,
+  mergeScaffoldWithLive,
+  SCAFFOLD_ROWS,
+} from "@/lib/uwTickerTiers";
 import type { UwTickerRow } from "@/lib/uwAnalyzeTypes";
+import { MetricCard, SourceBadge } from "@/components/ui/MetricCard";
 import GexProfileChart, {
   uwGexRowsToBuckets,
 } from "@/components/charts/GexProfileChart";
@@ -3494,7 +3501,7 @@ type WorkspaceSectionsProps = {
 };
 
 // =============================================================================
-// UW Analyse — per-ticker signal report (modular-mapping-simon plan)
+// UW Analysis — tiered ticker grid + single detail panel
 // =============================================================================
 
 function fmtNum(v: number | null | undefined, digits = 2, suffix = ""): string {
@@ -3516,6 +3523,14 @@ function fmtPct(v: number | null | undefined, digits = 1): string {
   return `${(v * 100).toFixed(digits)}%`;
 }
 
+function biasPillClass(bias: string | undefined): string {
+  if (!bias) return "pill neutral";
+  const b = bias.toUpperCase();
+  if (b.startsWith("BULL")) return "pill defined";
+  if (b.startsWith("BEAR")) return "pill distrib";
+  return "pill neutral";
+}
+
 function UwAnalyzeSections() {
   const {
     data,
@@ -3527,34 +3542,83 @@ function UwAnalyzeSections() {
     addAdhoc,
   } = useUwPortfolio();
   const [adhocInput, setAdhocInput] = useState("");
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [openOiPanels, setOpenOiPanels] = useState<Record<string, boolean>>({});
-  const [openFlowPanels, setOpenFlowPanels] = useState<Record<string, boolean>>(
-    {},
+  const [selected, setSelected] = useState<string | null>(null);
+
+  // Pending ad-hoc selections: the user submitted a ticker but the
+  // backend refresh round-trip hasn't landed yet. While the ticker is in
+  // this set the fallback-reset effect below is suppressed so the
+  // selection doesn't snap back to SPY.
+  const pendingSelectedRef = useRef<Map<string, number>>(new Map());
+  // Bumped whenever a pending ad-hoc entry is cleared (timeout or arrival)
+  // so the selection effect re-runs and the fallback can reclaim the
+  // detail pane if the submitted ticker never materialized.
+  const [pendingTick, setPendingTick] = useState(0);
+  // False until the first non-empty live portfolio response lands. While
+  // this is false the selection comes from the scaffold — once live data
+  // arrives we let the selection effect re-run exactly once so the
+  // fallback can promote to a changed ticker.
+  const liveSelectionLockedRef = useRef(false);
+
+  const mergedTickers = useMemo(
+    () => mergeScaffoldWithLive(SCAFFOLD_ROWS, data?.tickers ?? []),
+    [data],
+  );
+  const tiers = useMemo(() => groupByTier(mergedTickers), [mergedTickers]);
+  const allSorted = useMemo(
+    () => [
+      ...tiers.indices,
+      ...tiers.commodities,
+      ...tiers.fixed,
+      ...tiers.vol,
+      ...tiers.sector,
+      ...tiers.single,
+    ],
+    [tiers],
   );
 
-  // Sort: changed-first (alphabetical), then unchanged (alphabetical).
-  const sortedRows = useMemo(() => {
-    const rows = data?.tickers ?? [];
-    const changed = rows.filter((r) => (r.changes?.length ?? 0) > 0);
-    const unchanged = rows.filter((r) => (r.changes?.length ?? 0) === 0);
-    const byTicker = (a: UwTickerRow, b: UwTickerRow) =>
-      a.ticker.localeCompare(b.ticker);
-    return [...changed.sort(byTicker), ...unchanged.sort(byTicker)];
-  }, [data]);
-
-  // Auto-expand changed rows on first load.
+  // Selection effect: pick first changed, else SPY, else first row.
+  // Pending ad-hoc submissions suppress the fallback reset.
   useEffect(() => {
-    if (!data?.tickers) return;
-    setExpanded((prev) => {
-      const next = { ...prev };
-      for (const row of data.tickers) {
-        if ((row.changes?.length ?? 0) > 0 && next[row.ticker] === undefined) {
-          next[row.ticker] = true;
-        }
+    if (allSorted.length === 0) {
+      if (selected !== null) setSelected(null);
+      return;
+    }
+    if (selected && pendingSelectedRef.current.has(selected)) return;
+    // Standard sticky behavior — but only after the first live portfolio
+    // response has locked in the initial selection. Before that, the
+    // current pick is a scaffold-derived provisional that should yield
+    // to auto-focus on the first alerting live row.
+    if (
+      selected &&
+      liveSelectionLockedRef.current &&
+      allSorted.some((r) => r.ticker === selected)
+    )
+      return;
+    const firstChanged = allSorted.find((r) => (r.changes?.length ?? 0) > 0);
+    const fallback =
+      firstChanged?.ticker ??
+      allSorted.find((r) => r.ticker === "SPY")?.ticker ??
+      allSorted[0]?.ticker ??
+      null;
+    setSelected(fallback);
+    // Once any live row is present we consider selection locked — future
+    // data updates stop promoting away from an explicit selection.
+    if (allSorted.some((r) => !isScaffold(r))) {
+      liveSelectionLockedRef.current = true;
+    }
+  }, [allSorted, selected, pendingTick]);
+
+  // Drop pending tickers once they land in the live portfolio.
+  useEffect(() => {
+    const pending = pendingSelectedRef.current;
+    if (pending.size === 0) return;
+    const live = new Set((data?.tickers ?? []).map((r) => r.ticker));
+    for (const [t, timer] of pending.entries()) {
+      if (live.has(t)) {
+        window.clearTimeout(timer);
+        pending.delete(t);
       }
-      return next;
-    });
+    }
   }, [data]);
 
   const onAdhocSubmit = useCallback(
@@ -3563,15 +3627,29 @@ function UwAnalyzeSections() {
       const t = adhocInput.trim().toUpperCase();
       if (!t) return;
       addAdhoc(t);
+      setSelected(t);
+      // Suppress fallback snap-back for 5s or until the row arrives.
+      const pending = pendingSelectedRef.current;
+      const prev = pending.get(t);
+      if (prev != null) window.clearTimeout(prev);
+      const timer = window.setTimeout(() => {
+        pending.delete(t);
+        // Force the selection effect to re-run so the fallback can
+        // reclaim the detail pane if `t` never arrived in the portfolio.
+        setPendingTick((n) => n + 1);
+      }, 5000);
+      pending.set(t, timer);
       setAdhocInput("");
     },
     [adhocInput, addAdhoc],
   );
 
-  const toggleRow = (ticker: string) =>
-    setExpanded((p) => ({ ...p, [ticker]: !p[ticker] }));
+  const selectedRow = useMemo(
+    () => allSorted.find((r) => r.ticker === selected) ?? null,
+    [allSorted, selected],
+  );
 
-  const changedCount = sortedRows.filter(
+  const changedCount = allSorted.filter(
     (r) => (r.changes?.length ?? 0) > 0,
   ).length;
 
@@ -3580,12 +3658,12 @@ function UwAnalyzeSections() {
       {/* Top strip */}
       <div className="section" data-testid="uw-analyze-top-strip">
         <div className="section-header">
-          <div className="section-title">UW ANALYZE</div>
+          <div className="section-title">UW ANALYSIS</div>
           <div
             style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}
           >
             <span className="report-meta">
-              {sortedRows.length} underlyings · auto-refresh{" "}
+              {allSorted.length} underlyings · auto-refresh{" "}
               {data?.market_state === "open" ? "2m" : "5m"} · {changedCount}{" "}
               changed
             </span>
@@ -3626,9 +3704,9 @@ function UwAnalyzeSections() {
                 textTransform: "uppercase",
                 padding: "0.4rem 0.6rem",
                 background: "transparent",
-                border: "1px solid var(--border)",
+                border: "1px solid var(--border-dim)",
                 borderRadius: 4,
-                color: "var(--fg)",
+                color: "var(--text-primary)",
                 minWidth: 160,
               }}
             />
@@ -3639,7 +3717,7 @@ function UwAnalyzeSections() {
               disabled={!adhocInput.trim()}
               style={{ padding: "0.35rem 0.8rem" }}
             >
-              ANALYSE
+              ANALYZE
             </button>
           </form>
         </div>
@@ -3675,368 +3753,626 @@ function UwAnalyzeSections() {
         </div>
       )}
 
-      {/* Empty state */}
-      {!loading && !error && sortedRows.length === 0 && (
-        <div className="section" data-testid="uw-analyze-empty">
-          <div className="section-body">
-            <div className="alert-item">
-              No tickers in portfolio or watchlist. Add an ad-hoc ticker above
-              to get started.
-            </div>
-          </div>
+      {/* Tier grids — always rendered from scaffold so the page never
+          shows an empty above-the-fold state. */}
+      <div className="section" data-testid="uw-analyze-tiers">
+        <div className="section-body">
+          <UwTierRow
+            label="MARKET INDICES"
+            rows={tiers.indices}
+            selected={selected}
+            onSelect={setSelected}
+          />
+          <UwTierRow
+            label="COMMODITIES & SAFE HAVEN"
+            rows={tiers.commodities}
+            selected={selected}
+            onSelect={setSelected}
+          />
+          <UwTierRow
+            label="FIXED INCOME"
+            rows={tiers.fixed}
+            selected={selected}
+            onSelect={setSelected}
+          />
+          <UwTierRow
+            label="VOLATILITY"
+            rows={tiers.vol}
+            selected={selected}
+            onSelect={setSelected}
+          />
+          <UwTierRow
+            label="SECTOR ETFS"
+            rows={tiers.sector}
+            selected={selected}
+            onSelect={setSelected}
+          />
+          <UwTierRow
+            label="SINGLE NAMES"
+            rows={tiers.single}
+            selected={selected}
+            onSelect={setSelected}
+            emptyMessage="No single-name tickers. Add one above."
+          />
         </div>
+      </div>
+
+      {/* Detail panel for the selected ticker */}
+      {selectedRow && (
+        <UwTickerDetail
+          key={selectedRow.ticker}
+          row={selectedRow}
+          refreshOne={refreshOne}
+          loading={loading}
+        />
       )}
-
-      {/* Per-ticker rows */}
-      {sortedRows.map((row) => {
-        const isOpen = expanded[row.ticker] ?? false;
-        const snap = row.snapshot;
-        const display = snap?.display ?? {};
-        const report =
-          snap?.report ?? ({} as UwTickerRow["snapshot"]["report"]);
-        const derived = snap?.derived;
-        const scores = report.scores;
-        const thesis = report.setup_thesis;
-        const changeBadges = row.changes ?? [];
-        const oiOpen = openOiPanels[row.ticker] ?? false;
-        const flowOpen = openFlowPanels[row.ticker] ?? false;
-
-        return (
-          <div
-            className="section"
-            key={row.ticker}
-            data-testid={`uw-row-${row.ticker}`}
-          >
-            <div
-              className="section-header"
-              onClick={() => toggleRow(row.ticker)}
-              style={{ cursor: "pointer", userSelect: "none" }}
-            >
-              <div
-                className="section-title"
-                style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
-              >
-                {isOpen ? (
-                  <ChevronDown size={14} />
-                ) : (
-                  <ChevronRight size={14} />
-                )}
-                <span>{row.ticker}</span>
-                {report.price != null && (
-                  <span className="report-meta" style={{ margin: 0 }}>
-                    ${fmtNum(report.price, 2)}
-                  </span>
-                )}
-                {changeBadges.length > 0 && (
-                  <span className="pill undefined">CHANGED</span>
-                )}
-                {scores?.bias && (
-                  <span className="pill defined">Bias {scores.bias}</span>
-                )}
-                {scores?.grade && (
-                  <span className="pill neutral">Grade {scores.grade}</span>
-                )}
-              </div>
-              <div
-                style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}
-              >
-                {row.sources.map((s) => (
-                  <span
-                    key={s}
-                    className="pill neutral"
-                    style={{ fontSize: 9 }}
-                  >
-                    {s.toUpperCase()}
-                  </span>
-                ))}
-                <button
-                  type="button"
-                  className="pill defined"
-                  data-testid={`uw-refresh-${row.ticker}`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    refreshOne(row.ticker);
-                  }}
-                  style={{ padding: "0.2rem 0.5rem", fontSize: 10 }}
-                >
-                  ↻
-                </button>
-              </div>
-            </div>
-
-            {isOpen && (
-              <div
-                className="section-body"
-                data-testid={`uw-body-${row.ticker}`}
-              >
-                {/* Identity / thesis */}
-                <div className="report-meta" style={{ marginBottom: "0.5rem" }}>
-                  <strong>IDENTITY</strong> · Sector {display.sector ?? "—"}
-                  {scores?.mode && <> · Mode {scores.mode.toUpperCase()}</>}
-                  {display.iv_rank != null && (
-                    <> · IV rank {fmtNum(display.iv_rank, 0)}</>
-                  )}
-                  {report.fetched_at && <> · Fetched {report.fetched_at}</>}
-                </div>
-                {thesis && (
-                  <div
-                    className="report-meta"
-                    style={{ marginBottom: "0.5rem" }}
-                  >
-                    <strong>THESIS</strong> · Structure{" "}
-                    <strong>{thesis.structure_family ?? "—"}</strong> · Regime{" "}
-                    <strong>{thesis.regime ?? "—"}</strong> · Bias{" "}
-                    <strong>{thesis.bias ?? "—"}</strong>
-                    {thesis.rationale && (
-                      <div style={{ marginTop: 4 }}>{thesis.rationale}</div>
-                    )}
-                  </div>
-                )}
-
-                {/* 4-bucket grid */}
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "1fr 1fr",
-                    gap: "0.5rem",
-                    marginTop: "0.75rem",
-                  }}
-                >
-                  <div className="section">
-                    <div className="section-header">
-                      <div className="section-title">
-                        MARKET STRUCTURE{" "}
-                        {scores?.market_structure != null
-                          ? `${fmtNum(scores.market_structure, 0)}/28`
-                          : "—"}
-                      </div>
-                    </div>
-                    <div className="section-body">
-                      <div>GEX sign: {derived?.gex_sign ?? "—"}</div>
-                      <div>
-                        Flip dist:{" "}
-                        {report.regime?.flip_distance_pct != null
-                          ? `${report.regime.flip_distance_pct.toFixed(1)}%`
-                          : "—"}
-                      </div>
-                      <div>
-                        Call wall: {fmtNum(display.call_wall_strike, 2)}
-                      </div>
-                      <div>Put wall: {fmtNum(display.put_wall_strike, 2)}</div>
-                      <div>Max pain: {fmtNum(display.max_pain, 2)}</div>
-                      <div>γ per 1%: ${fmtCompact(display.gamma_per_1pct)}</div>
-                    </div>
-                  </div>
-
-                  <div className="section">
-                    <div className="section-header">
-                      <div className="section-title">
-                        VOLATILITY{" "}
-                        {scores?.volatility != null
-                          ? `${fmtNum(scores.volatility, 0)}/28`
-                          : "—"}
-                      </div>
-                    </div>
-                    <div className="section-body">
-                      <div>IV rank: {fmtNum(display.iv_rank, 0)}</div>
-                      <div>IV: {fmtNum(display.iv, 1)}</div>
-                      <div>RV: {fmtNum(display.rv, 1)}</div>
-                      <div>Term: {display.term_structure_label ?? "—"}</div>
-                    </div>
-                  </div>
-
-                  <div className="section">
-                    <div className="section-header">
-                      <div className="section-title">
-                        FLOW{" "}
-                        {scores?.flow != null
-                          ? `${fmtNum(scores.flow, 0)}/24`
-                          : "—"}
-                      </div>
-                    </div>
-                    <div className="section-body">
-                      <div>
-                        Net call prem: ${fmtCompact(display.net_call_premium)}
-                      </div>
-                      <div>
-                        Net put prem: ${fmtCompact(display.net_put_premium)}
-                      </div>
-                      <div>
-                        Short vol: {fmtNum(display.short_volume_ratio, 2)}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="section">
-                    <div className="section-header">
-                      <div className="section-title">
-                        POSITIONING{" "}
-                        {scores?.positioning != null
-                          ? `${fmtNum(scores.positioning, 0)}/20`
-                          : "— n/a"}
-                      </div>
-                    </div>
-                    <div className="section-body">
-                      {scores?.positioning != null ? (
-                        <div>{fmtNum(scores.positioning, 0)}/20</div>
-                      ) : (
-                        <div className="alert-item">
-                          v1 limitation — bucket reweighted out
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {/* GEX profile chart */}
-                {display.gex_by_strike && display.gex_by_strike.length > 0 && (
-                  <div style={{ marginTop: "1rem" }}>
-                    <GexProfileChart
-                      profile={uwGexRowsToBuckets(
-                        display.gex_by_strike,
-                        report.price ?? derived?.spot ?? null,
-                        derived?.gex_flip_strike ?? display.gex_flip ?? null,
-                      )}
-                      spot={report.price ?? derived?.spot ?? 0}
-                    />
-                  </div>
-                )}
-
-                {/* OI delta panel — folded */}
-                {row.oi_changes && row.oi_changes.length > 0 && (
-                  <div className="section" style={{ marginTop: "0.75rem" }}>
-                    <div
-                      className="section-header"
-                      onClick={() =>
-                        setOpenOiPanels((p) => ({
-                          ...p,
-                          [row.ticker]: !p[row.ticker],
-                        }))
-                      }
-                      style={{ cursor: "pointer", userSelect: "none" }}
-                    >
-                      <div className="section-title">
-                        {oiOpen ? (
-                          <ChevronDown size={14} />
-                        ) : (
-                          <ChevronRight size={14} />
-                        )}{" "}
-                        OPEN INTEREST DELTA (since prior session)
-                      </div>
-                      <span className="pill undefined">
-                        {row.oi_changes.length} notable
-                      </span>
-                    </div>
-                    {oiOpen && (
-                      <div className="section-body">
-                        {row.oi_changes.map((oc, i) => (
-                          <div
-                            key={`${oc.strike}-${oc.side}-${i}`}
-                            className="alert-item"
-                          >
-                            • {oc.label}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Unusual flow tracker — folded */}
-                {row.unusual_flow_events &&
-                  row.unusual_flow_events.length > 0 && (
-                    <div className="section" style={{ marginTop: "0.75rem" }}>
-                      <div
-                        className="section-header"
-                        onClick={() =>
-                          setOpenFlowPanels((p) => ({
-                            ...p,
-                            [row.ticker]: !p[row.ticker],
-                          }))
-                        }
-                        style={{ cursor: "pointer", userSelect: "none" }}
-                      >
-                        <div className="section-title">
-                          {flowOpen ? (
-                            <ChevronDown size={14} />
-                          ) : (
-                            <ChevronRight size={14} />
-                          )}{" "}
-                          UNUSUAL FLOW TRACKER
-                        </div>
-                        <span className="pill undefined">
-                          {
-                            row.unusual_flow_events.filter(
-                              (e) => e.status === "open",
-                            ).length
-                          }{" "}
-                          OPEN
-                          {row.unusual_flow_events.some(
-                            (e) => e.status === "anomaly",
-                          )
-                            ? ` · ${row.unusual_flow_events.filter((e) => e.status === "anomaly").length} ANOM`
-                            : ""}
-                        </span>
-                      </div>
-                      {flowOpen && (
-                        <div className="section-body">
-                          {row.unusual_flow_events.map((ev) => {
-                            const pillCls =
-                              ev.status === "anomaly"
-                                ? "bearish"
-                                : ev.status === "closed"
-                                  ? "neutral"
-                                  : ev.status === "expired"
-                                    ? "neutral"
-                                    : "defined";
-                            return (
-                              <div key={ev.id} className="alert-item">
-                                <span className={`pill ${pillCls}`}>
-                                  {ev.status.toUpperCase()}
-                                </span>{" "}
-                                ${ev.strike} {ev.side.toUpperCase()} {ev.expiry}
-                                {ev.anomaly_reason && (
-                                  <> — {ev.anomaly_reason}</>
-                                )}
-                                {ev.daily_track &&
-                                  ev.daily_track.length > 0 && (
-                                    <span
-                                      className="report-meta"
-                                      style={{ marginLeft: 8 }}
-                                    >
-                                      mid:{" "}
-                                      {ev.daily_track
-                                        .map((r) => r.mid.toFixed(2))
-                                        .join(" → ")}
-                                    </span>
-                                  )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                {/* Notes */}
-                {report.notes && report.notes.length > 0 && (
-                  <div style={{ marginTop: "0.75rem" }}>
-                    <div className="section-title">NOTES</div>
-                    {report.notes.map((n, i) => (
-                      <div key={i} className="alert-item">
-                        • {n}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        );
-      })}
     </>
   );
 }
+
+// -----------------------------------------------------------------------------
+// <UwTierRow> — labeled grid of ticker cards
+// -----------------------------------------------------------------------------
+
+function UwTierRow({
+  label,
+  rows,
+  selected,
+  onSelect,
+  emptyMessage,
+}: {
+  label: string;
+  rows: UwTickerRow[];
+  selected: string | null;
+  onSelect: (ticker: string) => void;
+  emptyMessage?: string;
+}) {
+  const alertCount = rows.reduce(
+    (sum, r) => sum + ((r.changes?.length ?? 0) > 0 ? 1 : 0),
+    0,
+  );
+  return (
+    <div style={{ marginBottom: "0.75rem" }}>
+      <div
+        className="report-meta"
+        style={{
+          marginBottom: "0.4rem",
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+          display: "flex",
+          gap: "0.5rem",
+          alignItems: "center",
+        }}
+      >
+        <span>{label}</span>
+        {alertCount > 0 && (
+          <span
+            className="pill"
+            style={{
+              fontSize: 9,
+              padding: "1px 6px",
+              background: "var(--warning)",
+              color: "var(--bg-base)",
+              borderRadius: 999,
+              letterSpacing: "0.05em",
+            }}
+          >
+            {alertCount} ALERT{alertCount === 1 ? "" : "S"}
+          </span>
+        )}
+      </div>
+      {rows.length === 0 && emptyMessage && (
+        <div className="alert-item" style={{ opacity: 0.6 }}>
+          {emptyMessage}
+        </div>
+      )}
+      {rows.length > 0 && (
+        <div className="uw-tier-grid">
+          {rows.map((row) => (
+            <UwTickerCard
+              key={row.ticker}
+              row={row}
+              isSelected={selected === row.ticker}
+              onSelect={onSelect}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// <UwTickerCard> — name card for one ticker
+// -----------------------------------------------------------------------------
+
+function UwTickerCard({
+  row,
+  isSelected,
+  onSelect,
+}: {
+  row: UwTickerRow;
+  isSelected: boolean;
+  onSelect: (ticker: string) => void;
+}) {
+  const snap = row.snapshot;
+  const report = snap?.report ?? ({} as UwTickerRow["snapshot"]["report"]);
+  const scores = report.scores;
+  const hasAlert = (row.changes?.length ?? 0) > 0;
+  const scaffold = isScaffold(row);
+  const changeCount = row.changes?.length ?? 0;
+  const fetchedTime = (() => {
+    if (scaffold) return "";
+    const raw = report.fetched_at;
+    if (!raw) return "";
+    try {
+      return new Date(raw).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch {
+      return String(raw).slice(11, 16);
+    }
+  })();
+
+  return (
+    <button
+      type="button"
+      className="uw-card"
+      data-testid={`uw-card-${row.ticker}`}
+      data-selected={isSelected ? "true" : "false"}
+      data-alert={hasAlert ? "true" : "false"}
+      data-scaffold={scaffold ? "true" : "false"}
+      aria-pressed={isSelected}
+      onClick={() => onSelect(row.ticker)}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: "0.4rem",
+        }}
+      >
+        <span style={{ fontWeight: 600, letterSpacing: "0.04em" }}>
+          {row.ticker}
+        </span>
+        {hasAlert && changeCount > 0 && (
+          <span
+            aria-label={`${changeCount} change${changeCount === 1 ? "" : "s"}`}
+            style={{
+              fontSize: 9,
+              fontWeight: 600,
+              background: "var(--warning)",
+              color: "var(--bg-base)",
+              borderRadius: 999,
+              padding: "1px 6px",
+              lineHeight: 1,
+              minWidth: 16,
+              textAlign: "center",
+            }}
+          >
+            {changeCount}
+          </span>
+        )}
+        {!hasAlert && scaffold && (
+          <span
+            aria-label="not yet scanned"
+            style={{
+              fontSize: 9,
+              color: "var(--text-muted)",
+              opacity: 0.6,
+              letterSpacing: "0.05em",
+            }}
+          >
+            NEW
+          </span>
+        )}
+      </div>
+      <div className="report-meta" style={{ margin: 0 }}>
+        {report.price != null ? `$${fmtNum(report.price, 2)}` : "—"}
+      </div>
+      <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
+        {scores?.bias && (
+          <span className={biasPillClass(scores.bias)} style={{ fontSize: 9 }}>
+            {scores.bias}
+          </span>
+        )}
+        {scores?.grade && (
+          <span className="pill neutral" style={{ fontSize: 9 }}>
+            {scores.grade}
+          </span>
+        )}
+      </div>
+      {fetchedTime && (
+        <div
+          className="report-meta"
+          style={{ margin: 0, fontSize: 9, opacity: 0.7 }}
+        >
+          {fetchedTime}
+        </div>
+      )}
+    </button>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// <UwTickerDetail> — full per-ticker report for the selected row
+// -----------------------------------------------------------------------------
+
+function UwTickerDetail({
+  row,
+  refreshOne,
+  loading,
+}: {
+  row: UwTickerRow;
+  refreshOne: (ticker: string) => void;
+  loading: boolean;
+}) {
+  const [oiOpen, setOiOpen] = useState(false);
+  const [flowOpen, setFlowOpen] = useState(false);
+
+  const snap = row.snapshot;
+  const display = snap?.display ?? ({} as UwTickerRow["snapshot"]["display"]);
+  const report = snap?.report ?? ({} as UwTickerRow["snapshot"]["report"]);
+  const derived = snap?.derived;
+  const scores = report.scores;
+  const thesis = report.setup_thesis;
+  const changeBadges = row.changes ?? [];
+
+  return (
+    <div className="section" data-testid="uw-detail" data-ticker={row.ticker}>
+      <div className="section-header">
+        <div
+          className="section-title"
+          style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
+        >
+          <span>{row.ticker}</span>
+          {report.price != null && (
+            <span className="report-meta" style={{ margin: 0 }}>
+              ${fmtNum(report.price, 2)}
+            </span>
+          )}
+          {changeBadges.length > 0 && (
+            <span className="pill undefined">CHANGED</span>
+          )}
+          {scores?.bias && (
+            <span className={biasPillClass(scores.bias)}>
+              Bias {scores.bias}
+            </span>
+          )}
+          {scores?.grade && (
+            <span className="pill neutral">Grade {scores.grade}</span>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+          {row.sources.map((s) => (
+            <span key={s} className="pill neutral" style={{ fontSize: 9 }}>
+              {s.toUpperCase()}
+            </span>
+          ))}
+          <button
+            type="button"
+            className="pill defined"
+            data-testid={`uw-refresh-${row.ticker}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              refreshOne(row.ticker);
+            }}
+            disabled={loading}
+            style={{ padding: "0.2rem 0.5rem", fontSize: 10 }}
+          >
+            ↻
+          </button>
+        </div>
+      </div>
+
+      <div className="section-body" data-testid={`uw-body-${row.ticker}`}>
+        {/* Identity / thesis */}
+        <div className="report-meta" style={{ marginBottom: "0.5rem" }}>
+          <strong>IDENTITY</strong> · Sector {display.sector ?? "—"}
+          {scores?.mode && <> · Mode {scores.mode.toUpperCase()}</>}
+          {display.iv_rank != null && (
+            <> · IV rank {fmtNum(display.iv_rank, 0)}</>
+          )}
+          {!isScaffold(row) && report.fetched_at && (
+            <> · Fetched {report.fetched_at}</>
+          )}
+        </div>
+        {thesis && (
+          <div className="report-meta" style={{ marginBottom: "0.5rem" }}>
+            <strong>THESIS</strong> · Structure{" "}
+            <strong>{thesis.structure_family ?? "—"}</strong> · Regime{" "}
+            <strong>{thesis.regime ?? "—"}</strong> · Bias{" "}
+            <strong>{thesis.bias ?? "—"}</strong>
+            {thesis.rationale && (
+              <div style={{ marginTop: 4 }}>{thesis.rationale}</div>
+            )}
+          </div>
+        )}
+
+        {/* GEX-tab-style metric grid */}
+        {(() => {
+          const flipStrike =
+            display.gex_flip ?? derived?.gex_flip_strike ?? null;
+          const flipDistPct = report.regime?.flip_distance_pct;
+          const gexSign = derived?.gex_sign ?? null;
+          const gammaPer1 = display.gamma_per_1pct;
+          const gammaSignColor =
+            gammaPer1 != null
+              ? gammaPer1 >= 0
+                ? "var(--signal-core)"
+                : "var(--fault)"
+              : undefined;
+          const flipSub = (() => {
+            const parts: string[] = [];
+            if (gexSign) parts.push(`SIGN ${gexSign}`);
+            if (flipDistPct != null)
+              parts.push(`${flipDistPct.toFixed(1)}% from spot`);
+            return parts.join(" · ");
+          })();
+          return (
+            <>
+              <div className="gex-metrics-row" style={{ marginTop: "0.75rem" }}>
+                <MetricCard
+                  label="SPOT"
+                  value={
+                    report.price != null ? `$${fmtNum(report.price, 2)}` : "—"
+                  }
+                />
+                <MetricCard
+                  label="GEX FLIP"
+                  value={flipStrike != null ? fmtNum(flipStrike, 2) : "—"}
+                  sub={flipSub || undefined}
+                  color="var(--warning)"
+                  badge={<SourceBadge source="uw" />}
+                />
+                <MetricCard
+                  label="NET GEX"
+                  value={gammaPer1 != null ? `$${fmtCompact(gammaPer1)}` : "—"}
+                  sub="per 1% move"
+                  color={gammaSignColor}
+                  badge={<SourceBadge source="uw" />}
+                />
+                <MetricCard
+                  label="γ per 1%"
+                  value={gammaPer1 != null ? `$${fmtCompact(gammaPer1)}` : "—"}
+                  color={gammaSignColor}
+                />
+                <MetricCard
+                  label="IV 30D"
+                  value={display.iv != null ? `${fmtNum(display.iv, 1)}%` : "—"}
+                  sub={
+                    display.iv_rank != null
+                      ? `rank ${fmtNum(display.iv_rank, 0)}`
+                      : undefined
+                  }
+                  badge={<SourceBadge source="uw" />}
+                />
+              </div>
+
+              <div className="gex-metrics-row" style={{ marginTop: "0.5rem" }}>
+                <MetricCard
+                  label="CALL WALL"
+                  value={fmtNum(display.call_wall_strike, 2)}
+                  color="var(--signal-core)"
+                />
+                <MetricCard
+                  label="PUT WALL"
+                  value={fmtNum(display.put_wall_strike, 2)}
+                  color="var(--fault)"
+                />
+                <MetricCard
+                  label="MAX PAIN"
+                  value={fmtNum(display.max_pain, 2)}
+                />
+                <MetricCard
+                  label="NET CALL PREM"
+                  value={
+                    display.net_call_premium != null
+                      ? `$${fmtCompact(display.net_call_premium)}`
+                      : "—"
+                  }
+                  color="var(--signal-core)"
+                />
+                <MetricCard
+                  label="NET PUT PREM"
+                  value={
+                    display.net_put_premium != null
+                      ? `$${fmtCompact(display.net_put_premium)}`
+                      : "—"
+                  }
+                  color="var(--fault)"
+                />
+                <MetricCard
+                  label="SHORT VOL"
+                  value={fmtNum(display.short_volume_ratio, 2)}
+                />
+                <MetricCard
+                  label="TERM"
+                  value={
+                    display.term_structure_label
+                      ? display.term_structure_label.toUpperCase()
+                      : "—"
+                  }
+                  sub={
+                    display.rv != null
+                      ? `RV ${fmtNum(display.rv, 1)}`
+                      : undefined
+                  }
+                />
+              </div>
+
+              {/* Bucket score strip */}
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "0.4rem",
+                  marginTop: "0.6rem",
+                  alignItems: "center",
+                }}
+                data-testid="uw-detail-bucket-scores"
+              >
+                <span className="pill neutral" style={{ fontSize: 9 }}>
+                  MARKET STRUCTURE{" "}
+                  {scores?.market_structure != null
+                    ? `${fmtNum(scores.market_structure, 0)}/28`
+                    : "—/28"}
+                </span>
+                <span className="pill neutral" style={{ fontSize: 9 }}>
+                  VOLATILITY{" "}
+                  {scores?.volatility != null
+                    ? `${fmtNum(scores.volatility, 0)}/28`
+                    : "—/28"}
+                </span>
+                <span className="pill neutral" style={{ fontSize: 9 }}>
+                  FLOW{" "}
+                  {scores?.flow != null
+                    ? `${fmtNum(scores.flow, 0)}/24`
+                    : "—/24"}
+                </span>
+                <span
+                  className="pill neutral"
+                  style={{ fontSize: 9 }}
+                  data-testid="uw-detail-positioning"
+                >
+                  POSITIONING{" "}
+                  {scores?.positioning != null
+                    ? `${fmtNum(scores.positioning, 0)}/20`
+                    : "v1 limitation — bucket reweighted out"}
+                </span>
+              </div>
+            </>
+          );
+        })()}
+
+        {/* GEX profile chart */}
+        {display.gex_by_strike && display.gex_by_strike.length > 0 && (
+          <div style={{ marginTop: "1rem" }}>
+            <GexProfileChart
+              profile={uwGexRowsToBuckets(
+                display.gex_by_strike,
+                report.price ?? derived?.spot ?? null,
+                derived?.gex_flip_strike ?? display.gex_flip ?? null,
+              )}
+              spot={report.price ?? derived?.spot ?? 0}
+            />
+          </div>
+        )}
+
+        {/* OI delta panel — folded */}
+        {row.oi_changes && row.oi_changes.length > 0 && (
+          <div className="section" style={{ marginTop: "0.75rem" }}>
+            <div
+              className="section-header"
+              onClick={() => setOiOpen((v) => !v)}
+              style={{ cursor: "pointer", userSelect: "none" }}
+            >
+              <div className="section-title">
+                {oiOpen ? (
+                  <ChevronDown size={14} />
+                ) : (
+                  <ChevronRight size={14} />
+                )}{" "}
+                OPEN INTEREST DELTA (since prior session)
+              </div>
+              <span className="pill undefined">
+                {row.oi_changes.length} notable
+              </span>
+            </div>
+            {oiOpen && (
+              <div className="section-body">
+                {row.oi_changes.map((oc, i) => (
+                  <div
+                    key={`${oc.strike}-${oc.side}-${i}`}
+                    className="alert-item"
+                  >
+                    • {oc.label}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Unusual flow tracker — folded */}
+        {row.unusual_flow_events && row.unusual_flow_events.length > 0 && (
+          <div className="section" style={{ marginTop: "0.75rem" }}>
+            <div
+              className="section-header"
+              onClick={() => setFlowOpen((v) => !v)}
+              style={{ cursor: "pointer", userSelect: "none" }}
+            >
+              <div className="section-title">
+                {flowOpen ? (
+                  <ChevronDown size={14} />
+                ) : (
+                  <ChevronRight size={14} />
+                )}{" "}
+                UNUSUAL FLOW TRACKER
+              </div>
+              <span className="pill undefined">
+                {
+                  row.unusual_flow_events.filter((e) => e.status === "open")
+                    .length
+                }{" "}
+                OPEN
+                {row.unusual_flow_events.some((e) => e.status === "anomaly")
+                  ? ` · ${row.unusual_flow_events.filter((e) => e.status === "anomaly").length} ANOM`
+                  : ""}
+              </span>
+            </div>
+            {flowOpen && (
+              <div className="section-body">
+                {row.unusual_flow_events.map((ev) => {
+                  const pillCls =
+                    ev.status === "anomaly"
+                      ? "bearish"
+                      : ev.status === "closed"
+                        ? "neutral"
+                        : ev.status === "expired"
+                          ? "neutral"
+                          : "defined";
+                  return (
+                    <div key={ev.id} className="alert-item">
+                      <span className={`pill ${pillCls}`}>
+                        {ev.status.toUpperCase()}
+                      </span>{" "}
+                      ${ev.strike} {ev.side.toUpperCase()} {ev.expiry}
+                      {ev.anomaly_reason && <> — {ev.anomaly_reason}</>}
+                      {ev.daily_track && ev.daily_track.length > 0 && (
+                        <span className="report-meta" style={{ marginLeft: 8 }}>
+                          mid:{" "}
+                          {ev.daily_track
+                            .map((r) => r.mid.toFixed(2))
+                            .join(" → ")}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Notes */}
+        {report.notes && report.notes.length > 0 && (
+          <div style={{ marginTop: "0.75rem" }}>
+            <div className="section-title">NOTES</div>
+            {report.notes.map((n, i) => (
+              <div key={i} className="alert-item">
+                • {n}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function WorkspaceSections({
   section,
   portfolio,

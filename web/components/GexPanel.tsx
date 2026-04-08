@@ -23,6 +23,7 @@ import { MarketState } from "@/lib/useMarketHours";
 import InfoTooltip from "./InfoTooltip";
 import ShareReportModal from "./ShareReportModal";
 import GexProfileChart from "./charts/GexProfileChart";
+import { MetricCard, SourceBadge } from "./ui/MetricCard";
 
 type GexPanelProps = {
   marketState?: MarketState;
@@ -82,79 +83,6 @@ function biasLabel(direction: string): string {
 function levelColor(gamma: number | undefined): string {
   if (gamma == null) return "var(--text-muted)";
   return gamma >= 0 ? "var(--signal-core)" : "var(--fault)";
-}
-
-/* ─── Metrics Card ────────────────────────────────────── */
-
-function SourceBadge({ source }: { source: "uw" | "mq" | "both" }) {
-  const styles: Record<string, React.CSSProperties> = {
-    uw: {
-      background: "rgba(15,110,86,0.18)",
-      color: "var(--signal-core)",
-      border: "0.5px solid rgba(15,110,86,0.4)",
-    },
-    mq: {
-      background: "rgba(56,138,221,0.15)",
-      color: "#85b7eb",
-      border: "0.5px solid rgba(56,138,221,0.35)",
-    },
-    both: {
-      background: "rgba(93,202,165,0.12)",
-      color: "var(--signal-core)",
-      border: "0.5px solid rgba(93,202,165,0.3)",
-    },
-  };
-  const labels = { uw: "UW", mq: "MQ", both: "UW+MQ" };
-  return (
-    <span
-      style={{
-        ...styles[source],
-        fontSize: 9,
-        fontWeight: 500,
-        padding: "1px 5px",
-        borderRadius: 2,
-        letterSpacing: "0.06em",
-      }}
-    >
-      {labels[source]}
-    </span>
-  );
-}
-
-function MetricCard({
-  label,
-  value,
-  sub,
-  color,
-  badge,
-  tooltip,
-}: {
-  label: string;
-  value: string;
-  sub?: string;
-  color?: string;
-  badge?: React.ReactNode;
-  tooltip?: string;
-}) {
-  return (
-    <div className="gex-metric-card">
-      <div
-        className="gex-metric-label"
-        style={{ display: "flex", alignItems: "center", gap: 4 }}
-      >
-        {label}
-        {tooltip && <InfoTooltip text={tooltip} />}
-        {badge}
-      </div>
-      <div
-        className="gex-metric-value"
-        style={{ color: color || "var(--text-primary)" }}
-      >
-        {value}
-      </div>
-      {sub && <div className="gex-metric-sub">{sub}</div>}
-    </div>
-  );
 }
 
 /* ─── Level Card ──────────────────────────────────────── */
