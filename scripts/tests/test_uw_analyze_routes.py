@@ -194,6 +194,68 @@ def test_portfolio_returns_changes_after_force_refresh(tmp_path):
     assert any(a["code"] == "UNUSUAL_CALL_SWEEP" for a in body["action_items"])
 
 
+def test_refresh_captures_flow_events(tmp_path):
+    """POST /refresh must capture flow events on the write path so a
+    subsequent GET /portfolio (fresh TTL, did_refresh=False) surfaces them."""
+    state = {"call_pnl": 0}
+
+    async def runner(t):
+        report = {
+            "ticker": t,
+            "price": 100,
+            "regime": {"gex_sign": "POSITIVE"},
+            "scores": {"flow": 5},
+        }
+        display = {
+            "iv_rank": 40,
+            "max_pain": 100,
+            "net_call_premium": state["call_pnl"],
+            "net_put_premium": 0,
+            "gex_flip": 99,
+            "call_wall_strike": 110,
+            "put_wall_strike": 90,
+        }
+        flow_alerts = (
+            [
+                {
+                    "option_type": "call",
+                    "strike": 105,
+                    "expiration_date": "2026-05-15",
+                    "total_premium": 7_000_000,
+                    "open_interest": 1500,
+                    "volume": 4000,
+                    "mid": 2.50,
+                }
+            ]
+            if state["call_pnl"]
+            else []
+        )
+        return report, display, flow_alerts
+
+    app = _build_app(
+        tmp_path,
+        runner,
+        portfolio={"positions": [{"ticker": "NVDA"}]},
+    )
+    client = TestClient(app)
+    # Seed baseline via refresh (no sweep yet).
+    r0 = client.post("/uw-analyze/refresh", json={"tickers": ["NVDA"]})
+    assert r0.status_code == 200
+    # Flip state and refresh again — this is where capture MUST run.
+    state["call_pnl"] = 10_000_000
+    r1 = client.post("/uw-analyze/refresh", json={"tickers": ["NVDA"]})
+    assert r1.status_code == 200
+    # Now GET /portfolio on fresh TTL (did_refresh=False). Events must
+    # still be present because /refresh already captured them.
+    body = client.get("/uw-analyze/portfolio").json()
+    nvda = next(r for r in body["tickers"] if r["ticker"] == "NVDA")
+    events = nvda["unusual_flow_events"]
+    assert events, "expected /refresh to have captured flow events"
+    assert any(
+        ev.get("ticker") == "NVDA" and ev.get("side") == "call" and float(ev.get("strike", 0)) == 105.0 for ev in events
+    ), f"expected FLOW event from sweep; got {events}"
+
+
 def test_portfolio_does_not_re_capture_on_repeat_get(tmp_path):
     """Second GET must not create duplicate flow events — flow capture is
     a write-path operation, triggered only on a fresh refresh."""

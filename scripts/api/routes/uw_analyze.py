@@ -445,6 +445,7 @@ async def uw_analyze_portfolio() -> dict:
 async def uw_analyze_refresh(req: RefreshRequest) -> dict:
     """Force re-run for the given tickers (or all candidates)."""
     cache = get_portfolio_cache()
+    flow_log = get_flow_log()
     targets: list[str]
     if req.tickers:
         targets = [t.strip().upper() for t in req.tickers if t and t.strip()]
@@ -456,17 +457,43 @@ async def uw_analyze_refresh(req: RefreshRequest) -> dict:
 
     refreshed = 0
     failed: list[dict] = []
+    captured_any = False
     for ticker in targets:
         try:
-            await cache.get_or_run(
+            entry, did_refresh = await cache.get_or_run(
                 ticker,
                 runner=_runner,
                 force=True,
                 sources=["adhoc"] if req.adhoc else (),
-            )  # returns (entry, did_refresh); unused here
+            )
             refreshed += 1
+
+            # Capture flow events on the write path (same contract as
+            # /portfolio). Mirrors that branch so a subsequent GET on
+            # fresh TTL still surfaces events triggered by this refresh.
+            if did_refresh:
+                snap = entry.get("current") or {}
+                prev = entry.get("previous")
+                change_dicts = entry.get("materialized_changes") or []
+                if change_dicts:
+                    flow_alerts = snap.get("flow_alerts") or None
+                    underlying = (snap.get("derived") or {}).get("spot")
+                    if flow_alerts and underlying is not None:
+                        changes_objs = compute_changes(prev, snap)
+                        new_events = capture_from_changes(
+                            ticker=ticker,
+                            changes=changes_objs,
+                            flow_alerts=flow_alerts,
+                            underlying_price=underlying,
+                        )
+                        for ev in new_events:
+                            flow_log.upsert(ev)
+                            captured_any = True
         except Exception as exc:  # noqa: BLE001
             logger.warning("refresh failed for %s: %s", ticker, exc)
             failed.append({"ticker": ticker, "error": str(exc)})
+
+    if captured_any:
+        flow_log.save()
 
     return {"refreshed": refreshed, "failed": failed}
