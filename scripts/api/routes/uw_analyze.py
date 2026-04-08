@@ -347,8 +347,7 @@ async def uw_analyze_portfolio() -> dict:
     flow_log = get_flow_log()
     candidates = seed_candidates()
 
-    rows: list[dict] = []
-    for ticker, sources in sorted(candidates.items()):
+    async def _process(ticker: str, sources) -> Optional[dict]:
         try:
             entry, did_refresh = await cache.get_or_run(
                 ticker,
@@ -358,11 +357,9 @@ async def uw_analyze_portfolio() -> dict:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("uw-analyze portfolio: %s failed: %s", ticker, exc)
-            continue
+            return None
 
-        # If the daily cron hasn't yet stamped oi_baseline (e.g. before 15:50 ET
-        # or first boot), fetch on-demand so the dashboard surfaces deltas
-        # immediately. Failures are non-fatal — empty oi_changes is fine.
+        # On-demand OI fetch when the daily cron hasn't yet stamped oi_baseline.
         if not entry.get("oi_baseline"):
             try:
                 from clients.uw_client import UWClient
@@ -380,8 +377,6 @@ async def uw_analyze_portfolio() -> dict:
 
         snap = entry.get("current") or {}
         prev = entry.get("previous")
-        # Read persisted materialized changes — never recompute on the GET
-        # path. Flow event capture below runs only on fresh refreshes.
         change_dicts = entry.get("materialized_changes") or []
 
         if did_refresh and change_dicts:
@@ -395,24 +390,25 @@ async def uw_analyze_portfolio() -> dict:
                     flow_alerts=flow_alerts,
                     underlying_price=underlying,
                 )
+                # Safe without a lock: FlowLog.upsert has no await points, so
+                # concurrent coroutines on a single event loop can't interleave
+                # mid-mutation.
                 for ev in new_events:
                     flow_log.upsert(ev)
 
         oi_baseline = entry.get("oi_baseline") or {}
-        oi_changes = oi_baseline.get("changes") or []
-        unusual_events = [e.to_dict() for e in flow_log.for_ticker(ticker)]
+        return {
+            "ticker": ticker,
+            "sources": list(sources),
+            "snapshot": snap,
+            "prev_ts": (prev or {}).get("ts") if isinstance(prev, dict) else None,
+            "changes": change_dicts,
+            "oi_changes": oi_baseline.get("changes") or [],
+            "unusual_flow_events": [e.to_dict() for e in flow_log.for_ticker(ticker)],
+        }
 
-        rows.append(
-            {
-                "ticker": ticker,
-                "sources": list(sources),
-                "snapshot": snap,
-                "prev_ts": (prev or {}).get("ts") if isinstance(prev, dict) else None,
-                "changes": change_dicts,
-                "oi_changes": oi_changes,
-                "unusual_flow_events": unusual_events,
-            }
-        )
+    results = await asyncio.gather(*[_process(t, s) for t, s in sorted(candidates.items())])
+    rows = [r for r in results if r is not None]
 
     if any(r.get("changes") for r in rows):
         flow_log.save()
@@ -440,10 +436,9 @@ async def uw_analyze_refresh(req: RefreshRequest) -> dict:
     else:
         targets = sorted(seed_candidates().keys())
 
-    refreshed = 0
-    failed: list[dict] = []
-    captured_any = False
-    for ticker in targets:
+    captured_any = {"flag": False}
+
+    async def _refresh_one(ticker: str) -> Optional[dict]:
         try:
             entry, did_refresh = await cache.get_or_run(
                 ticker,
@@ -451,34 +446,35 @@ async def uw_analyze_refresh(req: RefreshRequest) -> dict:
                 force=True,
                 sources=["adhoc"] if req.adhoc else (),
             )
-            refreshed += 1
-
-            # Capture flow events on the write path (same contract as
-            # /portfolio). Mirrors that branch so a subsequent GET on
-            # fresh TTL still surfaces events triggered by this refresh.
-            if did_refresh:
-                snap = entry.get("current") or {}
-                prev = entry.get("previous")
-                change_dicts = entry.get("materialized_changes") or []
-                if change_dicts:
-                    flow_alerts = snap.get("flow_alerts") or None
-                    underlying = (snap.get("derived") or {}).get("spot")
-                    if flow_alerts and underlying is not None:
-                        changes_objs = compute_changes(prev, snap)
-                        new_events = capture_from_changes(
-                            ticker=ticker,
-                            changes=changes_objs,
-                            flow_alerts=flow_alerts,
-                            underlying_price=underlying,
-                        )
-                        for ev in new_events:
-                            flow_log.upsert(ev)
-                            captured_any = True
         except Exception as exc:  # noqa: BLE001
             logger.warning("refresh failed for %s: %s", ticker, exc)
-            failed.append({"ticker": ticker, "error": str(exc)})
+            return {"ticker": ticker, "error": str(exc)}
 
-    if captured_any:
+        if did_refresh:
+            snap = entry.get("current") or {}
+            prev = entry.get("previous")
+            change_dicts = entry.get("materialized_changes") or []
+            if change_dicts:
+                flow_alerts = snap.get("flow_alerts") or None
+                underlying = (snap.get("derived") or {}).get("spot")
+                if flow_alerts and underlying is not None:
+                    changes_objs = compute_changes(prev, snap)
+                    new_events = capture_from_changes(
+                        ticker=ticker,
+                        changes=changes_objs,
+                        flow_alerts=flow_alerts,
+                        underlying_price=underlying,
+                    )
+                    for ev in new_events:
+                        flow_log.upsert(ev)
+                        captured_any["flag"] = True
+        return None
+
+    results = await asyncio.gather(*[_refresh_one(t) for t in targets])
+    failed = [r for r in results if r is not None]
+    refreshed = len(targets) - len(failed)
+
+    if captured_any["flag"]:
         flow_log.save()
 
     return {"refreshed": refreshed, "failed": failed}

@@ -358,6 +358,42 @@ def test_portfolio_surfaces_on_demand_oi_changes(monkeypatch, tmp_path):
     assert any(a["code"] == "OI_DELTA" for a in body["action_items"])
 
 
+def test_portfolio_runs_tickers_concurrently(tmp_path, monkeypatch):
+    """Confirm /portfolio fans out per-ticker work with asyncio.gather so the
+    cache's Semaphore(3) actually caps concurrency."""
+    in_flight = {"n": 0, "peak": 0}
+
+    async def slow_runner(ticker: str):
+        in_flight["n"] += 1
+        in_flight["peak"] = max(in_flight["peak"], in_flight["n"])
+        await asyncio.sleep(0.05)
+        in_flight["n"] -= 1
+        report = {
+            "ticker": ticker,
+            "price": 100.0,
+            "regime": {"gex_sign": "POSITIVE"},
+            "scores": {},
+        }
+        display = {
+            "iv_rank": 50.0,
+            "max_pain": 99.0,
+            "net_call_premium": 0,
+            "net_put_premium": 0,
+        }
+        return report, display, []
+
+    app = _build_app(
+        tmp_path,
+        slow_runner,
+        portfolio={"positions": [{"ticker": f"T{i}"} for i in range(5)]},
+    )
+    client = TestClient(app)
+    resp = client.get("/uw-analyze/portfolio")
+    assert resp.status_code == 200
+    assert len(resp.json()["tickers"]) == 5
+    assert in_flight["peak"] >= 2, f"expected concurrent runs, peak={in_flight['peak']}"
+
+
 # ── /refresh ────────────────────────────────────────────────────────────────
 
 
