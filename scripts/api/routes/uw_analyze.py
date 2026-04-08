@@ -22,12 +22,51 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from uw_analyze import run_analysis_with_data
 
+from api.services.uw_analyze_cache import UwAnalyzeCache, build_snapshot
+from api.services.uw_analyze_candidates import (
+    add_adhoc as _candidates_add_adhoc,
+)
+from api.services.uw_analyze_candidates import (
+    seed_candidates,
+)
+from api.services.uw_analyze_diff import compute_changes
+from api.services.uw_analyze_flow_tracker import FlowLog, capture_from_changes
+
 logger = logging.getLogger("xenon.uw_analyze")
 router = APIRouter()
 
-# 30s in-process TTL cache to absorb double-clicks / rate-limit risk.
+# 30s in-process TTL cache to absorb double-clicks / rate-limit risk on the
+# legacy single-ticker route. The portfolio routes use UwAnalyzeCache (5/30
+# minute TTL with singleflight) instead.
 _CACHE_TTL_SECONDS = 30.0
 _cache: dict[str, tuple[float, "UwAnalyzeResponse"]] = {}
+
+# Long-lived cache + flow log shared across requests for /portfolio and
+# /refresh. Lazily instantiated so test discovery doesn't touch disk.
+_portfolio_cache: Optional[UwAnalyzeCache] = None
+_flow_log: Optional[FlowLog] = None
+
+
+def get_portfolio_cache() -> UwAnalyzeCache:
+    global _portfolio_cache
+    if _portfolio_cache is None:
+        _portfolio_cache = UwAnalyzeCache()
+    return _portfolio_cache
+
+
+def get_flow_log() -> FlowLog:
+    global _flow_log
+    if _flow_log is None:
+        _flow_log = FlowLog()
+    return _flow_log
+
+
+def reset_state_for_tests() -> None:
+    """Reset module-level singletons. Tests only."""
+    global _portfolio_cache, _flow_log, _cache
+    _portfolio_cache = None
+    _flow_log = None
+    _cache = {}
 
 
 # ── Request / response models ─────────────────────────────────────────────
@@ -247,3 +286,163 @@ async def uw_analyze(req: UwAnalyzeRequest) -> UwAnalyzeResponse:
     )
     _cache[raw_ticker] = (now, response)
     return response
+
+
+# ── Portfolio routes ────────────────────────────────────────────────────────
+
+
+class RefreshRequest(BaseModel):
+    tickers: Optional[list[str]] = None
+    adhoc: bool = False
+
+
+async def _runner(ticker: str) -> tuple[dict, dict]:
+    """Adapt scripts.uw_analyze.run_analysis_with_data into the cache's
+    `(report_dict, display_dict)` contract."""
+    report, td = await asyncio.wait_for(
+        asyncio.to_thread(run_analysis_with_data, ticker),
+        timeout=60.0,
+    )
+    return _serialize_report(report), _td_to_display(td).model_dump()
+
+
+def _action_items_from(payload: list[dict]) -> list[dict]:
+    items: list[dict] = []
+    for row in payload:
+        ticker = row.get("ticker")
+        for ch in row.get("changes") or []:
+            if ch.get("severity") in ("warn", "alert"):
+                items.append(
+                    {
+                        "ticker": ticker,
+                        "code": ch["code"],
+                        "label": ch["label"],
+                        "severity": ch["severity"],
+                    }
+                )
+        for ev in row.get("unusual_flow_events") or []:
+            if ev.get("status") == "anomaly":
+                items.append(
+                    {
+                        "ticker": ticker,
+                        "code": "FLOW_ANOMALY",
+                        "label": f"{ticker} {ev.get('side', '').upper()} ${ev.get('strike')} {ev.get('expiry')} — {ev.get('anomaly_reason')}",
+                        "severity": "alert",
+                    }
+                )
+        # Surface the strongest OI delta per ticker.
+        oi = row.get("oi_changes") or []
+        if oi:
+            top = oi[0]
+            items.append(
+                {
+                    "ticker": ticker,
+                    "code": "OI_DELTA",
+                    "label": f"{ticker} — {top['label']}",
+                    "severity": "warn",
+                }
+            )
+    return items
+
+
+@router.get("/uw-analyze/portfolio")
+async def uw_analyze_portfolio() -> dict:
+    """Return current snapshots + diffs for all portfolio + watchlist tickers.
+
+    Cache is consulted first; only stale/missing entries trigger an upstream
+    call. Concurrency is bounded by the cache's semaphore.
+    """
+    from utils.market_hours import is_market_open
+
+    cache = get_portfolio_cache()
+    flow_log = get_flow_log()
+    candidates = seed_candidates()
+
+    rows: list[dict] = []
+    for ticker, sources in sorted(candidates.items()):
+        try:
+            entry = await cache.get_or_run(
+                ticker,
+                runner=_runner,
+                force=False,
+                sources=sources,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("uw-analyze portfolio: %s failed: %s", ticker, exc)
+            continue
+
+        snap = entry.get("current") or {}
+        prev = entry.get("previous")
+        changes = compute_changes(prev, snap)
+        change_dicts = [c.to_dict() for c in changes]
+
+        # Capture/upsert any sweep events into the flow log
+        flow_alerts = ((snap.get("report") or {}).get("flow_alerts")) or None
+        underlying = (snap.get("derived") or {}).get("spot")
+        if changes and flow_alerts and underlying is not None:
+            new_events = capture_from_changes(
+                ticker=ticker,
+                changes=changes,
+                flow_alerts=flow_alerts,
+                underlying_price=underlying,
+            )
+            for ev in new_events:
+                flow_log.upsert(ev)
+
+        oi_baseline = entry.get("oi_baseline") or {}
+        oi_changes = oi_baseline.get("changes") or []
+        unusual_events = [e.to_dict() for e in flow_log.for_ticker(ticker)]
+
+        rows.append(
+            {
+                "ticker": ticker,
+                "sources": list(sources),
+                "snapshot": snap,
+                "prev_ts": (prev or {}).get("ts") if isinstance(prev, dict) else None,
+                "changes": change_dicts,
+                "oi_changes": oi_changes,
+                "unusual_flow_events": unusual_events,
+            }
+        )
+
+    if any(r.get("changes") for r in rows):
+        flow_log.save()
+
+    return {
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "market_state": "open" if is_market_open() else "closed",
+        "ttl_seconds": cache._ttl(),
+        "tickers": rows,
+        "action_items": _action_items_from(rows),
+    }
+
+
+@router.post("/uw-analyze/refresh")
+async def uw_analyze_refresh(req: RefreshRequest) -> dict:
+    """Force re-run for the given tickers (or all candidates)."""
+    cache = get_portfolio_cache()
+    targets: list[str]
+    if req.tickers:
+        targets = [t.strip().upper() for t in req.tickers if t and t.strip()]
+        if req.adhoc:
+            for t in targets:
+                _candidates_add_adhoc(t)
+    else:
+        targets = sorted(seed_candidates().keys())
+
+    refreshed = 0
+    failed: list[dict] = []
+    for ticker in targets:
+        try:
+            await cache.get_or_run(
+                ticker,
+                runner=_runner,
+                force=True,
+                sources=["adhoc"] if req.adhoc else (),
+            )
+            refreshed += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("refresh failed for %s: %s", ticker, exc)
+            failed.append({"ticker": ticker, "error": str(exc)})
+
+    return {"refreshed": refreshed, "failed": failed}
