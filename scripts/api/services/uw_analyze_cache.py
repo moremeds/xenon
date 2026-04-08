@@ -224,9 +224,14 @@ class UwAnalyzeCache:
         runner: Callable[[str], Awaitable[tuple[dict, dict, list[dict]]]],
         force: bool = False,
         sources: Iterable[Source] = (),
-    ) -> dict:
-        """Return the cached entry for `ticker`, running `runner(ticker)` if
-        the snapshot is missing/stale or `force=True`.
+    ) -> tuple[dict, bool]:
+        """Return `(entry, did_refresh)` for `ticker`, running `runner(ticker)`
+        if the snapshot is missing/stale or `force=True`.
+
+        `did_refresh` is True when a fresh runner call just materialized a
+        new snapshot; callers use it to gate write-path side effects like
+        flow event capture. The materialized diff is persisted on the entry
+        at `materialized_changes` so GET paths never recompute.
 
         `runner` is an async callable returning
         `(report_dict, display_dict, flow_alerts)`. Injection makes the
@@ -244,7 +249,7 @@ class UwAnalyzeCache:
                 if sources:
                     self._merge_sources(entry, sources)
                     await self._persist()
-                return entry
+                return entry, False
 
             async with self._semaphore:
                 logger.info("uw_analyze_cache running analysis for %s (force=%s)", ticker, force)
@@ -254,15 +259,24 @@ class UwAnalyzeCache:
             prev_snapshot = entry.get("current") if entry else None
             existing_sources = list(entry.get("sources") or []) if entry else []
             merged_sources = sorted(set(existing_sources) | set(sources))
+
+            # Materialize the diff once at write time — the GET path reads
+            # this instead of recomputing (and re-capturing flow events)
+            # on every request.
+            from api.services.uw_analyze_diff import compute_changes as _compute_changes
+
+            materialized = [c.to_dict() for c in _compute_changes(prev_snapshot, new_snapshot)]
+
             new_entry = {
                 "current": new_snapshot,
                 "previous": prev_snapshot,
                 "oi_baseline": entry.get("oi_baseline") if entry else None,
                 "sources": merged_sources or list(sources),
+                "materialized_changes": materialized,
             }
             self._entries[ticker] = new_entry
             await self._persist()
-            return new_entry
+            return new_entry, True
 
     def _merge_sources(self, entry: dict, sources: Iterable[Source]) -> None:
         existing = set(entry.get("sources") or [])

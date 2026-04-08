@@ -365,7 +365,7 @@ async def uw_analyze_portfolio() -> dict:
     rows: list[dict] = []
     for ticker, sources in sorted(candidates.items()):
         try:
-            entry = await cache.get_or_run(
+            entry, did_refresh = await cache.get_or_run(
                 ticker,
                 runner=_runner,
                 force=False,
@@ -395,21 +395,23 @@ async def uw_analyze_portfolio() -> dict:
 
         snap = entry.get("current") or {}
         prev = entry.get("previous")
-        changes = compute_changes(prev, snap)
-        change_dicts = [c.to_dict() for c in changes]
+        # Read persisted materialized changes — never recompute on the GET
+        # path. Flow event capture below runs only on fresh refreshes.
+        change_dicts = entry.get("materialized_changes") or []
 
-        # Capture/upsert any sweep events into the flow log
-        flow_alerts = snap.get("flow_alerts") or None
-        underlying = (snap.get("derived") or {}).get("spot")
-        if changes and flow_alerts and underlying is not None:
-            new_events = capture_from_changes(
-                ticker=ticker,
-                changes=changes,
-                flow_alerts=flow_alerts,
-                underlying_price=underlying,
-            )
-            for ev in new_events:
-                flow_log.upsert(ev)
+        if did_refresh and change_dicts:
+            flow_alerts = snap.get("flow_alerts") or None
+            underlying = (snap.get("derived") or {}).get("spot")
+            if flow_alerts and underlying is not None:
+                changes_objs = compute_changes(prev, snap)
+                new_events = capture_from_changes(
+                    ticker=ticker,
+                    changes=changes_objs,
+                    flow_alerts=flow_alerts,
+                    underlying_price=underlying,
+                )
+                for ev in new_events:
+                    flow_log.upsert(ev)
 
         oi_baseline = entry.get("oi_baseline") or {}
         oi_changes = oi_baseline.get("changes") or []
@@ -461,7 +463,7 @@ async def uw_analyze_refresh(req: RefreshRequest) -> dict:
                 runner=_runner,
                 force=True,
                 sources=["adhoc"] if req.adhoc else (),
-            )
+            )  # returns (entry, did_refresh); unused here
             refreshed += 1
         except Exception as exc:  # noqa: BLE001
             logger.warning("refresh failed for %s: %s", ticker, exc)

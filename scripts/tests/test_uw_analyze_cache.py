@@ -116,8 +116,11 @@ def test_first_call_runs_runner(tmp_path):
     async def go():
         calls = []
         cache = make_cache(tmp_path)
-        entry = await cache.get_or_run("nvda", runner=make_runner(calls_record=calls), sources=["portfolio"])
+        entry, did_refresh = await cache.get_or_run(
+            "nvda", runner=make_runner(calls_record=calls), sources=["portfolio"]
+        )
         assert calls == ["NVDA"]
+        assert did_refresh is True
         assert entry["current"]["ticker"] == "NVDA"
         assert entry["sources"] == ["portfolio"]
 
@@ -153,7 +156,7 @@ def test_stale_entry_reruns(tmp_path):
         calls = []
         cache = make_cache(tmp_path, ttl_open_s=1)
         runner = make_runner(calls_record=calls)
-        entry = await cache.get_or_run("nvda", runner=runner)
+        entry, _ = await cache.get_or_run("nvda", runner=runner)
         old_ts = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
         entry["current"]["ts"] = old_ts
         await cache.get_or_run("nvda", runner=runner)
@@ -183,7 +186,7 @@ def test_singleflight_collapses_concurrent_same_ticker(tmp_path):
             cache.get_or_run("nvda", runner=runner),
         )
         assert len(calls) == 1
-        assert all(r["current"]["ticker"] == "NVDA" for r in results)
+        assert all(r[0]["current"]["ticker"] == "NVDA" for r in results)
 
     _run(go())
 

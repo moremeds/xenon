@@ -194,6 +194,70 @@ def test_portfolio_returns_changes_after_force_refresh(tmp_path):
     assert any(a["code"] == "UNUSUAL_CALL_SWEEP" for a in body["action_items"])
 
 
+def test_portfolio_does_not_re_capture_on_repeat_get(tmp_path):
+    """Second GET must not create duplicate flow events — flow capture is
+    a write-path operation, triggered only on a fresh refresh."""
+    state = {"call_pnl": 0}
+
+    async def runner(t):
+        report = {
+            "ticker": t,
+            "price": 100,
+            "regime": {"gex_sign": "POSITIVE"},
+            "scores": {"flow": 5},
+        }
+        display = {
+            "iv_rank": 40,
+            "max_pain": 100,
+            "net_call_premium": state["call_pnl"],
+            "net_put_premium": 0,
+            "gex_flip": 99,
+            "call_wall_strike": 110,
+            "put_wall_strike": 90,
+        }
+        flow_alerts = (
+            [
+                {
+                    "option_type": "call",
+                    "strike": 105,
+                    "expiration_date": "2026-05-15",
+                    "total_premium": 7_000_000,
+                    "open_interest": 1500,
+                    "volume": 4000,
+                    "mid": 2.50,
+                }
+            ]
+            if state["call_pnl"]
+            else []
+        )
+        return report, display, flow_alerts
+
+    app = _build_app(
+        tmp_path,
+        runner,
+        portfolio={"positions": [{"ticker": "NVDA"}]},
+    )
+    client = TestClient(app)
+    # First GET seeds baseline (no changes yet).
+    client.get("/uw-analyze/portfolio")
+    # Flip upstream state and expire the cache entry so the next GET
+    # triggers a fresh refresh (did_refresh=True) inside the /portfolio
+    # path, which is where flow capture runs.
+    state["call_pnl"] = 10_000_000
+    from datetime import datetime, timedelta
+    from datetime import timezone as _tz
+
+    old_ts = (datetime.now(_tz.utc) - timedelta(hours=1)).isoformat()
+    routes_mod._portfolio_cache._entries["NVDA"]["current"]["ts"] = old_ts
+
+    r1 = client.get("/uw-analyze/portfolio")
+    r2 = client.get("/uw-analyze/portfolio")
+    events_1 = sum(len(row["unusual_flow_events"]) for row in r1.json()["tickers"])
+    events_2 = sum(len(row["unusual_flow_events"]) for row in r2.json()["tickers"])
+    assert events_1 >= 1, "expected at least one captured flow event after refresh"
+    assert events_2 == events_1, "second GET must not create duplicate flow events"
+
+
 def test_portfolio_surfaces_on_demand_oi_changes(monkeypatch, tmp_path):
     """When oi_baseline is missing, /portfolio fetches OI on-demand and
     surfaces the changes in both row.oi_changes and action_items."""
