@@ -328,7 +328,7 @@ def maybe_close_or_expire(event: FlowEvent, *, today: Optional[date] = None) -> 
     # OI returned to ≤ initial → closed
     if event.daily_track and event.initial.oi:
         latest = event.daily_track[-1]
-        if latest.oi <= event.initial.oi:
+        if latest.oi < event.initial.oi:
             event.status = "closed"
             event.closed_at = today.isoformat()
     return event
@@ -345,12 +345,19 @@ def progress_event(
 ) -> FlowEvent:
     """End-to-end one-step progression for the daily cron."""
     advance_daily_track(event, today=today, oi=oi, mid=mid, underlying_price=underlying_price, volume=volume)
+    # Classify anomaly — only set status=anomaly once, preserve reason.
     reason = classify_anomaly(event)
-    if reason and event.status == "open":
-        event.status = "anomaly"
+    if reason and event.anomaly_reason is None:
         event.anomaly_reason = reason
-    if event.status == "open":
-        maybe_close_or_expire(event)
+        if event.status == "open":
+            event.status = "anomaly"
+    # Always check close/expire — anomaly is informational, not terminal.
+    if event.status in ("open", "anomaly"):
+        try:
+            today_d = date.fromisoformat(today)
+        except ValueError:
+            today_d = None
+        maybe_close_or_expire(event, today=today_d)
     return event
 
 

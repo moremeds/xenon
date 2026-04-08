@@ -271,6 +271,48 @@ def test_close_only_when_oi_falls_below_initial():
 # ── progress_event end-to-end ──────────────────────────────────────────────
 
 
+def test_progress_event_anomaly_can_still_expire():
+    """An event already flagged 'anomaly' must still transition to 'expired'
+    when its expiry date passes."""
+    from datetime import date, timedelta
+
+    from api.services.uw_analyze_flow_tracker import FlowEvent, FlowInitial, progress_event
+
+    expired_date = (date.today() - timedelta(days=1)).isoformat()
+    ev = FlowEvent(
+        id="x",
+        ticker="AAPL",
+        side="call",
+        strike=100,
+        expiry=expired_date,
+        detected_at="2026-04-08T15:50:00+00:00",
+        initial=FlowInitial(premium_usd=7e6, oi=1000, volume=4000, mid=2.5, underlying_price=99),
+        status="anomaly",
+        anomaly_reason="premium collapsed -70%",
+    )
+    progress_event(ev, today=date.today().isoformat(), oi=950, mid=0.7, underlying_price=99, volume=200)
+    assert ev.status == "expired"
+    assert ev.anomaly_reason == "premium collapsed -70%"
+
+
+def test_progress_event_anomaly_can_still_close():
+    from api.services.uw_analyze_flow_tracker import FlowEvent, FlowInitial, progress_event
+
+    ev = FlowEvent(
+        id="y",
+        ticker="AAPL",
+        side="call",
+        strike=100,
+        expiry="2027-01-15",
+        detected_at="2026-04-08T15:50:00+00:00",
+        initial=FlowInitial(premium_usd=7e6, oi=1000, volume=4000, mid=2.5, underlying_price=99),
+        status="anomaly",
+        anomaly_reason="OI evaporated -60%",
+    )
+    progress_event(ev, today="2026-04-10", oi=900, mid=2.5, underlying_price=99, volume=100)
+    assert ev.status == "closed"
+
+
 def test_progress_event_marks_anomaly_first():
     ev = _make_event(initial_mid=4.0)
     progress_event(ev, today="2026-04-09", oi=1000, mid=1.0, underlying_price=870.5)

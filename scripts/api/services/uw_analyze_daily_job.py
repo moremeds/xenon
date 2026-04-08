@@ -131,7 +131,7 @@ async def run_once(
     flow_log,
     uw_client,
     oi_fetcher: Optional[Callable[[str, Optional[float]], Awaitable[list]]] = None,
-    contract_fetcher: Optional[Callable[[str], Awaitable[Optional[dict]]]] = None,
+    contract_fetcher: Optional[Callable[..., Awaitable[Optional[dict]]]] = None,
 ) -> dict:
     """Single end-to-end pass.
 
@@ -176,14 +176,26 @@ async def run_once(
     # ── Flow event progression ─────────────────────────────────────────
     flow_log.load()
     for event in flow_log.all():
-        if event.status != "open":
+        if event.status not in ("open", "anomaly"):
             continue
         contract_state = None
         if contract_fetcher is not None:
             try:
-                contract_state = await contract_fetcher(event.id)
+                contract_state = await contract_fetcher(
+                    ticker=event.ticker,
+                    side=event.side,
+                    strike=event.strike,
+                    expiry=event.expiry,
+                )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("contract fetch failed for %s: %s", event.id, exc)
+                logger.warning(
+                    "contract fetch failed for %s %s $%s %s: %s",
+                    event.ticker,
+                    event.side,
+                    event.strike,
+                    event.expiry,
+                    exc,
+                )
         if not contract_state:
             # Without fresh data we can only check for expiry-based closeout.
             from api.services.uw_analyze_flow_tracker import maybe_close_or_expire

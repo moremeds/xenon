@@ -154,11 +154,50 @@ async def lifespan(app: FastAPI):
         from api.routes.uw_analyze import get_flow_log, get_portfolio_cache
         from api.services.uw_analyze_daily_job import run_loop as uw_daily_run_loop
 
+        _uw_client = UWClient() if uw_available else None
+
+        async def _default_contract_fetcher(*, ticker: str, side: str, strike: float, expiry: str):
+            """Resolve a single OCC contract's current oi/mid/underlying/volume.
+
+            Fetches the full chain for the expiry, finds the matching strike+side row.
+            Returns None on any failure so the caller falls back to expiry-only closeout.
+            """
+            if _uw_client is None:
+                return None
+            try:
+                resp = await asyncio.to_thread(_uw_client.get_option_chain, ticker, expiry=expiry)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("default contract_fetcher chain fetch failed for %s: %s", ticker, exc)
+                return None
+            rows = resp.get("data") if isinstance(resp, dict) else None
+            if not isinstance(rows, list):
+                return None
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                try:
+                    if abs(float(r.get("strike", -1)) - float(strike)) > 1e-6:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                key = "call" if side == "call" else "put"
+                try:
+                    return {
+                        "oi": int(float(r.get(f"{key}_oi") or 0)),
+                        "mid": float(r.get(f"{key}_mid") or r.get(f"{key}_last") or 0.0),
+                        "underlying_price": float(r.get("underlying_price") or 0.0),
+                        "volume": int(float(r.get(f"{key}_volume") or 0)),
+                    }
+                except (TypeError, ValueError):
+                    return None
+            return None
+
         uw_daily_task = asyncio.create_task(
             uw_daily_run_loop(
                 cache=get_portfolio_cache(),
                 flow_log=get_flow_log(),
-                uw_client=UWClient() if uw_available else None,
+                uw_client=_uw_client,
+                contract_fetcher=_default_contract_fetcher,
             )
         )
         logger.info("uw_analyze_daily_job background task started")

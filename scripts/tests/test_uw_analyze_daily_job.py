@@ -161,8 +161,10 @@ def test_run_once_advances_open_flow_events(tmp_path):
     async def fake_oi(ticker, spot):
         return []
 
-    async def fake_contract(eid):
-        return {"oi": 4000, "mid": 4.0, "underlying_price": 870.5}  # OI evaporation
+    async def fake_contract(*, ticker, side, strike, expiry):
+        # Premium collapse (mid -75%, underlying flat) — triggers anomaly but
+        # OI unchanged so close rule does not fire.
+        return {"oi": 10_000, "mid": 1.0, "underlying_price": 870.5}
 
     stats = _run(
         run_once(
@@ -201,8 +203,8 @@ def test_run_once_skips_already_closed_events(tmp_path):
 
     contract_calls = []
 
-    async def fake_contract(eid):
-        contract_calls.append(eid)
+    async def fake_contract(*, ticker, side, strike, expiry):
+        contract_calls.append((ticker, side, strike, expiry))
         return None
 
     _run(
