@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
@@ -35,12 +34,6 @@ from api.services.uw_analyze_flow_tracker import FlowLog, capture_from_changes
 logger = logging.getLogger("xenon.uw_analyze")
 router = APIRouter()
 
-# 30s in-process TTL cache to absorb double-clicks / rate-limit risk on the
-# legacy single-ticker route. The portfolio routes use UwAnalyzeCache (5/30
-# minute TTL with singleflight) instead.
-_CACHE_TTL_SECONDS = 30.0
-_cache: dict[str, tuple[float, "UwAnalyzeResponse"]] = {}
-
 # Long-lived cache + flow log shared across requests for /portfolio and
 # /refresh. Lazily instantiated so test discovery doesn't touch disk.
 _portfolio_cache: Optional[UwAnalyzeCache] = None
@@ -63,10 +56,9 @@ def get_flow_log() -> FlowLog:
 
 def reset_state_for_tests() -> None:
     """Reset module-level singletons. Tests only."""
-    global _portfolio_cache, _flow_log, _cache
+    global _portfolio_cache, _flow_log
     _portfolio_cache = None
     _flow_log = None
-    _cache = {}
 
 
 # ── Request / response models ─────────────────────────────────────────────
@@ -259,33 +251,26 @@ async def uw_analyze(req: UwAnalyzeRequest) -> UwAnalyzeResponse:
     if not raw_ticker or not raw_ticker.replace(".", "").replace("-", "").isalnum():
         raise HTTPException(status_code=400, detail="invalid ticker")
 
-    now = time.monotonic()
-    cached = _cache.get(raw_ticker)
-    if cached and (now - cached[0]) < _CACHE_TTL_SECONDS:
-        return cached[1]
-
+    cache = get_portfolio_cache()
     try:
-        report, td = await asyncio.wait_for(
-            asyncio.to_thread(run_analysis_with_data, raw_ticker),
-            timeout=60.0,
-        )
+        entry, _ = await cache.get_or_run(raw_ticker, runner=_runner, force=False)
     except UWNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"ticker not found: {raw_ticker}") from exc
     except UWAPIError as exc:
         logger.warning("uw-analyze upstream error for %s: %s", raw_ticker, exc)
         raise HTTPException(status_code=502, detail="UW upstream failed") from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except asyncio.TimeoutError as exc:
         raise HTTPException(status_code=504, detail="analysis timed out") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    response = UwAnalyzeResponse(
-        report=_serialize_report(report),
-        display=_td_to_display(td),
-        generated_at=datetime.now(timezone.utc).isoformat(),
+    snap = entry.get("current") or {}
+    display_dict = snap.get("display") or {}
+    return UwAnalyzeResponse(
+        report=snap.get("report") or {},
+        display=UwAnalyzeDisplay(**display_dict),
+        generated_at=snap.get("ts") or datetime.now(timezone.utc).isoformat(),
     )
-    _cache[raw_ticker] = (now, response)
-    return response
 
 
 # ── Portfolio routes ────────────────────────────────────────────────────────

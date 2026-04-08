@@ -422,3 +422,27 @@ def test_legacy_post_route_unchanged(tmp_path):
     client = TestClient(app)
     r = client.post("/uw-analyze", json={"ticker": ""})
     assert r.status_code == 400
+
+
+def test_legacy_post_uses_unified_cache(tmp_path):
+    """Two sequential POSTs for the same ticker within the cache TTL should
+    collapse to a single runner call, and populate UwAnalyzeCache — proving
+    the legacy in-process _cache is gone."""
+    call_count = {"n": 0}
+
+    async def counting_runner(ticker: str):
+        call_count["n"] += 1
+        base = _fake_runner()
+        return await base(ticker)
+
+    app = _build_app(tmp_path, counting_runner)
+    client = TestClient(app)
+
+    r1 = client.post("/uw-analyze", json={"ticker": "AAPL"})
+    r2 = client.post("/uw-analyze", json={"ticker": "AAPL"})
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert call_count["n"] == 1, "second POST must be served from UwAnalyzeCache"
+
+    # Most direct proof: the unified cache now has an entry for AAPL.
+    assert "AAPL" in routes_mod.get_portfolio_cache().all_entries()
