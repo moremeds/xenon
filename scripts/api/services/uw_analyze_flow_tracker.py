@@ -103,7 +103,12 @@ def _to_int(v: Any) -> Optional[int]:
 
 
 def _today_iso() -> str:
-    return date.today().isoformat()
+    try:
+        from api.services.uw_analyze_daily_job import now_et_date
+
+        return now_et_date().isoformat()
+    except Exception:  # noqa: BLE001
+        return date.today().isoformat()
 
 
 def make_event_id(ticker: str, side: str, strike: float, expiry: str, trade_date: str) -> str:
@@ -143,7 +148,13 @@ def _parse_alert_strike_expiry(alert: dict) -> tuple[Optional[float], Optional[s
 
 
 def _dte(expiry: str, today: Optional[date] = None) -> int:
-    today = today or date.today()
+    if today is None:
+        try:
+            from api.services.uw_analyze_daily_job import now_et_date
+
+            today = now_et_date()
+        except Exception:  # noqa: BLE001
+            today = date.today()
     try:
         exp = date.fromisoformat(expiry)
     except ValueError:
@@ -276,7 +287,12 @@ def classify_anomaly(event: FlowEvent, *, today: Optional[date] = None) -> Optio
         detected = datetime.fromisoformat(event.detected_at).date()
     except ValueError:
         detected = date.today()
-    days_since = (date.fromisoformat(latest.date) - detected).days
+    try:
+        from api.services.uw_analyze_daily_job import trading_days_between
+
+        days_since = trading_days_between(detected, date.fromisoformat(latest.date))
+    except Exception:  # noqa: BLE001
+        days_since = (date.fromisoformat(latest.date) - detected).days
     if 0 <= days_since <= OI_EVAPORATION_DAYS and event.initial.oi > 0:
         oi_drop = (event.initial.oi - latest.oi) / event.initial.oi
         if oi_drop >= OI_EVAPORATION_FRAC:
@@ -294,7 +310,13 @@ def classify_anomaly(event: FlowEvent, *, today: Optional[date] = None) -> Optio
 
 
 def maybe_close_or_expire(event: FlowEvent, *, today: Optional[date] = None) -> FlowEvent:
-    today = today or date.today()
+    if today is None:
+        try:
+            from api.services.uw_analyze_daily_job import now_et_date
+
+            today = now_et_date()
+        except Exception:  # noqa: BLE001
+            today = date.today()
     # Expired?
     try:
         if date.fromisoformat(event.expiry) < today:

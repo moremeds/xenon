@@ -59,6 +59,31 @@ def now_et() -> datetime:
     return datetime.now(_ET)
 
 
+def now_et_date() -> date:
+    return now_et().date()
+
+
+def trading_days_between(d1: date, d2: date) -> int:
+    """Count of trading days strictly after d1 up to and including d2.
+
+    Returns 0 if d2 <= d1. Respects weekends + is_trading_day() holiday calendar.
+    """
+    if d2 <= d1:
+        return 0
+    n = 0
+    cur = d1
+    while cur < d2:
+        cur = cur + timedelta(days=1)
+        dt = datetime.combine(cur, time(12, 0))
+        if hasattr(_ET, "localize"):
+            dt = _ET.localize(dt)
+        else:
+            dt = dt.replace(tzinfo=_ET)
+        if is_trading_day(dt):
+            n += 1
+    return n
+
+
 def is_trading_day(dt: datetime) -> bool:
     """Best-effort: weekday + market_calendar holiday check if available."""
     if dt.weekday() >= 5:
@@ -125,7 +150,7 @@ async def run_once(
         async def oi_fetcher(ticker: str, spot):  # type: ignore[no-redef]
             return await fetch_and_diff(uw_client, ticker, spot)
 
-    today_iso = date.today().isoformat()
+    today_iso = now_et_date().isoformat()
     stats = {"tickers_oi": 0, "events_advanced": 0, "events_anomaly": 0, "events_closed": 0}
 
     # ── OI deltas ─────────────────────────────────────────────────────

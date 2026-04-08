@@ -232,9 +232,12 @@ def test_anomaly_oi_evaporation_skipped_outside_window():
 
 def test_anomaly_skipped_within_3_dte_guard():
     """Late-cycle decay shouldn't trip the rule."""
-    near_expiry = (date.today() + timedelta(days=ANOMALY_DTE_GUARD)).isoformat()
+    from api.services.uw_analyze_daily_job import now_et_date
+
+    et_today = now_et_date()
+    near_expiry = (et_today + timedelta(days=ANOMALY_DTE_GUARD)).isoformat()
     ev = _make_event(expiry=near_expiry, initial_mid=4.0)
-    advance_daily_track(ev, today=date.today().isoformat(), oi=1000, mid=1.0, underlying_price=870.5)
+    advance_daily_track(ev, today=et_today.isoformat(), oi=1000, mid=1.0, underlying_price=870.5)
     assert classify_anomaly(ev) is None
 
 
@@ -250,7 +253,9 @@ def test_close_when_oi_returns_to_initial():
 
 
 def test_expired_when_past_expiry():
-    past = (date.today() - timedelta(days=1)).isoformat()
+    from api.services.uw_analyze_daily_job import now_et_date
+
+    past = (now_et_date() - timedelta(days=1)).isoformat()
     ev = _make_event(expiry=past)
     maybe_close_or_expire(ev)
     assert ev.status == "expired"
@@ -310,51 +315,135 @@ def test_flow_log_corrupt_file_starts_empty(tmp_path):
 
 
 def test_classify_anomaly_closing_volume_spike():
-    from api.services.uw_analyze_flow_tracker import (
-        FlowEvent, FlowInitial, FlowDailyRow, classify_anomaly
-    )
+    from api.services.uw_analyze_flow_tracker import FlowDailyRow, FlowEvent, FlowInitial, classify_anomaly
+
     ev = FlowEvent(
-        id="x", ticker="AAPL", side="call", strike=100, expiry="2026-09-15",
+        id="x",
+        ticker="AAPL",
+        side="call",
+        strike=100,
+        expiry="2026-09-15",
         detected_at="2026-04-08T15:50:00+00:00",
         initial=FlowInitial(premium_usd=7e6, oi=1000, volume=4000, mid=2.5, underlying_price=99),
     )
-    ev.daily_track.append(FlowDailyRow(
-        date="2026-04-09", oi=950, mid=2.4, underlying_price=99.5,
-        pct_change_premium=-0.04, volume=850,
-    ))
+    ev.daily_track.append(
+        FlowDailyRow(
+            date="2026-04-09",
+            oi=950,
+            mid=2.4,
+            underlying_price=99.5,
+            pct_change_premium=-0.04,
+            volume=850,
+        )
+    )
     reason = classify_anomaly(ev)
     assert reason and "closing volume" in reason.lower()
 
 
 def test_classify_anomaly_closing_volume_silent_below_threshold():
-    from api.services.uw_analyze_flow_tracker import (
-        FlowEvent, FlowInitial, FlowDailyRow, classify_anomaly
-    )
+    from api.services.uw_analyze_flow_tracker import FlowDailyRow, FlowEvent, FlowInitial, classify_anomaly
+
     ev = FlowEvent(
-        id="x", ticker="AAPL", side="call", strike=100, expiry="2026-09-15",
+        id="x",
+        ticker="AAPL",
+        side="call",
+        strike=100,
+        expiry="2026-09-15",
         detected_at="2026-04-08T15:50:00+00:00",
         initial=FlowInitial(premium_usd=7e6, oi=1000, volume=4000, mid=2.5, underlying_price=99),
     )
-    ev.daily_track.append(FlowDailyRow(
-        date="2026-04-09", oi=950, mid=2.4, underlying_price=99.5,
-        pct_change_premium=-0.04, volume=500,
-    ))
+    ev.daily_track.append(
+        FlowDailyRow(
+            date="2026-04-09",
+            oi=950,
+            mid=2.4,
+            underlying_price=99.5,
+            pct_change_premium=-0.04,
+            volume=500,
+        )
+    )
+    assert classify_anomaly(ev) is None
+
+
+def test_oi_evaporation_fires_on_trading_day_window_despite_calendar_days():
+    """Friday detection, next Wednesday evaluation: 5 calendar days
+    (would be silent under calendar rule) but only 3 trading days (fires)."""
+    from api.services.uw_analyze_flow_tracker import FlowDailyRow, FlowEvent, FlowInitial, classify_anomaly
+
+    ev = FlowEvent(
+        id="x",
+        ticker="AAPL",
+        side="call",
+        strike=100,
+        expiry="2026-09-15",
+        detected_at="2026-04-17T20:00:00+00:00",  # Fri
+        initial=FlowInitial(premium_usd=7e6, oi=1000, volume=4000, mid=2.5, underlying_price=99),
+    )
+    # Wed 2026-04-22: trading days = Mon 4-20, Tue 4-21, Wed 4-22 = 3
+    ev.daily_track.append(
+        FlowDailyRow(
+            date="2026-04-22",
+            oi=400,
+            mid=2.4,
+            underlying_price=99.0,
+            pct_change_premium=-0.04,
+            volume=100,
+        )
+    )
+    reason = classify_anomaly(ev)
+    assert reason and "OI evaporated" in reason, "3 trading days is within the window"
+
+
+def test_oi_evaporation_silent_beyond_trading_day_window():
+    """4 trading days > 3-day window — silent."""
+    from api.services.uw_analyze_flow_tracker import FlowDailyRow, FlowEvent, FlowInitial, classify_anomaly
+
+    ev = FlowEvent(
+        id="x",
+        ticker="AAPL",
+        side="call",
+        strike=100,
+        expiry="2026-09-15",
+        detected_at="2026-04-16T20:00:00+00:00",  # Thu
+        initial=FlowInitial(premium_usd=7e6, oi=1000, volume=4000, mid=2.5, underlying_price=99),
+    )
+    # Wed 2026-04-22: Fri 4-17, Mon 4-20, Tue 4-21, Wed 4-22 = 4 trading days
+    ev.daily_track.append(
+        FlowDailyRow(
+            date="2026-04-22",
+            oi=400,
+            mid=2.4,
+            underlying_price=99.0,
+            pct_change_premium=-0.04,
+            volume=100,
+        )
+    )
     assert classify_anomaly(ev) is None
 
 
 def test_classify_anomaly_closing_volume_dte_guard():
     from datetime import date, timedelta
-    from api.services.uw_analyze_flow_tracker import (
-        FlowEvent, FlowInitial, FlowDailyRow, classify_anomaly
-    )
+
+    from api.services.uw_analyze_flow_tracker import FlowDailyRow, FlowEvent, FlowInitial, classify_anomaly
+
     near_expiry = (date.today() + timedelta(days=2)).isoformat()
     ev = FlowEvent(
-        id="x", ticker="AAPL", side="call", strike=100, expiry=near_expiry,
+        id="x",
+        ticker="AAPL",
+        side="call",
+        strike=100,
+        expiry=near_expiry,
         detected_at="2026-04-08T15:50:00+00:00",
         initial=FlowInitial(premium_usd=7e6, oi=1000, volume=4000, mid=2.5, underlying_price=99),
     )
-    ev.daily_track.append(FlowDailyRow(
-        date="2026-04-09", oi=950, mid=2.4, underlying_price=99.5,
-        pct_change_premium=-0.04, volume=900,
-    ))
+    ev.daily_track.append(
+        FlowDailyRow(
+            date="2026-04-09",
+            oi=950,
+            mid=2.4,
+            underlying_price=99.5,
+            pct_change_premium=-0.04,
+            volume=900,
+        )
+    )
     assert classify_anomaly(ev) is None

@@ -136,7 +136,9 @@ def test_run_once_attaches_oi_baseline(tmp_path):
     )
     assert stats["tickers_oi"] == 1
     entry = cache.get_entry("NVDA")
-    assert entry["oi_baseline"]["data_date"] == date.today().isoformat()
+    from api.services.uw_analyze_daily_job import now_et_date
+
+    assert entry["oi_baseline"]["data_date"] == now_et_date().isoformat()
     assert entry["oi_baseline"]["changes"][0]["strike"] == 100
 
 
