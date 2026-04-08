@@ -81,24 +81,24 @@ else
     echo "$(date): scanner.py failed (exit $EXIT_CODE) — keeping existing data/scanner.json"
 fi
 
-# --- flow_analysis.py (per-account: ib + futu) ---
+# --- flow-analysis (per-account: ib + futu) ---
+# Previously ran scripts/flow_analysis.py which wrote a stale JSON cache per
+# account. The page is now backed by the shared uw-analyze LRU cache via
+# FastAPI's POST /flow-analysis endpoint, so refreshing it means hitting the
+# endpoint to warm the per-ticker entries. No disk cache file is written.
 FLOW_STATUS="OK"
 for ACCOUNT in ib futu; do
-    # Skip futu cleanly if its source portfolio is missing.
     if [ "$ACCOUNT" = "futu" ] && [ ! -f data/futu_portfolio.json ]; then
-        echo "$(date): flow_analysis.py --account futu skipped (no data/futu_portfolio.json)"
+        echo "$(date): flow-analysis --account futu skipped (no data/futu_portfolio.json)"
         continue
     fi
-    echo "$(date): Running flow_analysis.py --account $ACCOUNT..."
-    "$PYTHON_BIN" scripts/flow_analysis.py --account "$ACCOUNT" \
-        > "data/flow_analysis.${ACCOUNT}.json.tmp" 2>"/tmp/flow_analysis.${ACCOUNT}.err"
-    EXIT_CODE=$?
-    if [ "$EXIT_CODE" -eq 0 ]; then
-        mv "data/flow_analysis.${ACCOUNT}.json.tmp" "data/flow_analysis.${ACCOUNT}.json"
-        echo "$(date): flow_analysis.py --account $ACCOUNT complete (OK)"
+    echo "$(date): Warming flow-analysis cache via POST /flow-analysis?account=$ACCOUNT..."
+    HTTP_CODE=$(curl -sS -o "/tmp/flow_analysis.${ACCOUNT}.out" -w "%{http_code}" \
+        -X POST "http://localhost:8321/flow-analysis?account=${ACCOUNT}" --max-time 120)
+    if [ "$HTTP_CODE" = "200" ]; then
+        echo "$(date): flow-analysis --account $ACCOUNT complete (OK)"
     else
-        rm -f "data/flow_analysis.${ACCOUNT}.json.tmp"
-        echo "$(date): flow_analysis.py --account $ACCOUNT failed (exit $EXIT_CODE) — keeping existing cache"
+        echo "$(date): flow-analysis --account $ACCOUNT failed (HTTP $HTTP_CODE) — cache retains previous entries"
         FLOW_STATUS="FAIL"
     fi
 done

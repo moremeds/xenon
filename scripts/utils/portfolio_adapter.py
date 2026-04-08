@@ -2,12 +2,13 @@
 
 Loads positions from either the IB portfolio (`data/portfolio.json`) or the Futu
 portfolio (`data/futu_portfolio.json`) and converts them into a single
-`NormalizedPosition` shape so analysis scripts (e.g. `flow_analysis.py`) can stay
-source-unaware.
+`NormalizedPosition` shape so analysis services (e.g. the /flow-analysis
+portfolio-bias classifier) can stay source-unaware.
 
 Unsupported instruments (non-US, HK.*, etc.) are filtered out and counted in
 `LoadResult.skipped_unsupported`.
 """
+
 from __future__ import annotations
 
 import json
@@ -44,6 +45,7 @@ def _read_json(path: Path) -> dict:
         return {}
     try:
         from utils.atomic_io import verified_load  # type: ignore
+
         return verified_load(str(path))
     except Exception:
         try:
@@ -59,13 +61,15 @@ def _normalize_ib(rows: List[dict]) -> LoadResult:
         ticker = row.get("ticker") or row.get("symbol")
         if not ticker:
             continue
-        out.append(NormalizedPosition(
-            ticker=str(ticker).upper(),
-            direction=str(row.get("direction", "LONG")).upper(),
-            structure=str(row.get("structure", "Unknown")),
-            qty=float(row.get("contracts") or row.get("position") or 0),
-            raw=row,
-        ))
+        out.append(
+            NormalizedPosition(
+                ticker=str(ticker).upper(),
+                direction=str(row.get("direction", "LONG")).upper(),
+                structure=str(row.get("structure", "Unknown")),
+                qty=float(row.get("contracts") or row.get("position") or 0),
+                raw=row,
+            )
+        )
     return LoadResult(positions=out, skipped_unsupported=0)
 
 
@@ -107,13 +111,15 @@ def _normalize_futu(rows: List[dict]) -> LoadResult:
         if side not in ("LONG", "SHORT"):
             qty = float(row.get("quantity") or 0)
             side = "SHORT" if qty < 0 else "LONG"
-        out.append(NormalizedPosition(
-            ticker=str(ticker).upper(),
-            direction=side,
-            structure=_futu_structure_label(norm),
-            qty=float(row.get("quantity") or 0),
-            raw=row,
-        ))
+        out.append(
+            NormalizedPosition(
+                ticker=str(ticker).upper(),
+                direction=side,
+                structure=_futu_structure_label(norm),
+                qty=float(row.get("quantity") or 0),
+                raw=row,
+            )
+        )
     return LoadResult(positions=out, skipped_unsupported=skipped)
 
 

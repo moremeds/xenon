@@ -31,24 +31,24 @@ export default defineConfig({
       exclude: [
         "**/*.test.ts",
         "**/node_modules/**",
-        "web/lib/use*.ts",        // React hooks need jsdom
+        "web/lib/use*.ts", // React hooks need jsdom
         "web/lib/OrderActionsContext.tsx",
         "web/lib/TickerDetailContext.tsx",
-        "web/lib/types.ts",       // Pure type definitions, no runtime code
-        "lib/tools/pi-tools.ts",  // PI framework registration, untestable without PI
-        "lib/tools/schemas/index.ts",   // Re-export barrel
-        "lib/tools/wrappers/index.ts",  // Re-export barrel
+        "web/lib/types.ts", // Pure type definitions, no runtime code
+        "lib/tools/pi-tools.ts", // PI framework registration, untestable without PI
+        "lib/tools/schemas/index.ts", // Re-export barrel
+        "lib/tools/wrappers/index.ts", // Re-export barrel
         "lib/tools/wrappers/fetch-ticker.ts", // Thin runScript wrapper
         "lib/tools/wrappers/ib-order-manage.ts", // Thin runScript wrapper
-        "lib/tools/wrappers/ib-orders.ts",  // Thin runScript wrapper
-        "lib/tools/wrappers/ib-sync.ts",    // Thin runScript wrapper
-        "lib/tools/wrappers/scanner.ts",    // Thin runScript wrapper
-        "web/app/api/pi/**",         // Large PI dispatcher, tested via integration.test.ts
-        "web/app/api/prices/**",     // WebSocket client, needs live IB server
-        "web/app/api/blotter/**",    // Spawns Python subprocess for Flex Query
-        "web/app/api/discover/**",   // Spawns Python subprocess for discover.py
-        "web/app/api/flow-analysis/**", // Spawns Python subprocess for flow_analysis.py
-        "web/app/api/scanner/**",    // Spawns Python subprocess for scanner.py
+        "lib/tools/wrappers/ib-orders.ts", // Thin runScript wrapper
+        "lib/tools/wrappers/ib-sync.ts", // Thin runScript wrapper
+        "lib/tools/wrappers/scanner.ts", // Thin runScript wrapper
+        "web/app/api/pi/**", // Large PI dispatcher, tested via integration.test.ts
+        "web/app/api/prices/**", // WebSocket client, needs live IB server
+        "web/app/api/blotter/**", // Spawns Python subprocess for Flex Query
+        "web/app/api/discover/**", // Spawns Python subprocess for discover.py
+        "web/app/api/flow-analysis/**", // Proxies to FastAPI /flow-analysis
+        "web/app/api/scanner/**", // Spawns Python subprocess for scanner.py
       ],
     },
   },

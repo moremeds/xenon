@@ -912,15 +912,40 @@ async def discover():
 
 
 @app.post("/flow-analysis")
-async def flow_analysis(account: str = "ib"):
-    """Run portfolio flow analysis (flow_analysis.py) for the given broker account."""
+async def flow_analysis_post(account: str = "ib"):
+    """Portfolio flow alignment view for the given broker account.
+
+    POSTs trigger a cache fill on missing tickers (bounded concurrency),
+    so the returned payload is always complete. Reads dark-pool and
+    options-flow summaries from the shared uw-analyze LRU cache — no
+    second UW API pipeline, no stale JSON files on disk.
+    """
+    from api.routes.uw_analyze import _runner, get_portfolio_cache
+    from api.services.uw_analyze_portfolio_bias import classify_portfolio
+
     if account not in ("ib", "futu"):
         raise HTTPException(status_code=400, detail=f"Unknown account: {account!r}")
-    result = await run_script("flow_analysis.py", ["--account", account], timeout=120)
-    if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
-    _write_cache(DATA_DIR / f"flow_analysis.{account}.json", result.data)
-    return result.data
+    cache = get_portfolio_cache()
+    data = await classify_portfolio(account=account, cache=cache, runner=_runner, read_only=False)
+    return data
+
+
+@app.get("/flow-analysis")
+async def flow_analysis_get(account: str = "ib"):
+    """Read-only snapshot of portfolio flow alignment.
+
+    Serves whatever the uw-analyze cache already has without triggering
+    a refresh. Used by ``web/lib/useSyncHook`` on initial page load so
+    the first render is fast; a subsequent POST fills missing tickers.
+    """
+    from api.routes.uw_analyze import get_portfolio_cache
+    from api.services.uw_analyze_portfolio_bias import classify_portfolio
+
+    if account not in ("ib", "futu"):
+        raise HTTPException(status_code=400, detail=f"Unknown account: {account!r}")
+    cache = get_portfolio_cache()
+    data = await classify_portfolio(account=account, cache=cache, runner=None, read_only=True)
+    return data
 
 
 @app.get("/attribution")
