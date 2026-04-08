@@ -147,80 +147,98 @@ async def lifespan(app: FastAPI):
 
     # UW Analyze daily job (15:50 ET) — runs OI snapshot + advances open
     # unusual-flow events. Background asyncio task; cancelled on shutdown.
+    #
+    # Multi-worker guard: only worker 0 runs the daily job. Under
+    # `uvicorn --workers N`, every worker would otherwise spin up its own
+    # cron loop and fire N× at 15:50 ET. Uvicorn doesn't set a per-worker
+    # env var by default, so we check XENON_DAILY_JOB_WORKER_ID which
+    # operators can set per-worker (default "0" runs; any other value
+    # suppresses). Fall-through for single-worker deployments (no env var).
     uw_daily_task = None
-    try:
-        from clients.uw_client import UWClient
-
-        from api.routes.uw_analyze import get_flow_log, get_portfolio_cache
-        from api.services.uw_analyze_daily_job import run_loop as uw_daily_run_loop
-
-        _uw_client = UWClient() if uw_available else None
-
-        async def _default_contract_fetcher(*, ticker: str, side: str, strike: float, expiry: str):
-            """Resolve a single OCC contract's current oi/mid/underlying/volume.
-
-            Fetches the full chain for the expiry, finds the matching strike+side row.
-            Returns None on any failure so the caller falls back to expiry-only closeout.
-            """
-            if _uw_client is None:
-                return None
-            try:
-                resp = await asyncio.to_thread(_uw_client.get_option_chain, ticker, expiry=expiry)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("default contract_fetcher chain fetch failed for %s: %s", ticker, exc)
-                return None
-            rows = resp.get("data") if isinstance(resp, dict) else None
-            if not isinstance(rows, list):
-                return None
-            for r in rows:
-                if not isinstance(r, dict):
-                    continue
-                try:
-                    if abs(float(r.get("strike", -1)) - float(strike)) > 1e-6:
-                        continue
-                except (TypeError, ValueError):
-                    continue
-                key = "call" if side == "call" else "put"
-                try:
-                    return {
-                        "oi": int(float(r.get(f"{key}_oi") or 0)),
-                        "mid": float(r.get(f"{key}_mid") or r.get(f"{key}_last") or 0.0),
-                        "underlying_price": float(r.get("underlying_price") or 0.0),
-                        "volume": int(float(r.get(f"{key}_volume") or 0)),
-                    }
-                except (TypeError, ValueError):
-                    return None
-            return None
-
-        uw_daily_task = asyncio.create_task(
-            uw_daily_run_loop(
-                cache=get_portfolio_cache(),
-                flow_log=get_flow_log(),
-                uw_client=_uw_client,
-                contract_fetcher=_default_contract_fetcher,
-            )
+    _daily_worker_id = os.environ.get("XENON_DAILY_JOB_WORKER_ID", "0")
+    if _daily_worker_id != "0":
+        logger.info(
+            "uw_analyze_daily_job suppressed on worker_id=%s (multi-worker guard)",
+            _daily_worker_id,
         )
-        logger.info("uw_analyze_daily_job background task started")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("uw_analyze_daily_job failed to start: %s", exc)
-
-    yield
-
-    # Shutdown
-    if uw_daily_task is not None:
-        uw_daily_task.cancel()
+    else:
         try:
-            await uw_daily_task
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001
-            pass
-    if ib_pool:
-        await ib_pool.disconnect_all()
-    if _futu_client is not None:
-        try:
-            _futu_client.disconnect()
-        except Exception as exc:
-            logger.warning("FutuClient disconnect on shutdown failed: %s", exc)
-    logger.info("Xenon API shut down")
+            from clients.uw_client import UWClient
+
+            from api.routes.uw_analyze import get_flow_log, get_portfolio_cache
+            from api.services.uw_analyze_daily_job import run_loop as uw_daily_run_loop
+
+            _uw_client = UWClient() if uw_available else None
+
+            async def _default_contract_fetcher(*, ticker: str, side: str, strike: float, expiry: str):
+                """Resolve a single OCC contract's current oi/mid/underlying/volume.
+
+                Fetches the full chain for the expiry, finds the matching strike+side row.
+                Returns None on any failure so the caller falls back to expiry-only closeout.
+                """
+                if _uw_client is None:
+                    return None
+                try:
+                    resp = await asyncio.to_thread(_uw_client.get_option_chain, ticker, expiry=expiry)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("default contract_fetcher chain fetch failed for %s: %s", ticker, exc)
+                    return None
+                rows = resp.get("data") if isinstance(resp, dict) else None
+                if not isinstance(rows, list):
+                    return None
+                for r in rows:
+                    if not isinstance(r, dict):
+                        continue
+                    try:
+                        if abs(float(r.get("strike", -1)) - float(strike)) > 1e-6:
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                    key = "call" if side == "call" else "put"
+                    try:
+                        return {
+                            "oi": int(float(r.get(f"{key}_oi") or 0)),
+                            "mid": float(r.get(f"{key}_mid") or r.get(f"{key}_last") or 0.0),
+                            "underlying_price": float(r.get("underlying_price") or 0.0),
+                            "volume": int(float(r.get(f"{key}_volume") or 0)),
+                        }
+                    except (TypeError, ValueError):
+                        return None
+                return None
+
+            uw_daily_task = asyncio.create_task(
+                uw_daily_run_loop(
+                    cache=get_portfolio_cache(),
+                    flow_log=get_flow_log(),
+                    uw_client=_uw_client,
+                    contract_fetcher=_default_contract_fetcher,
+                )
+            )
+            logger.info("uw_analyze_daily_job background task started")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("uw_analyze_daily_job failed to start: %s", exc)
+
+    try:
+        yield
+    finally:
+        # Shutdown — always runs, even if the app raised.
+        if uw_daily_task is not None:
+            uw_daily_task.cancel()
+            try:
+                await uw_daily_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        if ib_pool:
+            try:
+                await ib_pool.disconnect_all()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("ib_pool.disconnect_all failed: %s", exc)
+        if _futu_client is not None:
+            try:
+                _futu_client.disconnect()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("FutuClient disconnect on shutdown failed: %s", exc)
+        logger.info("Xenon API shut down")
 
 
 app = FastAPI(title="Xenon API", version="1.0.0", lifespan=lifespan)
