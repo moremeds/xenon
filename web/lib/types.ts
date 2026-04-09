@@ -37,9 +37,27 @@ export type PiResponse = {
   error?: string;
 };
 
-export type WorkspaceSection = "dashboard" | "flow-analysis" | "portfolio" | "performance" | "orders" | "scanner" | "discover" | "journal" | "regime" | "cta" | "ticker-detail" | "uw-analyze";
+export type WorkspaceSection =
+  | "dashboard"
+  | "flow-analysis"
+  | "portfolio"
+  | "performance"
+  | "orders"
+  | "scanner"
+  | "discover"
+  | "journal"
+  | "regime"
+  | "cta"
+  | "ticker-detail"
+  | "uw-analyze";
 
-export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
 
 export type WorkspaceNavItem = {
   label: string;
@@ -413,18 +431,45 @@ export type ScannerData = {
   top_signals: ScannerSignal[];
 };
 
-// Flow Analysis types
-export type FlowAnalysisPosition = {
-  ticker: string;
-  position: string;
-  direction: string;
-  flow_direction: string;
-  flow_label: string;
-  flow_class: string;
+// Flow Analysis types — rewritten as part of the flow-analysis overhaul.
+// Dark-pool and options-flow signals are surfaced separately (no more
+// conflated single "flow" label). Bias is derived from position structure
+// via scripts/utils/position_bias.py, not from LONG/SHORT direction.
+export type FlowAnalysisBias =
+  | "bullish"
+  | "bearish"
+  | "neutral_vol"
+  | "income"
+  | "hedge"
+  | "unknown";
+
+export type FlowAnalysisAlignment =
+  | "supports"
+  | "against"
+  | "mixed"
+  | "non_directional"
+  | "neutral";
+
+export type FlowAnalysisDarkPool = {
+  direction: string; // ACCUMULATION | DISTRIBUTION | NEUTRAL | NO_DATA
   strength: number;
   buy_ratio: number | null;
-  daily_buy_ratios?: { date: string; buy_ratio: number | null }[];
-  note: string;
+  signal: string; // STRONG | MODERATE | WEAK | NONE | ERROR
+};
+
+export type FlowAnalysisOptionsFlow = {
+  bias: string; // STRONGLY_BULLISH | BULLISH | NEUTRAL | BEARISH | STRONGLY_BEARISH | NO_DATA | ALL_CALLS
+  call_put_ratio: number | null;
+};
+
+export type FlowAnalysisPosition = {
+  ticker: string;
+  structure: string;
+  direction: string;
+  bias: FlowAnalysisBias;
+  dark_pool: FlowAnalysisDarkPool;
+  options_flow: FlowAnalysisOptionsFlow;
+  alignment: FlowAnalysisAlignment;
 };
 
 export type FlowAnalysisData = {
@@ -434,7 +479,8 @@ export type FlowAnalysisData = {
   skipped_unsupported?: number;
   supports: FlowAnalysisPosition[];
   against: FlowAnalysisPosition[];
-  watch: FlowAnalysisPosition[];
+  mixed: FlowAnalysisPosition[];
+  non_directional: FlowAnalysisPosition[];
   neutral: FlowAnalysisPosition[];
   cache_meta?: {
     last_refresh: string | null;

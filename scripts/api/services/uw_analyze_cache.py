@@ -55,6 +55,7 @@ _MAX_MATERIALIZED_CHANGES = 10
 _SOURCE_TIERS: dict[str, int] = {"adhoc": 0, "watchlist": 1, "portfolio": 2}
 
 _DEFAULT_CACHE_PATH = _SCRIPTS.parent / "data" / "uw_analyze_cache.json"
+_DEFAULT_HISTORY_DIR = _SCRIPTS.parent / "data" / "uw_analyze_history"
 
 Source = str  # "portfolio" | "watchlist" | "adhoc"
 
@@ -82,6 +83,68 @@ def _coerce_jsonable(o: Any) -> Any:
     if hasattr(o, "isoformat"):
         return o.isoformat()
     return o
+
+
+# Display/derived fields where `None` in a new snapshot almost always
+# means a transient UW fetch failure (rate limit, timeout, 5xx), not a
+# legitimate state change. For these we prefer to keep the previous
+# snapshot's value instead of clobbering good data with `None` — this
+# stops the UI from flashing "—" every time the refresh cycle hits a
+# 429 on a single endpoint.
+#
+# Fields NOT listed here (e.g. `net_call_premium`, `flow_score`, `spot`,
+# `gex_sign`) are high-frequency mutable values; a stale carry-over
+# would be misleading, so those still clobber even when None.
+_DISPLAY_STICKY_FIELDS: frozenset[str] = frozenset(
+    {
+        "sector",
+        "iv_rank",
+        "iv",
+        "rv",
+        "iv_52w_low",
+        "iv_52w_high",
+        "gamma_per_1pct",
+        "call_wall_strike",
+        "put_wall_strike",
+        "short_volume_ratio",
+        "short_volume_trend",
+        "term_structure_label",
+        "max_pain",
+    }
+)
+_DERIVED_STICKY_FIELDS: frozenset[str] = frozenset(
+    {
+        "call_wall",
+        "put_wall",
+        "max_pain",
+        "iv_rank",
+    }
+)
+
+
+def _merge_sticky_fields(new_snapshot: dict, prev_snapshot: Optional[dict]) -> None:
+    """Last-known-good carry-over for enrichment fields that tend to
+    transiently vanish on UW 429/5xx.
+
+    Mutates ``new_snapshot`` in place. Only fills a field from
+    ``prev_snapshot`` if the new value is ``None`` AND the old value was
+    populated — legitimate value transitions (non-None -> new non-None)
+    are preserved.
+    """
+    if not isinstance(prev_snapshot, dict):
+        return
+    new_display = new_snapshot.get("display")
+    prev_display = prev_snapshot.get("display")
+    if isinstance(new_display, dict) and isinstance(prev_display, dict):
+        for field in _DISPLAY_STICKY_FIELDS:
+            if new_display.get(field) is None and prev_display.get(field) is not None:
+                new_display[field] = prev_display[field]
+    new_derived = new_snapshot.get("derived")
+    prev_derived = prev_snapshot.get("derived")
+    if isinstance(new_derived, dict) and isinstance(prev_derived, dict):
+        for field in _DERIVED_STICKY_FIELDS:
+            if new_derived.get(field) is None and prev_derived.get(field) is not None:
+                new_derived[field] = prev_derived[field]
 
 
 # ── Snapshot derivation ─────────────────────────────────────────────────────
@@ -117,7 +180,19 @@ def build_snapshot(
     report: dict,
     display: dict,
     flow_alerts: Optional[list[dict]] = None,
+    dark_pool_summary: Optional[dict] = None,
+    options_flow_summary: Optional[dict] = None,
 ) -> dict:
+    """Construct a cache entry snapshot.
+
+    The ``dark_pool_summary`` and ``options_flow_summary`` keys carry the
+    per-ticker outputs of ``scripts/analysis/dark_pool_summary.summarize_dark_pool``
+    and ``scripts/analysis/options_flow_summary.summarize_options_flow`` so
+    downstream consumers (notably the /flow-analysis portfolio classifier)
+    can read them without rerunning the UW API. They default to ``None``
+    when the caller did not compute them so existing uw-analyze consumers
+    that only read report/display/derived stay unaffected.
+    """
     return {
         "ticker": ticker,
         "ts": _now_iso(),
@@ -125,6 +200,8 @@ def build_snapshot(
         "display": display,
         "flow_alerts": list(flow_alerts or []),
         "derived": derive_from_report(report, display),
+        "dark_pool_summary": dark_pool_summary,
+        "options_flow_summary": options_flow_summary,
     }
 
 
@@ -138,6 +215,7 @@ class UwAnalyzeCache:
         self,
         *,
         cache_path: Optional[Path] = None,
+        history_path: Optional[Path] = None,
         market_open_fn: Callable[[], bool] = _is_market_open_default,
         ttl_open_s: int = _TTL_OPEN_S,
         ttl_closed_s: int = _TTL_CLOSED_S,
@@ -146,6 +224,10 @@ class UwAnalyzeCache:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.cache_path = Path(cache_path) if cache_path else _DEFAULT_CACHE_PATH
+        # History archive: one file per materialized refresh, under
+        # <history_path>/<TICKER>/YYYYMMDD-HHMMSS-ffffff.json. Default
+        # lives next to cache.json under data/uw_analyze_history.
+        self.history_path = Path(history_path) if history_path else _DEFAULT_HISTORY_DIR
         self._market_open_fn = market_open_fn
         self._ttl_open = ttl_open_s
         self._ttl_closed = ttl_closed_s
@@ -161,28 +243,86 @@ class UwAnalyzeCache:
     # ── Disk I/O ──────────────────────────────────────────────────────
 
     def _ensure_loaded(self) -> None:
+        """Lazily rehydrate the on-disk cache into memory.
+
+        The ``_loaded`` flag is only set to True on a *successful* parse of
+        a well-formed file, OR when the file is confirmed absent. Any other
+        outcome (raise, malformed shape) leaves ``_loaded`` False so the
+        next access retries — a transient partial-read or a file that
+        appears later must not cause permanent blindness to the archive.
+        """
         if self._loaded:
             return
-        self._loaded = True
         if not self.cache_path.exists():
+            # Legitimate cold start. Mark loaded so we don't stat the disk
+            # on every call; the next write will create the file and the
+            # in-memory state is authoritative from here.
+            self._loaded = True
             return
         try:
-            data = json.loads(self.cache_path.read_text())
-            entries = data.get("entries") if isinstance(data, dict) else None
-            if isinstance(entries, dict):
-                # Rehydrate into OrderedDict in whatever order the file
-                # provides; LRU order will re-establish on first access.
-                self._entries = OrderedDict(entries)
-                # Enforce the cap immediately on load — a pre-bounds cache
-                # file may contain more entries than the new limit allows.
-                self._evict_if_over_cap()
-                logger.info("uw_analyze_cache loaded %d entries from %s", len(self._entries), self.cache_path)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("uw_analyze_cache load failed (%s) — starting empty", exc)
-            self._entries = OrderedDict()
+            raw = self.cache_path.read_text()
+            data = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as exc:
+            # Transient read/parse failure (e.g., concurrent writer, zero-
+            # byte file from a crashed process). Do NOT set _loaded — the
+            # next access will retry and hopefully win the race.
+            logger.warning(
+                "uw_analyze_cache read/parse failed (%s) — will retry on next access",
+                exc,
+            )
+            return
+        entries = data.get("entries") if isinstance(data, dict) else None
+        if not isinstance(entries, dict):
+            # File exists and parses but is shaped wrong (wrong schema,
+            # empty `{}`, list payload from a legacy format). Leave
+            # _loaded False so a hand-fix of the file is picked up
+            # without restarting the process.
+            logger.warning(
+                "uw_analyze_cache file %s present but entries key missing or wrong shape "
+                "(top-level type=%s) — will retry on next access",
+                self.cache_path,
+                type(data).__name__,
+            )
+            return
+        # Rehydrate into OrderedDict in whatever order the file provides;
+        # LRU order will re-establish on first access.
+        self._entries = OrderedDict(entries)
+        # Enforce the cap immediately on load — a pre-bounds cache file
+        # may contain more entries than the new limit allows.
+        self._evict_if_over_cap()
+        self._loaded = True
+        logger.info(
+            "uw_analyze_cache loaded %d entries from %s",
+            len(self._entries),
+            self.cache_path,
+        )
 
-    async def _persist(self) -> None:
+    async def _persist(self, *, allow_empty: bool = False) -> None:
+        """Atomically rewrite the on-disk cache.
+
+        Refuses to overwrite a non-trivially-sized existing file with an
+        empty in-memory state unless ``allow_empty=True``. This blocks a
+        subtle data-loss path: if ``_ensure_loaded`` ever failed silently
+        and left ``_entries`` empty, the next write from the route layer
+        would otherwise nuke the real archive. Callers that legitimately
+        want to wipe the cache must pass ``allow_empty=True`` explicitly.
+        """
         async with self._disk_lock:
+            if not allow_empty and not self._entries and self.cache_path.exists():
+                try:
+                    existing_size = self.cache_path.stat().st_size
+                except OSError:
+                    existing_size = 0
+                # 64 bytes is larger than `{"updated_at": "...", "entries": {}}`
+                # but smaller than any file carrying even one entry.
+                if existing_size > 64:
+                    logger.error(
+                        "uw_analyze_cache refusing to overwrite non-empty disk file "
+                        "(%d bytes) with empty memory state — likely a failed load. "
+                        "Pass allow_empty=True to force.",
+                        existing_size,
+                    )
+                    return
             payload = {
                 "updated_at": _now_iso(),
                 "entries": _coerce_jsonable(self._entries),
@@ -201,6 +341,139 @@ class UwAnalyzeCache:
                 except OSError:
                     pass
                 raise
+
+    # ── History archive ───────────────────────────────────────────────
+
+    def _archive_file_for(self, ticker: str) -> Path:
+        """Build the archive filename for a just-committed snapshot.
+
+        Uses microsecond precision so two back-to-back forced refreshes
+        for the same ticker cannot collide within one wall-clock second.
+        Filenames remain lexicographically sortable by timestamp, which
+        ``load_history`` relies on to filter before parsing.
+        """
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        return self.history_path / ticker.upper() / f"{stamp}.json"
+
+    def _write_archive_sync(self, target: Path, payload: dict) -> None:
+        """Sync worker for archive writes. Runs inside asyncio.to_thread."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_path = tempfile.mkstemp(prefix=".uw_archive_", suffix=".json", dir=str(target.parent))
+        try:
+            with os.fdopen(tmp_fd, "w") as fh:
+                json.dump(payload, fh, indent=2, default=str)
+            os.replace(tmp_path, target)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    async def _archive_snapshot(
+        self,
+        ticker: str,
+        entry: dict,
+        materialized_changes: list[dict],
+    ) -> None:
+        """Append a just-committed snapshot to the history archive.
+
+        MUST be called only AFTER ``_persist()`` has successfully written
+        the live cache. Ordering matters: if archive lands first and
+        persist then fails, history would contain a phantom snapshot
+        that never became the committed ``current`` state.
+
+        Archive schema (documented contract):
+          Top-level keys — guaranteed: ``current``, ``materialized_changes``,
+          ``archived_at``.
+          Nested fields inside ``current`` — ``dark_pool_summary`` and
+          ``options_flow_summary`` may be ``None``; ``flow_alerts`` may be
+          empty; ``report``/``display`` sub-fields are runner-dependent.
+          Consumers MUST NOT assume nested fields are populated.
+
+        Error containment: failures are logged at WARNING but never raised
+        — disk-full on the archive path must not break ``/uw-analyze``.
+        The file write runs in ``asyncio.to_thread`` so it does not extend
+        event-loop stall on the refresh hot path.
+
+        Retention: none in v1. Operational guidance — add a janitor if the
+        history directory exceeds ~500K files or if ``load_history`` p99
+        latency exceeds ~50ms. At current rates (~1.5K files/day for a
+        20-ticker portfolio) this is many months away.
+        """
+        try:
+            current = entry.get("current") if isinstance(entry, dict) else None
+            if not isinstance(current, dict):
+                return
+            payload = _coerce_jsonable(
+                {
+                    "current": current,
+                    "materialized_changes": list(materialized_changes or []),
+                    "archived_at": _now_iso(),
+                }
+            )
+            target = self._archive_file_for(ticker)
+            await asyncio.to_thread(self._write_archive_sync, target, payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("uw_analyze_cache archive write failed for %s: %s", ticker, exc)
+
+    def load_history(
+        self,
+        ticker: str,
+        *,
+        limit: Optional[int] = None,
+        since: Optional[datetime] = None,
+    ) -> list[dict]:
+        """Return archived snapshots for ``ticker``, most-recent first.
+
+        Filters on filename (which carries the full UTC timestamp) BEFORE
+        parsing any JSON, so cost scales with the returned count — not the
+        total archive size. Used by debug tools and future time-series
+        consumers; no HTTP route wires this up yet.
+
+        Args:
+          limit: max number of snapshots to return (after sort).
+          since: only include snapshots with archive stamp >= this UTC
+                 datetime. Naive datetimes are treated as UTC.
+        """
+        ticker_dir = self.history_path / ticker.upper()
+        if not ticker_dir.exists():
+            return []
+
+        # List + sort by filename descending. Filename prefix
+        # YYYYMMDD-HHMMSS-ffffff is lex-sortable == time-sortable.
+        try:
+            names = [
+                e.name
+                for e in os.scandir(ticker_dir)
+                if e.is_file() and e.name.endswith(".json") and not e.name.startswith(".")
+            ]
+        except OSError as exc:
+            logger.warning("load_history scandir failed for %s: %s", ticker, exc)
+            return []
+        names.sort(reverse=True)
+
+        since_stamp: Optional[str] = None
+        if since is not None:
+            s = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+            since_stamp = s.astimezone(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+
+        out: list[dict] = []
+        for name in names:
+            if since_stamp is not None:
+                # Filename stem is the full stamp; compare as strings.
+                stem = name[:-5]  # drop ".json"
+                if stem < since_stamp:
+                    break  # names are descending — nothing older qualifies
+            if limit is not None and len(out) >= limit:
+                break
+            try:
+                with open(ticker_dir / name) as fh:
+                    out.append(json.load(fh))
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("load_history parse failed for %s/%s: %s", ticker, name, exc)
+                continue
+        return out
 
     # ── TTL ───────────────────────────────────────────────────────────
 
@@ -311,16 +584,49 @@ class UwAnalyzeCache:
                 # LRU touch: move to end on any hit.
                 self._entries.move_to_end(ticker)
                 if sources:
+                    # Only persist when the merge actually mutates. Warm
+                    # /portfolio GETs previously rewrote the full cache
+                    # JSON once per ticker here even when `sources` was
+                    # already a subset — which, combined with 35 concurrent
+                    # tickers behind `asyncio.gather`, pegged CPU and
+                    # allocated ~80MB of transient JSON per request.
+                    before = tuple(entry.get("sources") or ())
                     self._merge_sources(entry, sources)
-                    await self._persist()
+                    after = tuple(entry.get("sources") or ())
+                    if before != after:
+                        await self._persist()
                 return entry, False
 
             async with self._semaphore:
                 logger.info("uw_analyze_cache running analysis for %s (force=%s)", ticker, force)
-                report, display, flow_alerts = await asyncio.wait_for(runner(ticker), timeout=_RUN_TIMEOUT_S)
+                result = await asyncio.wait_for(runner(ticker), timeout=_RUN_TIMEOUT_S)
 
-            new_snapshot = build_snapshot(ticker, report, display, flow_alerts=flow_alerts)
+            # Runners may return a 3-tuple (legacy test runners) or a
+            # 5-tuple carrying dark_pool + options_flow summaries computed
+            # at analysis time so /flow-analysis can read them without a
+            # second UW fetch. Backward-compatible unpacking.
+            if len(result) == 5:
+                report, display, flow_alerts, dark_pool_summary, options_flow_summary = result
+            else:
+                report, display, flow_alerts = result
+                dark_pool_summary = None
+                options_flow_summary = None
+
+            new_snapshot = build_snapshot(
+                ticker,
+                report,
+                display,
+                flow_alerts=flow_alerts,
+                dark_pool_summary=dark_pool_summary,
+                options_flow_summary=options_flow_summary,
+            )
             prev_snapshot = entry.get("current") if entry else None
+            # Last-known-good: keep sticky enrichment fields from the
+            # previous snapshot when the new runner returned `None`
+            # (almost always due to a transient UW 429/5xx). Must run
+            # BEFORE `previous_light` drops the full previous snapshot
+            # — that stub strips `display` entirely.
+            _merge_sticky_fields(new_snapshot, prev_snapshot)
             existing_sources = list(entry.get("sources") or []) if entry else []
             merged_sources = sorted(set(existing_sources) | set(sources))
 
@@ -358,6 +664,9 @@ class UwAnalyzeCache:
             self._entries.move_to_end(ticker)
             self._evict_if_over_cap()
             await self._persist()
+            # Archive AFTER persist succeeds — ordering guarantees the
+            # archive is always a subset of committed cache states.
+            await self._archive_snapshot(ticker, new_entry, materialized)
             return new_entry, True
 
     def _merge_sources(self, entry: dict, sources: Iterable[Source]) -> None:

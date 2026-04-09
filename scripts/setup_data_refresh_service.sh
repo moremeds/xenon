@@ -99,7 +99,9 @@ install() {
     chmod +x "$WRAPPER"
 
     # 2. Verify Python scripts exist
-    for script in scanner.py flow_analysis.py discover.py; do
+    # flow_analysis.py removed: the page is now served from the shared
+    # uw-analyze cache via FastAPI POST /flow-analysis.
+    for script in scanner.py discover.py; do
         if [[ ! -f "$PROJECT_DIR/scripts/$script" ]]; then
             echo "ERROR: $script not found at $PROJECT_DIR/scripts/$script"
             exit 1

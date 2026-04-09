@@ -881,58 +881,47 @@ function usePriceDirection(price: number | null): {
 
 /* ─── Flow tables ───────────────────────────────────────── */
 
-type FlowPosKey = "ticker" | "position" | "flow_label" | "strength" | "note";
+type FlowPosKey = "ticker" | "structure" | "bias" | "dp" | "of";
 
 const flowPosExtract = (
   item: FlowAnalysisPosition,
   key: FlowPosKey,
 ): string | number => {
-  if (key === "strength") return item.strength;
-  return item[key];
+  if (key === "dp") return item.dark_pool.strength ?? 0;
+  if (key === "of") return item.options_flow.bias ?? "";
+  if (key === "structure") return item.structure;
+  return (item as unknown as Record<string, string>)[key] ?? "";
 };
 
-function FlowSparkline({
-  ratios,
-}: {
-  ratios?: { date: string; buy_ratio: number | null }[];
-}) {
-  if (!ratios || ratios.length === 0)
-    return <div className="strength-value">---</div>;
-  const maxH = 28;
-  return (
-    <div className="flow-sparkline">
-      {ratios.map((d, i) => {
-        const r = d.buy_ratio;
-        if (r == null)
-          return (
-            <div
-              key={i}
-              className="flow-spark-bar neutral"
-              style={{ height: 2 }}
-            />
-          );
-        const cls = r >= 0.55 ? "accum" : r <= 0.45 ? "distrib" : "neutral";
-        const h = Math.max(2, Math.round(r * maxH));
-        return (
-          <div
-            key={i}
-            className={`flow-spark-bar ${cls}`}
-            style={{ height: h }}
-            title={`${d.date}: ${Math.round(r * 100)}%`}
-          />
-        );
-      })}
-    </div>
-  );
+function flowBiasPillClass(bias: string): string {
+  switch (bias) {
+    case "bullish":
+      return "accum";
+    case "bearish":
+      return "distrib";
+    case "hedge":
+    case "income":
+    case "neutral_vol":
+      return "neutral";
+    default:
+      return "neutral";
+  }
 }
 
-function FlowTable({
-  rows,
-  lastColumn,
-}: {
-  rows: FlowAnalysisPosition[];
-  lastColumn: string;
-}) {
+function dpPillClass(direction: string): string {
+  if (direction === "ACCUMULATION") return "accum";
+  if (direction === "DISTRIBUTION") return "distrib";
+  return "neutral";
+}
+
+function ofPillClass(bias: string): string {
+  if (bias === "STRONGLY_BULLISH" || bias === "BULLISH" || bias === "ALL_CALLS")
+    return "accum";
+  if (bias === "STRONGLY_BEARISH" || bias === "BEARISH") return "distrib";
+  return "neutral";
+}
+
+function FlowTable({ rows }: { rows: FlowAnalysisPosition[] }) {
   const { sorted, sort, toggle } = useSort(rows, flowPosExtract);
   return (
     <table>
@@ -946,29 +935,29 @@ function FlowTable({
             onToggle={toggle}
           />
           <SortTh<FlowPosKey>
-            label="Position"
-            sortKey="position"
+            label="Structure"
+            sortKey="structure"
             activeKey={sort.key}
             direction={sort.direction}
             onToggle={toggle}
           />
           <SortTh<FlowPosKey>
-            label="Flow"
-            sortKey="flow_label"
+            label="Bias"
+            sortKey="bias"
             activeKey={sort.key}
             direction={sort.direction}
             onToggle={toggle}
           />
           <SortTh<FlowPosKey>
-            label="Strength"
-            sortKey="strength"
+            label="Dark Pool"
+            sortKey="dp"
             activeKey={sort.key}
             direction={sort.direction}
             onToggle={toggle}
           />
           <SortTh<FlowPosKey>
-            label={lastColumn}
-            sortKey="note"
+            label="Options Flow"
+            sortKey="of"
             activeKey={sort.key}
             direction={sort.direction}
             onToggle={toggle}
@@ -976,24 +965,43 @@ function FlowTable({
         </tr>
       </thead>
       <tbody>
-        {sorted.map((item) => (
-          <tr key={`${item.ticker}-${item.position}`}>
-            <td>
-              <TickerLink ticker={item.ticker} />
-            </td>
-            <td>{item.position}</td>
-            <td>
-              <span className={`pill ${item.flow_class}`}>
-                {item.flow_label}
-              </span>
-            </td>
-            <td>
-              <FlowSparkline ratios={item.daily_buy_ratios} />
-              <div className="strength-value">{item.strength}</div>
-            </td>
-            <td>{item.note}</td>
-          </tr>
-        ))}
+        {sorted.map((item) => {
+          const dp = item.dark_pool;
+          const of = item.options_flow;
+          const ratioPct =
+            dp.buy_ratio != null ? Math.round(dp.buy_ratio * 100) : null;
+          const dpLabel =
+            dp.direction === "NO_DATA"
+              ? "NO DATA"
+              : dp.direction === "NEUTRAL"
+                ? "NEUTRAL"
+                : ratioPct != null
+                  ? `${ratioPct}% ${dp.direction === "ACCUMULATION" ? "ACCUM" : "DISTRIB"}`
+                  : dp.direction;
+          return (
+            <tr key={`${item.ticker}-${item.structure}`}>
+              <td>
+                <TickerLink ticker={item.ticker} />
+              </td>
+              <td>{item.structure}</td>
+              <td>
+                <span className={`pill ${flowBiasPillClass(item.bias)}`}>
+                  {item.bias.toUpperCase().replace("_", " ")}
+                </span>
+              </td>
+              <td>
+                <span className={`pill ${dpPillClass(dp.direction)}`}>
+                  {dpLabel}
+                </span>
+              </td>
+              <td>
+                <span className={`pill ${ofPillClass(of.bias)}`}>
+                  {of.bias.replace("_", " ")}
+                </span>
+              </td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );
@@ -1011,12 +1019,13 @@ function FlowSections({
 
   const supportsArr = data?.supports ?? [];
   const againstArr = data?.against ?? [];
-  const watchArr = data?.watch ?? [];
+  const mixedArr = data?.mixed ?? [];
+  const nonDirectionalArr = data?.non_directional ?? [];
   const neutralArr = data?.neutral ?? [];
   const totalScanned = data?.positions_scanned ?? 0;
 
-  // Action items = against positions (flow contradicts trade direction)
-  const actionItems = againstArr.filter((p) => p.strength >= 15);
+  // Action items = against positions (flow contradicts position bias)
+  const actionItems = againstArr;
 
   return (
     <>
@@ -1029,11 +1038,13 @@ function FlowSections({
             </div>
             {actionItems.map((item) => (
               <div
-                key={`${item.ticker}-${item.position}`}
+                key={`${item.ticker}-${item.structure}`}
                 className="alert-item"
               >
                 <span className="alert-ticker">{item.ticker}</span> —{" "}
-                {item.position}: {item.note}
+                {item.structure}: flow {item.dark_pool.direction.toLowerCase()},
+                options {item.options_flow.bias.toLowerCase()}, position{" "}
+                {item.bias}
               </div>
             ))}
           </div>
@@ -1070,7 +1081,7 @@ function FlowSections({
         </div>
         <div className="section-body">
           {supportsArr.length > 0 ? (
-            <FlowTable rows={supportsArr} lastColumn="Signal" />
+            <FlowTable rows={supportsArr} />
           ) : (
             <div className="alert-item">
               {syncing
@@ -1092,9 +1103,47 @@ function FlowSections({
         </div>
         <div className="section-body">
           {againstArr.length > 0 ? (
-            <FlowTable rows={againstArr} lastColumn="Concern" />
+            <FlowTable rows={againstArr} />
           ) : (
             <div className="alert-item">No contradicting flow detected</div>
+          )}
+        </div>
+      </div>
+
+      <div className="section">
+        <div className="section-header">
+          <div className="section-title">
+            <Bell size={14} />
+            Mixed Signals
+            <InfoTooltip text="Dark pool and options flow disagree, or only one signal speaks. Investigate before acting." />
+          </div>
+          <span className="pill undefined">{mixedArr.length} POSITIONS</span>
+        </div>
+        <div className="section-body">
+          {mixedArr.length > 0 ? (
+            <FlowTable rows={mixedArr} />
+          ) : (
+            <div className="alert-item">No mixed signals</div>
+          )}
+        </div>
+      </div>
+
+      <div className="section">
+        <div className="section-header">
+          <div className="section-title">
+            <Circle size={14} />
+            Non-Directional
+            <InfoTooltip text="Iron condor, straddle, collar, and other structures that do not express a directional view." />
+          </div>
+          <span className="pill neutral">
+            {nonDirectionalArr.length} POSITIONS
+          </span>
+        </div>
+        <div className="section-body">
+          {nonDirectionalArr.length > 0 ? (
+            <FlowTable rows={nonDirectionalArr} />
+          ) : (
+            <div className="alert-item">No non-directional positions</div>
           )}
         </div>
       </div>
@@ -1110,27 +1159,9 @@ function FlowSections({
         </div>
         <div className="section-body">
           {neutralArr.length > 0 ? (
-            <FlowTable rows={neutralArr} lastColumn="Note" />
+            <FlowTable rows={neutralArr} />
           ) : (
             <div className="alert-item">No neutral positions</div>
-          )}
-        </div>
-      </div>
-
-      <div className="section">
-        <div className="section-header">
-          <div className="section-title">
-            <Bell size={14} />
-            Watch Closely
-            <InfoTooltip text={SECTION_TOOLTIPS["Watch Closely"]} />
-          </div>
-          <span className="pill undefined">{watchArr.length} POSITIONS</span>
-        </div>
-        <div className="section-body">
-          {watchArr.length > 0 ? (
-            <FlowTable rows={watchArr} lastColumn="Note" />
-          ) : (
-            <div className="alert-item">No watch items</div>
           )}
         </div>
       </div>
@@ -4149,6 +4180,24 @@ function UwTickerDetail({
                   }
                   badge={<SourceBadge source="uw" />}
                 />
+                {/*
+                 * TERM lives at the tail of row 1 (not row 2). With 7
+                 * cards, row 2 wrapped TERM onto a lone third line; row 1
+                 * had slack at the right edge. 6 + 6 now balances cleanly.
+                 */}
+                <MetricCard
+                  label="TERM"
+                  value={
+                    display.term_structure_label
+                      ? display.term_structure_label.toUpperCase()
+                      : "—"
+                  }
+                  sub={
+                    display.rv != null
+                      ? `RV ${fmtNum(display.rv, 1)}`
+                      : undefined
+                  }
+                />
               </div>
 
               <div className="gex-metrics-row" style={{ marginTop: "0.5rem" }}>
@@ -4187,19 +4236,6 @@ function UwTickerDetail({
                 <MetricCard
                   label="SHORT VOL"
                   value={fmtNum(display.short_volume_ratio, 2)}
-                />
-                <MetricCard
-                  label="TERM"
-                  value={
-                    display.term_structure_label
-                      ? display.term_structure_label.toUpperCase()
-                      : "—"
-                  }
-                  sub={
-                    display.rv != null
-                      ? `RV ${fmtNum(display.rv, 1)}`
-                      : undefined
-                  }
                 />
               </div>
 

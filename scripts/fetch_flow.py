@@ -18,23 +18,28 @@ Intraday Interpolation:
   - Volume comparison to prior days' averages
   This prevents false "fading" signals from incomplete intraday data.
 """
-import argparse, json, sys
+
+import argparse
+import json
+import sys
 from datetime import datetime, time
 from typing import Dict, List, Optional, Tuple
-import pytz
 
-from clients.uw_client import UWClient, UWAPIError
+import pytz
+from analysis.options_flow_summary import summarize_options_flow
+from clients.uw_client import UWAPIError, UWClient
+
 from utils.market_calendar import (
+    _is_trading_day,
     get_last_n_trading_days,
     load_holidays,
-    _is_trading_day,
 )
 
 # Trading day constants
 MARKET_OPEN = time(9, 30)  # 9:30 AM ET
 MARKET_CLOSE = time(16, 0)  # 4:00 PM ET
 TRADING_DAY_MINUTES = 390  # 6.5 hours = 390 minutes
-ET = pytz.timezone('America/New_York')
+ET = pytz.timezone("America/New_York")
 
 # Keep for backward compatibility with existing tests
 MARKET_HOLIDAYS_2026 = load_holidays(2026)
@@ -42,7 +47,7 @@ MARKET_HOLIDAYS_2026 = load_holidays(2026)
 
 def get_trading_day_progress() -> Tuple[float, bool, str]:
     """Calculate how far through the current trading day we are.
-    
+
     Returns:
         Tuple of (progress_pct, is_market_hours, status_msg)
         - progress_pct: 0.0 to 1.0 (0% to 100% of trading day elapsed)
@@ -51,47 +56,43 @@ def get_trading_day_progress() -> Tuple[float, bool, str]:
     """
     now_et = datetime.now(ET)
     current_time = now_et.time()
-    
+
     # Check if it's a trading day
     if not _is_trading_day(now_et):
         return 1.0, False, "Market closed (weekend/holiday)"
-    
+
     # Before market open
     if current_time < MARKET_OPEN:
         return 0.0, False, "Pre-market (before 9:30 AM ET)"
-    
+
     # After market close
     if current_time >= MARKET_CLOSE:
         return 1.0, False, "After hours (market closed)"
-    
+
     # During market hours - calculate progress
     market_open_dt = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
     elapsed = now_et - market_open_dt
     elapsed_minutes = elapsed.total_seconds() / 60
     progress = min(elapsed_minutes / TRADING_DAY_MINUTES, 1.0)
-    
+
     hours_elapsed = elapsed_minutes / 60
-    status = f"Market open ({hours_elapsed:.1f}h elapsed, {progress*100:.0f}% of day)"
-    
+    status = f"Market open ({hours_elapsed:.1f}h elapsed, {progress * 100:.0f}% of day)"
+
     return progress, True, status
 
 
-def interpolate_intraday_flow(
-    today_data: Dict,
-    prior_days: List[Dict],
-    trading_day_progress: float
-) -> Dict:
+def interpolate_intraday_flow(today_data: Dict, prior_days: List[Dict], trading_day_progress: float) -> Dict:
     """Interpolate today's partial data to estimate full-day values.
-    
+
     Uses volume-weighted interpolation based on:
     1. Time elapsed as % of trading day
     2. Today's volume vs prior days' average volume
-    
+
     Args:
         today_data: Today's dark pool analysis (partial if intraday)
         prior_days: List of prior days' full-day analyses
         trading_day_progress: 0.0-1.0 representing % of trading day elapsed
-        
+
     Returns:
         Dict with interpolated values and confidence metrics
     """
@@ -103,9 +104,9 @@ def interpolate_intraday_flow(
             "interpolated": today_data,
             "confidence": "HIGH",
             "trading_day_progress": 1.0,
-            "notes": "Full trading day data"
+            "notes": "Full trading day data",
         }
-    
+
     if trading_day_progress <= 0.0 or not prior_days:
         # No data or no prior days to compare
         return {
@@ -114,17 +115,17 @@ def interpolate_intraday_flow(
             "interpolated": today_data,
             "confidence": "LOW",
             "trading_day_progress": trading_day_progress,
-            "notes": "Insufficient data for interpolation"
+            "notes": "Insufficient data for interpolation",
         }
-    
+
     # Calculate prior days' average full-day volume
     prior_volumes = [d.get("total_volume", 0) for d in prior_days if d.get("total_volume", 0) > 0]
     avg_prior_volume = sum(prior_volumes) / len(prior_volumes) if prior_volumes else 0
-    
+
     today_volume = today_data.get("total_volume", 0)
     today_buy_volume = today_data.get("buy_volume", 0)
     today_sell_volume = today_data.get("sell_volume", 0)
-    
+
     # Project today's volume to full day based on time elapsed
     if trading_day_progress > 0:
         projected_volume = today_volume / trading_day_progress
@@ -134,26 +135,26 @@ def interpolate_intraday_flow(
         projected_volume = avg_prior_volume
         projected_buy = projected_volume * 0.5
         projected_sell = projected_volume * 0.5
-    
+
     # Calculate interpolated buy ratio
     projected_classified = projected_buy + projected_sell
     interpolated_buy_ratio = projected_buy / projected_classified if projected_classified > 0 else None
-    
+
     # Blend with prior days' pattern (weight recent days more heavily if today's data is sparse)
     # More weight to actual data as the day progresses
     actual_weight = trading_day_progress
     prior_weight = 1 - trading_day_progress
-    
+
     # Calculate prior days' average buy ratio (excluding neutral days)
     prior_ratios = [d.get("dp_buy_ratio") for d in prior_days if d.get("dp_buy_ratio") is not None]
     avg_prior_ratio = sum(prior_ratios) / len(prior_ratios) if prior_ratios else 0.5
-    
+
     # Blended estimate: weighted average of today's projected ratio and prior pattern
     if interpolated_buy_ratio is not None:
         blended_ratio = (interpolated_buy_ratio * actual_weight) + (avg_prior_ratio * prior_weight)
     else:
         blended_ratio = avg_prior_ratio
-    
+
     # Determine direction and strength from blended ratio
     if blended_ratio >= 0.55:
         direction = "ACCUMULATION"
@@ -164,7 +165,7 @@ def interpolate_intraday_flow(
     else:
         direction = "NEUTRAL"
         strength = 0
-    
+
     # Confidence based on how much of the day we have
     if trading_day_progress >= 0.75:
         confidence = "HIGH"
@@ -174,14 +175,16 @@ def interpolate_intraday_flow(
         confidence = "LOW"
     else:
         confidence = "VERY_LOW"
-    
+
     # Volume pace comparison
     expected_volume_at_this_point = avg_prior_volume * trading_day_progress
     volume_pace = today_volume / expected_volume_at_this_point if expected_volume_at_this_point > 0 else 1.0
-    
+
     interpolated = {
         "total_volume": round(projected_volume),
-        "total_premium": round(today_data.get("total_premium", 0) / trading_day_progress) if trading_day_progress > 0 else 0,
+        "total_premium": round(today_data.get("total_premium", 0) / trading_day_progress)
+        if trading_day_progress > 0
+        else 0,
         "buy_volume": round(projected_buy),
         "sell_volume": round(projected_sell),
         "dp_buy_ratio": round(blended_ratio, 4),
@@ -189,7 +192,7 @@ def interpolate_intraday_flow(
         "flow_strength": strength,
         "num_prints": today_data.get("num_prints", 0),
     }
-    
+
     return {
         "is_interpolated": True,
         "actual": today_data,
@@ -201,11 +204,8 @@ def interpolate_intraday_flow(
         "volume_pace_note": f"{'Above' if volume_pace > 1.1 else 'Below' if volume_pace < 0.9 else 'At'} average pace",
         "avg_prior_volume": round(avg_prior_volume),
         "avg_prior_buy_ratio": round(avg_prior_ratio, 4) if prior_ratios else None,
-        "blending_weights": {
-            "actual_weight": round(actual_weight, 2),
-            "prior_weight": round(prior_weight, 2)
-        },
-        "notes": f"Interpolated from {trading_day_progress*100:.0f}% of trading day. Confidence: {confidence}."
+        "blending_weights": {"actual_weight": round(actual_weight, 2), "prior_weight": round(prior_weight, 2)},
+        "notes": f"Interpolated from {trading_day_progress * 100:.0f}% of trading day. Confidence: {confidence}.",
     }
 
 
@@ -223,6 +223,7 @@ def fetch_darkpool(ticker: str, date: Optional[str] = None, _client: Optional[UW
     Returns list of individual dark pool transactions with price, size,
     NBBO context, and premium.
     """
+
     def _fetch(client):
         try:
             resp = client.get_darkpool_flow(ticker, date=date)
@@ -236,14 +237,13 @@ def fetch_darkpool(ticker: str, date: Optional[str] = None, _client: Optional[UW
         return _fetch(client)
 
 
-def fetch_flow_alerts(
-    ticker: str, min_premium: int = 50000, _client: Optional[UWClient] = None
-) -> List[Dict]:
+def fetch_flow_alerts(ticker: str, min_premium: int = 50000, _client: Optional[UWClient] = None) -> List[Dict]:
     """Fetch options flow alerts for a ticker.
 
     Filters for larger trades (default $50k+ premium) that are more likely
     to represent institutional activity.
     """
+
     def _fetch(client):
         try:
             resp = client.get_flow_alerts(ticker=ticker, min_premium=min_premium, limit=100)
@@ -332,55 +332,18 @@ def analyze_darkpool(trades: List[Dict]) -> Dict:
 
 
 def analyze_options_flow(alerts: List[Dict]) -> Dict:
-    """Summarize options flow alerts for directional bias."""
-    if not alerts:
-        return {
-            "total_alerts": 0,
-            "total_premium": 0,
-            "call_premium": 0,
-            "put_premium": 0,
-            "call_put_ratio": None,
-            "bias": "NO_DATA",
-        }
+    """Summarize options flow alerts for directional bias.
 
-    call_premium = 0.0
-    put_premium = 0.0
-
-    for a in alerts:
-        prem = float(a.get("premium", 0))
-        if a.get("is_call"):
-            call_premium += prem
-        else:
-            put_premium += prem
-
-    total = call_premium + put_premium
-    cp_ratio = round(call_premium / put_premium, 2) if put_premium > 0 else None
-
-    if cp_ratio is None:
-        bias = "ALL_CALLS" if call_premium > 0 else "NO_DATA"
-    elif cp_ratio >= 2.0:
-        bias = "STRONGLY_BULLISH"
-    elif cp_ratio >= 1.2:
-        bias = "BULLISH"
-    elif cp_ratio <= 0.5:
-        bias = "STRONGLY_BEARISH"
-    elif cp_ratio <= 0.8:
-        bias = "BEARISH"
-    else:
-        bias = "NEUTRAL"
-
-    return {
-        "total_alerts": len(alerts),
-        "total_premium": round(total, 2),
-        "call_premium": round(call_premium, 2),
-        "put_premium": round(put_premium, 2),
-        "call_put_ratio": cp_ratio,
-        "bias": bias,
-    }
+    Thin alias for analysis.options_flow_summary.summarize_options_flow; kept
+    as an importable symbol because other modules (and tests) historically
+    depend on this name.
+    """
+    return summarize_options_flow(alerts)
 
 
-def fetch_flow(ticker: str, lookback_days: int = 5, _client: Optional[UWClient] = None, 
-               skip_options_flow: bool = False) -> Dict:
+def fetch_flow(
+    ticker: str, lookback_days: int = 5, _client: Optional[UWClient] = None, skip_options_flow: bool = False
+) -> Dict:
     """Full flow analysis: dark pool prints + options flow alerts.
 
     Fetches dark pool data for each of the last N TRADING days and aggregates,
@@ -389,11 +352,11 @@ def fetch_flow(ticker: str, lookback_days: int = 5, _client: Optional[UWClient] 
     IMPORTANT: Always includes today's date (if it's a trading day) even during
     market hours. ``get_last_n_trading_days`` skips today before 4 PM ET, but
     for evaluations we need today's intraday flow to detect fading signals.
-    
+
     INTRADAY INTERPOLATION: When run during market hours, today's partial data
     is interpolated to estimate full-day values. Both actual and interpolated
     values are returned for transparency.
-    
+
     Args:
         ticker: Stock symbol
         lookback_days: Number of trading days to fetch (default 5)
@@ -447,10 +410,8 @@ def fetch_flow(ticker: str, lookback_days: int = 5, _client: Optional[UWClient] 
     if daily_signals and daily_signals[0].get("date") == today_str:
         today_data = daily_signals[0]
         prior_days = daily_signals[1:] if len(daily_signals) > 1 else []
-        today_interpolation = interpolate_intraday_flow(
-            today_data, prior_days, trading_day_progress
-        )
-        
+        today_interpolation = interpolate_intraday_flow(today_data, prior_days, trading_day_progress)
+
         # Update today's entry with interpolated flag
         daily_signals[0]["is_partial"] = trading_day_progress < 1.0
         daily_signals[0]["trading_day_progress"] = trading_day_progress
@@ -460,22 +421,22 @@ def fetch_flow(ticker: str, lookback_days: int = 5, _client: Optional[UWClient] 
     if today_interpolation and today_interpolation.get("is_interpolated"):
         # Recalculate aggregate using interpolated today values
         interpolated_today = today_interpolation["interpolated"]
-        
+
         # Sum up prior days + interpolated today
         total_volume = interpolated_today["total_volume"]
         total_premium = interpolated_today["total_premium"]
         buy_volume = interpolated_today["buy_volume"]
         sell_volume = interpolated_today["sell_volume"]
-        
+
         for day in daily_signals[1:]:
             total_volume += day.get("total_volume", 0)
             total_premium += day.get("total_premium", 0)
             buy_volume += day.get("buy_volume", 0)
             sell_volume += day.get("sell_volume", 0)
-        
+
         classified = buy_volume + sell_volume
         interp_buy_ratio = round(buy_volume / classified, 4) if classified > 0 else None
-        
+
         if interp_buy_ratio is None:
             interp_direction = "UNKNOWN"
             interp_strength = 0
@@ -488,7 +449,7 @@ def fetch_flow(ticker: str, lookback_days: int = 5, _client: Optional[UWClient] 
         else:
             interp_direction = "NEUTRAL"
             interp_strength = 0
-        
+
         aggregate_interpolated = {
             "total_volume": total_volume,
             "total_premium": round(total_premium, 2),
@@ -531,13 +492,13 @@ def fetch_flow(ticker: str, lookback_days: int = 5, _client: Optional[UWClient] 
         "options_flow": options_summary,
         "combined_signal": combined,
     }
-    
+
     # Add interpolation details if applicable
     if today_interpolation:
         result["intraday_interpolation"] = today_interpolation
         if aggregate_interpolated:
             result["dark_pool"]["aggregate_interpolated"] = aggregate_interpolated
-    
+
     return result
 
 
@@ -545,8 +506,9 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Fetch dark pool + options flow from Unusual Whales")
     p.add_argument("ticker", help="Stock ticker")
     p.add_argument("--days", type=int, default=5, help="Lookback trading days for dark pool data (default 5)")
-    p.add_argument("--min-premium", type=int, default=50000,
-                   help="Min premium filter for options flow alerts (default $50k)")
+    p.add_argument(
+        "--min-premium", type=int, default=50000, help="Min premium filter for options flow alerts (default $50k)"
+    )
     args = p.parse_args()
 
     result = fetch_flow(args.ticker, args.days)

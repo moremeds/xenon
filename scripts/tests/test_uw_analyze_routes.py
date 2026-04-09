@@ -358,6 +358,67 @@ def test_portfolio_surfaces_on_demand_oi_changes(monkeypatch, tmp_path):
     assert any(a["code"] == "OI_DELTA" for a in body["action_items"])
 
 
+def test_portfolio_refreshes_stale_oi_baseline(monkeypatch, tmp_path):
+    """When oi_baseline.data_date is from a prior trading day, /portfolio
+    must refetch and persist a fresh baseline stamped with today's ET date."""
+    from api.routes import uw_analyze as routes_mod
+    from api.services import uw_analyze_oi_tracker
+    from api.services.uw_analyze_daily_job import now_et_date
+    from api.services.uw_analyze_oi_tracker import OiChange
+
+    calls = {"n": 0}
+
+    async def fake_fetch(client, ticker, spot):
+        calls["n"] += 1
+        return [
+            OiChange(
+                strike=200.0,
+                side="put",
+                prev_oi=100,
+                curr_oi=900,
+                delta=800,
+                delta_pct=8.0,
+                label="+800 puts @ $200 (+800%)",
+            )
+        ]
+
+    monkeypatch.setattr(uw_analyze_oi_tracker, "fetch_and_diff", fake_fetch)
+    import clients.uw_client as uw_client_mod
+
+    monkeypatch.setattr(uw_client_mod, "UWClient", lambda *a, **k: object())
+
+    app = _build_app(
+        tmp_path,
+        _fake_runner(),
+        portfolio={"positions": [{"ticker": "TSLA"}]},
+    )
+    client = TestClient(app)
+    # Seed the cache, then poison oi_baseline with a stale date.
+    client.get("/uw-analyze/portfolio")
+    cache = routes_mod._portfolio_cache
+    cache._entries["TSLA"]["oi_baseline"] = {
+        "data_date": "2000-01-01",
+        "changes": [{"label": "stale"}],
+    }
+    persist_count = {"n": 0}
+    real_persist = cache._persist
+
+    async def counting_persist():
+        persist_count["n"] += 1
+        await real_persist()
+
+    monkeypatch.setattr(cache, "_persist", counting_persist)
+
+    body = client.get("/uw-analyze/portfolio").json()
+    row = next(r for r in body["tickers"] if r["ticker"] == "TSLA")
+    assert row["oi_changes"], "stale baseline should have been refreshed"
+    assert row["oi_changes"][0]["label"].startswith("+800 puts")
+    today_iso = now_et_date().isoformat()
+    assert cache._entries["TSLA"]["oi_baseline"]["data_date"] == today_iso
+    assert calls["n"] >= 1
+    assert persist_count["n"] >= 1, "refreshed baseline must be persisted"
+
+
 def test_portfolio_runs_tickers_concurrently(tmp_path, monkeypatch):
     """Confirm /portfolio fans out per-ticker work with asyncio.gather so the
     cache's Semaphore(3) actually caps concurrency."""
@@ -482,3 +543,217 @@ def test_legacy_post_uses_unified_cache(tmp_path):
 
     # Most direct proof: the unified cache now has an entry for AAPL.
     assert "AAPL" in routes_mod.get_portfolio_cache().all_entries()
+
+
+# ── On-demand OI refresh hotspot regressions ──────────────────────────────
+#
+# Three regressions locking in the fix for the "preload not working / 400%
+# CPU / fan spinning" incident. Root cause was per-ticker `_persist()` +
+# unbounded UWClient instantiation + unbounded `fetch_and_diff` fan-out
+# inside `asyncio.gather`. See docs/plans/stateless-scribbling-meadow.md.
+
+
+class _FakeOiChange:
+    def __init__(self, strike: float) -> None:
+        self.strike = strike
+
+    def to_dict(self) -> dict:
+        return {
+            "strike": self.strike,
+            "side": "call",
+            "delta": 1,
+            "label": f"+1 calls @ ${self.strike:g}",
+        }
+
+
+def _install_oi_stub(monkeypatch, *, tracker_fn):
+    """Point route-level on-demand OI refresh at `tracker_fn`.
+
+    The route imports `api.services.uw_analyze_oi_tracker` lazily inside
+    `_process`, so we monkeypatch the module attribute.
+    """
+    from api.services import uw_analyze_oi_tracker
+
+    monkeypatch.setattr(uw_analyze_oi_tracker, "fetch_and_diff", tracker_fn)
+
+
+def _clear_static_universe(monkeypatch):
+    """Drop the always-on scaffold universe for focused regression tests.
+    Without this, 21 macro tickers (SPY, QQQ, …) would also run through
+    `get_or_run` and inflate persist / UWClient counts."""
+    monkeypatch.setattr(cand, "UW_ANALYZE_STATIC_UNIVERSE", frozenset())
+
+
+def _seed_stale_entries(tickers):
+    """Populate the route cache singleton with entries whose oi_baseline
+    is stamped to yesterday, forcing the on-demand refresh branch."""
+    cache = routes_mod.get_portfolio_cache()
+    yesterday = "1970-01-01"  # any date != today — forces refresh branch
+    for t in tickers:
+        cache._entries[t] = {
+            "current": {
+                "ticker": t,
+                "ts": "2099-01-01T00:00:00+00:00",  # far future → TTL fresh
+                "report": {},
+                "display": {},
+                "flow_alerts": [],
+                "derived": {"spot": 100.0},
+            },
+            "previous": None,
+            "oi_baseline": {"data_date": yesterday, "changes": []},
+            # Must match what `seed_candidates` will attach, otherwise
+            # `get_or_run` mutates sources on first warm hit and persists.
+            "sources": ["portfolio"],
+            "materialized_changes": [],
+        }
+    cache._loaded = True
+
+
+def test_portfolio_persists_once_per_request(tmp_path, monkeypatch):
+    """Regression: the route must call `cache._persist()` at most ONCE per
+    /portfolio GET, no matter how many tickers trigger on-demand OI refresh.
+    The previous bug rewrote the 2.3MB cache file N times per request.
+    """
+    tickers = [f"T{i}" for i in range(5)]
+    app = _build_app(
+        tmp_path,
+        _fake_runner(),
+        portfolio={"positions": [{"ticker": t} for t in tickers]},
+    )
+    _clear_static_universe(monkeypatch)
+    _seed_stale_entries(tickers)
+
+    async def fake_fetch_and_diff(client, ticker, spot):
+        return [_FakeOiChange(100.0)]
+
+    _install_oi_stub(monkeypatch, tracker_fn=fake_fetch_and_diff)
+
+    cache = routes_mod.get_portfolio_cache()
+    persist_count = {"n": 0}
+    orig_persist = cache._persist
+
+    async def counting_persist(*a, **kw):
+        persist_count["n"] += 1
+        return await orig_persist(*a, **kw)
+
+    monkeypatch.setattr(cache, "_persist", counting_persist)
+
+    # Stub out UWClient so no real network.
+    class _StubUW:
+        pass
+
+    monkeypatch.setattr(routes_mod, "_shared_uw_client", lambda: _StubUW())
+
+    r = TestClient(app).get("/uw-analyze/portfolio")
+    assert r.status_code == 200
+    assert persist_count["n"] == 1, f"expected exactly 1 cache persist per /portfolio GET, got {persist_count['n']}"
+    # Internal flag must not leak to the response.
+    for row in r.json()["tickers"]:
+        assert "_oi_refreshed" not in row
+
+
+def test_on_demand_oi_fanout_is_bounded(tmp_path, monkeypatch):
+    """Regression: on-demand `fetch_and_diff` concurrency must be bounded
+    by `_ON_DEMAND_OI_SEM` (=3). Unbounded fan-out previously let 35
+    tickers hit UW simultaneously on the first warm-cache call."""
+    tickers = [f"T{i}" for i in range(10)]
+    app = _build_app(
+        tmp_path,
+        _fake_runner(),
+        portfolio={"positions": [{"ticker": t} for t in tickers]},
+    )
+    _clear_static_universe(monkeypatch)
+    _seed_stale_entries(tickers)
+
+    inflight = {"current": 0, "peak": 0}
+
+    async def fake_fetch_and_diff(client, ticker, spot):
+        inflight["current"] += 1
+        inflight["peak"] = max(inflight["peak"], inflight["current"])
+        # Yield control so other coroutines queued behind the semaphore
+        # have a chance to increment before we decrement.
+        await asyncio.sleep(0.01)
+        inflight["current"] -= 1
+        return [_FakeOiChange(100.0)]
+
+    _install_oi_stub(monkeypatch, tracker_fn=fake_fetch_and_diff)
+    monkeypatch.setattr(routes_mod, "_shared_uw_client", lambda: object())
+
+    r = TestClient(app).get("/uw-analyze/portfolio")
+    assert r.status_code == 200
+    # The module-level semaphore is 3; observed peak must not exceed that.
+    assert inflight["peak"] <= 3, f"on-demand OI concurrency unbounded: peak={inflight['peak']}"
+    # Sanity: all tickers did go through the refresh branch.
+    assert inflight["peak"] >= 1
+
+
+def test_shared_uw_client_reused_across_tickers(tmp_path, monkeypatch):
+    """Regression: `_shared_uw_client()` must be invoked at most once per
+    /portfolio GET regardless of ticker count. The previous bug allocated
+    a new `UWClient()` per ticker inside the gather loop."""
+    tickers = [f"T{i}" for i in range(5)]
+    app = _build_app(
+        tmp_path,
+        _fake_runner(),
+        portfolio={"positions": [{"ticker": t} for t in tickers]},
+    )
+    _clear_static_universe(monkeypatch)
+    _seed_stale_entries(tickers)
+
+    ctor_count = {"n": 0}
+
+    class _StubUW:
+        def __init__(self):
+            ctor_count["n"] += 1
+
+    # Force a fresh construction by clearing any prior singleton and
+    # pointing UWClient at our stub.
+    routes_mod._uw_client_singleton = None
+    monkeypatch.setattr("clients.uw_client.UWClient", _StubUW)
+
+    async def fake_fetch_and_diff(client, ticker, spot):
+        # Assert every call got the same client instance.
+        assert client is routes_mod._uw_client_singleton
+        return []
+
+    _install_oi_stub(monkeypatch, tracker_fn=fake_fetch_and_diff)
+
+    r = TestClient(app).get("/uw-analyze/portfolio")
+    assert r.status_code == 200
+    assert ctor_count["n"] == 1, f"UWClient constructed {ctor_count['n']} times; expected 1 shared instance"
+
+
+def test_portfolio_survives_persist_failure(tmp_path, monkeypatch):
+    """Regression: if the batched post-gather `_persist()` raises (e.g.
+    transient FS error), the /portfolio GET must still return 200 with
+    the in-memory refreshed baseline. The previous per-ticker persist
+    was wrapped in a try/except; the batched version must preserve that
+    robustness."""
+    tickers = [f"T{i}" for i in range(3)]
+    app = _build_app(
+        tmp_path,
+        _fake_runner(),
+        portfolio={"positions": [{"ticker": t} for t in tickers]},
+    )
+    _clear_static_universe(monkeypatch)
+    _seed_stale_entries(tickers)
+
+    async def fake_fetch_and_diff(client, ticker, spot):
+        return [_FakeOiChange(100.0)]
+
+    _install_oi_stub(monkeypatch, tracker_fn=fake_fetch_and_diff)
+    monkeypatch.setattr(routes_mod, "_shared_uw_client", lambda: object())
+
+    cache = routes_mod.get_portfolio_cache()
+
+    async def exploding_persist(*a, **kw):
+        raise OSError("simulated disk-full")
+
+    monkeypatch.setattr(cache, "_persist", exploding_persist)
+
+    r = TestClient(app).get("/uw-analyze/portfolio")
+    assert r.status_code == 200, f"persist failure must not 500 the route; got {r.status_code}: {r.text}"
+    # In-memory baseline was still updated, which is what matters for
+    # this request and subsequent ones this process serves.
+    body = r.json()
+    assert len(body["tickers"]) == 3

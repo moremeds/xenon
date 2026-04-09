@@ -383,3 +383,376 @@ def test_orphan_locks_swept_on_eviction(tmp_path):
     assert len(cache._entries) == 2
     # No orphan lock left for the evicted ticker.
     assert all(t in cache._entries for t in cache._per_ticker_locks)
+
+
+# ── History archive ────────────────────────────────────────────────────────
+
+
+def _archive_cache(tmp_path, **kw):
+    return UwAnalyzeCache(
+        cache_path=tmp_path / "cache.json",
+        history_path=tmp_path / "history",
+        market_open_fn=lambda: True,
+        **kw,
+    )
+
+
+def test_archive_written_on_refresh(tmp_path):
+    async def go():
+        cache = _archive_cache(tmp_path)
+        await cache.get_or_run("nvda", runner=make_runner(), sources=["portfolio"])
+        return cache
+
+    cache = _run(go())
+    nvda_dir = cache.history_path / "NVDA"
+    files = sorted(nvda_dir.glob("*.json"))
+    assert len(files) == 1
+    payload = json.loads(files[0].read_text())
+    assert set(payload.keys()) >= {"current", "materialized_changes", "archived_at"}
+    assert payload["current"]["ticker"] == "NVDA"
+
+
+def test_archive_not_written_on_cache_hit(tmp_path):
+    async def go():
+        cache = _archive_cache(tmp_path)
+        await cache.get_or_run("nvda", runner=make_runner())
+        await cache.get_or_run("nvda", runner=make_runner())  # fresh → cache hit
+        return cache
+
+    cache = _run(go())
+    files = list((cache.history_path / "NVDA").glob("*.json"))
+    assert len(files) == 1  # only the first refresh archived
+
+
+def test_archive_failure_does_not_break_request(tmp_path):
+    async def go():
+        cache = _archive_cache(tmp_path)
+
+        # Simulate disk-full at the sync write layer — the public wrapper
+        # must catch and log without raising.
+        def boom(target, payload):
+            raise OSError("disk full")
+
+        cache._write_archive_sync = boom  # type: ignore[method-assign]
+        entry, did_refresh = await cache.get_or_run("nvda", runner=make_runner())
+        return entry, did_refresh
+
+    entry, did_refresh = _run(go())
+    assert did_refresh is True
+    assert entry["current"]["ticker"] == "NVDA"
+
+
+def test_archive_happens_after_persist(tmp_path):
+    """If _persist raises, no archive file should exist — ordering guarantee."""
+
+    async def go():
+        cache = _archive_cache(tmp_path)
+        orig_persist = cache._persist
+
+        async def failing_persist():
+            await orig_persist()
+            raise RuntimeError("simulated persist failure")
+
+        cache._persist = failing_persist  # type: ignore[method-assign]
+        try:
+            await cache.get_or_run("nvda", runner=make_runner())
+        except RuntimeError:
+            pass
+        return cache
+
+    cache = _run(go())
+    nvda_dir = cache.history_path / "NVDA"
+    assert not nvda_dir.exists() or not list(nvda_dir.glob("*.json"))
+
+
+def test_archive_uses_coerce_jsonable(tmp_path):
+    """Archive must round-trip non-JSON-native values via _coerce_jsonable."""
+
+    async def go():
+        cache = _archive_cache(tmp_path)
+
+        # Inject a datetime into report — json.dump with default=str would
+        # stringify it, but _coerce_jsonable normalises via .isoformat().
+        report = _report()
+        report["fetched_at"] = datetime(2026, 4, 8, 12, 0, 0, tzinfo=timezone.utc)
+
+        async def runner(ticker):
+            return report, _display(), []
+
+        await cache.get_or_run("nvda", runner=runner)
+        return cache
+
+    cache = _run(go())
+    files = list((cache.history_path / "NVDA").glob("*.json"))
+    assert len(files) == 1
+    payload = json.loads(files[0].read_text())
+    fetched = payload["current"]["report"]["fetched_at"]
+    assert isinstance(fetched, str) and fetched.startswith("2026-04-08")
+
+
+def test_archive_handles_none_summaries(tmp_path):
+    """Runner returning 3-tuple → dark_pool/options_flow summaries are None."""
+
+    async def go():
+        cache = _archive_cache(tmp_path)
+        await cache.get_or_run("nvda", runner=make_runner())  # 3-tuple runner
+        return cache
+
+    cache = _run(go())
+    files = list((cache.history_path / "NVDA").glob("*.json"))
+    payload = json.loads(files[0].read_text())
+    assert payload["current"]["dark_pool_summary"] is None
+    assert payload["current"]["options_flow_summary"] is None
+
+
+def test_archive_filename_unique_under_burst(tmp_path):
+    """Two back-to-back forced refreshes must not collide on filename."""
+
+    async def go():
+        cache = _archive_cache(tmp_path)
+        await cache.get_or_run("nvda", runner=make_runner(), force=True)
+        await cache.get_or_run("nvda", runner=make_runner(), force=True)
+        return cache
+
+    cache = _run(go())
+    files = list((cache.history_path / "NVDA").glob("*.json"))
+    assert len(files) == 2
+
+
+def test_load_history_returns_descending(tmp_path):
+    cache = _archive_cache(tmp_path)
+    ticker_dir = cache.history_path / "NVDA"
+    ticker_dir.mkdir(parents=True)
+    stamps = ["20260101-120000-000000", "20260102-120000-000000", "20260103-120000-000000"]
+    for s in stamps:
+        (ticker_dir / f"{s}.json").write_text(json.dumps({"stamp": s}))
+
+    out = cache.load_history("nvda")
+    assert [o["stamp"] for o in out] == list(reversed(stamps))
+
+    out_limited = cache.load_history("nvda", limit=2)
+    assert [o["stamp"] for o in out_limited] == ["20260103-120000-000000", "20260102-120000-000000"]
+
+
+def test_load_history_applies_limit_before_parse(tmp_path, monkeypatch):
+    """limit must cut the filename list BEFORE any JSON parsing."""
+    cache = _archive_cache(tmp_path)
+    ticker_dir = cache.history_path / "NVDA"
+    ticker_dir.mkdir(parents=True)
+    for i in range(100):
+        stamp = f"20260101-120000-{i:06d}"
+        (ticker_dir / f"{stamp}.json").write_text(json.dumps({"i": i}))
+
+    parse_count = {"n": 0}
+    real_load = json.load
+
+    def counting_load(fh, *a, **kw):
+        parse_count["n"] += 1
+        return real_load(fh, *a, **kw)
+
+    monkeypatch.setattr(json, "load", counting_load)
+    out = cache.load_history("nvda", limit=5)
+    assert len(out) == 5
+    assert parse_count["n"] == 5  # exactly 5, not 100
+
+
+def test_load_history_since_filter(tmp_path):
+    cache = _archive_cache(tmp_path)
+    ticker_dir = cache.history_path / "NVDA"
+    ticker_dir.mkdir(parents=True)
+    for stamp in ["20260101-120000-000000", "20260105-120000-000000", "20260110-120000-000000"]:
+        (ticker_dir / f"{stamp}.json").write_text(json.dumps({"stamp": stamp}))
+
+    out = cache.load_history("nvda", since=datetime(2026, 1, 4, tzinfo=timezone.utc))
+    assert len(out) == 2
+    assert all(o["stamp"] >= "20260104" for o in out)
+
+
+def test_load_history_missing_ticker_returns_empty(tmp_path):
+    cache = _archive_cache(tmp_path)
+    assert cache.load_history("ZZZ") == []
+
+
+# ── Regression: _ensure_loaded must not permanently latch on transient failure
+
+
+def _seeded_cache_file(path: Path, *, ticker: str = "NVDA") -> None:
+    payload = {
+        "updated_at": "2026-04-08T00:00:00+00:00",
+        "entries": {
+            ticker: {
+                "current": {
+                    "ticker": ticker,
+                    "ts": "2026-04-08T00:00:00+00:00",
+                    "report": {},
+                    "display": {},
+                    "flow_alerts": [],
+                    "derived": {},
+                    "dark_pool_summary": None,
+                    "options_flow_summary": None,
+                },
+                "previous": None,
+                "oi_baseline": None,
+                "sources": ["portfolio"],
+                "materialized_changes": [],
+            }
+        },
+    }
+    path.write_text(json.dumps(payload))
+
+
+def test_ensure_loaded_retries_after_malformed_json(tmp_path):
+    """A half-written file must not permanently blind the cache."""
+    cache_file = tmp_path / "cache.json"
+    cache_file.write_text("{not valid json")  # partial write from a crashed writer
+
+    cache = UwAnalyzeCache(cache_path=cache_file, history_path=tmp_path / "hist")
+    assert cache.all_entries() == {}
+    assert cache._loaded is False, "malformed file must leave _loaded False for retry"
+
+    # File is fixed (atomic replace from another process).
+    _seeded_cache_file(cache_file)
+    entries = cache.all_entries()
+    assert "NVDA" in entries, "cache must retry load after transient parse failure"
+    assert cache._loaded is True
+
+
+def test_ensure_loaded_retries_after_wrong_shape(tmp_path):
+    """A schema-mismatched file must not permanently blind the cache."""
+    cache_file = tmp_path / "cache.json"
+    cache_file.write_text(json.dumps({"entries": []}))  # list, not dict
+
+    cache = UwAnalyzeCache(cache_path=cache_file, history_path=tmp_path / "hist")
+    assert cache.all_entries() == {}
+    assert cache._loaded is False, "wrong-shape file must leave _loaded False for retry"
+
+    _seeded_cache_file(cache_file)
+    entries = cache.all_entries()
+    assert "NVDA" in entries
+
+
+def test_ensure_loaded_picks_up_file_appearing_after_startup(tmp_path):
+    """Missing file at construction must not block a later-arriving file."""
+    cache_file = tmp_path / "cache.json"  # does not exist yet
+    cache = UwAnalyzeCache(cache_path=cache_file, history_path=tmp_path / "hist")
+    assert cache.all_entries() == {}
+    # Missing file is a legitimate cold start: _loaded latches True to
+    # avoid stat'ing disk on every call. The in-memory state is now
+    # authoritative, and a later file would require an explicit reload.
+    assert cache._loaded is True
+
+
+def test_persist_refuses_to_overwrite_nonempty_file_when_memory_empty(tmp_path):
+    """The data-loss footgun: a silently-empty cache must not clobber disk."""
+    cache_file = tmp_path / "cache.json"
+    _seeded_cache_file(cache_file)
+    original_bytes = cache_file.read_bytes()
+
+    cache = UwAnalyzeCache(cache_path=cache_file, history_path=tmp_path / "hist")
+    # Simulate the pathological state: loaded but empty.
+    cache._loaded = True
+    cache._entries.clear()
+
+    _run(cache._persist())
+    assert cache_file.read_bytes() == original_bytes, "persist must refuse to wipe real data"
+
+    # allow_empty=True overrides the guard for legitimate wipes.
+    _run(cache._persist(allow_empty=True))
+    assert cache_file.read_bytes() != original_bytes
+    assert json.loads(cache_file.read_text())["entries"] == {}
+
+
+# ── Last-known-good sticky-field merge ────────────────────────────────────
+#
+# Regressions locking in the fix for the "term card is empty / fields
+# disappear during refresh" incident: when a UW endpoint 429s, the
+# partial enrichment returned None, and the previous (good) value was
+# being clobbered on each refresh. `_merge_sticky_fields` now carries
+# the prior value forward for a whitelist of enrichment fields.
+
+
+def test_sticky_fields_carry_over_when_runner_returns_none(tmp_path):
+    """If the new snapshot has `term_structure_label=None` but the
+    previous snapshot had it populated, the new snapshot must inherit
+    the old value — UW had a transient failure, not a state change."""
+    cache = make_cache(tmp_path)
+
+    good_display = _display() | {
+        "term_structure_label": "inverted",
+        "sector": "Technology",
+        "iv": 42.0,
+        "rv": 33.1,
+        "gamma_per_1pct": 12345.0,
+        "short_volume_ratio": 0.48,
+    }
+    degraded_display = _display() | {
+        "term_structure_label": None,
+        "sector": None,
+        "iv": None,
+        "rv": None,
+        "gamma_per_1pct": None,
+        "short_volume_ratio": None,
+    }
+
+    # First refresh: runner returns good data.
+    _run(cache.get_or_run("NVDA", runner=make_runner(display=good_display)))
+    # Second refresh: runner returns a degraded snapshot (simulated
+    # UW 429 wiping the enrichment fields).
+    _run(
+        cache.get_or_run(
+            "NVDA",
+            runner=make_runner(display=degraded_display),
+            force=True,
+        )
+    )
+
+    disp = cache.get_entry("NVDA")["current"]["display"]
+    assert disp["term_structure_label"] == "inverted", "must carry over last-known-good"
+    assert disp["sector"] == "Technology"
+    assert disp["iv"] == 42.0
+    assert disp["rv"] == 33.1
+    assert disp["gamma_per_1pct"] == 12345.0
+    assert disp["short_volume_ratio"] == 0.48
+
+
+def test_sticky_fields_legitimate_transition_preserved(tmp_path):
+    """A non-None -> new non-None transition must NOT be masked by the
+    sticky merge. Carry-over only kicks in when the new value is None."""
+    cache = make_cache(tmp_path)
+
+    first = _display() | {"term_structure_label": "normal", "sector": "Tech"}
+    second = _display() | {"term_structure_label": "inverted", "sector": "Tech"}
+
+    _run(cache.get_or_run("NVDA", runner=make_runner(display=first)))
+    _run(cache.get_or_run("NVDA", runner=make_runner(display=second), force=True))
+    disp = cache.get_entry("NVDA")["current"]["display"]
+    assert disp["term_structure_label"] == "inverted"
+
+
+def test_non_sticky_fields_still_clobber_on_none(tmp_path):
+    """High-frequency mutable fields (net premium, flow score) must
+    NOT be carried over — a stale $27M call sweep would be misleading."""
+    cache = make_cache(tmp_path)
+
+    first = _display() | {"net_call_premium": 27_000_000, "net_put_premium": -4_000_000}
+    second = _display() | {"net_call_premium": None, "net_put_premium": None}
+
+    _run(cache.get_or_run("NVDA", runner=make_runner(display=first)))
+    _run(cache.get_or_run("NVDA", runner=make_runner(display=second), force=True))
+    disp = cache.get_entry("NVDA")["current"]["display"]
+    assert disp["net_call_premium"] is None, "flow fields must not be sticky"
+    assert disp["net_put_premium"] is None
+
+
+def test_sticky_merge_noop_on_first_refresh(tmp_path):
+    """No previous snapshot → merge is a no-op, None stays None."""
+    cache = make_cache(tmp_path)
+
+    _run(
+        cache.get_or_run(
+            "NVDA",
+            runner=make_runner(display=_display() | {"term_structure_label": None}),
+        )
+    )
+    disp = cache.get_entry("NVDA")["current"]["display"]
+    assert disp["term_structure_label"] is None
