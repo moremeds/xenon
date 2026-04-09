@@ -24,10 +24,6 @@ import pytest
 os.environ["XENON_TEST_MODE"] = "1"
 os.environ["XENON_API_TEST_MODE"] = "1"
 
-from fastapi.testclient import TestClient  # noqa: E402
-
-from api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
-from api.services.uw_analyze_flow_tracker import FlowLog  # noqa: E402
 from analysis.models import (  # noqa: E402
     AnalysisReport,
     BenchmarkContext,
@@ -37,8 +33,10 @@ from analysis.models import (  # noqa: E402
     TickerData,
     VRPState,
 )
+from api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
+from api.services.uw_analyze_flow_tracker import FlowLog  # noqa: E402
 from clients.uw_client import UWAPIError, UWNotFoundError  # noqa: E402
-
+from fastapi.testclient import TestClient  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = ROOT / "scripts"
@@ -58,7 +56,14 @@ def _make_fixtures() -> tuple[AnalysisReport, TickerData]:
         iv=22.0,
         rv=18.6,
         iv_percentile=38.0,
-        term_structure=[{"dte": 30, "iv": 22.0}],
+        # Real UW /volatility/term-structure shape: "volatility" as a
+        # stringly-typed IV, ordered front→back by dte. Previous fixture
+        # used "iv" which doesn't exist in the API response — that's the
+        # bug that made term_structure_label always None in production.
+        term_structure=[
+            {"dte": 1, "volatility": "0.22"},
+            {"dte": 981, "volatility": "0.28"},
+        ],
         rr_skew_25d=None,
         vrp_history=None,
         flow_alerts=None,
@@ -283,8 +288,10 @@ def test_route_uses_threadpool(client: TestClient) -> None:
 
     from api.routes import uw_analyze as route_mod  # noqa: WPS433
 
-    with patch("api.routes.uw_analyze.asyncio.to_thread", side_effect=fake_to_thread), \
-         patch("api.routes.uw_analyze.run_analysis_with_data", return_value=(report, td)) as mocked:
+    with (
+        patch("api.routes.uw_analyze.asyncio.to_thread", side_effect=fake_to_thread),
+        patch("api.routes.uw_analyze.run_analysis_with_data", return_value=(report, td)) as mocked,
+    ):
         report_dict, display_dict, flow_alerts = asyncio.run(route_mod._runner("AAPL"))
         assert len(calls) == 1
         assert calls[0][0] is mocked

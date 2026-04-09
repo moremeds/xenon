@@ -224,13 +224,19 @@ def _build_gex_rows(td: TickerData) -> Optional[list[GexStrikeRow]]:
 
 
 def _td_to_display(td: TickerData) -> UwAnalyzeDisplay:
-    # Term structure label: prefer VRP-derived, fall back from raw term_structure.
+    # Term structure label: compare front-month vs back-month IV.
+    #
+    # UW's /stock/{t}/volatility/term-structure returns rows with a
+    # "volatility" field (string, e.g. "0.2866"), sorted by dte. Earlier
+    # versions of this code read `.get("iv")` which does not exist in
+    # the response — that made `term_structure_label` always None for
+    # every ticker and the UI term card perpetually empty.
     term_label: Optional[Literal["normal", "inverted"]] = None
     ts = td.term_structure
-    if isinstance(ts, list) and len(ts) >= 1:
+    if isinstance(ts, list) and len(ts) >= 2:
         try:
-            front = float(ts[0].get("iv"))
-            back = float(ts[-1].get("iv"))
+            front = float(ts[0].get("volatility"))
+            back = float(ts[-1].get("volatility"))
             term_label = "inverted" if front > back else "normal"
         except (TypeError, ValueError, AttributeError):
             term_label = None
