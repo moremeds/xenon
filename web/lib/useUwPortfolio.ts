@@ -18,6 +18,22 @@ import { useMarketHours, MarketState } from "@/lib/useMarketHours";
 const POLL_OPEN_MS = 2 * 60 * 1000;
 const POLL_CLOSED_MS = 5 * 60 * 1000;
 
+// Module-level cache: survives unmount/remount of components using this
+// hook within the same browser session. Without it, navigating away from
+// /uw-analyze and back drops local useState and the page shows empty
+// until the next fetch lands. This stash lets re-mount paint the last
+// known data immediately while a background revalidation runs.
+type CacheSnapshot = {
+  data: UwPortfolioResponse;
+  lastFetchedAt: string | null;
+};
+let _cachedSnapshot: CacheSnapshot | null = null;
+
+/** Test-only: clear the cross-mount snapshot cache. */
+export function __resetUwPortfolioCacheForTests(): void {
+  _cachedSnapshot = null;
+}
+
 export type UseUwPortfolioState = {
   data: UwPortfolioResponse | null;
   loading: boolean;
@@ -53,10 +69,17 @@ async function _postRefresh(body: {
 }
 
 export function useUwPortfolio(): UseUwPortfolioState {
-  const [data, setData] = useState<UwPortfolioResponse | null>(null);
+  // Initialize from the module-level cache so re-mount paints the last
+  // known snapshot immediately. The background fetch in the effect below
+  // still runs to revalidate.
+  const [data, setData] = useState<UwPortfolioResponse | null>(
+    _cachedSnapshot?.data ?? null,
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [lastFetchedAt, setLastFetchedAt] = useState<string | null>(null);
+  const [lastFetchedAt, setLastFetchedAt] = useState<string | null>(
+    _cachedSnapshot?.lastFetchedAt ?? null,
+  );
 
   const inFlight = useRef(false);
   const market = useMarketHours();
@@ -68,8 +91,11 @@ export function useUwPortfolio(): UseUwPortfolioState {
     setError(null);
     try {
       const body = await _fetchPortfolio();
+      const stamp = body.fetched_at ?? new Date().toISOString();
       setData(body);
-      setLastFetchedAt(body.fetched_at ?? new Date().toISOString());
+      setLastFetchedAt(stamp);
+      // Stash for the next mount of any consumer of this hook.
+      _cachedSnapshot = { data: body, lastFetchedAt: stamp };
     } catch (e: any) {
       setError(String(e?.message ?? e));
     } finally {

@@ -8,7 +8,10 @@ vi.mock("@/lib/useMarketHours", () => ({
   useMarketHours: () => "closed",
 }));
 
-import { useUwPortfolio } from "@/lib/useUwPortfolio";
+import {
+  useUwPortfolio,
+  __resetUwPortfolioCacheForTests,
+} from "@/lib/useUwPortfolio";
 
 const FIXTURE = {
   fetched_at: "2026-04-08T14:00:00Z",
@@ -30,9 +33,11 @@ function mockFetchOk(body: unknown) {
 describe("useUwPortfolio", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    __resetUwPortfolioCacheForTests();
   });
   afterEach(() => {
     vi.restoreAllMocks();
+    __resetUwPortfolioCacheForTests();
   });
 
   it("fetches /api/uw-analyze/portfolio on mount and surfaces data", async () => {
@@ -64,6 +69,29 @@ describe("useUwPortfolio", () => {
     });
     expect(result.current.error).toContain("network down");
     expect(result.current.data).toBeNull();
+  });
+
+  it("re-mount paints the previous snapshot immediately from the module cache", async () => {
+    const fetchMock = mockFetchOk(FIXTURE);
+    vi.stubGlobal("fetch", fetchMock);
+
+    // First mount populates the module-level cache.
+    const first = renderHook(() => useUwPortfolio());
+    await waitFor(() => expect(first.result.current.data).not.toBeNull());
+    first.unmount();
+
+    // Second mount should see the previous data immediately on the very
+    // first render — before any new fetch resolves. Mock fetch with a
+    // never-resolving promise so the test can ONLY pass if the cache hit
+    // populated initial state.
+    const stalled = vi.fn(
+      () => new Promise(() => {}) as unknown as Promise<Response>,
+    );
+    vi.stubGlobal("fetch", stalled);
+
+    const second = renderHook(() => useUwPortfolio());
+    expect(second.result.current.data?.fetched_at).toBe(FIXTURE.fetched_at);
+    expect(second.result.current.lastFetchedAt).toBe(FIXTURE.fetched_at);
   });
 
   it("refreshAll() POSTs to /api/uw-analyze/refresh then refetches portfolio", async () => {
