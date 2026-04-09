@@ -660,3 +660,99 @@ def test_persist_refuses_to_overwrite_nonempty_file_when_memory_empty(tmp_path):
     _run(cache._persist(allow_empty=True))
     assert cache_file.read_bytes() != original_bytes
     assert json.loads(cache_file.read_text())["entries"] == {}
+
+
+# ── Last-known-good sticky-field merge ────────────────────────────────────
+#
+# Regressions locking in the fix for the "term card is empty / fields
+# disappear during refresh" incident: when a UW endpoint 429s, the
+# partial enrichment returned None, and the previous (good) value was
+# being clobbered on each refresh. `_merge_sticky_fields` now carries
+# the prior value forward for a whitelist of enrichment fields.
+
+
+def test_sticky_fields_carry_over_when_runner_returns_none(tmp_path):
+    """If the new snapshot has `term_structure_label=None` but the
+    previous snapshot had it populated, the new snapshot must inherit
+    the old value — UW had a transient failure, not a state change."""
+    cache = make_cache(tmp_path)
+
+    good_display = _display() | {
+        "term_structure_label": "inverted",
+        "sector": "Technology",
+        "iv": 42.0,
+        "rv": 33.1,
+        "gamma_per_1pct": 12345.0,
+        "short_volume_ratio": 0.48,
+    }
+    degraded_display = _display() | {
+        "term_structure_label": None,
+        "sector": None,
+        "iv": None,
+        "rv": None,
+        "gamma_per_1pct": None,
+        "short_volume_ratio": None,
+    }
+
+    # First refresh: runner returns good data.
+    _run(cache.get_or_run("NVDA", runner=make_runner(display=good_display)))
+    # Second refresh: runner returns a degraded snapshot (simulated
+    # UW 429 wiping the enrichment fields).
+    _run(
+        cache.get_or_run(
+            "NVDA",
+            runner=make_runner(display=degraded_display),
+            force=True,
+        )
+    )
+
+    disp = cache.get_entry("NVDA")["current"]["display"]
+    assert disp["term_structure_label"] == "inverted", "must carry over last-known-good"
+    assert disp["sector"] == "Technology"
+    assert disp["iv"] == 42.0
+    assert disp["rv"] == 33.1
+    assert disp["gamma_per_1pct"] == 12345.0
+    assert disp["short_volume_ratio"] == 0.48
+
+
+def test_sticky_fields_legitimate_transition_preserved(tmp_path):
+    """A non-None -> new non-None transition must NOT be masked by the
+    sticky merge. Carry-over only kicks in when the new value is None."""
+    cache = make_cache(tmp_path)
+
+    first = _display() | {"term_structure_label": "normal", "sector": "Tech"}
+    second = _display() | {"term_structure_label": "inverted", "sector": "Tech"}
+
+    _run(cache.get_or_run("NVDA", runner=make_runner(display=first)))
+    _run(cache.get_or_run("NVDA", runner=make_runner(display=second), force=True))
+    disp = cache.get_entry("NVDA")["current"]["display"]
+    assert disp["term_structure_label"] == "inverted"
+
+
+def test_non_sticky_fields_still_clobber_on_none(tmp_path):
+    """High-frequency mutable fields (net premium, flow score) must
+    NOT be carried over — a stale $27M call sweep would be misleading."""
+    cache = make_cache(tmp_path)
+
+    first = _display() | {"net_call_premium": 27_000_000, "net_put_premium": -4_000_000}
+    second = _display() | {"net_call_premium": None, "net_put_premium": None}
+
+    _run(cache.get_or_run("NVDA", runner=make_runner(display=first)))
+    _run(cache.get_or_run("NVDA", runner=make_runner(display=second), force=True))
+    disp = cache.get_entry("NVDA")["current"]["display"]
+    assert disp["net_call_premium"] is None, "flow fields must not be sticky"
+    assert disp["net_put_premium"] is None
+
+
+def test_sticky_merge_noop_on_first_refresh(tmp_path):
+    """No previous snapshot → merge is a no-op, None stays None."""
+    cache = make_cache(tmp_path)
+
+    _run(
+        cache.get_or_run(
+            "NVDA",
+            runner=make_runner(display=_display() | {"term_structure_label": None}),
+        )
+    )
+    disp = cache.get_entry("NVDA")["current"]["display"]
+    assert disp["term_structure_label"] is None

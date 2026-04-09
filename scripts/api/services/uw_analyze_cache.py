@@ -85,6 +85,68 @@ def _coerce_jsonable(o: Any) -> Any:
     return o
 
 
+# Display/derived fields where `None` in a new snapshot almost always
+# means a transient UW fetch failure (rate limit, timeout, 5xx), not a
+# legitimate state change. For these we prefer to keep the previous
+# snapshot's value instead of clobbering good data with `None` — this
+# stops the UI from flashing "—" every time the refresh cycle hits a
+# 429 on a single endpoint.
+#
+# Fields NOT listed here (e.g. `net_call_premium`, `flow_score`, `spot`,
+# `gex_sign`) are high-frequency mutable values; a stale carry-over
+# would be misleading, so those still clobber even when None.
+_DISPLAY_STICKY_FIELDS: frozenset[str] = frozenset(
+    {
+        "sector",
+        "iv_rank",
+        "iv",
+        "rv",
+        "iv_52w_low",
+        "iv_52w_high",
+        "gamma_per_1pct",
+        "call_wall_strike",
+        "put_wall_strike",
+        "short_volume_ratio",
+        "short_volume_trend",
+        "term_structure_label",
+        "max_pain",
+    }
+)
+_DERIVED_STICKY_FIELDS: frozenset[str] = frozenset(
+    {
+        "call_wall",
+        "put_wall",
+        "max_pain",
+        "iv_rank",
+    }
+)
+
+
+def _merge_sticky_fields(new_snapshot: dict, prev_snapshot: Optional[dict]) -> None:
+    """Last-known-good carry-over for enrichment fields that tend to
+    transiently vanish on UW 429/5xx.
+
+    Mutates ``new_snapshot`` in place. Only fills a field from
+    ``prev_snapshot`` if the new value is ``None`` AND the old value was
+    populated — legitimate value transitions (non-None -> new non-None)
+    are preserved.
+    """
+    if not isinstance(prev_snapshot, dict):
+        return
+    new_display = new_snapshot.get("display")
+    prev_display = prev_snapshot.get("display")
+    if isinstance(new_display, dict) and isinstance(prev_display, dict):
+        for field in _DISPLAY_STICKY_FIELDS:
+            if new_display.get(field) is None and prev_display.get(field) is not None:
+                new_display[field] = prev_display[field]
+    new_derived = new_snapshot.get("derived")
+    prev_derived = prev_snapshot.get("derived")
+    if isinstance(new_derived, dict) and isinstance(prev_derived, dict):
+        for field in _DERIVED_STICKY_FIELDS:
+            if new_derived.get(field) is None and prev_derived.get(field) is not None:
+                new_derived[field] = prev_derived[field]
+
+
 # ── Snapshot derivation ─────────────────────────────────────────────────────
 
 
@@ -559,6 +621,12 @@ class UwAnalyzeCache:
                 options_flow_summary=options_flow_summary,
             )
             prev_snapshot = entry.get("current") if entry else None
+            # Last-known-good: keep sticky enrichment fields from the
+            # previous snapshot when the new runner returned `None`
+            # (almost always due to a transient UW 429/5xx). Must run
+            # BEFORE `previous_light` drops the full previous snapshot
+            # — that stub strips `display` entirely.
+            _merge_sticky_fields(new_snapshot, prev_snapshot)
             existing_sources = list(entry.get("sources") or []) if entry else []
             merged_sources = sorted(set(existing_sources) | set(sources))
 
