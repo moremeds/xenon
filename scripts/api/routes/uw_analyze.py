@@ -40,6 +40,17 @@ router = APIRouter()
 # /refresh. Lazily instantiated so test discovery doesn't touch disk.
 _portfolio_cache: Optional[UwAnalyzeCache] = None
 _flow_log: Optional[FlowLog] = None
+# Shared UWClient for on-demand OI refresh. Reused across tickers within
+# a single /portfolio request and across requests — avoids allocating N
+# client/session objects per GET, which was a major contributor to
+# memory churn on the first warm-cache call after restart.
+_uw_client_singleton: Optional[Any] = None
+# Bounds on-demand OI fan-out inside /uw-analyze/portfolio. Without this,
+# 35 portfolio tickers whose oi_baseline is not today-stamped would all
+# fire `fetch_and_diff` (full option-chain fetch) in parallel, saturating
+# the UW client and Python threadpool. Mirrors the upstream runner
+# semaphore value in UwAnalyzeCache._semaphore (=3).
+_ON_DEMAND_OI_SEM = asyncio.Semaphore(3)
 
 
 def get_portfolio_cache() -> UwAnalyzeCache:
@@ -56,11 +67,30 @@ def get_flow_log() -> FlowLog:
     return _flow_log
 
 
+def _shared_uw_client():
+    """Return the process-wide shared UWClient, constructing on first use."""
+    global _uw_client_singleton
+    if _uw_client_singleton is None:
+        from clients.uw_client import UWClient
+
+        _uw_client_singleton = UWClient()
+    return _uw_client_singleton
+
+
 def reset_state_for_tests() -> None:
-    """Reset module-level singletons. Tests only."""
-    global _portfolio_cache, _flow_log
+    """Reset module-level singletons. Tests only.
+
+    Also recreates ``_ON_DEMAND_OI_SEM``. An `asyncio.Semaphore` captures
+    the running event loop on first `acquire()`; suites that build a
+    fresh event loop per test (FastAPI `TestClient` does this) must
+    start from a fresh semaphore or risk a "bound to a different event
+    loop" RuntimeError under contention.
+    """
+    global _portfolio_cache, _flow_log, _uw_client_singleton, _ON_DEMAND_OI_SEM
     _portfolio_cache = None
     _flow_log = None
+    _uw_client_singleton = None
+    _ON_DEMAND_OI_SEM = asyncio.Semaphore(3)
 
 
 # ── Request / response models ─────────────────────────────────────────────
@@ -398,19 +428,34 @@ async def uw_analyze_portfolio() -> dict:
             logger.warning("uw-analyze portfolio: %s failed: %s", ticker, exc)
             return None
 
-        # On-demand OI fetch when the daily cron hasn't yet stamped oi_baseline.
-        if not entry.get("oi_baseline"):
-            try:
-                from clients.uw_client import UWClient
+        # On-demand OI fetch when the daily cron hasn't yet stamped oi_baseline,
+        # OR when the stamped baseline is from an earlier trading day.
+        #
+        # IMPORTANT: this block must NOT call `cache._persist()`. The caller
+        # (`uw_analyze_portfolio`) batches a single persist after `gather()`
+        # based on the `oi_refreshed` flag on each row. Persisting here would
+        # rewrite the full cache JSON N times per request (~80MB transient
+        # allocation for a 35-ticker portfolio), which was the root cause of
+        # the "preload not working" + 400% CPU burst.
+        from api.services.uw_analyze_daily_job import now_et_date
 
+        today_iso = now_et_date().isoformat()
+        baseline = entry.get("oi_baseline") or {}
+        oi_refreshed = False
+        if not baseline or baseline.get("data_date") != today_iso:
+            try:
                 from api.services import uw_analyze_oi_tracker
 
                 spot = (entry.get("current") or {}).get("derived", {}).get("spot")
-                oi_changes_ondemand = await uw_analyze_oi_tracker.fetch_and_diff(UWClient(), ticker, spot)
+                # Bound concurrent UW OI chain fetches. Without this,
+                # 35 tickers would hit `fetch_and_diff` simultaneously.
+                async with _ON_DEMAND_OI_SEM:
+                    oi_changes_ondemand = await uw_analyze_oi_tracker.fetch_and_diff(_shared_uw_client(), ticker, spot)
                 entry["oi_baseline"] = {
-                    "data_date": datetime.now(timezone.utc).date().isoformat(),
+                    "data_date": today_iso,
                     "changes": [c.to_dict() for c in oi_changes_ondemand],
                 }
+                oi_refreshed = True
             except Exception as exc:  # noqa: BLE001
                 logger.debug("on-demand oi fetch failed for %s: %s", ticker, exc)
 
@@ -447,10 +492,35 @@ async def uw_analyze_portfolio() -> dict:
             "changes": change_dicts,
             "oi_changes": oi_baseline.get("changes") or [],
             "unusual_flow_events": [e.to_dict() for e in flow_log.for_ticker(ticker)],
+            # Internal flag stripped before the HTTP response. Signals to
+            # the caller that this ticker's `oi_baseline` was mutated and
+            # the cache needs a single post-gather persist.
+            "_oi_refreshed": oi_refreshed,
         }
 
     results = await asyncio.gather(*[_process(t, s) for t, s in sorted(candidates.items())])
     rows = [r for r in results if r is not None]
+
+    # Coalesce per-ticker oi_baseline mutations into a single atomic
+    # cache rewrite. The previous implementation called `_persist()`
+    # inside `_process`, which meant N full-cache JSON rewrites per
+    # /portfolio GET — ~80 MB of transient allocation for a 35-ticker
+    # portfolio and 400% CPU. Pop the internal flag so it never leaks
+    # to the HTTP response.
+    any_oi_refreshed = False
+    for r in rows:
+        if r.pop("_oi_refreshed", False):
+            any_oi_refreshed = True
+    if any_oi_refreshed:
+        # Disk write is best-effort: if it fails, the in-memory cache
+        # still reflects the refreshed baseline and subsequent requests
+        # this process serves will use it. On restart we'd re-fetch —
+        # that's strictly better than 500-ing the whole /portfolio
+        # response because an atomic-replace hit a transient FS error.
+        try:
+            await cache._persist()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("uw-analyze portfolio: batched persist failed: %s", exc)
 
     if any(r.get("changes") for r in rows):
         flow_log.save()
