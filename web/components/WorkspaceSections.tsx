@@ -4180,6 +4180,24 @@ function UwTickerDetail({
                   }
                   badge={<SourceBadge source="uw" />}
                 />
+                {/*
+                 * TERM lives at the tail of row 1 (not row 2). With 7
+                 * cards, row 2 wrapped TERM onto a lone third line; row 1
+                 * had slack at the right edge. 6 + 6 now balances cleanly.
+                 */}
+                <MetricCard
+                  label="TERM"
+                  value={
+                    display.term_structure_label
+                      ? display.term_structure_label.toUpperCase()
+                      : "—"
+                  }
+                  sub={
+                    display.rv != null
+                      ? `RV ${fmtNum(display.rv, 1)}`
+                      : undefined
+                  }
+                />
               </div>
 
               <div className="gex-metrics-row" style={{ marginTop: "0.5rem" }}>
@@ -4218,19 +4236,6 @@ function UwTickerDetail({
                 <MetricCard
                   label="SHORT VOL"
                   value={fmtNum(display.short_volume_ratio, 2)}
-                />
-                <MetricCard
-                  label="TERM"
-                  value={
-                    display.term_structure_label
-                      ? display.term_structure_label.toUpperCase()
-                      : "—"
-                  }
-                  sub={
-                    display.rv != null
-                      ? `RV ${fmtNum(display.rv, 1)}`
-                      : undefined
-                  }
                 />
               </div>
 
