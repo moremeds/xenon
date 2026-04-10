@@ -15,11 +15,23 @@ export function usePreviousClose(
   const [closePrices, setClosePrices] = useState<Record<string, number>>({});
   const fetchedRef = useRef<Set<string>>(new Set());
 
-  // Stock symbols (no underscores) with valid last but missing close
+  // Stock symbols (no underscores) with valid last but missing close.
+  // We rebuild this on every prices identity change (each WS tick produces a
+  // new object), but the inner loop short-circuits cheaply: most ticks update
+  // an existing symbol whose `close` we already backfilled, so the filter
+  // returns the same (empty) array. Joining to a stable string below means
+  // the fetch effect only fires when the missing set actually changes.
   const missingClose = useMemo(() => {
-    return Object.keys(prices).filter((key) =>
-      shouldBackfillPreviousClose(key, prices[key]) && !fetchedRef.current.has(key),
-    );
+    const out: string[] = [];
+    for (const key in prices) {
+      // Guard against inherited enumerable properties (prototype pollution /
+      // prototype extensions). Preserves `Object.keys()` own-properties-only
+      // semantics while avoiding the intermediate array + closure allocation.
+      if (!Object.hasOwn(prices, key)) continue;
+      if (fetchedRef.current.has(key)) continue;
+      if (shouldBackfillPreviousClose(key, prices[key])) out.push(key);
+    }
+    return out;
   }, [prices]);
 
   // Stable key so the effect only fires when the missing list actually changes
@@ -66,10 +78,15 @@ export function usePreviousClose(
 
 const REGIME_INDEX_SYMBOLS = new Set(["VIX", "VVIX", "COR1M"]);
 
-export function shouldBackfillPreviousClose(symbol: string, price: PriceData): boolean {
-  return !symbol.includes("_") &&
+export function shouldBackfillPreviousClose(
+  symbol: string,
+  price: PriceData,
+): boolean {
+  return (
+    !symbol.includes("_") &&
     !REGIME_INDEX_SYMBOLS.has(symbol) &&
     price.last != null &&
     price.last !== 0 &&
-    (price.close == null || price.close === 0);
+    (price.close == null || price.close === 0)
+  );
 }

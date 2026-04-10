@@ -1,5 +1,6 @@
 "use client";
 
+import { usePerfTracker } from "@/lib/perfTracker";
 import React, {
   useCallback,
   useEffect,
@@ -1201,13 +1202,24 @@ function PortfolioSections({
   prices?: Record<string, PriceData>;
   activeAccount?: "ib" | "futu";
 }) {
-  const positions = portfolio?.positions ?? [];
-  const definedPositions = positions.filter(
-    (p) => p.risk_profile === "defined",
+  const positions = useMemo(
+    () => portfolio?.positions ?? EMPTY_POSITIONS,
+    [portfolio?.positions],
   );
-  const equityPositions = positions.filter((p) => p.risk_profile === "equity");
-  const undefinedPositions = positions.filter(
-    (p) => p.risk_profile === "undefined" || p.risk_profile === "complex",
+  const definedPositions = useMemo(
+    () => positions.filter((p) => p.risk_profile === "defined"),
+    [positions],
+  );
+  const equityPositions = useMemo(
+    () => positions.filter((p) => p.risk_profile === "equity"),
+    [positions],
+  );
+  const undefinedPositions = useMemo(
+    () =>
+      positions.filter(
+        (p) => p.risk_profile === "undefined" || p.risk_profile === "complex",
+      ),
+    [positions],
   );
 
   const extractPositionSearchText = useCallback(
@@ -1500,7 +1512,7 @@ const scannerSigExtract = (
   }
 };
 
-function ScannerSections() {
+const ScannerSections = React.memo(function ScannerSections() {
   const { data, syncing, error, lastSync } = useScanner(true);
   const signals = data?.top_signals ?? [];
   const { sorted, sort, toggle } = useSort(signals, scannerSigExtract);
@@ -1664,7 +1676,7 @@ function ScannerSections() {
       )}
     </>
   );
-}
+});
 
 /* ─── Non-table sections ────────────────────────────────── */
 
@@ -1679,6 +1691,38 @@ type DiscoverSortKey =
   | "total_premium"
   | "sweeps"
   | "sector";
+
+// Stable empty array — avoids `?? []` creating a new identity per render,
+// which would invalidate downstream useSort/useMemo on every parent re-render.
+const EMPTY_DISCOVER_CANDIDATES: readonly DiscoverCandidate[] = Object.freeze(
+  [],
+);
+const EMPTY_POSITIONS: readonly PortfolioPosition[] = Object.freeze([]);
+
+// Hoisted formatters — module scope so they have stable identity across renders.
+function fmtDiscoverPremium(v: number): string {
+  if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000) return `$${(v / 1_000).toFixed(0)}K`;
+  return `$${v.toFixed(0)}`;
+}
+
+function discoverBiasClass(bias: string): string {
+  if (bias === "BULLISH" || bias === "CALLS") return "bullish";
+  if (bias === "BEARISH" || bias === "PUTS") return "bearish";
+  return "neutral";
+}
+
+function discoverDpClass(dir: string): string {
+  if (dir === "ACCUMULATION") return "bullish";
+  if (dir === "DISTRIBUTION") return "bearish";
+  return "neutral";
+}
+
+function discoverScoreClass(score: number): string {
+  if (score >= 60) return "bullish";
+  if (score >= 40) return "neutral";
+  return "bearish";
+}
 
 const discoverExtract = (
   item: DiscoverCandidate,
@@ -1710,39 +1754,16 @@ const discoverExtract = (
   }
 };
 
-function DiscoverSections() {
+const DiscoverSections = React.memo(function DiscoverSections() {
+  usePerfTracker("DiscoverSections");
   const { data, syncing, error, lastSync } = useDiscover(true);
-  const candidates = data?.candidates ?? [];
+  const candidates = data?.candidates ?? EMPTY_DISCOVER_CANDIDATES;
   const { sorted, sort, toggle } = useSort<DiscoverCandidate, DiscoverSortKey>(
     candidates,
     discoverExtract,
     "score",
     "desc",
   );
-
-  const fmtPremium = (v: number) => {
-    if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
-    if (v >= 1_000) return `$${(v / 1_000).toFixed(0)}K`;
-    return `$${v.toFixed(0)}`;
-  };
-
-  const biasClass = (bias: string) => {
-    if (bias === "BULLISH" || bias === "CALLS") return "bullish";
-    if (bias === "BEARISH" || bias === "PUTS") return "bearish";
-    return "neutral";
-  };
-
-  const dpClass = (dir: string) => {
-    if (dir === "ACCUMULATION") return "bullish";
-    if (dir === "DISTRIBUTION") return "bearish";
-    return "neutral";
-  };
-
-  const scoreClass = (score: number) => {
-    if (score >= 60) return "bullish";
-    if (score >= 40) return "neutral";
-    return "bearish";
-  };
 
   return (
     <>
@@ -1868,12 +1889,12 @@ function DiscoverSections() {
                       <TickerLink ticker={c.ticker} />
                     </td>
                     <td className="right">
-                      <span className={scoreClass(c.score)}>
+                      <span className={discoverScoreClass(c.score)}>
                         {c.score.toFixed(1)}
                       </span>
                     </td>
                     <td>
-                      <span className={dpClass(c.dp_direction)}>
+                      <span className={discoverDpClass(c.dp_direction)}>
                         {c.dp_direction}
                       </span>
                     </td>
@@ -1882,12 +1903,14 @@ function DiscoverSections() {
                       {(c.dp_buy_ratio * 100).toFixed(1)}%
                     </td>
                     <td>
-                      <span className={biasClass(c.options_bias)}>
+                      <span className={discoverBiasClass(c.options_bias)}>
                         {c.options_bias}
                       </span>
                     </td>
                     <td className="right">{c.alerts}</td>
-                    <td className="right">{fmtPremium(c.total_premium)}</td>
+                    <td className="right">
+                      {fmtDiscoverPremium(c.total_premium)}
+                    </td>
                     <td className="right">{c.sweeps}</td>
                     <td className="cell-muted">
                       {c.sector || c.issue_type || "—"}
@@ -1901,7 +1924,7 @@ function DiscoverSections() {
       </div>
     </>
   );
-}
+});
 
 type JournalSortKey =
   | "id"
@@ -1945,7 +1968,7 @@ const journalSortExtract = (
   }
 };
 
-function JournalSections() {
+const JournalSections = React.memo(function JournalSections() {
   const { data, loading, error, syncWithIB, syncing, lastSyncResult } =
     useJournal();
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -2271,7 +2294,7 @@ function JournalSections() {
       </div>
     </>
   );
-}
+});
 
 /* ─── Orders tables ────────────────────────────────────── */
 
@@ -3562,7 +3585,8 @@ function biasPillClass(bias: string | undefined): string {
   return "pill neutral";
 }
 
-function UwAnalyzeSections() {
+const UwAnalyzeSections = React.memo(function UwAnalyzeSections() {
+  usePerfTracker("UwAnalyzeSections");
   const {
     data,
     loading,
@@ -3680,9 +3704,10 @@ function UwAnalyzeSections() {
     [allSorted, selected],
   );
 
-  const changedCount = allSorted.filter(
-    (r) => (r.changes?.length ?? 0) > 0,
-  ).length;
+  const changedCount = useMemo(
+    () => allSorted.filter((r) => (r.changes?.length ?? 0) > 0).length,
+    [allSorted],
+  );
 
   return (
     <>
@@ -3839,7 +3864,7 @@ function UwAnalyzeSections() {
       )}
     </>
   );
-}
+});
 
 // -----------------------------------------------------------------------------
 // <UwTierRow> — labeled grid of ticker cards
@@ -3917,7 +3942,7 @@ function UwTierRow({
 // <UwTickerCard> — name card for one ticker
 // -----------------------------------------------------------------------------
 
-function UwTickerCard({
+const UwTickerCard = React.memo(function UwTickerCard({
   row,
   isSelected,
   onSelect,
@@ -4025,7 +4050,7 @@ function UwTickerCard({
       )}
     </button>
   );
-}
+});
 
 // -----------------------------------------------------------------------------
 // <UwTickerDetail> — full per-ticker report for the selected row
@@ -4420,6 +4445,7 @@ export default function WorkspaceSections({
   marketState,
   activeAccount = "ib",
 }: WorkspaceSectionsProps) {
+  usePerfTracker("WorkspaceSections");
   switch (section) {
     case "dashboard":
       return null;

@@ -22,14 +22,31 @@ export function useDiscover(active: boolean): UseDiscoverReturn {
   const [lastSync, setLastSync] = useState<string | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const didInitialSync = useRef(false);
+  const syncInFlightRef = useRef(false);
+  const syncQueuedRef = useRef(false);
+  const triggerSyncRef = useRef<() => Promise<void>>(async () => {});
 
-  const triggerSync = useCallback(async () => {
+  // Singleflight with trailing-queue: at most one in-flight POST + one queued
+  // run. A manual syncNow() that arrives during a background interval tick is
+  // preserved — it runs as soon as the current request finishes. Prevents
+  // concurrent expensive /api/discover POSTs without silently dropping
+  // user-initiated refresh clicks.
+  // Note: refs are instance-local, so unmount/remount while a POST is in
+  // flight can still allow one concurrent request. Intentional tradeoff.
+  const runSync = async () => {
+    if (syncInFlightRef.current) {
+      syncQueuedRef.current = true;
+      return;
+    }
+    syncInFlightRef.current = true;
     setSyncing(true);
     try {
       const res = await fetch("/api/discover", { method: "POST" });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error((body as { error?: string }).error ?? "Discover sync failed");
+        throw new Error(
+          (body as { error?: string }).error ?? "Discover sync failed",
+        );
       }
       const json = (await res.json()) as DiscoverData;
       setData(json);
@@ -38,9 +55,17 @@ export function useDiscover(active: boolean): UseDiscoverReturn {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Discover sync failed");
     } finally {
+      syncInFlightRef.current = false;
       setSyncing(false);
+      if (syncQueuedRef.current) {
+        syncQueuedRef.current = false;
+        void triggerSyncRef.current();
+      }
     }
-  }, []);
+  };
+  triggerSyncRef.current = runSync;
+
+  const triggerSync = useCallback(() => triggerSyncRef.current(), []);
 
   const syncNow = useCallback(() => {
     void triggerSync();
