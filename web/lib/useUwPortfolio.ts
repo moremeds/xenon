@@ -3,8 +3,10 @@
 /**
  * useUwPortfolio — polling hook for the UW Analyze portfolio dashboard.
  *
- * - Polls /api/uw-analyze/portfolio every 2 min during market hours,
- *   5 min when closed.
+ * - Fetches /api/uw-analyze/portfolio as an SSE stream so tickers render
+ *   incrementally (cached entries appear near-instantly, fresh scans trickle in).
+ * - Falls back to JSON fetch when streaming is unavailable.
+ * - Polls every 2 min (open) / 5 min (closed).
  * - Pauses polling when document is hidden (visibilitychange).
  * - Exposes refreshAll(), refreshOne(ticker), addAdhoc(ticker).
  *
@@ -12,17 +14,18 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { UwPortfolioResponse } from "@/lib/uwAnalyzeTypes";
+import type {
+  UwPortfolioResponse,
+  UwTickerRow,
+  UwActionItem,
+} from "@/lib/uwAnalyzeTypes";
 import { useMarketHours, MarketState } from "@/lib/useMarketHours";
 
 const POLL_OPEN_MS = 2 * 60 * 1000;
 const POLL_CLOSED_MS = 5 * 60 * 1000;
 
 // Module-level cache: survives unmount/remount of components using this
-// hook within the same browser session. Without it, navigating away from
-// /uw-analyze and back drops local useState and the page shows empty
-// until the next fetch lands. This stash lets re-mount paint the last
-// known data immediately while a background revalidation runs.
+// hook within the same browser session.
 type CacheSnapshot = {
   data: UwPortfolioResponse;
   lastFetchedAt: string | null;
@@ -44,7 +47,81 @@ export type UseUwPortfolioState = {
   addAdhoc: (ticker: string) => Promise<void>;
 };
 
-async function _fetchPortfolio(): Promise<UwPortfolioResponse> {
+// ---------------------------------------------------------------------------
+// SSE streaming fetch
+// ---------------------------------------------------------------------------
+
+type SseCallbacks = {
+  onMeta: (meta: {
+    fetched_at: string;
+    market_state: "open" | "closed";
+    ttl_seconds: number;
+  }) => void;
+  onTicker: (row: UwTickerRow) => void;
+  onDone: (summary: { action_items: UwActionItem[] }) => void;
+};
+
+async function _fetchPortfolioStreaming(
+  callbacks: SseCallbacks,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch("/api/uw-analyze/portfolio", {
+    cache: "no-store",
+    headers: { Accept: "text/event-stream" },
+    signal,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`portfolio fetch ${res.status}: ${body.slice(0, 200)}`);
+  }
+  if (!res.body) throw new Error("no response body for SSE stream");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Parse complete SSE events (delimited by blank lines).
+      const events = buffer.split(/\n\n|\r\n\r\n/);
+      buffer = events.pop()!; // incomplete last chunk stays in buffer
+
+      for (const event of events) {
+        if (!event.trim()) continue;
+        const lines = event.split(/\r?\n/);
+        let eventType = "message";
+        let data = "";
+        for (const line of lines) {
+          if (line.startsWith("event: ")) eventType = line.slice(7).trim();
+          else if (line.startsWith("data: ")) data += line.slice(6);
+        }
+        if (!data) continue;
+        try {
+          const parsed = JSON.parse(data);
+          if (eventType === "meta") callbacks.onMeta(parsed);
+          else if (eventType === "done") callbacks.onDone(parsed);
+          else callbacks.onTicker(parsed);
+        } catch {
+          // Malformed JSON in an SSE event — skip it.
+        }
+      }
+    }
+    // Flush decoder for any trailing bytes.
+    buffer += decoder.decode();
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// JSON fetch (fallback, used by refreshAll/refreshOne after POST)
+// ---------------------------------------------------------------------------
+
+async function _fetchPortfolioJson(): Promise<UwPortfolioResponse> {
   const res = await fetch("/api/uw-analyze/portfolio", { cache: "no-store" });
   if (!res.ok) {
     const body = await res.text();
@@ -68,10 +145,11 @@ async function _postRefresh(body: {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Hook
+// ---------------------------------------------------------------------------
+
 export function useUwPortfolio(): UseUwPortfolioState {
-  // Initialize from the module-level cache so re-mount paints the last
-  // known snapshot immediately. The background fetch in the effect below
-  // still runs to revalidate.
   const [data, setData] = useState<UwPortfolioResponse | null>(
     _cachedSnapshot?.data ?? null,
   );
@@ -82,22 +160,72 @@ export function useUwPortfolio(): UseUwPortfolioState {
   );
 
   const inFlight = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
   const market = useMarketHours();
 
   const fetchPortfolio = useCallback(async () => {
     if (inFlight.current) return;
     inFlight.current = true;
+
+    // Cancel any previous in-flight stream.
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setLoading(true);
     setError(null);
+
     try {
-      const body = await _fetchPortfolio();
-      const stamp = body.fetched_at ?? new Date().toISOString();
-      setData(body);
+      let meta: Partial<UwPortfolioResponse> = {};
+      const tickers: UwTickerRow[] = [];
+      let actionItems: UwActionItem[] = [];
+
+      await _fetchPortfolioStreaming(
+        {
+          onMeta: (m) => {
+            meta = m;
+          },
+          onTicker: (row) => {
+            tickers.push(row);
+            // Incremental state update — each ticker paints immediately.
+            setData((prev) => ({
+              ...(prev ?? {
+                fetched_at: "",
+                market_state: "closed" as const,
+                ttl_seconds: 300,
+                tickers: [],
+                action_items: [],
+              }),
+              ...meta,
+              tickers: [...tickers],
+            }));
+          },
+          onDone: (summary) => {
+            actionItems = summary.action_items;
+            setData((prev) =>
+              prev ? { ...prev, action_items: summary.action_items } : prev,
+            );
+          },
+        },
+        controller.signal,
+      );
+
+      const stamp =
+        (meta as { fetched_at?: string }).fetched_at ??
+        new Date().toISOString();
       setLastFetchedAt(stamp);
-      // Stash for the next mount of any consumer of this hook.
-      _cachedSnapshot = { data: body, lastFetchedAt: stamp };
-    } catch (e: any) {
-      setError(String(e?.message ?? e));
+      _cachedSnapshot = {
+        data: {
+          ...meta,
+          tickers,
+          action_items: actionItems,
+        } as UwPortfolioResponse,
+        lastFetchedAt: stamp,
+      };
+    } catch (e: unknown) {
+      // AbortError from superseding fetch — not a real error.
+      if (e instanceof Error && e.name === "AbortError") return;
+      setError(String(e instanceof Error ? e.message : e));
     } finally {
       setLoading(false);
       inFlight.current = false;
@@ -121,6 +249,7 @@ export function useUwPortfolio(): UseUwPortfolioState {
     return () => {
       window.clearInterval(id);
       document.removeEventListener("visibilitychange", onVis);
+      abortRef.current?.abort();
     };
   }, [fetchPortfolio, market]);
 
@@ -129,8 +258,8 @@ export function useUwPortfolio(): UseUwPortfolioState {
     try {
       await _postRefresh({});
       await fetchPortfolio();
-    } catch (e: any) {
-      setError(String(e?.message ?? e));
+    } catch (e: unknown) {
+      setError(String(e instanceof Error ? e.message : e));
     } finally {
       setLoading(false);
     }
@@ -143,8 +272,8 @@ export function useUwPortfolio(): UseUwPortfolioState {
       try {
         await _postRefresh({ tickers: [t] });
         await fetchPortfolio();
-      } catch (e: any) {
-        setError(String(e?.message ?? e));
+      } catch (e: unknown) {
+        setError(String(e instanceof Error ? e.message : e));
       }
     },
     [fetchPortfolio],
@@ -157,8 +286,8 @@ export function useUwPortfolio(): UseUwPortfolioState {
       try {
         await _postRefresh({ tickers: [t], adhoc: true });
         await fetchPortfolio();
-      } catch (e: any) {
-        setError(String(e?.message ?? e));
+      } catch (e: unknown) {
+        setError(String(e instanceof Error ? e.message : e));
       }
     },
     [fetchPortfolio],

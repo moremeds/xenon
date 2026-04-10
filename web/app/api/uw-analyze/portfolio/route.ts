@@ -1,26 +1,44 @@
 import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
-import { xenonFetch, XenonApiError } from "@/lib/xenonApi";
-import type { UwPortfolioResponse } from "@/lib/uwAnalyzeTypes";
 
 export const runtime = "nodejs";
 
-export async function GET(): Promise<Response> {
+const XENON_API = process.env.XENON_API_URL || "http://localhost:8321";
+
+export async function GET(request: Request): Promise<Response> {
   try {
     const { getToken } = await auth();
     const token = (await getToken()) ?? undefined;
-    const data = await xenonFetch<UwPortfolioResponse>(
-      "/uw-analyze/portfolio",
-      {
-        method: "GET",
-        token,
-        timeout: 120_000,
+    const headers: Record<string, string> = {
+      Accept: "text/event-stream",
+    };
+    if (token) headers.Authorization = `Bearer ${token}`;
+
+    const upstream = await fetch(`${XENON_API}/uw-analyze/portfolio`, {
+      headers,
+      cache: "no-store",
+      signal: request.signal,
+    });
+
+    if (!upstream.ok) {
+      const detail = await upstream
+        .text()
+        .catch(() => `HTTP ${upstream.status}`);
+      return NextResponse.json({ error: detail }, { status: upstream.status });
+    }
+
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
       },
-    );
-    return NextResponse.json(data);
+    });
   } catch (err) {
-    if (err instanceof XenonApiError) {
-      return NextResponse.json({ error: err.detail }, { status: err.status });
+    if (err instanceof Error && err.name === "AbortError") {
+      return new Response(null, { status: 499 });
     }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Unknown error" },

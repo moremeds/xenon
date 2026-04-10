@@ -121,7 +121,9 @@ def test_portfolio_returns_seeded_tickers(tmp_path):
     assert r.status_code == 200
     body = r.json()
     tickers = {row["ticker"] for row in body["tickers"]}
-    assert tickers == {"NVDA", "AAPL"}
+    # Portfolio (NVDA) + watchlist (AAPL) must be present; static universe
+    # tickers (SPY, QQQ, …) are also included by seed_candidates().
+    assert {"NVDA", "AAPL"} <= tickers
     assert body["market_state"] in ("open", "closed")
     # ttl_seconds reflects the cache singleton (market_open_fn → True),
     # so always 300 in tests.
@@ -451,7 +453,8 @@ def test_portfolio_runs_tickers_concurrently(tmp_path, monkeypatch):
     client = TestClient(app)
     resp = client.get("/uw-analyze/portfolio")
     assert resp.status_code == 200
-    assert len(resp.json()["tickers"]) == 5
+    # 5 portfolio tickers + static universe tickers
+    assert len(resp.json()["tickers"]) >= 5
     assert in_flight["peak"] >= 2, f"expected concurrent runs, peak={in_flight['peak']}"
 
 
@@ -492,8 +495,8 @@ def test_refresh_all_when_body_empty(tmp_path):
     client = TestClient(app)
     r = client.post("/uw-analyze/refresh", json={})
     assert r.status_code == 200
-    assert r.json()["refreshed"] == 2
-    assert sorted(calls) == ["AAPL", "NVDA"]
+    assert r.json()["refreshed"] >= 2
+    assert "AAPL" in calls and "NVDA" in calls
 
 
 def test_refresh_adhoc_adds_to_candidate_set(tmp_path):

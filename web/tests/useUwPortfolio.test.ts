@@ -13,21 +13,54 @@ import {
   __resetUwPortfolioCacheForTests,
 } from "@/lib/useUwPortfolio";
 
-const FIXTURE = {
+const FIXTURE_META = {
   fetched_at: "2026-04-08T14:00:00Z",
-  market_state: "closed" as const,
+  market_state: "closed",
   ttl_seconds: 300,
-  tickers: [],
+};
+
+const FIXTURE_DONE = {
   action_items: [],
 };
 
-function mockFetchOk(body: unknown) {
-  return vi.fn().mockResolvedValue({
-    ok: true,
+/** Build an SSE text payload from events. */
+function buildSse(events: { type?: string; data: unknown }[]): string {
+  return events
+    .map((e) => {
+      const prefix = e.type ? `event: ${e.type}\n` : "";
+      return `${prefix}data: ${JSON.stringify(e.data)}\n\n`;
+    })
+    .join("");
+}
+
+/** Create a mock fetch Response that streams SSE text. */
+function mockSseResponse(sseText: string): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(sseText));
+      controller.close();
+    },
+  });
+  return new Response(stream, {
     status: 200,
-    json: async () => body,
-    text: async () => JSON.stringify(body),
-  } as unknown as Response);
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
+function mockFetchSse(sseText: string) {
+  return vi.fn().mockImplementation((url: string) => {
+    if (typeof url === "string" && url.includes("/uw-analyze/portfolio")) {
+      return Promise.resolve(mockSseResponse(sseText));
+    }
+    // Fallback for POST /refresh etc.
+    return Promise.resolve(
+      new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+  });
 }
 
 describe("useUwPortfolio", () => {
@@ -40,8 +73,13 @@ describe("useUwPortfolio", () => {
     __resetUwPortfolioCacheForTests();
   });
 
-  it("fetches /api/uw-analyze/portfolio on mount and surfaces data", async () => {
-    const fetchMock = mockFetchOk(FIXTURE);
+  it("fetches /api/uw-analyze/portfolio via SSE and surfaces data", async () => {
+    const sse = buildSse([
+      { type: "meta", data: FIXTURE_META },
+      { data: { ticker: "SPY", sources: [], snapshot: {}, changes: [] } },
+      { type: "done", data: FIXTURE_DONE },
+    ]);
+    const fetchMock = mockFetchSse(sse);
     vi.stubGlobal("fetch", fetchMock);
 
     const { result } = renderHook(() => useUwPortfolio());
@@ -53,9 +91,10 @@ describe("useUwPortfolio", () => {
       "/api/uw-analyze/portfolio",
       expect.objectContaining({ cache: "no-store" }),
     );
-    expect(result.current.data?.fetched_at).toBe(FIXTURE.fetched_at);
+    expect(result.current.data?.tickers).toHaveLength(1);
+    expect(result.current.data?.tickers[0].ticker).toBe("SPY");
     expect(result.current.error).toBeNull();
-    expect(result.current.lastFetchedAt).toBe(FIXTURE.fetched_at);
+    expect(result.current.lastFetchedAt).toBe(FIXTURE_META.fetched_at);
   });
 
   it("surfaces error state when the portfolio fetch rejects", async () => {
@@ -72,7 +111,12 @@ describe("useUwPortfolio", () => {
   });
 
   it("re-mount paints the previous snapshot immediately from the module cache", async () => {
-    const fetchMock = mockFetchOk(FIXTURE);
+    const sse = buildSse([
+      { type: "meta", data: FIXTURE_META },
+      { data: { ticker: "SPY", sources: [], snapshot: {}, changes: [] } },
+      { type: "done", data: FIXTURE_DONE },
+    ]);
+    const fetchMock = mockFetchSse(sse);
     vi.stubGlobal("fetch", fetchMock);
 
     // First mount populates the module-level cache.
@@ -81,43 +125,48 @@ describe("useUwPortfolio", () => {
     first.unmount();
 
     // Second mount should see the previous data immediately on the very
-    // first render — before any new fetch resolves. Mock fetch with a
-    // never-resolving promise so the test can ONLY pass if the cache hit
-    // populated initial state.
+    // first render. Mock fetch with a never-resolving promise so the test
+    // can ONLY pass if the cache hit populated initial state.
     const stalled = vi.fn(
       () => new Promise(() => {}) as unknown as Promise<Response>,
     );
     vi.stubGlobal("fetch", stalled);
 
     const second = renderHook(() => useUwPortfolio());
-    expect(second.result.current.data?.fetched_at).toBe(FIXTURE.fetched_at);
-    expect(second.result.current.lastFetchedAt).toBe(FIXTURE.fetched_at);
+    expect(second.result.current.data?.tickers).toHaveLength(1);
+    expect(second.result.current.lastFetchedAt).toBe(FIXTURE_META.fetched_at);
   });
 
   it("refreshAll() POSTs to /api/uw-analyze/refresh then refetches portfolio", async () => {
-    const fetchMock = vi
-      .fn()
-      // initial mount fetch
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => FIXTURE,
-        text: async () => "",
-      })
-      // refreshAll POST
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({}),
-        text: async () => "",
-      })
-      // follow-up portfolio GET
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ ...FIXTURE, fetched_at: "2026-04-08T14:05:00Z" }),
-        text: async () => "",
-      });
+    const sse1 = buildSse([
+      { type: "meta", data: FIXTURE_META },
+      { data: { ticker: "SPY", sources: [], snapshot: {}, changes: [] } },
+      { type: "done", data: FIXTURE_DONE },
+    ]);
+    const sse2 = buildSse([
+      {
+        type: "meta",
+        data: { ...FIXTURE_META, fetched_at: "2026-04-08T14:05:00Z" },
+      },
+      { data: { ticker: "SPY", sources: [], snapshot: {}, changes: [] } },
+      { data: { ticker: "QQQ", sources: [], snapshot: {}, changes: [] } },
+      { type: "done", data: FIXTURE_DONE },
+    ]);
+    let callCount = 0;
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === "string" && url.includes("/uw-analyze/portfolio")) {
+        callCount++;
+        const text = callCount <= 1 ? sse1 : sse2;
+        return Promise.resolve(mockSseResponse(text));
+      }
+      // POST /refresh
+      return Promise.resolve(
+        new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const { result } = renderHook(() => useUwPortfolio());
@@ -127,12 +176,12 @@ describe("useUwPortfolio", () => {
       await result.current.refreshAll();
     });
 
-    const urls = fetchMock.mock.calls.map((c) => c[0]);
+    const urls = fetchMock.mock.calls.map((c: unknown[]) => c[0]);
     expect(urls).toContain("/api/uw-analyze/refresh");
     const refreshCall = fetchMock.mock.calls.find(
-      (c) => c[0] === "/api/uw-analyze/refresh",
+      (c: unknown[]) => c[0] === "/api/uw-analyze/refresh",
     );
     expect(refreshCall?.[1]?.method).toBe("POST");
-    expect(result.current.data?.fetched_at).toBe("2026-04-08T14:05:00Z");
+    expect(result.current.data?.tickers).toHaveLength(2);
   });
 });

@@ -49,6 +49,7 @@ import { useUwAnalyze } from "@/lib/useUwAnalyze";
 import { useUwPortfolio } from "@/lib/useUwPortfolio";
 import {
   groupByTier,
+  groupSingleNames,
   isScaffold,
   mergeScaffoldWithLive,
   SCAFFOLD_ROWS,
@@ -3843,13 +3844,22 @@ const UwAnalyzeSections = React.memo(function UwAnalyzeSections() {
             selected={selected}
             onSelect={setSelected}
           />
-          <UwTierRow
-            label="SINGLE NAMES"
-            rows={tiers.single}
-            selected={selected}
-            onSelect={setSelected}
-            emptyMessage="No single-name tickers. Add one above."
-          />
+          {/* WATCH — single names split into sub-groups */}
+          {groupSingleNames(tiers.single).map((group, i) => (
+            <UwTierRow
+              key={group.label}
+              label={i === 0 ? `WATCH · ${group.label}` : group.label}
+              rows={group.rows}
+              selected={selected}
+              onSelect={setSelected}
+              style={i > 0 ? { marginTop: 8 } : undefined}
+            />
+          ))}
+          {tiers.single.length === 0 && (
+            <div className="alert-item" style={{ opacity: 0.6 }}>
+              No watch tickers. Add one above.
+            </div>
+          )}
         </div>
       </div>
 
@@ -3876,19 +3886,21 @@ function UwTierRow({
   selected,
   onSelect,
   emptyMessage,
+  style,
 }: {
   label: string;
   rows: UwTickerRow[];
   selected: string | null;
   onSelect: (ticker: string) => void;
   emptyMessage?: string;
+  style?: React.CSSProperties;
 }) {
   const alertCount = rows.reduce(
     (sum, r) => sum + ((r.changes?.length ?? 0) > 0 ? 1 : 0),
     0,
   );
   return (
-    <div style={{ marginBottom: 0 }}>
+    <div style={{ marginBottom: 0, ...style }}>
       <div
         className="report-meta"
         style={{

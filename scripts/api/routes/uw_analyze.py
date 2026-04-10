@@ -10,6 +10,7 @@ Auth: covered globally by Clerk middleware in scripts/api/server.py.
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import logging
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -19,9 +20,10 @@ from analysis.dark_pool_summary import summarize_dark_pool
 from analysis.models import TickerData
 from analysis.options_flow_summary import summarize_options_flow
 from clients.uw_client import UWAPIError, UWNotFoundError
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fetch_flow import analyze_darkpool
 from pydantic import BaseModel, Field
+from starlette.responses import StreamingResponse
 from uw_analyze import run_analysis_with_data
 
 from api.services.uw_analyze_cache import UwAnalyzeCache, build_snapshot
@@ -409,127 +411,129 @@ def _action_items_from(payload: list[dict]) -> list[dict]:
     return items
 
 
+async def _process_ticker(
+    ticker: str,
+    sources,
+    cache: "UwAnalyzeCache",
+    flow_log: "FlowLog",
+) -> Optional[dict]:
+    """Process a single ticker: cache lookup/scan + OI baseline + flow capture.
+
+    Returns a row dict with an internal ``_oi_refreshed`` flag (stripped by
+    the caller before sending to the client).
+    """
+    try:
+        entry, did_refresh = await cache.get_or_run(
+            ticker,
+            runner=_runner,
+            force=False,
+            sources=sources,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("uw-analyze portfolio: %s failed: %s", ticker, exc)
+        return None
+
+    # On-demand OI fetch when the daily cron hasn't yet stamped oi_baseline,
+    # OR when the stamped baseline is from an earlier trading day.
+    #
+    # IMPORTANT: this block must NOT call `cache._persist()`. The caller
+    # batches a single persist after all tickers complete based on the
+    # `_oi_refreshed` flag on each row.
+    from api.services.uw_analyze_daily_job import now_et_date
+
+    today_iso = now_et_date().isoformat()
+    baseline = entry.get("oi_baseline") or {}
+    oi_refreshed = False
+    if not baseline or baseline.get("data_date") != today_iso:
+        try:
+            from api.services import uw_analyze_oi_tracker
+
+            spot = (entry.get("current") or {}).get("derived", {}).get("spot")
+            async with _ON_DEMAND_OI_SEM:
+                oi_changes_ondemand = await uw_analyze_oi_tracker.fetch_and_diff(_shared_uw_client(), ticker, spot)
+            entry["oi_baseline"] = {
+                "data_date": today_iso,
+                "changes": [c.to_dict() for c in oi_changes_ondemand],
+            }
+            oi_refreshed = True
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("on-demand oi fetch failed for %s: %s", ticker, exc)
+
+    snap = entry.get("current") or {}
+    prev = entry.get("previous")
+    change_dicts = entry.get("materialized_changes") or []
+
+    if did_refresh and change_dicts:
+        flow_alerts = snap.get("flow_alerts") or None
+        underlying = (snap.get("derived") or {}).get("spot")
+        if flow_alerts and underlying is not None:
+            new_events = capture_from_changes(
+                ticker=ticker,
+                changes=change_dicts,
+                flow_alerts=flow_alerts,
+                underlying_price=underlying,
+            )
+            for ev in new_events:
+                flow_log.upsert(ev)
+
+    oi_baseline = entry.get("oi_baseline") or {}
+    return {
+        "ticker": ticker,
+        "sources": list(sources),
+        "snapshot": snap,
+        "prev_ts": (prev or {}).get("ts") if isinstance(prev, dict) else None,
+        "changes": change_dicts,
+        "oi_changes": oi_baseline.get("changes") or [],
+        "unusual_flow_events": [e.to_dict() for e in flow_log.for_ticker(ticker)],
+        "_oi_refreshed": oi_refreshed,
+    }
+
+
+async def _finalize_rows(rows: list[dict], cache, flow_log) -> None:
+    """Post-process: strip internal flags, batched persist, save flow log."""
+    any_oi_refreshed = False
+    for r in rows:
+        if r.pop("_oi_refreshed", False):
+            any_oi_refreshed = True
+    if any_oi_refreshed:
+        try:
+            await cache._persist()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("uw-analyze portfolio: batched persist failed: %s", exc)
+    if any(r.get("changes") for r in rows):
+        flow_log.save()
+
+
 @router.get("/uw-analyze/portfolio")
-async def uw_analyze_portfolio() -> dict:
+async def uw_analyze_portfolio(request: Request):
     """Return current snapshots + diffs for all portfolio + watchlist tickers.
 
-    Cache is consulted first; only stale/missing entries trigger an upstream
-    call. Concurrency is bounded by the cache's semaphore.
+    Supports two response modes via Accept header:
+    - ``text/event-stream``: SSE stream — tickers emitted as they complete.
+    - default: JSON envelope (backward-compatible for tests/curl).
     """
+    want_sse = "text/event-stream" in (request.headers.get("accept") or "")
+
+    if want_sse:
+        return StreamingResponse(
+            _portfolio_sse(request),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    return await _portfolio_json()
+
+
+async def _portfolio_json() -> dict:
+    """Original JSON response path — unchanged for tests + backward compat."""
     from utils.market_hours import is_market_open
 
     cache = get_portfolio_cache()
     flow_log = get_flow_log()
     candidates = seed_candidates()
 
-    async def _process(ticker: str, sources) -> Optional[dict]:
-        try:
-            entry, did_refresh = await cache.get_or_run(
-                ticker,
-                runner=_runner,
-                force=False,
-                sources=sources,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("uw-analyze portfolio: %s failed: %s", ticker, exc)
-            return None
-
-        # On-demand OI fetch when the daily cron hasn't yet stamped oi_baseline,
-        # OR when the stamped baseline is from an earlier trading day.
-        #
-        # IMPORTANT: this block must NOT call `cache._persist()`. The caller
-        # (`uw_analyze_portfolio`) batches a single persist after `gather()`
-        # based on the `oi_refreshed` flag on each row. Persisting here would
-        # rewrite the full cache JSON N times per request (~80MB transient
-        # allocation for a 35-ticker portfolio), which was the root cause of
-        # the "preload not working" + 400% CPU burst.
-        from api.services.uw_analyze_daily_job import now_et_date
-
-        today_iso = now_et_date().isoformat()
-        baseline = entry.get("oi_baseline") or {}
-        oi_refreshed = False
-        if not baseline or baseline.get("data_date") != today_iso:
-            try:
-                from api.services import uw_analyze_oi_tracker
-
-                spot = (entry.get("current") or {}).get("derived", {}).get("spot")
-                # Bound concurrent UW OI chain fetches. Without this,
-                # 35 tickers would hit `fetch_and_diff` simultaneously.
-                async with _ON_DEMAND_OI_SEM:
-                    oi_changes_ondemand = await uw_analyze_oi_tracker.fetch_and_diff(_shared_uw_client(), ticker, spot)
-                entry["oi_baseline"] = {
-                    "data_date": today_iso,
-                    "changes": [c.to_dict() for c in oi_changes_ondemand],
-                }
-                oi_refreshed = True
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("on-demand oi fetch failed for %s: %s", ticker, exc)
-
-        snap = entry.get("current") or {}
-        prev = entry.get("previous")
-        change_dicts = entry.get("materialized_changes") or []
-
-        if did_refresh and change_dicts:
-            flow_alerts = snap.get("flow_alerts") or None
-            underlying = (snap.get("derived") or {}).get("spot")
-            if flow_alerts and underlying is not None:
-                # `capture_from_changes` accepts dicts or Change objects. Use
-                # the already-materialized list instead of recomputing from
-                # `prev`, which is now a light {ts, derived} stub to save
-                # memory.
-                new_events = capture_from_changes(
-                    ticker=ticker,
-                    changes=change_dicts,
-                    flow_alerts=flow_alerts,
-                    underlying_price=underlying,
-                )
-                # Safe without a lock: FlowLog.upsert has no await points, so
-                # concurrent coroutines on a single event loop can't interleave
-                # mid-mutation.
-                for ev in new_events:
-                    flow_log.upsert(ev)
-
-        oi_baseline = entry.get("oi_baseline") or {}
-        return {
-            "ticker": ticker,
-            "sources": list(sources),
-            "snapshot": snap,
-            "prev_ts": (prev or {}).get("ts") if isinstance(prev, dict) else None,
-            "changes": change_dicts,
-            "oi_changes": oi_baseline.get("changes") or [],
-            "unusual_flow_events": [e.to_dict() for e in flow_log.for_ticker(ticker)],
-            # Internal flag stripped before the HTTP response. Signals to
-            # the caller that this ticker's `oi_baseline` was mutated and
-            # the cache needs a single post-gather persist.
-            "_oi_refreshed": oi_refreshed,
-        }
-
-    results = await asyncio.gather(*[_process(t, s) for t, s in sorted(candidates.items())])
+    results = await asyncio.gather(*[_process_ticker(t, s, cache, flow_log) for t, s in sorted(candidates.items())])
     rows = [r for r in results if r is not None]
-
-    # Coalesce per-ticker oi_baseline mutations into a single atomic
-    # cache rewrite. The previous implementation called `_persist()`
-    # inside `_process`, which meant N full-cache JSON rewrites per
-    # /portfolio GET — ~80 MB of transient allocation for a 35-ticker
-    # portfolio and 400% CPU. Pop the internal flag so it never leaks
-    # to the HTTP response.
-    any_oi_refreshed = False
-    for r in rows:
-        if r.pop("_oi_refreshed", False):
-            any_oi_refreshed = True
-    if any_oi_refreshed:
-        # Disk write is best-effort: if it fails, the in-memory cache
-        # still reflects the refreshed baseline and subsequent requests
-        # this process serves will use it. On restart we'd re-fetch —
-        # that's strictly better than 500-ing the whole /portfolio
-        # response because an atomic-replace hit a transient FS error.
-        try:
-            await cache._persist()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("uw-analyze portfolio: batched persist failed: %s", exc)
-
-    if any(r.get("changes") for r in rows):
-        flow_log.save()
+    await _finalize_rows(rows, cache, flow_log)
 
     return {
         "fetched_at": datetime.now(timezone.utc).isoformat(),
@@ -538,6 +542,70 @@ async def uw_analyze_portfolio() -> dict:
         "tickers": rows,
         "action_items": _action_items_from(rows),
     }
+
+
+async def _portfolio_sse(request: Request):
+    """SSE generator — yields tickers as they complete for incremental rendering.
+
+    Events:
+    - ``event: meta`` — ``{fetched_at, market_state, ttl_seconds}``
+    - ``data: {ticker row}`` — one per ticker (default "message" event)
+    - ``event: done`` — ``{action_items: [...]}``
+    """
+    from utils.market_hours import is_market_open
+
+    cache = get_portfolio_cache()
+    flow_log = get_flow_log()
+    candidates = seed_candidates()
+
+    # Metadata first — frontend needs this before any tickers.
+    meta = {
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "market_state": "open" if is_market_open() else "closed",
+        "ttl_seconds": cache._ttl(),
+    }
+    yield f"event: meta\ndata: {_json.dumps(meta)}\n\n"
+
+    # Fan out all tickers through the same _process_ticker (OI + flow logic
+    # preserved). Results enqueued as they complete — cached entries finish
+    # near-instantly, fresh scans trickle in.
+    queue: asyncio.Queue[Optional[dict]] = asyncio.Queue()
+
+    async def _enqueue(ticker: str, sources) -> None:
+        try:
+            row = await _process_ticker(ticker, sources, cache, flow_log)
+            await queue.put(row)
+        except Exception:  # noqa: BLE001
+            await queue.put(None)
+
+    tasks = [asyncio.create_task(_enqueue(t, s)) for t, s in sorted(candidates.items())]
+
+    all_rows: list[dict] = []
+    try:
+        for _ in range(len(tasks)):
+            # Check for client disconnect between tickers.
+            if await request.is_disconnected():
+                break
+            row = await queue.get()
+            if row is not None:
+                all_rows.append(row)
+                # Strip internal flag before sending to client.
+                row_copy = {k: v for k, v in row.items() if k != "_oi_refreshed"}
+                yield f"data: {_json.dumps(row_copy)}\n\n"
+    finally:
+        # Cancel outstanding tasks on disconnect or error.
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        # Suppress CancelledError from tasks we just cancelled.
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Post-process: batched persist + flow log save.
+    await _finalize_rows(all_rows, cache, flow_log)
+
+    # Final event: action items summary.
+    done_payload = {"action_items": _action_items_from(all_rows)}
+    yield f"event: done\ndata: {_json.dumps(done_payload)}\n\n"
 
 
 @router.post("/uw-analyze/refresh")
