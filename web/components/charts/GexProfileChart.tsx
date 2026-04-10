@@ -113,7 +113,7 @@ export default function GexProfileChart({
                     : "var(--text-secondary)";
 
           return (
-            <g key={bucket.strike}>
+            <g key={`${bucket.strike}-${i}`}>
               <text
                 x={labelWidth - 8}
                 y={y + barHeight / 2 + 4}
