@@ -1,9 +1,15 @@
-"""Ticker universe loader for uw-scan."""
+"""uw-scan universe loading — delegates to scanner_lib for core utilities."""
+
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Literal, Optional
+
+from scripts.scanner_lib.universe import dedup_and_normalize
+
+logger = logging.getLogger(__name__)
 
 Mode = Literal["watchlist", "targeted"]
 
@@ -14,39 +20,26 @@ def load_universe(
     tickers: Optional[list[str]] = None,
     watchlist_path: str = "data/watchlist.json",
 ) -> list[str]:
+    """Load scan universe. 'targeted' uses explicit list; 'watchlist' reads JSON file."""
     if mode == "targeted":
-        if not tickers:
-            return []
-        seen: set[str] = set()
-        result: list[str] = []
-        for t in tickers:
-            up = t.upper()
-            if up not in seen:
-                seen.add(up)
-                result.append(up)
-        return result
-
-    if mode == "watchlist":
+        return dedup_and_normalize(tickers or [])
+    elif mode == "watchlist":
         path = Path(watchlist_path)
         if not path.exists():
+            logger.warning("Watchlist not found: %s", path)
             return []
         try:
-            data = json.loads(path.read_text())
-        except json.JSONDecodeError:
+            raw = json.loads(path.read_text())
+            data = raw.get("tickers", []) if isinstance(raw, dict) else raw
+            tickers_list: list[str] = []
+            for item in data:
+                if isinstance(item, str):
+                    tickers_list.append(item)
+                elif isinstance(item, dict) and "ticker" in item:
+                    tickers_list.append(item["ticker"])
+            return dedup_and_normalize(tickers_list)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Failed to load watchlist: %s", e)
             return []
-        raw_tickers = data.get("tickers", [])
-        out: list[str] = []
-        seen = set()
-        for row in raw_tickers:
-            if isinstance(row, dict) and row.get("ticker"):
-                up = str(row["ticker"]).upper()
-            elif isinstance(row, str):
-                up = row.upper()
-            else:
-                continue
-            if up not in seen:
-                seen.add(up)
-                out.append(up)
-        return out
-
-    raise ValueError(f"unsupported mode: {mode}")
+    else:
+        raise ValueError(f"Unsupported mode: {mode}")

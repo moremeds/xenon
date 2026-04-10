@@ -110,10 +110,13 @@ beforeEach(() => {
 describe("POST /api/scanner (via xenonFetch)", () => {
   it("returns data on success", async () => {
     const scanData = {
-      scan_time: "2026-03-14",
-      tickers_scanned: 30,
-      signals_found: 5,
-      top_signals: [],
+      scan_id: "trend_20260314",
+      scan_timestamp: "2026-03-14",
+      market_context: { spy_close: 520, vix_close: 17, regime: "bullish" },
+      universe_size: 500,
+      stage_a_survivors: 100,
+      stage_b_survivors: 50,
+      candidates: [],
     };
     mockXenonFetch.mockResolvedValue(scanData);
     mockStatSync.mockReturnValue({ mtime: new Date() });
@@ -122,7 +125,7 @@ describe("POST /api/scanner (via xenonFetch)", () => {
     const res = await POST();
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.tickers_scanned).toBe(30);
+    expect(body.universe_size).toBe(500);
     expect(body.cache_meta).toBeDefined();
   });
 
@@ -130,10 +133,13 @@ describe("POST /api/scanner (via xenonFetch)", () => {
     mockXenonFetch.mockRejectedValue(new Error("Connection refused"));
     mockReadFile.mockResolvedValue(
       JSON.stringify({
-        scan_time: "2026-03-13",
-        tickers_scanned: 25,
-        signals_found: 3,
-        top_signals: [],
+        scan_id: "trend_20260313",
+        scan_timestamp: "2026-03-13",
+        market_context: { spy_close: 520, vix_close: 17, regime: "bullish" },
+        universe_size: 400,
+        stage_a_survivors: 80,
+        stage_b_survivors: 40,
+        candidates: [],
       }),
     );
     mockStatSync.mockReturnValue({ mtime: new Date(Date.now() - 900_000) });
@@ -142,7 +148,7 @@ describe("POST /api/scanner (via xenonFetch)", () => {
     const res = await POST();
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.tickers_scanned).toBe(25);
+    expect(body.universe_size).toBe(400);
     expect(body.is_stale).toBe(true);
     expect(res.headers.get("X-Sync-Warning")).toContain("cached");
   });

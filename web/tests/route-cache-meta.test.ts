@@ -123,10 +123,13 @@ describe.skip("GET /api/flow-analysis — cache_meta (removed)", () => {
 
 describe("GET /api/scanner — cache_meta", () => {
   const validCacheData = JSON.stringify({
-    scan_time: "2026-03-09T14:00:00Z",
-    tickers_scanned: 10,
-    signals_found: 2,
-    top_signals: [],
+    scan_id: "trend_20260309_1400",
+    scan_timestamp: "2026-03-09T14:00:00Z",
+    market_context: { spy_close: 520, vix_close: 17, regime: "bullish" },
+    universe_size: 500,
+    stage_a_survivors: 100,
+    stage_b_survivors: 50,
+    candidates: [],
   });
 
   beforeEach(() => {

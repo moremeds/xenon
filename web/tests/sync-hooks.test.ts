@@ -82,10 +82,13 @@ describe("Scanner API GET", () => {
 
   it("returns cached data when file exists", async () => {
     const cached = {
-      scan_time: "2026-03-06T12:00:00",
-      tickers_scanned: 20,
-      signals_found: 5,
-      top_signals: [{ ticker: "NVDA", score: 75, signal: "STRONG" }],
+      scan_id: "trend_20260306_1200",
+      scan_timestamp: "2026-03-06T12:00:00",
+      market_context: { spy_close: 520, vix_close: 17, regime: "bullish" },
+      universe_size: 500,
+      stage_a_survivors: 100,
+      stage_b_survivors: 50,
+      candidates: [{ ticker: "NVDA", final_score: 0.85 }],
     };
     mockReadFile.mockResolvedValueOnce(JSON.stringify(cached));
 
@@ -94,8 +97,8 @@ describe("Scanner API GET", () => {
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.tickers_scanned).toBe(20);
-    expect(body.top_signals).toHaveLength(1);
+    expect(body.universe_size).toBe(500);
+    expect(body.candidates).toHaveLength(1);
   });
 
   it("returns empty structure when cache file is missing", async () => {
@@ -106,9 +109,8 @@ describe("Scanner API GET", () => {
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.tickers_scanned).toBe(0);
-    expect(body.signals_found).toBe(0);
-    expect(body.top_signals).toEqual([]);
+    expect(body.universe_size).toBe(0);
+    expect(body.candidates).toEqual([]);
   });
 });
 
@@ -132,13 +134,16 @@ describe("Type exports", () => {
 
   it("ScannerData has required fields", async () => {
     const data: import("@/lib/types").ScannerData = {
-      scan_time: "2026-03-06",
-      tickers_scanned: 0,
-      signals_found: 0,
-      top_signals: [],
+      scan_id: "trend_20260306",
+      scan_timestamp: "2026-03-06",
+      market_context: { spy_close: 520, vix_close: 17, regime: "bullish" },
+      universe_size: 0,
+      stage_a_survivors: 0,
+      stage_b_survivors: 0,
+      candidates: [],
     };
-    expect(data.scan_time).toBe("2026-03-06");
-    expect(data.top_signals).toEqual([]);
+    expect(data.scan_timestamp).toBe("2026-03-06");
+    expect(data.candidates).toEqual([]);
   });
 
   it("FlowAnalysisPosition has all fields", async () => {
@@ -157,21 +162,40 @@ describe("Type exports", () => {
     expect(pos.flow_class).toBe("accum");
   });
 
-  it("ScannerSignal has all fields", async () => {
-    const sig: import("@/lib/types").ScannerSignal = {
+  it("TrendCandidate has all fields", async () => {
+    const c: import("@/lib/types").TrendCandidate = {
       ticker: "NVDA",
-      sector: "Technology",
-      score: 75,
-      signal: "STRONG",
-      direction: "ACCUMULATION",
-      strength: 40,
-      buy_ratio: 0.72,
-      num_prints: 500,
-      sustained_days: 3,
-      recent_direction: "ACCUMULATION",
-      recent_strength: 45,
+      snapshot_timestamp: "2026-03-06T12:00:00",
+      spot_price: 148.3,
+      direction: "bullish",
+      final_score: 0.82,
+      scores: { trend: 0.91, structure: 0.75, volatility: 0.68, flow: 0.85 },
+      indicators: {
+        ma_20: 142.5,
+        ma_50: 138,
+        ma_200: 125,
+        rsi: 62,
+        adx: 32,
+        macd_histogram: 1.45,
+        bbw: 0.08,
+        rs_vs_spy: 1.15,
+        iv_rank: 22,
+        gamma_flip: 145,
+        call_wall: 160,
+        put_wall: 140,
+      },
+      summaries: {
+        trend: "Full MA stack",
+        structure: "Above gamma flip",
+        vol: "IV rank 22",
+        flow: "4 ask-side prints",
+      },
+      suggested_trade: "debit_call",
+      invalidation: 142.5,
+      flags: [],
+      holding_window: "5-15 trading days",
     };
-    expect(sig.signal).toBe("STRONG");
-    expect(sig.sustained_days).toBe(3);
+    expect(c.ticker).toBe("NVDA");
+    expect(c.scores.trend).toBe(0.91);
   });
 });
