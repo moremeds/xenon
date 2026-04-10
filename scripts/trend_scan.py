@@ -15,6 +15,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, Protocol
 
+# Ensure project root is on sys.path when run as subprocess from scripts/
+_project_root = str(Path(__file__).resolve().parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 from scripts.scanner_lib.cache import write_json_cache
 from scripts.scanner_lib.scoring import weighted_composite
 from scripts.trend_scan_lib.config import TrendScanConfig
