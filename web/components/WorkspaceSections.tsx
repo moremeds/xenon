@@ -3888,11 +3888,11 @@ function UwTierRow({
     0,
   );
   return (
-    <div style={{ marginBottom: "0.75rem" }}>
+    <div style={{ marginBottom: "0.15rem" }}>
       <div
         className="report-meta"
         style={{
-          marginBottom: "0.4rem",
+          marginBottom: "0.1rem",
           letterSpacing: "0.08em",
           textTransform: "uppercase",
           display: "flex",
@@ -3957,6 +3957,7 @@ const UwTickerCard = React.memo(function UwTickerCard({
   const hasAlert = (row.changes?.length ?? 0) > 0;
   const scaffold = isScaffold(row);
   const changeCount = row.changes?.length ?? 0;
+  const bias = scores?.bias ?? "";
   const fetchedTime = (() => {
     if (scaffold) return "";
     const raw = report.fetched_at;
@@ -3979,74 +3980,55 @@ const UwTickerCard = React.memo(function UwTickerCard({
       data-selected={isSelected ? "true" : "false"}
       data-alert={hasAlert ? "true" : "false"}
       data-scaffold={scaffold ? "true" : "false"}
+      data-bias={bias || undefined}
       aria-pressed={isSelected}
       onClick={() => onSelect(row.ticker)}
     >
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          gap: "0.4rem",
-        }}
-      >
-        <span style={{ fontWeight: 600, letterSpacing: "0.04em" }}>
-          {row.ticker}
+      <span style={{ fontWeight: 600, fontSize: 12, letterSpacing: "0.04em" }}>
+        {row.ticker}
+      </span>
+      {bias && <span className="sr-only">{bias.replace(/_/g, " ")}</span>}
+      {hasAlert && changeCount > 0 && (
+        <span
+          aria-label={`${changeCount} change${changeCount === 1 ? "" : "s"}`}
+          style={{
+            fontSize: 9,
+            fontWeight: 600,
+            background: "var(--warning)",
+            color: "var(--bg-base)",
+            borderRadius: 999,
+            padding: "1px 5px",
+            lineHeight: 1,
+            minWidth: 14,
+            textAlign: "center",
+          }}
+        >
+          {changeCount}
         </span>
-        {hasAlert && changeCount > 0 && (
-          <span
-            aria-label={`${changeCount} change${changeCount === 1 ? "" : "s"}`}
-            style={{
-              fontSize: 9,
-              fontWeight: 600,
-              background: "var(--warning)",
-              color: "var(--bg-base)",
-              borderRadius: 999,
-              padding: "1px 6px",
-              lineHeight: 1,
-              minWidth: 16,
-              textAlign: "center",
-            }}
-          >
-            {changeCount}
-          </span>
-        )}
-        {!hasAlert && scaffold && (
-          <span
-            aria-label="not yet scanned"
-            style={{
-              fontSize: 9,
-              color: "var(--text-muted)",
-              opacity: 0.6,
-              letterSpacing: "0.05em",
-            }}
-          >
-            NEW
-          </span>
-        )}
-      </div>
-      <div className="report-meta" style={{ margin: 0 }}>
-        {report.price != null ? `$${fmtNum(report.price, 2)}` : "—"}
-      </div>
-      <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
-        {scores?.bias && (
-          <span className={biasPillClass(scores.bias)} style={{ fontSize: 9 }}>
-            {scores.bias}
-          </span>
-        )}
-        {scores?.grade && (
-          <span className="pill neutral" style={{ fontSize: 9 }}>
-            {scores.grade}
-          </span>
-        )}
-      </div>
+      )}
+      {!hasAlert && scaffold && (
+        <span
+          aria-label="not yet scanned"
+          style={{
+            fontSize: 8,
+            color: "var(--text-muted)",
+            letterSpacing: "0.05em",
+          }}
+        >
+          NEW
+        </span>
+      )}
       {fetchedTime && (
-        <div
-          className="report-meta"
-          style={{ margin: 0, fontSize: 9, opacity: 0.7 }}
+        <span
+          style={{
+            fontSize: 8,
+            opacity: 0.5,
+            marginLeft: "auto",
+            color: "var(--text-muted)",
+          }}
         >
           {fetchedTime}
-        </div>
+        </span>
       )}
     </button>
   );
