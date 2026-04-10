@@ -279,13 +279,18 @@ async def lifespan(app: FastAPI):
         # dicts that would otherwise pin ~100s of MB across a reload cycle.
         try:
             from api.routes import uw_analyze as _uw_route_mod
-            from api.routes.uw_analyze import get_flow_log, get_portfolio_cache
 
-            _cache = get_portfolio_cache()
-            _cache._entries.clear()
-            _cache._per_ticker_locks.clear()
-            _flow = get_flow_log()
-            _flow._events.clear()
+            # Null the singletons so `get_portfolio_cache()` creates a fresh
+            # instance on the next reload cycle. The previous approach
+            # (_entries.clear()) left `_loaded=True` on the surviving object,
+            # which made `_ensure_loaded()` skip the disk read — every ticker
+            # re-scanned from scratch after --reload.
+            _uw_route_mod._portfolio_cache = None
+            _uw_route_mod._flow_log = None
+            # Recreate the OI semaphore so it binds to the new event loop
+            # on the next reload cycle (asyncio.Semaphore captures the loop
+            # on first acquire).
+            _uw_route_mod._ON_DEMAND_OI_SEM = asyncio.Semaphore(3)
             # Close the shared UWClient if one was constructed. Leaves
             # the underlying requests.Session idle connections to be
             # released rather than lingering across reload cycles.

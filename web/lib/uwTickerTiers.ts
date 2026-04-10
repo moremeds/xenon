@@ -35,6 +35,125 @@ export const SECTOR_ETFS = [
   "SMH",
 ] as const;
 
+/**
+ * Sub-groups within the "single" tier (rendered under the "WATCH" header).
+ * Order here = display order on the page.
+ */
+export const SINGLE_NAME_GROUPS: readonly {
+  label: string;
+  tickers: readonly string[];
+}[] = [
+  {
+    label: "M7",
+    tickers: ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA"],
+  },
+  {
+    label: "SEMIS",
+    tickers: [
+      "AMD",
+      "AVGO",
+      "INTC",
+      "MU",
+      "MRVL",
+      "TSM",
+      "QCOM",
+      "CRWV",
+      "NBIS",
+      "IREN",
+      "CRDO",
+      "SNDK",
+      "LITE",
+      "GLW",
+      "NOK",
+      "TSEM",
+    ],
+  },
+  {
+    label: "GROWTH / TECH",
+    tickers: [
+      "PLTR",
+      "HIMS",
+      "HOOD",
+      "SOFI",
+      "ASTS",
+      "RKLB",
+      "NET",
+      "PANW",
+      "BKSY",
+    ],
+  },
+  {
+    label: "INDUSTRIALS",
+    tickers: [
+      "KO",
+      "MCD",
+      "LLY",
+      "JPM",
+      "GS",
+      "BA",
+      "COST",
+      "WMT",
+      "MS",
+      "DAL",
+      "XOM",
+      "OXY",
+      "CVX",
+      "CRS",
+      "FLY",
+      "PL",
+    ],
+  },
+  { label: "CRYPTO", tickers: ["COIN", "MSTR", "CRCL"] },
+];
+
+const SINGLE_GROUP_SETS = SINGLE_NAME_GROUPS.map(
+  (g) => new Set(g.tickers.map((t) => t.toUpperCase())),
+);
+
+/** All single-name tickers that belong to a defined sub-group (for scaffold). */
+export const WATCH_TICKERS: readonly string[] = SINGLE_NAME_GROUPS.flatMap(
+  (g) => g.tickers,
+);
+
+/**
+ * Split single-tier rows into ordered sub-groups + an OTHER bucket.
+ * Within each sub-group, preserves the defined ticker order (changed-first
+ * tickers still bubble up within their sub-group).
+ */
+export function groupSingleNames<
+  T extends { ticker: string; changes?: unknown[] | null },
+>(rows: readonly T[]): { label: string; rows: T[] }[] {
+  const buckets: T[][] = SINGLE_NAME_GROUPS.map(() => []);
+  const other: T[] = [];
+
+  for (const row of rows) {
+    const t = row.ticker.toUpperCase();
+    let placed = false;
+    for (let i = 0; i < SINGLE_GROUP_SETS.length; i++) {
+      if (SINGLE_GROUP_SETS[i].has(t)) {
+        buckets[i].push(row);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) other.push(row);
+  }
+
+  const result: { label: string; rows: T[] }[] = [];
+  for (let i = 0; i < SINGLE_NAME_GROUPS.length; i++) {
+    if (buckets[i].length > 0) {
+      result.push({
+        label: SINGLE_NAME_GROUPS[i].label,
+        rows: sortTier(buckets[i], "single"),
+      });
+    }
+  }
+  if (other.length > 0) {
+    result.push({ label: "OTHER", rows: sortTier(other, "single") });
+  }
+  return result;
+}
+
 export type UwTier =
   | "indices"
   | "commodities"
@@ -165,6 +284,7 @@ export const SCAFFOLD_TICKERS: readonly string[] = [
   ...FIXED_INCOME,
   ...VOLATILITY,
   ...SECTOR_ETFS,
+  ...WATCH_TICKERS,
 ];
 
 export function makeScaffoldRow(ticker: string): UwTickerRow {

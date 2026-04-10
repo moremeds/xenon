@@ -3,6 +3,7 @@ import {
   tierOf,
   sortTier,
   groupByTier,
+  groupSingleNames,
   isScaffold,
   makeScaffoldRow,
   mergeScaffoldWithLive,
@@ -13,6 +14,7 @@ import {
   FIXED_INCOME,
   VOLATILITY,
   SECTOR_ETFS,
+  WATCH_TICKERS,
 } from "../lib/uwTickerTiers";
 import type { UwTickerRow } from "../lib/uwAnalyzeTypes";
 
@@ -116,7 +118,8 @@ describe("scaffold", () => {
       COMMODITIES.length +
       FIXED_INCOME.length +
       VOLATILITY.length +
-      SECTOR_ETFS.length;
+      SECTOR_ETFS.length +
+      WATCH_TICKERS.length;
     expect(SCAFFOLD_ROWS.length).toBe(expected);
     expect(SCAFFOLD_TICKERS.length).toBe(expected);
   });
@@ -147,6 +150,43 @@ describe("scaffold", () => {
       },
     };
     expect(isScaffold(populated)).toBe(false);
+  });
+});
+
+describe("groupSingleNames", () => {
+  it("splits single-tier rows into labelled sub-groups", () => {
+    const rows = [
+      { ticker: "AAPL" },
+      { ticker: "COIN" },
+      { ticker: "AMD" },
+      { ticker: "PLTR" },
+      { ticker: "KO" },
+    ];
+    const groups = groupSingleNames(rows);
+    expect(groups.map((g) => g.label)).toEqual([
+      "M7",
+      "SEMIS",
+      "GROWTH / TECH",
+      "INDUSTRIALS",
+      "CRYPTO",
+    ]);
+    expect(groups[0].rows.map((r) => r.ticker)).toEqual(["AAPL"]);
+    expect(groups[1].rows.map((r) => r.ticker)).toEqual(["AMD"]);
+    expect(groups[4].rows.map((r) => r.ticker)).toEqual(["COIN"]);
+  });
+
+  it("puts unknown tickers in OTHER", () => {
+    const rows = [{ ticker: "AAPL" }, { ticker: "ZZZZ" }];
+    const groups = groupSingleNames(rows);
+    const other = groups.find((g) => g.label === "OTHER");
+    expect(other?.rows.map((r) => r.ticker)).toEqual(["ZZZZ"]);
+  });
+
+  it("omits empty sub-groups", () => {
+    const rows = [{ ticker: "COIN" }];
+    const groups = groupSingleNames(rows);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].label).toBe("CRYPTO");
   });
 });
 
