@@ -17,7 +17,7 @@ import os
 import sys
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
@@ -116,6 +116,33 @@ def _next_test_order_ids() -> tuple[int, int]:
     order_id = test_order_counter
     perm_id = 8_000_000 + order_id
     return order_id, perm_id
+
+
+async def _trend_scan_premarket_loop():
+    """Run trend scanner at 8:30 AM ET on weekdays."""
+    import zoneinfo
+
+    et = zoneinfo.ZoneInfo("America/New_York")
+    while True:
+        now = datetime.now(et)
+        target_hour, target_min = 8, 30
+        target = now.replace(hour=target_hour, minute=target_min, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        while target.weekday() >= 5:
+            target += timedelta(days=1)
+        wait_secs = (target - now).total_seconds()
+        logger.info("Trend scan scheduled for %s (in %.0fs)", target, wait_secs)
+        await asyncio.sleep(wait_secs)
+        try:
+            result = await run_script("trend_scan.py", ["--top", "25"], timeout=180)
+            if result.ok:
+                _write_cache(DATA_DIR / "trend_scan.json", result.data)
+                logger.info("Pre-market trend scan complete: %d candidates", len(result.data.get("candidates", [])))
+            else:
+                logger.warning("Pre-market trend scan failed: %s", result.error)
+        except Exception:
+            logger.warning("Pre-market trend scan error", exc_info=True)
 
 
 @asynccontextmanager
@@ -254,10 +281,21 @@ async def lifespan(app: FastAPI):
         except Exception as exc:  # noqa: BLE001
             logger.warning("uw_analyze_daily_job failed to start: %s", exc)
 
+    # Pre-market trend scanner (8:30 AM ET weekdays)
+    _trend_scan_task = None
+    if os.environ.get("XENON_DAILY_JOB_WORKER_ID", "0") == "0":
+        _trend_scan_task = asyncio.create_task(_trend_scan_premarket_loop())
+
     try:
         yield
     finally:
         # Shutdown — always runs, even if the app raised.
+        if _trend_scan_task is not None:
+            _trend_scan_task.cancel()
+            try:
+                await _trend_scan_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         if uw_daily_task is not None:
             uw_daily_task.cancel()
             try:
@@ -950,6 +988,16 @@ async def scan():
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     _write_cache(DATA_DIR / "scanner.json", result.data)
+    return result.data
+
+
+@app.post("/trend-scan")
+async def trend_scan():
+    """Run 3-stage trend scanner (trend_scan.py --top 25)."""
+    result = await run_script("trend_scan.py", ["--top", "25"], timeout=180)
+    if not result.ok:
+        raise HTTPException(status_code=502, detail=result.error)
+    _write_cache(DATA_DIR / "trend_scan.json", result.data)
     return result.data
 
 
