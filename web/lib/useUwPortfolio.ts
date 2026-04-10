@@ -130,6 +130,18 @@ async function _fetchPortfolioJson(): Promise<UwPortfolioResponse> {
   return res.json();
 }
 
+/** Instant cache-only fetch — returns whatever is in memory without running analysis. */
+async function _fetchPortfolioCached(): Promise<UwPortfolioResponse> {
+  const res = await fetch("/api/uw-analyze/portfolio?cached=true", {
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`cached fetch ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
 async function _postRefresh(body: {
   tickers?: string[];
   adhoc?: boolean;
@@ -232,9 +244,34 @@ export function useUwPortfolio(): UseUwPortfolioState {
     }
   }, []);
 
-  // Initial fetch + interval.
+  // Initial fast cache load → then SSE polling.
+  // The cached fetch returns whatever is in memory without running analysis,
+  // so tiles paint immediately instead of showing blank scaffolds.
   useEffect(() => {
-    fetchPortfolio();
+    let cancelled = false;
+    const init = async () => {
+      // Skip the cache prefetch if we already have a module-level snapshot
+      // (e.g., from a previous mount within this browser session).
+      if (!_cachedSnapshot) {
+        try {
+          const cached = await _fetchPortfolioCached();
+          if (!cancelled && cached.tickers?.length) {
+            setData(cached);
+            setLastFetchedAt(cached.fetched_at ?? null);
+            _cachedSnapshot = {
+              data: cached,
+              lastFetchedAt: cached.fetched_at ?? null,
+            };
+          }
+        } catch {
+          // Cache fetch failed — SSE will still run below.
+        }
+      }
+      // Now start the live SSE stream which will overwrite with fresh data.
+      if (!cancelled) fetchPortfolio();
+    };
+    void init();
+
     const interval =
       market === MarketState.OPEN ? POLL_OPEN_MS : POLL_CLOSED_MS;
     const id = window.setInterval(() => {
@@ -247,6 +284,7 @@ export function useUwPortfolio(): UseUwPortfolioState {
     };
     document.addEventListener("visibilitychange", onVis);
     return () => {
+      cancelled = true;
       window.clearInterval(id);
       document.removeEventListener("visibilitychange", onVis);
       abortRef.current?.abort();

@@ -505,13 +505,18 @@ async def _finalize_rows(rows: list[dict], cache, flow_log) -> None:
 
 
 @router.get("/uw-analyze/portfolio")
-async def uw_analyze_portfolio(request: Request):
+async def uw_analyze_portfolio(request: Request, cached: bool = False):
     """Return current snapshots + diffs for all portfolio + watchlist tickers.
 
-    Supports two response modes via Accept header:
-    - ``text/event-stream``: SSE stream — tickers emitted as they complete.
+    Modes:
+    - ``?cached=true``: instant JSON from in-memory cache — no analysis triggered.
+      Used by the frontend for the initial paint so tiles aren't blank.
+    - ``Accept: text/event-stream``: SSE stream — tickers emitted as they complete.
     - default: JSON envelope (backward-compatible for tests/curl).
     """
+    if cached:
+        return await _portfolio_cached()
+
     want_sse = "text/event-stream" in (request.headers.get("accept") or "")
 
     if want_sse:
@@ -521,6 +526,46 @@ async def uw_analyze_portfolio(request: Request):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
     return await _portfolio_json()
+
+
+async def _portfolio_cached() -> dict:
+    """Instant cache-only response — no analysis triggered.
+
+    Returns whatever is in the in-memory cache right now, formatted as the
+    same ``{tickers, action_items, ...}`` envelope the frontend expects.
+    Used for the initial paint so tiles show data from the last session
+    instead of blank scaffolds while the SSE stream catches up.
+    """
+    from utils.market_hours import is_market_open
+
+    cache = get_portfolio_cache()
+    flow_log = get_flow_log()
+    entries = cache.all_entries()
+
+    rows: list[dict] = []
+    for ticker, entry in entries.items():
+        snap = entry.get("current") or {}
+        prev = entry.get("previous")
+        oi_baseline = entry.get("oi_baseline") or {}
+        rows.append(
+            {
+                "ticker": ticker,
+                "sources": list(entry.get("sources") or []),
+                "snapshot": snap,
+                "prev_ts": (prev or {}).get("ts") if isinstance(prev, dict) else None,
+                "changes": entry.get("materialized_changes") or [],
+                "oi_changes": oi_baseline.get("changes") or [],
+                "unusual_flow_events": [e.to_dict() for e in flow_log.for_ticker(ticker)],
+            }
+        )
+
+    return {
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "market_state": "open" if is_market_open() else "closed",
+        "ttl_seconds": cache._ttl(),
+        "tickers": rows,
+        "action_items": _action_items_from(rows),
+    }
 
 
 async def _portfolio_json() -> dict:

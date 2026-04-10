@@ -9,12 +9,19 @@ export async function GET(request: Request): Promise<Response> {
   try {
     const { getToken } = await auth();
     const token = (await getToken()) ?? undefined;
-    const headers: Record<string, string> = {
-      Accept: "text/event-stream",
-    };
+
+    const url = new URL(request.url);
+    const cached = url.searchParams.get("cached") === "true";
+
+    const headers: Record<string, string> = {};
+    if (!cached) headers.Accept = "text/event-stream";
     if (token) headers.Authorization = `Bearer ${token}`;
 
-    const upstream = await fetch(`${XENON_API}/uw-analyze/portfolio`, {
+    const upstreamUrl = cached
+      ? `${XENON_API}/uw-analyze/portfolio?cached=true`
+      : `${XENON_API}/uw-analyze/portfolio`;
+
+    const upstream = await fetch(upstreamUrl, {
       headers,
       cache: "no-store",
       signal: request.signal,
@@ -25,6 +32,10 @@ export async function GET(request: Request): Promise<Response> {
         .text()
         .catch(() => `HTTP ${upstream.status}`);
       return NextResponse.json({ error: detail }, { status: upstream.status });
+    }
+
+    if (cached) {
+      return NextResponse.json(await upstream.json());
     }
 
     return new Response(upstream.body, {
