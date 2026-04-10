@@ -63,3 +63,11 @@ def test_normalize_score_clamps():
     assert normalize_score(1.5) == 1.0
     assert normalize_score(-0.3) == 0.0
     assert normalize_score(0.5) == 0.5
+
+
+def test_normalize_score_nan_returns_zero():
+    from scripts.scanner_lib.scoring import normalize_score
+
+    assert normalize_score(float("nan")) == 0.0
+    assert normalize_score(float("inf")) == 0.0
+    assert normalize_score(float("-inf")) == 0.0

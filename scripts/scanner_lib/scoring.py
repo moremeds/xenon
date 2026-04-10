@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 
 def weighted_composite(scores: dict[str, float], weights: dict[str, float]) -> float:
     """Compute weighted composite score. Weights must sum to 1.0. Missing scores treated as 0."""
@@ -17,5 +19,7 @@ def passes_min_thresholds(scores: dict[str, float], thresholds: dict[str, float]
 
 
 def normalize_score(value: float) -> float:
-    """Clamp a value to [0.0, 1.0]."""
+    """Clamp a value to [0.0, 1.0]. Non-finite values return 0.0."""
+    if not math.isfinite(value):
+        return 0.0
     return max(0.0, min(1.0, value))

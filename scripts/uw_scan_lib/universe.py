@@ -30,7 +30,7 @@ def load_universe(
             return []
         try:
             raw = json.loads(path.read_text())
-            data = raw.get("tickers", raw) if isinstance(raw, dict) else raw
+            data = raw.get("tickers", []) if isinstance(raw, dict) else raw
             tickers_list: list[str] = []
             for item in data:
                 if isinstance(item, str):
