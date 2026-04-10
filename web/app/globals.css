@@ -959,16 +959,18 @@ td.last-price-cell {
 
 /* UW Analysis tiered ticker grid */
 .uw-tier-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(82px, 1fr));
-  gap: 0.3rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0 0.35rem;
 }
 
 .uw-card {
   display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-  padding: 0.35rem 0.45rem;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 4px 8px;
   font-size: 10px;
   line-height: 1.25;
   background: transparent;
@@ -984,7 +986,7 @@ td.last-price-cell {
 }
 
 .uw-card:hover {
-  background: var(--bg-hover);
+  filter: brightness(1.15);
 }
 
 .uw-card:focus-visible {
@@ -998,7 +1000,33 @@ td.last-price-cell {
 
 .uw-card[data-selected="true"] {
   border-color: var(--border-focus);
-  background: var(--bg-hover);
+  filter: brightness(1.2);
+}
+
+/* Sentiment background tints via color-mix */
+.uw-card[data-bias="STRONGLY_BULLISH"] {
+  background: color-mix(in srgb, var(--positive) 25%, transparent);
+  border-left: 2px solid var(--positive);
+}
+.uw-card[data-bias="BULLISH"] {
+  background: color-mix(in srgb, var(--positive) 12%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--positive) 50%, transparent);
+}
+.uw-card[data-bias="MIXED"] {
+  background: var(--bg-panel);
+}
+.uw-card[data-bias="BEARISH"] {
+  background: color-mix(in srgb, var(--negative) 12%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--negative) 50%, transparent);
+}
+.uw-card[data-bias="STRONGLY_BEARISH"] {
+  background: color-mix(in srgb, var(--negative) 25%, transparent);
+  border-left: 2px solid var(--negative);
+}
+
+/* Scaffold (not yet scanned) */
+.uw-card[data-scaffold="true"] {
+  opacity: 0.6;
 }
 
 .strength-bar {
