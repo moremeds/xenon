@@ -20,7 +20,7 @@ export default defineConfig({
   ],
   // Start Next.js dev server before tests
   webServer: {
-    command: `npx next dev --turbopack -p ${PORT}`,
+    command: `PLAYWRIGHT_DISABLE_AUTH=1 ASSISTANT_MOCK=1 npx next dev --turbopack -p ${PORT}`,
     url: `http://localhost:${PORT}`,
     reuseExistingServer: true,
     timeout: 60_000,

@@ -10,7 +10,8 @@ const isPublicRoute = createRouteMatcher([
 ]);
 
 export default clerkMiddleware(async (auth, request) => {
-  if (!isPublicRoute(request)) {
+  const authBypassEnabled = process.env.PLAYWRIGHT_DISABLE_AUTH === "1";
+  if (!authBypassEnabled && !isPublicRoute(request)) {
     await auth.protect();
   }
 });

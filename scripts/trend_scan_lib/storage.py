@@ -6,7 +6,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import duckdb
+try:
+    import duckdb as _duckdb
+except ModuleNotFoundError:  # pragma: no cover - exercised via runtime import test
+    _duckdb = None
 
 logger = logging.getLogger(__name__)
 DEFAULT_DB_PATH = "data/trend_scan.duckdb"
@@ -60,16 +63,27 @@ CREATE TABLE IF NOT EXISTS scan_candidates (
 """
 
 
-def get_connection(db_path: str = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
+def duckdb_available() -> bool:
+    return _duckdb is not None
+
+
+def _require_duckdb():
+    if _duckdb is None:
+        raise RuntimeError("duckdb is not installed; install duckdb to enable trend scan storage")
+    return _duckdb
+
+
+def get_connection(db_path: str = DEFAULT_DB_PATH):
+    duckdb = _require_duckdb()
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     return duckdb.connect(db_path)
 
 
-def init_schema(conn: duckdb.DuckDBPyConnection) -> None:
+def init_schema(conn) -> None:
     conn.execute(SCHEMA_SQL)
 
 
-def write_scan_run(conn: duckdb.DuckDBPyConnection, run: dict[str, Any]) -> None:
+def write_scan_run(conn, run: dict[str, Any]) -> None:
     conn.execute(
         "INSERT INTO scan_runs (scan_id, scan_timestamp, universe_size, stage_a_pass, stage_b_pass, candidates_out, spy_close, vix_close, regime, duration_secs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
@@ -87,7 +101,7 @@ def write_scan_run(conn: duckdb.DuckDBPyConnection, run: dict[str, Any]) -> None
     )
 
 
-def write_scan_candidates(conn: duckdb.DuckDBPyConnection, candidates: list[dict[str, Any]]) -> None:
+def write_scan_candidates(conn, candidates: list[dict[str, Any]]) -> None:
     for c in candidates:
         conn.execute(
             "INSERT INTO scan_candidates (scan_id, ticker, snapshot_timestamp, spot_price, direction, final_score, trend_score, structure_score, vol_score, flow_score, ma_20, ma_50, ma_200, rsi, adx, macd_histogram, bbw, rs_vs_spy, iv_rank, gamma_flip, call_wall, put_wall, suggested_trade, invalidation, flags, trend_summary, structure_summary, vol_summary, flow_summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

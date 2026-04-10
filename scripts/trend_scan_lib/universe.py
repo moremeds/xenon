@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from scripts.scanner_lib.universe import dedup_and_normalize, load_tickers_from_json, union_sources
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_rows(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        rows = payload.get("data")
+        return rows if isinstance(rows, list) else []
+    if isinstance(payload, list):
+        return payload
+    return []
 
 
 def build_static_universe(
@@ -30,16 +40,21 @@ def build_uw_flow_universe(
 ) -> list[str]:
     """Extract tickers from recent UW flow alerts and dark pool activity."""
     tickers: list[str] = []
+    newer_than = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).date().isoformat()
     try:
-        alerts = client.get_flow_alerts(min_premium=min_premium, lookback_days=lookback_days)
-        tickers.extend(a["ticker"] for a in alerts if "ticker" in a)
+        alerts = client.get_flow_alerts(min_premium=min_premium, newer_than=newer_than)
+        tickers.extend(a["ticker"] for a in _extract_rows(alerts) if isinstance(a, dict) and "ticker" in a)
     except Exception:
         logger.warning("Failed to fetch UW flow alerts for universe", exc_info=True)
 
     try:
-        dp = client.get_darkpool_flow()
-        if isinstance(dp, list):
-            tickers.extend(d["ticker"] for d in dp if "ticker" in d)
+        recent_fn = getattr(client, "get_darkpool_recent", None)
+        dp_rows: list[dict[str, Any]] = []
+        if callable(recent_fn):
+            dp_rows = _extract_rows(recent_fn(limit=250))
+        if not dp_rows:
+            dp_rows = _extract_rows(client.get_darkpool_flow())
+        tickers.extend(d["ticker"] for d in dp_rows if isinstance(d, dict) and "ticker" in d)
     except Exception:
         logger.warning("Failed to fetch UW dark pool for universe", exc_info=True)
 

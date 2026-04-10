@@ -17,6 +17,7 @@ requests>=2.28.0
 # Data analysis
 pandas>=1.5.0
 numpy>=1.26.0
+duckdb>=1.2.0
 
 # Environment and utilities
 python-dotenv>=1.0.0

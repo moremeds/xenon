@@ -60,6 +60,41 @@ def test_uw_flow_source_handles_error():
     assert result == []
 
 
+def test_uw_flow_source_supports_real_client_payload_shape():
+    from scripts.trend_scan_lib.universe import build_uw_flow_universe
+
+    mock_client = MagicMock()
+    mock_client.get_flow_alerts.return_value = {
+        "data": [
+            {"ticker": "AAPL", "premium": 500_000},
+            {"ticker": "NVDA", "premium": 200_000},
+        ]
+    }
+    mock_client.get_darkpool_flow.return_value = {
+        "data": [
+            {"ticker": "TSLA", "volume": 1_000_000},
+        ]
+    }
+
+    result = build_uw_flow_universe(client=mock_client, min_premium=100_000, lookback_days=5)
+    assert result == ["AAPL", "NVDA", "TSLA"]
+
+
+def test_uw_flow_source_uses_date_filters_not_unknown_kwargs():
+    from scripts.trend_scan_lib.universe import build_uw_flow_universe
+
+    mock_client = MagicMock()
+    mock_client.get_flow_alerts.return_value = {"data": []}
+    mock_client.get_darkpool_flow.return_value = {"data": []}
+
+    build_uw_flow_universe(client=mock_client, min_premium=100_000, lookback_days=5)
+
+    _, kwargs = mock_client.get_flow_alerts.call_args
+    assert kwargs["min_premium"] == 100_000
+    assert "newer_than" in kwargs
+    assert "lookback_days" not in kwargs
+
+
 def test_ib_scanner_source_extracts_tickers():
     from scripts.trend_scan_lib.universe import build_ib_scanner_universe
 
