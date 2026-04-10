@@ -3812,7 +3812,7 @@ const UwAnalyzeSections = React.memo(function UwAnalyzeSections() {
       {/* Tier grids — always rendered from scaffold so the page never
           shows an empty above-the-fold state. */}
       <div className="section" data-testid="uw-analyze-tiers">
-        <div className="section-body">
+        <div className="section-body" style={{ paddingBottom: "0.35rem" }}>
           <UwTierRow
             label="MARKET INDICES"
             rows={tiers.indices}
@@ -3888,7 +3888,7 @@ function UwTierRow({
     0,
   );
   return (
-    <div style={{ marginBottom: "0.15rem" }}>
+    <div style={{ marginBottom: 0 }}>
       <div
         className="report-meta"
         style={{
@@ -3898,6 +3898,8 @@ function UwTierRow({
           display: "flex",
           gap: "0.5rem",
           alignItems: "center",
+          borderBottom: "none",
+          padding: "4px 16px",
         }}
       >
         <span>{label}</span>
