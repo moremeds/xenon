@@ -409,26 +409,63 @@ export type BlotterData = {
   open_trades: BlotterTrade[];
 };
 
-// Scanner types
-export type ScannerSignal = {
+// Scanner types — Trend Scanner v2
+export type TrendScores = {
+  trend: number;
+  structure: number;
+  volatility: number;
+  flow: number;
+};
+
+export type TrendIndicators = {
+  ma_20: number;
+  ma_50: number;
+  ma_200: number;
+  rsi: number;
+  adx: number;
+  macd_histogram: number;
+  bbw: number;
+  rs_vs_spy: number;
+  iv_rank: number;
+  gamma_flip: number;
+  call_wall: number;
+  put_wall: number;
+};
+
+export type TrendSummaries = {
+  trend: string;
+  structure: string;
+  vol: string;
+  flow: string;
+};
+
+export type TrendCandidate = {
   ticker: string;
-  sector: string;
-  score: number;
-  signal: string;
-  direction: string;
-  strength: number;
-  buy_ratio: number | null;
-  num_prints: number;
-  sustained_days: number;
-  recent_direction: string;
-  recent_strength: number;
+  snapshot_timestamp: string;
+  spot_price: number;
+  direction: "bullish" | "bearish";
+  final_score: number;
+  scores: TrendScores;
+  indicators: TrendIndicators;
+  summaries: TrendSummaries;
+  suggested_trade: string;
+  invalidation: number;
+  flags: string[];
+  holding_window: string;
 };
 
 export type ScannerData = {
-  scan_time: string;
-  tickers_scanned: number;
-  signals_found: number;
-  top_signals: ScannerSignal[];
+  scan_id: string;
+  scan_timestamp: string;
+  market_context: {
+    spy_close: number;
+    vix_close: number;
+    regime: string;
+  };
+  universe_size: number;
+  stage_a_survivors: number;
+  stage_b_survivors: number;
+  candidates: TrendCandidate[];
 };
 
 // Flow Analysis types — rewritten as part of the flow-analysis overhaul.

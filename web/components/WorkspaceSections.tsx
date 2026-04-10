@@ -35,7 +35,7 @@ import type {
   OrdersData,
   PortfolioData,
   PortfolioPosition,
-  ScannerSignal,
+  TrendCandidate,
   TradeEntry,
   WorkspaceSection,
 } from "@/lib/types";
@@ -1475,60 +1475,211 @@ function PortfolioSections({
   );
 }
 
-/* ─── Scanner table ─────────────────────────────────────── */
+/* ─── Trend Scanner table ──────────────────────────────── */
 
-type ScannerSortKey =
+type TrendSortKey =
   | "ticker"
-  | "signal"
   | "direction"
-  | "score"
-  | "strength"
-  | "buy_ratio"
-  | "sustained_days"
-  | "num_prints";
+  | "final_score"
+  | "trend"
+  | "structure"
+  | "volatility"
+  | "flow"
+  | "spot_price"
+  | "suggested_trade";
 
-const scannerSigExtract = (
-  item: ScannerSignal,
-  key: ScannerSortKey,
+const trendExtract = (
+  item: TrendCandidate,
+  key: TrendSortKey,
 ): string | number | null => {
   switch (key) {
     case "ticker":
       return item.ticker;
-    case "signal":
-      return item.signal;
     case "direction":
       return item.direction;
-    case "score":
-      return item.score;
-    case "strength":
-      return item.strength;
-    case "buy_ratio":
-      return item.buy_ratio;
-    case "sustained_days":
-      return item.sustained_days;
-    case "num_prints":
-      return item.num_prints;
+    case "final_score":
+      return item.final_score;
+    case "trend":
+      return item.scores.trend;
+    case "structure":
+      return item.scores.structure;
+    case "volatility":
+      return item.scores.volatility;
+    case "flow":
+      return item.scores.flow;
+    case "spot_price":
+      return item.spot_price;
+    case "suggested_trade":
+      return item.suggested_trade;
     default:
       return null;
   }
 };
 
+function ScoreBar({ value }: { value: number }) {
+  const pct = Math.round(value * 100);
+  const cls = pct >= 70 ? "bullish" : pct >= 40 ? "neutral" : "bearish";
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "0.25rem",
+        minWidth: 80,
+      }}
+    >
+      <div
+        style={{
+          flex: 1,
+          height: 6,
+          background: "var(--bg-tertiary)",
+          borderRadius: 2,
+          overflow: "hidden",
+        }}
+      >
+        <div
+          className={cls}
+          style={{
+            width: `${pct}%`,
+            height: "100%",
+            background: "currentColor",
+            opacity: 0.7,
+            borderRadius: 2,
+          }}
+        />
+      </div>
+      <span className="mono" style={{ fontSize: "0.7rem", opacity: 0.7 }}>
+        {pct}
+      </span>
+    </div>
+  );
+}
+
+function TrendCandidateRow({
+  row,
+  expanded,
+  onToggle,
+}: {
+  row: TrendCandidate;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const dirCls = row.direction === "bullish" ? "bullish" : "bearish";
+  const tradeLabel = row.suggested_trade.replace(/_/g, " ");
+
+  return (
+    <>
+      <tr
+        onClick={onToggle}
+        style={{ cursor: "pointer" }}
+        className={expanded ? "expanded-row" : ""}
+      >
+        <td>
+          <TickerLink ticker={row.ticker} />
+        </td>
+        <td>
+          <span className={`pill ${dirCls}`}>
+            {row.direction.toUpperCase()}
+          </span>
+        </td>
+        <td className="right mono">{(row.final_score * 100).toFixed(0)}</td>
+        <td>
+          <ScoreBar value={row.scores.trend} />
+        </td>
+        <td>
+          <ScoreBar value={row.scores.structure} />
+        </td>
+        <td>
+          <ScoreBar value={row.scores.volatility} />
+        </td>
+        <td>
+          <ScoreBar value={row.scores.flow} />
+        </td>
+        <td className="right mono">${row.spot_price.toFixed(2)}</td>
+        <td>
+          <span className="pill defined">{tradeLabel}</span>
+        </td>
+        <td>
+          {row.flags.map((f) => (
+            <span key={f} className="pill caution" style={{ marginRight: 4 }}>
+              {f.replace(/_/g, " ")}
+            </span>
+          ))}
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="detail-row">
+          <td colSpan={10} style={{ padding: "0.5rem 1rem" }}>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: "0.5rem",
+                fontSize: "0.75rem",
+              }}
+            >
+              <div>
+                <strong>Trend:</strong> {row.summaries.trend}
+              </div>
+              <div>
+                <strong>Structure:</strong> {row.summaries.structure}
+              </div>
+              <div>
+                <strong>Volatility:</strong> {row.summaries.vol}
+              </div>
+              <div>
+                <strong>Flow:</strong> {row.summaries.flow}
+              </div>
+              <div>
+                <strong>Invalidation:</strong>{" "}
+                <span className="mono">${row.invalidation.toFixed(2)}</span>
+              </div>
+              <div>
+                <strong>Hold:</strong> {row.holding_window}
+              </div>
+              <div
+                style={{
+                  gridColumn: "1 / -1",
+                  display: "flex",
+                  gap: "1rem",
+                  flexWrap: "wrap",
+                  marginTop: "0.25rem",
+                }}
+              >
+                <span className="mono">
+                  RSI {row.indicators.rsi.toFixed(0)}
+                </span>
+                <span className="mono">
+                  ADX {row.indicators.adx.toFixed(0)}
+                </span>
+                <span className="mono">
+                  IV Rank {row.indicators.iv_rank.toFixed(0)}
+                </span>
+                <span className="mono">
+                  RS {row.indicators.rs_vs_spy.toFixed(2)}
+                </span>
+                <span className="mono">
+                  BBW {row.indicators.bbw.toFixed(3)}
+                </span>
+                <span className="mono">
+                  GEX Flip ${row.indicators.gamma_flip.toFixed(0)}
+                </span>
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
 const ScannerSections = React.memo(function ScannerSections() {
   const { data, syncing, error, lastSync } = useScanner(true);
-  const signals = data?.top_signals ?? [];
-  const { sorted, sort, toggle } = useSort(signals, scannerSigExtract);
-
-  const signalClass = (signal: string) => {
-    if (signal === "STRONG") return "bullish";
-    if (signal === "MODERATE") return "neutral";
-    return "bearish";
-  };
-
-  const dirClass = (dir: string) => {
-    if (dir === "ACCUMULATION") return "accum";
-    if (dir === "DISTRIBUTION") return "distrib";
-    return "neutral";
-  };
+  const candidates = data?.candidates ?? [];
+  const { sorted, sort, toggle } = useSort(candidates, trendExtract);
+  const [expandedTicker, setExpandedTicker] = React.useState<string | null>(
+    null,
+  );
 
   return (
     <>
@@ -1536,130 +1687,129 @@ const ScannerSections = React.memo(function ScannerSections() {
         <div className="section-header">
           <div className="section-title">
             <Sparkles size={14} />
-            Scanner Signals
-            <InfoTooltip text={SECTION_TOOLTIPS["Scanner Signals"]} />
+            Trend Scanner
+            <InfoTooltip text="3-stage trend scanner: TA prefilter → options structure → flow confirmation. Ranked by composite score." />
           </div>
           <div
             style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}
           >
+            {data?.market_context && (
+              <span className="report-meta" style={{ margin: 0 }}>
+                SPY {data.market_context.spy_close.toFixed(0)} · VIX{" "}
+                {data.market_context.vix_close.toFixed(1)} ·{" "}
+                {data.market_context.regime}
+              </span>
+            )}
             {lastSync && (
               <span className="report-meta" style={{ margin: 0 }}>
                 {new Date(lastSync).toLocaleTimeString()}
               </span>
             )}
             <span className="pill defined">
-              {syncing ? "SYNCING..." : `${data?.signals_found ?? 0} SIGNALS`}
+              {syncing ? "SCANNING..." : `${candidates.length} CANDIDATES`}
             </span>
           </div>
         </div>
+
         {error && (
           <div className="section-body">
             <div className="alert-item bearish">{error}</div>
           </div>
         )}
-        {signals.length === 0 && !syncing && !error && (
+
+        {candidates.length === 0 && !syncing && !error && (
           <div className="section-body">
             <div className="alert-item">
-              No scanner signals. Waiting for initial scan...
+              No trend candidates. Waiting for scan...
             </div>
           </div>
         )}
-        {signals.length > 0 && (
+
+        {candidates.length > 0 && (
           <div className="section-body table-wrap">
             <table>
               <thead>
                 <tr>
-                  <SortTh<ScannerSortKey>
+                  <SortTh<TrendSortKey>
                     label="Ticker"
                     sortKey="ticker"
                     activeKey={sort.key}
                     direction={sort.direction}
                     onToggle={toggle}
                   />
-                  <SortTh<ScannerSortKey>
-                    label="Signal"
-                    sortKey="signal"
-                    activeKey={sort.key}
-                    direction={sort.direction}
-                    onToggle={toggle}
-                  />
-                  <SortTh<ScannerSortKey>
-                    label="Direction"
+                  <SortTh<TrendSortKey>
+                    label="Dir"
                     sortKey="direction"
                     activeKey={sort.key}
                     direction={sort.direction}
                     onToggle={toggle}
                   />
-                  <SortTh<ScannerSortKey>
+                  <SortTh<TrendSortKey>
                     label="Score"
-                    sortKey="score"
+                    sortKey="final_score"
                     className="right"
                     activeKey={sort.key}
                     direction={sort.direction}
                     onToggle={toggle}
                   />
-                  <SortTh<ScannerSortKey>
-                    label="Strength"
-                    sortKey="strength"
+                  <SortTh<TrendSortKey>
+                    label="Trend"
+                    sortKey="trend"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<TrendSortKey>
+                    label="Structure"
+                    sortKey="structure"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<TrendSortKey>
+                    label="Vol"
+                    sortKey="volatility"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<TrendSortKey>
+                    label="Flow"
+                    sortKey="flow"
+                    activeKey={sort.key}
+                    direction={sort.direction}
+                    onToggle={toggle}
+                  />
+                  <SortTh<TrendSortKey>
+                    label="Price"
+                    sortKey="spot_price"
                     className="right"
                     activeKey={sort.key}
                     direction={sort.direction}
                     onToggle={toggle}
                   />
-                  <SortTh<ScannerSortKey>
-                    label="Buy Ratio"
-                    sortKey="buy_ratio"
-                    className="right"
+                  <SortTh<TrendSortKey>
+                    label="Trade"
+                    sortKey="suggested_trade"
                     activeKey={sort.key}
                     direction={sort.direction}
                     onToggle={toggle}
                   />
-                  <SortTh<ScannerSortKey>
-                    label="Sustained"
-                    sortKey="sustained_days"
-                    className="right"
-                    activeKey={sort.key}
-                    direction={sort.direction}
-                    onToggle={toggle}
-                  />
-                  <SortTh<ScannerSortKey>
-                    label="Prints"
-                    sortKey="num_prints"
-                    className="right"
-                    activeKey={sort.key}
-                    direction={sort.direction}
-                    onToggle={toggle}
-                  />
+                  <th>Flags</th>
                 </tr>
               </thead>
               <tbody>
                 {sorted.map((row) => (
-                  <tr key={`scanner-${row.ticker}`}>
-                    <td>
-                      <TickerLink ticker={row.ticker} />
-                    </td>
-                    <td>
-                      <span className={signalClass(row.signal)}>
-                        {row.signal}
-                      </span>
-                    </td>
-                    <td>
-                      <span className={`pill ${dirClass(row.direction)}`}>
-                        {row.direction}
-                      </span>
-                    </td>
-                    <td className="right">{row.score.toFixed(1)}</td>
-                    <td className="right">{row.strength.toFixed(1)}</td>
-                    <td className="right">
-                      {row.buy_ratio != null
-                        ? `${(row.buy_ratio * 100).toFixed(1)}%`
-                        : "—"}
-                    </td>
-                    <td className="right">
-                      {row.sustained_days > 0 ? `${row.sustained_days}d` : "—"}
-                    </td>
-                    <td className="right">{row.num_prints.toLocaleString()}</td>
-                  </tr>
+                  <TrendCandidateRow
+                    key={`trend-${row.ticker}`}
+                    row={row}
+                    expanded={expandedTicker === row.ticker}
+                    onToggle={() =>
+                      setExpandedTicker(
+                        expandedTicker === row.ticker ? null : row.ticker,
+                      )
+                    }
+                  />
                 ))}
               </tbody>
             </table>
@@ -1667,11 +1817,12 @@ const ScannerSections = React.memo(function ScannerSections() {
         )}
       </div>
 
-      {lastSync && (
+      {data && (
         <div className="section">
           <div className="report-meta">
-            Last Scan: {new Date(lastSync).toLocaleString()} •{" "}
-            {data?.tickers_scanned ?? 0} Tickers Scanned
+            {data.scan_id} · Universe: {data.universe_size} → Stage A:{" "}
+            {data.stage_a_survivors} → Stage B: {data.stage_b_survivors} → Top{" "}
+            {candidates.length}
           </div>
         </div>
       )}

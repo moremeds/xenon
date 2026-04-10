@@ -6,7 +6,7 @@ import { xenonFetch } from "@/lib/xenonApi";
 
 export const runtime = "nodejs";
 
-const CACHE_PATH = join(process.cwd(), "..", "data", "scanner.json");
+const CACHE_PATH = join(process.cwd(), "..", "data", "trend_scan.json");
 const STALE_THRESHOLD_SECONDS = 600;
 
 interface CacheMeta {
@@ -45,10 +45,13 @@ export async function GET(): Promise<Response> {
   } catch {
     const cache_meta = buildCacheMeta(CACHE_PATH);
     return NextResponse.json({
-      scan_time: "",
-      tickers_scanned: 0,
-      signals_found: 0,
-      top_signals: [],
+      scan_id: "",
+      scan_timestamp: "",
+      market_context: { spy_close: 0, vix_close: 0, regime: "unknown" },
+      universe_size: 0,
+      stage_a_survivors: 0,
+      stage_b_survivors: 0,
+      candidates: [],
       cache_meta,
     });
   }
@@ -56,7 +59,10 @@ export async function GET(): Promise<Response> {
 
 export async function POST(): Promise<Response> {
   try {
-    const data = await xenonFetch("/scan", { method: "POST", timeout: 130_000 });
+    const data = await xenonFetch("/trend-scan", {
+      method: "POST",
+      timeout: 200_000,
+    });
     const cache_meta = buildCacheMeta(CACHE_PATH);
     return NextResponse.json({ ...data, cache_meta });
   } catch (error) {
@@ -66,7 +72,10 @@ export async function POST(): Promise<Response> {
       const cached = JSON.parse(raw);
       const cache_meta = buildCacheMeta(CACHE_PATH);
       const res = NextResponse.json({ ...cached, cache_meta, is_stale: true });
-      res.headers.set("X-Sync-Warning", "Xenon API unavailable - serving cached data");
+      res.headers.set(
+        "X-Sync-Warning",
+        "Xenon API unavailable - serving cached data",
+      );
       return res;
     } catch {
       const message = error instanceof Error ? error.message : "Scanner failed";
