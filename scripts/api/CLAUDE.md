@@ -6,6 +6,28 @@ FastAPI bridge between Next.js and IB/UW/MenthorQ. Root `CLAUDE.md` is authorita
 
 Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xenonApi.ts`). **Never `spawn()`**. No spawn fallback — always try FastAPI first.
 
+## Module Layout
+
+- `server.py` — endpoint dispatch, IB pool lifecycle, background schedulers (pre-market trend scan 8:30 AM ET, CTA sync)
+- `routes/` — per-topic FastAPI routers, included from `server.py`:
+  - `uw_analyze.py` — `/uw-analyze/*` (portfolio bias, refresh, SSE streaming for progressive enrichment)
+  - `uw_stats.py` — `/uw-stats`, `/uw-stats/reset`
+  - `historical.py` — historical bars
+- `services/` — business logic (stateful, testable without HTTP):
+  - `uw_analyze_cache.py`, `uw_analyze_candidates.py`, `uw_analyze_daily_job.py`, `uw_analyze_diff.py`, `uw_analyze_flow_tracker.py`, `uw_analyze_oi_snapshots.py`, `uw_analyze_oi_tracker.py`, `uw_analyze_portfolio_bias.py`
+- `ib_pool.py` — persistent IB connection pool (clientId 0–9)
+- `pool_order_manage.py` — pool-based helpers (but see cancel/modify rule below — real cancel/modify uses subprocess)
+- `ws_ticket.py` — 30s single-use WebSocket auth tickets
+- `ib_gateway.py` — docker/cloud/launchd gateway lifecycle
+- `auth.py` — Clerk JWT + API key dependencies (localhost bypass inside)
+
+**New endpoint?** Add a router module under `routes/`, register it in `server.py`. Business logic goes in `services/`, not inline in the route.
+
+## Background Tasks
+
+- **Pre-market trend scan** — 8:30 AM ET weekdays, `trend_scan.py --top 25`, writes `data/trend_scan.json`. Defined as an asyncio loop started in the lifespan handler (`_trend_scan_premarket_loop`).
+- **Futu singleton** — lazy-initialized on first `/futu/sync` call so the server boots even when OpenD is down. asyncio singleflight lock collapses concurrent fetches. 10s cooldown gate. **Uses a `None` sentinel (not `0.0`) for last-sync** — near process start `time.monotonic() - 0.0` would look recently-synced and serve stale cache.
+
 ## Cancel / Modify Failure Propagation
 
 1. **Cancel and modify MUST use subprocess with original clientId.**
