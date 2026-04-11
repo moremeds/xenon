@@ -54,6 +54,7 @@ WRONG (mid-mid):
 ```
 
 **Implementations (all use correct algorithm):**
+
 - `computeNetOptionQuote()` in `optionsChainUtils.ts`
 - `ComboOrderForm.netPrices` in `OrderTab.tsx`
 - `resolveOrderPriceData()` for BAG in `ModifyOrderModal.tsx`
@@ -76,15 +77,15 @@ Sum of legs = position P&L. Uses WS price, fallback IB sync. Impl: `LegRow` in `
 
 ### Price Resolution Priority
 
-| Context | Source |
-|---------|--------|
-| Stock | `prices[ticker].last` |
-| Single-leg option | `prices[optionKey(...)].last` |
-| Multi-leg spread | Net from each leg's `prices[legPriceKey(...)]` |
-| BAG order last | `resolveOrderLastPrice()` — net mid from legs |
-| BAG modify BID/MID/ASK | `resolveOrderPriceData()` in `ModifyOrderModal.tsx` |
-| Order form BID/MID/ASK | Same as PriceBar |
-| PriceBar in modal | `resolvePriceBar()` — option-level for single-leg, underlying for multi-leg |
+| Context                | Source                                                                      |
+| ---------------------- | --------------------------------------------------------------------------- |
+| Stock                  | `prices[ticker].last`                                                       |
+| Single-leg option      | `prices[optionKey(...)].last`                                               |
+| Multi-leg spread       | Net from each leg's `prices[legPriceKey(...)]`                              |
+| BAG order last         | `resolveOrderLastPrice()` — net mid from legs                               |
+| BAG modify BID/MID/ASK | `resolveOrderPriceData()` in `ModifyOrderModal.tsx`                         |
+| Order form BID/MID/ASK | Same as PriceBar                                                            |
+| PriceBar in modal      | `resolvePriceBar()` — option-level for single-leg, underlying for multi-leg |
 
 **Never show underlying price where user expects option/spread price. Show "---" if unavailable.**
 
@@ -108,9 +109,31 @@ JSON data files: always `"ticker"`. IB contracts: `"symbol"`. Read defensively: 
 
 `xenonFetch()` in `web/lib/xenonApi.ts` — all Next.js routes call FastAPI via this helper (never `spawn()`). Attaches Clerk Bearer token automatically. Errors surfaced as `XenonApiError` with upstream status + detail preserved.
 
+## Multi-Broker Account Tabs
+
+`AccountTabBar.tsx` — switches between IB (live trading) and Futu (read-only positions snapshot). Futu is observe-only: never send orders, never treat as a quote source. Adapter: `futuPortfolioAdapter.ts`. Sync hook: `useFutuPortfolio.ts` — **POST polling** (`/futu/sync`), not GET; the GET endpoint returns cached data and was causing stale-snapshot bugs (commit 1be17ea).
+
+## uw-analyze — Cache-First Loading
+
+`/uw-analyze` loads from disk cache instantly on page open, then refreshes in background via SSE. Do not block initial render on a fresh fetch. Hook: `useUwAnalyze.ts`. Cross-mount snapshot cache keeps tickers warm across route changes (commit 6cd7b49). Last-known-good merge preserves sticky enrichment fields across refreshes (commit 1faa663). Contract tests: `web/tests/uw-analyze-*.test.ts`.
+
+## UW API Telemetry
+
+`useUwStats.ts` polls `/api/uw-stats` every 10s and surfaces request counts, latency p95, cache hit rate in the sidebar. Backed by the process-wide `scripts/utils/uw_api_stats.py` singleton. Silent-fail hook — sidebar shows `—` placeholders when unavailable.
+
+## Dev Commands
+
+```bash
+npm run dev           # next + IB realtime server + FastAPI (concurrent, from web/)
+npm run typecheck     # tsc --noEmit
+npm test              # Vitest (ASSISTANT_MOCK=1, NODE_ENV=test)
+npm run test:e2e      # Playwright (no-server config)
+```
+
 ## ⛔ Brand Identity — Mandatory for UI Work
 
 See `brand/CLAUDE.md` for the full spec. Non-negotiables:
+
 - 4px max border-radius on panels (badges: 999px capsule)
 - All colors via tokens — no raw hex
 - Mono for machine, sans for product — never reversed
