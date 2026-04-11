@@ -4,7 +4,12 @@ Used to deduplicate requests within a session (e.g., multiple tickers
 fetching the same date's darkpool data in the same evaluation run).
 
 Cache entries expire after TTL_SECONDS (default: 60s).
+
+Thread safety: UWClient._get() runs in concurrent threads via
+asyncio.to_thread(). All cache mutations are protected by a lock.
 """
+
+import threading
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -13,23 +18,26 @@ TTL_SECONDS = 60
 
 # Global cache: {cache_key: (timestamp, data)}
 _cache: Dict[str, Tuple[float, Any]] = {}
+_lock = threading.Lock()
 
 
 def get_cached(key: str) -> Optional[Any]:
     """Get a cached value if it exists and hasn't expired."""
-    entry = _cache.get(key)
-    if entry is None:
-        return None
-    timestamp, data = entry
-    if time.time() - timestamp > TTL_SECONDS:
-        del _cache[key]
-        return None
-    return data
+    with _lock:
+        entry = _cache.get(key)
+        if entry is None:
+            return None
+        timestamp, data = entry
+        if time.time() - timestamp > TTL_SECONDS:
+            del _cache[key]
+            return None
+        return data
 
 
 def set_cached(key: str, data: Any) -> None:
     """Store a value in the cache."""
-    _cache[key] = (time.time(), data)
+    with _lock:
+        _cache[key] = (time.time(), data)
 
 
 def make_key(endpoint: str, params: Optional[Dict] = None) -> str:
@@ -43,4 +51,5 @@ def make_key(endpoint: str, params: Optional[Dict] = None) -> str:
 
 def clear_cache() -> None:
     """Clear all cached entries."""
-    _cache.clear()
+    with _lock:
+        _cache.clear()

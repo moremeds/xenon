@@ -39,6 +39,12 @@ try:
 except ImportError:
     _USE_CACHE = False
 
+# Optional API usage stats (module-level singleton)
+try:
+    from utils.uw_api_stats import stats as _api_stats
+except ImportError:
+    _api_stats = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 # ══════════════════════════════════════════════════════════════════════
@@ -178,27 +184,47 @@ class UWClient:
             cache_key = make_key(endpoint, params)
             cached = get_cached(cache_key)
             if cached is not None:
+                if _api_stats is not None:
+                    _api_stats.record(endpoint, params=params, status=200, cached=True)
                 return cached
 
         last_exc: Optional[Exception] = None
+        t0 = time.monotonic()
 
         for attempt in range(1 + self._max_retries):
             try:
                 resp = self._session.get(url, params=params, timeout=self._timeout)
             except (ReqConnectionError, ReqTimeout) as exc:
                 last_exc = exc
+                if _api_stats is not None:
+                    _api_stats.record(
+                        endpoint,
+                        params=params,
+                        connection_error=True,
+                        latency_ms=(time.monotonic() - t0) * 1000,
+                        retried=attempt > 0,
+                    )
                 if attempt < self._max_retries:
                     self._sleep_backoff(attempt)
                     continue
                 raise UWAPIError(f"Connection failed after {attempt + 1} attempts: {exc}") from exc
 
             status = resp.status_code
+            latency_ms = (time.monotonic() - t0) * 1000
 
             if status == 200:
                 data = resp.json()
                 # Cache successful response
                 if cache_enabled:
                     set_cached(cache_key, data)
+                if _api_stats is not None:
+                    _api_stats.record(
+                        endpoint,
+                        params=params,
+                        status=200,
+                        latency_ms=latency_ms,
+                        retried=attempt > 0,
+                    )
                 return data
 
             # ── classify error ──
@@ -208,23 +234,42 @@ class UWClient:
             if status == 429:
                 exc = UWRateLimitError(msg, status_code=status, response_body=body)
             elif status in (401, 403):
+                if _api_stats is not None:
+                    _api_stats.record(endpoint, params=params, status=status, latency_ms=latency_ms)
                 raise UWAuthError(msg, status_code=status, response_body=body)
             elif status == 404:
+                if _api_stats is not None:
+                    _api_stats.record(endpoint, params=params, status=status, latency_ms=latency_ms)
                 raise UWNotFoundError(msg, status_code=status, response_body=body)
             elif status == 422:
+                if _api_stats is not None:
+                    _api_stats.record(endpoint, params=params, status=status, latency_ms=latency_ms)
                 raise UWValidationError(msg, status_code=status, response_body=body)
             elif status >= 500:
                 exc = UWServerError(msg, status_code=status, response_body=body)
             elif status >= 400:
+                if _api_stats is not None:
+                    _api_stats.record(endpoint, params=params, status=status, latency_ms=latency_ms)
                 raise UWAPIError(msg, status_code=status, response_body=body)
             else:
+                if _api_stats is not None:
+                    _api_stats.record(endpoint, params=params, status=status, latency_ms=latency_ms)
                 raise UWAPIError(msg, status_code=status, response_body=body)
 
-            # retryable path
+            # retryable path — record the failed attempt
+            if _api_stats is not None:
+                _api_stats.record(
+                    endpoint,
+                    params=params,
+                    status=status,
+                    latency_ms=latency_ms,
+                    retried=True,
+                )
             last_exc = exc
             if attempt < self._max_retries:
                 sleep_time = self._get_retry_delay(resp, attempt)
                 time.sleep(sleep_time)
+                t0 = time.monotonic()  # reset timer for next attempt
                 continue
 
             raise exc

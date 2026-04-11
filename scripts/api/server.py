@@ -43,6 +43,7 @@ from api.ib_pool import IBPool
 from api.pool_order_manage import pool_cancel_order, pool_modify_order
 from api.routes.historical import router as historical_router
 from api.routes.uw_analyze import router as uw_analyze_router
+from api.routes.uw_stats import router as uw_stats_router
 from api.subprocess import ScriptResult, run_module, run_script
 from api.ws_ticket import create_ticket, validate_ticket
 
@@ -343,12 +344,21 @@ async def lifespan(app: FastAPI):
                 _uw_route_mod._uw_client_singleton = None
         except Exception as exc:  # noqa: BLE001
             logger.warning("uw_analyze singleton clear on shutdown failed: %s", exc)
+        # Persist UW API stats hourly history so daily stats survive a
+        # FastAPI restart. Best-effort — never block shutdown on I/O.
+        try:
+            from utils.uw_api_stats import stats as _uw_stats
+
+            _uw_stats.flush_history()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("uw_api_stats history flush on shutdown failed: %s", exc)
         logger.info("Xenon API shut down")
 
 
 app = FastAPI(title="Xenon API", version="1.0.0", lifespan=lifespan)
 app.include_router(historical_router)
 app.include_router(uw_analyze_router)
+app.include_router(uw_stats_router)
 
 app.add_middleware(
     CORSMiddleware,
