@@ -395,7 +395,15 @@ class UWApiStats:
             logger.warning("uw_api_stats history write failed: %s", exc)
 
     def _load_history(self) -> None:
-        """Read persisted history on startup. Tolerates every failure mode."""
+        """Read persisted history on startup. Tolerates every failure mode.
+
+        After loading the hourly buckets, also rehydrates the in-memory
+        session counters (``_totals``, ``_by_status``) from them so the
+        sidebar shows cumulative stats after a restart instead of zeroing
+        out. Latency percentile samples are NOT rebuilt — we only persist
+        sum/count per hour, not the raw distribution — so ``latency_ms.p95``
+        stays absent until the first new live sample arrives.
+        """
         try:
             if not self.history_path.exists():
                 return
@@ -419,6 +427,7 @@ class UWApiStats:
             self._hourly = loaded
             # Prune immediately — the file might be from >96h ago.
             self._prune_history(now_ts=self._now_fn())
+            self._rehydrate_session_counters_from_history()
             logger.info("uw_api_stats loaded %d hourly buckets from %s", len(self._hourly), self.history_path)
         except (FileNotFoundError, json.JSONDecodeError, OSError, KeyError, TypeError, ValueError) as exc:
             logger.warning(
@@ -427,6 +436,50 @@ class UWApiStats:
                 exc,
             )
             self._hourly = {}
+
+    def _rehydrate_session_counters_from_history(self) -> None:
+        """Seed in-memory session counters from loaded hourly buckets.
+
+        Called only from ``__init__`` via ``_load_history`` — no locking
+        needed because no other thread can touch the instance yet.
+
+        Without this, ``get_stats()`` returns zeros after a restart (the
+        sidebar's "UW API", "Cache Hit", and 2xx/4xx/5xx rows zero out)
+        even though ``data/uw_api_stats_history.json`` is intact on disk.
+        After rehydration, live ``record()`` calls increment these same
+        counters so session + historic totals merge cleanly.
+        """
+        total_requests = 0
+        total_cached = 0
+        total_success = 0
+        total_failures = 0
+        sum_2xx = 0
+        sum_4xx = 0
+        sum_5xx = 0
+        for bucket in self._hourly.values():
+            r2 = int(bucket.get("requests_2xx", 0))
+            r4 = int(bucket.get("requests_4xx", 0))
+            r5 = int(bucket.get("requests_5xx", 0))
+            c = int(bucket.get("cached", 0))
+            total_requests += r2 + r4 + r5 + c
+            total_cached += c
+            total_success += r2
+            total_failures += r4 + r5
+            sum_2xx += r2
+            sum_4xx += r4
+            sum_5xx += r5
+        self._totals["requests"] = total_requests
+        self._totals["cached"] = total_cached
+        self._totals["success"] = total_success
+        self._totals["failures"] = total_failures
+        # by_status only has class granularity from history; synthesize
+        # canonical entries. New live records at the same code merge in.
+        if sum_2xx:
+            self._by_status[200] = sum_2xx
+        if sum_4xx:
+            self._by_status[400] = sum_4xx
+        if sum_5xx:
+            self._by_status[500] = sum_5xx
 
 
 # Module-level singleton — all UWClient instances share this.

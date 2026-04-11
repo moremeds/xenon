@@ -347,6 +347,73 @@ class TestPersistence:
         assert leftover == []
 
 
+# ── session counters rehydrated from persisted history ─────────────
+# Regression: after FastAPI restart, the sidebar was showing zeros
+# for requests/cache-hit/2xx-4xx-5xx even though the history file was
+# loaded fine — because get_stats() only reflected in-memory session
+# counters and _load_history() never seeded them.
+
+
+class TestRehydrateSessionCountersOnLoad:
+    def test_get_stats_reflects_loaded_history_after_restart(self, tmp_path):
+        clock = Clock(datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc))
+        s = _make_stats(tmp_path, clock)
+        # 5 requests covering every class + a cache hit.
+        s.record("stock/AAPL/volatility", status=200, latency_ms=100.0)
+        s.record("stock/AAPL/volatility", status=200, latency_ms=200.0)
+        s.record("stock/AAPL/volatility", status=404, latency_ms=50.0)
+        s.record("stock/AAPL/volatility", status=500, latency_ms=80.0)
+        s.record("stock/AAPL/volatility", status=200, cached=True)
+        s.flush_history()
+
+        # Simulate process restart: new instance pointing at same file.
+        clock2 = Clock(datetime(2026, 4, 10, 14, 30, tzinfo=timezone.utc))
+        s2 = _make_stats(tmp_path, clock2)
+        stats = s2.get_stats()
+
+        # 5 real records: 2x 200, 1x 404, 1x 500, 1x cached-200.
+        assert stats["totals"]["requests"] == 5
+        assert stats["totals"]["success"] == 2
+        assert stats["totals"]["cached"] == 1
+        assert stats["totals"]["failures"] == 2
+        # by_status is aggregated at class granularity — individual
+        # codes (404/500) can't be recovered from hourly buckets.
+        assert stats["by_status"].get(200) == 2
+        assert stats["by_status"].get(400) == 1
+        assert stats["by_status"].get(500) == 1
+        # p95 latency is not rebuildable from sum/count — stays absent
+        # until the first new live sample.
+        assert "p95" not in stats["latency_ms"]
+
+    def test_rehydrated_counters_merge_cleanly_with_live_records(self, tmp_path):
+        """After rehydration, new record() calls increment the seeded
+        counters rather than starting fresh — no drift, no double-count."""
+        clock = Clock(datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc))
+        s = _make_stats(tmp_path, clock)
+        s.record("stock/AAPL/volatility", status=200, latency_ms=100.0)
+        s.record("stock/AAPL/volatility", status=200, cached=True)
+        s.flush_history()
+
+        clock2 = Clock(datetime(2026, 4, 10, 14, 30, tzinfo=timezone.utc))
+        s2 = _make_stats(tmp_path, clock2)
+        # One fresh live request on top of the 2 historic ones.
+        s2.record("stock/AAPL/volatility", status=200, latency_ms=123.0)
+        stats = s2.get_stats()
+        assert stats["totals"]["requests"] == 3
+        assert stats["totals"]["success"] == 2  # 1 historic + 1 live
+        assert stats["totals"]["cached"] == 1
+        assert stats["by_status"][200] == 2  # historic 1 + live 1
+        # p95 now has exactly one live sample.
+        assert stats["latency_ms"]["p95"] == pytest.approx(123.0)
+
+    def test_rehydrate_noop_when_no_history_file(self, tmp_path):
+        clock = Clock(datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc))
+        s = _make_stats(tmp_path, clock)
+        stats = s.get_stats()
+        assert stats["totals"]["requests"] == 0
+        assert stats["by_status"] == {}
+
+
 # ── reset vs clear_history ───────────────────────────────────────────
 
 

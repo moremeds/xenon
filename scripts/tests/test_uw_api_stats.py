@@ -72,8 +72,12 @@ class TestNormalizeEndpoint:
 
 class TestUWApiStats:
     @pytest.fixture
-    def s(self):
-        return UWApiStats()
+    def s(self, tmp_path):
+        # Isolate from the real data/uw_api_stats_history.json — otherwise
+        # _load_history() rehydrates session counters from whatever the
+        # live FastAPI process wrote last, and "initial state" is no
+        # longer initial.
+        return UWApiStats(history_path=tmp_path / "uw_api_stats_history.json")
 
     def test_initial_state(self, s):
         stats = s.get_stats()
