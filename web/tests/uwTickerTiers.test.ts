@@ -213,7 +213,10 @@ describe("mergeScaffoldWithLive", () => {
   it("prefers the live row over the scaffold stub by ticker", () => {
     const merged = mergeScaffoldWithLive(scaffold, [liveRow("SPY", 500)]);
     const spy = merged.find((r) => r.ticker === "SPY");
-    expect(spy?.snapshot.report.price).toBe(500);
+    // `mergeScaffoldWithLive` returns wide `UwTickerRow[]`, so `.report`
+    // goes back to `UwAnalyzeReport | undefined` here — optional-chain
+    // the nested access rather than re-narrowing the return type.
+    expect(spy?.snapshot.report?.price).toBe(500);
     expect(isScaffold(spy!)).toBe(false);
     expect(isScaffold(merged.find((r) => r.ticker === "QQQ")!)).toBe(true);
   });

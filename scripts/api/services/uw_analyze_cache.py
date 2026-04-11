@@ -35,8 +35,15 @@ if str(_SCRIPTS) not in sys.path:
 logger = logging.getLogger("xenon.uw_analyze_cache")
 
 # ── Tunables ────────────────────────────────────────────────────────────────
-_TTL_OPEN_S = 300  # 5 min during market hours
-_TTL_CLOSED_S = 1800  # 30 min when closed
+# Default TTLs are enforced as the in-code fallback when the env vars are
+# unset. `_ttl()` re-reads the env on every call, so a runtime
+# ``export XENON_UW_TTL_OPEN_S=600`` takes effect immediately without
+# restarting FastAPI. Daily UW budget is ~20k calls; the 30-min open TTL keeps
+# the /uw-analyze portfolio under budget on a 70-ticker set.
+_TTL_OPEN_S = 1800  # 30 min during market hours
+_TTL_CLOSED_S = 3600  # 60 min when closed (used for user-initiated fetches only —
+# automatic refresh is blocked entirely outside market hours,
+# see get_or_run closed-market gate)
 _MAX_PARALLEL_RUNS = 3  # global cap on concurrent UW calls
 _RUN_TIMEOUT_S = 60.0  # per-ticker analyser timeout
 
@@ -477,8 +484,47 @@ class UwAnalyzeCache:
 
     # ── TTL ───────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _int_env(name: str, default: int) -> int:
+        """Read a positive integer env var with safe fallback.
+
+        Returns ``default`` when the env var is unset, empty, non-numeric,
+        has whitespace, or parses to a non-positive value. Also logs a
+        warning the first time a malformed value is seen so operators
+        notice the misconfig without crashing the /uw-analyze read path.
+
+        We cannot crash here: `_ttl()` is called inside `_is_fresh()` on
+        every `get_or_run()`, so a ValueError would 500 every request.
+        """
+        raw = os.environ.get(name)
+        if raw is None or raw == "":
+            return default
+        try:
+            v = int(raw)
+        except (ValueError, TypeError):
+            logger.warning(
+                "uw_analyze_cache: ignoring malformed %s=%r, using default %d",
+                name,
+                raw,
+                default,
+            )
+            return default
+        if v <= 0:
+            logger.warning(
+                "uw_analyze_cache: ignoring non-positive %s=%d, using default %d",
+                name,
+                v,
+                default,
+            )
+            return default
+        return v
+
     def _ttl(self) -> int:
-        return self._ttl_open if self._market_open_fn() else self._ttl_closed
+        # Env vars override the ctor defaults at call time. Tests inject
+        # explicit values via ctor kwargs; runtime tuning via env vars.
+        if self._market_open_fn():
+            return self._int_env("XENON_UW_TTL_OPEN_S", self._ttl_open)
+        return self._int_env("XENON_UW_TTL_CLOSED_S", self._ttl_closed)
 
     def _is_fresh(self, entry: dict) -> bool:
         cur = entry.get("current") if isinstance(entry, dict) else None
@@ -555,6 +601,7 @@ class UwAnalyzeCache:
         *,
         runner: Callable[[str], Awaitable[tuple[dict, dict, list[dict]]]],
         force: bool = False,
+        user_initiated: bool = False,
         sources: Iterable[Source] = (),
     ) -> tuple[dict, bool]:
         """Return `(entry, did_refresh)` for `ticker`, running `runner(ticker)`
@@ -564,6 +611,12 @@ class UwAnalyzeCache:
         new snapshot; callers use it to gate write-path side effects like
         flow event capture. The materialized diff is persisted on the entry
         at `materialized_changes` so GET paths never recompute.
+
+        `user_initiated=True` bypasses the closed-market gate. Set this on
+        explicit user actions (refresh button, single-ticker analyze, CLI).
+        Automatic paths (portfolio auto-poll, scheduled fills) leave it False
+        so they get gated outside market hours to preserve the daily UW
+        budget. See plan §2 in silly-humming-tide.md.
 
         `runner` is an async callable returning
         `(report_dict, display_dict, flow_alerts)`. Injection makes the
@@ -596,6 +649,26 @@ class UwAnalyzeCache:
                     if before != after:
                         await self._persist()
                 return entry, False
+
+            # Closed-market gate: block automatic refreshes outside market
+            # hours. Must be placed AFTER the freshness check above — fresh
+            # entries (including ones freshened by a recent force=True POST)
+            # flow through without being tagged served_stale. Only the
+            # "I would have called the analyzer" path hits the gate.
+            if not user_initiated and not self._market_open_fn():
+                if entry:
+                    # Stale entry during closed hours — serve last-known-good.
+                    result = dict(entry)  # shallow copy; do not mutate cache
+                    result["served_stale"] = True
+                    result["has_snapshot"] = True
+                    return result, False
+                # No entry at all — return a typed empty stub. UI must handle
+                # has_snapshot=False as scaffold state.
+                return {
+                    "current": None,
+                    "has_snapshot": False,
+                    "served_stale": False,
+                }, False
 
             async with self._semaphore:
                 logger.info("uw_analyze_cache running analysis for %s (force=%s)", ticker, force)

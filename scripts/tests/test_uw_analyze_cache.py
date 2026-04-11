@@ -172,6 +172,237 @@ def test_ttl_open_vs_closed(tmp_path):
     assert cache._ttl() == 1800
 
 
+def test_ttl_env_override_open(tmp_path, monkeypatch):
+    """XENON_UW_TTL_OPEN_S overrides the ctor default at call time, not import time.
+
+    The override is read inside ``_ttl()`` on every call, so a developer can
+    ``export XENON_UW_TTL_OPEN_S=600`` in a running shell and have the next
+    request honor it without restarting FastAPI.
+    """
+    cache = make_cache(tmp_path, market_open=True, ttl_open_s=300)
+    assert cache._ttl() == 300  # baseline from ctor
+    monkeypatch.setenv("XENON_UW_TTL_OPEN_S", "900")
+    assert cache._ttl() == 900  # env wins
+    monkeypatch.delenv("XENON_UW_TTL_OPEN_S")
+    assert cache._ttl() == 300  # falls back to ctor when env unset
+
+
+def test_ttl_env_override_closed(tmp_path, monkeypatch):
+    cache = make_cache(tmp_path, market_open=False, ttl_closed_s=1800)
+    assert cache._ttl() == 1800
+    monkeypatch.setenv("XENON_UW_TTL_CLOSED_S", "3600")
+    assert cache._ttl() == 3600
+
+
+def test_ttl_env_override_ignored_when_wrong_state(tmp_path, monkeypatch):
+    """XENON_UW_TTL_OPEN_S does not affect the closed path and vice versa."""
+    cache = make_cache(tmp_path, market_open=True, ttl_open_s=300, ttl_closed_s=1800)
+    monkeypatch.setenv("XENON_UW_TTL_CLOSED_S", "9999")
+    assert cache._ttl() == 300  # open path ignores CLOSED override
+    cache._market_open_fn = lambda: False
+    assert cache._ttl() == 9999  # now the CLOSED override kicks in
+
+
+def test_ttl_env_invalid_value_falls_back_to_default(tmp_path, monkeypatch):
+    """Malformed XENON_UW_TTL_* values must NOT crash the cache.
+
+    Before the _int_env helper, `int(os.environ.get(...))` would raise
+    ValueError on every _is_fresh() call, turning a misconfig into a hard
+    crash of every /uw-analyze read path. The helper now falls back to
+    the ctor default and logs a warning.
+    """
+    cache = make_cache(tmp_path, market_open=True, ttl_open_s=300)
+
+    # Non-numeric → fallback
+    monkeypatch.setenv("XENON_UW_TTL_OPEN_S", "abc")
+    assert cache._ttl() == 300
+
+    # Empty string → fallback
+    monkeypatch.setenv("XENON_UW_TTL_OPEN_S", "")
+    assert cache._ttl() == 300
+
+    # Negative / zero → fallback (TTLs must be positive)
+    monkeypatch.setenv("XENON_UW_TTL_OPEN_S", "-5")
+    assert cache._ttl() == 300
+    monkeypatch.setenv("XENON_UW_TTL_OPEN_S", "0")
+    assert cache._ttl() == 300
+
+    # Python's int() strips whitespace, so "1800 " is a valid value,
+    # not a misconfig. This is expected behavior.
+    monkeypatch.setenv("XENON_UW_TTL_OPEN_S", "1800 ")
+    assert cache._ttl() == 1800
+
+    # And a valid value still works after invalid ones.
+    monkeypatch.setenv("XENON_UW_TTL_OPEN_S", "900")
+    assert cache._ttl() == 900
+
+
+# ── Closed-market gate ────────────────────────────────────────────────────
+#
+# Gate semantics: when the market is closed AND the caller is not
+# user-initiated, get_or_run returns cached data (flagged served_stale)
+# or an empty stub, without calling the runner. User-initiated callers
+# (the refresh button, single-ticker analyze, CLI) bypass the gate and
+# always run the analyzer. Covers the 4 critical correctness properties
+# from plan §2 (silly-humming-tide.md).
+
+
+def test_closed_market_gate_serves_stale_without_running(tmp_path):
+    """Stale entry + closed market + automatic caller → serve stale, no runner call."""
+
+    async def go():
+        calls = []
+        # Both TTLs = 1s so the entry is stale in both OPEN and CLOSED states.
+        # Without ttl_closed_s=1, flipping to CLOSED would use ttl_closed_s
+        # default (3600) and `_is_fresh` would short-circuit before the gate.
+        cache = make_cache(tmp_path, market_open=True, ttl_open_s=1, ttl_closed_s=1)
+        runner = make_runner(calls_record=calls)
+        await cache.get_or_run("nvda", runner=runner)
+        assert calls == ["NVDA"]
+
+        # Age the entry past TTL, flip to closed market, automatic caller.
+        await asyncio.sleep(1.1)
+        cache._market_open_fn = lambda: False
+
+        entry, did_refresh = await cache.get_or_run("nvda", runner=runner)
+        # Runner must NOT have been called again.
+        assert calls == ["NVDA"]
+        assert did_refresh is False
+        # Stale served with flags set.
+        assert entry.get("served_stale") is True
+        assert entry.get("has_snapshot") is True
+        # Original cached fields still present.
+        assert entry["current"]["ticker"] == "NVDA"
+
+    _run(go())
+
+
+def test_closed_market_gate_returns_empty_stub_when_no_entry(tmp_path):
+    """No cached entry + closed market + automatic caller → empty stub."""
+
+    async def go():
+        calls = []
+        cache = make_cache(tmp_path, market_open=False)
+        runner = make_runner(calls_record=calls)
+
+        entry, did_refresh = await cache.get_or_run("ftnt", runner=runner)
+        assert calls == []  # runner never invoked
+        assert did_refresh is False
+        assert entry == {
+            "current": None,
+            "has_snapshot": False,
+            "served_stale": False,
+        }
+
+    _run(go())
+
+
+def test_closed_market_fresh_entry_bypasses_gate(tmp_path):
+    """Fresh entry during closed market → returned via _is_fresh short-circuit,
+    WITHOUT the served_stale flag. Gate must not fire for fresh data."""
+
+    async def go():
+        calls = []
+        # Seed while open, with a long TTL so it stays fresh.
+        cache = make_cache(tmp_path, market_open=True, ttl_open_s=3600)
+        runner = make_runner(calls_record=calls)
+        await cache.get_or_run("nvda", runner=runner)
+
+        # Flip to closed market — entry is still fresh.
+        cache._market_open_fn = lambda: False
+        entry, did_refresh = await cache.get_or_run("nvda", runner=runner)
+        assert calls == ["NVDA"]  # still only one runner call
+        assert did_refresh is False
+        # CRITICAL: fresh entries must NOT be tagged served_stale during
+        # closed market — the data actually IS fresh.
+        assert "served_stale" not in entry or entry.get("served_stale") is False
+
+    _run(go())
+
+
+def test_closed_market_user_initiated_bypasses_gate(tmp_path):
+    """user_initiated=True bypasses the gate and runs the analyzer even when
+    the market is closed. This is how the refresh button works during
+    overnight/weekend hours."""
+
+    async def go():
+        calls = []
+        cache = make_cache(tmp_path, market_open=False)
+        runner = make_runner(calls_record=calls)
+
+        entry, did_refresh = await cache.get_or_run("nvda", runner=runner, user_initiated=True)
+        assert calls == ["NVDA"]  # runner fired despite closed market
+        assert did_refresh is True
+        assert entry["current"]["ticker"] == "NVDA"
+        # Fresh fetch — no stale flag.
+        assert entry.get("served_stale") in (None, False)
+
+    _run(go())
+
+
+def test_open_market_user_initiated_is_noop_on_gate(tmp_path):
+    """During market hours, user_initiated has no effect on the gate path —
+    the gate never fires. Caching behavior is unchanged."""
+
+    async def go():
+        calls = []
+        cache = make_cache(tmp_path, market_open=True)
+        runner = make_runner(calls_record=calls)
+
+        await cache.get_or_run("nvda", runner=runner, user_initiated=False)
+        await cache.get_or_run("nvda", runner=runner, user_initiated=True)
+        # Second call is a fresh-entry cache hit; runner called once.
+        assert calls == ["NVDA"]
+
+    _run(go())
+
+
+def test_closed_market_force_true_user_initiated_false_is_still_gated(tmp_path):
+    """CRITICAL plan property: force and user_initiated are SEPARATE signals.
+
+    ``force=True`` alone must not bypass the closed-market gate — otherwise
+    any scheduled job passing ``force=True`` to "freshen at all costs" would
+    burn the daily UW budget overnight. Only explicit human action
+    (``user_initiated=True``) should bypass the gate.
+
+    This test locks in the semantic split so a future refactor that
+    collapses the two parameters will immediately fail.
+    """
+
+    async def go():
+        calls = []
+        # Both TTLs = 1s so the entry goes stale fast in either state.
+        cache = make_cache(tmp_path, market_open=True, ttl_open_s=1, ttl_closed_s=1)
+        runner = make_runner(calls_record=calls)
+
+        # Seed while open.
+        await cache.get_or_run("nvda", runner=runner)
+        assert calls == ["NVDA"]
+
+        # Age the entry, flip to closed, call with force=True but
+        # user_initiated=False (simulates a scheduled "always-fresh" job).
+        await asyncio.sleep(1.1)
+        cache._market_open_fn = lambda: False
+
+        entry, did_refresh = await cache.get_or_run(
+            "nvda",
+            runner=runner,
+            force=True,
+            user_initiated=False,
+        )
+        # CRITICAL: runner must NOT have been called again. force=True
+        # skips the _is_fresh short-circuit but the gate still blocks on
+        # `not user_initiated and not market_open`.
+        assert calls == ["NVDA"], (
+            "force=True alone must not bypass the closed-market gate; user_initiated=True is required"
+        )
+        assert did_refresh is False
+        assert entry.get("served_stale") is True
+        assert entry.get("has_snapshot") is True
+
+    _run(go())
+
+
 # ── Singleflight + semaphore ───────────────────────────────────────────────
 
 

@@ -14,7 +14,7 @@
  * the page never shows an empty above-the-fold grid.
  */
 
-import type { UwTickerRow } from "./uwAnalyzeTypes";
+import type { UwSnapshot, UwTickerRow } from "./uwAnalyzeTypes";
 
 export const MARKET_INDICES = ["SPY", "QQQ", "IWM", "DIA"] as const;
 export const COMMODITIES = ["GLD", "SLV"] as const;
@@ -287,7 +287,14 @@ export const SCAFFOLD_TICKERS: readonly string[] = [
   ...WATCH_TICKERS,
 ];
 
-export function makeScaffoldRow(ticker: string): UwTickerRow {
+// Return type carries a concrete `UwSnapshot` (not the `Partial<>` branch on
+// `UwTickerRow.snapshot`) because the factory always builds a fully-populated
+// snapshot. This lets callers — production code and tests alike — access
+// nested fields without null-checks while keeping the wider `UwTickerRow`
+// type honest about the closed-market empty-stub case. Fix #4 aftermath.
+export function makeScaffoldRow(
+  ticker: string,
+): UwTickerRow & { snapshot: UwSnapshot } {
   return {
     ticker,
     sources: [],
@@ -327,9 +334,19 @@ export const SCAFFOLD_ROWS: readonly UwTickerRow[] =
  * A scaffold row is one that has not yet been populated by a backend scan.
  * Check both the snapshot timestamp and report timestamp because either
  * sentinel ("") is only emitted by `makeScaffoldRow`.
+ *
+ * Also treat rows where the backend explicitly signals `has_snapshot=false`
+ * as scaffold — this is how uncached tickers come back during closed-market
+ * hours (silly-humming-tide.md plan §3). The backend returns an empty stub
+ * so the UI can render without crashing on missing display/report fields.
  */
 export function isScaffold(row: UwTickerRow): boolean {
-  return row.snapshot.ts === "" && row.snapshot.report.fetched_at === "";
+  if (row.has_snapshot === false) return true;
+  // `row.snapshot` is `UwSnapshot | Partial<UwSnapshot>` (Fix #4), so
+  // `report` may be undefined for a closed-market empty stub — those
+  // rows are NOT scaffolds (`has_snapshot` would be false above), so
+  // a missing report defaults to "not scaffold" via the optional chain.
+  return row.snapshot.ts === "" && row.snapshot.report?.fetched_at === "";
 }
 
 /**
