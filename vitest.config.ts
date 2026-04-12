@@ -31,25 +31,37 @@ export default defineConfig({
       exclude: [
         "**/*.test.ts",
         "**/node_modules/**",
-        "web/lib/use*.ts", // React hooks need jsdom
+        // Hooks that require Next.js navigation context (can't run in node or jsdom)
+        "web/lib/perfTracker.ts",
+        // React context providers (need full component tree)
         "web/lib/OrderActionsContext.tsx",
         "web/lib/TickerDetailContext.tsx",
-        "web/lib/types.ts", // Pure type definitions, no runtime code
-        "lib/tools/pi-tools.ts", // PI framework registration, untestable without PI
-        "lib/tools/schemas/index.ts", // Re-export barrel
-        "lib/tools/wrappers/index.ts", // Re-export barrel
-        "lib/tools/wrappers/fetch-ticker.ts", // Thin runScript wrapper
-        "lib/tools/wrappers/ib-order-manage.ts", // Thin runScript wrapper
-        "lib/tools/wrappers/ib-orders.ts", // Thin runScript wrapper
-        "lib/tools/wrappers/ib-sync.ts", // Thin runScript wrapper
-        "lib/tools/wrappers/scanner.ts", // Thin runScript wrapper
-        "web/app/api/pi/**", // Large PI dispatcher, tested via integration.test.ts
-        "web/app/api/prices/**", // WebSocket client, needs live IB server
-        "web/app/api/blotter/**", // Spawns Python subprocess for Flex Query
-        "web/app/api/discover/**", // Spawns Python subprocess for discover.py
-        "web/app/api/flow-analysis/**", // Proxies to FastAPI /flow-analysis
-        "web/app/api/scanner/**", // Spawns Python subprocess for scanner.py
+        "web/lib/accountContext.ts",
+        // Pure type definitions
+        "web/lib/types.ts",
+        "web/lib/orderModify.ts",
+        // PI framework
+        "lib/tools/pi-tools.ts",
+        "lib/tools/schemas/index.ts",
+        "lib/tools/wrappers/index.ts",
+        "lib/tools/wrappers/fetch-ticker.ts",
+        "lib/tools/wrappers/ib-order-manage.ts",
+        "lib/tools/wrappers/ib-orders.ts",
+        "lib/tools/wrappers/ib-sync.ts",
+        "lib/tools/wrappers/scanner.ts",
+        // Routes that spawn subprocesses or need live services
+        "web/app/api/pi/**",
+        "web/app/api/prices/**",
+        "web/app/api/blotter/**",
+        "web/app/api/discover/**",
+        "web/app/api/flow-analysis/**",
+        "web/app/api/scanner/**",
       ],
+      thresholds: {
+        lines: 80,
+        functions: 75,
+        branches: 70,
+      },
     },
   },
 });
