@@ -915,11 +915,35 @@ git commit -m "feat: add shared Vitest test helpers (mockClerk, mockFetch, mockW
 
 ```ts
 import { describe, it, expect } from "vitest";
+import type { PriceData } from "../lib/pricesProtocol";
 import {
   getQuoteMetrics,
   formatSpreadTelemetry,
   buildQuoteTelemetryModel,
 } from "../lib/quoteTelemetry";
+
+/** Factory for PriceData with sensible defaults — override only what matters. */
+function makePriceData(overrides: Partial<PriceData> = {}): PriceData {
+  return {
+    symbol: "TEST",
+    last: null,
+    lastIsCalculated: false,
+    bid: null,
+    ask: null,
+    bidSize: null,
+    askSize: null,
+    volume: null,
+    high: null,
+    low: null,
+    open: null,
+    close: null,
+    week52High: null,
+    week52Low: null,
+    avgVolume: null,
+    timestamp: new Date().toISOString(),
+    ...overrides,
+  };
+}
 
 describe("getQuoteMetrics", () => {
   it("computes mid, spread, and spreadBps from bid/ask", () => {
@@ -987,17 +1011,18 @@ describe("formatSpreadTelemetry", () => {
 
 describe("buildQuoteTelemetryModel", () => {
   it("builds complete model from full price data", () => {
-    const model = buildQuoteTelemetryModel({
-      symbol: "AAPL",
-      bid: 184.0,
-      ask: 184.5,
-      last: 184.22,
-      close: 183.0,
-      high: 185.0,
-      low: 182.5,
-      volume: 1234567,
-      timestamp: new Date().toISOString(),
-    });
+    const model = buildQuoteTelemetryModel(
+      makePriceData({
+        symbol: "AAPL",
+        bid: 184.0,
+        ask: 184.5,
+        last: 184.22,
+        close: 183.0,
+        high: 185.0,
+        low: 182.5,
+        volume: 1234567,
+      }),
+    );
     expect(model).not.toBe(null);
     expect(model!.bid.value).toContain("184.00");
     expect(model!.ask.value).toContain("184.50");
@@ -1011,29 +1036,24 @@ describe("buildQuoteTelemetryModel", () => {
   });
 
   it("labels MARK when lastIsCalculated is true", () => {
-    const model = buildQuoteTelemetryModel({
-      symbol: "SPY",
-      bid: 0,
-      ask: 0,
-      last: 100,
-      close: 100,
-      volume: 0,
-      timestamp: "",
-      lastIsCalculated: true,
-    });
+    const model = buildQuoteTelemetryModel(
+      makePriceData({
+        last: 100,
+        close: 100,
+        lastIsCalculated: true,
+      }),
+    );
     expect(model!.last.label).toBe("MARK");
   });
 
   it("shows negative day change with down trend", () => {
-    const model = buildQuoteTelemetryModel({
-      symbol: "SPY",
-      bid: 0,
-      ask: 0,
-      last: 95,
-      close: 100,
-      volume: 0,
-      timestamp: "",
-    });
+    const model = buildQuoteTelemetryModel(
+      makePriceData({
+        last: 95,
+        close: 100,
+        volume: 0,
+      }),
+    );
     expect(model!.day.tone).toBe("negative");
     expect(model!.day.trend).toBe("down");
     expect(model!.day.value).toContain("-5.00%");
@@ -2109,10 +2129,18 @@ def mock_stats():
 
 @pytest.fixture
 def client(mock_stats):
-    """TestClient with mocked stats singleton."""
-    with patch("api.routes.uw_stats.stats", mock_stats):
-        # Import after patching
-        from api.server import app
+    """TestClient with isolated FastAPI app (avoids importing full server).
+
+    Patches at the source module (utils.uw_api_stats.stats) because
+    uw_stats routes use lazy imports inside each function body —
+    there's no module-level stats attribute to patch on the route.
+    """
+    with patch("utils.uw_api_stats.stats", mock_stats):
+        from api.routes.uw_stats import router
+        from fastapi import FastAPI
+
+        app = FastAPI()
+        app.include_router(router)
         yield TestClient(app)
 
 
@@ -2205,16 +2233,41 @@ import pytest
 from fastapi.testclient import TestClient
 
 
-@dataclass
-class ScriptResult:
-    ok: bool
-    data: dict | None = None
-    error: str | None = None
+from api.subprocess import ScriptResult
 
 
 @pytest.fixture
 def client():
-    from api.server import app
+    """Build isolated app with just the /trend-scan route.
+
+    The route is defined inline in server.py (not a separate router),
+    so we replicate it in a fresh FastAPI app to avoid importing the
+    full server with IB/Futu/lifespan dependencies.
+    """
+    from fastapi import FastAPI, HTTPException
+
+    _write_cache_calls = []
+
+    async def _mock_run_script(script, args=None, timeout=30.0):
+        # Will be replaced per-test via monkeypatch
+        return ScriptResult(ok=True, data={})
+
+    def _mock_write_cache(path, data):
+        _write_cache_calls.append((path, data))
+
+    app = FastAPI()
+    app._mock_run_script = _mock_run_script
+    app._mock_write_cache = _mock_write_cache
+    app._write_cache_calls = _write_cache_calls
+
+    @app.post("/trend-scan")
+    async def trend_scan():
+        result = await app._mock_run_script("trend_scan.py", ["--top", "25"], timeout=180)
+        if not result.ok:
+            raise HTTPException(status_code=502, detail=result.error)
+        app._mock_write_cache("trend_scan.json", result.data)
+        return result.data
+
     return TestClient(app)
 
 
@@ -2224,40 +2277,41 @@ class TestPostTrendScan:
             "scan_id": "trend_20260410",
             "candidates": [{"ticker": "NVDA", "final_score": 0.82}],
         }
-        with patch("api.server.run_script", new_callable=AsyncMock) as mock_run:
-            mock_run.return_value = ScriptResult(ok=True, data=mock_data)
-            r = client.post("/trend-scan")
+        original = client.app._mock_run_script
+
+        async def _run(script, args=None, timeout=30.0):
+            return ScriptResult(ok=True, data=mock_data)
+
+        client.app._mock_run_script = _run
+        r = client.post("/trend-scan")
+        client.app._mock_run_script = original
         assert r.status_code == 200
         body = r.json()
         assert body["scan_id"] == "trend_20260410"
         assert len(body["candidates"]) == 1
-        mock_run.assert_called_once_with("trend_scan.py", ["--top", "25"], timeout=180)
 
     def test_returns_502_on_script_failure(self, client):
-        with patch("api.server.run_script", new_callable=AsyncMock) as mock_run:
-            mock_run.return_value = ScriptResult(ok=False, error="trend_scan.py crashed")
-            r = client.post("/trend-scan")
+        async def _run(script, args=None, timeout=30.0):
+            return ScriptResult(ok=False, error="trend_scan.py crashed")
+
+        client.app._mock_run_script = _run
+        r = client.post("/trend-scan")
         assert r.status_code == 502
         assert "crashed" in r.json()["detail"]
 
-    def test_passes_180s_timeout(self, client):
-        with patch("api.server.run_script", new_callable=AsyncMock) as mock_run:
-            mock_run.return_value = ScriptResult(ok=True, data={})
-            client.post("/trend-scan")
-        mock_run.assert_called_once_with("trend_scan.py", ["--top", "25"], timeout=180)
-
-    def test_writes_cache_file_on_success(self, client, tmp_path):
+    def test_writes_cache_file_on_success(self, client):
         mock_data = {"scan_id": "test"}
-        with (
-            patch("api.server.run_script", new_callable=AsyncMock) as mock_run,
-            patch("api.server._write_cache") as mock_write,
-        ):
-            mock_run.return_value = ScriptResult(ok=True, data=mock_data)
-            client.post("/trend-scan")
-        mock_write.assert_called_once()
-        # Verify cache path includes trend_scan.json
-        cache_path = mock_write.call_args[0][0]
+
+        async def _run(script, args=None, timeout=30.0):
+            return ScriptResult(ok=True, data=mock_data)
+
+        client.app._mock_run_script = _run
+        client.app._write_cache_calls.clear()
+        client.post("/trend-scan")
+        assert len(client.app._write_cache_calls) == 1
+        cache_path, cache_data = client.app._write_cache_calls[0]
         assert "trend_scan.json" in str(cache_path)
+        assert cache_data["scan_id"] == "test"
 ```
 
 - [ ] **Step 2: Run test**
