@@ -293,7 +293,9 @@ async def uw_analyze(req: UwAnalyzeRequest) -> UwAnalyzeResponse:
 
     cache = get_portfolio_cache()
     try:
-        entry, _ = await cache.get_or_run(raw_ticker, runner=_runner, force=False)
+        # POST /uw-analyze is explicit user action — bypass the closed-market
+        # gate so the user can analyze any ticker at any time.
+        entry, _ = await cache.get_or_run(raw_ticker, runner=_runner, force=False, user_initiated=True)
     except UWNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"ticker not found: {raw_ticker}") from exc
     except UWAPIError as exc:
@@ -416,17 +418,23 @@ async def _process_ticker(
     sources,
     cache: "UwAnalyzeCache",
     flow_log: "FlowLog",
+    *,
+    user_initiated: bool = False,
 ) -> Optional[dict]:
     """Process a single ticker: cache lookup/scan + OI baseline + flow capture.
 
     Returns a row dict with an internal ``_oi_refreshed`` flag (stripped by
     the caller before sending to the client).
+
+    ``user_initiated=True`` bypasses the closed-market gate on both the
+    primary cache.get_or_run call AND the on-demand OI refresh below.
     """
     try:
         entry, did_refresh = await cache.get_or_run(
             ticker,
             runner=_runner,
             force=False,
+            user_initiated=user_initiated,
             sources=sources,
         )
     except Exception as exc:  # noqa: BLE001
@@ -436,6 +444,13 @@ async def _process_ticker(
     # On-demand OI fetch when the daily cron hasn't yet stamped oi_baseline,
     # OR when the stamped baseline is from an earlier trading day.
     #
+    # CLOSED-MARKET GATE: this block hits UW directly (not via get_or_run),
+    # so we must gate it independently. Without this check, the midnight ET
+    # rollover makes every ticker's baseline stale and the next automatic
+    # /portfolio poll fires fetch_and_diff for all ~70 tickers — blowing
+    # through the daily UW budget on every Saturday morning. Plan §2a +
+    # Codex tribunal issue C1 in silly-humming-tide.md.
+    #
     # IMPORTANT: this block must NOT call `cache._persist()`. The caller
     # batches a single persist after all tickers complete based on the
     # `_oi_refreshed` flag on each row.
@@ -444,7 +459,12 @@ async def _process_ticker(
     today_iso = now_et_date().isoformat()
     baseline = entry.get("oi_baseline") or {}
     oi_refreshed = False
-    if not baseline or baseline.get("data_date") != today_iso:
+    oi_stale = not baseline or baseline.get("data_date") != today_iso
+    # Skip the OI refresh outside market hours unless this is an explicit
+    # user action. The cache entry's existing oi_baseline (even if stale) is
+    # served unchanged — the user can click refresh to pull fresh OI at any
+    # time, and the daily cron will restamp baselines during open hours.
+    if oi_stale and (cache._market_open_fn() or user_initiated):
         try:
             from api.services import uw_analyze_oi_tracker
 
@@ -477,6 +497,11 @@ async def _process_ticker(
                 flow_log.upsert(ev)
 
     oi_baseline = entry.get("oi_baseline") or {}
+    # Per-row stale fields (plan §3). `has_snapshot=False` signals scaffold
+    # render; `served_stale=True` signals a dimmer "cached" badge on the tile.
+    has_snapshot = bool(snap)
+    snap_ts = snap.get("ts") if isinstance(snap, dict) else None
+    served_stale = bool(entry.get("served_stale"))
     return {
         "ticker": ticker,
         "sources": list(sources),
@@ -485,6 +510,9 @@ async def _process_ticker(
         "changes": change_dicts,
         "oi_changes": oi_baseline.get("changes") or [],
         "unusual_flow_events": [e.to_dict() for e in flow_log.for_ticker(ticker)],
+        "has_snapshot": has_snapshot,
+        "served_stale": served_stale,
+        "snapshot_ts": snap_ts,
         "_oi_refreshed": oi_refreshed,
     }
 
@@ -505,7 +533,7 @@ async def _finalize_rows(rows: list[dict], cache, flow_log) -> None:
 
 
 @router.get("/uw-analyze/portfolio")
-async def uw_analyze_portfolio(request: Request, cached: bool = False):
+async def uw_analyze_portfolio(request: Request, cached: bool = False, user_initiated: bool = False):
     """Return current snapshots + diffs for all portfolio + watchlist tickers.
 
     Modes:
@@ -513,6 +541,12 @@ async def uw_analyze_portfolio(request: Request, cached: bool = False):
       Used by the frontend for the initial paint so tiles aren't blank.
     - ``Accept: text/event-stream``: SSE stream — tickers emitted as they complete.
     - default: JSON envelope (backward-compatible for tests/curl).
+
+    ``?user_initiated=1`` marks the request as an explicit user action and
+    bypasses the closed-market gate — both in the cache and in the OI fetch
+    path. Set by the frontend when chaining a refetch after
+    ``POST /uw-analyze/refresh`` so the follow-up read also refreshes the
+    OI baseline. See silly-humming-tide.md plan §2a.
     """
     if cached:
         return await _portfolio_cached()
@@ -521,11 +555,11 @@ async def uw_analyze_portfolio(request: Request, cached: bool = False):
 
     if want_sse:
         return StreamingResponse(
-            _portfolio_sse(request),
+            _portfolio_sse(request, user_initiated=user_initiated),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-    return await _portfolio_json()
+    return await _portfolio_json(user_initiated=user_initiated)
 
 
 async def _portfolio_cached() -> dict:
@@ -535,18 +569,35 @@ async def _portfolio_cached() -> dict:
     same ``{tickers, action_items, ...}`` envelope the frontend expects.
     Used for the initial paint so tiles show data from the last session
     instead of blank scaffolds while the SSE stream catches up.
-    """
-    from utils.market_hours import is_market_open
 
+    ``fetched_at`` is the newest ``snapshot_ts`` across all rows — NOT
+    ``datetime.now()`` — so the UI can accurately show how old the
+    displayed data is. Plan §3 / Codex issue #8 in silly-humming-tide.md.
+    """
     cache = get_portfolio_cache()
     flow_log = get_flow_log()
     entries = cache.all_entries()
 
+    # CRITICAL: read market state through the cache's injected function
+    # (not directly from utils.market_hours.is_market_open) so test clocks
+    # and the gate agree on a single source of truth. Fix #8 in
+    # silly-humming-tide.md review.
+    market_open = cache._market_open_fn()
+    gated = not market_open
+
     rows: list[dict] = []
+    latest_snapshot_ts: Optional[str] = None
     for ticker, entry in entries.items():
         snap = entry.get("current") or {}
+        snap_ts = snap.get("ts") if isinstance(snap, dict) else None
+        if isinstance(snap_ts, str) and (latest_snapshot_ts is None or snap_ts > latest_snapshot_ts):
+            latest_snapshot_ts = snap_ts
         prev = entry.get("previous")
         oi_baseline = entry.get("oi_baseline") or {}
+        has_snapshot = bool(snap)
+        # served_stale: entry exists but is past TTL. Only meaningful during
+        # closed hours (auto-refresh is paused so stale data is expected).
+        stale_now = has_snapshot and not cache._is_fresh(entry)
         rows.append(
             {
                 "ticker": ticker,
@@ -556,58 +607,94 @@ async def _portfolio_cached() -> dict:
                 "changes": entry.get("materialized_changes") or [],
                 "oi_changes": oi_baseline.get("changes") or [],
                 "unusual_flow_events": [e.to_dict() for e in flow_log.for_ticker(ticker)],
+                "has_snapshot": has_snapshot,
+                "served_stale": stale_now and gated,
+                "snapshot_ts": snap_ts,
             }
         )
 
     return {
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "market_state": "open" if is_market_open() else "closed",
+        "fetched_at": latest_snapshot_ts,
+        "response_generated_at": datetime.now(timezone.utc).isoformat(),
+        "market_state": "open" if market_open else "closed",
         "ttl_seconds": cache._ttl(),
+        "closed_market_paused": gated,
         "tickers": rows,
         "action_items": _action_items_from(rows),
     }
 
 
-async def _portfolio_json() -> dict:
-    """Original JSON response path — unchanged for tests + backward compat."""
-    from utils.market_hours import is_market_open
+async def _portfolio_json(*, user_initiated: bool = False) -> dict:
+    """Original JSON response path — unchanged for tests + backward compat.
 
+    Surfaces the same per-row and top-level stale fields as
+    ``_portfolio_cached`` so the frontend contract is consistent across the
+    two code paths.
+    """
     cache = get_portfolio_cache()
     flow_log = get_flow_log()
     candidates = seed_candidates()
 
-    results = await asyncio.gather(*[_process_ticker(t, s, cache, flow_log) for t, s in sorted(candidates.items())])
+    results = await asyncio.gather(
+        *[_process_ticker(t, s, cache, flow_log, user_initiated=user_initiated) for t, s in sorted(candidates.items())]
+    )
     rows = [r for r in results if r is not None]
     await _finalize_rows(rows, cache, flow_log)
 
+    # Single source of truth for market state — see Fix #8 note above.
+    market_open = cache._market_open_fn()
+    gated = not market_open
+    latest_snapshot_ts: Optional[str] = None
+    for r in rows:
+        ts = r.get("snapshot_ts")
+        if isinstance(ts, str) and (latest_snapshot_ts is None or ts > latest_snapshot_ts):
+            latest_snapshot_ts = ts
+
     return {
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "market_state": "open" if is_market_open() else "closed",
+        "fetched_at": latest_snapshot_ts,
+        "response_generated_at": datetime.now(timezone.utc).isoformat(),
+        "market_state": "open" if market_open else "closed",
         "ttl_seconds": cache._ttl(),
+        "closed_market_paused": gated,
         "tickers": rows,
         "action_items": _action_items_from(rows),
     }
 
 
-async def _portfolio_sse(request: Request):
+async def _portfolio_sse(request: Request, *, user_initiated: bool = False):
     """SSE generator — yields tickers as they complete for incremental rendering.
 
     Events:
-    - ``event: meta`` — ``{fetched_at, market_state, ttl_seconds}``
+    - ``event: meta`` — ``{fetched_at, response_generated_at, market_state,
+      ttl_seconds, closed_market_paused}``
     - ``data: {ticker row}`` — one per ticker (default "message" event)
+      (includes ``has_snapshot``, ``served_stale``, ``snapshot_ts``)
     - ``event: done`` — ``{action_items: [...]}``
-    """
-    from utils.market_hours import is_market_open
 
+    ``user_initiated=True`` propagates into every ``_process_ticker`` call
+    so both the cache gate AND the OI-fetch gate are bypassed. Used by the
+    frontend's follow-up GET after a refresh-button click.
+    """
     cache = get_portfolio_cache()
     flow_log = get_flow_log()
     candidates = seed_candidates()
 
+    # Single source of truth for market state — see Fix #8 note above.
+    market_open = cache._market_open_fn()
+
     # Metadata first — frontend needs this before any tickers.
+    # `fetched_at` here reflects the response-generation time, NOT the
+    # freshest snapshot timestamp, because at SSE meta-emission time we
+    # don't yet know what rows will arrive. Frontend prefers the per-row
+    # `snapshot_ts` when displaying row-level staleness (see
+    # useUwPortfolio.ts fetchPortfolio onTicker handler).
+    _now = datetime.now(timezone.utc).isoformat()
     meta = {
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "market_state": "open" if is_market_open() else "closed",
+        "fetched_at": _now,
+        "response_generated_at": _now,
+        "market_state": "open" if market_open else "closed",
         "ttl_seconds": cache._ttl(),
+        "closed_market_paused": not market_open,
     }
     yield f"event: meta\ndata: {_json.dumps(meta)}\n\n"
 
@@ -618,7 +705,7 @@ async def _portfolio_sse(request: Request):
 
     async def _enqueue(ticker: str, sources) -> None:
         try:
-            row = await _process_ticker(ticker, sources, cache, flow_log)
+            row = await _process_ticker(ticker, sources, cache, flow_log, user_initiated=user_initiated)
             await queue.put(row)
         except Exception:  # noqa: BLE001
             await queue.put(None)
@@ -671,10 +758,14 @@ async def uw_analyze_refresh(req: RefreshRequest) -> dict:
 
     async def _refresh_one(ticker: str) -> Optional[dict]:
         try:
+            # POST /uw-analyze/refresh is the refresh-button path — explicit
+            # user action. user_initiated=True bypasses the closed-market gate
+            # so the button works during overnight/weekend hours.
             entry, did_refresh = await cache.get_or_run(
                 ticker,
                 runner=_runner,
                 force=True,
+                user_initiated=True,
                 sources=["adhoc"] if req.adhoc else (),
             )
         except Exception as exc:  # noqa: BLE001

@@ -23,7 +23,7 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 
-def _build_app(tmp_path, fake_runner, *, portfolio=None, watchlist=None):
+def _build_app(tmp_path, fake_runner, *, portfolio=None, watchlist=None, market_open=True):
     """Wire a fresh module-state cache + flow log + candidate fixtures
     into the route singletons, then mount the router on a fresh app."""
     routes_mod.reset_state_for_tests()
@@ -46,7 +46,7 @@ def _build_app(tmp_path, fake_runner, *, portfolio=None, watchlist=None):
     # Inject our cache + flow log singletons.
     routes_mod._portfolio_cache = UwAnalyzeCache(
         cache_path=tmp_path / "cache.json",
-        market_open_fn=lambda: True,
+        market_open_fn=lambda: market_open,
     )
     routes_mod._flow_log = FlowLog(path=tmp_path / "flow.json")
 
@@ -126,8 +126,9 @@ def test_portfolio_returns_seeded_tickers(tmp_path):
     assert {"NVDA", "AAPL"} <= tickers
     assert body["market_state"] in ("open", "closed")
     # ttl_seconds reflects the cache singleton (market_open_fn → True),
-    # so always 300 in tests.
-    assert body["ttl_seconds"] == 300
+    # so it returns the OPEN TTL default (1800s / 30 min — see
+    # silly-humming-tide.md plan §1 for the budget rationale).
+    assert body["ttl_seconds"] == 1800
 
 
 def test_portfolio_merges_sources_for_overlap(tmp_path):
@@ -419,6 +420,122 @@ def test_portfolio_refreshes_stale_oi_baseline(monkeypatch, tmp_path):
     assert cache._entries["TSLA"]["oi_baseline"]["data_date"] == today_iso
     assert calls["n"] >= 1
     assert persist_count["n"] >= 1, "refreshed baseline must be persisted"
+
+
+def test_portfolio_user_initiated_query_param_refreshes_oi_during_closed_market(monkeypatch, tmp_path):
+    """Manual refresh during closed hours must also refresh OI baseline.
+
+    Regression for silly-humming-tide.md review finding #1 (Codex + Gemini
+    unanimous). POST /uw-analyze/refresh freshens the main snapshot via
+    get_or_run directly, but the follow-up SSE GET runs _process_ticker,
+    which owns the OI-fetch path. Without a ``user_initiated=1`` query
+    param on the follow-up GET, the OI gate still blocks and leaves
+    oi_changes stale even though the user explicitly clicked refresh.
+    """
+    from api.services import uw_analyze_oi_tracker
+    from api.services.uw_analyze_oi_tracker import OiChange
+
+    calls = {"n": 0}
+
+    async def fake_fetch(client, ticker, spot):
+        calls["n"] += 1
+        return [
+            OiChange(
+                strike=300.0,
+                side="call",
+                prev_oi=50,
+                curr_oi=500,
+                delta=450,
+                delta_pct=9.0,
+                label="+450 calls @ $300 (+900%)",
+            )
+        ]
+
+    monkeypatch.setattr(uw_analyze_oi_tracker, "fetch_and_diff", fake_fetch)
+    import clients.uw_client as uw_client_mod
+
+    monkeypatch.setattr(uw_client_mod, "UWClient", lambda *a, **k: object())
+
+    app = _build_app(
+        tmp_path,
+        _fake_runner(),
+        portfolio={"positions": [{"ticker": "TSLA"}]},
+        market_open=True,
+    )
+    client = TestClient(app)
+    client.get("/uw-analyze/portfolio")  # seed cache
+
+    cache = routes_mod._portfolio_cache
+    cache._entries["TSLA"]["oi_baseline"] = {
+        "data_date": "2000-01-01",
+        "changes": [],
+    }
+    calls["n"] = 0
+    cache._market_open_fn = lambda: False
+
+    # Baseline regression: default closed-market GET gates OI.
+    client.get("/uw-analyze/portfolio")
+    assert calls["n"] == 0, "default closed-market GET must gate OI"
+
+    # With user_initiated=1, the OI fetch runs despite the closed market.
+    body = client.get("/uw-analyze/portfolio?user_initiated=1").json()
+    assert calls["n"] == 1, "user_initiated=1 must unblock fetch_and_diff during closed hours"
+    row = next(r for r in body["tickers"] if r["ticker"] == "TSLA")
+    assert row["oi_changes"], "refreshed OI must appear in the row"
+    assert row["oi_changes"][0]["label"].startswith("+450 calls")
+
+
+def test_portfolio_skips_oi_refresh_during_closed_market(monkeypatch, tmp_path):
+    """Regression for the OI-fetch leak (silly-humming-tide.md §2a, Codex C1).
+
+    When the market is closed, automatic /portfolio polls must NOT trigger
+    `uw_analyze_oi_tracker.fetch_and_diff`. Before this fix, Monday morning
+    after a weekend would hit this path for every ticker because
+    `oi_baseline.data_date` was stamped with Friday's ET date — burning
+    hundreds of UW calls outside market hours.
+    """
+    from api.services import uw_analyze_oi_tracker
+
+    calls = {"n": 0}
+
+    async def fake_fetch(client, ticker, spot):
+        calls["n"] += 1
+        return []
+
+    monkeypatch.setattr(uw_analyze_oi_tracker, "fetch_and_diff", fake_fetch)
+    import clients.uw_client as uw_client_mod
+
+    monkeypatch.setattr(uw_client_mod, "UWClient", lambda *a, **k: object())
+
+    # Build the app in OPEN mode first so we can seed a cache entry for TSLA.
+    # Then flip the cache's market_open_fn to CLOSED and poison the OI
+    # baseline with an ancient date — the next /portfolio GET must NOT
+    # fetch OI.
+    app = _build_app(
+        tmp_path,
+        _fake_runner(),
+        portfolio={"positions": [{"ticker": "TSLA"}]},
+        market_open=True,
+    )
+    client = TestClient(app)
+    client.get("/uw-analyze/portfolio")  # seed cache
+
+    cache = routes_mod._portfolio_cache
+    cache._entries["TSLA"]["oi_baseline"] = {
+        "data_date": "2000-01-01",  # extremely stale
+        "changes": [],
+    }
+    # Reset call counter so we only count fetches from the closed-market GET.
+    calls["n"] = 0
+    # Flip to CLOSED. Automatic /portfolio polls should now be gated and
+    # must NOT hit the OI tracker.
+    cache._market_open_fn = lambda: False
+
+    body = client.get("/uw-analyze/portfolio").json()
+    assert calls["n"] == 0, f"closed-market /portfolio must not call fetch_and_diff, but got {calls['n']} call(s)"
+    # The baseline should still read as the poisoned stale value — we did
+    # not refresh it.
+    assert cache._entries["TSLA"]["oi_baseline"]["data_date"] == "2000-01-01"
 
 
 def test_portfolio_runs_tickers_concurrently(tmp_path, monkeypatch):

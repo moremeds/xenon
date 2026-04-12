@@ -32,7 +32,9 @@ export function useMarketHours(): MarketState {
      */
     const check = () => {
       const now = new Date();
-      const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const et = new Date(
+        now.toLocaleString("en-US", { timeZone: "America/New_York" }),
+      );
       const day = et.getDay(); // 0=Sun, 6=Sat
 
       // CLOSED on weekends (Saturdays and Sundays)
@@ -43,14 +45,20 @@ export function useMarketHours(): MarketState {
 
       const minutes = et.getHours() * 60 + et.getMinutes();
 
-      // Regular trading hours: 9:30 AM - 4:00 PM ET
-      if (minutes >= 9 * 60 + 30 && minutes <= 16 * 60) {
+      // Regular trading hours: 9:30 AM - 4:00 PM ET, half-open interval.
+      // IMPORTANT: `< 16*60` (not `<=`) so that at exactly 16:00 we agree
+      // with the Python backend's `is_market_open()` which uses the same
+      // half-open definition. Without this, frontend and backend disagree
+      // for a 60-second window at close and the UI ends up polling a gated
+      // backend. See silly-humming-tide.md §4 + Codex issue C4.
+      if (minutes >= 9 * 60 + 30 && minutes < 16 * 60) {
         setState(MarketState.OPEN);
       }
-      // Extended hours: Premarket (4:00 AM - 9:30 AM) or After Hours (4:00 PM - 8:00 PM)
+      // Extended hours: Premarket (4:00 AM - 9:30 AM) or After Hours
+      // (4:00 PM - 8:00 PM). 16:00 now falls into EXTENDED, not OPEN.
       else if (
         (minutes >= 4 * 60 && minutes < 9 * 60 + 30) ||
-        (minutes > 16 * 60 && minutes <= 20 * 60)
+        (minutes >= 16 * 60 && minutes <= 20 * 60)
       ) {
         setState(MarketState.EXTENDED);
       }

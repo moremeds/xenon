@@ -54,7 +54,11 @@ import {
   mergeScaffoldWithLive,
   SCAFFOLD_ROWS,
 } from "@/lib/uwTickerTiers";
-import type { UwTickerRow } from "@/lib/uwAnalyzeTypes";
+import type {
+  UwAnalyzeDisplay,
+  UwAnalyzeReport,
+  UwTickerRow,
+} from "@/lib/uwAnalyzeTypes";
 import { MetricCard, SourceBadge } from "@/components/ui/MetricCard";
 import GexProfileChart, {
   uwGexRowsToBuckets,
@@ -3871,9 +3875,11 @@ const UwAnalyzeSections = React.memo(function UwAnalyzeSections() {
             style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}
           >
             <span className="report-meta">
-              {allSorted.length} underlyings · auto-refresh{" "}
-              {data?.market_state === "open" ? "2m" : "5m"} · {changedCount}{" "}
-              changed
+              {allSorted.length} underlyings ·{" "}
+              {data?.market_state === "open"
+                ? "auto-refresh 2m"
+                : "auto-refresh paused (click refresh)"}{" "}
+              · {changedCount} changed
             </span>
             <button
               type="button"
@@ -4117,10 +4123,18 @@ const UwTickerCard = React.memo(function UwTickerCard({
   onSelect: (ticker: string) => void;
 }) {
   const snap = row.snapshot;
-  const report = snap?.report ?? ({} as UwTickerRow["snapshot"]["report"]);
+  // Cast to the concrete report type, not `UwTickerRow["snapshot"]["report"]`.
+  // `UwTickerRow.snapshot` is `UwSnapshot | Partial<UwSnapshot>` (Fix #4),
+  // which makes the indexed access resolve to `UwAnalyzeReport | undefined`
+  // and defeats the ?? narrowing. Downstream reads null-check every field.
+  const report = (snap?.report ?? {}) as UwAnalyzeReport;
   const scores = report.scores;
   const hasAlert = (row.changes?.length ?? 0) > 0;
   const scaffold = isScaffold(row);
+  // Stale: backend returned cached data but refresh was gated by the
+  // closed-market check. Scaffold rows take precedence (they have no data
+  // at all), so only flag stale when there IS a snapshot.
+  const stale = !scaffold && row.served_stale === true;
   const changeCount = row.changes?.length ?? 0;
   const bias = scores?.bias ?? "";
   const fetchedTime = (() => {
@@ -4145,8 +4159,10 @@ const UwTickerCard = React.memo(function UwTickerCard({
       data-selected={isSelected ? "true" : "false"}
       data-alert={hasAlert ? "true" : "false"}
       data-scaffold={scaffold ? "true" : "false"}
+      data-stale={stale ? "true" : "false"}
       data-bias={bias || undefined}
       aria-pressed={isSelected}
+      style={stale ? { opacity: 0.7 } : undefined}
       onClick={() => onSelect(row.ticker)}
     >
       <span style={{ fontWeight: 600, fontSize: 12, letterSpacing: "0.04em" }}>
@@ -4216,8 +4232,10 @@ function UwTickerDetail({
   const [flowOpen, setFlowOpen] = useState(false);
 
   const snap = row.snapshot;
-  const display = snap?.display ?? ({} as UwTickerRow["snapshot"]["display"]);
-  const report = snap?.report ?? ({} as UwTickerRow["snapshot"]["report"]);
+  // See UwTickerCard above — cast directly to the concrete types to sidestep
+  // the `Partial<UwSnapshot>` branch introduced by Fix #4.
+  const display = (snap?.display ?? {}) as UwAnalyzeDisplay;
+  const report = (snap?.report ?? {}) as UwAnalyzeReport;
   const derived = snap?.derived;
   const scores = report.scores;
   const thesis = report.setup_thesis;

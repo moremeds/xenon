@@ -2,11 +2,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, waitFor, act } from "@testing-library/react";
 
-// Keep market-hours deterministic so polling interval is known.
+// Keep market-hours deterministic. Default OPEN so the SSE codepath runs —
+// under the closed-market gate (silly-humming-tide.md plan §4), non-OPEN
+// states skip SSE entirely. Individual tests override this when they need
+// to exercise closed-market behavior.
+let _mockedMarketState: "open" | "extended" | "closed" = "open";
 vi.mock("@/lib/useMarketHours", () => ({
   MarketState: { OPEN: "open", EXTENDED: "extended", CLOSED: "closed" },
-  useMarketHours: () => "closed",
+  useMarketHours: () => _mockedMarketState,
 }));
+function setMockedMarketState(state: "open" | "extended" | "closed"): void {
+  _mockedMarketState = state;
+}
 
 import {
   useUwPortfolio,
@@ -67,16 +74,26 @@ describe("useUwPortfolio", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     __resetUwPortfolioCacheForTests();
+    setMockedMarketState("open"); // default OPEN so SSE path runs
   });
   afterEach(() => {
     vi.restoreAllMocks();
     __resetUwPortfolioCacheForTests();
+    setMockedMarketState("open");
   });
 
   it("fetches /api/uw-analyze/portfolio via SSE and surfaces data", async () => {
     const sse = buildSse([
       { type: "meta", data: FIXTURE_META },
-      { data: { ticker: "SPY", sources: [], snapshot: {}, changes: [] } },
+      {
+        data: {
+          ticker: "SPY",
+          sources: [],
+          snapshot: {},
+          changes: [],
+          snapshot_ts: FIXTURE_META.fetched_at,
+        },
+      },
       { type: "done", data: FIXTURE_DONE },
     ]);
     const fetchMock = mockFetchSse(sse);
@@ -113,7 +130,15 @@ describe("useUwPortfolio", () => {
   it("re-mount paints the previous snapshot immediately from the module cache", async () => {
     const sse = buildSse([
       { type: "meta", data: FIXTURE_META },
-      { data: { ticker: "SPY", sources: [], snapshot: {}, changes: [] } },
+      {
+        data: {
+          ticker: "SPY",
+          sources: [],
+          snapshot: {},
+          changes: [],
+          snapshot_ts: FIXTURE_META.fetched_at,
+        },
+      },
       { type: "done", data: FIXTURE_DONE },
     ]);
     const fetchMock = mockFetchSse(sse);
@@ -140,7 +165,15 @@ describe("useUwPortfolio", () => {
   it("refreshAll() POSTs to /api/uw-analyze/refresh then refetches portfolio", async () => {
     const sse1 = buildSse([
       { type: "meta", data: FIXTURE_META },
-      { data: { ticker: "SPY", sources: [], snapshot: {}, changes: [] } },
+      {
+        data: {
+          ticker: "SPY",
+          sources: [],
+          snapshot: {},
+          changes: [],
+          snapshot_ts: FIXTURE_META.fetched_at,
+        },
+      },
       { type: "done", data: FIXTURE_DONE },
     ]);
     const sse2 = buildSse([
@@ -148,8 +181,24 @@ describe("useUwPortfolio", () => {
         type: "meta",
         data: { ...FIXTURE_META, fetched_at: "2026-04-08T14:05:00Z" },
       },
-      { data: { ticker: "SPY", sources: [], snapshot: {}, changes: [] } },
-      { data: { ticker: "QQQ", sources: [], snapshot: {}, changes: [] } },
+      {
+        data: {
+          ticker: "SPY",
+          sources: [],
+          snapshot: {},
+          changes: [],
+          snapshot_ts: FIXTURE_META.fetched_at,
+        },
+      },
+      {
+        data: {
+          ticker: "QQQ",
+          sources: [],
+          snapshot: {},
+          changes: [],
+          snapshot_ts: "2026-04-08T14:05:00Z",
+        },
+      },
       { type: "done", data: FIXTURE_DONE },
     ]);
     let callCount = 0;
@@ -183,5 +232,200 @@ describe("useUwPortfolio", () => {
     );
     expect(refreshCall?.[1]?.method).toBe("POST");
     expect(result.current.data?.tickers).toHaveLength(2);
+  });
+
+  // ── Closed-market gate (silly-humming-tide.md plan §4) ──────────────
+
+  it("does NOT run SSE stream when market is CLOSED", async () => {
+    setMockedMarketState("closed");
+    const cachedPayload = {
+      fetched_at: "2026-04-08T03:00:00Z",
+      market_state: "closed",
+      ttl_seconds: 1800,
+      closed_market_paused: true,
+      tickers: [
+        {
+          ticker: "SPY",
+          sources: [],
+          snapshot: {},
+          changes: [],
+          has_snapshot: true,
+          served_stale: false,
+        },
+      ],
+      action_items: [],
+    };
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === "string" && url.includes("?cached=true")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(cachedPayload), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      // Any non-cached portfolio GET must NOT be called — fail loudly.
+      if (typeof url === "string" && url.includes("/uw-analyze/portfolio")) {
+        throw new Error("closed-market must not fire SSE fetch");
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useUwPortfolio());
+    await waitFor(() => {
+      expect(result.current.data).not.toBeNull();
+    });
+
+    // Prefetch fired, surfaced the cached payload.
+    expect(result.current.data?.tickers).toHaveLength(1);
+    // Only the cache-only endpoint was hit.
+    const urls = fetchMock.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(
+      urls.every(
+        (u) =>
+          u.includes("?cached=true") || !u.includes("/uw-analyze/portfolio"),
+      ),
+    ).toBe(true);
+  });
+
+  it("refreshAll() still works when market is CLOSED (bypasses gate)", async () => {
+    setMockedMarketState("closed");
+    const cachedPayload = {
+      fetched_at: null,
+      market_state: "closed",
+      ttl_seconds: 1800,
+      closed_market_paused: true,
+      tickers: [],
+      action_items: [],
+    };
+    const sseAfterRefresh = buildSse([
+      {
+        type: "meta",
+        data: { ...FIXTURE_META, market_state: "closed" },
+      },
+      {
+        data: {
+          ticker: "SPY",
+          sources: [],
+          snapshot: {},
+          changes: [],
+          has_snapshot: true,
+          served_stale: false,
+        },
+      },
+      { type: "done", data: FIXTURE_DONE },
+    ]);
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === "string" && url.includes("?cached=true")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(cachedPayload), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      if (typeof url === "string" && url.includes("/uw-analyze/portfolio")) {
+        // After refreshAll(), the hook pulls SSE — allowed because it's the
+        // user-initiated path chained by refreshAll.
+        return Promise.resolve(mockSseResponse(sseAfterRefresh));
+      }
+      // POST /refresh
+      return Promise.resolve(
+        new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useUwPortfolio());
+    // Wait for initial prefetch to settle.
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      await result.current.refreshAll();
+    });
+
+    const urls = fetchMock.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(urls).toContain("/api/uw-analyze/refresh");
+    const refreshCall = fetchMock.mock.calls.find(
+      (c: unknown[]) => c[0] === "/api/uw-analyze/refresh",
+    );
+    expect(refreshCall?.[1]?.method).toBe("POST");
+    // SSE GET /portfolio fired after the POST with ?user_initiated=1 so
+    // the backend bypasses BOTH the cache gate AND the OI-fetch gate
+    // (silly-humming-tide.md review fix #1).
+    expect(
+      urls.some((u) => u === "/api/uw-analyze/portfolio?user_initiated=1"),
+    ).toBe(true);
+    // Fresh tickers arrived.
+    expect(result.current.data?.tickers).toHaveLength(1);
+  });
+
+  it("does NOT run SSE stream when market is EXTENDED (treat same as CLOSED)", async () => {
+    // Silly-humming-tide.md review fix #10. EXTENDED hours must pause
+    // auto-polling just like CLOSED — otherwise the frontend polls the
+    // backend only for `is_market_open()` to return False and gate
+    // everything, wasting HTTP round trips.
+    setMockedMarketState("extended");
+    const cachedPayload = {
+      fetched_at: "2026-04-08T08:00:00Z",
+      market_state: "closed",
+      ttl_seconds: 1800,
+      closed_market_paused: true,
+      tickers: [
+        {
+          ticker: "SPY",
+          sources: [],
+          snapshot: {},
+          changes: [],
+          has_snapshot: true,
+          served_stale: false,
+        },
+      ],
+      action_items: [],
+    };
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === "string" && url.includes("?cached=true")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(cachedPayload), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      // Any non-cached portfolio GET during EXTENDED must not fire.
+      if (typeof url === "string" && url.includes("/uw-analyze/portfolio")) {
+        throw new Error("extended-hours must not fire SSE fetch");
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useUwPortfolio());
+    await waitFor(() => expect(result.current.data).not.toBeNull());
+
+    // Only the cache-only endpoint was hit — no SSE during extended hours.
+    const urls = fetchMock.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(
+      urls.every(
+        (u) =>
+          u.includes("?cached=true") || !u.includes("/uw-analyze/portfolio"),
+      ),
+    ).toBe(true);
+    // Prefetched data still paints the tile.
+    expect(result.current.data?.tickers).toHaveLength(1);
   });
 });

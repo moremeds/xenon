@@ -24,7 +24,11 @@ import {
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 import WorkspaceSections from "../components/WorkspaceSections";
-import type { UwPortfolioResponse, UwTickerRow } from "../lib/uwAnalyzeTypes";
+import type {
+  UwPortfolioResponse,
+  UwSnapshot,
+  UwTickerRow,
+} from "../lib/uwAnalyzeTypes";
 
 // Stub unrelated hooks pulled in by WorkspaceSections.
 vi.mock("@/lib/OrderActionsContext", () => ({
@@ -62,8 +66,8 @@ vi.mock("@/lib/useUwPortfolio", () => ({
 function makeRow(
   ticker: string,
   overrides: Partial<UwTickerRow> = {},
-): UwTickerRow {
-  const base: UwTickerRow = {
+): UwTickerRow & { snapshot: UwSnapshot } {
+  const base: UwTickerRow & { snapshot: UwSnapshot } = {
     ticker,
     sources: ["portfolio"],
     prev_ts: null,
@@ -129,7 +133,7 @@ function makeRow(
       },
     },
   };
-  return { ...base, ...overrides } as UwTickerRow;
+  return { ...base, ...overrides } as UwTickerRow & { snapshot: UwSnapshot };
 }
 
 function setPortfolio(rows: UwTickerRow[]): void {

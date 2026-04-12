@@ -138,11 +138,22 @@ export type UwSnapshot = {
 export type UwTickerRow = {
   ticker: string;
   sources: Source[];
-  snapshot: UwSnapshot;
+  // When `has_snapshot` is false (closed-market uncached ticker, fresh
+  // install, etc.) the backend emits an empty `{}` placeholder here rather
+  // than a populated UwSnapshot. Partial<> reflects that runtime contract
+  // honestly so callers are forced to null-check before accessing nested
+  // fields. Fix #4 (silly-humming-tide.md review).
+  snapshot: UwSnapshot | Partial<UwSnapshot>;
   prev_ts: string | null;
   changes: Change[];
   oi_changes: OiChange[];
   unusual_flow_events: FlowEvent[];
+  // Optional fields added by the closed-market gate (plan §3,
+  // silly-humming-tide.md). Older responses omit these — defaulting to
+  // undefined/false keeps pre-existing tests and fixtures intact.
+  has_snapshot?: boolean;
+  served_stale?: boolean;
+  snapshot_ts?: string | null;
 };
 
 export type UwActionItem = {
@@ -153,9 +164,16 @@ export type UwActionItem = {
 };
 
 export type UwPortfolioResponse = {
-  fetched_at: string;
+  fetched_at: string | null;
+  // `response_generated_at` is the wall-clock time the JSON was assembled,
+  // distinct from `fetched_at` (newest underlying snapshot ts). Optional so
+  // older fixtures that predate the field still typecheck.
+  response_generated_at?: string;
   market_state: "open" | "closed";
   ttl_seconds: number;
+  // True when the backend closed-market gate blocked auto-refresh for this
+  // response. Used by the UI to drive the "auto-refresh paused" header.
+  closed_market_paused?: boolean;
   tickers: UwTickerRow[];
   action_items: UwActionItem[];
 };
