@@ -1,0 +1,15 @@
+[run]
+source = scripts
+omit =
+    scripts/tests/*
+    scripts/*/__pycache__/*
+    scripts/data/*
+
+[report]
+fail_under = 80
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.
+    if TYPE_CHECKING:
+    raise NotImplementedError
+    \.\.\.
