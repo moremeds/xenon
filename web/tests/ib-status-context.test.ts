@@ -9,6 +9,11 @@ import React from "react";
 import { IBStatusProvider, useIBStatusContext } from "../lib/IBStatusContext";
 import type { ReactNode } from "react";
 
+// Mock Clerk auth — IBStatusProvider calls useAuth() for WS ticket
+vi.mock("@clerk/nextjs", () => ({
+  useAuth: () => ({ getToken: async () => null }),
+}));
+
 /* ---------- MockWebSocket ---------- */
 class MockWebSocket {
   static CONNECTING = 0 as const;
@@ -22,20 +27,34 @@ class MockWebSocket {
   onerror: ((event: Event) => void) | null = null;
   sent: string[] = [];
   url: string;
-  constructor(url: string) { this.url = url; }
-  send(data: string) { this.sent.push(data); }
+  constructor(url: string) {
+    this.url = url;
+  }
+  send(data: string) {
+    this.sent.push(data);
+  }
   close() {
     if (this.readyState === MockWebSocket.CLOSED) return;
     this.readyState = MockWebSocket.CLOSED;
     this.onclose?.(new Event("close"));
   }
-  simulateOpen() { this.readyState = MockWebSocket.OPEN; this.onopen?.(new Event("open")); }
-  simulateMessage(data: unknown) { this.onmessage?.({ data: JSON.stringify(data) }); }
-  simulateClose() { this.readyState = MockWebSocket.CLOSED; this.onclose?.(new Event("close")); }
+  simulateOpen() {
+    this.readyState = MockWebSocket.OPEN;
+    this.onopen?.(new Event("open"));
+  }
+  simulateMessage(data: unknown) {
+    this.onmessage?.({ data: JSON.stringify(data) });
+  }
+  simulateClose() {
+    this.readyState = MockWebSocket.CLOSED;
+    this.onclose?.(new Event("close"));
+  }
 }
 
 let wsInstances: MockWebSocket[] = [];
-function latestWs(): MockWebSocket { return wsInstances[wsInstances.length - 1]; }
+function latestWs(): MockWebSocket {
+  return wsInstances[wsInstances.length - 1];
+}
 
 const wrapper = ({ children }: { children: ReactNode }) =>
   React.createElement(IBStatusProvider, null, children);
@@ -43,32 +62,46 @@ const wrapper = ({ children }: { children: ReactNode }) =>
 beforeEach(() => {
   wsInstances = [];
   vi.useFakeTimers();
-  vi.stubGlobal("WebSocket", class extends MockWebSocket {
-    constructor(url: string) { super(url); wsInstances.push(this); }
-  });
+  vi.stubGlobal(
+    "WebSocket",
+    class extends MockWebSocket {
+      constructor(url: string) {
+        super(url);
+        wsInstances.push(this);
+      }
+    },
+  );
 });
-afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("IBStatusProvider", () => {
-  it("renders children", () => {
+  it("renders children", async () => {
     const { result } = renderHook(() => useIBStatusContext(), { wrapper });
+    await act(async () => {});
     expect(result.current).toBeDefined();
     expect(result.current.wsConnected).toBe(false);
   });
 
-  it("multiple consumers share same connection (only 1 WebSocket created)", () => {
+  it("multiple consumers share same connection (only 1 WebSocket created)", async () => {
     const Wrapper = ({ children }: { children: ReactNode }) =>
       React.createElement(IBStatusProvider, null, children);
 
     // Render two hooks under the same provider
-    const { result: r1 } = renderHook(() => useIBStatusContext(), { wrapper: Wrapper });
+    const { result: r1 } = renderHook(() => useIBStatusContext(), {
+      wrapper: Wrapper,
+    });
+    await act(async () => {});
     // Even with a second consumer, still only 1 WebSocket
     expect(wsInstances).toHaveLength(1);
     expect(r1.current).toBeDefined();
   });
 
-  it("wsConnected updates on WS open/close", () => {
+  it("wsConnected updates on WS open/close", async () => {
     const { result } = renderHook(() => useIBStatusContext(), { wrapper });
+    await act(async () => {});
     expect(result.current.wsConnected).toBe(false);
     act(() => latestWs().simulateOpen());
     expect(result.current.wsConnected).toBe(true);
@@ -76,33 +109,46 @@ describe("IBStatusProvider", () => {
     expect(result.current.wsConnected).toBe(false);
   });
 
-  it("ibConnected updates from status message", () => {
+  it("ibConnected updates from status message", async () => {
     const { result } = renderHook(() => useIBStatusContext(), { wrapper });
+    await act(async () => {});
     act(() => latestWs().simulateOpen());
     // Default ibConnected is true (assume connected until told otherwise)
-    act(() => latestWs().simulateMessage({ type: "status", ib_connected: false }));
+    act(() =>
+      latestWs().simulateMessage({ type: "status", ib_connected: false }),
+    );
     expect(result.current.ibConnected).toBe(false);
-    act(() => latestWs().simulateMessage({ type: "status", ib_connected: true }));
+    act(() =>
+      latestWs().simulateMessage({ type: "status", ib_connected: true }),
+    );
     expect(result.current.ibConnected).toBe(true);
   });
 
-  it("disconnectedSince set when IB disconnects, cleared on reconnect", () => {
+  it("disconnectedSince set when IB disconnects, cleared on reconnect", async () => {
     const { result } = renderHook(() => useIBStatusContext(), { wrapper });
+    await act(async () => {});
     act(() => latestWs().simulateOpen());
     expect(result.current.disconnectedSince).toBeNull();
-    act(() => latestWs().simulateMessage({ type: "status", ib_connected: false }));
+    act(() =>
+      latestWs().simulateMessage({ type: "status", ib_connected: false }),
+    );
     expect(result.current.disconnectedSince).toBeTypeOf("number");
     const ts = result.current.disconnectedSince;
     // Sending another disconnect should not change the timestamp
-    act(() => latestWs().simulateMessage({ type: "status", ib_connected: false }));
+    act(() =>
+      latestWs().simulateMessage({ type: "status", ib_connected: false }),
+    );
     expect(result.current.disconnectedSince).toBe(ts);
     // Reconnect clears it
-    act(() => latestWs().simulateMessage({ type: "status", ib_connected: true }));
+    act(() =>
+      latestWs().simulateMessage({ type: "status", ib_connected: true }),
+    );
     expect(result.current.disconnectedSince).toBeNull();
   });
 
-  it("connectionState derived correctly for all 3 states", () => {
+  it("connectionState derived correctly for all 3 states", async () => {
     const { result } = renderHook(() => useIBStatusContext(), { wrapper });
+    await act(async () => {});
     // Initial: relay offline (WS not connected)
     expect(result.current.connectionState).toBe("relay_offline");
 
@@ -110,7 +156,9 @@ describe("IBStatusProvider", () => {
     // WS open + ibConnected default true = connected
     expect(result.current.connectionState).toBe("connected");
 
-    act(() => latestWs().simulateMessage({ type: "status", ib_connected: false }));
+    act(() =>
+      latestWs().simulateMessage({ type: "status", ib_connected: false }),
+    );
     // WS open + IB disconnected = ib_offline
     expect(result.current.connectionState).toBe("ib_offline");
 
@@ -119,40 +167,51 @@ describe("IBStatusProvider", () => {
     expect(result.current.connectionState).toBe("relay_offline");
   });
 
-  it("responds to ping with pong", () => {
+  it("responds to ping with pong", async () => {
     const { result } = renderHook(() => useIBStatusContext(), { wrapper });
+    await act(async () => {});
     act(() => latestWs().simulateOpen());
     const ws = latestWs();
     act(() => ws.simulateMessage({ type: "ping" }));
-    const pongMsg = ws.sent.find(s => {
-      try { return JSON.parse(s).action === "pong"; } catch { return false; }
+    const pongMsg = ws.sent.find((s) => {
+      try {
+        return JSON.parse(s).action === "pong";
+      } catch {
+        return false;
+      }
     });
     expect(pongMsg).toBeDefined();
   });
 
-  it("reconnects on WS close with backoff", () => {
+  it("reconnects on WS close with backoff", async () => {
     const { result } = renderHook(() => useIBStatusContext(), { wrapper });
+    await act(async () => {});
     expect(wsInstances).toHaveLength(1);
     act(() => latestWs().simulateOpen());
     act(() => latestWs().simulateClose());
     // Should schedule reconnect
     const beforeCount = wsInstances.length;
     act(() => vi.advanceTimersByTime(2000));
+    await act(async () => {});
     expect(wsInstances.length).toBeGreaterThan(beforeCount);
   });
 
-  it("cleans up WebSocket on unmount", () => {
+  it("cleans up WebSocket on unmount", async () => {
     const { unmount } = renderHook(() => useIBStatusContext(), { wrapper });
+    await act(async () => {});
     act(() => latestWs().simulateOpen());
     const ws = latestWs();
     unmount();
     expect(ws.readyState).toBe(MockWebSocket.CLOSED);
   });
 
-  it("sets wsConnected false and disconnectedSince when WS drops", () => {
+  it("sets wsConnected false and disconnectedSince when WS drops", async () => {
     const { result } = renderHook(() => useIBStatusContext(), { wrapper });
+    await act(async () => {});
     act(() => latestWs().simulateOpen());
-    act(() => latestWs().simulateMessage({ type: "status", ib_connected: true }));
+    act(() =>
+      latestWs().simulateMessage({ type: "status", ib_connected: true }),
+    );
     expect(result.current.wsConnected).toBe(true);
     expect(result.current.disconnectedSince).toBeNull();
     act(() => latestWs().simulateClose());

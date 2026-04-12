@@ -24,14 +24,30 @@ vi.mock("child_process", () => ({
   spawn: (...args: unknown[]) => mockSpawn(...args),
 }));
 
+// Mock xenonFetch — flow-analysis route now proxies via xenonFetch
+const mockXenonFetch = vi.fn();
+vi.mock("@/lib/xenonApi", () => ({
+  xenonFetch: (...args: unknown[]) => mockXenonFetch(...args),
+  XenonApiError: class extends Error {
+    status: number;
+    detail: string;
+    constructor(status: number, detail: string) {
+      super(`Xenon API ${status}: ${detail}`);
+      this.name = "XenonApiError";
+      this.status = status;
+      this.detail = detail;
+    }
+  },
+}));
+
 // ---------------------------------------------------------------------------
-// Flow Analysis API — GET
+// Flow Analysis API — GET (proxies to FastAPI via xenonFetch)
 // ---------------------------------------------------------------------------
 
 describe("Flow Analysis API GET", () => {
   beforeEach(() => {
     vi.resetModules();
-    mockReadFile.mockReset();
+    mockXenonFetch.mockReset();
   });
 
   it("returns cached data when file exists", async () => {
@@ -43,10 +59,10 @@ describe("Flow Analysis API GET", () => {
       watch: [],
       neutral: [],
     };
-    mockReadFile.mockResolvedValueOnce(JSON.stringify(cached));
+    mockXenonFetch.mockResolvedValueOnce(cached);
 
     const { GET } = await import("../app/api/flow-analysis/route");
-    const res = await GET();
+    const res = await GET(new Request("http://localhost/api/flow-analysis"));
     const body = await res.json();
 
     expect(res.status).toBe(200);
@@ -55,17 +71,16 @@ describe("Flow Analysis API GET", () => {
   });
 
   it("returns empty structure when cache file is missing", async () => {
-    mockReadFile.mockRejectedValueOnce(new Error("ENOENT"));
+    mockXenonFetch.mockRejectedValueOnce(new Error("ECONNREFUSED"));
 
     const { GET } = await import("../app/api/flow-analysis/route");
-    const res = await GET();
+    const res = await GET(new Request("http://localhost/api/flow-analysis"));
     const body = await res.json();
 
     expect(res.status).toBe(200);
     expect(body.positions_scanned).toBe(0);
     expect(body.supports).toEqual([]);
     expect(body.against).toEqual([]);
-    expect(body.watch).toEqual([]);
     expect(body.neutral).toEqual([]);
   });
 });

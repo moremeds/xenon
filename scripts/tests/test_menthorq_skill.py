@@ -5,6 +5,7 @@ Validates:
 - commands.json includes all menthorq commands
 - docs/reference/menthorq-prompts.md is referenced and contains expected categories
 """
+
 from __future__ import annotations
 
 import json
@@ -17,10 +18,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 SKILL_DIR = PROJECT_ROOT / ".pi" / "skills" / "menthorq"
 SKILL_MD = SKILL_DIR / "SKILL.md"
 COMMANDS_JSON = PROJECT_ROOT / ".pi" / "commands.json"
-PROMPTS_MD = PROJECT_ROOT / "docs" / "menthorq-prompts.md"
+PROMPTS_MD = PROJECT_ROOT / "docs" / "reference" / "menthorq-prompts.md"
 
 
 # ── SKILL.md existence & frontmatter ────────────────────────────────
+
 
 class TestSkillMdExists:
     def test_skill_dir_exists(self):
@@ -31,16 +33,15 @@ class TestSkillMdExists:
 
     def test_frontmatter_has_name(self):
         content = SKILL_MD.read_text()
-        assert re.search(r"^name:\s*menthorq", content, re.MULTILINE), \
-            "SKILL.md frontmatter missing 'name: menthorq'"
+        assert re.search(r"^name:\s*menthorq", content, re.MULTILINE), "SKILL.md frontmatter missing 'name: menthorq'"
 
     def test_frontmatter_has_description(self):
         content = SKILL_MD.read_text()
-        assert re.search(r"^description:", content, re.MULTILINE), \
-            "SKILL.md frontmatter missing 'description:'"
+        assert re.search(r"^description:", content, re.MULTILINE), "SKILL.md frontmatter missing 'description:'"
 
 
 # ── SKILL.md required sections ──────────────────────────────────────
+
 
 class TestSkillMdSections:
     @pytest.fixture
@@ -48,36 +49,30 @@ class TestSkillMdSections:
         return SKILL_MD.read_text()
 
     def test_has_commands_section(self, content):
-        assert "## Commands" in content or "## Available Commands" in content, \
+        assert "## Commands" in content or "## Available Commands" in content, (
             "SKILL.md must document available commands"
+        )
 
     def test_documents_menthorq_cta(self, content):
-        assert "menthorq-cta" in content, \
-            "SKILL.md must document the menthorq-cta command"
+        assert "menthorq-cta" in content, "SKILL.md must document the menthorq-cta command"
 
     def test_documents_menthorq_dashboard(self, content):
-        assert "menthorq-dashboard" in content, \
-            "SKILL.md must document the menthorq-dashboard command"
+        assert "menthorq-dashboard" in content, "SKILL.md must document the menthorq-dashboard command"
 
     def test_documents_menthorq_screener(self, content):
-        assert "menthorq-screener" in content, \
-            "SKILL.md must document the menthorq-screener command"
+        assert "menthorq-screener" in content, "SKILL.md must document the menthorq-screener command"
 
     def test_documents_menthorq_forex(self, content):
-        assert "menthorq-forex" in content, \
-            "SKILL.md must document the menthorq-forex command"
+        assert "menthorq-forex" in content, "SKILL.md must document the menthorq-forex command"
 
     def test_documents_menthorq_summary(self, content):
-        assert "menthorq-summary" in content, \
-            "SKILL.md must document the menthorq-summary command"
+        assert "menthorq-summary" in content, "SKILL.md must document the menthorq-summary command"
 
     def test_references_prompts_file(self, content):
-        assert "menthorq-prompts.md" in content, \
-            "SKILL.md must reference docs/reference/menthorq-prompts.md"
+        assert "menthorq-prompts.md" in content, "SKILL.md must reference docs/reference/menthorq-prompts.md"
 
     def test_has_quin_screener_section(self, content):
-        assert "QUIN" in content, \
-            "SKILL.md must document the QUIN AI screener prompts"
+        assert "QUIN" in content, "SKILL.md must document the QUIN AI screener prompts"
 
     def test_has_preset_prompts(self, content):
         """SKILL.md must include at least 5 preset prompt examples."""
@@ -87,11 +82,11 @@ class TestSkillMdSections:
             content,
             re.MULTILINE,
         )
-        assert len(prompt_lines) >= 5, \
-            f"Expected ≥5 preset prompts, found {len(prompt_lines)}"
+        assert len(prompt_lines) >= 5, f"Expected ≥5 preset prompts, found {len(prompt_lines)}"
 
 
 # ── commands.json registration ──────────────────────────────────────
+
 
 class TestCommandsJson:
     @pytest.fixture
@@ -124,6 +119,7 @@ class TestCommandsJson:
 
 
 # ── Prompts doc structure ───────────────────────────────────────────
+
 
 class TestPromptsDoc:
     @pytest.fixture

@@ -41,11 +41,16 @@ beforeEach(() => {
 
 describe("xenonFetch — success", () => {
   it("returns parsed JSON on 200", async () => {
-    mockFetch.mockResolvedValue(jsonResponse({ positions: 20, bankroll: 100000 }));
+    mockFetch.mockResolvedValue(
+      jsonResponse({ positions: 20, bankroll: 100000 }),
+    );
 
-    const data = await xenonFetch<{ positions: number; bankroll: number }>("/portfolio/sync", {
-      method: "POST",
-    });
+    const data = await xenonFetch<{ positions: number; bankroll: number }>(
+      "/portfolio/sync",
+      {
+        method: "POST",
+      },
+    );
 
     expect(data.positions).toBe(20);
     expect(data.bankroll).toBe(100000);
@@ -73,14 +78,17 @@ describe("xenonFetch — success", () => {
     const [, opts] = mockFetch.mock.calls[0];
     expect(opts.method).toBe("POST");
     expect(opts.cache).toBe("no-store");
-    expect(opts.headers).toEqual({ "Content-Type": "application/json" });
+    expect(opts.headers).toBeInstanceOf(Headers);
+    expect(opts.headers.get("Content-Type")).toBe("application/json");
     expect(opts.body).toContain("AAPL");
   });
 
   it("returns 202 accepted as success", async () => {
     mockFetch.mockResolvedValue(jsonResponse({ status: "accepted" }, 202));
 
-    const data = await xenonFetch("/portfolio/background-sync", { method: "POST" });
+    const data = await xenonFetch("/portfolio/background-sync", {
+      method: "POST",
+    });
     expect(data).toEqual({ status: "accepted" });
   });
 });
@@ -91,7 +99,9 @@ describe("xenonFetch — success", () => {
 
 describe("xenonFetch — error handling", () => {
   it("throws XenonApiError with detail from FastAPI HTTPException", async () => {
-    mockFetch.mockResolvedValue(jsonResponse({ detail: "IB pool not connected" }, 503));
+    mockFetch.mockResolvedValue(
+      jsonResponse({ detail: "IB pool not connected" }, 503),
+    );
 
     try {
       await xenonFetch("/portfolio/sync", { method: "POST" });
@@ -186,11 +196,13 @@ describe("xenonFetch — timeout", () => {
   });
 
   it("propagates abort error from timed-out fetch", async () => {
-    mockFetch.mockRejectedValue(new DOMException("The operation was aborted", "AbortError"));
-
-    await expect(xenonFetch("/performance", { method: "POST", timeout: 1 })).rejects.toThrow(
-      "aborted",
+    mockFetch.mockRejectedValue(
+      new DOMException("The operation was aborted", "AbortError"),
     );
+
+    await expect(
+      xenonFetch("/performance", { method: "POST", timeout: 1 }),
+    ).rejects.toThrow("aborted");
   });
 });
 
@@ -206,7 +218,9 @@ describe("xenonFetch — network errors", () => {
   });
 
   it("propagates DNS resolution failure", async () => {
-    mockFetch.mockRejectedValue(new TypeError("getaddrinfo ENOTFOUND localhost"));
+    mockFetch.mockRejectedValue(
+      new TypeError("getaddrinfo ENOTFOUND localhost"),
+    );
 
     await expect(xenonFetch("/health")).rejects.toThrow("ENOTFOUND");
   });

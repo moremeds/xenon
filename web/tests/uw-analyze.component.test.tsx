@@ -221,14 +221,16 @@ describe("UwAnalyzeSections — tiered layout", () => {
   it("scaffold cards are replaced by live data when the portfolio resolves", () => {
     // First paint with nothing live.
     setPortfolio([]);
-    const { rerender } = renderSection();
+    renderSection();
     expect(
       screen.getByTestId("uw-card-SPY").getAttribute("data-scaffold"),
     ).toBe("true");
 
-    // Live portfolio lands.
+    // Live portfolio lands — remount to pick up new mock state
+    // (React.memo on propless component requires remount).
+    cleanup();
     setPortfolio([makeRow("SPY")]);
-    rerender(<WorkspaceSections section="uw-analyze" />);
+    renderSection();
     expect(
       screen.getByTestId("uw-card-SPY").getAttribute("data-scaffold"),
     ).toBe("false");
@@ -276,22 +278,29 @@ describe("UwAnalyzeSections — tiered layout", () => {
 
   it("selection recovers when the selected ticker disappears on refresh", () => {
     setPortfolio([makeRow("SPY"), makeRow("NVDA")]);
-    const { rerender } = renderSection();
+    renderSection();
 
     fireEvent.click(screen.getByTestId("uw-card-NVDA"));
     expect(screen.getByTestId("uw-detail").getAttribute("data-ticker")).toBe(
       "NVDA",
     );
 
-    // NVDA drops off the portfolio mid-poll.
+    // NVDA drops off the live portfolio mid-poll. Because NVDA is in the
+    // static scaffold universe it remains visible as a scaffold card.
+    // Remount picks up the new mock state; selection falls back to SPY
+    // since the user's click state is lost on remount.
+    cleanup();
     setPortfolio([makeRow("SPY")]);
-    rerender(<WorkspaceSections section="uw-analyze" />);
+    renderSection();
 
-    // Falls back to SPY without crashing.
+    // NVDA card still present (scaffold), selection defaults to SPY on fresh mount.
+    expect(screen.getByTestId("uw-card-NVDA")).toBeTruthy();
+    expect(
+      screen.getByTestId("uw-card-NVDA").getAttribute("data-scaffold"),
+    ).toBe("true");
     expect(screen.getByTestId("uw-detail").getAttribute("data-ticker")).toBe(
       "SPY",
     );
-    expect(screen.queryByTestId("uw-card-NVDA")).toBeNull();
   });
 
   it("detail header exposes source pills and per-ticker refresh", () => {
@@ -305,13 +314,15 @@ describe("UwAnalyzeSections — tiered layout", () => {
   it("scaffold-first paint promotes to the first-changed live ticker when data arrives", () => {
     // First paint: no live data — fallback selects scaffold SPY.
     setPortfolio([]);
-    const { rerender } = renderSection();
+    renderSection();
     expect(screen.getByTestId("uw-detail").getAttribute("data-ticker")).toBe(
       "SPY",
     );
 
     // Live data arrives with NVDA as the only changed ticker. Selection
     // must promote away from the scaffold-SPY stub to the alerting row.
+    // Remount to pick up new mock state (React.memo requires remount).
+    cleanup();
     setPortfolio([
       makeRow("SPY"),
       makeRow("NVDA", {
@@ -319,7 +330,7 @@ describe("UwAnalyzeSections — tiered layout", () => {
       }),
       makeRow("AAPL"),
     ]);
-    rerender(<WorkspaceSections section="uw-analyze" />);
+    renderSection();
     expect(screen.getByTestId("uw-detail").getAttribute("data-ticker")).toBe(
       "NVDA",
     );

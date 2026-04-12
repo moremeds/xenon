@@ -15,12 +15,31 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import pytest  # noqa: E402
 from api.routes import uw_analyze as routes_mod  # noqa: E402
 from api.services import uw_analyze_candidates as cand  # noqa: E402
 from api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
 from api.services.uw_analyze_flow_tracker import FlowLog  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+
+_original_runner = routes_mod._runner
+_original_portfolio_cache = routes_mod._portfolio_cache
+_original_flow_log = routes_mod._flow_log
+_original_portfolio_path = cand.PORTFOLIO_PATH
+_original_watchlist_path = cand.WATCHLIST_PATH
+
+
+@pytest.fixture(autouse=True)
+def _restore_module_state():
+    """Restore all mutated module attributes to prevent cross-file pollution."""
+    yield
+    routes_mod._runner = _original_runner
+    routes_mod._portfolio_cache = _original_portfolio_cache
+    routes_mod._flow_log = _original_flow_log
+    cand.PORTFOLIO_PATH = _original_portfolio_path
+    cand.WATCHLIST_PATH = _original_watchlist_path
+    routes_mod.reset_state_for_tests()
 
 
 def _build_app(tmp_path, fake_runner, *, portfolio=None, watchlist=None, market_open=True):

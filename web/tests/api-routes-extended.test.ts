@@ -31,7 +31,9 @@ vi.mock("fs/promises", () => ({
 }));
 
 // Mock @tools/runner for orders/place
-const mockRunScript = vi.fn().mockResolvedValue({ ok: false, stderr: "mocked" });
+const mockRunScript = vi
+  .fn()
+  .mockResolvedValue({ ok: false, stderr: "mocked" });
 vi.mock("@tools/runner", () => ({
   runScript: mockRunScript,
   resolveProjectRoot: vi.fn().mockReturnValue("/mock/root"),
@@ -52,7 +54,9 @@ vi.mock("@tools/wrappers/ib-orders", () => ({
 }));
 
 // Mock @tools/data-reader for reading orders.json after refresh
-const mockReadDataFile = vi.fn().mockResolvedValue({ ok: false, error: "not found" });
+const mockReadDataFile = vi
+  .fn()
+  .mockResolvedValue({ ok: false, error: "not found" });
 vi.mock("@tools/data-reader", () => ({
   readDataFile: mockReadDataFile,
 }));
@@ -62,6 +66,11 @@ vi.mock("@tools/schemas/ib-orders", () => ({
   OrdersData: {},
 }));
 
+// Mock Clerk auth — previous-close route calls auth() for WS ticket
+vi.mock("@clerk/nextjs/server", () => ({
+  auth: vi.fn(async () => ({ getToken: async () => "test-token" })),
+}));
+
 // Mock @/lib/syncMutex (some routes may import it)
 vi.mock("@/lib/syncMutex", () => ({
   createSyncMutex: (fn: () => Promise<unknown>) => fn,
@@ -69,7 +78,10 @@ vi.mock("@/lib/syncMutex", () => ({
 
 // Mock ws — WebSocket used by /api/previous-close for IB snapshots
 // Default: emit error so IB source fails and tests fall through to UW/Yahoo
-const mockWsInstances: Array<{ handlers: Record<string, Function>; sentMessages: string[] }> = [];
+const mockWsInstances: Array<{
+  handlers: Record<string, Function>;
+  sentMessages: string[];
+}> = [];
 let mockWsBehavior: "error" | "snapshot" = "error";
 let mockWsSnapshotData: Record<string, number> = {};
 
@@ -81,7 +93,10 @@ vi.mock("ws", () => {
     OPEN = 1;
 
     constructor() {
-      mockWsInstances.push({ handlers: this.handlers, sentMessages: this.sentMessages });
+      mockWsInstances.push({
+        handlers: this.handlers,
+        sentMessages: this.sentMessages,
+      });
       // Schedule events asynchronously like a real WebSocket
       setTimeout(() => {
         if (mockWsBehavior === "error") {
@@ -106,11 +121,21 @@ vi.mock("ws", () => {
           for (const sym of msg.symbols) {
             const close = mockWsSnapshotData[sym];
             setTimeout(() => {
-              this.handlers.message?.(JSON.stringify({
-                type: "snapshot",
-                symbol: sym,
-                data: close != null ? { close, last: close + 1, bid: close + 0.5, ask: close + 1.5 } : { close: null, last: null },
-              }));
+              this.handlers.message?.(
+                JSON.stringify({
+                  type: "snapshot",
+                  symbol: sym,
+                  data:
+                    close != null
+                      ? {
+                          close,
+                          last: close + 1,
+                          bid: close + 0.5,
+                          ask: close + 1.5,
+                        }
+                      : { close: null, last: null },
+                }),
+              );
             }, 5);
           }
         }
@@ -220,7 +245,9 @@ describe("GET /api/ticker/seasonality — extended", () => {
     mockReadFile.mockResolvedValue(JSON.stringify(cacheEntry));
 
     const { GET } = await import("../app/api/ticker/seasonality/route");
-    const res = await GET(new Request("http://localhost/api/ticker/seasonality?ticker=AAPL"));
+    const res = await GET(
+      new Request("http://localhost/api/ticker/seasonality?ticker=AAPL"),
+    );
     expect(res.status).toBe(200);
 
     const body = await res.json();
@@ -233,7 +260,9 @@ describe("GET /api/ticker/seasonality — extended", () => {
 
   it("returns 400 when ticker param is missing", async () => {
     const { GET } = await import("../app/api/ticker/seasonality/route");
-    const res = await GET(new Request("http://localhost/api/ticker/seasonality"));
+    const res = await GET(
+      new Request("http://localhost/api/ticker/seasonality"),
+    );
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toContain("ticker");
@@ -245,7 +274,9 @@ describe("GET /api/ticker/seasonality — extended", () => {
     mockReadFile.mockRejectedValue(new Error("ENOENT"));
 
     const { GET } = await import("../app/api/ticker/seasonality/route");
-    const res = await GET(new Request("http://localhost/api/ticker/seasonality?ticker=AAPL"));
+    const res = await GET(
+      new Request("http://localhost/api/ticker/seasonality?ticker=AAPL"),
+    );
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.error).toContain("UW_TOKEN");
@@ -262,7 +293,9 @@ describe("GET /api/ticker/seasonality — extended", () => {
     });
 
     const { GET } = await import("../app/api/ticker/seasonality/route");
-    const res = await GET(new Request("http://localhost/api/ticker/seasonality?ticker=AAPL"));
+    const res = await GET(
+      new Request("http://localhost/api/ticker/seasonality?ticker=AAPL"),
+    );
     expect(res.status).toBe(200);
 
     const body = await res.json();
@@ -289,7 +322,9 @@ describe("GET /api/ticker/seasonality — extended", () => {
     // extractViaVision: no API key means it returns null without fetching
 
     const { GET } = await import("../app/api/ticker/seasonality/route");
-    const res = await GET(new Request("http://localhost/api/ticker/seasonality?ticker=XYZ"));
+    const res = await GET(
+      new Request("http://localhost/api/ticker/seasonality?ticker=XYZ"),
+    );
     expect(res.status).toBe(200);
 
     const body = await res.json();
@@ -339,7 +374,9 @@ describe("GET /api/ticker/seasonality — extended", () => {
     });
 
     const { GET } = await import("../app/api/ticker/seasonality/route");
-    const res = await GET(new Request("http://localhost/api/ticker/seasonality?ticker=MSFT"));
+    const res = await GET(
+      new Request("http://localhost/api/ticker/seasonality?ticker=MSFT"),
+    );
     expect(res.status).toBe(200);
 
     const body = await res.json();
@@ -380,8 +417,16 @@ describe("GET /api/ticker/news — extended", () => {
 
   it("returns UW news when UW_TOKEN is set and fetch succeeds", async () => {
     const uwNews = [
-      { headline: "AAPL beats earnings", source: "Reuters", created_at: "2026-03-05T10:00:00Z" },
-      { headline: "AAPL expands AI division", source: "Bloomberg", created_at: "2026-03-05T09:00:00Z" },
+      {
+        headline: "AAPL beats earnings",
+        source: "Reuters",
+        created_at: "2026-03-05T10:00:00Z",
+      },
+      {
+        headline: "AAPL expands AI division",
+        source: "Bloomberg",
+        created_at: "2026-03-05T09:00:00Z",
+      },
     ];
 
     mockFetch.mockResolvedValueOnce({
@@ -390,7 +435,9 @@ describe("GET /api/ticker/news — extended", () => {
     });
 
     const { GET } = await import("../app/api/ticker/news/route");
-    const res = await GET(new Request("http://localhost/api/ticker/news?ticker=AAPL"));
+    const res = await GET(
+      new Request("http://localhost/api/ticker/news?ticker=AAPL"),
+    );
     expect(res.status).toBe(200);
 
     const body = await res.json();
@@ -420,7 +467,9 @@ describe("GET /api/ticker/news — extended", () => {
     });
 
     const { GET } = await import("../app/api/ticker/news/route");
-    const res = await GET(new Request("http://localhost/api/ticker/news?ticker=GOOG"));
+    const res = await GET(
+      new Request("http://localhost/api/ticker/news?ticker=GOOG"),
+    );
     expect(res.status).toBe(200);
 
     const body = await res.json();
@@ -438,7 +487,9 @@ describe("GET /api/ticker/news — extended", () => {
     mockFetch.mockResolvedValueOnce({ ok: false, json: async () => ({}) });
 
     const { GET } = await import("../app/api/ticker/news/route");
-    const res = await GET(new Request("http://localhost/api/ticker/news?ticker=XYZ"));
+    const res = await GET(
+      new Request("http://localhost/api/ticker/news?ticker=XYZ"),
+    );
     expect(res.status).toBe(200);
 
     const body = await res.json();
@@ -454,7 +505,9 @@ describe("GET /api/ticker/news — extended", () => {
     mockFetch.mockResolvedValueOnce({ ok: false, json: async () => ({}) });
 
     const { GET } = await import("../app/api/ticker/news/route");
-    const res = await GET(new Request("http://localhost/api/ticker/news?ticker=XYZ"));
+    const res = await GET(
+      new Request("http://localhost/api/ticker/news?ticker=XYZ"),
+    );
     expect(res.status).toBe(200);
 
     const body = await res.json();
@@ -498,8 +551,12 @@ describe("POST /api/previous-close — extended", () => {
 
     const body = await res.json();
     expect(body.closes.AAPL).toBe(182.52);
-    // Should NOT have called UW or Yahoo since IB succeeded
-    expect(mockFetch).not.toHaveBeenCalled();
+    // Should NOT have called UW or Yahoo since IB succeeded.
+    // The only fetch call should be the WS ticket request from buildWsUrl.
+    const nonTicketCalls = mockFetch.mock.calls.filter(
+      ([url]: [string]) => !String(url).includes("/ws-ticket"),
+    );
+    expect(nonTicketCalls).toHaveLength(0);
   });
 
   it("falls back to UW when IB connection fails", async () => {
@@ -540,7 +597,7 @@ describe("POST /api/previous-close — extended", () => {
           ok: true,
           json: async () => ({
             chart: {
-              result: [{ meta: { chartPreviousClose: 175.30 } }],
+              result: [{ meta: { chartPreviousClose: 175.3 } }],
             },
           }),
         };
@@ -559,7 +616,7 @@ describe("POST /api/previous-close — extended", () => {
     expect(res.status).toBe(200);
 
     const body = await res.json();
-    expect(body.closes.MSFT).toBe(175.30);
+    expect(body.closes.MSFT).toBe(175.3);
   });
 
   it("caches results — second call for same symbol does not re-fetch", async () => {
@@ -629,7 +686,12 @@ describe("POST /api/orders/cancel — extended", () => {
     mockReadDataFile.mockReset();
     mockReadDataFile.mockResolvedValue({
       ok: true,
-      data: { open_orders: [], executed_orders: [], open_count: 0, executed_count: 0 },
+      data: {
+        open_orders: [],
+        executed_orders: [],
+        open_count: 0,
+        executed_count: 0,
+      },
     });
   });
 
@@ -674,7 +736,10 @@ describe("POST /api/orders/cancel — extended", () => {
   it("preserves upstream 502 detail when FastAPI cancel fails", async () => {
     const { XenonApiError } = await import("@/lib/xenonApi");
     mockXenonFetch.mockRejectedValue(
-      new XenonApiError(502, "Cancel not confirmed by refreshed IB open orders"),
+      new XenonApiError(
+        502,
+        "Cancel not confirmed by refreshed IB open orders",
+      ),
     );
 
     const { POST } = await import("../app/api/orders/cancel/route");
@@ -688,7 +753,9 @@ describe("POST /api/orders/cancel — extended", () => {
     expect(res.status).toBe(502);
 
     const body = await res.json();
-    expect(body.error).toContain("Cancel not confirmed by refreshed IB open orders");
+    expect(body.error).toContain(
+      "Cancel not confirmed by refreshed IB open orders",
+    );
   });
 
   it("returns 400 when neither orderId nor permId provided", async () => {
@@ -718,7 +785,12 @@ describe("POST /api/orders/modify — extended", () => {
     mockReadDataFile.mockReset();
     mockReadDataFile.mockResolvedValue({
       ok: true,
-      data: { open_orders: [], executed_orders: [], open_count: 0, executed_count: 0 },
+      data: {
+        open_orders: [],
+        executed_orders: [],
+        open_count: 0,
+        executed_count: 0,
+      },
     });
   });
 
@@ -735,7 +807,10 @@ describe("POST /api/orders/modify — extended", () => {
       },
     });
     mockXenonFetch
-      .mockResolvedValueOnce({ status: "ok", message: "Order 101 modified to 5.50" })
+      .mockResolvedValueOnce({
+        status: "ok",
+        message: "Order 101 modified to 5.50",
+      })
       .mockResolvedValueOnce({});
 
     const { POST } = await import("../app/api/orders/modify/route");
@@ -743,7 +818,7 @@ describe("POST /api/orders/modify — extended", () => {
       new Request("http://localhost/api/orders/modify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orderId: 101, newPrice: 5.50 }),
+        body: JSON.stringify({ orderId: 101, newPrice: 5.5 }),
       }),
     );
     expect(res.status).toBe(200);
@@ -762,7 +837,7 @@ describe("POST /api/orders/modify — extended", () => {
       new Request("http://localhost/api/orders/modify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orderId: 202, newPrice: 3.00 }),
+        body: JSON.stringify({ orderId: 202, newPrice: 3.0 }),
       }),
     );
     expect(res.status).toBe(500);
@@ -777,7 +852,7 @@ describe("POST /api/orders/modify — extended", () => {
       new Request("http://localhost/api/orders/modify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ newPrice: 5.00 }),
+        body: JSON.stringify({ newPrice: 5.0 }),
       }),
     );
     expect(res.status).toBe(400);
@@ -799,7 +874,10 @@ describe("POST /api/orders/modify — extended", () => {
       },
     });
     mockXenonFetch
-      .mockResolvedValueOnce({ status: "ok", message: "Order 101 quantity modified to 75" })
+      .mockResolvedValueOnce({
+        status: "ok",
+        message: "Order 101 quantity modified to 75",
+      })
       .mockResolvedValueOnce({});
 
     const { POST } = await import("../app/api/orders/modify/route");
@@ -814,7 +892,11 @@ describe("POST /api/orders/modify — extended", () => {
 
     const [path, options] = mockXenonFetch.mock.calls[0];
     expect(path).toBe("/orders/modify");
-    expect(JSON.parse(String(options.body))).toMatchObject({ orderId: 101, permId: 0, newQuantity: 75 });
+    expect(JSON.parse(String(options.body))).toMatchObject({
+      orderId: 101,
+      permId: 0,
+      newQuantity: 75,
+    });
   });
 
   it("returns 502 when refreshed orders do not confirm the modified price", async () => {
@@ -822,7 +904,12 @@ describe("POST /api/orders/modify — extended", () => {
       ok: true,
       data: {
         open_orders: [
-          { orderId: 95, permId: 653624857, totalQuantity: 50, limitPrice: 5.7 },
+          {
+            orderId: 95,
+            permId: 653624857,
+            totalQuantity: 50,
+            limitPrice: 5.7,
+          },
         ],
         executed_orders: [],
         open_count: 1,
@@ -830,7 +917,10 @@ describe("POST /api/orders/modify — extended", () => {
       },
     });
     mockXenonFetch
-      .mockResolvedValueOnce({ status: "ok", message: "Order modified: $5.7 → $5.55" })
+      .mockResolvedValueOnce({
+        status: "ok",
+        message: "Order modified: $5.7 → $5.55",
+      })
       .mockResolvedValueOnce({});
 
     const { POST } = await import("../app/api/orders/modify/route");
@@ -838,7 +928,11 @@ describe("POST /api/orders/modify — extended", () => {
       new Request("http://localhost/api/orders/modify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orderId: 95, permId: 653624857, newPrice: 5.55 }),
+        body: JSON.stringify({
+          orderId: 95,
+          permId: 653624857,
+          newPrice: 5.55,
+        }),
       }),
     );
     expect(res.status).toBe(502);
@@ -851,7 +945,12 @@ describe("POST /api/orders/modify — extended", () => {
     mockXenonFetch
       .mockResolvedValueOnce({ status: "ok", message: "Order cancelled" })
       .mockResolvedValueOnce({ status: "ok", message: "Order cancelled" })
-      .mockResolvedValueOnce({ status: "ok", message: "Replacement placed", orderId: 202, permId: 999 })
+      .mockResolvedValueOnce({
+        status: "ok",
+        message: "Replacement placed",
+        orderId: 202,
+        permId: 999,
+      })
       .mockResolvedValueOnce({});
 
     const { POST } = await import("../app/api/orders/modify/route");
@@ -874,8 +973,20 @@ describe("POST /api/orders/modify — extended", () => {
             limitPrice: 0.75,
             tif: "DAY",
             legs: [
-              { expiry: "20260327", strike: 90, right: "P", action: "SELL", ratio: 1 },
-              { expiry: "20260327", strike: 100, right: "C", action: "BUY", ratio: 1 },
+              {
+                expiry: "20260327",
+                strike: 90,
+                right: "P",
+                action: "SELL",
+                ratio: 1,
+              },
+              {
+                expiry: "20260327",
+                strike: 100,
+                right: "C",
+                action: "BUY",
+                ratio: 1,
+              },
             ],
           },
         }),
@@ -885,25 +996,43 @@ describe("POST /api/orders/modify — extended", () => {
 
     expect(mockXenonFetch).toHaveBeenCalledTimes(4);
     expect(mockXenonFetch.mock.calls[0][0]).toBe("/orders/cancel");
-    expect(JSON.parse(String(mockXenonFetch.mock.calls[0][1].body))).toMatchObject({
+    expect(
+      JSON.parse(String(mockXenonFetch.mock.calls[0][1].body)),
+    ).toMatchObject({
       orderId: 77,
       permId: 653611587,
     });
     expect(mockXenonFetch.mock.calls[1][0]).toBe("/orders/cancel");
-    expect(JSON.parse(String(mockXenonFetch.mock.calls[1][1].body))).toMatchObject({
+    expect(
+      JSON.parse(String(mockXenonFetch.mock.calls[1][1].body)),
+    ).toMatchObject({
       orderId: 78,
       permId: 653611588,
     });
     expect(mockXenonFetch.mock.calls[2][0]).toBe("/orders/place");
-    expect(JSON.parse(String(mockXenonFetch.mock.calls[2][1].body))).toMatchObject({
+    expect(
+      JSON.parse(String(mockXenonFetch.mock.calls[2][1].body)),
+    ).toMatchObject({
       type: "combo",
       symbol: "AAOI",
       action: "SELL",
       quantity: 75,
       limitPrice: 0.75,
       legs: [
-        { expiry: "20260327", strike: 90, right: "P", action: "SELL", ratio: 1 },
-        { expiry: "20260327", strike: 100, right: "C", action: "BUY", ratio: 1 },
+        {
+          expiry: "20260327",
+          strike: 90,
+          right: "P",
+          action: "SELL",
+          ratio: 1,
+        },
+        {
+          expiry: "20260327",
+          strike: 100,
+          right: "C",
+          action: "BUY",
+          ratio: 1,
+        },
       ],
     });
   });
@@ -935,7 +1064,12 @@ describe("POST /api/orders/place — extended", () => {
     mockReadDataFile.mockReset();
     mockReadDataFile.mockResolvedValue({
       ok: true,
-      data: { open_orders: [], executed_orders: [], open_count: 0, executed_count: 0 },
+      data: {
+        open_orders: [],
+        executed_orders: [],
+        open_count: 0,
+        executed_count: 0,
+      },
     });
   });
 
@@ -960,7 +1094,7 @@ describe("POST /api/orders/place — extended", () => {
           symbol: "AAPL",
           action: "BUY",
           quantity: 100,
-          limitPrice: 175.00,
+          limitPrice: 175.0,
         }),
       }),
     );
@@ -987,7 +1121,7 @@ describe("POST /api/orders/place — extended", () => {
           symbol: "GOOG",
           action: "BUY",
           quantity: 50,
-          limitPrice: 180.00,
+          limitPrice: 180.0,
         }),
       }),
     );
@@ -1030,7 +1164,7 @@ describe("POST /api/orders/place — extended", () => {
           symbol: "AAPL",
           action: "BUY",
           quantity: 5,
-          limitPrice: 3.50,
+          limitPrice: 3.5,
           expiry: "20260320",
           strike: 200,
           right: "C",
@@ -1075,7 +1209,12 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
     mockReadDataFile.mockReset();
     mockReadDataFile.mockResolvedValue({
       ok: true,
-      data: { open_orders: [], executed_orders: [], open_count: 0, executed_count: 0 },
+      data: {
+        open_orders: [],
+        executed_orders: [],
+        open_count: 0,
+        executed_count: 0,
+      },
     });
   });
 
@@ -1298,7 +1437,9 @@ describe("GET /api/ticker/ratings — extended", () => {
     });
 
     const { GET } = await import("../app/api/ticker/ratings/route");
-    const res = await GET(new Request("http://localhost/api/ticker/ratings?ticker=AAPL"));
+    const res = await GET(
+      new Request("http://localhost/api/ticker/ratings?ticker=AAPL"),
+    );
     expect(res.status).toBe(200);
 
     const body = await res.json();
@@ -1314,7 +1455,9 @@ describe("GET /api/ticker/ratings — extended", () => {
     });
 
     const { GET } = await import("../app/api/ticker/ratings/route");
-    const res = await GET(new Request("http://localhost/api/ticker/ratings?ticker=XYZ"));
+    const res = await GET(
+      new Request("http://localhost/api/ticker/ratings?ticker=XYZ"),
+    );
     expect(res.status).toBe(502);
 
     const body = await res.json();
@@ -1492,7 +1635,12 @@ describe("GET /api/blotter — extended", () => {
   it("returns cached blotter data when file exists", async () => {
     const blotterData = {
       as_of: "2026-03-05",
-      summary: { closed_trades: 5, open_trades: 2, total_commissions: 45.50, realized_pnl: 1200 },
+      summary: {
+        closed_trades: 5,
+        open_trades: 2,
+        total_commissions: 45.5,
+        realized_pnl: 1200,
+      },
       closed_trades: [{ symbol: "AAPL", realized_pnl: 500 }],
       open_trades: [],
     };
