@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 @dataclass
@@ -35,9 +38,9 @@ class TrendScanConfig:
     min_dollar_volume: float = 10_000_000
     min_price: float = 5.0
 
-    # Universe source paths
-    sp500_path: str = "data/universe/sp500.json"
-    nasdaq100_path: str = "data/universe/nasdaq100.json"
+    # Universe source paths (absolute, resolved from project root)
+    sp500_path: str = str(_PROJECT_ROOT / "data" / "universe" / "sp500.json")
+    nasdaq100_path: str = str(_PROJECT_ROOT / "data" / "universe" / "nasdaq100.json")
 
     # UW flow alert filters for universe source
     uw_flow_min_premium: float = 100_000
