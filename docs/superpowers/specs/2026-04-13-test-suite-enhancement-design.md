@@ -56,10 +56,14 @@ A script that reports source files without corresponding tests. Two scan modes:
 
 **Python (`pyproject.toml` + `.coveragerc`):**
 
-```toml
-# pyproject.toml additions
-[tool.pytest.ini_options]
-addopts = "--cov=scripts --cov-config=.coveragerc --cov-fail-under=80"
+Do NOT add `--cov` to `addopts` — it would break `run_pytest_affected.py` which runs scoped subsets (coverage-under-threshold would fail on partial test runs). Instead, define a separate full-suite command:
+
+```bash
+# Full coverage run (manual or CI):
+pytest scripts/tests/ --cov=scripts --cov-config=.coveragerc --cov-fail-under=80
+
+# Scoped run (daily development):
+python scripts/run_pytest_affected.py   # no coverage overhead
 ```
 
 ```ini
@@ -137,27 +141,36 @@ def mock_ib_client():
 
 @pytest.fixture
 def mock_uw_client():
-    """UW API client mock with configurable response fixtures."""
+    """UW API client mock matching actual uw_client.py methods."""
     client = MagicMock()
     # Default: return empty but valid responses
-    client.get_flow = AsyncMock(return_value=[])
-    client.get_chain = AsyncMock(return_value={})
+    client.get_flow_alerts = MagicMock(return_value=[])
+    client.get_flow_alerts_by_ticker = MagicMock(return_value=[])
+    client.get_flow_per_strike = MagicMock(return_value={})
+    client.get_flow_per_expiry = MagicMock(return_value={})
     return client
 
 @pytest.fixture
 def tmp_data_dir(tmp_path, monkeypatch):
-    """Temp directory patched into all data/ path references."""
-    monkeypatch.setenv("XENON_DATA_DIR", str(tmp_path))
+    """Temp directory patched into server DATA_DIR and common data paths.
+    Note: XENON_DATA_DIR env var does not exist in the codebase.
+    Patch the actual DATA_DIR constants directly."""
+    monkeypatch.setattr("api.server.DATA_DIR", tmp_path)
     return tmp_path
 
 @pytest.fixture
 def frozen_market_time():
-    """Context manager to freeze market hours checks to a fixed ET time."""
+    """Context manager to freeze market hours checks to a fixed ET time.
+    Patches get_eastern_now() which is called by is_market_open(dt=None)."""
     @contextmanager
     def _freeze(hour, minute, weekday=0):
-        fake_now = datetime(2026, 4, 13, hour, minute, tzinfo=ZoneInfo("America/New_York"))
-        # weekday 0=Monday
-        with patch('scripts.utils.market_hours.now_et', return_value=fake_now):
+        # Pick a date matching the requested weekday (0=Monday)
+        from datetime import timedelta
+        base = datetime(2026, 4, 13, hour, minute)  # Monday
+        offset = (weekday - base.weekday()) % 7
+        target = base + timedelta(days=offset)
+        fake_now = EASTERN.localize(target.replace(hour=hour, minute=minute))
+        with patch('utils.market_hours.get_eastern_now', return_value=fake_now):
             yield fake_now
     return _freeze
 ```
@@ -188,36 +201,43 @@ def frozen_market_time():
 
 ### Tier 1 — Money Path (Order Handling, Portfolio)
 
-| Source File                                 | Test File (new)                  | Test Type | Cases                                                                       |
-| ------------------------------------------- | -------------------------------- | --------- | --------------------------------------------------------------------------- |
-| `web/lib/order/orderModify.ts`              | `order-modify.test.ts`           | Vitest    | Modify payload construction, field validation, partial modify, combo modify |
-| `web/lib/order/modifyOrderQuote.ts`         | `modify-order-quote.test.ts`     | Vitest    | Quote request shape, error propagation, stale quote handling                |
-| `web/lib/order/openOrderCombos.ts`          | `open-order-combos.test.ts`      | Vitest    | Combo leg grouping, orphan leg handling, multi-expiry combos                |
-| `web/lib/portfolio/portfolioByStructure.ts` | `portfolio-by-structure.test.ts` | Vitest    | Structure grouping, unknown structure fallback, empty portfolio             |
-| `web/lib/portfolio/positionUtils.ts`        | `position-utils.test.ts`         | Vitest    | Position aggregation, multi-leg P&L math, sign conventions                  |
+**Tribunal correction:** Several files originally listed here already have tests (identified by Codex codebase scan). The actual untested web/lib count is **21 files**, not 103. Files already covered: `openOrderCombos.ts` (3 test files), `positionUtils.ts` (5 test files), `modifyOrderQuote.ts`, `portfolioByStructure.ts`. `orderModify.ts` is types-only (no runtime logic).
+
+Remaining genuinely untested Tier 1 files:
+
+| Source File                 | Test File (new)           | Test Type | Cases                                                   |
+| --------------------------- | ------------------------- | --------- | ------------------------------------------------------- |
+| `web/lib/quoteTelemetry.ts` | `quote-telemetry.test.ts` | Vitest    | Event shape, batching, flush on unmount                 |
+| `web/lib/perfTracker.ts`    | `perf-tracker.test.ts`    | Vitest    | Timing capture, metric aggregation, overflow            |
+| `web/lib/apiContracts.ts`   | `api-contracts.test.ts`   | Vitest    | Contract shape validation, version drift detection      |
+| `web/lib/scales.ts`         | `scales.test.ts`          | Vitest    | Scale math, domain/range edge cases, zero-width domains |
 
 ### Tier 2 — Recently Shipped Features (Spec'd at 95%, Under-Tested)
 
-| Source File                                                 | Test File (new)                    | Test Type | Cases                                                                           |
-| ----------------------------------------------------------- | ---------------------------------- | --------- | ------------------------------------------------------------------------------- |
-| `web/lib/useUwStats.ts`                                     | `use-uw-stats.test.ts`             | Vitest    | Polling lifecycle, stale data, error states, unmount cleanup                    |
-| `web/lib/useUwStatsHistory.ts`                              | `use-uw-stats-history.test.ts`     | Vitest    | History fetch, empty state, date range filtering                                |
-| FastAPI `/uw-stats`, `/uw-stats/history`, `/uw-stats/reset` | `test_uw_stats_routes.py`          | pytest    | GET/POST endpoints, auth, validation, reset confirmation                        |
-| FastAPI `POST /trend-scan`                                  | `test_trend_scan_route.py`         | pytest    | Subprocess spawn, 180s timeout, scheduler trigger, error codes, pre-market gate |
-| uw-analyze SSE streaming                                    | `uw-analyze-sse.test.ts`           | Vitest    | Stream parsing, reconnection on drop, partial frame, multi-ticker ordering      |
-| uw-analyze cross-service                                    | `test_uw_analyze_orchestration.py` | pytest    | Cache → diff → flow tracker → action items full pipeline                        |
-| uw-analyze sticky fields                                    | `test_uw_analyze_sticky.py`        | pytest    | Sticky field merge under 429s, stale field diff false negatives                 |
-| uw-analyze semaphore                                        | `test_uw_analyze_concurrency.py`   | pytest    | 4th request when 3 slots full, timeout behavior, queue fairness                 |
+| Source File                                                                            | Test File (new)                    | Test Type | Cases                                                                               |
+| -------------------------------------------------------------------------------------- | ---------------------------------- | --------- | ----------------------------------------------------------------------------------- |
+| `web/lib/useUwStats.ts`                                                                | `use-uw-stats.test.ts`             | Vitest    | Polling lifecycle, stale data, error states, unmount cleanup                        |
+| `web/lib/useUwStatsHistory.ts`                                                         | `use-uw-stats-history.test.ts`     | Vitest    | History fetch, empty state, date range filtering                                    |
+| FastAPI `/uw-stats`, `/uw-stats/history`, `/uw-stats/reset`, `/uw-stats/history/clear` | `test_uw_stats_routes.py`          | pytest    | GET/POST endpoints, auth, validation, reset confirmation, destructive history clear |
+| FastAPI `POST /trend-scan`                                                             | `test_trend_scan_route.py`         | pytest    | Subprocess spawn, 180s timeout, scheduler trigger, error codes, pre-market gate     |
+| uw-analyze SSE streaming                                                               | `uw-analyze-sse.test.ts`           | Vitest    | Stream parsing, reconnection on drop, partial frame, multi-ticker ordering          |
+| uw-analyze cross-service                                                               | `test_uw_analyze_orchestration.py` | pytest    | Cache → diff → flow tracker → action items full pipeline                            |
+| uw-analyze sticky fields                                                               | `test_uw_analyze_sticky.py`        | pytest    | Sticky field merge under 429s, stale field diff false negatives                     |
+| uw-analyze semaphore                                                                   | `test_uw_analyze_concurrency.py`   | pytest    | 4th request when 3 slots full, timeout behavior, queue fairness                     |
 
 ### Tier 3 — Real-Time Data Plumbing
 
-| Source File                    | Test File (new)              | Test Type | Cases                                                       |
-| ------------------------------ | ---------------------------- | --------- | ----------------------------------------------------------- |
-| `web/lib/reconnectStrategy.ts` | `reconnect-strategy.test.ts` | Vitest    | Backoff math, max retries, jitter bounds, reset on success  |
-| `web/lib/quoteTelemetry.ts`    | `quote-telemetry.test.ts`    | Vitest    | Event shape, batching, flush on unmount                     |
-| `web/lib/criCalc.ts`           | `cri-calc.test.ts`           | Vitest    | CRI scoring math, edge inputs (NaN, zero, negative)         |
-| `web/lib/criCache.ts`          | `cri-cache.test.ts`          | Vitest    | Cache TTL, staleness flag, concurrent reads                 |
-| `web/lib/usePrices.ts`         | `use-prices.test.ts`         | Vitest    | WS subscription lifecycle, price merge, unmount unsubscribe |
+**Tribunal correction:** `reconnectStrategy.ts` already has `reconnect-strategy.test.ts` (8 tests), `criCache.ts` has `cri-cache-selection.test.ts`, `usePrices.ts` has `use-prices-ws-stability.test.ts` (30+ tests). `quoteTelemetry.ts` moved to Tier 1. Remaining genuinely untested:
+
+| Source File                 | Test File (new)           | Test Type | Cases                                                             |
+| --------------------------- | ------------------------- | --------- | ----------------------------------------------------------------- |
+| `web/lib/criCalc.ts`        | `cri-calc.test.ts`        | Vitest    | CRI scoring math, edge inputs (NaN, zero, negative)               |
+| `web/lib/ctaFreshness.ts`   | `cta-freshness.test.ts`   | Vitest    | Staleness detection, threshold math, timezone edge cases          |
+| `web/lib/ctaPercentiles.ts` | `cta-percentiles.test.ts` | Vitest    | Percentile calculation, empty arrays, single-element, tied values |
+| `web/lib/vcgStaleness.ts`   | `vcg-staleness.test.ts`   | Vitest    | VCG staleness flags, time boundary logic                          |
+| `web/lib/arrayUtils.ts`     | `array-utils.test.ts`     | Vitest    | Utility function coverage, empty/single/large array edge cases    |
+
+Also update vitest coverage config: remove blanket `web/lib/use*.ts` exclusion, replace with specific exclusions for hooks that genuinely can't run in node env. Hooks with `@vitest-environment jsdom` pragma (useUwStats, useUwStatsHistory) should be included in coverage.
 
 ### Tier 4 — E2E Flow Coverage
 
@@ -238,11 +258,11 @@ def frozen_market_time():
 | 1b        | Coverage thresholds | 2 modified + 1 new                 | —                       |
 | 1c        | E2E route manifest  | 1-2                                | —                       |
 | 1d        | Shared test infra   | 8-10 (helpers, fixtures, conftest) | —                       |
-| 2 Tier 1  | Money path tests    | 5                                  | ~25-30                  |
+| 2 Tier 1  | Untested core files | 4                                  | ~15-20                  |
 | 2 Tier 2  | Recent features     | 8                                  | ~50-60                  |
-| 2 Tier 3  | Real-time plumbing  | 5                                  | ~30-35                  |
+| 2 Tier 3  | Real-time plumbing  | 5                                  | ~20-25                  |
 | 2 Tier 4  | E2E specs           | 4                                  | ~20-25                  |
-| **Total** |                     | **~35-40 new files**               | **~125-150 test cases** |
+| **Total** |                     | **~30-35 new files**               | **~105-130 test cases** |
 
 ## Success Criteria
 
