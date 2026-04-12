@@ -4,6 +4,7 @@
  * Usage: import { setupClerkMock } from "./helpers";
  * Then call vi.mock("@clerk/nextjs/server", () => setupClerkMock());
  */
+import type { ReactNode } from "react";
 import { vi } from "vitest";
 
 export function setupClerkMock(token = "test-token") {
@@ -23,6 +24,6 @@ export function setupClerkClientMock() {
       getToken: async () => "test-token",
       isLoaded: true,
     })),
-    ClerkProvider: ({ children }: { children: React.ReactNode }) => children,
+    ClerkProvider: ({ children }: { children: ReactNode }) => children,
   };
 }

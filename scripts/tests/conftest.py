@@ -16,7 +16,7 @@ sys.path.insert(0, str(SCRIPTS_DIR / "trade_blotter"))
 # ── Shared fixtures ──────────────────────────────────────────────────────
 from contextlib import contextmanager
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytz
 
