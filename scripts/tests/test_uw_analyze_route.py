@@ -158,8 +158,13 @@ def _make_fixtures() -> tuple[AnalysisReport, TickerData]:
 
 @pytest.fixture(autouse=True)
 def _clear_cache(tmp_path) -> None:
+    import importlib
+
     from api.routes import uw_analyze as route_mod  # noqa: WPS433
 
+    # Reload the module to clear any cross-file pollution from prior tests
+    # that mutate module-level state (e.g. _runner, _portfolio_cache).
+    importlib.reload(route_mod)
     route_mod.reset_state_for_tests()
     route_mod._portfolio_cache = UwAnalyzeCache(
         cache_path=tmp_path / "uw-analyze-cache.json",
@@ -292,7 +297,8 @@ def test_route_uses_threadpool(client: TestClient) -> None:
         patch("api.routes.uw_analyze.asyncio.to_thread", side_effect=fake_to_thread),
         patch("api.routes.uw_analyze.run_analysis_with_data", return_value=(report, td)) as mocked,
     ):
-        report_dict, display_dict, flow_alerts = asyncio.run(route_mod._runner("AAPL"))
+        result = asyncio.run(route_mod._runner("AAPL"))
+        report_dict, display_dict, flow_alerts = result[0], result[1], result[2]
         assert len(calls) == 1
         assert calls[0][0] is mocked
         assert report_dict["ticker"] == "AAPL"

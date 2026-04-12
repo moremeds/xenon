@@ -10,6 +10,11 @@ import { usePrices } from "../lib/usePrices";
 import { IBStatusProvider, useIBStatusContext } from "../lib/IBStatusContext";
 import type { ReactNode } from "react";
 
+// Mock Clerk auth — IBStatusProvider calls useAuth() for WS ticket
+vi.mock("@clerk/nextjs", () => ({
+  useAuth: () => ({ getToken: async () => null }),
+}));
+
 /* ---------- MockWebSocket ---------- */
 class MockWebSocket {
   static CONNECTING = 0 as const;
@@ -24,22 +29,38 @@ class MockWebSocket {
   sent: string[] = [];
   url: string;
   closeCalled = false;
-  constructor(url: string) { this.url = url; }
-  send(data: string) { this.sent.push(data); }
+  constructor(url: string) {
+    this.url = url;
+  }
+  send(data: string) {
+    this.sent.push(data);
+  }
   close() {
     this.closeCalled = true;
     if (this.readyState === MockWebSocket.CLOSED) return;
     this.readyState = MockWebSocket.CLOSED;
     this.onclose?.(new Event("close"));
   }
-  simulateOpen() { this.readyState = MockWebSocket.OPEN; this.onopen?.(new Event("open")); }
-  simulateMessage(data: unknown) { this.onmessage?.({ data: JSON.stringify(data) }); }
-  simulateClose() { this.readyState = MockWebSocket.CLOSED; this.onclose?.(new Event("close")); }
+  simulateOpen() {
+    this.readyState = MockWebSocket.OPEN;
+    this.onopen?.(new Event("open"));
+  }
+  simulateMessage(data: unknown) {
+    this.onmessage?.({ data: JSON.stringify(data) });
+  }
+  simulateClose() {
+    this.readyState = MockWebSocket.CLOSED;
+    this.onclose?.(new Event("close"));
+  }
 }
 
 let wsInstances: MockWebSocket[] = [];
-function latestWs(): MockWebSocket { return wsInstances[wsInstances.length - 1]; }
-function sentMessages(ws: MockWebSocket) { return ws.sent.map(s => JSON.parse(s)); }
+function latestWs(): MockWebSocket {
+  return wsInstances[wsInstances.length - 1];
+}
+function sentMessages(ws: MockWebSocket) {
+  return ws.sent.map((s) => JSON.parse(s));
+}
 
 const ibWrapper = ({ children }: { children: ReactNode }) =>
   React.createElement(IBStatusProvider, null, children);
@@ -47,25 +68,36 @@ const ibWrapper = ({ children }: { children: ReactNode }) =>
 beforeEach(() => {
   wsInstances = [];
   vi.useFakeTimers();
-  vi.stubGlobal("WebSocket", class extends MockWebSocket {
-    constructor(url: string) { super(url); wsInstances.push(this); }
-  });
+  vi.stubGlobal(
+    "WebSocket",
+    class extends MockWebSocket {
+      constructor(url: string) {
+        super(url);
+        wsInstances.push(this);
+      }
+    },
+  );
 });
-afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("usePrices ping/pong", () => {
-  it("responds to ping message with pong", () => {
+  it("responds to ping message with pong", async () => {
     renderHook(() => usePrices({ symbols: ["AAPL"], enabled: true }));
+    await act(async () => {});
     const ws = latestWs();
     act(() => ws.simulateOpen());
     act(() => ws.simulateMessage({ type: "ping" }));
 
-    const pongs = sentMessages(ws).filter(m => m.action === "pong");
+    const pongs = sentMessages(ws).filter((m) => m.action === "pong");
     expect(pongs).toHaveLength(1);
   });
 
-  it("force-reconnects after 60s of silence", () => {
+  it("force-reconnects after 60s of silence", async () => {
     renderHook(() => usePrices({ symbols: ["AAPL"], enabled: true }));
+    await act(async () => {});
     const ws = latestWs();
     act(() => ws.simulateOpen());
 
@@ -84,20 +116,26 @@ describe("usePrices ping/pong", () => {
 });
 
 describe("IBStatusContext ping/pong", () => {
-  it("responds to ping message with pong", () => {
+  it("responds to ping message with pong", async () => {
     renderHook(() => useIBStatusContext(), { wrapper: ibWrapper });
+    await act(async () => {});
     const ws = latestWs();
     act(() => ws.simulateOpen());
     act(() => ws.simulateMessage({ type: "ping" }));
 
-    const pongs = ws.sent.filter(s => {
-      try { return JSON.parse(s).action === "pong"; } catch { return false; }
+    const pongs = ws.sent.filter((s) => {
+      try {
+        return JSON.parse(s).action === "pong";
+      } catch {
+        return false;
+      }
     });
     expect(pongs).toHaveLength(1);
   });
 
-  it("force-reconnects after 60s of silence", () => {
+  it("force-reconnects after 60s of silence", async () => {
     renderHook(() => useIBStatusContext(), { wrapper: ibWrapper });
+    await act(async () => {});
     const ws = latestWs();
     act(() => ws.simulateOpen());
 

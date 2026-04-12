@@ -10,6 +10,7 @@ ignore = ["E501"]  # line length handled separately
 known-first-party = ["utils", "trade_blotter"]
 
 [tool.pytest.ini_options]
+asyncio_mode = "strict"
 markers = [
     "integration: live tests hitting real MenthorQ (requires credentials)",
 ]
