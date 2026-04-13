@@ -1960,6 +1960,13 @@ Usage:
 
     # Dry run with no IB (read cache only):
     python3.13 scripts/ta_cli.py AAPL --cache-only
+
+    # Query the DuckDB directly:
+    python3.13 scripts/ta_cli.py --query "SELECT ticker, COUNT(*) as bars FROM ohlc_bars GROUP BY ticker"
+    python3.13 scripts/ta_cli.py --query "SELECT * FROM ta_indicators WHERE ticker='AAPL' ORDER BY bar_date DESC LIMIT 5"
+
+    # DB stats (row counts, tickers cached, date ranges):
+    python3.13 scripts/ta_cli.py --stats
 """
 
 from __future__ import annotations
@@ -1978,11 +1985,13 @@ if _project_root not in sys.path:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="TA-Lib manual test CLI")
-    parser.add_argument("tickers", nargs="+", help="Ticker symbols (e.g. AAPL MSFT SPY)")
+    parser.add_argument("tickers", nargs="*", help="Ticker symbols (e.g. AAPL MSFT SPY)")
     parser.add_argument("--history", action="store_true", help="Show full indicator DataFrame instead of snapshot")
     parser.add_argument("--refresh", action="store_true", help="Run bulk_refresh before reading")
     parser.add_argument("--db", default="data/ta.duckdb", help="DuckDB path (default: data/ta.duckdb)")
     parser.add_argument("--cache-only", action="store_true", help="Read cache only, no IB connection")
+    parser.add_argument("--query", type=str, help="Run raw SQL against the DuckDB")
+    parser.add_argument("--stats", action="store_true", help="Show DB stats (row counts, tickers, date ranges)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
     args = parser.parse_args(argv)
 
@@ -1990,6 +1999,53 @@ def main(argv=None):
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s: %(message)s",
     )
+
+    # --query and --stats modes: direct DuckDB access, no IB needed
+    if args.query or args.stats:
+        import duckdb
+        db_path = Path(args.db)
+        if not db_path.exists():
+            print(f"✗ Database not found: {args.db}")
+            return 1
+        conn = duckdb.connect(str(db_path), read_only=True)
+
+        if args.stats:
+            print(f"Database: {args.db}")
+            print(f"{'=' * 60}")
+            try:
+                ohlc_count = conn.execute("SELECT COUNT(*) FROM ohlc_bars").fetchone()[0]
+                ind_count = conn.execute("SELECT COUNT(*) FROM ta_indicators").fetchone()[0]
+                print(f"  ohlc_bars rows:      {ohlc_count:,}")
+                print(f"  ta_indicators rows:  {ind_count:,}")
+
+                tickers = conn.execute(
+                    "SELECT ticker, timeframe, COUNT(*) as bars, "
+                    "MIN(bar_date) as first_bar, MAX(bar_date) as last_bar, "
+                    "MAX(fetched_at) as last_fetch "
+                    "FROM ohlc_bars GROUP BY ticker, timeframe ORDER BY ticker"
+                ).fetchdf()
+                if len(tickers) > 0:
+                    print(f"\n  Cached tickers ({len(tickers)}):")
+                    print(tickers.to_string(index=False))
+                else:
+                    print("\n  No tickers cached yet.")
+            except Exception as e:
+                print(f"  Error reading stats: {e}")
+
+        if args.query:
+            print(f"\nSQL: {args.query}")
+            print(f"{'=' * 60}")
+            try:
+                result = conn.execute(args.query).fetchdf()
+                print(result.to_string(index=False) if len(result) > 0 else "(no rows)")
+            except Exception as e:
+                print(f"ERROR: {e}")
+
+        conn.close()
+        return 0
+
+    if not args.tickers:
+        parser.error("tickers required (or use --query/--stats)")
 
     from scripts.ta_lib.service import TAService
 
