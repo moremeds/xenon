@@ -28,7 +28,7 @@ def test_main_emits_json_payload(monkeypatch, capsys, tmp_path):
         pass
 
     def fake_build_runtime():
-        return DummyFetcher(), None, None
+        return DummyFetcher(), None, None, None
 
     def fake_run_scan_pipeline(*args, **kwargs):
         return {

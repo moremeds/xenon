@@ -93,7 +93,6 @@ def _mock_flow_data() -> dict:
 
 def test_scan_pipeline_produces_output(tmp_path):
     from scripts.trend_scan import run_scan_pipeline
-
     from scripts.trend_scan_lib.config import TrendScanConfig
 
     sp = tmp_path / "sp500.json"
@@ -117,7 +116,6 @@ def test_scan_pipeline_produces_output(tmp_path):
 
 def test_scan_pipeline_filters_weak_tickers(tmp_path):
     from scripts.trend_scan import run_scan_pipeline
-
     from scripts.trend_scan_lib.config import TrendScanConfig
 
     sp = tmp_path / "sp500.json"
@@ -138,7 +136,6 @@ def test_scan_pipeline_filters_weak_tickers(tmp_path):
 
 def test_scan_output_has_required_fields(tmp_path):
     from scripts.trend_scan import run_scan_pipeline
-
     from scripts.trend_scan_lib.config import TrendScanConfig
 
     sp = tmp_path / "sp500.json"
@@ -184,8 +181,8 @@ def test_scan_output_has_required_fields(tmp_path):
 
 def test_scan_writes_to_duckdb(tmp_path):
     import duckdb
-    from scripts.trend_scan import run_scan_pipeline
 
+    from scripts.trend_scan import run_scan_pipeline
     from scripts.trend_scan_lib.config import TrendScanConfig
 
     sp = tmp_path / "sp500.json"
@@ -207,3 +204,39 @@ def test_scan_writes_to_duckdb(tmp_path):
     conn.close()
     assert runs == 1
     assert candidates >= 1
+
+
+class TestTAServiceIntegration:
+    """Verify trend_scan works when wired to a real (mocked-IB) TAService."""
+
+    def test_fetch_ohlcv_delegates_to_ta_service(self):
+        from unittest.mock import MagicMock
+
+        import pandas as pd
+
+        mock_ta = MagicMock()
+        mock_ta.get_snapshot.return_value = _mock_ohlcv_data("AAPL", bullish=True)
+        mock_ta.get_indicators.return_value = pd.DataFrame(
+            {
+                "date": pd.bdate_range("2026-01-01", periods=30),
+                "close": [150.0] * 30,
+            }
+        )
+
+        from scripts.trend_scan import LiveTrendDataFetcher
+
+        uw = MagicMock()
+        uw.get_stock_info.return_value = {"data": {"marketcap": 2_000_000_000}}
+        fetcher = LiveTrendDataFetcher(uw_client=uw, ta_service=mock_ta)
+        fetcher._spy_df = pd.DataFrame(
+            {
+                "date": pd.bdate_range("2026-01-01", periods=30),
+                "close": [450.0] * 30,
+            }
+        )
+        result = fetcher.fetch_ohlcv("AAPL")
+
+        mock_ta.get_snapshot.assert_called_once_with("AAPL", allow_fetch=False)
+        assert result["ticker"] == "AAPL"
+        assert "rs_vs_spy" in result
+        assert "market_cap" in result
