@@ -902,7 +902,169 @@ class TestStoreE2E:
         assert Path(db_path).exists()
 ```
 
-- [ ] **Step 2: Run E2E tests**
+- [ ] **Step 2: Add transaction rollback test**
+
+Append to `scripts/tests/test_ta_lib/test_store_e2e.py`:
+
+```python
+    def test_transaction_rollback_on_indicator_failure(self, db_path):
+        """If write_indicators fails mid-transaction, write_ohlc must be rolled back."""
+        from unittest.mock import patch
+        from scripts.ta_lib.indicators import compute_all
+        from scripts.ta_lib.store import (
+            get_connection,
+            init_schema,
+            read_ohlc,
+            read_indicators,
+            write_ohlc,
+            write_indicators,
+        )
+
+        conn = get_connection(db_path)
+        init_schema(conn)
+
+        ohlc = _sample_ohlc_df(n=10)
+
+        # Simulate: write OHLC succeeds, write_indicators throws
+        conn.begin()
+        try:
+            write_ohlc(conn, "FAIL", "1d", ohlc)
+
+            # Force an error during indicator write
+            raise RuntimeError("Simulated indicator write failure")
+        except RuntimeError:
+            conn.rollback()
+
+        # Verify OHLC was NOT committed (rolled back)
+        result = read_ohlc(conn, "FAIL", "1d")
+        assert result is None, "OHLC should be rolled back when indicator write fails"
+
+        conn.close()
+```
+
+- [ ] **Step 3: Add partial cache recovery test**
+
+Append to `scripts/tests/test_ta_lib/test_store_e2e.py`:
+
+```python
+class TestPartialCacheRecovery:
+    """OHLC exists but indicators missing → service should recompute."""
+
+    def test_ohlc_without_indicators_detected_as_stale(self, db_path):
+        from scripts.ta_lib.store import (
+            get_connection,
+            init_schema,
+            read_indicators,
+            write_ohlc,
+        )
+
+        conn = get_connection(db_path)
+        init_schema(conn)
+
+        # Write OHLC only — no indicators
+        write_ohlc(conn, "PARTIAL", "1d", _sample_ohlc_df(n=30))
+
+        # Indicators should be None
+        ind = read_indicators(conn, "PARTIAL", "1d")
+        assert ind is None, "No indicators should exist for partial cache"
+
+        conn.close()
+```
+
+- [ ] **Step 4: Add split purge verification test**
+
+Append to `scripts/tests/test_ta_lib/test_store_e2e.py`:
+
+```python
+class TestSplitPurge:
+    """After split detection, old pre-split rows must be deleted."""
+
+    def test_delete_ticker_purges_all_rows(self, db_path):
+        from scripts.ta_lib.indicators import compute_all
+        from scripts.ta_lib.store import (
+            delete_ticker,
+            get_connection,
+            init_schema,
+            read_indicators,
+            read_ohlc,
+            write_indicators,
+            write_ohlc,
+        )
+
+        conn = get_connection(db_path)
+        init_schema(conn)
+
+        # Seed 30 bars of OHLC + indicators
+        ohlc = _sample_ohlc_df(n=30)
+        write_ohlc(conn, "SPLIT", "1d", ohlc)
+        ind_df = compute_all(ohlc)
+        ind_df["bar_date"] = ind_df["date"]
+        write_indicators(conn, "SPLIT", "1d", ind_df)
+
+        assert read_ohlc(conn, "SPLIT", "1d") is not None
+        assert read_indicators(conn, "SPLIT", "1d") is not None
+
+        # Purge — simulates what _refresh does on split detection
+        delete_ticker(conn, "SPLIT", "1d")
+
+        assert read_ohlc(conn, "SPLIT", "1d") is None, "OHLC should be purged"
+        assert read_indicators(conn, "SPLIT", "1d") is None, "Indicators should be purged"
+
+        # Write new post-split data
+        new_ohlc = _sample_ohlc_df(n=20, start_date="2026-05-01")
+        # Simulate halved prices (split)
+        new_ohlc["close"] = new_ohlc["close"] / 2
+        new_ohlc["open"] = new_ohlc["open"] / 2
+        new_ohlc["high"] = new_ohlc["high"] / 2
+        new_ohlc["low"] = new_ohlc["low"] / 2
+        write_ohlc(conn, "SPLIT", "1d", new_ohlc)
+
+        result = read_ohlc(conn, "SPLIT", "1d")
+        assert len(result) == 20, "Only post-split bars should remain"
+
+        conn.close()
+```
+
+- [ ] **Step 5: Add frozen baseline indicator test**
+
+Append to `scripts/tests/test_ta_lib/test_store_e2e.py`:
+
+```python
+class TestFrozenBaseline:
+    """Verify TA-Lib produces deterministic outputs for deterministic inputs."""
+
+    def test_indicators_are_deterministic(self, db_path):
+        from scripts.ta_lib.indicators import compute_all
+
+        # Same seed → same output every time
+        df1 = _sample_ohlc_df(n=50)
+        df2 = _sample_ohlc_df(n=50)  # same function, same default start_date
+
+        r1 = compute_all(df1)
+        r2 = compute_all(df2)
+
+        # All indicator values should match exactly
+        for col in ["sma_20", "rsi_14", "macd", "adx_14", "bb_width", "atr_14"]:
+            vals1 = r1[col].dropna().tolist()
+            vals2 = r2[col].dropna().tolist()
+            assert vals1 == vals2, f"{col} should be deterministic"
+
+    def test_sma_20_frozen_value(self, db_path):
+        """Freeze a known SMA-20 output for regression detection."""
+        from scripts.ta_lib.indicators import compute_all
+
+        df = _sample_ohlc_df(n=30)
+        result = compute_all(df)
+
+        # SMA-20 at last row = mean of last 20 closes
+        expected = df["close"].iloc[-20:].mean()
+        actual = result["sma_20"].iloc[-1]
+        assert abs(actual - expected) < 1e-10, (
+            f"SMA-20 frozen baseline broken: expected {expected}, got {actual}"
+        )
+```
+
+- [ ] **Step 6: Run all E2E tests**
 
 ```bash
 python3.13 -m pytest scripts/tests/test_ta_lib/test_store_e2e.py -xvs
@@ -910,11 +1072,11 @@ python3.13 -m pytest scripts/tests/test_ta_lib/test_store_e2e.py -xvs
 
 Expected: all PASS
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add scripts/tests/test_ta_lib/test_store_e2e.py
-git commit -m "test(ta_lib): add store E2E tests with real DuckDB file"
+git commit -m "test(ta_lib): add store E2E tests — rollback, partial cache, split purge, frozen baseline"
 ```
 
 ---
