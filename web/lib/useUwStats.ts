@@ -2,6 +2,17 @@
 
 import { useEffect, useState } from "react";
 
+export type UwDailyStats = {
+  reset_at: string;
+  requests: number;
+  requests_2xx: number;
+  requests_4xx: number;
+  requests_5xx: number;
+  cached: number;
+  cache_hit_pct: number;
+  avg_latency_ms: number | null;
+};
+
 export type UwStatsSnapshot = {
   totals: {
     requests: number;
@@ -24,6 +35,7 @@ export type UwStatsSnapshot = {
   // string-indexed here and narrowed by the consumer.
   by_status?: Record<string, number>;
   uptime_seconds: number;
+  daily?: UwDailyStats;
 };
 
 const POLL_INTERVAL_MS = 10_000;
