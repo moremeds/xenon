@@ -43,6 +43,7 @@ def main(argv=None):
     parser.add_argument("tickers", nargs="*", help="Ticker symbols (e.g. AAPL MSFT SPY)")
     parser.add_argument("--history", action="store_true", help="Show full indicator DataFrame instead of snapshot")
     parser.add_argument("--refresh", action="store_true", help="Run bulk_refresh before reading")
+    parser.add_argument("--timeframe", "-tf", default="1d", choices=["1d", "1h"], help="Timeframe (default: 1d)")
     parser.add_argument("--db", default="data/ta.duckdb", help="DuckDB path (default: data/ta.duckdb)")
     parser.add_argument("--cache-only", action="store_true", help="Read cache only, no IB connection")
     parser.add_argument("--query", type=str, help="Run raw SQL against the DuckDB")
@@ -122,19 +123,21 @@ def main(argv=None):
     svc = TAService(db_path=args.db, ib_client=ib_client)
     print(f"TAService initialized (db: {args.db})")
 
+    tf = args.timeframe
+
     if args.refresh:
-        print(f"\nRefreshing {len(args.tickers)} tickers...")
-        svc.bulk_refresh(args.tickers)
+        print(f"\nRefreshing {len(args.tickers)} tickers ({tf})...")
+        svc.bulk_refresh(args.tickers, timeframe=tf)
         print("Bulk refresh complete")
 
     for ticker in args.tickers:
         print(f"\n{'=' * 60}")
-        print(f"  {ticker}")
+        print(f"  {ticker} ({tf})")
         print(f"{'=' * 60}")
 
         try:
             if args.history:
-                df = svc.get_indicators(ticker, allow_fetch=not args.cache_only)
+                df = svc.get_indicators(ticker, timeframe=tf, allow_fetch=not args.cache_only)
                 if df.empty:
                     print("  (no data)")
                     continue
@@ -145,7 +148,7 @@ def main(argv=None):
                 display_cols = [c for c in cols if c in df.columns]
                 print(df[display_cols].tail().to_string(index=False))
             else:
-                snap = svc.get_snapshot(ticker, allow_fetch=not args.cache_only)
+                snap = svc.get_snapshot(ticker, timeframe=tf, allow_fetch=not args.cache_only)
                 print(f"  close:      {snap['close']:>10.2f}")
                 print(f"  price:      {snap['price']:>10.2f}")
                 print(f"  ma_20:      {snap.get('ma_20', 0):>10.2f}")
