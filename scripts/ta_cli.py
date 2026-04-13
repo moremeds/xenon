@@ -43,7 +43,6 @@ def main(argv=None):
     parser.add_argument("tickers", nargs="*", help="Ticker symbols (e.g. AAPL MSFT SPY)")
     parser.add_argument("--history", action="store_true", help="Show full indicator DataFrame instead of snapshot")
     parser.add_argument("--refresh", action="store_true", help="Run bulk_refresh before reading")
-    parser.add_argument("--timeframe", "-tf", default="1d", choices=["1d", "1h"], help="Timeframe (default: 1d)")
     parser.add_argument("--db", default="data/ta.duckdb", help="DuckDB path (default: data/ta.duckdb)")
     parser.add_argument("--cache-only", action="store_true", help="Read cache only, no IB connection")
     parser.add_argument("--query", type=str, help="Run raw SQL against the DuckDB")
@@ -123,58 +122,60 @@ def main(argv=None):
     svc = TAService(db_path=args.db, ib_client=ib_client)
     print(f"TAService initialized (db: {args.db})")
 
-    tf = args.timeframe
+    _TIMEFRAMES = ["1d", "1h"]
 
     if args.refresh:
-        print(f"\nRefreshing {len(args.tickers)} tickers ({tf})...")
-        svc.bulk_refresh(args.tickers, timeframe=tf)
+        for tf in _TIMEFRAMES:
+            print(f"\nRefreshing {len(args.tickers)} tickers ({tf})...")
+            svc.bulk_refresh(args.tickers, timeframe=tf)
         print("Bulk refresh complete")
 
     for ticker in args.tickers:
-        print(f"\n{'=' * 60}")
-        print(f"  {ticker} ({tf})")
-        print(f"{'=' * 60}")
+        for tf in _TIMEFRAMES:
+            print(f"\n{'=' * 60}")
+            print(f"  {ticker} ({tf})")
+            print(f"{'=' * 60}")
 
-        try:
-            if args.history:
-                df = svc.get_indicators(ticker, timeframe=tf, allow_fetch=not args.cache_only)
-                if df.empty:
-                    print("  (no data)")
-                    continue
-                print(f"  Rows: {len(df)}")
-                print(f"  Date range: {df['date'].iloc[0]} -> {df['date'].iloc[-1]}")
-                print(f"\n  Last 5 rows:")
-                cols = ["date", "close", "sma_20", "sma_50", "rsi_14", "adx_14", "macd", "bb_width", "atr_14"]
-                display_cols = [c for c in cols if c in df.columns]
-                print(df[display_cols].tail().to_string(index=False))
-            else:
-                snap = svc.get_snapshot(ticker, timeframe=tf, allow_fetch=not args.cache_only)
-                print(f"  close:      {snap['close']:>10.2f}")
-                print(f"  price:      {snap['price']:>10.2f}")
-                print(f"  ma_20:      {snap.get('ma_20', 0):>10.2f}")
-                print(f"  ma_50:      {snap.get('ma_50', 0):>10.2f}")
-                print(f"  ma_200:     {snap.get('ma_200', 0):>10.2f}")
-                print(f"  rsi:        {snap.get('rsi', 0):>10.1f}")
-                print(f"  adx:        {snap.get('adx', 0):>10.1f}")
-                print(f"  macd:       {snap.get('macd', 0):>10.4f}")
-                print(f"  macd_hist:  {snap.get('macd_histogram', 0):>10.4f}")
-                print(f"  bbw:        {snap.get('bbw', 0):>10.4f}")
-                print(f"  atr_pct:    {snap.get('atr_pct', 0):>10.4f}")
-                print(f"  high_52w:   {snap.get('high_52w', 0):>10.2f}")
-                print(f"  avg_vol:    {snap.get('avg_20d_volume', 0):>12,.0f}")
-                print(f"  dollar_vol: {snap.get('dollar_volume', 0):>12,.0f}")
-                print(f"  up_ratio:   {snap.get('recent_up_ratio', 0):>10.2f}")
-                print(f"  range_20d:  {snap.get('range_20d_pct', 0):>10.4f}")
-                print(f"  ma20_trend: {snap.get('ma_20_series', [])}")
+            try:
+                if args.history:
+                    df = svc.get_indicators(ticker, timeframe=tf, allow_fetch=not args.cache_only)
+                    if df.empty:
+                        print("  (no data)")
+                        continue
+                    print(f"  Rows: {len(df)}")
+                    print(f"  Date range: {df['date'].iloc[0]} -> {df['date'].iloc[-1]}")
+                    print(f"\n  Last 5 rows:")
+                    cols = ["date", "close", "sma_20", "sma_50", "rsi_14", "adx_14", "macd", "bb_width", "atr_14"]
+                    display_cols = [c for c in cols if c in df.columns]
+                    print(df[display_cols].tail().to_string(index=False))
+                else:
+                    snap = svc.get_snapshot(ticker, timeframe=tf, allow_fetch=not args.cache_only)
+                    print(f"  close:      {snap['close']:>10.2f}")
+                    print(f"  price:      {snap['price']:>10.2f}")
+                    print(f"  ma_20:      {snap.get('ma_20', 0):>10.2f}")
+                    print(f"  ma_50:      {snap.get('ma_50', 0):>10.2f}")
+                    print(f"  ma_200:     {snap.get('ma_200', 0):>10.2f}")
+                    print(f"  rsi:        {snap.get('rsi', 0):>10.1f}")
+                    print(f"  adx:        {snap.get('adx', 0):>10.1f}")
+                    print(f"  macd:       {snap.get('macd', 0):>10.4f}")
+                    print(f"  macd_hist:  {snap.get('macd_histogram', 0):>10.4f}")
+                    print(f"  bbw:        {snap.get('bbw', 0):>10.4f}")
+                    print(f"  atr_pct:    {snap.get('atr_pct', 0):>10.4f}")
+                    print(f"  high_52w:   {snap.get('high_52w', 0):>10.2f}")
+                    print(f"  avg_vol:    {snap.get('avg_20d_volume', 0):>12,.0f}")
+                    print(f"  dollar_vol: {snap.get('dollar_volume', 0):>12,.0f}")
+                    print(f"  up_ratio:   {snap.get('recent_up_ratio', 0):>10.2f}")
+                    print(f"  range_20d:  {snap.get('range_20d_pct', 0):>10.4f}")
+                    print(f"  ma20_trend: {snap.get('ma_20_series', [])}")
 
-        except RuntimeError as e:
-            print(f"  ERROR: {e}")
-        except Exception as e:
-            print(f"  UNEXPECTED: {e}")
-            if args.verbose:
-                import traceback
+            except RuntimeError as e:
+                print(f"  ERROR: {e}")
+            except Exception as e:
+                print(f"  UNEXPECTED: {e}")
+                if args.verbose:
+                    import traceback
 
-                traceback.print_exc()
+                    traceback.print_exc()
 
     if ib_client is not None:
         try:
