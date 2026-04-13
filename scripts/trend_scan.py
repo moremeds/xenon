@@ -670,7 +670,7 @@ def build_runtime():
 
     ib_client = IBClient()
     try:
-        ib_client.connect()
+        ib_client.connect(client_id="auto")
     except Exception:
         logger.warning("IB Gateway not available — TA cache will use stale data")
         ib_client = None

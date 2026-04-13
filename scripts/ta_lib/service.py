@@ -167,6 +167,10 @@ class TAService:
 
         Must be called on the main thread (ib_insync is not thread-safe).
         """
+        if self._ib_client is None:
+            logger.warning("bulk_refresh: no IB client — using cached data only")
+            return
+
         stale = [t.upper() for t in tickers if self._is_stale(t.upper(), timeframe)]
         if not stale:
             logger.info("bulk_refresh: all %d tickers are current", len(tickers))
