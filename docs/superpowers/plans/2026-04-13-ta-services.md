@@ -1931,6 +1931,165 @@ git commit -m "test(ta_lib): add IB error handling tests for TAService"
 
 ---
 
+### Task 8: CLI entry point for manual testing
+
+**Files:**
+
+- Create: `scripts/ta_cli.py`
+
+- [ ] **Step 1: Create the CLI script**
+
+Create `scripts/ta_cli.py`:
+
+```python
+#!/usr/bin/env python3.13
+"""Manual test CLI for TAService.
+
+Usage:
+    # With live IB Gateway:
+    python3.13 scripts/ta_cli.py AAPL MSFT SPY
+
+    # Show full indicator history (not just snapshot):
+    python3.13 scripts/ta_cli.py AAPL --history
+
+    # Bulk refresh then snapshot:
+    python3.13 scripts/ta_cli.py AAPL MSFT --refresh
+
+    # Use a custom DB path (e.g. temp for testing):
+    python3.13 scripts/ta_cli.py AAPL --db /tmp/test_ta.duckdb
+
+    # Dry run with no IB (read cache only):
+    python3.13 scripts/ta_cli.py AAPL --cache-only
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+from pathlib import Path
+
+# Ensure project root on sys.path
+_project_root = str(Path(__file__).resolve().parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="TA-Lib manual test CLI")
+    parser.add_argument("tickers", nargs="+", help="Ticker symbols (e.g. AAPL MSFT SPY)")
+    parser.add_argument("--history", action="store_true", help="Show full indicator DataFrame instead of snapshot")
+    parser.add_argument("--refresh", action="store_true", help="Run bulk_refresh before reading")
+    parser.add_argument("--db", default="data/ta.duckdb", help="DuckDB path (default: data/ta.duckdb)")
+    parser.add_argument("--cache-only", action="store_true", help="Read cache only, no IB connection")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)s: %(message)s",
+    )
+
+    from scripts.ta_lib.service import TAService
+
+    ib_client = None
+    if not args.cache_only:
+        try:
+            from scripts.clients.ib_client import IBClient
+            ib_client = IBClient()
+            ib_client.connect()
+            print(f"✓ IB Gateway connected")
+        except Exception as e:
+            print(f"✗ IB Gateway not available: {e}")
+            if not args.cache_only:
+                print("  Use --cache-only to read from cached data")
+                return 1
+
+    svc = TAService(db_path=args.db, ib_client=ib_client)
+    print(f"✓ TAService initialized (db: {args.db})")
+
+    if args.refresh:
+        print(f"\nRefreshing {len(args.tickers)} tickers...")
+        svc.bulk_refresh(args.tickers)
+        print("✓ Bulk refresh complete")
+
+    for ticker in args.tickers:
+        print(f"\n{'=' * 60}")
+        print(f"  {ticker}")
+        print(f"{'=' * 60}")
+
+        try:
+            if args.history:
+                df = svc.get_indicators(ticker, allow_fetch=not args.cache_only)
+                if df.empty:
+                    print("  (no data)")
+                    continue
+                print(f"  Rows: {len(df)}")
+                print(f"  Date range: {df['date'].iloc[0]} → {df['date'].iloc[-1]}")
+                print(f"\n  Last 5 rows:")
+                cols = ["date", "close", "sma_20", "sma_50", "rsi_14", "adx_14", "macd", "bb_width", "atr_14"]
+                display_cols = [c for c in cols if c in df.columns]
+                print(df[display_cols].tail().to_string(index=False))
+            else:
+                snap = svc.get_snapshot(ticker, allow_fetch=not args.cache_only)
+                # Print key fields in a readable format
+                print(f"  close:      {snap['close']:>10.2f}")
+                print(f"  price:      {snap['price']:>10.2f}")
+                print(f"  ma_20:      {snap.get('ma_20', 0):>10.2f}")
+                print(f"  ma_50:      {snap.get('ma_50', 0):>10.2f}")
+                print(f"  ma_200:     {snap.get('ma_200', 0):>10.2f}")
+                print(f"  rsi:        {snap.get('rsi', 0):>10.1f}")
+                print(f"  adx:        {snap.get('adx', 0):>10.1f}")
+                print(f"  macd:       {snap.get('macd', 0):>10.4f}")
+                print(f"  macd_hist:  {snap.get('macd_histogram', 0):>10.4f}")
+                print(f"  bbw:        {snap.get('bbw', 0):>10.4f}")
+                print(f"  atr_pct:    {snap.get('atr_pct', 0):>10.4f}")
+                print(f"  high_52w:   {snap.get('high_52w', 0):>10.2f}")
+                print(f"  avg_vol:    {snap.get('avg_20d_volume', 0):>12,.0f}")
+                print(f"  dollar_vol: {snap.get('dollar_volume', 0):>12,.0f}")
+                print(f"  up_ratio:   {snap.get('recent_up_ratio', 0):>10.2f}")
+                print(f"  range_20d:  {snap.get('range_20d_pct', 0):>10.4f}")
+                print(f"  ma20_trend: {snap.get('ma_20_series', [])}")
+
+        except RuntimeError as e:
+            print(f"  ERROR: {e}")
+        except Exception as e:
+            print(f"  UNEXPECTED: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+
+    if ib_client is not None:
+        try:
+            ib_client.disconnect()
+        except Exception:
+            pass
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+- [ ] **Step 2: Verify it runs (cache-only, no IB needed)**
+
+```bash
+python3.13 scripts/ta_cli.py SPY --cache-only
+```
+
+Expected: prints "no data" or cached snapshot if DB exists. No crash.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add scripts/ta_cli.py
+git commit -m "feat(ta_lib): add ta_cli.py manual test entry point"
+```
+
+---
+
 ## Verification Plan
 
 Run after all tasks are complete:
