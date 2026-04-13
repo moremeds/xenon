@@ -19,6 +19,9 @@ pandas>=1.5.0
 numpy>=1.26.0
 duckdb>=1.2.0
 
+# Technical analysis (requires TA-Lib C library: brew install ta-lib)
+ta-lib>=0.5.1
+
 # Environment and utilities
 python-dotenv>=1.0.0
 pytz>=2024.1
