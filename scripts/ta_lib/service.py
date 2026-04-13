@@ -41,7 +41,13 @@ _SPLIT_THRESHOLD = 0.30
 
 _ET = ZoneInfo("America/New_York")
 
-_SUPPORTED_TIMEFRAMES = {"1d"}
+_SUPPORTED_TIMEFRAMES = {"1d", "1h"}
+
+# IB bar_size and default cold-start duration per timeframe
+_TIMEFRAME_IB = {
+    "1d": {"bar_size": "1 day", "cold_duration": "1 Y"},
+    "1h": {"bar_size": "1 hour", "cold_duration": "1 M"},
+}
 
 
 class TAService:
@@ -236,23 +242,41 @@ class TAService:
             return True
 
         last_session = datetime.strptime(last_session_str[0], "%Y-%m-%d").date()
-        return latest < last_session
+
+        if timeframe == "1d":
+            return latest < last_session
+
+        # Intraday: stale if latest bar is from a previous session, OR if
+        # market is open and latest bar is more than 2 hours old
+        if latest < last_session:
+            return True
+        market_open = now_et.hour >= 9 and (now_et.hour > 9 or now_et.minute >= 30)
+        market_close = now_et.hour >= 16
+        if last_session == now_et.date() and market_open and not market_close:
+            # During market hours: stale if latest bar is >2h behind
+            latest_dt = datetime.combine(latest, datetime.min.time())
+            hours_behind = (now_et.replace(tzinfo=None) - latest_dt).total_seconds() / 3600
+            return hours_behind > 2
+        return False
 
     def _refresh(self, ticker: str, timeframe: str) -> None:
         """Fetch from IB, compute indicators, write to DB."""
+        ib_cfg = _TIMEFRAME_IB[timeframe]
+        bar_size = ib_cfg["bar_size"]
+        cold_duration = ib_cfg["cold_duration"]
         latest = get_latest_bar_date(self._conn, ticker, timeframe)
 
         if latest is None:
-            duration = "1 Y"
+            duration = cold_duration
             end_date = ""
-            logger.info("Cold start fetch for %s (%s)", ticker, duration)
+            logger.info("Cold start fetch for %s (%s, %s)", ticker, duration, bar_size)
         else:
             days_behind = (date.today() - latest).days
             duration = f"{max(days_behind + 5, 5)} D"
             end_date = ""
             logger.info("Incremental fetch for %s (%s, %d days behind)", ticker, duration, days_behind)
 
-        df = fetch_bars(self._ib_client, ticker, duration=duration, bar_size="1 day", end_date=end_date)
+        df = fetch_bars(self._ib_client, ticker, duration=duration, bar_size=bar_size, end_date=end_date)
 
         # Stock split detection: compare last cached close against the first
         # truly NEW bar (after the latest cached date). Incremental fetches include
@@ -278,7 +302,7 @@ class TAService:
                             gap * 100,
                         )
                         force_full_refetch = True
-                        df = fetch_bars(self._ib_client, ticker, duration="1 Y", bar_size="1 day")
+                        df = fetch_bars(self._ib_client, ticker, duration=cold_duration, bar_size=bar_size)
 
         # Atomic write: OHLC + indicators in one transaction
         self._conn.begin()

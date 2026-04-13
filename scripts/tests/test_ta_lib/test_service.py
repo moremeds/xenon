@@ -201,6 +201,32 @@ class TestBulkRefresh:
         mock_ib.get_historical_data.assert_not_called()
 
 
+class TestHourlyTimeframe:
+    def test_1h_fetches_with_hourly_bar_size(self, mock_ib):
+        from scripts.ta_lib.service import TAService
+
+        svc = TAService(db_path=":memory:", ib_client=mock_ib)
+        svc.get_indicators("AAPL", timeframe="1h")
+        call_kwargs = mock_ib.get_historical_data.call_args.kwargs
+        assert call_kwargs["bar_size"] == "1 hour"
+        assert call_kwargs["duration"] == "1 M"
+
+    def test_unsupported_timeframe_raises(self, mock_ib):
+        from scripts.ta_lib.service import TAService
+
+        svc = TAService(db_path=":memory:", ib_client=mock_ib)
+        with pytest.raises(ValueError, match="Unsupported timeframe"):
+            svc.get_indicators("AAPL", timeframe="15m")
+
+    def test_1h_snapshot_works(self, mock_ib):
+        from scripts.ta_lib.service import TAService
+
+        svc = TAService(db_path=":memory:", ib_client=mock_ib)
+        snap = svc.get_snapshot("AAPL", timeframe="1h")
+        assert snap["ticker"] == "AAPL"
+        assert snap["close"] > 0
+
+
 class TestIBErrorHandling:
     def test_invalid_contract_raises(self):
         from scripts.ta_lib.service import TAService
