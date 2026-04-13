@@ -25,6 +25,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +257,82 @@ class UWApiStats:
                 },
             }
 
+    def get_stats_with_daily(self) -> Dict[str, Any]:
+        """Return get_stats() + daily breakdown under a single lock.
+
+        Avoids a torn snapshot where a concurrent ``record()`` between
+        two separate lock acquisitions makes totals and daily inconsistent.
+        """
+        with self._lock:
+            # --- session stats (same as get_stats but inside shared lock) ---
+            latencies = sorted(self._latencies)
+            n = len(latencies)
+            lat: Dict[str, Any] = {"samples": n}
+            if n > 0:
+                lat["min"] = round(latencies[0], 1)
+                lat["max"] = round(latencies[-1], 1)
+                lat["avg"] = round(sum(latencies) / n, 1)
+                p95_idx = min(int(n * 0.95), n - 1)
+                lat["p95"] = round(latencies[p95_idx], 1)
+
+            result: Dict[str, Any] = {
+                "session_started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._started_at)),
+                "uptime_seconds": round(self._now_fn() - self._started_at),
+                "totals": dict(self._totals),
+                "latency_ms": lat,
+                "by_status": dict(self._by_status),
+                "by_ticker": {k: dict(v) for k, v in self._by_ticker.items()},
+                "by_endpoint_type": {
+                    k: {kk: round(vv, 1) if isinstance(vv, float) else vv for kk, vv in v.items()}
+                    for k, v in self._by_endpoint_type.items()
+                },
+            }
+
+            # --- daily stats (same as get_daily_stats but under shared lock) ---
+            hourly_snapshot = dict(self._hourly)
+
+        # Compute daily outside the lock — only reads the snapshot.
+        result["daily"] = self._compute_daily_from_hourly(hourly_snapshot)
+        return result
+
+    def _compute_daily_from_hourly(self, hourly: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        """Compute daily stats from an hourly snapshot. Lock-free."""
+        _ET = ZoneInfo("America/New_York")
+        now_utc = datetime.fromtimestamp(self._now_fn(), tz=timezone.utc)
+        now_et = now_utc.astimezone(_ET)
+
+        today_8pm_et = now_et.replace(hour=20, minute=0, second=0, microsecond=0)
+        reset_et = today_8pm_et - timedelta(days=1) if now_et < today_8pm_et else today_8pm_et
+
+        reset_utc = reset_et.astimezone(timezone.utc)
+        reset_key = reset_utc.strftime("%Y-%m-%dT%H:00:00Z")
+        reset_at_iso = reset_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        sum_2xx = sum_4xx = sum_5xx = sum_cached = latency_count = 0
+        sum_latency = 0.0
+        for key, bucket in hourly.items():
+            if key < reset_key:
+                continue
+            sum_2xx += int(bucket.get("requests_2xx", 0))
+            sum_4xx += int(bucket.get("requests_4xx", 0))
+            sum_5xx += int(bucket.get("requests_5xx", 0))
+            sum_cached += int(bucket.get("cached", 0))
+            sum_latency += float(bucket.get("sum_latency_ms", 0.0))
+            latency_count += int(bucket.get("latency_count", 0))
+
+        requests = sum_2xx + sum_4xx + sum_5xx
+        total_calls = requests + sum_cached
+        return {
+            "reset_at": reset_at_iso,
+            "requests": requests,
+            "requests_2xx": sum_2xx,
+            "requests_4xx": sum_4xx,
+            "requests_5xx": sum_5xx,
+            "cached": sum_cached,
+            "cache_hit_pct": round(sum_cached / total_calls * 100) if total_calls > 0 else 0,
+            "avg_latency_ms": round(sum_latency / latency_count, 1) if latency_count > 0 else None,
+        }
+
     def get_hourly_history(self, hours: int = _HISTORY_HOURS) -> list[Dict[str, Any]]:
         """Return a list of hour-buckets ordered ascending by hour.
 
@@ -294,6 +371,20 @@ class UWApiStats:
                     }
                 result.append(row)
         return result
+
+    def get_daily_stats(self) -> Dict[str, Any]:
+        """Sum hourly buckets since the most recent 8PM ET boundary.
+
+        UW's 20k/day quota resets at 8PM ET. This method finds the most
+        recent 8PM ET in wall-clock time (DST-aware via ZoneInfo), converts
+        to a UTC hour key, and sums all buckets at or after that key.
+
+        ``requests`` excludes cached hits because the local cache doesn't
+        consume UW's daily quota.
+        """
+        with self._lock:
+            hourly_snapshot = dict(self._hourly)
+        return self._compute_daily_from_hourly(hourly_snapshot)
 
     def reset(self) -> None:
         """Reset session counters. Preserves hourly history buckets —

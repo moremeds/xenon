@@ -27,36 +27,17 @@ export default function Sidebar({
   const syncTime = lastSync ? new Date(lastSync).toLocaleTimeString() : "—";
   const uwStats = useUwStats();
 
-  const totals = uwStats?.totals;
+  const daily = uwStats?.daily;
   const latency = uwStats?.latency_ms;
-  const uwActive = totals !== undefined && totals.requests > 0;
+  const uwActive = daily !== undefined && daily.requests > 0;
   const hasIssues =
-    totals !== undefined && (totals.rate_limits > 0 || totals.failures > 0);
+    daily !== undefined && (daily.requests_4xx > 0 || daily.requests_5xx > 0);
 
-  const cacheHitPct =
-    totals && totals.requests > 0
-      ? Math.round((totals.cached / totals.requests) * 100)
-      : null;
+  const cacheHitPct = daily?.cache_hit_pct ?? null;
 
-  // Aggregate raw HTTP status → 2xx / 4xx / 5xx classes. Connection
-  // errors are bucketed with 5xx (the collector records them with no
-  // status, so they only appear in totals.connection_errors).
-  const byStatus = uwStats?.by_status;
-  let count2xx: number | null = null;
-  let count4xx: number | null = null;
-  let count5xx: number | null = null;
-  if (byStatus) {
-    count2xx = 0;
-    count4xx = 0;
-    count5xx = 0;
-    for (const [codeStr, n] of Object.entries(byStatus)) {
-      const code = Number(codeStr);
-      if (code >= 200 && code < 300) count2xx += n;
-      else if (code >= 400 && code < 500) count4xx += n;
-      else if (code >= 500 && code < 600) count5xx += n;
-    }
-    if (totals?.connection_errors) count5xx += totals.connection_errors;
-  }
+  const count2xx = daily?.requests_2xx ?? null;
+  const count4xx = daily?.requests_4xx ?? null;
+  const count5xx = daily?.requests_5xx ?? null;
 
   return (
     <aside className="sidebar">
@@ -109,7 +90,7 @@ export default function Sidebar({
         <div className="sidebar-footer-divider" />
 
         <div className="status-row">
-          <span>UW API</span>
+          <span>UW Today</span>
           <span className="status-dot-wrap">
             <span
               className={`status-dot ${
@@ -120,7 +101,7 @@ export default function Sidebar({
                     : ""
               }`}
             />
-            {totals ? formatCount(totals.requests) : "—"}
+            {daily ? formatCount(daily.requests) : "—"}
           </span>
         </div>
         <div className="status-row">
@@ -151,17 +132,13 @@ export default function Sidebar({
             {count5xx !== null ? formatCount(count5xx) : "—"}
           </span>
         </div>
-        {totals && (totals.rate_limits > 0 || totals.failures > 0) ? (
+        {daily && (daily.requests_4xx > 0 || daily.requests_5xx > 0) ? (
           <div className="status-row">
             <span>Errors</span>
             <span className="uw-stats-errors">
-              {totals.rate_limits > 0 ? `${totals.rate_limits} 429` : null}
-              {totals.rate_limits > 0 && totals.failures > totals.rate_limits
-                ? " / "
-                : null}
-              {totals.failures > totals.rate_limits
-                ? `${totals.failures - totals.rate_limits} err`
-                : null}
+              {daily.requests_4xx > 0 ? `${daily.requests_4xx} 4xx` : null}
+              {daily.requests_4xx > 0 && daily.requests_5xx > 0 ? " / " : null}
+              {daily.requests_5xx > 0 ? `${daily.requests_5xx} 5xx` : null}
             </span>
           </div>
         ) : null}

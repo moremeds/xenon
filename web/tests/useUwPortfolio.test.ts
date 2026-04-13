@@ -428,4 +428,143 @@ describe("useUwPortfolio", () => {
     // Prefetched data still paints the tile.
     expect(result.current.data?.tickers).toHaveLength(1);
   });
+
+  // ── Two-Map merge: cached tickers stay visible during SSE ─────────
+
+  it("cached tickers remain visible while SSE tickers stream in (monotonicity)", async () => {
+    // Cache prefetch returns 3 tickers (A, B, C).
+    const cachedPayload = {
+      fetched_at: "2026-04-08T14:00:00Z",
+      market_state: "open",
+      ttl_seconds: 300,
+      tickers: [
+        {
+          ticker: "A",
+          sources: [],
+          snapshot: {},
+          changes: [],
+          snapshot_ts: "2026-04-08T14:00:00Z",
+        },
+        {
+          ticker: "B",
+          sources: [],
+          snapshot: {},
+          changes: [],
+          snapshot_ts: "2026-04-08T14:00:00Z",
+        },
+        {
+          ticker: "C",
+          sources: [],
+          snapshot: {},
+          changes: [],
+          snapshot_ts: "2026-04-08T14:00:00Z",
+        },
+      ],
+      action_items: [],
+    };
+
+    // SSE streams in 2 separate chunks: first A, then B + done.
+    // This lets us observe the intermediate state after chunk 1.
+    const chunk1 = buildSse([
+      { type: "meta", data: FIXTURE_META },
+      {
+        data: {
+          ticker: "A",
+          sources: ["sse"],
+          snapshot: { updated: true },
+          changes: [],
+          snapshot_ts: "2026-04-08T14:05:00Z",
+        },
+      },
+    ]);
+    const chunk2 = buildSse([
+      {
+        data: {
+          ticker: "B",
+          sources: ["sse"],
+          snapshot: { updated: true },
+          changes: [],
+          snapshot_ts: "2026-04-08T14:05:00Z",
+        },
+      },
+      { type: "done", data: FIXTURE_DONE },
+    ]);
+
+    // Gated ReadableStream: chunk2 is held until the test explicitly
+    // releases it, giving us a stable window to assert intermediate state.
+    let releaseChunk2!: () => void;
+    const chunk2Gate = new Promise<void>((r) => {
+      releaseChunk2 = r;
+    });
+
+    function mockGatedSseResponse(): Response {
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue(encoder.encode(chunk1));
+          await chunk2Gate;
+          controller.enqueue(encoder.encode(chunk2));
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    }
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (typeof url === "string" && url.includes("?cached=true")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(cachedPayload), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      if (typeof url === "string" && url.includes("/uw-analyze/portfolio")) {
+        return Promise.resolve(mockGatedSseResponse());
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useUwPortfolio());
+
+    // After chunk1 (meta + ticker A via SSE), all 3 should still be visible.
+    // BUG (pre-fix): the old code shows only [A] — cache wiped.
+    // Chunk2 is gated, so we have a stable window to check.
+    await waitFor(() => {
+      const tickers = result.current.data?.tickers ?? [];
+      const hasSseA = tickers.some(
+        (t) => t.ticker === "A" && t.sources?.[0] === "sse",
+      );
+      expect(hasSseA).toBe(true);
+      // Monotonicity: cached B+C still visible alongside SSE A.
+      expect(tickers.length).toBeGreaterThanOrEqual(3);
+    });
+
+    // Release chunk2 (ticker B + done).
+    releaseChunk2();
+
+    // Wait for stream to finish.
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    // After SSE completes, only SSE tickers remain (C dropped).
+    const finalTickers = result.current
+      .data!.tickers.map((t) => t.ticker)
+      .sort();
+    expect(finalTickers).toEqual(["A", "B"]);
+
+    // SSE data overwrote cache for A.
+    const tickerA = result.current.data!.tickers.find((t) => t.ticker === "A");
+    expect(tickerA?.sources).toEqual(["sse"]);
+  });
 });

@@ -12,6 +12,7 @@ Covers:
 - Load-on-init tolerance (missing file, corrupt JSON, unknown keys)
 - reset() preserves history; clear_history() wipes it
 - Thread-safety of bucket updates
+- Daily stats since 8PM ET boundary (DST-aware)
 """
 
 from __future__ import annotations
@@ -486,3 +487,133 @@ class TestGetStatsShapeUnchanged:
             "by_endpoint_type",
         ):
             assert key in stats, f"missing key: {key}"
+
+
+# ── daily stats (8PM ET boundary) ───────────────────────────────────
+
+
+class TestDailyStats:
+    """get_daily_stats() sums hourly buckets since the most recent 8PM ET.
+
+    8PM ET = midnight UTC during EDT (summer), 01:00 UTC during EST (winter).
+    The method uses ZoneInfo("America/New_York") so DST is handled correctly.
+    """
+
+    def test_sums_buckets_since_8pm_et(self, tmp_path):
+        """Records at 21:00 ET and 10:00 ET next day both count toward
+        the same daily window (reset at 20:00 ET)."""
+        # 2026-04-10 is EDT (UTC-4). 21:00 ET = 01:00 UTC Apr 11.
+        clock = Clock(datetime(2026, 4, 11, 1, 30, tzinfo=timezone.utc))  # 21:30 ET Apr 10
+        s = _make_stats(tmp_path, clock)
+        s.record("stock/AAPL/volatility", status=200, latency_ms=100.0)
+        s.record("stock/AAPL/volatility", status=404, latency_ms=50.0)
+
+        # Advance to next day 14:00 ET = 18:00 UTC Apr 11 (still same daily window)
+        clock.advance(16.5 * 3600)  # → 18:00 UTC Apr 11
+        s.record("stock/AAPL/volatility", status=200, latency_ms=200.0)
+
+        daily = s.get_daily_stats()
+        assert daily["requests"] == 3  # 2xx + 4xx (non-cached)
+        assert daily["requests_2xx"] == 2
+        assert daily["requests_4xx"] == 1
+        assert daily["requests_5xx"] == 0
+
+    def test_excludes_buckets_before_8pm_et_boundary(self, tmp_path):
+        """A record at 19:00 ET should belong to the previous daily window
+        when viewed from 21:00 ET the same day."""
+        # 19:00 ET Apr 10 = 23:00 UTC Apr 10 (EDT)
+        clock = Clock(datetime(2026, 4, 10, 23, 30, tzinfo=timezone.utc))  # 19:30 ET
+        s = _make_stats(tmp_path, clock)
+        s.record("stock/AAPL/volatility", status=200, latency_ms=100.0)
+
+        # Advance to 21:00 ET = 01:00 UTC Apr 11 (new daily window)
+        clock.advance(2 * 3600)  # → 01:30 UTC Apr 11
+        s.record("stock/AAPL/volatility", status=200, latency_ms=200.0)
+
+        daily = s.get_daily_stats()
+        # Only the 21:00 ET record counts — the 19:00 ET one is before the boundary.
+        assert daily["requests"] == 1
+        assert daily["requests_2xx"] == 1
+
+    def test_returns_zeros_when_no_history(self, tmp_path):
+        clock = Clock(datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc))
+        s = _make_stats(tmp_path, clock)
+        daily = s.get_daily_stats()
+        assert daily["requests"] == 0
+        assert daily["requests_2xx"] == 0
+        assert daily["requests_4xx"] == 0
+        assert daily["requests_5xx"] == 0
+        assert daily["cached"] == 0
+        assert daily["avg_latency_ms"] is None
+        assert "reset_at" in daily
+
+    def test_excludes_cached_hits_from_request_count(self, tmp_path):
+        """Cached hits are local — they don't consume UW's 20k/day quota."""
+        clock = Clock(datetime(2026, 4, 11, 1, 30, tzinfo=timezone.utc))  # 21:30 ET
+        s = _make_stats(tmp_path, clock)
+        s.record("stock/AAPL/volatility", status=200, latency_ms=100.0)
+        s.record("stock/AAPL/volatility", status=200, cached=True)
+        s.record("stock/AAPL/volatility", status=200, cached=True)
+
+        daily = s.get_daily_stats()
+        assert daily["requests"] == 1  # only the non-cached one
+        assert daily["cached"] == 2
+        assert daily["requests_2xx"] == 1
+
+    def test_dst_transition_edt_to_est(self, tmp_path):
+        """Fall back: Nov 1 2026, clocks fall back 2AM ET.
+        After fall-back, 8PM Nov 1 is EST (UTC-5) = 01:00 UTC Nov 2.
+        Compare with pre-fallback: 8PM Oct 31 EDT (UTC-4) = 00:00 UTC Nov 1."""
+        # 01:30 UTC Nov 2 = 8:30 PM EST Nov 1 (post-fallback)
+        clock = Clock(datetime(2026, 11, 2, 1, 30, tzinfo=timezone.utc))
+        s = _make_stats(tmp_path, clock)
+        s.record("stock/AAPL/volatility", status=200, latency_ms=100.0)
+
+        daily = s.get_daily_stats()
+        assert daily["requests"] == 1
+        # 8PM EST Nov 1 = 01:00 UTC Nov 2
+        assert daily["reset_at"] == "2026-11-02T01:00:00Z"
+
+    def test_dst_pre_fallback_uses_edt(self, tmp_path):
+        """Before fall-back (Oct 31 EDT), 8PM ET = 00:00 UTC Nov 1."""
+        # 00:30 UTC Nov 1 = 8:30 PM EDT Oct 31
+        clock = Clock(datetime(2026, 11, 1, 0, 30, tzinfo=timezone.utc))
+        s = _make_stats(tmp_path, clock)
+        s.record("stock/AAPL/volatility", status=200, latency_ms=100.0)
+
+        daily = s.get_daily_stats()
+        assert daily["requests"] == 1
+        # 8PM EDT Oct 31 = 00:00 UTC Nov 1
+        assert daily["reset_at"] == "2026-11-01T00:00:00Z"
+
+    def test_dst_transition_est_to_edt(self, tmp_path):
+        """Spring forward: Mar 8 2026, clocks spring forward 2AM ET.
+        After spring-forward, 8PM Mar 8 is EDT (UTC-4) = 00:00 UTC Mar 9."""
+        # Mar 8 2026 21:00 EDT = 01:00 UTC Mar 9
+        clock = Clock(datetime(2026, 3, 9, 1, 30, tzinfo=timezone.utc))
+        s = _make_stats(tmp_path, clock)
+        s.record("stock/AAPL/volatility", status=200, latency_ms=100.0)
+
+        daily = s.get_daily_stats()
+        assert daily["requests"] == 1
+        # After spring-forward, 8PM EDT = 00:00 UTC
+        assert daily["reset_at"] == "2026-03-09T00:00:00Z"
+
+    def test_cache_hit_pct_in_daily(self, tmp_path):
+        clock = Clock(datetime(2026, 4, 11, 1, 30, tzinfo=timezone.utc))
+        s = _make_stats(tmp_path, clock)
+        s.record("stock/AAPL/volatility", status=200, latency_ms=100.0)
+        s.record("stock/AAPL/volatility", status=200, cached=True)
+
+        daily = s.get_daily_stats()
+        # 1 real + 1 cached = 2 total API calls, 50% cache hit
+        assert daily["cache_hit_pct"] == 50
+
+    def test_avg_latency_in_daily(self, tmp_path):
+        clock = Clock(datetime(2026, 4, 11, 1, 30, tzinfo=timezone.utc))
+        s = _make_stats(tmp_path, clock)
+        s.record("stock/AAPL/volatility", status=200, latency_ms=100.0)
+        s.record("stock/AAPL/volatility", status=200, latency_ms=300.0)
+
+        daily = s.get_daily_stats()
+        assert daily["avg_latency_ms"] == pytest.approx(200.0)
