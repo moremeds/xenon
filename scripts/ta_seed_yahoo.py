@@ -52,9 +52,10 @@ def _extract_ticker_df(
     (single-ticker download).
     """
     if multi:
-        if ticker not in raw.columns.get_level_values(1):
+        # yfinance group_by="ticker" → level 0 = ticker, level 1 = field
+        if ticker not in raw.columns.get_level_values(0):
             return pd.DataFrame()
-        sub = raw.xs(ticker, level=1, axis=1).copy()
+        sub = raw[ticker].copy()
     else:
         sub = raw.copy()
 

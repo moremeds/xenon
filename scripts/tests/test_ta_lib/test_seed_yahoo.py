@@ -49,17 +49,18 @@ class TestExtractTickerDf:
         assert len(result) == 3
 
     def test_multi_index_columns(self):
-        """Multi-ticker download produces MultiIndex columns."""
+        """Multi-ticker download produces MultiIndex columns (ticker, field)."""
         dates = pd.date_range("2025-01-01", periods=2)
+        # yfinance group_by="ticker" → level 0 = ticker, level 1 = field
         arrays = [
-            ["Open", "Open", "Close", "Close", "High", "High", "Low", "Low", "Volume", "Volume"],
-            ["AAPL", "MSFT", "AAPL", "MSFT", "AAPL", "MSFT", "AAPL", "MSFT", "AAPL", "MSFT"],
+            ["AAPL", "AAPL", "AAPL", "AAPL", "AAPL", "MSFT", "MSFT", "MSFT", "MSFT", "MSFT"],
+            ["Open", "High", "Low", "Close", "Volume", "Open", "High", "Low", "Close", "Volume"],
         ]
         tuples = list(zip(*arrays))
         index = pd.MultiIndex.from_tuples(tuples)
         data = [
-            [100, 200, 101, 201, 102, 202, 99, 199, 1000, 2000],
-            [110, 210, 111, 211, 112, 212, 109, 209, 1100, 2100],
+            [100, 102, 99, 101, 1000, 200, 202, 199, 201, 2000],
+            [110, 112, 109, 111, 1100, 210, 212, 209, 211, 2100],
         ]
         df = pd.DataFrame(data, index=dates, columns=index)
         df.index.name = "Date"
@@ -73,10 +74,11 @@ class TestExtractTickerDf:
     def test_missing_ticker_returns_empty(self):
         """Requesting a ticker not in the MultiIndex returns empty DF."""
         dates = pd.date_range("2025-01-01", periods=2)
-        arrays = [["Open", "Open"], ["AAPL", "MSFT"]]
+        # level 0 = ticker, level 1 = field
+        arrays = [["AAPL", "AAPL", "MSFT", "MSFT"], ["Open", "Close", "Open", "Close"]]
         tuples = list(zip(*arrays))
         index = pd.MultiIndex.from_tuples(tuples)
-        df = pd.DataFrame([[1, 2], [3, 4]], index=dates, columns=index)
+        df = pd.DataFrame([[1, 2, 3, 4], [5, 6, 7, 8]], index=dates, columns=index)
         df.index.name = "Date"
 
         result = _extract_ticker_df(df, "GOOG", multi=True)
