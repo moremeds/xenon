@@ -22,7 +22,7 @@ Python pipelines, scanners, clients, commands. Root `CLAUDE.md` is authoritative
 - `scripts/scanner_lib/` — `cache`, `executor` (parallel_fetch), `models`, `scoring`, `universe`. Every scanner builds on this.
 - `scripts/trend_scan_lib/` — 3-stage pre-market trend scanner. Stages: `ta_prefilter` → `options_structure` + `volatility` + `flow_confirmation`. Config: `config.py`. Storage: DuckDB (`data/trend_scan.duckdb`) via `storage.py` — `duckdb` package imported lazily so scanners that don't need persistence still run.
 - `scripts/uw_scan_lib/` — tiered UW signal scanner. Signals: `dark_pool_accumulation`, `deep_conviction_flow`, `earnings_iv_crush`, `gex_pinning`. Context: `pcr_sentiment`. Confluence ranking: `ranking.py` + `confluence.py`.
-- `scripts/ta_lib/` — TA-Lib indicators with IB historical data and DuckDB caching. `bars.py` (IB OHLC fetch), `indicators.py` (TA-Lib wrappers), `store.py` (DuckDB at `data/ta.duckdb`), `service.py` (`TAService` read-through cache). Supports `1d` and `1h` timeframes. First consumer: `trend_scan.py`. Design spec: `docs/superpowers/specs/2026-04-13-ta-lib-module-design.md`.
+- `scripts/ta_lib/` — TA-Lib indicators with IB historical data and DuckDB caching. `bars.py` (IB OHLC fetch), `indicators.py` (TA-Lib wrappers), `store.py` (DuckDB at `data/ta.duckdb`), `service.py` (`TAService` read-through cache). Supports `1d` and `1h` timeframes. First consumer: `trend_scan.py`. Cold start seeding: `ta_seed_yahoo.py` (one-time Yahoo Finance exception to IB-first policy). Design spec: `docs/superpowers/specs/2026-04-13-ta-lib-module-design.md`.
 
 New scanners compose `scanner_lib` primitives — do not reimplement universe/executor/scoring logic.
 
@@ -126,3 +126,5 @@ Full data catalog: `docs/architecture/data-files.md`.
 | `menthorq-summary [CAT]`         | Summary tables (futures: 93 rows, cryptos: 16)                                                                                                                             |
 | `menthorq-quin [PROMPT]`         | QUIN AI screener. Presets: `docs/reference/menthorq-prompts.md`                                                                                                            |
 | `ta-cli [TICKERS]`               | TA-Lib manual test CLI. `--history` full DataFrame, `--refresh` bulk IB fetch, `--cache-only` no IB, `--query SQL` raw DuckDB, `--stats` DB overview, `-tf 1h` hourly bars |
+| `ta-premarket-prep`              | Pre-market data audit + IB refresh. `--audit-only` report, `--force` refresh all. Runs 6 AM ET via server scheduler.                                                       |
+| `ta-seed-yahoo [TICKERS]`        | One-off Yahoo Finance cold start for TA cache. `--dry-run` preview, `--tickers` override. Intentional exception to IB-first policy.                                        |

@@ -21,6 +21,7 @@ duckdb>=1.2.0
 
 # Technical analysis (requires TA-Lib C library: brew install ta-lib)
 ta-lib>=0.5.1
+yfinance>=0.2.36
 
 # Environment and utilities
 python-dotenv>=1.0.0
