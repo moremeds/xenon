@@ -70,6 +70,26 @@ class TestRsiEdgeCases:
         last_rsi = result["rsi_14"].iloc[-1]
         assert last_rsi == pytest.approx(50.0, abs=0.1)
 
+    def test_flat_after_drop_rsi_stays_near_zero(self):
+        """RSI should stay near 0 when a series drops then goes flat.
+
+        Wilder's smoothing remembers the old loss — RSI=0 is correct here,
+        not 50. Regression test for false-positive coercion bug.
+        """
+        from scripts.ta_lib.indicators import compute_all
+
+        df = _make_ohlcv_df()
+        # 200 bars at 100, then drop to 50, then flat at 50
+        df["close"] = 100.0
+        df.loc[200:, "close"] = 50.0
+        df["high"] = df["close"] + 1
+        df["low"] = df["close"] - 1
+        df["open"] = df["close"]
+        result = compute_all(df)
+        # RSI in the flat-at-50 tail should be near 0 (not coerced to 50)
+        last_rsi = result["rsi_14"].iloc[-1]
+        assert last_rsi < 5.0, f"RSI should stay near 0 after drop+flat, got {last_rsi}"
+
     def test_all_up_rsi_near_100(self):
         from scripts.ta_lib.indicators import compute_all
 

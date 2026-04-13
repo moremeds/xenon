@@ -8,7 +8,6 @@ import time
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-import numpy as np
 import pandas as pd
 
 from scripts.ta_lib.bars import fetch_bars
@@ -41,6 +40,8 @@ _FIELD_MAP = {
 _SPLIT_THRESHOLD = 0.30
 
 _ET = ZoneInfo("America/New_York")
+
+_SUPPORTED_TIMEFRAMES = {"1d"}
 
 
 class TAService:
@@ -75,6 +76,8 @@ class TAService:
         allow_fetch: bool = True,
     ) -> pd.DataFrame:
         """Return full history DataFrame with OHLC + all indicator columns."""
+        if timeframe not in _SUPPORTED_TIMEFRAMES:
+            raise ValueError(f"Unsupported timeframe '{timeframe}'. Supported: {_SUPPORTED_TIMEFRAMES}")
         ticker = ticker.upper()
         cursor = self._read_cursor()
 
@@ -135,7 +138,7 @@ class TAService:
             float(volumes.tail(20).mean()) if len(volumes) >= 20 else snapshot["recent_avg_volume"]
         )
 
-        delta = df["close"].diff()
+        delta = df["close"].diff().dropna()
         recent_delta = delta.tail(10)
         snapshot["recent_up_ratio"] = float((recent_delta > 0).mean()) if len(recent_delta) > 0 else 0.5
 
@@ -251,13 +254,21 @@ class TAService:
 
         df = fetch_bars(self._ib_client, ticker, duration=duration, bar_size="1 day", end_date=end_date)
 
-        # Stock split detection
+        # Stock split detection: compare last cached close against the first
+        # truly NEW bar (after the latest cached date). Incremental fetches include
+        # overlap bars due to the +5 day buffer — comparing iloc[0] would compare
+        # against an old overlapping bar and miss the split.
         force_full_refetch = False
         if latest is not None and len(df) > 0:
             cached_ohlc = read_ohlc(self._conn, ticker, timeframe)
             if cached_ohlc is not None and len(cached_ohlc) > 0:
                 last_cached_close = float(cached_ohlc["close"].iloc[-1])
-                first_new_open = float(df["open"].iloc[0])
+                # Filter to bars strictly after the latest cached date
+                latest_ts = pd.Timestamp(latest)
+                new_bars = df[df["date"] > latest_ts]
+                if len(new_bars) == 0:
+                    new_bars = df  # fallback: all bars are "new" (cold start edge)
+                first_new_open = float(new_bars["open"].iloc[0])
                 if last_cached_close > 0:
                     gap = abs(first_new_open - last_cached_close) / last_cached_close
                     if gap > _SPLIT_THRESHOLD:

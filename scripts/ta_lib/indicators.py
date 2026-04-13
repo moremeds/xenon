@@ -29,13 +29,15 @@ def compute_all(df: pd.DataFrame) -> pd.DataFrame:
 
     # RSI
     rsi = talib.RSI(close, timeperiod=14)
-    # Post-process: coerce flat-series to 50.0
-    # TA-Lib returns NaN or 0.0 for flat series (all gains/losses are zero).
-    # Detect by checking if close values in the lookback window have zero variance.
+    # Post-process: coerce flat-from-inception to 50.0
+    # TA-Lib returns 0.0 for series with zero gains (both truly-flat and
+    # flat-after-drop). Only coerce when the ENTIRE history up to that point
+    # has zero variance — meaning it's been flat from the start, not flat
+    # after a prior move (where Wilder's smoothing correctly remembers the loss).
     for i in range(14, len(rsi)):
         if np.isnan(rsi[i]) or rsi[i] == 0.0:
-            window = close[max(0, i - 14) : i + 1]
-            if np.std(window) < 1e-10:  # flat series
+            # Check full history from start to current bar (not just local window)
+            if np.std(close[: i + 1]) < 1e-10:
                 rsi[i] = 50.0
     result["rsi_14"] = rsi
 
