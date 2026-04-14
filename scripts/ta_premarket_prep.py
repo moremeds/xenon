@@ -49,16 +49,39 @@ def classify_tickers(
     tickers: list[str],
     ref_date: date,
 ) -> dict[str, list[str]]:
-    """Classify tickers as current / stale / missing against *ref_date*."""
+    """Classify tickers as current / stale / missing.
+
+    Delegates the freshness decision to TAService._is_stale() so audit
+    and scanner agree. A ticker is 'current' iff it has bars AND
+    indicators AND the most recent bar is from ref_date or later.
+    """
     current: list[str] = []
     stale: list[str] = []
     missing: list[str] = []
+
+    # _svc is constructed on first use to avoid the TAService import and
+    # __new__ call when every ticker is missing (e.g. empty DB on first run).
+    _svc = None
+
+    def _get_svc():
+        nonlocal _svc
+        if _svc is None:
+            from scripts.ta_lib.service import TAService  # lazy import to avoid IB dep at module load
+
+            # Build a read-only TAService bound to this connection.
+            _svc = TAService.__new__(TAService)
+            _svc._conn = conn
+            _svc._ib_client = None
+        return _svc
 
     for t in tickers:
         latest = get_latest_bar_date(conn, t, "1d")
         if latest is None:
             missing.append(t)
-        elif latest < ref_date:
+            continue
+        # Use _is_stale() — this catches "bars present but no indicators"
+        # and applies the same ET-aware logic scanners use.
+        if _get_svc()._is_stale(t, "1d", cursor=conn):
             stale.append(t)
         else:
             current.append(t)
