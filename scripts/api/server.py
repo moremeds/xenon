@@ -132,7 +132,7 @@ async def _premarket_data_prep_loop():
 
     # Catch-up: if we start between 6:00 and 8:30 on a trading day, run once now
     now = datetime.now(et)
-    if now.weekday() < 5 and 6 <= now.hour < 8 or (now.hour == 8 and now.minute < 30):
+    if now.weekday() < 5 and (6 <= now.hour < 8 or (now.hour == 8 and now.minute < 30)):
         logger.info("Pre-market data prep: catch-up run (server started after 6 AM ET)")
         try:
             result = await run_script("ta_premarket_prep.py", [], timeout=3600)

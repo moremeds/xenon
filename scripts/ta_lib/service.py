@@ -16,6 +16,7 @@ from scripts.ta_lib.store import (
     delete_ticker,
     get_connection,
     get_latest_bar_date,
+    get_latest_bar_timestamp,
     init_schema,
     read_indicators,
     read_ohlc,
@@ -257,9 +258,18 @@ class TAService:
         market_open = now_et.hour >= 9 and (now_et.hour > 9 or now_et.minute >= 30)
         market_close = now_et.hour >= 16
         if last_session == now_et.date() and market_open and not market_close:
-            # During market hours: stale if latest bar is >2h behind
-            latest_dt = datetime.combine(latest, datetime.min.time())
-            hours_behind = (now_et.replace(tzinfo=None) - latest_dt).total_seconds() / 3600
+            # During market hours: stale if latest bar is >2h behind.
+            # Use the full timestamp (not just date) so we don't treat a
+            # bar from 15:00 today as if it were midnight.
+            latest_ts = get_latest_bar_timestamp(conn, ticker, timeframe)
+            if latest_ts is None:
+                return True
+            # Normalize both sides to naive for robust subtraction
+            # (now_et may be tz-aware or mocked-naive; latest_ts from DuckDB
+            # may be tz-aware UTC or naive).
+            now_naive = now_et.replace(tzinfo=None) if now_et.tzinfo else now_et
+            latest_naive = latest_ts.replace(tzinfo=None) if latest_ts.tzinfo else latest_ts
+            hours_behind = (now_naive - latest_naive).total_seconds() / 3600
             return hours_behind > 2
         return False
 
