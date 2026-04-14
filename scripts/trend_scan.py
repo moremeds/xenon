@@ -199,9 +199,18 @@ class LiveTrendDataFetcher:
         self._greek_flow_cache: dict[str, tuple[float, float]] = {}
 
     def pre_cache_spy(self) -> None:
-        """Cache SPY indicator DataFrame for rs_vs_spy calculations."""
-        if self._ta_service is not None:
+        """Cache SPY indicator DataFrame for rs_vs_spy calculations.
+
+        Failure is non-fatal — RS benchmark is a nice-to-have; scan proceeds
+        with rs_vs_spy=1.0 fallback if SPY is cold and IB unavailable.
+        """
+        if self._ta_service is None:
+            return
+        try:
             self._spy_df = self._ta_service.get_indicators("SPY", allow_fetch=False)
+        except Exception as exc:
+            logger.warning("pre_cache_spy: SPY unavailable (%s) — falling back to rs_vs_spy=1.0", exc)
+            self._spy_df = None
 
     def _stock_info(self, ticker: str) -> dict[str, Any]:
         upper = ticker.upper()
