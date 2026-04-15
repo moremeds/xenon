@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -51,7 +52,8 @@ CREATE TABLE IF NOT EXISTS scan_candidates (
     gamma_flip         DOUBLE,
     call_wall          DOUBLE,
     put_wall           DOUBLE,
-    suggested_trade    VARCHAR,
+    structure_hint     VARCHAR,
+    catalysts          VARCHAR,
     invalidation       DOUBLE,
     flags              VARCHAR[],
     trend_summary      VARCHAR,
@@ -79,8 +81,21 @@ def get_connection(db_path: str = DEFAULT_DB_PATH):
     return duckdb.connect(db_path)
 
 
+_MIGRATIONS = [
+    # Drop suggested_trade; add structure_hint + catalysts if schema is stale
+    "ALTER TABLE scan_candidates ADD COLUMN IF NOT EXISTS structure_hint VARCHAR",
+    "ALTER TABLE scan_candidates ADD COLUMN IF NOT EXISTS catalysts VARCHAR",
+]
+
+
 def init_schema(conn) -> None:
     conn.execute(SCHEMA_SQL)
+    # Apply migrations for existing DBs that still have the old suggested_trade column.
+    for sql in _MIGRATIONS:
+        try:
+            conn.execute(sql)
+        except Exception:
+            pass  # column already exists or table not yet created (first run)
 
 
 def write_scan_run(conn, run: dict[str, Any]) -> None:
@@ -104,7 +119,7 @@ def write_scan_run(conn, run: dict[str, Any]) -> None:
 def write_scan_candidates(conn, candidates: list[dict[str, Any]]) -> None:
     for c in candidates:
         conn.execute(
-            "INSERT INTO scan_candidates (scan_id, ticker, snapshot_timestamp, spot_price, direction, final_score, trend_score, structure_score, vol_score, flow_score, ma_20, ma_50, ma_200, rsi, adx, macd_histogram, bbw, rs_vs_spy, iv_rank, gamma_flip, call_wall, put_wall, suggested_trade, invalidation, flags, trend_summary, structure_summary, vol_summary, flow_summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO scan_candidates (scan_id, ticker, snapshot_timestamp, spot_price, direction, final_score, trend_score, structure_score, vol_score, flow_score, ma_20, ma_50, ma_200, rsi, adx, macd_histogram, bbw, rs_vs_spy, iv_rank, gamma_flip, call_wall, put_wall, structure_hint, catalysts, invalidation, flags, trend_summary, structure_summary, vol_summary, flow_summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 c["scan_id"],
                 c["ticker"],
@@ -128,7 +143,8 @@ def write_scan_candidates(conn, candidates: list[dict[str, Any]]) -> None:
                 c.get("gamma_flip", 0),
                 c.get("call_wall", 0),
                 c.get("put_wall", 0),
-                c.get("suggested_trade", ""),
+                c.get("structure_hint", ""),
+                json.dumps(c.get("catalysts", [])),
                 c.get("invalidation", 0),
                 c.get("flags", []),
                 c.get("trend_summary", ""),

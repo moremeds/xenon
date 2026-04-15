@@ -27,7 +27,7 @@ from scripts.trend_scan_lib.ranking import apply_min_thresholds, compute_final_s
 from scripts.trend_scan_lib.stages.flow_confirmation import compute_flow_score
 from scripts.trend_scan_lib.stages.options_structure import compute_structure_score
 from scripts.trend_scan_lib.stages.ta_prefilter import compute_trend_score, passes_bullish_gate
-from scripts.trend_scan_lib.stages.volatility import compute_vol_score, suggest_trade_type
+from scripts.trend_scan_lib.stages.volatility import compute_vol_score
 from scripts.trend_scan_lib.storage import (
     DEFAULT_DB_PATH,
     get_connection,
@@ -422,20 +422,11 @@ def _stage_bc(ticker: str, ohlcv: dict, data_fetcher: DataFetcher) -> Optional[d
         flow_data = data_fetcher.fetch_flow(ticker)
         flow_score = compute_flow_score(flow_data)
 
-        spot = max(_safe_float(struct_data.get("spot"), default=0.0), 1.0)
-        call_wall = _safe_float(struct_data.get("call_wall"))
-        capped = call_wall > 0 and ((call_wall - spot) / spot) < 0.05
-        trade_type = suggest_trade_type(
-            iv_rank=vol_data.get("iv_rank", 50),
-            term_structure=vol_data.get("term_structure", "flat"),
-            capped=capped,
-        )
         return {
             "structure_score": structure_score,
             "vol_score": vol_score,
             "flow_score": flow_score,
             "vol_flags": vol_flags,
-            "suggested_trade": trade_type,
             "struct_data": struct_data,
             "vol_data": vol_data,
             "flow_data": flow_data,
@@ -546,6 +537,28 @@ def _resolve_universe(
     return build_universe(cfg, uw_client=uw_client, ib_client=ib_client)
 
 
+def _infer_structure_hint(direction: str, bc: dict, ohlcv: dict) -> str:
+    """Return a defined-risk long-side structure hint.
+
+    Never emits short premium — that would fail Gate 4 (naked short cover)
+    if taken literally at order-entry time. Hint is informational only;
+    actual structure selection happens at order-build time under Four Gates."""
+    iv_rank = bc.get("vol_data", {}).get("iv_rank", 0.5)
+    high_iv = iv_rank >= 0.6
+    if direction == "bullish":
+        return "long_call_vertical" if high_iv else "long_call"
+    if direction == "bearish":
+        return "long_put_vertical" if high_iv else "long_put"
+    return ""
+
+
+def _compute_invalidation(direction: str, ohlcv: dict) -> float:
+    """Price level at which the signal is invalidated. 20DMA for both
+    directions (bullish: close below = trend broken; bearish: close above
+    = thesis broken)."""
+    return float(ohlcv.get("ma_20", 0.0))
+
+
 def run_scan_pipeline(
     cfg: TrendScanConfig,
     *,
@@ -596,9 +609,10 @@ def run_scan_pipeline(
             "volatility": bc["vol_score"],
             "flow": bc["flow_score"],
         }
+        direction = "bullish"
         candidate = TrendCandidate(
             ticker=ticker,
-            direction="bullish",
+            direction=direction,
             final_score=compute_final_score(scores, cfg.weights),
             scores=scores,
             spot_price=ohlcv.get("close", 0),
@@ -622,8 +636,8 @@ def run_scan_pipeline(
                 "vol": _vol_summary(bc["vol_data"]),
                 "flow": _flow_summary(bc["flow_data"]),
             },
-            suggested_trade=bc["suggested_trade"],
-            invalidation=ohlcv.get("ma_20", 0),
+            structure_hint=_infer_structure_hint(direction, bc, ohlcv),
+            invalidation=_compute_invalidation(direction, ohlcv),
             flags=list(bc.get("vol_flags", [])),
         )
         candidates.append(candidate)
@@ -681,7 +695,8 @@ def run_scan_pipeline(
                     "vol_score": candidate.scores.get("volatility", 0),
                     "flow_score": candidate.scores.get("flow", 0),
                     **candidate.indicators,
-                    "suggested_trade": candidate.suggested_trade,
+                    "structure_hint": candidate.structure_hint,
+                    "catalysts": candidate.catalysts,
                     "invalidation": candidate.invalidation,
                     "flags": candidate.flags,
                     "trend_summary": candidate.summaries.get("trend", ""),
