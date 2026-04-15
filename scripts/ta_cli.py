@@ -2,7 +2,7 @@
 """Manual test CLI for TAService.
 
 Usage:
-    # With live IB Gateway:
+    # With live Massive.com access (MASSIVE_API_KEY in env):
     python3.13 scripts/ta_cli.py AAPL MSFT SPY
 
     # Show full indicator history (not just snapshot):
@@ -14,7 +14,7 @@ Usage:
     # Use a custom DB path (e.g. temp for testing):
     python3.13 scripts/ta_cli.py AAPL --db /tmp/test_ta.duckdb
 
-    # Dry run with no IB (read cache only):
+    # Dry run with no vendor (read cache only):
     python3.13 scripts/ta_cli.py AAPL --cache-only
 
     # Query the DuckDB directly:
@@ -37,92 +37,106 @@ _project_root = str(Path(__file__).resolve().parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+from scripts.ta_lib.service import TAService  # noqa: E402
 
-def main(argv=None):
+_TIMEFRAMES = ["1d", "1h"]
+
+
+def _build_massive_client():
+    """Factory — module-level so tests can monkeypatch it."""
+    from scripts.clients.massive_client import MassiveClient
+
+    return MassiveClient()
+
+
+def _parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="TA-Lib manual test CLI")
     parser.add_argument("tickers", nargs="*", help="Ticker symbols (e.g. AAPL MSFT SPY)")
     parser.add_argument("--history", action="store_true", help="Show full indicator DataFrame instead of snapshot")
     parser.add_argument("--refresh", action="store_true", help="Run bulk_refresh before reading")
     parser.add_argument("--db", default="data/ta.duckdb", help="DuckDB path (default: data/ta.duckdb)")
-    parser.add_argument("--cache-only", action="store_true", help="Read cache only, no IB connection")
+    parser.add_argument("--cache-only", action="store_true", help="Read cache only, no vendor connection")
     parser.add_argument("--query", type=str, help="Run raw SQL against the DuckDB")
     parser.add_argument("--stats", action="store_true", help="Show DB stats (row counts, tickers, date ranges)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
+
+
+def _cmd_stats_or_query(args: argparse.Namespace) -> int:
+    """Offline subcommand: direct DuckDB access, no vendor client needed."""
+    import duckdb
+
+    db_path = Path(args.db)
+    if not db_path.exists():
+        print(f"Database not found: {args.db}")
+        return 1
+    conn = duckdb.connect(str(db_path), read_only=True)
+
+    if args.stats:
+        print(f"Database: {args.db}")
+        print(f"{'=' * 60}")
+        try:
+            ohlc_count = conn.execute("SELECT COUNT(*) FROM ohlc_bars").fetchone()[0]
+            ind_count = conn.execute("SELECT COUNT(*) FROM ta_indicators").fetchone()[0]
+            print(f"  ohlc_bars rows:      {ohlc_count:,}")
+            print(f"  ta_indicators rows:  {ind_count:,}")
+
+            tickers = conn.execute(
+                "SELECT ticker, timeframe, COUNT(*) as bars, "
+                "MIN(bar_date) as first_bar, MAX(bar_date) as last_bar, "
+                "MAX(fetched_at) as last_fetch "
+                "FROM ohlc_bars GROUP BY ticker, timeframe ORDER BY ticker"
+            ).fetchdf()
+            if len(tickers) > 0:
+                print(f"\n  Cached tickers ({len(tickers)}):")
+                print(tickers.to_string(index=False))
+            else:
+                print("\n  No tickers cached yet.")
+        except Exception as e:
+            print(f"  Error reading stats: {e}")
+
+    if args.query:
+        print(f"\nSQL: {args.query}")
+        print(f"{'=' * 60}")
+        try:
+            result = conn.execute(args.query).fetchdf()
+            print(result.to_string(index=False) if len(result) > 0 else "(no rows)")
+        except Exception as e:
+            print(f"ERROR: {e}")
+
+    conn.close()
+    return 0
+
+
+def main(argv=None) -> int:
+    args = _parse_args(argv)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s: %(message)s",
     )
 
-    # --query and --stats modes: direct DuckDB access, no IB needed
+    # --- Offline subcommands first (no client needed) ---
     if args.query or args.stats:
-        import duckdb
-
-        db_path = Path(args.db)
-        if not db_path.exists():
-            print(f"Database not found: {args.db}")
-            return 1
-        conn = duckdb.connect(str(db_path), read_only=True)
-
-        if args.stats:
-            print(f"Database: {args.db}")
-            print(f"{'=' * 60}")
-            try:
-                ohlc_count = conn.execute("SELECT COUNT(*) FROM ohlc_bars").fetchone()[0]
-                ind_count = conn.execute("SELECT COUNT(*) FROM ta_indicators").fetchone()[0]
-                print(f"  ohlc_bars rows:      {ohlc_count:,}")
-                print(f"  ta_indicators rows:  {ind_count:,}")
-
-                tickers = conn.execute(
-                    "SELECT ticker, timeframe, COUNT(*) as bars, "
-                    "MIN(bar_date) as first_bar, MAX(bar_date) as last_bar, "
-                    "MAX(fetched_at) as last_fetch "
-                    "FROM ohlc_bars GROUP BY ticker, timeframe ORDER BY ticker"
-                ).fetchdf()
-                if len(tickers) > 0:
-                    print(f"\n  Cached tickers ({len(tickers)}):")
-                    print(tickers.to_string(index=False))
-                else:
-                    print("\n  No tickers cached yet.")
-            except Exception as e:
-                print(f"  Error reading stats: {e}")
-
-        if args.query:
-            print(f"\nSQL: {args.query}")
-            print(f"{'=' * 60}")
-            try:
-                result = conn.execute(args.query).fetchdf()
-                print(result.to_string(index=False) if len(result) > 0 else "(no rows)")
-            except Exception as e:
-                print(f"ERROR: {e}")
-
-        conn.close()
-        return 0
+        return _cmd_stats_or_query(args)
 
     if not args.tickers:
-        parser.error("tickers required (or use --query/--stats)")
+        print("ERROR: tickers required (or use --query/--stats)", file=sys.stderr)
+        return 2
 
-    from scripts.ta_lib.service import TAService
-
-    ib_client = None
+    # --- Reads: client needed unless --cache-only ---
+    massive_client = None
     if not args.cache_only:
         try:
-            from scripts.clients.ib_client import IBClient
-
-            ib_client = IBClient()
-            ib_client.connect(client_id="auto")
-            print("IB Gateway connected")
+            massive_client = _build_massive_client()
+            print("Massive.com client initialized")
         except Exception as e:
-            print(f"IB Gateway not available: {e}")
-            if not args.cache_only:
-                print("  Use --cache-only to read from cached data")
-                return 1
+            print(f"Massive.com client not available: {e}")
+            print("  Use --cache-only to read from cached data")
+            return 1
 
-    svc = TAService(db_path=args.db, ib_client=ib_client)
+    svc = TAService(db_path=args.db, massive_client=massive_client)
     print(f"TAService initialized (db: {args.db})")
-
-    _TIMEFRAMES = ["1d", "1h"]
 
     if args.refresh:
         for tf in _TIMEFRAMES:
@@ -139,12 +153,12 @@ def main(argv=None):
             try:
                 if args.history:
                     df = svc.get_indicators(ticker, timeframe=tf, allow_fetch=not args.cache_only)
-                    if df.empty:
+                    if hasattr(df, "empty") and df.empty:
                         print("  (no data)")
                         continue
                     print(f"  Rows: {len(df)}")
                     print(f"  Date range: {df['date'].iloc[0]} -> {df['date'].iloc[-1]}")
-                    print(f"\n  Last 5 rows:")
+                    print("\n  Last 5 rows:")
                     cols = ["date", "close", "sma_20", "sma_50", "rsi_14", "adx_14", "macd", "bb_width", "atr_14"]
                     display_cols = [c for c in cols if c in df.columns]
                     print(df[display_cols].tail().to_string(index=False))
@@ -176,12 +190,6 @@ def main(argv=None):
                     import traceback
 
                     traceback.print_exc()
-
-    if ib_client is not None:
-        try:
-            ib_client.disconnect()
-        except Exception:
-            pass
 
     return 0
 
