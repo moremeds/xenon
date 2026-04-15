@@ -16,7 +16,7 @@ import json
 import logging
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -210,7 +210,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         json.dumps(
             {
                 "tickers": tickers,
-                "built_at": datetime.now().isoformat(timespec="seconds"),
+                "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "source_counts": {
                     "total": len(tickers),
                     "has_uw": used_triple_source and uw_client is not None,

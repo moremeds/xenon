@@ -524,7 +524,7 @@ def _resolve_universe(
         if UNIVERSE_CACHE_PATH.exists():
             payload = json.loads(UNIVERSE_CACHE_PATH.read_text())
             built_at = datetime.fromisoformat(payload["built_at"])
-            age_s = (datetime.now() - built_at).total_seconds()
+            age_s = (datetime.now(timezone.utc) - built_at).total_seconds()
             if age_s <= UNIVERSE_CACHE_MAX_AGE_S and payload.get("tickers"):
                 logger.info(
                     "Using prep-persisted universe: %d tickers, %.0fs old",
@@ -538,8 +538,10 @@ def _resolve_universe(
                     age_s,
                     UNIVERSE_CACHE_MAX_AGE_S,
                 )
-    except Exception as exc:
+    except (OSError, json.JSONDecodeError) as exc:
         logger.warning("Universe cache read failed: %s — rebuilding", exc)
+    except (KeyError, ValueError, TypeError) as exc:
+        logger.error("Universe cache malformed (producer schema bug?): %s — rebuilding", exc)
 
     return build_universe(cfg, uw_client=uw_client, ib_client=ib_client)
 

@@ -257,7 +257,7 @@ class TestTAServiceIntegration:
 def test_run_scan_pipeline_uses_fresh_universe_cache(tmp_path, monkeypatch):
     """When data/ta_premarket_universe.json exists and is <2h old, use it."""
     import json
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     import scripts.trend_scan as ts
 
@@ -266,7 +266,7 @@ def test_run_scan_pipeline_uses_fresh_universe_cache(tmp_path, monkeypatch):
         json.dumps(
             {
                 "tickers": ["AAPL", "PREP_ONLY_XYZ"],
-                "built_at": datetime.now().isoformat(timespec="seconds"),
+                "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             }
         )
     )
@@ -286,7 +286,7 @@ def test_run_scan_pipeline_uses_fresh_universe_cache(tmp_path, monkeypatch):
 def test_run_scan_pipeline_rebuilds_if_cache_stale(tmp_path, monkeypatch):
     """When cache is >2h old, fall back to build_universe()."""
     import json
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     import scripts.trend_scan as ts
 
@@ -295,7 +295,7 @@ def test_run_scan_pipeline_rebuilds_if_cache_stale(tmp_path, monkeypatch):
         json.dumps(
             {
                 "tickers": ["STALE_CACHED"],
-                "built_at": (datetime.now() - timedelta(hours=3)).isoformat(timespec="seconds"),
+                "built_at": (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(timespec="seconds"),
             }
         )
     )
@@ -304,3 +304,17 @@ def test_run_scan_pipeline_rebuilds_if_cache_stale(tmp_path, monkeypatch):
 
     resolved = ts._resolve_universe(cfg=ts.TrendScanConfig(), uw_client=None, ib_client=None)
     assert resolved == ["FRESH_BUILD"]
+
+
+def test_resolve_universe_rebuilds_on_malformed_cache(tmp_path, monkeypatch):
+    """A corrupt cache file must trigger fallback to build_universe() rather
+    than propagating the parse error."""
+    import scripts.trend_scan as ts
+
+    cache = tmp_path / "ta_premarket_universe.json"
+    cache.write_text("{not valid json")
+    monkeypatch.setattr(ts, "UNIVERSE_CACHE_PATH", cache, raising=False)
+    monkeypatch.setattr(ts, "build_universe", lambda cfg, **k: ["FALLBACK"])
+
+    resolved = ts._resolve_universe(cfg=ts.TrendScanConfig(), uw_client=None, ib_client=None)
+    assert resolved == ["FALLBACK"]
