@@ -3,6 +3,36 @@
 All notable changes to Xenon are documented here. Format loosely based on
 [Keep a Changelog](https://keepachangelog.com/) with semver-ish versioning.
 
+## [0.2.0] - 2026-04-15
+
+### Changed
+
+- **Historical data source**: swapped IB for Massive.com for all OHLCV backfills
+  (1d, 1h). IB retained for live quotes/chains/execution only. `ta_seed_yahoo`
+  retired; `ta_reseed_massive` handles seeds. Spec:
+  `docs/superpowers/specs/2026-04-15-massive-historical-data-migration-design.md`.
+
+### Added
+
+- `MassiveClient` (`scripts/clients/massive_client.py`) — REST client with ET
+  timezone normalization, exponential backoff retries, typed exception hierarchy
+  (`MassiveAuthError`, `MassiveNoDataError`, `MassiveRateLimitError`).
+- `BulkRefreshResult` dataclass returned by `TAService.bulk_refresh()` — callers
+  can now compute real failure ratios instead of inferring from None.
+- `ta_premarket_status.json` — machine-readable prep outcome consumed by
+  `trend_scan.py`; status values: `ok`, `partial`, `aborted`.
+- `trend_scan` output now includes a top-level `warnings` list via new
+  `build_scan_output()` helper; abort/stale status surfaces here.
+- `ta_premarket_prep` exits with code 3 on vendor-down (>50% failure ratio).
+- `e2e` pytest marker for Massive-live tests (opt-in via `pytest -m e2e`).
+
+### Removed
+
+- `scripts/ta_seed_yahoo.py` and `scripts/tests/test_ta_lib/test_seed_yahoo.py`.
+- `TAService._ib_sleep()` and IB-specific 10-min inter-batch pacing.
+- `ib_client` parameter from `TAService.__init__` (replaced with `massive_client`).
+- Yahoo Finance from the Data Source Priority list.
+
 ## [0.1.0] - 2026-04-15
 
 ### Added — Trend Scanner: bearish pipeline, catalyst stage, pre-market prep

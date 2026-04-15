@@ -48,11 +48,20 @@ GATE 4 — NO NAKED SHORTS: Never naked short stock, calls, futures, or bonds. E
 
 **Any gate fails → stop. No rationalization.** Enforcement details: `scripts/CLAUDE.md` (naked-short table + combo guardrails).
 
+## Data Source Priority
+
+1. Interactive Brokers — real-time quotes, chains, execution, live portfolio
+2. Massive.com — historical OHLCV (≤ yesterday EOD), 1d + 1h bars
+3. Unusual Whales (`$UW_TOKEN`) — dark pool, sweeps, alerts
+4. Web scrape — last resort
+
+**Never use Yahoo Finance.** Historical data is sourced exclusively from Massive.
+
 ## Credentials
 
 | File          | Loader          | Contains                                                                                                                    |
 | ------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `.env` (root) | `python-dotenv` | `MENTHORQ_USER`, `MENTHORQ_PASS`, `CLERK_JWKS_URL`, `CLERK_ISSUER`, `ALLOWED_USER_IDS`                                      |
+| `.env` (root) | `python-dotenv` | `MENTHORQ_USER`, `MENTHORQ_PASS`, `MASSIVE_API_KEY`, `CLERK_JWKS_URL`, `CLERK_ISSUER`, `ALLOWED_USER_IDS`                   |
 | `web/.env`    | Next.js         | `ANTHROPIC_API_KEY`, `UW_TOKEN`, `EXA_API_KEY`, `CEREBRAS_API_KEY`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY` |
 
 ## Market Hours
