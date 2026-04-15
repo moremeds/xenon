@@ -26,7 +26,11 @@ from scripts.trend_scan_lib.models import TrendCandidate
 from scripts.trend_scan_lib.ranking import apply_min_thresholds, compute_final_score, rank_candidates
 from scripts.trend_scan_lib.stages.flow_confirmation import compute_flow_score
 from scripts.trend_scan_lib.stages.options_structure import compute_structure_score
-from scripts.trend_scan_lib.stages.ta_prefilter import compute_trend_score, passes_bullish_gate
+from scripts.trend_scan_lib.stages.ta_prefilter import (
+    compute_trend_score,
+    passes_bearish_gate,
+    passes_bullish_gate,
+)
 from scripts.trend_scan_lib.stages.volatility import compute_vol_score
 from scripts.trend_scan_lib.storage import (
     DEFAULT_DB_PATH,
@@ -390,37 +394,61 @@ class LiveTrendDataFetcher:
         return market_context
 
 
-def _stage_a(ticker: str, data_fetcher: DataFetcher, cfg: TrendScanConfig) -> Optional[dict]:
+def _stage_a_data(ticker: str, data_fetcher: DataFetcher, cfg: TrendScanConfig) -> Optional[dict]:
+    """Direction-neutral OHLCV fetch + liquidity/size floor. Runs once per ticker."""
     try:
         ohlcv = data_fetcher.fetch_ohlcv(ticker)
     except Exception:
-        logger.warning("Failed to fetch OHLCV for %s", ticker, exc_info=True)
+        logger.warning("Stage A fetch failed for %s", ticker, exc_info=True)
         return None
-    if ohlcv.get("close", 0) < cfg.min_price or ohlcv.get("market_cap", 0) < cfg.min_market_cap:
+    if ohlcv is None:
         return None
-    if not passes_bullish_gate(
-        close=ohlcv.get("close", 0),
-        ma_20=ohlcv.get("ma_20", 0),
-        rsi=ohlcv.get("rsi", 0),
-        dollar_volume=ohlcv.get("dollar_volume", 0),
-        min_dollar_volume=cfg.min_dollar_volume,
-    ):
+    if ohlcv.get("dollar_volume", 0) < cfg.min_dollar_volume:
         return None
-    ohlcv["trend_score"] = compute_trend_score(ohlcv)
+    if ohlcv.get("market_cap", 0) < cfg.min_market_cap:
+        return None
+    if ohlcv.get("price", 0) < cfg.min_price:
+        return None
     return ohlcv
 
 
-def _stage_bc(ticker: str, ohlcv: dict, data_fetcher: DataFetcher) -> Optional[dict]:
+def _stage_a_gate(ohlcv: dict, direction: str, cfg: TrendScanConfig) -> Optional[dict]:
+    """Direction-specific gate + trend score. Returns ohlcv with trend_score
+    attached if the direction's gate passes, else None."""
+    if direction == "bullish":
+        if not passes_bullish_gate(
+            close=ohlcv["close"],
+            ma_20=ohlcv["ma_20"],
+            rsi=ohlcv["rsi"],
+            dollar_volume=ohlcv["dollar_volume"],
+            min_dollar_volume=cfg.min_dollar_volume,
+        ):
+            return None
+    else:
+        if not passes_bearish_gate(
+            close=ohlcv["close"],
+            ma_20=ohlcv["ma_20"],
+            rsi=ohlcv["rsi"],
+            dollar_volume=ohlcv["dollar_volume"],
+            min_dollar_volume=cfg.min_dollar_volume,
+        ):
+            return None
+    result = dict(ohlcv)
+    result["trend_score"] = compute_trend_score(ohlcv, direction=direction)
+    return result
+
+
+def _stage_bc(ticker: str, ohlcv: dict, direction: str, data_fetcher: DataFetcher) -> Optional[dict]:
     try:
         struct_data = data_fetcher.fetch_structure(ticker)
-        structure_score, rejected = compute_structure_score(struct_data)
+        structure_score, rejected = compute_structure_score(struct_data, direction=direction)
         if rejected:
             return None
 
         vol_data = data_fetcher.fetch_volatility(ticker)
         vol_score, vol_flags = compute_vol_score(vol_data)
         flow_data = data_fetcher.fetch_flow(ticker)
-        flow_score = compute_flow_score(flow_data)
+        flow_score = compute_flow_score(flow_data, direction=direction)
 
         return {
             "structure_score": structure_score,
@@ -436,30 +464,40 @@ def _stage_bc(ticker: str, ohlcv: dict, data_fetcher: DataFetcher) -> Optional[d
         return None
 
 
-def _trend_summary(ohlcv: dict) -> str:
+def _trend_summary(ohlcv: dict, *, direction: str = "bullish") -> str:
     parts = []
     c = ohlcv.get("close", 0)
     m20 = ohlcv.get("ma_20", 0)
     m50 = ohlcv.get("ma_50", 0)
     m200 = ohlcv.get("ma_200", 0)
-    if c > m20 > m50 > m200:
-        parts.append("Full MA stack")
-    elif c > m20 > m50:
-        parts.append("Above 20/50 DMA")
-    elif c > m20:
-        parts.append("Above 20DMA")
+    if direction == "bearish":
+        if c < m20 < m50 < m200:
+            parts.append("Full MA stack (bearish)")
+        elif c < m20 < m50:
+            parts.append("Below 20/50 DMA")
+        elif c < m20:
+            parts.append("Below 20DMA")
+        if ohlcv.get("low_52w", 0) and (c - ohlcv["low_52w"]) / max(ohlcv["low_52w"], 1) <= 0.03:
+            parts.append("breakdown flag")
+    else:
+        if c > m20 > m50 > m200:
+            parts.append("Full MA stack")
+        elif c > m20 > m50:
+            parts.append("Above 20/50 DMA")
+        elif c > m20:
+            parts.append("Above 20DMA")
+        if ohlcv.get("high_52w", 0) and (ohlcv["high_52w"] - c) / max(ohlcv["high_52w"], 1) <= 0.03:
+            parts.append("breakout flag")
     adx = ohlcv.get("adx", 0)
     if adx:
         parts.append(f"ADX {adx:.0f}")
     rs = ohlcv.get("rs_vs_spy", 0)
     if rs and rs != 1.0:
         parts.append(f"RS {rs:.2f} vs SPY")
-    if ohlcv.get("high_52w", 0) and (ohlcv["high_52w"] - c) / max(ohlcv["high_52w"], 1) <= 0.03:
-        parts.append("breakout flag")
     return ", ".join(parts) if parts else "N/A"
 
 
-def _structure_summary(data: dict) -> str:
+def _structure_summary(data: dict, *, direction: str = "bullish") -> str:
     parts = []
     spot = data.get("spot", 0)
     gf = data.get("gamma_flip", 0)
@@ -489,14 +527,19 @@ def _vol_summary(data: dict) -> str:
     return ", ".join(parts) if parts else "N/A"
 
 
-def _flow_summary(data: dict) -> str:
+def _flow_summary(data: dict, *, direction: str = "bullish") -> str:
     parts = []
     if data.get("flow_count"):
         parts.append(f"{data['flow_count']} ask-side prints")
     if data.get("expiry_cluster_ratio", 0) >= 0.7:
         parts.append("clustered 1-4 week expiry")
-    if data.get("dp_direction") == "bullish":
-        parts.append("dark-pool alignment")
+    dp = data.get("dp_direction", "neutral")
+    if direction == "bearish":
+        if dp == "bearish":
+            parts.append("dark-pool aligned bearish")
+    else:
+        if dp == "bullish":
+            parts.append("dark-pool alignment")
     return ", ".join(parts) if parts else "N/A"
 
 
@@ -584,63 +627,72 @@ def run_scan_pipeline(
     if hasattr(data_fetcher, "pre_cache_spy"):
         data_fetcher.pre_cache_spy()
 
-    stage_a_pairs = parallel_fetch(
+    # Stage A data fetch — direction-neutral, runs once per ticker.
+    stage_a_data_pairs = parallel_fetch(
         items=universe,
-        fn=lambda ticker: (ticker, _stage_a(ticker, data_fetcher, cfg)),
+        fn=lambda ticker: (ticker, _stage_a_data(ticker, data_fetcher, cfg)),
         max_workers=cfg.max_workers,
     )
-    stage_a_results = {ticker: result for ticker, result in stage_a_pairs if result is not None}
-    stage_a_survivors = len(stage_a_results)
-
-    stage_bc_pairs = parallel_fetch(
-        items=list(stage_a_results.items()),
-        fn=lambda item: (item[0], _stage_bc(item[0], item[1], data_fetcher)),
-        max_workers=cfg.max_workers,
-    )
+    stage_a_base = {ticker: result for ticker, result in stage_a_data_pairs if result is not None}
 
     candidates: list[TrendCandidate] = []
-    for ticker, bc in stage_bc_pairs:
-        if bc is None:
-            continue
-        ohlcv = stage_a_results[ticker]
-        scores = {
-            "trend": ohlcv["trend_score"],
-            "structure": bc["structure_score"],
-            "volatility": bc["vol_score"],
-            "flow": bc["flow_score"],
-        }
-        direction = "bullish"
-        candidate = TrendCandidate(
-            ticker=ticker,
-            direction=direction,
-            final_score=compute_final_score(scores, cfg.weights),
-            scores=scores,
-            spot_price=ohlcv.get("close", 0),
-            indicators={
-                "ma_20": ohlcv.get("ma_20", 0),
-                "ma_50": ohlcv.get("ma_50", 0),
-                "ma_200": ohlcv.get("ma_200", 0),
-                "rsi": ohlcv.get("rsi", 0),
-                "adx": ohlcv.get("adx", 0),
-                "macd_histogram": ohlcv.get("macd_histogram", 0),
-                "bbw": ohlcv.get("bbw", 0),
-                "rs_vs_spy": ohlcv.get("rs_vs_spy", 0),
-                "iv_rank": bc["vol_data"].get("iv_rank", 0),
-                "gamma_flip": bc["struct_data"].get("gamma_flip", 0),
-                "call_wall": bc["struct_data"].get("call_wall", 0),
-                "put_wall": bc["struct_data"].get("put_wall", 0),
-            },
-            summaries={
-                "trend": _trend_summary(ohlcv),
-                "structure": _structure_summary(bc["struct_data"]),
-                "vol": _vol_summary(bc["vol_data"]),
-                "flow": _flow_summary(bc["flow_data"]),
-            },
-            structure_hint=_infer_structure_hint(direction, bc, ohlcv),
-            invalidation=_compute_invalidation(direction, ohlcv),
-            flags=list(bc.get("vol_flags", [])),
+    stage_a_survivors_set: set[str] = set()
+    for direction in ("bullish", "bearish"):
+        gated_map: dict[str, dict] = {}
+        for ticker, ohlcv in stage_a_base.items():
+            gated = _stage_a_gate(ohlcv, direction, cfg)
+            if gated is not None:
+                gated_map[ticker] = gated
+                stage_a_survivors_set.add(ticker)
+
+        bc_pairs = parallel_fetch(
+            items=list(gated_map.keys()),
+            fn=lambda ticker: (ticker, _stage_bc(ticker, gated_map[ticker], direction, data_fetcher)),
+            max_workers=cfg.max_workers,
         )
-        candidates.append(candidate)
+
+        for ticker, bc in bc_pairs:
+            if bc is None:
+                continue
+            ohlcv = gated_map[ticker]
+            scores = {
+                "trend": ohlcv["trend_score"],
+                "structure": bc["structure_score"],
+                "volatility": bc["vol_score"],
+                "flow": bc["flow_score"],
+            }
+            candidate = TrendCandidate(
+                ticker=ticker,
+                direction=direction,
+                final_score=compute_final_score(scores, cfg.weights),
+                scores=scores,
+                spot_price=ohlcv.get("close", 0),
+                indicators={
+                    "ma_20": ohlcv.get("ma_20", 0),
+                    "ma_50": ohlcv.get("ma_50", 0),
+                    "ma_200": ohlcv.get("ma_200", 0),
+                    "rsi": ohlcv.get("rsi", 0),
+                    "adx": ohlcv.get("adx", 0),
+                    "macd_histogram": ohlcv.get("macd_histogram", 0),
+                    "bbw": ohlcv.get("bbw", 0),
+                    "rs_vs_spy": ohlcv.get("rs_vs_spy", 0),
+                    "iv_rank": bc["vol_data"].get("iv_rank", 0),
+                    "gamma_flip": bc["struct_data"].get("gamma_flip", 0),
+                    "call_wall": bc["struct_data"].get("call_wall", 0),
+                    "put_wall": bc["struct_data"].get("put_wall", 0),
+                },
+                summaries={
+                    "trend": _trend_summary(ohlcv, direction=direction),
+                    "structure": _structure_summary(bc["struct_data"], direction=direction),
+                    "vol": _vol_summary(bc["vol_data"]),
+                    "flow": _flow_summary(bc["flow_data"], direction=direction),
+                },
+                structure_hint=_infer_structure_hint(direction, bc, ohlcv),
+                invalidation=_compute_invalidation(direction, ohlcv),
+                flags=list(bc.get("vol_flags", [])),
+            )
+            candidates.append(candidate)
+    stage_a_survivors = len(stage_a_survivors_set)
     stage_b_survivors = len(candidates)
 
     ranked = rank_candidates(apply_min_thresholds(candidates, cfg.min_thresholds), top_n=cfg.top_n)

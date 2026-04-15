@@ -150,8 +150,8 @@ def test_scan_pipeline_filters_weak_tickers(tmp_path):
     mock_data_fetcher.fetch_flow.side_effect = lambda t: _mock_flow_data()
     mock_data_fetcher.fetch_market_context.return_value = {"spy_close": 520.0, "vix_close": 17.0, "regime": "bullish"}
     result = run_scan_pipeline(cfg, data_fetcher=mock_data_fetcher, uw_client=None, ib_client=None, db_path=":memory:")
-    tickers = [c["ticker"] for c in result["candidates"]]
-    assert "BAD" not in tickers
+    bullish_tickers = [c["ticker"] for c in result["candidates"] if c["direction"] == "bullish"]
+    assert "BAD" not in bullish_tickers
 
 
 def test_scan_output_has_required_fields(tmp_path):

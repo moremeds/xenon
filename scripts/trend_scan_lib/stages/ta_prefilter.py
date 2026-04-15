@@ -157,6 +157,35 @@ def passes_bullish_gate(
     return close > ma_20 and rsi > 40 and dollar_volume >= min_dollar_volume
 
 
+def passes_bearish_gate(
+    *,
+    close: float,
+    ma_20: float,
+    rsi: float,
+    dollar_volume: float,
+    min_dollar_volume: float,
+) -> bool:
+    """Mirror of passes_bullish_gate: close < 20DMA, RSI < 60, liquid."""
+    return close < ma_20 and rsi < 60 and dollar_volume >= min_dollar_volume
+
+
+def detect_breakdown(
+    *,
+    close: float,
+    low_52w: float,
+    low_20d: float,
+    range_20d_pct: float,
+    atr_pct: float,
+) -> bool:
+    """Mirror of detect_breakout. Near 52w low OR close below 20d low
+    in tight consolidation = breakdown."""
+    near_52w = low_52w > 0 and (close - low_52w) / low_52w <= 0.03
+    tight_range = atr_pct > 0 and range_20d_pct < atr_pct * 3
+    below_20d_low = low_20d > 0 and close <= low_20d
+    consolidation_break = tight_range and below_20d_low
+    return near_52w or consolidation_break
+
+
 INDICATOR_WEIGHTS = {
     "ma_alignment": 0.20,
     "slope": 0.10,
@@ -170,8 +199,10 @@ INDICATOR_WEIGHTS = {
 BREAKOUT_BONUS = 0.1
 
 
-def compute_trend_score(indicators: dict) -> float:
-    """Compute composite trend score from raw indicators."""
+def compute_trend_score(indicators: dict, *, direction: str = "bullish") -> float:
+    """Composite trend score. Direction determines which structural event
+    (breakout vs breakdown) earns BREAKOUT_BONUS, and whether to invert
+    bull-centric sub-scores."""
     scores = {
         "ma_alignment": score_ma_alignment(
             close=indicators["close"],
@@ -197,15 +228,32 @@ def compute_trend_score(indicators: dict) -> float:
         "bbw": score_bbw(indicators.get("bbw", 0.10)),
     }
 
+    # Invert bull-centric sub-scores for bearish so a bearish-aligned
+    # ticker scores high. Keep 'bbw' (direction-agnostic: squeeze is
+    # squeeze) and 'adx' (trend strength regardless of direction).
+    if direction == "bearish":
+        for k in ("ma_alignment", "slope", "rsi", "macd", "relative_strength", "volume_profile"):
+            scores[k] = 1.0 - scores[k]
+
     composite = sum(scores[k] * w for k, w in INDICATOR_WEIGHTS.items())
 
-    if detect_breakout(
-        close=indicators["close"],
-        high_52w=indicators.get("high_52w", 0),
-        high_20d=indicators.get("high_20d", 0),
-        range_20d_pct=indicators.get("range_20d_pct", 1.0),
-        atr_pct=indicators.get("atr_pct", 0),
-    ):
+    if direction == "bullish":
+        structural = detect_breakout(
+            close=indicators["close"],
+            high_52w=indicators.get("high_52w", 0),
+            high_20d=indicators.get("high_20d", 0),
+            range_20d_pct=indicators.get("range_20d_pct", 1.0),
+            atr_pct=indicators.get("atr_pct", 0),
+        )
+    else:
+        structural = detect_breakdown(
+            close=indicators["close"],
+            low_52w=indicators.get("low_52w", 0),
+            low_20d=indicators.get("low_20d", 0),
+            range_20d_pct=indicators.get("range_20d_pct", 1.0),
+            atr_pct=indicators.get("atr_pct", 0),
+        )
+    if structural:
         composite += BREAKOUT_BONUS
 
     return normalize_score(composite)

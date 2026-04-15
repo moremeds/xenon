@@ -71,7 +71,7 @@ def score_dark_pool_alignment(*, dp_direction: str) -> float:
     return 0.0
 
 
-def compute_flow_score(data: dict) -> float:
+def compute_flow_score(data: dict, *, direction: str = "bullish") -> float:
     scores = {
         "ask_dominance": score_ask_dominance(data.get("ask_dominance", 0.5)),
         "flow_repetition": score_flow_repetition(data.get("flow_count", 0)),
