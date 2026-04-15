@@ -24,6 +24,7 @@ from scripts.scanner_lib.executor import parallel_fetch
 from scripts.trend_scan_lib.config import TrendScanConfig
 from scripts.trend_scan_lib.models import TrendCandidate
 from scripts.trend_scan_lib.ranking import apply_min_thresholds, compute_final_score, rank_candidates
+from scripts.trend_scan_lib.stages.catalysts import fetch_catalysts
 from scripts.trend_scan_lib.stages.flow_confirmation import compute_flow_score
 from scripts.trend_scan_lib.stages.options_structure import compute_structure_score
 from scripts.trend_scan_lib.stages.ta_prefilter import (
@@ -655,11 +656,18 @@ def run_scan_pipeline(
             if bc is None:
                 continue
             ohlcv = gated_map[ticker]
+            catalysts, catalyst_score = fetch_catalysts(
+                ticker=ticker,
+                direction=direction,
+                uw_client=uw_client,
+                earnings_days=bc["vol_data"].get("earnings_days", 30),
+            )
             scores = {
                 "trend": ohlcv["trend_score"],
                 "structure": bc["structure_score"],
                 "volatility": bc["vol_score"],
                 "flow": bc["flow_score"],
+                "catalyst": catalyst_score,
             }
             candidate = TrendCandidate(
                 ticker=ticker,
@@ -690,6 +698,7 @@ def run_scan_pipeline(
                 structure_hint=_infer_structure_hint(direction, bc, ohlcv),
                 invalidation=_compute_invalidation(direction, ohlcv),
                 flags=list(bc.get("vol_flags", [])),
+                catalysts=catalysts,
             )
             candidates.append(candidate)
     stage_a_survivors = len(stage_a_survivors_set)
