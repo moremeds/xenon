@@ -63,25 +63,35 @@ def score_delta_vega_flow(*, net_delta: float, net_vega: float) -> float:
     return 0.1
 
 
-def score_dark_pool_alignment(*, dp_direction: str) -> float:
-    if dp_direction.lower() == "bullish":
+def score_dark_pool_alignment(*, dp_direction: str, direction: str = "bullish") -> float:
+    """Reward dark-pool alignment with the candidate's direction. For a
+    bearish candidate, 'bearish' dark-pool flow is the positive signal."""
+    dp = dp_direction.lower()
+    if dp == direction:
         return 0.15
-    if dp_direction.lower() == "bearish":
+    if dp in ("bullish", "bearish"):
         return -0.05
     return 0.0
 
 
 def compute_flow_score(data: dict, *, direction: str = "bullish") -> float:
+    # Bearish candidates: short-delta flow is confirmation, not rejection.
+    effective_delta = data.get("net_delta", 0)
+    if direction == "bearish":
+        effective_delta = -effective_delta
     scores = {
         "ask_dominance": score_ask_dominance(data.get("ask_dominance", 0.5)),
         "flow_repetition": score_flow_repetition(data.get("flow_count", 0)),
         "expiry_clustering": score_expiry_clustering(cluster_ratio=data.get("expiry_cluster_ratio", 0.5)),
         "strike_reasonableness": score_strike_reasonableness(avg_strike_pct_otm=data.get("avg_strike_pct_otm", 0.10)),
         "delta_vega": score_delta_vega_flow(
-            net_delta=data.get("net_delta", 0),
+            net_delta=effective_delta,
             net_vega=data.get("net_vega", 0),
         ),
     }
     composite = sum(scores[k] * w for k, w in FLOW_WEIGHTS.items())
-    dp_bonus = score_dark_pool_alignment(dp_direction=data.get("dp_direction", "neutral"))
+    dp_bonus = score_dark_pool_alignment(
+        dp_direction=data.get("dp_direction", "neutral"),
+        direction=direction,
+    )
     return normalize_score(composite + dp_bonus)
