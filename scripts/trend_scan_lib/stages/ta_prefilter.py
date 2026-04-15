@@ -87,14 +87,26 @@ def score_slope(ma_series: list[float]) -> float:
     return 0.1
 
 
-def score_volume_profile(*, recent_avg_volume: float, avg_20d_volume: float, recent_up_ratio: float) -> float:
-    """Score volume profile. Above-average volume on up days = confirmation."""
+def score_volume_profile(
+    *,
+    recent_avg_volume: float,
+    avg_20d_volume: float,
+    recent_up_ratio: float,
+    up_day_volume_ratio: float = 1.0,
+) -> float:
+    """Score volume profile. Three signals, last one weighted 2x:
+    - Volume pickup (recent vs 20d) — trend attention.
+    - Up-day frequency (recent_up_ratio) — directional bias.
+    - Up-day vs down-day volume (up_day_volume_ratio) — accumulation vs distribution.
+    """
     if avg_20d_volume == 0:
         return 0.5
     vol_ratio = recent_avg_volume / avg_20d_volume
     vol_score = normalize_score(vol_ratio - 0.5)
     up_score = normalize_score(recent_up_ratio * 1.5 - 0.25)
-    return (vol_score + up_score) / 2
+    # up_day_volume_ratio typically 0.3–2.5; 1.0 = neutral, 1.5+ = accumulation, 0.7- = distribution.
+    accumulation_score = normalize_score((up_day_volume_ratio - 0.7) / 1.0)
+    return (vol_score + up_score + 2 * accumulation_score) / 4
 
 
 def score_bbw(bbw: float) -> float:
@@ -180,6 +192,7 @@ def compute_trend_score(indicators: dict) -> float:
             recent_avg_volume=indicators.get("recent_avg_volume", 0),
             avg_20d_volume=indicators.get("avg_20d_volume", 1),
             recent_up_ratio=indicators.get("recent_up_ratio", 0.5),
+            up_day_volume_ratio=indicators.get("up_day_volume_ratio", 1.0),
         ),
         "bbw": score_bbw(indicators.get("bbw", 0.10)),
     }

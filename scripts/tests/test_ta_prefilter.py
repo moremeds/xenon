@@ -95,7 +95,16 @@ def test_score_slope_negative():
 def test_score_volume_profile_above_avg():
     from scripts.trend_scan_lib.stages.ta_prefilter import score_volume_profile
 
-    assert score_volume_profile(recent_avg_volume=1_500_000, avg_20d_volume=1_000_000, recent_up_ratio=0.7) > 0.7
+    # Strong accumulation: above-avg volume, up-day-biased, up-day volume dominates.
+    assert (
+        score_volume_profile(
+            recent_avg_volume=1_500_000,
+            avg_20d_volume=1_000_000,
+            recent_up_ratio=0.7,
+            up_day_volume_ratio=1.5,
+        )
+        > 0.7
+    )
 
 
 def test_score_bbw_squeeze():
@@ -258,3 +267,36 @@ def test_detect_breakout_near_52w_high_still_qualifies():
         atr_pct=0.02,
     )
     assert result is True
+
+
+def test_score_volume_profile_penalizes_distribution():
+    """Stock rallying on low volume while selling on high volume (distribution)
+    must score lower than one accumulating (high volume on up days)."""
+    from scripts.trend_scan_lib.stages.ta_prefilter import score_volume_profile
+
+    accumulation = score_volume_profile(
+        recent_avg_volume=1_500_000,
+        avg_20d_volume=1_000_000,
+        recent_up_ratio=0.7,
+        up_day_volume_ratio=1.5,
+    )
+    distribution = score_volume_profile(
+        recent_avg_volume=1_500_000,
+        avg_20d_volume=1_000_000,
+        recent_up_ratio=0.7,
+        up_day_volume_ratio=0.6,
+    )
+    assert accumulation > distribution, f"accumulation ({accumulation}) should outscore distribution ({distribution})"
+
+
+def test_score_volume_profile_neutral_when_ratio_missing():
+    """When up_day_volume_ratio is 1.0 (neutral sentinel), score stays near legacy level."""
+    from scripts.trend_scan_lib.stages.ta_prefilter import score_volume_profile
+
+    score = score_volume_profile(
+        recent_avg_volume=1_500_000,
+        avg_20d_volume=1_000_000,
+        recent_up_ratio=0.7,
+        up_day_volume_ratio=1.0,
+    )
+    assert 0.3 < score < 0.9, f"neutral score should be mid-range, got {score}"
