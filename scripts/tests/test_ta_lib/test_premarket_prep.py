@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import date
 from pathlib import Path
@@ -111,12 +112,14 @@ def test_audit_only_never_creates_ib(mock_bar, mock_ltd, mock_init, mock_conn_fn
 @patch("scripts.ta_premarket_prep.init_schema")
 @patch("scripts.ta_premarket_prep._last_trading_date", return_value=date(2026, 4, 10))
 @patch("scripts.ta_premarket_prep.get_latest_bar_date", return_value=date(2026, 4, 9))
-def test_json_output_structure(mock_bar, mock_ltd, mock_init, mock_conn_fn, capsys):
-    """Full run with mocked IB produces the expected JSON keys."""
+def test_json_output_structure(mock_bar, mock_ltd, mock_init, mock_conn_fn, tmp_path, capsys):
+    """Full run with mocked Massive produces the expected JSON keys."""
+    from scripts.ta_lib.service import BulkRefreshResult as _BRR
+
     mock_conn_fn.return_value = MagicMock()
 
-    mock_ib_inst = MagicMock()
     mock_ta_inst = MagicMock()
+    mock_ta_inst.bulk_refresh.return_value = _BRR(attempted=2, succeeded=2, failed=0, failed_tickers=[], aborted=False)
 
     # Use a real class so TAService.read_only() works inside classify_tickers.
     class _FakeTAService:
@@ -133,9 +136,11 @@ def test_json_output_structure(mock_bar, mock_ltd, mock_init, mock_conn_fn, caps
     with (
         patch(
             "scripts.ta_premarket_prep._build_triple_source_universe",
-            return_value=(["AAPL", "SPY"], None, mock_ib_inst, True),
+            return_value=(["AAPL", "SPY"], None, None, True),
         ),
         patch("scripts.ta_premarket_prep.TAService", _FakeTAService),
+        patch("scripts.ta_premarket_prep._build_massive_client", lambda: MagicMock()),
+        patch("scripts.ta_premarket_prep.STATUS_FILE", tmp_path / "status.json"),
         patch("scripts.ta_premarket_prep.get_latest_bar_date", return_value=date(2026, 4, 9)),
         patch("scripts.ta_premarket_prep.UNIVERSE_CACHE", MagicMock(spec=Path)),
     ):
@@ -158,12 +163,14 @@ def test_json_output_structure(mock_bar, mock_ltd, mock_init, mock_conn_fn, caps
 @patch("scripts.ta_premarket_prep.init_schema")
 @patch("scripts.ta_premarket_prep._last_trading_date", return_value=date(2026, 4, 10))
 @patch("scripts.ta_premarket_prep.get_latest_bar_date", return_value=date(2026, 4, 10))
-def test_force_passes_all_tickers(mock_bar, mock_ltd, mock_init, mock_conn_fn, capsys):
+def test_force_passes_all_tickers(mock_bar, mock_ltd, mock_init, mock_conn_fn, tmp_path, capsys):
     """--force should pass ALL tickers to bulk_refresh, even if current."""
+    from scripts.ta_lib.service import BulkRefreshResult as _BRR
+
     mock_conn_fn.return_value = MagicMock()
 
-    mock_ib_inst = MagicMock()
     mock_ta_inst = MagicMock()
+    mock_ta_inst.bulk_refresh.return_value = _BRR(attempted=3, succeeded=3, failed=0, failed_tickers=[], aborted=False)
 
     # Use a real class so TAService.read_only() works inside classify_tickers.
     class _FakeTAService:
@@ -180,9 +187,11 @@ def test_force_passes_all_tickers(mock_bar, mock_ltd, mock_init, mock_conn_fn, c
     with (
         patch(
             "scripts.ta_premarket_prep._build_triple_source_universe",
-            return_value=(["AAPL", "MSFT", "SPY"], None, mock_ib_inst, True),
+            return_value=(["AAPL", "MSFT", "SPY"], None, None, True),
         ),
         patch("scripts.ta_premarket_prep.TAService", _FakeTAService),
+        patch("scripts.ta_premarket_prep._build_massive_client", lambda: MagicMock()),
+        patch("scripts.ta_premarket_prep.STATUS_FILE", tmp_path / "status.json"),
         patch("scripts.ta_premarket_prep.UNIVERSE_CACHE", MagicMock(spec=Path)),
     ):
         main(["--force", "--db", ":memory:"])
@@ -194,44 +203,6 @@ def test_force_passes_all_tickers(mock_bar, mock_ltd, mock_init, mock_conn_fn, c
     assert "MSFT" in call_tickers
     assert "SPY" in call_tickers
     assert len(call_tickers) == 3
-
-
-# ── IB connection failure ────────────────────────────────────────────────
-
-
-@patch("scripts.ta_premarket_prep.get_connection")
-@patch("scripts.ta_premarket_prep.init_schema")
-@patch("scripts.ta_premarket_prep._last_trading_date", return_value=date(2026, 4, 10))
-@patch("scripts.ta_premarket_prep.get_latest_bar_date", return_value=None)
-def test_ib_connection_failure_prints_audit(mock_bar, mock_ltd, mock_init, mock_conn_fn, capsys):
-    """If IB connection fails, output audit JSON with error field.
-
-    Simulated by having _build_triple_source_universe return no IB client
-    and no pre-opened fallback, and the inline IBClient connect also failing.
-    """
-    mock_conn_fn.return_value = MagicMock()
-
-    mock_ib_cls = MagicMock()
-    mock_ib_cls.return_value.connect.side_effect = ConnectionError("no gateway")
-
-    with (
-        # _build_triple_source_universe returns no pre-opened IB client
-        patch(
-            "scripts.ta_premarket_prep._build_triple_source_universe",
-            return_value=(["AAPL", "SPY"], None, None, True),
-        ),
-        patch("scripts.ta_premarket_prep.UNIVERSE_CACHE", MagicMock(spec=Path)),
-        patch.dict(
-            sys.modules,
-            {"scripts.clients.ib_client": MagicMock(IBClient=mock_ib_cls)},
-        ),
-    ):
-        main(["--db", ":memory:"])
-
-    captured = capsys.readouterr()
-    data = json.loads(captured.out)
-    assert "before" in data
-    assert "error" in data
 
 
 # ── staleness unification ─────────────────────────────────────────────────
@@ -304,6 +275,7 @@ def test_refresh_path_uses_full_universe_when_clients_available(tmp_path, monkey
     monkeypatch.setattr(prep, "get_connection", lambda p: MagicMock())
     monkeypatch.setattr(prep, "init_schema", lambda c: None)
     monkeypatch.setattr(prep, "classify_tickers", lambda c, t, d: {"current": t, "stale": [], "missing": []})
+    monkeypatch.setattr(prep, "STATUS_FILE", tmp_path / "status.json", raising=False)
     # Make TAService / bulk_refresh no-ops
     fake_svc = MagicMock()
     fake_svc.bulk_refresh.return_value = None
@@ -385,6 +357,7 @@ def test_universe_cache_honest_when_build_universe_fails(tmp_path, monkeypatch):
 
     cache_path = tmp_path / "universe.json"
     monkeypatch.setattr(prep, "UNIVERSE_CACHE", cache_path, raising=False)
+    monkeypatch.setattr(prep, "STATUS_FILE", tmp_path / "status.json", raising=False)
 
     db = tmp_path / "ta.duckdb"
     prep.main(["--db", str(db)])
@@ -394,3 +367,96 @@ def test_universe_cache_honest_when_build_universe_fails(tmp_path, monkeypatch):
     assert payload["source_counts"]["has_ib_scanner"] is False
     assert payload["source_counts"]["total"] == 3  # AAPL, MSFT, SPY (appended)
     assert "SPY" in payload["tickers"]
+
+
+# ── Task 4: Massive + status file + exit 3 on vendor down ───────────────
+
+from scripts.ta_lib.service import BulkRefreshResult
+
+
+@patch.dict(os.environ, {}, clear=True)
+def test_audit_only_works_without_massive_key(monkeypatch):
+    """Regression: --audit-only must not touch network or API key."""
+    import scripts.ta_premarket_prep as prep
+
+    monkeypatch.setattr(prep, "_build_static_only_universe", lambda args: ["AAPL", "SPY"])
+    with (
+        patch("scripts.ta_premarket_prep.get_latest_bar_date", return_value=date(2026, 4, 10)),
+        patch("scripts.ta_lib.service.TAService._is_stale", return_value=False),
+        patch("scripts.ta_premarket_prep._last_trading_date", return_value=date(2026, 4, 10)),
+        patch("scripts.ta_premarket_prep.init_schema"),
+        patch("scripts.ta_premarket_prep.get_connection"),
+    ):
+        exit_code = prep.main(["--audit-only"])
+    assert exit_code == 0
+
+
+def test_vendor_down_emits_exit_code_3_and_status_file(tmp_path, monkeypatch):
+    """>50% failure ratio → exit 3, aborted status file."""
+    import scripts.ta_premarket_prep as prep
+
+    fake_svc = MagicMock()
+    fake_svc.bulk_refresh.return_value = BulkRefreshResult(
+        attempted=4,
+        succeeded=1,
+        failed=3,
+        failed_tickers=["SPY", "MSFT", "TSLA"],
+        aborted=False,
+    )
+    monkeypatch.setattr(prep, "TAService", lambda **kw: fake_svc)
+    monkeypatch.setattr(
+        prep, "_build_triple_source_universe", lambda *a, **kw: (["AAPL", "SPY", "MSFT", "TSLA"], None, None, False)
+    )
+    monkeypatch.setattr(prep, "STATUS_FILE", tmp_path / "status.json")
+    monkeypatch.setattr(prep, "_build_massive_client", lambda: MagicMock())
+    monkeypatch.setattr(prep, "classify_tickers", lambda c, t, d: {"current": [], "stale": list(t), "missing": []})
+
+    with (
+        patch("scripts.ta_premarket_prep.get_latest_bar_date", return_value=date(2026, 4, 1)),
+        patch("scripts.ta_premarket_prep._last_trading_date", return_value=date(2026, 4, 14)),
+        patch("scripts.ta_premarket_prep.init_schema"),
+        patch("scripts.ta_premarket_prep.get_connection"),
+    ):
+        exit_code = prep.main([])
+    assert exit_code == 3
+
+    from scripts.api_status.ta_premarket_status import load_status
+
+    status = load_status(tmp_path / "status.json")
+    assert status is not None
+    assert status.status == "aborted"
+    assert status.failure_reason == "vendor_down"
+    assert status.failed_tickers == 3
+    assert status.refreshed_tickers == 1
+
+
+def test_success_writes_ok_status(tmp_path, monkeypatch):
+    import scripts.ta_premarket_prep as prep
+
+    fake_svc = MagicMock()
+    fake_svc.bulk_refresh.return_value = BulkRefreshResult(
+        attempted=2,
+        succeeded=2,
+        failed=0,
+        failed_tickers=[],
+        aborted=False,
+    )
+    monkeypatch.setattr(prep, "TAService", lambda **kw: fake_svc)
+    monkeypatch.setattr(prep, "_build_triple_source_universe", lambda *a, **kw: (["AAPL", "SPY"], None, None, False))
+    monkeypatch.setattr(prep, "STATUS_FILE", tmp_path / "status.json")
+    monkeypatch.setattr(prep, "_build_massive_client", lambda: MagicMock())
+    monkeypatch.setattr(prep, "classify_tickers", lambda c, t, d: {"current": [], "stale": list(t), "missing": []})
+
+    with (
+        patch("scripts.ta_premarket_prep.get_latest_bar_date", return_value=date(2026, 4, 1)),
+        patch("scripts.ta_premarket_prep._last_trading_date", return_value=date(2026, 4, 14)),
+        patch("scripts.ta_premarket_prep.init_schema"),
+        patch("scripts.ta_premarket_prep.get_connection"),
+    ):
+        exit_code = prep.main([])
+    assert exit_code == 0
+
+    from scripts.api_status.ta_premarket_status import load_status
+
+    status = load_status(tmp_path / "status.json")
+    assert status.status == "ok"

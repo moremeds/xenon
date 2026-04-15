@@ -24,6 +24,7 @@ _project_root = str(Path(__file__).resolve().parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+from scripts.api_status.ta_premarket_status import TaPremarketStatus, save_status
 from scripts.ta_lib.service import TAService
 from scripts.ta_lib.store import get_connection, get_latest_bar_date, init_schema
 from scripts.trend_scan_lib.config import TrendScanConfig
@@ -36,6 +37,16 @@ DEFAULT_DB = "data/ta.duckdb"
 DEFAULT_SP500 = "data/universe/sp500.json"
 DEFAULT_NASDAQ100 = "data/universe/nasdaq100.json"
 UNIVERSE_CACHE = Path("data/ta_premarket_universe.json")
+STATUS_FILE = Path("data/ta_premarket_status.json")
+EXIT_VENDOR_DOWN = 3  # distinct from pytest's collection-error 2
+_FAILURE_ABORT_RATIO = 0.50
+
+
+def _build_massive_client():
+    """Factory — module-level so tests can monkeypatch it."""
+    from scripts.clients.massive_client import MassiveClient
+
+    return MassiveClient()
 
 
 # ── Phase 1: Audit ──────────────────────────────────────────────────────
@@ -177,9 +188,9 @@ def _build_static_only_universe(args) -> list[str]:
 # ── Main ─────────────────────────────────────────────────────────────────
 
 
-def main(argv: Optional[list[str]] = None) -> None:
+def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Pre-market TA data prep")
-    parser.add_argument("--audit-only", action="store_true", help="Audit only, no IB refresh. Offline.")
+    parser.add_argument("--audit-only", action="store_true", help="Audit only, no refresh. Offline.")
     parser.add_argument("--force", action="store_true", help="Refresh all tickers, not just stale/missing")
     parser.add_argument("--db", default=DEFAULT_DB, help="DuckDB path")
     parser.add_argument("--sp500", default=DEFAULT_SP500, help="SP500 universe JSON")
@@ -198,7 +209,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         _print_audit("BEFORE", before)
         json.dump({"before": _counts(before)}, sys.stdout, indent=2)
         print(file=sys.stdout)
-        return
+        return 0
 
     # Refresh mode: build the FULL scanner universe via real TrendScanConfig.
     cfg = TrendScanConfig(sp500_path=args.sp500, nasdaq100_path=args.nasdaq100)
@@ -224,53 +235,131 @@ def main(argv: Optional[list[str]] = None) -> None:
     before = classify_tickers(conn, tickers, ref_date)
     _print_audit("BEFORE", before)
 
-    t0 = time.monotonic()
-    if ib_client_preopened is not None:
-        ib = ib_client_preopened
-    else:
-        try:
-            from scripts.clients.ib_client import IBClient
+    refresh_tickers = tickers if args.force else before["stale"] + before["missing"]
+    total = len(refresh_tickers)
 
-            ib = IBClient()
-            ib.connect(client_id="auto")
-        except Exception as exc:
-            logger.warning("IB connection failed: %s — skipping refresh", exc)
-            json.dump({"before": _counts(before), "error": str(exc)}, sys.stdout, indent=2)
-            print(file=sys.stdout)
-            return
-
-    ta_svc = TAService(db_path=args.db, ib_client=ib)
-    try:
-        refresh_tickers = tickers if args.force else before["stale"] + before["missing"]
-        if refresh_tickers:
-            logger.info("Refreshing %d tickers ...", len(refresh_tickers))
-            ta_svc.bulk_refresh(refresh_tickers)
-
-        elapsed = time.monotonic() - t0
-        after = classify_tickers(conn, tickers, ref_date)
-        _print_audit("AFTER", after)
-
-        failed = sorted(set(after["stale"] + after["missing"]) & set(refresh_tickers))
-        result = {
-            "before": _counts(before),
-            "after": _counts(after),
-            "refreshed": len(refresh_tickers),
-            "failed_tickers": failed,
-            "elapsed_s": round(elapsed, 1),
-        }
-        json.dump(result, sys.stdout, indent=2)
-        print(file=sys.stdout)
-    finally:
-        try:
-            ib.disconnect()
-        except Exception:
-            pass
+    if not refresh_tickers:
+        logger.info("No tickers to refresh.")
+        save_status(
+            STATUS_FILE,
+            TaPremarketStatus(
+                last_run_ts=datetime.now(timezone.utc),
+                status="ok",
+                refreshed_tickers=0,
+                failed_tickers=0,
+                failure_ratio=0.0,
+                failure_reason=None,
+            ),
+        )
         try:
             if uw_client is not None:
                 uw_client.close()
         except Exception:
             pass
+        try:
+            if ib_client_preopened is not None:
+                ib_client_preopened.disconnect()
+        except Exception:
+            pass
+        return 0
+
+    massive = _build_massive_client()
+    ta_svc = TAService(db_path=args.db, massive_client=massive)
+
+    t0 = time.monotonic()
+    try:
+        result = ta_svc.bulk_refresh(refresh_tickers)  # loops both 1d + 1h
+    except Exception as exc:
+        logger.exception("bulk_refresh crashed outright: %s", exc)
+        save_status(
+            STATUS_FILE,
+            TaPremarketStatus(
+                last_run_ts=datetime.now(timezone.utc),
+                status="aborted",
+                refreshed_tickers=0,
+                failed_tickers=total,
+                failure_ratio=1.0,
+                failure_reason="vendor_down",
+            ),
+        )
+        try:
+            if uw_client is not None:
+                uw_client.close()
+        except Exception:
+            pass
+        try:
+            if ib_client_preopened is not None:
+                ib_client_preopened.disconnect()
+        except Exception:
+            pass
+        return EXIT_VENDOR_DOWN
+
+    ratio = result.failure_ratio
+    if ratio >= _FAILURE_ABORT_RATIO:
+        save_status(
+            STATUS_FILE,
+            TaPremarketStatus(
+                last_run_ts=datetime.now(timezone.utc),
+                status="aborted",
+                refreshed_tickers=result.succeeded,
+                failed_tickers=result.failed,
+                failure_ratio=ratio,
+                failure_reason="vendor_down",
+            ),
+        )
+        try:
+            if uw_client is not None:
+                uw_client.close()
+        except Exception:
+            pass
+        try:
+            if ib_client_preopened is not None:
+                ib_client_preopened.disconnect()
+        except Exception:
+            pass
+        return EXIT_VENDOR_DOWN
+
+    status_kind = "ok" if result.failed == 0 else "partial"
+    save_status(
+        STATUS_FILE,
+        TaPremarketStatus(
+            last_run_ts=datetime.now(timezone.utc),
+            status=status_kind,
+            refreshed_tickers=result.succeeded,
+            failed_tickers=result.failed,
+            failure_ratio=ratio,
+            failure_reason=None,
+        ),
+    )
+
+    elapsed = time.monotonic() - t0
+    after = classify_tickers(conn, tickers, ref_date)
+    _print_audit("AFTER", after)
+
+    failed = sorted(set(after["stale"] + after["missing"]) & set(refresh_tickers))
+    output = {
+        "before": _counts(before),
+        "after": _counts(after),
+        "refreshed": len(refresh_tickers),
+        "failed_tickers": failed,
+        "elapsed_s": round(elapsed, 1),
+    }
+    json.dump(output, sys.stdout, indent=2)
+    print(file=sys.stdout)
+
+    try:
+        if uw_client is not None:
+            uw_client.close()
+    except Exception:
+        pass
+    try:
+        if ib_client_preopened is not None:
+            ib_client_preopened.disconnect()
+    except Exception:
+        pass
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)
