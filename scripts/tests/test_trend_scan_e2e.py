@@ -4,9 +4,21 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_universe_cache(monkeypatch, tmp_path):
+    """Point UNIVERSE_CACHE_PATH at a non-existent file by default so tests
+    that build their own universe fixtures are not affected by a real cache
+    on disk. Tests that need the cache override UNIVERSE_CACHE_PATH themselves.
+    """
+    import scripts.trend_scan as ts
+
+    monkeypatch.setattr(ts, "UNIVERSE_CACHE_PATH", tmp_path / "_absent_cache.json", raising=False)
 
 
 def _mock_ohlcv_data(ticker: str, bullish: bool = True) -> dict:
@@ -34,6 +46,10 @@ def _mock_ohlcv_data(ticker: str, bullish: bool = True) -> dict:
             "dollar_volume": 20_000_000,
             "market_cap": 2_000_000_000,
             "price": 150,
+            "high_20d": 151,
+            "low_20d": 145,
+            "low_52w": 90,
+            "up_day_volume_ratio": 1.4,
         }
     return {
         "ticker": ticker,
@@ -58,6 +74,10 @@ def _mock_ohlcv_data(ticker: str, bullish: bool = True) -> dict:
         "dollar_volume": 20_000_000,
         "market_cap": 2_000_000_000,
         "price": 120,
+        "high_20d": 149,
+        "low_20d": 148,
+        "low_52w": 140,
+        "up_day_volume_ratio": 0.7,
     }
 
 
@@ -93,7 +113,6 @@ def _mock_flow_data() -> dict:
 
 def test_scan_pipeline_produces_output(tmp_path):
     from scripts.trend_scan import run_scan_pipeline
-
     from scripts.trend_scan_lib.config import TrendScanConfig
 
     sp = tmp_path / "sp500.json"
@@ -117,7 +136,6 @@ def test_scan_pipeline_produces_output(tmp_path):
 
 def test_scan_pipeline_filters_weak_tickers(tmp_path):
     from scripts.trend_scan import run_scan_pipeline
-
     from scripts.trend_scan_lib.config import TrendScanConfig
 
     sp = tmp_path / "sp500.json"
@@ -132,13 +150,12 @@ def test_scan_pipeline_filters_weak_tickers(tmp_path):
     mock_data_fetcher.fetch_flow.side_effect = lambda t: _mock_flow_data()
     mock_data_fetcher.fetch_market_context.return_value = {"spy_close": 520.0, "vix_close": 17.0, "regime": "bullish"}
     result = run_scan_pipeline(cfg, data_fetcher=mock_data_fetcher, uw_client=None, ib_client=None, db_path=":memory:")
-    tickers = [c["ticker"] for c in result["candidates"]]
-    assert "BAD" not in tickers
+    bullish_tickers = [c["ticker"] for c in result["candidates"] if c["direction"] == "bullish"]
+    assert "BAD" not in bullish_tickers
 
 
 def test_scan_output_has_required_fields(tmp_path):
     from scripts.trend_scan import run_scan_pipeline
-
     from scripts.trend_scan_lib.config import TrendScanConfig
 
     sp = tmp_path / "sp500.json"
@@ -173,7 +190,8 @@ def test_scan_output_has_required_fields(tmp_path):
             "scores",
             "indicators",
             "summaries",
-            "suggested_trade",
+            "structure_hint",
+            "catalysts",
             "invalidation",
             "flags",
             "holding_window",
@@ -184,8 +202,8 @@ def test_scan_output_has_required_fields(tmp_path):
 
 def test_scan_writes_to_duckdb(tmp_path):
     import duckdb
-    from scripts.trend_scan import run_scan_pipeline
 
+    from scripts.trend_scan import run_scan_pipeline
     from scripts.trend_scan_lib.config import TrendScanConfig
 
     sp = tmp_path / "sp500.json"
@@ -207,3 +225,105 @@ def test_scan_writes_to_duckdb(tmp_path):
     conn.close()
     assert runs == 1
     assert candidates >= 1
+
+
+class TestTAServiceIntegration:
+    """Verify trend_scan works when wired to a real (mocked-IB) TAService."""
+
+    def test_fetch_ohlcv_delegates_to_ta_service(self):
+        from unittest.mock import MagicMock
+
+        import pandas as pd
+
+        mock_ta = MagicMock()
+        mock_ta.get_snapshot.return_value = _mock_ohlcv_data("AAPL", bullish=True)
+        mock_ta.get_indicators.return_value = pd.DataFrame(
+            {
+                "date": pd.bdate_range("2026-01-01", periods=30),
+                "close": [150.0] * 30,
+            }
+        )
+
+        from scripts.trend_scan import LiveTrendDataFetcher
+
+        uw = MagicMock()
+        uw.get_stock_info.return_value = {"data": {"marketcap": 2_000_000_000}}
+        fetcher = LiveTrendDataFetcher(uw_client=uw, ta_service=mock_ta)
+        fetcher._spy_df = pd.DataFrame(
+            {
+                "date": pd.bdate_range("2026-01-01", periods=30),
+                "close": [450.0] * 30,
+            }
+        )
+        result = fetcher.fetch_ohlcv("AAPL")
+
+        mock_ta.get_snapshot.assert_called_once_with("AAPL", allow_fetch=False)
+        assert result["ticker"] == "AAPL"
+        assert "rs_vs_spy" in result
+        assert "market_cap" in result
+
+
+def test_run_scan_pipeline_uses_fresh_universe_cache(tmp_path, monkeypatch):
+    """When data/ta_premarket_universe.json exists and is <2h old, use it."""
+    import json
+    from datetime import datetime, timezone
+
+    import scripts.trend_scan as ts
+
+    cache = tmp_path / "ta_premarket_universe.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "tickers": ["AAPL", "PREP_ONLY_XYZ"],
+                "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+        )
+    )
+    monkeypatch.setattr(ts, "UNIVERSE_CACHE_PATH", cache, raising=False)
+
+    # If build_universe is called we fail — cache should pre-empt it
+    monkeypatch.setattr(
+        ts,
+        "build_universe",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("build_universe should not be called")),
+    )
+
+    resolved = ts._resolve_universe(cfg=ts.TrendScanConfig(), uw_client=None, ib_client=None)
+    assert "PREP_ONLY_XYZ" in resolved
+
+
+def test_run_scan_pipeline_rebuilds_if_cache_stale(tmp_path, monkeypatch):
+    """When cache is >2h old, fall back to build_universe()."""
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    import scripts.trend_scan as ts
+
+    cache = tmp_path / "ta_premarket_universe.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "tickers": ["STALE_CACHED"],
+                "built_at": (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(timespec="seconds"),
+            }
+        )
+    )
+    monkeypatch.setattr(ts, "UNIVERSE_CACHE_PATH", cache, raising=False)
+    monkeypatch.setattr(ts, "build_universe", lambda cfg, **k: ["FRESH_BUILD"])
+
+    resolved = ts._resolve_universe(cfg=ts.TrendScanConfig(), uw_client=None, ib_client=None)
+    assert resolved == ["FRESH_BUILD"]
+
+
+def test_resolve_universe_rebuilds_on_malformed_cache(tmp_path, monkeypatch):
+    """A corrupt cache file must trigger fallback to build_universe() rather
+    than propagating the parse error."""
+    import scripts.trend_scan as ts
+
+    cache = tmp_path / "ta_premarket_universe.json"
+    cache.write_text("{not valid json")
+    monkeypatch.setattr(ts, "UNIVERSE_CACHE_PATH", cache, raising=False)
+    monkeypatch.setattr(ts, "build_universe", lambda cfg, **k: ["FALLBACK"])
+
+    resolved = ts._resolve_universe(cfg=ts.TrendScanConfig(), uw_client=None, ib_client=None)
+    assert resolved == ["FALLBACK"]

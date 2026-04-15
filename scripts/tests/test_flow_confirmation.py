@@ -126,3 +126,42 @@ def test_compute_flow_score_no_data():
 
     score = compute_flow_score({})
     assert 0.0 <= score <= 0.5
+
+
+def test_compute_flow_score_bearish_rewards_put_flow():
+    """Bearish candidate: net_delta < 0 and dp_direction='bearish' are
+    confirmation. Same data scored as bullish must score lower."""
+    from scripts.trend_scan_lib.stages.flow_confirmation import compute_flow_score
+
+    shared_data = {
+        "ask_dominance": 0.7,
+        "flow_count": 20,
+        "expiry_cluster_ratio": 0.6,
+        "avg_strike_pct_otm": 0.05,
+        "net_delta": -5e6,
+        "net_vega": 3e5,
+        "dp_direction": "bearish",
+    }
+    bearish_aligned = compute_flow_score(shared_data, direction="bearish")
+    bullish_same_data = compute_flow_score(shared_data, direction="bullish")
+
+    assert bearish_aligned > 0.6
+    # Direction-agnostic sub-scores (ask_dominance, flow_repetition,
+    # expiry_clustering, strike_reasonableness) still fire for the bullish
+    # read of the same data — so absolute level stays moderate. What must
+    # separate them is the direction-aware delta/vega + dp alignment.
+    assert bearish_aligned - bullish_same_data > 0.15
+
+
+def test_dark_pool_alignment_direction_symmetry():
+    """Direction alignment is symmetric: bearish-DP rewards bearish candidate
+    exactly as much as bullish-DP rewards bullish candidate."""
+    from scripts.trend_scan_lib.stages.flow_confirmation import score_dark_pool_alignment
+
+    aligned_bull = score_dark_pool_alignment(dp_direction="bullish", direction="bullish")
+    aligned_bear = score_dark_pool_alignment(dp_direction="bearish", direction="bearish")
+    assert aligned_bull == aligned_bear == 0.15
+
+    bull_vs_bear_dp = score_dark_pool_alignment(dp_direction="bearish", direction="bullish")
+    bear_vs_bull_dp = score_dark_pool_alignment(dp_direction="bullish", direction="bearish")
+    assert bull_vs_bear_dp == bear_vs_bull_dp == -0.05

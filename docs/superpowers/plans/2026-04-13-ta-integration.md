@@ -183,9 +183,8 @@ Find the `__init__` method (around line 219) and add the `ta_service` parameter:
 
 ```python
 class LiveTrendDataFetcher:
-    def __init__(self, uw_client, ib_client=None, ta_service=None):
+    def __init__(self, *, uw_client: Any, ta_service: Any = None):
         self.uw_client = uw_client
-        self.ib_client = ib_client
         self._ta_service = ta_service
         self._spy_df: Optional[pd.DataFrame] = None  # cached SPY data for rs_vs_spy
         self._stock_info_cache: dict[str, dict[str, Any]] = {}
@@ -193,6 +192,8 @@ class LiveTrendDataFetcher:
         self._oi_change_cache: dict[str, list[dict[str, Any]]] = {}
         self._greek_flow_cache: dict[str, tuple[float, float]] = {}
 ```
+
+**NOTE:** Keep the `*` keyword-only marker — existing callers use `uw_client=`. Drop `ib_client` param (TAService owns the IB connection, LiveTrendDataFetcher never uses IB directly). Remove `self._bars_cache` (dead after fetch_ohlcv replacement).
 
 - [ ] **Step 2b: Add SPY pre-cache method**
 
@@ -257,9 +258,10 @@ Remove these methods and functions from `scripts/trend_scan.py` that are no long
 
 - `_bars_frame()` method (lines ~235-241)
 - `_build_price_frame()` function (lines ~100-125)
+- `_series_value()` function (lines ~128-132) — only used inside `fetch_ohlcv()`, now dead
 - Remove `self._bars_cache` from `__init__`
 
-Do NOT remove `_series_value()` or `_safe_float()` — they're still used elsewhere in the file.
+Do NOT remove `_safe_float()` — it's still used elsewhere in the file (e.g., `_stock_info`, `fetch_structure`).
 
 - [ ] **Step 5: Run existing tests to check for import/syntax errors**
 
@@ -348,7 +350,7 @@ def build_runtime():
 
     ta_service = TAService(db_path="data/ta.duckdb", ib_client=ib_client)
     data_fetcher = LiveTrendDataFetcher(
-        uw_client=uw_client, ib_client=ib_client, ta_service=ta_service,
+        uw_client=uw_client, ta_service=ta_service,
     )
     return data_fetcher, uw_client, ib_client, ta_service
 ```
@@ -494,7 +496,7 @@ class TestTAServiceIntegration:
         from scripts.trend_scan import LiveTrendDataFetcher
         uw = MagicMock()
         uw.get_stock_info.return_value = {"data": {"marketcap": 2_000_000_000}}
-        fetcher = LiveTrendDataFetcher(uw_client=uw, ta_service=mock_ta)
+        fetcher = LiveTrendDataFetcher(uw_client=uw, ta_service=mock_ta)  # keyword-only
         # Pre-cache SPY since fetch_ohlcv uses it
         fetcher._spy_df = pd.DataFrame({
             "date": pd.bdate_range("2026-01-01", periods=30),
@@ -766,6 +768,12 @@ fetcher = LiveTrendDataFetcher(uw_client=MagicMock(), ta_service=MagicMock())
 assert not hasattr(fetcher, '_bars_frame'), '_bars_frame should be removed'
 assert not hasattr(fetcher, '_bars_cache'), '_bars_cache should be removed'
 print('Dead code removal verified')
+
+# Verify _series_value is gone
+import scripts.trend_scan as ts_mod
+assert not hasattr(ts_mod, '_series_value'), '_series_value should be removed'
+assert not hasattr(ts_mod, '_build_price_frame'), '_build_price_frame should be removed'
+print('Module-level dead code verified')
 
 # Verify no UW OHLC path remains
 import inspect

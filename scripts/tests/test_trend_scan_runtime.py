@@ -28,7 +28,7 @@ def test_main_emits_json_payload(monkeypatch, capsys, tmp_path):
         pass
 
     def fake_build_runtime():
-        return DummyFetcher(), None, None
+        return DummyFetcher(), None, None, None
 
     def fake_run_scan_pipeline(*args, **kwargs):
         return {
@@ -63,3 +63,22 @@ def test_main_emits_json_payload(monkeypatch, capsys, tmp_path):
     assert exit_code == 0
     assert payload["scan_id"] == "trend_test"
     assert payload["market_context"]["regime"] == "bullish"
+
+
+def test_pre_cache_spy_swallows_failure():
+    """If SPY indicators fetch raises, pre_cache_spy must not propagate —
+    scan continues with rs_vs_spy=1.0 default via existing branch in fetch_ohlcv."""
+    from unittest.mock import MagicMock
+
+    from scripts.trend_scan import LiveTrendDataFetcher
+
+    failing_svc = MagicMock()
+    failing_svc.get_indicators.side_effect = RuntimeError("SPY cold")
+
+    fetcher = LiveTrendDataFetcher(uw_client=MagicMock(), ta_service=failing_svc)
+
+    # Must not raise
+    fetcher.pre_cache_spy()
+
+    # Must leave _spy_df as None so fetch_ohlcv falls back to rs_vs_spy=1.0
+    assert fetcher._spy_df is None

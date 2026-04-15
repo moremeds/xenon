@@ -193,3 +193,21 @@ def get_latest_bar_date(
             return val
         return pd.Timestamp(val).date()
     return None
+
+
+def get_latest_bar_timestamp(
+    conn: duckdb.DuckDBPyConnection,
+    ticker: str,
+    timeframe: str,
+) -> Optional[datetime]:
+    """Return the most recent bar_date as a full timestamp (for intraday freshness)."""
+    result = conn.execute(
+        "SELECT MAX(bar_date) FROM ohlc_bars WHERE ticker = ? AND timeframe = ?",
+        [ticker, timeframe],
+    ).fetchone()
+    if result and result[0] is not None:
+        val = result[0]
+        if isinstance(val, datetime):
+            return val
+        return pd.Timestamp(val).to_pydatetime()
+    return None

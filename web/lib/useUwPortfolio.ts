@@ -201,8 +201,13 @@ export function useUwPortfolio(): UseUwPortfolioState {
 
       try {
         let meta: Partial<UwPortfolioResponse> = {};
-        const tickers: UwTickerRow[] = [];
+        // Two-Map architecture: SSE tickers accumulate independently from
+        // cached tickers. The displayed state is a merge (SSE wins on
+        // conflict, cache fills gaps). This prevents the first SSE arrival
+        // from wiping all cached tiles.
+        const sseTickers = new Map<string, UwTickerRow>();
         let actionItems: UwActionItem[] = [];
+        let doneReceived = false;
         // Track the freshest `snapshot_ts` across all streamed rows so
         // `lastFetchedAt` reflects actual data age — NOT the SSE meta
         // `fetched_at` which is response-generation time (backend emits
@@ -215,7 +220,7 @@ export function useUwPortfolio(): UseUwPortfolioState {
               meta = m;
             },
             onTicker: (row) => {
-              tickers.push(row);
+              sseTickers.set(row.ticker, row);
               const ts = row.snapshot_ts;
               if (
                 typeof ts === "string" &&
@@ -223,23 +228,39 @@ export function useUwPortfolio(): UseUwPortfolioState {
               ) {
                 latestSnapshotTs = ts;
               }
-              // Incremental state update — each ticker paints immediately.
-              setData((prev) => ({
-                ...(prev ?? {
+              // Incremental state update — merge cached + SSE tickers.
+              // Monotonicity: visible count never decreases during streaming.
+              setData((prev) => {
+                const base = prev ?? {
                   fetched_at: "",
                   market_state: "closed" as const,
                   ttl_seconds: 300,
                   tickers: [],
                   action_items: [],
-                }),
-                ...meta,
-                tickers: [...tickers],
-              }));
+                };
+                const merged = new Map<string, UwTickerRow>();
+                for (const t of base.tickers) merged.set(t.ticker, t);
+                for (const [k, v] of sseTickers) merged.set(k, v);
+                return {
+                  ...base,
+                  ...meta,
+                  tickers: Array.from(merged.values()),
+                };
+              });
             },
             onDone: (summary) => {
+              doneReceived = true;
               actionItems = summary.action_items;
+              // Finalize: SSE is authoritative — drop cached tickers not
+              // present in the stream (portfolio/watchlist changed).
               setData((prev) =>
-                prev ? { ...prev, action_items: summary.action_items } : prev,
+                prev
+                  ? {
+                      ...prev,
+                      tickers: Array.from(sseTickers.values()),
+                      action_items: summary.action_items,
+                    }
+                  : prev,
               );
             },
           },
@@ -254,10 +275,29 @@ export function useUwPortfolio(): UseUwPortfolioState {
           (meta as { response_generated_at?: string }).response_generated_at ??
           new Date().toISOString();
         setLastFetchedAt(stamp);
+
+        // Only write SSE-only tickers to the snapshot cache when the
+        // stream completed cleanly (done event received). If done was
+        // missing (truncated stream, malformed payload), keep the merged
+        // view in cache to avoid dropping tiles on next remount.
+        const finalTickers = doneReceived
+          ? Array.from(sseTickers.values())
+          : Array.from(
+              (() => {
+                const m = new Map<string, UwTickerRow>();
+                if (_cachedSnapshot) {
+                  for (const t of _cachedSnapshot.data.tickers)
+                    m.set(t.ticker, t);
+                }
+                for (const [k, v] of sseTickers) m.set(k, v);
+                return m.values();
+              })(),
+            );
+
         _cachedSnapshot = {
           data: {
             ...meta,
-            tickers,
+            tickers: finalTickers,
             action_items: actionItems,
             // Keep the top-level `fetched_at` consistent with the hook's
             // `lastFetchedAt` so downstream consumers see one truth.

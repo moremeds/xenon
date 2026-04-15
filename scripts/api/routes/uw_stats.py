@@ -17,10 +17,10 @@ router = APIRouter()
 
 @router.get("/uw-stats")
 async def uw_stats() -> dict:
-    """Return current UW API usage statistics."""
+    """Return current UW API usage statistics with daily breakdown."""
     from utils.uw_api_stats import stats
 
-    return stats.get_stats()
+    return stats.get_stats_with_daily()
 
 
 @router.post("/uw-stats/reset")

@@ -16,6 +16,7 @@ from scripts.ta_lib.store import (
     delete_ticker,
     get_connection,
     get_latest_bar_date,
+    get_latest_bar_timestamp,
     init_schema,
     read_indicators,
     read_ohlc,
@@ -67,6 +68,20 @@ class TAService:
         init_schema(self._conn)
         self._ib_client = ib_client
         self._local = threading.local()
+
+    @classmethod
+    def read_only(cls, conn) -> "TAService":
+        """Construct a TAService bound to an existing connection.
+
+        Skips __init__ entirely — no IB client, no schema init. The caller
+        is responsible for passing a connection with schema already
+        initialized. Use this for read-only audit paths (e.g.,
+        ta_premarket_prep.classify_tickers).
+        """
+        svc = cls.__new__(cls)
+        svc._conn = conn
+        svc._ib_client = None
+        return svc
 
     def _read_cursor(self):
         """Return a thread-local cursor for read operations."""
@@ -158,6 +173,33 @@ class TAService:
         else:
             snapshot["range_20d_pct"] = 0.0
 
+        # 20-day high/low and 52w low — for breakout/breakdown detection.
+        snapshot["high_20d"] = float(highs.tail(20).max()) if len(highs) >= 20 else close
+        snapshot["low_20d"] = float(lows.tail(20).min()) if len(lows) >= 20 else close
+        snapshot["low_52w"] = float(lows.tail(252).min()) if not lows.empty else close
+
+        # Up-day / down-day volume ratio over last 10 sessions.
+        # Require minimum 3 samples on BOTH sides — otherwise return neutral (1.0).
+        # A previously proposed 2.0 sentinel for all-up windows was dropped after
+        # tribunal review: it created false-precision spikes that dominated the
+        # trend score (which weights this 2x) without real directional evidence.
+        recent = df.tail(10)
+        if len(recent) >= 5:
+            diffs = recent["close"].diff().dropna()
+            vols = recent["volume"].fillna(0).loc[diffs.index]
+            up_mask = diffs > 0
+            down_mask = diffs < 0
+            up_count = int(up_mask.sum())
+            down_count = int(down_mask.sum())
+            if up_count >= 3 and down_count >= 3:
+                up_vol = float(vols[up_mask].mean())
+                down_vol = float(vols[down_mask].mean())
+                snapshot["up_day_volume_ratio"] = up_vol / max(down_vol, 1.0)
+            else:
+                snapshot["up_day_volume_ratio"] = 1.0
+        else:
+            snapshot["up_day_volume_ratio"] = 1.0
+
         snapshot["dollar_volume"] = close * snapshot["avg_20d_volume"]
 
         return snapshot
@@ -167,6 +209,10 @@ class TAService:
 
         Must be called on the main thread (ib_insync is not thread-safe).
         """
+        if self._ib_client is None:
+            logger.warning("bulk_refresh: no IB client — using cached data only")
+            return
+
         stale = [t.upper() for t in tickers if self._is_stale(t.upper(), timeframe)]
         if not stale:
             logger.info("bulk_refresh: all %d tickers are current", len(tickers))
@@ -253,9 +299,18 @@ class TAService:
         market_open = now_et.hour >= 9 and (now_et.hour > 9 or now_et.minute >= 30)
         market_close = now_et.hour >= 16
         if last_session == now_et.date() and market_open and not market_close:
-            # During market hours: stale if latest bar is >2h behind
-            latest_dt = datetime.combine(latest, datetime.min.time())
-            hours_behind = (now_et.replace(tzinfo=None) - latest_dt).total_seconds() / 3600
+            # During market hours: stale if latest bar is >2h behind.
+            # Use the full timestamp (not just date) so we don't treat a
+            # bar from 15:00 today as if it were midnight.
+            latest_ts = get_latest_bar_timestamp(conn, ticker, timeframe)
+            if latest_ts is None:
+                return True
+            # Normalize both sides to naive for robust subtraction
+            # (now_et may be tz-aware or mocked-naive; latest_ts from DuckDB
+            # may be tz-aware UTC or naive).
+            now_naive = now_et.replace(tzinfo=None) if now_et.tzinfo else now_et
+            latest_naive = latest_ts.replace(tzinfo=None) if latest_ts.tzinfo else latest_ts
+            hours_behind = (now_naive - latest_naive).total_seconds() / 3600
             return hours_behind > 2
         return False
 

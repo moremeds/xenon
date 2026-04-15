@@ -1490,7 +1490,7 @@ type TrendSortKey =
   | "volatility"
   | "flow"
   | "spot_price"
-  | "suggested_trade";
+  | "structure_hint";
 
 const trendExtract = (
   item: TrendCandidate,
@@ -1513,8 +1513,8 @@ const trendExtract = (
       return item.scores.flow;
     case "spot_price":
       return item.spot_price;
-    case "suggested_trade":
-      return item.suggested_trade;
+    case "structure_hint":
+      return item.structure_hint;
     default:
       return null;
   }
@@ -1569,7 +1569,7 @@ function TrendCandidateRow({
   onToggle: () => void;
 }) {
   const dirCls = row.direction === "bullish" ? "bullish" : "bearish";
-  const tradeLabel = row.suggested_trade.replace(/_/g, " ");
+  const hintLabel = row.structure_hint.replace(/_/g, " ");
 
   return (
     <>
@@ -1601,7 +1601,9 @@ function TrendCandidateRow({
         </td>
         <td className="right mono">${row.spot_price.toFixed(2)}</td>
         <td>
-          <span className="pill defined">{tradeLabel}</span>
+          <span className="pill defined" title="Structure hint — analysis only">
+            {hintLabel}
+          </span>
         </td>
         <td>
           {row.flags.map((f) => (
@@ -1793,8 +1795,8 @@ const ScannerSections = React.memo(function ScannerSections() {
                     onToggle={toggle}
                   />
                   <SortTh<TrendSortKey>
-                    label="Trade"
-                    sortKey="suggested_trade"
+                    label="Structure hint"
+                    sortKey="structure_hint"
                     activeKey={sort.key}
                     direction={sort.direction}
                     onToggle={toggle}
