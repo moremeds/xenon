@@ -110,11 +110,27 @@ def score_bbw(bbw: float) -> float:
     return 0.1
 
 
-def detect_breakout(*, close: float, high_52w: float, range_20d_pct: float, atr_pct: float) -> bool:
-    """Detect breakout: within 3% of 52w high OR breaking above tight consolidation."""
-    near_high = high_52w > 0 and (high_52w - close) / high_52w <= 0.03
-    consolidation_break = atr_pct > 0 and range_20d_pct < atr_pct * 3
-    return near_high or consolidation_break
+def detect_breakout(
+    *,
+    close: float,
+    high_52w: float,
+    high_20d: float,
+    range_20d_pct: float,
+    atr_pct: float,
+) -> bool:
+    """Detect breakout.
+
+    Two qualifying paths:
+      1. Within 3% of 52w high — price is punching through long-term resistance.
+      2. Close is above 20d high AND the 20d range was tight — coiled spring release.
+
+    Previous version accepted path 2 on consolidation narrowness alone,
+    which flagged stocks sitting mid-range in a tight band as 'breakouts'."""
+    near_52w = high_52w > 0 and (high_52w - close) / high_52w <= 0.03
+    tight_range = atr_pct > 0 and range_20d_pct < atr_pct * 3
+    above_20d_high = high_20d > 0 and close >= high_20d
+    consolidation_break = tight_range and above_20d_high
+    return near_52w or consolidation_break
 
 
 def passes_bullish_gate(
@@ -173,6 +189,7 @@ def compute_trend_score(indicators: dict) -> float:
     if detect_breakout(
         close=indicators["close"],
         high_52w=indicators.get("high_52w", 0),
+        high_20d=indicators.get("high_20d", 0),
         range_20d_pct=indicators.get("range_20d_pct", 1.0),
         atr_pct=indicators.get("atr_pct", 0),
     ):
