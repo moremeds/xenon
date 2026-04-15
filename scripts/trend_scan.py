@@ -7,7 +7,7 @@ import json
 import logging
 import sys
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, Protocol
 
@@ -19,6 +19,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from scripts.analysis.ticker_data import fetch_ticker_data
+from scripts.api_status.ta_premarket_status import load_status
 from scripts.scanner_lib.cache import write_json_cache
 from scripts.scanner_lib.executor import parallel_fetch
 from scripts.trend_scan_lib.config import TrendScanConfig
@@ -46,6 +47,59 @@ logger = logging.getLogger(__name__)
 
 UNIVERSE_CACHE_PATH = Path(_project_root) / "data" / "ta_premarket_universe.json"
 UNIVERSE_CACHE_MAX_AGE_S = 2 * 60 * 60  # 2 hours
+
+STATUS_FILE = Path(_project_root) / "data" / "ta_premarket_status.json"
+_STATUS_STALE_AFTER = timedelta(days=1)
+
+
+def _check_premarket_status() -> str | None:
+    """Return a human-readable warning if status indicates abort or is stale, else None."""
+    status = load_status(STATUS_FILE)
+    if status is None:
+        return None
+    if status.status == "aborted":
+        total = status.refreshed_tickers + status.failed_tickers
+        return (
+            f"Premarket prep aborted at {status.last_run_ts.isoformat()} "
+            f"(reason: {status.failure_reason}, {status.failed_tickers}/{total} tickers failed). "
+            "Cache may be stale."
+        )
+    age = datetime.now(timezone.utc) - status.last_run_ts
+    if age > _STATUS_STALE_AFTER:
+        return (
+            f"Premarket prep status is stale (last_run={status.last_run_ts.isoformat()}, age={age}). Cache may be old."
+        )
+    return None
+
+
+def build_scan_output(
+    *,
+    candidates: list[dict],
+    warnings: list[str] | None = None,
+    scan_id: str | None = None,
+    scan_timestamp: str | None = None,
+    market_context: dict | None = None,
+    universe_size: int = 0,
+    stage_a_survivors: int = 0,
+    stage_b_survivors: int = 0,
+) -> dict:
+    """Assemble the trend-scan output dict, including the 'warnings' list.
+
+    Preserves the top-level keys existing consumers rely on (``scan_id``,
+    ``scan_timestamp``, ``market_context``, ``universe_size``,
+    ``stage_a_survivors``, ``stage_b_survivors``, ``candidates``) and adds
+    ``warnings`` from Task 6 of the Massive migration.
+    """
+    return {
+        "scan_id": scan_id or _generate_scan_id(),
+        "scan_timestamp": scan_timestamp or datetime.now(timezone.utc).isoformat(),
+        "market_context": market_context or {},
+        "universe_size": universe_size,
+        "stage_a_survivors": stage_a_survivors,
+        "stage_b_survivors": stage_b_survivors,
+        "candidates": candidates,
+        "warnings": warnings or [],
+    }
 
 
 class DataFetcher(Protocol):
@@ -612,10 +666,17 @@ def run_scan_pipeline(
     db_path: str = DEFAULT_DB_PATH,
     json_cache_path: Optional[str] = None,
     ta_service: Any = None,
+    warnings: Optional[list[str]] = None,
 ) -> dict:
     start = time.monotonic()
     scan_id = _generate_scan_id()
     now = datetime.now(timezone.utc)
+
+    scan_warnings: list[str] = list(warnings) if warnings else []
+    status_warning = _check_premarket_status()
+    if status_warning:
+        logger.warning(status_warning)
+        scan_warnings.append(status_warning)
 
     universe = _resolve_universe(cfg=cfg, uw_client=uw_client, ib_client=ib_client)
 
@@ -713,15 +774,16 @@ def run_scan_pipeline(
         market_ctx = {"spy_close": 0, "vix_close": 0, "regime": "unknown"}
 
     duration = time.monotonic() - start
-    output = {
-        "scan_id": scan_id,
-        "scan_timestamp": now.isoformat(),
-        "market_context": market_ctx,
-        "universe_size": len(universe),
-        "stage_a_survivors": stage_a_survivors,
-        "stage_b_survivors": stage_b_survivors,
-        "candidates": [{**candidate.to_dict(), "snapshot_timestamp": now.isoformat()} for candidate in ranked],
-    }
+    output = build_scan_output(
+        candidates=[{**candidate.to_dict(), "snapshot_timestamp": now.isoformat()} for candidate in ranked],
+        warnings=scan_warnings,
+        scan_id=scan_id,
+        scan_timestamp=now.isoformat(),
+        market_context=market_ctx,
+        universe_size=len(universe),
+        stage_a_survivors=stage_a_survivors,
+        stage_b_survivors=stage_b_survivors,
+    )
 
     try:
         conn = get_connection(db_path)
@@ -800,12 +862,22 @@ def build_runtime():
         logger.warning("IB Gateway not available — TA cache will use stale data")
         ib_client = None
 
-    ta_service = TAService(db_path="data/ta.duckdb", ib_client=ib_client)
+    startup_warnings: list[str] = []
+    try:
+        from scripts.clients.massive_client import MassiveClient
+
+        massive_client: Any = MassiveClient()
+    except Exception as exc:
+        logger.warning("MassiveClient unavailable — TA cache will use stale data: %s", exc)
+        massive_client = None
+        startup_warnings.append(f"MassiveClient unavailable: {exc}")
+
+    ta_service = TAService(db_path="data/ta.duckdb", massive_client=massive_client)
     data_fetcher = LiveTrendDataFetcher(
         uw_client=uw_client,
         ta_service=ta_service,
     )
-    return data_fetcher, uw_client, ib_client, ta_service
+    return data_fetcher, uw_client, ib_client, ta_service, startup_warnings
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -820,7 +892,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     uw_client = None
     ib_client = None
     try:
-        data_fetcher, uw_client, ib_client, ta_service = build_runtime()
+        data_fetcher, uw_client, ib_client, ta_service, startup_warnings = build_runtime()
         result = run_scan_pipeline(
             TrendScanConfig(top_n=args.top),
             data_fetcher=data_fetcher,
@@ -829,6 +901,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             db_path=args.db_path,
             json_cache_path=args.json_cache,
             ta_service=ta_service,
+            warnings=startup_warnings,
         )
         print(json.dumps(result, indent=2))
         return 0
