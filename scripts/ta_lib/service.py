@@ -69,6 +69,20 @@ class TAService:
         self._ib_client = ib_client
         self._local = threading.local()
 
+    @classmethod
+    def read_only(cls, conn) -> "TAService":
+        """Construct a TAService bound to an existing connection.
+
+        Skips __init__ entirely — no IB client, no schema init. The caller
+        is responsible for passing a connection with schema already
+        initialized. Use this for read-only audit paths (e.g.,
+        ta_premarket_prep.classify_tickers).
+        """
+        svc = cls.__new__(cls)
+        svc._conn = conn
+        svc._ib_client = None
+        return svc
+
     def _read_cursor(self):
         """Return a thread-local cursor for read operations."""
         if not hasattr(self._local, "cursor"):

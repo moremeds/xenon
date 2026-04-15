@@ -47,20 +47,24 @@ def _last_trading_date() -> date:
 def classify_tickers(
     conn,
     tickers: list[str],
-    ref_date: date,
+    ref_date: date,  # noqa: ARG001 — unused; _is_stale uses its own session-anchored cutoff
 ) -> dict[str, list[str]]:
     """Classify tickers as current / stale / missing.
 
-    Delegates the freshness decision to TAService._is_stale() so audit
-    and scanner agree. A ticker is 'current' iff it has bars AND
-    indicators AND the most recent bar is from ref_date or later.
+    Delegates the freshness decision to TAService._is_stale(), which uses
+    its own ET-aware "last completed trading session" logic. The staleness
+    cutoff is therefore independent of ref_date.
+
+    ref_date is retained for API compatibility — main() passes it, and
+    callers may depend on the signature — but it does not drive the
+    staleness check.
     """
     current: list[str] = []
     stale: list[str] = []
     missing: list[str] = []
 
     # _svc is constructed on first use to avoid the TAService import and
-    # __new__ call when every ticker is missing (e.g. empty DB on first run).
+    # read_only() call when every ticker is missing (e.g. empty DB on first run).
     _svc = None
 
     def _get_svc():
@@ -68,10 +72,7 @@ def classify_tickers(
         if _svc is None:
             from scripts.ta_lib.service import TAService  # lazy import to avoid IB dep at module load
 
-            # Build a read-only TAService bound to this connection.
-            _svc = TAService.__new__(TAService)
-            _svc._conn = conn
-            _svc._ib_client = None
+            _svc = TAService.read_only(conn)
         return _svc
 
     for t in tickers:

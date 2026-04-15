@@ -127,9 +127,13 @@ def test_json_output_structure(mock_bar, mock_ltd, mock_init, mock_conn_fn, mock
 
     mock_ta_inst = MagicMock()
 
-    # Use a real class so TAService.__new__(TAService) works inside classify_tickers.
+    # Use a real class so TAService.read_only() works inside classify_tickers.
     class _FakeTAService:
         def __new__(cls, *a, **kw):
+            return mock_ta_inst
+
+        @classmethod
+        def read_only(cls, conn):
             return mock_ta_inst
 
         def _is_stale(self, ticker, timeframe, cursor=None):
@@ -172,9 +176,13 @@ def test_force_passes_all_tickers(mock_bar, mock_ltd, mock_init, mock_conn_fn, m
     mock_ib_cls = MagicMock()
     mock_ta_inst = MagicMock()
 
-    # Use a real class so TAService.__new__(TAService) works inside classify_tickers.
+    # Use a real class so TAService.read_only() works inside classify_tickers.
     class _FakeTAService:
         def __new__(cls, *a, **kw):
+            return mock_ta_inst
+
+        @classmethod
+        def read_only(cls, conn):
             return mock_ta_inst
 
         def _is_stale(self, ticker, timeframe, cursor=None):
