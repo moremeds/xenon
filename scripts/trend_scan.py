@@ -39,6 +39,9 @@ from scripts.trend_scan_lib.universe import build_universe
 
 logger = logging.getLogger(__name__)
 
+UNIVERSE_CACHE_PATH = Path(_project_root) / "data" / "ta_premarket_universe.json"
+UNIVERSE_CACHE_MAX_AGE_S = 2 * 60 * 60  # 2 hours
+
 
 class DataFetcher(Protocol):
     def fetch_ohlcv(self, ticker: str) -> dict: ...
@@ -506,6 +509,41 @@ def _flow_summary(data: dict) -> str:
     return ", ".join(parts) if parts else "N/A"
 
 
+def _resolve_universe(
+    *,
+    cfg: TrendScanConfig,
+    uw_client: Any,
+    ib_client: Any,
+) -> list[str]:
+    """Prefer prep-persisted universe if fresh (<2h); otherwise rebuild.
+
+    This guarantees the 8:30 AM scan sees the same universe ta_premarket_prep
+    warmed at 6:00 AM — no silent mismatches from UW flow changes between
+    prep and scan time."""
+    try:
+        if UNIVERSE_CACHE_PATH.exists():
+            payload = json.loads(UNIVERSE_CACHE_PATH.read_text())
+            built_at = datetime.fromisoformat(payload["built_at"])
+            age_s = (datetime.now() - built_at).total_seconds()
+            if age_s <= UNIVERSE_CACHE_MAX_AGE_S and payload.get("tickers"):
+                logger.info(
+                    "Using prep-persisted universe: %d tickers, %.0fs old",
+                    len(payload["tickers"]),
+                    age_s,
+                )
+                return payload["tickers"]
+            else:
+                logger.info(
+                    "Universe cache stale (%.0fs old, max %d); rebuilding",
+                    age_s,
+                    UNIVERSE_CACHE_MAX_AGE_S,
+                )
+    except Exception as exc:
+        logger.warning("Universe cache read failed: %s — rebuilding", exc)
+
+    return build_universe(cfg, uw_client=uw_client, ib_client=ib_client)
+
+
 def run_scan_pipeline(
     cfg: TrendScanConfig,
     *,
@@ -520,7 +558,7 @@ def run_scan_pipeline(
     scan_id = _generate_scan_id()
     now = datetime.now(timezone.utc)
 
-    universe = build_universe(cfg, uw_client=uw_client, ib_client=ib_client)
+    universe = _resolve_universe(cfg=cfg, uw_client=uw_client, ib_client=ib_client)
 
     # Pre-warm TA cache on main thread (ib_insync is not thread-safe)
     if ta_service is not None:

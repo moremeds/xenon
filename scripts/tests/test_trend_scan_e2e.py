@@ -4,9 +4,21 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _no_universe_cache(monkeypatch, tmp_path):
+    """Point UNIVERSE_CACHE_PATH at a non-existent file by default so tests
+    that build their own universe fixtures are not affected by a real cache
+    on disk. Tests that need the cache override UNIVERSE_CACHE_PATH themselves.
+    """
+    import scripts.trend_scan as ts
+
+    monkeypatch.setattr(ts, "UNIVERSE_CACHE_PATH", tmp_path / "_absent_cache.json", raising=False)
 
 
 def _mock_ohlcv_data(ticker: str, bullish: bool = True) -> dict:
@@ -240,3 +252,55 @@ class TestTAServiceIntegration:
         assert result["ticker"] == "AAPL"
         assert "rs_vs_spy" in result
         assert "market_cap" in result
+
+
+def test_run_scan_pipeline_uses_fresh_universe_cache(tmp_path, monkeypatch):
+    """When data/ta_premarket_universe.json exists and is <2h old, use it."""
+    import json
+    from datetime import datetime
+
+    import scripts.trend_scan as ts
+
+    cache = tmp_path / "ta_premarket_universe.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "tickers": ["AAPL", "PREP_ONLY_XYZ"],
+                "built_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+    )
+    monkeypatch.setattr(ts, "UNIVERSE_CACHE_PATH", cache, raising=False)
+
+    # If build_universe is called we fail — cache should pre-empt it
+    monkeypatch.setattr(
+        ts,
+        "build_universe",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("build_universe should not be called")),
+    )
+
+    resolved = ts._resolve_universe(cfg=ts.TrendScanConfig(), uw_client=None, ib_client=None)
+    assert "PREP_ONLY_XYZ" in resolved
+
+
+def test_run_scan_pipeline_rebuilds_if_cache_stale(tmp_path, monkeypatch):
+    """When cache is >2h old, fall back to build_universe()."""
+    import json
+    from datetime import datetime, timedelta
+
+    import scripts.trend_scan as ts
+
+    cache = tmp_path / "ta_premarket_universe.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "tickers": ["STALE_CACHED"],
+                "built_at": (datetime.now() - timedelta(hours=3)).isoformat(timespec="seconds"),
+            }
+        )
+    )
+    monkeypatch.setattr(ts, "UNIVERSE_CACHE_PATH", cache, raising=False)
+    monkeypatch.setattr(ts, "build_universe", lambda cfg, **k: ["FRESH_BUILD"])
+
+    resolved = ts._resolve_universe(cfg=ts.TrendScanConfig(), uw_client=None, ib_client=None)
+    assert resolved == ["FRESH_BUILD"]
