@@ -173,6 +173,33 @@ class TAService:
         else:
             snapshot["range_20d_pct"] = 0.0
 
+        # 20-day high/low and 52w low — for breakout/breakdown detection.
+        snapshot["high_20d"] = float(highs.tail(20).max()) if len(highs) >= 20 else close
+        snapshot["low_20d"] = float(lows.tail(20).min()) if len(lows) >= 20 else close
+        snapshot["low_52w"] = float(lows.tail(252).min()) if not lows.empty else close
+
+        # Up-day / down-day volume ratio over last 10 sessions.
+        # Require minimum 3 samples on BOTH sides — otherwise return neutral (1.0).
+        # A previously proposed 2.0 sentinel for all-up windows was dropped after
+        # tribunal review: it created false-precision spikes that dominated the
+        # trend score (which weights this 2x) without real directional evidence.
+        recent = df.tail(10)
+        if len(recent) >= 5:
+            diffs = recent["close"].diff().dropna()
+            vols = recent["volume"].fillna(0).loc[diffs.index]
+            up_mask = diffs > 0
+            down_mask = diffs < 0
+            up_count = int(up_mask.sum())
+            down_count = int(down_mask.sum())
+            if up_count >= 3 and down_count >= 3:
+                up_vol = float(vols[up_mask].mean())
+                down_vol = float(vols[down_mask].mean())
+                snapshot["up_day_volume_ratio"] = up_vol / max(down_vol, 1.0)
+            else:
+                snapshot["up_day_volume_ratio"] = 1.0
+        else:
+            snapshot["up_day_volume_ratio"] = 1.0
+
         snapshot["dollar_volume"] = close * snapshot["avg_20d_volume"]
 
         return snapshot

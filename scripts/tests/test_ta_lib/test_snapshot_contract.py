@@ -105,3 +105,72 @@ class TestSnapshotContract:
     def test_ticker_is_uppercase(self, ta_service):
         snapshot = ta_service.get_snapshot("aapl")
         assert snapshot["ticker"] == "AAPL"
+
+
+def test_snapshot_exposes_high_low_and_up_day_volume_ratio(ta_service):
+    """Snapshot must expose:
+      - high_20d, low_20d: for breakout / breakdown verification
+      - low_52w: bearish-mirror of high_52w (for near-52w-low detection)
+      - up_day_volume_ratio: volume-confirmed trend scoring
+
+    up_day_volume_ratio = mean(up-day volume) / mean(down-day volume) over 10 sessions."""
+    snap = ta_service.get_snapshot("AAPL")
+
+    for field in ("high_20d", "low_20d", "low_52w", "up_day_volume_ratio"):
+        assert field in snap, f"missing {field} in {sorted(snap.keys())}"
+
+    assert snap["high_20d"] >= snap["low_20d"] > 0
+    assert snap["low_52w"] > 0
+    assert 0.0 < snap["up_day_volume_ratio"] < 10.0
+
+
+def test_up_day_volume_ratio_is_neutral_with_insufficient_samples(tmp_path):
+    """When fewer than 3 up-days OR fewer than 3 down-days are available in
+    the 10-session window, up_day_volume_ratio MUST default to 1.0 (neutral).
+
+    Post-tribunal fix: the previous 2.0 sentinel for all-up windows created
+    false-precision spikes that dominated the trend score without real
+    evidence (Task 6 weights this signal 2x)."""
+    from datetime import date, timedelta
+
+    import pandas as pd
+
+    from scripts.ta_lib.service import TAService
+    from scripts.ta_lib.store import get_connection, init_schema, write_ohlc
+
+    db = tmp_path / "ta.duckdb"
+    conn = get_connection(str(db))
+    init_schema(conn)
+
+    # Seed 10 sessions of monotonically up prices — zero down days.
+    today = date.today()
+    rows = []
+    base = 100.0
+    for i in range(10):
+        d = today - timedelta(days=10 - i)
+        rows.append(
+            {
+                "date": pd.Timestamp(d),
+                "open": base + i,
+                "high": base + i + 0.5,
+                "low": base + i - 0.5,
+                "close": base + i + 0.3,
+                "volume": 1_000_000,
+            }
+        )
+    write_ohlc(conn, "ALLUP", "1d", pd.DataFrame(rows))
+
+    # Compute indicators so _is_stale is satisfied (normally done by bulk_refresh)
+    from scripts.ta_lib.indicators import compute_all
+    from scripts.ta_lib.store import write_indicators
+
+    bars_df = pd.DataFrame(rows)
+    ind_df = compute_all(bars_df)
+    ind_df["bar_date"] = ind_df["date"]
+    write_indicators(conn, "ALLUP", "1d", ind_df)
+
+    svc = TAService(db_path=str(db), ib_client=None)
+    snap = svc.get_snapshot("ALLUP", allow_fetch=False)
+    assert snap["up_day_volume_ratio"] == 1.0, (
+        f"expected neutral (1.0) when sample is all-up, got {snap['up_day_volume_ratio']}"
+    )

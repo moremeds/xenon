@@ -46,6 +46,10 @@ def _mock_ohlcv_data(ticker: str, bullish: bool = True) -> dict:
             "dollar_volume": 20_000_000,
             "market_cap": 2_000_000_000,
             "price": 150,
+            "high_20d": 151,
+            "low_20d": 145,
+            "low_52w": 90,
+            "up_day_volume_ratio": 1.4,
         }
     return {
         "ticker": ticker,
@@ -70,6 +74,10 @@ def _mock_ohlcv_data(ticker: str, bullish: bool = True) -> dict:
         "dollar_volume": 20_000_000,
         "market_cap": 2_000_000_000,
         "price": 120,
+        "high_20d": 149,
+        "low_20d": 148,
+        "low_52w": 140,
+        "up_day_volume_ratio": 0.7,
     }
 
 
