@@ -833,7 +833,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(json.dumps(result, indent=2))
         return 0
     except Exception as exc:
-        logger.error("Trend scan failed: %s", exc)
+        logger.error("Trend scan failed: %s", exc, exc_info=True)
         return 1
     finally:
         if uw_client is not None:

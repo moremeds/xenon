@@ -33,7 +33,7 @@ def fetch_catalysts(
     ticker: str,
     direction: str,
     uw_client: Optional[object],
-    earnings_days: int,
+    earnings_days: Optional[int],
 ) -> tuple[list[str], float]:
     """Return (catalyst tags, score in [0,1]) for *ticker* in *direction*.
 
@@ -44,7 +44,7 @@ def fetch_catalysts(
     """
     catalysts: list[str] = []
 
-    if 0 <= earnings_days <= 7:
+    if earnings_days is not None and 0 <= earnings_days <= 7:
         catalysts.append("earnings_within_7d")
 
     if uw_client is not None:

@@ -18,6 +18,22 @@ def test_catalyst_stage_degrades_gracefully_without_uw_client():
     assert score == 0.5
 
 
+def test_catalyst_stage_tolerates_missing_earnings_days():
+    """If fetch_volatility returns earnings_days=None (UW didn't resolve
+    earnings date), fetch_catalysts must not crash on the int-vs-None
+    comparison. Real-scan regression surfaced this bug."""
+    from scripts.trend_scan_lib.stages.catalysts import fetch_catalysts
+
+    catalysts, score = fetch_catalysts(
+        ticker="AAPL",
+        direction="bullish",
+        uw_client=None,
+        earnings_days=None,
+    )
+    assert catalysts == []
+    assert score == 0.5
+
+
 def test_catalyst_stage_flags_imminent_earnings():
     """Earnings within 7 days is always a catalyst (direction-agnostic —
     creates event risk either way). Scored as neutral (0.5) since we
