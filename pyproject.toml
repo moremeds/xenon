@@ -24,5 +24,6 @@ test = [
 asyncio_mode = "strict"
 markers = [
     "integration: live tests hitting real MenthorQ (requires credentials)",
+    "e2e: live tests hitting real Massive API (requires MASSIVE_API_KEY)",
 ]
 
