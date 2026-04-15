@@ -138,16 +138,20 @@ def _connect_ib_client():
 
 def _build_triple_source_universe(
     cfg: TrendScanConfig,
-) -> tuple[list[str], object | None, object | None]:
+) -> tuple[list[str], object | None, object | None, bool]:
     """Build the full scanner universe (refresh mode only).
 
     Never called from --audit-only. Uses real TrendScanConfig defaults so
     prep sees the same UW lookback / premium threshold the scanner does.
-    Returns (tickers, uw_client_or_None, ib_client_or_None). The IB client
-    (if returned) is kept open for reuse by the TAService refresh phase.
+    Returns (tickers, uw_client_or_None, ib_client_or_None, used_triple_source).
+    `used_triple_source=False` means we fell back to static-only after
+    build_universe raised — callers writing telemetry should set `has_uw`
+    and `has_ib_scanner` to False in that case. The IB client (if returned)
+    is kept open for reuse by the TAService refresh phase.
     """
     uw = _connect_uw_client()
     ib = _connect_ib_client()
+    used_triple_source = True
     try:
         tickers = build_universe(cfg, uw_client=uw, ib_client=ib)
     except Exception as exc:
@@ -156,9 +160,10 @@ def _build_triple_source_universe(
             sp500_path=cfg.sp500_path,
             nasdaq100_path=cfg.nasdaq100_path,
         )
+        used_triple_source = False
     if "SPY" not in tickers:
         tickers.append("SPY")
-    return tickers, uw, ib
+    return tickers, uw, ib, used_triple_source
 
 
 def _build_static_only_universe(args) -> list[str]:
@@ -197,7 +202,7 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     # Refresh mode: build the FULL scanner universe via real TrendScanConfig.
     cfg = TrendScanConfig(sp500_path=args.sp500, nasdaq100_path=args.nasdaq100)
-    tickers, uw_client, ib_client_preopened = _build_triple_source_universe(cfg)
+    tickers, uw_client, ib_client_preopened, used_triple_source = _build_triple_source_universe(cfg)
 
     # Persist so the 8:30 AM scan can reuse the exact same universe.
     UNIVERSE_CACHE.parent.mkdir(parents=True, exist_ok=True)
@@ -208,8 +213,8 @@ def main(argv: Optional[list[str]] = None) -> None:
                 "built_at": datetime.now().isoformat(timespec="seconds"),
                 "source_counts": {
                     "total": len(tickers),
-                    "has_uw": uw_client is not None,
-                    "has_ib_scanner": ib_client_preopened is not None,
+                    "has_uw": used_triple_source and uw_client is not None,
+                    "has_ib_scanner": used_triple_source and ib_client_preopened is not None,
                 },
             },
             indent=2,
@@ -235,31 +240,36 @@ def main(argv: Optional[list[str]] = None) -> None:
             return
 
     ta_svc = TAService(db_path=args.db, ib_client=ib)
-
-    refresh_tickers = tickers if args.force else before["stale"] + before["missing"]
-    if refresh_tickers:
-        logger.info("Refreshing %d tickers ...", len(refresh_tickers))
-        ta_svc.bulk_refresh(refresh_tickers)
-
-    elapsed = time.monotonic() - t0
-    after = classify_tickers(conn, tickers, ref_date)
-    _print_audit("AFTER", after)
-
-    failed = sorted(set(after["stale"] + after["missing"]) & set(refresh_tickers))
-    result = {
-        "before": _counts(before),
-        "after": _counts(after),
-        "refreshed": len(refresh_tickers),
-        "failed_tickers": failed,
-        "elapsed_s": round(elapsed, 1),
-    }
-    json.dump(result, sys.stdout, indent=2)
-    print(file=sys.stdout)
-
     try:
-        ib.disconnect()
-    except Exception:
-        pass
+        refresh_tickers = tickers if args.force else before["stale"] + before["missing"]
+        if refresh_tickers:
+            logger.info("Refreshing %d tickers ...", len(refresh_tickers))
+            ta_svc.bulk_refresh(refresh_tickers)
+
+        elapsed = time.monotonic() - t0
+        after = classify_tickers(conn, tickers, ref_date)
+        _print_audit("AFTER", after)
+
+        failed = sorted(set(after["stale"] + after["missing"]) & set(refresh_tickers))
+        result = {
+            "before": _counts(before),
+            "after": _counts(after),
+            "refreshed": len(refresh_tickers),
+            "failed_tickers": failed,
+            "elapsed_s": round(elapsed, 1),
+        }
+        json.dump(result, sys.stdout, indent=2)
+        print(file=sys.stdout)
+    finally:
+        try:
+            ib.disconnect()
+        except Exception:
+            pass
+        try:
+            if uw_client is not None:
+                uw_client.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

@@ -133,7 +133,7 @@ def test_json_output_structure(mock_bar, mock_ltd, mock_init, mock_conn_fn, caps
     with (
         patch(
             "scripts.ta_premarket_prep._build_triple_source_universe",
-            return_value=(["AAPL", "SPY"], None, mock_ib_inst),
+            return_value=(["AAPL", "SPY"], None, mock_ib_inst, True),
         ),
         patch("scripts.ta_premarket_prep.TAService", _FakeTAService),
         patch("scripts.ta_premarket_prep.get_latest_bar_date", return_value=date(2026, 4, 9)),
@@ -180,7 +180,7 @@ def test_force_passes_all_tickers(mock_bar, mock_ltd, mock_init, mock_conn_fn, c
     with (
         patch(
             "scripts.ta_premarket_prep._build_triple_source_universe",
-            return_value=(["AAPL", "MSFT", "SPY"], None, mock_ib_inst),
+            return_value=(["AAPL", "MSFT", "SPY"], None, mock_ib_inst, True),
         ),
         patch("scripts.ta_premarket_prep.TAService", _FakeTAService),
         patch("scripts.ta_premarket_prep.UNIVERSE_CACHE", MagicMock(spec=Path)),
@@ -218,7 +218,7 @@ def test_ib_connection_failure_prints_audit(mock_bar, mock_ltd, mock_init, mock_
         # _build_triple_source_universe returns no pre-opened IB client
         patch(
             "scripts.ta_premarket_prep._build_triple_source_universe",
-            return_value=(["AAPL", "SPY"], None, None),
+            return_value=(["AAPL", "SPY"], None, None, True),
         ),
         patch("scripts.ta_premarket_prep.UNIVERSE_CACHE", MagicMock(spec=Path)),
         patch.dict(
@@ -352,3 +352,45 @@ def test_audit_only_stays_offline(tmp_path, monkeypatch):
 
     assert not uw_called, "--audit-only must not connect to UW"
     assert not ib_called, "--audit-only must not connect to IB"
+
+
+# ── source_counts telemetry honesty ─────────────────────────────────────
+
+
+def test_universe_cache_honest_when_build_universe_fails(tmp_path, monkeypatch):
+    """When build_universe raises, persisted source_counts must reflect
+    that triple-source was NOT actually used, even if clients connected."""
+    import json as _json
+    from pathlib import Path
+    from unittest.mock import MagicMock
+
+    import scripts.ta_premarket_prep as prep
+
+    monkeypatch.setattr(prep, "_connect_uw_client", lambda: MagicMock(), raising=False)
+    monkeypatch.setattr(prep, "_connect_ib_client", lambda: MagicMock(), raising=False)
+
+    def boom(cfg, *, uw_client, ib_client):
+        raise RuntimeError("UW API down")
+
+    monkeypatch.setattr(prep, "build_universe", boom, raising=False)
+    monkeypatch.setattr(prep, "build_static_universe", lambda **k: ["AAPL", "MSFT"])
+
+    monkeypatch.setattr(prep, "get_connection", lambda p: MagicMock())
+    monkeypatch.setattr(prep, "init_schema", lambda c: None)
+    monkeypatch.setattr(prep, "classify_tickers", lambda c, t, d: {"current": t, "stale": [], "missing": []})
+
+    fake_svc = MagicMock()
+    fake_svc.bulk_refresh.return_value = None
+    monkeypatch.setattr(prep, "TAService", lambda **k: fake_svc, raising=False)
+
+    cache_path = tmp_path / "universe.json"
+    monkeypatch.setattr(prep, "UNIVERSE_CACHE", cache_path, raising=False)
+
+    db = tmp_path / "ta.duckdb"
+    prep.main(["--db", str(db)])
+
+    payload = _json.loads(cache_path.read_text())
+    assert payload["source_counts"]["has_uw"] is False
+    assert payload["source_counts"]["has_ib_scanner"] is False
+    assert payload["source_counts"]["total"] == 3  # AAPL, MSFT, SPY (appended)
+    assert "SPY" in payload["tickers"]
