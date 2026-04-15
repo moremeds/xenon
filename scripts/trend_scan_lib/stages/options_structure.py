@@ -14,6 +14,8 @@ STRUCTURE_WEIGHTS = {
 }
 PINNING_GEX_THRESHOLD = 1_000_000
 PINNING_SPOT_PCT = 0.005
+OVERHEAD_WALL_PCT_ABOVE = 0.02  # call wall within 2% above spot
+SUPPORTIVE_PUT_PCT_BELOW = 0.03  # put wall within 3% below spot counts as support
 
 
 def score_gamma_flip(*, spot: float, gamma_flip: float) -> float:
@@ -101,12 +103,41 @@ def is_severely_pinned(
     return within_range and high_gex
 
 
+def has_unsupported_overhead_wall(
+    *,
+    spot: float,
+    call_wall: float,
+    put_wall: float,
+) -> bool:
+    """True iff a call wall sits close above spot with no meaningful put
+    wall below. This is the second hard-fail case in Stage B structure
+    (the first being severe pinning)."""
+    if spot <= 0 or call_wall <= 0:
+        return False
+    call_overhead = (call_wall - spot) / spot
+    if not (0 < call_overhead <= OVERHEAD_WALL_PCT_ABOVE):
+        return False
+    # Check for supportive put wall
+    if put_wall > 0:
+        put_support = (spot - put_wall) / spot
+        if 0 < put_support <= SUPPORTIVE_PUT_PCT_BELOW:
+            return False  # supported — not a hard reject
+    return True
+
+
 def compute_structure_score(data: dict) -> tuple[float, bool]:
     spot = data.get("spot", 0)
     max_pain = data.get("max_pain", 0)
     gex_at_spot = data.get("gex_at_spot", 0)
 
     if is_severely_pinned(spot=spot, max_pain=max_pain, gex_at_spot=gex_at_spot):
+        return 0.0, True
+
+    if has_unsupported_overhead_wall(
+        spot=spot,
+        call_wall=data.get("call_wall", 0),
+        put_wall=data.get("put_wall", 0),
+    ):
         return 0.0, True
 
     scores = {

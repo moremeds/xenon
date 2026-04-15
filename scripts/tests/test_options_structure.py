@@ -143,3 +143,49 @@ def test_compute_structure_score_rejected_pinning():
     }
     score, rejected = compute_structure_score(data)
     assert rejected
+
+
+def test_compute_structure_score_rejects_overhead_wall_without_support():
+    """A large call wall within 2% above spot with no put wall below
+    = immediate overhead resistance with nothing to bounce off.
+    Must hard-reject like pinning does."""
+    from scripts.trend_scan_lib.stages.options_structure import compute_structure_score
+
+    score, rejected = compute_structure_score(
+        {
+            "spot": 100.0,
+            "max_pain": 95.0,  # not pinned
+            "gex_at_spot": 0.0,
+            "call_wall": 101.5,  # within 2% above spot
+            "put_wall": 0.0,  # no support below
+            "net_call_oi_change": 0,
+            "net_put_oi_change": 0,
+            "net_gex": 0,
+            "gamma_flip": 95.0,
+        }
+    )
+
+    assert rejected is True, "overhead wall with no put support must reject"
+    assert score == 0.0
+
+
+def test_compute_structure_score_overhead_wall_ok_with_put_support():
+    """Overhead wall is acceptable if a meaningful put wall exists below —
+    range-bound structure is still tradeable."""
+    from scripts.trend_scan_lib.stages.options_structure import compute_structure_score
+
+    score, rejected = compute_structure_score(
+        {
+            "spot": 100.0,
+            "max_pain": 95.0,
+            "gex_at_spot": 0.0,
+            "call_wall": 101.5,
+            "put_wall": 98.0,  # meaningful support
+            "net_call_oi_change": 0,
+            "net_put_oi_change": 1000,
+            "net_gex": 0,
+            "gamma_flip": 98.0,
+        }
+    )
+
+    assert rejected is False
