@@ -24,8 +24,10 @@ _project_root = str(Path(__file__).resolve().parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+from scripts.ta_lib.service import TAService
 from scripts.ta_lib.store import get_connection, get_latest_bar_date, init_schema
-from scripts.trend_scan_lib.universe import build_static_universe
+from scripts.trend_scan_lib.config import TrendScanConfig
+from scripts.trend_scan_lib.universe import build_static_universe, build_universe
 from scripts.utils.market_calendar import get_last_n_trading_days
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_DB = "data/ta.duckdb"
 DEFAULT_SP500 = "data/universe/sp500.json"
 DEFAULT_NASDAQ100 = "data/universe/nasdaq100.json"
+UNIVERSE_CACHE = Path("data/ta_premarket_universe.json")
 
 
 # ── Phase 1: Audit ──────────────────────────────────────────────────────
@@ -70,8 +73,6 @@ def classify_tickers(
     def _get_svc():
         nonlocal _svc
         if _svc is None:
-            from scripts.ta_lib.service import TAService  # lazy import to avoid IB dep at module load
-
             _svc = TAService.read_only(conn)
         return _svc
 
@@ -108,12 +109,72 @@ def _counts(cls: dict[str, list[str]]) -> dict[str, int]:
     return {k: len(v) for k, v in cls.items()}
 
 
+# ── Universe helpers ─────────────────────────────────────────────────────
+
+
+def _connect_uw_client():
+    """Return a UW client or None if unavailable — non-fatal."""
+    try:
+        from scripts.clients.uw_client import UWClient
+
+        return UWClient()
+    except Exception as exc:
+        logger.warning("UW client unavailable: %s — prep will omit UW flow tickers", exc)
+        return None
+
+
+def _connect_ib_client():
+    """Return an IB client or None if unavailable — non-fatal."""
+    try:
+        from scripts.clients.ib_client import IBClient
+
+        ib = IBClient()
+        ib.connect(client_id="auto")
+        return ib
+    except Exception as exc:
+        logger.warning("IB client unavailable: %s — prep will skip IB scanner universe", exc)
+        return None
+
+
+def _build_triple_source_universe(
+    cfg: TrendScanConfig,
+) -> tuple[list[str], object | None, object | None]:
+    """Build the full scanner universe (refresh mode only).
+
+    Never called from --audit-only. Uses real TrendScanConfig defaults so
+    prep sees the same UW lookback / premium threshold the scanner does.
+    Returns (tickers, uw_client_or_None, ib_client_or_None). The IB client
+    (if returned) is kept open for reuse by the TAService refresh phase.
+    """
+    uw = _connect_uw_client()
+    ib = _connect_ib_client()
+    try:
+        tickers = build_universe(cfg, uw_client=uw, ib_client=ib)
+    except Exception as exc:
+        logger.warning("build_universe failed (%s) — falling back to static-only", exc)
+        tickers = build_static_universe(
+            sp500_path=cfg.sp500_path,
+            nasdaq100_path=cfg.nasdaq100_path,
+        )
+    if "SPY" not in tickers:
+        tickers.append("SPY")
+    return tickers, uw, ib
+
+
+def _build_static_only_universe(args) -> list[str]:
+    """Build static-only universe for --audit-only. Never touches network."""
+    tickers = build_static_universe(sp500_path=args.sp500, nasdaq100_path=args.nasdaq100)
+    if "SPY" not in tickers:
+        tickers.append("SPY")
+    return tickers
+
+
 # ── Main ─────────────────────────────────────────────────────────────────
 
 
 def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Pre-market TA data prep")
-    parser.add_argument("--audit-only", action="store_true", help="Audit only, no IB refresh")
+    parser.add_argument("--audit-only", action="store_true", help="Audit only, no IB refresh. Offline.")
     parser.add_argument("--force", action="store_true", help="Refresh all tickers, not just stale/missing")
     parser.add_argument("--db", default=DEFAULT_DB, help="DuckDB path")
     parser.add_argument("--sp500", default=DEFAULT_SP500, help="SP500 universe JSON")
@@ -122,36 +183,56 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-    # Build universe
-    tickers = build_static_universe(sp500_path=args.sp500, nasdaq100_path=args.nasdaq100)
-    if "SPY" not in tickers:
-        tickers.append("SPY")
-
-    # Phase 1 — Audit
     conn = get_connection(args.db)
     init_schema(conn)
     ref_date = _last_trading_date()
+
+    if args.audit_only:
+        tickers = _build_static_only_universe(args)
+        before = classify_tickers(conn, tickers, ref_date)
+        _print_audit("BEFORE", before)
+        json.dump({"before": _counts(before)}, sys.stdout, indent=2)
+        print(file=sys.stdout)
+        return
+
+    # Refresh mode: build the FULL scanner universe via real TrendScanConfig.
+    cfg = TrendScanConfig(sp500_path=args.sp500, nasdaq100_path=args.nasdaq100)
+    tickers, uw_client, ib_client_preopened = _build_triple_source_universe(cfg)
+
+    # Persist so the 8:30 AM scan can reuse the exact same universe.
+    UNIVERSE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    UNIVERSE_CACHE.write_text(
+        json.dumps(
+            {
+                "tickers": tickers,
+                "built_at": datetime.now().isoformat(timespec="seconds"),
+                "source_counts": {
+                    "total": len(tickers),
+                    "has_uw": uw_client is not None,
+                    "has_ib_scanner": ib_client_preopened is not None,
+                },
+            },
+            indent=2,
+        )
+    )
+
     before = classify_tickers(conn, tickers, ref_date)
     _print_audit("BEFORE", before)
 
-    if args.audit_only:
-        json.dump({"before": _counts(before)}, sys.stdout, indent=2)
-        print(file=sys.stdout)
-        sys.exit(0)
-
-    # Phase 2 — IB Refresh
     t0 = time.monotonic()
-    try:
-        from scripts.clients.ib_client import IBClient
-        from scripts.ta_lib.service import TAService
+    if ib_client_preopened is not None:
+        ib = ib_client_preopened
+    else:
+        try:
+            from scripts.clients.ib_client import IBClient
 
-        ib = IBClient()
-        ib.connect(client_id="auto")
-    except Exception as exc:
-        logger.warning("IB connection failed: %s — skipping refresh", exc)
-        json.dump({"before": _counts(before), "error": str(exc)}, sys.stdout, indent=2)
-        print(file=sys.stdout)
-        return
+            ib = IBClient()
+            ib.connect(client_id="auto")
+        except Exception as exc:
+            logger.warning("IB connection failed: %s — skipping refresh", exc)
+            json.dump({"before": _counts(before), "error": str(exc)}, sys.stdout, indent=2)
+            print(file=sys.stdout)
+            return
 
     ta_svc = TAService(db_path=args.db, ib_client=ib)
 
@@ -159,18 +240,12 @@ def main(argv: Optional[list[str]] = None) -> None:
     if refresh_tickers:
         logger.info("Refreshing %d tickers ...", len(refresh_tickers))
         ta_svc.bulk_refresh(refresh_tickers)
-    else:
-        logger.info("Nothing to refresh")
 
     elapsed = time.monotonic() - t0
-
-    # Phase 3 — Post-Refresh Audit
     after = classify_tickers(conn, tickers, ref_date)
     _print_audit("AFTER", after)
 
-    # Determine failed tickers (still stale or missing after refresh)
     failed = sorted(set(after["stale"] + after["missing"]) & set(refresh_tickers))
-
     result = {
         "before": _counts(before),
         "after": _counts(after),
