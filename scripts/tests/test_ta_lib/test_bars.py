@@ -1,76 +1,94 @@
-"""Unit tests for ta_lib.bars with mocked IB client."""
+"""Tests for scripts.ta_lib.bars (Massive-backed)."""
 
 from __future__ import annotations
 
-from datetime import datetime
-from types import SimpleNamespace
-from unittest.mock import MagicMock
+from datetime import date
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
-
-def _make_bar_data(n: int = 5, start_date: str = "20260401") -> list:
-    """Create mock ib_insync BarData objects."""
-    bars = []
-    dt = datetime.strptime(start_date, "%Y%m%d")
-    for i in range(n):
-        bar_date = dt.replace(day=dt.day + i)
-        bars.append(
-            SimpleNamespace(
-                date=bar_date.strftime("%Y%m%d"),
-                open=100.0 + i,
-                high=101.0 + i,
-                low=99.0 + i,
-                close=100.5 + i,
-                volume=1_000_000 + i * 100_000,
-            )
-        )
-    return bars
+from scripts.ta_lib.bars import fetch_bars
 
 
-class TestFetchBars:
-    def test_returns_dataframe(self):
-        from scripts.ta_lib.bars import fetch_bars
+def _massive_df() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "date": pd.Timestamp("2026-04-08", tz="America/New_York"),
+                "open": 170.0,
+                "high": 172.0,
+                "low": 169.5,
+                "close": 171.5,
+                "volume": 50_000_000,
+                "vwap": 170.8,
+                "tx_count": 450_000,
+            },
+            {
+                "date": pd.Timestamp("2026-04-09", tz="America/New_York"),
+                "open": 171.5,
+                "high": 173.0,
+                "low": 170.9,
+                "close": 172.7,
+                "volume": 48_000_000,
+                "vwap": 171.9,
+                "tx_count": 430_000,
+            },
+        ]
+    )
 
-        mock_ib = MagicMock()
-        mock_ib.get_historical_data.return_value = _make_bar_data(n=5)
-        mock_ib._ib = MagicMock()
-        mock_ib._ib.qualifyContracts.return_value = [MagicMock()]
 
-        result = fetch_bars(mock_ib, "AAPL", duration="1 Y", bar_size="1 day")
-        assert isinstance(result, pd.DataFrame)
-        assert len(result) == 5
-        assert list(result.columns) == ["date", "open", "high", "low", "close", "volume"]
+def test_fetch_bars_returns_store_compatible_columns():
+    mc = MagicMock()
+    mc.get_aggregates.return_value = _massive_df()
+    df = fetch_bars(mc, "AAPL", timeframe="1d", lookback_days=30)
+    assert list(df.columns) == ["date", "open", "high", "low", "close", "volume"]
 
-    def test_date_parsed_correctly(self):
-        from scripts.ta_lib.bars import fetch_bars
 
-        mock_ib = MagicMock()
-        mock_ib.get_historical_data.return_value = _make_bar_data(n=1, start_date="20260410")
-        mock_ib._ib = MagicMock()
-        mock_ib._ib.qualifyContracts.return_value = [MagicMock()]
+def test_fetch_bars_passes_overlap_days():
+    mc = MagicMock()
+    mc.get_aggregates.return_value = _massive_df()
+    with patch("scripts.ta_lib.bars._today_et", return_value=date(2026, 4, 10)):
+        fetch_bars(mc, "AAPL", timeframe="1d", lookback_days=30, overlap_days=5)
+    kwargs = mc.get_aggregates.call_args.kwargs
+    # to_date = today ET; from_date = to_date - (30 + 5) = 35 days back
+    assert kwargs["to_date"] == "2026-04-10"
+    assert kwargs["from_date"] == "2026-03-06"
 
-        result = fetch_bars(mock_ib, "AAPL", duration="1 D", bar_size="1 day")
-        assert result["date"].iloc[0] == pd.Timestamp("2026-04-10")
 
-    def test_empty_response_raises(self):
-        from scripts.ta_lib.bars import fetch_bars
+def test_fetch_bars_1h_timeframe():
+    mc = MagicMock()
+    mc.get_aggregates.return_value = _massive_df()
+    fetch_bars(mc, "AAPL", timeframe="1h", lookback_days=7)
+    assert mc.get_aggregates.call_args.kwargs["timeframe"] == "1h"
 
-        mock_ib = MagicMock()
-        mock_ib.get_historical_data.return_value = []
-        mock_ib._ib = MagicMock()
-        mock_ib._ib.qualifyContracts.return_value = [MagicMock()]
 
-        with pytest.raises(RuntimeError, match="No historical data"):
-            fetch_bars(mock_ib, "AAPL", duration="1 Y", bar_size="1 day")
+def test_fetch_bars_filters_malformed_rows():
+    bad = _massive_df().copy()
+    bad.loc[len(bad)] = {
+        "date": pd.Timestamp("2026-04-10", tz="America/New_York"),
+        "open": 0.0,
+        "high": 0.0,
+        "low": 0.0,
+        "close": 0.0,
+        "volume": -1,
+        "vwap": 0.0,
+        "tx_count": 0,
+    }
+    mc = MagicMock()
+    mc.get_aggregates.return_value = bad
+    df = fetch_bars(mc, "AAPL", timeframe="1d", lookback_days=30)
+    assert len(df) == 2
 
-    def test_invalid_contract_raises(self):
-        from scripts.ta_lib.bars import fetch_bars
 
-        mock_ib = MagicMock()
-        mock_ib._ib = MagicMock()
-        mock_ib._ib.qualifyContracts.return_value = []  # qualification failed
+def test_fetch_bars_invalid_timeframe():
+    with pytest.raises(ValueError):
+        fetch_bars(MagicMock(), "AAPL", timeframe="5m", lookback_days=30)
 
-        with pytest.raises(ValueError, match="INVALID"):
-            fetch_bars(mock_ib, "INVALID", duration="1 Y", bar_size="1 day")
+
+def test_fetch_bars_defaults_to_ET_today():
+    mc = MagicMock()
+    mc.get_aggregates.return_value = _massive_df()
+    with patch("scripts.ta_lib.bars._today_et", return_value=date(2026, 4, 15)):
+        fetch_bars(mc, "AAPL", timeframe="1d", lookback_days=10)
+    assert mc.get_aggregates.call_args.kwargs["to_date"] == "2026-04-15"

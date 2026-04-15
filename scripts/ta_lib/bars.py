@@ -1,81 +1,85 @@
-"""IB historical data fetch with BarData → DataFrame conversion."""
+"""Massive-backed historical OHLCV fetch with Massive -> DataFrame -> store contract conversion.
+
+Contract: returns a DataFrame with columns [date, open, high, low, close, volume]
+(dropping Massive's VWAP and tx_count -- Phase 2 persistence).
+
+tz contract: Massive returns `date` as pd.Timestamp with tz="America/New_York".
+The DuckDB schema in store.py declares `bar_date TIMESTAMPTZ`, so we keep tz-aware
+timestamps intact all the way through write_ohlc. No tz stripping needed.
+"""
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
-from ib_insync import Stock
 
 logger = logging.getLogger(__name__)
 
+_ET = ZoneInfo("America/New_York")
+_SUPPORTED_TIMEFRAMES = {"1d", "1h"}
+_STORE_COLUMNS = ["date", "open", "high", "low", "close", "volume"]
+
+
+def _today_et() -> date:
+    """Return today's date in America/New_York -- avoids host-local TZ skew."""
+    return datetime.now(_ET).date()
+
 
 def fetch_bars(
-    ib_client,
+    massive_client,
     ticker: str,
-    duration: str = "1 Y",
-    bar_size: str = "1 day",
-    what_to_show: str = "TRADES",
+    timeframe: str,
+    lookback_days: int,
+    overlap_days: int = 5,
     end_date: str = "",
 ) -> pd.DataFrame:
-    """Fetch historical bars from IB and return as DataFrame.
+    """Fetch OHLCV bars from Massive.com and reduce to the store schema.
 
     Args:
-        ib_client: An IBClient instance (scripts.clients.ib_client.IBClient).
+        massive_client: A MassiveClient instance (scripts.clients.massive_client).
         ticker: Stock symbol (e.g. "AAPL").
-        duration: IB duration string (e.g. "1 Y", "1 M").
-        bar_size: IB bar size (e.g. "1 day", "1 hour").
-        what_to_show: Data type ("TRADES", "MIDPOINT", etc.).
-        end_date: End date string (empty = now).
+        timeframe: "1d" or "1h".
+        lookback_days: Calendar days of history requested relative to end_date.
+        overlap_days: Extra days fetched before lookback_days (incremental overlap buffer).
+        end_date: End date string "YYYY-MM-DD". Empty -> today in ET.
 
     Returns:
-        DataFrame with columns [date, open, high, low, close, volume].
+        DataFrame with columns [date, open, high, low, close, volume], sorted ascending.
+        `date` is tz-aware (America/New_York). Matches the store's TIMESTAMPTZ contract.
 
     Raises:
-        ValueError: If the contract can't be qualified (invalid/ambiguous symbol).
-        RuntimeError: If IB returns no data.
+        ValueError: For unsupported timeframes.
     """
-    contract = Stock(ticker, "SMART", "USD")
-    qualified = ib_client._ib.qualifyContracts(contract)
-    if not qualified:
-        raise ValueError(f"Could not qualify IB contract for '{ticker}'")
+    if timeframe not in _SUPPORTED_TIMEFRAMES:
+        raise ValueError(f"Unsupported timeframe {timeframe!r}")
 
-    bars = ib_client.get_historical_data(
-        contract=qualified[0],
-        duration=duration,
-        bar_size=bar_size,
-        what_to_show=what_to_show,
-        end_date=end_date,
+    to_dt = date.fromisoformat(end_date) if end_date else _today_et()
+    from_dt = to_dt - timedelta(days=lookback_days + overlap_days)
+
+    df = massive_client.get_aggregates(
+        ticker=ticker,
+        timeframe=timeframe,
+        from_date=from_dt.isoformat(),
+        to_date=to_dt.isoformat(),
+        adjusted=True,
     )
 
-    if not bars:
-        raise RuntimeError(f"No historical data returned for '{ticker}'")
+    df = df[_STORE_COLUMNS].copy()  # drop VWAP + tx_count
 
-    return _bars_to_dataframe(bars)
-
-
-def _bars_to_dataframe(bars: list) -> pd.DataFrame:
-    """Convert list of ib_insync BarData to a pandas DataFrame."""
-    rows = []
-    for bar in bars:
-        date_str = str(bar.date)
-        # IB formatDate=1 gives "yyyyMMdd" for daily, or datetime for intraday
-        if len(date_str) == 8 and date_str.isdigit():
-            dt = pd.Timestamp(datetime.strptime(date_str, "%Y%m%d"))
-        else:
-            dt = pd.Timestamp(date_str)
-        rows.append(
-            {
-                "date": dt,
-                "open": float(bar.open),
-                "high": float(bar.high),
-                "low": float(bar.low),
-                "close": float(bar.close),
-                "volume": int(bar.volume),
-            }
+    before = len(df)
+    df = df[(df["open"] > 0) & (df["high"] > 0) & (df["low"] > 0) & (df["close"] > 0) & (df["volume"] >= 0)].copy()
+    dropped = before - len(df)
+    if dropped:
+        logger.warning(
+            "fetch_bars: dropped %d malformed row(s) for %s %s",
+            dropped,
+            ticker,
+            timeframe,
         )
-    df = pd.DataFrame(rows)
+
     df.sort_values("date", inplace=True)
     df.reset_index(drop=True, inplace=True)
     return df

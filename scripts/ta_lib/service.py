@@ -1,16 +1,16 @@
-"""TAService — read-through cache orchestrator."""
+"""TAService -- read-through cache orchestrator (Massive-backed)."""
 
 from __future__ import annotations
 
 import logging
 import threading
-import time
-from datetime import date, datetime
+from dataclasses import dataclass, field
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from scripts.ta_lib.bars import fetch_bars
+from scripts.ta_lib.bars import _today_et, fetch_bars
 from scripts.ta_lib.indicators import compute_all
 from scripts.ta_lib.store import (
     delete_ticker,
@@ -27,7 +27,7 @@ from scripts.utils.market_calendar import get_last_n_trading_days
 
 logger = logging.getLogger(__name__)
 
-# Field name mapping: DB column → trend_scan.py key
+# Field name mapping: DB column -> trend_scan.py key
 _FIELD_MAP = {
     "sma_20": "ma_20",
     "sma_50": "ma_50",
@@ -44,11 +44,27 @@ _ET = ZoneInfo("America/New_York")
 
 _SUPPORTED_TIMEFRAMES = {"1d", "1h"}
 
-# IB bar_size and default cold-start duration per timeframe
-_TIMEFRAME_IB = {
-    "1d": {"bar_size": "1 day", "cold_duration": "1 Y"},
-    "1h": {"bar_size": "1 hour", "cold_duration": "1 M"},
-}
+# Cold-start calendar lookback per timeframe (Massive is calendar-day based).
+_COLD_LOOKBACK_DAYS = {"1d": 365, "1h": 30}
+
+
+@dataclass
+class BulkRefreshResult:
+    """Outcome of a bulk_refresh() invocation.
+
+    Callers (e.g. ta_premarket_prep) use `failure_ratio` to decide whether to
+    emit GOOD/DEGRADED/FAILED status codes.
+    """
+
+    attempted: int
+    succeeded: int
+    failed: int
+    failed_tickers: list[str] = field(default_factory=list)
+    aborted: bool = False
+
+    @property
+    def failure_ratio(self) -> float:
+        return self.failed / max(self.attempted, 1)
 
 
 class TAService:
@@ -58,7 +74,7 @@ class TAService:
     Reads use thread-local cursors via _read_cursor() for parallel_fetch compatibility.
     """
 
-    def __init__(self, db_path: str = "data/ta.duckdb", ib_client=None):
+    def __init__(self, db_path: str = "data/ta.duckdb", massive_client=None):
         if db_path == ":memory:":
             import duckdb
 
@@ -66,21 +82,21 @@ class TAService:
         else:
             self._conn = get_connection(db_path)
         init_schema(self._conn)
-        self._ib_client = ib_client
+        self._massive_client = massive_client
         self._local = threading.local()
 
     @classmethod
     def read_only(cls, conn) -> "TAService":
         """Construct a TAService bound to an existing connection.
 
-        Skips __init__ entirely — no IB client, no schema init. The caller
+        Skips __init__ entirely -- no Massive client, no schema init. The caller
         is responsible for passing a connection with schema already
         initialized. Use this for read-only audit paths (e.g.,
         ta_premarket_prep.classify_tickers).
         """
         svc = cls.__new__(cls)
         svc._conn = conn
-        svc._ib_client = None
+        svc._massive_client = None
         return svc
 
     def _read_cursor(self):
@@ -133,7 +149,7 @@ class TAService:
         latest = df.iloc[-1]
         close = float(latest["close"])
 
-        # Map DB column names → trend_scan.py field names
+        # Map DB column names -> trend_scan.py field names
         snapshot = {"ticker": ticker}
         snapshot["close"] = close
         snapshot["price"] = close
@@ -173,13 +189,13 @@ class TAService:
         else:
             snapshot["range_20d_pct"] = 0.0
 
-        # 20-day high/low and 52w low — for breakout/breakdown detection.
+        # 20-day high/low and 52w low -- for breakout/breakdown detection.
         snapshot["high_20d"] = float(highs.tail(20).max()) if len(highs) >= 20 else close
         snapshot["low_20d"] = float(lows.tail(20).min()) if len(lows) >= 20 else close
         snapshot["low_52w"] = float(lows.tail(252).min()) if not lows.empty else close
 
         # Up-day / down-day volume ratio over last 10 sessions.
-        # Require minimum 3 samples on BOTH sides — otherwise return neutral (1.0).
+        # Require minimum 3 samples on BOTH sides -- otherwise return neutral (1.0).
         # A previously proposed 2.0 sentinel for all-up windows was dropped after
         # tribunal review: it created false-precision spikes that dominated the
         # trend score (which weights this 2x) without real directional evidence.
@@ -204,70 +220,69 @@ class TAService:
 
         return snapshot
 
-    def bulk_refresh(self, tickers: list[str], timeframe: str = "1d") -> None:
-        """Pre-fetch OHLC for all stale tickers with IB pacing.
+    def bulk_refresh(
+        self,
+        tickers: list[str],
+        timeframe: str | None = None,
+    ) -> BulkRefreshResult:
+        """Pre-fetch OHLC + indicators for stale tickers via Massive.
 
-        Must be called on the main thread (ib_insync is not thread-safe).
+        If `timeframe is None`, loops both 1d and 1h. No IB pacing anymore --
+        Massive is an HTTP REST API with its own rate-limit headers handled
+        by MassiveClient.
+
+        Must be called on the main thread (shared DuckDB connection).
         """
-        if self._ib_client is None:
-            logger.warning("bulk_refresh: no IB client — using cached data only")
-            return
+        if self._massive_client is None:
+            logger.warning("bulk_refresh: no Massive client -- using cached data only")
+            return BulkRefreshResult(attempted=0, succeeded=0, failed=0)
 
-        stale = [t.upper() for t in tickers if self._is_stale(t.upper(), timeframe)]
-        if not stale:
-            logger.info("bulk_refresh: all %d tickers are current", len(tickers))
-            return
+        timeframes = ["1d", "1h"] if timeframe is None else [timeframe]
+        attempted = 0
+        succeeded = 0
+        failed_set: set[str] = set()
 
-        logger.info("bulk_refresh: %d/%d tickers need refresh", len(stale), len(tickers))
-        batch_size = 55
-        consecutive_batch_failures = 0
-        backoff_s = 10
+        for tf in timeframes:
+            stale = [t.upper() for t in tickers if self._is_stale(t.upper(), tf)]
+            if not stale:
+                logger.info("bulk_refresh: all %d tickers current for %s", len(tickers), tf)
+                continue
+            logger.info(
+                "bulk_refresh: %d/%d tickers need refresh for %s",
+                len(stale),
+                len(tickers),
+                tf,
+            )
 
-        for batch_start in range(0, len(stale), batch_size):
-            if consecutive_batch_failures >= 3:
-                logger.error("bulk_refresh: 3 consecutive batch failures, aborting")
-                break
-
-            batch = stale[batch_start : batch_start + batch_size]
-            batch_had_failure = False
-            consecutive_ticker_failures = 0
-
-            for ticker in batch:
+            for ticker in stale:
+                attempted += 1
                 try:
-                    self._refresh(ticker, timeframe)
-                    consecutive_ticker_failures = 0
-                    backoff_s = 10
+                    self._refresh(ticker, tf)
+                    succeeded += 1
                 except Exception as exc:
-                    logger.warning("bulk_refresh: failed to refresh %s: %s", ticker, exc)
-                    consecutive_ticker_failures += 1
-                    batch_had_failure = True
+                    logger.warning("bulk_refresh: failed %s %s: %s", ticker, tf, exc)
+                    failed_set.add(ticker)
 
-                    if "pacing" in str(exc).lower() or "162" in str(exc):
-                        logger.info("Pacing error — backing off %ds", backoff_s)
-                        self._ib_sleep(backoff_s)
-                        backoff_s = min(backoff_s * 2, 120)
+        failed = attempted - succeeded
+        return BulkRefreshResult(
+            attempted=attempted,
+            succeeded=succeeded,
+            failed=failed,
+            failed_tickers=sorted(failed_set),
+            aborted=False,
+        )
 
-                    if consecutive_ticker_failures >= 5:
-                        logger.error("bulk_refresh: 5 consecutive ticker failures, skipping rest of batch")
-                        break
-                self._ib_sleep(0.2)
+    def _compute_lookback_days(self, ticker: str, timeframe: str) -> int:
+        """Calendar-day lookback for Massive.
 
-            if batch_had_failure:
-                consecutive_batch_failures += 1
-            else:
-                consecutive_batch_failures = 0
-
-            # Sleep between batches (skip after last batch)
-            if batch_start + batch_size < len(stale):
-                logger.info("bulk_refresh: pacing — sleeping 10 min before next batch")
-                self._ib_sleep(600)
-
-    def _ib_sleep(self, seconds: float) -> None:
-        """Sleep without blocking ib_insync's asyncio event loop."""
-        if self._ib_client and hasattr(self._ib_client, "_ib"):
-            self._ib_client._ib.sleep(seconds)
-        else:
-            time.sleep(seconds)
+        Cold start -> _COLD_LOOKBACK_DAYS[timeframe]. Incremental -> days since
+        latest cached bar (minimum 1).
+        """
+        latest = get_latest_bar_date(self._conn, ticker, timeframe)
+        if latest is None:
+            return _COLD_LOOKBACK_DAYS[timeframe]
+        days_behind = (_today_et() - latest).days
+        return max(days_behind, 1)
 
     def _is_stale(self, ticker: str, timeframe: str, cursor=None) -> bool:
         """Check if cached data needs refresh."""
@@ -281,62 +296,65 @@ class TAService:
         if indicators is None or len(indicators) == 0:
             return True
 
-        # Use ET-aware datetime for correct session detection
+        if timeframe == "1h":
+            # "Latest cached bar must be at or after the prior trading day's
+            # 15:30 ET close" (the last full hourly bar of a session).
+            prior_day_strs = get_last_n_trading_days(2)
+            if not prior_day_strs:
+                return True
+            target_str = prior_day_strs[-2] if len(prior_day_strs) >= 2 else prior_day_strs[0]
+            prior_trading_day = datetime.strptime(target_str, "%Y-%m-%d").date()
+            required_min = datetime.combine(prior_trading_day, time(15, 30), tzinfo=_ET)
+            latest_ts = get_latest_bar_timestamp(conn, ticker, timeframe)
+            if latest_ts is None:
+                return True
+            # Normalize tz: compare both aware in ET.
+            if latest_ts.tzinfo is None:
+                latest_ts = latest_ts.replace(tzinfo=_ET)
+            else:
+                latest_ts = latest_ts.astimezone(_ET)
+            return latest_ts < required_min
+
+        # 1d branch -- unchanged semantics.
         now_et = datetime.now(_ET)
         last_session_str = get_last_n_trading_days(1, from_date=now_et)
         if not last_session_str:
             return True
-
         last_session = datetime.strptime(last_session_str[0], "%Y-%m-%d").date()
-
-        if timeframe == "1d":
-            return latest < last_session
-
-        # Intraday: stale if latest bar is from a previous session, OR if
-        # market is open and latest bar is more than 2 hours old
-        if latest < last_session:
-            return True
-        market_open = now_et.hour >= 9 and (now_et.hour > 9 or now_et.minute >= 30)
-        market_close = now_et.hour >= 16
-        if last_session == now_et.date() and market_open and not market_close:
-            # During market hours: stale if latest bar is >2h behind.
-            # Use the full timestamp (not just date) so we don't treat a
-            # bar from 15:00 today as if it were midnight.
-            latest_ts = get_latest_bar_timestamp(conn, ticker, timeframe)
-            if latest_ts is None:
-                return True
-            # Normalize both sides to naive for robust subtraction
-            # (now_et may be tz-aware or mocked-naive; latest_ts from DuckDB
-            # may be tz-aware UTC or naive).
-            now_naive = now_et.replace(tzinfo=None) if now_et.tzinfo else now_et
-            latest_naive = latest_ts.replace(tzinfo=None) if latest_ts.tzinfo else latest_ts
-            hours_behind = (now_naive - latest_naive).total_seconds() / 3600
-            return hours_behind > 2
-        return False
+        return latest < last_session
 
     def _refresh(self, ticker: str, timeframe: str) -> None:
-        """Fetch from IB, compute indicators, write to DB."""
-        ib_cfg = _TIMEFRAME_IB[timeframe]
-        bar_size = ib_cfg["bar_size"]
-        cold_duration = ib_cfg["cold_duration"]
+        """Fetch from Massive, compute indicators, write to DB."""
+        lookback_days = self._compute_lookback_days(ticker, timeframe)
         latest = get_latest_bar_date(self._conn, ticker, timeframe)
+        end_date = ""
 
         if latest is None:
-            duration = cold_duration
-            end_date = ""
-            logger.info("Cold start fetch for %s (%s, %s)", ticker, duration, bar_size)
+            logger.info(
+                "Cold start fetch for %s (%s, %d calendar days)",
+                ticker,
+                timeframe,
+                lookback_days,
+            )
         else:
-            days_behind = (date.today() - latest).days
-            duration = f"{max(days_behind + 5, 5)} D"
-            end_date = ""
-            logger.info("Incremental fetch for %s (%s, %d days behind)", ticker, duration, days_behind)
+            logger.info(
+                "Incremental fetch for %s (%s, %d calendar days behind)",
+                ticker,
+                timeframe,
+                lookback_days,
+            )
 
-        df = fetch_bars(self._ib_client, ticker, duration=duration, bar_size=bar_size, end_date=end_date)
+        df = fetch_bars(
+            self._massive_client,
+            ticker,
+            timeframe=timeframe,
+            lookback_days=lookback_days,
+            overlap_days=5,
+            end_date=end_date,
+        )
 
         # Stock split detection: compare last cached close against the first
-        # truly NEW bar (after the latest cached date). Incremental fetches include
-        # overlap bars due to the +5 day buffer — comparing iloc[0] would compare
-        # against an old overlapping bar and miss the split.
+        # truly NEW bar (after the latest cached date).
         force_full_refetch = False
         if latest is not None and len(df) > 0:
             cached_ohlc = read_ohlc(self._conn, ticker, timeframe)
@@ -344,6 +362,10 @@ class TAService:
                 last_cached_close = float(cached_ohlc["close"].iloc[-1])
                 # Filter to bars strictly after the latest cached date
                 latest_ts = pd.Timestamp(latest)
+                # Align tz if df["date"] is tz-aware
+                df_dates = df["date"]
+                if hasattr(df_dates.dtype, "tz") and df_dates.dtype.tz is not None and latest_ts.tzinfo is None:
+                    latest_ts = latest_ts.tz_localize(_ET)
                 new_bars = df[df["date"] > latest_ts]
                 if len(new_bars) == 0:
                     new_bars = df  # fallback: all bars are "new" (cold start edge)
@@ -357,7 +379,14 @@ class TAService:
                             gap * 100,
                         )
                         force_full_refetch = True
-                        df = fetch_bars(self._ib_client, ticker, duration=cold_duration, bar_size=bar_size)
+                        df = fetch_bars(
+                            self._massive_client,
+                            ticker,
+                            timeframe=timeframe,
+                            lookback_days=_COLD_LOOKBACK_DAYS[timeframe],
+                            overlap_days=5,
+                            end_date=end_date,
+                        )
 
         # Atomic write: OHLC + indicators in one transaction
         self._conn.begin()

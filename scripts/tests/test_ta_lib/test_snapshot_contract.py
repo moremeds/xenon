@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -33,41 +32,41 @@ REQUIRED_KEYS = {
     "atr_pct",
     "dollar_volume",
     "price",
-    # NOTE: market_cap is NOT here — it comes from stock_info, not TAService
-    # NOTE: rs_vs_spy is NOT here — it's computed cross-ticker in trend_scan.py
+    # NOTE: market_cap is NOT here -- it comes from stock_info, not TAService
+    # NOTE: rs_vs_spy is NOT here -- it's computed cross-ticker in trend_scan.py
 }
 
 
-def _make_bar_data(n: int = 260) -> list:
+def _make_massive_df(n: int = 260) -> pd.DataFrame:
+    """Create a Massive-shaped DataFrame (tz-aware ET date, VWAP + tx_count)."""
     np.random.seed(42)
-    bars = []
-    from datetime import datetime
-
+    rows = []
+    start = pd.Timestamp("2025-05-01", tz="America/New_York")
     for i in range(n):
-        current = datetime(2025, 5, 1) + pd.tseries.offsets.BDay(i)
+        current = start + pd.tseries.offsets.BDay(i)
         close = 100.0 + i * 0.1 + np.random.randn() * 0.3
-        bars.append(
-            SimpleNamespace(
-                date=current.strftime("%Y%m%d"),
-                open=close - 0.1,
-                high=close + 0.5,
-                low=close - 0.5,
-                close=close,
-                volume=1_000_000,
-            )
+        rows.append(
+            {
+                "date": current,
+                "open": close - 0.1,
+                "high": close + 0.5,
+                "low": close - 0.5,
+                "close": close,
+                "volume": 1_000_000,
+                "vwap": close,
+                "tx_count": 10_000,
+            }
         )
-    return bars
+    return pd.DataFrame(rows)
 
 
 @pytest.fixture
 def ta_service():
     from scripts.ta_lib.service import TAService
 
-    mock_ib = MagicMock()
-    mock_ib.get_historical_data.return_value = _make_bar_data(n=260)
-    mock_ib._ib = MagicMock()
-    mock_ib._ib.qualifyContracts.return_value = [MagicMock()]
-    return TAService(db_path=":memory:", ib_client=mock_ib)
+    mc = MagicMock()
+    mc.get_aggregates.return_value = _make_massive_df(n=260)
+    return TAService(db_path=":memory:", massive_client=mc)
 
 
 class TestSnapshotContract:
@@ -82,7 +81,7 @@ class TestSnapshotContract:
         for key in scalar_keys:
             val = snapshot[key]
             assert not (isinstance(val, float) and np.isnan(val)), (
-                f"snapshot['{key}'] is NaN — trend_scan scoring will break"
+                f"snapshot['{key}'] is NaN -- trend_scan scoring will break"
             )
 
     def test_ma_20_series_is_list_of_floats(self, ta_service):
@@ -142,7 +141,7 @@ def test_up_day_volume_ratio_is_neutral_with_insufficient_samples(tmp_path):
     conn = get_connection(str(db))
     init_schema(conn)
 
-    # Seed 10 sessions of monotonically up prices — zero down days.
+    # Seed 10 sessions of monotonically up prices -- zero down days.
     today = date.today()
     rows = []
     base = 100.0
@@ -150,7 +149,7 @@ def test_up_day_volume_ratio_is_neutral_with_insufficient_samples(tmp_path):
         d = today - timedelta(days=10 - i)
         rows.append(
             {
-                "date": pd.Timestamp(d),
+                "date": pd.Timestamp(d, tz="America/New_York"),
                 "open": base + i,
                 "high": base + i + 0.5,
                 "low": base + i - 0.5,
@@ -169,7 +168,7 @@ def test_up_day_volume_ratio_is_neutral_with_insufficient_samples(tmp_path):
     ind_df["bar_date"] = ind_df["date"]
     write_indicators(conn, "ALLUP", "1d", ind_df)
 
-    svc = TAService(db_path=str(db), ib_client=None)
+    svc = TAService(db_path=str(db), massive_client=None)
     snap = svc.get_snapshot("ALLUP", allow_fetch=False)
     assert snap["up_day_volume_ratio"] == 1.0, (
         f"expected neutral (1.0) when sample is all-up, got {snap['up_day_volume_ratio']}"
