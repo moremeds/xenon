@@ -18,10 +18,11 @@ class TrendScanConfig:
     # Scoring weights — must sum to 1.0
     weights: dict[str, float] = field(
         default_factory=lambda: {
-            "trend": 0.35,
+            "trend": 0.30,
             "structure": 0.25,
             "volatility": 0.20,
-            "flow": 0.20,
+            "flow": 0.15,
+            "catalyst": 0.10,
         }
     )
 

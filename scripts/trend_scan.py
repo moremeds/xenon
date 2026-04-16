@@ -24,10 +24,15 @@ from scripts.scanner_lib.executor import parallel_fetch
 from scripts.trend_scan_lib.config import TrendScanConfig
 from scripts.trend_scan_lib.models import TrendCandidate
 from scripts.trend_scan_lib.ranking import apply_min_thresholds, compute_final_score, rank_candidates
+from scripts.trend_scan_lib.stages.catalysts import fetch_catalysts
 from scripts.trend_scan_lib.stages.flow_confirmation import compute_flow_score
 from scripts.trend_scan_lib.stages.options_structure import compute_structure_score
-from scripts.trend_scan_lib.stages.ta_prefilter import compute_trend_score, passes_bullish_gate
-from scripts.trend_scan_lib.stages.volatility import compute_vol_score, suggest_trade_type
+from scripts.trend_scan_lib.stages.ta_prefilter import (
+    compute_trend_score,
+    passes_bearish_gate,
+    passes_bullish_gate,
+)
+from scripts.trend_scan_lib.stages.volatility import compute_vol_score
 from scripts.trend_scan_lib.storage import (
     DEFAULT_DB_PATH,
     get_connection,
@@ -38,6 +43,9 @@ from scripts.trend_scan_lib.storage import (
 from scripts.trend_scan_lib.universe import build_universe
 
 logger = logging.getLogger(__name__)
+
+UNIVERSE_CACHE_PATH = Path(_project_root) / "data" / "ta_premarket_universe.json"
+UNIVERSE_CACHE_MAX_AGE_S = 2 * 60 * 60  # 2 hours
 
 
 class DataFetcher(Protocol):
@@ -95,41 +103,6 @@ def _parse_expiry_date(payload: dict[str, Any]) -> Optional[date]:
             except ValueError:
                 return None
     return None
-
-
-def _build_price_frame(bars: list[dict[str, Any]]) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
-    for bar in bars:
-        dt = str(bar.get("date") or bar.get("datetime") or "")[:10]
-        close = _safe_float(bar.get("close"), default=float("nan"))
-        high = _safe_float(bar.get("high"), default=close)
-        low = _safe_float(bar.get("low"), default=close)
-        open_ = _safe_float(bar.get("open"), default=close)
-        volume = _safe_float(bar.get("volume") or bar.get("vol"), default=0.0)
-        if not dt or not pd.notna(close):
-            continue
-        rows.append(
-            {
-                "date": dt,
-                "open": open_,
-                "high": high,
-                "low": low,
-                "close": close,
-                "volume": volume,
-            }
-        )
-    if not rows:
-        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
-    frame = pd.DataFrame(rows).sort_values("date").drop_duplicates(subset=["date"], keep="last")
-    frame.reset_index(drop=True, inplace=True)
-    return frame
-
-
-def _series_value(series: pd.Series, default: float = 0.0) -> float:
-    if series.empty:
-        return default
-    value = series.iloc[-1]
-    return default if pd.isna(value) else float(value)
 
 
 def _term_structure_shape(rows: Optional[list[dict[str, Any]]]) -> str:
@@ -224,28 +197,41 @@ def _compute_greek_flow_totals(rows: Any) -> tuple[float, float]:
 class LiveTrendDataFetcher:
     """Best-effort live fetcher backed by Unusual Whales with graceful degradation."""
 
-    def __init__(self, *, uw_client: Any):
+    def __init__(self, *, uw_client: Any, ta_service: Any = None):
         self.uw_client = uw_client
-        self._bars_cache: dict[str, pd.DataFrame] = {}
+        self._ta_service = ta_service
+        self._spy_df: Optional[pd.DataFrame] = None
         self._stock_info_cache: dict[str, dict[str, Any]] = {}
         self._ticker_data_cache: dict[str, Any] = {}
         self._oi_change_cache: dict[str, list[dict[str, Any]]] = {}
         self._greek_flow_cache: dict[str, tuple[float, float]] = {}
 
-    def _bars_frame(self, ticker: str) -> pd.DataFrame:
-        upper = ticker.upper()
-        if upper not in self._bars_cache:
-            payload = self.uw_client.get_stock_ohlc(upper, candle_size="1d")
-            bars = payload.get("data", []) if isinstance(payload, dict) else []
-            self._bars_cache[upper] = _build_price_frame(bars if isinstance(bars, list) else [])
-        return self._bars_cache[upper]
+    def pre_cache_spy(self) -> None:
+        """Cache SPY indicator DataFrame for rs_vs_spy calculations.
+
+        Failure is non-fatal — RS benchmark is a nice-to-have; scan proceeds
+        with rs_vs_spy=1.0 fallback if SPY is cold and IB unavailable.
+        """
+        if self._ta_service is None:
+            return
+        try:
+            self._spy_df = self._ta_service.get_indicators("SPY", allow_fetch=False)
+        except Exception as exc:
+            logger.warning("pre_cache_spy: SPY unavailable (%s) — falling back to rs_vs_spy=1.0", exc)
+            self._spy_df = None
 
     def _stock_info(self, ticker: str) -> dict[str, Any]:
         upper = ticker.upper()
         if upper not in self._stock_info_cache:
             payload = self.uw_client.get_stock_info(upper)
-            info = payload.get("data", {}) if isinstance(payload, dict) else {}
-            self._stock_info_cache[upper] = info if isinstance(info, dict) else {}
+            raw = payload.get("data", {}) if isinstance(payload, dict) else {}
+            if isinstance(raw, list):
+                info = raw[0] if raw else {}
+            elif isinstance(raw, dict):
+                info = raw
+            else:
+                info = {}
+            self._stock_info_cache[upper] = info
         return self._stock_info_cache[upper]
 
     def _analysis_snapshot(self, ticker: str):
@@ -278,112 +264,35 @@ class LiveTrendDataFetcher:
         return self._greek_flow_cache[upper]
 
     def fetch_ohlcv(self, ticker: str) -> dict:
-        frame = self._bars_frame(ticker)
-        if frame.empty or len(frame) < 30:
-            raise RuntimeError(f"insufficient OHLCV history for {ticker}")
+        if self._ta_service is None:
+            raise RuntimeError("TAService not configured — cannot fetch OHLCV")
 
-        closes = frame["close"]
-        highs = frame["high"]
-        lows = frame["low"]
-        volumes = frame["volume"].fillna(0.0)
+        snapshot = self._ta_service.get_snapshot(ticker, allow_fetch=False)
 
-        ma_20 = closes.rolling(20, min_periods=20).mean()
-        ma_50 = closes.rolling(50, min_periods=50).mean()
-        ma_200 = closes.rolling(200, min_periods=200).mean()
-
-        delta = closes.diff()
-        gains = delta.clip(lower=0)
-        losses = (-delta).clip(lower=0)
-        avg_gain = gains.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
-        avg_loss = losses.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
-        rs = avg_gain / avg_loss.where(avg_loss != 0, pd.NA)
-        rsi = 100 - (100 / (1 + rs))
-        rsi = rsi.fillna(50.0)
-        rsi = rsi.where(avg_loss != 0, 100.0)
-        rsi = rsi.where(avg_gain != 0, 0.0)
-        rsi = rsi.where((avg_gain != 0) | (avg_loss != 0), 50.0)
-
-        ema_12 = closes.ewm(span=12, adjust=False).mean()
-        ema_26 = closes.ewm(span=26, adjust=False).mean()
-        macd = ema_12 - ema_26
-        macd_signal = macd.ewm(span=9, adjust=False).mean()
-        macd_histogram = macd - macd_signal
-
-        prev_close = closes.shift(1)
-        true_range = pd.concat(
-            [
-                highs - lows,
-                (highs - prev_close).abs(),
-                (lows - prev_close).abs(),
-            ],
-            axis=1,
-        ).max(axis=1)
-        atr = true_range.rolling(14, min_periods=14).mean()
-        atr_pct = (_series_value(atr) / max(_series_value(closes, default=1.0), 1.0)) if not atr.empty else 0.0
-
-        plus_dm = highs.diff()
-        minus_dm = -lows.diff()
-        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-        tr14 = true_range.rolling(14, min_periods=14).sum()
-        plus_di = 100 * plus_dm.rolling(14, min_periods=14).sum() / tr14.replace(0, pd.NA)
-        minus_di = 100 * minus_dm.rolling(14, min_periods=14).sum() / tr14.replace(0, pd.NA)
-        dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, pd.NA)) * 100
-        adx = dx.rolling(14, min_periods=14).mean().fillna(0.0)
-
-        bb_mean = closes.rolling(20, min_periods=20).mean()
-        bb_std = closes.rolling(20, min_periods=20).std(ddof=0)
-        upper_band = bb_mean + 2 * bb_std
-        lower_band = bb_mean - 2 * bb_std
-        bbw = ((upper_band - lower_band) / bb_mean.replace(0, pd.NA)).fillna(0.0)
-
-        benchmark_frame = self._bars_frame("SPY") if ticker.upper() != "SPY" else None
+        # rs_vs_spy: cross-ticker logic using pre-cached SPY DataFrame
         rs_vs_spy = 1.0
-        if benchmark_frame is not None and len(benchmark_frame) >= 21 and len(frame) >= 21:
-            benchmark = benchmark_frame.set_index("date")["close"]
-            aligned = pd.concat([frame.set_index("date")["close"], benchmark], axis=1, join="inner").tail(40)
-            aligned.columns = ["stock", "spy"]
-            if len(aligned) >= 21:
-                stock_return = aligned["stock"].iloc[-1] / aligned["stock"].iloc[-21]
-                spy_return = aligned["spy"].iloc[-1] / aligned["spy"].iloc[-21]
-                if spy_return > 0:
-                    rs_vs_spy = float(stock_return / spy_return)
+        if ticker.upper() != "SPY" and self._spy_df is not None:
+            try:
+                ticker_df = self._ta_service.get_indicators(ticker, allow_fetch=False)
+                if len(self._spy_df) >= 21 and len(ticker_df) >= 21:
+                    spy_closes = self._spy_df.set_index("date")["close"]
+                    ticker_closes = ticker_df.set_index("date")["close"]
+                    aligned = pd.concat([ticker_closes, spy_closes], axis=1, join="inner").tail(40)
+                    aligned.columns = ["stock", "spy"]
+                    if len(aligned) >= 21:
+                        stock_return = aligned["stock"].iloc[-1] / aligned["stock"].iloc[-21]
+                        spy_return = aligned["spy"].iloc[-1] / aligned["spy"].iloc[-21]
+                        if spy_return > 0:
+                            rs_vs_spy = float(stock_return / spy_return)
+            except Exception:
+                logger.debug("rs_vs_spy calculation failed for %s", ticker, exc_info=True)
 
-        ma_20_series = ma_20.dropna().tail(5).tolist()
-        recent_up_ratio = float((delta.tail(10) > 0).mean()) if len(delta.tail(10)) else 0.5
-        recent_avg_volume = float(volumes.tail(5).mean()) if len(volumes.tail(5)) else 0.0
-        avg_20d_volume = float(volumes.tail(20).mean()) if len(volumes.tail(20)) else recent_avg_volume
-        range_20d_pct = (
-            (float(highs.tail(20).max()) - float(lows.tail(20).min())) / max(_series_value(closes, default=1.0), 1.0)
-        )
+        snapshot["rs_vs_spy"] = rs_vs_spy
 
         info = self._stock_info(ticker)
-        market_cap = _safe_float(info.get("market_cap") or info.get("marketCap"))
+        snapshot["market_cap"] = _safe_float(info.get("marketcap") or info.get("market_cap") or info.get("marketCap"))
 
-        return {
-            "ticker": ticker.upper(),
-            "close": _series_value(closes),
-            "ma_20": _series_value(ma_20),
-            "ma_50": _series_value(ma_50),
-            "ma_200": _series_value(ma_200),
-            "rsi": _series_value(rsi, default=50.0),
-            "adx": _series_value(adx),
-            "macd": _series_value(macd),
-            "macd_signal": _series_value(macd_signal),
-            "macd_histogram": _series_value(macd_histogram),
-            "rs_vs_spy": rs_vs_spy,
-            "ma_20_series": [float(v) for v in ma_20_series],
-            "recent_avg_volume": recent_avg_volume,
-            "avg_20d_volume": avg_20d_volume,
-            "recent_up_ratio": recent_up_ratio,
-            "bbw": _series_value(bbw),
-            "high_52w": float(highs.tail(252).max()) if not highs.empty else _series_value(closes),
-            "range_20d_pct": range_20d_pct,
-            "atr_pct": atr_pct,
-            "dollar_volume": _series_value(closes) * avg_20d_volume,
-            "market_cap": market_cap,
-            "price": _series_value(closes),
-        }
+        return snapshot
 
     def fetch_structure(self, ticker: str) -> dict:
         snapshot = self._analysis_snapshot(ticker)
@@ -486,52 +395,67 @@ class LiveTrendDataFetcher:
         return market_context
 
 
-def _stage_a(ticker: str, data_fetcher: DataFetcher, cfg: TrendScanConfig) -> Optional[dict]:
+def _stage_a_data(ticker: str, data_fetcher: DataFetcher, cfg: TrendScanConfig) -> Optional[dict]:
+    """Direction-neutral OHLCV fetch + liquidity/size floor. Runs once per ticker."""
     try:
         ohlcv = data_fetcher.fetch_ohlcv(ticker)
     except Exception:
-        logger.warning("Failed to fetch OHLCV for %s", ticker, exc_info=True)
+        logger.warning("Stage A fetch failed for %s", ticker, exc_info=True)
         return None
-    if ohlcv.get("close", 0) < cfg.min_price or ohlcv.get("market_cap", 0) < cfg.min_market_cap:
+    if ohlcv is None:
         return None
-    if not passes_bullish_gate(
-        close=ohlcv.get("close", 0),
-        ma_20=ohlcv.get("ma_20", 0),
-        rsi=ohlcv.get("rsi", 0),
-        dollar_volume=ohlcv.get("dollar_volume", 0),
-        min_dollar_volume=cfg.min_dollar_volume,
-    ):
+    if ohlcv.get("dollar_volume", 0) < cfg.min_dollar_volume:
         return None
-    ohlcv["trend_score"] = compute_trend_score(ohlcv)
+    if ohlcv.get("market_cap", 0) < cfg.min_market_cap:
+        return None
+    if ohlcv.get("price", 0) < cfg.min_price:
+        return None
     return ohlcv
 
 
-def _stage_bc(ticker: str, ohlcv: dict, data_fetcher: DataFetcher) -> Optional[dict]:
+def _stage_a_gate(ohlcv: dict, direction: str, cfg: TrendScanConfig) -> Optional[dict]:
+    """Direction-specific gate + trend score. Returns ohlcv with trend_score
+    attached if the direction's gate passes, else None."""
+    if direction == "bullish":
+        if not passes_bullish_gate(
+            close=ohlcv["close"],
+            ma_20=ohlcv["ma_20"],
+            rsi=ohlcv["rsi"],
+            dollar_volume=ohlcv["dollar_volume"],
+            min_dollar_volume=cfg.min_dollar_volume,
+        ):
+            return None
+    else:
+        if not passes_bearish_gate(
+            close=ohlcv["close"],
+            ma_20=ohlcv["ma_20"],
+            rsi=ohlcv["rsi"],
+            dollar_volume=ohlcv["dollar_volume"],
+            min_dollar_volume=cfg.min_dollar_volume,
+        ):
+            return None
+    result = dict(ohlcv)
+    result["trend_score"] = compute_trend_score(ohlcv, direction=direction)
+    return result
+
+
+def _stage_bc(ticker: str, ohlcv: dict, direction: str, data_fetcher: DataFetcher) -> Optional[dict]:
     try:
         struct_data = data_fetcher.fetch_structure(ticker)
-        structure_score, rejected = compute_structure_score(struct_data)
+        structure_score, rejected = compute_structure_score(struct_data, direction=direction)
         if rejected:
             return None
 
         vol_data = data_fetcher.fetch_volatility(ticker)
         vol_score, vol_flags = compute_vol_score(vol_data)
         flow_data = data_fetcher.fetch_flow(ticker)
-        flow_score = compute_flow_score(flow_data)
+        flow_score = compute_flow_score(flow_data, direction=direction)
 
-        spot = max(_safe_float(struct_data.get("spot"), default=0.0), 1.0)
-        call_wall = _safe_float(struct_data.get("call_wall"))
-        capped = call_wall > 0 and ((call_wall - spot) / spot) < 0.05
-        trade_type = suggest_trade_type(
-            iv_rank=vol_data.get("iv_rank", 50),
-            term_structure=vol_data.get("term_structure", "flat"),
-            capped=capped,
-        )
         return {
             "structure_score": structure_score,
             "vol_score": vol_score,
             "flow_score": flow_score,
             "vol_flags": vol_flags,
-            "suggested_trade": trade_type,
             "struct_data": struct_data,
             "vol_data": vol_data,
             "flow_data": flow_data,
@@ -541,30 +465,40 @@ def _stage_bc(ticker: str, ohlcv: dict, data_fetcher: DataFetcher) -> Optional[d
         return None
 
 
-def _trend_summary(ohlcv: dict) -> str:
+def _trend_summary(ohlcv: dict, *, direction: str = "bullish") -> str:
     parts = []
     c = ohlcv.get("close", 0)
     m20 = ohlcv.get("ma_20", 0)
     m50 = ohlcv.get("ma_50", 0)
     m200 = ohlcv.get("ma_200", 0)
-    if c > m20 > m50 > m200:
-        parts.append("Full MA stack")
-    elif c > m20 > m50:
-        parts.append("Above 20/50 DMA")
-    elif c > m20:
-        parts.append("Above 20DMA")
+    if direction == "bearish":
+        if c < m20 < m50 < m200:
+            parts.append("Full MA stack (bearish)")
+        elif c < m20 < m50:
+            parts.append("Below 20/50 DMA")
+        elif c < m20:
+            parts.append("Below 20DMA")
+        if ohlcv.get("low_52w", 0) and (c - ohlcv["low_52w"]) / max(ohlcv["low_52w"], 1) <= 0.03:
+            parts.append("breakdown flag")
+    else:
+        if c > m20 > m50 > m200:
+            parts.append("Full MA stack")
+        elif c > m20 > m50:
+            parts.append("Above 20/50 DMA")
+        elif c > m20:
+            parts.append("Above 20DMA")
+        if ohlcv.get("high_52w", 0) and (ohlcv["high_52w"] - c) / max(ohlcv["high_52w"], 1) <= 0.03:
+            parts.append("breakout flag")
     adx = ohlcv.get("adx", 0)
     if adx:
         parts.append(f"ADX {adx:.0f}")
     rs = ohlcv.get("rs_vs_spy", 0)
     if rs and rs != 1.0:
         parts.append(f"RS {rs:.2f} vs SPY")
-    if ohlcv.get("high_52w", 0) and (ohlcv["high_52w"] - c) / max(ohlcv["high_52w"], 1) <= 0.03:
-        parts.append("breakout flag")
     return ", ".join(parts) if parts else "N/A"
 
 
-def _structure_summary(data: dict) -> str:
+def _structure_summary(data: dict, *, direction: str = "bullish") -> str:
     parts = []
     spot = data.get("spot", 0)
     gf = data.get("gamma_flip", 0)
@@ -594,15 +528,79 @@ def _vol_summary(data: dict) -> str:
     return ", ".join(parts) if parts else "N/A"
 
 
-def _flow_summary(data: dict) -> str:
+def _flow_summary(data: dict, *, direction: str = "bullish") -> str:
     parts = []
     if data.get("flow_count"):
         parts.append(f"{data['flow_count']} ask-side prints")
     if data.get("expiry_cluster_ratio", 0) >= 0.7:
         parts.append("clustered 1-4 week expiry")
-    if data.get("dp_direction") == "bullish":
-        parts.append("dark-pool alignment")
+    dp = data.get("dp_direction", "neutral")
+    if direction == "bearish":
+        if dp == "bearish":
+            parts.append("dark-pool aligned bearish")
+    else:
+        if dp == "bullish":
+            parts.append("dark-pool alignment")
     return ", ".join(parts) if parts else "N/A"
+
+
+def _resolve_universe(
+    *,
+    cfg: TrendScanConfig,
+    uw_client: Any,
+    ib_client: Any,
+) -> list[str]:
+    """Prefer prep-persisted universe if fresh (<2h); otherwise rebuild.
+
+    This guarantees the 8:30 AM scan sees the same universe ta_premarket_prep
+    warmed at 6:00 AM — no silent mismatches from UW flow changes between
+    prep and scan time."""
+    try:
+        if UNIVERSE_CACHE_PATH.exists():
+            payload = json.loads(UNIVERSE_CACHE_PATH.read_text())
+            built_at = datetime.fromisoformat(payload["built_at"])
+            age_s = (datetime.now(timezone.utc) - built_at).total_seconds()
+            if age_s <= UNIVERSE_CACHE_MAX_AGE_S and payload.get("tickers"):
+                logger.info(
+                    "Using prep-persisted universe: %d tickers, %.0fs old",
+                    len(payload["tickers"]),
+                    age_s,
+                )
+                return payload["tickers"]
+            else:
+                logger.info(
+                    "Universe cache stale (%.0fs old, max %d); rebuilding",
+                    age_s,
+                    UNIVERSE_CACHE_MAX_AGE_S,
+                )
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Universe cache read failed: %s — rebuilding", exc)
+    except (KeyError, ValueError, TypeError) as exc:
+        logger.error("Universe cache malformed (producer schema bug?): %s — rebuilding", exc)
+
+    return build_universe(cfg, uw_client=uw_client, ib_client=ib_client)
+
+
+def _infer_structure_hint(direction: str, bc: dict, ohlcv: dict) -> str:
+    """Return a defined-risk long-side structure hint.
+
+    Never emits short premium — that would fail Gate 4 (naked short cover)
+    if taken literally at order-entry time. Hint is informational only;
+    actual structure selection happens at order-build time under Four Gates."""
+    iv_rank = bc.get("vol_data", {}).get("iv_rank", 0.5)
+    high_iv = iv_rank >= 0.6
+    if direction == "bullish":
+        return "long_call_vertical" if high_iv else "long_call"
+    if direction == "bearish":
+        return "long_put_vertical" if high_iv else "long_put"
+    return ""
+
+
+def _compute_invalidation(direction: str, ohlcv: dict) -> float:
+    """Price level at which the signal is invalidated. 20DMA for both
+    directions (bullish: close below = trend broken; bearish: close above
+    = thesis broken)."""
+    return float(ohlcv.get("ma_20", 0.0))
 
 
 def run_scan_pipeline(
@@ -613,69 +611,97 @@ def run_scan_pipeline(
     ib_client: Any = None,
     db_path: str = DEFAULT_DB_PATH,
     json_cache_path: Optional[str] = None,
+    ta_service: Any = None,
 ) -> dict:
     start = time.monotonic()
     scan_id = _generate_scan_id()
     now = datetime.now(timezone.utc)
 
-    universe = build_universe(cfg, uw_client=uw_client, ib_client=ib_client)
+    universe = _resolve_universe(cfg=cfg, uw_client=uw_client, ib_client=ib_client)
 
-    stage_a_pairs = parallel_fetch(
+    # Pre-warm TA cache on main thread (ib_insync is not thread-safe)
+    if ta_service is not None:
+        refresh_tickers = list(universe) + ["SPY"]
+        ta_service.bulk_refresh(refresh_tickers)
+
+    # Pre-cache SPY DataFrame so worker threads don't each query DuckDB for it
+    if hasattr(data_fetcher, "pre_cache_spy"):
+        data_fetcher.pre_cache_spy()
+
+    # Stage A data fetch — direction-neutral, runs once per ticker.
+    stage_a_data_pairs = parallel_fetch(
         items=universe,
-        fn=lambda ticker: (ticker, _stage_a(ticker, data_fetcher, cfg)),
+        fn=lambda ticker: (ticker, _stage_a_data(ticker, data_fetcher, cfg)),
         max_workers=cfg.max_workers,
     )
-    stage_a_results = {ticker: result for ticker, result in stage_a_pairs if result is not None}
-    stage_a_survivors = len(stage_a_results)
-
-    stage_bc_pairs = parallel_fetch(
-        items=list(stage_a_results.items()),
-        fn=lambda item: (item[0], _stage_bc(item[0], item[1], data_fetcher)),
-        max_workers=cfg.max_workers,
-    )
+    stage_a_base = {ticker: result for ticker, result in stage_a_data_pairs if result is not None}
 
     candidates: list[TrendCandidate] = []
-    for ticker, bc in stage_bc_pairs:
-        if bc is None:
-            continue
-        ohlcv = stage_a_results[ticker]
-        scores = {
-            "trend": ohlcv["trend_score"],
-            "structure": bc["structure_score"],
-            "volatility": bc["vol_score"],
-            "flow": bc["flow_score"],
-        }
-        candidate = TrendCandidate(
-            ticker=ticker,
-            direction="bullish",
-            final_score=compute_final_score(scores, cfg.weights),
-            scores=scores,
-            spot_price=ohlcv.get("close", 0),
-            indicators={
-                "ma_20": ohlcv.get("ma_20", 0),
-                "ma_50": ohlcv.get("ma_50", 0),
-                "ma_200": ohlcv.get("ma_200", 0),
-                "rsi": ohlcv.get("rsi", 0),
-                "adx": ohlcv.get("adx", 0),
-                "macd_histogram": ohlcv.get("macd_histogram", 0),
-                "bbw": ohlcv.get("bbw", 0),
-                "rs_vs_spy": ohlcv.get("rs_vs_spy", 0),
-                "iv_rank": bc["vol_data"].get("iv_rank", 0),
-                "gamma_flip": bc["struct_data"].get("gamma_flip", 0),
-                "call_wall": bc["struct_data"].get("call_wall", 0),
-                "put_wall": bc["struct_data"].get("put_wall", 0),
-            },
-            summaries={
-                "trend": _trend_summary(ohlcv),
-                "structure": _structure_summary(bc["struct_data"]),
-                "vol": _vol_summary(bc["vol_data"]),
-                "flow": _flow_summary(bc["flow_data"]),
-            },
-            suggested_trade=bc["suggested_trade"],
-            invalidation=ohlcv.get("ma_20", 0),
-            flags=list(bc.get("vol_flags", [])),
+    stage_a_survivors_set: set[str] = set()
+    for direction in ("bullish", "bearish"):
+        gated_map: dict[str, dict] = {}
+        for ticker, ohlcv in stage_a_base.items():
+            gated = _stage_a_gate(ohlcv, direction, cfg)
+            if gated is not None:
+                gated_map[ticker] = gated
+                stage_a_survivors_set.add(ticker)
+
+        bc_pairs = parallel_fetch(
+            items=list(gated_map.keys()),
+            fn=lambda ticker: (ticker, _stage_bc(ticker, gated_map[ticker], direction, data_fetcher)),
+            max_workers=cfg.max_workers,
         )
-        candidates.append(candidate)
+
+        for ticker, bc in bc_pairs:
+            if bc is None:
+                continue
+            ohlcv = gated_map[ticker]
+            catalysts, catalyst_score = fetch_catalysts(
+                ticker=ticker,
+                direction=direction,
+                uw_client=uw_client,
+                earnings_days=bc["vol_data"].get("earnings_days", 30),
+            )
+            scores = {
+                "trend": ohlcv["trend_score"],
+                "structure": bc["structure_score"],
+                "volatility": bc["vol_score"],
+                "flow": bc["flow_score"],
+                "catalyst": catalyst_score,
+            }
+            candidate = TrendCandidate(
+                ticker=ticker,
+                direction=direction,
+                final_score=compute_final_score(scores, cfg.weights),
+                scores=scores,
+                spot_price=ohlcv.get("close", 0),
+                indicators={
+                    "ma_20": ohlcv.get("ma_20", 0),
+                    "ma_50": ohlcv.get("ma_50", 0),
+                    "ma_200": ohlcv.get("ma_200", 0),
+                    "rsi": ohlcv.get("rsi", 0),
+                    "adx": ohlcv.get("adx", 0),
+                    "macd_histogram": ohlcv.get("macd_histogram", 0),
+                    "bbw": ohlcv.get("bbw", 0),
+                    "rs_vs_spy": ohlcv.get("rs_vs_spy", 0),
+                    "iv_rank": bc["vol_data"].get("iv_rank", 0),
+                    "gamma_flip": bc["struct_data"].get("gamma_flip", 0),
+                    "call_wall": bc["struct_data"].get("call_wall", 0),
+                    "put_wall": bc["struct_data"].get("put_wall", 0),
+                },
+                summaries={
+                    "trend": _trend_summary(ohlcv, direction=direction),
+                    "structure": _structure_summary(bc["struct_data"], direction=direction),
+                    "vol": _vol_summary(bc["vol_data"]),
+                    "flow": _flow_summary(bc["flow_data"], direction=direction),
+                },
+                structure_hint=_infer_structure_hint(direction, bc, ohlcv),
+                invalidation=_compute_invalidation(direction, ohlcv),
+                flags=list(bc.get("vol_flags", [])),
+                catalysts=catalysts,
+            )
+            candidates.append(candidate)
+    stage_a_survivors = len(stage_a_survivors_set)
     stage_b_survivors = len(candidates)
 
     ranked = rank_candidates(apply_min_thresholds(candidates, cfg.min_thresholds), top_n=cfg.top_n)
@@ -730,7 +756,8 @@ def run_scan_pipeline(
                     "vol_score": candidate.scores.get("volatility", 0),
                     "flow_score": candidate.scores.get("flow", 0),
                     **candidate.indicators,
-                    "suggested_trade": candidate.suggested_trade,
+                    "structure_hint": candidate.structure_hint,
+                    "catalysts": candidate.catalysts,
                     "invalidation": candidate.invalidation,
                     "flags": candidate.flags,
                     "trend_summary": candidate.summaries.get("trend", ""),
@@ -755,14 +782,30 @@ def run_scan_pipeline(
 
 
 def build_runtime():
-    from scripts.clients.uw_client import UWClient
     from dotenv import load_dotenv
+
+    from scripts.clients.ib_client import IBClient
+    from scripts.clients.uw_client import UWClient
+    from scripts.ta_lib import TAService
 
     project_root = Path(_project_root)
     load_dotenv(project_root / ".env")
     load_dotenv(project_root / "web" / ".env")
     uw_client = UWClient()
-    return LiveTrendDataFetcher(uw_client=uw_client), uw_client, None
+
+    ib_client = IBClient()
+    try:
+        ib_client.connect(client_id="auto")
+    except Exception:
+        logger.warning("IB Gateway not available — TA cache will use stale data")
+        ib_client = None
+
+    ta_service = TAService(db_path="data/ta.duckdb", ib_client=ib_client)
+    data_fetcher = LiveTrendDataFetcher(
+        uw_client=uw_client,
+        ta_service=ta_service,
+    )
+    return data_fetcher, uw_client, ib_client, ta_service
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -777,7 +820,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     uw_client = None
     ib_client = None
     try:
-        data_fetcher, uw_client, ib_client = build_runtime()
+        data_fetcher, uw_client, ib_client, ta_service = build_runtime()
         result = run_scan_pipeline(
             TrendScanConfig(top_n=args.top),
             data_fetcher=data_fetcher,
@@ -785,11 +828,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             ib_client=ib_client,
             db_path=args.db_path,
             json_cache_path=args.json_cache,
+            ta_service=ta_service,
         )
         print(json.dumps(result, indent=2))
         return 0
     except Exception as exc:
-        logger.error("Trend scan failed: %s", exc)
+        logger.error("Trend scan failed: %s", exc, exc_info=True)
         return 1
     finally:
         if uw_client is not None:

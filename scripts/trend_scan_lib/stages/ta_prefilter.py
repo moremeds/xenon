@@ -87,14 +87,26 @@ def score_slope(ma_series: list[float]) -> float:
     return 0.1
 
 
-def score_volume_profile(*, recent_avg_volume: float, avg_20d_volume: float, recent_up_ratio: float) -> float:
-    """Score volume profile. Above-average volume on up days = confirmation."""
+def score_volume_profile(
+    *,
+    recent_avg_volume: float,
+    avg_20d_volume: float,
+    recent_up_ratio: float,
+    up_day_volume_ratio: float = 1.0,
+) -> float:
+    """Score volume profile. Three signals, last one weighted 2x:
+    - Volume pickup (recent vs 20d) — trend attention.
+    - Up-day frequency (recent_up_ratio) — directional bias.
+    - Up-day vs down-day volume (up_day_volume_ratio) — accumulation vs distribution.
+    """
     if avg_20d_volume == 0:
         return 0.5
     vol_ratio = recent_avg_volume / avg_20d_volume
     vol_score = normalize_score(vol_ratio - 0.5)
     up_score = normalize_score(recent_up_ratio * 1.5 - 0.25)
-    return (vol_score + up_score) / 2
+    # up_day_volume_ratio typically 0.3–2.5; 1.0 = neutral, 1.5+ = accumulation, 0.7- = distribution.
+    accumulation_score = normalize_score((up_day_volume_ratio - 0.7) / 1.0)
+    return (vol_score + up_score + 2 * accumulation_score) / 4
 
 
 def score_bbw(bbw: float) -> float:
@@ -110,11 +122,27 @@ def score_bbw(bbw: float) -> float:
     return 0.1
 
 
-def detect_breakout(*, close: float, high_52w: float, range_20d_pct: float, atr_pct: float) -> bool:
-    """Detect breakout: within 3% of 52w high OR breaking above tight consolidation."""
-    near_high = high_52w > 0 and (high_52w - close) / high_52w <= 0.03
-    consolidation_break = atr_pct > 0 and range_20d_pct < atr_pct * 3
-    return near_high or consolidation_break
+def detect_breakout(
+    *,
+    close: float,
+    high_52w: float,
+    high_20d: float,
+    range_20d_pct: float,
+    atr_pct: float,
+) -> bool:
+    """Detect breakout.
+
+    Two qualifying paths:
+      1. Within 3% of 52w high — price is punching through long-term resistance.
+      2. Close is above 20d high AND the 20d range was tight — coiled spring release.
+
+    Previous version accepted path 2 on consolidation narrowness alone,
+    which flagged stocks sitting mid-range in a tight band as 'breakouts'."""
+    near_52w = high_52w > 0 and (high_52w - close) / high_52w <= 0.03
+    tight_range = atr_pct > 0 and range_20d_pct < atr_pct * 3
+    above_20d_high = high_20d > 0 and close >= high_20d
+    consolidation_break = tight_range and above_20d_high
+    return near_52w or consolidation_break
 
 
 def passes_bullish_gate(
@@ -127,6 +155,35 @@ def passes_bullish_gate(
 ) -> bool:
     """Hard gate: close > 20DMA, RSI > 40, dollar volume above floor."""
     return close > ma_20 and rsi > 40 and dollar_volume >= min_dollar_volume
+
+
+def passes_bearish_gate(
+    *,
+    close: float,
+    ma_20: float,
+    rsi: float,
+    dollar_volume: float,
+    min_dollar_volume: float,
+) -> bool:
+    """Mirror of passes_bullish_gate: close < 20DMA, RSI < 60, liquid."""
+    return close < ma_20 and rsi < 60 and dollar_volume >= min_dollar_volume
+
+
+def detect_breakdown(
+    *,
+    close: float,
+    low_52w: float,
+    low_20d: float,
+    range_20d_pct: float,
+    atr_pct: float,
+) -> bool:
+    """Mirror of detect_breakout. Near 52w low OR close below 20d low
+    in tight consolidation = breakdown."""
+    near_52w = low_52w > 0 and (close - low_52w) / low_52w <= 0.03
+    tight_range = atr_pct > 0 and range_20d_pct < atr_pct * 3
+    below_20d_low = low_20d > 0 and close <= low_20d
+    consolidation_break = tight_range and below_20d_low
+    return near_52w or consolidation_break
 
 
 INDICATOR_WEIGHTS = {
@@ -142,8 +199,10 @@ INDICATOR_WEIGHTS = {
 BREAKOUT_BONUS = 0.1
 
 
-def compute_trend_score(indicators: dict) -> float:
-    """Compute composite trend score from raw indicators."""
+def compute_trend_score(indicators: dict, *, direction: str = "bullish") -> float:
+    """Composite trend score. Direction determines which structural event
+    (breakout vs breakdown) earns BREAKOUT_BONUS, and whether to invert
+    bull-centric sub-scores."""
     scores = {
         "ma_alignment": score_ma_alignment(
             close=indicators["close"],
@@ -164,18 +223,37 @@ def compute_trend_score(indicators: dict) -> float:
             recent_avg_volume=indicators.get("recent_avg_volume", 0),
             avg_20d_volume=indicators.get("avg_20d_volume", 1),
             recent_up_ratio=indicators.get("recent_up_ratio", 0.5),
+            up_day_volume_ratio=indicators.get("up_day_volume_ratio", 1.0),
         ),
         "bbw": score_bbw(indicators.get("bbw", 0.10)),
     }
 
+    # Invert bull-centric sub-scores for bearish so a bearish-aligned
+    # ticker scores high. Keep 'bbw' (direction-agnostic: squeeze is
+    # squeeze) and 'adx' (trend strength regardless of direction).
+    if direction == "bearish":
+        for k in ("ma_alignment", "slope", "rsi", "macd", "relative_strength", "volume_profile"):
+            scores[k] = 1.0 - scores[k]
+
     composite = sum(scores[k] * w for k, w in INDICATOR_WEIGHTS.items())
 
-    if detect_breakout(
-        close=indicators["close"],
-        high_52w=indicators.get("high_52w", 0),
-        range_20d_pct=indicators.get("range_20d_pct", 1.0),
-        atr_pct=indicators.get("atr_pct", 0),
-    ):
+    if direction == "bullish":
+        structural = detect_breakout(
+            close=indicators["close"],
+            high_52w=indicators.get("high_52w", 0),
+            high_20d=indicators.get("high_20d", 0),
+            range_20d_pct=indicators.get("range_20d_pct", 1.0),
+            atr_pct=indicators.get("atr_pct", 0),
+        )
+    else:
+        structural = detect_breakdown(
+            close=indicators["close"],
+            low_52w=indicators.get("low_52w", 0),
+            low_20d=indicators.get("low_20d", 0),
+            range_20d_pct=indicators.get("range_20d_pct", 1.0),
+            atr_pct=indicators.get("atr_pct", 0),
+        )
+    if structural:
         composite += BREAKOUT_BONUS
 
     return normalize_score(composite)

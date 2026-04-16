@@ -205,9 +205,10 @@ describe("Type exports", () => {
         vol: "IV rank 22",
         flow: "4 ask-side prints",
       },
-      suggested_trade: "debit_call",
+      structure_hint: "long_call",
+      catalysts: [],
       invalidation: 142.5,
-      flags: [],
+      flags: ["four_gates_not_applied"],
       holding_window: "5-15 trading days",
     };
     expect(c.ticker).toBe("NVDA");

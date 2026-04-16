@@ -119,6 +119,50 @@ def _next_test_order_ids() -> tuple[int, int]:
     return order_id, perm_id
 
 
+async def _premarket_data_prep_loop():
+    """Run pre-market data prep at 6:00 AM ET on weekdays.
+
+    Audits the DuckDB TA cache and refreshes stale tickers via IB so the
+    8:30 AM trend scan hits 100% cache.  Includes catch-up logic: if the
+    server restarts after 6 AM but before 8:30 AM, run immediately once.
+    """
+    import zoneinfo
+
+    et = zoneinfo.ZoneInfo("America/New_York")
+
+    # Catch-up: if we start between 6:00 and 8:30 on a trading day, run once now
+    now = datetime.now(et)
+    if now.weekday() < 5 and (6 <= now.hour < 8 or (now.hour == 8 and now.minute < 30)):
+        logger.info("Pre-market data prep: catch-up run (server started after 6 AM ET)")
+        try:
+            result = await run_script("ta_premarket_prep.py", [], timeout=3600)
+            if result.ok:
+                logger.info("Pre-market data prep catch-up complete")
+            else:
+                logger.warning("Pre-market data prep catch-up failed: %s", result.error)
+        except Exception:
+            logger.warning("Pre-market data prep catch-up error", exc_info=True)
+
+    while True:
+        now = datetime.now(et)
+        target = now.replace(hour=6, minute=0, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        while target.weekday() >= 5:
+            target += timedelta(days=1)
+        wait_secs = (target - now).total_seconds()
+        logger.info("Pre-market data prep scheduled for %s (in %.0fs)", target, wait_secs)
+        await asyncio.sleep(wait_secs)
+        try:
+            result = await run_script("ta_premarket_prep.py", [], timeout=3600)
+            if result.ok:
+                logger.info("Pre-market data prep complete")
+            else:
+                logger.warning("Pre-market data prep failed: %s", result.error)
+        except Exception:
+            logger.warning("Pre-market data prep error", exc_info=True)
+
+
 async def _trend_scan_premarket_loop():
     """Run trend scanner at 8:30 AM ET on weekdays."""
     import zoneinfo
@@ -282,15 +326,23 @@ async def lifespan(app: FastAPI):
         except Exception as exc:  # noqa: BLE001
             logger.warning("uw_analyze_daily_job failed to start: %s", exc)
 
-    # Pre-market trend scanner (8:30 AM ET weekdays)
+    # Pre-market data prep (6:00 AM ET weekdays) + trend scanner (8:30 AM ET)
+    _data_prep_task = None
     _trend_scan_task = None
     if os.environ.get("XENON_DAILY_JOB_WORKER_ID", "0") == "0":
+        _data_prep_task = asyncio.create_task(_premarket_data_prep_loop())
         _trend_scan_task = asyncio.create_task(_trend_scan_premarket_loop())
 
     try:
         yield
     finally:
         # Shutdown — always runs, even if the app raised.
+        if _data_prep_task is not None:
+            _data_prep_task.cancel()
+            try:
+                await _data_prep_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         if _trend_scan_task is not None:
             _trend_scan_task.cancel()
             try:

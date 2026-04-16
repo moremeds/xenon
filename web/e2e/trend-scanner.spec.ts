@@ -33,13 +33,15 @@ const SCANNER_MOCK = {
       },
       summaries: {
         trend: "Full MA stack, ADX 32, RS 1.15 vs SPY, breakout flag",
-        structure: "Above gamma flip by 2.3%, call wall at +8%, put support at -3%",
+        structure:
+          "Above gamma flip by 2.3%, call wall at +8%, put support at -3%",
         vol: "IV rank 22, normal term structure, IV/RV 0.94",
         flow: "4 ask-side prints, clustered 1-4 week expiry, dark-pool alignment",
       },
-      suggested_trade: "debit_call",
+      structure_hint: "long_call",
+      catalysts: [],
       invalidation: 142.5,
-      flags: ["event_premium"],
+      flags: ["event_premium", "four_gates_not_applied"],
       holding_window: "5-15 trading days",
     },
   ],
@@ -94,10 +96,18 @@ const CRI_MOCK = {
   spx_100d_ma: 516,
   spx_distance_pct: 1.4,
   spy_closes: Array.from({ length: 22 }, (_, i) => 515 + i * 0.4),
-  cri: { score: 14.5, level: "LOW", components: { vix: 4, vvix: 4, correlation: 3, momentum: 3.5 } },
+  cri: {
+    score: 14.5,
+    level: "LOW",
+    components: { vix: 4, vvix: 4, correlation: 3, momentum: 3.5 },
+  },
   crash_trigger: {
     triggered: false,
-    conditions: { spx_below_100d_ma: false, realized_vol_gt_25: false, cor1m_gt_60: false },
+    conditions: {
+      spx_below_100d_ma: false,
+      realized_vol_gt_25: false,
+      cor1m_gt_60: false,
+    },
   },
   cta: { exposure_pct: 94, forced_reduction_pct: 0, est_selling_bn: 0 },
   menthorq_cta: null,
@@ -108,19 +118,39 @@ async function stubScannerPage(page: import("@playwright/test").Page) {
   await page.unrouteAll({ behavior: "ignoreErrors" });
 
   await page.route("**/api/scanner", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(SCANNER_MOCK) }),
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(SCANNER_MOCK),
+    }),
   );
   await page.route("**/api/portfolio", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(PORTFOLIO_MOCK) }),
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(PORTFOLIO_MOCK),
+    }),
   );
   await page.route("**/api/orders", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(EMPTY_ORDERS) }),
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(EMPTY_ORDERS),
+    }),
   );
   await page.route("**/api/regime", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(CRI_MOCK) }),
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(CRI_MOCK),
+    }),
   );
   await page.route("**/api/ib-status", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ connected: true }) }),
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ connected: true }),
+    }),
   );
   await page.route("**/api/blotter", (route) =>
     route.fulfill({
@@ -128,17 +158,30 @@ async function stubScannerPage(page: import("@playwright/test").Page) {
       contentType: "application/json",
       body: JSON.stringify({
         as_of: new Date().toISOString(),
-        summary: { realized_pnl: 0, closed_trades: 0, open_trades: 0, total_commissions: 0 },
+        summary: {
+          realized_pnl: 0,
+          closed_trades: 0,
+          open_trades: 0,
+          total_commissions: 0,
+        },
         closed_trades: [],
         open_trades: [],
       }),
     }),
   );
   await page.route("**/api/menthorq/cta", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ tables: [] }) }),
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ tables: [] }),
+    }),
   );
   await page.route("**/api/previous-close", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ closes: {} }) }),
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ closes: {} }),
+    }),
   );
   await page.route("**/api/prices**", (route) => route.abort());
 
@@ -177,23 +220,39 @@ async function stubScannerPage(page: import("@playwright/test").Page) {
 }
 
 test.describe("Trend scanner page", () => {
-  test("renders ranked candidates and expands row details", async ({ page }) => {
+  test("renders ranked candidates and expands row details", async ({
+    page,
+  }) => {
     await stubScannerPage(page);
     await page.goto("/scanner");
 
-    await expect(page.getByText("Trend Scanner")).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText("Trend Scanner")).toBeVisible({
+      timeout: 10_000,
+    });
     await expect(page.getByText("1 CANDIDATES")).toBeVisible();
-    await expect(page.getByRole("button", { name: "View details for NVDA" })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "View details for NVDA" }),
+    ).toBeVisible();
     await expect(page.getByText("BULLISH", { exact: true })).toBeVisible();
-    await expect(page.getByText("debit call", { exact: true })).toBeVisible();
+    await expect(page.getByText("long call", { exact: true })).toBeVisible();
     await expect(page.getByText("SPY 523 · VIX 18.2 · bullish")).toBeVisible();
 
     await page.getByRole("button", { name: "View details for NVDA" }).click();
     await expect(page.getByText("Invalidation:")).toBeVisible();
-    await expect(page.getByText("Full MA stack, ADX 32, RS 1.15 vs SPY, breakout flag")).toBeVisible();
-    await expect(page.getByText("IV rank 22, normal term structure, IV/RV 0.94")).toBeVisible();
+    await expect(
+      page.getByText("Full MA stack, ADX 32, RS 1.15 vs SPY, breakout flag"),
+    ).toBeVisible();
+    await expect(
+      page.getByText("IV rank 22, normal term structure, IV/RV 0.94"),
+    ).toBeVisible();
 
-    const evidenceDir = join(process.cwd(), "..", "data", "evidence", "scanner");
+    const evidenceDir = join(
+      process.cwd(),
+      "..",
+      "data",
+      "evidence",
+      "scanner",
+    );
     mkdirSync(evidenceDir, { recursive: true });
     await page.screenshot({
       path: join(evidenceDir, "trend-scanner-page.png"),

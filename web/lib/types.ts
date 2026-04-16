@@ -448,7 +448,8 @@ export type TrendCandidate = {
   scores: TrendScores;
   indicators: TrendIndicators;
   summaries: TrendSummaries;
-  suggested_trade: string;
+  structure_hint: string;
+  catalysts: string[];
   invalidation: number;
   flags: string[];
   holding_window: string;

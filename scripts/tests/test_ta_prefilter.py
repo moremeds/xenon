@@ -95,7 +95,16 @@ def test_score_slope_negative():
 def test_score_volume_profile_above_avg():
     from scripts.trend_scan_lib.stages.ta_prefilter import score_volume_profile
 
-    assert score_volume_profile(recent_avg_volume=1_500_000, avg_20d_volume=1_000_000, recent_up_ratio=0.7) > 0.7
+    # Strong accumulation: above-avg volume, up-day-biased, up-day volume dominates.
+    assert (
+        score_volume_profile(
+            recent_avg_volume=1_500_000,
+            avg_20d_volume=1_000_000,
+            recent_up_ratio=0.7,
+            up_day_volume_ratio=1.5,
+        )
+        > 0.7
+    )
 
 
 def test_score_bbw_squeeze():
@@ -113,19 +122,19 @@ def test_score_bbw_wide():
 def test_breakout_near_52w_high():
     from scripts.trend_scan_lib.stages.ta_prefilter import detect_breakout
 
-    assert detect_breakout(close=148, high_52w=150, range_20d_pct=0.05, atr_pct=0.02) is True
+    assert detect_breakout(close=148, high_52w=150, high_20d=147.5, range_20d_pct=0.05, atr_pct=0.02) is True
 
 
 def test_breakout_consolidation_break():
     from scripts.trend_scan_lib.stages.ta_prefilter import detect_breakout
 
-    assert detect_breakout(close=100, high_52w=120, range_20d_pct=0.03, atr_pct=0.015) is True
+    assert detect_breakout(close=100, high_52w=120, high_20d=99.5, range_20d_pct=0.03, atr_pct=0.015) is True
 
 
 def test_no_breakout():
     from scripts.trend_scan_lib.stages.ta_prefilter import detect_breakout
 
-    assert detect_breakout(close=100, high_52w=150, range_20d_pct=0.15, atr_pct=0.02) is False
+    assert detect_breakout(close=100, high_52w=150, high_20d=105, range_20d_pct=0.15, atr_pct=0.02) is False
 
 
 def test_bullish_gate_passes():
@@ -216,3 +225,78 @@ def test_compute_trend_score_weak_trend():
     }
     score = compute_trend_score(indicators)
     assert score < 0.4
+
+
+def test_detect_breakout_requires_close_above_20d_high():
+    """A narrow-range stock NOT above its 20d high must not register
+    as a breakout. Consolidation alone is not a breakout signal — the
+    breakout itself must be occurring."""
+    from scripts.trend_scan_lib.stages.ta_prefilter import detect_breakout
+
+    # Narrow consolidation, but close is mid-range, not above 20d high
+    result = detect_breakout(
+        close=100.0,
+        high_52w=120.0,  # not near 52w high
+        high_20d=105.0,  # 20d high is 5% above close
+        range_20d_pct=0.03,  # tight range
+        atr_pct=0.02,  # range_20d_pct < atr_pct * 3 (0.06)
+    )
+    assert result is False, "consolidation without breakout must not register"
+
+    # Same narrow consolidation, close now ABOVE 20d high
+    result = detect_breakout(
+        close=106.0,
+        high_52w=120.0,
+        high_20d=105.0,
+        range_20d_pct=0.03,
+        atr_pct=0.02,
+    )
+    assert result is True, "close above 20d high in tight range = breakout"
+
+
+def test_detect_breakout_near_52w_high_still_qualifies():
+    """Pre-existing path: within 3% of 52w high always qualifies as breakout
+    regardless of 20d structure."""
+    from scripts.trend_scan_lib.stages.ta_prefilter import detect_breakout
+
+    result = detect_breakout(
+        close=119.0,
+        high_52w=120.0,
+        high_20d=119.5,
+        range_20d_pct=0.08,
+        atr_pct=0.02,
+    )
+    assert result is True
+
+
+def test_score_volume_profile_penalizes_distribution():
+    """Stock rallying on low volume while selling on high volume (distribution)
+    must score lower than one accumulating (high volume on up days)."""
+    from scripts.trend_scan_lib.stages.ta_prefilter import score_volume_profile
+
+    accumulation = score_volume_profile(
+        recent_avg_volume=1_500_000,
+        avg_20d_volume=1_000_000,
+        recent_up_ratio=0.7,
+        up_day_volume_ratio=1.5,
+    )
+    distribution = score_volume_profile(
+        recent_avg_volume=1_500_000,
+        avg_20d_volume=1_000_000,
+        recent_up_ratio=0.7,
+        up_day_volume_ratio=0.6,
+    )
+    assert accumulation > distribution, f"accumulation ({accumulation}) should outscore distribution ({distribution})"
+
+
+def test_score_volume_profile_neutral_when_ratio_missing():
+    """When up_day_volume_ratio is 1.0 (neutral sentinel), score stays near legacy level."""
+    from scripts.trend_scan_lib.stages.ta_prefilter import score_volume_profile
+
+    score = score_volume_profile(
+        recent_avg_volume=1_500_000,
+        avg_20d_volume=1_000_000,
+        recent_up_ratio=0.7,
+        up_day_volume_ratio=1.0,
+    )
+    assert 0.3 < score < 0.9, f"neutral score should be mid-range, got {score}"

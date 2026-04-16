@@ -11,7 +11,7 @@ def test_default_config():
     cfg = TrendScanConfig()
     assert cfg.top_n == 25
     assert cfg.max_workers == 15
-    assert cfg.weights == {"trend": 0.35, "structure": 0.25, "volatility": 0.20, "flow": 0.20}
+    assert cfg.weights == {"trend": 0.30, "structure": 0.25, "volatility": 0.20, "flow": 0.15, "catalyst": 0.10}
     assert abs(sum(cfg.weights.values()) - 1.0) < 0.01
 
 
