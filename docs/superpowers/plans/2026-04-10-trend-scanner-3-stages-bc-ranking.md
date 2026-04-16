@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build Stage B (options structure + volatility scoring), Stage C (flow confirmation), trade type suggestion, and final composite ranking with min threshold gates.
+**Goal:** Build Stage B (options structure + volatility scoring), Stage C (flow confirmation), trade type suggestion, and final composite ranking with min threshold gates. (v1: bullish trade suggestions only.)
 
 **Architecture:** Three independent stage scorers feed into a ranking module that computes weighted composite scores and enforces minimum threshold gates. Each stage scorer takes ticker data from UWClient and returns a 0-1 score.
 
@@ -509,8 +509,10 @@ def score_iv_rank(iv_rank: float) -> float:
     return 0.2
 
 
-def score_term_structure(shape: str) -> float:
+def score_term_structure(shape: str | None) -> float:
     """Score term structure shape. Normal = best for swing trades."""
+    if not shape or not isinstance(shape, str):
+        return 0.5
     shapes = {"normal": 1.0, "flat": 0.6, "inverted": 0.3}
     return shapes.get(shape.lower(), 0.5)
 
@@ -557,11 +559,12 @@ def suggest_trade_type(
     capped: bool,
 ) -> str:
     """Suggest trade expression based on volatility state and structure."""
+    ts = term_structure.lower() if isinstance(term_structure, str) else "flat"
     if iv_rank >= 60 and capped:
         return "premium_sell"
     if iv_rank >= 30 and capped:
         return "call_spread"
-    if iv_rank < 30 and term_structure.lower() == "normal":
+    if iv_rank < 30 and ts == "normal":
         return "debit_call"
     if iv_rank < 30:
         return "debit_call"
@@ -802,8 +805,10 @@ def score_delta_vega_flow(*, net_delta: float, net_vega: float) -> float:
     return 0.1
 
 
-def score_dark_pool_alignment(*, dp_direction: str) -> float:
+def score_dark_pool_alignment(*, dp_direction: str | None) -> float:
     """Dark pool alignment bonus. Returns 0 or 0.15."""
+    if not dp_direction or not isinstance(dp_direction, str):
+        return 0.0
     if dp_direction.lower() == "bullish":
         return 0.15
     if dp_direction.lower() == "bearish":

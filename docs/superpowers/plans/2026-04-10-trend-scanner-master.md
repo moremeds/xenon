@@ -2,7 +2,7 @@
 
 > **For agentic workers:** This is a master plan with 5 sub-plans. Execute each sub-plan in order using superpowers:subagent-driven-development or superpowers:executing-plans. Each sub-plan produces working, testable software independently.
 
-**Goal:** Build a 3-stage pre-market trend scanner (TA → options structure → flow confirmation) that replaces the existing scanner page.
+**Goal:** Build a 3-stage pre-market trend scanner (TA → options structure → flow confirmation) that replaces the existing scanner page. **v1 scope: bullish trends only.** Bearish scanning is a follow-on.
 
 **Architecture:** Shared foundation layer (`scanner_lib/`) extracted from `uw_scan_lib/`, new `trend_scan_lib/` with staged pipeline, DuckDB storage for backtesting, web integration via existing FastAPI/Next.js patterns.
 
@@ -21,28 +21,28 @@ Execute in order — each sub-plan depends on the previous one being complete.
 **File:** `2026-04-10-trend-scanner-1-foundation.md`
 **Scope:** Extract shared primitives from `uw_scan_lib/` into `scanner_lib/`. Models, universe loader, parallel executor, JSON cache writer, base scoring. Refactor `uw_scan` to import from `scanner_lib/`. All existing `uw_scan` tests must still pass.
 
-**Produces:** `scripts/scanner_lib/` with 5 modules, `uw_scan_lib/` updated to use shared imports. Zero behavior change in `uw_scan`.
+**Produces:** `scripts/scanner_lib/` with 5 modules, `uw_scan_lib/universe.py` delegates to shared utilities. Zero behavior change in `uw_scan`.
 
 ### Sub-Plan 2: Universe + Stage A (`trend_scan_lib/` part 1)
 
 **File:** `2026-04-10-trend-scanner-2-universe-stage-a.md`
-**Scope:** Triple-source universe builder (static indexes + UW flow + IB scanner), TA prefilter with 9 indicators, bullish/bearish gates, breakout detection. Static index files. Runnable as a standalone Stage A filter.
+**Scope:** Triple-source universe builder (static indexes + UW flow + IB scanner), TA prefilter with 9 indicators, bullish gate, breakout detection. Static index files with validation. Runnable as a standalone Stage A filter.
 
 **Produces:** `scripts/trend_scan_lib/universe.py`, `scripts/trend_scan_lib/stages/ta_prefilter.py`, `data/universe/sp500.json`, `data/universe/nasdaq100.json`. Can filter 800 tickers to ~150 trend survivors.
 
 ### Sub-Plan 3: Stages B + C + Ranking (`trend_scan_lib/` part 2)
 
 **File:** `2026-04-10-trend-scanner-3-stages-bc-ranking.md`
-**Scope:** Options structure scoring, volatility scoring, flow confirmation scoring, trade type suggestion, composite ranking with min threshold gates, news sanity check flags.
+**Scope:** Options structure scoring, volatility scoring, flow confirmation scoring, trade type suggestion, composite ranking with min threshold gates.
 
 **Produces:** `scripts/trend_scan_lib/stages/options_structure.py`, `volatility.py`, `flow_confirmation.py`, `scripts/trend_scan_lib/ranking.py`. Full 3-stage pipeline produces ranked candidates.
 
 ### Sub-Plan 4: Storage + CLI Entry Point
 
 **File:** `2026-04-10-trend-scanner-4-storage-cli.md`
-**Scope:** DuckDB schema + writer, JSON cache output, `trend_scan.py` CLI entry point with `--top N` flag, `TrendScanConfig`, end-to-end pipeline wiring.
+**Scope:** DuckDB schema + writer, JSON cache output, `trend_scan.py` CLI entry point with `--top N` flag, `TrendScanConfig`, end-to-end pipeline wiring, **real `DataFetcher` adapter wrapping `UWClient`**.
 
-**Produces:** `scripts/trend_scan_lib/storage.py`, `scripts/trend_scan.py`. Runnable via `python scripts/trend_scan.py --top 25`, outputs to DuckDB + JSON.
+**Produces:** `scripts/trend_scan_lib/storage.py`, `scripts/trend_scan_lib/data_fetcher.py`, `scripts/trend_scan.py`. Runnable via `python scripts/trend_scan.py --top 25`, outputs JSON to stdout + DuckDB + JSON cache.
 
 ### Sub-Plan 5: Web Integration
 

@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the triple-source universe builder and Stage A TA trend scoring with 9 indicators, gates, and breakout detection.
+**Goal:** Build the triple-source universe builder and Stage A TA trend scoring with 9 indicators, bullish gate, and breakout detection. (Bearish scanning deferred to follow-on.)
 
-**Architecture:** `trend_scan_lib/universe.py` fetches tickers from 3 sources (static index files, UW flow alerts, IB scanner), unions them, applies floor filters. `trend_scan_lib/stages/ta_prefilter.py` computes TA indicators from OHLCV data and scores each ticker 0-1.
+**Architecture:** `trend_scan_lib/universe.py` fetches tickers from 3 sources (static index files, UW flow alerts, IB scanner) and unions them. Note: universe floor filters (market cap, price, dollar volume) are applied at Stage A gate time via `passes_bullish_gate()`, not at universe build time. `trend_scan_lib/stages/ta_prefilter.py` computes TA indicators from OHLCV data and scores each ticker 0-1.
 
 **Tech Stack:** Python 3.14, pytest, UWClient, IBClient
 
@@ -312,7 +312,7 @@ Run: `mkdir -p /Users/chenxi/projects/xenon/data/universe`
 
 - [ ] **Step 2: Generate S&P 500 ticker list**
 
-Create a JSON file with current S&P 500 constituents. Use a script to fetch from a reliable source:
+Create a JSON file with current S&P 500 constituents. **Important:** Remove any delisted/acquired symbols (e.g., ATVI→MSFT, FRC→JPM, SIVB/SBNY→closed, DISH→merged). Verify by spot-checking 5 random tickers are fetchable. Use a script to generate:
 
 ```bash
 cd /Users/chenxi/projects/xenon && python -c "
@@ -325,7 +325,7 @@ tickers = [
     'AEP','AES','AFL','AIG','AIZ','AJG','AKAM','ALB','ALGN','ALK',
     'ALL','ALLE','AMAT','AMCR','AMD','AME','AMGN','AMP','AMT','AMZN',
     'ANET','ANSS','AON','AOS','APA','APD','APH','APTV','ARE','ATO',
-    'ATVI','AVGO','AVY','AWK','AXP','AZO','BA','BAC','BAX','BBWI',
+    'AVGO','AVY','AWK','AXP','AZO','BA','BAC','BAX','BBWI',
     'BBY','BDX','BEN','BF.B','BIO','BIIB','BK','BKNG','BKR','BLK',
     'BMY','BR','BRK.B','BRO','BSX','BWA','BXP','C','CAG','CAH',
     'CARR','CAT','CB','CBOE','CBRE','CCI','CCL','CDNS','CDW','CE',
@@ -333,13 +333,13 @@ tickers = [
     'CMA','CMCSA','CME','CMG','CMI','CMS','CNC','CNP','COF','COO',
     'COP','COST','CPB','CPRT','CPT','CRL','CRM','CSCO','CSGP','CSX',
     'CTAS','CTLT','CTRA','CTSH','CTVA','CVS','CVX','CZR','D','DAL',
-    'DD','DE','DFS','DG','DGX','DHI','DHR','DIS','DISH','DLR',
+    'DD','DE','DFS','DG','DGX','DHI','DHR','DIS','DLR',
     'DLTR','DOV','DOW','DPZ','DRI','DTE','DUK','DVA','DVN','DXC',
     'DXCM','EA','EBAY','ECL','ED','EFX','EIX','EL','EMN','EMR',
     'ENPH','EOG','EPAM','EQIX','EQR','EQT','ES','ESS','ETN','ETR',
     'ETSY','EVRG','EW','EXC','EXPD','EXPE','EXR','F','FANG','FAST',
     'FBHS','FCX','FDS','FDX','FE','FFIV','FIS','FISV','FITB','FLT',
-    'FMC','FOX','FOXA','FRC','FRT','FTNT','FTV','GD','GE','GEHC',
+    'FMC','FOX','FOXA','FRT','FTNT','FTV','GD','GE','GEHC',
     'GEN','GILD','GIS','GL','GLW','GM','GNRC','GOOG','GOOGL','GPC',
     'GPN','GRMN','GS','GWW','HAL','HAS','HBAN','HCA','HD','PEAK',
     'HES','HIG','HII','HLT','HOLX','HON','HPE','HPQ','HRL','HSIC',
@@ -360,8 +360,8 @@ tickers = [
     'PH','PHM','PKG','PKI','PLD','PM','PNC','PNR','PNW','POOL',
     'PPG','PPL','PRU','PSA','PSX','PTC','PVH','PWR','PXD','PYPL',
     'QCOM','QRVO','RCL','RE','REG','REGN','RF','RHI','RJF','RL',
-    'RMD','ROK','ROL','ROP','ROST','RSG','RTX','SBAC','SBNY','SBUX',
-    'SCHW','SEE','SHW','SIVB','SJM','SLB','SNA','SNPS','SO','SPG',
+    'RMD','ROK','ROL','ROP','ROST','RSG','RTX','SBAC','SBUX',
+    'SCHW','SEE','SHW','SJM','SLB','SNA','SNPS','SO','SPG',
     'SPGI','SRE','STE','STT','STX','STZ','SWK','SWKS','SYF','SYK',
     'SYY','T','TAP','TDG','TDY','TECH','TEL','TER','TFC','TFX',
     'TGT','TJX','TMO','TMUS','TPR','TRGP','TRMB','TROW','TRV','TSCO',
@@ -516,12 +516,31 @@ def test_build_full_universe(tmp_path):
 
     cfg = TrendScanConfig(sp500_path=str(sp), nasdaq100_path=str(nq))
 
-    # Mock UW and IB to isolate static source
+    mock_uw = MagicMock()
+    mock_ib = MagicMock()
+
+    # Mock UW and IB builder functions to return known tickers
     with patch("scripts.trend_scan_lib.universe.build_uw_flow_universe", return_value=["GOOG"]), \
          patch("scripts.trend_scan_lib.universe.build_ib_scanner_universe", return_value=["TSLA"]):
-        result = build_universe(cfg, uw_client=None, ib_client=None)
+        result = build_universe(cfg, uw_client=mock_uw, ib_client=mock_ib)
 
     assert result == ["AAPL", "GOOG", "MSFT", "NVDA", "TSLA"]
+
+
+def test_build_universe_no_clients(tmp_path):
+    """When uw_client and ib_client are None, only static sources are used."""
+    from scripts.trend_scan_lib.config import TrendScanConfig
+    from scripts.trend_scan_lib.universe import build_universe
+
+    sp = tmp_path / "sp500.json"
+    nq = tmp_path / "nasdaq100.json"
+    sp.write_text(json.dumps(["AAPL", "MSFT"]))
+    nq.write_text(json.dumps(["NVDA"]))
+
+    cfg = TrendScanConfig(sp500_path=str(sp), nasdaq100_path=str(nq))
+    result = build_universe(cfg, uw_client=None, ib_client=None)
+
+    assert result == ["AAPL", "MSFT", "NVDA"]
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -633,7 +652,7 @@ def build_universe(
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd /Users/chenxi/projects/xenon && python -m pytest scripts/tests/test_trend_universe.py -v`
-Expected: 7 passed
+Expected: 8 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1028,8 +1047,22 @@ INDICATOR_WEIGHTS = {
 BREAKOUT_BONUS = 0.1
 
 
+def _validate_ohlcv(indicators: dict) -> bool:
+    """Check that required OHLCV fields are present."""
+    required = ["close", "ma_20", "ma_50", "ma_200", "rsi", "adx", "macd", "macd_signal", "macd_histogram"]
+    return all(k in indicators for k in required)
+
+
 def compute_trend_score(indicators: dict) -> float:
-    """Compute composite trend score from raw indicators."""
+    """Compute composite trend score from raw indicators.
+
+    Required keys: close, ma_20, ma_50, ma_200, rsi, adx, macd, macd_signal, macd_histogram.
+    Optional keys (with defaults): rs_vs_spy, ma_20_series, recent_avg_volume, avg_20d_volume,
+    recent_up_ratio, bbw, high_52w, range_20d_pct, atr_pct.
+    """
+    if not _validate_ohlcv(indicators):
+        return 0.0
+
     scores = {
         "ma_alignment": score_ma_alignment(
             close=indicators["close"],
