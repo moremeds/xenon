@@ -343,8 +343,9 @@ class LiveTrendDataFetcher:
 
         snapshot["rs_vs_spy"] = rs_vs_spy
 
-        info = self._stock_info(ticker)
-        snapshot["market_cap"] = _safe_float(info.get("marketcap") or info.get("market_cap") or info.get("marketCap"))
+        # market_cap defaults to 0.0 — _stock_info (UW) is deferred to Stage B
+        # so Stage A stays pure-TA and doesn't hammer UW across the full universe.
+        snapshot["market_cap"] = 0.0
 
         return snapshot
 
@@ -460,8 +461,9 @@ def _stage_a_data(ticker: str, data_fetcher: DataFetcher, cfg: TrendScanConfig) 
         return None
     if ohlcv.get("dollar_volume", 0) < cfg.min_dollar_volume:
         return None
-    if ohlcv.get("market_cap", 0) < cfg.min_market_cap:
-        return None
+    # market_cap check skipped at Stage A — we'd need a UW call per ticker to
+    # populate it, which blows the UW rate budget on the full universe. Stage B
+    # still fetches UW for survivors, so market_cap filtering moves there.
     if ohlcv.get("price", 0) < cfg.min_price:
         return None
     return ohlcv
@@ -680,10 +682,9 @@ def run_scan_pipeline(
 
     universe = _resolve_universe(cfg=cfg, uw_client=uw_client, ib_client=ib_client)
 
-    # Pre-warm TA cache on main thread (ib_insync is not thread-safe)
-    if ta_service is not None:
-        refresh_tickers = list(universe) + ["SPY"]
-        ta_service.bulk_refresh(refresh_tickers)
+    # Scanner is read-only against the TA cache — ta_premarket_prep owns the
+    # refresh SLA. Missing/stale tickers surface via the ta_premarket_status.json
+    # warning in output rather than triggering a mid-scan refetch.
 
     # Pre-cache SPY DataFrame so worker threads don't each query DuckDB for it
     if hasattr(data_fetcher, "pre_cache_spy"):
@@ -707,15 +708,51 @@ def run_scan_pipeline(
                 gated_map[ticker] = gated
                 stage_a_survivors_set.add(ticker)
 
+        # Stage A cap: keep top N by trend_score before fanning out UW calls
+        if cfg.stage_a_cap and len(gated_map) > cfg.stage_a_cap:
+            ranked_a = sorted(
+                gated_map.items(),
+                key=lambda kv: kv[1].get("trend_score", 0.0),
+                reverse=True,
+            )[: cfg.stage_a_cap]
+            logger.info(
+                "stage_a cap (%s): %d → %d by trend_score",
+                direction,
+                len(gated_map),
+                cfg.stage_a_cap,
+            )
+            gated_map = dict(ranked_a)
+
         bc_pairs = parallel_fetch(
             items=list(gated_map.keys()),
             fn=lambda ticker: (ticker, _stage_bc(ticker, gated_map[ticker], direction, data_fetcher)),
             max_workers=cfg.max_workers,
         )
 
-        for ticker, bc in bc_pairs:
-            if bc is None:
-                continue
+        # Stage B cap: keep top M by combined trend+structure+vol+flow before catalyst fan-out
+        b_survivors = [(t, bc) for t, bc in bc_pairs if bc is not None]
+        if cfg.stage_b_cap and len(b_survivors) > cfg.stage_b_cap:
+
+            def _combined(pair):
+                t, bc = pair
+                ohlcv = gated_map[t]
+                return (
+                    ohlcv.get("trend_score", 0.0)
+                    + bc.get("structure_score", 0.0)
+                    + bc.get("vol_score", 0.0)
+                    + bc.get("flow_score", 0.0)
+                )
+
+            ranked_b = sorted(b_survivors, key=_combined, reverse=True)[: cfg.stage_b_cap]
+            logger.info(
+                "stage_b cap (%s): %d → %d by combined score",
+                direction,
+                len(b_survivors),
+                cfg.stage_b_cap,
+            )
+            b_survivors = ranked_b
+
+        for ticker, bc in b_survivors:
             ohlcv = gated_map[ticker]
             catalysts, catalyst_score = fetch_catalysts(
                 ticker=ticker,
@@ -883,6 +920,12 @@ def build_runtime():
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Trend scanner")
     parser.add_argument("--top", type=int, default=25)
+    parser.add_argument(
+        "--stage-a-cap", type=int, default=100, help="Max survivors per direction after Stage A gate (0=unlimited)"
+    )
+    parser.add_argument(
+        "--stage-b-cap", type=int, default=25, help="Max survivors per direction before catalyst fetch (0=unlimited)"
+    )
     parser.add_argument("--db-path", default=DEFAULT_DB_PATH)
     parser.add_argument("--json-cache", default="data/trend_scan.json")
     args = parser.parse_args(argv)
@@ -894,7 +937,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         data_fetcher, uw_client, ib_client, ta_service, startup_warnings = build_runtime()
         result = run_scan_pipeline(
-            TrendScanConfig(top_n=args.top),
+            TrendScanConfig(
+                top_n=args.top,
+                stage_a_cap=args.stage_a_cap,
+                stage_b_cap=args.stage_b_cap,
+            ),
             data_fetcher=data_fetcher,
             uw_client=uw_client,
             ib_client=ib_client,

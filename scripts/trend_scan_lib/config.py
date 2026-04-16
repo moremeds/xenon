@@ -15,6 +15,9 @@ class TrendScanConfig:
     top_n: int = 25
     max_workers: int = 15
 
+    stage_a_cap: int = 100
+    stage_b_cap: int = 25
+
     # Scoring weights — must sum to 1.0
     weights: dict[str, float] = field(
         default_factory=lambda: {
