@@ -1,76 +1,94 @@
-"""Unit tests for ta_lib.bars with mocked IB client."""
+"""Tests for scripts.ta_lib.bars — producer-side Massive→OHLCV adapter."""
 
 from __future__ import annotations
 
-from datetime import datetime
-from types import SimpleNamespace
+from datetime import date
 from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
 
 
-def _make_bar_data(n: int = 5, start_date: str = "20260401") -> list:
-    """Create mock ib_insync BarData objects."""
-    bars = []
-    dt = datetime.strptime(start_date, "%Y%m%d")
-    for i in range(n):
-        bar_date = dt.replace(day=dt.day + i)
-        bars.append(
-            SimpleNamespace(
-                date=bar_date.strftime("%Y%m%d"),
-                open=100.0 + i,
-                high=101.0 + i,
-                low=99.0 + i,
-                close=100.5 + i,
-                volume=1_000_000 + i * 100_000,
-            )
-        )
-    return bars
+def _massive_aggregates_response() -> pd.DataFrame:
+    """Shape of what MassiveClient.get_aggregates returns."""
+    return pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2026-01-02T09:30:00-05:00", "2026-01-02T10:30:00-05:00"]),
+            "open": [100.0, 101.0],
+            "high": [101.0, 102.0],
+            "low": [99.0, 100.0],
+            "close": [100.5, 101.5],
+            "volume": [1000, 2000],
+            "vwap": [100.25, 101.25],
+            "tx_count": [150, 175],
+        }
+    )
 
 
-class TestFetchBars:
-    def test_returns_dataframe(self):
-        from scripts.ta_lib.bars import fetch_bars
+def test_fetch_bars_calls_get_aggregates_with_iso_dates():
+    from scripts.ta_lib.bars import fetch_bars
 
-        mock_ib = MagicMock()
-        mock_ib.get_historical_data.return_value = _make_bar_data(n=5)
-        mock_ib._ib = MagicMock()
-        mock_ib._ib.qualifyContracts.return_value = [MagicMock()]
+    client = MagicMock()
+    client.get_aggregates.return_value = _massive_aggregates_response()
 
-        result = fetch_bars(mock_ib, "AAPL", duration="1 Y", bar_size="1 day")
-        assert isinstance(result, pd.DataFrame)
-        assert len(result) == 5
-        assert list(result.columns) == ["date", "open", "high", "low", "close", "volume"]
+    fetch_bars(client, "AAPL", timeframe="1h", start=date(2026, 1, 1), end=date(2026, 1, 2))
 
-    def test_date_parsed_correctly(self):
-        from scripts.ta_lib.bars import fetch_bars
+    client.get_aggregates.assert_called_once_with("AAPL", "1h", "2026-01-01", "2026-01-02")
 
-        mock_ib = MagicMock()
-        mock_ib.get_historical_data.return_value = _make_bar_data(n=1, start_date="20260410")
-        mock_ib._ib = MagicMock()
-        mock_ib._ib.qualifyContracts.return_value = [MagicMock()]
 
-        result = fetch_bars(mock_ib, "AAPL", duration="1 D", bar_size="1 day")
-        assert result["date"].iloc[0] == pd.Timestamp("2026-04-10")
+def test_fetch_bars_renames_date_to_timestamp():
+    from scripts.ta_lib.bars import fetch_bars
 
-    def test_empty_response_raises(self):
-        from scripts.ta_lib.bars import fetch_bars
+    client = MagicMock()
+    client.get_aggregates.return_value = _massive_aggregates_response()
 
-        mock_ib = MagicMock()
-        mock_ib.get_historical_data.return_value = []
-        mock_ib._ib = MagicMock()
-        mock_ib._ib.qualifyContracts.return_value = [MagicMock()]
+    df = fetch_bars(client, "AAPL", timeframe="1h", start=date(2026, 1, 1), end=date(2026, 1, 2))
 
-        with pytest.raises(RuntimeError, match="No historical data"):
-            fetch_bars(mock_ib, "AAPL", duration="1 Y", bar_size="1 day")
+    assert "timestamp" in df.columns
+    assert "date" not in df.columns
 
-    def test_invalid_contract_raises(self):
-        from scripts.ta_lib.bars import fetch_bars
 
-        mock_ib = MagicMock()
-        mock_ib._ib = MagicMock()
-        mock_ib._ib.qualifyContracts.return_value = []  # qualification failed
+def test_fetch_bars_drops_vwap_and_tx_count():
+    from scripts.ta_lib.bars import fetch_bars
 
-        with pytest.raises(ValueError, match="INVALID"):
-            fetch_bars(mock_ib, "INVALID", duration="1 Y", bar_size="1 day")
+    client = MagicMock()
+    client.get_aggregates.return_value = _massive_aggregates_response()
+
+    df = fetch_bars(client, "AAPL", timeframe="1h", start=date(2026, 1, 1), end=date(2026, 1, 2))
+
+    assert set(df.columns) == {"timestamp", "open", "high", "low", "close", "volume"}
+
+
+def test_fetch_bars_returns_columns_in_canonical_order():
+    from scripts.ta_lib.bars import fetch_bars
+
+    client = MagicMock()
+    client.get_aggregates.return_value = _massive_aggregates_response()
+
+    df = fetch_bars(client, "AAPL", timeframe="1h", start=date(2026, 1, 1), end=date(2026, 1, 2))
+
+    assert list(df.columns) == ["timestamp", "open", "high", "low", "close", "volume"]
+
+
+def test_fetch_bars_preserves_tz_aware_timestamps():
+    """The MassiveClient returns ET-aware timestamps. Adapter must not strip the tz."""
+    from scripts.ta_lib.bars import fetch_bars
+
+    client = MagicMock()
+    client.get_aggregates.return_value = _massive_aggregates_response()
+
+    df = fetch_bars(client, "AAPL", timeframe="1h", start=date(2026, 1, 1), end=date(2026, 1, 2))
+
+    assert df["timestamp"].dt.tz is not None
+
+
+def test_fetch_bars_propagates_massive_errors():
+    """MassiveNoDataError / MassiveAuthError should not be swallowed."""
+    from scripts.clients.massive_client import MassiveNoDataError
+    from scripts.ta_lib.bars import fetch_bars
+
+    client = MagicMock()
+    client.get_aggregates.side_effect = MassiveNoDataError("UNKNOWN")
+
+    with pytest.raises(MassiveNoDataError):
+        fetch_bars(client, "UNKNOWN", timeframe="1d", start=date(2026, 1, 1), end=date(2026, 1, 2))
