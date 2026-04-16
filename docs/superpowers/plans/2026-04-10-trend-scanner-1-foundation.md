@@ -4,7 +4,7 @@
 
 **Goal:** Extract shared scanner primitives into `scripts/scanner_lib/` so both `uw_scan` and the new `trend_scan` can reuse them.
 
-**Architecture:** Move generic models, universe loading, parallel execution, JSON caching, and base scoring into a shared library. Refactor `uw_scan_lib` to import from `scanner_lib` instead of owning these primitives. Zero behavior change — all existing `uw_scan` tests must pass unchanged.
+**Architecture:** Create generic models, universe loading, parallel execution, JSON caching, and base scoring in a new shared library. Refactor `uw_scan_lib/universe.py` to delegate to `scanner_lib` universe utilities. Note: `uw_scan_lib/models.py` is UNCHANGED — its models (`SignalHit`, `ContextFlag`, `ScanCandidate`) have UW-specific fields (`tier`, `freshness`, `hits`, `gates`) that don't map to the generic base models. Zero behavior change — all existing `uw_scan` tests must pass unchanged.
 
 **Tech Stack:** Python 3.14, pytest, dataclasses
 
@@ -22,13 +22,13 @@ scripts/
 │   ├── universe.py          # CREATE — UniverseLoader with pluggable sources
 │   ├── executor.py          # CREATE — ParallelFetcher wrapping ThreadPoolExecutor
 │   ├── cache.py             # CREATE — JSONCacheWriter (extracted from api/server.py _write_cache)
-│   └── scoring.py           # CREATE — weighted_composite_score(), min_threshold_gate()
+│   └── scoring.py           # CREATE — weighted_composite(), passes_min_thresholds(), normalize_score()
 ├── uw_scan_lib/
-│   ├── models.py            # MODIFY — import base classes from scanner_lib, extend
-│   ├── universe.py          # MODIFY — delegate to scanner_lib UniverseLoader
-│   ├── ranking.py           # MODIFY — use scanner_lib scoring helpers
+│   ├── models.py            # UNCHANGED — UW-specific fields (tier, freshness, hits, gates) incompatible with base models
+│   ├── universe.py          # MODIFY — delegate dedup/normalize to scanner_lib utilities
+│   ├── ranking.py           # UNCHANGED — UW-specific ranking logic stays as-is
 │   └── (signals/, context/, confluence.py — UNCHANGED)
-└── uw_scan.py               # MODIFY — update imports only
+└── uw_scan.py               # UNCHANGED — no import changes needed until uw_scan_lib models change
 ```
 
 ---

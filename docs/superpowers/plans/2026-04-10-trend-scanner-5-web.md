@@ -107,8 +107,17 @@ In the `lifespan()` startup section, add alongside the existing daily job:
 
 ```python
 # Pre-market trend scanner (8:30 AM ET weekdays)
+_trend_scan_task = None
 if os.environ.get("XENON_DAILY_JOB_WORKER_ID", "0") == "0":
-    asyncio.create_task(_trend_scan_premarket_loop())
+    _trend_scan_task = asyncio.create_task(_trend_scan_premarket_loop())
+```
+
+In the `lifespan()` shutdown section, add cancellation:
+
+```python
+# Cancel trend scan scheduler on shutdown
+if _trend_scan_task is not None:
+    _trend_scan_task.cancel()
 ```
 
 - [ ] **Step 4: Commit**
@@ -126,36 +135,11 @@ git commit -m "feat(api): add POST /trend-scan route and pre-market scheduler"
 
 - Modify: `web/lib/types.ts`
 
-- [ ] **Step 1: Replace scanner types**
+- [ ] **Step 1: Add new trend scanner types (additive — do NOT delete old types yet)**
 
-In `web/lib/types.ts`, replace the existing `ScannerSignal` and `ScannerData` types (lines ~413-432):
+In `web/lib/types.ts`, **add** the following types AFTER the existing `ScannerSignal` and `ScannerData` types. Keep the old types until all consumers are migrated in Step 2. Once migration is complete, delete the old types.
 
-Old:
-
-```typescript
-export type ScannerSignal = {
-  ticker: string;
-  sector: string;
-  score: number;
-  signal: string;
-  direction: string;
-  strength: number;
-  buy_ratio: number | null;
-  num_prints: number;
-  sustained_days: number;
-  recent_direction: string;
-  recent_strength: number;
-};
-
-export type ScannerData = {
-  scan_time: string;
-  tickers_scanned: number;
-  signals_found: number;
-  top_signals: ScannerSignal[];
-};
-```
-
-New:
+New types to ADD:
 
 ```typescript
 export type TrendScores = {
@@ -217,11 +201,27 @@ export type ScannerData = {
 };
 ```
 
-- [ ] **Step 2: Commit**
+- [ ] **Step 2: Remove old `ScannerSignal` and `ScannerData` types**
+
+Delete the old `ScannerSignal` and `ScannerData` type definitions from `web/lib/types.ts` (lines ~413-432). Then grep for any remaining references:
 
 ```bash
-cd /Users/chenxi/projects/xenon && git add web/lib/types.ts
-git commit -m "feat(web): replace scanner types with trend scanner data model"
+cd /Users/chenxi/projects/xenon/web && grep -rn "ScannerSignal\|ScannerData" --include="*.ts" --include="*.tsx" | grep -v "node_modules"
+```
+
+Update any test files that reference the old types:
+
+- `web/tests/sync-hooks.test.ts` — update mock data shape to use `TrendCandidate`/new `ScannerData`
+- `web/tests/route-cache-meta.test.ts` — update mock data shape
+- `web/tests/fastapi-migration.test.ts` — update mock data shape
+
+Each test file must be updated to use the new `ScannerData` shape with `scan_id`, `scan_timestamp`, `candidates[]`, etc.
+
+- [ ] **Step 3: Commit**
+
+```bash
+cd /Users/chenxi/projects/xenon && git add web/lib/types.ts web/tests/sync-hooks.test.ts web/tests/route-cache-meta.test.ts web/tests/fastapi-migration.test.ts
+git commit -m "feat(web): migrate scanner types to trend scanner data model"
 ```
 
 ---
@@ -460,7 +460,65 @@ describe("ScannerData shape", () => {
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails (types don't exist yet if Task 2 not done, otherwise passes)**
+**Note:** This test file covers type shape validation AND component rendering. The render tests use mocked `useScanner` to verify table headers, score bars, expand/collapse, and empty states — not just type instantiation.
+
+Add render tests after the type shape tests:
+
+```typescript
+// Additional render tests (add after the ScannerData shape tests above)
+import { render, screen, fireEvent } from "@testing-library/react";
+
+// Mock useScanner to return controlled data
+vi.mock("@/lib/useScanner", () => ({
+  useScanner: vi.fn(),
+}));
+
+describe("ScannerSections component", () => {
+  it("renders table headers", async () => {
+    const { useScanner } = await import("@/lib/useScanner");
+    (useScanner as any).mockReturnValue({
+      data: {
+        scan_id: "test",
+        scan_timestamp: "2026-04-10T08:45:12-04:00",
+        market_context: { spy_close: 523, vix_close: 18, regime: "bullish" },
+        universe_size: 100,
+        stage_a_survivors: 50,
+        stage_b_survivors: 25,
+        candidates: [makeMockCandidate()],
+      },
+      syncing: false,
+      error: null,
+      lastSync: "2026-04-10T08:45:12-04:00",
+    });
+    // Render and verify headers exist
+    // Verify: Ticker, Dir, Score, Trend, Structure, Vol, Flow, Price, Trade, Flags
+  });
+
+  it("shows empty state when no candidates", async () => {
+    const { useScanner } = await import("@/lib/useScanner");
+    (useScanner as any).mockReturnValue({
+      data: { candidates: [] },
+      syncing: false,
+      error: null,
+      lastSync: null,
+    });
+    // Verify: "No trend candidates. Waiting for scan..." message
+  });
+
+  it("shows error state", async () => {
+    const { useScanner } = await import("@/lib/useScanner");
+    (useScanner as any).mockReturnValue({
+      data: null,
+      syncing: false,
+      error: "Xenon API unavailable",
+      lastSync: null,
+    });
+    // Verify: error message rendered
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd /Users/chenxi/projects/xenon/web && npx vitest run tests/trend-scanner.test.ts`
 

@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the DuckDB storage layer for scan history and the `trend_scan.py` CLI entry point that wires the full 3-stage pipeline together.
+**Goal:** Build the DuckDB storage layer for scan history, the real `DataFetcher` adapter wrapping `UWClient`, and the `trend_scan.py` CLI entry point that wires the full 3-stage pipeline together.
 
-**Architecture:** `trend_scan_lib/storage.py` manages DuckDB schema creation and inserts. `trend_scan.py` orchestrates: build universe → Stage A filter → Stage B/C score → rank → write DuckDB + JSON cache. CLI supports `--top N` flag, outputs JSON to stdout for FastAPI subprocess integration.
+**Architecture:** `trend_scan_lib/storage.py` manages DuckDB schema creation and inserts. `trend_scan_lib/data_fetcher.py` implements the `DataFetcher` protocol using `UWClient`. `trend_scan.py` orchestrates: build universe → Stage A filter (parallel) → Stage B/C score → rank → write DuckDB + JSON cache. CLI supports `--top N` flag, outputs JSON to stdout for FastAPI subprocess integration.
 
 **Tech Stack:** Python 3.14, pytest, DuckDB, argparse
 
@@ -19,10 +19,12 @@
 ```
 scripts/
 ├── trend_scan_lib/
-│   └── storage.py               # CREATE — DuckDB schema + writer
+│   ├── storage.py               # CREATE — DuckDB schema + writer
+│   └── data_fetcher.py          # CREATE — DataFetcher adapter wrapping UWClient
 ├── trend_scan.py                 # CREATE — CLI entry point + pipeline orchestrator
 └── tests/
     ├── test_trend_storage.py     # CREATE
+    ├── test_data_fetcher.py      # CREATE
     └── test_trend_scan_e2e.py    # CREATE
 ```
 
@@ -333,11 +335,13 @@ CREATE TABLE IF NOT EXISTS scan_candidates (
     suggested_trade    VARCHAR,
     invalidation       DOUBLE,
     flags              VARCHAR[],
+    holding_window     VARCHAR,
     trend_summary      VARCHAR,
     structure_summary  VARCHAR,
     vol_summary        VARCHAR,
     flow_summary       VARCHAR,
-    PRIMARY KEY (scan_id, ticker)
+    PRIMARY KEY (scan_id, ticker),
+    FOREIGN KEY (scan_id) REFERENCES scan_runs(scan_id)
 );
 """
 
@@ -387,9 +391,9 @@ def write_scan_candidates(
                 final_score, trend_score, structure_score, vol_score, flow_score,
                 ma_20, ma_50, ma_200, rsi, adx, macd_histogram, bbw, rs_vs_spy,
                 iv_rank, gamma_flip, call_wall, put_wall,
-                suggested_trade, invalidation, flags,
+                suggested_trade, invalidation, flags, holding_window,
                 trend_summary, structure_summary, vol_summary, flow_summary
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 c["scan_id"], c["ticker"], c["snapshot_timestamp"],
                 c.get("spot_price", 0), c.get("direction", "bullish"),
@@ -401,7 +405,7 @@ def write_scan_candidates(
                 c.get("iv_rank", 0), c.get("gamma_flip", 0),
                 c.get("call_wall", 0), c.get("put_wall", 0),
                 c.get("suggested_trade", ""), c.get("invalidation", 0),
-                c.get("flags", []),
+                c.get("flags", []), c.get("holding_window", ""),
                 c.get("trend_summary", ""), c.get("structure_summary", ""),
                 c.get("vol_summary", ""), c.get("flow_summary", ""),
             ],
@@ -422,7 +426,167 @@ git commit -m "feat(trend_scan_lib): add DuckDB storage for scan history"
 
 ---
 
-### Task 2: CLI Entry Point (`trend_scan.py`)
+### Task 2: DataFetcher Adapter (`trend_scan_lib/data_fetcher.py`)
+
+**Files:**
+
+- Create: `scripts/trend_scan_lib/data_fetcher.py`
+- Test: `scripts/tests/test_data_fetcher.py`
+
+- [ ] **Step 1: Write failing tests**
+
+```python
+# scripts/tests/test_data_fetcher.py
+"""Tests for UWDataFetcher adapter."""
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+import pytest
+
+
+def test_fetch_ohlcv_returns_dict():
+    from scripts.trend_scan_lib.data_fetcher import UWDataFetcher
+
+    mock_uw = MagicMock()
+    mock_uw.get_ticker_data.return_value = {
+        "close": 150.0, "ma_20": 145.0, "ma_50": 140.0, "ma_200": 130.0,
+        "rsi": 62.0, "adx": 32.0, "macd": 1.5, "macd_signal": 1.0,
+        "macd_histogram": 0.5, "rs_vs_spy": 1.15,
+    }
+    fetcher = UWDataFetcher(uw_client=mock_uw)
+    result = fetcher.fetch_ohlcv("AAPL")
+    assert result["close"] == 150.0
+    assert result["rsi"] == 62.0
+
+
+def test_fetch_structure_returns_dict():
+    from scripts.trend_scan_lib.data_fetcher import UWDataFetcher
+
+    mock_uw = MagicMock()
+    mock_uw.get_greek_exposure.return_value = {
+        "spot": 150, "gamma_flip": 145, "call_wall": 165,
+        "put_wall": 146, "max_pain": 148, "net_gex": 200_000,
+    }
+    fetcher = UWDataFetcher(uw_client=mock_uw)
+    result = fetcher.fetch_structure("AAPL")
+    assert "gamma_flip" in result
+
+
+def test_fetch_volatility_returns_dict():
+    from scripts.trend_scan_lib.data_fetcher import UWDataFetcher
+
+    mock_uw = MagicMock()
+    mock_uw.get_iv_data.return_value = {"iv_rank": 22, "term_structure": "normal"}
+    fetcher = UWDataFetcher(uw_client=mock_uw)
+    result = fetcher.fetch_volatility("AAPL")
+    assert result["iv_rank"] == 22
+
+
+def test_fetch_flow_returns_dict():
+    from scripts.trend_scan_lib.data_fetcher import UWDataFetcher
+
+    mock_uw = MagicMock()
+    mock_uw.get_flow_alerts.return_value = [
+        {"ticker": "AAPL", "side": "ask", "premium": 500_000},
+    ]
+    fetcher = UWDataFetcher(uw_client=mock_uw)
+    result = fetcher.fetch_flow("AAPL")
+    assert "ask_dominance" in result or "flow_count" in result
+
+
+def test_fetch_market_context_returns_dict():
+    from scripts.trend_scan_lib.data_fetcher import UWDataFetcher
+
+    mock_uw = MagicMock()
+    mock_uw.get_market_overview.return_value = {
+        "spy_close": 520.0, "vix_close": 17.0,
+    }
+    fetcher = UWDataFetcher(uw_client=mock_uw)
+    result = fetcher.fetch_market_context()
+    assert "spy_close" in result
+    assert "regime" in result
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `cd /Users/chenxi/projects/xenon && python -m pytest scripts/tests/test_data_fetcher.py -v`
+Expected: FAIL — `ModuleNotFoundError`
+
+- [ ] **Step 3: Implement DataFetcher adapter**
+
+```python
+# scripts/trend_scan_lib/data_fetcher.py
+"""DataFetcher adapter wrapping UWClient for the trend scanner pipeline."""
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+class UWDataFetcher:
+    """Adapts UWClient API calls to the DataFetcher protocol expected by trend_scan pipeline."""
+
+    def __init__(self, uw_client: Any) -> None:
+        self._uw = uw_client
+
+    def fetch_ohlcv(self, ticker: str) -> dict:
+        """Fetch OHLCV + TA indicators for a ticker."""
+        return self._uw.get_ticker_data(ticker)
+
+    def fetch_structure(self, ticker: str) -> dict:
+        """Fetch options structure (gamma, walls, GEX) for a ticker."""
+        return self._uw.get_greek_exposure(ticker)
+
+    def fetch_volatility(self, ticker: str) -> dict:
+        """Fetch IV state for a ticker."""
+        return self._uw.get_iv_data(ticker)
+
+    def fetch_flow(self, ticker: str) -> dict:
+        """Fetch flow alerts and aggregate into flow summary for a ticker."""
+        alerts = self._uw.get_flow_alerts(ticker=ticker) or []
+        ask_count = sum(1 for a in alerts if a.get("side") == "ask")
+        total = len(alerts)
+        return {
+            "ask_dominance": ask_count / total if total > 0 else 0.5,
+            "flow_count": total,
+            "expiry_cluster_ratio": 0.5,  # TODO: compute from alert expiry spread
+            "avg_strike_pct_otm": 0.05,   # TODO: compute from alert strikes
+            "net_delta": sum(a.get("delta", 0) for a in alerts),
+            "net_vega": sum(a.get("vega", 0) for a in alerts),
+            "dp_direction": "neutral",     # TODO: integrate dark pool data
+        }
+
+    def fetch_market_context(self) -> dict:
+        """Fetch market overview (SPY, VIX, regime)."""
+        try:
+            overview = self._uw.get_market_overview()
+            spy = overview.get("spy_close", 0)
+            vix = overview.get("vix_close", 0)
+            regime = "bullish" if vix < 20 else "cautious" if vix < 30 else "fear"
+            return {"spy_close": spy, "vix_close": vix, "regime": regime}
+        except Exception:
+            logger.warning("Failed to fetch market context", exc_info=True)
+            return {"spy_close": 0, "vix_close": 0, "regime": "unknown"}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `cd /Users/chenxi/projects/xenon && python -m pytest scripts/tests/test_data_fetcher.py -v`
+Expected: 5 passed
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/trend_scan_lib/data_fetcher.py scripts/tests/test_data_fetcher.py
+git commit -m "feat(trend_scan_lib): add UWDataFetcher adapter for trend scanner pipeline"
+```
+
+---
+
+### Task 3: CLI Entry Point (`trend_scan.py`)
 
 **Files:**
 
@@ -791,11 +955,11 @@ def run_scan_pipeline(
     universe = build_universe(cfg, uw_client=uw_client, ib_client=ib_client)
 
     # Stage A: parallel TA prefilter
-    stage_a_results: dict[str, dict] = {}
-    for ticker in universe:
-        result = _stage_a(ticker, data_fetcher, cfg)
-        if result is not None:
-            stage_a_results[ticker] = result
+    def _run_stage_a(ticker: str) -> tuple[str, dict | None]:
+        return ticker, _stage_a(ticker, data_fetcher, cfg)
+
+    stage_a_raw = parallel_fetch(items=universe, fn=_run_stage_a, max_workers=cfg.max_workers)
+    stage_a_results: dict[str, dict] = {t: d for t, d in stage_a_raw if d is not None}
 
     stage_a_survivors = len(stage_a_results)
 
@@ -911,6 +1075,7 @@ def run_scan_pipeline(
                 "suggested_trade": c.suggested_trade,
                 "invalidation": c.invalidation,
                 "flags": c.flags,
+                "holding_window": c.holding_window,
                 "trend_summary": c.summaries.get("trend", ""),
                 "structure_summary": c.summaries.get("structure", ""),
                 "vol_summary": c.summaries.get("vol", ""),
@@ -1009,18 +1174,23 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    cfg = TrendScanConfig(top_n=args.top)
-
-    # Import real data fetcher (implemented in a future task or via UWClient adapter)
-    # For now, this will be wired up in the web integration sub-plan
+    from scripts.trend_scan_lib.data_fetcher import UWDataFetcher
     from scripts.clients.uw_client import UWClient
 
+    cfg = TrendScanConfig(top_n=args.top)
     uw_client = UWClient()
+    data_fetcher = UWDataFetcher(uw_client=uw_client)
 
-    # TODO: Wire up real DataFetcher adapter over UWClient + IBClient
-    # For now, the CLI exists for FastAPI subprocess integration
-    logger.error("Real DataFetcher not yet wired — use via FastAPI POST /trend-scan")
-    sys.exit(1)
+    result = run_scan_pipeline(
+        cfg,
+        data_fetcher=data_fetcher,
+        uw_client=uw_client,
+        ib_client=None,
+        db_path=args.db_path,
+        json_cache_path=args.json_cache,
+    )
+
+    print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":
@@ -1041,7 +1211,7 @@ git commit -m "feat: add trend_scan.py CLI entry point with full 3-stage pipelin
 
 ---
 
-### Task 3: Run Full Test Suite
+### Task 4: Run Full Test Suite
 
 - [ ] **Step 1: Run all trend scanner tests**
 
