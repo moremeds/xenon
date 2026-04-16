@@ -3,6 +3,44 @@
 All notable changes to Xenon are documented here. Format loosely based on
 [Keep a Changelog](https://keepachangelog.com/) with semver-ish versioning.
 
+## [0.1.1] - 2026-04-16
+
+### Fixed — UW portfolio SSE cache preservation + daily stats reset at 8PM ET
+
+Two coupled fixes to the Unusual Whales telemetry path.
+
+#### SSE streaming no longer wipes cached tiles
+
+`useUwPortfolio` now uses a two-Map architecture during streaming: SSE rows
+accumulate independently, and the displayed state is a merge of cached tickers
+(loaded from the on-disk snapshot) with incoming SSE tickers (SSE wins on
+conflict). Previously, the first SSE row reset the visible list to a
+single-element array, causing the rest of the portfolio's tiles to vanish for
+several seconds until later events repopulated. Monotonicity now holds: the
+visible ticker count never decreases during a stream. On a valid `done` event,
+the snapshot cache is finalized to the SSE-only set (authoritative); incomplete
+streams preserve the merged view so remounts don't drop tiles.
+
+#### Daily stats aligned to UW's 8PM ET quota boundary
+
+New `get_stats_with_daily()` and `get_daily_stats()` on the process-wide
+`UWApiStats` singleton expose counters for the current UW daily quota window,
+rolled up from hourly buckets. The sidebar now shows "UW Today" with daily
+request count, cache-hit %, and 2xx/4xx/5xx breakdown — previously session
+totals were displayed, which never reset and bore no relation to UW's 20k/day
+budget ceiling. Boundary computation uses `ZoneInfo("America/New_York")` for
+DST-correct wall-clock math. The `/uw-stats` endpoint returns session + daily
+under a single lock to prevent torn snapshots under concurrent writes.
+
+#### Tests
+
+- `test_uw_api_stats_history.py`: 40 tests covering hour-boundary correctness,
+  DST transitions in both directions, cache-hit exclusion from request count,
+  zero-state behavior, and concurrent-write snapshot consistency.
+- `useUwPortfolio.test.ts`: 8 tests covering cached-tile preservation during
+  streaming, SSE-wins-on-conflict merge, `done`-gated finalization, and
+  incomplete-stream cache behavior.
+
 ## [0.1.0] - 2026-04-15
 
 ### Added — Trend Scanner: bearish pipeline, catalyst stage, pre-market prep
