@@ -14,7 +14,7 @@ Stop the trend scanner from calling Massive.com at scan time. Produce OHLCV and 
 **Success criteria:**
 
 - `scripts/trend_scan.py` never imports `MassiveClient` or makes any HTTP call to Massive.
-- Action runs nightly at 8 PM ET (incremental Mon–Fri) and 1 AM ET Saturday (full refresh), completes under 60 min.
+- Action runs nightly around 00:00 UTC Tue–Sat (= 7–8 PM ET Mon–Fri evenings depending on DST; incremental) and 05:00 UTC Sat (= 00:00–01:00 ET Sat; full refresh). Completes under 60 min.
 - Scanner cold-start (sync + run) completes under 45 seconds from stale mirror.
 - R2 `meta/last_updated.json` reflects our writes; external producer's `meta/universe.json` stays authoritative and untouched.
 
@@ -54,7 +54,8 @@ External producer (unchanged) ──▶ meta/universe.json, meta/market_caps.jso
                       │                                      │
                       │  1. apex_sync: R2 → data/apex_mirror │
                       │     (gated by meta/last_updated.json)│
-                      │  2. load into DuckDB; join universe  │
+                      │  2. load parquets via pyarrow;       │
+                      │     join universe (pandas)           │
                       │  3. Stage A gate (price/mcap/$vol)   │
                       │  4. Stage B/C: UW structure/vol/flow │
                       │  5. rank, write data/trend_scan.json │
@@ -115,6 +116,8 @@ parquet/indicators/{tf}/{T}.parquet (NEW)
 
 Rows match 1-to-1 with the ticker's historical parquet (same timestamps). Computed at Action time, never recomputed by scanner.
 
+**Resolution note:** we emit microsecond (`us`) precision, not nanosecond (`ns`) like the existing producer. Microsecond is ample for bar-level data (daily + hourly; we never handle sub-second), reads well in pandas (pandas 2.x default is `ns` but auto-converts), and is slightly smaller on disk. DuckDB and pyarrow both handle both natively.
+
 ### 3.1 Timestamp normalization — the Asia/Hong_Kong bug
 
 **Finding (verified against live R2 data 2026-04-16):** existing `parquet/historical/{1d,1h}/*.parquet` files carry Arrow schema `timestamp[ns, tz=Asia/Hong_Kong]`. Inspection of hourly values (`2025-11-28 09:30:00+0800`) shows the producer wrote ET-local wall-clock times but labeled them HKT — almost certainly a machine-local tz leaking into an unguarded `tz_localize()`. Daily bars are less broken (only the date matters) but still misleading.
@@ -157,7 +160,7 @@ After each Action run, append per-ticker rows recording `{symbol, timeframe, bar
 ### New files
 
 - **`.github/workflows/apex-data-refresh.yml`**
-  - Triggers: cron `0 0 * * 2-6` UTC (8 PM ET weeknights), cron `0 5 * * 6` UTC (1 AM ET Saturday full), `workflow_dispatch` (manual).
+  - Triggers: cron `0 0 * * 2-6` UTC (fires Tue–Sat at 00:00 UTC, which is Mon–Fri 7–8 PM ET after market close, incremental mode), cron `0 5 * * 6` UTC (Saturday 05:00 UTC ≈ early Saturday ET, full mode), `workflow_dispatch` (manual).
   - Secrets: `MASSIVE_API_KEY`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ENDPOINT`, `R2_BUCKET`.
   - Runtime: Ubuntu 24.04, Python 3.13, ta-lib via apt, boto3 + pyarrow + pandas.
   - Timeout: 90 min.
