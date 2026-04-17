@@ -358,11 +358,23 @@ def _prior_trading_day(now_et: datetime) -> date:
 
 
 def _incremental_session_ready(r2, *, now_et: datetime | None = None) -> tuple[bool, str]:
-    """A18: return (ready, reason). If not ready, caller should exit 0 and defer."""
-    from scripts.clients.massive_client import MassiveNoDataError
+    """A18: return (ready, reason). If not ready, caller should exit 0 and defer.
+
+    Error handling (T1):
+      MassiveNoDataError                              -> defer cleanly (vendor catches up later)
+      MassiveAuthError                                -> defer loudly (config issue; no point running)
+      MassiveRateLimitError / requests.RequestException -> proceed (transient; per-ticker retry in run)
+      any other exception                             -> defer with reason (fail-closed on unknown state)
+    """
+    import requests
+
+    from scripts.clients.massive_client import (
+        MassiveAuthError,
+        MassiveNoDataError,
+        MassiveRateLimitError,
+    )
 
     now_et = now_et or datetime.now(_ET)
-    # If we're running pre-16:00 ET on a weekday, defer.
     if now_et.weekday() < 5 and now_et.hour < _MARKET_CLOSE_HOUR:
         return False, f"pre-close ({now_et:%Y-%m-%d %H:%M ET}) — defer"
 
@@ -372,9 +384,12 @@ def _incremental_session_ready(r2, *, now_et: datetime | None = None) -> tuple[b
         fetch_bars(massive, "SPY", timeframe="1d", start=target, end=target)
     except MassiveNoDataError:
         return False, f"Massive has not published SPY 1d for {target} yet — defer"
+    except MassiveAuthError as exc:
+        return False, f"MassiveAuthError during A18 probe: {exc} — defer"
+    except (MassiveRateLimitError, requests.RequestException) as exc:
+        logger.warning("A18 probe transient error: %s — proceeding (run will retry)", exc)
     except Exception as exc:  # noqa: BLE001
-        # Don't block the run on a probe failure — log and proceed
-        logger.warning("A18 probe failed with %s; proceeding anyway", exc)
+        return False, f"A18 probe failed unexpectedly ({type(exc).__name__}: {exc}) — defer"
     return True, ""
 
 

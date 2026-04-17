@@ -708,3 +708,80 @@ def test_main_full_mode_bypasses_a18(monkeypatch):
     rc = apex.main(["--mode", "full", "--dry-run"])
     assert rc == 0
     assert called == [], "A18 guard must NOT run in full mode"
+
+
+# ---------------------------------------------------------------------------
+# Task 1 (T1): Narrow A18 probe exception handling
+# ---------------------------------------------------------------------------
+
+
+def test_a18_session_not_ready_on_massive_auth_error(monkeypatch):
+    """T1: MassiveAuthError must NOT fall through to 'proceed anyway'."""
+    from datetime import datetime
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    from scripts.apex_refresh import _incremental_session_ready
+    from scripts.clients.massive_client import MassiveAuthError
+
+    r2 = MagicMock()
+    now = datetime(2025, 11, 17, 17, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    def raise_auth():
+        raise MassiveAuthError("MASSIVE_API_KEY not set")
+
+    monkeypatch.setattr("scripts.apex_refresh.MassiveClient", raise_auth)
+
+    ready, reason = _incremental_session_ready(r2, now_et=now)
+    assert not ready
+    assert "MassiveAuthError" in reason or "MASSIVE_API_KEY" in reason
+
+
+def test_a18_session_tolerates_transient_network_probe_failure(monkeypatch):
+    """T1: genuinely transient probe errors (requests.RequestException) still 'proceed'
+    so a flaky DNS blip doesn't kill the nightly."""
+    from datetime import datetime
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    import requests
+
+    from scripts.apex_refresh import _incremental_session_ready
+
+    r2 = MagicMock()
+    now = datetime(2025, 11, 17, 17, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    massive = MagicMock()
+    monkeypatch.setattr("scripts.apex_refresh.MassiveClient", lambda: massive)
+
+    def flake(*a, **kw):
+        raise requests.ConnectionError("DNS blip")
+
+    monkeypatch.setattr("scripts.apex_refresh.fetch_bars", flake)
+
+    ready, reason = _incremental_session_ready(r2, now_et=now)
+    assert ready, f"transient network probe error should still proceed; got reason={reason}"
+
+
+def test_a18_session_defers_on_unknown_probe_error(monkeypatch):
+    """T1: unexpected exceptions from the probe should fail CLOSED (defer), not proceed."""
+    from datetime import datetime
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    from scripts.apex_refresh import _incremental_session_ready
+
+    r2 = MagicMock()
+    now = datetime(2025, 11, 17, 17, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    massive = MagicMock()
+    monkeypatch.setattr("scripts.apex_refresh.MassiveClient", lambda: massive)
+
+    def weird(*a, **kw):
+        raise ValueError("unexpected vendor response shape")
+
+    monkeypatch.setattr("scripts.apex_refresh.fetch_bars", weird)
+
+    ready, reason = _incremental_session_ready(r2, now_et=now)
+    assert not ready
+    assert "ValueError" in reason or "unexpected" in reason
