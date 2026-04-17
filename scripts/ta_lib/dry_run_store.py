@@ -62,7 +62,8 @@ class DryRunStore:
         for p in root.rglob("*"):
             if p.is_file():
                 yield (
-                    str(p.relative_to(base)),
+                    # C9: POSIX separators to match R2 key format cross-platform
+                    p.relative_to(base).as_posix(),
                     p.stat().st_size,
                     datetime.fromtimestamp(p.stat().st_mtime),
                 )
