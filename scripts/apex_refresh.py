@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write to data/apex_mirror_preview/ instead of R2 (wired in Task 6 per A17)",
     )
-    parser.add_argument("--max-workers", type=int, default=10)
+    parser.add_argument("--max-workers", type=int, default=_DEFAULT_MAX_WORKERS)
     return parser
 
 
@@ -78,6 +78,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
+from scripts.clients.massive_client import MassiveClient
 from scripts.ta_lib.bars import fetch_bars
 from scripts.ta_lib.parquet_store import (
     INDICATOR_COLUMNS,
@@ -228,6 +229,117 @@ def refresh_one(
         )
 
 
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+
+from scripts.ta_lib.r2_store import R2PreconditionError
+
+_FAILURE_RATIO_ABORT = 0.50
+_SCHEMA_VERSION = 1
+_MANIFEST_KEY = "meta/last_updated.json"
+_DATA_QUALITY_KEY = "meta/data_quality.json"
+_DEFAULT_MAX_WORKERS = 5  # A22: conservative vs. Massive rate limits + session contention
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _update_manifest_with_retry(r2, *, attempts: int = 3) -> None:
+    """A16: CAS write of meta/last_updated.json with exponential backoff on ETag mismatch."""
+    now = _now_iso()
+    for attempt in range(attempts):
+        try:
+            prev = r2.head(_MANIFEST_KEY)
+            prev_etag = prev["ETag"] if prev else None
+            existing = r2.get_json(_MANIFEST_KEY) if prev else {}
+            manifest = {
+                **existing,
+                "historical": now,
+                "indicators": now,
+                "schema_version": _SCHEMA_VERSION,
+            }
+            r2.put_json(_MANIFEST_KEY, manifest, if_match=prev_etag)
+            return
+        except R2PreconditionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(2**attempt)
+
+
+def run_refresh(
+    *,
+    r2,
+    mode: str,
+    timeframes: tuple[str, ...],
+    max_workers: int = _DEFAULT_MAX_WORKERS,
+) -> int:
+    """Orchestrator.
+
+    Returns 0 on success (failure_ratio <= 50%), 3 when >50% of tickers failed,
+    1 on other unrecoverable error (propagated to GH action status).
+
+    Threshold is strict >: exactly 50% failure still passes (A21).
+
+    Per A4: on degraded runs (>50% failure), the manifest is NOT updated —
+    the scanner continues to see yesterday's fresh data and the next Action
+    run starts from the same baseline. data_quality.json is still written as
+    a diagnostic.
+
+    Per A22: max_workers defaults to 5 (conservative vs. Massive rate limits
+    and requests.Session connection-pool contention). MassiveClient is
+    instantiated once and shared across threads.
+    """
+    universe = load_universe(r2)
+    targets = list(expand_targets(universe, timeframes=timeframes))
+    logger.info("Refreshing %d targets in %s mode (workers=%d)", len(targets), mode, max_workers)
+
+    massive = MassiveClient()
+    results: list[RefreshResult] = []
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = [
+            ex.submit(refresh_one, r2=r2, massive=massive, ticker=t, timeframe=tf, mode=mode) for t, tf in targets
+        ]
+        for fut in as_completed(futures):
+            res = fut.result()
+            results.append(res)
+            if not res.succeeded:
+                logger.warning("refresh failed: %s/%s — %s", res.ticker, res.timeframe, res.error)
+
+    failed = [r for r in results if not r.succeeded]
+    total = max(len(results), 1)
+    failure_ratio = len(failed) / total
+    logger.info(
+        "Done. %d ok, %d failed (%.1f%%)",
+        len(results) - len(failed),
+        len(failed),
+        failure_ratio * 100,
+    )
+
+    # A4: write data_quality on every run (diagnostic)
+    dq = {
+        "generated_at": _now_iso(),
+        "mode": mode,
+        "total_entries": len(results),
+        "by_status": {"PASS": len(results) - len(failed), "FAIL": len(failed)},
+        "failures": [{"symbol": r.ticker, "timeframe": r.timeframe, "error": r.error} for r in failed[:200]],
+    }
+    try:
+        r2.put_json(_DATA_QUALITY_KEY, dq)
+    except Exception:  # noqa: BLE001
+        logger.exception("failed to write %s — continuing", _DATA_QUALITY_KEY)
+
+    if failure_ratio > _FAILURE_RATIO_ABORT:
+        logger.error("Aborting manifest update: failure_ratio=%.2f > %.2f", failure_ratio, _FAILURE_RATIO_ABORT)
+        return 3
+
+    # Only now update the manifest (A4)
+    _update_manifest_with_retry(r2)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv(_PROJECT_ROOT / ".env")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -243,12 +355,12 @@ def main(argv: list[str] | None = None) -> int:
 
         r2 = R2Store()
 
-    # Task 7 will replace this stub with run_refresh(r2=r2, mode=..., ...)
-    universe = load_universe(r2)
-    targets = list(expand_targets(universe, timeframes=tuple(args.timeframes)))
-    logger.info("Loaded %d tickers; %d (ticker, tf) targets", len(universe), len(targets))
-    logger.info("Mode=%s dry_run=%s workers=%d", args.mode, args.dry_run, args.max_workers)
-    return 0
+    return run_refresh(
+        r2=r2,
+        mode=args.mode,
+        timeframes=tuple(args.timeframes),
+        max_workers=args.max_workers,
+    )
 
 
 if __name__ == "__main__":

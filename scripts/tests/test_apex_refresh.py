@@ -385,9 +385,180 @@ def test_dry_run_store_writes_to_local_filesystem(tmp_path):
 def test_dry_run_store_get_object_raises_r2_not_found_on_missing(tmp_path):
     """A17: DryRunStore uses the same exception type as R2Store so callers are interchangeable."""
     from scripts.ta_lib.dry_run_store import DryRunStore
-
     from scripts.ta_lib.r2_store import R2NotFoundError
 
     r2 = DryRunStore(tmp_path / "preview")
     with pytest.raises(R2NotFoundError):
         r2.get_object("nope")
+
+
+# ---------------------------------------------------------------------------
+# Task 7: run_refresh parallel driver + A4/A16/A21/A22 amendments
+# ---------------------------------------------------------------------------
+
+
+def test_run_refresh_happy_path_writes_manifest_and_returns_zero():
+    from unittest.mock import MagicMock, patch
+
+    from scripts.apex_refresh import RefreshResult, run_refresh
+
+    r2 = MagicMock()
+    r2.get_json.side_effect = [
+        {
+            "tickers": [
+                {"symbol": "AAPL", "timeframes": ["1d"]},
+                {"symbol": "MSFT", "timeframes": ["1d"]},
+            ]
+        },
+        {},  # existing manifest (empty)
+    ]
+
+    def head_or_get(key):
+        if key == "meta/last_updated.json":
+            return {"ETag": '"abc"'}
+        return None
+
+    r2.head.side_effect = head_or_get
+
+    with patch("scripts.apex_refresh.refresh_one") as mock_refresh:
+        mock_refresh.side_effect = lambda *, r2, massive, ticker, timeframe, mode: RefreshResult(
+            ticker, timeframe, succeeded=True, rows_written=10
+        )
+        with patch("scripts.apex_refresh.MassiveClient") as mclient:
+            mclient.return_value = MagicMock()
+            exit_code = run_refresh(r2=r2, mode="full", timeframes=("1d",), max_workers=2)
+
+    assert exit_code == 0
+    # Verify manifest PUT occurred
+    manifest_puts = [c for c in r2.put_json.call_args_list if c.args[0] == "meta/last_updated.json"]
+    assert len(manifest_puts) == 1
+    payload = manifest_puts[0].args[1]
+    assert "historical" in payload and "indicators" in payload
+    assert payload["schema_version"] == 1
+
+
+def test_run_refresh_50pct_boundary_writes_manifest_strict_gt():
+    """A21: exactly 50% failure (1 of 2) is still ALLOWED (strict >)."""
+    from unittest.mock import MagicMock, patch
+
+    from scripts.apex_refresh import RefreshResult, run_refresh
+
+    r2 = MagicMock()
+    r2.get_json.side_effect = [
+        {"tickers": [{"symbol": "A", "timeframes": ["1d"]}, {"symbol": "B", "timeframes": ["1d"]}]},
+        {},
+    ]
+    r2.head.return_value = None
+
+    def rr(*, r2, massive, ticker, timeframe, mode):
+        return RefreshResult(ticker, timeframe, succeeded=(ticker == "A"), error=None if ticker == "A" else "boom")
+
+    with patch("scripts.apex_refresh.refresh_one", side_effect=rr):
+        with patch("scripts.apex_refresh.MassiveClient") as mclient:
+            mclient.return_value = MagicMock()
+            exit_code = run_refresh(r2=r2, mode="full", timeframes=("1d",), max_workers=2)
+    assert exit_code == 0
+    manifest_puts = [c for c in r2.put_json.call_args_list if c.args[0] == "meta/last_updated.json"]
+    assert len(manifest_puts) == 1, "50% is still <=0.50 under strict >, manifest should be written"
+
+
+def test_run_refresh_over_50pct_failure_skips_manifest_and_returns_3():
+    """A4: 60% failure (6 of 10) -> manifest NOT written, data_quality IS written."""
+    from unittest.mock import MagicMock, patch
+
+    from scripts.apex_refresh import RefreshResult, run_refresh
+
+    r2 = MagicMock()
+    r2.get_json.side_effect = [
+        {"tickers": [{"symbol": f"T{i}", "timeframes": ["1d"]} for i in range(10)]},
+    ]
+    r2.head.return_value = None
+
+    def rr(*, r2, massive, ticker, timeframe, mode):
+        idx = int(ticker[1:])
+        succeeded = idx < 4  # 4 pass, 6 fail -> 60%
+        return RefreshResult(ticker, timeframe, succeeded=succeeded, error=None if succeeded else "boom")
+
+    with patch("scripts.apex_refresh.refresh_one", side_effect=rr):
+        with patch("scripts.apex_refresh.MassiveClient") as mclient:
+            mclient.return_value = MagicMock()
+            exit_code = run_refresh(r2=r2, mode="full", timeframes=("1d",), max_workers=2)
+
+    assert exit_code == 3, f"expected 3 on degraded run, got {exit_code}"
+    # Manifest NOT written
+    manifest_puts = [c for c in r2.put_json.call_args_list if c.args[0] == "meta/last_updated.json"]
+    assert len(manifest_puts) == 0, "manifest MUST NOT be written on degraded run (A4)"
+    # data_quality IS written
+    dq_puts = [c for c in r2.put_json.call_args_list if c.args[0] == "meta/data_quality.json"]
+    assert len(dq_puts) == 1
+
+
+def test_run_refresh_zero_percent_failure_writes_manifest():
+    """A21: 0% failure is the happy path; double-check it writes."""
+    from unittest.mock import MagicMock, patch
+
+    from scripts.apex_refresh import RefreshResult, run_refresh
+
+    r2 = MagicMock()
+    r2.get_json.side_effect = [
+        {"tickers": [{"symbol": "A", "timeframes": ["1d"]}]},
+        {},
+    ]
+    r2.head.return_value = None
+
+    with patch("scripts.apex_refresh.refresh_one") as mock_refresh:
+        mock_refresh.side_effect = lambda *, r2, massive, ticker, timeframe, mode: RefreshResult(
+            ticker, timeframe, succeeded=True, rows_written=1
+        )
+        with patch("scripts.apex_refresh.MassiveClient") as mclient:
+            mclient.return_value = MagicMock()
+            exit_code = run_refresh(r2=r2, mode="full", timeframes=("1d",), max_workers=1)
+    assert exit_code == 0
+    manifest_puts = [c for c in r2.put_json.call_args_list if c.args[0] == "meta/last_updated.json"]
+    assert len(manifest_puts) == 1
+
+
+def test_update_manifest_with_retry_retries_on_precondition_failure():
+    """A16: R2PreconditionError -> retry up to 3 attempts before raising."""
+    from unittest.mock import MagicMock, patch
+
+    from scripts.apex_refresh import _update_manifest_with_retry
+    from scripts.ta_lib.r2_store import R2PreconditionError
+
+    r2 = MagicMock()
+    r2.head.return_value = {"ETag": '"etag1"'}
+    r2.get_json.return_value = {"schema_version": 1}
+
+    # First two attempts raise; third succeeds
+    r2.put_json.side_effect = [R2PreconditionError("mismatch"), R2PreconditionError("mismatch"), '"new-etag"']
+
+    with patch("scripts.apex_refresh.time.sleep") as sleep_mock:
+        _update_manifest_with_retry(r2)
+
+    assert r2.put_json.call_count == 3
+    assert sleep_mock.call_count == 2  # between attempts 0->1 and 1->2
+
+
+def test_update_manifest_with_retry_raises_after_max_attempts():
+    from unittest.mock import MagicMock, patch
+
+    from scripts.apex_refresh import _update_manifest_with_retry
+    from scripts.ta_lib.r2_store import R2PreconditionError
+
+    r2 = MagicMock()
+    r2.head.return_value = None
+    r2.put_json.side_effect = R2PreconditionError("persistent")
+
+    with patch("scripts.apex_refresh.time.sleep"):
+        with pytest.raises(R2PreconditionError):
+            _update_manifest_with_retry(r2, attempts=3)
+    assert r2.put_json.call_count == 3
+
+
+def test_default_max_workers_is_5_per_a22():
+    """A22: conservative default to reduce MassiveClient session contention."""
+    from scripts.apex_refresh import _DEFAULT_MAX_WORKERS, build_parser
+
+    assert _DEFAULT_MAX_WORKERS == 5
+    args = build_parser().parse_args(["--mode", "full"])
+    assert args.max_workers == 5
