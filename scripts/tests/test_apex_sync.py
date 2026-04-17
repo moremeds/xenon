@@ -264,3 +264,114 @@ def test_download_prefix_counts_successes_ignores_errors(tmp_path):
     downloaded, errors = _download_prefix(r2, "parquet/historical/1d/", tmp_path, max_workers=5)
     assert downloaded == 5
     assert len(errors) == 5
+
+
+def test_sync_recovers_from_interrupted_swap_where_only_old_exists(tmp_path):
+    """T3: mirror_dir missing + <mirror_dir>.old present → rename .old back BEFORE R2 call."""
+    import json
+    import shutil
+    from unittest.mock import MagicMock
+
+    from scripts.ta_lib.apex_sync import sync_if_stale
+
+    # Simulate interrupted swap: only .old exists, live mirror gone
+    old_dir = tmp_path.with_name(tmp_path.name + ".old")
+    (old_dir / "meta").mkdir(parents=True, exist_ok=True)
+    (old_dir / "meta" / "universe.json").write_text('{"tickers": []}')
+    (old_dir / ".last_sync.json").write_text(
+        json.dumps(
+            {
+                "historical": "2026-04-15T00:00:00+00:00",
+                "indicators": "2026-04-15T00:00:00+00:00",
+                "schema_version": 1,
+            }
+        )
+    )
+    if tmp_path.exists():
+        shutil.rmtree(tmp_path)
+
+    # R2 reports same ts as recovered mirror → not stale → no download
+    r2 = MagicMock()
+    r2.get_json.return_value = {
+        "historical": "2026-04-15T00:00:00+00:00",
+        "indicators": "2026-04-15T00:00:00+00:00",
+        "schema_version": 1,
+    }
+
+    result = sync_if_stale(mirror_dir=tmp_path, r2=r2)
+    assert result.synced is False
+    # Live mirror is back
+    assert (tmp_path / "meta" / "universe.json").exists()
+    # .old is gone
+    assert not old_dir.exists()
+
+
+def test_sync_recovers_from_interrupted_swap_where_only_tmp_exists(tmp_path):
+    """T3: mirror_dir missing + <mirror_dir>.tmp present (with .last_sync.json) → promote .tmp."""
+    import json
+    import shutil
+    from unittest.mock import MagicMock
+
+    from scripts.ta_lib.apex_sync import sync_if_stale
+
+    tmp_dir = tmp_path.with_name(tmp_path.name + ".tmp")
+    (tmp_dir / "meta").mkdir(parents=True, exist_ok=True)
+    (tmp_dir / "meta" / "universe.json").write_text('{"tickers": []}')
+    (tmp_dir / ".last_sync.json").write_text(
+        json.dumps(
+            {
+                "historical": "2026-04-16T00:00:00+00:00",
+                "indicators": "2026-04-16T00:00:00+00:00",
+                "schema_version": 1,
+            }
+        )
+    )
+    if tmp_path.exists():
+        shutil.rmtree(tmp_path)
+
+    r2 = MagicMock()
+    r2.get_json.return_value = {
+        "historical": "2026-04-16T00:00:00+00:00",
+        "indicators": "2026-04-16T00:00:00+00:00",
+        "schema_version": 1,
+    }
+
+    result = sync_if_stale(mirror_dir=tmp_path, r2=r2)
+    assert result.synced is False  # matches remote manifest now, no new sync
+    assert (tmp_path / "meta" / "universe.json").exists()
+    assert not tmp_dir.exists()
+
+
+def test_sync_leaves_mirror_alone_when_already_present(tmp_path):
+    """T3: no self-heal when mirror_dir is already present (normal case)."""
+    import json
+    from unittest.mock import MagicMock
+
+    from scripts.ta_lib.apex_sync import sync_if_stale
+
+    (tmp_path / ".last_sync.json").write_text(
+        json.dumps(
+            {
+                "historical": "2026-04-16T00:00:00+00:00",
+                "indicators": "2026-04-16T00:00:00+00:00",
+                "schema_version": 1,
+            }
+        )
+    )
+
+    # Put stale sibling dirs around — they should NOT be touched while mirror_dir exists
+    old_dir = tmp_path.with_name(tmp_path.name + ".old")
+    old_dir.mkdir()
+    (old_dir / "stale-marker").write_text("left over")
+
+    r2 = MagicMock()
+    r2.get_json.return_value = {
+        "historical": "2026-04-16T00:00:00+00:00",
+        "indicators": "2026-04-16T00:00:00+00:00",
+        "schema_version": 1,
+    }
+
+    result = sync_if_stale(mirror_dir=tmp_path, r2=r2)
+    assert result.synced is False
+    # .old was not promoted (mirror_dir was present, so self-heal skipped)
+    assert (old_dir / "stale-marker").exists()

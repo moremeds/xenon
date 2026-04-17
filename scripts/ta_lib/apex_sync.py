@@ -84,6 +84,42 @@ def _download_prefix(r2, prefix: str, target_root: Path, max_workers: int) -> tu
     return downloaded, errors
 
 
+def _recover_from_interrupted_swap(mirror_dir: Path) -> None:
+    """T3: before any sync work, heal an interrupted two-rename swap.
+
+    Two failure shapes we repair:
+      (a) mirror_dir missing + <mirror_dir>.tmp present + tmp has .last_sync.json
+          -> rename .tmp into place (the full sync completed; only the second
+             rename got interrupted). Also remove any .old left behind.
+      (b) mirror_dir missing + <mirror_dir>.old present
+          -> rename .old back (the first rename happened; the second didn't).
+    If mirror_dir is present, leave any stale .old / .tmp alone — the previous
+    swap completed; .old / .tmp cleanup is a best-effort step that may have
+    been killed post-swap.
+    """
+    if mirror_dir.exists():
+        return
+    tmp_dir = mirror_dir.with_name(mirror_dir.name + ".tmp")
+    old_dir = mirror_dir.with_name(mirror_dir.name + ".old")
+
+    if tmp_dir.exists() and (tmp_dir / _LAST_SYNC_FILE).exists():
+        logger.warning(
+            "apex_sync: live mirror missing; promoting %s (interrupted swap recovery)",
+            tmp_dir,
+        )
+        tmp_dir.rename(mirror_dir)
+        if old_dir.exists():
+            shutil.rmtree(old_dir, ignore_errors=True)
+        return
+
+    if old_dir.exists():
+        logger.warning(
+            "apex_sync: live mirror missing; restoring %s (interrupted swap recovery)",
+            old_dir,
+        )
+        old_dir.rename(mirror_dir)
+
+
 def sync_if_stale(
     *,
     mirror_dir: Path = Path("data/apex_mirror"),
@@ -95,6 +131,7 @@ def sync_if_stale(
     from scripts.ta_lib.r2_store import R2Error
 
     mirror_dir = Path(mirror_dir)
+    _recover_from_interrupted_swap(mirror_dir)  # T3
     if r2 is None:
         from scripts.ta_lib.r2_store import R2Store
 
