@@ -2,10 +2,12 @@ name: Apex Data Refresh
 
 on:
   schedule:
-    # Mon-Fri after US close: Tue-Sat 01:00 UTC = Mon-Fri ~8-9 PM ET (DST-dependent)
-    # 01:00 UTC picked (rather than 00:00) to give Massive a ~5 hour buffer after 16:00 ET close.
-    - cron: "0 1 * * 2-6"
-    # Saturday full refresh: Sat 05:00 UTC = Fri night / early Sat ET
+    # C8: Mon-Fri after US close — incremental Tue-Fri 01:00 UTC = Mon-Fri ~8-9 PM ET
+    # (DST-dependent). 01:00 UTC picked (rather than 00:00) to give Massive a ~5 hour
+    # buffer after 16:00 ET close. Saturday is handled entirely by the full cron below
+    # — no need to double-run.
+    - cron: "0 1 * * 2-5"
+    # Saturday full refresh: Sat 05:00 UTC ≈ Fri ~midnight ET / early Sat ET
     - cron: "0 5 * * 6"
   workflow_dispatch:
     inputs:
