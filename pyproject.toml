@@ -13,5 +13,17 @@ known-first-party = ["utils", "trade_blotter"]
 asyncio_mode = "strict"
 markers = [
     "integration: live tests hitting real MenthorQ (requires credentials)",
+    "e2e: end-to-end tests requiring live external services",
 ]
 
+[project]
+dependencies = [
+    "boto3>=1.42",
+    "pyarrow>=15.0",
+    "botocore>=1.42",
+]
+
+[project.optional-dependencies]
+test = [
+    "moto[s3]>=5.0",
+]

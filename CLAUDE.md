@@ -22,6 +22,16 @@ Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` fi
 
 New scanners MUST build on `scanner_lib/` — do not duplicate universe/executor/scoring logic.
 
+## Data Source Priority
+
+1. Interactive Brokers — real-time quotes, chains, execution, live portfolio
+2. **Cloudflare R2 `apex-data` bucket** — pre-computed OHLCV + TA indicators (nightly, via GitHub Action `apex-data-refresh`). Read-only in the scanner.
+3. Massive.com — historical OHLCV source. Action-side only; the trend scanner never calls Massive directly at scan time.
+4. Unusual Whales (`$UW_TOKEN`) — dark pool, sweeps, alerts (Stage B/C).
+5. Web scrape — last resort.
+
+**Never use Yahoo Finance.** Historical data flows Massive → R2 → scanner.
+
 ## ⛔ Mandatory Rules
 
 1. **Be concise.** No preamble, no filler.
@@ -50,10 +60,10 @@ GATE 4 — NO NAKED SHORTS: Never naked short stock, calls, futures, or bonds. E
 
 ## Credentials
 
-| File          | Loader          | Contains                                                                                                                    |
-| ------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `.env` (root) | `python-dotenv` | `MENTHORQ_USER`, `MENTHORQ_PASS`, `CLERK_JWKS_URL`, `CLERK_ISSUER`, `ALLOWED_USER_IDS`                                      |
-| `web/.env`    | Next.js         | `ANTHROPIC_API_KEY`, `UW_TOKEN`, `EXA_API_KEY`, `CEREBRAS_API_KEY`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY` |
+| File          | Loader          | Contains                                                                                                                                                                          |
+| ------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.env` (root) | `python-dotenv` | `MENTHORQ_USER`, `MENTHORQ_PASS`, `MASSIVE_API_KEY`, `CLERK_JWKS_URL`, `CLERK_ISSUER`, `ALLOWED_USER_IDS`, `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` |
+| `web/.env`    | Next.js         | `ANTHROPIC_API_KEY`, `UW_TOKEN`, `EXA_API_KEY`, `CEREBRAS_API_KEY`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`                                                       |
 
 ## Market Hours
 

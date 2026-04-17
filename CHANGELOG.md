@@ -3,6 +3,37 @@
 All notable changes to Xenon are documented here. Format loosely based on
 [Keep a Changelog](https://keepachangelog.com/) with semver-ish versioning.
 
+## [Unreleased]
+
+### Changed
+
+- **Apex R2 ETL (feat/apex-r2-etl).** Historical OHLCV + TA-indicator computation moved out of the trend scanner into a nightly GitHub Action (`apex-data-refresh`). Scanner now reads pre-computed Parquet from Cloudflare R2 `apex-data` bucket via a local mirror at `data/apex_mirror/`. No Massive or UW calls at scan time for Stage A.
+- New dependencies: `boto3`, `pyarrow`, `moto[s3]` (test). See `pyproject.toml`.
+- New tribunal amendments A1–A22 shipped inline; see `docs/superpowers/plans/2026-04-16-apex-r2-etl.md` on `trend-scan-cleanup` anchor branch for the full audit trail.
+
+### Added
+
+- `scripts/ta_lib/r2_store.py` — Cloudflare R2 S3-compatible wrapper (ETag, typed errors, retry).
+- `scripts/ta_lib/parquet_store.py` — pyarrow I/O with UTC enforcement, DST-safe HKT→UTC normalization, UTC-midnight daily bars.
+- `scripts/ta_lib/apex_sync.py` — scanner-side mirror sync with atomic swap + R2-outage fallback.
+- `scripts/ta_lib/dry_run_store.py` — local-filesystem stand-in for `R2Store` under `--dry-run`.
+- `scripts/apex_refresh.py` — GitHub Action entrypoint. Parallel ThreadPoolExecutor driver, conditional-PUT manifest update with retry, session-completeness guard (A18).
+- `.github/workflows/apex-data-refresh.yml` — nightly + Saturday-full cron + workflow_dispatch.
+- `docs/runbooks/apex-r2-cutover.md` — operator runbook.
+
+### Removed
+
+- `scripts/ta_premarket_prep.py`, `scripts/ta_reseed_massive.py`, `scripts/ta_seed_yahoo.py`, `scripts/ta_cli.py`.
+- `scripts/api_status/` directory (entire package).
+- `data/ta.duckdb` runtime cache (superseded by parquet mirror).
+- FastAPI scheduler hook for pre-market data prep (`_premarket_data_prep_loop` in `scripts/api/server.py`).
+- Orphaned tests: `test_trend_scan_bearish.py`, `test_trend_scan_e2e.py`, `test_trend_universe.py`, `test_ta_lib/test_premarket_prep.py`, `test_ta_lib/test_seed_yahoo.py`, `test_ta_reseed_massive.py`, `test_ta_premarket_status.py`, `test_e2e_massive_pipeline.py`, `test_ta_lib/test_store_e2e.py`, `test_ta_lib/test_store.py`, `test_ta_lib/test_ta_cli_offline.py`, `test_trend_scan_status.py`.
+
+### Follow-ups (post-soak)
+
+- Update `docs/superpowers/specs/2026-04-16-apex-r2-etl-design.md` (on `trend-scan-cleanup` anchor) §6 to state the RSI threshold is `rsi > 40 / rsi < 60` (matching the implementation in `scripts/trend_scan_lib/stages/ta_prefilter.py:157,169`), not `rsi > 50` as originally written. This is amendment **A20**; documented here because the spec file itself is not on this branch.
+- Retire `trend-scan-cleanup` branch after one clean week of the new pipeline.
+
 ## [0.1.1] - 2026-04-16
 
 ### Fixed — UW portfolio SSE cache preservation + daily stats reset at 8PM ET
