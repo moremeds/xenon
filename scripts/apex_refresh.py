@@ -13,6 +13,7 @@ import logging
 import sys
 from pathlib import Path
 from typing import Iterable, Iterator
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -340,6 +341,43 @@ def run_refresh(
     return 0
 
 
+_ET = ZoneInfo("America/New_York")
+_MARKET_CLOSE_HOUR = 16  # 4 PM ET
+
+
+def _prior_trading_day(now_et: datetime) -> date:
+    """Return the most recent ET weekday whose close (16:00 ET) has passed."""
+    candidate = now_et.date()
+    # If it's a weekday but before 16:00 ET, step back a day
+    if now_et.hour < _MARKET_CLOSE_HOUR and candidate.weekday() < 5:
+        candidate = candidate - timedelta(days=1)
+    # Skip back through weekends
+    while candidate.weekday() >= 5:
+        candidate = candidate - timedelta(days=1)
+    return candidate
+
+
+def _incremental_session_ready(r2, *, now_et: datetime | None = None) -> tuple[bool, str]:
+    """A18: return (ready, reason). If not ready, caller should exit 0 and defer."""
+    from scripts.clients.massive_client import MassiveNoDataError
+
+    now_et = now_et or datetime.now(_ET)
+    # If we're running pre-16:00 ET on a weekday, defer.
+    if now_et.weekday() < 5 and now_et.hour < _MARKET_CLOSE_HOUR:
+        return False, f"pre-close ({now_et:%Y-%m-%d %H:%M ET}) — defer"
+
+    target = _prior_trading_day(now_et)
+    try:
+        massive = MassiveClient()
+        fetch_bars(massive, "SPY", timeframe="1d", start=target, end=target)
+    except MassiveNoDataError:
+        return False, f"Massive has not published SPY 1d for {target} yet — defer"
+    except Exception as exc:  # noqa: BLE001
+        # Don't block the run on a probe failure — log and proceed
+        logger.warning("A18 probe failed with %s; proceeding anyway", exc)
+    return True, ""
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv(_PROJECT_ROOT / ".env")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -354,6 +392,13 @@ def main(argv: list[str] | None = None) -> int:
         from scripts.ta_lib.r2_store import R2Store
 
         r2 = R2Store()
+
+    # A18: incremental mode defers if US session isn't complete yet
+    if args.mode == "incremental":
+        ready, reason = _incremental_session_ready(r2)
+        if not ready:
+            logger.info("A18 deferred: %s", reason)
+            return 0
 
     return run_refresh(
         r2=r2,

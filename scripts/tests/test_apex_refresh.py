@@ -562,3 +562,149 @@ def test_default_max_workers_is_5_per_a22():
     assert _DEFAULT_MAX_WORKERS == 5
     args = build_parser().parse_args(["--mode", "full"])
     assert args.max_workers == 5
+
+
+# ---------------------------------------------------------------------------
+# Task 13: A18 session-completeness guard
+# ---------------------------------------------------------------------------
+
+
+def test_a18_prior_trading_day_weekday_after_close():
+    """A monday afternoon 17:00 ET → prior trading day is the same monday."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from scripts.apex_refresh import _prior_trading_day
+
+    # 2025-11-17 = Monday, 17:00 ET (post-close)
+    now = datetime(2025, 11, 17, 17, 0, tzinfo=ZoneInfo("America/New_York"))
+    assert _prior_trading_day(now).isoformat() == "2025-11-17"
+
+
+def test_a18_prior_trading_day_weekday_before_close():
+    """Monday 12:00 ET → prior trading day is prior Friday."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from scripts.apex_refresh import _prior_trading_day
+
+    # 2025-11-17 = Monday, 12:00 ET (pre-close) → expect Friday 2025-11-14
+    now = datetime(2025, 11, 17, 12, 0, tzinfo=ZoneInfo("America/New_York"))
+    assert _prior_trading_day(now).isoformat() == "2025-11-14"
+
+
+def test_a18_prior_trading_day_saturday():
+    """Saturday (any time) → prior trading day = prior Friday."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from scripts.apex_refresh import _prior_trading_day
+
+    now = datetime(2025, 11, 15, 10, 0, tzinfo=ZoneInfo("America/New_York"))  # Saturday
+    assert _prior_trading_day(now).isoformat() == "2025-11-14"
+
+
+def test_a18_prior_trading_day_sunday():
+    """Sunday → prior Friday."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from scripts.apex_refresh import _prior_trading_day
+
+    now = datetime(2025, 11, 16, 23, 0, tzinfo=ZoneInfo("America/New_York"))
+    assert _prior_trading_day(now).isoformat() == "2025-11-14"
+
+
+def test_a18_session_not_ready_pre_close_weekday():
+    from datetime import datetime
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    from scripts.apex_refresh import _incremental_session_ready
+
+    r2 = MagicMock()
+    now = datetime(2025, 11, 17, 12, 0, tzinfo=ZoneInfo("America/New_York"))  # Mon 12:00
+    ready, reason = _incremental_session_ready(r2, now_et=now)
+    assert not ready
+    assert "pre-close" in reason
+
+
+def test_a18_session_ready_post_close_with_spy_available(monkeypatch):
+    """Happy path: post-close weekday, SPY 1d probe succeeds → ready=True."""
+    from datetime import datetime
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    from scripts.apex_refresh import _incremental_session_ready
+
+    r2 = MagicMock()
+    now = datetime(2025, 11, 17, 17, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    # Patch MassiveClient + fetch_bars to succeed
+    massive = MagicMock()
+    monkeypatch.setattr("scripts.apex_refresh.MassiveClient", lambda: massive)
+    monkeypatch.setattr("scripts.apex_refresh.fetch_bars", lambda *a, **kw: object())
+
+    ready, reason = _incremental_session_ready(r2, now_et=now)
+    assert ready, reason
+
+
+def test_a18_session_not_ready_when_spy_bar_missing(monkeypatch):
+    """Post-close but Massive hasn't published yesterday's SPY → defer."""
+    from datetime import datetime
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    from scripts.apex_refresh import _incremental_session_ready
+    from scripts.clients.massive_client import MassiveNoDataError
+
+    r2 = MagicMock()
+    now = datetime(2025, 11, 17, 17, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    massive = MagicMock()
+
+    def raise_no_data(*a, **kw):
+        raise MassiveNoDataError("SPY 1d not ready")
+
+    monkeypatch.setattr("scripts.apex_refresh.MassiveClient", lambda: massive)
+    monkeypatch.setattr("scripts.apex_refresh.fetch_bars", raise_no_data)
+
+    ready, reason = _incremental_session_ready(r2, now_et=now)
+    assert not ready
+    assert "not published" in reason
+
+
+def test_main_skips_run_refresh_when_a18_not_ready(monkeypatch, capsys):
+    """main() should exit 0 without running the refresh when session isn't ready."""
+    from unittest.mock import MagicMock
+
+    import scripts.apex_refresh as apex
+
+    # Make the session-ready probe return False
+    monkeypatch.setattr(apex, "_incremental_session_ready", lambda r2, now_et=None: (False, "stubbed"))
+    run_calls = []
+    monkeypatch.setattr(apex, "run_refresh", lambda **kw: run_calls.append(kw) or 0)
+    monkeypatch.setattr(apex, "DryRunStore", lambda path: MagicMock(), raising=False)
+
+    # Use dry-run to avoid needing real R2 env
+    rc = apex.main(["--mode", "incremental", "--dry-run"])
+    assert rc == 0
+    assert run_calls == [], "run_refresh should NOT be called when A18 defers"
+
+
+def test_main_full_mode_bypasses_a18(monkeypatch):
+    """Full mode skips the A18 guard entirely."""
+    from unittest.mock import MagicMock
+
+    import scripts.apex_refresh as apex
+
+    called = []
+    monkeypatch.setattr(
+        apex, "_incremental_session_ready", lambda r2, now_et=None: called.append(True) or (False, "stub")
+    )
+    monkeypatch.setattr(apex, "run_refresh", lambda **kw: 0)
+    monkeypatch.setattr(apex, "DryRunStore", lambda path: MagicMock(), raising=False)
+
+    rc = apex.main(["--mode", "full", "--dry-run"])
+    assert rc == 0
+    assert called == [], "A18 guard must NOT run in full mode"
