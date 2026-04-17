@@ -45,6 +45,12 @@ from scripts.trend_scan_lib.universe import load_universe_from_mirror
 
 logger = logging.getLogger(__name__)
 
+# C7: single source of truth for the timeframes Stage A reads. If the scanner
+# ever consumes additional timeframes (e.g. 1h for intraday features), update
+# this tuple and both _filter_universe_to_covered and sync_if_stale will stay
+# aligned via the references below.
+_SCANNER_TIMEFRAMES: tuple[str, ...] = ("1d",)
+
 
 class DataFetcher(Protocol):
     def fetch_ohlcv(self, ticker: str) -> dict: ...
@@ -630,12 +636,14 @@ def run_scan_pipeline(
 
     # Sync R2 mirror (apex_sync handles R2 outage fallback per A15).
     mirror_dir = Path(_project_root) / "data" / "apex_mirror"
-    sync_result = sync_if_stale(mirror_dir=mirror_dir)
+    sync_result = sync_if_stale(mirror_dir=mirror_dir, timeframes=_SCANNER_TIMEFRAMES)
     if sync_result.errors:
         logger.warning("Apex sync errors: %s", sync_result.errors)
 
     universe_rows = load_universe_from_mirror(mirror_dir)
-    covered_rows, missing_symbols = _filter_universe_to_covered(mirror_dir, universe_rows, timeframes=("1d",))
+    covered_rows, missing_symbols = _filter_universe_to_covered(
+        mirror_dir, universe_rows, timeframes=_SCANNER_TIMEFRAMES
+    )
     if missing_symbols:
         logger.warning(
             "A19: %d universe tickers missing from mirror (e.g. %s) — skipping",

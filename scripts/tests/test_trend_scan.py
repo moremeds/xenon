@@ -156,3 +156,28 @@ def test_fetch_ohlcv_does_not_drop_ticker_on_uw_stock_info_failure():
     assert result["close"] == 200.0
     # market_cap falls back to 0.0 (absent raise = soft-fail)
     assert result.get("market_cap", 0.0) == 0.0
+
+
+def test_filter_universe_to_covered_requires_all_requested_timeframes(tmp_path: Path):
+    """C7: if we request ('1d', '1h'), a ticker with only 1d parquet must be filtered out."""
+    from scripts.trend_scan import _filter_universe_to_covered
+
+    (tmp_path / "parquet" / "historical" / "1d").mkdir(parents=True)
+    (tmp_path / "parquet" / "historical" / "1h").mkdir(parents=True)
+    (tmp_path / "parquet" / "historical" / "1d" / "AAPL.parquet").write_bytes(b"x")
+    (tmp_path / "parquet" / "historical" / "1h" / "AAPL.parquet").write_bytes(b"x")
+    (tmp_path / "parquet" / "historical" / "1d" / "DAILY_ONLY.parquet").write_bytes(b"x")
+
+    universe = [{"symbol": "AAPL"}, {"symbol": "DAILY_ONLY"}]
+    covered, missing = _filter_universe_to_covered(tmp_path, universe, timeframes=("1d", "1h"))
+    assert [r["symbol"] for r in covered] == ["AAPL"]
+    assert missing == ["DAILY_ONLY"]
+
+
+def test_scanner_timeframes_constant_is_tuple_of_strings():
+    """C7: verify the module-level _SCANNER_TIMEFRAMES constant exists and is typed right."""
+    from scripts.trend_scan import _SCANNER_TIMEFRAMES
+
+    assert isinstance(_SCANNER_TIMEFRAMES, tuple)
+    assert all(isinstance(tf, str) for tf in _SCANNER_TIMEFRAMES)
+    assert "1d" in _SCANNER_TIMEFRAMES
