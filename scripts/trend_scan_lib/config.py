@@ -39,6 +39,10 @@ class TrendScanConfig:
     min_dollar_volume: float = 10_000_000
     min_price: float = 5.0
 
+    # Stage A hard filters — joined against meta/universe.json
+    min_turnover_rate: float = 0.0
+    exclude_tiers: set[str] = field(default_factory=set)
+
     # Universe source paths (absolute, resolved from project root)
     sp500_path: str = str(_PROJECT_ROOT / "data" / "universe" / "sp500.json")
     nasdaq100_path: str = str(_PROJECT_ROOT / "data" / "universe" / "nasdaq100.json")
