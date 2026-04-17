@@ -224,9 +224,29 @@ def refresh_one(
         ind_buf = io.BytesIO()
         write_indicators(ind_buf, indicators, timeframe=timeframe)
 
-        # Only now issue PUTs
+        # T2: historical first, then indicators. If indicators fails, roll back the
+        # historical PUT so the ticker's two-parquet state stays consistent (both
+        # present or neither). The outer try/except converts the re-raised
+        # indicator exception to RefreshResult(succeeded=False).
         r2.put_object(hist_key, hist_buf.getvalue())
-        r2.put_object(ind_key, ind_buf.getvalue())
+        try:
+            r2.put_object(ind_key, ind_buf.getvalue())
+        except Exception as ind_exc:
+            try:
+                r2.delete_object(hist_key)
+                logger.warning(
+                    "rolled back historical PUT for %s/%s after indicator failure: %s",
+                    ticker,
+                    timeframe,
+                    ind_exc,
+                )
+            except Exception:
+                logger.exception(
+                    "FAILED to roll back historical PUT for %s/%s — manual cleanup may be needed",
+                    ticker,
+                    timeframe,
+                )
+            raise
 
         return RefreshResult(ticker, timeframe, succeeded=True, rows_written=len(ohlcv))
     except Exception as exc:  # noqa: BLE001 — convert ALL vendor/r2/parse errors to a typed failure

@@ -48,6 +48,12 @@ class DryRunStore:
             return None
         return {"ETag": '"dryrun"', "ContentLength": path.stat().st_size}
 
+    def delete_object(self, key: str) -> None:
+        """Idempotent delete for dry-run / tests."""
+        path = self._path(key)
+        if path.exists():
+            path.unlink()
+
     def list_objects(self, prefix: str) -> Iterator[tuple[str, int, datetime]]:
         root = self._path(prefix)
         if not root.exists():

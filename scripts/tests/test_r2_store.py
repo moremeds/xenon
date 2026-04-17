@@ -28,6 +28,15 @@ def mock_r2():
         yield config
 
 
+@pytest.fixture
+def r2_env(monkeypatch):
+    """Set R2 env vars so R2Store() no-arg constructor works inside @mock_aws tests."""
+    monkeypatch.setenv("R2_ENDPOINT", "https://s3.amazonaws.com")
+    monkeypatch.setenv("R2_BUCKET", "apex-data")
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", "fake-key")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "fake-secret")
+
+
 def test_put_then_get_json_roundtrip(mock_r2):
     r2 = R2Store(config=mock_r2)
     r2.put_json("meta/last_updated.json", {"historical": "2026-04-16T00:00:00Z"})
@@ -69,3 +78,32 @@ def test_get_object_raises_on_404(mock_r2):
     r2 = R2Store(config=mock_r2)
     with pytest.raises(R2NotFoundError):
         r2.get_object("nope")
+
+
+@mock_aws
+def test_delete_object_roundtrip(r2_env):
+    import boto3
+
+    boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="apex-data")
+
+    from scripts.ta_lib.r2_store import R2NotFoundError, R2Store
+
+    r2 = R2Store()
+    r2.put_object("meta/test.bin", b"xyz")
+    r2.delete_object("meta/test.bin")
+    import pytest
+
+    with pytest.raises(R2NotFoundError):
+        r2.get_object("meta/test.bin")
+
+
+@mock_aws
+def test_delete_object_missing_is_noop(r2_env):
+    """Deleting a missing key must NOT raise — rollback path relies on idempotency."""
+    import boto3
+
+    boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="apex-data")
+
+    from scripts.ta_lib.r2_store import R2Store
+
+    R2Store().delete_object("does/not/exist")  # must not raise

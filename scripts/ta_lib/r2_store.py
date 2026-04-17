@@ -109,6 +109,16 @@ class R2Store:
                 return None
             raise R2ClientError(f"head({key!r})") from exc
 
+    def delete_object(self, key: str) -> None:
+        """Idempotent delete — raises R2ClientError only on non-404 failure."""
+        try:
+            self._client.delete_object(Bucket=self.bucket, Key=key)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code")
+            if code in ("NoSuchKey", "404"):
+                return
+            raise R2ClientError(f"delete_object({key!r}): {code}") from exc
+
     def list_objects(self, prefix: str) -> Iterator[tuple[str, int, datetime]]:
         paginator = self._client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):

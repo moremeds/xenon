@@ -792,6 +792,60 @@ def test_a18_session_defers_on_unknown_probe_error(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_refresh_one_rolls_back_historical_put_when_indicator_put_fails():
+    """T2: if indicator PUT fails after historical PUT succeeded, delete the
+    historical object so the ticker's two-parquet state stays consistent
+    (both present or neither)."""
+    from unittest.mock import MagicMock
+
+    import pandas as pd
+
+    from scripts.apex_refresh import refresh_one
+
+    n = 300
+    massive = MagicMock()
+    massive.get_aggregates.return_value = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=n, freq="D", tz="America/New_York"),
+            "open": [100.0] * n,
+            "high": [101.0] * n,
+            "low": [99.0] * n,
+            "close": [100.5] * n,
+            "volume": [1_000_000] * n,
+            "vwap": [100.25] * n,
+            "tx_count": [150] * n,
+        }
+    )
+
+    r2 = MagicMock()
+    written: dict[str, bytes] = {}
+
+    hist_key = "parquet/historical/1d/AAPL.parquet"
+    ind_key = "parquet/indicators/1d/AAPL.parquet"
+
+    def fake_put(key, body, if_match=None):
+        if key == ind_key:
+            raise RuntimeError("simulated indicator PUT failure")
+        written[key] = body
+        return '"etag"'
+
+    deleted: list[str] = []
+
+    def fake_delete(key):
+        deleted.append(key)
+        written.pop(key, None)
+
+    r2.put_object.side_effect = fake_put
+    r2.delete_object.side_effect = fake_delete
+
+    result = refresh_one(r2=r2, massive=massive, ticker="AAPL", timeframe="1d", mode="full")
+
+    assert not result.succeeded
+    # Historical was PUT then rolled back
+    assert hist_key in deleted, f"expected historical rollback; deletes={deleted!r}"
+    assert hist_key not in written, "historical object must be gone after rollback"
+
+
 def test_compute_indicators_adapter_handles_zero_close_without_inf():
     """T5: a zero close row must not emit inf for atr_pct / range_20d_pct."""
     import numpy as np
