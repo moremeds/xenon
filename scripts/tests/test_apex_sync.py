@@ -70,7 +70,6 @@ def test_sync_rejects_unknown_schema_version(tmp_path: Path):
 def test_sync_a15_r2_outage_falls_back_to_local_mirror(tmp_path: Path):
     """A15: R2Error on manifest GET + existing local mirror → synced=False with warning."""
     from scripts.ta_lib.apex_sync import sync_if_stale
-
     from scripts.ta_lib.r2_store import R2Error
 
     # Set up a local mirror with at least meta/universe.json
@@ -90,7 +89,6 @@ def test_sync_a15_r2_outage_falls_back_to_local_mirror(tmp_path: Path):
 def test_sync_a15_r2_outage_hard_fails_without_local_mirror(tmp_path: Path):
     """A15: R2Error + no local mirror = raise."""
     from scripts.ta_lib.apex_sync import sync_if_stale
-
     from scripts.ta_lib.r2_store import R2Error
 
     r2 = MagicMock()
@@ -212,3 +210,57 @@ def test_sync_downloads_universe_metadata(tmp_path: Path):
 
     sync_if_stale(mirror_dir=tmp_path, r2=r2, timeframes=("1d",))
     assert (tmp_path / "meta" / "universe.json").exists()
+
+
+def test_download_prefix_counter_deterministic_under_concurrency(tmp_path):
+    """T6: with many keys and 10 workers, the returned `downloaded` count must
+    equal the number of successful downloads, never miscount via the nonlocal += race."""
+    import shutil
+    from unittest.mock import MagicMock
+
+    from scripts.ta_lib.apex_sync import _download_prefix
+
+    n_keys = 200
+    keys = [(f"parquet/historical/1d/T{i:03d}.parquet", 100, None) for i in range(n_keys)]
+
+    r2 = MagicMock()
+    r2.list_objects.return_value = iter(keys)
+    r2.get_object.return_value = b"x" * 100
+
+    # Run multiple iterations to surface any timing race
+    for _ in range(5):
+        target = tmp_path / "sync"
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir()
+        # Re-set return_value because iter() is consumed
+        r2.list_objects.return_value = iter(keys)
+        downloaded, errors = _download_prefix(r2, "parquet/historical/1d/", target, max_workers=10)
+        assert errors == []
+        assert downloaded == n_keys, f"expected {n_keys}, got {downloaded}"
+
+
+def test_download_prefix_counts_successes_ignores_errors(tmp_path):
+    """T6: when some gets raise, downloaded must equal the success count only."""
+    from unittest.mock import MagicMock
+
+    from scripts.ta_lib.apex_sync import _download_prefix
+
+    r2 = MagicMock()
+    keys = [(f"parquet/historical/1d/T{i}.parquet", 100, None) for i in range(10)]
+    r2.list_objects.return_value = iter(keys)
+
+    # Half the gets raise
+    call_count = [0]
+
+    def fake_get(key):
+        call_count[0] += 1
+        if call_count[0] % 2 == 0:
+            raise RuntimeError("simulated")
+        return b"payload"
+
+    r2.get_object.side_effect = fake_get
+
+    downloaded, errors = _download_prefix(r2, "parquet/historical/1d/", tmp_path, max_workers=5)
+    assert downloaded == 5
+    assert len(errors) == 5

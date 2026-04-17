@@ -58,23 +58,28 @@ def _is_stale(local: dict, remote: dict) -> str | None:
 
 
 def _download_prefix(r2, prefix: str, target_root: Path, max_workers: int) -> tuple[int, list[str]]:
+    """Download every object under `prefix` into `target_root / key`.
+
+    T6: thread-safe via return-value accumulation rather than nonlocal counter.
+    `errors.append(...)` on a plain list is thread-safe in CPython (bytecode-level
+    list.append via the GIL), so no lock is needed there.
+    """
     keys = [k for k, _size, _mtime in r2.list_objects(prefix)]
     errors: list[str] = []
-    downloaded = 0
 
-    def _one(key: str) -> None:
-        nonlocal downloaded
+    def _one(key: str) -> int:
         try:
             body = r2.get_object(key)
             target = target_root / key
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(body)
-            downloaded += 1
+            return 1
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{key}: {exc}")
+            return 0
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        list(ex.map(_one, keys))
+        downloaded = sum(ex.map(_one, keys))
 
     return downloaded, errors
 
