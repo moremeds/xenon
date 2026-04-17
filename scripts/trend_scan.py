@@ -21,6 +21,7 @@ if _project_root not in sys.path:
 from scripts.analysis.ticker_data import fetch_ticker_data
 from scripts.scanner_lib.cache import write_json_cache
 from scripts.scanner_lib.executor import parallel_fetch
+from scripts.ta_lib.apex_sync import sync_if_stale
 from scripts.trend_scan_lib.config import TrendScanConfig
 from scripts.trend_scan_lib.models import TrendCandidate
 from scripts.trend_scan_lib.ranking import apply_min_thresholds, compute_final_score, rank_candidates
@@ -40,12 +41,9 @@ from scripts.trend_scan_lib.storage import (
     write_scan_candidates,
     write_scan_run,
 )
-from scripts.trend_scan_lib.universe import build_universe
+from scripts.trend_scan_lib.universe import load_universe_from_mirror
 
 logger = logging.getLogger(__name__)
-
-UNIVERSE_CACHE_PATH = Path(_project_root) / "data" / "ta_premarket_universe.json"
-UNIVERSE_CACHE_MAX_AGE_S = 2 * 60 * 60  # 2 hours
 
 
 class DataFetcher(Protocol):
@@ -215,7 +213,7 @@ class LiveTrendDataFetcher:
         if self._ta_service is None:
             return
         try:
-            self._spy_df = self._ta_service.get_indicators("SPY", allow_fetch=False)
+            self._spy_df = self._ta_service.get_indicators("SPY")
         except Exception as exc:
             logger.warning("pre_cache_spy: SPY unavailable (%s) — falling back to rs_vs_spy=1.0", exc)
             self._spy_df = None
@@ -267,16 +265,28 @@ class LiveTrendDataFetcher:
         if self._ta_service is None:
             raise RuntimeError("TAService not configured — cannot fetch OHLCV")
 
-        snapshot = self._ta_service.get_snapshot(ticker, allow_fetch=False)
+        snapshot = self._ta_service.get_snapshot(ticker)
+        if snapshot is None:
+            return None
 
-        # rs_vs_spy: cross-ticker logic using pre-cached SPY DataFrame
+        # rs_vs_spy: cross-ticker logic using pre-cached SPY DataFrame.
+        # New parquet schema uses the `close` column on the OHLCV (historical)
+        # parquet, not the indicators parquet; pull closes from get_ohlcv for
+        # both SPY and the ticker. spy_df (indicators) is only used to gate
+        # the length check.
         rs_vs_spy = 1.0
         if ticker.upper() != "SPY" and self._spy_df is not None:
             try:
-                ticker_df = self._ta_service.get_indicators(ticker, allow_fetch=False)
-                if len(self._spy_df) >= 21 and len(ticker_df) >= 21:
-                    spy_closes = self._spy_df.set_index("date")["close"]
-                    ticker_closes = ticker_df.set_index("date")["close"]
+                spy_ohlcv = self._ta_service.get_ohlcv("SPY")
+                ticker_ohlcv = self._ta_service.get_ohlcv(ticker)
+                if (
+                    spy_ohlcv is not None
+                    and ticker_ohlcv is not None
+                    and len(spy_ohlcv) >= 21
+                    and len(ticker_ohlcv) >= 21
+                ):
+                    spy_closes = spy_ohlcv.set_index("timestamp")["close"]
+                    ticker_closes = ticker_ohlcv.set_index("timestamp")["close"]
                     aligned = pd.concat([ticker_closes, spy_closes], axis=1, join="inner").tail(40)
                     aligned.columns = ["stock", "spy"]
                     if len(aligned) >= 21:
@@ -395,8 +405,13 @@ class LiveTrendDataFetcher:
         return market_context
 
 
-def _stage_a_data(ticker: str, data_fetcher: DataFetcher, cfg: TrendScanConfig) -> Optional[dict]:
-    """Direction-neutral OHLCV fetch + liquidity/size floor. Runs once per ticker."""
+def _stage_a_data(
+    ticker: str,
+    universe_row: dict,
+    data_fetcher: DataFetcher,
+    cfg: TrendScanConfig,
+) -> Optional[dict]:
+    """Direction-neutral parquet read + liquidity/size/tier floor (joined from universe)."""
     try:
         ohlcv = data_fetcher.fetch_ohlcv(ticker)
     except Exception:
@@ -404,11 +419,15 @@ def _stage_a_data(ticker: str, data_fetcher: DataFetcher, cfg: TrendScanConfig) 
         return None
     if ohlcv is None:
         return None
-    if ohlcv.get("dollar_volume", 0) < cfg.min_dollar_volume:
+    if ohlcv.get("close", 0) < cfg.min_price:
         return None
-    if ohlcv.get("market_cap", 0) < cfg.min_market_cap:
+    if universe_row.get("dollar_volume", 0) < cfg.min_dollar_volume:
         return None
-    if ohlcv.get("price", 0) < cfg.min_price:
+    if universe_row.get("marketCap", 0) < cfg.min_market_cap:
+        return None
+    if universe_row.get("turnover_rate", 0) < cfg.min_turnover_rate:
+        return None
+    if universe_row.get("tier") in cfg.exclude_tiers:
         return None
     return ohlcv
 
@@ -544,41 +563,25 @@ def _flow_summary(data: dict, *, direction: str = "bullish") -> str:
     return ", ".join(parts) if parts else "N/A"
 
 
-def _resolve_universe(
-    *,
-    cfg: TrendScanConfig,
-    uw_client: Any,
-    ib_client: Any,
-) -> list[str]:
-    """Prefer prep-persisted universe if fresh (<2h); otherwise rebuild.
-
-    This guarantees the 8:30 AM scan sees the same universe ta_premarket_prep
-    warmed at 6:00 AM — no silent mismatches from UW flow changes between
-    prep and scan time."""
-    try:
-        if UNIVERSE_CACHE_PATH.exists():
-            payload = json.loads(UNIVERSE_CACHE_PATH.read_text())
-            built_at = datetime.fromisoformat(payload["built_at"])
-            age_s = (datetime.now(timezone.utc) - built_at).total_seconds()
-            if age_s <= UNIVERSE_CACHE_MAX_AGE_S and payload.get("tickers"):
-                logger.info(
-                    "Using prep-persisted universe: %d tickers, %.0fs old",
-                    len(payload["tickers"]),
-                    age_s,
-                )
-                return payload["tickers"]
-            else:
-                logger.info(
-                    "Universe cache stale (%.0fs old, max %d); rebuilding",
-                    age_s,
-                    UNIVERSE_CACHE_MAX_AGE_S,
-                )
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("Universe cache read failed: %s — rebuilding", exc)
-    except (KeyError, ValueError, TypeError) as exc:
-        logger.error("Universe cache malformed (producer schema bug?): %s — rebuilding", exc)
-
-    return build_universe(cfg, uw_client=uw_client, ib_client=ib_client)
+def _filter_universe_to_covered(
+    mirror_dir: Path,
+    universe_rows: list[dict],
+    timeframes: tuple[str, ...] = ("1d",),
+) -> tuple[list[dict], list[str]]:
+    """A19: Split universe into (has_parquet, missing_symbols). Scanner warns
+    about missing and proceeds with covered rows.
+    """
+    covered: list[dict] = []
+    missing: list[str] = []
+    for row in universe_rows:
+        sym = row.get("symbol")
+        if not sym:
+            continue
+        if all((mirror_dir / "parquet" / "historical" / tf / f"{sym}.parquet").exists() for tf in timeframes):
+            covered.append(row)
+        else:
+            missing.append(sym)
+    return covered, missing
 
 
 def _infer_structure_hint(direction: str, bc: dict, ohlcv: dict) -> str:
@@ -617,12 +620,23 @@ def run_scan_pipeline(
     scan_id = _generate_scan_id()
     now = datetime.now(timezone.utc)
 
-    universe = _resolve_universe(cfg=cfg, uw_client=uw_client, ib_client=ib_client)
+    # Sync R2 mirror (apex_sync handles R2 outage fallback per A15).
+    mirror_dir = Path(_project_root) / "data" / "apex_mirror"
+    sync_result = sync_if_stale(mirror_dir=mirror_dir)
+    if sync_result.errors:
+        logger.warning("Apex sync errors: %s", sync_result.errors)
 
-    # Pre-warm TA cache on main thread (ib_insync is not thread-safe)
-    if ta_service is not None:
-        refresh_tickers = list(universe) + ["SPY"]
-        ta_service.bulk_refresh(refresh_tickers)
+    universe_rows = load_universe_from_mirror(mirror_dir)
+    covered_rows, missing_symbols = _filter_universe_to_covered(mirror_dir, universe_rows, timeframes=("1d",))
+    if missing_symbols:
+        logger.warning(
+            "A19: %d universe tickers missing from mirror (e.g. %s) — skipping",
+            len(missing_symbols),
+            ", ".join(missing_symbols[:5]),
+        )
+
+    universe_by_symbol: dict[str, dict] = {r["symbol"]: r for r in covered_rows}
+    universe_symbols = list(universe_by_symbol.keys())
 
     # Pre-cache SPY DataFrame so worker threads don't each query DuckDB for it
     if hasattr(data_fetcher, "pre_cache_spy"):
@@ -630,8 +644,11 @@ def run_scan_pipeline(
 
     # Stage A data fetch — direction-neutral, runs once per ticker.
     stage_a_data_pairs = parallel_fetch(
-        items=universe,
-        fn=lambda ticker: (ticker, _stage_a_data(ticker, data_fetcher, cfg)),
+        items=universe_symbols,
+        fn=lambda ticker: (
+            ticker,
+            _stage_a_data(ticker, universe_by_symbol[ticker], data_fetcher, cfg),
+        ),
         max_workers=cfg.max_workers,
     )
     stage_a_base = {ticker: result for ticker, result in stage_a_data_pairs if result is not None}
@@ -717,7 +734,7 @@ def run_scan_pipeline(
         "scan_id": scan_id,
         "scan_timestamp": now.isoformat(),
         "market_context": market_ctx,
-        "universe_size": len(universe),
+        "universe_size": len(universe_symbols),
         "stage_a_survivors": stage_a_survivors,
         "stage_b_survivors": stage_b_survivors,
         "candidates": [{**candidate.to_dict(), "snapshot_timestamp": now.isoformat()} for candidate in ranked],
@@ -731,7 +748,7 @@ def run_scan_pipeline(
             {
                 "scan_id": scan_id,
                 "scan_timestamp": now,
-                "universe_size": len(universe),
+                "universe_size": len(universe_symbols),
                 "stage_a_pass": stage_a_survivors,
                 "stage_b_pass": stage_b_survivors,
                 "candidates_out": len(ranked),
@@ -797,10 +814,10 @@ def build_runtime():
     try:
         ib_client.connect(client_id="auto")
     except Exception:
-        logger.warning("IB Gateway not available — TA cache will use stale data")
+        logger.warning("IB Gateway not available — scanner continues without IB")
         ib_client = None
 
-    ta_service = TAService(db_path="data/ta.duckdb", ib_client=ib_client)
+    ta_service = TAService(mirror_dir=project_root / "data" / "apex_mirror")
     data_fetcher = LiveTrendDataFetcher(
         uw_client=uw_client,
         ta_service=ta_service,
