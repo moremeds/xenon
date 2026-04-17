@@ -260,7 +260,7 @@ trend_scan.py main():
          ohlcv = ta_service.get_snapshot(ticker)   # reads from local parquet
          if ohlcv is None: skip (missing data)
          apply Stage A hard filters (price, $vol, mcap, tier)
-         apply trend gate (bull: close > ma_20, rsi > 50; bear: mirror)
+         apply trend gate (bull: close > ma_20 AND rsi > 40; bear: close < ma_20 AND rsi < 60)
          score by trend
      - cap top 100 by trend_score per direction
   5. Stage B/C (UW): structure + vol + flow for survivors (unchanged)
@@ -310,7 +310,7 @@ def _stage_a_data(ticker: str, universe_row: dict, data_fetcher, cfg) -> dict | 
     return ohlcv
 ```
 
-Existing `passes_bullish_gate` / `passes_bearish_gate` in `ta_prefilter.py` still run after this — they handle trend direction (close vs ma_20, rsi > 50), not liquidity/size.
+Existing `passes_bullish_gate` / `passes_bearish_gate` in `ta_prefilter.py` still run after this — they handle trend direction (bullish: `close > ma_20` AND `rsi > 40`; bearish mirror: `close < ma_20` AND `rsi < 60`), not liquidity/size. An earlier draft of this spec said `rsi > 50`; amendment A20 reconciled the spec with the shipped implementation, which intentionally widened the RSI band to preserve Stage A candidate yield. This paragraph is the single source of truth.
 
 ## 7. Branch & migration
 
