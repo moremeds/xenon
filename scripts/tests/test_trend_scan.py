@@ -110,3 +110,49 @@ def test_filter_universe_to_covered_a19(tmp_path: Path):
     covered, missing = _filter_universe_to_covered(tmp_path, universe, timeframes=("1d",))
     assert [r["symbol"] for r in covered] == ["AAPL"]
     assert set(missing) == {"NEWCO", "OTHER"}
+
+
+def test_fetch_ohlcv_does_not_drop_ticker_on_uw_stock_info_failure():
+    """T4: a transient UW stock_info failure must NOT turn a valid OHLCV into None."""
+    from unittest.mock import MagicMock
+
+    from scripts.trend_scan import LiveTrendDataFetcher
+
+    ta_service = MagicMock()
+    ta_service.get_snapshot.return_value = {
+        "ticker": "AAPL",
+        "close": 200.0,
+        "price": 200.0,
+        "dollar_volume": 4e10,
+        "ma_20": 195.0,
+        "ma_50": 190.0,
+        "ma_200": 170.0,
+        "rsi": 55.0,
+        "adx": 20.0,
+        "bbw": 0.04,
+        "macd": 0.5,
+        "macd_signal": 0.3,
+        "macd_histogram": 0.2,
+        "ma_20_series": [193.0, 194.0, 194.5, 195.0, 195.0],
+        "recent_avg_volume": 5e7,
+        "avg_20d_volume": 4e7,
+        "recent_up_ratio": 0.6,
+        "high_52w": 290.0,
+        "range_20d_pct": 0.08,
+        "atr_pct": 0.02,
+        "volume": 5e7,
+        "open": 199.0,
+        "high": 201.0,
+        "low": 198.0,
+    }
+
+    uw = MagicMock()
+    uw.get_stock_info.side_effect = RuntimeError("UW outage")
+
+    fetcher = LiveTrendDataFetcher(uw_client=uw, ta_service=ta_service)
+    result = fetcher.fetch_ohlcv("AAPL")
+
+    assert result is not None, "UW stock_info outage must not drop the ticker"
+    assert result["close"] == 200.0
+    # market_cap falls back to 0.0 (absent raise = soft-fail)
+    assert result.get("market_cap", 0.0) == 0.0

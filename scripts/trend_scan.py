@@ -299,8 +299,16 @@ class LiveTrendDataFetcher:
 
         snapshot["rs_vs_spy"] = rs_vs_spy
 
-        info = self._stock_info(ticker)
-        snapshot["market_cap"] = _safe_float(info.get("marketcap") or info.get("market_cap") or info.get("marketCap"))
+        # T4: UW stock_info is best-effort. Stage A reads marketCap from universe_row
+        # (meta/universe.json), so a UW outage must not drop the ticker here.
+        try:
+            info = self._stock_info(ticker)
+            snapshot["market_cap"] = _safe_float(
+                info.get("marketcap") or info.get("market_cap") or info.get("marketCap")
+            )
+        except Exception:
+            logger.debug("UW stock_info unavailable for %s — skipping market_cap", ticker, exc_info=True)
+            snapshot["market_cap"] = 0.0
 
         return snapshot
 
