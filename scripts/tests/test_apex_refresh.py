@@ -785,3 +785,36 @@ def test_a18_session_defers_on_unknown_probe_error(monkeypatch):
     ready, reason = _incremental_session_ready(r2, now_et=now)
     assert not ready
     assert "ValueError" in reason or "unexpected" in reason
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (T5): Sanitize inf from indicator division-by-zero
+# ---------------------------------------------------------------------------
+
+
+def test_compute_indicators_adapter_handles_zero_close_without_inf():
+    """T5: a zero close row must not emit inf for atr_pct / range_20d_pct."""
+    import numpy as np
+    import pandas as pd
+
+    from scripts.apex_refresh import _compute_indicators_adapter
+
+    n = 60
+    # Day 30 has close=0 (pathological but defensible to guard)
+    closes = [100.0 + i * 0.1 for i in range(n)]
+    closes[29] = 0.0
+    ohlcv = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2025-01-01", periods=n, freq="D", tz="UTC"),
+            "open": closes,
+            "high": [c + 0.5 for c in closes],
+            "low": [c - 0.5 for c in closes],
+            "close": closes,
+            "volume": [1_000_000] * n,
+        }
+    )
+    ind = _compute_indicators_adapter(ohlcv)
+
+    # the zero-close row itself may be NaN but MUST NOT be inf
+    assert not np.isinf(ind["atr_pct"]).any(), "atr_pct must never be +/-inf"
+    assert not np.isinf(ind["range_20d_pct"]).any(), "range_20d_pct must never be +/-inf"

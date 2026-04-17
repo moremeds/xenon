@@ -77,6 +77,7 @@ import io
 from dataclasses import dataclass
 from datetime import date, timedelta
 
+import numpy as np
 import pandas as pd
 
 from scripts.clients.massive_client import MassiveClient
@@ -142,10 +143,17 @@ def _compute_indicators_adapter(ohlcv: pd.DataFrame) -> pd.DataFrame:
     enriched["recent_avg_volume"] = enriched["volume"].rolling(5, min_periods=5).mean()
     enriched["avg_20d_volume"] = enriched["volume"].rolling(20, min_periods=20).mean()
     enriched["recent_up_ratio"] = up_mask.rolling(20, min_periods=20).mean()
-    enriched["range_20d_pct"] = (
-        enriched["high"].rolling(20, min_periods=20).max() - enriched["low"].rolling(20, min_periods=20).min()
-    ) / enriched["close"]
-    enriched["atr_pct"] = enriched["atr_14"] / enriched["close"]
+
+    # T5: guard div-by-zero so inf never reaches the indicator parquet. When close is
+    # 0.0 (pathological), the result is NaN and TAService._coerce_float will map NaN
+    # -> 0.0 at the scanner boundary. inf would flow through and confuse downstream.
+    safe_close = enriched["close"].where(enriched["close"] > 0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        range_numerator = (
+            enriched["high"].rolling(20, min_periods=20).max() - enriched["low"].rolling(20, min_periods=20).min()
+        )
+        enriched["range_20d_pct"] = (range_numerator / safe_close).replace([np.inf, -np.inf], np.nan)
+        enriched["atr_pct"] = (enriched["atr_14"] / safe_close).replace([np.inf, -np.inf], np.nan)
 
     # Project to canonical indicator schema
     return enriched.loc[:, list(INDICATOR_COLUMNS)]
