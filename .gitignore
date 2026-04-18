@@ -166,4 +166,5 @@ docker/ib-gateway/secrets/*.txt
 .worktrees/
 .pi/
 data/
+.serena/
 .gstack/
