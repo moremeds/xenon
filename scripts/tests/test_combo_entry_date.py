@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import ib_sync
+from execution import ib_sync
 
 
 class TestComboEntryDateResolution(unittest.TestCase):
