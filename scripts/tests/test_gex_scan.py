@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from gex_scan import (
+from scanners.gex import (
     bucket_profile,
     compute_gex_flip,
     find_key_levels,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from scripts.scanner_lib.models import BaseScanCandidate
+from scanners._shared.models import BaseScanCandidate
 
 
 @dataclass

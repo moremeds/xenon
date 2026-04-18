@@ -1,7 +1,7 @@
 """Tests for scanner.py — signal scoring from flow data."""
 import pytest
 
-from scanner import analyze_signal
+from scanners.scanner import analyze_signal
 
 
 class TestAnalyzeSignal:

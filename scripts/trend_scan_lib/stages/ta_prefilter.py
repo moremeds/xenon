@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scripts.scanner_lib.scoring import normalize_score
+from scanners._shared.scoring import normalize_score
 
 
 def score_ma_alignment(*, close: float, ma_20: float, ma_50: float, ma_200: float) -> float:

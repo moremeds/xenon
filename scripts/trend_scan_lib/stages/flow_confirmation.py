@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scripts.scanner_lib.scoring import normalize_score
+from scanners._shared.scoring import normalize_score
 
 FLOW_WEIGHTS = {
     "ask_dominance": 0.20,

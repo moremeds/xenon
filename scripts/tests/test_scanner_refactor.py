@@ -5,7 +5,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from scanner import WATCHLIST, PORTFOLIO, fetch_flow_data
+from scanners.scanner import WATCHLIST, PORTFOLIO, fetch_flow_data
 
 
 class TestWatchlistPathResolution:
@@ -33,7 +33,7 @@ class TestWatchlistPathResolution:
 class TestFetchFlowDataDirect:
     """Verify scanner uses direct function import instead of subprocess."""
 
-    @patch("scanner.fetch_flow_module")
+    @patch("scanners.scanner.fetch_flow_module")
     def test_fetch_flow_data_calls_module_directly(self, mock_module):
         """fetch_flow_data should call fetch_flow.fetch_flow directly, not subprocess."""
         mock_module.return_value = {"ticker": "AAPL", "dark_pool": {}}
@@ -41,14 +41,14 @@ class TestFetchFlowDataDirect:
         mock_module.assert_called_once_with("AAPL", lookback_days=5, skip_options_flow=True)
         assert result == {"ticker": "AAPL", "dark_pool": {}}
 
-    @patch("scanner.fetch_flow_module")
+    @patch("scanners.scanner.fetch_flow_module")
     def test_fetch_flow_data_handles_exception(self, mock_module):
         """If the imported function raises, return error dict."""
         mock_module.side_effect = Exception("API timeout")
         result = fetch_flow_data("AAPL", days=5)
         assert "error" in result
 
-    @patch("scanner.fetch_flow_module")
+    @patch("scanners.scanner.fetch_flow_module")
     def test_fetch_flow_data_returns_data(self, mock_module):
         """On success, return the flow data dict."""
         expected = {

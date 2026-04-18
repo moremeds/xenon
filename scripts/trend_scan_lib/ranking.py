@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scripts.scanner_lib.scoring import passes_min_thresholds, weighted_composite
+from scanners._shared.scoring import passes_min_thresholds, weighted_composite
 from scripts.trend_scan_lib.models import TrendCandidate
 
 
