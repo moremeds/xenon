@@ -19,7 +19,7 @@ from typing import Any
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from fetch_menthorq_cta import cache_path  # noqa: E402
+from fetchers.fetch_menthorq_cta import cache_path  # noqa: E402
 from utils.cta_sync import latest_closed_trading_day  # noqa: E402
 from utils.cta_sync_health import (  # noqa: E402
     ARTIFACT_DIR,
@@ -221,7 +221,7 @@ def run_cta_sync(
                 # previous attempts when retried in-process.
                 fetch_cmd = [
                     sys.executable,
-                    str(SCRIPT_DIR / "fetch_menthorq_cta.py"),
+                    str(SCRIPT_DIR / "fetchers.fetch_menthorq_cta.py"),
                     "--json",
                     "--date", target,
                 ]

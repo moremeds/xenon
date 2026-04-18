@@ -21,7 +21,7 @@ from analysis.models import TickerData
 from analysis.options_flow_summary import summarize_options_flow
 from clients.uw_client import UWAPIError, UWNotFoundError
 from fastapi import APIRouter, HTTPException, Request
-from fetch_flow import analyze_darkpool
+from fetchers.fetch_flow import analyze_darkpool
 from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 from uw_analyze import run_analysis_with_data
