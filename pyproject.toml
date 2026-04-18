@@ -7,10 +7,35 @@ select = ["E", "F", "W", "B", "I"]
 ignore = ["E501"]  # line length handled separately
 
 [tool.ruff.lint.isort]
-known-first-party = ["utils", "trade_blotter"]
+known-first-party = [
+    "utils",
+    "trade_blotter",
+    "fetchers",
+    "scanners",
+    "execution",
+    "reports",
+    "shares",
+    "services",
+    "ta",
+    "infra",
+    "clients",
+    "analysis",
+    "scanner_lib",
+    "trend_scan_lib",
+    "uw_scan_lib",
+    "ta_lib",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
+norecursedirs = [
+    "scripts/infra/ib_realtime",
+    ".venv",
+    "node_modules",
+    "data",
+    "logs",
+    "tmp",
+]
 markers = [
     "integration: live tests hitting real MenthorQ (requires credentials)",
     "e2e: end-to-end tests requiring live external services",
