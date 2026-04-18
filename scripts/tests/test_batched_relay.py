@@ -12,7 +12,7 @@ import asyncio
 import json
 import pytest
 
-from scripts.batched_relay import BatchedPriceRelay
+from infra.dev.batched_relay import BatchedPriceRelay
 
 
 def make_tick(symbol: str, last: float) -> dict:
