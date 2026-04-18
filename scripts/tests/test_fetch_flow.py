@@ -3,7 +3,7 @@ import pytest
 from datetime import datetime
 from unittest.mock import patch, MagicMock
 
-from fetch_flow import (
+from fetchers.fetch_flow import (
     is_market_open,
     get_last_n_trading_days,
     analyze_darkpool,
@@ -206,10 +206,10 @@ class TestAnalyzeOptionsFlow:
 class TestFetchFlowCombinedSignal:
     """Test the combined signal logic from fetch_flow() by mocking I/O."""
 
-    @patch("fetch_flow.UWClient")
-    @patch("fetch_flow.fetch_flow_alerts", return_value=[])
-    @patch("fetch_flow.fetch_darkpool", return_value=[])
-    @patch("fetch_flow.get_last_n_trading_days", return_value=["2026-03-02"])
+    @patch("fetchers.fetch_flow.UWClient")
+    @patch("fetchers.fetch_flow.fetch_flow_alerts", return_value=[])
+    @patch("fetchers.fetch_flow.fetch_darkpool", return_value=[])
+    @patch("fetchers.fetch_flow.get_last_n_trading_days", return_value=["2026-03-02"])
     def test_no_data_no_signal(self, mock_days, mock_dp, mock_flow, MockUWClient):
         mock_client = MagicMock()
         MockUWClient.return_value.__enter__ = MagicMock(return_value=mock_client)
@@ -218,10 +218,10 @@ class TestFetchFlowCombinedSignal:
         result = fetch_flow("AAPL", lookback_days=1)
         assert result["combined_signal"] == "NO_SIGNAL"
 
-    @patch("fetch_flow.UWClient")
-    @patch("fetch_flow.fetch_flow_alerts")
-    @patch("fetch_flow.fetch_darkpool")
-    @patch("fetch_flow.get_last_n_trading_days", return_value=["2026-03-02"])
+    @patch("fetchers.fetch_flow.UWClient")
+    @patch("fetchers.fetch_flow.fetch_flow_alerts")
+    @patch("fetchers.fetch_flow.fetch_darkpool")
+    @patch("fetchers.fetch_flow.get_last_n_trading_days", return_value=["2026-03-02"])
     def test_bullish_confluence(self, mock_days, mock_dp, mock_flow, MockUWClient):
         mock_client = MagicMock()
         MockUWClient.return_value.__enter__ = MagicMock(return_value=mock_client)
@@ -240,10 +240,10 @@ class TestFetchFlowCombinedSignal:
         result = fetch_flow("AAPL", lookback_days=1)
         assert result["combined_signal"] == "STRONG_BULLISH_CONFLUENCE"
 
-    @patch("fetch_flow.UWClient")
-    @patch("fetch_flow.fetch_flow_alerts")
-    @patch("fetch_flow.fetch_darkpool")
-    @patch("fetch_flow.get_last_n_trading_days", return_value=["2026-03-02"])
+    @patch("fetchers.fetch_flow.UWClient")
+    @patch("fetchers.fetch_flow.fetch_flow_alerts")
+    @patch("fetchers.fetch_flow.fetch_darkpool")
+    @patch("fetchers.fetch_flow.get_last_n_trading_days", return_value=["2026-03-02"])
     def test_dp_only_signal(self, mock_days, mock_dp, mock_flow, MockUWClient):
         mock_client = MagicMock()
         MockUWClient.return_value.__enter__ = MagicMock(return_value=mock_client)

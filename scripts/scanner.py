@@ -19,7 +19,7 @@ from pathlib import Path
 
 from analysis.dark_pool_summary import summarize_dark_pool
 from clients.uw_client import UWRateLimitError
-from fetch_flow import fetch_flow as fetch_flow_module
+from fetchers.fetch_flow import fetch_flow as fetch_flow_module
 
 logger = logging.getLogger(__name__)
 

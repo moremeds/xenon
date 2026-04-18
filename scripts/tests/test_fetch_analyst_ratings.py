@@ -4,7 +4,7 @@ import pytest
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
-from fetch_analyst_ratings import (
+from fetchers.fetch_analyst_ratings import (
     calculate_rating_signal,
     get_watchlist_tickers,
     get_portfolio_tickers,
@@ -112,7 +112,7 @@ class TestGetWatchlistTickers:
                 "@someone": {"tickers": [{"ticker": "NVDA"}]}
             }
         }))
-        with patch("fetch_analyst_ratings.WATCHLIST_FILE", wl):
+        with patch("fetchers.fetch_analyst_ratings.WATCHLIST_FILE", wl):
             tickers = get_watchlist_tickers()
             assert "AAPL" in tickers
             assert "MSFT" in tickers
@@ -121,7 +121,7 @@ class TestGetWatchlistTickers:
     def test_empty_watchlist(self, tmp_path):
         wl = tmp_path / "watchlist.json"
         wl.write_text(json.dumps({}))
-        with patch("fetch_analyst_ratings.WATCHLIST_FILE", wl):
+        with patch("fetchers.fetch_analyst_ratings.WATCHLIST_FILE", wl):
             assert get_watchlist_tickers() == []
 
 
@@ -136,7 +136,7 @@ class TestGetPortfolioTickers:
                 {"ticker": "NVDA"},
             ]
         }))
-        with patch("fetch_analyst_ratings.PORTFOLIO_FILE", pf):
+        with patch("fetchers.fetch_analyst_ratings.PORTFOLIO_FILE", pf):
             tickers = get_portfolio_tickers()
             assert "AAPL" in tickers
             assert "NVDA" in tickers
@@ -153,7 +153,7 @@ class TestCachedRating:
                 "AAPL": {"fetched_at": fresh_time, "recommendation": "buy"}
             }
         }))
-        with patch("fetch_analyst_ratings.RATINGS_CACHE_FILE", cache_file):
+        with patch("fetchers.fetch_analyst_ratings.RATINGS_CACHE_FILE", cache_file):
             result = get_cached_rating("AAPL")
             assert result is not None
             assert result["from_cache"] is True
@@ -166,14 +166,14 @@ class TestCachedRating:
                 "AAPL": {"fetched_at": stale_time, "recommendation": "buy"}
             }
         }))
-        with patch("fetch_analyst_ratings.RATINGS_CACHE_FILE", cache_file):
+        with patch("fetchers.fetch_analyst_ratings.RATINGS_CACHE_FILE", cache_file):
             result = get_cached_rating("AAPL")
             assert result is None
 
     def test_missing_ticker_returns_none(self, tmp_path):
         cache_file = tmp_path / "cache.json"
         cache_file.write_text(json.dumps({"ratings": {}}))
-        with patch("fetch_analyst_ratings.RATINGS_CACHE_FILE", cache_file):
+        with patch("fetchers.fetch_analyst_ratings.RATINGS_CACHE_FILE", cache_file):
             assert get_cached_rating("FAKE") is None
 
 
