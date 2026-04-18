@@ -1,7 +1,7 @@
 """Extended tests for kelly.py — thresholds and dollar sizing."""
 import pytest
 
-from kelly import kelly
+from reports.kelly import kelly
 
 
 class TestKellyRecommendations:

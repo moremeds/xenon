@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -12,19 +12,19 @@ import pytest
 
 # Prevent price_cache from creating dirs on import
 with patch("os.makedirs"):
-    from portfolio_performance import (
+    from reports.portfolio_performance import (
         TradeFill,
+        _fetch_all_histories,
+        _fetch_option_history_safe,
+        _fetch_stock_history_fallback,
+        _fetch_stock_history_ib_only,
+        _get_worker_count,
         build_option_id,
         build_payload,
         compute_performance_metrics,
         parse_flex_trade_rows,
         reconstruct_equity_curve,
         select_option_mark,
-        _get_worker_count,
-        _fetch_stock_history_ib_only,
-        _fetch_stock_history_fallback,
-        _fetch_option_history_safe,
-        _fetch_all_histories,
     )
 
 
@@ -34,33 +34,44 @@ def test_build_option_id_formats_occ_style_identifier():
 
 
 def test_select_option_mark_prefers_nbbo_mid_then_avg_then_last():
-    assert select_option_mark({
-        "nbbo_bid": "1.00",
-        "nbbo_ask": "1.40",
-        "avg_price": "1.35",
-        "last_price": "1.20",
-    }) == pytest.approx(1.20)
+    assert select_option_mark(
+        {
+            "nbbo_bid": "1.00",
+            "nbbo_ask": "1.40",
+            "avg_price": "1.35",
+            "last_price": "1.20",
+        }
+    ) == pytest.approx(1.20)
 
-    assert select_option_mark({
-        "nbbo_bid": "0",
-        "nbbo_ask": "0",
-        "avg_price": "1.35",
-        "last_price": "1.20",
-    }) == pytest.approx(1.35)
+    assert select_option_mark(
+        {
+            "nbbo_bid": "0",
+            "nbbo_ask": "0",
+            "avg_price": "1.35",
+            "last_price": "1.20",
+        }
+    ) == pytest.approx(1.35)
 
-    assert select_option_mark({
-        "nbbo_bid": None,
-        "nbbo_ask": None,
-        "avg_price": None,
-        "last_price": "1.20",
-    }) == pytest.approx(1.20)
+    assert select_option_mark(
+        {
+            "nbbo_bid": None,
+            "nbbo_ask": None,
+            "avg_price": None,
+            "last_price": "1.20",
+        }
+    ) == pytest.approx(1.20)
 
-    assert select_option_mark({
-        "nbbo_bid": None,
-        "nbbo_ask": None,
-        "avg_price": None,
-        "last_price": None,
-    }) is None
+    assert (
+        select_option_mark(
+            {
+                "nbbo_bid": None,
+                "nbbo_ask": None,
+                "avg_price": None,
+                "last_price": None,
+            }
+        )
+        is None
+    )
 
 
 def test_reconstruct_equity_curve_calibrates_cash_to_final_equity():
@@ -136,16 +147,18 @@ def test_reconstruct_equity_curve_normalizes_compact_trade_dates():
 
 
 def test_parse_flex_trade_rows_normalizes_trade_dates_to_iso():
-    df = pd.DataFrame([
-        {
-            "assetCategory": "STK",
-            "tradeDate": "20260311",
-            "symbol": "AAPL",
-            "quantity": 5,
-            "netCash": -1000,
-            "multiplier": 1,
-        }
-    ])
+    df = pd.DataFrame(
+        [
+            {
+                "assetCategory": "STK",
+                "tradeDate": "20260311",
+                "symbol": "AAPL",
+                "quantity": 5,
+                "netCash": -1000,
+                "multiplier": 1,
+            }
+        ]
+    )
 
     fills = parse_flex_trade_rows(df)
 
@@ -161,7 +174,9 @@ def test_compute_performance_metrics_matches_core_manual_statistics():
 
     portfolio_returns = np.array([0.10, (105.0 / 110.0) - 1.0, (120.0 / 105.0) - 1.0])
     benchmark_returns = np.array([0.05, (103.0 / 105.0) - 1.0, (108.0 / 103.0) - 1.0])
-    expected_beta = float(np.cov(portfolio_returns, benchmark_returns, ddof=1)[0, 1] / np.var(benchmark_returns, ddof=1))
+    expected_beta = float(
+        np.cov(portfolio_returns, benchmark_returns, ddof=1)[0, 1] / np.var(benchmark_returns, ddof=1)
+    )
     expected_corr = float(np.corrcoef(portfolio_returns, benchmark_returns)[0, 1])
     expected_mdd = min(0.0, (105.0 / 110.0) - 1.0)
 
@@ -220,21 +235,24 @@ def test_build_payload_exposes_expected_top_level_contract(monkeypatch):
         }
         return marks, []
 
-    monkeypatch.setattr("portfolio_performance.load_portfolio_snapshot", lambda: {
-        "last_sync": "2026-01-06T16:00:00",
-        "account_summary": {"net_liquidation": 2000.0},
-        "bankroll": 2000.0,
-    })
-    monkeypatch.setattr("portfolio_performance.fetch_ib_nav_series", lambda: None)
-    monkeypatch.setattr("portfolio_performance.load_ib_nav_cache", lambda: None)
-    monkeypatch.setattr("portfolio_performance.fetch_flex_trade_fills", lambda: (trades, "ib_flex"))
-    monkeypatch.setattr("portfolio_performance.extract_fill_marks", lambda *a, **kw: {})
-    monkeypatch.setattr("portfolio_performance.fetch_stock_history", fake_stock_history)
-    monkeypatch.setattr("portfolio_performance._fetch_all_histories", fake_fetch_all)
-    monkeypatch.setattr("portfolio_performance._fetch_stock_history_fallback", lambda s, st, en: (s, {}, "none"))
-    monkeypatch.setattr("portfolio_performance.IBClient", DummyIBClient)
-    monkeypatch.setattr("portfolio_performance.read_cache", lambda *a: None)
-    monkeypatch.setattr("portfolio_performance.write_cache", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "reports.portfolio_performance.load_portfolio_snapshot",
+        lambda: {
+            "last_sync": "2026-01-06T16:00:00",
+            "account_summary": {"net_liquidation": 2000.0},
+            "bankroll": 2000.0,
+        },
+    )
+    monkeypatch.setattr("reports.portfolio_performance.fetch_ib_nav_series", lambda: None)
+    monkeypatch.setattr("reports.portfolio_performance.load_ib_nav_cache", lambda: None)
+    monkeypatch.setattr("reports.portfolio_performance.fetch_flex_trade_fills", lambda: (trades, "ib_flex"))
+    monkeypatch.setattr("reports.portfolio_performance.extract_fill_marks", lambda *a, **kw: {})
+    monkeypatch.setattr("reports.portfolio_performance.fetch_stock_history", fake_stock_history)
+    monkeypatch.setattr("reports.portfolio_performance._fetch_all_histories", fake_fetch_all)
+    monkeypatch.setattr("reports.portfolio_performance._fetch_stock_history_fallback", lambda s, st, en: (s, {}, "none"))
+    monkeypatch.setattr("reports.portfolio_performance.IBClient", DummyIBClient)
+    monkeypatch.setattr("reports.portfolio_performance.read_cache", lambda *a: None)
+    monkeypatch.setattr("reports.portfolio_performance.write_cache", lambda *a, **kw: None)
 
     payload = build_payload()
 
@@ -276,25 +294,31 @@ def test_build_payload_warns_and_continues_when_option_history_is_rate_limited(m
         warnings.append("Option history unavailable for SPY260320C00570000: rate limited")
         return {}, ["SPY260320C00570000"]
 
-    monkeypatch.setattr("portfolio_performance.load_portfolio_snapshot", lambda: {
-        "last_sync": "2026-01-06T16:00:00",
-        "account_summary": {"net_liquidation": 1000.0},
-        "bankroll": 1000.0,
-    })
-    monkeypatch.setattr("portfolio_performance.fetch_ib_nav_series", lambda: None)
-    monkeypatch.setattr("portfolio_performance.load_ib_nav_cache", lambda: None)
-    monkeypatch.setattr("portfolio_performance.fetch_flex_trade_fills", lambda: (trades, "ib_flex"))
-    monkeypatch.setattr("portfolio_performance.extract_fill_marks", lambda *a, **kw: {})
-    monkeypatch.setattr("portfolio_performance.fetch_stock_history", lambda symbol, start_date, end_date, ib_client, uw_client: {
-        "2026-01-02": 100.0,
-        "2026-01-05": 101.0,
-        "2026-01-06": 102.0,
-    })
-    monkeypatch.setattr("portfolio_performance._fetch_all_histories", fake_fetch_all)
-    monkeypatch.setattr("portfolio_performance._fetch_stock_history_fallback", lambda s, st, en: (s, {}, "none"))
-    monkeypatch.setattr("portfolio_performance.IBClient", DummyIBClient)
-    monkeypatch.setattr("portfolio_performance.read_cache", lambda *a: None)
-    monkeypatch.setattr("portfolio_performance.write_cache", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "reports.portfolio_performance.load_portfolio_snapshot",
+        lambda: {
+            "last_sync": "2026-01-06T16:00:00",
+            "account_summary": {"net_liquidation": 1000.0},
+            "bankroll": 1000.0,
+        },
+    )
+    monkeypatch.setattr("reports.portfolio_performance.fetch_ib_nav_series", lambda: None)
+    monkeypatch.setattr("reports.portfolio_performance.load_ib_nav_cache", lambda: None)
+    monkeypatch.setattr("reports.portfolio_performance.fetch_flex_trade_fills", lambda: (trades, "ib_flex"))
+    monkeypatch.setattr("reports.portfolio_performance.extract_fill_marks", lambda *a, **kw: {})
+    monkeypatch.setattr(
+        "reports.portfolio_performance.fetch_stock_history",
+        lambda symbol, start_date, end_date, ib_client, uw_client: {
+            "2026-01-02": 100.0,
+            "2026-01-05": 101.0,
+            "2026-01-06": 102.0,
+        },
+    )
+    monkeypatch.setattr("reports.portfolio_performance._fetch_all_histories", fake_fetch_all)
+    monkeypatch.setattr("reports.portfolio_performance._fetch_stock_history_fallback", lambda s, st, en: (s, {}, "none"))
+    monkeypatch.setattr("reports.portfolio_performance.IBClient", DummyIBClient)
+    monkeypatch.setattr("reports.portfolio_performance.read_cache", lambda *a: None)
+    monkeypatch.setattr("reports.portfolio_performance.write_cache", lambda *a, **kw: None)
 
     payload = build_payload()
 
@@ -375,40 +399,38 @@ class TestFetchStockHistoryIBOnly:
 
 
 class TestFetchStockHistoryFallback:
-    @patch("portfolio_performance.read_cache")
+    @patch("reports.portfolio_performance.read_cache")
     def test_cache_hit(self, mock_read):
         mock_read.return_value = {"2026-01-02": 230.5}
         sym, history, source = _fetch_stock_history_fallback("SPY", "2026-01-01", "2026-03-17")
         assert history == {"2026-01-02": 230.5}
         assert source == "cache"
 
-    @patch("portfolio_performance.write_cache")
-    @patch("portfolio_performance.read_cache", return_value=None)
-    @patch("portfolio_performance.UWClient")
+    @patch("reports.portfolio_performance.write_cache")
+    @patch("reports.portfolio_performance.read_cache", return_value=None)
+    @patch("reports.portfolio_performance.UWClient")
     def test_uw_success(self, mock_uw_cls, mock_read, mock_write):
         mock_uw = MagicMock()
-        mock_uw.get_stock_ohlc.return_value = {
-            "data": [{"date": "2026-01-02", "close": 230.5}]
-        }
+        mock_uw.get_stock_ohlc.return_value = {"data": [{"date": "2026-01-02", "close": 230.5}]}
         mock_uw_cls.return_value = mock_uw
 
         sym, history, source = _fetch_stock_history_fallback("SPY", "2026-01-01", "2026-03-17")
         assert history == {"2026-01-02": 230.5}
         assert source == "uw"
 
-    @patch("portfolio_performance.write_cache")
-    @patch("portfolio_performance.read_cache", return_value=None)
-    @patch("portfolio_performance.UWClient", side_effect=Exception("no token"))
-    @patch("portfolio_performance._fetch_yahoo_chart")
+    @patch("reports.portfolio_performance.write_cache")
+    @patch("reports.portfolio_performance.read_cache", return_value=None)
+    @patch("reports.portfolio_performance.UWClient", side_effect=Exception("no token"))
+    @patch("reports.portfolio_performance._fetch_yahoo_chart")
     def test_yahoo_fallback(self, mock_yahoo, mock_uw_cls, mock_read, mock_write):
         mock_yahoo.return_value = [("2026-01-02", 230.5)]
         sym, history, source = _fetch_stock_history_fallback("SPY", "2026-01-01", "2026-03-17")
         assert history == {"2026-01-02": 230.5}
         assert source == "yahoo"
 
-    @patch("portfolio_performance.read_cache", return_value=None)
-    @patch("portfolio_performance.UWClient", side_effect=Exception("no token"))
-    @patch("portfolio_performance._fetch_yahoo_chart", side_effect=Exception("network"))
+    @patch("reports.portfolio_performance.read_cache", return_value=None)
+    @patch("reports.portfolio_performance.UWClient", side_effect=Exception("no token"))
+    @patch("reports.portfolio_performance._fetch_yahoo_chart", side_effect=Exception("network"))
     def test_all_fail(self, mock_yahoo, mock_uw_cls, mock_read):
         sym, history, source = _fetch_stock_history_fallback("SPY", "2026-01-01", "2026-03-17")
         assert history == {}
@@ -416,16 +438,16 @@ class TestFetchStockHistoryFallback:
 
 
 class TestFetchOptionHistorySafe:
-    @patch("portfolio_performance.read_cache")
+    @patch("reports.portfolio_performance.read_cache")
     def test_cache_hit(self, mock_read):
         mock_read.return_value = {"2026-02-15": 5.50}
         oid, history, warning = _fetch_option_history_safe("AAPL260321C00230000", "2026-01-01", "2026-03-17")
         assert history == {"2026-02-15": 5.50}
         assert warning is None
 
-    @patch("portfolio_performance.write_cache")
-    @patch("portfolio_performance.read_cache", return_value=None)
-    @patch("portfolio_performance.UWClient")
+    @patch("reports.portfolio_performance.write_cache")
+    @patch("reports.portfolio_performance.read_cache", return_value=None)
+    @patch("reports.portfolio_performance.UWClient")
     def test_uw_success(self, mock_uw_cls, mock_read, mock_write):
         mock_uw = MagicMock()
         mock_uw.get_option_contract_historic.return_value = {
@@ -437,10 +459,11 @@ class TestFetchOptionHistorySafe:
         assert history == {"2026-02-15": 5.5}
         assert warning is None
 
-    @patch("portfolio_performance.read_cache", return_value=None)
-    @patch("portfolio_performance.UWClient")
+    @patch("reports.portfolio_performance.read_cache", return_value=None)
+    @patch("reports.portfolio_performance.UWClient")
     def test_rate_limit_skips(self, mock_uw_cls, mock_read):
         from clients.uw_client import UWRateLimitError
+
         mock_uw = MagicMock()
         mock_uw.get_option_contract_historic.side_effect = UWRateLimitError("429")
         mock_uw_cls.return_value = mock_uw
@@ -449,8 +472,8 @@ class TestFetchOptionHistorySafe:
         assert history == {}
         assert "Rate limited" in warning
 
-    @patch("portfolio_performance.read_cache", return_value=None)
-    @patch("portfolio_performance.UWClient")
+    @patch("reports.portfolio_performance.read_cache", return_value=None)
+    @patch("reports.portfolio_performance.UWClient")
     def test_generic_exception(self, mock_uw_cls, mock_read):
         mock_uw = MagicMock()
         mock_uw.get_option_contract_historic.side_effect = Exception("network error")
@@ -474,11 +497,11 @@ class TestFetchAllHistories:
             option_id=option_id,
         )
 
-    @patch("portfolio_performance.prune_cache")
-    @patch("portfolio_performance._fetch_option_history_safe")
-    @patch("portfolio_performance._fetch_stock_history_ib_only")
-    @patch("portfolio_performance.read_cache", return_value=None)
-    @patch("portfolio_performance.write_cache")
+    @patch("reports.portfolio_performance.prune_cache")
+    @patch("reports.portfolio_performance._fetch_option_history_safe")
+    @patch("reports.portfolio_performance._fetch_stock_history_ib_only")
+    @patch("reports.portfolio_performance.read_cache", return_value=None)
+    @patch("reports.portfolio_performance.write_cache")
     def test_parallel_execution(self, mock_wc, mock_read, mock_ib, mock_opt, mock_prune):
         mock_ib.return_value = ("AAPL", {"2026-01-15": 230.0})
         mock_opt.return_value = ("AAPL260321C00230000", {"2026-02-15": 5.5}, None)
@@ -495,11 +518,11 @@ class TestFetchAllHistories:
         assert "AAPL260321C00230000" in marks
         assert len(missing) == 0
 
-    @patch("portfolio_performance.prune_cache")
-    @patch("portfolio_performance._fetch_stock_history_fallback")
-    @patch("portfolio_performance._fetch_stock_history_ib_only")
-    @patch("portfolio_performance.read_cache", return_value=None)
-    @patch("portfolio_performance.write_cache")
+    @patch("reports.portfolio_performance.prune_cache")
+    @patch("reports.portfolio_performance._fetch_stock_history_fallback")
+    @patch("reports.portfolio_performance._fetch_stock_history_ib_only")
+    @patch("reports.portfolio_performance.read_cache", return_value=None)
+    @patch("reports.portfolio_performance.write_cache")
     def test_ib_fail_triggers_fallback(self, mock_wc, mock_read, mock_ib, mock_fallback, mock_prune):
         mock_ib.return_value = ("AAPL", {})  # IB failure
         mock_fallback.return_value = ("AAPL", {"2026-01-15": 230.0}, "uw")
@@ -512,9 +535,9 @@ class TestFetchAllHistories:
         assert "STK:AAPL" in marks
         mock_fallback.assert_called_once()
 
-    @patch("portfolio_performance.prune_cache")
-    @patch("portfolio_performance._fetch_option_history_safe")
-    @patch("portfolio_performance.read_cache", return_value=None)
+    @patch("reports.portfolio_performance.prune_cache")
+    @patch("reports.portfolio_performance._fetch_option_history_safe")
+    @patch("reports.portfolio_performance.read_cache", return_value=None)
     def test_option_warning_propagated(self, mock_read, mock_opt, mock_prune):
         mock_opt.return_value = ("OPT123", {}, "Rate limited fetching OPT123 — skipped")
 
@@ -526,9 +549,9 @@ class TestFetchAllHistories:
         assert "OPT123" in missing
         assert any("Rate limited" in w for w in warnings)
 
-    @patch("portfolio_performance.prune_cache")
-    @patch("portfolio_performance._fetch_stock_history_fallback")
-    @patch("portfolio_performance.read_cache", return_value=None)
+    @patch("reports.portfolio_performance.prune_cache")
+    @patch("reports.portfolio_performance._fetch_stock_history_fallback")
+    @patch("reports.portfolio_performance.read_cache", return_value=None)
     def test_no_ib_client(self, mock_read, mock_fb, mock_prune):
         mock_fb.return_value = ("AAPL", {"2026-01-15": 230.0}, "yahoo")
         trades = [self._make_trade("STK", "AAPL")]
@@ -538,7 +561,7 @@ class TestFetchAllHistories:
 
         assert "STK:AAPL" in marks
 
-    @patch("portfolio_performance.read_cache")
+    @patch("reports.portfolio_performance.read_cache")
     def test_cache_hit_skips_ib(self, mock_read):
         mock_read.return_value = {"2026-01-15": 230.0}
 

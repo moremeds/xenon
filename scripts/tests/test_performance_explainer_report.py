@@ -1,4 +1,4 @@
-from performance_explainer_report import (
+from reports.performance_explainer_report import (
     build_html,
     chart_family_contract,
     chart_role_color,

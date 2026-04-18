@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 # Module under test
-from portfolio_performance import (
+from reports.portfolio_performance import (
     load_nav_history,
     build_nav_equity_curve,
     parse_option_id,
