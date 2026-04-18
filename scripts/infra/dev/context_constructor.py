@@ -16,13 +16,13 @@ Also implements the Evaluator stage (--save-facts):
 Usage:
     # Constructor: load context at session start
     python3 scripts/context_constructor.py
-    
-    # Constructor: JSON output for programmatic use  
+
+    # Constructor: JSON output for programmatic use
     python3 scripts/context_constructor.py --json
-    
+
     # Evaluator: save a fact
     python3 scripts/context_constructor.py --save-fact "key" "value" --confidence 0.9 --source "session"
-    
+
     # Evaluator: save session summary
     python3 scripts/context_constructor.py --save-episode "Session summary text" --session-id "abc"
 """
@@ -39,11 +39,12 @@ from pathlib import Path
 from typing import Optional
 
 # Project root
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent.parent
 CONTEXT_DIR = ROOT / "context"
 MEMORY_DIR = CONTEXT_DIR / "memory"
 HISTORY_DIR = CONTEXT_DIR / "history"
 HUMAN_DIR = CONTEXT_DIR / "human"
+
 
 # Token budget: rough estimate 1 token ≈ 4 chars
 def estimate_tokens(text: str) -> int:
@@ -88,10 +89,11 @@ def log_transaction(operation: str, path_str: str, agent_id: str = "xenon"):
 
 # ─── Constructor ────────────────────────────────────────────
 
+
 def construct_context(token_budget: int = 8000) -> dict:
     """
     Build context payload from persistent memory.
-    
+
     Returns:
         {
             "context": str,          # Assembled context text
@@ -112,13 +114,13 @@ def construct_context(token_budget: int = 8000) -> dict:
         "included": [],
         "excluded": [],
     }
-    
+
     sections = []
     tokens_remaining = token_budget
     facts_loaded = 0
     episodes_loaded = 0
     human_loaded = 0
-    
+
     # 1. Load facts (highest priority — atomic, verified knowledge)
     facts = list_context_entries(MEMORY_DIR / "fact")
     if facts:
@@ -129,26 +131,30 @@ def construct_context(token_budget: int = 8000) -> dict:
             confidence = fact.get("confidence", 1.0)
             line = f"- **{key}**: {value} (confidence: {confidence})"
             line_tokens = estimate_tokens(line)
-            
+
             if line_tokens <= tokens_remaining:
                 fact_lines.append(line)
                 tokens_remaining -= line_tokens
                 facts_loaded += 1
-                manifest["included"].append({
-                    "path": f"memory/fact/{fact['_file']}",
-                    "tokens": line_tokens,
-                    "reason": "persistent fact",
-                })
+                manifest["included"].append(
+                    {
+                        "path": f"memory/fact/{fact['_file']}",
+                        "tokens": line_tokens,
+                        "reason": "persistent fact",
+                    }
+                )
             else:
-                manifest["excluded"].append({
-                    "path": f"memory/fact/{fact['_file']}",
-                    "tokens": line_tokens,
-                    "reason": "exceeded token budget",
-                })
-        
+                manifest["excluded"].append(
+                    {
+                        "path": f"memory/fact/{fact['_file']}",
+                        "tokens": line_tokens,
+                        "reason": "exceeded token budget",
+                    }
+                )
+
         if fact_lines:
             sections.append("### Persistent Facts\n" + "\n".join(fact_lines))
-    
+
     # 2. Load episodic summaries (medium priority — session history)
     episodes = list_context_entries(MEMORY_DIR / "episodic")
     if episodes:
@@ -160,26 +166,30 @@ def construct_context(token_budget: int = 8000) -> dict:
             date = ep.get("createdAt", "")[:10]
             line = f"- **{date}** ({session_id}): {summary}"
             line_tokens = estimate_tokens(line)
-            
+
             if line_tokens <= tokens_remaining:
                 episode_lines.append(line)
                 tokens_remaining -= line_tokens
                 episodes_loaded += 1
-                manifest["included"].append({
-                    "path": f"memory/episodic/{ep['_file']}",
-                    "tokens": line_tokens,
-                    "reason": "recent session summary",
-                })
+                manifest["included"].append(
+                    {
+                        "path": f"memory/episodic/{ep['_file']}",
+                        "tokens": line_tokens,
+                        "reason": "recent session summary",
+                    }
+                )
             else:
-                manifest["excluded"].append({
-                    "path": f"memory/episodic/{ep['_file']}",
-                    "tokens": line_tokens,
-                    "reason": "exceeded token budget",
-                })
-        
+                manifest["excluded"].append(
+                    {
+                        "path": f"memory/episodic/{ep['_file']}",
+                        "tokens": line_tokens,
+                        "reason": "exceeded token budget",
+                    }
+                )
+
         if episode_lines:
             sections.append("### Recent Session History\n" + "\n".join(episode_lines))
-    
+
     # 3. Load human annotations (highest authority — overrides model output)
     annotations = list_context_entries(HUMAN_DIR)
     if annotations:
@@ -189,26 +199,30 @@ def construct_context(token_budget: int = 8000) -> dict:
             priority = ann.get("priority", "normal")
             line = f"- {'⚠️ ' if priority == 'high' else ''}{content}"
             line_tokens = estimate_tokens(line)
-            
+
             if line_tokens <= tokens_remaining:
                 human_lines.append(line)
                 tokens_remaining -= line_tokens
                 human_loaded += 1
-                manifest["included"].append({
-                    "path": f"human/{ann['_file']}",
-                    "tokens": line_tokens,
-                    "reason": "human annotation (overrides model)",
-                })
+                manifest["included"].append(
+                    {
+                        "path": f"human/{ann['_file']}",
+                        "tokens": line_tokens,
+                        "reason": "human annotation (overrides model)",
+                    }
+                )
             else:
-                manifest["excluded"].append({
-                    "path": f"human/{ann['_file']}",
-                    "tokens": line_tokens,
-                    "reason": "exceeded token budget",
-                })
-        
+                manifest["excluded"].append(
+                    {
+                        "path": f"human/{ann['_file']}",
+                        "tokens": line_tokens,
+                        "reason": "exceeded token budget",
+                    }
+                )
+
         if human_lines:
             sections.append("### Human Annotations (Authoritative)\n" + "\n".join(human_lines))
-    
+
     # 4. Load experiential memories (observation-action trajectories)
     experiential = list_context_entries(MEMORY_DIR / "experiential")
     if experiential:
@@ -219,29 +233,31 @@ def construct_context(token_budget: int = 8000) -> dict:
             outcome = exp.get("outcome", "")
             line = f"- Observed: {observation} → Action: {action} → Outcome: {outcome}"
             line_tokens = estimate_tokens(line)
-            
+
             if line_tokens <= tokens_remaining:
                 exp_lines.append(line)
                 tokens_remaining -= line_tokens
-                manifest["included"].append({
-                    "path": f"memory/experiential/{exp['_file']}",
-                    "tokens": line_tokens,
-                    "reason": "experiential learning",
-                })
-        
+                manifest["included"].append(
+                    {
+                        "path": f"memory/experiential/{exp['_file']}",
+                        "tokens": line_tokens,
+                        "reason": "experiential learning",
+                    }
+                )
+
         if exp_lines:
             sections.append("### Experiential Learnings\n" + "\n".join(exp_lines))
-    
+
     # Assemble
     tokens_used = token_budget - tokens_remaining
     manifest["tokenUsed"] = tokens_used
-    
+
     context = "\n\n".join(sections) if sections else ""
-    
+
     # Log the construction
     if context:
         log_transaction("construct", "session-startup", "xenon")
-    
+
     return {
         "context": context,
         "manifest": manifest,
@@ -254,22 +270,23 @@ def construct_context(token_budget: int = 8000) -> dict:
 
 # ─── Evaluator: Save Fact ───────────────────────────────────
 
+
 def save_fact(key: str, value: str, confidence: float = 0.9, source: str = "session"):
     """Persist a fact to context/memory/fact/."""
     fact_dir = MEMORY_DIR / "fact"
     fact_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Sanitize key for filename
     safe_key = key.replace("/", "-").replace(" ", "-").replace(".", "-").lower()
     filename = f"{safe_key}.json"
     filepath = fact_dir / filename
-    
+
     # Check for existing fact (update revision)
     existing = load_json_file(filepath)
     revision = (existing.get("revisionId", 0) + 1) if existing else 1
-    
+
     now = datetime.now(timezone.utc).isoformat()
-    
+
     entry = {
         "id": f"fact-{safe_key}",
         "key": key,
@@ -282,25 +299,26 @@ def save_fact(key: str, value: str, confidence: float = 0.9, source: str = "sess
         "revisionId": revision,
         "expiresAt": None,
     }
-    
+
     filepath.write_text(json.dumps(entry, indent=2))
     log_transaction("write", f"memory/fact/{filename}", "xenon")
-    
+
     return entry
 
 
 # ─── Evaluator: Save Episode ────────────────────────────────
 
+
 def save_episode(summary: str, session_id: str | None = None):
     """Persist a session summary to context/memory/episodic/."""
     ep_dir = MEMORY_DIR / "episodic"
     ep_dir.mkdir(parents=True, exist_ok=True)
-    
+
     now = datetime.now(timezone.utc)
     sid = session_id or f"session-{now.strftime('%Y%m%d-%H%M%S')}"
     filename = f"{sid}.json"
     filepath = ep_dir / filename
-    
+
     entry = {
         "id": f"ep-{sid}",
         "sessionId": sid,
@@ -308,31 +326,32 @@ def save_episode(summary: str, session_id: str | None = None):
         "createdAt": now.isoformat(),
         "tokenCount": estimate_tokens(summary),
     }
-    
+
     filepath.write_text(json.dumps(entry, indent=2))
     log_transaction("write", f"memory/episodic/{filename}", "xenon")
-    
+
     return entry
 
 
 # ─── CLI ────────────────────────────────────────────────────
+
 
 def main():
     parser = argparse.ArgumentParser(description="Context Constructor — build session context from persistent memory")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     parser.add_argument("--budget", type=int, default=8000, help="Token budget (default: 8000)")
     parser.add_argument("--manifest-only", action="store_true", help="Show manifest only (no context)")
-    
+
     # Evaluator subcommands
     parser.add_argument("--save-fact", nargs=2, metavar=("KEY", "VALUE"), help="Save a fact")
     parser.add_argument("--confidence", type=float, default=0.9, help="Fact confidence (0-1)")
     parser.add_argument("--source", default="session", help="Fact source identifier")
-    
+
     parser.add_argument("--save-episode", metavar="SUMMARY", help="Save session episode summary")
     parser.add_argument("--session-id", help="Session ID for episode")
-    
+
     args = parser.parse_args()
-    
+
     # ─── Evaluator: save fact ───
     if args.save_fact:
         key, value = args.save_fact
@@ -342,7 +361,7 @@ def main():
         else:
             print(f"✓ Saved fact: {key} = {value} (confidence: {args.confidence}, rev: {entry['revisionId']})")
         return
-    
+
     # ─── Evaluator: save episode ───
     if args.save_episode:
         entry = save_episode(args.save_episode, args.session_id)
@@ -351,31 +370,31 @@ def main():
         else:
             print(f"✓ Saved episode: {entry['sessionId']} ({entry['tokenCount']} tokens)")
         return
-    
+
     # ─── Constructor: build context ───
     result = construct_context(args.budget)
-    
+
     if args.json:
         print(json.dumps(result, indent=2))
         return
-    
+
     if args.manifest_only:
         print(json.dumps(result["manifest"], indent=2))
         return
-    
+
     # Human-readable output
     facts = result["facts_count"]
     episodes = result["episodes_count"]
     human = result["human_count"]
     tokens = result["tokens_used"]
     budget = args.budget
-    
+
     if result["context"]:
         print(f"📚 Context loaded: {facts} facts, {episodes} episodes, {human} annotations ({tokens}/{budget} tokens)")
         print(result["context"])
     else:
         print(f"📚 Context: empty (no persistent memory yet)")
-    
+
     # Show manifest summary
     excluded = result["manifest"]["excluded"]
     if excluded:

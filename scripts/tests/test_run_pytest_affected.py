@@ -1,10 +1,10 @@
 from pathlib import Path
 
-from scripts.run_pytest_affected import resolve_pytest_targets
+from infra.dev.run_pytest_affected import resolve_pytest_targets
 
 
 def test_resolve_pytest_targets_prefers_direct_matching_test_file():
-    targets = resolve_pytest_targets(["scripts/run_pytest_affected.py"])
+    targets = resolve_pytest_targets(["scripts/infra/dev/run_pytest_affected.py"])
     assert "scripts/tests/test_run_pytest_affected.py" in targets
 
 
