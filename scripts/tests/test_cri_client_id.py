@@ -1,6 +1,6 @@
 """Tests for CRI scanner IB client-id pools."""
 
-from cri_scan import CRI_IB_HISTORY_CLIENT_IDS, CRI_IB_QUOTE_CLIENT_IDS
+from scanners.cri import CRI_IB_HISTORY_CLIENT_IDS, CRI_IB_QUOTE_CLIENT_IDS
 
 
 class TestCRIClientIds:

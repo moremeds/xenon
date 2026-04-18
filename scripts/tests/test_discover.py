@@ -2,7 +2,7 @@
 import pytest
 from datetime import datetime
 
-from discover import (
+from scanners.discover import (
     analyze_darkpool_day,
     calculate_score,
     is_market_open,

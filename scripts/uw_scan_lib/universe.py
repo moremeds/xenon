@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Literal, Optional
 
-from scripts.scanner_lib.universe import dedup_and_normalize
+from scanners._shared.universe import dedup_and_normalize
 
 logger = logging.getLogger(__name__)
 

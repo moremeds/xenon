@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scripts.scanner_lib.scoring import normalize_score
+from scanners._shared.scoring import normalize_score
 
 STRUCTURE_WEIGHTS = {
     "gamma_flip": 0.25,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scripts.scanner_lib.scoring import normalize_score
+from scanners._shared.scoring import normalize_score
 
 VOL_WEIGHTS = {"iv_rank": 0.40, "term_structure": 0.30, "iv_rv_ratio": 0.30}
 

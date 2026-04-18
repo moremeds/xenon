@@ -19,8 +19,8 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from scripts.analysis.ticker_data import fetch_ticker_data
-from scripts.scanner_lib.cache import write_json_cache
-from scripts.scanner_lib.executor import parallel_fetch
+from scripts.scanners._shared.cache import write_json_cache
+from scripts.scanners._shared.executor import parallel_fetch
 from scripts.ta_lib.apex_sync import sync_if_stale
 from scripts.trend_scan_lib.config import TrendScanConfig
 from scripts.trend_scan_lib.models import TrendCandidate

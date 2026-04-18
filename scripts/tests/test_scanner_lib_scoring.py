@@ -6,7 +6,7 @@ import pytest
 
 
 def test_weighted_composite_basic():
-    from scripts.scanner_lib.scoring import weighted_composite
+    from scanners._shared.scoring import weighted_composite
 
     scores = {"trend": 0.8, "structure": 0.6, "vol": 0.5, "flow": 0.7}
     weights = {"trend": 0.35, "structure": 0.25, "vol": 0.20, "flow": 0.20}
@@ -16,7 +16,7 @@ def test_weighted_composite_basic():
 
 
 def test_weighted_composite_missing_score_treated_as_zero():
-    from scripts.scanner_lib.scoring import weighted_composite
+    from scanners._shared.scoring import weighted_composite
 
     scores = {"trend": 0.8}
     weights = {"trend": 0.35, "structure": 0.65}
@@ -25,7 +25,7 @@ def test_weighted_composite_missing_score_treated_as_zero():
 
 
 def test_weighted_composite_weights_must_sum_to_one():
-    from scripts.scanner_lib.scoring import weighted_composite
+    from scanners._shared.scoring import weighted_composite
 
     scores = {"a": 0.5}
     weights = {"a": 0.5, "b": 0.3}
@@ -34,7 +34,7 @@ def test_weighted_composite_weights_must_sum_to_one():
 
 
 def test_passes_min_thresholds_all_pass():
-    from scripts.scanner_lib.scoring import passes_min_thresholds
+    from scanners._shared.scoring import passes_min_thresholds
 
     scores = {"trend": 0.6, "structure": 0.5}
     thresholds = {"trend": 0.4, "structure": 0.3}
@@ -42,7 +42,7 @@ def test_passes_min_thresholds_all_pass():
 
 
 def test_passes_min_thresholds_one_fails():
-    from scripts.scanner_lib.scoring import passes_min_thresholds
+    from scanners._shared.scoring import passes_min_thresholds
 
     scores = {"trend": 0.35, "structure": 0.5}
     thresholds = {"trend": 0.4, "structure": 0.3}
@@ -50,7 +50,7 @@ def test_passes_min_thresholds_one_fails():
 
 
 def test_passes_min_thresholds_missing_score_fails():
-    from scripts.scanner_lib.scoring import passes_min_thresholds
+    from scanners._shared.scoring import passes_min_thresholds
 
     scores = {"trend": 0.6}
     thresholds = {"trend": 0.4, "structure": 0.3}
@@ -58,7 +58,7 @@ def test_passes_min_thresholds_missing_score_fails():
 
 
 def test_normalize_score_clamps():
-    from scripts.scanner_lib.scoring import normalize_score
+    from scanners._shared.scoring import normalize_score
 
     assert normalize_score(1.5) == 1.0
     assert normalize_score(-0.3) == 0.0
@@ -66,7 +66,7 @@ def test_normalize_score_clamps():
 
 
 def test_normalize_score_nan_returns_zero():
-    from scripts.scanner_lib.scoring import normalize_score
+    from scanners._shared.scoring import normalize_score
 
     assert normalize_score(float("nan")) == 0.0
     assert normalize_score(float("inf")) == 0.0
