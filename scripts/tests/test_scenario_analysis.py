@@ -2,7 +2,7 @@
 import pytest
 import math
 
-from scenario_analysis import (
+from reports.scenario_analysis import (
     approx_delta,
     compute_position_delta,
     compute_exposure,

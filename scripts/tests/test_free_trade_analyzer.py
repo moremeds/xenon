@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from free_trade_analyzer import (
+from reports.free_trade_analyzer import (
     Leg,
     FreeTradeSuggestion,
     classify_position,

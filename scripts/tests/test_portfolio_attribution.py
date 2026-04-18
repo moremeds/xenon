@@ -6,7 +6,7 @@ from pathlib import Path
 # Ensure scripts/ is on path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from portfolio_attribution import (
+from reports.portfolio_attribution import (
     classify_trade,
     classify_edge_type,
     build_attribution,
