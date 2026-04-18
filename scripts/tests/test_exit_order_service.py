@@ -2,7 +2,7 @@
 import pytest
 import re
 
-from exit_order_service import extract_expiry
+from services.exit_order_service import extract_expiry
 
 
 class TestExtractExpiry:

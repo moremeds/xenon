@@ -1,0 +1,203 @@
+#!/bin/bash
+#
+# Holiday-aware data refresh wrapper for launchd
+#
+# Checks if today is a trading day (weekday + not holiday) before running
+# scanner.py, flow_analysis.py, and discover.py. Saves output to data/.
+#
+
+cd "$(dirname "$0")/.."
+
+# Load env vars from both .env files — launchd doesn't inherit shell env
+# Avoid process substitution <(...) which is unreliable under launchd's bash 3.2
+_load_env() {
+    local f="$1"
+    [ -f "$f" ] || return
+    local tmp
+    tmp=$(mktemp)
+    grep -v '^#' "$f" | grep -v '^\s*$' | sed 's/^export //' > "$tmp"
+    set -a
+    # shellcheck disable=SC1090
+    . "$tmp"
+    set +a
+    rm -f "$tmp"
+}
+_load_env "web/.env"
+_load_env ".env"
+
+resolve_python() {
+    local candidate
+    for candidate in "${XENON_PYTHON_BIN:-}" python3.13 python3.9 /usr/bin/python3 python3; do
+        [ -n "$candidate" ] || continue
+        command -v "$candidate" >/dev/null 2>&1 || continue
+        "$candidate" - <<'PY' >/dev/null 2>&1
+import importlib.util
+required = ("ib_insync",)
+raise SystemExit(0 if all(importlib.util.find_spec(name) for name in required) else 1)
+PY
+        if [ $? -eq 0 ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+PYTHON_BIN=$(resolve_python)
+if [ -z "$PYTHON_BIN" ]; then
+    echo "$(date): No Python interpreter with ib_insync available for data refresh"
+    exit 1
+fi
+
+# Check if today is a trading day (reuses market_holidays.json)
+IS_TRADING=$("$PYTHON_BIN" -c "
+import sys; sys.path.insert(0, 'scripts')
+from utils.market_calendar import _is_trading_day
+from datetime import datetime
+print('yes' if _is_trading_day(datetime.now()) else 'no')
+" 2>/dev/null || echo "yes")
+
+if [ "$IS_TRADING" = "no" ]; then
+    echo "$(date): Market holiday — skipping data refresh"
+    exit 0
+fi
+
+mkdir -p data
+
+SCANNER_STATUS="FAIL"
+FLOW_STATUS="FAIL"
+DISCOVER_STATUS="FAIL"
+
+# --- scanner.py ---
+echo "$(date): Running scanner.py --top 25..."
+"$PYTHON_BIN" scripts/scanner.py --top 25 > data/scanner.json.tmp 2>/tmp/scanner.err
+EXIT_CODE=$?
+if [ "$EXIT_CODE" -eq 0 ]; then
+    mv data/scanner.json.tmp data/scanner.json
+    SCANNER_STATUS="OK"
+    echo "$(date): scanner.py complete (OK)"
+else
+    rm -f data/scanner.json.tmp
+    echo "$(date): scanner.py failed (exit $EXIT_CODE) — keeping existing data/scanner.json"
+fi
+
+# --- flow-analysis (per-account: ib + futu) ---
+# Previously ran scripts/flow_analysis.py which wrote a stale JSON cache per
+# account. The page is now backed by the shared uw-analyze LRU cache via
+# FastAPI's POST /flow-analysis endpoint, so refreshing it means hitting the
+# endpoint to warm the per-ticker entries. No disk cache file is written.
+FLOW_STATUS="OK"
+for ACCOUNT in ib futu; do
+    if [ "$ACCOUNT" = "futu" ] && [ ! -f data/futu_portfolio.json ]; then
+        echo "$(date): flow-analysis --account futu skipped (no data/futu_portfolio.json)"
+        continue
+    fi
+    echo "$(date): Warming flow-analysis cache via POST /flow-analysis?account=$ACCOUNT..."
+    HTTP_CODE=$(curl -sS -o "/tmp/flow_analysis.${ACCOUNT}.out" -w "%{http_code}" \
+        -X POST "http://localhost:8321/flow-analysis?account=${ACCOUNT}" --max-time 120)
+    if [ "$HTTP_CODE" = "200" ]; then
+        echo "$(date): flow-analysis --account $ACCOUNT complete (OK)"
+    else
+        echo "$(date): flow-analysis --account $ACCOUNT failed (HTTP $HTTP_CODE) — cache retains previous entries"
+        FLOW_STATUS="FAIL"
+    fi
+done
+
+# --- discover.py ---
+echo "$(date): Running discover.py --min-alerts 1..."
+"$PYTHON_BIN" scripts/discover.py --min-alerts 1 > data/discover.json.tmp 2>/tmp/discover.err
+EXIT_CODE=$?
+if [ "$EXIT_CODE" -eq 0 ]; then
+    mv data/discover.json.tmp data/discover.json
+    DISCOVER_STATUS="OK"
+    echo "$(date): discover.py complete (OK)"
+else
+    rm -f data/discover.json.tmp
+    echo "$(date): discover.py failed (exit $EXIT_CODE) — keeping existing data/discover.json"
+fi
+
+echo "$(date): Data refresh complete (scanner: $SCANNER_STATUS, flow: $FLOW_STATUS, discover: $DISCOVER_STATUS)"
+
+cri_cache_has_complete_rvol() {
+    "$PYTHON_BIN" - "$1" "$2" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+cache_path = Path(sys.argv[1])
+today_et = sys.argv[2]
+
+if not cache_path.exists():
+    print("no")
+    raise SystemExit(0)
+
+try:
+    data = json.loads(cache_path.read_text())
+except Exception:
+    print("no")
+    raise SystemExit(0)
+
+history = data.get("history") or []
+complete = (
+    data.get("date") == today_et
+    and len(history) >= 20
+    and all(entry.get("realized_vol") is not None for entry in history[-20:])
+)
+print("yes" if complete else "no")
+PY
+}
+
+refresh_cri_cache_post_close() {
+    local today_et="$1"
+    local cache_status
+    local timestamp
+    local tmp_cache
+    local scheduled_path
+    local scan_complete
+
+    cache_status=$(cri_cache_has_complete_rvol "data/cri.json" "$today_et")
+    if [ "$cache_status" = "yes" ]; then
+        echo "$(date): CRI cache already contains 20 RVOL history points for $today_et — skipping"
+        return
+    fi
+
+    mkdir -p data/cri_scheduled logs
+    timestamp=$(TZ=America/New_York date +"%Y-%m-%dT%H-%M")
+    tmp_cache="data/cri.json.tmp"
+    scheduled_path="data/cri_scheduled/cri-${timestamp}.json"
+
+    echo "$(date): Refreshing CRI cache with 20-session RVOL history..."
+    if "$PYTHON_BIN" scripts/cri_scan.py --json > "$tmp_cache" 2>>"logs/cri-scan.err.log"; then
+        mv "$tmp_cache" data/cri.json
+        cp data/cri.json "$scheduled_path"
+        scan_complete=$(cri_cache_has_complete_rvol "data/cri.json" "$today_et")
+        if [ "$scan_complete" = "yes" ]; then
+            echo "$(date): CRI cache refresh complete (OK) → data/cri.json, $scheduled_path"
+            return
+        fi
+        echo "$(date): CRI scan output is still missing complete RVOL history — attempting repair fallback"
+    else
+        local exit_code=$?
+        rm -f "$tmp_cache"
+        echo "$(date): CRI cache refresh failed (exit $exit_code) — attempting repair fallback"
+    fi
+
+    if "$PYTHON_BIN" scripts/repair_cri_rvol_cache.py --write --target-date "$today_et" 2>>"logs/cri-scan.err.log"; then
+        echo "$(date): CRI cache repair complete (OK)"
+    else
+        local repair_exit_code=$?
+        echo "$(date): CRI cache repair failed (exit $repair_exit_code)"
+    fi
+}
+
+# --- post-close CRI repair ---
+# CTA sync now runs via the dedicated com.xenon.cta-sync launch agent so
+# this wrapper only owns the CRI post-close repair path.
+CURRENT_HOUR_ET=$(TZ=America/New_York date +%H)
+TODAY_ET=$(TZ=America/New_York date +%Y-%m-%d)
+
+if [ "$CURRENT_HOUR_ET" -ge 16 ]; then
+    refresh_cri_cache_post_close "$TODAY_ET"
+else
+    echo "$(date): Post-close CRI refresh skipped (market not yet closed, hour=$CURRENT_HOUR_ET ET)"
+fi
