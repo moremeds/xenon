@@ -10,7 +10,7 @@ import pytest
 # Add scripts dir to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ib_order_manage import find_trade, cancel_order, modify_order, output
+from execution.ib_order_manage import find_trade, cancel_order, modify_order, output
 
 
 # ─── Helpers ────────────────────────────────────────────
