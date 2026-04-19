@@ -221,7 +221,7 @@ def run_cta_sync(
                 # previous attempts when retried in-process.
                 fetch_cmd = [
                     sys.executable,
-                    str(SCRIPT_DIR / "fetchers" / "fetch_menthorq_cta.py"),
+                    str(SCRIPT_DIR / "fetch_menthorq_cta.py"),
                     "--json",
                     "--date",
                     target,
