@@ -23,16 +23,14 @@ PLIST_SRC="$PROJECT_DIR/config/$PLIST_NAME"
 PLIST_DST="$HOME/Library/LaunchAgents/$PLIST_NAME"
 LABEL="com.xenon.cta-sync"
 LOG_DIR="$PROJECT_DIR/logs"
-WRAPPER="$PROJECT_DIR/scripts/run_cta_sync.sh"
+WRAPPER="$PROJECT_DIR/scripts/services/run_cta_sync.sh"
 
 generate_plist() {
     local entries
-    entries=$(PROJECT_DIR_ENV="$PROJECT_DIR" python3.13 - <<'PY'
+    entries=$(PROJECT_DIR_ENV="$PROJECT_DIR" "$PROJECT_DIR/.venv/bin/python" - <<'PY'
 import os
-import sys
 
 project_dir = os.environ["PROJECT_DIR_ENV"]
-sys.path.insert(0, os.path.join(project_dir, "scripts"))
 
 from xenon.utils.cta_sync import CTA_SYNC_ET_SLOTS
 from xenon.utils.launchd_calendar import build_local_calendar_entries, render_calendar_interval_xml
@@ -92,8 +90,8 @@ install() {
     fi
     chmod +x "$WRAPPER"
 
-    if [[ ! -f "$PROJECT_DIR/scripts/fetch_menthorq_cta.py" ]]; then
-        echo "ERROR: fetch_menthorq_cta.py not found"
+    if [[ ! -f "$PROJECT_DIR/src/xenon/fetchers/fetch_menthorq_cta.py" ]]; then
+        echo "ERROR: xenon.fetchers.fetch_menthorq_cta module not found"
         exit 1
     fi
 

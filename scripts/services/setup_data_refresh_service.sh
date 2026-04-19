@@ -23,18 +23,16 @@ PLIST_SRC="$PROJECT_DIR/config/$PLIST_NAME"
 PLIST_DST="$HOME/Library/LaunchAgents/$PLIST_NAME"
 LABEL="com.xenon.data-refresh"
 LOG_DIR="$PROJECT_DIR/logs"
-WRAPPER="$PROJECT_DIR/scripts/run_data_refresh.sh"
+WRAPPER="$PROJECT_DIR/scripts/services/run_data_refresh.sh"
 
 # --- Helpers ---
 
 generate_plist() {
     local entries
-    entries=$(PROJECT_DIR_ENV="$PROJECT_DIR" python3.13 - <<'PY'
+    entries=$(PROJECT_DIR_ENV="$PROJECT_DIR" "$PROJECT_DIR/.venv/bin/python" - <<'PY'
 import os
-import sys
 
 project_dir = os.environ["PROJECT_DIR_ENV"]
-sys.path.insert(0, os.path.join(project_dir, "scripts"))
 
 from xenon.utils.launchd_calendar import build_local_calendar_entries, expand_intraday_slots, render_calendar_interval_xml
 
@@ -98,12 +96,12 @@ install() {
     fi
     chmod +x "$WRAPPER"
 
-    # 2. Verify Python scripts exist
+    # 2. Verify Python scanner modules exist
     # flow_analysis.py removed: the page is now served from the shared
     # uw-analyze cache via FastAPI POST /flow-analysis.
-    for script in scanner.py discover.py; do
-        if [[ ! -f "$PROJECT_DIR/scripts/$script" ]]; then
-            echo "ERROR: $script not found at $PROJECT_DIR/scripts/$script"
+    for module in scanner.py discover.py; do
+        if [[ ! -f "$PROJECT_DIR/src/xenon/scanners/$module" ]]; then
+            echo "ERROR: xenon.scanners.${module%.py} not found at $PROJECT_DIR/src/xenon/scanners/$module"
             exit 1
         fi
     done

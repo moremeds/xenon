@@ -52,8 +52,7 @@ if [ -z "$PYTHON_BIN" ]; then
 fi
 
 # Check if today is a trading day (reuses market_holidays.json)
-IS_TRADING=$("$PYTHON_BIN" -c "
-import sys; sys.path.insert(0, 'src')
+IS_TRADING=$("$PROJECT_DIR/.venv/bin/python" -c "
 from xenon.utils.market_calendar import _is_trading_day
 from datetime import datetime
 print('yes' if _is_trading_day(datetime.now()) else 'no')
@@ -121,7 +120,7 @@ fi
 echo "$(date): Data refresh complete (scanner: $SCANNER_STATUS, flow: $FLOW_STATUS, discover: $DISCOVER_STATUS)"
 
 cri_cache_has_complete_rvol() {
-    "$PYTHON_BIN" - "$1" "$2" <<'PY'
+    "$PROJECT_DIR/.venv/bin/python" - "$1" "$2" <<'PY'
 import json
 import sys
 from pathlib import Path
