@@ -6,7 +6,9 @@
 # cri_scan.py --json. Saves timestamped output to data/cri_scheduled/.
 #
 
-cd "$(dirname "$0")/.."
+PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$PROJECT_DIR"
+export PATH="$PROJECT_DIR/.venv/bin:$PATH"
 
 resolve_python() {
     local candidate
@@ -50,7 +52,7 @@ TIMESTAMP=$(TZ=America/New_York date +"%Y-%m-%dT%H-%M")
 OUT_PATH="data/cri_scheduled/cri-${TIMESTAMP}.json"
 TMP_PATH=$(mktemp "data/cri_scheduled/.cri-${TIMESTAMP}.XXXXXX.tmp")
 echo "$(date): Running CRI scan..."
-"$PYTHON_BIN" scripts/cri_scan.py --json > "$TMP_PATH" 2>>"logs/cri-scan.err.log"
+"$PROJECT_DIR/.venv/bin/xenon-cri-scan" --json > "$TMP_PATH" 2>>"logs/cri-scan.err.log"
 EXIT_CODE=$?
 if [ "$EXIT_CODE" -eq 0 ]; then
     mv "$TMP_PATH" "$OUT_PATH"
