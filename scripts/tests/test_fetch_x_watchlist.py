@@ -1,7 +1,7 @@
 """Tests for fetch_x_watchlist.py — ticker extraction and sentiment analysis."""
 import pytest
 
-from fetchers.fetch_x_watchlist import (
+from xenon.fetchers.fetch_x_watchlist import (
     extract_tickers,
     analyze_sentiment,
     COMMON_TICKERS,

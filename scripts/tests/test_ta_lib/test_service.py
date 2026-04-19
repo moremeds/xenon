@@ -9,7 +9,7 @@ import pytest
 
 
 def _write_minimal_parquet(mirror: Path, ticker: str = "AAPL", timeframe: str = "1d", n: int = 260):
-    from scripts.apex_refresh import _compute_indicators_adapter
+    from xenon.fetchers.fetch_apex_data import _compute_indicators_adapter
     from scripts.ta_lib.parquet_store import write_indicators, write_ohlcv
 
     ts = pd.date_range("2024-01-01", periods=n, freq="B", tz="UTC")
