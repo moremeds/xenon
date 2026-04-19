@@ -1,1 +1,0 @@
-services/setup_cri_service.sh

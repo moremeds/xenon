@@ -1,1 +1,0 @@
-infra/ibc_remote_control.sh

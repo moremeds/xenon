@@ -1,1 +1,0 @@
-services/setup_data_refresh_service.sh
