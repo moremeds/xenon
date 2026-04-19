@@ -362,7 +362,7 @@ async def _ensure_docker_container() -> Dict:
             "gateway_mode": "docker",
             "error": (
                 f"Container started but Gateway not accepting connections after {RESTART_WAIT_SECS}s. "
-                "Check 2FA approval or container logs: scripts/docker_ib_gateway.sh logs"
+                "Check 2FA approval or container logs: scripts/infra/docker_ib_gateway.sh logs"
             ),
         }
 

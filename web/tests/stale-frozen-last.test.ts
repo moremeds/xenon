@@ -19,13 +19,24 @@
 
 import { describe, it, expect } from "vitest";
 
-const handlerPath = new URL("../../scripts/ib_tick_handler.js", import.meta.url).pathname;
+const handlerPath = new URL(
+  "../../scripts/infra/ib_realtime/ib_tick_handler.js",
+  import.meta.url,
+).pathname;
 const { createPriceData, updatePriceFromTickPrice } = await import(handlerPath);
 
 // IB TICK_TYPE constants
 const TICK = {
-  BID: 1, ASK: 2, LAST: 4, HIGH: 6, LOW: 7, CLOSE: 9,
-  DELAYED_BID: 66, DELAYED_ASK: 67, DELAYED_LAST: 68, DELAYED_CLOSE: 75,
+  BID: 1,
+  ASK: 2,
+  LAST: 4,
+  HIGH: 6,
+  LOW: 7,
+  CLOSE: 9,
+  DELAYED_BID: 66,
+  DELAYED_ASK: 67,
+  DELAYED_LAST: 68,
+  DELAYED_CLOSE: 75,
 };
 
 describe("Stale frozen LAST override — AAOI bug", () => {
@@ -42,10 +53,10 @@ describe("Stale frozen LAST override — AAOI bug", () => {
     updatePriceFromTickPrice(d, TICK.LAST, 25.26);
 
     // IB sends real-time BID
-    updatePriceFromTickPrice(d, TICK.BID, 10.30);
+    updatePriceFromTickPrice(d, TICK.BID, 10.3);
 
     // IB sends real-time ASK
-    updatePriceFromTickPrice(d, TICK.ASK, 11.70);
+    updatePriceFromTickPrice(d, TICK.ASK, 11.7);
 
     // After bid/ask arrive, last should reflect current market, not stale close
     expect(d.last).toBeCloseTo(11.0, 1); // mid of 10.30 and 11.70
@@ -57,8 +68,8 @@ describe("Stale frozen LAST override — AAOI bug", () => {
 
     updatePriceFromTickPrice(d, TICK.CLOSE, 25.26);
     updatePriceFromTickPrice(d, TICK.LAST, 11.95); // genuine trade, differs from close
-    updatePriceFromTickPrice(d, TICK.BID, 10.30);
-    updatePriceFromTickPrice(d, TICK.ASK, 11.70);
+    updatePriceFromTickPrice(d, TICK.BID, 10.3);
+    updatePriceFromTickPrice(d, TICK.ASK, 11.7);
 
     // last=11.95 is a genuine trade, NOT stale — keep it
     expect(d.last).toBe(11.95);
@@ -70,8 +81,8 @@ describe("Stale frozen LAST override — AAOI bug", () => {
 
     updatePriceFromTickPrice(d, TICK.DELAYED_CLOSE, 25.26);
     updatePriceFromTickPrice(d, TICK.DELAYED_LAST, 25.26); // stale
-    updatePriceFromTickPrice(d, TICK.DELAYED_BID, 10.30);
-    updatePriceFromTickPrice(d, TICK.DELAYED_ASK, 11.70);
+    updatePriceFromTickPrice(d, TICK.DELAYED_BID, 10.3);
+    updatePriceFromTickPrice(d, TICK.DELAYED_ASK, 11.7);
 
     expect(d.last).toBeCloseTo(11.0, 1);
     expect(d.lastIsCalculated).toBe(true);
@@ -80,8 +91,8 @@ describe("Stale frozen LAST override — AAOI bug", () => {
   it("BID/ASK arrive before LAST — stale LAST is corrected immediately", () => {
     const d = createPriceData("AAOI_20260320_105_C");
 
-    updatePriceFromTickPrice(d, TICK.BID, 10.30);
-    updatePriceFromTickPrice(d, TICK.ASK, 11.70);
+    updatePriceFromTickPrice(d, TICK.BID, 10.3);
+    updatePriceFromTickPrice(d, TICK.ASK, 11.7);
     // At this point, last=mid=11.0 (calculated from bid/ask)
 
     // Now close arrives
@@ -102,8 +113,8 @@ describe("Stale frozen LAST override — AAOI bug", () => {
 
     updatePriceFromTickPrice(d, TICK.CLOSE, 109.75);
     updatePriceFromTickPrice(d, TICK.LAST, 109.75);
-    updatePriceFromTickPrice(d, TICK.BID, 109.50);
-    updatePriceFromTickPrice(d, TICK.ASK, 110.00);
+    updatePriceFromTickPrice(d, TICK.BID, 109.5);
+    updatePriceFromTickPrice(d, TICK.ASK, 110.0);
 
     // For stocks, last=close is normal (especially after hours) — don't override
     expect(d.last).toBe(109.75);
@@ -113,14 +124,14 @@ describe("Stale frozen LAST override — AAOI bug", () => {
   it("large divergence threshold: only override when bid/ask mid is >20% from last", () => {
     const d = createPriceData("AAOI_20260320_105_C");
 
-    updatePriceFromTickPrice(d, TICK.CLOSE, 10.00);
-    updatePriceFromTickPrice(d, TICK.LAST, 10.00);  // stale
-    updatePriceFromTickPrice(d, TICK.BID, 9.80);
-    updatePriceFromTickPrice(d, TICK.ASK, 10.20);
+    updatePriceFromTickPrice(d, TICK.CLOSE, 10.0);
+    updatePriceFromTickPrice(d, TICK.LAST, 10.0); // stale
+    updatePriceFromTickPrice(d, TICK.BID, 9.8);
+    updatePriceFromTickPrice(d, TICK.ASK, 10.2);
 
     // Mid=10.0, close=10.0, last=10.0 — within 20% → NO override needed
     // last should stay as 10.00 since there's no meaningful divergence
-    expect(d.last).toBe(10.00);
+    expect(d.last).toBe(10.0);
   });
 
   it("correctly recalculates after genuine LAST tick arrives later", () => {
@@ -129,8 +140,8 @@ describe("Stale frozen LAST override — AAOI bug", () => {
     // Stale sequence
     updatePriceFromTickPrice(d, TICK.CLOSE, 25.26);
     updatePriceFromTickPrice(d, TICK.LAST, 25.26);
-    updatePriceFromTickPrice(d, TICK.BID, 10.30);
-    updatePriceFromTickPrice(d, TICK.ASK, 11.70);
+    updatePriceFromTickPrice(d, TICK.BID, 10.3);
+    updatePriceFromTickPrice(d, TICK.ASK, 11.7);
     expect(d.last).toBeCloseTo(11.0, 1); // corrected to mid
 
     // Now a genuine live LAST arrives

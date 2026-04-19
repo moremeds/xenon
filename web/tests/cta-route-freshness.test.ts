@@ -97,7 +97,9 @@ describe("GET /api/menthorq/cta — freshness contract", () => {
     expect(mockSpawn).toHaveBeenCalledOnce();
     const [cmd, args] = mockSpawn.mock.calls[0] as [string, string[]];
     expect(cmd).toBe("bash");
-    expect(args.some((arg) => arg.includes("scripts/run_cta_sync.sh"))).toBe(true);
+    expect(
+      args.some((arg) => arg.includes("scripts/services/run_cta_sync.sh")),
+    ).toBe(true);
   });
 
   it("returns a fresh cache_meta contract and does not trigger sync when the latest cache matches the target trading day", async () => {
@@ -159,7 +161,10 @@ describe("GET /api/menthorq/cta — freshness contract", () => {
           target_date: "2026-03-12",
           latest_available_date: "2026-03-10",
           last_attempt_started_at: "2026-03-12T02:55:58Z",
-          last_error: { type: "unexpected_failure", message: "S3 download failed" },
+          last_error: {
+            type: "unexpected_failure",
+            message: "S3 download failed",
+          },
           attempt_count: 1,
         });
       }

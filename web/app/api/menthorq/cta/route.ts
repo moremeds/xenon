@@ -8,7 +8,12 @@ export const runtime = "nodejs";
 const PROJECT_ROOT = join(process.cwd(), "..");
 const CACHE_DIR = join(PROJECT_ROOT, "data", "menthorq_cache");
 const STATUS_PATH = join(CACHE_DIR, "health", "cta-sync-latest.json");
-const SERVICE_STATUS_PATH = join(PROJECT_ROOT, "data", "service_health", "cta-sync.json");
+const SERVICE_STATUS_PATH = join(
+  PROJECT_ROOT,
+  "data",
+  "service_health",
+  "cta-sync.json",
+);
 const LEGACY_STATUS_PATH = join(CACHE_DIR, "cta_sync_status.json");
 
 type CtaTables = {
@@ -42,7 +47,13 @@ let bgSyncInFlight = false;
  * double-conversion bug where new Date(localeString) is parsed in
  * the system timezone instead of ET.
  */
-function etDateParts(now: Date): { year: number; month: number; day: number; hour: number; minute: number } {
+function etDateParts(now: Date): {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+} {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
     year: "numeric",
@@ -52,8 +63,15 @@ function etDateParts(now: Date): { year: number; month: number; day: number; hou
     minute: "2-digit",
     hour12: false,
   }).formatToParts(now);
-  const get = (type: string) => Number(parts.find((p) => p.type === type)!.value);
-  return { year: get("year"), month: get("month"), day: get("day"), hour: get("hour"), minute: get("minute") };
+  const get = (type: string) =>
+    Number(parts.find((p) => p.type === type)!.value);
+  return {
+    year: get("year"),
+    month: get("month"),
+    day: get("day"),
+    hour: get("hour"),
+    minute: get("minute"),
+  };
 }
 
 function formatYMD(d: Date): string {
@@ -103,31 +121,39 @@ function emptySyncHealth(targetDate: string): CtaSyncHealth {
   };
 }
 
-function normalizeSyncHealth(raw: Record<string, unknown> | null, targetDate: string): CtaSyncHealth {
+function normalizeSyncHealth(
+  raw: Record<string, unknown> | null,
+  targetDate: string,
+): CtaSyncHealth {
   if (!raw) return emptySyncHealth(targetDate);
 
-  const derivedState = typeof raw.state === "string"
-    ? raw.state
-    : raw.status === "success"
-      ? "healthy"
-      : raw.status === "error"
-        ? "degraded"
-        : typeof raw.status === "string"
-          ? raw.status
-          : "unknown";
+  const derivedState =
+    typeof raw.state === "string"
+      ? raw.state
+      : raw.status === "success"
+        ? "healthy"
+        : raw.status === "error"
+          ? "degraded"
+          : typeof raw.status === "string"
+            ? raw.status
+            : "unknown";
 
-  const lastError = raw.last_error && typeof raw.last_error === "object"
-    ? raw.last_error as { type?: unknown; message?: unknown }
-    : (raw.error_type || raw.error_excerpt)
-      ? { type: raw.error_type, message: raw.error_excerpt }
-      : null;
+  const lastError =
+    raw.last_error && typeof raw.last_error === "object"
+      ? (raw.last_error as { type?: unknown; message?: unknown })
+      : raw.error_type || raw.error_excerpt
+        ? { type: raw.error_type, message: raw.error_excerpt }
+        : null;
 
   return {
     service: typeof raw.service === "string" ? raw.service : "cta-sync",
     state: derivedState,
-    target_date: typeof raw.target_date === "string" ? raw.target_date : targetDate,
+    target_date:
+      typeof raw.target_date === "string" ? raw.target_date : targetDate,
     latest_available_date:
-      typeof raw.latest_available_date === "string" ? raw.latest_available_date : null,
+      typeof raw.latest_available_date === "string"
+        ? raw.latest_available_date
+        : null,
     last_attempt_started_at:
       typeof raw.last_attempt_started_at === "string"
         ? raw.last_attempt_started_at
@@ -141,9 +167,13 @@ function normalizeSyncHealth(raw: Record<string, unknown> | null, targetDate: st
           ? raw.finished_at
           : null,
     last_successful_date:
-      typeof raw.last_successful_date === "string" ? raw.last_successful_date : null,
+      typeof raw.last_successful_date === "string"
+        ? raw.last_successful_date
+        : null,
     last_successful_at:
-      typeof raw.last_successful_at === "string" ? raw.last_successful_at : null,
+      typeof raw.last_successful_at === "string"
+        ? raw.last_successful_at
+        : null,
     last_cache_path:
       typeof raw.last_cache_path === "string"
         ? raw.last_cache_path
@@ -151,35 +181,45 @@ function normalizeSyncHealth(raw: Record<string, unknown> | null, targetDate: st
           ? raw.cache_path
           : null,
     attempt_count:
-      typeof raw.attempt_count === "number" && Number.isFinite(raw.attempt_count)
+      typeof raw.attempt_count === "number" &&
+      Number.isFinite(raw.attempt_count)
         ? raw.attempt_count
         : 0,
-    last_error: lastError && typeof lastError.type === "string"
-      ? {
-          type: lastError.type,
-          message: typeof lastError.message === "string" ? lastError.message : "",
-        }
-      : null,
+    last_error:
+      lastError && typeof lastError.type === "string"
+        ? {
+            type: lastError.type,
+            message:
+              typeof lastError.message === "string" ? lastError.message : "",
+          }
+        : null,
     last_run_source:
       typeof raw.last_run_source === "string"
         ? raw.last_run_source
         : typeof raw.trigger === "string"
           ? raw.trigger
           : null,
-    artifacts: raw.artifacts && typeof raw.artifacts === "object"
-      ? raw.artifacts as Record<string, string>
-      : {},
+    artifacts:
+      raw.artifacts && typeof raw.artifacts === "object"
+        ? (raw.artifacts as Record<string, string>)
+        : {},
     message: typeof raw.message === "string" ? raw.message : null,
   };
 }
 
-async function readSyncHealth(targetDate: string): Promise<CtaSyncHealth | null> {
+async function readSyncHealth(
+  targetDate: string,
+): Promise<CtaSyncHealth | null> {
   for (const path of [STATUS_PATH, SERVICE_STATUS_PATH, LEGACY_STATUS_PATH]) {
     try {
-      const raw = JSON.parse(await readFile(path, "utf-8")) as Record<string, unknown>;
-      const looksLikeSyncHealth = typeof raw.service === "string"
-        || typeof raw.state === "string"
-        || typeof raw.status === "string";
+      const raw = JSON.parse(await readFile(path, "utf-8")) as Record<
+        string,
+        unknown
+      >;
+      const looksLikeSyncHealth =
+        typeof raw.service === "string" ||
+        typeof raw.state === "string" ||
+        typeof raw.status === "string";
       if (!looksLikeSyncHealth) {
         continue;
       }
@@ -211,7 +251,9 @@ async function readLatestCta(): Promise<{
     }
 
     const latestFile = ctaFiles[ctaFiles.length - 1];
-    const raw = JSON.parse(await readFile(join(CACHE_DIR, latestFile), "utf-8")) as Record<string, unknown>;
+    const raw = JSON.parse(
+      await readFile(join(CACHE_DIR, latestFile), "utf-8"),
+    ) as Record<string, unknown>;
     const fileStat = await stat(join(CACHE_DIR, latestFile));
 
     return {
@@ -237,13 +279,16 @@ function buildCacheMeta(
   latestAvailableDate: string | null,
   mtimeMs: number | null,
 ): Record<string, string | number | boolean | null> {
-  const ageSeconds = mtimeMs == null ? null : Math.round((Date.now() - mtimeMs) / 1000);
-  const isStale = latestAvailableDate == null || latestAvailableDate !== expectedDate;
-  const staleReason = latestAvailableDate == null
-    ? "missing_cache"
-    : latestAvailableDate !== expectedDate
-      ? "behind_target"
-      : "fresh";
+  const ageSeconds =
+    mtimeMs == null ? null : Math.round((Date.now() - mtimeMs) / 1000);
+  const isStale =
+    latestAvailableDate == null || latestAvailableDate !== expectedDate;
+  const staleReason =
+    latestAvailableDate == null
+      ? "missing_cache"
+      : latestAvailableDate !== expectedDate
+        ? "behind_target"
+        : "fresh";
 
   return {
     last_refresh: mtimeMs == null ? null : new Date(mtimeMs).toISOString(),
@@ -263,7 +308,7 @@ function triggerBackgroundSync(expectedDate: string): void {
 
   const child = spawn(
     "bash",
-    ["scripts/run_cta_sync.sh", "--target-date", expectedDate],
+    ["scripts/services/run_cta_sync.sh", "--target-date", expectedDate],
     {
       cwd: PROJECT_ROOT,
       env: { ...process.env, XENON_CTA_SYNC_SOURCE: "api" },
@@ -291,22 +336,28 @@ export async function GET(): Promise<Response> {
   const expectedDate = latestClosedTradingDay();
   const latest = await readLatestCta();
   const syncHealth = await readSyncHealth(expectedDate);
-  const latestAvailableDate = latest.data.date
-    ?? latest.latestFile?.replace(/^cta_/, "").replace(/\.json$/, "")
-    ?? null;
-  const cache_meta = buildCacheMeta(expectedDate, latestAvailableDate, latest.mtimeMs);
+  const latestAvailableDate =
+    latest.data.date ??
+    latest.latestFile?.replace(/^cta_/, "").replace(/\.json$/, "") ??
+    null;
+  const cache_meta = buildCacheMeta(
+    expectedDate,
+    latestAvailableDate,
+    latest.mtimeMs,
+  );
 
   // Allow re-trigger if the "syncing" state is stale (> 5 min since last attempt).
   // A dead-process lock can leave the service permanently in "syncing" otherwise.
   const syncingIsStale =
     syncHealth?.state === "syncing" &&
     syncHealth?.last_attempt_started_at != null &&
-    Date.now() - new Date(syncHealth.last_attempt_started_at).getTime() > 5 * 60 * 1000;
+    Date.now() - new Date(syncHealth.last_attempt_started_at).getTime() >
+      5 * 60 * 1000;
 
   if (
-    cache_meta.is_stale === true
-    && (syncHealth?.state !== "syncing" || syncingIsStale)
-    && expectedDate !== latestAvailableDate
+    cache_meta.is_stale === true &&
+    (syncHealth?.state !== "syncing" || syncingIsStale) &&
+    expectedDate !== latestAvailableDate
   ) {
     triggerBackgroundSync(expectedDate);
   }
@@ -315,7 +366,8 @@ export async function GET(): Promise<Response> {
     ? {
         ...syncHealth,
         target_date: expectedDate,
-        latest_available_date: syncHealth.latest_available_date ?? latestAvailableDate,
+        latest_available_date:
+          syncHealth.latest_available_date ?? latestAvailableDate,
       }
     : null;
   const syncStatusPayload = syncHealth
@@ -335,16 +387,20 @@ export async function GET(): Promise<Response> {
         attempt_count: syncHealth.attempt_count,
         cache_path: syncHealth.last_cache_path,
         error_type: syncHealth.last_error?.type ?? null,
-        error_excerpt: syncHealth.last_error?.message ?? syncHealth.message ?? null,
+        error_excerpt:
+          syncHealth.last_error?.message ?? syncHealth.message ?? null,
         artifact_log_path: syncHealth.artifacts.context ?? null,
       }
     : null;
   const status = latest.latestFile ? 200 : 503;
 
-  return NextResponse.json({
-    ...latest.data,
-    cache_meta,
-    sync_health: syncHealthPayload,
-    sync_status: syncStatusPayload,
-  }, { status });
+  return NextResponse.json(
+    {
+      ...latest.data,
+      cache_meta,
+      sync_health: syncHealthPayload,
+      sync_status: syncStatusPayload,
+    },
+    { status },
+  );
 }

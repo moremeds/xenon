@@ -136,10 +136,10 @@ cp .env.example .env
 
 ```bash
 # Default settings
-node ../scripts/ib_realtime_server.js
+node ../scripts/infra/ib_realtime/ib_realtime_server.js
 
 # Custom ports
-node ../scripts/ib_realtime_server.js --port 8765 --ib-port 4001
+node ../scripts/infra/ib_realtime/ib_realtime_server.js --port 8765 --ib-port 4001
 ```
 
 ### API Endpoint
@@ -395,7 +395,7 @@ To verify that market-hours aware polling is working correctly:
 
 ```bash
 # Start the server with explicit IB port and verify startup logs
-node ../scripts/ib_realtime_server.js --ib-port 4001
+node ../scripts/infra/ib_realtime/ib_realtime_server.js --ib-port 4001
 ```
 
 - Confirm logs include:
