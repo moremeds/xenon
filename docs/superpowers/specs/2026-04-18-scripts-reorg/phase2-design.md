@@ -76,7 +76,6 @@ xenon/                         # repo root
   │       ├── reports/         # was scripts/reports/
   │       ├── shares/          # was scripts/shares/
   │       ├── services/        # was scripts/services/ (python files only; .sh stay below)
-  │       ├── ta/              # was scripts/ta/
   │       ├── api/             # was scripts/api/
   │       ├── clients/         # was scripts/clients/
   │       ├── utils/           # was scripts/utils/
@@ -239,10 +238,6 @@ xenon-generate-gex-share    = "xenon.shares.generate_gex_share:main"
 
 xenon-exit-order-service   = "xenon.services.exit_order_service:main"
 xenon-cta-sync-service     = "xenon.services.cta_sync_service:main"
-
-xenon-ta-cli               = "xenon.ta.cli:main"
-xenon-ta-premarket-prep    = "xenon.ta.premarket_prep:main"
-xenon-ta-reseed-massive    = "xenon.ta.reseed_massive:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/xenon"]
@@ -431,7 +426,6 @@ See "Production Invocation" above. `run_entry_point()` invokes `.venv/bin/<entry
 | Before                                         | After                                                  |
 | ---------------------------------------------- | ------------------------------------------------------ |
 | `run_script("trend_scan.py", ["--top", "25"])` | `run_entry_point("xenon-trend-scan", ["--top", "25"])` |
-| `run_script("ta_premarket_prep.py", [])`       | `run_entry_point("xenon-ta-premarket-prep", [])`       |
 | `run_script("cri_scan.py", ["--json"])`        | `run_entry_point("xenon-cri-scan", ["--json"])`        |
 | …and ~12 more                                  | …same pattern                                          |
 
@@ -487,7 +481,6 @@ After all external callers update, delete every Phase 1 shim in one commit:
 # Delete Python shims left at old root paths:
 for f in scripts/fetch_*.py scripts/ib_*.py scripts/portfolio_*.py scripts/scenario_*.py \
          scripts/generate_*_share.py scripts/trend_scan.py scripts/uw_scan.py scripts/uw_analyze.py \
-         scripts/ta_cli.py scripts/ta_premarket_prep.py scripts/ta_reseed_massive.py \
          scripts/evaluate.py scripts/kelly.py scripts/blotter.py scripts/risk_reversal.py \
          scripts/free_trade_analyzer.py scripts/verify_options_oi.py scripts/scanner.py \
          scripts/discover.py scripts/discover_forex_dom.py scripts/cri_scan.py scripts/vcg_scan.py \
@@ -528,14 +521,13 @@ Phase 2 is one long-running PR chain. Each step is atomic; main stays green.
    **Move order:**
    1. `shares/` (4 files, isolated)
    2. `infra/` (mostly Node, minimal Python imports)
-   3. `ta/` (consumed by some scanners but standalone CLIs)
-   4. `fetchers/` (consumed by scanners + reports + api)
-   5. `scanners/` (consumed by api)
-   6. `execution/` (consumed by api)
-   7. `reports/` (consumed by api + web)
-   8. `services/` (`exit_order_service`, `cta_sync_service` — daemons)
-   9. `clients/`, `utils/`, `analysis/`, `lib/`, `config/`, `monitor_daemon/`, `trade_blotter/` (foundational, also consumed by api)
-   10. **`api/` last** — most imports of all the above. Single largest move.
+   3. `fetchers/` (consumed by scanners + reports + api)
+   4. `scanners/` (consumed by api)
+   5. `execution/` (consumed by api)
+   6. `reports/` (consumed by api + web)
+   7. `services/` (`exit_order_service`, `cta_sync_service` — daemons)
+   8. `clients/`, `utils/`, `analysis/`, `lib/`, `config/`, `monitor_daemon/`, `trade_blotter/` (foundational, also consumed by api)
+   9. **`api/` last** — most imports of all the above. Single largest move.
 
    For each bucket move:
    - `git mv scripts/<bucket> src/xenon/<bucket>`.
@@ -550,7 +542,7 @@ Phase 2 is one long-running PR chain. Each step is atomic; main stays green.
 
    ```bash
    # Check no internal api/ files import from a still-unmigrated module:
-   rg "^(from|import) (api|clients|utils|analysis|lib|config|trade_blotter|monitor_daemon|fetchers|scanners|execution|reports|shares|services|ta|infra)\b" src/xenon/api/
+   rg "^(from|import) (api|clients|utils|analysis|lib|config|trade_blotter|monitor_daemon|fetchers|scanners|execution|reports|shares|services|infra)\b" src/xenon/api/
    # Should return zero — all imports must be `xenon.*` qualified.
    ```
 
@@ -603,7 +595,6 @@ uv sync --frozen
 .venv/bin/xenon-trend-scan --top 5
 .venv/bin/xenon-uw-scan --help
 .venv/bin/xenon-cri-scan --json >/dev/null
-.venv/bin/xenon-ta-cli AAPL
 .venv/bin/xenon-api &              # starts FastAPI
 sleep 3
 curl http://localhost:8321/health
@@ -622,7 +613,6 @@ rg "scripts/(fetch_|ib_|portfolio_|scenario_|generate_|trend_scan|uw_scan|uw_ana
 ### Soak
 
 - 8:30 AM ET trend scan runs successfully for 3 consecutive weekdays after migration.
-- 6 AM ET TA prep runs successfully for 3 consecutive weekdays.
 - No `ScriptResult(ok=False, error="Script not found...")` in FastAPI logs for a week.
 - No launchd plist errors in Console.app for a week.
 
@@ -649,5 +639,5 @@ The guiding principle: shims stay alive until **every** external caller has been
 - Zero references to retired `scripts/<file>.py` paths in `web/`, `docs/`, `scripts/api/server.py`, or shell scripts.
 - `pyproject.toml` is the single source of truth for dependencies and CLI commands.
 - `from xenon.X.Y import Z` works everywhere; no `sys.path.insert` required anywhere.
-- 8:30 AM ET trend scan and 6 AM ET TA prep run successfully post-migration.
+- 8:30 AM ET trend scan runs successfully post-migration.
 - `web/` test suite and Playwright E2E suite green.

@@ -35,7 +35,7 @@ A 3-way review (Codex + Gemini + Claude) surfaced 8 CRITICAL and 10 IMPORTANT is
 | Rollback `git checkout … -- scripts/` reverts too much                                                                     | PR 4 rollback (explicit file list)                              |
 | Docs grep gate impossible — many intentional `scripts/*.py` doc references                                                 | PR 4 verification (split runtime from docs) + PR 5 (docs sweep) |
 | PR 5 missing `scripts/infra/dev/run_pytest_affected.py` (hardcodes `scripts/tests`)                                        | PR 5                                                            |
-| `ta_premarket_prep` 6 AM ET trigger has no in-repo scheduler — external caller                                             | PR 3 (TA moved here, was PR 2)                                  |
+| `ta_premarket_prep` 6 AM ET trigger — file + scheduler deleted in 33b96e77 before plan-write date                          | Retired in PR 0 plan amendment (this commit)                    |
 | `data/reconciliation.json` startup gate doesn't map to actual writer                                                       | PR 3 verification (replaced)                                    |
 | Entry-point smoke list incomplete                                                                                          | PR 4 (expanded)                                                 |
 | `launchctl list                                                                                                            | grep` only proves "loaded", not healthy                         | PR 4 verification (per-service status) |
@@ -154,7 +154,7 @@ The original spec listed `lib/`, `infra/`, and `ta/` as PR 2 candidates. Audit f
 - **`scripts/infra/`** contains `cloud.sh`, `local.sh`, `docker_ib_gateway.sh`, the Node `ib_realtime/` server, plus `infra/dev/` (Python dev tools). Carve-out:
   - `scripts/infra/dev/*.py` (the Python content) → `src/xenon/infra/dev/` is wrong — these are dev tools, not package code. Move to `src/xenon/dev/` instead, OR leave at `scripts/infra/dev/` as standalone scripts. **Decision: leave at `scripts/infra/dev/` — they're invoked by path, not import, and don't need entry-point binaries.**
   - `scripts/infra/*.sh` and `scripts/infra/ib_realtime/*` stay where they are (final slim layout).
-- **`scripts/ta/`** moved to PR 3, not PR 2 — `ta_premarket_prep.py` runs at 6 AM ET via an external (non-FastAPI) scheduler. Treat as production-path; soak required.
+- **`scripts/ta/`** retired entirely — the 3 source files (`ta_cli.py`, `ta_premarket_prep.py`, `ta_reseed_massive.py`) and the FastAPI `_premarket_data_prep_loop` 6 AM ET driver were deleted in commit `33b96e77` (Apr 17, 2026) before this plan was written. The empty `scripts/ta/__init__.py` from Phase 1 scaffolding can stay — it costs nothing — or be cleaned up in PR 5 if desired. No bucket move, no entry points, no soak gate.
 
 ### Changes per moved bucket
 
@@ -181,8 +181,6 @@ Verification after the whole PR:
 uv sync --frozen
 .venv/bin/xenon-generate-cta-share --help               # shares/
 .venv/bin/xenon-generate-gex-share --help
-.venv/bin/xenon-ta-cli AAPL --help                      # ta/
-.venv/bin/xenon-ta-premarket-prep --help
 # Sibling-import regression (foundational buckets are heavily imported):
 .venv/bin/python -c "from xenon.utils import ib_connection; print('ok')"
 .venv/bin/python -c "from xenon.clients import ib_client; print('ok')"
@@ -212,7 +210,6 @@ cd web && npm test && npx playwright test               # web unaffected (still 
 
 - `fetchers/` (includes the newly-bucketed `fetch_apex_data`)
 - `scanners/` — both stages (2.8a direct moves + 2.8b `trend/` and `uw/` paired consolidations). Includes the `trend_scan.py` → `xenon.scanners.trend.cli` flow that runs at 8:30 AM ET.
-- `ta/` — `ta_cli`, `ta_premarket_prep`, `ta_reseed_massive`, `ta_lib/*`. **Moved here (not PR 2) because `ta_premarket_prep.py` runs at 6 AM ET via an external scheduler; no in-repo scheduler caller exists, so production impact requires soak.** Before merging: audit the external trigger (user's laptop cron? VPS cron? GHA? launchd plist not in `config/`?) and update its invocation to use `.venv/bin/xenon-ta-premarket-prep`.
 - `execution/` — IB + Futu + naked short audit. Broker writes.
 - `reports/` — portfolio + evaluate + kelly. Consumed by `web/` via subprocess.
 - `services/` — `cta_sync_service.py` and the **monitor-daemon stack** (`monitor_daemon/` package). `exit_order_service.py` is **legacy** — `setup_monitor_daemon.sh:22-37` explicitly removes the old exit-order plist. Plan to **retire** `exit_order_service.py` entry point rather than ship `xenon-exit-order-service` — confirm monitor-daemon has taken over exit-order behavior before deleting.
@@ -223,12 +220,11 @@ Apply during this PR:
 
 - [ ] `sys.path.insert(0, ...)` fixes for `risk_reversal`, `portfolio_report`, `portfolio_performance`, `evaluate`, `gex_scan`, `garch_convergence`, `fetch_news`, `ib_order_manage`, `naked_short_audit`, `ib_reconcile`, `verify_options_oi`, `ib_place_order`. After the move, remove the inserts entirely (editable install handles it).
 - [ ] `blotter.py` hardcoded `trade_blotter` sibling path — remove entirely (xenon-qualified import replaces it).
-- [ ] `ta_cli.py` / `ta_premarket_prep.py` `_project_root` walk — already handled in PR 2 since `ta/` moves there. Verify.
 - [ ] `main()` extraction for any file with inline `if __name__ == "__main__":` logic.
 
 ### Verification
 
-After each bucket move inside the PR (order: `fetchers/`, then `scanners/`, then `ta/`, then `execution/`, then `reports/`, then `services/`):
+After each bucket move inside the PR (order: `fetchers/`, then `scanners/`, then `execution/`, then `reports/`, then `services/`):
 
 ```bash
 uv sync --frozen
@@ -252,8 +248,6 @@ End-of-PR integration verification (real FastAPI routes — see `scripts/api/ser
 .venv/bin/xenon-evaluate AAPL
 .venv/bin/xenon-kelly --help
 .venv/bin/xenon-portfolio-report --help
-.venv/bin/xenon-ta-cli AAPL
-.venv/bin/xenon-ta-premarket-prep --help
 .venv/bin/xenon-cta-sync-service --help
 # Note: no xenon-exit-order-service — service retired in favor of monitor-daemon.
 
@@ -274,7 +268,6 @@ cd web && npm test && npx playwright test
 ### Soak — 1 full trading day
 
 - [ ] 8:30 AM ET trend scan completes successfully (`data/trend_scan.json` timestamp within the window).
-- [ ] 6 AM ET TA prep completes successfully (log-verified — check external scheduler's log, not FastAPI).
 - [ ] `monitor-daemon` service logs clean (`logs/monitor-daemon.log`; no uncaught tracebacks). **Do not look for `ScriptResult(ok=False)` in this log — the service uses bespoke logging, not `ScriptResult`.**
 - [ ] Manual `xenon-ib-reconcile` invocation updates `data/reconciliation.json` with fresh timestamp (FastAPI startup does **not** run reconciliation; don't assert startup-triggered update).
 - [ ] No new entries in `logs/cri-scan.err.log` or equivalent.
@@ -391,7 +384,6 @@ cd web && npm test && npx playwright test
       scripts/leap_iv_scanner.py scripts/leap_scanner_uw.py
       scripts/garch_convergence.py scripts/repair_cri_rvol_cache.py
       scripts/trend_scan.py scripts/uw_scan.py scripts/uw_analyze.py
-      scripts/ta_cli.py scripts/ta_premarket_prep.py scripts/ta_reseed_massive.py
       scripts/cta_sync_service.py scripts/test_ib_realtime.py
       # scripts/exit_order_service.py — already deleted in Commit 6 (monitor-daemon retirement)
     )
@@ -487,7 +479,6 @@ cd web && npm test && npx playwright test
 ### Soak — 3 full trading days
 
 - [ ] Trend scan 8:30 AM ET: 3 consecutive weekday-greens (`data/trend_scan.json` timestamp within the window each day).
-- [ ] TA prep 6 AM ET: 3 consecutive weekday-greens (check the external scheduler's log — FastAPI does not trigger this).
 - [ ] Monitor-daemon logs (`logs/monitor-daemon.log`): no uncaught tracebacks. **Do not grep for `ScriptResult(ok=False)` here — the service uses bespoke logging.**
 - [ ] CRI scan service: 30-min intervals all green (`launchctl print gui/$UID/com.xenon.cri-scan` shows `last exit code = 0`).
 - [ ] FastAPI log grep for `run_entry_point.*ok=False`: zero hits during soak.
@@ -516,8 +507,8 @@ git show phase2-pre-shim-deletion -- $(printf 'scripts/%s\n' \
   generate_vcg_share.py generate_gex_share.py scanner.py discover.py \
   discover_forex_dom.py cri_scan.py vcg_scan.py gex_scan.py leap_iv_scanner.py \
   leap_scanner_uw.py garch_convergence.py repair_cri_rvol_cache.py \
-  trend_scan.py uw_scan.py uw_analyze.py ta_cli.py ta_premarket_prep.py \
-  ta_reseed_massive.py cta_sync_service.py test_ib_realtime.py) | git apply
+  trend_scan.py uw_scan.py uw_analyze.py \
+  cta_sync_service.py test_ib_realtime.py) | git apply
 ```
 
 ### Partial launchd-install rollback (VPS cutover fails mid-cycle)
@@ -598,7 +589,7 @@ rg "scripts/[a-z_]+\.py" docs/ README.md \
 - Zero references to retired `scripts/<file>.py` paths anywhere in `web/`, `docs/`, `src/`, `scripts/`.
 - `pyproject.toml` is the single source of truth for dependencies and entry points.
 - No `sys.path.insert` anywhere in `src/xenon/`.
-- 8:30 AM ET trend scan + 6 AM ET TA prep + CRI scan 30-min intervals green for 5 consecutive weekdays post-merge.
+- 8:30 AM ET trend scan + CRI scan 30-min intervals green for 5 consecutive weekdays post-merge.
 - Web test suite + Playwright E2E suite green.
 - `requirements-api.txt` deleted.
 

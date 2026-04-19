@@ -13,16 +13,16 @@
 
 ## Decisions Locked (do not re-litigate)
 
-| Decision                            | Choice                                                                          |
-| ----------------------------------- | ------------------------------------------------------------------------------- |
-| Scope                               | Phase 2 + 1 Phase 1 loose end (`apex_refresh.py` bucketing)                     |
-| PR cadence                          | 5 grouped PRs (PR 0–PR 5), not 10+ per-bucket PRs                               |
-| `apex_refresh.py` placement         | `scripts/fetchers/fetch_apex_data.py` → `xenon-fetch-apex-data`                 |
-| Smoke mechanism                     | Bash script at `scripts/infra/dev/smoke_phase1_shims.sh`                        |
-| `src/xenon/` vs keep `scripts/`     | `src/xenon/` (design spec)                                                      |
-| `exit_order_service`                | **Retire** — replaced by `monitor-daemon` (per `setup_monitor_daemon.sh:22-37`) |
-| `scripts/lib/` and `scripts/infra/` | Stay at `scripts/` (JS + Bash — not Python package content)                     |
-| `ta/` timing                        | PR 3 (not PR 2) — 6 AM ET external scheduler makes it production-path           |
+| Decision                            | Choice                                                                                                                                                                              |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Scope                               | Phase 2 + 1 Phase 1 loose end (`apex_refresh.py` bucketing)                                                                                                                         |
+| PR cadence                          | 5 grouped PRs (PR 0–PR 5), not 10+ per-bucket PRs                                                                                                                                   |
+| `apex_refresh.py` placement         | `scripts/fetchers/fetch_apex_data.py` → `xenon-fetch-apex-data`                                                                                                                     |
+| Smoke mechanism                     | Bash script at `scripts/infra/dev/smoke_phase1_shims.sh`                                                                                                                            |
+| `src/xenon/` vs keep `scripts/`     | `src/xenon/` (design spec)                                                                                                                                                          |
+| `exit_order_service`                | **Retire** — replaced by `monitor-daemon` (per `setup_monitor_daemon.sh:22-37`)                                                                                                     |
+| `scripts/lib/` and `scripts/infra/` | Stay at `scripts/` (JS + Bash — not Python package content)                                                                                                                         |
+| `ta/` bucket                        | Retired — `ta_cli.py` / `ta_premarket_prep.py` / `ta_reseed_massive.py` deleted in commit 33b96e77 (Apr 17, 2026) along with the FastAPI 6 AM ET scheduler loop. No work in any PR. |
 
 ## Tribunal Findings Already Resolved
 
@@ -35,6 +35,7 @@ The plan file has a "Tribunal Review Findings — Resolved In-Line" table mappin
 - Internal `subprocess.run([…, "scripts/X.py"])` callers in `risk_reversal.py:43,63`, `portfolio_report.py:905`, `cta_sync_service.py:230` (PR 4 Commit 7).
 - FastAPI real routes are `POST /trend-scan` and `POST /regime/scan` — **not** `/trend-scan/run` / `/cri-scan/run`.
 - `pyproject.toml` already exists with partial `[project]` + `target-version = "py39"` — PR 1 **expands**, bumps to `py313`.
+- TA bucket retired post-plan-write (commit 33b96e77, Apr 17). PR 3 ta/ work + 6 AM ET soak gate amended out — see plan + design.
 
 ## Immediate Next Step
 
