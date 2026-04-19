@@ -8,7 +8,13 @@ import { fileURLToPath } from "node:url";
 const __dirname = resolve(fileURLToPath(import.meta.url), "..");
 const webDir = resolve(__dirname, "..");
 const projectRoot = resolve(webDir, "..");
-const serverScript = resolve(projectRoot, "scripts", "ib_realtime_server.js");
+const serverScript = resolve(
+  projectRoot,
+  "scripts",
+  "infra",
+  "ib_realtime",
+  "ib_realtime_server.js",
+);
 
 const occupiedServers: net.Server[] = [];
 
@@ -41,33 +47,49 @@ async function occupyPort() {
 }
 
 describe("ib realtime server startup", () => {
-  it("exits cleanly when the websocket port is already in use", { timeout: 10_000 }, async () => {
-    const port = await occupyPort();
+  it(
+    "exits cleanly when the websocket port is already in use",
+    { timeout: 10_000 },
+    async () => {
+      const port = await occupyPort();
 
-    const child = spawn(process.execPath, [serverScript, "--port", String(port)], {
-      cwd: projectRoot,
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+      const child = spawn(
+        process.execPath,
+        [serverScript, "--port", String(port)],
+        {
+          cwd: projectRoot,
+          env: process.env,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
 
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
-    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk.toString();
+      });
 
-    const [code] = await Promise.race([
-      once(child, "exit"),
-      new Promise((_, reject) => {
-        setTimeout(() => {
-          child.kill("SIGTERM");
-          reject(new Error("Timed out waiting for ib_realtime_server.js to exit"));
-        }, 5_000);
-      }),
-    ]);
+      const [code] = await Promise.race([
+        once(child, "exit"),
+        new Promise((_, reject) => {
+          setTimeout(() => {
+            child.kill("SIGTERM");
+            reject(
+              new Error("Timed out waiting for ib_realtime_server.js to exit"),
+            );
+          }, 5_000);
+        }),
+      ]);
 
-    expect(code).toBe(0);
-    expect(stdout).toContain(`WebSocket port already in use at ws://0.0.0.0:${port}`);
-    expect(stdout).toContain("skipping duplicate startup");
-    expect(stderr).not.toContain("EADDRINUSE");
-  });
+      expect(code).toBe(0);
+      expect(stdout).toContain(
+        `WebSocket port already in use at ws://0.0.0.0:${port}`,
+      );
+      expect(stdout).toContain("skipping duplicate startup");
+      expect(stderr).not.toContain("EADDRINUSE");
+    },
+  );
 });

@@ -45,7 +45,16 @@ describe("GET /api/discover", () => {
 
 describe("ib_realtime_server.js requests frozen market data", () => {
   it("requests frozen market data on connect", () => {
-    const content = readFileSync(resolve(projectRoot, "scripts", "ib_realtime_server.js"), "utf8");
+    const content = readFileSync(
+      resolve(
+        projectRoot,
+        "scripts",
+        "infra",
+        "ib_realtime",
+        "ib_realtime_server.js",
+      ),
+      "utf8",
+    );
     expect(content.includes("reqMarketDataType(4)")).toBeTruthy();
   });
 });
@@ -54,7 +63,10 @@ describe("ib_realtime_server.js requests frozen market data", () => {
 
 describe("ib_sync.py frozen market data", () => {
   it("calls set_market_data_type(4) before fetching prices", () => {
-    const content = readFileSync(resolve(projectRoot, "scripts", "ib_sync.py"), "utf8");
+    const content = readFileSync(
+      resolve(projectRoot, "src", "xenon", "execution", "ib_sync.py"),
+      "utf8",
+    );
     expect(content.includes("set_market_data_type(4)")).toBeTruthy();
   });
 });
@@ -63,18 +75,24 @@ describe("ib_sync.py frozen market data", () => {
 
 describe("ib_order_manage.py cancel clientId fix", () => {
   it("cancel_order reconnects as original clientId", () => {
-    const content = readFileSync(resolve(projectRoot, "scripts", "ib_order_manage.py"), "utf8");
+    const content = readFileSync(
+      resolve(projectRoot, "src", "xenon", "execution", "ib_order_manage.py"),
+      "utf8",
+    );
     // Verify the clientId reconnect pattern exists in cancel_order
     expect(
-      content.includes("trade.order.clientId") && content.includes("client.disconnect()"),
+      content.includes("trade.order.clientId") &&
+        content.includes("client.disconnect()"),
     ).toBeTruthy();
   });
 
   it("cancel_order captures IB error events", () => {
-    const content = readFileSync(resolve(projectRoot, "scripts", "ib_order_manage.py"), "utf8");
+    const content = readFileSync(
+      resolve(projectRoot, "src", "xenon", "execution", "ib_order_manage.py"),
+      "utf8",
+    );
     expect(content.includes("errorEvent += on_error")).toBeTruthy();
     // Verify it checks for error 10147
     expect(content.includes("10147")).toBeTruthy();
   });
 });
-
