@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from scripts.analysis.models import BenchmarkContext, BenchmarkSnapshot
+from xenon.analysis.models import BenchmarkContext, BenchmarkSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +114,7 @@ def _load_snapshot(client, ticker: str) -> BenchmarkSnapshot:
                 pg = _to_float(r.get("put_gex")) or 0.0
                 normalized.append({"strike": strike, "gamma": cg + pg})
             if normalized:
-                from scripts.analysis.gex import detect_flip_point
+                from xenon.analysis.gex import detect_flip_point
                 if price and price > 0:
                     band_lo, band_hi = price * 0.8, price * 1.2
                     flip_input = [s for s in normalized if band_lo <= s["strike"] <= band_hi]

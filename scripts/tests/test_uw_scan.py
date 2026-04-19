@@ -1,7 +1,7 @@
 from datetime import datetime
 from unittest.mock import MagicMock
 
-from scripts.analysis.models import TickerData
+from xenon.analysis.models import TickerData
 from scripts.scanners.uw.scan import scan_universe, ScanConfig
 
 

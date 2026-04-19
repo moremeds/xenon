@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock
 
 from scripts.scanners.uw.analyze import run_analysis
-from scripts.analysis.models import AnalysisReport
+from xenon.analysis.models import AnalysisReport
 
 
 def _full_client():
@@ -58,7 +58,7 @@ def test_setup_thesis_no_trade_when_regime_R2():
     """Force vrp.iv_percentile high enough that regime classifies R2 if eligible.
     Simpler: build the thesis directly via internal helper."""
     from scripts.scanners.uw.analyze import _build_setup_thesis
-    from scripts.analysis.models import TickerData, VRPState, RegimeState, BucketScores
+    from xenon.analysis.models import TickerData, VRPState, RegimeState, BucketScores
     from datetime import datetime
 
     td = TickerData(

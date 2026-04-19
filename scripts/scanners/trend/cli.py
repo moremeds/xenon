@@ -28,7 +28,7 @@ from scripts.scanners.trend.stages.ta_prefilter import (
 )
 from scripts.scanners.trend.stages.volatility import compute_vol_score
 
-from scripts.analysis.ticker_data import fetch_ticker_data
+from xenon.analysis.ticker_data import fetch_ticker_data
 from scripts.scanners._shared.cache import write_json_cache
 from scripts.scanners._shared.executor import parallel_fetch
 from scripts.scanners.trend.config import TrendScanConfig

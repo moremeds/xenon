@@ -4,8 +4,8 @@ from __future__ import annotations
 from datetime import date
 from typing import Optional
 
-from scripts.analysis.gex import detect_pinning, is_opex_week
-from scripts.analysis.models import TickerData
+from xenon.analysis.gex import detect_pinning, is_opex_week
+from xenon.analysis.models import TickerData
 from scripts.scanners.uw.models import SignalHit
 
 MEGA_CAPS: frozenset[str] = frozenset({

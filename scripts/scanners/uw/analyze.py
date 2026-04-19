@@ -18,17 +18,17 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.analysis.benchmark import load_benchmark_context
-from scripts.analysis.models import (
+from xenon.analysis.benchmark import load_benchmark_context
+from xenon.analysis.models import (
     AnalysisReport,
     BucketScores,
     RegimeState,
     TickerData,
     VRPState,
 )
-from scripts.analysis.scoring import score_buckets
-from scripts.analysis.ticker_data import fetch_ticker_data
-from scripts.analysis.vrp import build_vrp_state, classify_regime
+from xenon.analysis.scoring import score_buckets
+from xenon.analysis.ticker_data import fetch_ticker_data
+from xenon.analysis.vrp import build_vrp_state, classify_regime
 from scripts.clients.uw_client import UWClient
 
 

@@ -1,5 +1,5 @@
 from unittest.mock import MagicMock
-from scripts.analysis.benchmark import load_benchmark_context, SECTOR_ETF_MAP
+from xenon.analysis.benchmark import load_benchmark_context, SECTOR_ETF_MAP
 
 
 def test_sector_etf_map_has_common_sectors():

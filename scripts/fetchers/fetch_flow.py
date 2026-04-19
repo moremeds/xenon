@@ -27,13 +27,13 @@ from typing import Dict, List, Optional, Tuple
 
 import pytz
 
-from analysis.options_flow_summary import summarize_options_flow
 from clients.uw_client import UWAPIError, UWClient
 from utils.market_calendar import (
     _is_trading_day,
     get_last_n_trading_days,
     load_holidays,
 )
+from xenon.analysis.options_flow_summary import summarize_options_flow
 
 # Trading day constants
 MARKET_OPEN = time(9, 30)  # 9:30 AM ET

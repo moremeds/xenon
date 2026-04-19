@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from scripts.analysis.models import TickerData
+from xenon.analysis.models import TickerData
 from scripts.scanners.uw.signals.gex_pinning import detect, MEGA_CAPS
 
 

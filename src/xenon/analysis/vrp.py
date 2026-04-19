@@ -9,7 +9,7 @@ from __future__ import annotations
 import statistics
 from typing import Optional
 
-from scripts.analysis.models import RegimeState, TickerData, VRPState
+from xenon.analysis.models import RegimeState, TickerData, VRPState
 
 
 def _parse_iv(raw) -> Optional[float]:

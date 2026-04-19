@@ -1,5 +1,5 @@
 from datetime import datetime, date, timedelta
-from scripts.analysis.models import TickerData
+from xenon.analysis.models import TickerData
 from scripts.scanners.uw.signals.earnings_iv_crush import detect
 
 

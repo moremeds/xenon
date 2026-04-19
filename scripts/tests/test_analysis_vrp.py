@@ -1,6 +1,6 @@
 from datetime import datetime
-from scripts.analysis.models import TickerData
-from scripts.analysis.vrp import build_vrp_state, classify_regime
+from xenon.analysis.models import TickerData
+from xenon.analysis.vrp import build_vrp_state, classify_regime
 
 
 def _td(**kwargs):

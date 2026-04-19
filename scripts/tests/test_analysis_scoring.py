@@ -1,6 +1,6 @@
 from datetime import datetime
-from scripts.analysis.models import TickerData, VRPState, RegimeState
-from scripts.analysis.scoring import score_buckets, BUCKET_WEIGHTS
+from xenon.analysis.models import TickerData, VRPState, RegimeState
+from xenon.analysis.scoring import score_buckets, BUCKET_WEIGHTS
 
 
 def _td(**kwargs):
@@ -170,7 +170,7 @@ def test_saturation_aliasing_two_strong_fixtures_distinct_composites():
 
 
 def test_bias_mapping_boundaries():
-    from scripts.analysis.scoring import score_to_bias
+    from xenon.analysis.scoring import score_to_bias
     assert score_to_bias(75.0) == "STRONGLY_BULLISH"
     assert score_to_bias(60.0) == "STRONGLY_BULLISH"
     assert score_to_bias(59.9) == "BULLISH"

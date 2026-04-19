@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from scripts.analysis.models import TickerData
+from xenon.analysis.models import TickerData
 from scripts.scanners.uw.models import ContextFlag
 
 

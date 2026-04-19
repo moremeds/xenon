@@ -16,9 +16,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.analysis.gates import earnings_gate, liquidity_gate, regime_gate
-from scripts.analysis.ticker_data import fetch_ticker_data
-from scripts.analysis.vrp import build_vrp_state, classify_regime
+from xenon.analysis.gates import earnings_gate, liquidity_gate, regime_gate
+from xenon.analysis.ticker_data import fetch_ticker_data
+from xenon.analysis.vrp import build_vrp_state, classify_regime
 from scripts.clients.uw_client import UWClient
 from scripts.scanners.uw.context.pcr_sentiment import flag as pcr_flag
 from scripts.scanners.uw.models import ContextFlag, ScanCandidate, SignalHit

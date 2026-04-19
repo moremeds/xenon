@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from scripts.analysis.models import BucketScores, RegimeState, TickerData, VRPState
+from xenon.analysis.models import BucketScores, RegimeState, TickerData, VRPState
 
 
 BUCKET_WEIGHTS: dict[str, int] = {

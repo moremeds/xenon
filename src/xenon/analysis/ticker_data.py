@@ -12,12 +12,12 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from scripts.analysis.gex import (
+from xenon.analysis.gex import (
     compute_gamma_per_1pct,
     extract_call_wall,
     extract_put_wall,
 )
-from scripts.analysis.models import TickerData
+from xenon.analysis.models import TickerData
 
 logger = logging.getLogger(__name__)
 
@@ -289,7 +289,7 @@ def fetch_ticker_data(ticker: str, client, *, deep: bool = False) -> TickerData:
                 # create an empty {} envelope (it would make
                 # bucket_available("market_structure") return True with all
                 # zeros and silently consume 28 weight points).
-                from scripts.analysis.gex import detect_flip_point as _flip
+                from xenon.analysis.gex import detect_flip_point as _flip
 
                 if price and price > 0:
                     band_lo, band_hi = price * 0.8, price * 1.2

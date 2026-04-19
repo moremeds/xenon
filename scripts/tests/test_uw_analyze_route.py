@@ -24,7 +24,12 @@ import pytest
 os.environ["XENON_TEST_MODE"] = "1"
 os.environ["XENON_API_TEST_MODE"] = "1"
 
-from analysis.models import (  # noqa: E402
+from api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
+from api.services.uw_analyze_flow_tracker import FlowLog  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from clients.uw_client import UWAPIError, UWNotFoundError  # noqa: E402
+from xenon.analysis.models import (  # noqa: E402
     AnalysisReport,
     BenchmarkContext,
     BenchmarkSnapshot,
@@ -33,10 +38,6 @@ from analysis.models import (  # noqa: E402
     TickerData,
     VRPState,
 )
-from api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
-from api.services.uw_analyze_flow_tracker import FlowLog  # noqa: E402
-from clients.uw_client import UWAPIError, UWNotFoundError  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = ROOT / "scripts"

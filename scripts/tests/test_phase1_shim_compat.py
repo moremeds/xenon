@@ -13,6 +13,7 @@ Adding or retiring a shim requires a one-line edit in BOTH files.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -63,12 +64,22 @@ def test_phase1_shim_help_exits_zero(shim: str) -> None:
     shim_path = REPO_ROOT / "scripts" / shim
     assert shim_path.exists(), f"Shim missing at {shim_path}"
 
+    # Make the xenon package importable under bare `python3.13`, matching
+    # the Phase 1 smoke harness (scripts/infra/dev/smoke_phase1_shims.sh) which
+    # also exports PYTHONPATH=src. Required once Phase 2 bucket moves land:
+    # shims re-export bucketed modules that themselves import `xenon.<bucket>`.
+    env = os.environ.copy()
+    src_path = str(REPO_ROOT / "src")
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = src_path + (os.pathsep + existing if existing else "")
+
     result = subprocess.run(
         [sys.executable, str(shim_path), "--help"],
         capture_output=True,
         text=True,
         timeout=30,
         cwd=REPO_ROOT,
+        env=env,
     )
 
     assert result.returncode == 0, (

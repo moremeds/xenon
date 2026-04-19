@@ -1,5 +1,5 @@
 from datetime import datetime
-from scripts.analysis.models import TickerData
+from xenon.analysis.models import TickerData
 from scripts.scanners.uw.context.pcr_sentiment import flag
 
 
