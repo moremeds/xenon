@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Compatibility shim. Real home: scripts/shares/generate_vcg_share.py.
+"""Compatibility shim. Real home: src/xenon/shares/generate_vcg_share.py.
 
-Phase 1 preserves old invocation paths. Removed in Phase 2."""
+Phase 1 preserves old invocation paths. Removed in Phase 2 PR 4."""
 
-from shares.generate_vcg_share import *  # noqa: F401,F403
-from shares.generate_vcg_share import main
+import runpy
 
 if __name__ == "__main__":
-    main()
+    runpy.run_module("xenon.shares.generate_vcg_share", run_name="__main__")

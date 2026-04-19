@@ -18,6 +18,12 @@ dependencies = [
     "duckdb>=1.2.0",
 ]
 
+[project.scripts]
+xenon-generate-cta-share    = "xenon.shares.generate_cta_share:main"
+xenon-generate-gex-share    = "xenon.shares.generate_gex_share:main"
+xenon-generate-regime-share = "xenon.shares.generate_regime_share:main"
+xenon-generate-vcg-share    = "xenon.shares.generate_vcg_share:main"
+
 [project.optional-dependencies]
 test = [
     "moto[s3]>=5.0",
@@ -50,7 +56,6 @@ known-first-party = [
     "scanners",
     "execution",
     "reports",
-    "shares",
     "services",
     "ta",
     "infra",
