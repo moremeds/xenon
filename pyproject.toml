@@ -19,6 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
+xenon-api                   = "xenon.api.server:main"
 xenon-generate-cta-share    = "xenon.shares.generate_cta_share:main"
 xenon-generate-gex-share    = "xenon.shares.generate_gex_share:main"
 xenon-generate-regime-share = "xenon.shares.generate_regime_share:main"
