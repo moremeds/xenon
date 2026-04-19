@@ -2,8 +2,8 @@
 """Compatibility shim. Real home: scripts/scanners/cri.py.
 
 Phase 1 preserves old invocation paths. Removed in Phase 2."""
-from scanners.cri import *  # noqa: F401,F403
-from scanners.cri import main
+from xenon.scanners.cri import *  # noqa: F401,F403
+from xenon.scanners.cri import main
 
 if __name__ == "__main__":
     main()
