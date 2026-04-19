@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 def test_build_account_summary_contains_all_ib_portal_fields():
     """All IB Portal balance fields appear in build_account_summary output."""
-    from ib_sync import build_account_summary
+    from xenon.execution.ib_sync import build_account_summary
 
     account = {
         'NetLiquidation': 1_156_681.47,
@@ -64,7 +64,7 @@ def test_build_account_summary_contains_all_ib_portal_fields():
 
 def test_build_account_summary_values_match_ib_portal():
     """Values match IB Portal ground truth."""
-    from ib_sync import build_account_summary
+    from xenon.execution.ib_sync import build_account_summary
 
     account = {
         'NetLiquidation': 1_156_681.47,
@@ -113,7 +113,7 @@ def test_build_account_summary_values_match_ib_portal():
 
 def test_build_account_summary_settled_cash_fallback():
     """When SettledCash is missing, settled_cash falls back to TotalCashValue."""
-    from ib_sync import build_account_summary
+    from xenon.execution.ib_sync import build_account_summary
 
     account = {
         'NetLiquidation': 100_000.0,
@@ -130,7 +130,7 @@ def test_build_account_summary_settled_cash_fallback():
 
 def test_build_account_summary_missing_new_fields_default_zero():
     """New fields default to 0.0 when IB tags are missing (backward compat)."""
-    from ib_sync import build_account_summary
+    from xenon.execution.ib_sync import build_account_summary
 
     account = {
         'NetLiquidation': 100_000.0,
@@ -151,7 +151,7 @@ def test_build_account_summary_missing_new_fields_default_zero():
 
 def test_build_account_summary_daily_pnl_none_when_unavailable():
     """daily_pnl is None (not 0) when reqPnL data is unavailable."""
-    from ib_sync import build_account_summary
+    from xenon.execution.ib_sync import build_account_summary
 
     account = {'NetLiquidation': 100_000.0, 'TotalCashValue': 50_000.0}
     pnl_data = {}  # No dailyPnL

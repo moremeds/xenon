@@ -53,6 +53,15 @@ xenon-uw-scan               = "xenon.scanners.uw.scan:main"
 xenon-uw-analyze            = "xenon.scanners.uw.analyze:main"
 xenon-repair-cri-rvol       = "xenon.scanners.repair_cri_rvol_cache:main"
 xenon-garch                 = "xenon.scanners.garch:main"
+xenon-ib-execute            = "xenon.execution.ib_execute:main"
+xenon-ib-place-order        = "xenon.execution.ib_place_order:main"
+xenon-ib-order-manage       = "xenon.execution.ib_order_manage:main"
+xenon-ib-orders             = "xenon.execution.ib_orders:main"
+xenon-ib-option-chain       = "xenon.execution.ib_option_chain:main"
+xenon-ib-reconcile          = "xenon.execution.ib_reconcile:main"
+xenon-ib-sync               = "xenon.execution.ib_sync:main"
+xenon-naked-short-audit     = "xenon.execution.naked_short_audit:main"
+xenon-futu-sync             = "xenon.execution.futu_sync:main"
 
 [project.optional-dependencies]
 test = [

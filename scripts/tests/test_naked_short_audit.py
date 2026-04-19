@@ -1,18 +1,21 @@
 """Tests for naked_short_audit.py — naked short violation detection and cancellation."""
+
 import json
-import pytest
 from unittest.mock import MagicMock, patch
 
-# Will be importable once implemented
-from xenon.execution.naked_short_audit import find_naked_short_violations, cancel_violations
+import pytest
 
+# Will be importable once implemented
+from xenon.execution.naked_short_audit import cancel_violations, find_naked_short_violations
 
 # ---------------------------------------------------------------------------
 # Helpers — build minimal order / position dicts matching real data shapes
 # ---------------------------------------------------------------------------
 
-def make_order(order_id, perm_id, symbol, sec_type, action, qty,
-               status="Submitted", right="?", strike=0.0, expiry=None):
+
+def make_order(
+    order_id, perm_id, symbol, sec_type, action, qty, status="Submitted", right="?", strike=0.0, expiry=None
+):
     return {
         "orderId": order_id,
         "permId": perm_id,
@@ -91,6 +94,7 @@ def make_spread_position(ticker, contracts, long_strike, short_strike):
 # Test: find_naked_short_violations
 # ===========================================================================
 
+
 class TestFindNakedShortViolations:
     def test_no_orders_no_violations(self):
         assert find_naked_short_violations([], []) == []
@@ -107,8 +111,10 @@ class TestFindNakedShortViolations:
         assert violations[0]["order_id"] == 1
         assert violations[0]["perm_id"] == 100
         assert violations[0]["symbol"] == "AAPL"
-        assert "no LONG stock position" in violations[0]["reason"].lower() or \
-               "no long stock" in violations[0]["reason"].lower()
+        assert (
+            "no LONG stock position" in violations[0]["reason"].lower()
+            or "no long stock" in violations[0]["reason"].lower()
+        )
 
     def test_sell_stock_within_position_no_violation(self):
         orders = [make_order(1, 100, "AAPL", "STK", "SELL", 100)]
@@ -122,21 +128,17 @@ class TestFindNakedShortViolations:
         violations = find_naked_short_violations(orders, positions)
         assert len(violations) == 1
         assert violations[0]["order_id"] == 1
-        assert "exceeds" in violations[0]["reason"].lower() or \
-               ">" in violations[0]["reason"]
+        assert "exceeds" in violations[0]["reason"].lower() or ">" in violations[0]["reason"]
 
     def test_sell_call_no_stock_violation(self):
-        orders = [make_order(1, 100, "AAPL", "OPT", "SELL", 5,
-                             right="C", strike=150.0, expiry="2026-06-20")]
+        orders = [make_order(1, 100, "AAPL", "OPT", "SELL", 5, right="C", strike=150.0, expiry="2026-06-20")]
         violations = find_naked_short_violations(orders, [])
         assert len(violations) == 1
         assert violations[0]["order_id"] == 1
-        assert "naked" in violations[0]["reason"].lower() or \
-               "no long stock" in violations[0]["reason"].lower()
+        assert "naked" in violations[0]["reason"].lower() or "no long stock" in violations[0]["reason"].lower()
 
     def test_sell_call_covered_no_violation(self):
-        orders = [make_order(1, 100, "AAPL", "OPT", "SELL", 2,
-                             right="C", strike=150.0, expiry="2026-06-20")]
+        orders = [make_order(1, 100, "AAPL", "OPT", "SELL", 2, right="C", strike=150.0, expiry="2026-06-20")]
         positions = [make_stock_position("AAPL", 500)]
         violations = find_naked_short_violations(orders, positions)
         assert violations == []
@@ -144,8 +146,7 @@ class TestFindNakedShortViolations:
     def test_sell_call_undercovered_violation(self):
         """Existing 3 SHORT calls in portfolio + 5 new SELL call order = 8 contracts.
         8 * 100 = 800 shares needed. Only have 500 shares → violation."""
-        orders = [make_order(1, 100, "AAPL", "OPT", "SELL", 5,
-                             right="C", strike=150.0, expiry="2026-06-20")]
+        orders = [make_order(1, 100, "AAPL", "OPT", "SELL", 5, right="C", strike=150.0, expiry="2026-06-20")]
         positions = [
             make_stock_position("AAPL", 500),
             make_option_position("AAPL", "SHORT", "Call", 3, strike=150.0),
@@ -155,8 +156,7 @@ class TestFindNakedShortViolations:
         assert violations[0]["order_id"] == 1
 
     def test_sell_put_no_violation(self):
-        orders = [make_order(1, 100, "AAPL", "OPT", "SELL", 10,
-                             right="P", strike=100.0, expiry="2026-06-20")]
+        orders = [make_order(1, 100, "AAPL", "OPT", "SELL", 10, right="P", strike=100.0, expiry="2026-06-20")]
         violations = find_naked_short_violations(orders, [])
         assert violations == []
 
@@ -168,8 +168,7 @@ class TestFindNakedShortViolations:
     def test_multiple_violations(self):
         orders = [
             make_order(1, 100, "AAPL", "STK", "SELL", 100),
-            make_order(2, 200, "GOOG", "OPT", "SELL", 5,
-                       right="C", strike=200.0, expiry="2026-06-20"),
+            make_order(2, 200, "GOOG", "OPT", "SELL", 5, right="C", strike=200.0, expiry="2026-06-20"),
             make_order(3, 300, "MSFT", "STK", "BUY", 50),  # not a violation
         ]
         violations = find_naked_short_violations(orders, [])
@@ -188,8 +187,7 @@ class TestFindNakedShortViolations:
 
     def test_sell_call_covered_by_spread_short_leg(self):
         """Short call leg in a spread position counts toward existing short calls."""
-        orders = [make_order(1, 100, "AAPL", "OPT", "SELL", 2,
-                             right="C", strike=160.0, expiry="2026-06-20")]
+        orders = [make_order(1, 100, "AAPL", "OPT", "SELL", 2, right="C", strike=160.0, expiry="2026-06-20")]
         positions = [
             make_stock_position("AAPL", 500),
             make_spread_position("AAPL", 3, 140.0, 160.0),  # 3 SHORT calls in spread
@@ -202,6 +200,7 @@ class TestFindNakedShortViolations:
 # ===========================================================================
 # Test: cancel_violations
 # ===========================================================================
+
 
 class TestCancelViolations:
     def test_cancel_calls_client(self):
@@ -233,6 +232,7 @@ class TestCancelViolations:
 # Test: dry-run mode (main)
 # ===========================================================================
 
+
 class TestDryRun:
     def test_dry_run_does_not_cancel(self, tmp_path):
         """Dry-run prints violations but does not connect to IB or cancel."""
@@ -247,13 +247,22 @@ class TestDryRun:
         pf.write_text(json.dumps(portfolio))
         of.write_text(json.dumps(orders))
 
-        from naked_short_audit import main as audit_main
         import sys
 
-        with patch.object(sys, "argv", [
-            "execution.naked_short_audit.py", "--dry-run",
-            "--portfolio", str(pf), "--orders", str(of),
-        ]):
+        from xenon.execution.naked_short_audit import main as audit_main
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "execution.naked_short_audit.py",
+                "--dry-run",
+                "--portfolio",
+                str(pf),
+                "--orders",
+                str(of),
+            ],
+        ):
             with patch("xenon.execution.naked_short_audit.IBClient") as mock_ib:
                 result = audit_main()
                 mock_ib.assert_not_called()
