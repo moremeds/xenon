@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Compatibility shim. Real home: scripts/reports/blotter.py.
+"""Compatibility shim. Real home: src/xenon/trade_blotter/cli.py.
 
-Phase 1 preserves old invocation paths. Removed in Phase 2."""
-import sys
-from reports.blotter import *  # noqa: F401,F403
-from reports.blotter import main
+Phase 1 preserves old invocation paths. Removed in Phase 2 PR 4."""
+
+import runpy
 
 if __name__ == "__main__":
-    sys.exit(main())
+    runpy.run_module("xenon.trade_blotter.cli", run_name="__main__")

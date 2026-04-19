@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Compatibility shim. Real home: scripts/reports/scenario_report.py.
+"""Compatibility shim. Real home: src/xenon/reports/scenario_report.py.
 
-Phase 1 preserves old invocation paths. Removed in Phase 2.
-Uses runpy because scenario_report is a top-level script (no main() function)."""
+Phase 1 preserves old invocation paths. Removed in Phase 2 PR 4."""
+
 import runpy
-from pathlib import Path
 
-_target = Path(__file__).resolve().parent / "reports" / "scenario_report.py"
-runpy.run_path(str(_target), run_name="__main__")
+if __name__ == "__main__":
+    runpy.run_module("xenon.reports.scenario_report", run_name="__main__")

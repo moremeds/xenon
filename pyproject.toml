@@ -62,6 +62,17 @@ xenon-ib-reconcile          = "xenon.execution.ib_reconcile:main"
 xenon-ib-sync               = "xenon.execution.ib_sync:main"
 xenon-naked-short-audit     = "xenon.execution.naked_short_audit:main"
 xenon-futu-sync             = "xenon.execution.futu_sync:main"
+xenon-evaluate              = "xenon.reports.evaluate:main"
+xenon-kelly                 = "xenon.reports.kelly:main"
+xenon-risk-reversal         = "xenon.reports.risk_reversal:main"
+xenon-free-trade-analyzer   = "xenon.reports.free_trade_analyzer:main"
+xenon-verify-options-oi     = "xenon.reports.verify_options_oi:main"
+xenon-portfolio-report      = "xenon.reports.portfolio_report:main"
+xenon-portfolio-attrib      = "xenon.reports.portfolio_attribution:main"
+xenon-portfolio-perf        = "xenon.reports.portfolio_performance:main"
+xenon-perf-explainer        = "xenon.reports.performance_explainer_report:main"
+xenon-scenario              = "xenon.reports.scenario_analysis:main"
+xenon-scenario-report       = "xenon.reports.scenario_report:main"
 
 [project.optional-dependencies]
 test = [
