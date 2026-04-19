@@ -15,10 +15,9 @@ from typing import Any, List, Optional
 
 logger = logging.getLogger("xenon.subprocess")
 
-# File now at src/xenon/api/subprocess.py — point SCRIPTS_DIR back at the legacy scripts/ tree
-# where Phase 1 shims still resolve filename → entry-point. PR4-1 added run_entry_point() which
-# bypasses the shim and invokes the installed .venv/bin/xenon-* console entry points directly.
-# run_script() is retained for backward-compat until PR4-5 removes it.
+# run_entry_point() invokes installed .venv/bin/xenon-* console entry points directly.
+# SCRIPTS_DIR is retained as the default cwd for subprocesses (config files, relative paths
+# in data/ still resolve from there).
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 VENV_BIN = PROJECT_ROOT / ".venv" / "bin"
@@ -52,82 +51,6 @@ class ScriptResult:
     exit_code: Optional[int] = None
 
 
-async def run_script(
-    script: str,
-    args: Optional[List[str]] = None,
-    timeout: float = 30.0,
-    cwd: Optional[str] = None,
-) -> ScriptResult:
-    """Run a Python script as an async subprocess.
-
-    Mirrors the JSON extraction pattern from runner.ts: finds the first '{'
-    in stdout and parses from there.
-
-    Args:
-        script: Script path relative to scripts/ (e.g. "scanner.py")
-        args: CLI arguments
-        timeout: Seconds before SIGKILL
-        cwd: Working directory (defaults to scripts/)
-
-    Returns:
-        ScriptResult with parsed JSON data or error string.
-    """
-    script_path = SCRIPTS_DIR / script
-    if not script_path.exists():
-        return ScriptResult(ok=False, error=f"Script not found: {script}")
-
-    cmd = [sys.executable, str(script_path)] + (args or [])
-    work_dir = cwd or str(SCRIPTS_DIR)
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=work_dir,
-        )
-
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-
-        stdout = stdout_bytes.decode("utf-8", errors="replace")
-        stderr = stderr_bytes.decode("utf-8", errors="replace")
-
-        if proc.returncode != 0:
-            err_msg = _extract_error_message(
-                stdout,
-                stderr,
-                f"Script exited with code {proc.returncode}",
-            )
-            logger.warning("Script %s failed (code %d): %s", script, proc.returncode, err_msg)
-            return ScriptResult(ok=False, error=err_msg, exit_code=proc.returncode)
-
-        # Extract JSON from stdout (scripts may print progress before JSON)
-        json_start = stdout.find("{")
-        if json_start == -1:
-            # Some scripts write to files instead of stdout (rawOutput pattern)
-            return ScriptResult(ok=True, data={})
-
-        data = json.loads(stdout[json_start:])
-        return ScriptResult(ok=True, data=data)
-
-    except asyncio.TimeoutError:
-        logger.error("Script %s timed out after %.0fs", script, timeout)
-        try:
-            proc.kill()
-            await proc.wait()
-        except Exception:
-            pass
-        return ScriptResult(ok=False, error=f"Script timed out after {timeout}s")
-
-    except json.JSONDecodeError as e:
-        logger.error("Script %s returned invalid JSON: %s", script, e)
-        return ScriptResult(ok=False, error=f"Invalid JSON output: {e}")
-
-    except Exception as e:
-        logger.error("Script %s error: %s", script, e)
-        return ScriptResult(ok=False, error=str(e))
-
-
 async def run_entry_point(
     entry: str,
     args: Optional[List[str]] = None,
@@ -136,15 +59,14 @@ async def run_entry_point(
 ) -> ScriptResult:
     """Run a xenon-* console entry-point binary from .venv/bin/ as an async subprocess.
 
-    Equivalent to run_script() but invokes the installed entry-point binary directly,
-    bypassing the scripts/ shim tree. The entry-point is defined in pyproject.toml
-    [project.scripts].
+    Invokes the installed entry-point binary directly. The entry-point is defined
+    in pyproject.toml [project.scripts].
 
     Args:
         entry: Entry-point name (e.g. "xenon-trend-scan"), must exist in .venv/bin/
         args: CLI arguments
         timeout: Seconds before SIGKILL
-        cwd: Working directory (defaults to scripts/ for parity with run_script)
+        cwd: Working directory (defaults to scripts/)
 
     Returns:
         ScriptResult with parsed JSON data or error string.
