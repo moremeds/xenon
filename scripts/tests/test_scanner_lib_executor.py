@@ -8,7 +8,7 @@ import pytest
 
 
 def test_parallel_fetch_basic():
-    from scanners._shared.executor import parallel_fetch
+    from xenon.scanners._shared.executor import parallel_fetch
 
     def double(x: int) -> int:
         return x * 2
@@ -18,7 +18,7 @@ def test_parallel_fetch_basic():
 
 
 def test_parallel_fetch_preserves_order_by_input():
-    from scanners._shared.executor import parallel_fetch
+    from xenon.scanners._shared.executor import parallel_fetch
 
     def identity(x: str) -> str:
         return x
@@ -28,7 +28,7 @@ def test_parallel_fetch_preserves_order_by_input():
 
 
 def test_parallel_fetch_handles_exceptions():
-    from scanners._shared.executor import parallel_fetch
+    from xenon.scanners._shared.executor import parallel_fetch
 
     def fail_on_b(x: str) -> str:
         if x == "b":
@@ -40,14 +40,14 @@ def test_parallel_fetch_handles_exceptions():
 
 
 def test_parallel_fetch_empty_input():
-    from scanners._shared.executor import parallel_fetch
+    from xenon.scanners._shared.executor import parallel_fetch
 
     results = parallel_fetch(items=[], fn=lambda x: x, max_workers=2)
     assert results == []
 
 
 def test_parallel_fetch_actually_parallel():
-    from scanners._shared.executor import parallel_fetch
+    from xenon.scanners._shared.executor import parallel_fetch
 
     def slow(x: int) -> int:
         time.sleep(0.1)

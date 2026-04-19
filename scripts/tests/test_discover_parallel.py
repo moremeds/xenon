@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch, call
 import pytest
 
 from xenon.clients.uw_client import UWRateLimitError, UWAPIError
-from scanners.discover import discover, discover_targeted
+from xenon.scanners.discover import discover, discover_targeted
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -67,8 +67,8 @@ class TestDiscoverTargetedParallel:
 
         mock_client.get_flow_alerts.side_effect = mock_flow_alerts
 
-        with patch("scanners.discover.UWClient", return_value=mock_client), \
-             patch("scanners.discover.fetch_darkpool_multi", return_value=_mock_dp_result()):
+        with patch("xenon.scanners.discover.UWClient", return_value=mock_client), \
+             patch("xenon.scanners.discover.fetch_darkpool_multi", return_value=_mock_dp_result()):
             result = discover_targeted(tickers)
 
         assert len(thread_ids) > 1, (
@@ -90,8 +90,8 @@ class TestDiscoverTargetedParallel:
 
         mock_client.get_flow_alerts.side_effect = mock_flow_alerts
 
-        with patch("scanners.discover.UWClient", return_value=mock_client), \
-             patch("scanners.discover.fetch_darkpool_multi", return_value=_mock_dp_result()):
+        with patch("xenon.scanners.discover.UWClient", return_value=mock_client), \
+             patch("xenon.scanners.discover.fetch_darkpool_multi", return_value=_mock_dp_result()):
             result = discover_targeted(tickers, top=50)
 
         candidate_tickers = {c["ticker"] for c in result["candidates"]}
@@ -121,8 +121,8 @@ class TestDiscoverTargetedErrorHandling:
 
         mock_client.get_flow_alerts.side_effect = mock_flow_alerts
 
-        with patch("scanners.discover.UWClient", return_value=mock_client), \
-             patch("scanners.discover.fetch_darkpool_multi", return_value=_mock_dp_result()):
+        with patch("xenon.scanners.discover.UWClient", return_value=mock_client), \
+             patch("xenon.scanners.discover.fetch_darkpool_multi", return_value=_mock_dp_result()):
             result = discover_targeted(tickers, top=50)
 
         # At least the non-failing tickers should produce candidates
@@ -145,8 +145,8 @@ class TestDiscoverTargetedErrorHandling:
 
         mock_client.get_flow_alerts.side_effect = mock_flow_alerts
 
-        with patch("scanners.discover.UWClient", return_value=mock_client), \
-             patch("scanners.discover.fetch_darkpool_multi", return_value=_mock_dp_result()):
+        with patch("xenon.scanners.discover.UWClient", return_value=mock_client), \
+             patch("xenon.scanners.discover.fetch_darkpool_multi", return_value=_mock_dp_result()):
             result = discover_targeted(tickers, top=50)
 
         candidate_tickers = {c["ticker"] for c in result["candidates"]}
@@ -189,9 +189,9 @@ class TestDiscoverMarketWideParallel:
             time.sleep(0.02)
             return _mock_dp_result()
 
-        with patch("scanners.discover.UWClient", return_value=mock_client), \
-             patch("scanners.discover.get_existing_tickers", return_value=set()), \
-             patch("scanners.discover.fetch_darkpool_multi", side_effect=track_dp):
+        with patch("xenon.scanners.discover.UWClient", return_value=mock_client), \
+             patch("xenon.scanners.discover.get_existing_tickers", return_value=set()), \
+             patch("xenon.scanners.discover.fetch_darkpool_multi", side_effect=track_dp):
             result = discover(min_premium=500000, top=50)
 
         assert len(thread_ids) > 1, "Market-wide mode should use multiple threads"
@@ -216,9 +216,9 @@ class TestDiscoverMaxWorkers:
 
         mock_client.get_flow_alerts.side_effect = mock_flow_alerts
 
-        with patch("scanners.discover.UWClient", return_value=mock_client), \
-             patch("scanners.discover.fetch_darkpool_multi", return_value=_mock_dp_result()), \
-             patch("scanners.discover.ThreadPoolExecutor", wraps=ThreadPoolExecutor) as mock_exec:
+        with patch("xenon.scanners.discover.UWClient", return_value=mock_client), \
+             patch("xenon.scanners.discover.fetch_darkpool_multi", return_value=_mock_dp_result()), \
+             patch("xenon.scanners.discover.ThreadPoolExecutor", wraps=ThreadPoolExecutor) as mock_exec:
             result = discover_targeted(tickers, max_workers=7)
 
         # The inner ThreadPoolExecutor for the outer ticker loop should use max_workers=7

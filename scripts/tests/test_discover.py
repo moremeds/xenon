@@ -2,7 +2,7 @@
 import pytest
 from datetime import datetime
 
-from scanners.discover import (
+from xenon.scanners.discover import (
     analyze_darkpool_day,
     calculate_score,
     is_market_open,

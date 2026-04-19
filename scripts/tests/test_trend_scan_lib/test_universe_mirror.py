@@ -1,4 +1,4 @@
-"""Tests for scripts.scanners.trend.universe — mirror-based loader."""
+"""Tests for xenon.scanners.trend.universe — mirror-based loader."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 
 
 def test_load_universe_from_mirror_returns_tickers(tmp_path: Path):
-    from scripts.scanners.trend.universe import load_universe_from_mirror
+    from xenon.scanners.trend.universe import load_universe_from_mirror
 
     (tmp_path / "meta").mkdir()
     (tmp_path / "meta" / "universe.json").write_text(
@@ -30,7 +30,7 @@ def test_load_universe_from_mirror_returns_tickers(tmp_path: Path):
 
 
 def test_load_universe_raises_when_mirror_missing(tmp_path: Path):
-    from scripts.scanners.trend.universe import load_universe_from_mirror
+    from xenon.scanners.trend.universe import load_universe_from_mirror
 
     with pytest.raises(FileNotFoundError):
         load_universe_from_mirror(tmp_path)
@@ -38,7 +38,7 @@ def test_load_universe_raises_when_mirror_missing(tmp_path: Path):
 
 def test_load_universe_returns_empty_list_when_no_tickers(tmp_path: Path):
     """Behavior when the file exists but `tickers` is missing/empty."""
-    from scripts.scanners.trend.universe import load_universe_from_mirror
+    from xenon.scanners.trend.universe import load_universe_from_mirror
 
     (tmp_path / "meta").mkdir()
     (tmp_path / "meta" / "universe.json").write_text(json.dumps({}))
@@ -48,7 +48,7 @@ def test_load_universe_returns_empty_list_when_no_tickers(tmp_path: Path):
 
 
 def test_trendscanconfig_has_turnover_and_tier_floors():
-    from scripts.scanners.trend.config import TrendScanConfig
+    from xenon.scanners.trend.config import TrendScanConfig
 
     cfg = TrendScanConfig()
     assert cfg.min_turnover_rate == 0.0
@@ -56,7 +56,7 @@ def test_trendscanconfig_has_turnover_and_tier_floors():
 
 
 def test_trendscanconfig_accepts_exclude_tiers():
-    from scripts.scanners.trend.config import TrendScanConfig
+    from xenon.scanners.trend.config import TrendScanConfig
 
     cfg = TrendScanConfig(exclude_tiers={"leveraged_etf", "inverse_etf"})
     assert "leveraged_etf" in cfg.exclude_tiers

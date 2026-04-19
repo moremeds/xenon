@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from xenon.clients.ib_client import DEFAULT_HOST
-from scanners.cri import (
+from xenon.scanners.cri import (
     _extract_ib_quote_value,
     _connect_ib_with_retry,
     append_post_close_snapshot,
@@ -168,11 +168,11 @@ class TestCor1mHistoricalFallbackOrder:
             bases = {"VIX": 18.0, "VVIX": 92.0, "SPY": 580.0}
             return self._bars(bases[ticker])
 
-        monkeypatch.setattr("scanners.cri._fetch_ib", fake_fetch_ib)
-        monkeypatch.setattr("scanners.cri._fetch_uw", fake_fetch_uw)
-        monkeypatch.setattr("scanners.cri._fetch_cboe_cor1m", fake_fetch_cboe_cor1m, raising=False)
-        monkeypatch.setattr("scanners.cri._fetch_yahoo", fake_fetch_yahoo)
-        monkeypatch.setattr("scanners.cri.time.sleep", lambda _seconds: None)
+        monkeypatch.setattr("xenon.scanners.cri._fetch_ib", fake_fetch_ib)
+        monkeypatch.setattr("xenon.scanners.cri._fetch_uw", fake_fetch_uw)
+        monkeypatch.setattr("xenon.scanners.cri._fetch_cboe_cor1m", fake_fetch_cboe_cor1m, raising=False)
+        monkeypatch.setattr("xenon.scanners.cri._fetch_yahoo", fake_fetch_yahoo)
+        monkeypatch.setattr("xenon.scanners.cri.time.sleep", lambda _seconds: None)
 
         aligned, common_dates = fetch_all(["VIX", "VVIX", "SPY", "COR1M"])
 
@@ -194,17 +194,17 @@ class TestCor1mHistoricalFallback:
         }
         yahoo_calls = []
 
-        monkeypatch.setattr("scanners.cri.MIN_BARS", 20)
-        monkeypatch.setattr("scanners.cri._fetch_ib", lambda tickers: {})
-        monkeypatch.setattr("scanners.cri._fetch_uw", lambda tickers: {"SPY": ticker_bars["SPY"]})
-        monkeypatch.setattr("scanners.cri._fetch_cboe_cor1m", lambda: ticker_bars["COR1M"])
+        monkeypatch.setattr("xenon.scanners.cri.MIN_BARS", 20)
+        monkeypatch.setattr("xenon.scanners.cri._fetch_ib", lambda tickers: {})
+        monkeypatch.setattr("xenon.scanners.cri._fetch_uw", lambda tickers: {"SPY": ticker_bars["SPY"]})
+        monkeypatch.setattr("xenon.scanners.cri._fetch_cboe_cor1m", lambda: ticker_bars["COR1M"])
 
         def fake_yahoo(ticker, days=400):
             yahoo_calls.append(ticker)
             return ticker_bars[ticker]
 
-        monkeypatch.setattr("scanners.cri._fetch_yahoo", fake_yahoo)
-        monkeypatch.setattr("scanners.cri.time.sleep", lambda _: None)
+        monkeypatch.setattr("xenon.scanners.cri._fetch_yahoo", fake_yahoo)
+        monkeypatch.setattr("xenon.scanners.cri.time.sleep", lambda _: None)
 
         aligned, common_dates = fetch_all(["VIX", "VVIX", "SPY", "COR1M"])
 

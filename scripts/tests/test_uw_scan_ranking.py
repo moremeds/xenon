@@ -1,5 +1,5 @@
-from scripts.scanners.uw.models import SignalHit, ContextFlag, ScanCandidate
-from scripts.scanners.uw.ranking import build_candidate, rank_candidates, RAW_RANKING_EXCLUDE
+from xenon.scanners.uw.models import SignalHit, ContextFlag, ScanCandidate
+from xenon.scanners.uw.ranking import build_candidate, rank_candidates, RAW_RANKING_EXCLUDE
 
 
 def _hit(ticker, sig_type, tier, score=0.8):

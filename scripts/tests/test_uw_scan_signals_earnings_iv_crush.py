@@ -1,6 +1,6 @@
 from datetime import datetime, date, timedelta
 from xenon.analysis.models import TickerData
-from scripts.scanners.uw.signals.earnings_iv_crush import detect
+from xenon.scanners.uw.signals.earnings_iv_crush import detect
 
 
 def _td(iv_pct, earnings_within_14d, earnings_date=None):

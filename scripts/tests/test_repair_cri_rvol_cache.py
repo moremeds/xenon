@@ -5,7 +5,7 @@ from datetime import date, timedelta
 import numpy as np
 import pytest
 
-from scanners.repair_cri_rvol_cache import build_repaired_cri_payload
+from xenon.scanners.repair_cri_rvol_cache import build_repaired_cri_payload
 
 
 def make_dates(count: int) -> list[str]:

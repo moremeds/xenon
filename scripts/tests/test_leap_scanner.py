@@ -2,13 +2,13 @@
 import math
 import pytest
 
-from scanners.leap_iv import (
+from xenon.scanners.leap_iv import (
     calculate_historical_volatility,
     analyze_mispricing,
     find_strikes_by_delta,
     VolatilityData,
 )
-from scanners.leap_uw import (
+from xenon.scanners.leap_uw import (
     calculate_hv,
     approximate_delta,
 )
