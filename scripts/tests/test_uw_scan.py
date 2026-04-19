@@ -32,7 +32,7 @@ def test_scan_targeted_mode_runs_all_signals(monkeypatch):
             return _full_td("TSLA", flow_alerts=[dict(_ALERT)])
         return _full_td(ticker)
 
-    monkeypatch.setattr("scripts.uw_scan.fetch_ticker_data", fake_fetch)
+    monkeypatch.setattr("scripts.scanners.uw.scan.fetch_ticker_data", fake_fetch)
 
     cfg = ScanConfig(mode="targeted", tickers=["TSLA", "NVDA"], full=True)
     result = scan_universe(cfg, client=MagicMock())
@@ -47,7 +47,7 @@ def test_scan_targeted_mode_runs_all_signals(monkeypatch):
 
 def test_scan_output_schema_has_required_fields(monkeypatch):
     monkeypatch.setattr(
-        "scripts.uw_scan.fetch_ticker_data",
+        "scripts.scanners.uw.scan.fetch_ticker_data",
         lambda t, c: _full_td(t),
     )
     cfg = ScanConfig(mode="targeted", tickers=["AAPL"], full=False)
@@ -60,7 +60,7 @@ def test_scan_output_schema_has_required_fields(monkeypatch):
 def test_scan_min_confluence_filter(monkeypatch):
     def fake_fetch(ticker, client):
         return _full_td(ticker, flow_alerts=[dict(_ALERT)])
-    monkeypatch.setattr("scripts.uw_scan.fetch_ticker_data", fake_fetch)
+    monkeypatch.setattr("scripts.scanners.uw.scan.fetch_ticker_data", fake_fetch)
 
     cfg = ScanConfig(mode="targeted", tickers=["A", "B"], full=True, min_confluence=2)
     result = scan_universe(cfg, client=MagicMock())
