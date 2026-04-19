@@ -23,11 +23,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Project paths. SCRIPT_DIR still points at the scripts/ dir because
-# subprocess callers below invoke Phase 1 shim entry scripts; those
-# shim paths will be rewritten to xenon-* entry points in PR4-4.
+# Project paths. Subprocess callers below invoke xenon-* entry-point
+# binaries from the repo's .venv (PR4-4).
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-SCRIPT_DIR = PROJECT_ROOT / "scripts"
+_VENV_BIN = PROJECT_ROOT / ".venv" / "bin"
 
 from ib_insync import Option, Stock
 
@@ -42,7 +41,7 @@ def fetch_flow_data(ticker: str) -> Dict:
     """Run fetch_flow.py and return parsed JSON."""
     try:
         result = subprocess.run(
-            [sys.executable, str(SCRIPT_DIR / "fetch_flow.py"), ticker],
+            [str(_VENV_BIN / "xenon-fetch-flow"), ticker],
             capture_output=True,
             text=True,
             timeout=30,
@@ -62,7 +61,7 @@ def fetch_options_data(ticker: str) -> Dict:
     """Run fetch_options.py --json and return parsed JSON."""
     try:
         result = subprocess.run(
-            [sys.executable, str(SCRIPT_DIR / "fetch_options.py"), ticker, "--json"],
+            [str(_VENV_BIN / "xenon-fetch-options"), ticker, "--json"],
             capture_output=True,
             text=True,
             timeout=30,

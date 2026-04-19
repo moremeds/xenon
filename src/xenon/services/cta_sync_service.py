@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SCRIPT_DIR = REPO_ROOT / "scripts"
+_VENV_BIN = REPO_ROOT / ".venv" / "bin"
 
 from xenon.fetchers.fetch_menthorq_cta import cache_path  # noqa: E402
 from xenon.utils.cta_sync import latest_closed_trading_day  # noqa: E402
@@ -220,8 +220,7 @@ def run_cta_sync(
                 # Playwright sync API conflicts with stale event loops from
                 # previous attempts when retried in-process.
                 fetch_cmd = [
-                    sys.executable,
-                    str(SCRIPT_DIR / "fetch_menthorq_cta.py"),
+                    str(_VENV_BIN / "xenon-fetch-menthorq-cta"),
                     "--json",
                     "--date",
                     target,
@@ -233,7 +232,7 @@ def run_cta_sync(
                     capture_output=True,
                     text=True,
                     timeout=300,
-                    cwd=str(SCRIPT_DIR.parent),
+                    cwd=str(REPO_ROOT),
                     env={**os.environ, "MENTHORQ_ARTIFACT_DIR": str(attempt_artifact_dir)},
                 )
                 captured_stdout = fetch_result.stdout

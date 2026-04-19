@@ -41,7 +41,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # PATHS
 # ---------------------------------------------------------------------------
 PROJECT_DIR = Path(__file__).resolve().parents[3]
-SCRIPT_DIR = PROJECT_DIR / "scripts"  # kept for subprocess shim invocations (see PR4-4)
+_VENV_BIN = PROJECT_DIR / ".venv" / "bin"
 
 from xenon.clients.ib_client import DEFAULT_HOST
 
@@ -899,7 +899,7 @@ def main():
 
     if args.sync:
         print("\n  Syncing portfolio.json...")
-        subprocess.run(["python3", str(SCRIPT_DIR / "ib_sync.py"), "--sync"], capture_output=True, text=True)
+        subprocess.run([str(_VENV_BIN / "xenon-ib-sync"), "--sync"], capture_output=True, text=True)
 
     if not args.no_open:
         print("\n🌐 Opening in browser...")
