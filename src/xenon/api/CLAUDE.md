@@ -1,4 +1,4 @@
-# scripts/api/ — CLAUDE.md
+# src/xenon/api/ — CLAUDE.md
 
 FastAPI bridge between Next.js and IB/UW/MenthorQ. Root `CLAUDE.md` is authoritative for policy. Infrastructure reference (files, ports, gateway modes, auth component map, deployment): `docs/architecture/api-infrastructure.md`.
 

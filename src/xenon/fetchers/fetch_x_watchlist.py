@@ -6,9 +6,9 @@ Updates the watchlist with bullish/bearish signals.
 Uses agent-browser CLI for local browser automation.
 
 Usage:
-    python3 scripts/fetch_x_watchlist.py --account USERNAME
-    python3 scripts/fetch_x_watchlist.py --account USERNAME --hours 48
-    python3 scripts/fetch_x_watchlist.py --hours 48         # Look back 48 hours
+    xenon-fetch-x-watchlist --account USERNAME
+    xenon-fetch-x-watchlist --account USERNAME --hours 48
+    xenon-fetch-x-watchlist --hours 48         # Look back 48 hours
 """
 
 import argparse

@@ -6,10 +6,10 @@ Verifies options flow claims by checking actual Open Interest from UW.
 Use this to validate external signals (screenshots, tweets, etc.) before trading.
 
 Usage:
-    python3 scripts/verify_options_oi.py MSFT --expiry 2027-01-15
-    python3 scripts/verify_options_oi.py MSFT --expiry 2027-01-15 --strikes 575,625,675
-    python3 scripts/verify_options_oi.py MSFT --expiry 2027-01-15 --min-strike 500
-    python3 scripts/verify_options_oi.py MSFT --expiry 2027-01-15 --json
+    xenon-verify-options-oi MSFT --expiry 2027-01-15
+    xenon-verify-options-oi MSFT --expiry 2027-01-15 --strikes 575,625,675
+    xenon-verify-options-oi MSFT --expiry 2027-01-15 --min-strike 500
+    xenon-verify-options-oi MSFT --expiry 2027-01-15 --json
 
 See docs/runbooks/options-flow-verification.md for full methodology.
 """
@@ -255,13 +255,13 @@ def main():
         epilog="""
 Examples:
   # Check all Jan 2027 MSFT calls
-  python3 scripts/verify_options_oi.py MSFT --expiry 2027-01-15
+  xenon-verify-options-oi MSFT --expiry 2027-01-15
 
   # Verify specific strikes from a screenshot
-  python3 scripts/verify_options_oi.py MSFT --expiry 2027-01-15 --strikes 575,625,675
+  xenon-verify-options-oi MSFT --expiry 2027-01-15 --strikes 575,625,675
 
   # Verify with claimed sizes
-  python3 scripts/verify_options_oi.py MSFT --expiry 2027-01-15 --verify "575:50000,625:100000,675:-50000"
+  xenon-verify-options-oi MSFT --expiry 2027-01-15 --verify "575:50000,625:100000,675:-50000"
         """,
     )
 

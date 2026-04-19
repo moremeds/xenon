@@ -11,8 +11,8 @@ Cards:
   4. Profile        — top-strikes bar chart ±8% of spot
 
 Usage:
-    python3 scripts/generate_gex_share.py
-    python3 scripts/generate_gex_share.py --json --no-open
+    xenon-generate-gex-share
+    xenon-generate-gex-share --json --no-open
 """
 
 from __future__ import annotations

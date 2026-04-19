@@ -9,21 +9,21 @@ Strategy spec: docs/trading/strategy-garch-convergence.md
 
 Usage:
     # Inline pairs
-    python3 scripts/garch_convergence.py NVDA AMD GOOGL META
+    xenon-garch NVDA AMD GOOGL META
 
     # Built-in presets
-    python3 scripts/garch_convergence.py --preset semis
-    python3 scripts/garch_convergence.py --preset mega-tech
-    python3 scripts/garch_convergence.py --preset energy
-    python3 scripts/garch_convergence.py --preset all     # Run all built-in
+    xenon-garch --preset semis
+    xenon-garch --preset mega-tech
+    xenon-garch --preset energy
+    xenon-garch --preset all     # Run all built-in
 
     # File presets (from data/presets/)
-    python3 scripts/garch_convergence.py --preset sp500-semiconductors
-    python3 scripts/garch_convergence.py --preset ndx100-biotech
+    xenon-garch --preset sp500-semiconductors
+    xenon-garch --preset ndx100-biotech
 
     # Options
-    python3 scripts/garch_convergence.py --preset semis --json
-    python3 scripts/garch_convergence.py --preset semis --no-open
+    xenon-garch --preset semis --json
+    xenon-garch --preset semis --no-open
 """
 
 from __future__ import annotations
@@ -745,9 +745,9 @@ Built-in presets:
 Also supports any data/presets/ file preset (e.g. sp500-semiconductors).
 
 Examples:
-  python3 scripts/garch_convergence.py --preset all
-  python3 scripts/garch_convergence.py --preset semis --json
-  python3 scripts/garch_convergence.py NVDA AMD GOOGL META
+  xenon-garch --preset all
+  xenon-garch --preset semis --json
+  xenon-garch NVDA AMD GOOGL META
 """,
     )
     parser.add_argument("tickers", nargs="*", help="Tickers (paired consecutively)")

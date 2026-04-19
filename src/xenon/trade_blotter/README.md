@@ -14,18 +14,18 @@ Deterministic trade reconciliation and P&L calculation for Interactive Brokers.
 
 ### Today's Trades
 ```bash
-python3.13 scripts/blotter.py
-python3.13 scripts/blotter.py --summary
-python3.13 scripts/blotter.py --json
+xenon-blotter
+xenon-blotter --summary
+xenon-blotter --json
 ```
 
 ### Historical Trades
 ```bash
 # First time: see setup guide
-python3.13 scripts/trade_blotter/flex_query.py --setup
+xenon-blotter-history --setup
 
 # After setup:
-python3.13 scripts/trade_blotter/flex_query.py --symbol EWY
+xenon-blotter-history --symbol EWY
 ```
 
 ## Setup

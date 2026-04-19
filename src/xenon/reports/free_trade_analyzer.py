@@ -15,9 +15,9 @@ Supports:
 - Collars (with stock)
 
 Usage:
-    python3 scripts/free_trade_analyzer.py
-    python3 scripts/free_trade_analyzer.py --json
-    python3 scripts/free_trade_analyzer.py --ticker EWY
+    xenon-free-trade-analyzer
+    xenon-free-trade-analyzer --json
+    xenon-free-trade-analyzer --ticker EWY
 """
 
 import argparse

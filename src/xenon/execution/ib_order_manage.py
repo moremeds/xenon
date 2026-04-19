@@ -6,8 +6,8 @@ Connects to TWS/IB Gateway to cancel or modify open orders.
 All output is JSON to stdout for API route parsing.
 
 Usage:
-  python3 scripts/ib_order_manage.py cancel --order-id 10 --perm-id 12345
-  python3 scripts/ib_order_manage.py modify --order-id 10 --perm-id 12345 --new-price 22.50
+  xenon-ib-order-manage cancel --order-id 10 --perm-id 12345
+  xenon-ib-order-manage modify --order-id 10 --perm-id 12345 --new-price 22.50
 """
 
 import argparse

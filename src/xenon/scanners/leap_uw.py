@@ -17,12 +17,12 @@ Key endpoints used:
   - GET /api/stock/{ticker}/info - Ticker metadata
 
 Usage:
-  python3 scripts/leap_scanner_uw.py XLK XLE XLF
-  python3 scripts/leap_scanner_uw.py --preset sectors
-  python3 scripts/leap_scanner_uw.py --preset mag7 --min-gap 20
-  python3 scripts/leap_scanner_uw.py --preset row          # All country ETFs
-  python3 scripts/leap_scanner_uw.py --preset row-europe   # European country ETFs
-  python3 scripts/leap_scanner_uw.py --preset row-asia     # Asian country ETFs
+  xenon-leap-uw XLK XLE XLF
+  xenon-leap-uw --preset sectors
+  xenon-leap-uw --preset mag7 --min-gap 20
+  xenon-leap-uw --preset row          # All country ETFs
+  xenon-leap-uw --preset row-europe   # European country ETFs
+  xenon-leap-uw --preset row-asia     # Asian country ETFs
 
 Presets:
   sectors      - S&P 500 sector ETFs (XLK, XLE, XLF, etc.)

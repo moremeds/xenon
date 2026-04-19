@@ -12,9 +12,9 @@ Data sources:
      fetched via Playwright browser automation (optional, graceful fallback)
 
 Usage:
-    python3 scripts/gex_scan.py --json --ticker SPX
-    python3 scripts/gex_scan.py --json --ticker SPY
-    python3 scripts/gex_scan.py --json --ticker QQQ --no-mq
+    xenon-gex-scan --json --ticker SPX
+    xenon-gex-scan --json --ticker SPY
+    xenon-gex-scan --json --ticker QQQ --no-mq
 """
 
 from __future__ import annotations

@@ -12,10 +12,10 @@ Vision API key (from web/.env or shell):
   ANTHROPIC_API_KEY / CLAUDE_CODE_API_KEY / CLAUDE_API_KEY
 
 Usage:
-    python3 scripts/fetch_menthorq_cta.py              # Fetch + cache + print summary
-    python3 scripts/fetch_menthorq_cta.py --json        # JSON to stdout
-    python3 scripts/fetch_menthorq_cta.py --date 2026-03-06  # Specific date
-    python3 scripts/fetch_menthorq_cta.py --force --save-images  # Re-fetch + save S3 PNGs to tmp/
+    xenon-fetch-menthorq-cta              # Fetch + cache + print summary
+    xenon-fetch-menthorq-cta --json        # JSON to stdout
+    xenon-fetch-menthorq-cta --date 2026-03-06  # Specific date
+    xenon-fetch-menthorq-cta --force --save-images  # Re-fetch + save S3 PNGs to tmp/
 """
 
 from __future__ import annotations
@@ -338,10 +338,10 @@ Fetches CTA positioning data from MenthorQ via headless browser + Vision.
 Requires MENTHORQ_USER, MENTHORQ_PASS, and an Anthropic API key.
 
 Examples:
-  python3 scripts/fetch_menthorq_cta.py              # Fetch + summary
-  python3 scripts/fetch_menthorq_cta.py --json        # JSON to stdout
-  python3 scripts/fetch_menthorq_cta.py --date 2026-03-06
-  python3 scripts/fetch_menthorq_cta.py --force        # Bypass cache
+  xenon-fetch-menthorq-cta              # Fetch + summary
+  xenon-fetch-menthorq-cta --json        # JSON to stdout
+  xenon-fetch-menthorq-cta --date 2026-03-06
+  xenon-fetch-menthorq-cta --force        # Bypass cache
 """,
     )
     parser.add_argument("--json", action="store_true", help="Output JSON to stdout")

@@ -184,7 +184,7 @@ def run_cta_sync(
 
         for index in range(max_attempts):
             attempt_count = index + 1
-            command = [python_bin, "scripts/fetch_menthorq_cta.py", "--date", target_date]
+            command = [python_bin, "-m", "xenon.fetchers.fetch_menthorq_cta", "--date", target_date]
 
             try:
                 result = runner(

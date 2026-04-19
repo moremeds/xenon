@@ -20,25 +20,25 @@ Xenon detects institutional positioning through dark pool flow, volatility signa
 
 ## Four Gates (sequential, no exceptions)
 
-| Gate | Rule |
-|---|---|
-| **1. Convexity** | Potential gain ≥ 2× potential loss. Defined-risk only. |
-| **2. Edge** | Specific, data-backed dark pool / OTC signal that hasn't moved price yet. |
-| **3. Risk** | Fractional Kelly. Hard cap: 2.5% of bankroll per position. |
+| Gate                   | Rule                                                                             |
+| ---------------------- | -------------------------------------------------------------------------------- |
+| **1. Convexity**       | Potential gain ≥ 2× potential loss. Defined-risk only.                           |
+| **2. Edge**            | Specific, data-backed dark pool / OTC signal that hasn't moved price yet.        |
+| **3. Risk**            | Fractional Kelly. Hard cap: 2.5% of bankroll per position.                       |
 | **4. No Naked Shorts** | Every short call must be covered by long shares (1:100). Violations auto-cancel. |
 
 Any gate fails → stop. Full enforcement matrix: [`scripts/CLAUDE.md`](scripts/CLAUDE.md).
 
 ## Strategies
 
-| Strategy | Signal | Typical Structure | Timeframe |
-|---|---|---|---|
-| **Dark Pool Flow** | Hidden institutional accumulation/distribution | Long options, vertical spreads | 2–6 weeks |
-| **LEAP IV Mispricing** | Realized vol above long-dated IV | Long LEAPs, diagonals | Weeks–9 months |
-| **GARCH Convergence** | Cross-asset vol repricing lag | Calendars, verticals | 2–8 weeks |
-| **Risk Reversal** | Put/call skew distortion | Risk reversal | 2–8 weeks |
-| **Volatility-Credit Gap (VCG-R)** | VIX>28 + VCG>2.5σ | HYG puts, bear put spreads | 1–5 days |
-| **Crash Risk Index (CRI)** | CTA deleveraging + COR1M stress | Index puts, tactical hedges | 3–5 days |
+| Strategy                          | Signal                                         | Typical Structure              | Timeframe      |
+| --------------------------------- | ---------------------------------------------- | ------------------------------ | -------------- |
+| **Dark Pool Flow**                | Hidden institutional accumulation/distribution | Long options, vertical spreads | 2–6 weeks      |
+| **LEAP IV Mispricing**            | Realized vol above long-dated IV               | Long LEAPs, diagonals          | Weeks–9 months |
+| **GARCH Convergence**             | Cross-asset vol repricing lag                  | Calendars, verticals           | 2–8 weeks      |
+| **Risk Reversal**                 | Put/call skew distortion                       | Risk reversal                  | 2–8 weeks      |
+| **Volatility-Credit Gap (VCG-R)** | VIX>28 + VCG>2.5σ                              | HYG puts, bear put spreads     | 1–5 days       |
+| **Crash Risk Index (CRI)**        | CTA deleveraging + COR1M stress                | Index puts, tactical hedges    | 3–5 days       |
 
 Full specs: [`docs/trading/strategies.md`](docs/trading/strategies.md) · VCG math: [`docs/trading/strategy-vcg.md`](docs/trading/strategy-vcg.md).
 
@@ -160,7 +160,7 @@ Auxiliary: **Futu OpenD** (read-only positions snapshot for Futu-held accounts �
 
 ### Futu (read-only)
 
-Futu support is intentionally observe-only: `scripts/clients/futu_client.py` fetches positions and account info from a local Futu OpenD instance, exposed via `/futu/sync` on the FastAPI bridge (10s cooldown, singleton-lifecycle, singleflight lock). The terminal surfaces it as a separate account tab alongside IB. No orders, no fills, no market-data subscriptions flow through Futu. Requires Futu OpenD running locally; the client stays quiet and degrades gracefully when unreachable.
+Futu support is intentionally observe-only: `src/xenon/clients/futu_client.py` fetches positions and account info from a local Futu OpenD instance, exposed via `/futu/sync` on the FastAPI bridge (10s cooldown, singleton-lifecycle, singleflight lock). The terminal surfaces it as a separate account tab alongside IB. No orders, no fills, no market-data subscriptions flow through Futu. Requires Futu OpenD running locally; the client stays quiet and degrades gracefully when unreachable.
 
 ## Testing
 
@@ -178,12 +178,12 @@ Prefer `run_pytest_affected.py` over a full repo run. Unit tests mock IB/UW, so 
 
 ## Services
 
-| Service | Purpose |
-|---|---|
-| IB Gateway (cloud/Docker/launchd) | Broker session for quotes, execution, reports |
-| CRI scan service | Intraday crash-risk refresh with atomic cache snapshots |
-| CTA sync service | MenthorQ CTA cache at 4:15/5:00 PM ET with `RunAtLoad` catch-up |
-| Monitor daemon | Fills, exit orders, off-hours rebalance, Flex token checks (10MB log rotation) |
+| Service                           | Purpose                                                                        |
+| --------------------------------- | ------------------------------------------------------------------------------ |
+| IB Gateway (cloud/Docker/launchd) | Broker session for quotes, execution, reports                                  |
+| CRI scan service                  | Intraday crash-risk refresh with atomic cache snapshots                        |
+| CTA sync service                  | MenthorQ CTA cache at 4:15/5:00 PM ET with `RunAtLoad` catch-up                |
+| Monitor daemon                    | Fills, exit orders, off-hours rebalance, Flex token checks (10MB log rotation) |
 
 CTA freshness is an explicit contract: `data/menthorq_cache/health/cta-sync-latest.json` is the machine-readable health record; `/api/menthorq/cta` triggers background sync when stale and exposes `cache_meta` + `sync_health`.
 
@@ -191,12 +191,12 @@ Full ops runbooks: [`docs/runbooks/ib-connection-troubleshooting.md`](docs/runbo
 
 ## Glossary
 
-| Term | Definition |
-|---|---|
-| **Convexity** | Asymmetric payoff — expected upside materially exceeds downside |
-| **CRI** | Crash Risk Index — composite crash-risk and deleveraging model |
-| **CTA** | Commodity Trading Advisor — systematic trend-following funds |
-| **Dark Pool** | Private off-exchange venue for institutional trading |
-| **Edge** | Specific reason the market is mispricing an outcome |
-| **Kelly Criterion** | Position-sizing framework scaled to edge and odds |
-| **VCG-R** | Volatility-Credit Gap — VIX>28 + VCG>2.5σ divergence triggers risk-off |
+| Term                | Definition                                                             |
+| ------------------- | ---------------------------------------------------------------------- |
+| **Convexity**       | Asymmetric payoff — expected upside materially exceeds downside        |
+| **CRI**             | Crash Risk Index — composite crash-risk and deleveraging model         |
+| **CTA**             | Commodity Trading Advisor — systematic trend-following funds           |
+| **Dark Pool**       | Private off-exchange venue for institutional trading                   |
+| **Edge**            | Specific reason the market is mispricing an outcome                    |
+| **Kelly Criterion** | Position-sizing framework scaled to edge and odds                      |
+| **VCG-R**           | Volatility-Credit Gap — VIX>28 + VCG>2.5σ divergence triggers risk-off |

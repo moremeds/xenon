@@ -11,9 +11,9 @@ Cards:
   4. CTA Squeeze State — equity positioning z-score, forced selling
 
 Usage:
-  python3 scripts/generate_regime_share.py
-  python3 scripts/generate_regime_share.py --json
-  python3 scripts/generate_regime_share.py --date 2026-03-19
+  xenon-generate-regime-share
+  xenon-generate-regime-share --json
+  xenon-generate-regime-share --date 2026-03-19
 """
 
 from __future__ import annotations

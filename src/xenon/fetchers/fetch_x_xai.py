@@ -4,10 +4,10 @@ Fetch tweets from X accounts using xAI's live search API.
 Much more reliable than browser scraping.
 
 Usage:
-    python3 scripts/fetch_x_xai.py --account USERNAME
-    python3 scripts/fetch_x_xai.py --account USERNAME --days 7
-    python3 scripts/fetch_x_xai.py --days 7                # Look back 7 days
-    python3 scripts/fetch_x_xai.py --dry-run               # Don't update watchlist
+    xenon-fetch-x-xai --account USERNAME
+    xenon-fetch-x-xai --account USERNAME --days 7
+    xenon-fetch-x-xai --days 7                # Look back 7 days
+    xenon-fetch-x-xai --dry-run               # Don't update watchlist
 """
 
 import argparse
@@ -733,7 +733,7 @@ def main():
     except RuntimeError as e:
         if "timed out" in str(e).lower():
             print(f"⚠️  API timed out. xAI x_search may be rate-limited.")
-            print(f"   Try again in a few minutes, or use: python3 scripts/fetch_x_watchlist.py (browser scraper)")
+            print(f"   Try again in a few minutes, or use: xenon-fetch-x-watchlist (browser scraper)")
         else:
             print(f"❌ Error: {e}")
         sys.exit(1)

@@ -10,8 +10,8 @@ Cards:
   4. 10-Day History — rolling VCG values
 
 Usage:
-  python3 scripts/generate_vcg_share.py
-  python3 scripts/generate_vcg_share.py --json
+  xenon-generate-vcg-share
+  xenon-generate-vcg-share --json
 """
 
 from __future__ import annotations

@@ -2,9 +2,9 @@
 """Fetch MenthorQ dashboard chart data via S3 image download + Vision extraction.
 
 Usage:
-    python3 scripts/fetch_menthorq_dashboard.py --command vol
-    python3 scripts/fetch_menthorq_dashboard.py --command eod [--date 2026-03-06]
-    python3 scripts/fetch_menthorq_dashboard.py --command futures
+    xenon-fetch-menthorq-dashboard --command vol
+    xenon-fetch-menthorq-dashboard --command eod [--date 2026-03-06]
+    xenon-fetch-menthorq-dashboard --command futures
 
 Caches to: data/menthorq_cache/{command}_{DATE}.json
 """

@@ -6,8 +6,8 @@ Detects orders that would create naked short positions (stock or call options)
 and optionally cancels them via IB Gateway.
 
 Usage:
-  python3 scripts/naked_short_audit.py --dry-run
-  python3 scripts/naked_short_audit.py
+  xenon-naked-short-audit --dry-run
+  xenon-naked-short-audit
 """
 
 import argparse

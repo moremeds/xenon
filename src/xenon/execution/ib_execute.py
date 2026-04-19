@@ -12,22 +12,22 @@ Requirements:
 
 Usage:
   # Sell stock
-  python3 scripts/ib_execute.py --type stock --symbol NFLX --qty 4500 --side SELL --limit 98.70
+  xenon-ib-execute --type stock --symbol NFLX --qty 4500 --side SELL --limit 98.70
 
   # Buy option
-  python3 scripts/ib_execute.py --type option --symbol GOOG --expiry 20260417 --strike 315 --right C --qty 10 --side BUY --limit 9.00
+  xenon-ib-execute --type option --symbol GOOG --expiry 20260417 --strike 315 --right C --qty 10 --side BUY --limit 9.00
 
   # Use mid price
-  python3 scripts/ib_execute.py --type option --symbol GOOG --expiry 20260417 --strike 315 --right C --qty 10 --side BUY --limit MID
+  xenon-ib-execute --type option --symbol GOOG --expiry 20260417 --strike 315 --right C --qty 10 --side BUY --limit MID
 
   # Dry run
-  python3 scripts/ib_execute.py --type stock --symbol NFLX --qty 100 --side SELL --limit 98.70 --dry-run
+  xenon-ib-execute --type stock --symbol NFLX --qty 100 --side SELL --limit 98.70 --dry-run
 
   # Skip confirmation prompt
-  python3 scripts/ib_execute.py --type stock --symbol NFLX --qty 100 --side SELL --limit 98.70 --yes
+  xenon-ib-execute --type stock --symbol NFLX --qty 100 --side SELL --limit 98.70 --yes
 
   # Custom timeout for monitoring
-  python3 scripts/ib_execute.py --type stock --symbol NFLX --qty 100 --side SELL --limit 98.70 --timeout 120
+  xenon-ib-execute --type stock --symbol NFLX --qty 100 --side SELL --limit 98.70 --timeout 120
 """
 
 import argparse

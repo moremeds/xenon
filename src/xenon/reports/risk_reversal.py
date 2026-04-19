@@ -6,11 +6,11 @@ Scans a single ticker's options chain for optimal risk reversal structures
 Exploits IV skew between puts and calls. Generates HTML report.
 
 Usage:
-    python3 scripts/risk_reversal.py IWM
-    python3 scripts/risk_reversal.py SPY --bearish
-    python3 scripts/risk_reversal.py QQQ --bankroll 500000 --min-dte 21 --max-dte 45
-    python3 scripts/risk_reversal.py IWM --no-open
-    python3 scripts/risk_reversal.py IWM --json
+    xenon-risk-reversal IWM
+    xenon-risk-reversal SPY --bearish
+    xenon-risk-reversal QQQ --bankroll 500000 --min-dte 21 --max-dte 45
+    xenon-risk-reversal IWM --no-open
+    xenon-risk-reversal IWM --json
 """
 
 import argparse
@@ -494,10 +494,10 @@ def _build_execution_cmd(combo: Dict, ticker: str, label: str) -> str:
           <div class="callout-title">{label}</div>
           <pre style="font-size:12px; white-space:pre-wrap; margin-top:8px;">
 # Leg 1: Sell {short_label}
-python3 scripts/ib_execute.py --type option --symbol {ticker} --expiry {combo["expiry"]} --strike {combo["short_strike"]:.0f} --right {short_right_flag} --qty {combo["max_qty"]} --side SELL --limit {combo["short_bid"]:.2f} --thesis "{thesis}" --yes
+xenon-ib-execute --type option --symbol {ticker} --expiry {combo["expiry"]} --strike {combo["short_strike"]:.0f} --right {short_right_flag} --qty {combo["max_qty"]} --side SELL --limit {combo["short_bid"]:.2f} --thesis "{thesis}" --yes
 
 # Leg 2: Buy {long_label}
-python3 scripts/ib_execute.py --type option --symbol {ticker} --expiry {combo["expiry"]} --strike {combo["long_strike"]:.0f} --right {long_right_flag} --qty {combo["max_qty"]} --side BUY --limit {combo["long_ask"]:.2f} --thesis "{thesis}" --yes</pre>
+xenon-ib-execute --type option --symbol {ticker} --expiry {combo["expiry"]} --strike {combo["long_strike"]:.0f} --right {long_right_flag} --qty {combo["max_qty"]} --side BUY --limit {combo["long_ask"]:.2f} --thesis "{thesis}" --yes</pre>
         </div>"""
 
 

@@ -18,9 +18,9 @@ Milestones 1 through 3B run in *parallel* (ThreadPoolExecutor).
 Milestones 4-7 run sequentially after the parallel group completes.
 
 Usage:
-    python3 scripts/evaluate.py AAPL
-    python3 scripts/evaluate.py AAPL --json
-    python3 scripts/evaluate.py AAPL --bankroll 1200000
+    xenon-evaluate AAPL
+    xenon-evaluate AAPL --json
+    xenon-evaluate AAPL --bankroll 1200000
 """
 
 from __future__ import annotations

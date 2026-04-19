@@ -8,9 +8,9 @@ Requirements:
   pip install ib_insync
 
 Usage:
-  python3 scripts/ib_sync.py              # Display portfolio
-  python3 scripts/ib_sync.py --sync       # Sync to portfolio.json
-  python3 scripts/ib_sync.py --port 7497  # Custom port (7497=TWS paper, 7496=TWS live, 4001=Gateway)
+  xenon-ib-sync              # Display portfolio
+  xenon-ib-sync --sync       # Sync to portfolio.json
+  xenon-ib-sync --port 7497  # Custom port (7497=TWS paper, 7496=TWS live, 4001=Gateway)
 """
 
 import argparse

@@ -6,11 +6,11 @@ Fetches OI change data from UW to identify significant institutional positioning
 that may not appear in flow alerts.
 
 Usage:
-    python3 scripts/fetch_oi_changes.py MSFT
-    python3 scripts/fetch_oi_changes.py MSFT --min-oi-change 10000
-    python3 scripts/fetch_oi_changes.py MSFT --min-premium 1000000
-    python3 scripts/fetch_oi_changes.py --market  # Market-wide scan
-    python3 scripts/fetch_oi_changes.py --json
+    xenon-fetch-oi MSFT
+    xenon-fetch-oi MSFT --min-oi-change 10000
+    xenon-fetch-oi MSFT --min-premium 1000000
+    xenon-fetch-oi --market  # Market-wide scan
+    xenon-fetch-oi --json
 
 This is a REQUIRED part of every evaluation. Flow alerts may miss large trades
 that don't trigger "unusual" filters. OI changes show ALL significant positioning.
@@ -167,19 +167,19 @@ def main():
         epilog="""
 Examples:
   # Ticker-specific OI changes
-  python3 scripts/fetch_oi_changes.py MSFT
+  xenon-fetch-oi MSFT
 
   # Filter by minimum OI change
-  python3 scripts/fetch_oi_changes.py MSFT --min-oi-change 10000
+  xenon-fetch-oi MSFT --min-oi-change 10000
 
   # Filter by minimum premium
-  python3 scripts/fetch_oi_changes.py MSFT --min-premium 1000000
+  xenon-fetch-oi MSFT --min-premium 1000000
 
   # Market-wide scan for biggest OI changes
-  python3 scripts/fetch_oi_changes.py --market
+  xenon-fetch-oi --market
 
   # JSON output
-  python3 scripts/fetch_oi_changes.py MSFT --json
+  xenon-fetch-oi MSFT --json
         """,
     )
 

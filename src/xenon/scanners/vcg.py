@@ -18,10 +18,10 @@ Data sources (priority order):
      IB unavailable (UW cannot serve index data).
 
 Usage:
-    python3 scripts/vcg_scan.py                 # Human-readable summary
-    python3 scripts/vcg_scan.py --json           # JSON to stdout
-    python3 scripts/vcg_scan.py --proxy JNK      # Alternate credit proxy
-    python3 scripts/vcg_scan.py --backtest --days 252   # Rolling backtest
+    xenon-vcg-scan                 # Human-readable summary
+    xenon-vcg-scan --json           # JSON to stdout
+    xenon-vcg-scan --proxy JNK      # Alternate credit proxy
+    xenon-vcg-scan --backtest --days 252   # Rolling backtest
 """
 
 from __future__ import annotations
@@ -1052,10 +1052,10 @@ cash credit markets (HYG/JNK/LQD).  When VVIX spikes but credit stays
 calm, the VCG fires a risk-off overlay signal.
 
 Examples:
-  python3 scripts/vcg_scan.py                  # Human-readable summary
-  python3 scripts/vcg_scan.py --json           # JSON output
-  python3 scripts/vcg_scan.py --proxy JNK      # Use JNK as credit proxy
-  python3 scripts/vcg_scan.py --backtest --days 252   # 1-year backtest
+  xenon-vcg-scan                  # Human-readable summary
+  xenon-vcg-scan --json           # JSON output
+  xenon-vcg-scan --proxy JNK      # Use JNK as credit proxy
+  xenon-vcg-scan --backtest --days 252   # 1-year backtest
 """,
     )
     parser.add_argument("--proxy", default="HYG", help="Credit proxy ticker (default: HYG)")

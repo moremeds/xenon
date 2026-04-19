@@ -4,10 +4,10 @@ Fetch options chain and flow data.
 Priority: IB (chain) → UW (chain + flow) → Yahoo (ABSOLUTE LAST RESORT)
 
 Usage:
-    python3 scripts/fetch_options.py RMBS
-    python3 scripts/fetch_options.py RMBS --dte-min 14 --dte-max 60
-    python3 scripts/fetch_options.py RMBS --port 7497  # IB paper trading
-    python3 scripts/fetch_options.py RMBS --source uw  # Force Unusual Whales
+    xenon-fetch-options RMBS
+    xenon-fetch-options RMBS --dte-min 14 --dte-max 60
+    xenon-fetch-options RMBS --port 7497  # IB paper trading
+    xenon-fetch-options RMBS --source uw  # Force Unusual Whales
 """
 
 import argparse

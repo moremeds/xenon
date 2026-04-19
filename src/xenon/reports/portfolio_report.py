@@ -20,9 +20,9 @@ Sections (8 required):
   8. Footer — data sources, summary
 
 Usage:
-  python3 scripts/portfolio_report.py              # Generate and open
-  python3 scripts/portfolio_report.py --no-open    # Generate only
-  python3 scripts/portfolio_report.py --port 7497  # Custom IB port
+  xenon-portfolio-report              # Generate and open
+  xenon-portfolio-report --no-open    # Generate only
+  xenon-portfolio-report --port 7497  # Custom IB port
 """
 
 import argparse

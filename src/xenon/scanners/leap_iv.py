@@ -11,17 +11,17 @@ forward volatility.
 
 Usage:
   # Scan specific tickers
-  python3 scripts/leap_iv_scanner.py AAPL MSFT NVDA
+  xenon-leap-iv AAPL MSFT NVDA
 
   # Scan preset groups
-  python3 scripts/leap_iv_scanner.py --preset sectors
-  python3 scripts/leap_iv_scanner.py --preset mag7
+  xenon-leap-iv --preset sectors
+  xenon-leap-iv --preset mag7
 
   # Scan portfolio holdings
-  python3 scripts/leap_iv_scanner.py --portfolio
+  xenon-leap-iv --portfolio
 
   # Custom parameters
-  python3 scripts/leap_iv_scanner.py TSLA --min-gap 20 --years 2027 2028
+  xenon-leap-iv TSLA --min-gap 20 --years 2027 2028
 """
 
 import argparse

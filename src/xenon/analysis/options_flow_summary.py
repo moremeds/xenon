@@ -1,7 +1,7 @@
 """Shared options-flow summarizer.
 
 Consumes a list of flow alerts (UW /api/option-trades/flow-alerts shape) and
-emits a directional bias summary. Extracted from scripts/fetch_flow.py so that
+emits a directional bias summary. Extracted from src/xenon/fetchers/fetch_flow.py so that
 both /flow-analysis and /uw-analyze pipelines share the same scoring.
 """
 

@@ -938,7 +938,7 @@ def build_html(payload: dict, chart_system: dict) -> str:
         </div>
       </div>
       <div class="sources">
-        <div class="source-card"><strong>Metric Engine</strong><br><code>scripts/portfolio_performance.py</code></div>
+        <div class="source-card"><strong>Metric Engine</strong><br><code>src/xenon/reports/portfolio_performance.py</code></div>
         <div class="source-card"><strong>Rendered Surface</strong><br><code>web/components/PerformancePanel.tsx</code></div>
         <div class="source-card"><strong>Chart System</strong><br><code>web/lib/chart-system-spec.json</code></div>
         <div class="source-card"><strong>Conventions</strong><br><code>empyrical</code> / <code>quantstats</code> aligned, risk-free = 0</div>

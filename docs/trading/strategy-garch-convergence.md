@@ -33,15 +33,15 @@ The result: Asset A's IV catches up in days. Asset B's IV takes weeks. The gap b
 
 ## Strategy vs. Existing Approaches
 
-| Dimension | Dark Pool Flow | LEAP IV Mispricing | GARCH Convergence (NEW) |
-|-----------|---------------|-------------------|------------------------|
-| Edge source | Institutional positioning | Single-asset vol mispricing | Cross-asset repricing lag |
-| Signal | Dark pool prints + options flow | HV > LEAP IV gap | IV divergence between correlated assets |
-| Instrument | ATM/OTM options (2-6 weeks) | LEAPS calls (1-3 years) | Diagonal calendar spreads (1-6 months) |
-| Profit driver | Delta (directional move) | Vega (IV expansion) | Relative vega (IV convergence) |
-| Directional bias | Yes (bullish or bearish) | Mildly bullish (long calls) | Neutral to mildly directional |
-| Max loss | Premium paid | Premium paid | Net debit paid |
-| Typical hold | 2-6 weeks | Weeks to 9 months | 2-8 weeks |
+| Dimension        | Dark Pool Flow                  | LEAP IV Mispricing          | GARCH Convergence (NEW)                 |
+| ---------------- | ------------------------------- | --------------------------- | --------------------------------------- |
+| Edge source      | Institutional positioning       | Single-asset vol mispricing | Cross-asset repricing lag               |
+| Signal           | Dark pool prints + options flow | HV > LEAP IV gap            | IV divergence between correlated assets |
+| Instrument       | ATM/OTM options (2-6 weeks)     | LEAPS calls (1-3 years)     | Diagonal calendar spreads (1-6 months)  |
+| Profit driver    | Delta (directional move)        | Vega (IV expansion)         | Relative vega (IV convergence)          |
+| Directional bias | Yes (bullish or bearish)        | Mildly bullish (long calls) | Neutral to mildly directional           |
+| Max loss         | Premium paid                    | Premium paid                | Net debit paid                          |
+| Typical hold     | 2-6 weeks                       | Weeks to 9 months           | 2-8 weeks                               |
 
 ---
 
@@ -51,13 +51,13 @@ The result: Asset A's IV catches up in days. Asset B's IV takes weeks. The gap b
 
 Look for assets with high fundamental correlation but independent option chains:
 
-| Pair Type | Example | Correlation Driver |
-|-----------|---------|-------------------|
-| Component vs ETF | Samsung/SK Hynix vs EWY | ETF holds the components |
-| Sector peers | XOM vs COP, NVDA vs AMD | Same fundamental drivers |
-| Supply chain | MU vs AMAT, TSM vs ASML | Upstream/downstream linkage |
-| Cross-listed | BABA (US ADR) vs 9988.HK | Same company, different markets |
-| Leveraged vs vanilla | SOXL vs SOXX | Same index, different structures |
+| Pair Type            | Example                  | Correlation Driver               |
+| -------------------- | ------------------------ | -------------------------------- |
+| Component vs ETF     | Samsung/SK Hynix vs EWY  | ETF holds the components         |
+| Sector peers         | XOM vs COP, NVDA vs AMD  | Same fundamental drivers         |
+| Supply chain         | MU vs AMAT, TSM vs ASML  | Upstream/downstream linkage      |
+| Cross-listed         | BABA (US ADR) vs 9988.HK | Same company, different markets  |
+| Leveraged vs vanilla | SOXL vs SOXX             | Same index, different structures |
 
 ### Step 2: Measure IV Divergence
 
@@ -68,6 +68,7 @@ IV_Repricing_Gap = (IV_leader / HV_leader) - (IV_lagger / HV_lagger)
 ```
 
 Where:
+
 - **Leader** = the asset whose IV has already risen to reflect new realized vol
 - **Lagger** = the asset whose IV is still anchored to pre-regime levels
 
@@ -111,23 +112,23 @@ Example:
 
 ## Signal Criteria
 
-| Criterion | Threshold | Required? |
-|-----------|-----------|-----------|
-| IV Ratio Divergence | >1σ from 60-day mean | Yes |
-| Lagger HV20 > Lagger IV | ≥10 points | Yes |
-| Fundamental correlation | Same primary vol driver | Yes |
-| Lagger IV rank | <50th percentile | Yes |
-| Leader IV move confirmed | Leader IV/HV ≥ 1.0 | Yes |
-| Lagger option liquidity | OI >100, bid-ask <15% of mid | Yes |
-| Days since regime shift | 5-30 days | Preferred |
+| Criterion                | Threshold                    | Required? |
+| ------------------------ | ---------------------------- | --------- |
+| IV Ratio Divergence      | >1σ from 60-day mean         | Yes       |
+| Lagger HV20 > Lagger IV  | ≥10 points                   | Yes       |
+| Fundamental correlation  | Same primary vol driver      | Yes       |
+| Lagger IV rank           | <50th percentile             | Yes       |
+| Leader IV move confirmed | Leader IV/HV ≥ 1.0           | Yes       |
+| Lagger option liquidity  | OI >100, bid-ask <15% of mid | Yes       |
+| Days since regime shift  | 5-30 days                    | Preferred |
 
 **Signal strength tiers:**
 
-| Tier | Conditions | Action |
-|------|-----------|--------|
-| Strong | Divergence >2σ, HV gap >20pts, IV rank <30% | Full size (2.5% bankroll) |
-| Moderate | Divergence >1.5σ, HV gap >15pts, IV rank <40% | Half size (1.25%) |
-| Weak | Divergence >1σ, HV gap >10pts, IV rank <50% | Monitor only |
+| Tier     | Conditions                                    | Action                    |
+| -------- | --------------------------------------------- | ------------------------- |
+| Strong   | Divergence >2σ, HV gap >20pts, IV rank <30%   | Full size (2.5% bankroll) |
+| Moderate | Divergence >1.5σ, HV gap >15pts, IV rank <40% | Half size (1.25%)         |
+| Weak     | Divergence >1σ, HV gap >10pts, IV rank <50%   | Monitor only              |
 
 ---
 
@@ -169,11 +170,11 @@ The LEAPS strategy targets 1-3 year options for maximum vega. This strategy uses
 
 ### Gate Compliance
 
-| Gate | How It's Met |
-|------|-------------|
+| Gate                 | How It's Met                                                                                                  |
+| -------------------- | ------------------------------------------------------------------------------------------------------------- |
 | Convexity (≥2:1 R:R) | Long options: max loss = premium; 12+ pt IV expansion on 0.15-0.25 vega = 1.8-3.0 pts of premium gain vs cost |
-| Edge | Measurable GARCH divergence between correlated assets with confirmed structural linkage |
-| Risk Management | Fractional Kelly sizing, 2.5% hard cap, defined risk only |
+| Edge                 | Measurable GARCH divergence between correlated assets with confirmed structural linkage                       |
+| Risk Management      | Fractional Kelly sizing, 2.5% hard cap, defined risk only                                                     |
 
 ---
 
@@ -193,26 +194,26 @@ The LEAPS strategy targets 1-3 year options for maximum vega. This strategy uses
 
 ### Monitoring
 
-| Metric | Frequency | Action Trigger |
-|--------|-----------|---------------|
-| Lagger IV | Daily | Track convergence progress |
-| IV Ratio | Daily | Exit if ratio normalizes |
-| Lagger HV | Weekly | Confirm vol regime persists |
-| Leader IV | Weekly | Watch for leader IV collapse (invalidates thesis) |
-| Correlation | Weekly | Exit if fundamental correlation breaks |
+| Metric      | Frequency | Action Trigger                                    |
+| ----------- | --------- | ------------------------------------------------- |
+| Lagger IV   | Daily     | Track convergence progress                        |
+| IV Ratio    | Daily     | Exit if ratio normalizes                          |
+| Lagger HV   | Weekly    | Confirm vol regime persists                       |
+| Leader IV   | Weekly    | Watch for leader IV collapse (invalidates thesis) |
+| Correlation | Weekly    | Exit if fundamental correlation breaks            |
 
 ### Exit Rules
 
-| Condition | Action |
-|-----------|--------|
-| IV Ratio converges to within 0.5σ of mean | Close for profit |
-| Lagger IV rises ≥70% of expected move | Take partial profits (50%) |
-| 50%+ of premium gained | Trail stop at breakeven |
-| Leader IV collapses (was overpriced, not lagger underpriced) | Close — wrong thesis |
-| Fundamental correlation breaks | Close immediately |
-| 40-50% of premium lost | Reassess; close if thesis weakened |
-| >8 weeks held with no convergence | Close — GARCH models have adjusted |
-| Lagger HV drops below IV | Close — mispricing resolved from other direction |
+| Condition                                                    | Action                                           |
+| ------------------------------------------------------------ | ------------------------------------------------ |
+| IV Ratio converges to within 0.5σ of mean                    | Close for profit                                 |
+| Lagger IV rises ≥70% of expected move                        | Take partial profits (50%)                       |
+| 50%+ of premium gained                                       | Trail stop at breakeven                          |
+| Leader IV collapses (was overpriced, not lagger underpriced) | Close — wrong thesis                             |
+| Fundamental correlation breaks                               | Close immediately                                |
+| 40-50% of premium lost                                       | Reassess; close if thesis weakened               |
+| >8 weeks held with no convergence                            | Close — GARCH models have adjusted               |
+| Lagger HV drops below IV                                     | Close — mispricing resolved from other direction |
 
 ---
 
@@ -222,17 +223,18 @@ The LEAPS strategy targets 1-3 year options for maximum vega. This strategy uses
 
 ```bash
 # ALWAYS use this script for GARCH convergence scans
-python3.13 scripts/garch_convergence.py --preset all          # All 4 built-in presets (~3s)
-python3.13 scripts/garch_convergence.py --preset semis        # Just semiconductors
-python3.13 scripts/garch_convergence.py --preset mega-tech    # Mega-cap tech
-python3.13 scripts/garch_convergence.py --preset energy       # Energy
-python3.13 scripts/garch_convergence.py --preset china-etf    # China/Asia
-python3.13 scripts/garch_convergence.py --preset sp500-semiconductors  # File preset
-python3.13 scripts/garch_convergence.py NVDA AMD GOOGL META   # Ad-hoc ticker pairs
-python3.13 scripts/garch_convergence.py --preset all --json   # JSON output
+xenon-garch --preset all          # All 4 built-in presets (~3s)
+xenon-garch --preset semis        # Just semiconductors
+xenon-garch --preset mega-tech    # Mega-cap tech
+xenon-garch --preset energy       # Energy
+xenon-garch --preset china-etf    # China/Asia
+xenon-garch --preset sp500-semiconductors  # File preset
+xenon-garch NVDA AMD GOOGL META   # Ad-hoc ticker pairs
+xenon-garch --preset all --json   # JSON output
 ```
 
 **Architecture:**
+
 1. Resolves tickers from built-in presets, file presets (`data/presets/`), or ad-hoc CLI args
 2. Fetches ALL ticker data in parallel (8 ThreadPoolExecutor workers)
    - Yahoo Finance: HV20, HV60, HV252 (concurrent HTTP requests)
@@ -246,13 +248,13 @@ python3.13 scripts/garch_convergence.py --preset all --json   # JSON output
 
 **Built-in pair presets:**
 
-| Preset | Pairs |
-|--------|-------|
-| `semis` | (NVDA, AMD), (TSM, ASML), (AVGO, QCOM), (MU, AMAT) |
-| `mega-tech` | (AAPL, MSFT), (GOOGL, META), (AMZN, NFLX) |
-| `energy` | (XOM, COP), (SLB, HAL), (XLE, OIH) |
-| `china-etf` | (FXI, BABA), (EWY, FXI) |
-| `all` | Run all 4 above |
+| Preset      | Pairs                                              |
+| ----------- | -------------------------------------------------- |
+| `semis`     | (NVDA, AMD), (TSM, ASML), (AVGO, QCOM), (MU, AMAT) |
+| `mega-tech` | (AAPL, MSFT), (GOOGL, META), (AMZN, NFLX)          |
+| `energy`    | (XOM, COP), (SLB, HAL), (XLE, OIH)                 |
+| `china-etf` | (FXI, BABA), (EWY, FXI)                            |
+| `all`       | Run all 4 above                                    |
 
 Also supports any file preset from `data/presets/` (150+ presets with pairs).
 
@@ -260,23 +262,23 @@ Also supports any file preset from `data/presets/` (150+ presets with pairs).
 
 ## Risk Management
 
-| Rule | Limit | Rationale |
-|------|-------|-----------|
-| Max per position | 2.5% of bankroll | Standard Xenon cap |
-| Max concurrent convergence trades | 3 | Convergence trades can correlate in vol selloffs |
-| Sizing method | Fractional Kelly (0.25x) | Conservative for estimation uncertainty |
-| Correlation check | Pairs must share <50% overlap with existing positions | Avoid concentrated sector bets |
-| Max time in trade | 8 weeks | GARCH models adjust; edge decays |
+| Rule                              | Limit                                                 | Rationale                                        |
+| --------------------------------- | ----------------------------------------------------- | ------------------------------------------------ |
+| Max per position                  | 2.5% of bankroll                                      | Standard Xenon cap                               |
+| Max concurrent convergence trades | 3                                                     | Convergence trades can correlate in vol selloffs |
+| Sizing method                     | Fractional Kelly (0.25x)                              | Conservative for estimation uncertainty          |
+| Correlation check                 | Pairs must share <50% overlap with existing positions | Avoid concentrated sector bets                   |
+| Max time in trade                 | 8 weeks                                               | GARCH models adjust; edge decays                 |
 
 ### What Can Go Wrong
 
-| Risk | Mitigation |
-|------|-----------|
-| Correlation breaks (assets diverge fundamentally) | Pre-trade structural linkage check; daily correlation monitoring |
-| Both IVs collapse (vol regime ends for both) | Long-only version: accept premium loss; paired version: partially hedged |
-| Lagger IV stays low because it has structurally lower vol | Confirm lagger HV has actually increased before entering |
-| Leader IV was a bubble (overpriced), not lagger underpriced | Check leader IV/HV ratio — if >1.3, leader may be overpriced |
-| Liquidity trap on exit | OI >100 and bid-ask <15% required at entry |
+| Risk                                                        | Mitigation                                                               |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Correlation breaks (assets diverge fundamentally)           | Pre-trade structural linkage check; daily correlation monitoring         |
+| Both IVs collapse (vol regime ends for both)                | Long-only version: accept premium loss; paired version: partially hedged |
+| Lagger IV stays low because it has structurally lower vol   | Confirm lagger HV has actually increased before entering                 |
+| Leader IV was a bubble (overpriced), not lagger underpriced | Check leader IV/HV ratio — if >1.3, leader may be overpriced             |
+| Liquidity trap on exit                                      | OI >100 and bid-ask <15% required at entry                               |
 
 ---
 
@@ -284,21 +286,23 @@ Also supports any file preset from `data/presets/` (150+ presets with pairs).
 
 **Setup (hypothetical):**
 
-| Metric | NVDA (Leader) | AMD (Lagger) |
-|--------|---------------|--------------|
-| HV20 | 58% | 52% |
-| HV60 | 54% | 49% |
-| 4-month ATM IV | 56% | 37% |
-| IV/HV60 ratio | 1.04 | 0.76 |
-| IV rank | 72nd %ile | 28th %ile |
+| Metric         | NVDA (Leader) | AMD (Lagger) |
+| -------------- | ------------- | ------------ |
+| HV20           | 58%           | 52%          |
+| HV60           | 54%           | 49%          |
+| 4-month ATM IV | 56%           | 37%          |
+| IV/HV60 ratio  | 1.04          | 0.76         |
+| IV rank        | 72nd %ile     | 28th %ile    |
 
 **Signal:**
+
 - IV Ratio (NVDA/AMD): currently 1.51, historical 60-day avg: 1.18 → divergence = +0.33 (>2σ)
 - AMD HV20 (52%) > AMD IV (37%) by 15 points
 - AMD IV rank 28th %ile (cheap)
 - Both driven by same AI semiconductor demand catalyst
 
 **Trade:**
+
 - BUY AMD 4-month 30Δ calls
 - Premium: $4.50 per contract
 - Vega: 0.18 per 1% IV
@@ -307,6 +311,7 @@ Also supports any file preset from `data/presets/` (150+ presets with pairs).
 - R:R: 1.98 / 4.50 = 0.44:1 on vega alone + delta upside → combined ≥2:1
 
 **Outcome scenarios:**
+
 - Convergence (65% est.): +40-80% on premium
 - Partial convergence (20%): +10-20%
 - No convergence (15%): -30-50% (time decay + no IV move)
@@ -315,11 +320,11 @@ Also supports any file preset from `data/presets/` (150+ presets with pairs).
 
 ## Relationship to Other Strategies
 
-| Interaction | Description |
-|-------------|------------|
-| LEAP IV → Convergence | If LEAP scan shows single-asset mispricing, check if paired assets are also mispriced → may upgrade to convergence trade for better risk/reward |
-| Dark Pool → Convergence | If dark pool flow confirms accumulation in the lagger specifically, convergence thesis strengthens |
-| Convergence → LEAP | If convergence resolves quickly, the lagger's IV may still be below long-term fair value → roll into LEAPS |
+| Interaction             | Description                                                                                                                                     |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| LEAP IV → Convergence   | If LEAP scan shows single-asset mispricing, check if paired assets are also mispriced → may upgrade to convergence trade for better risk/reward |
+| Dark Pool → Convergence | If dark pool flow confirms accumulation in the lagger specifically, convergence thesis strengthens                                              |
+| Convergence → LEAP      | If convergence resolves quickly, the lagger's IV may still be below long-term fair value → roll into LEAPS                                      |
 
 ---
 
@@ -390,17 +395,17 @@ Every GARCH convergence report MUST include:
 
 ### CSS Classes Reference
 
-| Element | Class |
-|---------|-------|
-| Section title | `.section-header` |
-| Data table | `.panel` + `table` |
-| Highlighted row | `tr.highlight` |
-| Pass indicator | `.text-positive` |
-| Fail indicator | `.text-negative` |
-| Warning | `.text-warning` |
-| Badge | `.pill`, `.pill-positive`, `.pill-negative`, `.pill-warning` |
-| Callout box | `.callout`, `.callout.positive`, `.callout.warning` |
-| Metrics grid | `.metrics` + `.metric` |
+| Element         | Class                                                        |
+| --------------- | ------------------------------------------------------------ |
+| Section title   | `.section-header`                                            |
+| Data table      | `.panel` + `table`                                           |
+| Highlighted row | `tr.highlight`                                               |
+| Pass indicator  | `.text-positive`                                             |
+| Fail indicator  | `.text-negative`                                             |
+| Warning         | `.text-warning`                                              |
+| Badge           | `.pill`, `.pill-positive`, `.pill-negative`, `.pill-warning` |
+| Callout box     | `.callout`, `.callout.positive`, `.callout.warning`          |
+| Metrics grid    | `.metrics` + `.metric`                                       |
 
 See `.pi/skills/html-report/SKILL.md` for full CSS reference.
 
@@ -408,7 +413,7 @@ See `.pi/skills/html-report/SKILL.md` for full CSS reference.
 
 ## Key Citations
 
-- Engle, R.F. (1982). "Autoregressive Conditional Heteroscedasticity with Estimates of the Variance of United Kingdom Inflation." *Econometrica*, 50(4), 987-1007.
-- Bollerslev, T. (1986). "Generalized Autoregressive Conditional Heteroscedasticity." *Journal of Econometrics*, 31(3), 307-327.
-- Kelly, B., Pruitt, S., & Su, Y. (2019). "Characteristics Are Covariances: A Unified Model of Risk and Return." *Journal of Financial Economics*, 134(3).
-- Epps, T.W. (1979). "Comovements in Stock Prices in the Very Short Run." *Journal of the American Statistical Association*, 74(366).
+- Engle, R.F. (1982). "Autoregressive Conditional Heteroscedasticity with Estimates of the Variance of United Kingdom Inflation." _Econometrica_, 50(4), 987-1007.
+- Bollerslev, T. (1986). "Generalized Autoregressive Conditional Heteroscedasticity." _Journal of Econometrics_, 31(3), 307-327.
+- Kelly, B., Pruitt, S., & Su, Y. (2019). "Characteristics Are Covariances: A Unified Model of Risk and Return." _Journal of Financial Economics_, 134(3).
+- Epps, T.W. (1979). "Comovements in Stock Prices in the Very Short Run." _Journal of the American Statistical Association_, 74(366).

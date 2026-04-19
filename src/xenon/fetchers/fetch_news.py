@@ -4,9 +4,9 @@
 Data source priority: UW → Exa (web search) → Yahoo (last resort).
 
 Usage:
-    python3 scripts/fetch_news.py AAPL
-    python3 scripts/fetch_news.py CRM --json
-    python3 scripts/fetch_news.py CRM --days 7
+    xenon-fetch-news AAPL
+    xenon-fetch-news CRM --json
+    xenon-fetch-news CRM --days 7
 """
 
 from __future__ import annotations

@@ -6,8 +6,8 @@ Places a limit order via IB, waits briefly for acknowledgement, returns JSON.
 Does NOT monitor fills or log trades (web layer handles that).
 
 Usage:
-  python3 scripts/ib_place_order.py --json '{"type":"stock","symbol":"AAPL","action":"BUY","quantity":100,"limitPrice":214.50,"tif":"DAY"}'
-  python3 scripts/ib_place_order.py --json '{"type":"option","symbol":"GOOG","action":"BUY","quantity":10,"limitPrice":9.00,"tif":"GTC","expiry":"20260417","strike":315,"right":"C"}'
+  xenon-ib-place-order --json '{"type":"stock","symbol":"AAPL","action":"BUY","quantity":100,"limitPrice":214.50,"tif":"DAY"}'
+  xenon-ib-place-order --json '{"type":"option","symbol":"GOOG","action":"BUY","quantity":10,"limitPrice":9.00,"tif":"GTC","expiry":"20260417","strike":315,"right":"C"}'
 """
 
 import json

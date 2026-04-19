@@ -119,7 +119,7 @@ JSON data files: always `"ticker"`. IB contracts: `"symbol"`. Read defensively: 
 
 ## UW API Telemetry
 
-`useUwStats.ts` polls `/api/uw-stats` every 10s. The "UW Today" sidebar row shows **daily-scoped** counters aligned to UW's 8PM ET quota reset: request count, cache-hit %, 2xx/4xx/5xx breakdown, and latency p95. Backed by the process-wide `scripts/utils/uw_api_stats.py` singleton, which rolls up hourly buckets across the current daily window (`get_stats_with_daily()` returns session + daily under a single lock). DST boundary via `ZoneInfo("America/New_York")`. Silent-fail hook — sidebar shows `—` placeholders when unavailable.
+`useUwStats.ts` polls `/api/uw-stats` every 10s. The "UW Today" sidebar row shows **daily-scoped** counters aligned to UW's 8PM ET quota reset: request count, cache-hit %, 2xx/4xx/5xx breakdown, and latency p95. Backed by the process-wide `src/xenon/utils/uw_api_stats.py` singleton, which rolls up hourly buckets across the current daily window (`get_stats_with_daily()` returns session + daily under a single lock). DST boundary via `ZoneInfo("America/New_York")`. Silent-fail hook — sidebar shows `—` placeholders when unavailable.
 
 ## Dev Commands
 

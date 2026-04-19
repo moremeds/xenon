@@ -6,7 +6,7 @@ Runs once per trading day to:
 - Advance the daily_track for every open FlowEvent in the unusual
   flow log; classify anomalies; close out unwound positions.
 
-Lifecycle: started from FastAPI lifespan (`scripts/api/server.py`),
+Lifecycle: started from FastAPI lifespan (`src/xenon/api/server.py`),
 runs as a long-lived asyncio task that loops:
 
     while True:

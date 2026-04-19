@@ -19,9 +19,9 @@ Data sources (priority order):
      higher-priority sources fail; COR1M reaches Yahoo only if IB + Cboe fail.
 
 Usage:
-    python3 scripts/cri_scan.py                 # HTML report (opens in browser)
-    python3 scripts/cri_scan.py --json           # JSON to stdout
-    python3 scripts/cri_scan.py --no-open        # HTML report, don't open browser
+    xenon-cri-scan                 # HTML report (opens in browser)
+    xenon-cri-scan --json           # JSON to stdout
+    xenon-cri-scan --no-open        # HTML report, don't open browser
 """
 
 from __future__ import annotations
@@ -991,7 +991,7 @@ def print_summary(result: Dict[str, Any], market_open: bool) -> None:
         print(f"    3M Z-Score         : {spx.get('z_score_3m', '---')}", file=sys.stderr)
         print(f"    Data date          : {menthorq.get('date', '---')}", file=sys.stderr)
     else:
-        print(f"\n  MENTHORQ CTA: Data unavailable (run: python3 scripts/fetch_menthorq_cta.py)", file=sys.stderr)
+        print(f"\n  MENTHORQ CTA: Data unavailable (run: xenon-fetch-menthorq-cta)", file=sys.stderr)
 
     # Crash trigger
     trigger = result["crash_trigger"]
@@ -1287,7 +1287,7 @@ def generate_html_report(
 <div class="section-header">MenthorQ CTA Positioning</div>
 <div class="panel">
   <div class="panel-body" style="color:var(--text-muted);font-size:11px">
-    Data unavailable. Run <code>python3 scripts/fetch_menthorq_cta.py</code> to fetch institutional CTA positioning data.
+    Data unavailable. Run <code>xenon-fetch-menthorq-cta</code> to fetch institutional CTA positioning data.
   </div>
 </div>""")
 
@@ -1425,9 +1425,9 @@ distance from the 100-day moving average. When the crash trigger fires
 (all three conditions met), CTAs are forced to deleverage.
 
 Examples:
-  python3 scripts/cri_scan.py                  # HTML report
-  python3 scripts/cri_scan.py --json           # JSON output
-  python3 scripts/cri_scan.py --no-open        # Don't open browser
+  xenon-cri-scan                  # HTML report
+  xenon-cri-scan --json           # JSON output
+  xenon-cri-scan --no-open        # Don't open browser
 """,
     )
     parser.add_argument("--json", action="store_true", help="Output JSON to stdout")

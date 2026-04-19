@@ -11,13 +11,13 @@ API Reference: docs/reference/unusual_whales_api.md for UW endpoint details
 Full Spec: docs/reference/unusual_whales_api_spec.yaml
 
 Usage:
-    python3 scripts/fetch_analyst_ratings.py AAPL MSFT NVDA
-    python3 scripts/fetch_analyst_ratings.py --watchlist
-    python3 scripts/fetch_analyst_ratings.py --portfolio
-    python3 scripts/fetch_analyst_ratings.py --all
-    python3 scripts/fetch_analyst_ratings.py --changes-only  # Only show recent changes
-    python3 scripts/fetch_analyst_ratings.py --source uw     # Force Unusual Whales
-    python3 scripts/fetch_analyst_ratings.py --source yahoo  # LAST RESORT ONLY
+    xenon-fetch-analyst AAPL MSFT NVDA
+    xenon-fetch-analyst --watchlist
+    xenon-fetch-analyst --portfolio
+    xenon-fetch-analyst --all
+    xenon-fetch-analyst --changes-only  # Only show recent changes
+    xenon-fetch-analyst --source uw     # Force Unusual Whales
+    xenon-fetch-analyst --source yahoo  # LAST RESORT ONLY
 """
 
 import argparse

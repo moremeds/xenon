@@ -1,10 +1,10 @@
 """POST /uw-analyze — per-ticker UW signal analysis for the web UI.
 
-Wraps `scripts.uw_analyze.run_analysis_with_data` and exposes both the
+Wraps `xenon.scanners.uw.analyze.run_analysis_with_data` and exposes both the
 serialized AnalysisReport and a UI-facing display slice extracted from
 TickerData (walls, gamma, IV rank, net premium, gex_by_strike rows).
 
-Auth: covered globally by Clerk middleware in scripts/api/server.py.
+Auth: covered globally by Clerk middleware in src/xenon/api/server.py.
 """
 
 from __future__ import annotations

@@ -5,9 +5,9 @@ Reads from the latest MenthorQ CTA cache, produces 4 PNG cards
 and a self-contained HTML preview page.
 
 Usage:
-  python3 scripts/generate_cta_share.py
-  python3 scripts/generate_cta_share.py --json    # print output path as JSON
-  python3 scripts/generate_cta_share.py --date 2026-03-19
+  xenon-generate-cta-share
+  xenon-generate-cta-share --json    # print output path as JSON
+  xenon-generate-cta-share --date 2026-03-19
 """
 
 from __future__ import annotations

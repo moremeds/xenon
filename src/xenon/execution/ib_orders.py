@@ -8,9 +8,9 @@ Requirements:
   pip install ib_insync
 
 Usage:
-  python3 scripts/ib_orders.py              # Display orders
-  python3 scripts/ib_orders.py --sync       # Sync to orders.json
-  python3 scripts/ib_orders.py --port 4001  # Custom port
+  xenon-ib-orders              # Display orders
+  xenon-ib-orders --sync       # Sync to orders.json
+  xenon-ib-orders --port 4001  # Custom port
 """
 
 import argparse

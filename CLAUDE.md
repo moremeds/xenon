@@ -16,11 +16,11 @@ Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` fi
 
 ## Scanner Hierarchy
 
-- `scripts/scanner_lib/` — shared foundation (cache, executor, models, scoring, universe)
-- `scripts/trend_scan_lib/` + `scripts/trend_scan.py` — 3-stage pre-market trend scanner, DuckDB-backed (`data/trend_scan.duckdb`). Auto-runs 8:30 AM ET weekdays via the FastAPI scheduler.
-- `scripts/uw_scan_lib/` + `scripts/uw_scan.py` — tiered UW signal scanner with Type F confluence
+- `src/xenon/scanners/_shared/` — shared foundation (cache, executor, models, scoring, universe)
+- `src/xenon/scanners/trend/` (entry: `xenon-trend-scan`) — 3-stage pre-market trend scanner, DuckDB-backed (`data/trend_scan.duckdb`). Auto-runs 8:30 AM ET weekdays via the FastAPI scheduler.
+- `src/xenon/scanners/uw/` (entries: `xenon-uw-scan`, `xenon-uw-analyze`) — tiered UW signal scanner with Type F confluence
 
-New scanners MUST build on `scanner_lib/` — do not duplicate universe/executor/scoring logic.
+New scanners MUST build on `src/xenon/scanners/_shared/` — do not duplicate universe/executor/scoring logic.
 
 ## Data Source Priority
 

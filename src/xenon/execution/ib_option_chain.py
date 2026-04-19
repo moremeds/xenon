@@ -2,8 +2,8 @@
 """Fetch option chain data from IB for a given symbol.
 
 Usage:
-    python3 scripts/ib_option_chain.py --symbol AAPL
-    python3 scripts/ib_option_chain.py --symbol AAPL --expiry 20260417
+    xenon-ib-option-chain --symbol AAPL
+    xenon-ib-option-chain --symbol AAPL --expiry 20260417
 """
 
 import argparse
