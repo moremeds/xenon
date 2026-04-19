@@ -2,7 +2,7 @@ from datetime import datetime
 from unittest.mock import MagicMock
 
 from scripts.analysis.models import TickerData
-from scripts.uw_scan import scan_universe, ScanConfig
+from scripts.scanners.uw.scan import scan_universe, ScanConfig
 
 
 def _full_td(ticker, *, flow_alerts=None, darkpool=None, iv_pct=None,

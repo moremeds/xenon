@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Optional
 
 from scripts.analysis.models import TickerData
-from scripts.uw_scan_lib.models import ContextFlag
+from scripts.scanners.uw.models import ContextFlag
 
 
 def flag(ticker: str, td: TickerData) -> Optional[ContextFlag]:

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 def test_catalyst_stage_degrades_gracefully_without_uw_client():
     """If UW client is None (unavailable / budget exhausted), stage returns
     empty catalysts and neutral score — never raises."""
-    from scripts.trend_scan_lib.stages.catalysts import fetch_catalysts
+    from scripts.scanners.trend.stages.catalysts import fetch_catalysts
 
     catalysts, score = fetch_catalysts(
         ticker="AAPL",
@@ -22,7 +22,7 @@ def test_catalyst_stage_tolerates_missing_earnings_days():
     """If fetch_volatility returns earnings_days=None (UW didn't resolve
     earnings date), fetch_catalysts must not crash on the int-vs-None
     comparison. Real-scan regression surfaced this bug."""
-    from scripts.trend_scan_lib.stages.catalysts import fetch_catalysts
+    from scripts.scanners.trend.stages.catalysts import fetch_catalysts
 
     catalysts, score = fetch_catalysts(
         ticker="AAPL",
@@ -38,7 +38,7 @@ def test_catalyst_stage_flags_imminent_earnings():
     """Earnings within 7 days is always a catalyst (direction-agnostic —
     creates event risk either way). Scored as neutral (0.5) since we
     don't predict direction of the move."""
-    from scripts.trend_scan_lib.stages.catalysts import fetch_catalysts
+    from scripts.scanners.trend.stages.catalysts import fetch_catalysts
 
     catalysts, score = fetch_catalysts(
         ticker="AAPL",
@@ -51,7 +51,7 @@ def test_catalyst_stage_flags_imminent_earnings():
 
 
 def test_catalyst_stage_rewards_bullish_aligned_headlines():
-    from scripts.trend_scan_lib.stages.catalysts import fetch_catalysts
+    from scripts.scanners.trend.stages.catalysts import fetch_catalysts
 
     fake_uw = MagicMock()
     fake_uw.get_headlines.return_value = [
@@ -71,7 +71,7 @@ def test_catalyst_stage_rewards_bullish_aligned_headlines():
 
 
 def test_catalyst_stage_penalizes_bullish_against_bearish_headlines():
-    from scripts.trend_scan_lib.stages.catalysts import fetch_catalysts
+    from scripts.scanners.trend.stages.catalysts import fetch_catalysts
 
     fake_uw = MagicMock()
     fake_uw.get_headlines.return_value = [

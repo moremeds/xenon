@@ -6,7 +6,7 @@ import pytest
 
 
 def test_trend_candidate_creation():
-    from scripts.trend_scan_lib.models import TrendCandidate
+    from scripts.scanners.trend.models import TrendCandidate
 
     c = TrendCandidate(
         ticker="NVDA",
@@ -26,7 +26,7 @@ def test_trend_candidate_creation():
 
 
 def test_trend_candidate_defaults():
-    from scripts.trend_scan_lib.models import TrendCandidate
+    from scripts.scanners.trend.models import TrendCandidate
 
     c = TrendCandidate(
         ticker="AAPL",
@@ -44,7 +44,7 @@ def test_trend_candidate_defaults():
 
 
 def test_trend_candidate_to_dict():
-    from scripts.trend_scan_lib.models import TrendCandidate
+    from scripts.scanners.trend.models import TrendCandidate
 
     c = TrendCandidate(
         ticker="AAPL",
@@ -65,7 +65,7 @@ def test_trend_candidate_has_four_gates_flag_and_no_suggested_trade():
     """Scanner is analysis-only. Output carries a flag making that explicit,
     and must not emit a 'suggested_trade' field (would invite consumers to
     trade without running Four Gates)."""
-    from scripts.trend_scan_lib.models import TrendCandidate
+    from scripts.scanners.trend.models import TrendCandidate
 
     c = TrendCandidate(
         ticker="AAPL",

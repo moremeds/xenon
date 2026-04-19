@@ -1,5 +1,5 @@
-from scripts.uw_scan_lib.models import SignalHit
-from scripts.uw_scan_lib.confluence import compute_confluence, is_type_f
+from scripts.scanners.uw.models import SignalHit
+from scripts.scanners.uw.confluence import compute_confluence, is_type_f
 
 
 def _hit(sig_type, tier, score=0.8):

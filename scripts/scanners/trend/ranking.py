@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from scanners._shared.scoring import passes_min_thresholds, weighted_composite
-from scripts.trend_scan_lib.models import TrendCandidate
+from scripts.scanners.trend.models import TrendCandidate
 
 
 def compute_final_score(scores: dict[str, float], weights: dict[str, float]) -> float:

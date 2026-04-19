@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Optional
 
 from scripts.analysis.models import TickerData
-from scripts.uw_scan_lib.models import SignalHit
+from scripts.scanners.uw.models import SignalHit
 
 MIN_PREMIUM = 500_000
 MIN_ASK_SIDE = 0.80

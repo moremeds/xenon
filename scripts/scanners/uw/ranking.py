@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from scripts.uw_scan_lib.confluence import compute_confluence, is_type_f
-from scripts.uw_scan_lib.models import ContextFlag, ScanCandidate, SignalHit
+from scripts.scanners.uw.confluence import compute_confluence, is_type_f
+from scripts.scanners.uw.models import ContextFlag, ScanCandidate, SignalHit
 
 RANKING_TIER_WEIGHTS = {1: 3.0, 2: 1.5}
 RAW_RANKING_EXCLUDE: frozenset[str] = frozenset({"dark_pool_accumulation"})

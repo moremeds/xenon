@@ -6,7 +6,7 @@ from typing import Optional
 
 from scripts.analysis.gex import detect_pinning, is_opex_week
 from scripts.analysis.models import TickerData
-from scripts.uw_scan_lib.models import SignalHit
+from scripts.scanners.uw.models import SignalHit
 
 MEGA_CAPS: frozenset[str] = frozenset({
     "SPY", "QQQ", "IWM", "DIA",
