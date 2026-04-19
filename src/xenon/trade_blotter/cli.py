@@ -8,24 +8,22 @@ Usage:
     python3 cli.py --json             # JSON output
     python3 cli.py --summary          # P&L summary only
 """
+
 import argparse
 import json
 import sys
 from datetime import datetime
 from decimal import Decimal
 
-# Add parent directory to path for imports
-import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from blotter_service import create_blotter_service, IBFetcher
 from xenon.clients.ib_client import DEFAULT_HOST
-from formatting import format_currency, format_pnl
-from models import TradeBlotter, Trade
+from xenon.trade_blotter.blotter_service import IBFetcher, create_blotter_service
+from xenon.trade_blotter.formatting import format_currency, format_pnl
+from xenon.trade_blotter.models import Trade, TradeBlotter
 
 
 class DecimalEncoder(json.JSONEncoder):
     """JSON encoder that handles Decimal types."""
+
     def default(self, obj):
         if isinstance(obj, Decimal):
             return float(obj)
@@ -38,24 +36,26 @@ def print_trade(trade: Trade, show_executions: bool = True):
     """Print a single trade with details."""
     status = "CLOSED" if trade.is_closed else "OPEN"
     status_icon = "🔒" if trade.is_closed else "📂"
-    
+
     print(f"\n{status_icon} {trade.contract_desc} [{status}]")
     print(f"   Net Qty: {trade.net_quantity}")
     print(f"   Commissions: {format_currency(trade.total_commission)}")
-    
+
     if trade.is_closed:
         print(f"   Realized P&L: {format_pnl(trade.realized_pnl)}")
     else:
         print(f"   Cost Basis: {format_currency(trade.cost_basis)}")
         print(f"   Cash Flow: {format_currency(trade.total_cash_flow)}")
-    
+
     if show_executions:
         print("   Executions:")
         for e in trade.executions:
             side_icon = "🟢" if e.side.value == "BOT" else "🔴"
-            print(f"      {side_icon} {e.time.strftime('%H:%M:%S')} | "
-                  f"{e.side.value} {e.quantity}x @ ${e.price:.2f} | "
-                  f"Fee: ${e.commission:.2f}")
+            print(
+                f"      {side_icon} {e.time.strftime('%H:%M:%S')} | "
+                f"{e.side.value} {e.quantity}x @ ${e.price:.2f} | "
+                f"Fee: ${e.commission:.2f}"
+            )
 
 
 def print_blotter(blotter: TradeBlotter, verbose: bool = False):
@@ -64,24 +64,24 @@ def print_blotter(blotter: TradeBlotter, verbose: bool = False):
     print("TRADE BLOTTER")
     print(f"As of: {blotter.as_of.strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 70)
-    
+
     # Closed trades
     if blotter.closed_trades:
         print(f"\n📊 CLOSED TRADES ({len(blotter.closed_trades)})")
         print("-" * 50)
         for trade in blotter.closed_trades:
             print_trade(trade, show_executions=verbose)
-    
+
     # Open positions
     if blotter.open_trades:
         print(f"\n📈 OPEN POSITIONS ({len(blotter.open_trades)})")
         print("-" * 50)
         for trade in blotter.open_trades:
             print_trade(trade, show_executions=verbose)
-    
+
     # Spreads
     print_spreads(blotter)
-    
+
     # Summary
     print("\n" + "=" * 70)
     print("SUMMARY")
@@ -90,7 +90,7 @@ def print_blotter(blotter: TradeBlotter, verbose: bool = False):
     print(f"  Open Positions:   {len(blotter.open_trades)}")
     print(f"  Total Commissions: {format_currency(blotter.total_commissions)}")
     print(f"  Realized P&L:     {format_pnl(blotter.total_realized_pnl)}")
-    
+
     # Spread summary
     spreads = blotter.get_spreads()
     if spreads:
@@ -101,27 +101,27 @@ def print_blotter(blotter: TradeBlotter, verbose: bool = False):
 def print_spreads(blotter: TradeBlotter):
     """Print spread summary with combined P&L."""
     spreads = blotter.get_spreads()
-    
+
     if not spreads:
         return
-    
+
     print(f"\n📊 SPREAD POSITIONS ({len(spreads)})")
     print("-" * 60)
-    
+
     for spread in spreads:
         status = "CLOSED" if spread.is_closed else "OPEN"
         status_icon = "🔒" if spread.is_closed else "📂"
-        
+
         print(f"\n{status_icon} {spread.name} (exp: {spread.expiry}) [{status}]")
         print(f"   Legs: {len(spread.legs)}")
-        
+
         for leg in spread.legs:
             qty_str = f"{leg.net_quantity:+}"
             print(f"      • {leg.contract_desc}: {qty_str}")
-        
+
         print(f"   Commissions: {format_currency(spread.total_commission)}")
         print(f"   Net Cash Flow: {format_pnl(spread.total_cash_flow)}")
-        
+
         if spread.is_closed:
             print(f"   Realized P&L: {format_pnl(spread.realized_pnl)}")
 
@@ -135,7 +135,7 @@ def print_summary(blotter: TradeBlotter):
     print(f"  Open Positions:    {len(blotter.open_trades)}")
     print(f"  Total Commissions: {format_currency(blotter.total_commissions)}")
     print(f"  Realized P&L:      {format_pnl(blotter.total_realized_pnl)}")
-    
+
     # Add spread summary
     spreads = blotter.get_spreads()
     if spreads:
@@ -144,12 +144,13 @@ def print_summary(blotter: TradeBlotter):
         total_spread_flow = sum(s.total_cash_flow for s in spreads)
         print(f"  Spreads:           {len(spreads)}")
         print(f"  Net Spread Flow:   {format_pnl(total_spread_flow)}")
-    
+
     print("=" * 50)
 
 
 def blotter_to_dict(blotter: TradeBlotter) -> dict:
     """Convert blotter to JSON-serializable dict."""
+
     def trade_to_dict(trade: Trade) -> dict:
         return {
             "symbol": trade.symbol,
@@ -175,9 +176,9 @@ def blotter_to_dict(blotter: TradeBlotter) -> dict:
                     "net_cash_flow": e.net_cash_flow,
                 }
                 for e in trade.executions
-            ]
+            ],
         }
-    
+
     def spread_to_dict(spread) -> dict:
         return {
             "name": spread.name,
@@ -189,10 +190,10 @@ def blotter_to_dict(blotter: TradeBlotter) -> dict:
             "total_cash_flow": spread.total_cash_flow,
             "realized_pnl": spread.realized_pnl,
         }
-    
+
     spreads = blotter.get_spreads()
     total_spread_flow = sum(s.total_cash_flow for s in spreads)
-    
+
     return {
         "as_of": blotter.as_of,
         "summary": {
@@ -217,9 +218,9 @@ def main():
     parser.add_argument("--json", action="store_true", help="Output as JSON")
     parser.add_argument("--summary", action="store_true", help="Show P&L summary only")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show execution details")
-    
+
     args = parser.parse_args()
-    
+
     try:
         # Create service and fetch data
         service = create_blotter_service(
@@ -228,18 +229,18 @@ def main():
             port=args.port,
             client_id=args.client_id,
         )
-        
+
         blotter = service.build_blotter()
-        
+
         if args.json:
             print(json.dumps(blotter_to_dict(blotter), cls=DecimalEncoder, indent=2))
         elif args.summary:
             print_summary(blotter)
         else:
             print_blotter(blotter, verbose=args.verbose)
-        
+
         return 0
-        
+
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1

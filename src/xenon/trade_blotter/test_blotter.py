@@ -7,7 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 from unittest.mock import Mock, patch, MagicMock
 
-from models import Execution, Trade, TradeBlotter, Spread, Side, SecurityType
+from xenon.trade_blotter.models import Execution, Trade, TradeBlotter, Spread, Side, SecurityType
 
 
 class TestExecution:
@@ -561,7 +561,7 @@ class TestIBFetcher:
     
     def test_fetch_executions_parses_fills(self):
         """IBFetcher correctly parses IB fill objects."""
-        from blotter_service import IBFetcher
+        from xenon.trade_blotter.blotter_service import IBFetcher
         
         # Create mock IB fill
         mock_fill = Mock()
@@ -595,7 +595,7 @@ class TestIBFetcher:
     
     def test_fetch_executions_handles_options(self):
         """IBFetcher correctly parses option fills."""
-        from blotter_service import IBFetcher
+        from xenon.trade_blotter.blotter_service import IBFetcher
         
         mock_fill = Mock()
         mock_fill.contract.symbol = "EWY"
@@ -633,7 +633,7 @@ class TestBlotterService:
     
     def test_group_executions_by_contract(self):
         """Executions are grouped into trades by contract."""
-        from blotter_service import BlotterService
+        from xenon.trade_blotter.blotter_service import BlotterService
         
         executions = [
             Execution("001", datetime(2026, 3, 3, 10, 0), "AAPL", SecurityType.STOCK,
@@ -659,7 +659,7 @@ class TestBlotterService:
     
     def test_build_blotter_from_executions(self):
         """Full blotter build from raw executions."""
-        from blotter_service import BlotterService
+        from xenon.trade_blotter.blotter_service import BlotterService
         
         mock_fetcher = Mock()
         mock_fetcher.fetch_executions.return_value = [
@@ -783,7 +783,7 @@ class TestFlexQueryFetcher:
     
     def test_parse_flex_query_response(self):
         """Parse XML response from IB Flex Query."""
-        from blotter_service import FlexQueryFetcher
+        from xenon.trade_blotter.blotter_service import FlexQueryFetcher
         
         sample_xml = """<?xml version="1.0" encoding="UTF-8"?>
         <FlexQueryResponse>

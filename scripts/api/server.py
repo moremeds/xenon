@@ -1579,7 +1579,7 @@ async def internals_skew_history(
 @app.post("/blotter")
 async def blotter_sync():
     """Run IB Flex Query for historical trades. 120s timeout."""
-    result = await run_module("trade_blotter.flex_query", ["--json"], timeout=120)
+    result = await run_module("xenon.trade_blotter.flex_query", ["--json"], timeout=120)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     _write_cache(DATA_DIR / "blotter.json", result.data)

@@ -13,13 +13,9 @@ Integration tests:
     python3 scripts/trade_blotter/test_integration.py
 """
 
-import os
 import sys
 
-# Add trade_blotter package to path
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trade_blotter"))
-
-from cli import main
+from xenon.trade_blotter.cli import main
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -20,10 +20,11 @@ Usage:
     python3 flex_query.py --token YOUR_TOKEN --query-id YOUR_QUERY_ID
     python3 flex_query.py --setup  # Interactive setup guide
 """
+
 import argparse
+import json
 import os
 import sys
-import json
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
@@ -33,10 +34,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from models import Execution, Trade, TradeBlotter, Side, SecurityType
-from formatting import format_currency, format_pnl
+from xenon.trade_blotter.formatting import format_currency, format_pnl
+from xenon.trade_blotter.models import Execution, SecurityType, Side, Trade, TradeBlotter
 
 
 def _http_get_text(url: str, params: dict, timeout: int = 30) -> str:
@@ -57,17 +56,17 @@ class FlexQueryFetcher:
     """
     Fetches historical executions via IB Flex Query.
     """
-    
+
     FLEX_SERVICE_URL = "https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService"
-    
+
     def __init__(self, token: str, query_id: str):
         self.token = token
         self.query_id = query_id
-    
+
     def fetch_executions(self, days_back: int = 30) -> List[Execution]:
         """Fetch executions from Flex Query."""
         print(f"Requesting Flex Query report...")
-        
+
         # Step 1: Request the report
         request_url = f"{self.FLEX_SERVICE_URL}.SendRequest"
         params = {
@@ -77,20 +76,20 @@ class FlexQueryFetcher:
         }
 
         response_text = _http_get_text(request_url, params, timeout=30)
-        
+
         # Parse response
         try:
             root = ET.fromstring(response_text)
         except ET.ParseError:
             raise RuntimeError(f"Invalid XML response: {response_text[:500]}")
-        
+
         status = root.find(".//Status")
         if status is None:
             # Check if it's a direct FlexStatement response
             if root.tag == "FlexQueryResponse" or root.find(".//FlexStatements") is not None:
                 return self._parse_xml(response_text)
             raise RuntimeError(f"Unexpected response format: {response_text[:500]}")
-        
+
         if status.text != "Success":
             error_msg = root.find(".//ErrorMessage")
             error_code = root.find(".//ErrorCode")
@@ -98,21 +97,21 @@ class FlexQueryFetcher:
                 f"Flex Query request failed: {error_msg.text if error_msg is not None else 'Unknown error'} "
                 f"(code: {error_code.text if error_code is not None else 'N/A'})"
             )
-        
+
         reference_code = root.find(".//ReferenceCode")
         if reference_code is None:
             raise RuntimeError("No reference code in response")
-        
+
         print(f"Report requested. Reference: {reference_code.text}")
         print("Waiting for report generation...")
-        
+
         # Step 2: Poll for the report
         statement_url = f"{self.FLEX_SERVICE_URL}.GetStatement"
         max_attempts = 40
-        
+
         for attempt in range(max_attempts):
             time.sleep(3)  # Wait before polling
-            
+
             params = {
                 "t": self.token,
                 "q": reference_code.text,
@@ -124,23 +123,23 @@ class FlexQueryFetcher:
             except RuntimeError:
                 print(f"  Attempt {attempt + 1}: Request failed, retrying...")
                 continue
-            
+
             # Check if still processing
             # IB returns <FlexStatements count="N"> (with attribute), not bare <FlexStatements>
             if "<Status>Success</Status>" not in response_text and "<FlexStatements" not in response_text:
                 print(f"  Attempt {attempt + 1}: Still processing...")
                 continue
-            
+
             print("Report ready. Parsing...")
             return self._parse_xml(response_text)
-        
+
         raise RuntimeError("Flex Query timed out after 120 seconds")
-    
+
     def _parse_xml(self, xml_content: str) -> List[Execution]:
         """Parse Flex Query XML response into executions."""
         root = ET.fromstring(xml_content)
         executions = []
-        
+
         # Find all Trade elements
         for trade in root.findall(".//Trade"):
             try:
@@ -150,18 +149,18 @@ class FlexQueryFetcher:
             except Exception as e:
                 print(f"Warning: Failed to parse trade: {e}")
                 continue
-        
+
         # Sort by time
         executions.sort(key=lambda e: e.time)
-        
+
         return executions
-    
+
     def _parse_trade_element(self, trade: ET.Element) -> Optional[Execution]:
         """Parse a single Trade XML element."""
         symbol = trade.get("symbol")
         if not symbol:
             return None
-        
+
         # Security type
         asset_category = trade.get("assetCategory", "STK")
         sec_type_map = {
@@ -172,12 +171,12 @@ class FlexQueryFetcher:
             "FOP": SecurityType.OPTION,  # Future options
         }
         sec_type = sec_type_map.get(asset_category, SecurityType.STOCK)
-        
+
         # Parse datetime
         datetime_str = trade.get("dateTime") or trade.get("tradeDate")
         if not datetime_str:
             return None
-        
+
         try:
             if ";" in datetime_str:
                 # IB Flex returns YYYYMMDD;HHMMSS (no separators)
@@ -194,7 +193,7 @@ class FlexQueryFetcher:
         except ValueError as e:
             print(f"Warning: Could not parse date '{datetime_str}': {e}")
             return None
-        
+
         # Parse side
         buy_sell = trade.get("buySell") or trade.get("side", "")
         if buy_sell.upper() in ("BUY", "BOT", "B"):
@@ -203,34 +202,34 @@ class FlexQueryFetcher:
             side = Side.SELL
         else:
             return None
-        
+
         # Parse quantities and prices
         quantity_str = trade.get("quantity") or trade.get("shares", "0")
         price_str = trade.get("tradePrice") or trade.get("price", "0")
         commission_str = trade.get("ibCommission") or trade.get("commission", "0")
-        
+
         quantity = Decimal(str(abs(float(quantity_str))))
         price = Decimal(price_str)
         commission = Decimal(str(abs(float(commission_str))))
-        
+
         # Option fields
         strike = None
         right = None
         expiry = None
-        
+
         if sec_type == SecurityType.OPTION:
             strike_str = trade.get("strike", "0")
             if strike_str and float(strike_str) > 0:
                 strike = Decimal(strike_str)
-            
+
             right = trade.get("putCall") or trade.get("right", "")
             if right:
                 right = right[0].upper()  # 'C' or 'P'
-            
+
             expiry = trade.get("expiry") or trade.get("lastTradeDateOrContractMonth", "")
-        
+
         trade_id = trade.get("tradeID") or trade.get("execId") or f"{symbol}_{datetime_str}"
-        
+
         return Execution(
             exec_id=trade_id,
             time=exec_time,
@@ -249,25 +248,27 @@ class FlexQueryFetcher:
 def group_executions_to_trades(executions: List[Execution]) -> List[Trade]:
     """Group executions into trades by contract."""
     from collections import defaultdict
-    
+
     trades_map = defaultdict(lambda: {"executions": [], "sec_type": None, "symbol": None})
-    
+
     for exec in executions:
         key = exec.contract_desc
         trades_map[key]["executions"].append(exec)
         trades_map[key]["sec_type"] = exec.sec_type
         trades_map[key]["symbol"] = exec.symbol
-    
+
     trades = []
     for key, data in trades_map.items():
         data["executions"].sort(key=lambda e: e.time)
-        trades.append(Trade(
-            symbol=data["symbol"],
-            contract_desc=key,
-            sec_type=data["sec_type"],
-            executions=data["executions"],
-        ))
-    
+        trades.append(
+            Trade(
+                symbol=data["symbol"],
+                contract_desc=key,
+                sec_type=data["sec_type"],
+                executions=data["executions"],
+            )
+        )
+
     return trades
 
 
@@ -342,12 +343,12 @@ def print_blotter(blotter: TradeBlotter, filter_symbol: str = None):
     print("HISTORICAL TRADE BLOTTER")
     print(f"As of: {blotter.as_of.strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 70)
-    
+
     trades = blotter.trades
     if filter_symbol:
         trades = [t for t in trades if t.symbol == filter_symbol.upper()]
         print(f"Filtered to: {filter_symbol.upper()}")
-    
+
     # Closed trades
     closed = [t for t in trades if t.is_closed]
     if closed:
@@ -358,14 +359,16 @@ def print_blotter(blotter: TradeBlotter, filter_symbol: str = None):
             print(f"     Executions: {len(trade.executions)}")
             print(f"     Commissions: {format_currency(trade.total_commission)}")
             print(f"     Realized P&L: {format_pnl(trade.realized_pnl)}")
-            
+
             # Show executions
             for e in trade.executions:
                 side_icon = "🟢" if e.side == Side.BUY else "🔴"
-                print(f"        {side_icon} {e.time.strftime('%Y-%m-%d %H:%M')} | "
-                      f"{e.side.value} {e.quantity}x @ ${e.price:.2f} | "
-                      f"Fee: ${e.commission:.2f}")
-    
+                print(
+                    f"        {side_icon} {e.time.strftime('%Y-%m-%d %H:%M')} | "
+                    f"{e.side.value} {e.quantity}x @ ${e.price:.2f} | "
+                    f"Fee: ${e.commission:.2f}"
+                )
+
     # Open trades
     open_trades = [t for t in trades if not t.is_closed]
     if open_trades:
@@ -376,20 +379,20 @@ def print_blotter(blotter: TradeBlotter, filter_symbol: str = None):
             print(f"     Net Qty: {trade.net_quantity}")
             print(f"     Cost Basis: {format_currency(trade.cost_basis)}")
             print(f"     Commissions: {format_currency(trade.total_commission)}")
-    
+
     # Summary
     print("\n" + "=" * 70)
     print("SUMMARY")
     print("=" * 70)
-    
+
     total_realized = sum(t.realized_pnl or Decimal(0) for t in closed)
     total_commission = sum(t.total_commission for t in trades)
-    
+
     print(f"  Closed Trades:     {len(closed)}")
     print(f"  Open Positions:    {len(open_trades)}")
     print(f"  Total Commissions: {format_currency(total_commission)}")
     print(f"  Total Realized:    {format_pnl(total_realized)}")
-    
+
     # Spread analysis
     spreads = blotter.get_spreads()
     if spreads:
@@ -409,52 +412,54 @@ Examples:
   python3 flex_query.py --setup                          # Show setup guide
   python3 flex_query.py --token XXX --query-id 123456    # Fetch trades
   python3 flex_query.py --symbol EWY                     # Filter by symbol
-        """
+        """,
     )
     parser.add_argument("--setup", action="store_true", help="Show setup guide")
     parser.add_argument("--token", help="Flex Web Service token (or IB_FLEX_TOKEN env)")
     parser.add_argument("--query-id", help="Flex Query ID (or IB_FLEX_QUERY_ID env)")
     parser.add_argument("--symbol", help="Filter results to specific symbol")
     parser.add_argument("--json", action="store_true", help="Output as JSON")
-    
+
     args = parser.parse_args()
-    
+
     if args.setup:
         print_setup_guide()
         return 0
-    
+
     # Get credentials
     token = args.token or os.environ.get("IB_FLEX_TOKEN")
     query_id = args.query_id or os.environ.get("IB_FLEX_QUERY_ID")
-    
+
     if not token or not query_id:
         print("Error: Flex Query credentials required.")
         print("       Use --token and --query-id, or set IB_FLEX_TOKEN and IB_FLEX_QUERY_ID")
         print("       Run with --setup for configuration guide.")
         return 1
-    
+
     try:
         # Fetch executions
         fetcher = FlexQueryFetcher(token=token, query_id=query_id)
         executions = fetcher.fetch_executions()
-        
+
         print(f"Fetched {len(executions)} executions")
-        
+
         # Group into trades
         trades = group_executions_to_trades(executions)
-        
+
         # Build blotter
         blotter = TradeBlotter(trades=trades, as_of=datetime.now())
-        
+
         if args.json:
             import json
-            from cli import blotter_to_dict, DecimalEncoder
+
+            from xenon.trade_blotter.cli import DecimalEncoder, blotter_to_dict
+
             print(json.dumps(blotter_to_dict(blotter), cls=DecimalEncoder, indent=2))
         else:
             print_blotter(blotter, filter_symbol=args.symbol)
-        
+
         return 0
-        
+
     except Exception as e:
         print(f"Error: {e}")
         return 1
