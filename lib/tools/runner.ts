@@ -14,7 +14,11 @@ import type { TSchema, Static } from "@sinclair/typebox";
 // ── Result types ──────────────────────────────────────────────────────
 
 export type ScriptSuccess<T> = { ok: true; data: T };
-export type ScriptFailure = { ok: false; exitCode: number | null; stderr: string };
+export type ScriptFailure = {
+  ok: false;
+  exitCode: number | null;
+  stderr: string;
+};
 export type ScriptResult<T> = ScriptSuccess<T> | ScriptFailure;
 
 // ── Options ───────────────────────────────────────────────────────────
@@ -82,7 +86,10 @@ export function _resetRootCache(): void {
  * @param opts        See {@link RunScriptOptions}.
  * @returns           Discriminated union: `{ ok, data }` or `{ ok, exitCode, stderr }`.
  */
-export function runScript<T = unknown, S extends TSchema | undefined = undefined>(
+export function runScript<
+  T = unknown,
+  S extends TSchema | undefined = undefined,
+>(
   scriptPath: string,
   opts: RunScriptOptions<S> = {},
 ): Promise<ScriptResult<S extends TSchema ? Static<S> : T>> {
@@ -97,10 +104,14 @@ export function runScript<T = unknown, S extends TSchema | undefined = undefined
   } = opts;
 
   return new Promise((resolve) => {
+    // Entry-point binaries under .venv/bin/ (e.g. ".venv/bin/xenon-fetch-analyst")
+    // are spawned directly; legacy .py scripts are invoked via python3.13.
+    const isEntryPoint =
+      scriptPath.includes(".venv/bin/") || scriptPath.startsWith("xenon-");
     const fullPath = path.join(cwd, scriptPath);
 
     // Fail fast if script doesn't exist
-    if (!existsSync(fullPath)) {
+    if (!isEntryPoint && !existsSync(fullPath)) {
       resolve({
         ok: false,
         exitCode: null,
@@ -109,12 +120,19 @@ export function runScript<T = unknown, S extends TSchema | undefined = undefined
       return;
     }
 
-    const proc: ChildProcess = spawn("python3.13", [scriptPath, ...args], {
-      cwd,
-      env: process.env,
-      detached,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const proc: ChildProcess = isEntryPoint
+      ? spawn(scriptPath, args, {
+          cwd,
+          env: process.env,
+          detached,
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+      : spawn("python3.13", [scriptPath, ...args], {
+          cwd,
+          env: process.env,
+          detached,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
 
     let stdout = "";
     let stderr = "";
@@ -149,7 +167,10 @@ export function runScript<T = unknown, S extends TSchema | undefined = undefined
 
       // Skip JSON parsing for scripts that write to files instead of stdout
       if (rawOutput) {
-        resolve({ ok: true, data: stdout as S extends TSchema ? Static<S> : T });
+        resolve({
+          ok: true,
+          data: stdout as S extends TSchema ? Static<S> : T,
+        });
         return;
       }
 
