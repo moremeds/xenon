@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Compatibility shim. Real home: scripts/services/cta_sync_service.py.
+"""Compatibility shim. Real home: src/xenon/services/cta_sync_service.py.
 
-Phase 1 preserves old invocation paths. Removed in Phase 2."""
-from services.cta_sync_service import *  # noqa: F401,F403
-from services.cta_sync_service import main
+Phase 1 preserves old invocation paths. Removed in Phase 2 PR 4."""
+
+import runpy
 
 if __name__ == "__main__":
-    main()
+    runpy.run_module("xenon.services.cta_sync_service", run_name="__main__")
