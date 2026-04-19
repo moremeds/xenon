@@ -23,14 +23,11 @@ import logging
 import sys
 from pathlib import Path
 
-# Ensure the repo root is on sys.path when run as a script.
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
-from xenon.clients.futu_client import FutuClient  # noqa: E402
-from xenon.clients.futu_exceptions import FutuError  # noqa: E402
-from xenon.utils.atomic_io import atomic_save  # noqa: E402
+from xenon.clients.futu_client import FutuClient
+from xenon.clients.futu_exceptions import FutuError
+from xenon.utils.atomic_io import atomic_save
 
 
 def main() -> int:

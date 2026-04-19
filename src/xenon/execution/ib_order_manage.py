@@ -16,10 +16,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-# Add parent so clients is importable when run from project root
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from xenon.clients.ib_client import IBClient, CLIENT_IDS, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
+from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
 DEFAULT_CLIENT_ID = CLIENT_IDS["ib_order_manage"]
@@ -82,8 +79,7 @@ def find_trade(client: IBClient, order_id: int, perm_id: int):
     return None
 
 
-def cancel_order(client: IBClient, order_id: int, perm_id: int,
-                 host: str, port: int):
+def cancel_order(client: IBClient, order_id: int, perm_id: int, host: str, port: int):
     """Cancel an open order.
 
     IB's cancelOrder is scoped by (clientId, orderId) -- a cancel from a
@@ -110,6 +106,7 @@ def cancel_order(client: IBClient, order_id: int, perm_id: int,
 
     # Capture IB error events during the cancel attempt
     error_msgs = []
+
     def on_error(reqId, errorCode, errorString, advancedOrderRejectJson=""):
         if reqId == trade.order.orderId or reqId == -1:
             error_msgs.append((errorCode, errorString))
@@ -150,12 +147,21 @@ def cancel_order(client: IBClient, order_id: int, perm_id: int,
             finish("error", f"IB rejected cancel: {fatal[0][1]}")
 
     final_status = latest_trade.orderStatus.status if latest_trade is not None else trade.orderStatus.status
-    finish("error", f"Cancel failed — order still {final_status}",
-           orderId=trade.order.orderId, finalStatus=final_status)
+    finish(
+        "error", f"Cancel failed — order still {final_status}", orderId=trade.order.orderId, finalStatus=final_status
+    )
 
 
-def modify_order(client: IBClient, order_id: int, perm_id: int, new_price: Optional[float],
-                 host: str, port: int, outside_rth=None, new_quantity: Optional[int] = None):
+def modify_order(
+    client: IBClient,
+    order_id: int,
+    perm_id: int,
+    new_price: Optional[float],
+    host: str,
+    port: int,
+    outside_rth=None,
+    new_quantity: Optional[int] = None,
+):
     """Modify an open order.
 
     IB's placeOrder is scoped by (clientId, orderId) -- a modify from a
@@ -194,6 +200,7 @@ def modify_order(client: IBClient, order_id: int, perm_id: int, new_price: Optio
 
     # Capture IB error events during the modify attempt
     error_msgs = []
+
     def on_error(reqId, errorCode, errorString, advancedOrderRejectJson=""):
         if reqId == trade.order.orderId or reqId == -1:
             error_msgs.append((errorCode, errorString))
@@ -215,14 +222,15 @@ def modify_order(client: IBClient, order_id: int, perm_id: int, new_price: Optio
     # IB populates these on open order snapshots; re-submitting them on a
     # LMT order causes "VOL order requires non-negative floating point value".
     if order_type not in ("VOL",):
-        trade.order.volatility = 1.7976931348623157e+308  # IB sentinel = unset
-        trade.order.volatilityType = 2147483647            # IB sentinel = unset
+        trade.order.volatility = 1.7976931348623157e308  # IB sentinel = unset
+        trade.order.volatilityType = 2147483647  # IB sentinel = unset
 
     # Ensure NonGuaranteed is set for combo/BAG orders.
     # IB's open order snapshot may strip smartComboRoutingParams;
     # re-submitting without it causes "Missing or invalid NonGuaranteed value".
     if trade.contract.secType == "BAG":
         from ib_insync import TagValue
+
         trade.order.smartComboRoutingParams = [TagValue("NonGuaranteed", "1")]
 
     client.place_order(trade.contract, trade.order)
@@ -270,10 +278,16 @@ def modify_order(client: IBClient, order_id: int, perm_id: int, new_price: Optio
     if outside_rth is not None:
         changes.append("outside RTH updated")
     suffix = f": {', '.join(changes)}" if changes else ""
-    output("ok", f"Order modified{suffix}",
-           orderId=trade.order.orderId, oldPrice=old_price,
-           newPrice=applied_price, oldQuantity=json_number(old_quantity),
-           newQuantity=json_number(confirmed_trade.order.totalQuantity), finalStatus=final_status)
+    output(
+        "ok",
+        f"Order modified{suffix}",
+        orderId=trade.order.orderId,
+        oldPrice=old_price,
+        newPrice=applied_price,
+        oldQuantity=json_number(old_quantity),
+        newQuantity=json_number(confirmed_trade.order.totalQuantity),
+        finalStatus=final_status,
+    )
 
 
 def main():
@@ -291,10 +305,15 @@ def main():
     modify_p.add_argument("--perm-id", type=int, default=0)
     modify_p.add_argument("--new-price", type=float)
     modify_p.add_argument("--new-quantity", type=int)
-    modify_p.add_argument("--outside-rth", action="store_true", default=None,
-                          help="Allow order to fill outside regular trading hours")
-    modify_p.add_argument("--no-outside-rth", dest="outside_rth", action="store_false",
-                          help="Restrict order to regular trading hours only")
+    modify_p.add_argument(
+        "--outside-rth", action="store_true", default=None, help="Allow order to fill outside regular trading hours"
+    )
+    modify_p.add_argument(
+        "--no-outside-rth",
+        dest="outside_rth",
+        action="store_false",
+        help="Restrict order to regular trading hours only",
+    )
     modify_p.add_argument("--host", default=DEFAULT_HOST)
     modify_p.add_argument("--port", type=int, default=DEFAULT_PORT)
 
@@ -311,12 +330,18 @@ def main():
 
     try:
         if args.action == "cancel":
-            cancel_order(client, args.order_id, args.perm_id,
-                         args.host, args.port)
+            cancel_order(client, args.order_id, args.perm_id, args.host, args.port)
         elif args.action == "modify":
-            modify_order(client, args.order_id, args.perm_id, args.new_price,
-                         args.host, args.port, outside_rth=args.outside_rth,
-                         new_quantity=args.new_quantity)
+            modify_order(
+                client,
+                args.order_id,
+                args.perm_id,
+                args.new_price,
+                args.host,
+                args.port,
+                outside_rth=args.outside_rth,
+                new_quantity=args.new_quantity,
+            )
     finally:
         client.disconnect()
 

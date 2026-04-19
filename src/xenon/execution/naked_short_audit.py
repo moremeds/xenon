@@ -16,15 +16,12 @@ import logging
 import sys
 from pathlib import Path
 
-# Add parent so clients is importable when run from project root
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from xenon.clients.ib_client import IBClient, CLIENT_IDS, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
+from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 
 logger = logging.getLogger(__name__)
 
 ACTIVE_STATUSES = {"Submitted", "PreSubmitted"}
-DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
+DATA_DIR = Path(__file__).resolve().parents[3] / "data"
 
 
 def _get_stock_shares(positions: list, ticker: str) -> int:
@@ -87,20 +84,23 @@ def find_naked_short_violations(orders: list, positions: list) -> list:
         if sec_type == "STK":
             shares_held = _get_stock_shares(positions, symbol)
             if shares_held == 0:
-                violations.append({
-                    "order_id": order_id,
-                    "perm_id": perm_id,
-                    "symbol": symbol,
-                    "reason": f"SELL {qty} shares of {symbol}: no LONG stock position exists",
-                })
+                violations.append(
+                    {
+                        "order_id": order_id,
+                        "perm_id": perm_id,
+                        "symbol": symbol,
+                        "reason": f"SELL {qty} shares of {symbol}: no LONG stock position exists",
+                    }
+                )
             elif qty > shares_held:
-                violations.append({
-                    "order_id": order_id,
-                    "perm_id": perm_id,
-                    "symbol": symbol,
-                    "reason": (f"SELL {qty} shares of {symbol} exceeds "
-                               f"{shares_held} shares held"),
-                })
+                violations.append(
+                    {
+                        "order_id": order_id,
+                        "perm_id": perm_id,
+                        "symbol": symbol,
+                        "reason": (f"SELL {qty} shares of {symbol} exceeds {shares_held} shares held"),
+                    }
+                )
             continue
 
         # SELL option
@@ -115,27 +115,32 @@ def find_naked_short_violations(orders: list, positions: list) -> list:
             if right == "C":
                 shares_held = _get_stock_shares(positions, symbol)
                 if shares_held == 0:
-                    violations.append({
-                        "order_id": order_id,
-                        "perm_id": perm_id,
-                        "symbol": symbol,
-                        "reason": (f"SELL {qty} call(s) on {symbol}: "
-                                   f"no LONG stock position — naked short call"),
-                    })
+                    violations.append(
+                        {
+                            "order_id": order_id,
+                            "perm_id": perm_id,
+                            "symbol": symbol,
+                            "reason": (f"SELL {qty} call(s) on {symbol}: no LONG stock position — naked short call"),
+                        }
+                    )
                 else:
                     existing_short_calls = _get_short_call_contracts(positions, symbol)
                     total_short_calls = existing_short_calls + qty
                     shares_needed = total_short_calls * 100
                     if shares_needed > shares_held:
-                        violations.append({
-                            "order_id": order_id,
-                            "perm_id": perm_id,
-                            "symbol": symbol,
-                            "reason": (f"SELL {qty} call(s) on {symbol}: "
-                                       f"total short calls ({total_short_calls}) * 100 = "
-                                       f"{shares_needed} shares needed, "
-                                       f"only {shares_held} held — under-covered"),
-                        })
+                        violations.append(
+                            {
+                                "order_id": order_id,
+                                "perm_id": perm_id,
+                                "symbol": symbol,
+                                "reason": (
+                                    f"SELL {qty} call(s) on {symbol}: "
+                                    f"total short calls ({total_short_calls}) * 100 = "
+                                    f"{shares_needed} shares needed, "
+                                    f"only {shares_held} held — under-covered"
+                                ),
+                            }
+                        )
             continue
 
     return violations
@@ -176,18 +181,17 @@ def cancel_violations(client, violations: list) -> int:
                         break
 
             if trade is None:
-                logger.warning("Order not found for cancellation: %s (orderId=%s, permId=%s)",
-                               symbol, order_id, perm_id)
+                logger.warning(
+                    "Order not found for cancellation: %s (orderId=%s, permId=%s)", symbol, order_id, perm_id
+                )
                 continue
 
             client.cancel_order(trade.order)
             client.sleep(1)
             cancelled += 1
-            logger.info("Cancelled naked short violation: %s orderId=%s — %s",
-                        symbol, order_id, v["reason"])
+            logger.info("Cancelled naked short violation: %s orderId=%s — %s", symbol, order_id, v["reason"])
         except Exception as e:
-            logger.error("Failed to cancel order %s (orderId=%s): %s",
-                         symbol, order_id, e)
+            logger.error("Failed to cancel order %s (orderId=%s): %s", symbol, order_id, e)
 
     return cancelled
 
@@ -195,14 +199,11 @@ def cancel_violations(client, violations: list) -> int:
 def main(argv=None):
     """CLI entry point. Returns summary dict (for testing)."""
     parser = argparse.ArgumentParser(description="Naked short audit — detect and cancel violations")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Print violations without cancelling")
-    parser.add_argument("--portfolio", type=str,
-                        default=str(DATA_DIR / "portfolio.json"),
-                        help="Path to portfolio.json")
-    parser.add_argument("--orders", type=str,
-                        default=str(DATA_DIR / "orders.json"),
-                        help="Path to orders.json")
+    parser.add_argument("--dry-run", action="store_true", help="Print violations without cancelling")
+    parser.add_argument(
+        "--portfolio", type=str, default=str(DATA_DIR / "portfolio.json"), help="Path to portfolio.json"
+    )
+    parser.add_argument("--orders", type=str, default=str(DATA_DIR / "orders.json"), help="Path to orders.json")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_GATEWAY_PORT)
 
@@ -238,8 +239,7 @@ def main(argv=None):
     # Live mode: connect and cancel
     client = IBClient()
     try:
-        client.connect(host=args.host, port=args.port,
-                       client_id=CLIENT_IDS.get("ib_order_manage", 25))
+        client.connect(host=args.host, port=args.port, client_id=CLIENT_IDS.get("ib_order_manage", 25))
         summary["cancelled"] = cancel_violations(client, violations)
     except Exception as e:
         logger.error("IB connection failed: %s", e)

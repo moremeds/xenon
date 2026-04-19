@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 # Will be importable once implemented
-from execution.naked_short_audit import find_naked_short_violations, cancel_violations
+from xenon.execution.naked_short_audit import find_naked_short_violations, cancel_violations
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +254,7 @@ class TestDryRun:
             "execution.naked_short_audit.py", "--dry-run",
             "--portfolio", str(pf), "--orders", str(of),
         ]):
-            with patch("execution.naked_short_audit.IBClient") as mock_ib:
+            with patch("xenon.execution.naked_short_audit.IBClient") as mock_ib:
                 result = audit_main()
                 mock_ib.assert_not_called()
                 assert result["violations_found"] == 1

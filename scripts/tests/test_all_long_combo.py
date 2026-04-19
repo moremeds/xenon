@@ -15,7 +15,7 @@ Red/Green workflow:
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from execution.ib_sync import detect_structure_type
+from xenon.execution.ib_sync import detect_structure_type
 
 
 def _make_leg(right: str, strike: float, position: int) -> dict:

@@ -21,12 +21,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from xenon.clients.ib_client import IBClient, CLIENT_IDS, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
+from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
 DEFAULT_CLIENT_ID = CLIENT_IDS["ib_orders"]
 
-ORDERS_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "orders.json"
+ORDERS_PATH = Path(__file__).resolve().parents[3] / "data" / "orders.json"
 
 # IB uses this sentinel for "no value" on realizedPNL
 IB_SENTINEL = 1.7976931348623157e308
@@ -144,6 +144,7 @@ def fetch_open_orders(client: IBClient) -> list:
     resolved_legs: dict = {}
     if combo_con_ids:
         from ib_insync import Contract as IBContract
+
         for con_id in combo_con_ids:
             try:
                 c = IBContract(conId=con_id)
@@ -159,22 +160,24 @@ def fetch_open_orders(client: IBClient) -> list:
         order = trade.order
         status = trade.orderStatus
 
-        orders.append({
-            "orderId": order.orderId,
-            "permId": order.permId,
-            "symbol": format_contract(contract),
-            "contract": serialize_contract(contract, resolved_legs),
-            "action": order.action,  # BUY or SELL
-            "orderType": order.orderType,  # LMT, MKT, STP, etc.
-            "totalQuantity": float(order.totalQuantity),
-            "limitPrice": safe_float(order.lmtPrice),
-            "auxPrice": safe_float(order.auxPrice),  # stop price
-            "status": status.status,  # Submitted, PreSubmitted, etc.
-            "filled": float(status.filled),
-            "remaining": float(status.remaining),
-            "avgFillPrice": safe_float(status.avgFillPrice),
-            "tif": order.tif,  # DAY, GTC, IOC, etc.
-        })
+        orders.append(
+            {
+                "orderId": order.orderId,
+                "permId": order.permId,
+                "symbol": format_contract(contract),
+                "contract": serialize_contract(contract, resolved_legs),
+                "action": order.action,  # BUY or SELL
+                "orderType": order.orderType,  # LMT, MKT, STP, etc.
+                "totalQuantity": float(order.totalQuantity),
+                "limitPrice": safe_float(order.lmtPrice),
+                "auxPrice": safe_float(order.auxPrice),  # stop price
+                "status": status.status,  # Submitted, PreSubmitted, etc.
+                "filled": float(status.filled),
+                "remaining": float(status.remaining),
+                "avgFillPrice": safe_float(status.avgFillPrice),
+                "tif": order.tif,  # DAY, GTC, IOC, etc.
+            }
+        )
 
     return orders
 
@@ -192,18 +195,20 @@ def fetch_executed_orders(client: IBClient) -> list:
         realized_pnl = safe_float(getattr(commission_report, "realizedPNL", None))
         commission = safe_float(getattr(commission_report, "commission", None))
 
-        executed.append({
-            "execId": execution.execId,
-            "symbol": format_contract(contract),
-            "contract": serialize_contract(contract),
-            "side": execution.side,  # BOT or SLD
-            "quantity": float(execution.shares),
-            "avgPrice": safe_float(execution.avgPrice),
-            "commission": commission,
-            "realizedPNL": realized_pnl,
-            "time": execution.time.isoformat() if hasattr(execution.time, "isoformat") else str(execution.time),
-            "exchange": execution.exchange,
-        })
+        executed.append(
+            {
+                "execId": execution.execId,
+                "symbol": format_contract(contract),
+                "contract": serialize_contract(contract),
+                "side": execution.side,  # BOT or SLD
+                "quantity": float(execution.shares),
+                "avgPrice": safe_float(execution.avgPrice),
+                "commission": commission,
+                "realizedPNL": realized_pnl,
+                "time": execution.time.isoformat() if hasattr(execution.time, "isoformat") else str(execution.time),
+                "exchange": execution.exchange,
+            }
+        )
 
     # Sort by time descending (most recent first)
     executed.sort(key=lambda x: x["time"], reverse=True)
@@ -237,9 +242,9 @@ def save_orders(data: dict):
 
 def display_orders(open_orders: list, executed_orders: list):
     """Pretty print orders"""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("OPEN ORDERS")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     if not open_orders:
         print("  No open orders")
@@ -248,9 +253,9 @@ def display_orders(open_orders: list, executed_orders: list):
             lmt = f" @ ${o['limitPrice']}" if o["limitPrice"] else ""
             print(f"  {o['action']} {o['totalQuantity']:.0f}x {o['symbol']}{lmt} [{o['orderType']}] — {o['status']}")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("EXECUTED ORDERS")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     if not executed_orders:
         print("  No fills this session")

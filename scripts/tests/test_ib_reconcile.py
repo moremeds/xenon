@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from execution.ib_reconcile import group_executions_by_symbol, find_new_trades
+from xenon.execution.ib_reconcile import group_executions_by_symbol, find_new_trades
 
 
 def _make_execution(symbol, sec_type, side, shares, price, strike=None, expiry=None, right=None, commission=0, realized_pnl=0):

@@ -11,8 +11,6 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-
 from xenon.clients.ib_client import IBClient
 
 
@@ -31,6 +29,7 @@ def main():
 
         # Qualify the underlying to get a valid conId (required by reqSecDefOptParams)
         from ib_insync import Stock
+
         stk = Stock(args.symbol, "SMART", "USD")
         client._ib.qualifyContracts(stk)
         if not stk.conId:
@@ -54,13 +53,17 @@ def main():
             # Get strikes for this expiry
             strikes = sorted(target_chain.strikes)
 
-            print(json.dumps({
-                "symbol": args.symbol,
-                "expiry": args.expiry,
-                "exchange": target_chain.exchange,
-                "strikes": strikes,
-                "multiplier": str(target_chain.multiplier),
-            }))
+            print(
+                json.dumps(
+                    {
+                        "symbol": args.symbol,
+                        "expiry": args.expiry,
+                        "exchange": target_chain.exchange,
+                        "strikes": strikes,
+                        "multiplier": str(target_chain.multiplier),
+                    }
+                )
+            )
         else:
             # Fetch all expirations
             all_expirations = set()
@@ -72,11 +75,15 @@ def main():
 
             expirations = sorted(all_expirations)
 
-            print(json.dumps({
-                "symbol": args.symbol,
-                "expirations": expirations,
-                "exchanges": exchanges,
-            }))
+            print(
+                json.dumps(
+                    {
+                        "symbol": args.symbol,
+                        "expirations": expirations,
+                        "exchanges": exchanges,
+                    }
+                )
+            )
     except Exception as e:
         print(json.dumps({"error": str(e)}))
         sys.exit(1)

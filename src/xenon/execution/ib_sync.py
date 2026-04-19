@@ -28,13 +28,13 @@ except ImportError:
     print("Install with: pip install ib_insync")
     sys.exit(1)
 
-from xenon.clients.ib_client import IBClient, CLIENT_IDS, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
+from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 
 # Default connection settings
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
 DEFAULT_CLIENT_ID = CLIENT_IDS["ib_sync"]
 
-PORTFOLIO_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "portfolio.json"
+PORTFOLIO_PATH = Path(__file__).resolve().parents[3] / "data" / "portfolio.json"
 
 
 def connect_ib(host: str, port: int, client_id="auto") -> IBClient:
@@ -55,13 +55,24 @@ def connect_ib(host: str, port: int, client_id="auto") -> IBClient:
 
 
 ACCOUNT_TAGS = [
-    'NetLiquidation', 'TotalCashValue', 'SettledCash',
-    'UnrealizedPnL', 'RealizedPnL',
-    'AccruedCash', 'NetDividend',
-    'MaintMarginReq', 'InitMarginReq', 'ExcessLiquidity', 'BuyingPower',
-    'AvailableFunds', 'Cushion',
-    'EquityWithLoanValue', 'PreviousDayEquityWithLoanValue',
-    'RegTEquity', 'SMA', 'GrossPositionValue',
+    "NetLiquidation",
+    "TotalCashValue",
+    "SettledCash",
+    "UnrealizedPnL",
+    "RealizedPnL",
+    "AccruedCash",
+    "NetDividend",
+    "MaintMarginReq",
+    "InitMarginReq",
+    "ExcessLiquidity",
+    "BuyingPower",
+    "AvailableFunds",
+    "Cushion",
+    "EquityWithLoanValue",
+    "PreviousDayEquityWithLoanValue",
+    "RegTEquity",
+    "SMA",
+    "GrossPositionValue",
 ]
 
 
@@ -76,7 +87,7 @@ def get_account_summary(client: IBClient) -> dict:
 
     summary = {}
     for av in account_values:
-        if av.tag in ACCOUNT_TAGS and av.currency == 'USD':
+        if av.tag in ACCOUNT_TAGS and av.currency == "USD":
             summary[av.tag] = float(av.value)
 
     return summary
@@ -97,18 +108,18 @@ def get_pnl(client: IBClient, account: str = "") -> dict:
         pnl = client.get_pnl(account)
         # Poll until dailyPnL is non-NaN (IB streams this asynchronously)
         for _ in range(8):  # 8 x 1s = 8s max on top of the 2s in get_pnl
-            if pnl and _valid(getattr(pnl, 'dailyPnL', None)):
+            if pnl and _valid(getattr(pnl, "dailyPnL", None)):
                 break
             client.sleep(1)
 
         result = {}
-        if pnl and hasattr(pnl, 'dailyPnL'):
+        if pnl and hasattr(pnl, "dailyPnL"):
             daily = pnl.dailyPnL
             unrealized = pnl.unrealizedPnL
             realized = pnl.realizedPnL
-            result['dailyPnL'] = float(daily) if _valid(daily) else None
-            result['unrealizedPnL'] = float(unrealized) if _valid(unrealized) else None
-            result['realizedPnL'] = float(realized) if _valid(realized) else None
+            result["dailyPnL"] = float(daily) if _valid(daily) else None
+            result["unrealizedPnL"] = float(unrealized) if _valid(unrealized) else None
+            result["realizedPnL"] = float(realized) if _valid(realized) else None
         try:
             client.cancel_pnl(pnl)
         except Exception:
@@ -121,10 +132,10 @@ def get_pnl(client: IBClient, account: str = "") -> dict:
 
 def format_option_structure(contract, position) -> str:
     """Format option contract into readable structure string"""
-    if contract.secType == 'OPT':
-        right = 'Call' if contract.right == 'C' else 'Put'
+    if contract.secType == "OPT":
+        right = "Call" if contract.right == "C" else "Put"
         return f"{right} ${contract.strike} ({contract.lastTradeDateOrContractMonth})"
-    elif contract.secType == 'STK':
+    elif contract.secType == "STK":
         return f"Stock ({position} shares)"
     else:
         return contract.secType
@@ -137,73 +148,73 @@ def detect_structure_type(legs: list) -> Tuple[str, str]:
     """
     if len(legs) == 1:
         leg = legs[0]
-        if leg['secType'] == 'STK':
+        if leg["secType"] == "STK":
             return "Stock", "equity"
-        direction = "Long" if leg['position'] > 0 else "Short"
-        right = "Call" if leg.get('right') == 'C' else "Put"
+        direction = "Long" if leg["position"] > 0 else "Short"
+        right = "Call" if leg.get("right") == "C" else "Put"
         return f"{direction} {right}", "defined" if direction == "Long" else "undefined"
-    
+
     # Sort legs by strike for consistent ordering
-    opt_legs = [l for l in legs if l['secType'] == 'OPT']
-    stk_legs = [l for l in legs if l['secType'] == 'STK']
-    
+    opt_legs = [l for l in legs if l["secType"] == "OPT"]
+    stk_legs = [l for l in legs if l["secType"] == "STK"]
+
     if not opt_legs:
         return "Mixed", "unknown"
-    
+
     # ── Covered Call Detection ──
     # Long stock + short call(s) in same ticker = covered call (defined risk)
     # Requires: stock shares >= short call contracts * 100
     if stk_legs and opt_legs:
-        long_stock = [s for s in stk_legs if s['position'] > 0]
-        short_calls = [o for o in opt_legs if o.get('right') == 'C' and o['position'] < 0]
-        
+        long_stock = [s for s in stk_legs if s["position"] > 0]
+        short_calls = [o for o in opt_legs if o.get("right") == "C" and o["position"] < 0]
+
         if long_stock and short_calls and len(opt_legs) == len(short_calls):
-            total_shares = sum(s['position'] for s in long_stock)
-            total_short_contracts = sum(abs(o['position']) for o in short_calls)
+            total_shares = sum(s["position"] for s in long_stock)
+            total_short_contracts = sum(abs(o["position"]) for o in short_calls)
             shares_needed = total_short_contracts * 100
-            
+
             if total_shares >= shares_needed:
                 return "Covered Call", "defined"
             else:
                 # Partially covered — still has naked exposure
                 return "Partially Covered Call", "undefined"
-    
+
     # Analyze leg composition
-    calls = [l for l in opt_legs if l.get('right') == 'C']
-    puts = [l for l in opt_legs if l.get('right') == 'P']
-    long_legs = [l for l in opt_legs if l['position'] > 0]
-    short_legs = [l for l in opt_legs if l['position'] < 0]
-    
+    calls = [l for l in opt_legs if l.get("right") == "C"]
+    puts = [l for l in opt_legs if l.get("right") == "P"]
+    long_legs = [l for l in opt_legs if l["position"] > 0]
+    short_legs = [l for l in opt_legs if l["position"] < 0]
+
     # Helper: detect if leg contract counts differ (ratio position)
     def _is_ratio(leg_a, leg_b):
-        return abs(leg_a['position']) != abs(leg_b['position'])
+        return abs(leg_a["position"]) != abs(leg_b["position"])
 
     # Synthetic or Risk Reversal: Short Put + Long Call (or vice versa)
     # Same strike = Synthetic Long/Short (behaves like stock)
     # Different strikes = Risk Reversal (directional bet with hedge)
     if len(puts) == 1 and len(calls) == 1:
-        same_strike = puts[0].get('strike') == calls[0].get('strike')
+        same_strike = puts[0].get("strike") == calls[0].get("strike")
         ratio_prefix = "Ratio " if _is_ratio(puts[0], calls[0]) else ""
 
-        if puts[0]['position'] < 0 and calls[0]['position'] > 0:
+        if puts[0]["position"] < 0 and calls[0]["position"] > 0:
             # Long Call + Short Put
             if same_strike:
                 return f"{ratio_prefix}Synthetic Long", "undefined"
             return f"{ratio_prefix}Risk Reversal", "undefined"
-        if puts[0]['position'] > 0 and calls[0]['position'] < 0:
+        if puts[0]["position"] > 0 and calls[0]["position"] < 0:
             # Long Put + Short Call
             if same_strike:
                 return f"{ratio_prefix}Synthetic Short", "undefined"
             return f"{ratio_prefix}Reverse Risk Reversal", "undefined"
-        if puts[0]['position'] > 0 and calls[0]['position'] > 0:
+        if puts[0]["position"] > 0 and calls[0]["position"] > 0:
             return "Strangle" if not same_strike else "Straddle", "defined"
 
     # Vertical Spreads: Same type, different strikes, opposite directions
     if len(calls) == 2 and len(puts) == 0:
         if len(long_legs) == 1 and len(short_legs) == 1:
             ratio_prefix = "Ratio " if _is_ratio(long_legs[0], short_legs[0]) else ""
-            long_strike = long_legs[0].get('strike', 0)
-            short_strike = short_legs[0].get('strike', 0)
+            long_strike = long_legs[0].get("strike", 0)
+            short_strike = short_legs[0].get("strike", 0)
             if long_strike < short_strike:
                 return f"{ratio_prefix}Bull Call Spread", "defined" if not ratio_prefix else "undefined"
             else:
@@ -212,18 +223,18 @@ def detect_structure_type(legs: list) -> Tuple[str, str]:
     if len(puts) == 2 and len(calls) == 0:
         if len(long_legs) == 1 and len(short_legs) == 1:
             ratio_prefix = "Ratio " if _is_ratio(long_legs[0], short_legs[0]) else ""
-            long_strike = long_legs[0].get('strike', 0)
-            short_strike = short_legs[0].get('strike', 0)
+            long_strike = long_legs[0].get("strike", 0)
+            short_strike = short_legs[0].get("strike", 0)
             if long_strike > short_strike:
                 return f"{ratio_prefix}Bear Put Spread", "defined" if not ratio_prefix else "undefined"
             else:
                 return f"{ratio_prefix}Bull Put Spread", "defined" if not ratio_prefix else "undefined"
-    
+
     # ── All-long combos: fully defined risk ──
     # If every option leg is long (position > 0), max loss = total premium paid.
     # Examples: 2 long calls at different strikes, long call + long put (strangle handled above),
     #           3-leg all-long butterflies, etc.
-    if opt_legs and all(l['position'] > 0 for l in opt_legs) and not stk_legs:
+    if opt_legs and all(l["position"] > 0 for l in opt_legs) and not stk_legs:
         if len(calls) > 0 and len(puts) == 0:
             return f"Long Call Combo ({len(opt_legs)} legs)", "defined"
         if len(puts) > 0 and len(calls) == 0:
@@ -243,7 +254,11 @@ def _ratio_label(legs: list) -> str:
     if len(legs) != 2:
         return ""
     from math import gcd
-    a, b = int(abs(legs[0].get('position', legs[0].get('contracts', 0)))), int(abs(legs[1].get('position', legs[1].get('contracts', 0))))
+
+    a, b = (
+        int(abs(legs[0].get("position", legs[0].get("contracts", 0)))),
+        int(abs(legs[1].get("position", legs[1].get("contracts", 0)))),
+    )
     if a == b or a == 0 or b == 0:
         return ""
     g = gcd(a, b)
@@ -253,10 +268,9 @@ def _ratio_label(legs: list) -> str:
 def format_structure_description(structure_type: str, legs: list) -> str:
     """Create human-readable structure description with strikes"""
     if structure_type == "Stock":
-        return legs[0]['structure']
+        return legs[0]["structure"]
 
-    opt_legs = sorted([l for l in legs if l['secType'] == 'OPT'],
-                      key=lambda x: x.get('strike', 0))
+    opt_legs = sorted([l for l in legs if l["secType"] == "OPT"], key=lambda x: x.get("strike", 0))
 
     if not opt_legs:
         return structure_type
@@ -265,36 +279,36 @@ def format_structure_description(structure_type: str, legs: list) -> str:
     ratio_suffix = f" {ratio}" if ratio else ""
 
     if "Spread" in structure_type:
-        strikes = [l.get('strike') for l in opt_legs]
+        strikes = [l.get("strike") for l in opt_legs]
         return f"{structure_type}{ratio_suffix} ${min(strikes)}/${max(strikes)}"
 
     if "Covered Call" in structure_type:
-        call_legs = sorted([l for l in opt_legs if l.get('right') == 'C'], key=lambda x: x.get('strike', 0))
-        stk_legs = [l for l in legs if l.get('secType') == 'STK' or l.get('type') == 'Stock']
-        shares = sum(abs(l.get('position', l.get('contracts', 0))) for l in stk_legs)
+        call_legs = sorted([l for l in opt_legs if l.get("right") == "C"], key=lambda x: x.get("strike", 0))
+        stk_legs = [l for l in legs if l.get("secType") == "STK" or l.get("type") == "Stock"]
+        shares = sum(abs(l.get("position", l.get("contracts", 0))) for l in stk_legs)
         if call_legs:
-            strike = call_legs[0].get('strike', '?')
+            strike = call_legs[0].get("strike", "?")
             return f"{structure_type} ${strike} ({int(shares)} shares)"
         return structure_type
 
     if "Synthetic" in structure_type:
-        strike = next((l.get('strike') for l in opt_legs if l.get('right') in ('C', 'P')), '?')
+        strike = next((l.get("strike") for l in opt_legs if l.get("right") in ("C", "P")), "?")
         return f"{structure_type}{ratio_suffix} ${strike}"
 
     if "Risk Reversal" in structure_type:
-        put_strike = next((l.get('strike') for l in opt_legs if l.get('right') == 'P'), '?')
-        call_strike = next((l.get('strike') for l in opt_legs if l.get('right') == 'C'), '?')
+        put_strike = next((l.get("strike") for l in opt_legs if l.get("right") == "P"), "?")
+        call_strike = next((l.get("strike") for l in opt_legs if l.get("right") == "C"), "?")
         return f"{structure_type}{ratio_suffix} (P${put_strike}/C${call_strike})"
 
     if structure_type in ("Straddle", "Strangle"):
-        strikes = [l.get('strike') for l in opt_legs]
+        strikes = [l.get("strike") for l in opt_legs]
         if len(set(strikes)) == 1:
             return f"{structure_type} ${strikes[0]}"
         return f"{structure_type} ${min(strikes)}/${max(strikes)}"
 
     # Single-leg options: Short Put, Short Call, Long Put, Long Call
     if len(opt_legs) == 1:
-        strike = opt_legs[0].get('strike', '?')
+        strike = opt_legs[0].get("strike", "?")
         return f"{structure_type} ${strike}"
 
     return structure_type
@@ -303,55 +317,55 @@ def format_structure_description(structure_type: str, legs: list) -> str:
 def _merge_covered_call_groups(groups: dict) -> dict:
     """
     Merge standalone short-call groups into same-ticker stock groups to form covered calls.
-    
+
     IB returns stock and options as separate positions with different expiries,
     so they end up in separate (symbol, expiry) groups. This pass detects when
     a short-call-only group can be merged with a long-stock group for the same ticker,
     creating a covered call structure.
-    
+
     Only merges if:
     1. The short call group contains ONLY short calls (no other option types)
     2. A stock group exists for the same ticker with long shares
     3. Stock shares >= short call contracts * 100 (fully covered)
     """
     from collections import defaultdict
-    
+
     # Find all stock groups and short-call-only groups per ticker
     stock_groups = {}  # ticker -> (key, legs)
     short_call_groups = {}  # ticker -> [(key, legs), ...]
-    
+
     for key, legs in groups.items():
         symbol = key[0]
-        
+
         # Is this a stock-only group?
-        if all(l['secType'] == 'STK' for l in legs):
-            long_shares = sum(l['position'] for l in legs if l['position'] > 0)
+        if all(l["secType"] == "STK" for l in legs):
+            long_shares = sum(l["position"] for l in legs if l["position"] > 0)
             if long_shares > 0:
                 stock_groups[symbol] = key
-        
+
         # Is this a short-call-only group?
-        elif all(l['secType'] == 'OPT' for l in legs):
+        elif all(l["secType"] == "OPT" for l in legs):
             opt_legs = legs
-            if all(l.get('right') == 'C' and l['position'] < 0 for l in opt_legs):
+            if all(l.get("right") == "C" and l["position"] < 0 for l in opt_legs):
                 if symbol not in short_call_groups:
                     short_call_groups[symbol] = []
                 short_call_groups[symbol].append(key)
-    
+
     # Merge matching pairs
     merged = dict(groups)  # copy
     for symbol, sc_keys in short_call_groups.items():
         if symbol not in stock_groups:
             continue
-        
+
         stk_key = stock_groups[symbol]
         stk_legs = merged[stk_key]
-        total_shares = sum(l['position'] for l in stk_legs if l['position'] > 0)
-        
+        total_shares = sum(l["position"] for l in stk_legs if l["position"] > 0)
+
         for sc_key in sc_keys:
             sc_legs = merged.get(sc_key, [])
-            total_short_contracts = sum(abs(l['position']) for l in sc_legs)
+            total_short_contracts = sum(abs(l["position"]) for l in sc_legs)
             shares_needed = total_short_contracts * 100
-            
+
             if total_shares >= shares_needed:
                 # Merge: combine legs into a single group keyed by the option expiry
                 combined = list(stk_legs) + list(sc_legs)
@@ -362,7 +376,7 @@ def _merge_covered_call_groups(groups: dict) -> dict:
                 # Reduce available shares for any additional short call groups
                 total_shares -= shares_needed
                 break  # Only merge one short call group per stock group
-    
+
     return merged
 
 
@@ -372,51 +386,51 @@ def collapse_positions(positions: list) -> list:
     Groups by ticker + expiry, detects structure type.
     """
     from collections import defaultdict
-    
+
     # Group by ticker + expiry
     groups = defaultdict(list)
     for pos in positions:
         # Use N/A expiry for stocks to keep them separate
-        key = (pos['symbol'], pos['expiry'])
+        key = (pos["symbol"], pos["expiry"])
         groups[key].append(pos)
-    
+
     # ── Second pass: merge covered calls ──
     # A standalone short call group + same-ticker stock group = covered call.
     # Merge them into a single group so detect_structure_type can identify it.
     groups = _merge_covered_call_groups(groups)
-    
+
     collapsed = []
     position_id = 1
-    
+
     for (symbol, expiry), legs in groups.items():
         structure_type, risk_profile = detect_structure_type(legs)
         structure_desc = format_structure_description(structure_type, legs)
-        
+
         # Calculate aggregate values — sign-aware (short legs are credits)
         total_entry_cost = 0
         for leg in legs:
-            if leg['position'] > 0:
-                total_entry_cost += leg['entry_cost']
+            if leg["position"] > 0:
+                total_entry_cost += leg["entry_cost"]
             else:
-                total_entry_cost -= leg['entry_cost']
+                total_entry_cost -= leg["entry_cost"]
 
         known_mv = []
         is_market_price_calculated = False
         for leg in legs:
-            mv = leg.get('marketValue')
+            mv = leg.get("marketValue")
             if mv is not None:
-                sign = 1 if leg['position'] > 0 else -1
+                sign = 1 if leg["position"] > 0 else -1
                 known_mv.append(sign * mv)
-                if leg.get('marketPriceIsCalculated'):
+                if leg.get("marketPriceIsCalculated"):
                     is_market_price_calculated = True
         total_market_value = sum(known_mv) if known_mv else None
-        
+
         # Net contracts (for spreads, use the long leg count)
-        long_legs = [l for l in legs if l['position'] > 0]
-        contracts = int(abs(long_legs[0]['position'])) if long_legs else int(abs(legs[0]['position']))
-        
+        long_legs = [l for l in legs if l["position"] > 0]
+        contracts = int(abs(long_legs[0]["position"])) if long_legs else int(abs(legs[0]["position"]))
+
         # Determine net direction
-        net_position = sum(l['position'] for l in legs)
+        net_position = sum(l["position"] for l in legs)
         num_legs = len(legs)
         if structure_type == "Stock":
             direction = "LONG" if net_position > 0 else "SHORT"
@@ -426,12 +440,12 @@ def collapse_positions(positions: list) -> list:
             direction = "COMBO"
         else:
             direction = "LONG" if net_position > 0 else "SHORT"
-        
+
         # Calculate max risk
         if risk_profile == "defined":
             # For defined risk, max loss is net debit paid
             if "Spread" in structure_type:
-                strikes = sorted([l.get('strike', 0) for l in legs if l['secType'] == 'OPT'])
+                strikes = sorted([l.get("strike", 0) for l in legs if l["secType"] == "OPT"])
                 width = (strikes[-1] - strikes[0]) * 100 * contracts if len(strikes) >= 2 else 0
                 if direction == "DEBIT":
                     max_risk = total_entry_cost
@@ -441,12 +455,12 @@ def collapse_positions(positions: list) -> list:
                 max_risk = total_entry_cost
         else:
             max_risk = None  # Undefined risk
-        
+
         # Aggregate per-position daily P&L from IB's reqPnLSingle.
         # This is more accurate than WS close-based calculation because IB
         # correctly handles intraday additions (only overnight contracts use
         # yesterday's close; intraday adds use fill price as reference).
-        ib_daily_pnl_parts = [leg.get('ibDailyPnl') for leg in legs]
+        ib_daily_pnl_parts = [leg.get("ibDailyPnl") for leg in legs]
         if all(p is not None for p in ib_daily_pnl_parts):
             ib_daily_pnl = round(sum(ib_daily_pnl_parts), 2)
         else:
@@ -454,53 +468,59 @@ def collapse_positions(positions: list) -> list:
 
         # Format legs for subtree
         formatted_legs = []
-        for leg in sorted(legs, key=lambda x: (x.get('right', 'Z'), x.get('strike', 0))):
-            formatted_legs.append({
-                "direction": "LONG" if leg['position'] > 0 else "SHORT",
-                "contracts": int(abs(leg['position'])),
-                "type": "Call" if leg.get('right') == 'C' else ("Put" if leg.get('right') == 'P' else "Stock"),
-                "strike": leg.get('strike'),
-                "entry_cost": leg['entry_cost'],
-                "avg_cost": leg['avgCost'],
-                "market_price": leg.get('marketPrice'),
-                "market_value": leg.get('marketValue'),
-                "market_price_is_calculated": bool(leg.get('marketPriceIsCalculated'))
-            })
-        
-        collapsed.append({
-            "id": position_id,
-            "ticker": symbol,
-            "structure": structure_desc,
-            "structure_type": structure_type,
-            "risk_profile": risk_profile,
-            "expiry": expiry,
-            "contracts": contracts,
-            "direction": direction,
-            "entry_cost": round(total_entry_cost, 2),
-            "max_risk": round(max_risk, 2) if max_risk is not None else None,
-            "market_value": round(total_market_value, 2) if total_market_value is not None else None,
-            "market_price_is_calculated": bool(is_market_price_calculated) if total_market_value is not None else False,
-            "ib_daily_pnl": ib_daily_pnl,
-            "legs": formatted_legs,
-            "kelly_optimal": None,
-            "target": None,
-            "stop": None
-        })
+        for leg in sorted(legs, key=lambda x: (x.get("right", "Z"), x.get("strike", 0))):
+            formatted_legs.append(
+                {
+                    "direction": "LONG" if leg["position"] > 0 else "SHORT",
+                    "contracts": int(abs(leg["position"])),
+                    "type": "Call" if leg.get("right") == "C" else ("Put" if leg.get("right") == "P" else "Stock"),
+                    "strike": leg.get("strike"),
+                    "entry_cost": leg["entry_cost"],
+                    "avg_cost": leg["avgCost"],
+                    "market_price": leg.get("marketPrice"),
+                    "market_value": leg.get("marketValue"),
+                    "market_price_is_calculated": bool(leg.get("marketPriceIsCalculated")),
+                }
+            )
+
+        collapsed.append(
+            {
+                "id": position_id,
+                "ticker": symbol,
+                "structure": structure_desc,
+                "structure_type": structure_type,
+                "risk_profile": risk_profile,
+                "expiry": expiry,
+                "contracts": contracts,
+                "direction": direction,
+                "entry_cost": round(total_entry_cost, 2),
+                "max_risk": round(max_risk, 2) if max_risk is not None else None,
+                "market_value": round(total_market_value, 2) if total_market_value is not None else None,
+                "market_price_is_calculated": bool(is_market_price_calculated)
+                if total_market_value is not None
+                else False,
+                "ib_daily_pnl": ib_daily_pnl,
+                "legs": formatted_legs,
+                "kelly_optimal": None,
+                "target": None,
+                "stop": None,
+            }
+        )
         position_id += 1
-    
+
     # Sort by ticker, then expiry
-    collapsed.sort(key=lambda x: (x['ticker'], x['expiry'] or 'Z'))
-    
+    collapsed.sort(key=lambda x: (x["ticker"], x["expiry"] or "Z"))
+
     # Re-assign IDs after sorting
     for i, pos in enumerate(collapsed, 1):
-        pos['id'] = i
-    
+        pos["id"] = i
+
     return collapsed
 
 
 def parse_expiry(contract) -> str:
     """Parse expiry date from contract"""
-    if hasattr(contract, 'lastTradeDateOrContractMonth') and contract.lastTradeDateOrContractMonth:
+    if hasattr(contract, "lastTradeDateOrContractMonth") and contract.lastTradeDateOrContractMonth:
         expiry_str = contract.lastTradeDateOrContractMonth
         # Format: YYYYMMDD -> YYYY-MM-DD
         if len(expiry_str) == 8:
@@ -520,7 +540,9 @@ def _normalize_market_price(raw_price) -> Optional[float]:
     return float(raw_price)
 
 
-def _resolve_market_price(market_price: Optional[float], bid: Optional[float], ask: Optional[float], close: Optional[float] = None) -> Tuple[Optional[float], bool]:
+def _resolve_market_price(
+    market_price: Optional[float], bid: Optional[float], ask: Optional[float], close: Optional[float] = None
+) -> Tuple[Optional[float], bool]:
     """Return a usable price and whether it was calculated.
 
     Fallback chain: marketPrice → midpoint(bid, ask) → close.
@@ -539,35 +561,37 @@ def _resolve_market_price(market_price: Optional[float], bid: Optional[float], a
 def fetch_positions(client: IBClient) -> list:
     """Fetch all positions from IB"""
     positions = client.get_positions()
-    
+
     formatted = []
     for pos in positions:
         contract = pos.contract
-        
+
         # Calculate position value
         avg_cost = pos.avgCost
         position_size = pos.position
-        
+
         # For options, avgCost is per share, multiply by 100 for per contract
-        if contract.secType == 'OPT':
+        if contract.secType == "OPT":
             entry_cost = abs(avg_cost * position_size)  # Already multiplied by multiplier internally
         else:
             entry_cost = abs(avg_cost * position_size)
-        
-        formatted.append({
-            "symbol": contract.symbol,
-            "secType": contract.secType,
-            "position": position_size,
-            "avgCost": avg_cost,
-            "entry_cost": round(entry_cost, 2),
-            "expiry": parse_expiry(contract),
-            "strike": getattr(contract, 'strike', None),
-            "right": getattr(contract, 'right', None),
-            "structure": format_option_structure(contract, position_size),
-            "conId": contract.conId,  # Needed for reqPnLSingle
-            "contract": contract  # Keep for market data requests
-        })
-    
+
+        formatted.append(
+            {
+                "symbol": contract.symbol,
+                "secType": contract.secType,
+                "position": position_size,
+                "avgCost": avg_cost,
+                "entry_cost": round(entry_cost, 2),
+                "expiry": parse_expiry(contract),
+                "strike": getattr(contract, "strike", None),
+                "right": getattr(contract, "right", None),
+                "structure": format_option_structure(contract, position_size),
+                "conId": contract.conId,  # Needed for reqPnLSingle
+                "contract": contract,  # Keep for market data requests
+            }
+        )
+
     return formatted
 
 
@@ -578,13 +602,13 @@ def fetch_market_prices(client: IBClient, positions: list) -> list:
     client.set_market_data_type(4)
 
     # Qualify all contracts at once
-    contracts = [pos['contract'] for pos in positions]
+    contracts = [pos["contract"] for pos in positions]
     client.qualify_contracts(*contracts)
 
     # Request all market data simultaneously
     tickers = []
     for pos in positions:
-        ticker = client.get_quote(pos['contract'])
+        ticker = client.get_quote(pos["contract"])
         tickers.append(ticker)
 
     # Single sleep for all data to arrive
@@ -599,38 +623,38 @@ def fetch_market_prices(client: IBClient, positions: list) -> list:
         price, is_calculated = _resolve_market_price(market_price, bid, ask, close)
 
         if price is not None:
-            multiplier = 100 if pos['secType'] == 'OPT' else 1
-            pos['marketPrice'] = price
-            pos['marketValue'] = round(price * abs(pos['position']) * multiplier, 2)
-            pos['marketPriceIsCalculated'] = is_calculated
+            multiplier = 100 if pos["secType"] == "OPT" else 1
+            pos["marketPrice"] = price
+            pos["marketValue"] = round(price * abs(pos["position"]) * multiplier, 2)
+            pos["marketPriceIsCalculated"] = is_calculated
         else:
-            pos['marketPrice'] = None
-            pos['marketValue'] = None
-            pos['marketPriceIsCalculated'] = False
-        client.cancel_market_data(pos['contract'])
-        del pos['contract']  # Remove non-serializable contract object
+            pos["marketPrice"] = None
+            pos["marketValue"] = None
+            pos["marketPriceIsCalculated"] = False
+        client.cancel_market_data(pos["contract"])
+        del pos["contract"]  # Remove non-serializable contract object
 
     return positions
 
 
 def fetch_position_daily_pnl(client: IBClient, positions: list, account: str = "") -> list:
     """Fetch IB's per-position daily P&L via reqPnLSingle (batched).
-    
+
     IB correctly handles intraday additions — if you held 25 contracts
     overnight and bought 25 more today, IB's dailyPnL reflects:
-      overnight_contracts × (current - yesterday_close) + 
+      overnight_contracts × (current - yesterday_close) +
       intraday_contracts × (current - fill_price)
-    
+
     This is more accurate than our WS close-based calculation which
     assumes all contracts were held overnight.
-    
+
     Performance: All PnL subscriptions are requested at once (no per-request
     sleep), then a single combined sleep waits for data to arrive.
     """
     from ib_insync import util as ib_util
 
     def _valid(val):
-        return val is not None and not ib_util.isNan(val) and val != 1.7976931348623157e+308
+        return val is not None and not ib_util.isNan(val) and val != 1.7976931348623157e308
 
     if not account:
         accounts = client.ib.managedAccounts()
@@ -643,7 +667,7 @@ def fetch_position_daily_pnl(client: IBClient, positions: list, account: str = "
     # get_pnl_single() which sleeps 0.5s per call, and call IB API directly.
     pnl_requests = []
     for pos in positions:
-        con_id = pos.get('conId')
+        con_id = pos.get("conId")
         if con_id:
             try:
                 pnl_single = client.ib.reqPnLSingle(account, "", con_id)
@@ -660,91 +684,91 @@ def fetch_position_daily_pnl(client: IBClient, positions: list, account: str = "
     # Read results and cancel subscriptions
     for pos, pnl_single, con_id in pnl_requests:
         if pnl_single is not None:
-            daily = getattr(pnl_single, 'dailyPnL', None)
+            daily = getattr(pnl_single, "dailyPnL", None)
             if _valid(daily):
-                pos['ibDailyPnl'] = round(float(daily), 2)
+                pos["ibDailyPnl"] = round(float(daily), 2)
             else:
-                pos['ibDailyPnl'] = None
+                pos["ibDailyPnl"] = None
             # Cancel subscription
             if con_id:
                 client.cancel_pnl_single(account, con_id)
         else:
-            pos['ibDailyPnl'] = None
+            pos["ibDailyPnl"] = None
 
     return positions
 
 
 def display_portfolio(account: dict, positions: list, collapsed: list = None):
     """Pretty print portfolio"""
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("INTERACTIVE BROKERS PORTFOLIO")
-    print("="*70)
-    
+    print("=" * 70)
+
     print("\n📊 ACCOUNT SUMMARY")
-    print("-"*50)
+    print("-" * 50)
     for key, value in account.items():
         print(f"  {key}: ${value:,.2f}")
-    
+
     print("\n📈 POSITIONS")
-    print("-"*50)
-    
+    print("-" * 50)
+
     # Use collapsed view if available
     display_positions = collapsed if collapsed else positions
-    
+
     if not display_positions:
         print("  No open positions")
     elif collapsed:
         # Display collapsed multi-leg structures
         for pos in collapsed:
-            risk_icon = "✓" if pos['risk_profile'] == 'defined' else "⚠"
+            risk_icon = "✓" if pos["risk_profile"] == "defined" else "⚠"
             print(f"\n  [{pos['id']}] {pos['ticker']} — {pos['structure']}")
             print(f"      {risk_icon} {pos['risk_profile'].upper()} | {pos['direction']} | {pos['contracts']}x")
             print(f"      Entry: ${pos['entry_cost']:,.2f}", end="")
-            if pos['max_risk'] is not None:
+            if pos["max_risk"] is not None:
                 print(f" | Max Risk: ${pos['max_risk']:,.2f}", end="")
             print()
-            if pos.get('market_value') is not None:
-                pnl = pos['market_value'] - pos['entry_cost']
-                pnl_pct = (pnl / abs(pos['entry_cost']) * 100) if pos['entry_cost'] != 0 else 0
+            if pos.get("market_value") is not None:
+                pnl = pos["market_value"] - pos["entry_cost"]
+                pnl_pct = (pnl / abs(pos["entry_cost"]) * 100) if pos["entry_cost"] != 0 else 0
                 print(f"      Market Value: ${pos['market_value']:,.2f} ({pnl_pct:+.1f}%)")
-            if pos['expiry'] and pos['expiry'] != "N/A":
+            if pos["expiry"] and pos["expiry"] != "N/A":
                 print(f"      Expiry: {pos['expiry']}")
-            
+
             # Show legs subtree
-            if len(pos['legs']) > 1:
+            if len(pos["legs"]) > 1:
                 print("      ├─ Legs:")
-                for i, leg in enumerate(pos['legs']):
-                    is_last = i == len(pos['legs']) - 1
+                for i, leg in enumerate(pos["legs"]):
+                    is_last = i == len(pos["legs"]) - 1
                     prefix = "└" if is_last else "├"
-                    strike_str = f" ${leg['strike']}" if leg['strike'] else ""
+                    strike_str = f" ${leg['strike']}" if leg["strike"] else ""
                     print(f"      │  {prefix}─ {leg['direction']} {leg['contracts']}x {leg['type']}{strike_str}")
                     print(f"      │     Cost: ${leg['entry_cost']:,.2f}", end="")
-                    if leg.get('market_value') is not None:
+                    if leg.get("market_value") is not None:
                         print(f" → ${leg['market_value']:,.2f}", end="")
                     print()
     else:
         # Fallback: group by underlying (old behavior)
         by_symbol = {}
         for pos in positions:
-            sym = pos['symbol']
+            sym = pos["symbol"]
             if sym not in by_symbol:
                 by_symbol[sym] = []
             by_symbol[sym].append(pos)
-        
+
         for symbol, symbol_positions in by_symbol.items():
             print(f"\n  {symbol}")
             for pos in symbol_positions:
-                direction = "LONG" if pos['position'] > 0 else "SHORT"
+                direction = "LONG" if pos["position"] > 0 else "SHORT"
                 print(f"    {direction} {abs(pos['position'])}x {pos['structure']}")
                 print(f"      Entry Cost: ${pos['entry_cost']:,.2f}")
-                if pos.get('marketValue') is not None:
-                    pnl = pos['marketValue'] - pos['entry_cost']
-                    pnl_pct = (pnl / pos['entry_cost'] * 100) if pos['entry_cost'] > 0 else 0
+                if pos.get("marketValue") is not None:
+                    pnl = pos["marketValue"] - pos["entry_cost"]
+                    pnl_pct = (pnl / pos["entry_cost"] * 100) if pos["entry_cost"] > 0 else 0
                     print(f"      Market Value: ${pos['marketValue']:,.2f} ({pnl_pct:+.1f}%)")
-                if pos['expiry'] != "N/A":
+                if pos["expiry"] != "N/A":
                     print(f"      Expiry: {pos['expiry']}")
-    
-    print("\n" + "="*70)
+
+    print("\n" + "=" * 70)
 
 
 def build_account_summary(account: dict, pnl_data: dict) -> dict:
@@ -767,6 +791,7 @@ def build_account_summary(account: dict, pnl_data: dict) -> dict:
       excess_liquidity → ExcessLiquidity
       buying_power     → BuyingPower
     """
+
     def safe_float(val, default=0.0):
         if val is None:
             return default
@@ -776,36 +801,36 @@ def build_account_summary(account: dict, pnl_data: dict) -> dict:
             return default
 
     # Prefer reqPnL for unrealized/realized (real-time), fall back to accountSummary
-    unrealized = pnl_data.get('unrealizedPnL')
+    unrealized = pnl_data.get("unrealizedPnL")
     if unrealized is None:
-        unrealized = account.get('UnrealizedPnL')
-    realized = pnl_data.get('realizedPnL')
+        unrealized = account.get("UnrealizedPnL")
+    realized = pnl_data.get("realizedPnL")
     if realized is None:
-        realized = account.get('RealizedPnL')
+        realized = account.get("RealizedPnL")
 
     # SettledCash may not always be present; fall back to TotalCashValue
-    settled = account.get('SettledCash')
+    settled = account.get("SettledCash")
     if settled is None:
-        settled = account.get('TotalCashValue')
+        settled = account.get("TotalCashValue")
 
     return {
-        "net_liquidation": safe_float(account.get('NetLiquidation')),
-        "daily_pnl": pnl_data.get('dailyPnL'),  # None when unavailable, not 0
+        "net_liquidation": safe_float(account.get("NetLiquidation")),
+        "daily_pnl": pnl_data.get("dailyPnL"),  # None when unavailable, not 0
         "unrealized_pnl": safe_float(unrealized),
         "realized_pnl": safe_float(realized),
-        "cash": safe_float(account.get('TotalCashValue')),
+        "cash": safe_float(account.get("TotalCashValue")),
         "settled_cash": safe_float(settled),
-        "maintenance_margin": safe_float(account.get('MaintMarginReq')),
-        "initial_margin": safe_float(account.get('InitMarginReq')),
-        "excess_liquidity": safe_float(account.get('ExcessLiquidity')),
-        "buying_power": safe_float(account.get('BuyingPower')),
-        "available_funds": safe_float(account.get('AvailableFunds')),
-        "dividends": safe_float(account.get('NetDividend')),
-        "equity_with_loan": safe_float(account.get('EquityWithLoanValue')),
-        "previous_day_ewl": safe_float(account.get('PreviousDayEquityWithLoanValue')),
-        "reg_t_equity": safe_float(account.get('RegTEquity')),
-        "sma": safe_float(account.get('SMA')),
-        "gross_position_value": safe_float(account.get('GrossPositionValue')),
+        "maintenance_margin": safe_float(account.get("MaintMarginReq")),
+        "initial_margin": safe_float(account.get("InitMarginReq")),
+        "excess_liquidity": safe_float(account.get("ExcessLiquidity")),
+        "buying_power": safe_float(account.get("BuyingPower")),
+        "available_funds": safe_float(account.get("AvailableFunds")),
+        "dividends": safe_float(account.get("NetDividend")),
+        "equity_with_loan": safe_float(account.get("EquityWithLoanValue")),
+        "previous_day_ewl": safe_float(account.get("PreviousDayEquityWithLoanValue")),
+        "reg_t_equity": safe_float(account.get("RegTEquity")),
+        "sma": safe_float(account.get("SMA")),
+        "gross_position_value": safe_float(account.get("GrossPositionValue")),
     }
 
 
@@ -850,19 +875,22 @@ def build_fill_dates(client) -> dict:
     return fill_dates
 
 
-def convert_to_portfolio_format(account: dict, collapsed_positions: list, pnl_data: Optional[dict] = None, fill_dates: Optional[dict] = None) -> dict:
+def convert_to_portfolio_format(
+    account: dict, collapsed_positions: list, pnl_data: Optional[dict] = None, fill_dates: Optional[dict] = None
+) -> dict:
     """Convert IB data to portfolio.json format using collapsed positions"""
 
-    bankroll = account.get('NetLiquidation', account.get('TotalCashValue', 0))
+    bankroll = account.get("NetLiquidation", account.get("TotalCashValue", 0))
 
     # Calculate totals from collapsed positions
-    total_deployed = sum(p['entry_cost'] for p in collapsed_positions)
+    total_deployed = sum(p["entry_cost"] for p in collapsed_positions)
     deployed_pct = (total_deployed / bankroll * 100) if bankroll > 0 else 0
 
     # Derive entry_date from trade_log and previous portfolio.
     # Priority: trade_log (most recent BUY/TRADE for matching ticker+structure) →
     # previous portfolio → today (truly new position).
     import json as _json
+
     today = datetime.now().strftime("%Y-%m-%d")
 
     # Build date lookup from trade_log (latest trade per ticker+structure key)
@@ -959,10 +987,9 @@ def convert_to_portfolio_format(account: dict, collapsed_positions: list, pnl_da
             contract_date = blotter_dates.get(contract_key)
             if contract_date:
                 contract_dates.append(contract_date)
-        if contract_dates and len(contract_dates) == len([
-            leg for leg in legs
-            if leg.get("type") in ("Call", "Put") and leg.get("strike") not in (None, 0)
-        ]):
+        if contract_dates and len(contract_dates) == len(
+            [leg for leg in legs if leg.get("type") in ("Call", "Put") and leg.get("strike") not in (None, 0)]
+        ):
             blotter_contract_date = min(contract_dates)
 
         # IB fill dates (same-session trades not yet in blotter/trade_log)
@@ -981,7 +1008,7 @@ def convert_to_portfolio_format(account: dict, collapsed_positions: list, pnl_da
 
         # Fallback chain: blotter (per-contract) → trade_log → blotter (ticker) →
         # IB fills → prev portfolio → "unknown"
-        pos['entry_date'] = (
+        pos["entry_date"] = (
             blotter_contract_date
             or trade_log_dates.get(f"{ticker}|{structure}")
             or blotter_dates.get(ticker)
@@ -999,8 +1026,8 @@ def convert_to_portfolio_format(account: dict, collapsed_positions: list, pnl_da
         "total_deployed_dollars": round(total_deployed, 2),
         "remaining_capacity_pct": round(100 - deployed_pct, 2),
         "position_count": len(collapsed_positions),
-        "defined_risk_count": len([p for p in collapsed_positions if p['risk_profile'] == 'defined']),
-        "undefined_risk_count": len([p for p in collapsed_positions if p['risk_profile'] != 'defined']),
+        "defined_risk_count": len([p for p in collapsed_positions if p["risk_profile"] == "defined"]),
+        "undefined_risk_count": len([p for p in collapsed_positions if p["risk_profile"] != "defined"]),
         "avg_kelly_optimal": None,  # Needs evaluation
         "account_summary": build_account_summary(account, pnl_data or {}),
     }
@@ -1053,7 +1080,7 @@ def save_portfolio(portfolio: dict):
 
     # Backup existing
     if PORTFOLIO_PATH.exists():
-        backup_path = PORTFOLIO_PATH.with_suffix('.json.bak')
+        backup_path = PORTFOLIO_PATH.with_suffix(".json.bak")
         backup_path.write_text(PORTFOLIO_PATH.read_text())
         print(f"✓ Backed up existing portfolio to {backup_path.name}")
 
@@ -1073,8 +1100,9 @@ def save_portfolio(portfolio: dict):
 def main():
     parser = argparse.ArgumentParser(description="Sync portfolio from Interactive Brokers")
     parser.add_argument("--host", default=DEFAULT_HOST, help="TWS/Gateway host")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, 
-                        help="TWS/Gateway port (7497=paper, 7496=live, 4001=gateway)")
+    parser.add_argument(
+        "--port", type=int, default=DEFAULT_PORT, help="TWS/Gateway port (7497=paper, 7496=live, 4001=gateway)"
+    )
     parser.add_argument("--client-id", type=int, default=None, help="Client ID (omit for auto-allocation)")
     parser.add_argument("--sync", action="store_true", help="Sync to portfolio.json")
     parser.add_argument("--no-prices", action="store_true", help="Skip market price fetch")
@@ -1114,13 +1142,13 @@ def main():
             for pos in positions:
                 # Force SMART for all — stocks from get_positions() may have
                 # exchange-specific values (AMEX, BATS) that fail with reqMktData type 4
-                pos['contract'].exchange = 'SMART'
+                pos["contract"].exchange = "SMART"
 
             # Request PnL Single FIRST (takes slightly longer to arrive)
             pnl_requests = []
             if ib_account:
                 for pos in positions:
-                    con_id = pos.get('conId')
+                    con_id = pos.get("conId")
                     if con_id:
                         try:
                             pnl_single = client.ib.reqPnLSingle(ib_account, "", con_id)
@@ -1135,7 +1163,7 @@ def main():
             # (bypasses subscription tracking in IBClient.get_quote)
             tickers = []
             for pos in positions:
-                ticker = client.ib.reqMktData(pos['contract'], "", False, False)
+                ticker = client.ib.reqMktData(pos["contract"], "", False, False)
                 tickers.append(ticker)
 
             # ── Phase 4: ONE combined sleep for all streaming data ──
@@ -1154,38 +1182,38 @@ def main():
                 price, is_calculated = _resolve_market_price(market_price, bid, ask, close)
 
                 if price is not None:
-                    multiplier = 100 if pos['secType'] == 'OPT' else 1
-                    pos['marketPrice'] = price
-                    pos['marketValue'] = round(price * abs(pos['position']) * multiplier, 2)
-                    pos['marketPriceIsCalculated'] = is_calculated
+                    multiplier = 100 if pos["secType"] == "OPT" else 1
+                    pos["marketPrice"] = price
+                    pos["marketValue"] = round(price * abs(pos["position"]) * multiplier, 2)
+                    pos["marketPriceIsCalculated"] = is_calculated
                 else:
-                    pos['marketPrice'] = None
-                    pos['marketValue'] = None
-                    pos['marketPriceIsCalculated'] = False
-                client.ib.cancelMktData(pos['contract'])
-                del pos['contract']
+                    pos["marketPrice"] = None
+                    pos["marketValue"] = None
+                    pos["marketPriceIsCalculated"] = False
+                client.ib.cancelMktData(pos["contract"])
+                del pos["contract"]
 
             # Per-position PnL
             def _valid_daily(val):
-                return val is not None and not ib_util.isNan(val) and val != 1.7976931348623157e+308
+                return val is not None and not ib_util.isNan(val) and val != 1.7976931348623157e308
 
             for pos, pnl_single, con_id in pnl_requests:
                 if pnl_single is not None:
-                    daily = getattr(pnl_single, 'dailyPnL', None)
+                    daily = getattr(pnl_single, "dailyPnL", None)
                     if _valid_daily(daily):
-                        pos['ibDailyPnl'] = round(float(daily), 2)
+                        pos["ibDailyPnl"] = round(float(daily), 2)
                     else:
-                        pos['ibDailyPnl'] = None
+                        pos["ibDailyPnl"] = None
                     if con_id:
                         client.cancel_pnl_single(ib_account, con_id)
                 else:
-                    pos['ibDailyPnl'] = None
+                    pos["ibDailyPnl"] = None
         else:
             # No prices requested
             for pos in positions:
-                if 'contract' in pos:
-                    del pos['contract']
-                pos['ibDailyPnl'] = None
+                if "contract" in pos:
+                    del pos["contract"]
+                pos["ibDailyPnl"] = None
 
         # ── Phase 6: Read account PnL (should have arrived during the combined sleep) ──
         pnl_data = {}
@@ -1196,9 +1224,9 @@ def main():
             daily = pnl_obj.dailyPnL
             unrealized = pnl_obj.unrealizedPnL
             realized = pnl_obj.realizedPnL
-            pnl_data['dailyPnL'] = float(daily) if _valid_pnl(daily) else None
-            pnl_data['unrealizedPnL'] = float(unrealized) if _valid_pnl(unrealized) else None
-            pnl_data['realizedPnL'] = float(realized) if _valid_pnl(realized) else None
+            pnl_data["dailyPnL"] = float(daily) if _valid_pnl(daily) else None
+            pnl_data["unrealizedPnL"] = float(unrealized) if _valid_pnl(unrealized) else None
+            pnl_data["realizedPnL"] = float(realized) if _valid_pnl(realized) else None
             try:
                 client.cancel_pnl(pnl_obj)
             except Exception:
@@ -1212,8 +1240,8 @@ def main():
         display_portfolio(account, positions, collapsed)
 
         # Summary stats
-        defined = len([p for p in collapsed if p['risk_profile'] == 'defined'])
-        undefined = len([p for p in collapsed if p['risk_profile'] != 'defined'])
+        defined = len([p for p in collapsed if p["risk_profile"] == "defined"])
+        undefined = len([p for p in collapsed if p["risk_profile"] != "defined"])
         print(f"\n📋 SUMMARY: {len(collapsed)} positions ({defined} defined risk, {undefined} undefined)")
 
         # Sync if requested
@@ -1225,9 +1253,10 @@ def main():
             # ── Naked Short Audit (post-sync) ──
             if not args.skip_audit:
                 try:
+                    import logging
+
                     from naked_short_audit import find_naked_short_violations
 
-                    import logging
                     log = logging.getLogger("ib_sync.audit")
 
                     data_dir = str(PORTFOLIO_PATH.parent)
@@ -1235,7 +1264,11 @@ def main():
                     if os.path.exists(orders_path):
                         with open(orders_path) as f:
                             orders_data = json.load(f)
-                        orders = orders_data if isinstance(orders_data, list) else orders_data.get("orders", orders_data.get("open_orders", []))
+                        orders = (
+                            orders_data
+                            if isinstance(orders_data, list)
+                            else orders_data.get("orders", orders_data.get("open_orders", []))
+                        )
 
                         violations = find_naked_short_violations(orders, portfolio["positions"])
                         if violations:
@@ -1246,6 +1279,7 @@ def main():
                             # Auto-cancel only if client is still connected
                             if client.is_connected():
                                 from naked_short_audit import cancel_violations
+
                                 cancelled = cancel_violations(client, violations)
                                 log.warning("  Cancelled %d violating order(s)", cancelled)
                             else:
@@ -1256,11 +1290,13 @@ def main():
                         print("  Naked short audit: orders.json not found, skipping")
                 except ImportError:
                     import logging
+
                     logging.getLogger("ib_sync.audit").warning(
                         "naked_short_audit module not available — skipping audit"
                     )
                 except Exception:
                     import logging
+
                     logging.getLogger("ib_sync.audit").warning(
                         "Naked short audit failed — sync completed successfully",
                         exc_info=True,

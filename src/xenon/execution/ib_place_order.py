@@ -15,17 +15,12 @@ import sys
 from pathlib import Path
 
 try:
-    from ib_insync import Stock, Option, Contract, ComboLeg, LimitOrder, TagValue, util
+    from ib_insync import ComboLeg, Contract, LimitOrder, Option, Stock, TagValue, util
 except ImportError:
     print(json.dumps({"status": "error", "message": "ib_insync not installed"}))
     sys.exit(1)
 
-# Add project root + scripts dir to path
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from xenon.clients.ib_client import IBClient, CLIENT_IDS, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
+from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 
 CLIENT_ID = CLIENT_IDS.get("ib_place_order", 26)
 PORT = DEFAULT_GATEWAY_PORT
@@ -130,7 +125,9 @@ def place_order(params: dict) -> dict:
 
         if order_type == "combo":
             order.smartComboRoutingParams = [TagValue("NonGuaranteed", "1")]
-            print(f"  Combo order: {len(legs_data)} legs, NonGuaranteed=1, ratios={[int(l.get('ratio',1)) for l in legs_data]}")
+            print(
+                f"  Combo order: {len(legs_data)} legs, NonGuaranteed=1, ratios={[int(l.get('ratio', 1)) for l in legs_data]}"
+            )
 
         # Place
         trade = client.place_order(contract, order)
