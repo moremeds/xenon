@@ -17,6 +17,7 @@ Usage:
     python3 scripts/fetch_menthorq_cta.py --date 2026-03-06  # Specific date
     python3 scripts/fetch_menthorq_cta.py --force --save-images  # Re-fetch + save S3 PNGs to tmp/
 """
+
 from __future__ import annotations
 
 import argparse
@@ -29,12 +30,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 # ── path setup ────────────────────────────────────────────────────
-_SCRIPT_DIR = Path(__file__).resolve().parent.parent
-_PROJECT_DIR = _SCRIPT_DIR.parent
+_PROJECT_DIR = Path(__file__).resolve().parent.parent.parent.parent
 CACHE_DIR = _PROJECT_DIR / "data" / "menthorq_cache"
 
-from xenon.utils.env_loader import load_env_file
 from xenon.utils.atomic_io import atomic_save
+from xenon.utils.env_loader import load_env_file
 
 # Load .env from project root (before any os.environ reads)
 load_env_file(_PROJECT_DIR / ".env")
@@ -48,13 +48,16 @@ CTA_TABLES = {
     "currency": "cta_currency",
 }
 
+
 def is_market_open() -> bool:
     """Check if US equity markets are currently open."""
     import zoneinfo
+
     try:
         et = zoneinfo.ZoneInfo("America/New_York")
     except Exception:
         from datetime import timedelta as _td
+
         now_utc = datetime.now(timezone.utc)
         et_offset = _td(hours=-5)
         now_et = now_utc + et_offset
@@ -74,11 +77,13 @@ def resolve_trading_date() -> str:
     On weekends or before market open on Monday, use last Friday.
     """
     import zoneinfo
+
     try:
         et = zoneinfo.ZoneInfo("America/New_York")
         now = datetime.now(et)
     except Exception:
         from datetime import timedelta as _td
+
         now = datetime.now(timezone.utc) + _td(hours=-5)
 
     weekday = now.weekday()  # Mon=0 ... Sun=6
@@ -97,6 +102,7 @@ def resolve_trading_date() -> str:
             delta = 0
 
     from datetime import timedelta
+
     target = now - timedelta(days=delta)
     return target.strftime("%Y-%m-%d")
 
@@ -125,6 +131,7 @@ Rules:
 # ══════════════════════════════════════════════════════════════════
 # Cache
 # ══════════════════════════════════════════════════════════════════
+
 
 def cache_path(date_str: str) -> Path:
     return CACHE_DIR / f"cta_{date_str}.json"
@@ -160,6 +167,7 @@ def write_cache(date_str: str, tables: Dict[str, List[Dict]]) -> Path:
 # Main Fetch Pipeline
 # ══════════════════════════════════════════════════════════════════
 
+
 def fetch_menthorq_cta(
     date_str: Optional[str] = None,
     force: bool = False,
@@ -190,8 +198,7 @@ def fetch_menthorq_cta(
 
     # Use MenthorQClient for browser + vision extraction
     try:
-        from xenon.clients.menthorq_client import MenthorQClient, MenthorQError
-        from xenon.clients.menthorq_client import CTA_SLUGS
+        from xenon.clients.menthorq_client import CTA_SLUGS, MenthorQClient, MenthorQError
     except Exception as exc:
         print(f"  ERROR: Failed to initialize MenthorQ client: {exc}", file=sys.stderr)
         return None
@@ -237,6 +244,7 @@ def fetch_menthorq_cta(
 # Helper: Find asset in MenthorQ tables
 # ══════════════════════════════════════════════════════════════════
 
+
 def find_by_underlying(
     table: List[Dict[str, Any]],
     search: str,
@@ -262,6 +270,7 @@ def load_menthorq_cache(date_str: Optional[str] = None) -> Optional[Dict[str, An
 
     # Try previous trading day fallback
     from datetime import timedelta
+
     yesterday = (datetime.strptime(trading_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
     return read_cache(yesterday)
 
@@ -270,12 +279,13 @@ def load_menthorq_cache(date_str: Optional[str] = None) -> Optional[Dict[str, An
 # Console Summary
 # ══════════════════════════════════════════════════════════════════
 
+
 def print_summary(data: Dict[str, Any]) -> None:
     """Print human-readable summary of MenthorQ CTA data."""
-    print(f"\n{'='*60}", file=sys.stderr)
+    print(f"\n{'=' * 60}", file=sys.stderr)
     print(f"MENTHORQ CTA POSITIONING — {data['date']}", file=sys.stderr)
     print(f"Source: {data['source']} | Fetched: {data['fetched_at']}", file=sys.stderr)
-    print(f"{'='*60}", file=sys.stderr)
+    print(f"{'=' * 60}", file=sys.stderr)
 
     for table_key in ["main", "index", "commodity", "currency"]:
         table = data.get("tables", {}).get(table_key, [])
@@ -285,7 +295,7 @@ def print_summary(data: Dict[str, Any]) -> None:
         label = table_key.upper()
         print(f"\n  {label} ({len(table)} assets):", file=sys.stderr)
         print(f"  {'Underlying':<35} {'Pos Today':>10} {'Pos Yest':>10} {'Pctl 3M':>8} {'Z-Score':>8}", file=sys.stderr)
-        print(f"  {'-'*35} {'-'*10} {'-'*10} {'-'*8} {'-'*8}", file=sys.stderr)
+        print(f"  {'-' * 35} {'-' * 10} {'-' * 10} {'-' * 8} {'-' * 8}", file=sys.stderr)
 
         for entry in table:
             name = entry.get("underlying", "?")[:35]
@@ -311,12 +321,13 @@ def print_summary(data: Dict[str, Any]) -> None:
         print(f"    3M Percentile      : {spx.get('percentile_3m', '---')}", file=sys.stderr)
         print(f"    3M Z-Score         : {spx.get('z_score_3m', '---')}", file=sys.stderr)
 
-    print(f"\n{'='*60}\n", file=sys.stderr)
+    print(f"\n{'=' * 60}\n", file=sys.stderr)
 
 
 # ══════════════════════════════════════════════════════════════════
 # CLI
 # ══════════════════════════════════════════════════════════════════
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -343,9 +354,9 @@ Examples:
 
     date_str = args.date or resolve_trading_date()
 
-    print(f"\n{'='*60}", file=sys.stderr)
+    print(f"\n{'=' * 60}", file=sys.stderr)
     print(f"MENTHORQ CTA FETCH — {date_str}", file=sys.stderr)
-    print(f"{'='*60}", file=sys.stderr)
+    print(f"{'=' * 60}", file=sys.stderr)
 
     artifact_dir = os.environ.get("MENTHORQ_ARTIFACT_DIR")
 

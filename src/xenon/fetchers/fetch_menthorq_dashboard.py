@@ -8,6 +8,7 @@ Usage:
 
 Caches to: data/menthorq_cache/{command}_{DATE}.json
 """
+
 from __future__ import annotations
 
 import argparse
@@ -16,9 +17,6 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-
-# Allow imports from project root
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from xenon.clients.menthorq_client import (
     MenthorQClient,
@@ -33,7 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "menthorq_cache"
+CACHE_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "menthorq_cache"
 
 # ══════════════════════════════════════════════════════════════════════
 # Vision extraction prompts per dashboard type
@@ -56,7 +54,6 @@ Rules:
 - Values are decimal numbers as shown
 - Signal states should be extracted as shown (e.g. "risk-on", "risk-off", "neutral")
 - Return ONLY the JSON object, no markdown, no explanation""",
-
     "eod": """Extract end-of-day options data from this chart image.
 Return ONLY a JSON object with this exact structure:
 {
@@ -120,9 +117,7 @@ def fetch_dashboard(
         # Extract via Vision
         extracted = client._extract_via_vision(png_bytes, prompt)
         if not extracted:
-            raise MenthorQExtractionError(
-                f"Vision extraction returned no data for {command} dashboard."
-            )
+            raise MenthorQExtractionError(f"Vision extraction returned no data for {command} dashboard.")
 
     # _extract_via_vision returns a list, but dashboard prompts return objects
     # Handle both cases
@@ -151,9 +146,7 @@ def fetch_dashboard(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Fetch MenthorQ dashboard chart data"
-    )
+    parser = argparse.ArgumentParser(description="Fetch MenthorQ dashboard chart data")
     parser.add_argument(
         "--command",
         required=True,

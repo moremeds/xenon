@@ -17,9 +17,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-from xenon.clients.uw_client import UWRateLimitError
-from fetchers.fetch_flow import fetch_flow as fetch_flow_module
 from xenon.analysis.dark_pool_summary import summarize_dark_pool
+from xenon.clients.uw_client import UWRateLimitError
+from xenon.fetchers.fetch_flow import fetch_flow as fetch_flow_module
 
 logger = logging.getLogger(__name__)
 

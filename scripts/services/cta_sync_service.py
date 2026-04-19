@@ -19,7 +19,7 @@ from typing import Any
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from fetchers.fetch_menthorq_cta import cache_path  # noqa: E402
+from xenon.fetchers.fetch_menthorq_cta import cache_path  # noqa: E402
 from xenon.utils.cta_sync import latest_closed_trading_day  # noqa: E402
 from xenon.utils.cta_sync_health import (  # noqa: E402
     ARTIFACT_DIR,
@@ -223,7 +223,8 @@ def run_cta_sync(
                     sys.executable,
                     str(SCRIPT_DIR / "fetchers.fetch_menthorq_cta.py"),
                     "--json",
-                    "--date", target,
+                    "--date",
+                    target,
                 ]
                 if force:
                     fetch_cmd.append("--force")

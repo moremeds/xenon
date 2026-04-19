@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
@@ -80,7 +80,6 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 
-from xenon.clients.massive_client import MassiveClient
 from scripts.ta_lib.bars import fetch_bars
 from scripts.ta_lib.parquet_store import (
     INDICATOR_COLUMNS,
@@ -90,6 +89,7 @@ from scripts.ta_lib.parquet_store import (
     write_ohlcv,
 )
 from scripts.ta_lib.r2_store import R2NotFoundError
+from xenon.clients.massive_client import MassiveClient
 
 _FULL_LOOKBACK_DAYS = 730  # 2 years for cold-start / full refresh
 

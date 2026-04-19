@@ -20,10 +20,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from xenon.clients.uw_client import UWClient, UWNotFoundError, UWAPIError
-from xenon.utils.market_calendar import get_last_n_trading_days, load_holidays, _is_trading_day
+from xenon.clients.uw_client import UWAPIError, UWClient, UWNotFoundError
+from xenon.utils.market_calendar import _is_trading_day, get_last_n_trading_days, load_holidays
 
-CACHE_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "ticker_cache.json"
+CACHE_FILE = Path(__file__).resolve().parent.parent.parent.parent / "data" / "ticker_cache.json"
 
 # Keep for backward compatibility with existing tests
 MARKET_HOLIDAYS_2026 = load_holidays(2026)
@@ -59,10 +59,7 @@ def get_cached_ticker(ticker: str):
 def cache_ticker(ticker: str, company_name: str, sector: str = None) -> None:
     """Add or update a ticker in the cache."""
     cache = load_cache()
-    cache["tickers"][ticker.upper()] = {
-        "company_name": company_name,
-        "sector": sector
-    }
+    cache["tickers"][ticker.upper()] = {"company_name": company_name, "sector": sector}
     save_cache(cache)
 
 
@@ -99,7 +96,7 @@ def fetch_ticker_info(ticker: str) -> dict:
         "avg_volume": None,
         "current_price": None,
         "options_available": False,
-        "error": None
+        "error": None,
     }
 
     with UWClient() as client:
@@ -138,10 +135,7 @@ def fetch_ticker_info(ticker: str) -> dict:
             result["error"] = f"API error: {e}"
             return result
 
-        active_trades = [
-            trade for trade in trades
-            if not trade.get("canceled")
-        ]
+        active_trades = [trade for trade in trades if not trade.get("canceled")]
 
         if active_trades:
             result["verified"] = True
@@ -197,7 +191,9 @@ def main():
         company_name = args.add_cache[0]
         sector = args.add_cache[1] if len(args.add_cache) > 1 else None
         cache_ticker(ticker, company_name, sector)
-        print(json.dumps({"status": "cached", "ticker": ticker, "company_name": company_name, "sector": sector}, indent=2))
+        print(
+            json.dumps({"status": "cached", "ticker": ticker, "company_name": company_name, "sector": sector}, indent=2)
+        )
         sys.exit(0)
 
     result = fetch_ticker_info(ticker)

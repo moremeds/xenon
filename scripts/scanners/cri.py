@@ -852,7 +852,7 @@ def run_analysis(
     # MenthorQ CTA positioning (institutional data overlay)
     menthorq_cta = None
     try:
-        from fetch_menthorq_cta import load_menthorq_cache, find_by_underlying
+        from xenon.fetchers.fetch_menthorq_cta import load_menthorq_cache, find_by_underlying
         menthorq = load_menthorq_cache()
         if menthorq:
             main_table = menthorq.get("tables", {}).get("main", [])
