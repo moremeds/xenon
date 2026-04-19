@@ -4,7 +4,7 @@ Persistent IB connections, shared UW client, uniform JSON responses.
 Port 8321, no auth for local use.
 
 Usage:
-    python3 -m uvicorn scripts.api.server:app --host 127.0.0.1 --port 8321 --reload
+    python3 -m uvicorn xenon.api.server:app --host 127.0.0.1 --port 8321 --reload
 """
 
 from __future__ import annotations
@@ -25,25 +25,22 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Req
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-# Ensure scripts/ is on sys.path for client imports
-SCRIPTS_DIR = Path(__file__).parent.parent
-PROJECT_ROOT = SCRIPTS_DIR.parent
+# Project paths — file lives at src/xenon/api/server.py
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+SRC_DIR = PROJECT_ROOT / "src"
 DATA_DIR = PROJECT_ROOT / "data"
 INTERNALS_SKEW_CACHE_DIR = DATA_DIR / "cache"
 INTERNALS_SKEW_CACHE_TTL_SECONDS = 60 * 15
 
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
-
-from api.auth import verify_api_key, verify_clerk_jwt
-from api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_mode, is_docker_mode, restart_ib_gateway
-from api.ib_pool import IBPool
-from api.pool_order_manage import pool_cancel_order, pool_modify_order
-from api.routes.historical import router as historical_router
-from api.routes.uw_analyze import router as uw_analyze_router
-from api.routes.uw_stats import router as uw_stats_router
-from api.subprocess import ScriptResult, run_module, run_script
-from api.ws_ticket import create_ticket, validate_ticket
+from xenon.api.auth import verify_api_key, verify_clerk_jwt
+from xenon.api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_mode, is_docker_mode, restart_ib_gateway
+from xenon.api.ib_pool import IBPool
+from xenon.api.pool_order_manage import pool_cancel_order, pool_modify_order
+from xenon.api.routes.historical import router as historical_router
+from xenon.api.routes.uw_analyze import router as uw_analyze_router
+from xenon.api.routes.uw_stats import router as uw_stats_router
+from xenon.api.subprocess import ScriptResult, run_module, run_script
+from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
 
 # Load .env from project root for Python scripts
@@ -181,8 +178,8 @@ async def lifespan(app: FastAPI):
     # mode so unit tests seeing an empty singleton aren't polluted by the
     # real data/uw_analyze_cache.json on disk.
     try:
-        from api.routes.uw_analyze import get_portfolio_cache as _get_portfolio_cache
-        from api.services import uw_analyze_cache as _uw_cache_mod
+        from xenon.api.routes.uw_analyze import get_portfolio_cache as _get_portfolio_cache
+        from xenon.api.services import uw_analyze_cache as _uw_cache_mod
 
         _cache_singleton = _get_portfolio_cache()
         _preloaded = _cache_singleton.all_entries()
@@ -227,8 +224,9 @@ async def lifespan(app: FastAPI):
         )
     else:
         try:
-            from api.routes.uw_analyze import get_flow_log, get_portfolio_cache
-            from api.services.uw_analyze_daily_job import run_loop as uw_daily_run_loop
+            from xenon.api.routes.uw_analyze import get_flow_log, get_portfolio_cache
+            from xenon.api.services.uw_analyze_daily_job import run_loop as uw_daily_run_loop
+
             from xenon.clients.uw_client import UWClient
 
             _uw_client = UWClient() if uw_available else None
@@ -316,7 +314,7 @@ async def lifespan(app: FastAPI):
         # double-allocate them on module reimport. Also releases cached report
         # dicts that would otherwise pin ~100s of MB across a reload cycle.
         try:
-            from api.routes import uw_analyze as _uw_route_mod
+            from xenon.api.routes import uw_analyze as _uw_route_mod
 
             # Null the singletons so `get_portfolio_cache()` creates a fresh
             # instance on the next reload cycle. The previous approach
@@ -1031,8 +1029,8 @@ async def flow_analysis_post(account: str = "ib"):
     options-flow summaries from the shared uw-analyze LRU cache — no
     second UW API pipeline, no stale JSON files on disk.
     """
-    from api.routes.uw_analyze import _runner, get_portfolio_cache
-    from api.services.uw_analyze_portfolio_bias import classify_portfolio
+    from xenon.api.routes.uw_analyze import _runner, get_portfolio_cache
+    from xenon.api.services.uw_analyze_portfolio_bias import classify_portfolio
 
     if account not in ("ib", "futu"):
         raise HTTPException(status_code=400, detail=f"Unknown account: {account!r}")
@@ -1049,8 +1047,8 @@ async def flow_analysis_get(account: str = "ib"):
     a refresh. Used by ``web/lib/useSyncHook`` on initial page load so
     the first render is fast; a subsequent POST fills missing tickers.
     """
-    from api.routes.uw_analyze import get_portfolio_cache
-    from api.services.uw_analyze_portfolio_bias import classify_portfolio
+    from xenon.api.routes.uw_analyze import get_portfolio_cache
+    from xenon.api.services.uw_analyze_portfolio_bias import classify_portfolio
 
     if account not in ("ib", "futu"):
         raise HTTPException(status_code=400, detail=f"Unknown account: {account!r}")
@@ -1816,7 +1814,7 @@ def main() -> None:
         host="127.0.0.1",
         port=8321,
         reload=True,
-        reload_dirs=[str(SCRIPTS_DIR)],
+        reload_dirs=[str(SRC_DIR)],
     )
 
 

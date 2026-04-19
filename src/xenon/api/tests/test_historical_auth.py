@@ -1,10 +1,11 @@
 """Tests for historical endpoint API key auth scoping."""
 
 import os
-import pytest
 from unittest.mock import patch
 
-from api.auth import verify_api_key, API_KEY_ALLOWED_PATHS
+import pytest
+
+from xenon.api.auth import API_KEY_ALLOWED_PATHS, verify_api_key
 
 
 class FakeRequest:
@@ -54,8 +55,14 @@ class TestVerifyApiKey:
                 assert verify_api_key(req) is not None, f"Path {path} should be allowed"
 
     def test_trading_paths_rejected(self):
-        trading_paths = ["/orders/place", "/orders/cancel", "/orders/modify",
-                         "/portfolio/sync", "/blotter", "/regime/scan"]
+        trading_paths = [
+            "/orders/place",
+            "/orders/cancel",
+            "/orders/modify",
+            "/portfolio/sync",
+            "/blotter",
+            "/regime/scan",
+        ]
         with patch.dict(os.environ, {"MDW_API_KEY": "key"}):
             for path in trading_paths:
                 req = FakeRequest(path, {"X-API-Key": "key"})

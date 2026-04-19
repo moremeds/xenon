@@ -40,7 +40,7 @@ class TestPoolCancelOrder:
     @pytest.mark.asyncio
     async def test_cancel_returns_ok_when_order_disappears(self):
         """Cancel succeeds when order disappears from open orders."""
-        from api.pool_order_manage import pool_cancel_order
+        from xenon.api.pool_order_manage import pool_cancel_order
 
         trade = _make_trade()
         client = MagicMock()
@@ -55,7 +55,7 @@ class TestPoolCancelOrder:
     @pytest.mark.asyncio
     async def test_cancel_returns_ok_when_status_cancelled(self):
         """Cancel succeeds when order status becomes Cancelled."""
-        from api.pool_order_manage import pool_cancel_order
+        from xenon.api.pool_order_manage import pool_cancel_order
 
         trade = _make_trade()
         cancelled_trade = _make_trade(status="Cancelled")
@@ -69,7 +69,7 @@ class TestPoolCancelOrder:
     @pytest.mark.asyncio
     async def test_cancel_returns_error_when_trade_not_found(self):
         """Cancel fails when trade doesn't exist."""
-        from api.pool_order_manage import pool_cancel_order
+        from xenon.api.pool_order_manage import pool_cancel_order
 
         client = MagicMock()
         client.get_open_orders.return_value = []
@@ -82,7 +82,7 @@ class TestPoolCancelOrder:
     @pytest.mark.asyncio
     async def test_cancel_returns_error_when_already_filled(self):
         """Cancel fails when order is already filled."""
-        from api.pool_order_manage import pool_cancel_order
+        from xenon.api.pool_order_manage import pool_cancel_order
 
         trade = _make_trade(status="Filled")
         client = MagicMock()
@@ -96,7 +96,7 @@ class TestPoolCancelOrder:
     @pytest.mark.asyncio
     async def test_cancel_uses_perm_id_over_order_id(self):
         """permId is preferred for finding orders (globally unique)."""
-        from api.pool_order_manage import pool_cancel_order
+        from xenon.api.pool_order_manage import pool_cancel_order
 
         trade_a = _make_trade(order_id=10, perm_id=111)
         trade_b = _make_trade(order_id=20, perm_id=222)
@@ -111,7 +111,7 @@ class TestPoolCancelOrder:
     @pytest.mark.asyncio
     async def test_cancel_works_for_any_client_id(self):
         """Master client (0) can cancel orders placed by any clientId."""
-        from api.pool_order_manage import pool_cancel_order
+        from xenon.api.pool_order_manage import pool_cancel_order
 
         # Order placed by clientId=26 (subprocess), but pool is clientId=0 (master)
         trade = _make_trade(client_id=26)
@@ -136,7 +136,7 @@ class TestPoolModifyOrder:
     @pytest.mark.asyncio
     async def test_modify_price_returns_ok(self):
         """Modify price succeeds when IB confirms new price."""
-        from api.pool_order_manage import pool_modify_order
+        from xenon.api.pool_order_manage import pool_modify_order
 
         trade = _make_trade(lmt_price=5.0)
         modified = _make_trade(lmt_price=6.0)
@@ -153,7 +153,7 @@ class TestPoolModifyOrder:
     @pytest.mark.asyncio
     async def test_modify_returns_error_when_trade_not_found(self):
         """Modify fails when trade doesn't exist."""
-        from api.pool_order_manage import pool_modify_order
+        from xenon.api.pool_order_manage import pool_modify_order
 
         client = MagicMock()
         client.get_open_orders.return_value = []
@@ -167,7 +167,7 @@ class TestPoolModifyOrder:
     @pytest.mark.asyncio
     async def test_modify_works_for_any_client_id(self):
         """Master client can modify orders placed by any clientId."""
-        from api.pool_order_manage import pool_modify_order
+        from xenon.api.pool_order_manage import pool_modify_order
 
         trade = _make_trade(client_id=26, lmt_price=5.0)
         modified = _make_trade(client_id=26, lmt_price=6.0)
@@ -184,7 +184,7 @@ class TestPoolModifyOrder:
     @pytest.mark.asyncio
     async def test_modify_clears_vol_fields_on_lmt_order(self):
         """Modify must reset volatility/volatilityType sentinels to prevent IB error 321."""
-        from api.pool_order_manage import pool_modify_order
+        from xenon.api.pool_order_manage import pool_modify_order
 
         trade = _make_trade(lmt_price=5.0)
         # Simulate IB populating VOL fields on open order snapshot
@@ -207,7 +207,7 @@ class TestPoolModifyOrder:
     @pytest.mark.asyncio
     async def test_modify_rejects_non_limit_order(self):
         """Modify fails for non-LMT order types."""
-        from api.pool_order_manage import pool_modify_order
+        from xenon.api.pool_order_manage import pool_modify_order
 
         trade = _make_trade(order_type="MKT")
         client = MagicMock()

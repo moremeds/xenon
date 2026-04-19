@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from api.services.uw_analyze_oi_tracker import (  # noqa: E402
+from xenon.api.services.uw_analyze_oi_tracker import (  # noqa: E402
     NEAR_SPOT_PCT,
     NOTABLE_ABSOLUTE,
     NOTABLE_PCT,

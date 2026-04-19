@@ -19,21 +19,21 @@ from typing import Any, Literal, Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
-from uw_analyze import run_analysis_with_data
 
-from api.services.uw_analyze_cache import UwAnalyzeCache, build_snapshot
-from api.services.uw_analyze_candidates import (
-    add_adhoc as _candidates_add_adhoc,
-)
-from api.services.uw_analyze_candidates import (
-    seed_candidates,
-)
-from api.services.uw_analyze_flow_tracker import FlowLog, capture_from_changes
 from xenon.analysis.dark_pool_summary import summarize_dark_pool
 from xenon.analysis.models import TickerData
 from xenon.analysis.options_flow_summary import summarize_options_flow
+from xenon.api.services.uw_analyze_cache import UwAnalyzeCache, build_snapshot
+from xenon.api.services.uw_analyze_candidates import (
+    add_adhoc as _candidates_add_adhoc,
+)
+from xenon.api.services.uw_analyze_candidates import (
+    seed_candidates,
+)
+from xenon.api.services.uw_analyze_flow_tracker import FlowLog, capture_from_changes
 from xenon.clients.uw_client import UWAPIError, UWNotFoundError
 from xenon.fetchers.fetch_flow import analyze_darkpool
+from xenon.scanners.uw.analyze import run_analysis_with_data
 
 logger = logging.getLogger("xenon.uw_analyze")
 router = APIRouter()
@@ -454,7 +454,7 @@ async def _process_ticker(
     # IMPORTANT: this block must NOT call `cache._persist()`. The caller
     # batches a single persist after all tickers complete based on the
     # `_oi_refreshed` flag on each row.
-    from api.services.uw_analyze_daily_job import now_et_date
+    from xenon.api.services.uw_analyze_daily_job import now_et_date
 
     today_iso = now_et_date().isoformat()
     baseline = entry.get("oi_baseline") or {}
@@ -466,7 +466,7 @@ async def _process_ticker(
     # time, and the daily cron will restamp baselines during open hours.
     if oi_stale and (cache._market_open_fn() or user_initiated):
         try:
-            from api.services import uw_analyze_oi_tracker
+            from xenon.api.services import uw_analyze_oi_tracker
 
             spot = (entry.get("current") or {}).get("derived", {}).get("spot")
             async with _ON_DEMAND_OI_SEM:

@@ -258,57 +258,57 @@ class TestConnectionErrorPatterns:
     """Test that _is_ib_connection_error detects all failure modes."""
 
     def test_econnrefused_detected(self):
-        from api.server import _is_ib_connection_error
+        from xenon.api.server import _is_ib_connection_error
         assert _is_ib_connection_error("Connect call failed: ECONNREFUSED")
 
     def test_connection_refused_detected(self):
-        from api.server import _is_ib_connection_error
+        from xenon.api.server import _is_ib_connection_error
         assert _is_ib_connection_error("Connection refused on 127.0.0.1:4001")
 
     def test_timeout_error_detected(self):
-        from api.server import _is_ib_connection_error
+        from xenon.api.server import _is_ib_connection_error
         assert _is_ib_connection_error("API connection failed: TimeoutError()")
 
     def test_api_connection_failed_detected(self):
-        from api.server import _is_ib_connection_error
+        from xenon.api.server import _is_ib_connection_error
         assert _is_ib_connection_error("API connection failed: some reason")
 
     def test_failed_to_connect_detected(self):
-        from api.server import _is_ib_connection_error
+        from xenon.api.server import _is_ib_connection_error
         assert _is_ib_connection_error(
             "Failed to connect to IB on 127.0.0.1:4001 after 1 attempt(s): "
         )
 
     def test_ib_connection_error_class_detected(self):
-        from api.server import _is_ib_connection_error
+        from xenon.api.server import _is_ib_connection_error
         assert _is_ib_connection_error(
             "xenon.clients.ib_client.IBConnectionError: Failed to connect"
         )
 
     def test_unrelated_error_not_detected(self):
-        from api.server import _is_ib_connection_error
+        from xenon.api.server import _is_ib_connection_error
         assert not _is_ib_connection_error("No security definition found")
 
     def test_none_safe(self):
-        from api.server import _is_ib_connection_error
+        from xenon.api.server import _is_ib_connection_error
         assert not _is_ib_connection_error(None)
 
     def test_empty_safe(self):
-        from api.server import _is_ib_connection_error
+        from xenon.api.server import _is_ib_connection_error
         assert not _is_ib_connection_error("")
 
     def test_make_sure_api_port_detected(self):
-        from api.server import _is_ib_connection_error
+        from xenon.api.server import _is_ib_connection_error
         assert _is_ib_connection_error("Make sure API port on TWS/IBG is open")
 
     def test_connectivity_lost_detected(self):
-        from api.server import _is_ib_connection_error
+        from xenon.api.server import _is_ib_connection_error
         assert _is_ib_connection_error(
             "Connectivity between IBKR and Trader Workstation has been lost."
         )
 
     def test_request_timed_out_detected(self):
-        from api.server import _is_ib_connection_error
+        from xenon.api.server import _is_ib_connection_error
         assert _is_ib_connection_error("account updates for U4698258 request timed out")
 
 
@@ -320,28 +320,28 @@ class TestConnectionErrorPatterns:
 class TestCloseWaitDetection:
     """Test _has_close_wait detection of dead upstream IB sessions."""
 
-    @patch("api.ib_gateway.subprocess.check_output")
+    @patch("xenon.api.ib_gateway.subprocess.check_output")
     def test_close_wait_detected(self, mock_lsof):
-        from api.ib_gateway import _has_close_wait
+        from xenon.api.ib_gateway import _has_close_wait
         mock_lsof.return_value = (
             "java 62381 user 50u IPv6 0xce TCP 10.0.0.215:52097->8.17.22.31:4001 (CLOSE_WAIT)\n"
             "java 62381 user 41u IPv6 0xa9 TCP *:4001 (LISTEN)\n"
         )
         assert _has_close_wait() is True
 
-    @patch("api.ib_gateway.subprocess.check_output")
+    @patch("xenon.api.ib_gateway.subprocess.check_output")
     def test_healthy_no_close_wait(self, mock_lsof):
-        from api.ib_gateway import _has_close_wait
+        from xenon.api.ib_gateway import _has_close_wait
         mock_lsof.return_value = (
             "java 62381 user 41u IPv6 0xa9 TCP *:4001 (LISTEN)\n"
             "java 62381 user 56u IPv6 0xf8 TCP localhost:4001->localhost:52132 (ESTABLISHED)\n"
         )
         assert _has_close_wait() is False
 
-    @patch("api.ib_gateway.subprocess.check_output")
+    @patch("xenon.api.ib_gateway.subprocess.check_output")
     def test_lsof_failure_returns_false(self, mock_lsof):
         import subprocess
-        from api.ib_gateway import _has_close_wait
+        from xenon.api.ib_gateway import _has_close_wait
         mock_lsof.side_effect = subprocess.SubprocessError("lsof not found")
         assert _has_close_wait() is False
 
@@ -355,8 +355,8 @@ class TestPoolPreflightCheck:
     """Test _pool_has_any_connection fast-fail logic."""
 
     def test_returns_false_when_no_pool(self):
-        from api.server import _pool_has_any_connection
-        import api.server as srv
+        from xenon.api.server import _pool_has_any_connection
+        import xenon.api.server as srv
         original = srv.ib_pool
         srv.ib_pool = None
         try:
@@ -365,8 +365,8 @@ class TestPoolPreflightCheck:
             srv.ib_pool = original
 
     def test_returns_true_when_any_role_connected(self):
-        from api.server import _pool_has_any_connection
-        import api.server as srv
+        from xenon.api.server import _pool_has_any_connection
+        import xenon.api.server as srv
         mock_pool = MagicMock()
         mock_pool.is_connected.side_effect = lambda r: r == "sync"
         original = srv.ib_pool
@@ -377,8 +377,8 @@ class TestPoolPreflightCheck:
             srv.ib_pool = original
 
     def test_returns_false_when_all_disconnected(self):
-        from api.server import _pool_has_any_connection
-        import api.server as srv
+        from xenon.api.server import _pool_has_any_connection
+        import xenon.api.server as srv
         mock_pool = MagicMock()
         mock_pool.is_connected.return_value = False
         original = srv.ib_pool

@@ -42,10 +42,6 @@ except Exception:  # noqa: BLE001
 
     _ET = timezone(timedelta(hours=-5))  # crude fallback
 
-_SCRIPTS = Path(__file__).resolve().parents[2]
-if str(_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS))
-
 logger = logging.getLogger("xenon.uw_analyze_daily_job")
 
 # 15:50 ET — 10 minutes before close so EOD OI is ready and we still have time
@@ -142,8 +138,8 @@ async def run_once(
     `oi_fetcher` and `contract_fetcher` are injectable so tests can drive the
     job without UW.
     """
-    from api.services.uw_analyze_flow_tracker import progress_event
-    from api.services.uw_analyze_oi_tracker import fetch_and_diff
+    from xenon.api.services.uw_analyze_flow_tracker import progress_event
+    from xenon.api.services.uw_analyze_oi_tracker import fetch_and_diff
 
     if oi_fetcher is None:
 
@@ -198,7 +194,7 @@ async def run_once(
                 )
         if not contract_state:
             # Without fresh data we can only check for expiry-based closeout.
-            from api.services.uw_analyze_flow_tracker import maybe_close_or_expire
+            from xenon.api.services.uw_analyze_flow_tracker import maybe_close_or_expire
 
             maybe_close_or_expire(event)
             flow_log.replace(event)

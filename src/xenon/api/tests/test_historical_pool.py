@@ -1,10 +1,11 @@
 """Tests for historical endpoint ib_pool resolution via app.state."""
 
-import pytest
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi import HTTPException
-from api.routes.historical import _get_pool
+
+from xenon.api.routes.historical import _get_pool
 
 
 class FakeState:

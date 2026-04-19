@@ -16,10 +16,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import pytest  # noqa: E402
-from api.routes import uw_analyze as routes_mod  # noqa: E402
-from api.services import uw_analyze_candidates as cand  # noqa: E402
-from api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
-from api.services.uw_analyze_flow_tracker import FlowLog  # noqa: E402
+from xenon.api.routes import uw_analyze as routes_mod  # noqa: E402
+from xenon.api.services import uw_analyze_candidates as cand  # noqa: E402
+from xenon.api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
+from xenon.api.services.uw_analyze_flow_tracker import FlowLog  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -345,8 +345,8 @@ def test_portfolio_does_not_re_capture_on_repeat_get(tmp_path):
 def test_portfolio_surfaces_on_demand_oi_changes(monkeypatch, tmp_path):
     """When oi_baseline is missing, /portfolio fetches OI on-demand and
     surfaces the changes in both row.oi_changes and action_items."""
-    from api.services import uw_analyze_oi_tracker
-    from api.services.uw_analyze_oi_tracker import OiChange
+    from xenon.api.services import uw_analyze_oi_tracker
+    from xenon.api.services.uw_analyze_oi_tracker import OiChange
 
     async def fake_fetch(client, ticker, spot):
         return [
@@ -383,10 +383,10 @@ def test_portfolio_surfaces_on_demand_oi_changes(monkeypatch, tmp_path):
 def test_portfolio_refreshes_stale_oi_baseline(monkeypatch, tmp_path):
     """When oi_baseline.data_date is from a prior trading day, /portfolio
     must refetch and persist a fresh baseline stamped with today's ET date."""
-    from api.routes import uw_analyze as routes_mod
-    from api.services import uw_analyze_oi_tracker
-    from api.services.uw_analyze_daily_job import now_et_date
-    from api.services.uw_analyze_oi_tracker import OiChange
+    from xenon.api.routes import uw_analyze as routes_mod
+    from xenon.api.services import uw_analyze_oi_tracker
+    from xenon.api.services.uw_analyze_daily_job import now_et_date
+    from xenon.api.services.uw_analyze_oi_tracker import OiChange
 
     calls = {"n": 0}
 
@@ -451,8 +451,8 @@ def test_portfolio_user_initiated_query_param_refreshes_oi_during_closed_market(
     param on the follow-up GET, the OI gate still blocks and leaves
     oi_changes stale even though the user explicitly clicked refresh.
     """
-    from api.services import uw_analyze_oi_tracker
-    from api.services.uw_analyze_oi_tracker import OiChange
+    from xenon.api.services import uw_analyze_oi_tracker
+    from xenon.api.services.uw_analyze_oi_tracker import OiChange
 
     calls = {"n": 0}
 
@@ -513,7 +513,7 @@ def test_portfolio_skips_oi_refresh_during_closed_market(monkeypatch, tmp_path):
     `oi_baseline.data_date` was stamped with Friday's ET date — burning
     hundreds of UW calls outside market hours.
     """
-    from api.services import uw_analyze_oi_tracker
+    from xenon.api.services import uw_analyze_oi_tracker
 
     calls = {"n": 0}
 
@@ -711,7 +711,7 @@ def _install_oi_stub(monkeypatch, *, tracker_fn):
     The route imports `api.services.uw_analyze_oi_tracker` lazily inside
     `_process`, so we monkeypatch the module attribute.
     """
-    from api.services import uw_analyze_oi_tracker
+    from xenon.api.services import uw_analyze_oi_tracker
 
     monkeypatch.setattr(uw_analyze_oi_tracker, "fetch_and_diff", tracker_fn)
 

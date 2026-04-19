@@ -15,10 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from api.routes import uw_analyze as routes_mod  # noqa: E402
-from api.services import uw_analyze_candidates as cand  # noqa: E402
-from api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
-from api.services.uw_analyze_flow_tracker import FlowLog  # noqa: E402
+from xenon.api.routes import uw_analyze as routes_mod  # noqa: E402
+from xenon.api.services import uw_analyze_candidates as cand  # noqa: E402
+from xenon.api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
+from xenon.api.services.uw_analyze_flow_tracker import FlowLog  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -90,7 +90,7 @@ def test_full_stack_refresh_then_portfolio_surfaces_sweep_event(monkeypatch, tmp
     async def fake_fetch(client, ticker, spot):
         return []
 
-    monkeypatch.setattr("api.services.uw_analyze_oi_tracker.fetch_and_diff", fake_fetch)
+    monkeypatch.setattr("xenon.api.services.uw_analyze_oi_tracker.fetch_and_diff", fake_fetch)
     import xenon.clients.uw_client as uw_client_mod
 
     monkeypatch.setattr(uw_client_mod, "UWClient", lambda *a, **k: object())

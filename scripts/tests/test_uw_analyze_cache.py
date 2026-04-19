@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from api.services.uw_analyze_cache import (  # noqa: E402
+from xenon.api.services.uw_analyze_cache import (  # noqa: E402
     UwAnalyzeCache,
     build_snapshot,
     derive_from_report,
@@ -92,7 +92,7 @@ def test_build_snapshot_includes_derived_and_ts():
 
 
 def test_build_snapshot_includes_flow_alerts():
-    from api.services.uw_analyze_cache import build_snapshot as _bs
+    from xenon.api.services.uw_analyze_cache import build_snapshot as _bs
 
     report = {"price": 100.0, "regime": {"gex_sign": "POSITIVE"}}
     display = {"max_pain": 99.0}
@@ -559,7 +559,7 @@ def test_entries_evicts_lru_adhoc_first_over_cap(tmp_path):
 def test_materialized_changes_capped(tmp_path, monkeypatch):
     """Even if the diff engine emits many changes, only the last N are
     kept on the entry to bound memory."""
-    from api.services import uw_analyze_cache as mod
+    from xenon.api.services import uw_analyze_cache as mod
 
     # Force the diff engine to emit 25 synthetic changes so we can assert
     # the cap trims to _MAX_MATERIALIZED_CHANGES (10).
@@ -582,7 +582,7 @@ def test_materialized_changes_capped(tmp_path, monkeypatch):
             return []
         return [_FakeChange(i) for i in range(25)]
 
-    import api.services.uw_analyze_diff as diff_mod
+    import xenon.api.services.uw_analyze_diff as diff_mod
 
     monkeypatch.setattr(diff_mod, "compute_changes", _fake_compute)
 

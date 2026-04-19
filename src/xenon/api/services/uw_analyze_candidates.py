@@ -17,13 +17,11 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
-_SCRIPTS = Path(__file__).resolve().parents[2]
-if str(_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS))
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 logger = logging.getLogger("xenon.uw_analyze_candidates")
 
-_DATA = _SCRIPTS.parent / "data"
+_DATA = _PROJECT_ROOT / "data"
 PORTFOLIO_PATH = _DATA / "portfolio.json"
 WATCHLIST_PATH = _DATA / "watchlist.json"
 

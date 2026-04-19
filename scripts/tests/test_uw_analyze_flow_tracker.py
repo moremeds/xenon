@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from api.services.uw_analyze_diff import Change  # noqa: E402
-from api.services.uw_analyze_flow_tracker import (  # noqa: E402
+from xenon.api.services.uw_analyze_diff import Change  # noqa: E402
+from xenon.api.services.uw_analyze_flow_tracker import (  # noqa: E402
     ANOMALY_DTE_GUARD,
     FlowEvent,
     FlowInitial,
@@ -232,7 +232,7 @@ def test_anomaly_oi_evaporation_skipped_outside_window():
 
 def test_anomaly_skipped_within_3_dte_guard():
     """Late-cycle decay shouldn't trip the rule."""
-    from api.services.uw_analyze_daily_job import now_et_date
+    from xenon.api.services.uw_analyze_daily_job import now_et_date
 
     et_today = now_et_date()
     near_expiry = (et_today + timedelta(days=ANOMALY_DTE_GUARD)).isoformat()
@@ -253,7 +253,7 @@ def test_close_when_oi_returns_to_initial():
 
 
 def test_expired_when_past_expiry():
-    from api.services.uw_analyze_daily_job import now_et_date
+    from xenon.api.services.uw_analyze_daily_job import now_et_date
 
     past = (now_et_date() - timedelta(days=1)).isoformat()
     ev = _make_event(expiry=past)
@@ -276,7 +276,7 @@ def test_progress_event_anomaly_can_still_expire():
     when its expiry date passes."""
     from datetime import date, timedelta
 
-    from api.services.uw_analyze_flow_tracker import FlowEvent, FlowInitial, progress_event
+    from xenon.api.services.uw_analyze_flow_tracker import FlowEvent, FlowInitial, progress_event
 
     expired_date = (date.today() - timedelta(days=1)).isoformat()
     ev = FlowEvent(
@@ -296,7 +296,7 @@ def test_progress_event_anomaly_can_still_expire():
 
 
 def test_progress_event_anomaly_can_still_close():
-    from api.services.uw_analyze_flow_tracker import FlowEvent, FlowInitial, progress_event
+    from xenon.api.services.uw_analyze_flow_tracker import FlowEvent, FlowInitial, progress_event
 
     ev = FlowEvent(
         id="y",
@@ -363,7 +363,7 @@ def test_daily_track_capped_at_max_rows():
     """advance_daily_track drops the oldest rows once MAX_DAILY_TRACK_ROWS
     is exceeded — classify_anomaly only reads the latest row, so retaining
     more is pure memory cost."""
-    from api.services.uw_analyze_flow_tracker import MAX_DAILY_TRACK_ROWS
+    from xenon.api.services.uw_analyze_flow_tracker import MAX_DAILY_TRACK_ROWS
 
     ev = _make_event()
     # Push 2× the cap worth of days.
@@ -407,7 +407,7 @@ def test_flow_log_purge_removes_old_closed_events(tmp_path):
 
 
 def test_classify_anomaly_closing_volume_spike():
-    from api.services.uw_analyze_flow_tracker import FlowDailyRow, FlowEvent, FlowInitial, classify_anomaly
+    from xenon.api.services.uw_analyze_flow_tracker import FlowDailyRow, FlowEvent, FlowInitial, classify_anomaly
 
     ev = FlowEvent(
         id="x",
@@ -433,7 +433,7 @@ def test_classify_anomaly_closing_volume_spike():
 
 
 def test_classify_anomaly_closing_volume_silent_below_threshold():
-    from api.services.uw_analyze_flow_tracker import FlowDailyRow, FlowEvent, FlowInitial, classify_anomaly
+    from xenon.api.services.uw_analyze_flow_tracker import FlowDailyRow, FlowEvent, FlowInitial, classify_anomaly
 
     ev = FlowEvent(
         id="x",
@@ -460,7 +460,7 @@ def test_classify_anomaly_closing_volume_silent_below_threshold():
 def test_oi_evaporation_fires_on_trading_day_window_despite_calendar_days():
     """Friday detection, next Wednesday evaluation: 5 calendar days
     (would be silent under calendar rule) but only 3 trading days (fires)."""
-    from api.services.uw_analyze_flow_tracker import FlowDailyRow, FlowEvent, FlowInitial, classify_anomaly
+    from xenon.api.services.uw_analyze_flow_tracker import FlowDailyRow, FlowEvent, FlowInitial, classify_anomaly
 
     ev = FlowEvent(
         id="x",
@@ -488,7 +488,7 @@ def test_oi_evaporation_fires_on_trading_day_window_despite_calendar_days():
 
 def test_oi_evaporation_silent_beyond_trading_day_window():
     """4 trading days > 3-day window — silent."""
-    from api.services.uw_analyze_flow_tracker import FlowDailyRow, FlowEvent, FlowInitial, classify_anomaly
+    from xenon.api.services.uw_analyze_flow_tracker import FlowDailyRow, FlowEvent, FlowInitial, classify_anomaly
 
     ev = FlowEvent(
         id="x",
@@ -516,7 +516,7 @@ def test_oi_evaporation_silent_beyond_trading_day_window():
 def test_classify_anomaly_closing_volume_dte_guard():
     from datetime import date, timedelta
 
-    from api.services.uw_analyze_flow_tracker import FlowDailyRow, FlowEvent, FlowInitial, classify_anomaly
+    from xenon.api.services.uw_analyze_flow_tracker import FlowDailyRow, FlowEvent, FlowInitial, classify_anomaly
 
     near_expiry = (date.today() + timedelta(days=2)).isoformat()
     ev = FlowEvent(

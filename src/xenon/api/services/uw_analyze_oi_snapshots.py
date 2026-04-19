@@ -14,14 +14,12 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Optional
 
-_SCRIPTS = Path(__file__).resolve().parents[2]
-if str(_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS))
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 logger = logging.getLogger("xenon.uw_analyze_oi_snapshots")
 
 RETENTION_DAYS = 5
-_DEFAULT_DIR = _SCRIPTS.parent / "data" / "uw_oi_snapshots"
+_DEFAULT_DIR = _PROJECT_ROOT / "data" / "uw_oi_snapshots"
 
 
 def _path_for(ticker: str, data_dir: Optional[Path]) -> Path:

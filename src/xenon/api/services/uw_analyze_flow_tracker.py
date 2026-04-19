@@ -25,9 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
 
-_SCRIPTS = Path(__file__).resolve().parents[2]
-if str(_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS))
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 logger = logging.getLogger("xenon.uw_analyze_flow_tracker")
 
@@ -44,7 +42,7 @@ PURGE_AFTER_DAYS = 30  # drop closed/expired events older than this
 Side = Literal["call", "put"]
 Status = Literal["open", "closed", "anomaly", "expired"]
 
-_DEFAULT_PATH = _SCRIPTS.parent / "data" / "uw_unusual_flow_log.json"
+_DEFAULT_PATH = _PROJECT_ROOT / "data" / "uw_unusual_flow_log.json"
 
 
 # ── Data classes ────────────────────────────────────────────────────────────
@@ -106,7 +104,7 @@ def _to_int(v: Any) -> Optional[int]:
 
 def _today_iso() -> str:
     try:
-        from api.services.uw_analyze_daily_job import now_et_date
+        from xenon.api.services.uw_analyze_daily_job import now_et_date
 
         return now_et_date().isoformat()
     except Exception:  # noqa: BLE001
@@ -152,7 +150,7 @@ def _parse_alert_strike_expiry(alert: dict) -> tuple[Optional[float], Optional[s
 def _dte(expiry: str, today: Optional[date] = None) -> int:
     if today is None:
         try:
-            from api.services.uw_analyze_daily_job import now_et_date
+            from xenon.api.services.uw_analyze_daily_job import now_et_date
 
             today = now_et_date()
         except Exception:  # noqa: BLE001
@@ -294,7 +292,7 @@ def classify_anomaly(event: FlowEvent, *, today: Optional[date] = None) -> Optio
     except ValueError:
         detected = date.today()
     try:
-        from api.services.uw_analyze_daily_job import trading_days_between
+        from xenon.api.services.uw_analyze_daily_job import trading_days_between
 
         days_since = trading_days_between(detected, date.fromisoformat(latest.date))
     except Exception:  # noqa: BLE001
@@ -318,7 +316,7 @@ def classify_anomaly(event: FlowEvent, *, today: Optional[date] = None) -> Optio
 def maybe_close_or_expire(event: FlowEvent, *, today: Optional[date] = None) -> FlowEvent:
     if today is None:
         try:
-            from api.services.uw_analyze_daily_job import now_et_date
+            from xenon.api.services.uw_analyze_daily_job import now_et_date
 
             today = now_et_date()
         except Exception:  # noqa: BLE001

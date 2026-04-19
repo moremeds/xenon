@@ -15,28 +15,25 @@ from typing import Any, List, Optional
 
 logger = logging.getLogger("xenon.subprocess")
 
-SCRIPTS_DIR = Path(__file__).parent.parent
-PROJECT_ROOT = SCRIPTS_DIR.parent
+# File now at src/xenon/api/subprocess.py — point SCRIPTS_DIR back at the legacy scripts/ tree
+# where Phase 1 shims still resolve filename → entry-point. PR4-1 will rewrite run_script()
+# itself to call the new .venv/bin/xenon-* entry points directly.
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 
 
 def _extract_error_message(stdout: str, stderr: str, default: str) -> str:
     """Prefer the last meaningful stderr line, then stdout, then the default."""
     for stream in (stderr, stdout):
         lines = [
-            l for l in stream.strip().split("\n")
-            if l and "warnings.warn(" not in l and "NotOpenSSLWarning" not in l
+            l for l in stream.strip().split("\n") if l and "warnings.warn(" not in l and "NotOpenSSLWarning" not in l
         ]
         if lines:
             err_msg = lines[-1]
             try:
                 parsed = json.loads(err_msg)
                 if isinstance(parsed, dict):
-                    err_msg = (
-                        parsed.get("detail")
-                        or parsed.get("message")
-                        or parsed.get("error")
-                        or err_msg
-                    )
+                    err_msg = parsed.get("detail") or parsed.get("message") or parsed.get("error") or err_msg
             except Exception:
                 pass
             if len(err_msg) > 300:
@@ -88,9 +85,7 @@ async def run_script(
             cwd=work_dir,
         )
 
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout
-        )
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
@@ -150,9 +145,7 @@ async def run_module(
             cwd=str(SCRIPTS_DIR),
         )
 
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout
-        )
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")

@@ -36,7 +36,7 @@ START_SCRIPT = IBC_HOME / "start-secure-ibc-service.sh"
 RESTART_SCRIPT = IBC_HOME / "restart-secure-ibc-service.sh"
 
 # Docker paths
-COMPOSE_DIR = Path(__file__).parent.parent.parent / "docker" / "ib-gateway"
+COMPOSE_DIR = Path(__file__).resolve().parents[3] / "docker" / "ib-gateway"
 
 # Timing
 RESTART_WAIT_SECS = 45
@@ -102,7 +102,8 @@ async def _run_shell(script: Path, timeout: float = 10.0) -> tuple:
         return ("", f"Script not found: {script}", 1)
 
     proc = await asyncio.create_subprocess_exec(
-        "bash", str(script),
+        "bash",
+        str(script),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -152,7 +153,8 @@ async def _ensure_launchd() -> Dict:
         if close_wait:
             logger.warning(
                 "IB Gateway on %s:%d has CLOSE_WAIT (upstream dead) — restarting",
-                IB_HOST, IB_PORT,
+                IB_HOST,
+                IB_PORT,
             )
             return await _restart_launchd()
         return {"status": "already_running", "port_listening": True, "gateway_mode": "launchd"}
@@ -442,7 +444,8 @@ async def _ensure_cloud() -> Dict:
         return {"status": "already_running", "port_listening": True, "gateway_mode": "cloud"}
     logger.warning(
         "Cloud IB Gateway not reachable at %s:%d — check remote host",
-        IB_HOST, IB_PORT,
+        IB_HOST,
+        IB_PORT,
     )
     return {
         "status": "unreachable",

@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from api.services.uw_analyze_oi_snapshots import RETENTION_DAYS, load_history, snapshot_oi
+from xenon.api.services.uw_analyze_oi_snapshots import RETENTION_DAYS, load_history, snapshot_oi
 
 
 class FakeChain:

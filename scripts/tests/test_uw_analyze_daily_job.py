@@ -12,20 +12,20 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import pytz  # type: ignore  # noqa: E402
-from api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
-from api.services.uw_analyze_daily_job import (  # noqa: E402
+from xenon.api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
+from xenon.api.services.uw_analyze_daily_job import (  # noqa: E402
     DAILY_TRIGGER,
     is_trading_day,
     run_once,
     seconds_until_next_trigger,
 )
-from api.services.uw_analyze_flow_tracker import (  # noqa: E402
+from xenon.api.services.uw_analyze_flow_tracker import (  # noqa: E402
     FlowEvent,
     FlowInitial,
     FlowLog,
     make_event_id,
 )
-from api.services.uw_analyze_oi_tracker import OiChange  # noqa: E402
+from xenon.api.services.uw_analyze_oi_tracker import OiChange  # noqa: E402
 
 ET = pytz.timezone("America/New_York")
 
@@ -136,7 +136,7 @@ def test_run_once_attaches_oi_baseline(tmp_path):
     )
     assert stats["tickers_oi"] == 1
     entry = cache.get_entry("NVDA")
-    from api.services.uw_analyze_daily_job import now_et_date
+    from xenon.api.services.uw_analyze_daily_job import now_et_date
 
     assert entry["oi_baseline"]["data_date"] == now_et_date().isoformat()
     assert entry["oi_baseline"]["changes"][0]["strike"] == 100
@@ -228,7 +228,7 @@ def test_run_loop_double_start_suppressed(monkeypatch):
     """Starting run_loop twice should leave _job_running True and skip the
     second invocation cleanly; finally: must reset _job_running to False
     after both tasks are cancelled."""
-    from api.services import uw_analyze_daily_job as job
+    from xenon.api.services import uw_analyze_daily_job as job
 
     job._job_running = False
 
@@ -274,7 +274,7 @@ def test_run_loop_double_start_suppressed(monkeypatch):
 def test_run_loop_test_trigger_now_fires_run_once(monkeypatch):
     """With test_trigger_now=True, run_loop should call run_once at least once
     before entering the long sleep."""
-    from api.services import uw_analyze_daily_job as job
+    from xenon.api.services import uw_analyze_daily_job as job
 
     job._job_running = False
     fired = {"count": 0}

@@ -23,7 +23,7 @@ import pytest
 SCRIPTS_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from api.subprocess import run_script, run_module, ScriptResult, _extract_error_message
+from xenon.api.subprocess import run_script, run_module, ScriptResult, _extract_error_message
 
 
 @pytest.fixture

@@ -24,8 +24,8 @@ import pytest
 os.environ["XENON_TEST_MODE"] = "1"
 os.environ["XENON_API_TEST_MODE"] = "1"
 
-from api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
-from api.services.uw_analyze_flow_tracker import FlowLog  # noqa: E402
+from xenon.api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
+from xenon.api.services.uw_analyze_flow_tracker import FlowLog  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from xenon.analysis.models import (  # noqa: E402
@@ -161,7 +161,7 @@ def _make_fixtures() -> tuple[AnalysisReport, TickerData]:
 def _clear_cache(tmp_path) -> None:
     import importlib
 
-    from api.routes import uw_analyze as route_mod  # noqa: WPS433
+    from xenon.api.routes import uw_analyze as route_mod  # noqa: WPS433
 
     # Reload the module to clear any cross-file pollution from prior tests
     # that mutate module-level state (e.g. _runner, _portfolio_cache).
@@ -178,14 +178,14 @@ def _clear_cache(tmp_path) -> None:
 
 @pytest.fixture()
 def client() -> TestClient:
-    from api import server  # noqa: WPS433
+    from xenon.api import server  # noqa: WPS433
 
     return TestClient(server.app)
 
 
 def test_happy_path_returns_report_and_display(client: TestClient) -> None:
     report, td = _make_fixtures()
-    with patch("api.routes.uw_analyze.run_analysis_with_data", return_value=(report, td)) as m:
+    with patch("xenon.api.routes.uw_analyze.run_analysis_with_data", return_value=(report, td)) as m:
         resp = client.post("/uw-analyze", json={"ticker": "aapl"})
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -218,7 +218,7 @@ def test_unknown_ticker_returns_404(client: TestClient) -> None:
     def _raise(*_a, **_kw):
         raise UWNotFoundError("nope", status_code=404, response_body="")
 
-    with patch("api.routes.uw_analyze.run_analysis_with_data", side_effect=_raise):
+    with patch("xenon.api.routes.uw_analyze.run_analysis_with_data", side_effect=_raise):
         resp = client.post("/uw-analyze", json={"ticker": "ZZZZ"})
     assert resp.status_code == 404
 
@@ -227,7 +227,7 @@ def test_upstream_uw_error_returns_502(client: TestClient) -> None:
     def _raise(*_a, **_kw):
         raise UWAPIError("upstream boom")
 
-    with patch("api.routes.uw_analyze.run_analysis_with_data", side_effect=_raise):
+    with patch("xenon.api.routes.uw_analyze.run_analysis_with_data", side_effect=_raise):
         resp = client.post("/uw-analyze", json={"ticker": "AAPL"})
     assert resp.status_code == 502
 
@@ -252,7 +252,7 @@ def test_gex_table_built_from_real_strikes_shape(client: TestClient) -> None:
     from dataclasses import replace
 
     td2 = replace(td, gex_by_strike=real_shape)
-    with patch("api.routes.uw_analyze.run_analysis_with_data", return_value=(report, td2)):
+    with patch("xenon.api.routes.uw_analyze.run_analysis_with_data", return_value=(report, td2)):
         resp = client.post("/uw-analyze", json={"ticker": "AAPL"})
     assert resp.status_code == 200
     rows = resp.json()["display"]["gex_by_strike"]
@@ -273,7 +273,7 @@ def test_route_imports_with_scripts_only_pythonpath() -> None:
     (api/, scanners/, fetchers/, ...) and src/ for `xenon.*`. This mirrors
     how scripts/infra/dev/smoke_phase1_shims.sh sets up PYTHONPATH.
     """
-    code = "from api.routes import uw_analyze; print(uw_analyze.__file__)"
+    code = "from xenon.api.routes import uw_analyze; print(uw_analyze.__file__)"
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join([str(SCRIPTS_DIR), str(ROOT / "src")])
 
@@ -298,11 +298,11 @@ def test_route_uses_threadpool(client: TestClient) -> None:
         calls.append((func, args, kwargs))
         return func(*args, **kwargs)
 
-    from api.routes import uw_analyze as route_mod  # noqa: WPS433
+    from xenon.api.routes import uw_analyze as route_mod  # noqa: WPS433
 
     with (
-        patch("api.routes.uw_analyze.asyncio.to_thread", side_effect=fake_to_thread),
-        patch("api.routes.uw_analyze.run_analysis_with_data", return_value=(report, td)) as mocked,
+        patch("xenon.api.routes.uw_analyze.asyncio.to_thread", side_effect=fake_to_thread),
+        patch("xenon.api.routes.uw_analyze.run_analysis_with_data", return_value=(report, td)) as mocked,
     ):
         result = asyncio.run(route_mod._runner("AAPL"))
         report_dict, display_dict, flow_alerts = result[0], result[1], result[2]

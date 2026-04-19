@@ -1,20 +1,14 @@
 """Tests for Clerk JWT auth middleware and WebSocket ticket system."""
 
 import os
-import sys
 import time
 import uuid
 from unittest.mock import patch
 
 import pytest
 
-# Ensure the scripts/ directory is on sys.path so `from api.*` imports resolve.
-_scripts_dir = os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
-sys.path.insert(0, os.path.abspath(_scripts_dir))
-
 # --- ws_ticket tests ---
-
-from api.ws_ticket import create_ticket, validate_ticket, _ticket_store, TICKET_TTL_SECONDS
+from xenon.api.ws_ticket import TICKET_TTL_SECONDS, _ticket_store, create_ticket, validate_ticket
 
 
 class TestCreateTicket:
@@ -65,7 +59,7 @@ class TestValidateTicket:
 
 # --- auth.py tests ---
 
-from api.auth import _get_allowed_users, _get_issuer
+from xenon.api.auth import _get_allowed_users, _get_issuer
 
 
 class TestGetAllowedUsers:

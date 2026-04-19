@@ -13,15 +13,7 @@ from typing import Dict, Optional
 
 logger = logging.getLogger("xenon.ib_pool")
 
-# Import path setup — scripts/api/ needs scripts/ on sys.path
-import sys
-from pathlib import Path
-
-SCRIPTS_DIR = Path(__file__).parent.parent
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
-
-from xenon.clients.ib_client import IBClient, POOL_ROLES, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
+from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST, POOL_ROLES, IBClient
 
 
 def _connect_in_thread(host: str, port: int, client_id: int, timeout: int = 5) -> IBClient:
@@ -31,6 +23,7 @@ def _connect_in_thread(host: str, port: int, client_id: int, timeout: int = 5) -
     from asyncio.to_thread(), the thread has no loop by default.
     """
     import asyncio as _aio
+
     try:
         _aio.get_event_loop()
     except RuntimeError:
@@ -86,7 +79,10 @@ class IBPool:
                 try:
                     client = await asyncio.to_thread(
                         _connect_in_thread,
-                        self._host, self._port, client_id, 10,
+                        self._host,
+                        self._port,
+                        client_id,
+                        10,
                     )
                     self._clients[role] = client
                     self._connected[role] = True
@@ -147,7 +143,10 @@ class IBPool:
         try:
             client = await asyncio.to_thread(
                 _connect_in_thread,
-                self._host, self._port, client_id, 5,
+                self._host,
+                self._port,
+                client_id,
+                5,
             )
             self._clients[role] = client
             self._connected[role] = True

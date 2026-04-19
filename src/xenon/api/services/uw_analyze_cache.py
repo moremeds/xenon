@@ -27,10 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Optional
 
-# Make scripts/ importable when running tests directly.
-_SCRIPTS = Path(__file__).resolve().parents[2]
-if str(_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS))
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 logger = logging.getLogger("xenon.uw_analyze_cache")
 
@@ -61,8 +58,8 @@ _MAX_MATERIALIZED_CHANGES = 10
 # these sources belong to the corresponding tier; ties broken by LRU order.
 _SOURCE_TIERS: dict[str, int] = {"adhoc": 0, "watchlist": 1, "portfolio": 2}
 
-_DEFAULT_CACHE_PATH = _SCRIPTS.parent / "data" / "uw_analyze_cache.json"
-_DEFAULT_HISTORY_DIR = _SCRIPTS.parent / "data" / "uw_analyze_history"
+_DEFAULT_CACHE_PATH = _PROJECT_ROOT / "data" / "uw_analyze_cache.json"
+_DEFAULT_HISTORY_DIR = _PROJECT_ROOT / "data" / "uw_analyze_history"
 
 Source = str  # "portfolio" | "watchlist" | "adhoc"
 
@@ -706,7 +703,7 @@ class UwAnalyzeCache:
             # Materialize the diff once at write time — the GET path reads
             # this instead of recomputing (and re-capturing flow events)
             # on every request.
-            from api.services.uw_analyze_diff import compute_changes as _compute_changes
+            from xenon.api.services.uw_analyze_diff import compute_changes as _compute_changes
 
             materialized = [c.to_dict() for c in _compute_changes(prev_snapshot, new_snapshot)]
             # Bound the in-memory and on-disk growth: keep only the most

@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from api.services.uw_analyze_portfolio_bias import (
+from xenon.api.services.uw_analyze_portfolio_bias import (
     align,
     classify_portfolio,
 )
