@@ -8,7 +8,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/joemccann/dev/apps/finance/xenon/scripts/run_data_refresh.sh</string>
+        <string>/Users/joemccann/dev/apps/finance/xenon/scripts/services/run_data_refresh.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
