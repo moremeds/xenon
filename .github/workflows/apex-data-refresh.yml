@@ -94,7 +94,7 @@ jobs:
 
       - name: Run apex_refresh
         run: |
-          python scripts/apex_refresh.py \
+          python scripts/fetchers/fetch_apex_data.py \
             --mode "${{ steps.mode.outputs.mode }}" \
             --timeframes "${{ steps.mode.outputs.timeframes }}" \
             --max-workers 5
