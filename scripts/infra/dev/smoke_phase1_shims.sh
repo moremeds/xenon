@@ -24,6 +24,12 @@ while [ -L "$script_path" ]; do
 done
 cd "$(dirname "$script_path")/../../.."   # repo root, regardless of invocation cwd
 
+# Make the `xenon` package importable under bare `python3.13` without requiring
+# a system-wide `pip install -e .`. As Phase 2 bucket moves land, runpy-gated
+# shims resolve `xenon.<bucket>.<name>` via sys.path. Exported (not prefixed)
+# so `bash` wrappers in CLIS inherit it too.
+export PYTHONPATH="$(pwd)/src${PYTHONPATH:+:$PYTHONPATH}"
+
 CLIS=(
   # --- Python shims (Phase 1 baseline from phase1-design.md §Baseline) ---
   # Note: ta_cli.py and ta_premarket_prep.py were in the original baseline
