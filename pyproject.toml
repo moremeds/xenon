@@ -56,10 +56,7 @@ known-first-party = [
     "infra",
     "clients",
     "analysis",
-    "scanner_lib",
-    "trend_scan_lib",
-    "uw_scan_lib",
-    "ta_lib",
+    "ta_lib",  # active — consumed by fetchers/fetch_apex_data, scanners/trend/cli, etc.
 ]
 
 [tool.pytest.ini_options]

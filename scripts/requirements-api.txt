@@ -1,3 +1,6 @@
+# DEPRECATED: dependencies have moved to /pyproject.toml [project.dependencies].
+# This file is preserved through Phase 2 PR 4 only for legacy callers; new
+# work should use `uv sync --frozen --no-dev`. Removed in scripts-reorg PR 4.
 fastapi>=0.115
 uvicorn[standard]>=0.32
 python-dotenv
