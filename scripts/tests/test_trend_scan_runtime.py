@@ -10,7 +10,7 @@ import sys
 
 def test_trend_scan_imports_without_duckdb(monkeypatch):
     """Verify that trend_scan module works when duckdb is not installed."""
-    import scripts.trend_scan_lib.storage as storage_mod
+    import scripts.scanners.trend.storage as storage_mod
 
     monkeypatch.setattr(storage_mod, "_duckdb", None)
     assert not storage_mod.duckdb_available()
@@ -70,7 +70,7 @@ def test_pre_cache_spy_swallows_failure():
     scan continues with rs_vs_spy=1.0 default via existing branch in fetch_ohlcv."""
     from unittest.mock import MagicMock
 
-    from scripts.trend_scan import LiveTrendDataFetcher
+    from scripts.scanners.trend.cli import LiveTrendDataFetcher
 
     failing_svc = MagicMock()
     failing_svc.get_indicators.side_effect = RuntimeError("SPY cold")

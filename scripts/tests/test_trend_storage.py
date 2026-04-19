@@ -10,7 +10,7 @@ import pytest
 def test_init_schema_creates_tables():
     import duckdb
 
-    from scripts.trend_scan_lib.storage import init_schema
+    from scripts.scanners.trend.storage import init_schema
 
     conn = duckdb.connect(":memory:")
     init_schema(conn)
@@ -23,7 +23,7 @@ def test_init_schema_creates_tables():
 def test_init_schema_idempotent():
     import duckdb
 
-    from scripts.trend_scan_lib.storage import init_schema
+    from scripts.scanners.trend.storage import init_schema
 
     conn = duckdb.connect(":memory:")
     init_schema(conn)
@@ -35,7 +35,7 @@ def test_init_schema_idempotent():
 def test_write_scan_run():
     import duckdb
 
-    from scripts.trend_scan_lib.storage import init_schema, write_scan_run
+    from scripts.scanners.trend.storage import init_schema, write_scan_run
 
     conn = duckdb.connect(":memory:")
     init_schema(conn)
@@ -61,7 +61,7 @@ def test_write_scan_run():
 def test_write_scan_candidate():
     import duckdb
 
-    from scripts.trend_scan_lib.storage import init_schema, write_scan_candidates, write_scan_run
+    from scripts.scanners.trend.storage import init_schema, write_scan_candidates, write_scan_run
 
     conn = duckdb.connect(":memory:")
     init_schema(conn)
@@ -123,7 +123,7 @@ def test_write_scan_candidate():
 def test_write_multiple_candidates():
     import duckdb
 
-    from scripts.trend_scan_lib.storage import init_schema, write_scan_candidates, write_scan_run
+    from scripts.scanners.trend.storage import init_schema, write_scan_candidates, write_scan_run
 
     conn = duckdb.connect(":memory:")
     init_schema(conn)
@@ -149,7 +149,7 @@ def test_write_multiple_candidates():
 def test_query_historical_scores():
     import duckdb
 
-    from scripts.trend_scan_lib.storage import init_schema, write_scan_candidates, write_scan_run
+    from scripts.scanners.trend.storage import init_schema, write_scan_candidates, write_scan_run
 
     conn = duckdb.connect(":memory:")
     init_schema(conn)
@@ -181,7 +181,7 @@ def test_query_historical_scores():
 def test_file_based_db(tmp_path):
     import duckdb
 
-    from scripts.trend_scan_lib.storage import get_connection, init_schema
+    from scripts.scanners.trend.storage import get_connection, init_schema
 
     db_path = tmp_path / "test.duckdb"
     conn = get_connection(str(db_path))

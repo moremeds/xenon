@@ -1,7 +1,7 @@
 """Type F (multi-signal confluence) detection."""
 from __future__ import annotations
 
-from scripts.uw_scan_lib.models import SignalHit
+from scripts.scanners.uw.models import SignalHit
 
 CONFLUENCE_WEIGHTS = {1: 3.0, 2: 1.5}
 

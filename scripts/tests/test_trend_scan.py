@@ -6,8 +6,8 @@ from pathlib import Path
 
 
 def test_stage_a_data_rejects_below_market_cap():
-    from scripts.trend_scan import _stage_a_data
-    from scripts.trend_scan_lib.config import TrendScanConfig
+    from scripts.scanners.trend.cli import _stage_a_data
+    from scripts.scanners.trend.config import TrendScanConfig
 
     cfg = TrendScanConfig(min_market_cap=1_000_000_000, min_dollar_volume=10_000_000, min_price=5.0)
     universe_row = {"symbol": "AAPL", "marketCap": 5e8, "dollar_volume": 2e10, "tier": "mid_cap"}
@@ -21,8 +21,8 @@ def test_stage_a_data_rejects_below_market_cap():
 
 
 def test_stage_a_data_rejects_excluded_tier():
-    from scripts.trend_scan import _stage_a_data
-    from scripts.trend_scan_lib.config import TrendScanConfig
+    from scripts.scanners.trend.cli import _stage_a_data
+    from scripts.scanners.trend.config import TrendScanConfig
 
     cfg = TrendScanConfig(exclude_tiers={"leveraged_etf"})
     universe_row = {"symbol": "TQQQ", "marketCap": 1e10, "dollar_volume": 1e10, "tier": "leveraged_etf"}
@@ -36,8 +36,8 @@ def test_stage_a_data_rejects_excluded_tier():
 
 
 def test_stage_a_data_rejects_below_turnover_rate():
-    from scripts.trend_scan import _stage_a_data
-    from scripts.trend_scan_lib.config import TrendScanConfig
+    from scripts.scanners.trend.cli import _stage_a_data
+    from scripts.scanners.trend.config import TrendScanConfig
 
     cfg = TrendScanConfig(min_turnover_rate=0.05)  # 5% turnover floor
     universe_row = {
@@ -57,8 +57,8 @@ def test_stage_a_data_rejects_below_turnover_rate():
 
 
 def test_stage_a_data_passes_when_all_floors_met():
-    from scripts.trend_scan import _stage_a_data
-    from scripts.trend_scan_lib.config import TrendScanConfig
+    from scripts.scanners.trend.cli import _stage_a_data
+    from scripts.scanners.trend.config import TrendScanConfig
 
     cfg = TrendScanConfig()
     universe_row = {
@@ -81,8 +81,8 @@ def test_stage_a_data_passes_when_all_floors_met():
 
 def test_stage_a_data_rejects_below_min_price():
     """min_price is checked against OHLCV close (not universe row)."""
-    from scripts.trend_scan import _stage_a_data
-    from scripts.trend_scan_lib.config import TrendScanConfig
+    from scripts.scanners.trend.cli import _stage_a_data
+    from scripts.scanners.trend.config import TrendScanConfig
 
     cfg = TrendScanConfig(min_price=5.0)
     universe_row = {"symbol": "LOW", "marketCap": 5e9, "dollar_volume": 5e8, "tier": "mid_cap"}
@@ -97,7 +97,7 @@ def test_stage_a_data_rejects_below_min_price():
 
 def test_filter_universe_to_covered_a19(tmp_path: Path):
     """A19: tickers missing a parquet file are filtered out and reported as missing."""
-    from scripts.trend_scan import _filter_universe_to_covered
+    from scripts.scanners.trend.cli import _filter_universe_to_covered
 
     (tmp_path / "parquet" / "historical" / "1d").mkdir(parents=True)
     (tmp_path / "parquet" / "historical" / "1d" / "AAPL.parquet").write_bytes(b"fake")
@@ -116,7 +116,7 @@ def test_fetch_ohlcv_does_not_drop_ticker_on_uw_stock_info_failure():
     """T4: a transient UW stock_info failure must NOT turn a valid OHLCV into None."""
     from unittest.mock import MagicMock
 
-    from scripts.trend_scan import LiveTrendDataFetcher
+    from scripts.scanners.trend.cli import LiveTrendDataFetcher
 
     ta_service = MagicMock()
     ta_service.get_snapshot.return_value = {
@@ -160,7 +160,7 @@ def test_fetch_ohlcv_does_not_drop_ticker_on_uw_stock_info_failure():
 
 def test_filter_universe_to_covered_requires_all_requested_timeframes(tmp_path: Path):
     """C7: if we request ('1d', '1h'), a ticker with only 1d parquet must be filtered out."""
-    from scripts.trend_scan import _filter_universe_to_covered
+    from scripts.scanners.trend.cli import _filter_universe_to_covered
 
     (tmp_path / "parquet" / "historical" / "1d").mkdir(parents=True)
     (tmp_path / "parquet" / "historical" / "1h").mkdir(parents=True)
@@ -176,7 +176,7 @@ def test_filter_universe_to_covered_requires_all_requested_timeframes(tmp_path: 
 
 def test_scanner_timeframes_constant_is_tuple_of_strings():
     """C7: verify the module-level _SCANNER_TIMEFRAMES constant exists and is typed right."""
-    from scripts.trend_scan import _SCANNER_TIMEFRAMES
+    from scripts.scanners.trend.cli import _SCANNER_TIMEFRAMES
 
     assert isinstance(_SCANNER_TIMEFRAMES, tuple)
     assert all(isinstance(tf, str) for tf in _SCANNER_TIMEFRAMES)

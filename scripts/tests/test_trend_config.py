@@ -6,7 +6,7 @@ import pytest
 
 
 def test_default_config():
-    from scripts.trend_scan_lib.config import TrendScanConfig
+    from scripts.scanners.trend.config import TrendScanConfig
 
     cfg = TrendScanConfig()
     assert cfg.top_n == 25
@@ -16,7 +16,7 @@ def test_default_config():
 
 
 def test_config_min_thresholds():
-    from scripts.trend_scan_lib.config import TrendScanConfig
+    from scripts.scanners.trend.config import TrendScanConfig
 
     cfg = TrendScanConfig()
     assert cfg.min_thresholds["trend"] == 0.4
@@ -24,7 +24,7 @@ def test_config_min_thresholds():
 
 
 def test_config_universe_floor():
-    from scripts.trend_scan_lib.config import TrendScanConfig
+    from scripts.scanners.trend.config import TrendScanConfig
 
     cfg = TrendScanConfig()
     assert cfg.min_market_cap == 1_000_000_000
@@ -33,7 +33,7 @@ def test_config_universe_floor():
 
 
 def test_config_custom_top_n():
-    from scripts.trend_scan_lib.config import TrendScanConfig
+    from scripts.scanners.trend.config import TrendScanConfig
 
     cfg = TrendScanConfig(top_n=10)
     assert cfg.top_n == 10

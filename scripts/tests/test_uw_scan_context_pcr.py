@@ -1,6 +1,6 @@
 from datetime import datetime
 from scripts.analysis.models import TickerData
-from scripts.uw_scan_lib.context.pcr_sentiment import flag
+from scripts.scanners.uw.context.pcr_sentiment import flag
 
 
 def _td(pcr, earnings_within_14d=False):

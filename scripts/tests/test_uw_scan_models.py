@@ -1,4 +1,4 @@
-from scripts.uw_scan_lib.models import SignalHit, ScanCandidate
+from scripts.scanners.uw.models import SignalHit, ScanCandidate
 
 
 def test_signal_hit_basic():

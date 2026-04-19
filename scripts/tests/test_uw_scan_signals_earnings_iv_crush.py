@@ -1,6 +1,6 @@
 from datetime import datetime, date, timedelta
 from scripts.analysis.models import TickerData
-from scripts.uw_scan_lib.signals.earnings_iv_crush import detect
+from scripts.scanners.uw.signals.earnings_iv_crush import detect
 
 
 def _td(iv_pct, earnings_within_14d, earnings_date=None):
