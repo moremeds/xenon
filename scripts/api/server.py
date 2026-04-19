@@ -35,8 +35,6 @@ INTERNALS_SKEW_CACHE_TTL_SECONDS = 60 * 15
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
-
 from api.auth import verify_api_key, verify_clerk_jwt
 from api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_mode, is_docker_mode, restart_ib_gateway
 from api.ib_pool import IBPool
@@ -46,6 +44,7 @@ from api.routes.uw_analyze import router as uw_analyze_router
 from api.routes.uw_stats import router as uw_stats_router
 from api.subprocess import ScriptResult, run_module, run_script
 from api.ws_ticket import create_ticket, validate_ticket
+from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
 
 # Load .env from project root for Python scripts
 try:
@@ -65,10 +64,11 @@ logging.getLogger("ib_insync.wrapper").setLevel(logging.WARNING)
 logging.getLogger("ib_insync.client").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
+from ib_insync import Index
+
 from xenon.clients.futu_client import FutuClient
 from xenon.clients.futu_exceptions import FutuConnectionError, FutuError
 from xenon.clients.uw_client import UWAPIError, UWClient, UWNotFoundError
-from ib_insync import Index
 
 # Futu singleton — lazy-initialized on first /futu/sync call so the server
 # boots cleanly even when OpenD is not running. Guarded by an asyncio lock
@@ -227,10 +227,9 @@ async def lifespan(app: FastAPI):
         )
     else:
         try:
-            from xenon.clients.uw_client import UWClient
-
             from api.routes.uw_analyze import get_flow_log, get_portfolio_cache
             from api.services.uw_analyze_daily_job import run_loop as uw_daily_run_loop
+            from xenon.clients.uw_client import UWClient
 
             _uw_client = UWClient() if uw_available else None
 
@@ -1808,13 +1807,18 @@ async def _run_ib_script_with_recovery(script: str, args: list, timeout: float =
 # Entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+
+def main() -> None:
     import uvicorn
 
     uvicorn.run(
-        "scripts.api.server:app",
+        "xenon.api.server:app",
         host="127.0.0.1",
         port=8321,
         reload=True,
         reload_dirs=[str(SCRIPTS_DIR)],
     )
+
+
+if __name__ == "__main__":
+    main()
