@@ -39,7 +39,7 @@ from xenon.api.pool_order_manage import pool_cancel_order, pool_modify_order
 from xenon.api.routes.historical import router as historical_router
 from xenon.api.routes.uw_analyze import router as uw_analyze_router
 from xenon.api.routes.uw_stats import router as uw_stats_router
-from xenon.api.subprocess import ScriptResult, run_module, run_script
+from xenon.api.subprocess import ScriptResult, run_entry_point, run_module, run_script
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
 
@@ -133,7 +133,7 @@ async def _trend_scan_premarket_loop():
         logger.info("Trend scan scheduled for %s (in %.0fs)", target, wait_secs)
         await asyncio.sleep(wait_secs)
         try:
-            result = await run_script("trend_scan.py", ["--top", "25"], timeout=180)
+            result = await run_entry_point("xenon-trend-scan", ["--top", "25"], timeout=180)
             if result.ok:
                 _write_cache(DATA_DIR / "trend_scan.json", result.data)
                 logger.info("Pre-market trend scan complete: %d candidates", len(result.data.get("candidates", [])))
@@ -226,7 +226,6 @@ async def lifespan(app: FastAPI):
         try:
             from xenon.api.routes.uw_analyze import get_flow_log, get_portfolio_cache
             from xenon.api.services.uw_analyze_daily_job import run_loop as uw_daily_run_loop
-
             from xenon.clients.uw_client import UWClient
 
             _uw_client = UWClient() if uw_available else None
@@ -991,7 +990,7 @@ async def ib_restart():
 @app.post("/scan")
 async def scan():
     """Run watchlist scanner (scanner.py --top 25)."""
-    result = await run_script("scanner.py", ["--top", "25"], timeout=120)
+    result = await run_entry_point("xenon-scan", ["--top", "25"], timeout=120)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     _write_cache(DATA_DIR / "scanner.json", result.data)
@@ -1001,7 +1000,7 @@ async def scan():
 @app.post("/trend-scan")
 async def trend_scan():
     """Run 3-stage trend scanner (trend_scan.py --top 25)."""
-    result = await run_script("trend_scan.py", ["--top", "25"], timeout=180)
+    result = await run_entry_point("xenon-trend-scan", ["--top", "25"], timeout=180)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     _write_cache(DATA_DIR / "trend_scan.json", result.data)
@@ -1011,7 +1010,7 @@ async def trend_scan():
 @app.post("/discover")
 async def discover():
     """Run market-wide discovery (discover.py --min-alerts 1)."""
-    result = await run_script("discover.py", ["--min-alerts", "1"], timeout=120)
+    result = await run_entry_point("xenon-discover", ["--min-alerts", "1"], timeout=120)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     if result.data and result.data.get("error"):
@@ -1060,7 +1059,7 @@ async def flow_analysis_get(account: str = "ib"):
 @app.get("/attribution")
 async def attribution():
     """Run portfolio attribution (portfolio_attribution.py --json)."""
-    result = await run_script("portfolio_attribution.py", ["--json"], timeout=15)
+    result = await run_entry_point("xenon-portfolio-attrib", ["--json"], timeout=15)
     if not result.ok:
         raise HTTPException(status_code=500, detail=result.error)
     return result.data
@@ -1248,7 +1247,7 @@ async def orders_modify(request: Request):
 @app.post("/cta/share")
 async def cta_share():
     """Generate CTA X share report (4 cards + preview HTML). Returns output path."""
-    result = await run_script("generate_cta_share.py", ["--json", "--no-open"], timeout=120)
+    result = await run_entry_point("xenon-generate-cta-share", ["--json", "--no-open"], timeout=120)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     return result.data
@@ -1257,7 +1256,7 @@ async def cta_share():
 @app.post("/regime/scan")
 async def regime_scan():
     """Run CRI scan (cri_scan.py --json). 120s timeout."""
-    result = await run_script("cri_scan.py", ["--json"], timeout=120)
+    result = await run_entry_point("xenon-cri-scan", ["--json"], timeout=120)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     _write_cache(DATA_DIR / "cri.json", result.data)
@@ -1289,7 +1288,7 @@ async def vcg_scan():
             cached = _read_cache(DATA_DIR / "vcg.json")
             if cached:
                 return cached
-        result = await run_script("vcg_scan.py", ["--json"], timeout=120)
+        result = await run_entry_point("xenon-vcg-scan", ["--json"], timeout=120)
         if not result.ok:
             raise HTTPException(status_code=502, detail=result.error)
         _write_cache(DATA_DIR / "vcg.json", result.data)
@@ -1441,7 +1440,7 @@ async def futu_portfolio():
 @app.post("/vcg/share")
 async def vcg_share():
     """Generate VCG X share report (4 cards + preview HTML). Returns output path."""
-    result = await run_script("generate_vcg_share.py", ["--json", "--no-open"], timeout=120)
+    result = await run_entry_point("xenon-generate-vcg-share", ["--json", "--no-open"], timeout=120)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     return result.data
@@ -1457,7 +1456,7 @@ GEX_COOLDOWN_S = 60
 @app.post("/gex/share")
 async def gex_share():
     """Generate GEX X share report (4 cards + preview HTML). Returns output path."""
-    result = await run_script("generate_gex_share.py", ["--json", "--no-open"], timeout=120)
+    result = await run_entry_point("xenon-generate-gex-share", ["--json", "--no-open"], timeout=120)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     return result.data
@@ -1481,7 +1480,7 @@ async def gex_scan(ticker: str = "SPX"):
             cached = _read_cache(DATA_DIR / "gex.json")
             if cached:
                 return cached
-        result = await run_script("gex_scan.py", ["--json", "--ticker", ticker.upper()], timeout=120)
+        result = await run_entry_point("xenon-gex-scan", ["--json", "--ticker", ticker.upper()], timeout=120)
         if not result.ok:
             raise HTTPException(status_code=502, detail=result.error)
         _write_cache(DATA_DIR / "gex.json", result.data)
@@ -1492,7 +1491,7 @@ async def gex_scan(ticker: str = "SPX"):
 @app.post("/regime/share")
 async def regime_share():
     """Generate Regime/CRI X share report (4 cards + preview HTML). Returns output path."""
-    result = await run_script("generate_regime_share.py", ["--json", "--no-open"], timeout=120)
+    result = await run_entry_point("xenon-generate-regime-share", ["--json", "--no-open"], timeout=120)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     return result.data
@@ -1501,7 +1500,7 @@ async def regime_share():
 @app.post("/internals/share")
 async def internals_share():
     """Generate internals share report using the shared CRI report builder."""
-    result = await run_script("generate_regime_share.py", ["--json", "--no-open"], timeout=120)
+    result = await run_entry_point("xenon-generate-regime-share", ["--json", "--no-open"], timeout=120)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     return result.data
@@ -1591,7 +1590,7 @@ _running_build: Optional[asyncio.Task] = None
 
 async def _do_performance_rebuild() -> dict:
     """Run portfolio_performance.py and cache result."""
-    result = await run_script("portfolio_performance.py", ["--json"], timeout=180)
+    result = await run_entry_point("xenon-portfolio-perf", ["--json"], timeout=180)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     _write_cache(DATA_DIR / "performance.json", result.data)
@@ -1641,7 +1640,7 @@ async def options_chain(symbol: str, expiry: Optional[str] = None):
 @app.get("/options/expirations")
 async def options_expirations(symbol: str):
     """List option expirations for a symbol."""
-    result = await run_script("ib_option_chain.py", ["--symbol", symbol.upper()], timeout=15)
+    result = await run_entry_point("xenon-ib-option-chain", ["--symbol", symbol.upper()], timeout=15)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     if result.data and result.data.get("error"):
