@@ -28,7 +28,7 @@ from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
-PRESETS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "presets"
+PRESETS_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent / "data" / "presets"
 CHANGELOG_PATH = PRESETS_DIR / "changelog.json"
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
 

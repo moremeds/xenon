@@ -17,7 +17,7 @@ from typing import Dict, Optional
 
 from xenon.utils.atomic_io import atomic_save, verified_load
 
-CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "price_history_cache"
+CACHE_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "price_history_cache"
 STOCKS_DIR = CACHE_DIR / "stocks"
 OPTIONS_DIR = CACHE_DIR / "options"
 

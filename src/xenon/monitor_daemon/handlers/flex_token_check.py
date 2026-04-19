@@ -20,7 +20,7 @@ from xenon.monitor_daemon.handlers.base import BaseHandler
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent
 CONFIG_PATH = PROJECT_ROOT / "data" / "flex_token_config.json"
 
 # Run once per day (86400s)

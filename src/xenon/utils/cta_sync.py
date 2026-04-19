@@ -12,7 +12,6 @@ from zoneinfo import ZoneInfo
 
 from xenon.utils.market_calendar import _is_trading_day
 
-
 ET = ZoneInfo("America/New_York")
 MARKET_CLOSE_MINUTE = 16 * 60
 CTA_SYNC_ET_SLOTS = [
@@ -20,7 +19,7 @@ CTA_SYNC_ET_SLOTS = [
     (17, 0),
 ]
 
-PROJECT_DIR = Path(__file__).resolve().parents[2]
+PROJECT_DIR = Path(__file__).resolve().parents[3]
 DATA_DIR = PROJECT_DIR / "data"
 CTA_CACHE_DIR = DATA_DIR / "menthorq_cache"
 CTA_SERVICE_HEALTH_DIR = DATA_DIR / "service_health"
@@ -235,9 +234,10 @@ def run_cta_sync(
                 )
                 return 0
 
-            combined = "\n".join(
-                part for part in [result.stderr or "", result.stdout or ""] if part
-            ) or f"CTA sync command exited with {result.returncode}"
+            combined = (
+                "\n".join(part for part in [result.stderr or "", result.stdout or ""] if part)
+                or f"CTA sync command exited with {result.returncode}"
+            )
             last_excerpt = _sanitize_excerpt(combined)
             last_error_type = classify_sync_error(combined)
 

@@ -26,7 +26,7 @@ from typing import Literal, Optional
 
 Bias = Literal["bullish", "bearish", "neutral_vol", "income", "hedge", "unknown"]
 
-_STRUCTURES_PATH = Path(__file__).resolve().parent.parent.parent / "docs" / "trading" / "options-structures.json"
+_STRUCTURES_PATH = Path(__file__).resolve().parent.parent.parent.parent / "docs" / "trading" / "options-structures.json"
 
 
 def _load_structure_bias_table() -> dict[str, str]:

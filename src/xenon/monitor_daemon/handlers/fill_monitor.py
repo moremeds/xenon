@@ -23,7 +23,7 @@ from xenon.clients.ib_client import IBClient, DEFAULT_HOST
 logger = logging.getLogger(__name__)
 
 # Default paths
-DEFAULT_TRADE_LOG = Path(__file__).parent.parent.parent.parent / "data" / "trade_log.json"
+DEFAULT_TRADE_LOG = Path(__file__).parent.parent.parent.parent.parent / "data" / "trade_log.json"
 DEFAULT_IB_PORT = 4001
 DEFAULT_CLIENT_ID = 70
 

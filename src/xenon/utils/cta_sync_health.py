@@ -10,7 +10,7 @@ from typing import Any, Optional
 from xenon.utils.atomic_io import atomic_save
 
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent.parent
+PROJECT_DIR = Path(__file__).resolve().parent.parent.parent.parent
 CACHE_DIR = PROJECT_DIR / "data" / "menthorq_cache"
 HEALTH_DIR = CACHE_DIR / "health"
 STATUS_PATH = HEALTH_DIR / "cta-sync-latest.json"

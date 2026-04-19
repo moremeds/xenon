@@ -28,7 +28,6 @@ from api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
 from api.services.uw_analyze_flow_tracker import FlowLog  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from xenon.clients.uw_client import UWAPIError, UWNotFoundError  # noqa: E402
 from xenon.analysis.models import (  # noqa: E402
     AnalysisReport,
     BenchmarkContext,
@@ -38,6 +37,7 @@ from xenon.analysis.models import (  # noqa: E402
     TickerData,
     VRPState,
 )
+from xenon.clients.uw_client import UWAPIError, UWNotFoundError  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = ROOT / "scripts"
@@ -266,10 +266,16 @@ def test_gex_table_built_from_real_strikes_shape(client: TestClient) -> None:
 
 
 def test_route_imports_with_scripts_only_pythonpath() -> None:
-    """Legacy scripts tests run from scripts/tests with only scripts/ on PYTHONPATH."""
+    """API routes import cleanly when both scripts/ and src/ are on PYTHONPATH.
+
+    Phase 2 PR 2 moved analysis/, clients/, utils/, etc. to src/xenon/, so the
+    route now needs both directories on path: scripts/ for the legacy buckets
+    (api/, scanners/, fetchers/, ...) and src/ for `xenon.*`. This mirrors
+    how scripts/infra/dev/smoke_phase1_shims.sh sets up PYTHONPATH.
+    """
     code = "from api.routes import uw_analyze; print(uw_analyze.__file__)"
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(SCRIPTS_DIR)
+    env["PYTHONPATH"] = os.pathsep.join([str(SCRIPTS_DIR), str(ROOT / "src")])
 
     proc = subprocess.run(
         [sys.executable, "-c", code],

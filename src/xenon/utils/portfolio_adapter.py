@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Literal
 Account = Literal["ib", "futu"]
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
-PROJECT_DIR = SCRIPT_DIR.parent
+PROJECT_DIR = SCRIPT_DIR.parent.parent
 IB_PORTFOLIO = PROJECT_DIR / "data" / "portfolio.json"
 FUTU_PORTFOLIO = PROJECT_DIR / "data" / "futu_portfolio.json"
 

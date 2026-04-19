@@ -28,7 +28,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 SCHEDULED_DIR = DATA_DIR / "cri_scheduled"
 CACHE_PATH = DATA_DIR / "cri.json"

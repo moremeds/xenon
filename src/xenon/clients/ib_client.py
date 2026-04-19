@@ -32,7 +32,7 @@ from dotenv import load_dotenv
 from ib_insync import IB, FlexReport, Option
 
 # Load root .env so IB_GATEWAY_HOST/PORT are available before defaults are computed
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
 # ---------------------------------------------------------------------------

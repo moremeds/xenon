@@ -43,7 +43,7 @@ from playwright.sync_api import sync_playwright, Page
 from xenon.utils.env_loader import load_env_file
 
 # Load .env from project root
-load_env_file(Path(__file__).resolve().parent.parent.parent / ".env")
+load_env_file(Path(__file__).resolve().parent.parent.parent.parent / ".env")
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +53,8 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://menthorq.com/account/"
 LOGIN_URL = "https://menthorq.com/login/"
-DEFAULT_ARTIFACT_ROOT = Path(__file__).resolve().parent.parent.parent / "logs" / "menthorq_artifacts"
-DEFAULT_STORAGE_STATE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "menthorq_cache" / "menthorq_storage_state.json"
+DEFAULT_ARTIFACT_ROOT = Path(__file__).resolve().parent.parent.parent.parent / "logs" / "menthorq_artifacts"
+DEFAULT_STORAGE_STATE_PATH = Path(__file__).resolve().parent.parent.parent.parent / "data" / "menthorq_cache" / "menthorq_storage_state.json"
 
 # CTA card slugs (data-command-slug attributes)
 CTA_SLUGS = {

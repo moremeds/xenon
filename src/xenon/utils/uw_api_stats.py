@@ -43,7 +43,7 @@ _PERSIST_THROTTLE_SECONDS = 30.0
 _HISTORY_SCHEMA_VERSION = 1
 
 # Default history file path — resolves to <repo>/data/uw_api_stats_history.json.
-_DEFAULT_HISTORY_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "uw_api_stats_history.json"
+_DEFAULT_HISTORY_PATH = Path(__file__).resolve().parent.parent.parent.parent / "data" / "uw_api_stats_history.json"
 
 # Regex to extract ticker from common UW endpoint paths.
 # Matches: stock/{TICKER}/..., darkpool/{TICKER}, earnings/{TICKER},
