@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT = Path(__file__).resolve().parents[3]
 DATA_PATH = ROOT / "data" / "performance.json"
 CHART_SYSTEM_PATH = ROOT / "web" / "lib" / "chart-system-spec.json"
 REPORTS_DIR = ROOT / "reports"

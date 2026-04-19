@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from reports.free_trade_analyzer import (
+from xenon.reports.free_trade_analyzer import (
     Leg,
     FreeTradeSuggestion,
     classify_position,

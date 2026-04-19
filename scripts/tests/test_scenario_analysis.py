@@ -2,7 +2,7 @@
 import pytest
 import math
 
-from reports.scenario_analysis import (
+from xenon.reports.scenario_analysis import (
     approx_delta,
     compute_position_delta,
     compute_exposure,

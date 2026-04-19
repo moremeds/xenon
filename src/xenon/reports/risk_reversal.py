@@ -23,10 +23,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Add project paths
-SCRIPT_DIR = Path(__file__).resolve().parent.parent
-PROJECT_ROOT = SCRIPT_DIR.parent
-sys.path.insert(0, str(SCRIPT_DIR))
+# Project paths. SCRIPT_DIR still points at the scripts/ dir because
+# subprocess callers below invoke Phase 1 shim entry scripts; those
+# shim paths will be rewritten to xenon-* entry points in PR4-4.
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+SCRIPT_DIR = PROJECT_ROOT / "scripts"
 
 from ib_insync import Option, Stock
 

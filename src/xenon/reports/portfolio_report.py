@@ -40,10 +40,9 @@ from typing import Any, Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 # PATHS
 # ---------------------------------------------------------------------------
-SCRIPT_DIR = Path(__file__).resolve().parent.parent
-PROJECT_DIR = SCRIPT_DIR.parent
+PROJECT_DIR = Path(__file__).resolve().parents[3]
+SCRIPT_DIR = PROJECT_DIR / "scripts"  # kept for subprocess shim invocations (see PR4-4)
 
-sys.path.insert(0, str(SCRIPT_DIR))
 from xenon.clients.ib_client import DEFAULT_HOST
 
 TEMPLATE_PATH = PROJECT_DIR / ".pi/skills/html-report/portfolio-template.html"
@@ -61,7 +60,6 @@ TODAY_STR = TODAY.strftime("%Y-%m-%d")
 
 def connect_ib(port: int = 4001, client_id: int = 55):
     """Connect to IB Gateway/TWS."""
-    sys.path.insert(0, str(SCRIPT_DIR))
     from ib_insync import IB
 
     ib = IB()
@@ -856,7 +854,6 @@ def main():
 
     # Detect market status
     try:
-        sys.path.insert(0, str(SCRIPT_DIR))
         from xenon.utils.market_hours import is_market_open
 
         market_open = is_market_open()

@@ -33,8 +33,6 @@ import numpy as np
 import pandas as pd
 from ib_insync import Stock
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from xenon.clients.ib_client import IBClient  # noqa: E402
 from xenon.clients.uw_client import UWClient, UWRateLimitError  # noqa: E402
 from xenon.utils.price_cache import (  # noqa: E402
@@ -55,7 +53,7 @@ _MIN_WORKERS = 1
 _MAX_WORKERS = 20
 
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT = Path(__file__).resolve().parents[3]
 PORTFOLIO_PATH = ROOT / "data" / "portfolio.json"
 BLOTTER_CACHE_PATH = ROOT / "data" / "blotter.json"
 TRADING_DAYS = 252

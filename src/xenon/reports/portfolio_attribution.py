@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+ROOT = Path(__file__).resolve().parents[3]
 TRADE_LOG_PATH = ROOT / "data" / "trade_log.json"
 STRATEGIES_PATH = ROOT / "data" / "strategies.json"
 

@@ -36,21 +36,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# ---------------------------------------------------------------------------
-# Ensure scripts/ is on sys.path for sibling imports
-# ---------------------------------------------------------------------------
-_SCRIPT_DIR = Path(__file__).resolve().parent.parent
-if str(_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR))
-
+from xenon.clients.uw_client import UWClient
 from xenon.fetchers.fetch_analyst_ratings import fetch_analyst_ratings
 from xenon.fetchers.fetch_flow import fetch_flow
 from xenon.fetchers.fetch_news import fetch_news
 from xenon.fetchers.fetch_oi_changes import categorize_signal, fetch_ticker_oi_changes
 from xenon.fetchers.fetch_options import fetch_options
 from xenon.fetchers.fetch_ticker import fetch_ticker_info
-
-from xenon.clients.uw_client import UWClient
 
 # ---------------------------------------------------------------------------
 # Data classes
