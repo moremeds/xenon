@@ -24,5 +24,5 @@ class PresetRebalanceHandler(BaseHandler):
 
     def execute(self) -> Dict[str, Any]:
         # Import here to avoid circular / slow imports at daemon startup
-        from monitor_daemon.handlers.preset_rebalance import execute as run_rebalance
+        from xenon.monitor_daemon.handlers.preset_rebalance import execute as run_rebalance
         return run_rebalance()

@@ -14,8 +14,8 @@ from datetime import datetime, time
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from monitor_daemon.daemon import MonitorDaemon
-from monitor_daemon.handlers.base import BaseHandler
+from xenon.monitor_daemon.daemon import MonitorDaemon
+from xenon.monitor_daemon.handlers.base import BaseHandler
 
 
 class TestMonitorDaemonInit:
@@ -60,11 +60,11 @@ class TestMonitorDaemonMarketHours:
         daemon = MonitorDaemon()
         
         # Wednesday at 10:00 AM ET
-        with patch('monitor_daemon.daemon.datetime') as mock_dt:
+        with patch('xenon.monitor_daemon.daemon.datetime') as mock_dt:
             mock_dt.now.return_value = datetime(2026, 3, 4, 10, 0, 0)  # 10 AM
             mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
             # Mock as Wednesday
-            with patch('monitor_daemon.daemon.datetime') as mock_dt2:
+            with patch('xenon.monitor_daemon.daemon.datetime') as mock_dt2:
                 mock_now = MagicMock()
                 mock_now.weekday.return_value = 2  # Wednesday
                 mock_now.hour = 10

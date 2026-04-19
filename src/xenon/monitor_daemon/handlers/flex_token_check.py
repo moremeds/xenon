@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
-from monitor_daemon.handlers.base import BaseHandler
+from xenon.monitor_daemon.handlers.base import BaseHandler
 
 logger = logging.getLogger(__name__)
 

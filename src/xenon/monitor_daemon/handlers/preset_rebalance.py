@@ -14,17 +14,17 @@ Sources:
 Registered as a monitor daemon handler.
 """
 
-import json
 import csv
 import io
-import re
-import os
+import json
 import logging
+import os
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Set, Tuple, Optional
-from urllib.request import Request, urlopen
+from typing import Dict, List, Optional, Set, Tuple
 from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,7 @@ USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
 
 
 # ─── Fetchers ────────────────────────────────────────────────
+
 
 def fetch_sp500() -> List[Dict]:
     """Fetch current S&P 500 constituents from Wikipedia."""
@@ -55,12 +56,14 @@ def fetch_sp500() -> List[Dict]:
             sector = re.sub(r"<[^>]+>", "", cells[2]).strip()
             sub_industry = re.sub(r"<[^>]+>", "", cells[3]).strip().replace("&amp;", "&")
             if ticker:
-                companies.append({
-                    "ticker": ticker,
-                    "name": name,
-                    "sector": sector,
-                    "sub_industry": sub_industry,
-                })
+                companies.append(
+                    {
+                        "ticker": ticker,
+                        "name": name,
+                        "sector": sector,
+                        "sub_industry": sub_industry,
+                    }
+                )
 
     # Dedup
     seen = set()
@@ -92,12 +95,14 @@ def fetch_ndx100() -> List[Dict]:
             sector = re.sub(r"<[^>]+>", "", cells[2]).strip()
             sub_industry = re.sub(r"<[^>]+>", "", cells[3]).strip().replace("&amp;", "&")
             if ticker:
-                companies.append({
-                    "ticker": ticker,
-                    "name": name,
-                    "sector": sector,
-                    "sub_industry": sub_industry,
-                })
+                companies.append(
+                    {
+                        "ticker": ticker,
+                        "name": name,
+                        "sector": sector,
+                        "sub_industry": sub_industry,
+                    }
+                )
 
     seen = set()
     unique = []
@@ -157,12 +162,14 @@ def fetch_r2k() -> List[Dict]:
         except ValueError:
             weight = 0.0
 
-        companies.append({
-            "ticker": ticker,
-            "name": name,
-            "sector": sector,
-            "weight": weight,
-        })
+        companies.append(
+            {
+                "ticker": ticker,
+                "name": name,
+                "sector": sector,
+                "weight": weight,
+            }
+        )
 
     seen = set()
     unique = []
@@ -175,9 +182,8 @@ def fetch_r2k() -> List[Dict]:
 
 # ─── Diff Logic ──────────────────────────────────────────────
 
-def diff_tickers(
-    current_preset: List[str], fresh_list: List[str]
-) -> Tuple[Set[str], Set[str]]:
+
+def diff_tickers(current_preset: List[str], fresh_list: List[str]) -> Tuple[Set[str], Set[str]]:
     """Return (added, removed) tickers."""
     current = set(current_preset)
     fresh = set(fresh_list)
@@ -185,6 +191,7 @@ def diff_tickers(
 
 
 # ─── Preset Update Logic ────────────────────────────────────
+
 
 def update_sp500_presets(fresh_companies: List[Dict], added: Set[str], removed: Set[str]) -> int:
     """Update SP500 master and sub-presets. Returns number of files written."""
@@ -420,7 +427,7 @@ def update_r2k_presets(fresh_companies: List[Dict], added: Set[str], removed: Se
     }
 
     for tier_key, (start, end) in tiers.items():
-        tier_companies = sorted_all[start:min(end, len(sorted_all))]
+        tier_companies = sorted_all[start : min(end, len(sorted_all))]
         tier_tickers = [c["ticker"] for c in tier_companies]
         tier_pairs = []
         for i in range(0, len(tier_tickers) - 1, 2):
@@ -469,6 +476,7 @@ def update_r2k_presets(fresh_companies: List[Dict], added: Set[str], removed: Se
 
 # ─── Changelog ───────────────────────────────────────────────
 
+
 def log_changes(index: str, added: Set[str], removed: Set[str]):
     """Append to changelog.json."""
     changelog = []
@@ -497,6 +505,7 @@ def log_changes(index: str, added: Set[str], removed: Set[str]):
 
 
 # ─── Main Handler ────────────────────────────────────────────
+
 
 def execute() -> dict:
     """
@@ -612,7 +621,8 @@ def execute() -> dict:
 
 # ─── CLI ─────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+
+def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Index Rebalance Checker")
@@ -683,3 +693,7 @@ if __name__ == "__main__":
                     print(f"  {idx}: +{added} -{removed}")
                 else:
                     print(f"  {idx}: ✅ No changes")
+
+
+if __name__ == "__main__":
+    main()

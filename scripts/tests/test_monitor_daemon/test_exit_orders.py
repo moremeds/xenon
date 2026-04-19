@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch, MagicMock
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from monitor_daemon.handlers.exit_orders import ExitOrdersHandler
+from xenon.monitor_daemon.handlers.exit_orders import ExitOrdersHandler
 
 
 def make_mock_client():
@@ -128,9 +128,9 @@ class TestExitOrdersExecute:
 
     def test_places_order_when_gap_acceptable(self, tmp_path):
         """Places order when within 40% gap."""
-        with patch('monitor_daemon.handlers.exit_orders.IBClient') as mock_cls, \
-             patch('monitor_daemon.handlers.exit_orders.Option') as mock_option, \
-             patch('monitor_daemon.handlers.exit_orders.LimitOrder') as mock_limit_order:
+        with patch('xenon.monitor_daemon.handlers.exit_orders.IBClient') as mock_cls, \
+             patch('xenon.monitor_daemon.handlers.exit_orders.Option') as mock_option, \
+             patch('xenon.monitor_daemon.handlers.exit_orders.LimitOrder') as mock_limit_order:
             mock_client = make_mock_client()
             mock_cls.return_value = mock_client
 
@@ -182,8 +182,8 @@ class TestExitOrdersExecute:
 
     def test_skips_order_when_gap_too_large(self, tmp_path):
         """Skips order when gap exceeds 40%."""
-        with patch('monitor_daemon.handlers.exit_orders.IBClient') as mock_cls, \
-             patch('monitor_daemon.handlers.exit_orders.Option') as mock_option:
+        with patch('xenon.monitor_daemon.handlers.exit_orders.IBClient') as mock_cls, \
+             patch('xenon.monitor_daemon.handlers.exit_orders.Option') as mock_option:
             mock_client = make_mock_client()
             mock_cls.return_value = mock_client
 
@@ -234,9 +234,9 @@ class TestExitOrdersTradeLogUpdate:
 
     def test_updates_trade_log_on_placement(self, tmp_path):
         """Updates trade_log.json when order is placed."""
-        with patch('monitor_daemon.handlers.exit_orders.IBClient') as mock_cls, \
-             patch('monitor_daemon.handlers.exit_orders.Option') as mock_option, \
-             patch('monitor_daemon.handlers.exit_orders.LimitOrder') as mock_limit_order:
+        with patch('xenon.monitor_daemon.handlers.exit_orders.IBClient') as mock_cls, \
+             patch('xenon.monitor_daemon.handlers.exit_orders.Option') as mock_option, \
+             patch('xenon.monitor_daemon.handlers.exit_orders.LimitOrder') as mock_limit_order:
             mock_client = make_mock_client()
             mock_cls.return_value = mock_client
 
