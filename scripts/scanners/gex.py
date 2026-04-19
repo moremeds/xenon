@@ -900,7 +900,7 @@ def main():
 
     # Always write cache
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    from utils.atomic_io import atomic_save
+    from xenon.utils.atomic_io import atomic_save
     atomic_save(str(cache_path), result)
     print(f"  Cache written: {cache_path}", file=sys.stderr)
 

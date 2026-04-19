@@ -33,7 +33,7 @@ from requests.exceptions import Timeout as ReqTimeout
 
 # Optional in-memory cache for request deduplication
 try:
-    from utils.uw_cache import get_cached, make_key, set_cached
+    from xenon.utils.uw_cache import get_cached, make_key, set_cached
 
     _USE_CACHE = True
 except ImportError:
@@ -41,7 +41,7 @@ except ImportError:
 
 # Optional API usage stats (module-level singleton)
 try:
-    from utils.uw_api_stats import stats as _api_stats
+    from xenon.utils.uw_api_stats import stats as _api_stats
 except ImportError:
     _api_stats = None  # type: ignore[assignment]
 

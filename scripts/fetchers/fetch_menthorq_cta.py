@@ -33,8 +33,8 @@ _SCRIPT_DIR = Path(__file__).resolve().parent.parent
 _PROJECT_DIR = _SCRIPT_DIR.parent
 CACHE_DIR = _PROJECT_DIR / "data" / "menthorq_cache"
 
-from utils.env_loader import load_env_file
-from utils.atomic_io import atomic_save
+from xenon.utils.env_loader import load_env_file
+from xenon.utils.atomic_io import atomic_save
 
 # Load .env from project root (before any os.environ reads)
 load_env_file(_PROJECT_DIR / ".env")

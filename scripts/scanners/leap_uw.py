@@ -660,7 +660,7 @@ def main():
             print(f"  {name:20s}  {len(PRESETS[name]):>4d} tickers")
         print("\n=== FILE PRESETS (data/presets/) ===\n")
         try:
-            from utils.presets import list_presets
+            from xenon.utils.presets import list_presets
             for name, desc, count in list_presets():
                 print(f"  {name:50s}  {count:>4d} tickers  {desc[:60]}")
         except ImportError:
@@ -676,7 +676,7 @@ def main():
             tickers = PRESETS[args.preset]
         else:
             try:
-                from utils.presets import load_preset
+                from xenon.utils.presets import load_preset
                 p = load_preset(args.preset)
                 tickers = p.tickers
                 print(f"📂 Loaded preset: {p.name} ({p.ticker_count} tickers)")

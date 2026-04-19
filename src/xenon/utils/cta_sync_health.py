@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-from utils.atomic_io import atomic_save
+from xenon.utils.atomic_io import atomic_save
 
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent.parent

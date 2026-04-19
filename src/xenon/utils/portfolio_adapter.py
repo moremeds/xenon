@@ -44,7 +44,7 @@ def _read_json(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        from utils.atomic_io import verified_load  # type: ignore
+        from xenon.utils.atomic_io import verified_load  # type: ignore
 
         return verified_load(str(path))
     except Exception:

@@ -347,7 +347,7 @@ async def lifespan(app: FastAPI):
         # Persist UW API stats hourly history so daily stats survive a
         # FastAPI restart. Best-effort — never block shutdown on I/O.
         try:
-            from utils.uw_api_stats import stats as _uw_stats
+            from xenon.utils.uw_api_stats import stats as _uw_stats
 
             _uw_stats.flush_history()
         except Exception as exc:  # noqa: BLE001
@@ -436,7 +436,7 @@ def _write_cache(path: Path, data: dict) -> None:
 
 def _atomic_save(path: str, data: dict) -> str:
     """Use the project's atomic_save for portfolio/orders files."""
-    from utils.atomic_io import atomic_save
+    from xenon.utils.atomic_io import atomic_save
 
     return atomic_save(path, data)
 
@@ -1087,7 +1087,7 @@ async def portfolio_sync():
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     # ib_sync.py writes to data/portfolio.json; read it back
-    from utils.atomic_io import verified_load
+    from xenon.utils.atomic_io import verified_load
 
     try:
         data = verified_load(str(DATA_DIR / "portfolio.json"))

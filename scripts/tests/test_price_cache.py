@@ -9,7 +9,7 @@ import pytest
 
 # price_cache auto-creates dirs on import; patch os.makedirs to avoid side effects
 with patch("os.makedirs"):
-    from utils.price_cache import (
+    from xenon.utils.price_cache import (
         STOCKS_DIR,
         OPTIONS_DIR,
         cache_key_stock,
@@ -63,8 +63,8 @@ class TestReadWriteCache:
         key = cache_key_stock("SPY", "2026-01-01", "2026-03-17")
         data = {"2026-01-02": 230.5, "2026-01-03": 232.1}
 
-        with patch("utils.price_cache.STOCKS_DIR", stocks_dir), \
-             patch("utils.price_cache.OPTIONS_DIR", cache_dirs[1]):
+        with patch("xenon.utils.price_cache.STOCKS_DIR", stocks_dir), \
+             patch("xenon.utils.price_cache.OPTIONS_DIR", cache_dirs[1]):
             write_cache(stocks_dir, key, data, source="ib", ttl=86400)
             result = read_cache(stocks_dir, key)
 
@@ -74,8 +74,8 @@ class TestReadWriteCache:
         stocks_dir, _ = cache_dirs
         key = cache_key_stock("MISSING", "2026-01-01", "2026-03-17")
 
-        with patch("utils.price_cache.STOCKS_DIR", stocks_dir), \
-             patch("utils.price_cache.OPTIONS_DIR", cache_dirs[1]):
+        with patch("xenon.utils.price_cache.STOCKS_DIR", stocks_dir), \
+             patch("xenon.utils.price_cache.OPTIONS_DIR", cache_dirs[1]):
             result = read_cache(stocks_dir, key)
 
         assert result is None
@@ -85,8 +85,8 @@ class TestReadWriteCache:
         key = cache_key_stock("SPY", "2026-01-01", "2026-03-17")
         data = {"2026-01-02": 230.5}
 
-        with patch("utils.price_cache.STOCKS_DIR", stocks_dir), \
-             patch("utils.price_cache.OPTIONS_DIR", cache_dirs[1]):
+        with patch("xenon.utils.price_cache.STOCKS_DIR", stocks_dir), \
+             patch("xenon.utils.price_cache.OPTIONS_DIR", cache_dirs[1]):
             write_cache(stocks_dir, key, data, source="ib", ttl=1)
 
             # Patch time to be 2 seconds ahead
@@ -98,8 +98,8 @@ class TestReadWriteCache:
     def test_corrupted_json_returns_none(self, cache_dirs):
         stocks_dir, _ = cache_dirs
         key = cache_key_stock("CORRUPT", "2026-01-01", "2026-03-17")
-        from utils.price_cache import _cache_path
-        with patch("utils.price_cache.STOCKS_DIR", stocks_dir):
+        from xenon.utils.price_cache import _cache_path
+        with patch("xenon.utils.price_cache.STOCKS_DIR", stocks_dir):
             path = _cache_path(stocks_dir, key)
             path.write_text("{invalid json")
             result = read_cache(stocks_dir, key)
@@ -111,8 +111,8 @@ class TestReadWriteCache:
         key = cache_key_option("AAPL260321C00230000", "2026-01-01", "2026-03-17")
         data = {"2026-02-15": 5.50, "2026-02-16": 5.75}
 
-        with patch("utils.price_cache.STOCKS_DIR", cache_dirs[0]), \
-             patch("utils.price_cache.OPTIONS_DIR", options_dir):
+        with patch("xenon.utils.price_cache.STOCKS_DIR", cache_dirs[0]), \
+             patch("xenon.utils.price_cache.OPTIONS_DIR", options_dir):
             write_cache(options_dir, key, data, source="uw", ttl=86400)
             result = read_cache(options_dir, key)
 
@@ -123,8 +123,8 @@ class TestReadWriteCache:
         key = cache_key_stock("SPY", "2026-01-01", "2026-03-17")
         data = {"2026-01-02": 230.5}
 
-        with patch("utils.price_cache.STOCKS_DIR", stocks_dir), \
-             patch("utils.price_cache.OPTIONS_DIR", cache_dirs[1]):
+        with patch("xenon.utils.price_cache.STOCKS_DIR", stocks_dir), \
+             patch("xenon.utils.price_cache.OPTIONS_DIR", cache_dirs[1]):
             write_cache(stocks_dir, key, data, source="ib", ttl=86400)
             result = read_cache(stocks_dir, key)
 
@@ -137,7 +137,7 @@ class TestMarketHours:
         from datetime import datetime as dt
         from zoneinfo import ZoneInfo
         mock_now = dt(2026, 3, 17, 10, 0, 0, tzinfo=ZoneInfo("America/New_York"))
-        with patch("utils.price_cache.datetime") as mock_dt:
+        with patch("xenon.utils.price_cache.datetime") as mock_dt:
             mock_dt.now.return_value = mock_now
             mock_dt.fromisoformat = dt.fromisoformat
             assert is_market_hours() is True
@@ -147,7 +147,7 @@ class TestMarketHours:
         from datetime import datetime as dt
         from zoneinfo import ZoneInfo
         mock_now = dt(2026, 3, 17, 17, 0, 0, tzinfo=ZoneInfo("America/New_York"))
-        with patch("utils.price_cache.datetime") as mock_dt:
+        with patch("xenon.utils.price_cache.datetime") as mock_dt:
             mock_dt.now.return_value = mock_now
             mock_dt.fromisoformat = dt.fromisoformat
             assert is_market_hours() is False
@@ -158,7 +158,7 @@ class TestMarketHours:
         from zoneinfo import ZoneInfo
         # 2026-03-14 is a Saturday
         mock_now = dt(2026, 3, 14, 12, 0, 0, tzinfo=ZoneInfo("America/New_York"))
-        with patch("utils.price_cache.datetime") as mock_dt:
+        with patch("xenon.utils.price_cache.datetime") as mock_dt:
             mock_dt.now.return_value = mock_now
             mock_dt.fromisoformat = dt.fromisoformat
             assert is_market_hours() is False
@@ -171,8 +171,8 @@ class TestPruneCache:
         for i in range(3):
             (stocks_dir / f"file{i}.json").write_text("{}")
 
-        with patch("utils.price_cache.STOCKS_DIR", stocks_dir), \
-             patch("utils.price_cache.OPTIONS_DIR", options_dir):
+        with patch("xenon.utils.price_cache.STOCKS_DIR", stocks_dir), \
+             patch("xenon.utils.price_cache.OPTIONS_DIR", options_dir):
             deleted = prune_cache(stocks_dir, max_files=10)
         assert deleted == 0
 
@@ -183,8 +183,8 @@ class TestPruneCache:
             f = stocks_dir / f"file{i}.json"
             f.write_text("{}")
 
-        with patch("utils.price_cache.STOCKS_DIR", stocks_dir), \
-             patch("utils.price_cache.OPTIONS_DIR", options_dir):
+        with patch("xenon.utils.price_cache.STOCKS_DIR", stocks_dir), \
+             patch("xenon.utils.price_cache.OPTIONS_DIR", options_dir):
             deleted = prune_cache(stocks_dir, max_files=3)
 
         assert deleted == 2
@@ -197,8 +197,8 @@ class TestPruneCache:
         for i in range(3):
             (stocks_dir / f"file{i}.json").write_text("{}")
 
-        with patch("utils.price_cache.STOCKS_DIR", stocks_dir), \
-             patch("utils.price_cache.OPTIONS_DIR", options_dir):
+        with patch("xenon.utils.price_cache.STOCKS_DIR", stocks_dir), \
+             patch("xenon.utils.price_cache.OPTIONS_DIR", options_dir):
             deleted = prune_cache(stocks_dir, max_files=5)
 
         assert deleted == 0

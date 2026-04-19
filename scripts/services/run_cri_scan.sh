@@ -34,8 +34,8 @@ fi
 
 # Check if today is a trading day (reuses market_holidays.json)
 IS_TRADING=$("$PYTHON_BIN" -c "
-import sys; sys.path.insert(0, 'scripts')
-from utils.market_calendar import _is_trading_day
+import sys; sys.path.insert(0, 'src')
+from xenon.utils.market_calendar import _is_trading_day
 from datetime import datetime
 print('yes' if _is_trading_day(datetime.now()) else 'no')
 " 2>/dev/null || echo "yes")

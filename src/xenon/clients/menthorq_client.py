@@ -40,7 +40,7 @@ from typing import Any, Dict, List, Optional
 
 from playwright.sync_api import sync_playwright, Page
 
-from utils.env_loader import load_env_file
+from xenon.utils.env_loader import load_env_file
 
 # Load .env from project root
 load_env_file(Path(__file__).resolve().parent.parent.parent / ".env")

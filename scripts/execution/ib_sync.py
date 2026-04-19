@@ -1049,7 +1049,7 @@ def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
 
 def save_portfolio(portfolio: dict):
     """Save portfolio to JSON file (atomic write with SHA-256 checksum)."""
-    from utils.atomic_io import atomic_save
+    from xenon.utils.atomic_io import atomic_save
 
     # Backup existing
     if PORTFOLIO_PATH.exists():

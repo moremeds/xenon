@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.utils.symbol_norm import futu_to_ib, ib_to_futu
+from xenon.utils.symbol_norm import futu_to_ib, ib_to_futu
 
 
 # ────────────────────────────────────────────────────────────────────

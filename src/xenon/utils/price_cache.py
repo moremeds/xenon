@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
-from utils.atomic_io import atomic_save, verified_load
+from xenon.utils.atomic_io import atomic_save, verified_load
 
 CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "price_history_cache"
 STOCKS_DIR = CACHE_DIR / "stocks"

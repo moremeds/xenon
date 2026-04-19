@@ -2,8 +2,8 @@
 
 from datetime import date, datetime
 
-from utils.cta_sync import CTA_SYNC_ET_SLOTS, latest_closed_trading_day
-from utils.launchd_schedule import convert_et_calendar_entries, expand_intraday_slots
+from xenon.utils.cta_sync import CTA_SYNC_ET_SLOTS, latest_closed_trading_day
+from xenon.utils.launchd_schedule import convert_et_calendar_entries, expand_intraday_slots
 
 
 class TestLatestClosedTradingDay:

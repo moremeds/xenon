@@ -89,7 +89,7 @@ def is_trading_day(dt: datetime) -> bool:
     if dt.weekday() >= 5:
         return False
     try:
-        from utils.market_calendar import load_holidays
+        from xenon.utils.market_calendar import load_holidays
 
         holidays = load_holidays(dt.year)
         if dt.strftime("%Y-%m-%d") in holidays:

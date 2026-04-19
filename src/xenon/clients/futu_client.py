@@ -48,17 +48,8 @@ from xenon.clients.futu_exceptions import (
     FutuRateLimitError,
     classify_futu_exception,
 )
-
-# utils/ still lives under scripts/ pre-bucket-5 move. Bare `from utils...`
-# resolves via conftest's scripts/-on-sys.path; inside the running API
-# server process scripts/ is also the cwd at startup. When bucket 5 lands,
-# update these two imports to `xenon.utils.*`.
-try:
-    from utils.symbol_norm import futu_to_ib
-    from utils.time_norm import iso_z, now_utc
-except ImportError:  # pragma: no cover - alternate layout fallback
-    from scripts.utils.symbol_norm import futu_to_ib  # type: ignore[no-redef]
-    from scripts.utils.time_norm import iso_z, now_utc  # type: ignore[no-redef]
+from xenon.utils.symbol_norm import futu_to_ib
+from xenon.utils.time_norm import iso_z, now_utc
 
 logger = logging.getLogger("xenon.futu")
 

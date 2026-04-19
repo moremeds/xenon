@@ -73,7 +73,7 @@ def _now_iso() -> str:
 
 def _is_market_open_default() -> bool:
     try:
-        from utils.market_hours import is_market_open
+        from xenon.utils.market_hours import is_market_open
 
         return bool(is_market_open())
     except Exception:  # noqa: BLE001

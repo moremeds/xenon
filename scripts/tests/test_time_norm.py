@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 import pytest
 from zoneinfo import ZoneInfo
 
-from scripts.utils.time_norm import (
+from xenon.utils.time_norm import (
     from_futu_naive,
     from_futu_us_eastern,
     iso_z,

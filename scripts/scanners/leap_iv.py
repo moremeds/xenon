@@ -986,7 +986,7 @@ def load_portfolio_tickers() -> Dict[str, str]:
         return {}
     
     try:
-        from utils.atomic_io import verified_load
+        from xenon.utils.atomic_io import verified_load
         portfolio = verified_load(str(portfolio_path))
     except (ValueError, ImportError):
         with open(portfolio_path) as f:

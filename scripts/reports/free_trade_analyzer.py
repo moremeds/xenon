@@ -38,7 +38,7 @@ PORTFOLIO_FILE = DATA_DIR / "portfolio.json"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 try:
-    from utils.market_hours import is_market_open, get_market_status, get_last_market_close
+    from xenon.utils.market_hours import is_market_open, get_market_status, get_last_market_close
     MARKET_HOURS_AVAILABLE = True
 except ImportError:
     MARKET_HOURS_AVAILABLE = False
@@ -322,7 +322,7 @@ def load_portfolio() -> list:
     if not PORTFOLIO_FILE.exists():
         return []
     try:
-        from utils.atomic_io import verified_load
+        from xenon.utils.atomic_io import verified_load
         data = verified_load(str(PORTFOLIO_FILE))
     except (ValueError, ImportError):
         with open(PORTFOLIO_FILE) as f:

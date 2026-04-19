@@ -407,7 +407,7 @@ def resolve_inputs(
             else:
                 # Try file preset
                 try:
-                    from utils.presets import load_preset
+                    from xenon.utils.presets import load_preset
                     fp = load_preset(name)
                     all_pairs.extend(fp.pairs)
                     descriptions.append(fp.description)

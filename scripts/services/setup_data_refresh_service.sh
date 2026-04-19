@@ -36,7 +36,7 @@ import sys
 project_dir = os.environ["PROJECT_DIR_ENV"]
 sys.path.insert(0, os.path.join(project_dir, "scripts"))
 
-from utils.launchd_calendar import build_local_calendar_entries, expand_intraday_slots, render_calendar_interval_xml
+from xenon.utils.launchd_calendar import build_local_calendar_entries, expand_intraday_slots, render_calendar_interval_xml
 
 slots = expand_intraday_slots((9, 30), (16, 15), 15)
 entries = build_local_calendar_entries(slots, weekdays=[1, 2, 3, 4, 5])

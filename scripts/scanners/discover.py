@@ -31,7 +31,7 @@ from pathlib import Path
 from xenon.clients.uw_client import UWClient, UWAPIError, UWRateLimitError
 
 logger = logging.getLogger(__name__)
-from utils.market_calendar import (
+from xenon.utils.market_calendar import (
     get_last_n_trading_days,
     load_holidays,
     _is_trading_day,
@@ -283,7 +283,7 @@ def resolve_tickers(args_tickers: list) -> list:
 
     Presets are detected by checking if a matching file exists in data/presets/.
     """
-    from utils.presets import load_preset, PRESETS_DIR
+    from xenon.utils.presets import load_preset, PRESETS_DIR
 
     tickers: list[str] = []
     seen: set[str] = set()

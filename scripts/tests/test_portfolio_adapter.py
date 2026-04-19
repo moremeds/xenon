@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from utils.portfolio_adapter import (
+from xenon.utils.portfolio_adapter import (
     NormalizedPosition,
     group_by_ticker,
     load_normalized_positions,
@@ -52,7 +52,7 @@ def futu_portfolio_file(tmp_path: Path) -> Path:
 
 
 def test_load_ib(monkeypatch, ib_portfolio_file):
-    from utils import portfolio_adapter
+    from xenon.utils import portfolio_adapter
     monkeypatch.setattr(portfolio_adapter, "IB_PORTFOLIO", ib_portfolio_file)
     result = load_normalized_positions("ib")
     assert len(result.positions) == 2
@@ -65,7 +65,7 @@ def test_load_ib(monkeypatch, ib_portfolio_file):
 
 
 def test_load_futu_filters_non_us(monkeypatch, futu_portfolio_file):
-    from utils import portfolio_adapter
+    from xenon.utils import portfolio_adapter
     monkeypatch.setattr(portfolio_adapter, "FUTU_PORTFOLIO", futu_portfolio_file)
     result = load_normalized_positions("futu")
     tickers = [p.ticker for p in result.positions]
@@ -79,7 +79,7 @@ def test_load_futu_filters_non_us(monkeypatch, futu_portfolio_file):
 
 
 def test_load_missing_file_returns_empty(monkeypatch, tmp_path):
-    from utils import portfolio_adapter
+    from xenon.utils import portfolio_adapter
     monkeypatch.setattr(portfolio_adapter, "FUTU_PORTFOLIO", tmp_path / "nope.json")
     result = load_normalized_positions("futu")
     assert result.positions == []

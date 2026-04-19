@@ -34,8 +34,8 @@ import sys
 project_dir = os.environ["PROJECT_DIR_ENV"]
 sys.path.insert(0, os.path.join(project_dir, "scripts"))
 
-from utils.cta_sync import CTA_SYNC_ET_SLOTS
-from utils.launchd_calendar import build_local_calendar_entries, render_calendar_interval_xml
+from xenon.utils.cta_sync import CTA_SYNC_ET_SLOTS
+from xenon.utils.launchd_calendar import build_local_calendar_entries, render_calendar_interval_xml
 
 entries = build_local_calendar_entries(CTA_SYNC_ET_SLOTS, weekdays=[1, 2, 3, 4, 5])
 print(render_calendar_interval_xml(entries), end="")

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from utils import cta_sync
+from xenon.utils import cta_sync
 
 
 def completed(returncode: int, stdout: str = "", stderr: str = "") -> SimpleNamespace:

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from utils.incremental_sync import incremental_sync, positions_changed
+from xenon.utils.incremental_sync import incremental_sync, positions_changed
 
 
 # ---------------------------------------------------------------------------

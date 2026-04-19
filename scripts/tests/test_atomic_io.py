@@ -12,7 +12,7 @@ import pytest
 # Ensure scripts/ is on sys.path so we can import utils.atomic_io
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils.atomic_io import atomic_save, verified_load
+from xenon.utils.atomic_io import atomic_save, verified_load
 
 
 class TestAtomicSave:

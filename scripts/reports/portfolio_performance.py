@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from xenon.clients.ib_client import IBClient  # noqa: E402
 from xenon.clients.uw_client import UWClient, UWRateLimitError  # noqa: E402
-from utils.price_cache import (  # noqa: E402
+from xenon.utils.price_cache import (  # noqa: E402
     OPTIONS_DIR,
     STOCKS_DIR,
     TTL_AFTER_CLOSE,
@@ -144,7 +144,7 @@ def select_option_mark(row: Mapping[str, Any]) -> Optional[float]:
 
 def load_portfolio_snapshot(path: Path = PORTFOLIO_PATH) -> dict:
     try:
-        from utils.atomic_io import verified_load
+        from xenon.utils.atomic_io import verified_load
 
         return verified_load(str(path))
     except (ValueError, ImportError):

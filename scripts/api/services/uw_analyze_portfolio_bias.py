@@ -25,13 +25,13 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Any, Callable, Literal, Optional, Protocol
 
-from utils.portfolio_adapter import (
+from xenon.utils.portfolio_adapter import (
     LoadResult,
     NormalizedPosition,
     group_by_ticker,
     load_normalized_positions,
 )
-from utils.position_bias import Bias, position_bias
+from xenon.utils.position_bias import Bias, position_bias
 
 logger = logging.getLogger("xenon.flow_analysis")
 

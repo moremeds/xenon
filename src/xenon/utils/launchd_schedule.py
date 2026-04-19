@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from utils.launchd_calendar import expand_intraday_slots, render_calendar_interval_xml
+from xenon.utils.launchd_calendar import expand_intraday_slots, render_calendar_interval_xml
 
 
 ET = ZoneInfo("America/New_York")

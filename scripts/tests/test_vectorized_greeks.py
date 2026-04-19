@@ -2,7 +2,7 @@
 import math
 import numpy as np
 import pytest
-from scripts.utils.vectorized_greeks import portfolio_greeks_vectorized
+from xenon.utils.vectorized_greeks import portfolio_greeks_vectorized
 
 
 def ts_approx_delta(spot: float, strike: float, dte: float, opt_type: str) -> float:

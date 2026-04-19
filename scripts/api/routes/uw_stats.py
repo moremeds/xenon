@@ -18,7 +18,7 @@ router = APIRouter()
 @router.get("/uw-stats")
 async def uw_stats() -> dict:
     """Return current UW API usage statistics with daily breakdown."""
-    from utils.uw_api_stats import stats
+    from xenon.utils.uw_api_stats import stats
 
     return stats.get_stats_with_daily()
 
@@ -27,7 +27,7 @@ async def uw_stats() -> dict:
 async def uw_stats_reset() -> dict:
     """Reset session counters. Hourly history buckets are preserved —
     use POST /uw-stats/history/clear for the destructive wipe."""
-    from utils.uw_api_stats import stats
+    from xenon.utils.uw_api_stats import stats
 
     stats.reset()
     return {"status": "reset"}
@@ -38,7 +38,7 @@ async def uw_stats_history(
     hours: int = Query(96, ge=1, le=168, description="Number of hourly buckets to return"),
 ) -> dict:
     """Return the rolling hourly history, zero-filled over the window."""
-    from utils.uw_api_stats import stats
+    from xenon.utils.uw_api_stats import stats
 
     return {"buckets": stats.get_hourly_history(hours=hours)}
 
@@ -51,7 +51,7 @@ async def uw_stats_history_clear() -> dict:
     restarts and resetting it would defeat the whole point. Only call
     this for explicit operator-driven clears.
     """
-    from utils.uw_api_stats import stats
+    from xenon.utils.uw_api_stats import stats
 
     stats.clear_history()
     return {"status": "cleared"}

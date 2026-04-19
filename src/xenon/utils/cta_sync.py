@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 from zoneinfo import ZoneInfo
 
-from utils.market_calendar import _is_trading_day
+from xenon.utils.market_calendar import _is_trading_day
 
 
 ET = ZoneInfo("America/New_York")

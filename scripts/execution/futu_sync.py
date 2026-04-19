@@ -30,7 +30,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from xenon.clients.futu_client import FutuClient  # noqa: E402
 from xenon.clients.futu_exceptions import FutuError  # noqa: E402
-from scripts.utils.atomic_io import atomic_save  # noqa: E402
+from xenon.utils.atomic_io import atomic_save  # noqa: E402
 
 
 def main() -> int:

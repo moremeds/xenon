@@ -14,7 +14,7 @@ from api.services.uw_analyze_portfolio_bias import (
     classify_portfolio,
 )
 
-from utils.portfolio_adapter import LoadResult, NormalizedPosition
+from xenon.utils.portfolio_adapter import LoadResult, NormalizedPosition
 
 
 def _pos(ticker, structure_type, structure=None, direction="LONG", extra_raw=None):

@@ -5,7 +5,7 @@ Preset loader — strategy-agnostic ticker/pair presets.
 Used by leap-scan, garch-convergence, discover, and any future strategy.
 
 Usage:
-    from utils.presets import load_preset, list_presets, Preset
+    from xenon.utils.presets import load_preset, list_presets, Preset
 
     # List all
     for name, desc in list_presets():
@@ -21,8 +21,7 @@ Usage:
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Tuple, Dict, Optional
-
+from typing import Dict, List, Optional, Tuple
 
 PRESETS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "presets"
 
@@ -30,6 +29,7 @@ PRESETS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "presets"
 @dataclass
 class Preset:
     """A strategy-agnostic ticker preset."""
+
     name: str
     description: str
     tickers: List[str]
@@ -68,7 +68,7 @@ class Preset:
 def list_presets() -> List[Tuple[str, str, int]]:
     """
     List all available presets.
-    
+
     Returns:
         List of (name, description, ticker_count) tuples, sorted by name.
     """
@@ -93,26 +93,24 @@ def list_presets() -> List[Tuple[str, str, int]]:
 def load_preset(name: str) -> Preset:
     """
     Load a preset by name.
-    
+
     Args:
         name: Preset name (e.g., "sp500-semis"). ".json" extension optional.
-    
+
     Returns:
         Preset dataclass instance.
-    
+
     Raises:
         FileNotFoundError: If preset doesn't exist.
         ValueError: If preset file is malformed.
     """
     # Strip .json if provided
     name = name.replace(".json", "")
-    
+
     filepath = PRESETS_DIR / f"{name}.json"
     if not filepath.exists():
         available = [f.stem for f in PRESETS_DIR.glob("*.json")]
-        raise FileNotFoundError(
-            f"Preset '{name}' not found. Available: {', '.join(sorted(available))}"
-        )
+        raise FileNotFoundError(f"Preset '{name}' not found. Available: {', '.join(sorted(available))}")
 
     with open(filepath) as f:
         data = json.load(f)
@@ -143,7 +141,12 @@ def get_preset_pairs(name: str) -> List[List[str]]:
     return load_preset(name).pairs
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """CLI entry point: list all available presets."""
     print("Available presets:\n")
     for name, desc, count in list_presets():
         print(f"  {name:30s}  {count:>4d} tickers  {desc}")
+
+
+if __name__ == "__main__":
+    main()

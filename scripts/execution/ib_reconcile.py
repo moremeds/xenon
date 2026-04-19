@@ -278,7 +278,7 @@ def main():
         trade_log = load_json(str(trade_log_path))
         # Use verified_load for portfolio (checksum integrity check)
         try:
-            from utils.atomic_io import verified_load
+            from xenon.utils.atomic_io import verified_load
             portfolio = verified_load(str(portfolio_path))
         except (FileNotFoundError, json.JSONDecodeError):
             portfolio = {}

@@ -8,21 +8,8 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
-
-# Repo root → src/xenon/config/market_holidays.json. This file currently lives
-# at scripts/utils/market_calendar.py (pre-Phase 2 utils move); when it moves
-# to src/xenon/utils/market_calendar.py the repo-root resolution still works.
-def _find_config_path() -> Path:
-    here = Path(__file__).resolve()
-    for parent in here.parents:
-        candidate = parent / "src" / "xenon" / "config" / "market_holidays.json"
-        if candidate.exists():
-            return candidate
-    # Fallback to legacy location in case of unusual layouts.
-    return here.parent.parent / "config" / "market_holidays.json"
-
-
-_CONFIG_PATH = _find_config_path()
+# src/xenon/utils/market_calendar.py → src/xenon/config/market_holidays.json
+_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "market_holidays.json"
 
 # Module-level cache so we only read the file once per process.
 _holidays_cache: dict = {}

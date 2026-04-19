@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from utils.cta_sync_health import (
+from xenon.utils.cta_sync_health import (
     classify_sync_error,
     latest_available_cta_date,
     load_cta_sync_status,

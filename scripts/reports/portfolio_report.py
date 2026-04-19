@@ -857,7 +857,7 @@ def main():
     # Detect market status
     try:
         sys.path.insert(0, str(SCRIPT_DIR))
-        from utils.market_hours import is_market_open
+        from xenon.utils.market_hours import is_market_open
 
         market_open = is_market_open()
     except Exception:
