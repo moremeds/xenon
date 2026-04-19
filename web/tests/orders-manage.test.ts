@@ -70,7 +70,7 @@ describe("POST /api/orders/modify validation", () => {
     const req = new NextRequest("http://localhost/api/orders/modify", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ newPrice: 22.50 }),
+      body: JSON.stringify({ newPrice: 22.5 }),
     });
 
     const res = await modifyPOST(req);
@@ -87,7 +87,9 @@ describe("POST /api/orders/modify validation", () => {
     const res = await modifyPOST(req);
     expect(res.status).toBe(400);
     const body = await res.json();
-    expect((body as { error: string }).error.toLowerCase().includes("modify")).toBeTruthy();
+    expect(
+      (body as { error: string }).error.toLowerCase().includes("modify"),
+    ).toBeTruthy();
   });
 
   it("rejects newPrice of zero", async () => {
@@ -119,7 +121,10 @@ describe("POST /api/orders/modify validation", () => {
 
 describe("IB clientId collision prevention", () => {
   it("ib_orders uses a dedicated clientId, not master (0)", async () => {
-    const filePath = path.resolve(__dirname, "../../scripts/clients/ib_client.py");
+    const filePath = path.resolve(
+      __dirname,
+      "../../scripts/clients/ib_client.py",
+    );
     const content = await readFile(filePath, "utf8");
     const match = content.match(/"ib_orders":\s*(\d+)/);
     expect(match).toBeTruthy();
@@ -135,14 +140,20 @@ describe("IB clientId collision prevention", () => {
   });
 
   it("cancel route passes clientId via typed wrapper", async () => {
-    const filePath = path.resolve(__dirname, "../app/api/orders/cancel/route.ts");
+    const filePath = path.resolve(
+      __dirname,
+      "../app/api/orders/cancel/route.ts",
+    );
     const content = await readFile(filePath, "utf8");
     expect(content.includes("xenonFetch")).toBeTruthy();
     expect(content.includes('"/orders/cancel"')).toBeTruthy();
   });
 
   it("modify route passes clientId via typed wrapper", async () => {
-    const filePath = path.resolve(__dirname, "../app/api/orders/modify/route.ts");
+    const filePath = path.resolve(
+      __dirname,
+      "../app/api/orders/modify/route.ts",
+    );
     const content = await readFile(filePath, "utf8");
     expect(content.includes("xenonFetch")).toBeTruthy();
     expect(content.includes('"/orders/modify"')).toBeTruthy();
@@ -157,7 +168,10 @@ describe("Cross-client modify fix (Error 103)", () => {
   let scriptContent: string;
 
   beforeAll(async () => {
-    const filePath = path.resolve(__dirname, "../../scripts/ib_order_manage.py");
+    const filePath = path.resolve(
+      __dirname,
+      "../../src/xenon/execution/ib_order_manage.py",
+    );
     scriptContent = await readFile(filePath, "utf8");
   });
 
@@ -173,11 +187,10 @@ describe("Cross-client modify fix (Error 103)", () => {
   it("modify_order reconnects as original clientId", () => {
     // Must read trade.order.clientId and reconnect if different
     expect(
-      scriptContent.includes("trade.order.clientId") || scriptContent.includes("original_client_id"),
+      scriptContent.includes("trade.order.clientId") ||
+        scriptContent.includes("original_client_id"),
     ).toBeTruthy();
-    expect(
-      scriptContent.includes("client.disconnect()"),
-    ).toBeTruthy();
+    expect(scriptContent.includes("client.disconnect()")).toBeTruthy();
   });
 
   it("modify_order detects IB error events", () => {
