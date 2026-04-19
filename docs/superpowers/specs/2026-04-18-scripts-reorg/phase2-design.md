@@ -554,7 +554,7 @@ Phase 2 is one long-running PR chain. Each step is atomic; main stays green.
 
 8. **Update launchd plists on all deployment hosts** (re-run `services/setup_*_service.sh install` on each — installer rewrites the plist with the new wrapper contents).
 
-9. **Wait 1 full trading day** with both old (shim) and new (`.venv/bin/xenon-*`) paths working. Verify cron/scheduled runs (8:30 AM trend scan, 6 AM TA prep).
+9. **Wait 1 full trading day** with both old (shim) and new (`.venv/bin/xenon-*`) paths working. Verify cron/scheduled runs (8:30 AM trend scan).
 
 10. **Pre-delete audit for `requirements-api.txt` consumers (P2-4).** Before deleting:
 
