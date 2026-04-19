@@ -16,10 +16,12 @@ from typing import Any, List, Optional
 logger = logging.getLogger("xenon.subprocess")
 
 # File now at src/xenon/api/subprocess.py — point SCRIPTS_DIR back at the legacy scripts/ tree
-# where Phase 1 shims still resolve filename → entry-point. PR4-1 will rewrite run_script()
-# itself to call the new .venv/bin/xenon-* entry points directly.
+# where Phase 1 shims still resolve filename → entry-point. PR4-1 added run_entry_point() which
+# bypasses the shim and invokes the installed .venv/bin/xenon-* console entry points directly.
+# run_script() is retained for backward-compat until PR4-5 removes it.
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
+VENV_BIN = PROJECT_ROOT / ".venv" / "bin"
 
 
 def _extract_error_message(stdout: str, stderr: str, default: str) -> str:
@@ -123,6 +125,81 @@ async def run_script(
 
     except Exception as e:
         logger.error("Script %s error: %s", script, e)
+        return ScriptResult(ok=False, error=str(e))
+
+
+async def run_entry_point(
+    entry: str,
+    args: Optional[List[str]] = None,
+    timeout: float = 30.0,
+    cwd: Optional[str] = None,
+) -> ScriptResult:
+    """Run a xenon-* console entry-point binary from .venv/bin/ as an async subprocess.
+
+    Equivalent to run_script() but invokes the installed entry-point binary directly,
+    bypassing the scripts/ shim tree. The entry-point is defined in pyproject.toml
+    [project.scripts].
+
+    Args:
+        entry: Entry-point name (e.g. "xenon-trend-scan"), must exist in .venv/bin/
+        args: CLI arguments
+        timeout: Seconds before SIGKILL
+        cwd: Working directory (defaults to scripts/ for parity with run_script)
+
+    Returns:
+        ScriptResult with parsed JSON data or error string.
+    """
+    entry_path = VENV_BIN / entry
+    if not entry_path.exists():
+        return ScriptResult(ok=False, error=f"Entry point not found: {entry}")
+
+    cmd = [str(entry_path)] + (args or [])
+    work_dir = cwd or str(SCRIPTS_DIR)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=work_dir,
+        )
+
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
+
+        if proc.returncode != 0:
+            err_msg = _extract_error_message(
+                stdout,
+                stderr,
+                f"Entry point exited with code {proc.returncode}",
+            )
+            logger.warning("Entry point %s failed (code %d): %s", entry, proc.returncode, err_msg)
+            return ScriptResult(ok=False, error=err_msg, exit_code=proc.returncode)
+
+        json_start = stdout.find("{")
+        if json_start == -1:
+            return ScriptResult(ok=True, data={})
+
+        data = json.loads(stdout[json_start:])
+        return ScriptResult(ok=True, data=data)
+
+    except asyncio.TimeoutError:
+        logger.error("Entry point %s timed out after %.0fs", entry, timeout)
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
+        return ScriptResult(ok=False, error=f"Entry point timed out after {timeout}s")
+
+    except json.JSONDecodeError as e:
+        logger.error("Entry point %s returned invalid JSON: %s", entry, e)
+        return ScriptResult(ok=False, error=f"Invalid JSON output: {e}")
+
+    except Exception as e:
+        logger.error("Entry point %s error: %s", entry, e)
         return ScriptResult(ok=False, error=str(e))
 
 
