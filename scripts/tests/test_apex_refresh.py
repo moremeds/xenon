@@ -1,4 +1,4 @@
-"""Unit tests for scripts.apex_refresh."""
+"""Unit tests for scripts.fetchers.fetch_apex_data."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import pytest
 
 
 def test_cli_rejects_unknown_mode():
-    from scripts.apex_refresh import build_parser
+    from scripts.fetchers.fetch_apex_data import build_parser
 
     parser = build_parser()
     with pytest.raises(SystemExit):
@@ -16,7 +16,7 @@ def test_cli_rejects_unknown_mode():
 
 
 def test_cli_accepts_incremental_and_full():
-    from scripts.apex_refresh import build_parser
+    from scripts.fetchers.fetch_apex_data import build_parser
 
     parser = build_parser()
     args = parser.parse_args(["--mode", "incremental"])
@@ -27,7 +27,7 @@ def test_cli_accepts_incremental_and_full():
 
 
 def test_load_universe_returns_tickers_and_timeframes():
-    from scripts.apex_refresh import load_universe
+    from scripts.fetchers.fetch_apex_data import load_universe
 
     fake_r2 = MagicMock()
     fake_r2.get_json.return_value = {
@@ -43,7 +43,7 @@ def test_load_universe_returns_tickers_and_timeframes():
 
 
 def test_load_universe_raises_on_empty_tickers():
-    from scripts.apex_refresh import load_universe
+    from scripts.fetchers.fetch_apex_data import load_universe
 
     fake_r2 = MagicMock()
     fake_r2.get_json.return_value = {"tickers": []}
@@ -52,7 +52,7 @@ def test_load_universe_raises_on_empty_tickers():
 
 
 def test_expand_targets_only_includes_requested_timeframes():
-    from scripts.apex_refresh import expand_targets
+    from scripts.fetchers.fetch_apex_data import expand_targets
 
     universe = [
         {"symbol": "AAPL", "timeframes": ["1d", "1h", "4h"]},
@@ -66,7 +66,7 @@ def test_expand_targets_only_includes_requested_timeframes():
 
 
 def test_expand_targets_skips_rows_without_symbol():
-    from scripts.apex_refresh import expand_targets
+    from scripts.fetchers.fetch_apex_data import expand_targets
 
     universe = [
         {"symbol": "AAPL", "timeframes": ["1d"]},
@@ -87,7 +87,7 @@ def test_refresh_one_full_mode_writes_both_parquets():
 
     import pandas as pd
 
-    from scripts.apex_refresh import refresh_one
+    from scripts.fetchers.fetch_apex_data import refresh_one
 
     # MassiveClient stub — actually called via bars.fetch_bars which wraps get_aggregates
     massive = MagicMock()
@@ -129,7 +129,7 @@ def test_refresh_one_incremental_reads_existing_and_dedupes():
 
     import pandas as pd
 
-    from scripts.apex_refresh import refresh_one
+    from scripts.fetchers.fetch_apex_data import refresh_one
     from scripts.ta_lib.parquet_store import write_ohlcv
 
     # Build an existing parquet (300 bars ending 2025-10-26)
@@ -183,7 +183,7 @@ def test_refresh_one_incremental_cold_start_when_no_existing():
 
     import pandas as pd
 
-    from scripts.apex_refresh import refresh_one
+    from scripts.fetchers.fetch_apex_data import refresh_one
     from scripts.ta_lib.r2_store import R2NotFoundError
 
     r2 = MagicMock()
@@ -225,7 +225,7 @@ def test_refresh_one_hourly_incremental_uses_same_date_start():
 
     import pandas as pd
 
-    from scripts.apex_refresh import refresh_one
+    from scripts.fetchers.fetch_apex_data import refresh_one
     from scripts.ta_lib.parquet_store import write_ohlcv
 
     # Existing file: hourly bars up to 2025-10-26 15:00 ET (last trading hour)
@@ -272,8 +272,8 @@ def test_refresh_one_hourly_incremental_uses_same_date_start():
 def test_refresh_one_captures_massive_failure_without_raising():
     from unittest.mock import MagicMock
 
-    from scripts.apex_refresh import refresh_one
     from scripts.clients.massive_client import MassiveNoDataError
+    from scripts.fetchers.fetch_apex_data import refresh_one
 
     massive = MagicMock()
     massive.get_aggregates.side_effect = MassiveNoDataError("UNKNOWN_TICKER")
@@ -291,7 +291,7 @@ def test_refresh_one_a5_atomicity_no_put_when_indicator_compute_fails(monkeypatc
 
     import pandas as pd
 
-    from scripts.apex_refresh import refresh_one
+    from scripts.fetchers.fetch_apex_data import refresh_one
 
     r2 = MagicMock()
     massive = MagicMock()
@@ -313,7 +313,7 @@ def test_refresh_one_a5_atomicity_no_put_when_indicator_compute_fails(monkeypatc
     def boom(_):
         raise RuntimeError("simulated compute failure")
 
-    monkeypatch.setattr("scripts.apex_refresh._compute_indicators_adapter", boom)
+    monkeypatch.setattr("scripts.fetchers.fetch_apex_data._compute_indicators_adapter", boom)
 
     result = refresh_one(r2=r2, massive=massive, ticker="AAPL", timeframe="1d", mode="full")
     assert not result.succeeded
@@ -326,7 +326,7 @@ def test_compute_indicators_adapter_keeps_nan_during_warmup():
     import numpy as np
     import pandas as pd
 
-    from scripts.apex_refresh import _compute_indicators_adapter
+    from scripts.fetchers.fetch_apex_data import _compute_indicators_adapter
 
     n = 30
     ohlcv = pd.DataFrame(
@@ -352,7 +352,7 @@ def test_compute_indicators_adapter_includes_a3_fields():
     """A3: recent_avg_volume, avg_20d_volume, recent_up_ratio, range_20d_pct, atr_pct present."""
     import pandas as pd
 
-    from scripts.apex_refresh import _compute_indicators_adapter
+    from scripts.fetchers.fetch_apex_data import _compute_indicators_adapter
 
     n = 300
     ohlcv = pd.DataFrame(
@@ -400,7 +400,7 @@ def test_dry_run_store_get_object_raises_r2_not_found_on_missing(tmp_path):
 def test_run_refresh_happy_path_writes_manifest_and_returns_zero():
     from unittest.mock import MagicMock, patch
 
-    from scripts.apex_refresh import RefreshResult, run_refresh
+    from scripts.fetchers.fetch_apex_data import RefreshResult, run_refresh
 
     r2 = MagicMock()
     r2.get_json.side_effect = [
@@ -420,11 +420,11 @@ def test_run_refresh_happy_path_writes_manifest_and_returns_zero():
 
     r2.head.side_effect = head_or_get
 
-    with patch("scripts.apex_refresh.refresh_one") as mock_refresh:
+    with patch("scripts.fetchers.fetch_apex_data.refresh_one") as mock_refresh:
         mock_refresh.side_effect = lambda *, r2, massive, ticker, timeframe, mode: RefreshResult(
             ticker, timeframe, succeeded=True, rows_written=10
         )
-        with patch("scripts.apex_refresh.MassiveClient") as mclient:
+        with patch("scripts.fetchers.fetch_apex_data.MassiveClient") as mclient:
             mclient.return_value = MagicMock()
             exit_code = run_refresh(r2=r2, mode="full", timeframes=("1d",), max_workers=2)
 
@@ -441,7 +441,7 @@ def test_run_refresh_50pct_boundary_writes_manifest_strict_gt():
     """A21: exactly 50% failure (1 of 2) is still ALLOWED (strict >)."""
     from unittest.mock import MagicMock, patch
 
-    from scripts.apex_refresh import RefreshResult, run_refresh
+    from scripts.fetchers.fetch_apex_data import RefreshResult, run_refresh
 
     r2 = MagicMock()
     r2.get_json.side_effect = [
@@ -453,8 +453,8 @@ def test_run_refresh_50pct_boundary_writes_manifest_strict_gt():
     def rr(*, r2, massive, ticker, timeframe, mode):
         return RefreshResult(ticker, timeframe, succeeded=(ticker == "A"), error=None if ticker == "A" else "boom")
 
-    with patch("scripts.apex_refresh.refresh_one", side_effect=rr):
-        with patch("scripts.apex_refresh.MassiveClient") as mclient:
+    with patch("scripts.fetchers.fetch_apex_data.refresh_one", side_effect=rr):
+        with patch("scripts.fetchers.fetch_apex_data.MassiveClient") as mclient:
             mclient.return_value = MagicMock()
             exit_code = run_refresh(r2=r2, mode="full", timeframes=("1d",), max_workers=2)
     assert exit_code == 0
@@ -466,7 +466,7 @@ def test_run_refresh_over_50pct_failure_skips_manifest_and_returns_3():
     """A4: 60% failure (6 of 10) -> manifest NOT written, data_quality IS written."""
     from unittest.mock import MagicMock, patch
 
-    from scripts.apex_refresh import RefreshResult, run_refresh
+    from scripts.fetchers.fetch_apex_data import RefreshResult, run_refresh
 
     r2 = MagicMock()
     r2.get_json.side_effect = [
@@ -479,8 +479,8 @@ def test_run_refresh_over_50pct_failure_skips_manifest_and_returns_3():
         succeeded = idx < 4  # 4 pass, 6 fail -> 60%
         return RefreshResult(ticker, timeframe, succeeded=succeeded, error=None if succeeded else "boom")
 
-    with patch("scripts.apex_refresh.refresh_one", side_effect=rr):
-        with patch("scripts.apex_refresh.MassiveClient") as mclient:
+    with patch("scripts.fetchers.fetch_apex_data.refresh_one", side_effect=rr):
+        with patch("scripts.fetchers.fetch_apex_data.MassiveClient") as mclient:
             mclient.return_value = MagicMock()
             exit_code = run_refresh(r2=r2, mode="full", timeframes=("1d",), max_workers=2)
 
@@ -497,7 +497,7 @@ def test_run_refresh_zero_percent_failure_writes_manifest():
     """A21: 0% failure is the happy path; double-check it writes."""
     from unittest.mock import MagicMock, patch
 
-    from scripts.apex_refresh import RefreshResult, run_refresh
+    from scripts.fetchers.fetch_apex_data import RefreshResult, run_refresh
 
     r2 = MagicMock()
     r2.get_json.side_effect = [
@@ -506,11 +506,11 @@ def test_run_refresh_zero_percent_failure_writes_manifest():
     ]
     r2.head.return_value = None
 
-    with patch("scripts.apex_refresh.refresh_one") as mock_refresh:
+    with patch("scripts.fetchers.fetch_apex_data.refresh_one") as mock_refresh:
         mock_refresh.side_effect = lambda *, r2, massive, ticker, timeframe, mode: RefreshResult(
             ticker, timeframe, succeeded=True, rows_written=1
         )
-        with patch("scripts.apex_refresh.MassiveClient") as mclient:
+        with patch("scripts.fetchers.fetch_apex_data.MassiveClient") as mclient:
             mclient.return_value = MagicMock()
             exit_code = run_refresh(r2=r2, mode="full", timeframes=("1d",), max_workers=1)
     assert exit_code == 0
@@ -522,7 +522,7 @@ def test_update_manifest_with_retry_retries_on_precondition_failure():
     """A16: R2PreconditionError -> retry up to 3 attempts before raising."""
     from unittest.mock import MagicMock, patch
 
-    from scripts.apex_refresh import _update_manifest_with_retry
+    from scripts.fetchers.fetch_apex_data import _update_manifest_with_retry
     from scripts.ta_lib.r2_store import R2PreconditionError
 
     r2 = MagicMock()
@@ -532,7 +532,7 @@ def test_update_manifest_with_retry_retries_on_precondition_failure():
     # First two attempts raise; third succeeds
     r2.put_json.side_effect = [R2PreconditionError("mismatch"), R2PreconditionError("mismatch"), '"new-etag"']
 
-    with patch("scripts.apex_refresh.time.sleep") as sleep_mock:
+    with patch("scripts.fetchers.fetch_apex_data.time.sleep") as sleep_mock:
         _update_manifest_with_retry(r2)
 
     assert r2.put_json.call_count == 3
@@ -542,14 +542,14 @@ def test_update_manifest_with_retry_retries_on_precondition_failure():
 def test_update_manifest_with_retry_raises_after_max_attempts():
     from unittest.mock import MagicMock, patch
 
-    from scripts.apex_refresh import _update_manifest_with_retry
+    from scripts.fetchers.fetch_apex_data import _update_manifest_with_retry
     from scripts.ta_lib.r2_store import R2PreconditionError
 
     r2 = MagicMock()
     r2.head.return_value = None
     r2.put_json.side_effect = R2PreconditionError("persistent")
 
-    with patch("scripts.apex_refresh.time.sleep"):
+    with patch("scripts.fetchers.fetch_apex_data.time.sleep"):
         with pytest.raises(R2PreconditionError):
             _update_manifest_with_retry(r2, attempts=3)
     assert r2.put_json.call_count == 3
@@ -557,7 +557,7 @@ def test_update_manifest_with_retry_raises_after_max_attempts():
 
 def test_default_max_workers_is_5_per_a22():
     """A22: conservative default to reduce MassiveClient session contention."""
-    from scripts.apex_refresh import _DEFAULT_MAX_WORKERS, build_parser
+    from scripts.fetchers.fetch_apex_data import _DEFAULT_MAX_WORKERS, build_parser
 
     assert _DEFAULT_MAX_WORKERS == 5
     args = build_parser().parse_args(["--mode", "full"])
@@ -574,7 +574,7 @@ def test_a18_prior_trading_day_weekday_after_close():
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    from scripts.apex_refresh import _prior_trading_day
+    from scripts.fetchers.fetch_apex_data import _prior_trading_day
 
     # 2025-11-17 = Monday, 17:00 ET (post-close)
     now = datetime(2025, 11, 17, 17, 0, tzinfo=ZoneInfo("America/New_York"))
@@ -586,7 +586,7 @@ def test_a18_prior_trading_day_weekday_before_close():
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    from scripts.apex_refresh import _prior_trading_day
+    from scripts.fetchers.fetch_apex_data import _prior_trading_day
 
     # 2025-11-17 = Monday, 12:00 ET (pre-close) → expect Friday 2025-11-14
     now = datetime(2025, 11, 17, 12, 0, tzinfo=ZoneInfo("America/New_York"))
@@ -598,7 +598,7 @@ def test_a18_prior_trading_day_saturday():
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    from scripts.apex_refresh import _prior_trading_day
+    from scripts.fetchers.fetch_apex_data import _prior_trading_day
 
     now = datetime(2025, 11, 15, 10, 0, tzinfo=ZoneInfo("America/New_York"))  # Saturday
     assert _prior_trading_day(now).isoformat() == "2025-11-14"
@@ -609,7 +609,7 @@ def test_a18_prior_trading_day_sunday():
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    from scripts.apex_refresh import _prior_trading_day
+    from scripts.fetchers.fetch_apex_data import _prior_trading_day
 
     now = datetime(2025, 11, 16, 23, 0, tzinfo=ZoneInfo("America/New_York"))
     assert _prior_trading_day(now).isoformat() == "2025-11-14"
@@ -620,7 +620,7 @@ def test_a18_session_not_ready_pre_close_weekday():
     from unittest.mock import MagicMock
     from zoneinfo import ZoneInfo
 
-    from scripts.apex_refresh import _incremental_session_ready
+    from scripts.fetchers.fetch_apex_data import _incremental_session_ready
 
     r2 = MagicMock()
     now = datetime(2025, 11, 17, 12, 0, tzinfo=ZoneInfo("America/New_York"))  # Mon 12:00
@@ -635,15 +635,15 @@ def test_a18_session_ready_post_close_with_spy_available(monkeypatch):
     from unittest.mock import MagicMock
     from zoneinfo import ZoneInfo
 
-    from scripts.apex_refresh import _incremental_session_ready
+    from scripts.fetchers.fetch_apex_data import _incremental_session_ready
 
     r2 = MagicMock()
     now = datetime(2025, 11, 17, 17, 0, tzinfo=ZoneInfo("America/New_York"))
 
     # Patch MassiveClient + fetch_bars to succeed
     massive = MagicMock()
-    monkeypatch.setattr("scripts.apex_refresh.MassiveClient", lambda: massive)
-    monkeypatch.setattr("scripts.apex_refresh.fetch_bars", lambda *a, **kw: object())
+    monkeypatch.setattr("scripts.fetchers.fetch_apex_data.MassiveClient", lambda: massive)
+    monkeypatch.setattr("scripts.fetchers.fetch_apex_data.fetch_bars", lambda *a, **kw: object())
 
     ready, reason = _incremental_session_ready(r2, now_et=now)
     assert ready, reason
@@ -655,8 +655,8 @@ def test_a18_session_not_ready_when_spy_bar_missing(monkeypatch):
     from unittest.mock import MagicMock
     from zoneinfo import ZoneInfo
 
-    from scripts.apex_refresh import _incremental_session_ready
     from scripts.clients.massive_client import MassiveNoDataError
+    from scripts.fetchers.fetch_apex_data import _incremental_session_ready
 
     r2 = MagicMock()
     now = datetime(2025, 11, 17, 17, 0, tzinfo=ZoneInfo("America/New_York"))
@@ -666,8 +666,8 @@ def test_a18_session_not_ready_when_spy_bar_missing(monkeypatch):
     def raise_no_data(*a, **kw):
         raise MassiveNoDataError("SPY 1d not ready")
 
-    monkeypatch.setattr("scripts.apex_refresh.MassiveClient", lambda: massive)
-    monkeypatch.setattr("scripts.apex_refresh.fetch_bars", raise_no_data)
+    monkeypatch.setattr("scripts.fetchers.fetch_apex_data.MassiveClient", lambda: massive)
+    monkeypatch.setattr("scripts.fetchers.fetch_apex_data.fetch_bars", raise_no_data)
 
     ready, reason = _incremental_session_ready(r2, now_et=now)
     assert not ready
@@ -678,7 +678,7 @@ def test_main_skips_run_refresh_when_a18_not_ready(monkeypatch, capsys):
     """main() should exit 0 without running the refresh when session isn't ready."""
     from unittest.mock import MagicMock
 
-    import scripts.apex_refresh as apex
+    import scripts.fetchers.fetch_apex_data as apex
 
     # Make the session-ready probe return False
     monkeypatch.setattr(apex, "_incremental_session_ready", lambda r2, now_et=None: (False, "stubbed"))
@@ -696,7 +696,7 @@ def test_main_full_mode_bypasses_a18(monkeypatch):
     """Full mode skips the A18 guard entirely."""
     from unittest.mock import MagicMock
 
-    import scripts.apex_refresh as apex
+    import scripts.fetchers.fetch_apex_data as apex
 
     called = []
     monkeypatch.setattr(
@@ -721,8 +721,8 @@ def test_a18_session_not_ready_on_massive_auth_error(monkeypatch):
     from unittest.mock import MagicMock
     from zoneinfo import ZoneInfo
 
-    from scripts.apex_refresh import _incremental_session_ready
     from scripts.clients.massive_client import MassiveAuthError
+    from scripts.fetchers.fetch_apex_data import _incremental_session_ready
 
     r2 = MagicMock()
     now = datetime(2025, 11, 17, 17, 0, tzinfo=ZoneInfo("America/New_York"))
@@ -730,7 +730,7 @@ def test_a18_session_not_ready_on_massive_auth_error(monkeypatch):
     def raise_auth():
         raise MassiveAuthError("MASSIVE_API_KEY not set")
 
-    monkeypatch.setattr("scripts.apex_refresh.MassiveClient", raise_auth)
+    monkeypatch.setattr("scripts.fetchers.fetch_apex_data.MassiveClient", raise_auth)
 
     ready, reason = _incremental_session_ready(r2, now_et=now)
     assert not ready
@@ -746,18 +746,18 @@ def test_a18_session_tolerates_transient_network_probe_failure(monkeypatch):
 
     import requests
 
-    from scripts.apex_refresh import _incremental_session_ready
+    from scripts.fetchers.fetch_apex_data import _incremental_session_ready
 
     r2 = MagicMock()
     now = datetime(2025, 11, 17, 17, 0, tzinfo=ZoneInfo("America/New_York"))
 
     massive = MagicMock()
-    monkeypatch.setattr("scripts.apex_refresh.MassiveClient", lambda: massive)
+    monkeypatch.setattr("scripts.fetchers.fetch_apex_data.MassiveClient", lambda: massive)
 
     def flake(*a, **kw):
         raise requests.ConnectionError("DNS blip")
 
-    monkeypatch.setattr("scripts.apex_refresh.fetch_bars", flake)
+    monkeypatch.setattr("scripts.fetchers.fetch_apex_data.fetch_bars", flake)
 
     ready, reason = _incremental_session_ready(r2, now_et=now)
     assert ready, f"transient network probe error should still proceed; got reason={reason}"
@@ -769,18 +769,18 @@ def test_a18_session_defers_on_unknown_probe_error(monkeypatch):
     from unittest.mock import MagicMock
     from zoneinfo import ZoneInfo
 
-    from scripts.apex_refresh import _incremental_session_ready
+    from scripts.fetchers.fetch_apex_data import _incremental_session_ready
 
     r2 = MagicMock()
     now = datetime(2025, 11, 17, 17, 0, tzinfo=ZoneInfo("America/New_York"))
 
     massive = MagicMock()
-    monkeypatch.setattr("scripts.apex_refresh.MassiveClient", lambda: massive)
+    monkeypatch.setattr("scripts.fetchers.fetch_apex_data.MassiveClient", lambda: massive)
 
     def weird(*a, **kw):
         raise ValueError("unexpected vendor response shape")
 
-    monkeypatch.setattr("scripts.apex_refresh.fetch_bars", weird)
+    monkeypatch.setattr("scripts.fetchers.fetch_apex_data.fetch_bars", weird)
 
     ready, reason = _incremental_session_ready(r2, now_et=now)
     assert not ready
@@ -800,7 +800,7 @@ def test_refresh_one_rolls_back_historical_put_when_indicator_put_fails():
 
     import pandas as pd
 
-    from scripts.apex_refresh import refresh_one
+    from scripts.fetchers.fetch_apex_data import refresh_one
 
     n = 300
     massive = MagicMock()
@@ -851,7 +851,7 @@ def test_compute_indicators_adapter_handles_zero_close_without_inf():
     import numpy as np
     import pandas as pd
 
-    from scripts.apex_refresh import _compute_indicators_adapter
+    from scripts.fetchers.fetch_apex_data import _compute_indicators_adapter
 
     n = 60
     # Day 30 has close=0 (pathological but defensible to guard)

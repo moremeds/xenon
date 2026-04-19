@@ -23,7 +23,7 @@ Expected: all pass.
 
 ```bash
 set -a && source .env && set +a
-python3.13 scripts/apex_refresh.py --mode full --dry-run --timeframes 1d --max-workers 3
+python3.13 scripts/fetchers/fetch_apex_data.py --mode full --dry-run --timeframes 1d --max-workers 3
 ```
 
 Expected: writes to `data/apex_mirror_preview/`. Verify schemas:
