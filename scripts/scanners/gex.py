@@ -56,7 +56,7 @@ def _bucket_size_for(ticker: str, spot: float) -> int:
 # ══════════════════════════════════════════════════════════════════
 
 def _get_uw_client():
-    from clients.uw_client import UWClient
+    from xenon.clients.uw_client import UWClient
     return UWClient()
 
 

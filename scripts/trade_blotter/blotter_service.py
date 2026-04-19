@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from clients.ib_client import IBClient, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
+from xenon.clients.ib_client import IBClient, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
 
 
 def _http_get_text(url: str, params: dict, timeout: int = 30) -> str:

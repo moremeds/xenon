@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Discover all screener sub-slugs and test ticker tab clicking."""
-import sys, os, json, time
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-os.chdir(os.path.join(os.path.dirname(__file__), "../.."))
-from clients.menthorq_client import MenthorQClient
+
+import json
+import os
+import time
+
+os.chdir(os.path.join(os.path.dirname(__file__), "../../.."))
+from xenon.clients.menthorq_client import MenthorQClient
 
 JS_SCREENER_SLUGS = """() => {
     var links = document.querySelectorAll("a[href*='slug=']");
@@ -36,7 +39,9 @@ client._navigate({"action": "data", "type": "dashboard", "commands": "eod", "tic
 time.sleep(5)
 
 # Current ticker
-current = client._page.evaluate('() => { var s = document.querySelector(".ticker-item.selected"); return s ? s.getAttribute("data-ticker") : null; }')
+current = client._page.evaluate(
+    '() => { var s = document.querySelector(".ticker-item.selected"); return s ? s.getAttribute("data-ticker") : null; }'
+)
 print(f"Default selected: {current}")
 
 # Click NVDA tab
@@ -60,7 +65,7 @@ after = client._page.evaluate("""() => {
 }""")
 print(f"After click NVDA: {json.dumps(after, indent=2)}")
 
-# 3. Check the summary pages 
+# 3. Check the summary pages
 print("\n\n=== SUMMARY PAGES ===")
 for cat in ["futures", "cryptos"]:
     client._navigate({"action": "data", "type": "summary", "category": cat})

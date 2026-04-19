@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from xenon.analysis.gates import earnings_gate, liquidity_gate, regime_gate
 from xenon.analysis.ticker_data import fetch_ticker_data
 from xenon.analysis.vrp import build_vrp_state, classify_regime
-from scripts.clients.uw_client import UWClient
+from xenon.clients.uw_client import UWClient
 from scripts.scanners.uw.context.pcr_sentiment import flag as pcr_flag
 from scripts.scanners.uw.models import ContextFlag, ScanCandidate, SignalHit
 from scripts.scanners.uw.ranking import build_candidate, rank_candidates

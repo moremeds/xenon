@@ -53,7 +53,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # Also add scripts dir so clients package is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from clients.ib_client import IBClient, CLIENT_IDS, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
+from xenon.clients.ib_client import IBClient, CLIENT_IDS, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
 
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
 DEFAULT_CLIENT_ID = CLIENT_IDS.get("ib_execute", 25)

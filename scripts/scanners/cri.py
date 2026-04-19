@@ -43,7 +43,7 @@ _PROJECT_DIR = _SCRIPT_DIR.parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from clients.ib_client import DEFAULT_HOST
+from xenon.clients.ib_client import DEFAULT_HOST
 
 # ── constants ─────────────────────────────────────────────────────
 ALL_TICKERS = ["VIX", "VVIX", "SPY", "COR1M"]
@@ -172,7 +172,7 @@ def _fetch_uw(tickers: List[str]) -> Dict[str, List[Tuple[str, float]]]:
     Returns {ticker: [(date_str, close), ...]} for successful fetches.
     """
     try:
-        from clients.uw_client import UWClient
+        from xenon.clients.uw_client import UWClient
     except ImportError:
         return {}
 

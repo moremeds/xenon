@@ -46,7 +46,7 @@ _PROJECT_DIR = _SCRIPT_DIR.parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from clients.uw_client import UWClient, UWAPIError
+from xenon.clients.uw_client import UWClient, UWAPIError
 
 # ── built-in pair presets ─────────────────────────────────────────
 PAIR_PRESETS: Dict[str, Dict[str, Any]] = {

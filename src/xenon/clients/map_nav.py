@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Map the complete MenthorQ navigation tree."""
-import sys, os, json, time
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-os.chdir(os.path.join(os.path.dirname(__file__), "../.."))
-from clients.menthorq_client import MenthorQClient
+
+import json
+import os
+import time
+
+os.chdir(os.path.join(os.path.dirname(__file__), "../../.."))
+from xenon.clients.menthorq_client import MenthorQClient
 
 JS_NAV = """() => {
     var sidebar = document.querySelector(".sidebar-menu, .sidebar, nav, .nav-menu");
@@ -40,8 +43,9 @@ JS_NAV = """() => {
 client = MenthorQClient(headless=True)
 
 # Start at the main dashboard to get full sidebar
-client._page.goto("https://menthorq.com/account/?action=data&type=dashboard", 
-                   wait_until="domcontentloaded", timeout=60000)
+client._page.goto(
+    "https://menthorq.com/account/?action=data&type=dashboard", wait_until="domcontentloaded", timeout=60000
+)
 time.sleep(5)
 
 nav = client._page.evaluate(JS_NAV)

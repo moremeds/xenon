@@ -4,7 +4,7 @@ Provides typed, session-managed access to all UW endpoints with automatic
 retry, rate-limit backoff, and a clear exception hierarchy.
 
 Usage:
-    from clients.uw_client import UWClient
+    from xenon.clients.uw_client import UWClient
 
     client = UWClient()                    # reads UW_TOKEN from env
     flow = client.get_darkpool_flow("AAPL")

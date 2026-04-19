@@ -50,7 +50,7 @@ from fetch_oi_changes import categorize_signal, fetch_ticker_oi_changes
 from fetch_options import fetch_options
 from fetch_ticker import fetch_ticker_info
 
-from clients.uw_client import UWClient
+from xenon.clients.uw_client import UWClient
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -176,7 +176,7 @@ def fetch_price_history(ticker: str, days: int = 10) -> List[Dict]:
 
         from ib_insync import IB, Stock, util
 
-        from clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST
+        from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST
 
         # Suppress noisy ib_insync connection logs in worker threads
         logging.getLogger("ib_insync").setLevel(logging.CRITICAL)
@@ -555,7 +555,7 @@ def _fetch_all_prices(tickers: List[str], days: int = 10) -> Dict[str, List[Dict
 
         from ib_insync import IB, Stock
 
-        from clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST
+        from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST
 
         logging.getLogger("ib_insync").setLevel(logging.CRITICAL)
 

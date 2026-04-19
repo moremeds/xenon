@@ -20,7 +20,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from clients.uw_client import UWClient, UWNotFoundError, UWAPIError
+from xenon.clients.uw_client import UWClient, UWNotFoundError, UWAPIError
 from utils.market_calendar import get_last_n_trading_days, load_holidays, _is_trading_day
 
 CACHE_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "ticker_cache.json"

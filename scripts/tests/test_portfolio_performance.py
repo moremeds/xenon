@@ -462,7 +462,7 @@ class TestFetchOptionHistorySafe:
     @patch("reports.portfolio_performance.read_cache", return_value=None)
     @patch("reports.portfolio_performance.UWClient")
     def test_rate_limit_skips(self, mock_uw_cls, mock_read):
-        from clients.uw_client import UWRateLimitError
+        from xenon.clients.uw_client import UWRateLimitError
 
         mock_uw = MagicMock()
         mock_uw.get_option_contract_historic.side_effect = UWRateLimitError("429")

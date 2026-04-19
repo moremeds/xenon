@@ -818,8 +818,8 @@ def run_scan_pipeline(
 def build_runtime():
     from dotenv import load_dotenv
 
-    from scripts.clients.ib_client import IBClient
-    from scripts.clients.uw_client import UWClient
+    from xenon.clients.ib_client import IBClient
+    from xenon.clients.uw_client import UWClient
     from scripts.ta_lib import TAService
 
     project_root = Path(_project_root)

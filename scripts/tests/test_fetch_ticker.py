@@ -4,7 +4,7 @@ import pytest
 from datetime import datetime
 from unittest.mock import patch, MagicMock
 
-from clients.uw_client import UWNotFoundError, UWAPIError
+from xenon.clients.uw_client import UWNotFoundError, UWAPIError
 
 from fetchers.fetch_ticker import (
     is_market_open,

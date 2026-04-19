@@ -272,7 +272,7 @@ def test_refresh_one_hourly_incremental_uses_same_date_start():
 def test_refresh_one_captures_massive_failure_without_raising():
     from unittest.mock import MagicMock
 
-    from scripts.clients.massive_client import MassiveNoDataError
+    from xenon.clients.massive_client import MassiveNoDataError
     from scripts.fetchers.fetch_apex_data import refresh_one
 
     massive = MagicMock()
@@ -655,7 +655,7 @@ def test_a18_session_not_ready_when_spy_bar_missing(monkeypatch):
     from unittest.mock import MagicMock
     from zoneinfo import ZoneInfo
 
-    from scripts.clients.massive_client import MassiveNoDataError
+    from xenon.clients.massive_client import MassiveNoDataError
     from scripts.fetchers.fetch_apex_data import _incremental_session_ready
 
     r2 = MagicMock()
@@ -721,7 +721,7 @@ def test_a18_session_not_ready_on_massive_auth_error(monkeypatch):
     from unittest.mock import MagicMock
     from zoneinfo import ZoneInfo
 
-    from scripts.clients.massive_client import MassiveAuthError
+    from xenon.clients.massive_client import MassiveAuthError
     from scripts.fetchers.fetch_apex_data import _incremental_session_ready
 
     r2 = MagicMock()

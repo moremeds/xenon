@@ -6,7 +6,7 @@ handles authentication, navigation, HTML scraping, and image-based extraction.
 
 Usage::
 
-    from clients.menthorq_client import MenthorQClient
+    from xenon.clients.menthorq_client import MenthorQClient
 
     with MenthorQClient() as client:
         eod = client.get_eod("SPX", "2026-03-06")

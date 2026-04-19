@@ -21,7 +21,7 @@ SCRIPTS_DIR = Path(__file__).parent.parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from clients.ib_client import IBClient, POOL_ROLES, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
+from xenon.clients.ib_client import IBClient, POOL_ROLES, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
 
 
 def _connect_in_thread(host: str, port: int, client_id: int, timeout: int = 5) -> IBClient:

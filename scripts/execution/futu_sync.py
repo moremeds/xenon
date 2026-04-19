@@ -28,8 +28,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from scripts.clients.futu_client import FutuClient  # noqa: E402
-from scripts.clients.futu_exceptions import FutuError  # noqa: E402
+from xenon.clients.futu_client import FutuClient  # noqa: E402
+from xenon.clients.futu_exceptions import FutuError  # noqa: E402
 from scripts.utils.atomic_io import atomic_save  # noqa: E402
 
 

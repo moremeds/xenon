@@ -80,7 +80,7 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 
-from scripts.clients.massive_client import MassiveClient
+from xenon.clients.massive_client import MassiveClient
 from scripts.ta_lib.bars import fetch_bars
 from scripts.ta_lib.parquet_store import (
     INDICATOR_COLUMNS,
@@ -396,7 +396,7 @@ def _incremental_session_ready(r2, *, now_et: datetime | None = None) -> tuple[b
     """
     import requests
 
-    from scripts.clients.massive_client import (
+    from xenon.clients.massive_client import (
         MassiveAuthError,
         MassiveNoDataError,
         MassiveRateLimitError,

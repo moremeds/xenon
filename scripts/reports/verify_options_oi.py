@@ -24,7 +24,7 @@ from typing import List, Optional
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from clients.uw_client import UWClient
+from xenon.clients.uw_client import UWClient
 
 
 def parse_strike_from_symbol(symbol: str) -> float:

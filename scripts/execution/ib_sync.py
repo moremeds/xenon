@@ -28,7 +28,7 @@ except ImportError:
     print("Install with: pip install ib_insync")
     sys.exit(1)
 
-from clients.ib_client import IBClient, CLIENT_IDS, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
+from xenon.clients.ib_client import IBClient, CLIENT_IDS, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
 
 # Default connection settings
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT

@@ -29,7 +29,7 @@ from xenon.analysis.models import (
 from xenon.analysis.scoring import score_buckets
 from xenon.analysis.ticker_data import fetch_ticker_data
 from xenon.analysis.vrp import build_vrp_state, classify_regime
-from scripts.clients.uw_client import UWClient
+from xenon.clients.uw_client import UWClient
 
 
 def _build_setup_thesis(td: TickerData, vrp: VRPState, regime: RegimeState, scores: BucketScores) -> dict:

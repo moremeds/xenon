@@ -84,7 +84,7 @@ def test_fetch_bars_preserves_tz_aware_timestamps():
 
 def test_fetch_bars_propagates_massive_errors():
     """MassiveNoDataError / MassiveAuthError should not be swallowed."""
-    from scripts.clients.massive_client import MassiveNoDataError
+    from xenon.clients.massive_client import MassiveNoDataError
     from scripts.ta_lib.bars import fetch_bars
 
     client = MagicMock()

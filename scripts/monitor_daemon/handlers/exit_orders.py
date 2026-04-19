@@ -18,7 +18,7 @@ from typing import Dict, Any, List, Optional
 from ib_insync import Option, LimitOrder
 
 from .base import BaseHandler
-from clients.ib_client import IBClient, DEFAULT_HOST
+from xenon.clients.ib_client import IBClient, DEFAULT_HOST
 
 logger = logging.getLogger(__name__)
 

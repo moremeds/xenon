@@ -19,7 +19,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from blotter_service import create_blotter_service, IBFetcher
-from clients.ib_client import DEFAULT_HOST
+from xenon.clients.ib_client import DEFAULT_HOST
 from formatting import format_currency, format_pnl
 from models import TradeBlotter, Trade
 

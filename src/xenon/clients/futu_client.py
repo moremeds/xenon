@@ -41,27 +41,22 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-# Support both `python scripts/futu_sync.py` (bare 'scripts' on sys.path via
-# futu_sync.py bootstrap) and the FastAPI path where `scripts/` is on sys.path
-# but `scripts.` is not an importable package.
+from xenon.clients.futu_exceptions import (
+    FutuConnectionError,
+    FutuDataError,
+    FutuError,
+    FutuRateLimitError,
+    classify_futu_exception,
+)
+
+# utils/ still lives under scripts/ pre-bucket-5 move. Bare `from utils...`
+# resolves via conftest's scripts/-on-sys.path; inside the running API
+# server process scripts/ is also the cwd at startup. When bucket 5 lands,
+# update these two imports to `xenon.utils.*`.
 try:
-    from clients.futu_exceptions import (
-        FutuConnectionError,
-        FutuDataError,
-        FutuError,
-        FutuRateLimitError,
-        classify_futu_exception,
-    )
     from utils.symbol_norm import futu_to_ib
     from utils.time_norm import iso_z, now_utc
-except ImportError:
-    from scripts.clients.futu_exceptions import (  # type: ignore[no-redef]
-        FutuConnectionError,
-        FutuDataError,
-        FutuError,
-        FutuRateLimitError,
-        classify_futu_exception,
-    )
+except ImportError:  # pragma: no cover - alternate layout fallback
     from scripts.utils.symbol_norm import futu_to_ib  # type: ignore[no-redef]
     from scripts.utils.time_norm import iso_z, now_utc  # type: ignore[no-redef]
 
@@ -129,9 +124,7 @@ class FutuClient:
                 TrdMarket,
             )
         except ImportError as exc:
-            raise FutuConnectionError(
-                "futu-api is not installed. `pip install futu-api`"
-            ) from exc
+            raise FutuConnectionError("futu-api is not installed. `pip install futu-api`") from exc
 
         trd_market = getattr(TrdMarket, self.filter_trading_market, TrdMarket.US)
         sec_firm = getattr(SecurityFirm, self.security_firm, SecurityFirm.FUTUSECURITIES)
@@ -225,9 +218,7 @@ class FutuClient:
             try:
                 result = self._fetch_positions_impl()
             except FutuRateLimitError as exc:
-                self._positions_cooldown_until = now_utc() + timedelta(
-                    seconds=exc.cooldown_seconds
-                )
+                self._positions_cooldown_until = now_utc() + timedelta(seconds=exc.cooldown_seconds)
                 if self._positions_cache is not None:
                     stale = dict(self._positions_cache)
                     stale["is_stale"] = True
@@ -241,9 +232,7 @@ class FutuClient:
                 if self._positions_cache is not None:
                     stale = dict(self._positions_cache)
                     stale["is_stale"] = True
-                    stale["warnings"] = list(stale.get("warnings", [])) + [
-                        "connection lost, served cache"
-                    ]
+                    stale["warnings"] = list(stale.get("warnings", [])) + ["connection lost, served cache"]
                     return stale
                 raise
 
@@ -311,9 +300,7 @@ class FutuClient:
 
         return self._positions_envelope(positions, warnings)
 
-    def _positions_envelope(
-        self, positions: List[Dict[str, Any]], warnings: List[str]
-    ) -> Dict[str, Any]:
+    def _positions_envelope(self, positions: List[Dict[str, Any]], warnings: List[str]) -> Dict[str, Any]:
         now_str = iso_z(now_utc())
         return {
             "fetched_at": now_str,
@@ -452,9 +439,7 @@ class FutuClient:
 
         positions: List[Dict[str, Any]] = positions_env.get("positions", [])
 
-        total_unrealized = sum(
-            (p.get("unrealized_pnl") or 0.0) for p in positions
-        )
+        total_unrealized = sum((p.get("unrealized_pnl") or 0.0) for p in positions)
 
         long_mv = 0.0
         short_mv = 0.0
@@ -576,7 +561,9 @@ class FutuClient:
             "buying_power": maybe(row.get("power")),
             # Futu returns "N/A" for available_funds on this account; fall
             # back to `power` which is semantically equivalent.
-            "available_funds": maybe(row.get("available_funds")) if row.get("available_funds") not in (None, "N/A", "") else maybe(row.get("power")),
+            "available_funds": maybe(row.get("available_funds"))
+            if row.get("available_funds") not in (None, "N/A", "")
+            else maybe(row.get("power")),
             "maintenance_margin": maybe(row.get("maintenance_margin")),
             "initial_margin": maybe(row.get("initial_margin")),
             # These are "N/A" in the real dump; leave None rather than fake 0.

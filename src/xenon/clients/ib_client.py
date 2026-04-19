@@ -5,7 +5,7 @@ market data, portfolio queries, fill monitoring, and Flex Query support.
 
 Usage::
 
-    from clients.ib_client import IBClient
+    from xenon.clients.ib_client import IBClient
 
     with IBClient() as client:
         client.connect(client_name="ib_sync")

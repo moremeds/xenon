@@ -30,7 +30,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from ib_insync import Option, Stock
 
-from clients.ib_client import IBClient
+from xenon.clients.ib_client import IBClient
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Inspect MenthorQ dashboard page DOM structure to find chart containers."""
-import sys
-import os
+
 import json
+import os
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-os.chdir(os.path.join(os.path.dirname(__file__), "../.."))
+os.chdir(os.path.join(os.path.dirname(__file__), "../../.."))
 
-from clients.menthorq_client import MenthorQClient
+from xenon.clients.menthorq_client import MenthorQClient
 
 JS_INSPECT = """() => {
     var selectors = [
@@ -82,9 +81,9 @@ for cmd in ["gex", "dix", "cta", "cta-flows", "vol-models"]:
     time.sleep(5)
 
     result = client._page.evaluate(JS_INSPECT)
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  {cmd.upper()}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(json.dumps(result, indent=2))
 
 client.close()

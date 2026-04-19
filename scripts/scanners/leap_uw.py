@@ -50,7 +50,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from dataclasses import dataclass, field, asdict
 
-from clients.uw_client import UWClient, UWAPIError
+from xenon.clients.uw_client import UWClient, UWAPIError
 
 # Preset ticker groups
 PRESETS = {

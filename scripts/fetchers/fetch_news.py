@@ -220,7 +220,7 @@ def fetch_news(
 
     # ── Source 1: Unusual Whales ─────────────────────────────────────
     try:
-        from clients.uw_client import UWClient
+        from xenon.clients.uw_client import UWClient
 
         with UWClient() as uw:
             data = uw.get_news_headlines(ticker=ticker, limit=limit)

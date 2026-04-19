@@ -28,7 +28,7 @@ from api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
 from api.services.uw_analyze_flow_tracker import FlowLog  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from clients.uw_client import UWAPIError, UWNotFoundError  # noqa: E402
+from xenon.clients.uw_client import UWAPIError, UWNotFoundError  # noqa: E402
 from xenon.analysis.models import (  # noqa: E402
     AnalysisReport,
     BenchmarkContext,

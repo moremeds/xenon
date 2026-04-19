@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from clients.ib_client import DEFAULT_HOST
+from xenon.clients.ib_client import DEFAULT_HOST
 from scanners.cri import (
     _extract_ib_quote_value,
     _connect_ib_with_retry,

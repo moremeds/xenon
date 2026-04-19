@@ -36,13 +36,13 @@ MAX_RETRIES = 2
 RETRY_DELAY = 3  # seconds between retries
 CACHE_TTL_HOURS = 4  # Use cached data if less than this old
 
-from clients.ib_client import (
+from xenon.clients.ib_client import (
     IBClient,
     CLIENT_IDS,
     DEFAULT_HOST as IB_HOST,
     DEFAULT_GATEWAY_PORT as IB_PORT,
 )
-from clients.uw_client import UWClient
+from xenon.clients.uw_client import UWClient
 
 IB_CLIENT_ID = CLIENT_IDS["fetch_analyst_ratings"]
 

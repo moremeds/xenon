@@ -10,7 +10,7 @@ import os
 import pytest
 from unittest.mock import MagicMock, patch, PropertyMock, call
 
-from clients.menthorq_client import (
+from xenon.clients.menthorq_client import (
     MenthorQClient,
     MenthorQError,
     MenthorQAuthError,
@@ -43,8 +43,8 @@ def mock_env_creds():
 @pytest.fixture
 def mock_playwright():
     """Mock Playwright so no real browser is launched."""
-    with patch("clients.menthorq_client.sync_playwright") as mock_sp, \
-         patch("clients.menthorq_client.time.sleep"):
+    with patch("xenon.clients.menthorq_client.sync_playwright") as mock_sp, \
+         patch("xenon.clients.menthorq_client.time.sleep"):
         # Build the mock browser chain
         mock_pw = MagicMock()
         mock_sp.return_value.__enter__ = MagicMock(return_value=mock_pw)

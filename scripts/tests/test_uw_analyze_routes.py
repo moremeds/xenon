@@ -363,7 +363,7 @@ def test_portfolio_surfaces_on_demand_oi_changes(monkeypatch, tmp_path):
 
     monkeypatch.setattr(uw_analyze_oi_tracker, "fetch_and_diff", fake_fetch)
 
-    import clients.uw_client as uw_client_mod
+    import xenon.clients.uw_client as uw_client_mod
 
     monkeypatch.setattr(uw_client_mod, "UWClient", lambda *a, **k: object())
 
@@ -405,7 +405,7 @@ def test_portfolio_refreshes_stale_oi_baseline(monkeypatch, tmp_path):
         ]
 
     monkeypatch.setattr(uw_analyze_oi_tracker, "fetch_and_diff", fake_fetch)
-    import clients.uw_client as uw_client_mod
+    import xenon.clients.uw_client as uw_client_mod
 
     monkeypatch.setattr(uw_client_mod, "UWClient", lambda *a, **k: object())
 
@@ -471,7 +471,7 @@ def test_portfolio_user_initiated_query_param_refreshes_oi_during_closed_market(
         ]
 
     monkeypatch.setattr(uw_analyze_oi_tracker, "fetch_and_diff", fake_fetch)
-    import clients.uw_client as uw_client_mod
+    import xenon.clients.uw_client as uw_client_mod
 
     monkeypatch.setattr(uw_client_mod, "UWClient", lambda *a, **k: object())
 
@@ -522,7 +522,7 @@ def test_portfolio_skips_oi_refresh_during_closed_market(monkeypatch, tmp_path):
         return []
 
     monkeypatch.setattr(uw_analyze_oi_tracker, "fetch_and_diff", fake_fetch)
-    import clients.uw_client as uw_client_mod
+    import xenon.clients.uw_client as uw_client_mod
 
     monkeypatch.setattr(uw_client_mod, "UWClient", lambda *a, **k: object())
 
@@ -848,7 +848,7 @@ def test_shared_uw_client_reused_across_tickers(tmp_path, monkeypatch):
     # Force a fresh construction by clearing any prior singleton and
     # pointing UWClient at our stub.
     routes_mod._uw_client_singleton = None
-    monkeypatch.setattr("clients.uw_client.UWClient", _StubUW)
+    monkeypatch.setattr("xenon.clients.uw_client.UWClient", _StubUW)
 
     async def fake_fetch_and_diff(client, ticker, spot):
         # Assert every call got the same client instance.

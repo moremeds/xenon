@@ -59,7 +59,6 @@ known-first-party = [
     "services",
     "ta",
     "infra",
-    "clients",
     "ta_lib",  # active — consumed by fetchers/fetch_apex_data, scanners/trend/cli, etc.
 ]
 

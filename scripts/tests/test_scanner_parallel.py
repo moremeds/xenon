@@ -92,7 +92,7 @@ class TestScannerErrorHandling:
     @patch("scanners.scanner.get_open_positions", return_value=set())
     def test_rate_limit_error_skips_ticker(self, mock_positions, tmp_path, capsys):
         """UWRateLimitError on one ticker should not crash the batch."""
-        from clients.uw_client import UWRateLimitError
+        from xenon.clients.uw_client import UWRateLimitError
 
         tickers = ["AAPL", "FAIL", "GOOG"]
         wl_file = tmp_path / "watchlist.json"

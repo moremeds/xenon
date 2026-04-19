@@ -91,7 +91,7 @@ def test_full_stack_refresh_then_portfolio_surfaces_sweep_event(monkeypatch, tmp
         return []
 
     monkeypatch.setattr("api.services.uw_analyze_oi_tracker.fetch_and_diff", fake_fetch)
-    import clients.uw_client as uw_client_mod
+    import xenon.clients.uw_client as uw_client_mod
 
     monkeypatch.setattr(uw_client_mod, "UWClient", lambda *a, **k: object())
 

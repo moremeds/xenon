@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Check sub-navigation (ticker tabs, selectors) on each dashboard page."""
-import sys, os, json, time
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-os.chdir(os.path.join(os.path.dirname(__file__), "../.."))
-from clients.menthorq_client import MenthorQClient
+
+import json
+import os
+import time
+
+os.chdir(os.path.join(os.path.dirname(__file__), "../../.."))
+from xenon.clients.menthorq_client import MenthorQClient
 
 JS_SUBNAV = """() => {
     var tabs = document.querySelectorAll("[data-ticker], .ticker-item");
@@ -45,8 +48,14 @@ routes = [
     {"label": "Vol Models", "p": {"action": "data", "type": "dashboard", "commands": "vol"}},
     {"label": "Forex Levels", "p": {"action": "data", "type": "dashboard", "commands": "forex"}},
     {"label": "Crypto Summary", "p": {"action": "data", "type": "summary", "category": "cryptos"}},
-    {"label": "Crypto Quant", "p": {"action": "data", "type": "dashboard", "commands": "cryptos_technical", "tickers": "cryptos_technical"}},
-    {"label": "Crypto Options", "p": {"action": "data", "type": "dashboard", "commands": "cryptos_options", "tickers": "cryptos_options"}},
+    {
+        "label": "Crypto Quant",
+        "p": {"action": "data", "type": "dashboard", "commands": "cryptos_technical", "tickers": "cryptos_technical"},
+    },
+    {
+        "label": "Crypto Options",
+        "p": {"action": "data", "type": "dashboard", "commands": "cryptos_options", "tickers": "cryptos_options"},
+    },
     {"label": "Screener: Gamma", "p": {"action": "data", "type": "screeners", "category": "gamma"}},
 ]
 
@@ -56,7 +65,9 @@ for r in routes:
     result = client._page.evaluate(JS_SUBNAV)
     tickers = [t["ticker"] for t in result["tickerTabs"]]
     selected = [t["ticker"] for t in result["tickerTabs"] if t["selected"]]
-    print(f"\n{r['label']:25s} | tabs={len(tickers):2d} sel={selected} cards={result['cardCount']:2d} tables={result['tableCount']:2d}")
+    print(
+        f"\n{r['label']:25s} | tabs={len(tickers):2d} sel={selected} cards={result['cardCount']:2d} tables={result['tableCount']:2d}"
+    )
     if tickers:
         print(f"{'':25s} | tickers: {', '.join(tickers)}")
     if result["cardSlugs"]:

@@ -11,7 +11,7 @@ import json
 import sys
 import time
 
-from clients.menthorq_client import MenthorQClient
+from xenon.clients.menthorq_client import MenthorQClient
 
 
 def pp(label: str, data):

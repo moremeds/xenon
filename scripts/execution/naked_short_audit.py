@@ -19,7 +19,7 @@ from pathlib import Path
 # Add parent so clients is importable when run from project root
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from clients.ib_client import IBClient, CLIENT_IDS, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
+from xenon.clients.ib_client import IBClient, CLIENT_IDS, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
 
 logger = logging.getLogger(__name__)
 

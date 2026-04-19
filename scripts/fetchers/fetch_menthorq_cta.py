@@ -190,8 +190,8 @@ def fetch_menthorq_cta(
 
     # Use MenthorQClient for browser + vision extraction
     try:
-        from clients.menthorq_client import MenthorQClient, MenthorQError
-        from clients.menthorq_client import CTA_SLUGS
+        from xenon.clients.menthorq_client import MenthorQClient, MenthorQError
+        from xenon.clients.menthorq_client import CTA_SLUGS
     except Exception as exc:
         print(f"  ERROR: Failed to initialize MenthorQ client: {exc}", file=sys.stderr)
         return None

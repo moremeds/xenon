@@ -35,8 +35,8 @@ from ib_insync import Stock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from clients.ib_client import IBClient  # noqa: E402
-from clients.uw_client import UWClient, UWRateLimitError  # noqa: E402
+from xenon.clients.ib_client import IBClient  # noqa: E402
+from xenon.clients.uw_client import UWClient, UWRateLimitError  # noqa: E402
 from utils.price_cache import (  # noqa: E402
     OPTIONS_DIR,
     STOCKS_DIR,

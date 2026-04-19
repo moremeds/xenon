@@ -44,7 +44,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 PROJECT_DIR = SCRIPT_DIR.parent
 
 sys.path.insert(0, str(SCRIPT_DIR))
-from clients.ib_client import DEFAULT_HOST
+from xenon.clients.ib_client import DEFAULT_HOST
 
 TEMPLATE_PATH = PROJECT_DIR / ".pi/skills/html-report/portfolio-template.html"
 TRADE_LOG_PATH = PROJECT_DIR / "data/trade_log.json"

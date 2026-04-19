@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from clients.uw_client import UWRateLimitError, UWAPIError
+from xenon.clients.uw_client import UWRateLimitError, UWAPIError
 from scanners.discover import discover, discover_targeted
 
 

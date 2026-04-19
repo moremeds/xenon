@@ -35,7 +35,7 @@ INTERNALS_SKEW_CACHE_TTL_SECONDS = 60 * 15
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from clients.ib_client import DEFAULT_GATEWAY_PORT
+from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
 
 from api.auth import verify_api_key, verify_clerk_jwt
 from api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_mode, is_docker_mode, restart_ib_gateway
@@ -65,9 +65,9 @@ logging.getLogger("ib_insync.wrapper").setLevel(logging.WARNING)
 logging.getLogger("ib_insync.client").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
-from clients.futu_client import FutuClient
-from clients.futu_exceptions import FutuConnectionError, FutuError
-from clients.uw_client import UWAPIError, UWClient, UWNotFoundError
+from xenon.clients.futu_client import FutuClient
+from xenon.clients.futu_exceptions import FutuConnectionError, FutuError
+from xenon.clients.uw_client import UWAPIError, UWClient, UWNotFoundError
 from ib_insync import Index
 
 # Futu singleton — lazy-initialized on first /futu/sync call so the server
@@ -227,7 +227,7 @@ async def lifespan(app: FastAPI):
         )
     else:
         try:
-            from clients.uw_client import UWClient
+            from xenon.clients.uw_client import UWClient
 
             from api.routes.uw_analyze import get_flow_log, get_portfolio_cache
             from api.services.uw_analyze_daily_job import run_loop as uw_daily_run_loop

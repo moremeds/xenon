@@ -28,7 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-from clients.uw_client import UWClient, UWAPIError, UWRateLimitError
+from xenon.clients.uw_client import UWClient, UWAPIError, UWRateLimitError
 
 logger = logging.getLogger(__name__)
 from utils.market_calendar import (

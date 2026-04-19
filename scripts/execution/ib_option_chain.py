@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from scripts.clients.ib_client import IBClient
+from xenon.clients.ib_client import IBClient
 
 
 def main():

@@ -27,7 +27,7 @@ from typing import Dict, List, Optional, Tuple
 
 import pytz
 
-from clients.uw_client import UWAPIError, UWClient
+from xenon.clients.uw_client import UWAPIError, UWClient
 from utils.market_calendar import (
     _is_trading_day,
     get_last_n_trading_days,

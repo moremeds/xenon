@@ -75,7 +75,7 @@ YAHOO_TICKERS = {
 def _fetch_ib(tickers: List[str]) -> Dict[str, List[Tuple[str, float]]]:
     """Fetch 1Y daily bars from IB.  Returns {ticker: [(date_str, close), ...]}."""
     try:
-        from clients.ib_client import IBClient, IBConnectionError
+        from xenon.clients.ib_client import IBClient, IBConnectionError
         from ib_insync import Index, Stock
     except ImportError:
         return {}
@@ -122,7 +122,7 @@ def _fetch_uw(tickers: List[str]) -> Dict[str, List[Tuple[str, float]]]:
     Returns {ticker: [(date_str, close), ...]} for successful fetches.
     """
     try:
-        from clients.uw_client import UWClient
+        from xenon.clients.uw_client import UWClient
     except ImportError:
         return {}
 

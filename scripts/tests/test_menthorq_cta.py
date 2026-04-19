@@ -269,7 +269,7 @@ class TestFetchMenthorqCtaFailures:
         real_import = builtins.__import__
 
         def guarded_import(name, *args, **kwargs):
-            if name == "clients.menthorq_client":
+            if name == "xenon.clients.menthorq_client":
                 raise ModuleNotFoundError("playwright")
             return real_import(name, *args, **kwargs)
 

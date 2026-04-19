@@ -26,7 +26,7 @@ from typing import Optional, List
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from clients.uw_client import UWClient
+from xenon.clients.uw_client import UWClient
 
 
 def fetch_ticker_oi_changes(

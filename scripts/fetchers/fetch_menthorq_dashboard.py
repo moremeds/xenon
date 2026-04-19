@@ -20,7 +20,7 @@ from pathlib import Path
 # Allow imports from project root
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from clients.menthorq_client import (
+from xenon.clients.menthorq_client import (
     MenthorQClient,
     MenthorQError,
     MenthorQExtractionError,

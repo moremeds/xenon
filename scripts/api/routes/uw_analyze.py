@@ -29,7 +29,7 @@ from api.services.uw_analyze_candidates import (
     seed_candidates,
 )
 from api.services.uw_analyze_flow_tracker import FlowLog, capture_from_changes
-from clients.uw_client import UWAPIError, UWNotFoundError
+from xenon.clients.uw_client import UWAPIError, UWNotFoundError
 from fetchers.fetch_flow import analyze_darkpool
 from xenon.analysis.dark_pool_summary import summarize_dark_pool
 from xenon.analysis.models import TickerData
@@ -73,7 +73,7 @@ def _shared_uw_client():
     """Return the process-wide shared UWClient, constructing on first use."""
     global _uw_client_singleton
     if _uw_client_singleton is None:
-        from clients.uw_client import UWClient
+        from xenon.clients.uw_client import UWClient
 
         _uw_client_singleton = UWClient()
     return _uw_client_singleton

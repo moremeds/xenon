@@ -4,7 +4,7 @@ import socket
 from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock
 
-from clients.uw_client import UWAPIError
+from xenon.clients.uw_client import UWAPIError
 
 from fetchers.fetch_options import (
     check_ib_connection,

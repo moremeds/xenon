@@ -40,7 +40,7 @@ except ImportError as e:
     print("Install with: pip install ib_insync")
     sys.exit(1)
 
-from clients.ib_client import IBClient, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
+from xenon.clients.ib_client import IBClient, DEFAULT_HOST, DEFAULT_GATEWAY_PORT
 
 
 # Preset ticker groups
