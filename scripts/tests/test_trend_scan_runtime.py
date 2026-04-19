@@ -16,13 +16,13 @@ def test_trend_scan_imports_without_duckdb(monkeypatch):
     assert not storage_mod.duckdb_available()
 
     # The pipeline function should still be callable
-    import scripts.trend_scan as trend_scan
+    from scripts.scanners.trend import cli as trend_scan
 
     assert callable(trend_scan.run_scan_pipeline)
 
 
 def test_main_emits_json_payload(monkeypatch, capsys, tmp_path):
-    import scripts.trend_scan as trend_scan
+    from scripts.scanners.trend import cli as trend_scan
 
     class DummyFetcher:
         pass
