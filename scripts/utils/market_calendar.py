@@ -1,14 +1,28 @@
 """Shared market calendar utilities.
 
 Provides holiday data, market-open checks, and trading-day calculations.
-Holidays are loaded from scripts/config/market_holidays.json.
+Holidays are loaded from src/xenon/config/market_holidays.json.
 """
 
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
-_CONFIG_PATH = Path(__file__).parent.parent / "config" / "market_holidays.json"
+
+# Repo root → src/xenon/config/market_holidays.json. This file currently lives
+# at scripts/utils/market_calendar.py (pre-Phase 2 utils move); when it moves
+# to src/xenon/utils/market_calendar.py the repo-root resolution still works.
+def _find_config_path() -> Path:
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "src" / "xenon" / "config" / "market_holidays.json"
+        if candidate.exists():
+            return candidate
+    # Fallback to legacy location in case of unusual layouts.
+    return here.parent.parent / "config" / "market_holidays.json"
+
+
+_CONFIG_PATH = _find_config_path()
 
 # Module-level cache so we only read the file once per process.
 _holidays_cache: dict = {}
@@ -75,8 +89,7 @@ def is_market_open(now: datetime = None) -> bool:
     return True
 
 
-def get_last_n_trading_days(n: int, from_date: datetime = None,
-                           include_today: bool = False) -> list:
+def get_last_n_trading_days(n: int, from_date: datetime = None, include_today: bool = False) -> list:
     """Return the last *n* trading days as ``["YYYY-MM-DD", ...]``.
 
     A trading day is a weekday that is not a holiday.
@@ -119,6 +132,7 @@ def get_last_n_trading_days(n: int, from_date: datetime = None,
 
 
 # ── internal helpers ──────────────────────────────────────────────────
+
 
 def _is_trading_day(dt: datetime) -> bool:
     """Check if *dt* falls on a trading day (weekday + not holiday)."""
