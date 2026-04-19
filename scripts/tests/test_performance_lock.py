@@ -10,7 +10,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -34,18 +34,19 @@ def anyio_backend():
 @pytest.fixture()
 async def client():
     """Create an httpx.AsyncClient against the FastAPI app with mocked startup."""
-    import httpx
     from contextlib import asynccontextmanager
+
+    import httpx
 
     # Patch lifespan to avoid IB/UW connections
     @asynccontextmanager
     async def mock_lifespan(app):
         yield
 
-    with patch("xenon.api.server.lifespan", mock_lifespan), \
-         patch("xenon.api.server.ib_pool", mock_ib_pool):
+    with patch("xenon.api.server.lifespan", mock_lifespan), patch("xenon.api.server.ib_pool", mock_ib_pool):
         # Must import after patching
         from xenon.api.server import app
+
         app.router.lifespan_context = mock_lifespan
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
@@ -67,12 +68,16 @@ FAKE_PERF_DATA = {
 async def test_post_performance_returns_result(client, tmp_path):
     """POST /performance returns the build result."""
     from xenon.api.subprocess import ScriptResult
+
     mock_result = ScriptResult(ok=True, data=FAKE_PERF_DATA)
 
-    with patch("xenon.api.server.run_script", AsyncMock(return_value=mock_result)), \
-         patch("xenon.api.server._write_cache"), \
-         patch("xenon.api.server._running_build", None):
+    with (
+        patch("xenon.api.server.run_entry_point", AsyncMock(return_value=mock_result)),
+        patch("xenon.api.server._write_cache"),
+        patch("xenon.api.server._running_build", None),
+    ):
         import xenon.api.server
+
         xenon.api.server._running_build = None
         resp = await client.post("/performance")
 
@@ -86,11 +91,15 @@ async def test_post_performance_returns_result(client, tmp_path):
 async def test_background_returns_202(client):
     """POST /performance/background returns 202 accepted."""
     from xenon.api.subprocess import ScriptResult
+
     mock_result = ScriptResult(ok=True, data=FAKE_PERF_DATA)
 
-    with patch("xenon.api.server.run_script", AsyncMock(return_value=mock_result)), \
-         patch("xenon.api.server._write_cache"):
+    with (
+        patch("xenon.api.server.run_entry_point", AsyncMock(return_value=mock_result)),
+        patch("xenon.api.server._write_cache"),
+    ):
         import xenon.api.server
+
         xenon.api.server._running_build = None
         resp = await client.post("/performance/background")
 
@@ -134,8 +143,7 @@ async def test_post_piggybacks_on_inflight_task(client):
         await asyncio.sleep(0.01)
         return ScriptResult(ok=True, data=FAKE_PERF_DATA)
 
-    with patch("xenon.api.server.run_script", slow_build), \
-         patch("xenon.api.server._write_cache"):
+    with patch("xenon.api.server.run_entry_point", slow_build), patch("xenon.api.server._write_cache"):
         xenon.api.server._running_build = None
 
         # Fire two concurrent POST requests
@@ -174,11 +182,15 @@ async def test_atomic_write_cache_survives_crash(tmp_path):
 async def test_no_internal_metadata_in_response(client):
     """Response from POST /performance must not contain _checksum or cache metadata."""
     from xenon.api.subprocess import ScriptResult
+
     mock_result = ScriptResult(ok=True, data=FAKE_PERF_DATA)
 
-    with patch("xenon.api.server.run_script", AsyncMock(return_value=mock_result)), \
-         patch("xenon.api.server._write_cache"):
+    with (
+        patch("xenon.api.server.run_entry_point", AsyncMock(return_value=mock_result)),
+        patch("xenon.api.server._write_cache"),
+    ):
         import xenon.api.server
+
         xenon.api.server._running_build = None
         resp = await client.post("/performance")
 

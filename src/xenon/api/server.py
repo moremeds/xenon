@@ -1078,7 +1078,7 @@ async def portfolio_sync():
     Auto-restarts IB Gateway on ECONNREFUSED and retries once.
     """
     result = await _run_ib_script_with_recovery(
-        "ib_sync.py", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
+        "xenon-ib-sync", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
     )
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
@@ -1102,7 +1102,7 @@ async def portfolio_background_sync(bg: BackgroundTasks):
 async def _bg_sync_via_subprocess():
     """Background task: run ib_sync.py as subprocess with auto-recovery."""
     result = await _run_ib_script_with_recovery(
-        "ib_sync.py", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
+        "xenon-ib-sync", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
     )
     if result.ok:
         logger.info("Background portfolio sync complete")
@@ -1121,7 +1121,7 @@ async def orders_refresh():
         return {"status": "ok", "orders": []}
 
     result = await _run_ib_script_with_recovery(
-        "ib_orders.py", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
+        "xenon-ib-orders", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
     )
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
@@ -1153,7 +1153,7 @@ async def orders_place(request: Request):
         }
 
     order_json = json.dumps(body)
-    result = await _run_ib_script_with_recovery("ib_place_order.py", ["--json", order_json], timeout=15)
+    result = await _run_ib_script_with_recovery("xenon-ib-place-order", ["--json", order_json], timeout=15)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     if result.data and result.data.get("status") == "error":
@@ -1186,7 +1186,7 @@ async def orders_cancel(request: Request):
     if perm_id:
         args.extend(["--perm-id", str(perm_id)])
 
-    result = await _run_ib_script_with_recovery("ib_order_manage.py", args, timeout=15)
+    result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=15)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     if result.data and result.data.get("status") == "error":
@@ -1231,7 +1231,7 @@ async def orders_modify(request: Request):
     elif outside_rth is False:
         args.append("--no-outside-rth")
 
-    result = await _run_ib_script_with_recovery("ib_order_manage.py", args, timeout=15)
+    result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=15)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     if result.data and result.data.get("status") == "error":
@@ -1629,7 +1629,7 @@ async def options_chain(symbol: str, expiry: Optional[str] = None):
     args = ["--symbol", symbol.upper()]
     if expiry:
         args.extend(["--expiry", expiry])
-    result = await _run_ib_script_with_recovery("ib_option_chain.py", args, timeout=15)
+    result = await _run_ib_script_with_recovery("xenon-ib-option-chain", args, timeout=15)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     if result.data and result.data.get("error"):
@@ -1690,8 +1690,8 @@ def _pool_has_any_connection() -> bool:
     return False
 
 
-async def _run_ib_script_with_recovery(script: str, args: list, timeout: float = 30) -> ScriptResult:
-    """Run an IB-dependent script with pre-flight health check and cooldown.
+async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 30) -> ScriptResult:
+    """Run an IB-dependent xenon-* entry point with pre-flight health check and cooldown.
 
     Three layers of fast-fail:
     1. Cooldown: if a recent IB script failed, skip for _IB_SCRIPT_COOLDOWN_SECS
@@ -1706,7 +1706,7 @@ async def _run_ib_script_with_recovery(script: str, args: list, timeout: float =
         elapsed = now - _ib_last_failure
         logger.debug(
             "Skipping %s — IB cooldown active (%.1fs since last failure, %ds cooldown)",
-            script,
+            entry,
             elapsed,
             _IB_SCRIPT_COOLDOWN_SECS,
         )
@@ -1725,7 +1725,7 @@ async def _run_ib_script_with_recovery(script: str, args: list, timeout: float =
             _ib_last_failure = now
             logger.warning(
                 "Skipping %s — Gateway down (port=%s, upstream_dead=%s), pool disconnected",
-                script,
+                entry,
                 port_ok,
                 upstream_dead,
             )
@@ -1734,7 +1734,7 @@ async def _run_ib_script_with_recovery(script: str, args: list, timeout: float =
                 error="IB Gateway is not accepting connections. Check IBKR Mobile for 2FA approval.",
             )
 
-    result = await run_script(script, args, timeout=timeout)
+    result = await run_entry_point(entry, args, timeout=timeout)
 
     # Clear cooldown on success
     if result.ok:
@@ -1753,7 +1753,7 @@ async def _run_ib_script_with_recovery(script: str, args: list, timeout: float =
             # Gateway is healthy — subprocess failed for other reasons
             logger.warning(
                 "Script %s failed but Gateway is healthy — not restarting (cooldown %ds)",
-                script,
+                entry,
                 _IB_SCRIPT_COOLDOWN_SECS,
             )
             return result
@@ -1783,12 +1783,12 @@ async def _run_ib_script_with_recovery(script: str, args: list, timeout: float =
             gw_result = await restart_ib_gateway()
 
             if gw_result.get("restarted") and gw_result.get("port_listening"):
-                logger.info("IB Gateway restarted, retrying %s", script)
+                logger.info("IB Gateway restarted, retrying %s", entry)
                 _ib_last_failure = 0.0  # Clear cooldown after successful restart
                 if ib_pool:
                     await ib_pool.disconnect_all()
                     await ib_pool.connect_all()
-                result = await run_script(script, args, timeout=timeout)
+                result = await run_entry_point(entry, args, timeout=timeout)
             else:
                 logger.error("IB Gateway restart failed: %s", gw_result)
                 result = ScriptResult(
