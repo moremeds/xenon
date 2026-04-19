@@ -29,6 +29,17 @@ xenon-market-hours          = "xenon.utils.market_hours:main"
 xenon-presets               = "xenon.utils.presets:main"
 xenon-monitor-daemon        = "xenon.monitor_daemon.run:main"
 xenon-preset-rebalance      = "xenon.monitor_daemon.handlers.preset_rebalance:main"
+xenon-fetch-flow            = "xenon.fetchers.fetch_flow:main"
+xenon-fetch-ticker          = "xenon.fetchers.fetch_ticker:main"
+xenon-fetch-options         = "xenon.fetchers.fetch_options:main"
+xenon-fetch-oi              = "xenon.fetchers.fetch_oi_changes:main"
+xenon-fetch-analyst         = "xenon.fetchers.fetch_analyst_ratings:main"
+xenon-fetch-news            = "xenon.fetchers.fetch_news:main"
+xenon-fetch-menthorq-cta    = "xenon.fetchers.fetch_menthorq_cta:main"
+xenon-fetch-menthorq-dashboard = "xenon.fetchers.fetch_menthorq_dashboard:main"
+xenon-fetch-x-watchlist     = "xenon.fetchers.fetch_x_watchlist:main"
+xenon-fetch-x-xai           = "xenon.fetchers.fetch_x_xai:main"
+xenon-fetch-apex-data       = "xenon.fetchers.fetch_apex_data:main"
 
 [project.optional-dependencies]
 test = [
