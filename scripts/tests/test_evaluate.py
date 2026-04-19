@@ -689,13 +689,13 @@ class TestOICategorization:
     """OI changes are categorized by premium size."""
 
     def test_massive_oi_flagged(self, oi_data_massive):
-        from evaluate import categorize_oi_signals
+        from xenon.reports.evaluate import categorize_oi_signals
         cats = categorize_oi_signals(oi_data_massive)
         assert cats["massive_count"] >= 1
         assert cats["total_premium"] > 10_000_000
 
     def test_empty_oi(self):
-        from evaluate import categorize_oi_signals
+        from xenon.reports.evaluate import categorize_oi_signals
         cats = categorize_oi_signals([])
         assert cats["massive_count"] == 0
         assert cats["total_premium"] == 0
@@ -709,18 +709,18 @@ class TestSeasonality:
     """Seasonality is context, not a gate — but needs to be parsed."""
 
     def test_favorable_rating(self):
-        from evaluate import rate_seasonality
+        from xenon.reports.evaluate import rate_seasonality
         assert rate_seasonality(65, 5.5) == "FAVORABLE"
 
     def test_neutral_rating(self):
-        from evaluate import rate_seasonality
+        from xenon.reports.evaluate import rate_seasonality
         assert rate_seasonality(55, 2.0) == "NEUTRAL"
 
     def test_unfavorable_rating(self):
-        from evaluate import rate_seasonality
+        from xenon.reports.evaluate import rate_seasonality
         assert rate_seasonality(40, -1.0) == "UNFAVORABLE"
 
     def test_edge_case_boundary(self):
-        from evaluate import rate_seasonality
+        from xenon.reports.evaluate import rate_seasonality
         # 60% and 5% exactly → boundary check
         assert rate_seasonality(60, 5.0) in ("FAVORABLE", "NEUTRAL")

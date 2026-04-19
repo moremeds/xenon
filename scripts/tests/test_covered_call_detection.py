@@ -137,7 +137,7 @@ class TestCoveredCallDetection_PortfolioReport:
 
     def test_portfolio_report_detects_covered_call(self):
         """Portfolio report grouping should merge stock + short call into covered call."""
-        from portfolio_report import group_positions
+        from xenon.reports.portfolio_report import group_positions
 
         # Simulate flattened positions from IB
         positions = [
