@@ -16,8 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SCRIPT_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(SCRIPT_DIR))
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SCRIPT_DIR = REPO_ROOT / "scripts"
 
 from xenon.fetchers.fetch_menthorq_cta import cache_path  # noqa: E402
 from xenon.utils.cta_sync import latest_closed_trading_day  # noqa: E402
@@ -221,7 +221,7 @@ def run_cta_sync(
                 # previous attempts when retried in-process.
                 fetch_cmd = [
                     sys.executable,
-                    str(SCRIPT_DIR / "fetchers.fetch_menthorq_cta.py"),
+                    str(SCRIPT_DIR / "fetchers" / "fetch_menthorq_cta.py"),
                     "--json",
                     "--date",
                     target,
