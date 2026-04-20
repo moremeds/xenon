@@ -3,20 +3,24 @@
 Authoritative reference material. Policy rules live in `CLAUDE.md` files in the project tree; this directory holds the detailed specs, catalogs, and runbooks.
 
 ## Live state
+
 - `status.md` — decision log and audit trail (NOT a live portfolio view — IB is source of truth)
 
 ## Workflows
+
 - `workflows/plans.md` — evaluation milestone workflow
 - `workflows/implement.md` — execution runbook
 - `workflows/prompt.md` — spec, hard constraints, deliverables
 
 ## Architecture
+
 - `architecture/architecture.md` — high-throughput, parallel scanning, atomic state, WS relay, perf page
 - `architecture/api-infrastructure.md` — FastAPI server, auth, IB pool, gateway modes, cloud deployment
 - `architecture/data-files.md` — `data/` catalog
 - `architecture/performance-reconstruction.md` — perf calc methodology
 
 ## Trading
+
 - `trading/options-structures.md` + `trading/options-structures.json` — 58-structure catalog, guard decisions, position classification
 - `trading/strategies.md` — full strategy specs
 - `trading/strategy-garch-convergence.md` — GARCH vol divergence strategy
@@ -25,6 +29,7 @@ Authoritative reference material. Policy rules live in `CLAUDE.md` files in the 
 - `trading/signal-thresholds.md` — P/C, flow side, analyst, discovery, seasonality cutoffs
 
 ## Reference
+
 - `reference/brand-identity.md` — brand spec
 - `reference/chart-system.md` — chart system reference
 - `reference/web-ui-reference.md` — regime/VCG panels, reports, share cards, WS state machine, seasonality
@@ -34,6 +39,7 @@ Authoritative reference material. Policy rules live in `CLAUDE.md` files in the 
 - `reference/ib_tws_api.md` — IB TWS API reference
 
 ## Runbooks
+
 - `runbooks/ib-connection-troubleshooting.md`
 - `runbooks/ib-gateway-docker.md`
 - `runbooks/ibc-remote-access.md`
@@ -42,6 +48,8 @@ Authoritative reference material. Policy rules live in `CLAUDE.md` files in the 
 - `runbooks/ops.md` — log rotation
 
 ## Subdirectories
+
 - `autoresearch/` — research notes and ideas
-- `plans/` — dated implementation plans
+- `note/` — ad-hoc research notes
 - `reference/apex-futu/` — Apex/Futu broker reference
+- `superpowers/archive/` — historical plans and specs for shipped work (reference only, do not execute)
