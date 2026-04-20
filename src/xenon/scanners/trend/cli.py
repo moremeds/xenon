@@ -13,13 +13,8 @@ from typing import Any, Optional, Protocol
 
 import pandas as pd
 
-# Ensure project root is on sys.path so `from scripts.ta_lib.apex_sync` resolves
-# (ta_lib hasn't been moved to src/ yet — same pattern as fetchers/fetch_apex_data.py).
 _project_root = str(Path(__file__).resolve().parent.parent.parent.parent.parent)
-if _project_root not in sys.path:
-    sys.path.insert(0, _project_root)
 
-from scripts.ta_lib.apex_sync import sync_if_stale
 from xenon.analysis.ticker_data import fetch_ticker_data
 from xenon.scanners._shared.cache import write_json_cache
 from xenon.scanners._shared.executor import parallel_fetch
@@ -43,6 +38,7 @@ from xenon.scanners.trend.storage import (
     write_scan_run,
 )
 from xenon.scanners.trend.universe import load_universe_from_mirror
+from xenon.ta_lib.apex_sync import sync_if_stale
 
 logger = logging.getLogger(__name__)
 
@@ -818,9 +814,9 @@ def run_scan_pipeline(
 def build_runtime():
     from dotenv import load_dotenv
 
-    from scripts.ta_lib import TAService
     from xenon.clients.ib_client import IBClient
     from xenon.clients.uw_client import UWClient
+    from xenon.ta_lib import TAService
 
     project_root = Path(_project_root)
     load_dotenv(project_root / ".env")
