@@ -16,7 +16,8 @@ describe("generate_regime_share.py", () => {
   it("exists at scripts/shares/generate_regime_share.py", async () => {
     const scriptPath = path.join(
       PROJECT_ROOT,
-      "scripts",
+      "src",
+      "xenon",
       "shares",
       "generate_regime_share.py",
     );
@@ -28,7 +29,8 @@ describe("generate_regime_share.py", () => {
   it("has Python 3.9-compatible type hints (no X | Y syntax)", async () => {
     const scriptPath = path.join(
       PROJECT_ROOT,
-      "scripts",
+      "src",
+      "xenon",
       "shares",
       "generate_regime_share.py",
     );
@@ -50,30 +52,54 @@ describe("generate_regime_share.py", () => {
 
 describe("POST /regime/share FastAPI endpoint", () => {
   it("is registered in server.py", async () => {
-    const serverPath = path.join(PROJECT_ROOT, "scripts", "api", "server.py");
+    const serverPath = path.join(
+      PROJECT_ROOT,
+      "src",
+      "xenon",
+      "api",
+      "server.py",
+    );
     const content = await readFile(serverPath, "utf-8");
     expect(content).toContain('"/regime/share"');
   });
 
   it("calls generate_regime_share.py", async () => {
-    const serverPath = path.join(PROJECT_ROOT, "scripts", "api", "server.py");
+    const serverPath = path.join(
+      PROJECT_ROOT,
+      "src",
+      "xenon",
+      "api",
+      "server.py",
+    );
     const content = await readFile(serverPath, "utf-8");
-    expect(content).toContain("generate_regime_share.py");
+    expect(content).toContain("xenon-generate-regime-share");
   });
 });
 
 describe("POST /internals/share FastAPI endpoint", () => {
   it("is registered in server.py", async () => {
-    const serverPath = path.join(PROJECT_ROOT, "scripts", "api", "server.py");
+    const serverPath = path.join(
+      PROJECT_ROOT,
+      "src",
+      "xenon",
+      "api",
+      "server.py",
+    );
     const content = await readFile(serverPath, "utf-8");
     expect(content).toContain('"/internals/share"');
   });
 
   it("calls generate_regime_share.py", async () => {
-    const serverPath = path.join(PROJECT_ROOT, "scripts", "api", "server.py");
+    const serverPath = path.join(
+      PROJECT_ROOT,
+      "src",
+      "xenon",
+      "api",
+      "server.py",
+    );
     const content = await readFile(serverPath, "utf-8");
     const idxInternals = content.indexOf('"/internals/share"');
-    const idxGenerate = content.indexOf("generate_regime_share.py");
+    const idxGenerate = content.indexOf("xenon-generate-regime-share");
     expect(idxInternals).toBeGreaterThan(-1);
     expect(idxGenerate).toBeGreaterThan(-1);
   });
@@ -264,7 +290,8 @@ describe("Regime share card content", () => {
   it("script reads from CRI cache (not VCG-only)", async () => {
     const scriptPath = path.join(
       PROJECT_ROOT,
-      "scripts",
+      "src",
+      "xenon",
       "shares",
       "generate_regime_share.py",
     );
@@ -275,7 +302,8 @@ describe("Regime share card content", () => {
   it("script generates exactly 4 cards", async () => {
     const scriptPath = path.join(
       PROJECT_ROOT,
-      "scripts",
+      "src",
+      "xenon",
       "shares",
       "generate_regime_share.py",
     );
@@ -288,7 +316,8 @@ describe("Regime share card content", () => {
   it("script builds tweet text with viral hook", async () => {
     const scriptPath = path.join(
       PROJECT_ROOT,
-      "scripts",
+      "src",
+      "xenon",
       "shares",
       "generate_regime_share.py",
     );
@@ -300,7 +329,8 @@ describe("Regime share card content", () => {
   it("script uses from __future__ import annotations for 3.9 compat", async () => {
     const scriptPath = path.join(
       PROJECT_ROOT,
-      "scripts",
+      "src",
+      "xenon",
       "shares",
       "generate_regime_share.py",
     );

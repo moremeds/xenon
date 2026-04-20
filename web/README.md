@@ -26,6 +26,7 @@ npm run dev
 ```
 
 The `npm run dev` command starts three services:
+
 - Next.js dev server (port 3000)
 - IB real-time price server (port 8765)
 - FastAPI server (port 8321) — Python script execution, IB Gateway auto-restart
@@ -51,11 +52,11 @@ FastAPI (port 8321)
 
 ### Pricing vs Sync (Separated)
 
-| Component | Purpose | Update Frequency |
-|-----------|---------|------------------|
-| `ib_sync.py` | Portfolio positions, P&L, account values | Every 60 seconds (via FastAPI, **paused during CLOSED market**) |
-| `ib_realtime_server.js` | Live bid/ask/last prices | Real-time (<1ms latency) |
-| `scripts/api/server.py` | FastAPI bridge — runs Python scripts as async subprocesses | On-demand (API calls, **paused during CLOSED market**) |
+| Component                                           | Purpose                                                         | Update Frequency                                                |
+| --------------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------- |
+| `ib_sync.py`                                        | Portfolio positions, P&L, account values                        | Every 60 seconds (via FastAPI, **paused during CLOSED market**) |
+| `ib_realtime_server.js`                             | Live bid/ask/last prices                                        | Real-time (<1ms latency)                                        |
+| `src/xenon/api/server.py` (`xenon-api` entry point) | FastAPI bridge — runs Python entry points as async subprocesses | On-demand (API calls, **paused during CLOSED market**)          |
 
 ## Market-Hours Polling
 
@@ -63,12 +64,12 @@ The frontend automatically adjusts polling intervals based on market state (OPEN
 
 ### Polling Behavior
 
-| Market State | Time (ET) | Portfolio | Orders | Regime |
-|--------------|-----------|-----------|--------|--------|
-| **CLOSED** | Weekends / 8:00 PM – 4:00 AM | ❌ Paused | ❌ Paused | ❌ Paused |
-| **EXTENDED** | 4:00 AM – 9:30 AM (premarket) | 30s ✅ | 30s ✅ | 5min ✅ |
-| **OPEN** | 9:30 AM – 4:00 PM (regular) | 30s ✅ | 30s ✅ | 1min ✅ |
-| **EXTENDED** | 4:00 PM – 8:00 PM (after hours) | 30s ✅ | 30s ✅ | 5min ✅ |
+| Market State | Time (ET)                       | Portfolio | Orders    | Regime    |
+| ------------ | ------------------------------- | --------- | --------- | --------- |
+| **CLOSED**   | Weekends / 8:00 PM – 4:00 AM    | ❌ Paused | ❌ Paused | ❌ Paused |
+| **EXTENDED** | 4:00 AM – 9:30 AM (premarket)   | 30s ✅    | 30s ✅    | 5min ✅   |
+| **OPEN**     | 9:30 AM – 4:00 PM (regular)     | 30s ✅    | 30s ✅    | 1min ✅   |
+| **EXTENDED** | 4:00 PM – 8:00 PM (after hours) | 30s ✅    | 30s ✅    | 5min ✅   |
 
 ### Expected Savings
 
@@ -79,11 +80,12 @@ The frontend automatically adjusts polling intervals based on market state (OPEN
 ### Implementation
 
 **Core hook:** `web/lib/useMarketHours.ts`
+
 ```typescript
 import { useMarketHours, MarketState } from "@/lib/useMarketHours";
 
 function PortfolioComponent() {
-  const marketState = useMarketHours();  // Returns OPEN/EXTENDED/CLOSED
+  const marketState = useMarketHours(); // Returns OPEN/EXTENDED/CLOSED
 
   // Use in data fetching hooks
   const { data, syncing } = usePortfolio(marketState !== MarketState.CLOSED);
@@ -95,6 +97,7 @@ function PortfolioComponent() {
 ```
 
 All polling hooks automatically respect market hours:
+
 - `usePortfolio()` - Always performs one cached `GET` on mount, then stops sync/polling when market is CLOSED
 - `useOrders()` - Always performs one cached `GET` on mount, then stops IB sync/polling when market is CLOSED
 - `useRegime()` - Always performs one cached `GET` on mount, then uses adaptive intervals (60s OPEN / 300s EXTENDED / 0 CLOSED)
@@ -102,6 +105,7 @@ All polling hooks automatically respect market hours:
 ### Backward Compatibility
 
 All changes maintain backward compatibility:
+
 - `useOrders()` defaults to `active=true`
 - `usePortfolio()` defaults to `active=true`
 - `useRegime(true)` converts boolean → `MarketState.OPEN`
@@ -115,10 +119,12 @@ cp .env.example .env
 ```
 
 **Required:**
+
 - `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_API_KEY` or `CLAUDE_API_KEY`)
 - `UW_TOKEN` - Unusual Whales API key
 
 **Optional:**
+
 - `ANTHROPIC_MODEL` - Model override
 - `ANTHROPIC_API_URL` - API endpoint override
 - `IB_REALTIME_WS_URL` - Server-side websocket URL used by `/api/prices` for one-time snapshots (default: `ws://localhost:8765`)
@@ -130,15 +136,16 @@ cp .env.example .env
 
 ```bash
 # Default settings
-node ../scripts/ib_realtime_server.js
+node ../scripts/infra/ib_realtime/ib_realtime_server.js
 
 # Custom ports
-node ../scripts/ib_realtime_server.js --port 8765 --ib-port 4001
+node ../scripts/infra/ib_realtime/ib_realtime_server.js --port 8765 --ib-port 4001
 ```
 
 ### API Endpoint
 
 **Stream prices (WebSocket):**
+
 ```
 ws://localhost:8765
 
@@ -149,12 +156,21 @@ Message:
 Index subscriptions use the same websocket action with an `indexes` array:
 
 ```json
-{"action":"subscribe","symbols":["SPY"],"indexes":[{"symbol":"VIX","exchange":"CBOE"},{"symbol":"VVIX","exchange":"CBOE"},{"symbol":"COR1M","exchange":"CBOE"}]}
+{
+  "action": "subscribe",
+  "symbols": ["SPY"],
+  "indexes": [
+    { "symbol": "VIX", "exchange": "CBOE" },
+    { "symbol": "VVIX", "exchange": "CBOE" },
+    { "symbol": "COR1M", "exchange": "CBOE" }
+  ]
+}
 ```
 
 The realtime server preserves the typed IB contract for stock, option, and index subscriptions as soon as the websocket subscription arrives, so reconnect and cold-restore flows resubscribe `/regime` indexes as CBOE indices instead of rebuilding them as stocks.
 
 **Snapshot (one-time):**
+
 ```bash
 curl -X POST http://localhost:3000/api/prices \
   -H "Content-Type: application/json" \
@@ -174,7 +190,7 @@ function PriceDisplay() {
     symbols: ["AAPL", "MSFT", "NVDA"],
     onPriceUpdate: (update) => {
       console.log(`${update.symbol}: $${update.data.last}`);
-    }
+    },
   });
 
   return (
@@ -210,63 +226,63 @@ function PriceDisplay() {
 
 ### Portfolio and Performance
 
-| Route | Method | Description |
-|-------|--------|-------------|
-| `/api/portfolio` | GET, POST | Positions and exposure (GET=read, POST=IB sync). Stale-while-revalidate. **Frontend always does one cached GET; POST sync/polling stops during CLOSED market.** |
-| `/api/performance` | GET, POST | YTD performance metrics (hidden — see `docs/architecture/performance-reconstruction.md`) |
-| `/api/blotter` | GET, POST | Today's fills and closed trades |
-| `/api/journal` | GET | Trade log (append-only) |
-| `/api/journal/sync` | POST | Import new IB trades from reconciliation |
-| `/api/attribution` | GET | P&L attribution data |
+| Route               | Method    | Description                                                                                                                                                     |
+| ------------------- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/api/portfolio`    | GET, POST | Positions and exposure (GET=read, POST=IB sync). Stale-while-revalidate. **Frontend always does one cached GET; POST sync/polling stops during CLOSED market.** |
+| `/api/performance`  | GET, POST | YTD performance metrics (hidden — see `docs/architecture/performance-reconstruction.md`)                                                                        |
+| `/api/blotter`      | GET, POST | Today's fills and closed trades                                                                                                                                 |
+| `/api/journal`      | GET       | Trade log (append-only)                                                                                                                                         |
+| `/api/journal/sync` | POST      | Import new IB trades from reconciliation                                                                                                                        |
+| `/api/attribution`  | GET       | P&L attribution data                                                                                                                                            |
 
 ### Orders
 
-| Route | Method | Description |
-|-------|--------|-------------|
-| `/api/orders` | GET, POST | Open/executed orders (GET=read, POST=IB sync). **Frontend poll stops during CLOSED market.** |
-| `/api/orders/place` | POST | Place stock/option/combo orders (naked short guard enforced) |
-| `/api/orders/cancel` | POST | Cancel by orderId or permId |
-| `/api/orders/modify` | POST | Modify price/quantity/outsideRth or replace combo |
+| Route                | Method    | Description                                                                                  |
+| -------------------- | --------- | -------------------------------------------------------------------------------------------- |
+| `/api/orders`        | GET, POST | Open/executed orders (GET=read, POST=IB sync). **Frontend poll stops during CLOSED market.** |
+| `/api/orders/place`  | POST      | Place stock/option/combo orders (naked short guard enforced)                                 |
+| `/api/orders/cancel` | POST      | Cancel by orderId or permId                                                                  |
+| `/api/orders/modify` | POST      | Modify price/quantity/outsideRth or replace combo                                            |
 
 ### Market Data and Regime
 
-| Route | Method | Description |
-|-------|--------|-------------|
-| `/api/prices` | POST | One-time price snapshot (GET deprecated) |
-| `/api/previous-close` | POST | Previous-day closing prices (IB → UW → Yahoo fallback) |
-| `/api/regime` | GET, POST | CRI regime data. **Frontend always does one cached GET; polling uses adaptive intervals: 1min (OPEN), 5min (EXTENDED), paused (CLOSED).** |
-| `/api/internals` | GET, POST | Market internals and skew history. **Frontend always does one cached GET; polling uses adaptive intervals: 1min (OPEN), 5min (EXTENDED), paused (CLOSED).** |
-| `/api/scanner` | GET, POST | Watchlist scan results with cache metadata |
-| `/api/discover` | GET, POST | Market-wide flow scanning |
-| `/api/flow-analysis` | GET, POST | Portfolio flow analysis (supports/against/watch) |
-| `/api/menthorq/cta` | GET | CTA positioning with sync health metadata |
-| `/api/flex-token` | GET | IB Flex token expiry status |
+| Route                 | Method    | Description                                                                                                                                                 |
+| --------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/api/prices`         | POST      | One-time price snapshot (GET deprecated)                                                                                                                    |
+| `/api/previous-close` | POST      | Previous-day closing prices (IB → UW → Yahoo fallback)                                                                                                      |
+| `/api/regime`         | GET, POST | CRI regime data. **Frontend always does one cached GET; polling uses adaptive intervals: 1min (OPEN), 5min (EXTENDED), paused (CLOSED).**                   |
+| `/api/internals`      | GET, POST | Market internals and skew history. **Frontend always does one cached GET; polling uses adaptive intervals: 1min (OPEN), 5min (EXTENDED), paused (CLOSED).** |
+| `/api/scanner`        | GET, POST | Watchlist scan results with cache metadata                                                                                                                  |
+| `/api/discover`       | GET, POST | Market-wide flow scanning                                                                                                                                   |
+| `/api/flow-analysis`  | GET, POST | Portfolio flow analysis (supports/against/watch)                                                                                                            |
+| `/api/menthorq/cta`   | GET       | CTA positioning with sync health metadata                                                                                                                   |
+| `/api/flex-token`     | GET       | IB Flex token expiry status                                                                                                                                 |
 
 ### Ticker Data
 
-| Route | Method | Description |
-|-------|--------|-------------|
-| `/api/ticker/info` | GET | Company info (UW + Exa, cached) |
-| `/api/ticker/news` | GET | News headlines (UW → Yahoo fallback) |
-| `/api/ticker/ratings` | GET | Analyst ratings and price targets |
-| `/api/ticker/seasonality` | GET | Monthly seasonality (UW → EquityClock Vision → cache) |
-| `/api/options/chain` | GET | Options chain for symbol |
-| `/api/options/expirations` | GET | Available expiration dates |
+| Route                      | Method | Description                                           |
+| -------------------------- | ------ | ----------------------------------------------------- |
+| `/api/ticker/info`         | GET    | Company info (UW + Exa, cached)                       |
+| `/api/ticker/news`         | GET    | News headlines (UW → Yahoo fallback)                  |
+| `/api/ticker/ratings`      | GET    | Analyst ratings and price targets                     |
+| `/api/ticker/seasonality`  | GET    | Monthly seasonality (UW → EquityClock Vision → cache) |
+| `/api/options/chain`       | GET    | Options chain for symbol                              |
+| `/api/options/expirations` | GET    | Available expiration dates                            |
 
 ### AI and Commands
 
-| Route | Method | Description |
-|-------|--------|-------------|
-| `/api/assistant` | POST | Claude conversation |
-| `/api/pi` | POST | Execute PI commands (scanner, evaluate, etc.) |
+| Route            | Method | Description                                   |
+| ---------------- | ------ | --------------------------------------------- |
+| `/api/assistant` | POST   | Claude conversation                           |
+| `/api/pi`        | POST   | Execute PI commands (scanner, evaluate, etc.) |
 
 ### Share Cards
 
-| Route | Method | Description |
-|-------|--------|-------------|
-| `/api/regime/share` | POST | Generate regime PNG card |
-| `/api/menthorq/cta/share` | POST | Generate CTA PNG card |
-| `/api/internals/share` | POST | Generate internals PNG card |
+| Route                     | Method | Description                 |
+| ------------------------- | ------ | --------------------------- |
+| `/api/regime/share`       | POST   | Generate regime PNG card    |
+| `/api/menthorq/cta/share` | POST   | Generate CTA PNG card       |
+| `/api/internals/share`    | POST   | Generate internals PNG card |
 
 ## Tests
 
@@ -288,9 +304,9 @@ ASSISTANT_MOCK=1 npm test
 ### IB Connectivity Tests
 
 ```bash
-python3.13 ../scripts/test_ib_realtime.py            # Full test
-python3.13 ../scripts/test_ib_realtime.py --ib-only   # IB only
-python3.13 ../scripts/test_ib_realtime.py --ws-only   # WebSocket only
+python3.13 ../scripts/infra/ib_realtime/test_ib_realtime.py            # Full test
+python3.13 ../scripts/infra/ib_realtime/test_ib_realtime.py --ib-only   # IB only
+python3.13 ../scripts/infra/ib_realtime/test_ib_realtime.py --ws-only   # WebSocket only
 ```
 
 ## Development
@@ -322,6 +338,7 @@ npm run test:ib
 ```
 
 **Note:** When developing on weekends or outside market hours, data polling will be paused. To test live polling behavior:
+
 - Use browser DevTools console to simulate different times (modify `useMarketHours.ts` temporarily)
 - Wait for market hours (9:30 AM - 4:00 PM ET on weekdays) to observe full-rate polling
 
@@ -329,16 +346,16 @@ npm run test:ib
 
 API specifications, strategy docs, and implementation notes live in the project root `docs/` directory (`../docs/` from here):
 
-| File | Description |
-|------|-------------|
-| `docs/reference/unusual_whales_api.md` | Unusual Whales API reference |
-| `docs/reference/unusual_whales_api_spec.yaml` | UW OpenAPI spec |
-| `docs/reference/ib_tws_api.md` | Interactive Brokers TWS/Gateway API |
-| `docs/trading/strategies.md` | Trading strategy documentation |
-| `docs/status.md` | Current portfolio status and recent evaluations |
-| `docs/workflows/plans.md` | Implementation plans |
-| `docs/workflows/implement.md` | Implementation notes |
-| `docs/workflows/prompt.md` | System prompt reference |
+| File                                              | Description                                                   |
+| ------------------------------------------------- | ------------------------------------------------------------- |
+| `docs/reference/unusual_whales_api.md`            | Unusual Whales API reference                                  |
+| `docs/reference/unusual_whales_api_spec.yaml`     | UW OpenAPI spec                                               |
+| `docs/reference/ib_tws_api.md`                    | Interactive Brokers TWS/Gateway API                           |
+| `docs/trading/strategies.md`                      | Trading strategy documentation                                |
+| `docs/status.md`                                  | Current portfolio status and recent evaluations               |
+| `docs/workflows/plans.md`                         | Implementation plans                                          |
+| `docs/workflows/implement.md`                     | Implementation notes                                          |
+| `docs/workflows/prompt.md`                        | System prompt reference                                       |
 | `docs/architecture/performance-reconstruction.md` | Performance page analysis — TWR approaches tried, why shelved |
 
 ## Troubleshooting
@@ -378,7 +395,7 @@ To verify that market-hours aware polling is working correctly:
 
 ```bash
 # Start the server with explicit IB port and verify startup logs
-node ../scripts/ib_realtime_server.js --ib-port 4001
+node ../scripts/infra/ib_realtime/ib_realtime_server.js --ib-port 4001
 ```
 
 - Confirm logs include:

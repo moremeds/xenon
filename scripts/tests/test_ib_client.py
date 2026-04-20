@@ -142,7 +142,7 @@ def _make_contract_details():
 # Import the client (will fail during RED phase, succeed during GREEN)
 # ---------------------------------------------------------------------------
 
-from clients.ib_client import (
+from xenon.clients.ib_client import (
     IBClient,
     IBConnectionError,
     IBContractError,
@@ -208,7 +208,7 @@ class TestConstants:
 class TestConnection:
     """Test connect, disconnect, reconnect, and context manager."""
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_connect_success(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -219,7 +219,7 @@ class TestConnection:
         mock_ib.connect.assert_called_once_with("127.0.0.1", 4001, clientId=1, timeout=3)
         assert client.is_connected()
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_connect_with_client_name(self, MockIB):
         """Connect using a registered client name to look up client_id."""
         mock_ib = MockIB.return_value
@@ -233,13 +233,13 @@ class TestConnection:
             DEFAULT_HOST, DEFAULT_GATEWAY_PORT, clientId=expected_id, timeout=3
         )
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_connect_unknown_client_name_raises(self, MockIB):
         client = IBClient()
         with pytest.raises(ValueError, match="Unknown client name"):
             client.connect(client_name="nonexistent_script")
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_connect_failure_raises_ib_connection_error(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.connect.side_effect = ConnectionRefusedError("refused")
@@ -248,7 +248,7 @@ class TestConnection:
         with pytest.raises(IBConnectionError):
             client.connect()
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_connect_timeout_raises_ib_connection_error(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.connect.side_effect = TimeoutError("timeout")
@@ -257,7 +257,7 @@ class TestConnection:
         with pytest.raises(IBConnectionError):
             client.connect()
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_connect_custom_timeout(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -267,7 +267,7 @@ class TestConnection:
 
         mock_ib.connect.assert_called_once_with(DEFAULT_HOST, 4001, clientId=1, timeout=30)
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_disconnect(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -278,7 +278,7 @@ class TestConnection:
 
         mock_ib.disconnect.assert_called_once()
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_disconnect_when_not_connected(self, MockIB):
         """Disconnect should be safe to call even when not connected."""
         mock_ib = MockIB.return_value
@@ -287,7 +287,7 @@ class TestConnection:
         client = IBClient()
         client.disconnect()  # should not raise
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_is_connected(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = False
@@ -298,7 +298,7 @@ class TestConnection:
         mock_ib.isConnected.return_value = True
         assert client.is_connected()
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_reconnect(self, MockIB):
         """Reconnect should disconnect then connect again."""
         mock_ib = MockIB.return_value
@@ -311,7 +311,7 @@ class TestConnection:
         assert mock_ib.disconnect.call_count == 1
         assert mock_ib.connect.call_count == 2
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_context_manager(self, MockIB):
         """Test using IBClient as a context manager."""
         mock_ib = MockIB.return_value
@@ -323,7 +323,7 @@ class TestConnection:
 
         mock_ib.disconnect.assert_called()
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_context_manager_disconnects_on_exception(self, MockIB):
         """Context manager should disconnect even if an exception occurs."""
         mock_ib = MockIB.return_value
@@ -344,7 +344,7 @@ class TestConnection:
 class TestPortfolioOperations:
     """Test get_positions, get_portfolio, get_account_summary."""
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_positions(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -361,7 +361,7 @@ class TestPortfolioOperations:
         assert len(positions) == 2
         assert positions[0].contract.symbol == "AAPL"
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_positions_empty(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -373,7 +373,7 @@ class TestPortfolioOperations:
 
         assert positions == []
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_portfolio(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -389,7 +389,7 @@ class TestPortfolioOperations:
         assert len(items) == 1
         assert items[0].contract.symbol == "AAPL"
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_account_summary(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -407,7 +407,7 @@ class TestPortfolioOperations:
         mock_ib.accountSummary.assert_called_once()
         assert len(summary) == 4
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_account_summary_filtered(self, MockIB):
         """get_account_summary with specific tags."""
         mock_ib = MockIB.return_value
@@ -423,7 +423,7 @@ class TestPortfolioOperations:
 
         assert len(summary) == 2
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_operations_require_connection(self, MockIB):
         """Calling operations without connecting should raise."""
         mock_ib = MockIB.return_value
@@ -441,7 +441,7 @@ class TestPortfolioOperations:
 class TestOrderOperations:
     """Test place_order, cancel_order, modify_order, get_open_orders, get_order_status."""
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_place_order(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -458,7 +458,7 @@ class TestOrderOperations:
         mock_ib.placeOrder.assert_called_once_with(contract, order)
         assert trade.order.orderId == 42
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_place_order_error(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -470,7 +470,7 @@ class TestOrderOperations:
         with pytest.raises(IBOrderError):
             client.place_order(MagicMock(), MagicMock())
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_place_bracket_order(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -497,7 +497,7 @@ class TestOrderOperations:
         assert mock_ib.bracketOrder.call_count == 1
         assert mock_ib.placeOrder.call_count == 3
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_cancel_order(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -511,7 +511,7 @@ class TestOrderOperations:
 
         mock_ib.cancelOrder.assert_called_once_with(trade.order)
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_cancel_order_error(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -523,7 +523,7 @@ class TestOrderOperations:
         with pytest.raises(IBOrderError):
             client.cancel_order(MagicMock())
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_modify_order(self, MockIB):
         """Modify an existing order by changing price."""
         mock_ib = MockIB.return_value
@@ -540,7 +540,7 @@ class TestOrderOperations:
         assert trade.order.lmtPrice == 155.0
         mock_ib.placeOrder.assert_called_once_with(trade.contract, trade.order)
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_modify_order_multiple_fields(self, MockIB):
         """Modify order with multiple field changes."""
         mock_ib = MockIB.return_value
@@ -556,7 +556,7 @@ class TestOrderOperations:
         assert trade.order.lmtPrice == 155.0
         assert trade.order.totalQuantity == 20
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_open_orders(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -576,7 +576,7 @@ class TestOrderOperations:
         mock_ib.reqAllOpenOrders.assert_called_once()
         assert len(orders) == 2
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_order_status(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -592,7 +592,7 @@ class TestOrderOperations:
         assert found_trade is not None
         assert found_trade.orderStatus.status == "Filled"
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_order_status_not_found(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -604,7 +604,7 @@ class TestOrderOperations:
 
         assert result is None
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_order_status_by_perm_id(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -628,7 +628,7 @@ class TestOrderOperations:
 class TestMarketData:
     """Test get_quote, get_option_chain, get_option_price, qualify_contract."""
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_quote(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -646,7 +646,7 @@ class TestMarketData:
         assert quote.bid == 150.0
         assert quote.ask == 151.0
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_quote_snapshot(self, MockIB):
         """Get a snapshot quote (non-streaming)."""
         mock_ib = MockIB.return_value
@@ -665,7 +665,7 @@ class TestMarketData:
         # Snapshot is a positional or keyword arg
         assert quote is not None
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_option_chain(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -686,7 +686,7 @@ class TestMarketData:
         mock_ib.reqSecDefOptParams.assert_called_once()
         assert len(chains) >= 1
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_option_chain_empty(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -698,7 +698,7 @@ class TestMarketData:
 
         assert chains == []
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_option_price(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -713,7 +713,7 @@ class TestMarketData:
 
         assert quote is not None
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_qualify_contract(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -730,7 +730,7 @@ class TestMarketData:
         mock_ib.qualifyContracts.assert_called_once_with(contract)
         assert result.conId == 265598
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_qualify_contract_failure(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -742,7 +742,7 @@ class TestMarketData:
         with pytest.raises(IBContractError, match="qualify"):
             client.qualify_contract(MagicMock())
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_qualify_contracts_batch(self, MockIB):
         """Qualify multiple contracts in a single call."""
         mock_ib = MockIB.return_value
@@ -761,7 +761,7 @@ class TestMarketData:
         mock_ib.qualifyContracts.assert_called_once_with(c1, c2)
         assert len(results) == 2
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_cancel_market_data(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -773,7 +773,7 @@ class TestMarketData:
 
         mock_ib.cancelMktData.assert_called_once_with(contract)
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_set_market_data_type(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -792,7 +792,7 @@ class TestMarketData:
 class TestExecutionOperations:
     """Test get_executions, get_fills, wait_for_fill."""
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_executions(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -808,7 +808,7 @@ class TestExecutionOperations:
         mock_ib.reqExecutions.assert_called_once()
         assert len(executions) == 2
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_executions_with_filter(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -824,7 +824,7 @@ class TestExecutionOperations:
         mock_ib.reqExecutions.assert_called_once_with(exec_filter)
         assert len(executions) == 1
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_fills(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -840,7 +840,7 @@ class TestExecutionOperations:
         assert len(fills) == 1
         assert fills[0].execution.shares == 10
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_wait_for_fill_success(self, MockIB):
         """wait_for_fill returns when trade is filled within timeout."""
         mock_ib = MockIB.return_value
@@ -865,7 +865,7 @@ class TestExecutionOperations:
 
         assert result.orderStatus.status == "Filled"
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_wait_for_fill_timeout(self, MockIB):
         """wait_for_fill raises IBTimeoutError when trade doesn't fill."""
         mock_ib = MockIB.return_value
@@ -881,7 +881,7 @@ class TestExecutionOperations:
         with pytest.raises(IBTimeoutError):
             client.wait_for_fill(trade, timeout=2)
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_wait_for_fill_cancelled(self, MockIB):
         """wait_for_fill raises IBOrderError when trade is cancelled."""
         mock_ib = MockIB.return_value
@@ -908,8 +908,8 @@ class TestExecutionOperations:
 class TestFlexQuery:
     """Test Flex Query execution."""
 
-    @patch("clients.ib_client.FlexReport")
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.FlexReport")
+    @patch("xenon.clients.ib_client.IB")
     def test_run_flex_query(self, MockIB, MockFlexReport):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -924,8 +924,8 @@ class TestFlexQuery:
 
         MockFlexReport.assert_called_once_with(token="test_token", queryId=123456)
 
-    @patch("clients.ib_client.FlexReport")
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.FlexReport")
+    @patch("xenon.clients.ib_client.IB")
     def test_run_flex_query_error(self, MockIB, MockFlexReport):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -946,7 +946,7 @@ class TestFlexQuery:
 class TestErrorHandling:
     """Test handling of known IB error codes."""
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_error_10358_reuters_inactive(self, MockIB):
         """IB error 10358 (Reuters subscription inactive) should be logged but not raise."""
         mock_ib = MockIB.return_value
@@ -959,7 +959,7 @@ class TestErrorHandling:
         client._on_error(10358, "10358", "Reuters Fundamentals subscription inactive")
         # Should not raise, just log
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_error_103_duplicate_order(self, MockIB):
         """IB error 103 (duplicate order id) should be raised as IBOrderError."""
         mock_ib = MockIB.return_value
@@ -971,7 +971,7 @@ class TestErrorHandling:
         # The error handler should store the error for the next operation to check
         client._on_error(103, "103", "Duplicate order id")
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_error_connection_lost(self, MockIB):
         """IB connection lost error should update connection state."""
         mock_ib = MockIB.return_value
@@ -984,7 +984,7 @@ class TestErrorHandling:
         client._on_error(1100, "1100", "Connectivity between IB and TWS has been lost")
         # Should log the error
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_non_critical_errors_logged(self, MockIB):
         """Non-critical errors should be logged but not interrupt execution."""
         mock_ib = MockIB.return_value
@@ -1005,7 +1005,7 @@ class TestErrorHandling:
 class TestFastTimeout:
     """IBClient.connect() defaults to 3s timeout for fast failure."""
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_default_timeout_is_3s(self, MockIB):
         """Default timeout should be 3s, not 10s."""
         mock_ib = MockIB.return_value
@@ -1018,7 +1018,7 @@ class TestFastTimeout:
             "127.0.0.1", 4001, clientId=1, timeout=3,
         )
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_explicit_timeout_overrides_default(self, MockIB):
         """Callers can pass a custom timeout."""
         mock_ib = MockIB.return_value
@@ -1036,7 +1036,7 @@ class TestRetryLogic:
     """Test automatic retry for transient errors."""
 
     @patch("time.sleep")
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_connect_retries_on_transient_error(self, MockIB, _mock_sleep):
         """Connection should retry on transient failures."""
         mock_ib = MockIB.return_value
@@ -1051,7 +1051,7 @@ class TestRetryLogic:
         assert mock_ib.connect.call_count == 2
 
     @patch("time.sleep")
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_connect_exhausts_retries(self, MockIB, _mock_sleep):
         """Connection should raise after exhausting retries."""
         mock_ib = MockIB.return_value
@@ -1071,13 +1071,13 @@ class TestRetryLogic:
 class TestLogging:
     """Test that structured logging is present."""
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_logger_exists(self, MockIB):
         client = IBClient()
         assert client.logger is not None
         assert isinstance(client.logger, logging.Logger)
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_connect_logs(self, MockIB, caplog):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -1088,7 +1088,7 @@ class TestLogging:
 
         assert any("connect" in r.message.lower() or "connected" in r.message.lower() for r in caplog.records)
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_disconnect_logs(self, MockIB, caplog):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -1108,7 +1108,7 @@ class TestLogging:
 class TestHistoricalData:
     """Test historical data retrieval."""
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_historical_data(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -1138,7 +1138,7 @@ class TestHistoricalData:
 class TestContractDetails:
     """Test contract details retrieval."""
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_contract_details(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -1162,7 +1162,7 @@ class TestContractDetails:
 class TestUtilities:
     """Test utility methods."""
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_sleep(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -1173,7 +1173,7 @@ class TestUtilities:
 
         mock_ib.sleep.assert_called_once_with(1.5)
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_ib_property(self, MockIB):
         """The underlying ib_insync.IB instance should be accessible."""
         mock_ib = MockIB.return_value
@@ -1188,7 +1188,7 @@ class TestUtilities:
 class TestOpenTrades:
     """Test open trades retrieval."""
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_open_trades(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -1203,7 +1203,7 @@ class TestOpenTrades:
         mock_ib.openTrades.assert_called_once()
         assert len(trades) == 1
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_trades(self, MockIB):
         """Get all trades (open + completed) for the session."""
         mock_ib = MockIB.return_value

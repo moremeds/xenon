@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from clients.ib_client import IBClient, IBConnectionError
+from xenon.clients.ib_client import IBClient, IBConnectionError
 
 
 # ---------------------------------------------------------------------------
@@ -20,7 +20,7 @@ from clients.ib_client import IBClient, IBConnectionError
 class TestSubscriptionTracking:
     """Track active market data subscriptions for recovery after disconnect."""
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_quote_streaming_adds_subscription(self, MockIB):
         """get_quote with snapshot=False should record the subscription."""
         mock_ib = MockIB.return_value
@@ -38,7 +38,7 @@ class TestSubscriptionTracking:
         assert sub["contract"] is contract
         assert sub["generic_ticks"] == "233"
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_get_quote_snapshot_does_not_add_subscription(self, MockIB):
         """get_quote with snapshot=True should NOT record a subscription."""
         mock_ib = MockIB.return_value
@@ -53,7 +53,7 @@ class TestSubscriptionTracking:
 
         assert len(client._subscriptions) == 0
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_multiple_subscriptions_tracked(self, MockIB):
         """Multiple streaming subscriptions should all be tracked."""
         mock_ib = MockIB.return_value
@@ -70,7 +70,7 @@ class TestSubscriptionTracking:
 
         assert len(client._subscriptions) == 2
 
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.IB")
     def test_clear_subscriptions(self, MockIB):
         """clear_subscriptions should empty the tracking list."""
         mock_ib = MockIB.return_value
@@ -95,8 +95,8 @@ class TestSubscriptionTracking:
 class TestDisconnectHandler:
     """Test _on_disconnect auto-reconnect with exponential backoff."""
 
-    @patch("clients.ib_client.time.sleep")
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.time.sleep")
+    @patch("xenon.clients.ib_client.IB")
     def test_on_disconnect_attempts_reconnection(self, MockIB, mock_sleep):
         """_on_disconnect should attempt to reconnect."""
         mock_ib = MockIB.return_value
@@ -112,8 +112,8 @@ class TestDisconnectHandler:
         # Should have called connect again
         assert mock_ib.connect.call_count >= 1
 
-    @patch("clients.ib_client.time.sleep")
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.time.sleep")
+    @patch("xenon.clients.ib_client.IB")
     def test_on_disconnect_exponential_backoff(self, MockIB, mock_sleep):
         """_on_disconnect should use exponential backoff between attempts."""
         mock_ib = MockIB.return_value
@@ -139,8 +139,8 @@ class TestDisconnectHandler:
         # First delay should be small, second larger
         assert sleep_calls[0] <= sleep_calls[1]
 
-    @patch("clients.ib_client.time.sleep")
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.time.sleep")
+    @patch("xenon.clients.ib_client.IB")
     def test_on_disconnect_restores_subscriptions(self, MockIB, mock_sleep):
         """After reconnect, tracked subscriptions should be restored."""
         mock_ib = MockIB.return_value
@@ -167,8 +167,8 @@ class TestDisconnectHandler:
         # reqMktData should have been called again for each subscription
         assert mock_ib.reqMktData.call_count == initial_count + 2
 
-    @patch("clients.ib_client.time.sleep")
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.time.sleep")
+    @patch("xenon.clients.ib_client.IB")
     def test_reconnecting_flag_prevents_concurrent_reconnects(self, MockIB, mock_sleep):
         """_reconnecting flag should prevent concurrent reconnect attempts."""
         mock_ib = MockIB.return_value
@@ -186,8 +186,8 @@ class TestDisconnectHandler:
         # Should not have attempted to reconnect
         mock_ib.connect.assert_not_called()
 
-    @patch("clients.ib_client.time.sleep")
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.time.sleep")
+    @patch("xenon.clients.ib_client.IB")
     def test_reconnection_gives_up_after_max_attempts(self, MockIB, mock_sleep):
         """After max attempts (5), _on_disconnect should give up."""
         mock_ib = MockIB.return_value
@@ -205,8 +205,8 @@ class TestDisconnectHandler:
         # Should have tried exactly 5 times (MAX_RECONNECT_ATTEMPTS)
         assert mock_ib.connect.call_count == 5
 
-    @patch("clients.ib_client.time.sleep")
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.time.sleep")
+    @patch("xenon.clients.ib_client.IB")
     def test_reconnecting_flag_cleared_after_success(self, MockIB, mock_sleep):
         """_reconnecting flag should be cleared after successful reconnect."""
         mock_ib = MockIB.return_value
@@ -220,8 +220,8 @@ class TestDisconnectHandler:
 
         assert client._reconnecting is False
 
-    @patch("clients.ib_client.time.sleep")
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.time.sleep")
+    @patch("xenon.clients.ib_client.IB")
     def test_reconnecting_flag_cleared_after_failure(self, MockIB, mock_sleep):
         """_reconnecting flag should be cleared even after failed reconnect."""
         mock_ib = MockIB.return_value
@@ -237,8 +237,8 @@ class TestDisconnectHandler:
 
         assert client._reconnecting is False
 
-    @patch("clients.ib_client.time.sleep")
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.time.sleep")
+    @patch("xenon.clients.ib_client.IB")
     def test_on_disconnect_logs_restored_count(self, MockIB, mock_sleep, caplog):
         """Should log how many subscriptions were restored vs failed."""
         mock_ib = MockIB.return_value
@@ -257,8 +257,8 @@ class TestDisconnectHandler:
 
         assert any("restor" in r.message.lower() for r in caplog.records)
 
-    @patch("clients.ib_client.time.sleep")
-    @patch("clients.ib_client.IB")
+    @patch("xenon.clients.ib_client.time.sleep")
+    @patch("xenon.clients.ib_client.IB")
     def test_backoff_capped_at_30_seconds(self, MockIB, mock_sleep):
         """Exponential backoff should be capped at 30 seconds."""
         mock_ib = MockIB.return_value

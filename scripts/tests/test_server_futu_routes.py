@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 @pytest.fixture()
 def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point scripts.api.server.DATA_DIR at a tmp directory and reset globals."""
-    from api import server  # type: ignore
+    from xenon.api import server  # type: ignore
 
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
     # Reset module-global sync state between tests.
@@ -39,7 +39,7 @@ def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture()
 def client(isolated_data_dir: Path) -> TestClient:
-    from api import server  # type: ignore
+    from xenon.api import server  # type: ignore
     return TestClient(server.app)
 
 
@@ -135,7 +135,7 @@ def test_futu_sync_cooldown_sentinel_first_call_proceeds(
 ) -> None:
     """With _futu_last_sync_monotonic=None, first call MUST hit the client
     even if a cache file exists. Codex #3: 0.0 init would misfire here."""
-    from api import server  # type: ignore
+    from xenon.api import server  # type: ignore
 
     # Cache exists but should NOT be served — first call must fetch fresh.
     stale_cache = {
@@ -181,7 +181,7 @@ def test_futu_sync_cooldown_sentinel_first_call_proceeds(
 def test_maybe_preserve_partial_failure_blocks_degraded_overwrite(
     isolated_data_dir: Path,
 ) -> None:
-    from api import server  # type: ignore
+    from xenon.api import server  # type: ignore
 
     # Existing snapshot: 27 positions, clean
     good_cache = {
@@ -217,7 +217,7 @@ def test_maybe_preserve_partial_failure_allows_clean_overwrite(
 ) -> None:
     """If the new snapshot has no warnings, let it overwrite even if count drops
     (e.g. user legitimately closed positions)."""
-    from api import server  # type: ignore
+    from xenon.api import server  # type: ignore
 
     good_cache = {"count": 27, "positions": [], "warnings": []}
     (isolated_data_dir / "futu_portfolio.json").write_text(json.dumps(good_cache))
@@ -232,7 +232,7 @@ def test_maybe_preserve_partial_failure_allows_larger_new_snapshot(
     isolated_data_dir: Path,
 ) -> None:
     """If warnings exist but new count >= prev count, allow overwrite."""
-    from api import server  # type: ignore
+    from xenon.api import server  # type: ignore
 
     good_cache = {"count": 10, "positions": [], "warnings": []}
     (isolated_data_dir / "futu_portfolio.json").write_text(json.dumps(good_cache))

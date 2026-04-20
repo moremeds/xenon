@@ -34,7 +34,7 @@ REQUIRED_KEYS = {
 
 def _build_mirror(tmp_path: Path, ticker: str = "AAPL", n: int = 260) -> Path:
     """Populate a parquet mirror with one ticker's OHLCV + computed indicators."""
-    from scripts.apex_refresh import _compute_indicators_adapter
+    from xenon.fetchers.fetch_apex_data import _compute_indicators_adapter
     from scripts.ta_lib.parquet_store import write_indicators, write_ohlcv
 
     np.random.seed(42)

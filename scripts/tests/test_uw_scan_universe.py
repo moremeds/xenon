@@ -1,6 +1,6 @@
 import json
 
-from scripts.scanners.uw.universe import load_universe
+from xenon.scanners.uw.universe import load_universe
 
 
 def test_targeted_mode_returns_explicit_list():

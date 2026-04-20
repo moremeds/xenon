@@ -4,7 +4,7 @@ import {
   createFundamentalsData,
   parseFundamentalRatios,
   updatePriceFromTickPrice,
-} from "../../scripts/ib_tick_handler.js";
+} from "../../scripts/infra/ib_realtime/ib_tick_handler.js";
 
 // IB tick types for Misc Stats (generic tick 165)
 const TICK_LOW_52_WEEK = 19;
@@ -57,7 +57,8 @@ describe("createFundamentalsData", () => {
 describe("parseFundamentalRatios", () => {
   it("parses semicolon-delimited key=value IB string", () => {
     const data = createFundamentalsData("AAPL");
-    const str = "PEEXCLXOR=25.30;TTMEPSXCLX=6.42;YIELD=0.55;NHIG=199.62;NLOW=124.17;PRICE2BK=48.5;TTMROEPCT=157.41;TTMREV=391035000000";
+    const str =
+      "PEEXCLXOR=25.30;TTMEPSXCLX=6.42;YIELD=0.55;NHIG=199.62;NLOW=124.17;PRICE2BK=48.5;TTMROEPCT=157.41;TTMREV=391035000000";
     const updated = parseFundamentalRatios(data, str);
     expect(updated).toBe(true);
     expect(data.peRatio).toBe(25.3);
@@ -72,7 +73,8 @@ describe("parseFundamentalRatios", () => {
 
   it("filters out IB sentinel values (DBL_MAX)", () => {
     const data = createFundamentalsData("TEST");
-    const str = "PEEXCLXOR=1.7976931348623157e+308;YIELD=0.55;NHIG=1.7976931348623157e308";
+    const str =
+      "PEEXCLXOR=1.7976931348623157e+308;YIELD=0.55;NHIG=1.7976931348623157e308";
     parseFundamentalRatios(data, str);
     expect(data.peRatio).toBeNull();
     expect(data.dividendYield).toBe(0.55);
@@ -103,7 +105,9 @@ describe("parseFundamentalRatios", () => {
   it("returns false for non-string input", () => {
     const data = createFundamentalsData("TEST");
     expect(parseFundamentalRatios(data, null as unknown as string)).toBe(false);
-    expect(parseFundamentalRatios(data, undefined as unknown as string)).toBe(false);
+    expect(parseFundamentalRatios(data, undefined as unknown as string)).toBe(
+      false,
+    );
   });
 
   it("returns false when all keys are unknown", () => {

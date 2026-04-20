@@ -11,15 +11,31 @@ type CommandResult = {
   stderr: string;
 };
 
-const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const projectRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+);
 
 const runPython = (args: string[]): CommandResult => {
-  const result = spawnSync("python3.13", args, {
-    cwd: projectRoot,
-    encoding: "utf8",
-    shell: false,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  // Entry-point binaries under .venv/bin/ are spawned directly; legacy .py
+  // scripts are invoked via python3.13.
+  const [first, ...rest] = args;
+  const isEntryPoint =
+    first.includes(".venv/bin/") || first.startsWith("xenon-");
+  const result = isEntryPoint
+    ? spawnSync(first, rest, {
+        cwd: projectRoot,
+        encoding: "utf8",
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      })
+    : spawnSync("python3.13", args, {
+        cwd: projectRoot,
+        encoding: "utf8",
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
 
   return {
     status: result.status ?? 1,
@@ -42,15 +58,29 @@ const runPiRequest = async (input: string) => {
 };
 
 test("__resolvePiInput combines command and separate text payloads", () => {
-  expect(__resolvePiInput({ command: "/evaluate", text: "KWEB" })).toBe("/evaluate KWEB");
-  expect(__resolvePiInput({ command: "/evaluate", input: "KWEB" })).toBe("/evaluate KWEB");
+  expect(__resolvePiInput({ command: "/evaluate", text: "KWEB" })).toBe(
+    "/evaluate KWEB",
+  );
+  expect(__resolvePiInput({ command: "/evaluate", input: "KWEB" })).toBe(
+    "/evaluate KWEB",
+  );
   expect(__resolvePiInput({ input: "/evaluate KWEB" })).toBe("/evaluate KWEB");
   expect(__resolvePiInput({ text: "/evaluate KWEB" })).toBe("/evaluate KWEB");
 });
 
 test("buildEvaluateCommand builds single evaluate command with default and explicit --days", () => {
-  expect(buildEvaluateCommand(["AAPL"])).toEqual(["scripts/evaluate.py", "AAPL", "--days", "5"]);
-  expect(buildEvaluateCommand(["AAPL", "--days", "10"])).toEqual(["scripts/evaluate.py", "AAPL", "--days", "10"]);
+  expect(buildEvaluateCommand(["AAPL"])).toEqual([
+    ".venv/bin/xenon-evaluate",
+    "AAPL",
+    "--days",
+    "5",
+  ]);
+  expect(buildEvaluateCommand(["AAPL", "--days", "10"])).toEqual([
+    ".venv/bin/xenon-evaluate",
+    "AAPL",
+    "--days",
+    "10",
+  ]);
 });
 
 test("pi API returns local portfolio payload", async () => {
@@ -110,10 +140,10 @@ test("assistant API route returns mock response when mock mode is enabled", asyn
 
 test("pi command --help screens are available", () => {
   const helpCommands = [
-    { command: ["scripts/fetch_flow.py", "--help"], expectedStatus: 0 },
-    { command: ["scripts/discover.py", "--help"], expectedStatus: 0 },
-    { command: ["scripts/scanner.py", "--help"], expectedStatus: 0 },
-    { command: ["scripts/fetch_ticker.py"], expectedStatus: 2 },
+    { command: [".venv/bin/xenon-fetch-flow", "--help"], expectedStatus: 0 },
+    { command: [".venv/bin/xenon-discover", "--help"], expectedStatus: 0 },
+    { command: [".venv/bin/xenon-scan", "--help"], expectedStatus: 0 },
+    { command: [".venv/bin/xenon-fetch-ticker"], expectedStatus: 2 },
   ];
 
   for (const item of helpCommands) {
@@ -126,7 +156,7 @@ test("pi command --help screens are available", () => {
 
 test("kelly command returns valid risk sizing JSON", () => {
   const result = runPython([
-    "scripts/kelly.py",
+    ".venv/bin/xenon-kelly",
     "--prob",
     "0.35",
     "--odds",
@@ -150,7 +180,7 @@ test("GET /api/prices returns deprecation response", async () => {
   const { GET } = await import("../app/api/prices/route");
 
   const response = await GET();
-  const body = await response.json() as { error?: string };
+  const body = (await response.json()) as { error?: string };
 
   expect(response.status).toBe(405);
   expect(typeof body.error === "string").toBeTruthy();
@@ -166,7 +196,7 @@ test("POST /api/prices returns deprecation response", async () => {
   });
 
   const response = await POST(request);
-  const body = await response.json() as { error?: string };
+  const body = (await response.json()) as { error?: string };
 
   expect(response.status).toBe(405);
   expect(body.error).toContain("deprecated");

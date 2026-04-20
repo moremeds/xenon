@@ -7,8 +7,9 @@ Covers:
 """
 
 import pytest
-from analysis.dark_pool_summary import summarize_dark_pool
-from analysis.options_flow_summary import summarize_options_flow
+
+from xenon.analysis.dark_pool_summary import summarize_dark_pool
+from xenon.analysis.options_flow_summary import summarize_options_flow
 
 
 def _flow(direction="ACCUMULATION", strength=60.0, buy_ratio=0.8, num_prints=200, daily=None, options_bias=None):

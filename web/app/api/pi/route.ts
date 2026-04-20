@@ -37,7 +37,16 @@ type PiResponse = {
 const MAX_CHAR_RESPONSE = 40_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
 
-const PI_COMMANDS = ["help", "scan", "discover", "evaluate", "portfolio", "journal", "sync", "leap-scan"] as const;
+const PI_COMMANDS = [
+  "help",
+  "scan",
+  "discover",
+  "evaluate",
+  "portfolio",
+  "journal",
+  "sync",
+  "leap-scan",
+] as const;
 type PiCommand = (typeof PI_COMMANDS)[number];
 
 type ParsedCommand = {
@@ -66,12 +75,19 @@ const trimOutput = (value: string) => {
 };
 
 const resolveProjectPaths = (): Paths => {
-  const candidates = [process.cwd(), path.resolve(process.cwd(), ".."), path.resolve(process.cwd(), "..", "..")];
+  const candidates = [
+    process.cwd(),
+    path.resolve(process.cwd(), ".."),
+    path.resolve(process.cwd(), "..", ".."),
+  ];
 
   for (const candidate of candidates) {
     const scriptsDir = path.join(candidate, "scripts");
     const dataDir = path.join(candidate, "data");
-    if (existsSync(path.join(scriptsDir, "scanner.py")) && existsSync(path.join(dataDir, "portfolio.json"))) {
+    if (
+      existsSync(path.join(scriptsDir, "run_pytest_affected.py")) &&
+      existsSync(path.join(dataDir, "portfolio.json"))
+    ) {
       return { cwd: candidate, scriptsDir, dataDir };
     }
   }
@@ -85,11 +101,14 @@ const resolveProjectPaths = (): Paths => {
 
 const readScriptablePaths = () => resolveProjectPaths();
 
-const clamp = (value: string, maxLength = 200) => value.slice(0, maxLength).toUpperCase();
+const clamp = (value: string, maxLength = 200) =>
+  value.slice(0, maxLength).toUpperCase();
 
-const isPositiveInt = (value: string) => Number.isInteger(Number(value)) && Number(value) >= 0;
+const isPositiveInt = (value: string) =>
+  Number.isInteger(Number(value)) && Number(value) >= 0;
 const isTicker = (value: string) => /^[A-Z0-9.\-]{1,12}$/i.test(value);
-const splitCommandTokens = (input: string) => input.trim().split(/\s+/).filter(Boolean);
+const splitCommandTokens = (input: string) =>
+  input.trim().split(/\s+/).filter(Boolean);
 
 const normalizeCommand = (value: string): ParsedCommand | null => {
   const tokens = splitCommandTokens(value);
@@ -109,10 +128,28 @@ const normalizeCommand = (value: string): ParsedCommand | null => {
   };
 };
 
-const runPythonScript = (script: string, args: string[], cwd: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<ScriptResult> => {
+const runPythonScript = (
+  script: string,
+  args: string[],
+  cwd: string,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+): Promise<ScriptResult> => {
   return new Promise((resolve) => {
-    const pieces = [script, ...args];
-    const proc = spawn("python3.13", pieces, { cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    // Entry-point binaries under .venv/bin/ (e.g. ".venv/bin/xenon-evaluate") are
+    // spawned directly; legacy .py scripts are invoked via python3.13.
+    const isEntryPoint =
+      script.includes(".venv/bin/") || script.startsWith("xenon-");
+    const proc = isEntryPoint
+      ? spawn(script, args, {
+          cwd,
+          env: process.env,
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+      : spawn("python3.13", [script, ...args], {
+          cwd,
+          env: process.env,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -248,10 +285,13 @@ const parseEvaluate = (args: string[]) => {
 
 export const buildEvaluateCommand = (args: string[]): string[] => {
   const { ticker, days } = parseEvaluate(args);
-  return ["scripts/evaluate.py", ticker, "--days", days ?? "5"];
+  return [".venv/bin/xenon-evaluate", ticker, "--days", days ?? "5"];
 };
 
-const parseGenericIntFlags = (args: string[], schema: Record<string, (value: string) => string>) => {
+const parseGenericIntFlags = (
+  args: string[],
+  schema: Record<string, (value: string) => string>,
+) => {
   const parsed: Record<string, string> = {};
   const positional: string[] = [];
 
@@ -300,7 +340,9 @@ const parseBooleanFlags = (args: string[], booleanSet: Set<string>) => {
 };
 
 const executePortfolio = async (paths: Paths): Promise<ScriptResult> => {
-  const data = await readLocalJsonFile(path.join(paths.dataDir, "portfolio.json"));
+  const data = await readLocalJsonFile(
+    path.join(paths.dataDir, "portfolio.json"),
+  );
   return {
     command: "portfolio",
     status: "ok",
@@ -312,7 +354,10 @@ const executePortfolio = async (paths: Paths): Promise<ScriptResult> => {
   };
 };
 
-const executeJournal = (args: string[], paths: Paths): Promise<ScriptResult> => {
+const executeJournal = (
+  args: string[],
+  paths: Paths,
+): Promise<ScriptResult> => {
   const parsed = parseGenericIntFlags(args, {
     "--limit": (value) => parseFlagInt(value, "limit"),
   });
@@ -322,24 +367,29 @@ const executeJournal = (args: string[], paths: Paths): Promise<ScriptResult> => 
     throw new Error("journal accepts only --limit");
   }
 
-  return readLocalJsonFile(path.join(paths.dataDir, "trade_log.json")).then((raw) => ({
-    command: "journal",
-    status: "ok",
-    output: formatJournal(raw, limit),
-    stderr: "",
-    exitCode: 0,
-    timedOut: false,
-    source: "local",
-  }));
+  return readLocalJsonFile(path.join(paths.dataDir, "trade_log.json")).then(
+    (raw) => ({
+      command: "journal",
+      status: "ok",
+      output: formatJournal(raw, limit),
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+      source: "local",
+    }),
+  );
 };
 
-const executeScan = async (args: string[], paths: Paths): Promise<ScriptResult> => {
+const executeScan = async (
+  args: string[],
+  paths: Paths,
+): Promise<ScriptResult> => {
   const parsed = parseGenericIntFlags(args, {
     "--top": (value) => parseFlagInt(value, "top"),
     "--min-score": (value) => parseFlagInt(value, "min-score"),
   });
 
-  const commandArgs = [path.join("scripts", "scanner.py")];
+  const commandArgs = [".venv/bin/xenon-scan"];
   if (parsed.parsed["top"]) {
     commandArgs.push("--top", parsed.parsed["top"]);
   }
@@ -354,7 +404,10 @@ const executeScan = async (args: string[], paths: Paths): Promise<ScriptResult> 
   return runPythonScript(commandArgs[0], commandArgs.slice(1), paths.cwd);
 };
 
-const executeDiscover = async (args: string[], paths: Paths): Promise<ScriptResult> => {
+const executeDiscover = async (
+  args: string[],
+  paths: Paths,
+): Promise<ScriptResult> => {
   const booleanFlags = new Set<string>(["--include-indices"]);
   const booleanParsed = parseBooleanFlags(args, booleanFlags);
   const integerFlags = parseGenericIntFlags(booleanParsed.positional, {
@@ -367,21 +420,33 @@ const executeDiscover = async (args: string[], paths: Paths): Promise<ScriptResu
     throw new Error("discover does not accept positional tickers");
   }
 
-  const commandArgs = [path.join("scripts", "discover.py")];
-  if (integerFlags.parsed["min-premium"]) commandArgs.push("--min-premium", integerFlags.parsed["min-premium"]);
-  if (integerFlags.parsed["min-alerts"]) commandArgs.push("--min-alerts", integerFlags.parsed["min-alerts"]);
-  if (integerFlags.parsed["dp-days"]) commandArgs.push("--dp-days", integerFlags.parsed["dp-days"]);
-  if (booleanParsed.parsed.has("--include-indices")) commandArgs.push("--include-indices");
+  const commandArgs = [".venv/bin/xenon-discover"];
+  if (integerFlags.parsed["min-premium"])
+    commandArgs.push("--min-premium", integerFlags.parsed["min-premium"]);
+  if (integerFlags.parsed["min-alerts"])
+    commandArgs.push("--min-alerts", integerFlags.parsed["min-alerts"]);
+  if (integerFlags.parsed["dp-days"])
+    commandArgs.push("--dp-days", integerFlags.parsed["dp-days"]);
+  if (booleanParsed.parsed.has("--include-indices"))
+    commandArgs.push("--include-indices");
 
   return runPythonScript(commandArgs[0], commandArgs.slice(1), paths.cwd);
 };
 
-const executeEvaluate = async (args: string[], paths: Paths): Promise<ScriptResult> => {
+const executeEvaluate = async (
+  args: string[],
+  paths: Paths,
+): Promise<ScriptResult> => {
   const commandArgs = buildEvaluateCommand(args);
 
-  const result = await runPythonScript(commandArgs[0], commandArgs.slice(1), paths.cwd);
+  const result = await runPythonScript(
+    commandArgs[0],
+    commandArgs.slice(1),
+    paths.cwd,
+  );
 
-  const status: CommandStatus = result.exitCode === 0 || !!result.output ? "ok" : "error";
+  const status: CommandStatus =
+    result.exitCode === 0 || !!result.output ? "ok" : "error";
 
   return {
     command: "evaluate",
@@ -395,19 +460,25 @@ const executeEvaluate = async (args: string[], paths: Paths): Promise<ScriptResu
 };
 
 const executeSync = (args: string[], paths: Paths): Promise<ScriptResult> => {
-  const booleanParsed = parseBooleanFlags(args, new Set(["--sync", "--no-prices"]));
+  const booleanParsed = parseBooleanFlags(
+    args,
+    new Set(["--sync", "--no-prices"]),
+  );
   const parsed = parseGenericIntFlags(booleanParsed.positional, {
     "--port": (value) => parseFlagInt(value, "port"),
     "--client-id": (value) => parseFlagInt(value, "client-id"),
   });
 
-  const commandArgs = ["scripts/ib_sync.py"];
+  const commandArgs = [".venv/bin/xenon-ib-sync"];
 
   if (parsed.positional.length) {
-    throw new Error("sync accepts only --sync, --no-prices, --port, --client-id");
+    throw new Error(
+      "sync accepts only --sync, --no-prices, --port, --client-id",
+    );
   }
 
-  if (parsed.parsed["client-id"]) commandArgs.push("--client-id", parsed.parsed["client-id"]);
+  if (parsed.parsed["client-id"])
+    commandArgs.push("--client-id", parsed.parsed["client-id"]);
   if (parsed.parsed["port"]) commandArgs.push("--port", parsed.parsed["port"]);
   if (booleanParsed.parsed.has("--sync")) commandArgs.push("--sync");
   if (booleanParsed.parsed.has("--no-prices")) commandArgs.push("--no-prices");
@@ -415,8 +486,11 @@ const executeSync = (args: string[], paths: Paths): Promise<ScriptResult> => {
   return runPythonScript(commandArgs[0], commandArgs.slice(1), paths.cwd);
 };
 
-const executeLeapScan = (args: string[], paths: Paths): Promise<ScriptResult> => {
-  const commandArgs = ["scripts/leap_scanner_uw.py"];
+const executeLeapScan = (
+  args: string[],
+  paths: Paths,
+): Promise<ScriptResult> => {
+  const commandArgs = [".venv/bin/xenon-leap-uw"];
 
   for (let i = 0; i < args.length; i += 1) {
     const token = args[i];
@@ -531,7 +605,10 @@ export async function POST(request: NextRequest): Promise<Response> {
   try {
     body = (await request.json()) as PiRoutePayload;
   } catch {
-    return NextResponse.json({ error: "Invalid JSON payload." }, { status: 400 });
+    return NextResponse.json(
+      { error: "Invalid JSON payload." },
+      { status: 400 },
+    );
   }
 
   const normalizedInput = resolvePiInput(body);
@@ -566,7 +643,11 @@ export async function POST(request: NextRequest): Promise<Response> {
     const status = result.status === "ok" ? 200 : 422;
     return NextResponse.json(response, { status });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "pi command failed";
-    return NextResponse.json({ command: parsed.command, status: "error", output: message }, { status: 400 });
+    const message =
+      error instanceof Error ? error.message : "pi command failed";
+    return NextResponse.json(
+      { command: parsed.command, status: "error", output: message },
+      { status: 400 },
+    );
   }
 }

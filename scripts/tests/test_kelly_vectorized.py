@@ -1,7 +1,7 @@
 """Tests for vectorized Kelly batch sizing."""
 import numpy as np
 import pytest
-from reports.kelly import kelly, kelly_size_batch
+from xenon.reports.kelly import kelly, kelly_size_batch
 
 
 class TestKellySizeBatch:

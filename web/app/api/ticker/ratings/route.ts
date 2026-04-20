@@ -9,10 +9,13 @@ export async function GET(request: Request): Promise<Response> {
     const ticker = searchParams.get("ticker");
 
     if (!ticker) {
-      return NextResponse.json({ error: "ticker parameter required" }, { status: 400 });
+      return NextResponse.json(
+        { error: "ticker parameter required" },
+        { status: 400 },
+      );
     }
 
-    const result = await runScript("scripts/fetch_analyst_ratings.py", {
+    const result = await runScript(".venv/bin/xenon-fetch-analyst", {
       args: [ticker.toUpperCase(), "--json"],
       timeout: 30_000,
     });
@@ -26,7 +29,8 @@ export async function GET(request: Request): Promise<Response> {
 
     return NextResponse.json(result.data);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to fetch ratings";
+    const message =
+      error instanceof Error ? error.message : "Failed to fetch ratings";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

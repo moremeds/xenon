@@ -10,8 +10,8 @@ from unittest.mock import patch
 
 import pytest
 
-from fetchers import fetch_menthorq_cta as fetch_menthorq_cta_module
-from fetchers.fetch_menthorq_cta import (
+from xenon.fetchers import fetch_menthorq_cta as fetch_menthorq_cta_module
+from xenon.fetchers.fetch_menthorq_cta import (
     CACHE_DIR,
     CTA_TABLES,
     EXTRACTION_PROMPT,
@@ -105,7 +105,7 @@ class TestCacheReadWrite:
 
     def test_write_and_read_cache(self, tmp_path, monkeypatch):
         """Write cache, read it back, verify contents."""
-        monkeypatch.setattr("fetchers.fetch_menthorq_cta.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("xenon.fetchers.fetch_menthorq_cta.CACHE_DIR", tmp_path)
 
         tables = {"main": SAMPLE_MAIN_TABLE, "index": SAMPLE_INDEX_TABLE}
         write_cache("2026-03-07", tables)
@@ -119,13 +119,13 @@ class TestCacheReadWrite:
 
     def test_cache_miss_returns_none(self, tmp_path, monkeypatch):
         """Missing file returns None."""
-        monkeypatch.setattr("fetchers.fetch_menthorq_cta.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("xenon.fetchers.fetch_menthorq_cta.CACHE_DIR", tmp_path)
         result = read_cache("2020-01-01")
         assert result is None
 
     def test_corrupt_cache_returns_none(self, tmp_path, monkeypatch):
         """Corrupt JSON returns None."""
-        monkeypatch.setattr("fetchers.fetch_menthorq_cta.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("xenon.fetchers.fetch_menthorq_cta.CACHE_DIR", tmp_path)
         p = tmp_path / "cta_2026-03-07.json"
         p.write_text("not valid json{{{")
         result = read_cache("2026-03-07")
@@ -133,7 +133,7 @@ class TestCacheReadWrite:
 
     def test_cache_path_format(self, tmp_path, monkeypatch):
         """Cache path follows expected naming convention."""
-        monkeypatch.setattr("fetchers.fetch_menthorq_cta.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("xenon.fetchers.fetch_menthorq_cta.CACHE_DIR", tmp_path)
         p = cache_path("2026-03-07")
         assert p.name == "cta_2026-03-07.json"
 
@@ -254,7 +254,7 @@ class TestLoadMenthorqCache:
 
     def test_load_specific_date(self, tmp_path, monkeypatch):
         """Load by specific date."""
-        monkeypatch.setattr("fetchers.fetch_menthorq_cta.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("xenon.fetchers.fetch_menthorq_cta.CACHE_DIR", tmp_path)
         write_cache("2026-03-07", {"main": SAMPLE_MAIN_TABLE})
         result = load_menthorq_cache("2026-03-07")
         assert result is not None
@@ -269,7 +269,7 @@ class TestFetchMenthorqCtaFailures:
         real_import = builtins.__import__
 
         def guarded_import(name, *args, **kwargs):
-            if name == "clients.menthorq_client":
+            if name == "xenon.clients.menthorq_client":
                 raise ModuleNotFoundError("playwright")
             return real_import(name, *args, **kwargs)
 
@@ -286,7 +286,7 @@ class TestFetchMenthorqCtaFailures:
 
     def test_load_missing_date(self, tmp_path, monkeypatch):
         """Missing date returns None."""
-        monkeypatch.setattr("fetchers.fetch_menthorq_cta.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("xenon.fetchers.fetch_menthorq_cta.CACHE_DIR", tmp_path)
         result = load_menthorq_cache("2020-01-01")
         assert result is None
 
@@ -316,7 +316,7 @@ class TestCRIIntegration:
 
     def test_cache_structure_for_cri(self, tmp_path, monkeypatch):
         """Cache entry has the shape CRI scanner expects."""
-        monkeypatch.setattr("fetchers.fetch_menthorq_cta.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("xenon.fetchers.fetch_menthorq_cta.CACHE_DIR", tmp_path)
         write_cache("2026-03-07", {"main": SAMPLE_MAIN_TABLE})
         data = read_cache("2026-03-07")
         assert "tables" in data

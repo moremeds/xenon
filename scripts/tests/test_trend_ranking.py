@@ -6,9 +6,9 @@ import pytest
 
 
 def test_rank_by_final_score():
-    from scripts.scanners.trend.ranking import rank_candidates
+    from xenon.scanners.trend.ranking import rank_candidates
 
-    from scripts.scanners.trend.models import TrendCandidate
+    from xenon.scanners.trend.models import TrendCandidate
 
     candidates = [
         TrendCandidate(
@@ -30,9 +30,9 @@ def test_rank_by_final_score():
 
 
 def test_rank_top_n_limit():
-    from scripts.scanners.trend.ranking import rank_candidates
+    from xenon.scanners.trend.ranking import rank_candidates
 
-    from scripts.scanners.trend.models import TrendCandidate
+    from xenon.scanners.trend.models import TrendCandidate
 
     candidates = [
         TrendCandidate(ticker=f"T{i}", direction="bullish", final_score=i * 0.1, scores={"trend": 0.5}, spot_price=100)
@@ -44,9 +44,9 @@ def test_rank_top_n_limit():
 
 
 def test_apply_min_thresholds_filters():
-    from scripts.scanners.trend.ranking import apply_min_thresholds
+    from xenon.scanners.trend.ranking import apply_min_thresholds
 
-    from scripts.scanners.trend.models import TrendCandidate
+    from xenon.scanners.trend.models import TrendCandidate
 
     candidates = [
         TrendCandidate(
@@ -74,9 +74,9 @@ def test_apply_min_thresholds_filters():
 
 
 def test_apply_min_thresholds_missing_score():
-    from scripts.scanners.trend.ranking import apply_min_thresholds
+    from xenon.scanners.trend.ranking import apply_min_thresholds
 
-    from scripts.scanners.trend.models import TrendCandidate
+    from xenon.scanners.trend.models import TrendCandidate
 
     candidates = [
         TrendCandidate(ticker="MISSING", direction="bullish", final_score=0.8, scores={"trend": 0.8}, spot_price=100),
@@ -87,7 +87,7 @@ def test_apply_min_thresholds_missing_score():
 
 
 def test_compute_final_scores():
-    from scripts.scanners.trend.ranking import compute_final_score
+    from xenon.scanners.trend.ranking import compute_final_score
 
     scores = {"trend": 0.9, "structure": 0.7, "volatility": 0.6, "flow": 0.8}
     weights = {"trend": 0.35, "structure": 0.25, "volatility": 0.20, "flow": 0.20}
@@ -97,9 +97,9 @@ def test_compute_final_scores():
 
 
 def test_mixed_directions_ranked_together():
-    from scripts.scanners.trend.ranking import rank_candidates
+    from xenon.scanners.trend.ranking import rank_candidates
 
-    from scripts.scanners.trend.models import TrendCandidate
+    from xenon.scanners.trend.models import TrendCandidate
 
     candidates = [
         TrendCandidate(ticker="BULL", direction="bullish", final_score=0.8, scores={"trend": 0.8}, spot_price=100),

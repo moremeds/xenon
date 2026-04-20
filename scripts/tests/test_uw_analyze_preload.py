@@ -50,8 +50,8 @@ def test_lifespan_preloads_uw_analyze_cache(tmp_path, monkeypatch):
     cache_file = tmp_path / "cache.json"
     cache_file.write_text(json.dumps(seeded))
 
-    from api.routes import uw_analyze as route_mod
-    from api.services import uw_analyze_cache as cache_mod
+    from xenon.api.routes import uw_analyze as route_mod
+    from xenon.api.services import uw_analyze_cache as cache_mod
 
     monkeypatch.setattr(cache_mod, "_DEFAULT_CACHE_PATH", cache_file)
     route_mod.reset_state_for_tests()
@@ -61,7 +61,7 @@ def test_lifespan_preloads_uw_analyze_cache(tmp_path, monkeypatch):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    from api import server as server_mod
+    from xenon.api import server as server_mod
     from fastapi import FastAPI
 
     # Force non-test-mode so the lifespan preload branch runs. Stub out

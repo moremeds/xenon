@@ -1,1 +1,0 @@
-services/run_cri_scan.sh

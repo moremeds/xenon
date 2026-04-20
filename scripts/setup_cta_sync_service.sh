@@ -1,1 +1,0 @@
-services/setup_cta_sync_service.sh

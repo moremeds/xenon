@@ -1,6 +1,6 @@
 from datetime import datetime
-from scripts.analysis.models import TickerData
-from scripts.scanners.uw.signals.dark_pool_accumulation import detect
+from xenon.analysis.models import TickerData
+from xenon.scanners.uw.signals.dark_pool_accumulation import detect
 
 
 def _td(darkpool):

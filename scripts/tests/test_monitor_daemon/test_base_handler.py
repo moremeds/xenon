@@ -13,7 +13,7 @@ from unittest.mock import patch
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from monitor_daemon.handlers.base import BaseHandler
+from xenon.monitor_daemon.handlers.base import BaseHandler
 
 
 class ConcreteHandler(BaseHandler):

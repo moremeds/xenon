@@ -6,7 +6,9 @@
 # scanner.py, flow_analysis.py, and discover.py. Saves output to data/.
 #
 
-cd "$(dirname "$0")/.."
+PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$PROJECT_DIR"
+export PATH="$PROJECT_DIR/.venv/bin:$PATH"
 
 # Load env vars from both .env files — launchd doesn't inherit shell env
 # Avoid process substitution <(...) which is unreliable under launchd's bash 3.2
@@ -50,9 +52,8 @@ if [ -z "$PYTHON_BIN" ]; then
 fi
 
 # Check if today is a trading day (reuses market_holidays.json)
-IS_TRADING=$("$PYTHON_BIN" -c "
-import sys; sys.path.insert(0, 'scripts')
-from utils.market_calendar import _is_trading_day
+IS_TRADING=$("$PROJECT_DIR/.venv/bin/python" -c "
+from xenon.utils.market_calendar import _is_trading_day
 from datetime import datetime
 print('yes' if _is_trading_day(datetime.now()) else 'no')
 " 2>/dev/null || echo "yes")
@@ -70,7 +71,7 @@ DISCOVER_STATUS="FAIL"
 
 # --- scanner.py ---
 echo "$(date): Running scanner.py --top 25..."
-"$PYTHON_BIN" scripts/scanner.py --top 25 > data/scanner.json.tmp 2>/tmp/scanner.err
+"$PROJECT_DIR/.venv/bin/xenon-scan" --top 25 > data/scanner.json.tmp 2>/tmp/scanner.err
 EXIT_CODE=$?
 if [ "$EXIT_CODE" -eq 0 ]; then
     mv data/scanner.json.tmp data/scanner.json
@@ -105,7 +106,7 @@ done
 
 # --- discover.py ---
 echo "$(date): Running discover.py --min-alerts 1..."
-"$PYTHON_BIN" scripts/discover.py --min-alerts 1 > data/discover.json.tmp 2>/tmp/discover.err
+"$PROJECT_DIR/.venv/bin/xenon-discover" --min-alerts 1 > data/discover.json.tmp 2>/tmp/discover.err
 EXIT_CODE=$?
 if [ "$EXIT_CODE" -eq 0 ]; then
     mv data/discover.json.tmp data/discover.json
@@ -119,7 +120,7 @@ fi
 echo "$(date): Data refresh complete (scanner: $SCANNER_STATUS, flow: $FLOW_STATUS, discover: $DISCOVER_STATUS)"
 
 cri_cache_has_complete_rvol() {
-    "$PYTHON_BIN" - "$1" "$2" <<'PY'
+    "$PROJECT_DIR/.venv/bin/python" - "$1" "$2" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -167,7 +168,7 @@ refresh_cri_cache_post_close() {
     scheduled_path="data/cri_scheduled/cri-${timestamp}.json"
 
     echo "$(date): Refreshing CRI cache with 20-session RVOL history..."
-    if "$PYTHON_BIN" scripts/cri_scan.py --json > "$tmp_cache" 2>>"logs/cri-scan.err.log"; then
+    if "$PROJECT_DIR/.venv/bin/xenon-cri-scan" --json > "$tmp_cache" 2>>"logs/cri-scan.err.log"; then
         mv "$tmp_cache" data/cri.json
         cp data/cri.json "$scheduled_path"
         scan_complete=$(cri_cache_has_complete_rvol "data/cri.json" "$today_et")
@@ -182,7 +183,7 @@ refresh_cri_cache_post_close() {
         echo "$(date): CRI cache refresh failed (exit $exit_code) — attempting repair fallback"
     fi
 
-    if "$PYTHON_BIN" scripts/repair_cri_rvol_cache.py --write --target-date "$today_et" 2>>"logs/cri-scan.err.log"; then
+    if "$PROJECT_DIR/.venv/bin/xenon-repair-cri-rvol" --write --target-date "$today_et" 2>>"logs/cri-scan.err.log"; then
         echo "$(date): CRI cache repair complete (OK)"
     else
         local repair_exit_code=$?

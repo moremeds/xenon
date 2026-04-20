@@ -1,4 +1,4 @@
-"""Unit tests for scripts.clients.massive_client."""
+"""Unit tests for xenon.clients.massive_client."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 import responses
 
-from scripts.clients.massive_client import (
+from xenon.clients.massive_client import (
     MassiveAuthError,
     MassiveClient,
     MassiveNoDataError,
@@ -52,7 +52,7 @@ def client():
 
 
 def test_missing_key_raises_at_init():
-    with patch.dict(os.environ, {}, clear=True), patch("scripts.clients.massive_client.load_dotenv", lambda: None):
+    with patch.dict(os.environ, {}, clear=True), patch("xenon.clients.massive_client.load_dotenv", lambda: None):
         with pytest.raises(MassiveAuthError):
             MassiveClient()
 
@@ -137,7 +137,7 @@ def test_empty_results_raises_no_data(client):
 def test_429_retries_then_raises(client, monkeypatch):
     sleeps = []
     monkeypatch.setattr(
-        "scripts.clients.massive_client.time.sleep",
+        "xenon.clients.massive_client.time.sleep",
         lambda s: sleeps.append(s),
     )
     for _ in range(4):

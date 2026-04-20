@@ -26,4 +26,4 @@
 
   Refreshed by `scripts/ta_lib/apex_sync.sync_if_stale()` at scanner startup. Nightly producer is `.github/workflows/apex-data-refresh.yml`.
 
-- `data/apex_mirror_preview/` — `--dry-run` output of `scripts/apex_refresh.py`. Created on demand; safe to delete.
+- `data/apex_mirror_preview/` — `--dry-run` output of `xenon-fetch-apex-data` (`src/xenon/fetchers/fetch_apex_data.py`). Created on demand; safe to delete.

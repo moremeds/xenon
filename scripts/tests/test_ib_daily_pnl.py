@@ -39,7 +39,7 @@ class TestIbDailyPnlCollapse(unittest.TestCase):
 
     def test_single_leg_ib_daily_pnl_passes_through(self):
         """Single-leg position should pass ibDailyPnl to collapsed ib_daily_pnl."""
-        from ib_sync import collapse_positions
+        from xenon.execution.ib_sync import collapse_positions
         positions = [self._make_leg(ib_daily_pnl=-24997.64)]
         collapsed = collapse_positions(positions)
         self.assertEqual(len(collapsed), 1)
@@ -47,7 +47,7 @@ class TestIbDailyPnlCollapse(unittest.TestCase):
 
     def test_multi_leg_ib_daily_pnl_aggregates(self):
         """Multi-leg position should sum ibDailyPnl from all legs."""
-        from ib_sync import collapse_positions
+        from xenon.execution.ib_sync import collapse_positions
         # Bull call spread: long $315 call + short $340 call
         positions = [
             self._make_leg(symbol='GOOG', strike=315, right='C', position=44,
@@ -61,7 +61,7 @@ class TestIbDailyPnlCollapse(unittest.TestCase):
 
     def test_none_ib_daily_pnl_propagates_as_none(self):
         """If any leg has None ibDailyPnl, collapsed should be None."""
-        from ib_sync import collapse_positions
+        from xenon.execution.ib_sync import collapse_positions
         positions = [
             self._make_leg(symbol='GOOG', strike=315, right='C', position=44,
                            expiry='2026-04-17', ib_daily_pnl=-5000.0),
@@ -74,7 +74,7 @@ class TestIbDailyPnlCollapse(unittest.TestCase):
 
     def test_all_none_ib_daily_pnl_is_none(self):
         """If all legs have None ibDailyPnl, collapsed should be None."""
-        from ib_sync import collapse_positions
+        from xenon.execution.ib_sync import collapse_positions
         positions = [self._make_leg(ib_daily_pnl=None)]
         collapsed = collapse_positions(positions)
         self.assertEqual(len(collapsed), 1)
@@ -82,7 +82,7 @@ class TestIbDailyPnlCollapse(unittest.TestCase):
 
     def test_zero_ib_daily_pnl_is_zero_not_none(self):
         """ibDailyPnl of 0.0 should remain 0.0, not become None."""
-        from ib_sync import collapse_positions
+        from xenon.execution.ib_sync import collapse_positions
         positions = [self._make_leg(ib_daily_pnl=0.0)]
         collapsed = collapse_positions(positions)
         self.assertEqual(len(collapsed), 1)
@@ -90,7 +90,7 @@ class TestIbDailyPnlCollapse(unittest.TestCase):
 
     def test_stock_position_has_ib_daily_pnl(self):
         """Stock positions should also carry ib_daily_pnl."""
-        from ib_sync import collapse_positions
+        from xenon.execution.ib_sync import collapse_positions
         positions = [{
             'symbol': 'MSFT',
             'secType': 'STK',

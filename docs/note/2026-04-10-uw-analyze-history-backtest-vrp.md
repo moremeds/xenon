@@ -84,7 +84,7 @@ Feasible for **directional / hit-rate evaluation of the current bias logic** on 
 
 ### The literal trigger
 
-`scripts/uw_analyze.py:143-144` appends the note iff `vrp.vrp_zscore is None`. The z-score itself is built in `scripts/analysis/vrp.py:66-68`:
+`src/xenon/scanners/uw/analyze.py:143-144` appends the note iff `vrp.vrp_zscore is None`. The z-score itself is built in `src/xenon/analysis/vrp.py:66-68`:
 
 ```python
 vrp_raw = None

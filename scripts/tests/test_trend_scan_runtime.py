@@ -10,19 +10,19 @@ import sys
 
 def test_trend_scan_imports_without_duckdb(monkeypatch):
     """Verify that trend_scan module works when duckdb is not installed."""
-    import scripts.scanners.trend.storage as storage_mod
+    import xenon.scanners.trend.storage as storage_mod
 
     monkeypatch.setattr(storage_mod, "_duckdb", None)
     assert not storage_mod.duckdb_available()
 
     # The pipeline function should still be callable
-    from scripts.scanners.trend import cli as trend_scan
+    from xenon.scanners.trend import cli as trend_scan
 
     assert callable(trend_scan.run_scan_pipeline)
 
 
 def test_main_emits_json_payload(monkeypatch, capsys, tmp_path):
-    from scripts.scanners.trend import cli as trend_scan
+    from xenon.scanners.trend import cli as trend_scan
 
     class DummyFetcher:
         pass
@@ -70,7 +70,7 @@ def test_pre_cache_spy_swallows_failure():
     scan continues with rs_vs_spy=1.0 default via existing branch in fetch_ohlcv."""
     from unittest.mock import MagicMock
 
-    from scripts.scanners.trend.cli import LiveTrendDataFetcher
+    from xenon.scanners.trend.cli import LiveTrendDataFetcher
 
     failing_svc = MagicMock()
     failing_svc.get_indicators.side_effect = RuntimeError("SPY cold")

@@ -4,9 +4,9 @@ import socket
 from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock
 
-from clients.uw_client import UWAPIError
+from xenon.clients.uw_client import UWAPIError
 
-from fetchers.fetch_options import (
+from xenon.fetchers.fetch_options import (
     check_ib_connection,
     fetch_uw_chain,
     fetch_uw_flow,
@@ -43,11 +43,11 @@ class TestCheckIbConnection:
 # ── fetch_uw_chain ──────────────────────────────────────────────────
 
 class TestFetchUwChain:
-    @patch("fetchers.fetch_options.UW_TOKEN", None)
+    @patch("xenon.fetchers.fetch_options.UW_TOKEN", None)
     def test_no_token_returns_none(self):
         assert fetch_uw_chain("AAPL") is None
 
-    @patch("fetchers.fetch_options.UW_TOKEN", "test-token")
+    @patch("xenon.fetchers.fetch_options.UW_TOKEN", "test-token")
     def test_bullish_bias_low_pc_ratio(self):
         """Low put/call ratio -> BULLISH."""
         mock_client = MagicMock()
@@ -66,7 +66,7 @@ class TestFetchUwChain:
         assert result["bias"] == "BULLISH"
         assert result["put_call_ratio"] < 0.5
 
-    @patch("fetchers.fetch_options.UW_TOKEN", "test-token")
+    @patch("xenon.fetchers.fetch_options.UW_TOKEN", "test-token")
     def test_bearish_bias_high_pc_ratio(self):
         """High put/call ratio -> BEARISH."""
         mock_client = MagicMock()
@@ -84,7 +84,7 @@ class TestFetchUwChain:
         assert result is not None
         assert result["bias"] == "BEARISH"
 
-    @patch("fetchers.fetch_options.UW_TOKEN", "test-token")
+    @patch("xenon.fetchers.fetch_options.UW_TOKEN", "test-token")
     def test_iv_normalization_decimal(self):
         """IV < 5 treated as decimal and multiplied by 100."""
         mock_client = MagicMock()
@@ -106,7 +106,7 @@ class TestFetchUwChain:
         call_contract = [c for c in result["top_contracts"] if c["type"] == "call"][0]
         assert call_contract["iv"] == 30.0
 
-    @patch("fetchers.fetch_options.UW_TOKEN", "test-token")
+    @patch("xenon.fetchers.fetch_options.UW_TOKEN", "test-token")
     def test_iv_normalization_percent(self):
         """IV >= 5 already in percent, keep as-is (round to 1 decimal)."""
         mock_client = MagicMock()
@@ -126,7 +126,7 @@ class TestFetchUwChain:
         call_contract = [c for c in result["top_contracts"] if c["type"] == "call"][0]
         assert call_contract["iv"] == 30.0
 
-    @patch("fetchers.fetch_options.UW_TOKEN", "test-token")
+    @patch("xenon.fetchers.fetch_options.UW_TOKEN", "test-token")
     def test_empty_chain_returns_error(self):
         mock_client = MagicMock()
         mock_client.get_option_contracts.return_value = {"data": []}
@@ -137,11 +137,11 @@ class TestFetchUwChain:
 # ── fetch_uw_flow ───────────────────────────────────────────────────
 
 class TestFetchUwFlow:
-    @patch("fetchers.fetch_options.UW_TOKEN", None)
+    @patch("xenon.fetchers.fetch_options.UW_TOKEN", None)
     def test_no_token_returns_none(self):
         assert fetch_uw_flow("AAPL") is None
 
-    @patch("fetchers.fetch_options.UW_TOKEN", "test-token")
+    @patch("xenon.fetchers.fetch_options.UW_TOKEN", "test-token")
     def test_call_heavy_bullish(self):
         mock_client = MagicMock()
         mock_client.get_flow_alerts.return_value = {"data": [
@@ -159,7 +159,7 @@ class TestFetchUwFlow:
         result = fetch_uw_flow("AAPL", _client=mock_client)
         assert result["flow_bias"] == "BULLISH"
 
-    @patch("fetchers.fetch_options.UW_TOKEN", "test-token")
+    @patch("xenon.fetchers.fetch_options.UW_TOKEN", "test-token")
     def test_put_heavy_bearish(self):
         mock_client = MagicMock()
         mock_client.get_flow_alerts.return_value = {"data": [
@@ -177,7 +177,7 @@ class TestFetchUwFlow:
         result = fetch_uw_flow("AAPL", _client=mock_client)
         assert result["flow_bias"] == "BEARISH"
 
-    @patch("fetchers.fetch_options.UW_TOKEN", "test-token")
+    @patch("xenon.fetchers.fetch_options.UW_TOKEN", "test-token")
     def test_recent_bias_buying_calls(self):
         mock_client = MagicMock()
         mock_client.get_flow_alerts.return_value = {"data": [
@@ -190,7 +190,7 @@ class TestFetchUwFlow:
         result = fetch_uw_flow("AAPL", _client=mock_client)
         assert result["recent_bias"] == "BULLISH"
 
-    @patch("fetchers.fetch_options.UW_TOKEN", "test-token")
+    @patch("xenon.fetchers.fetch_options.UW_TOKEN", "test-token")
     def test_no_data(self):
         mock_client = MagicMock()
         mock_client.get_flow_alerts.return_value = {"data": []}
@@ -201,11 +201,11 @@ class TestFetchUwFlow:
 # ── fetch_options combined analysis ─────────────────────────────────
 
 class TestFetchOptionsCombined:
-    @patch("fetchers.fetch_options.UWClient")
-    @patch("fetchers.fetch_options.fetch_uw_flow")
-    @patch("fetchers.fetch_options.fetch_uw_chain")
-    @patch("fetchers.fetch_options.fetch_ib_options", return_value=None)
-    @patch("fetchers.fetch_options.UW_TOKEN", "test-token")
+    @patch("xenon.fetchers.fetch_options.UWClient")
+    @patch("xenon.fetchers.fetch_options.fetch_uw_flow")
+    @patch("xenon.fetchers.fetch_options.fetch_uw_chain")
+    @patch("xenon.fetchers.fetch_options.fetch_ib_options", return_value=None)
+    @patch("xenon.fetchers.fetch_options.UW_TOKEN", "test-token")
     def test_both_bullish_high_confidence(self, mock_ib, mock_chain, mock_flow, MockUWClient):
         mock_client = MagicMock()
         MockUWClient.return_value.__enter__ = MagicMock(return_value=mock_client)
@@ -223,11 +223,11 @@ class TestFetchOptionsCombined:
         assert analysis["combined_bias"] == "BULLISH"
         assert analysis["confidence"] == "HIGH"
 
-    @patch("fetchers.fetch_options.UWClient")
-    @patch("fetchers.fetch_options.fetch_uw_flow")
-    @patch("fetchers.fetch_options.fetch_uw_chain")
-    @patch("fetchers.fetch_options.fetch_ib_options", return_value=None)
-    @patch("fetchers.fetch_options.UW_TOKEN", "test-token")
+    @patch("xenon.fetchers.fetch_options.UWClient")
+    @patch("xenon.fetchers.fetch_options.fetch_uw_flow")
+    @patch("xenon.fetchers.fetch_options.fetch_uw_chain")
+    @patch("xenon.fetchers.fetch_options.fetch_ib_options", return_value=None)
+    @patch("xenon.fetchers.fetch_options.UW_TOKEN", "test-token")
     def test_conflicting_signals_low_confidence(self, mock_ib, mock_chain, mock_flow, MockUWClient):
         mock_client = MagicMock()
         MockUWClient.return_value.__enter__ = MagicMock(return_value=mock_client)
@@ -244,11 +244,11 @@ class TestFetchOptionsCombined:
         analysis = result["analysis"]
         assert analysis["confidence"] == "LOW"
 
-    @patch("fetchers.fetch_options.UWClient")
-    @patch("fetchers.fetch_options.fetch_uw_flow", return_value=None)
-    @patch("fetchers.fetch_options.fetch_uw_chain")
-    @patch("fetchers.fetch_options.fetch_ib_options", return_value=None)
-    @patch("fetchers.fetch_options.UW_TOKEN", "test-token")
+    @patch("xenon.fetchers.fetch_options.UWClient")
+    @patch("xenon.fetchers.fetch_options.fetch_uw_flow", return_value=None)
+    @patch("xenon.fetchers.fetch_options.fetch_uw_chain")
+    @patch("xenon.fetchers.fetch_options.fetch_ib_options", return_value=None)
+    @patch("xenon.fetchers.fetch_options.UW_TOKEN", "test-token")
     def test_chain_only_low_confidence(self, mock_ib, mock_chain, mock_flow, MockUWClient):
         mock_client = MagicMock()
         MockUWClient.return_value.__enter__ = MagicMock(return_value=mock_client)
@@ -262,10 +262,10 @@ class TestFetchOptionsCombined:
         assert analysis["combined_bias"] == "BULLISH"
         assert analysis["confidence"] == "LOW"
 
-    @patch("fetchers.fetch_options.fetch_uw_flow", return_value=None)
-    @patch("fetchers.fetch_options.fetch_uw_chain", return_value=None)
-    @patch("fetchers.fetch_options.fetch_ib_options", return_value=None)
-    @patch("fetchers.fetch_options.UW_TOKEN", None)
+    @patch("xenon.fetchers.fetch_options.fetch_uw_flow", return_value=None)
+    @patch("xenon.fetchers.fetch_options.fetch_uw_chain", return_value=None)
+    @patch("xenon.fetchers.fetch_options.fetch_ib_options", return_value=None)
+    @patch("xenon.fetchers.fetch_options.UW_TOKEN", None)
     def test_no_token_skips_uw(self, mock_ib, mock_chain, mock_flow):
         result = fetch_options("AAPL", source="uw")
         assert result["chain"] is None

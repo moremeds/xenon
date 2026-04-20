@@ -1,5 +1,5 @@
 from datetime import datetime
-from scripts.analysis.models import (
+from xenon.analysis.models import (
     VRPState, RegimeState, BucketScores, BenchmarkSnapshot, BenchmarkContext,
     TickerData, AnalysisReport,
 )

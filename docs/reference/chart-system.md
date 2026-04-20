@@ -2,7 +2,7 @@
 
 This document is the sanctioned chart-family and renderer contract for Xenon.
 
-The machine-readable source of truth is [web/lib/chart-system-spec.json](/Users/joemccann/dev/apps/finance/xenon/web/lib/chart-system-spec.json). Runtime helpers live in [web/lib/chartSystem.ts](/Users/joemccann/dev/apps/finance/xenon/web/lib/chartSystem.ts). Downstream OG/report surfaces consume the same contract via [web/lib/og-theme.ts](/Users/joemccann/dev/apps/finance/xenon/web/lib/og-theme.ts), [web/lib/og-charts.tsx](/Users/joemccann/dev/apps/finance/xenon/web/lib/og-charts.tsx), and [scripts/performance_explainer_report.py](/Users/joemccann/dev/apps/finance/xenon/scripts/performance_explainer_report.py).
+The machine-readable source of truth is [web/lib/chart-system-spec.json](/Users/joemccann/dev/apps/finance/xenon/web/lib/chart-system-spec.json). Runtime helpers live in [web/lib/chartSystem.ts](/Users/joemccann/dev/apps/finance/xenon/web/lib/chartSystem.ts). Downstream OG/report surfaces consume the same contract via [web/lib/og-theme.ts](/Users/joemccann/dev/apps/finance/xenon/web/lib/og-theme.ts), [web/lib/og-charts.tsx](/Users/joemccann/dev/apps/finance/xenon/web/lib/og-charts.tsx), and [src/xenon/reports/performance_explainer_report.py](/Users/joemccann/dev/apps/finance/xenon/src/xenon/reports/performance_explainer_report.py).
 
 ## Purpose
 
@@ -36,39 +36,43 @@ Reason: runtime React can resolve CSS variables, but OG images and Python-genera
 
 ## Sanctioned Families
 
-| Family ID | Label | Default Renderer | Interaction | Axes |
-|-----------|-------|------------------|-------------|------|
-| `live-trace` | Live Trace | `canvas-adapter` | scrub | optional |
-| `analytical-time-series` | Analytical Time Series | `svg` | inspect | required |
-| `distribution-bar` | Distribution Bar | `html-css-or-svg` | static | no |
-| `matrix-heatmap` | Matrix Heatmap | `html-css-or-svg` | static | no |
+| Family ID                | Label                  | Default Renderer  | Interaction | Axes     |
+| ------------------------ | ---------------------- | ----------------- | ----------- | -------- |
+| `live-trace`             | Live Trace             | `canvas-adapter`  | scrub       | optional |
+| `analytical-time-series` | Analytical Time Series | `svg`             | inspect     | required |
+| `distribution-bar`       | Distribution Bar       | `html-css-or-svg` | static      | no       |
+| `matrix-heatmap`         | Matrix Heatmap         | `html-css-or-svg` | static      | no       |
 
 ### Family Notes
 
 `live-trace`
+
 - Use for dense, operator-driven price traces where scrubbing is the main product value.
 - Canvas is allowed because the interaction model is more important than DOM-level axis composition.
 
 `analytical-time-series`
+
 - Default family for `/performance`, `/regime`, and similar operator charts.
 - Axes are not optional. If time or magnitude drives interpretation, visible scale context is mandatory.
 
 `distribution-bar`
+
 - Use for stacked bars, exposure strips, compact histogram-like summaries, and gauge-style breakdowns.
 - Prefer DOM/CSS when the operator benefits from reading labels directly from the layout.
 
 `matrix-heatmap`
+
 - Use for comparative grids like seasonality and percentile tables.
 - The grid cell is the primitive; do not force these into line-chart scaffolds.
 
 ## Renderer Policy
 
-| Renderer | Status | Rule |
-|----------|--------|------|
-| `svg` | default | Use for operator charts that need shared frame, axis, legend, and semantic series control. |
-| `canvas-adapter` | allowed | Use only for high-frequency interactive traces where performance and scrub behavior dominate. |
-| `d3-svg` | conditional | Use only when scale logic or interaction complexity materially exceeds the shared SVG primitives. |
-| `html-css-or-svg` | allowed | Use for compact bars, gauges, matrix views, and telemetry-first visuals. |
+| Renderer          | Status      | Rule                                                                                              |
+| ----------------- | ----------- | ------------------------------------------------------------------------------------------------- |
+| `svg`             | default     | Use for operator charts that need shared frame, axis, legend, and semantic series control.        |
+| `canvas-adapter`  | allowed     | Use only for high-frequency interactive traces where performance and scrub behavior dominate.     |
+| `d3-svg`          | conditional | Use only when scale logic or interaction complexity materially exceeds the shared SVG primitives. |
+| `html-css-or-svg` | allowed     | Use for compact bars, gauges, matrix views, and telemetry-first visuals.                          |
 
 ### Rejection Rules
 
@@ -78,15 +82,15 @@ Reason: runtime React can resolve CSS variables, but OG images and Python-genera
 
 ## Semantic Series Roles
 
-| Role | Meaning | Fallback |
-|------|---------|----------|
-| `primary` | primary structural signal | `#05AD98` |
-| `comparison` | benchmark or baseline context | `rgba(148, 163, 184, 0.72)` |
-| `caution` | elevated risk / warning context | `#F5A623` |
-| `dislocation` | structural dislocation | `#D946A8` |
-| `extreme` | rare or extreme state | `#8B5CF6` |
-| `fault` | downside exception / fault state | `#E85D6C` |
-| `neutral` | supporting neutral context | `#94A3B8` |
+| Role          | Meaning                          | Fallback                    |
+| ------------- | -------------------------------- | --------------------------- |
+| `primary`     | primary structural signal        | `#05AD98`                   |
+| `comparison`  | benchmark or baseline context    | `rgba(148, 163, 184, 0.72)` |
+| `caution`     | elevated risk / warning context  | `#F5A623`                   |
+| `dislocation` | structural dislocation           | `#D946A8`                   |
+| `extreme`     | rare or extreme state            | `#8B5CF6`                   |
+| `fault`       | downside exception / fault state | `#E85D6C`                   |
+| `neutral`     | supporting neutral context       | `#94A3B8`                   |
 
 ### Role Usage
 

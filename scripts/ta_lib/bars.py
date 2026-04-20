@@ -14,7 +14,7 @@ from datetime import date
 
 import pandas as pd
 
-from scripts.clients.massive_client import MassiveClient
+from xenon.clients.massive_client import MassiveClient
 from scripts.ta_lib.parquet_store import OHLCV_COLUMNS
 
 

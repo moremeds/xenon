@@ -1,6 +1,6 @@
 from datetime import date, datetime
-from scripts.analysis.models import TickerData
-from scripts.scanners.uw.signals.gex_pinning import detect, MEGA_CAPS
+from xenon.analysis.models import TickerData
+from xenon.scanners.uw.signals.gex_pinning import detect, MEGA_CAPS
 
 
 def _td(ticker, gex_by_strike=None, price=100.0):

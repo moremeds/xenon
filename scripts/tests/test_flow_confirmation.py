@@ -6,91 +6,91 @@ import pytest
 
 
 def test_score_ask_dominance_high():
-    from scripts.scanners.trend.stages.flow_confirmation import score_ask_dominance
+    from xenon.scanners.trend.stages.flow_confirmation import score_ask_dominance
 
     assert score_ask_dominance(0.85) == 1.0
 
 
 def test_score_ask_dominance_moderate():
-    from scripts.scanners.trend.stages.flow_confirmation import score_ask_dominance
+    from xenon.scanners.trend.stages.flow_confirmation import score_ask_dominance
 
     assert score_ask_dominance(0.65) == 0.7
 
 
 def test_score_ask_dominance_low():
-    from scripts.scanners.trend.stages.flow_confirmation import score_ask_dominance
+    from xenon.scanners.trend.stages.flow_confirmation import score_ask_dominance
 
     assert score_ask_dominance(0.45) == 0.2
 
 
 def test_score_flow_repetition_multiple():
-    from scripts.scanners.trend.stages.flow_confirmation import score_flow_repetition
+    from xenon.scanners.trend.stages.flow_confirmation import score_flow_repetition
 
     assert score_flow_repetition(5) == 1.0
 
 
 def test_score_flow_repetition_single():
-    from scripts.scanners.trend.stages.flow_confirmation import score_flow_repetition
+    from xenon.scanners.trend.stages.flow_confirmation import score_flow_repetition
 
     assert score_flow_repetition(1) == 0.2
 
 
 def test_score_flow_repetition_zero():
-    from scripts.scanners.trend.stages.flow_confirmation import score_flow_repetition
+    from xenon.scanners.trend.stages.flow_confirmation import score_flow_repetition
 
     assert score_flow_repetition(0) == 0.0
 
 
 def test_score_expiry_clustering_tight():
-    from scripts.scanners.trend.stages.flow_confirmation import score_expiry_clustering
+    from xenon.scanners.trend.stages.flow_confirmation import score_expiry_clustering
 
     assert score_expiry_clustering(cluster_ratio=0.8) == 1.0
 
 
 def test_score_expiry_clustering_scattered():
-    from scripts.scanners.trend.stages.flow_confirmation import score_expiry_clustering
+    from xenon.scanners.trend.stages.flow_confirmation import score_expiry_clustering
 
     assert score_expiry_clustering(cluster_ratio=0.3) == 0.4
 
 
 def test_score_strike_reasonableness_near():
-    from scripts.scanners.trend.stages.flow_confirmation import score_strike_reasonableness
+    from xenon.scanners.trend.stages.flow_confirmation import score_strike_reasonableness
 
     assert score_strike_reasonableness(avg_strike_pct_otm=0.05) == 1.0
 
 
 def test_score_strike_reasonableness_far():
-    from scripts.scanners.trend.stages.flow_confirmation import score_strike_reasonableness
+    from xenon.scanners.trend.stages.flow_confirmation import score_strike_reasonableness
 
     assert score_strike_reasonableness(avg_strike_pct_otm=0.20) == 0.2
 
 
 def test_score_delta_vega_positive():
-    from scripts.scanners.trend.stages.flow_confirmation import score_delta_vega_flow
+    from xenon.scanners.trend.stages.flow_confirmation import score_delta_vega_flow
 
     assert score_delta_vega_flow(net_delta=50_000, net_vega=30_000) == 1.0
 
 
 def test_score_delta_vega_contradictory():
-    from scripts.scanners.trend.stages.flow_confirmation import score_delta_vega_flow
+    from xenon.scanners.trend.stages.flow_confirmation import score_delta_vega_flow
 
     assert score_delta_vega_flow(net_delta=-20_000, net_vega=-10_000) == 0.1
 
 
 def test_score_dark_pool_bullish_bonus():
-    from scripts.scanners.trend.stages.flow_confirmation import score_dark_pool_alignment
+    from xenon.scanners.trend.stages.flow_confirmation import score_dark_pool_alignment
 
     assert score_dark_pool_alignment(dp_direction="bullish") == 0.15
 
 
 def test_score_dark_pool_none():
-    from scripts.scanners.trend.stages.flow_confirmation import score_dark_pool_alignment
+    from xenon.scanners.trend.stages.flow_confirmation import score_dark_pool_alignment
 
     assert score_dark_pool_alignment(dp_direction="neutral") == 0.0
 
 
 def test_compute_flow_score_strong():
-    from scripts.scanners.trend.stages.flow_confirmation import compute_flow_score
+    from xenon.scanners.trend.stages.flow_confirmation import compute_flow_score
 
     data = {
         "ask_dominance": 0.85,
@@ -106,7 +106,7 @@ def test_compute_flow_score_strong():
 
 
 def test_compute_flow_score_weak():
-    from scripts.scanners.trend.stages.flow_confirmation import compute_flow_score
+    from xenon.scanners.trend.stages.flow_confirmation import compute_flow_score
 
     data = {
         "ask_dominance": 0.40,
@@ -122,7 +122,7 @@ def test_compute_flow_score_weak():
 
 
 def test_compute_flow_score_no_data():
-    from scripts.scanners.trend.stages.flow_confirmation import compute_flow_score
+    from xenon.scanners.trend.stages.flow_confirmation import compute_flow_score
 
     score = compute_flow_score({})
     assert 0.0 <= score <= 0.5
@@ -131,7 +131,7 @@ def test_compute_flow_score_no_data():
 def test_compute_flow_score_bearish_rewards_put_flow():
     """Bearish candidate: net_delta < 0 and dp_direction='bearish' are
     confirmation. Same data scored as bullish must score lower."""
-    from scripts.scanners.trend.stages.flow_confirmation import compute_flow_score
+    from xenon.scanners.trend.stages.flow_confirmation import compute_flow_score
 
     shared_data = {
         "ask_dominance": 0.7,
@@ -156,7 +156,7 @@ def test_compute_flow_score_bearish_rewards_put_flow():
 def test_dark_pool_alignment_direction_symmetry():
     """Direction alignment is symmetric: bearish-DP rewards bearish candidate
     exactly as much as bullish-DP rewards bullish candidate."""
-    from scripts.scanners.trend.stages.flow_confirmation import score_dark_pool_alignment
+    from xenon.scanners.trend.stages.flow_confirmation import score_dark_pool_alignment
 
     aligned_bull = score_dark_pool_alignment(dp_direction="bullish", direction="bullish")
     aligned_bear = score_dark_pool_alignment(dp_direction="bearish", direction="bearish")

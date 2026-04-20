@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from api.services.uw_analyze_diff import (  # noqa: E402
+from xenon.api.services.uw_analyze_diff import (  # noqa: E402
     IV_RANK_JUMP_PTS,
     MAX_PAIN_SHIFT_FRAC,
     UNUSUAL_PREMIUM_USD,
@@ -163,7 +163,7 @@ def test_call_sweep_negative_delta_silent():
 
 
 def test_call_sweep_null_skipped():
-    from api.services.uw_analyze_diff import compute_changes
+    from xenon.api.services.uw_analyze_diff import compute_changes
 
     prev = {"derived": {"net_call_premium": None}}
     curr = {"derived": {"net_call_premium": 10_000_000}}
@@ -172,7 +172,7 @@ def test_call_sweep_null_skipped():
 
 
 def test_call_sweep_prev_null_skipped():
-    from api.services.uw_analyze_diff import compute_changes
+    from xenon.api.services.uw_analyze_diff import compute_changes
 
     prev = {"derived": {"net_call_premium": 0}}
     curr = {"derived": {"net_call_premium": None}}
@@ -180,7 +180,7 @@ def test_call_sweep_prev_null_skipped():
 
 
 def test_max_pain_zero_spot_skipped():
-    from api.services.uw_analyze_diff import compute_changes
+    from xenon.api.services.uw_analyze_diff import compute_changes
 
     prev = {"derived": {"max_pain": 100}}
     curr = {"derived": {"max_pain": 110, "spot": 0}}

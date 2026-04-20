@@ -6,14 +6,14 @@
 
 The Xenon employs six strategies, each exploiting informational or structural advantages that institutional players leave behind.
 
-| Strategy | Edge Source | Instrument | Timeframe | Risk Profile |
-|----------|-------------|------------|-----------|--------------|
-| **Dark Pool Flow** | Institutional positioning | ATM/OTM options | 2-6 weeks | Defined (long options) |
-| **LEAP IV Mispricing** | Volatility regime change | Long-dated calls | 1-3 years | Defined (long options) |
-| **GARCH Convergence** | Cross-asset repricing lag | Medium-dated options | 2-8 weeks | Defined (long options/spreads) |
-| **Risk Reversal** | IV skew exploitation | Sell put + Buy call | 2-8 weeks | **Undefined** (manager override) |
-| **Volatility-Credit Gap (VCG-R)** | Vol/credit divergence (VIX>28 + VCG>2.5) | HY puts, CDX protection | 1-5 days | Defined (long puts/spreads) |
-| **Crash Risk Index** | CTA deleveraging | SPY puts, tail hedges | 3-5 days | Defined (long puts/spreads) |
+| Strategy                          | Edge Source                              | Instrument              | Timeframe | Risk Profile                     |
+| --------------------------------- | ---------------------------------------- | ----------------------- | --------- | -------------------------------- |
+| **Dark Pool Flow**                | Institutional positioning                | ATM/OTM options         | 2-6 weeks | Defined (long options)           |
+| **LEAP IV Mispricing**            | Volatility regime change                 | Long-dated calls        | 1-3 years | Defined (long options)           |
+| **GARCH Convergence**             | Cross-asset repricing lag                | Medium-dated options    | 2-8 weeks | Defined (long options/spreads)   |
+| **Risk Reversal**                 | IV skew exploitation                     | Sell put + Buy call     | 2-8 weeks | **Undefined** (manager override) |
+| **Volatility-Credit Gap (VCG-R)** | Vol/credit divergence (VIX>28 + VCG>2.5) | HY puts, CDX protection | 1-5 days  | Defined (long puts/spreads)      |
+| **Crash Risk Index**              | CTA deleveraging                         | SPY puts, tail hedges   | 3-5 days  | Defined (long puts/spreads)      |
 
 See also: [`strategy-garch-convergence.md`](strategy-garch-convergence.md) for the full GARCH Convergence Spreads specification.
 See also: [`strategy-vcg.md`](strategy-vcg.md) for the full VCG mathematical specification.
@@ -35,19 +35,19 @@ Large institutional players accumulate or distribute positions through dark pool
 
 ### Signal Criteria
 
-| Criterion | Threshold | Weight |
-|-----------|-----------|--------|
-| Sustained direction | 3+ consecutive days same direction | Required |
-| Flow strength | >50 aggregate OR >70 recent days | Required |
-| Options confirmation | Call/put flow alignment | Preferred |
-| Price lag | Signal NOT yet reflected in price | Required |
+| Criterion            | Threshold                          | Weight    |
+| -------------------- | ---------------------------------- | --------- |
+| Sustained direction  | 3+ consecutive days same direction | Required  |
+| Flow strength        | >50 aggregate OR >70 recent days   | Required  |
+| Options confirmation | Call/put flow alignment            | Preferred |
+| Price lag            | Signal NOT yet reflected in price  | Required  |
 
 ### Options Flow Confirmation
 
 Use `fetch_options.py` to confirm or contradict dark pool signals:
 
 ```bash
-python3.13 scripts/fetch_options.py [TICKER]
+xenon-fetch-options [TICKER]
 ```
 
 **Chain Analysis:**
@@ -60,6 +60,7 @@ python3.13 scripts/fetch_options.py [TICKER]
 | <0.5x | BULLISH (confirms accumulation) |
 
 **Flow Alerts Analysis:**
+
 - **Sweeps**: Urgency signal — aggressive buying/selling across exchanges
 - **Bid-side dominant**: Selling pressure (closing longs or opening shorts)
 - **Ask-side dominant**: Buying pressure (opening longs)
@@ -96,11 +97,11 @@ python3.13 scripts/fetch_options.py [TICKER]
 
 ### Commands: Scan vs Evaluate
 
-| Command | Data Fetched | Purpose | Speed |
-|---------|-------------|---------|-------|
-| `scan` | Dark pool only (5 days) | Quick ranking of watchlist | ~17-25s for 19 tickers |
-| `evaluate [TICKER] [--days N]` | Dark pool + options flow + OI + news + analysts | Full trade decision | ~6-15s per ticker |
-| `discover` | Flow alerts market-wide | Find new candidates | Variable |
+| Command                        | Data Fetched                                    | Purpose                    | Speed                  |
+| ------------------------------ | ----------------------------------------------- | -------------------------- | ---------------------- |
+| `scan`                         | Dark pool only (5 days)                         | Quick ranking of watchlist | ~17-25s for 19 tickers |
+| `evaluate [TICKER] [--days N]` | Dark pool + options flow + OI + news + analysts | Full trade decision        | ~6-15s per ticker      |
+| `discover`                     | Flow alerts market-wide                         | Find new candidates        | Variable               |
 
 **Key difference**: `scan` skips options flow for speed. It ranks tickers by dark pool signal strength but does NOT detect conflicts with options flow. Use `evaluate` for trade decisions — it does full 7-milestone analysis including conflict detection.
 
@@ -112,26 +113,26 @@ python3.13 scripts/fetch_options.py [TICKER]
 
 ```bash
 # Scan watchlist for flow signals (dark pool only, fast)
-python3.13 scripts/scanner.py
+xenon-scan
 
 # Discover new candidates market-wide (default)
-python3.13 scripts/discover.py
+xenon-discover
 
 # Discover from a preset
-python3.13 scripts/discover.py ndx100
-python3.13 scripts/discover.py sp500-semiconductors
+xenon-discover ndx100
+xenon-discover sp500-semiconductors
 
 # Discover specific tickers
-python3.13 scripts/discover.py AAPL MSFT NVDA
+xenon-discover AAPL MSFT NVDA
 
 # Fetch dark pool flow (5-day)
-python3.13 scripts/fetch_flow.py [TICKER]
+xenon-fetch-flow [TICKER]
 
 # Fetch options chain + flow analysis
-python3.13 scripts/fetch_options.py [TICKER]
+xenon-fetch-options [TICKER]
 
 # Full evaluation output (JSON)
-python3.13 scripts/fetch_options.py [TICKER] --json
+xenon-fetch-options [TICKER] --json
 ```
 
 ---
@@ -155,12 +156,12 @@ The market's forward vol estimate diverges from true expected realized vol due t
 
 ### Signal Criteria
 
-| Criterion | Threshold | Notes |
-|-----------|-----------|-------|
-| HV20 > LEAP IV | ≥15-20 points | Primary signal |
-| HV60 > LEAP IV | ≥15-20 points | Confirmation |
-| Structural thesis | Required | Why vol won't revert |
-| Regime shift | Identified | New cycle, policy change, concentration |
+| Criterion         | Threshold     | Notes                                   |
+| ----------------- | ------------- | --------------------------------------- |
+| HV20 > LEAP IV    | ≥15-20 points | Primary signal                          |
+| HV60 > LEAP IV    | ≥15-20 points | Confirmation                            |
+| Structural thesis | Required      | Why vol won't revert                    |
+| Regime shift      | Identified    | New cycle, policy change, concentration |
 
 ### Structural Factors to Analyze
 
@@ -210,14 +211,15 @@ Vega on 30Δ 2-year call ≈ 0.30-0.50 per 1% IV
 
 ### Example: EWY (South Korea ETF)
 
-| Metric | Historical | Recent | LEAP Pricing |
-|--------|------------|--------|--------------|
-| 10Y HV | 20-30% | — | — |
-| HV60 | — | 65-70% | — |
-| 2028 OTM Call IV | — | — | 32-44% |
-| **Gap** | — | — | **+25-35 pts** |
+| Metric           | Historical | Recent | LEAP Pricing   |
+| ---------------- | ---------- | ------ | -------------- |
+| 10Y HV           | 20-30%     | —      | —              |
+| HV60             | —          | 65-70% | —              |
+| 2028 OTM Call IV | —          | —      | 32-44%         |
+| **Gap**          | —          | —      | **+25-35 pts** |
 
 **Hidden factors:**
+
 - Samsung + SK Hynix = ~47% of ETF but 90%+ of vol contribution
 - Pass-through holdings amplify effective concentration
 - AI memory supercycle = structural high-vol earnings
@@ -243,14 +245,14 @@ Vega on 30Δ 2-year call ≈ 0.30-0.50 per 1% IV
 
 When fetching any market data, **ALWAYS** use sources in this priority order:
 
-| Priority | Source | Best For | Limitations |
-|----------|--------|----------|-------------|
-| **1st** | Interactive Brokers | Real-time quotes, options chains, analyst ratings, fundamentals | Requires TWS/Gateway connection |
-| **2nd** | Unusual Whales | Dark pool flow, options activity, institutional signals, analyst ratings | API key required |
-| **3rd** | Exa (web search) | Company research, news, data not in IB/UW | API key required |
-| **4th** | agent-browser | Interactive pages, JS-rendered content | Slow, fallback only |
-| **5th** | Cboe official index feeds | COR1M historical fallback before Yahoo | COR1M-specific, delayed historical feed |
-| **6th ⚠️** | Yahoo Finance | **ABSOLUTE LAST RESORT** — only if ALL above fail | Rate limited, unreliable, delayed |
+| Priority   | Source                    | Best For                                                                 | Limitations                             |
+| ---------- | ------------------------- | ------------------------------------------------------------------------ | --------------------------------------- |
+| **1st**    | Interactive Brokers       | Real-time quotes, options chains, analyst ratings, fundamentals          | Requires TWS/Gateway connection         |
+| **2nd**    | Unusual Whales            | Dark pool flow, options activity, institutional signals, analyst ratings | API key required                        |
+| **3rd**    | Exa (web search)          | Company research, news, data not in IB/UW                                | API key required                        |
+| **4th**    | agent-browser             | Interactive pages, JS-rendered content                                   | Slow, fallback only                     |
+| **5th**    | Cboe official index feeds | COR1M historical fallback before Yahoo                                   | COR1M-specific, delayed historical feed |
+| **6th ⚠️** | Yahoo Finance             | **ABSOLUTE LAST RESORT** — only if ALL above fail                        | Rate limited, unreliable, delayed       |
 
 **For COR1M, use the official Cboe dashboard historical feed before Yahoo Finance.**
 **Yahoo Finance is the ABSOLUTE LAST RESORT. Never use it if IB, UW, Exa, agent-browser, or an official Cboe feed can provide the data.**
@@ -259,29 +261,29 @@ When fetching any market data, **ALWAYS** use sources in this priority order:
 
 ```bash
 # Scan State Street sector ETFs
-python3.13 scripts/leap_iv_scanner.py --preset sectors
+xenon-leap-iv --preset sectors
 
 # Scan specific tickers
-python3.13 scripts/leap_iv_scanner.py AAPL MSFT NVDA EWY
+xenon-leap-iv AAPL MSFT NVDA EWY
 
 # Scan with custom parameters
-python3.13 scripts/leap_iv_scanner.py --min-gap 20 --years 2027 2028
+xenon-leap-iv --min-gap 20 --years 2027 2028
 
 # Scan portfolio holdings
-python3.13 scripts/leap_iv_scanner.py --portfolio
+xenon-leap-iv --portfolio
 ```
 
 ### Presets Available
 
-| Preset | Tickers |
-|--------|---------|
-| `sectors` | XLB, XLC, XLE, XLF, XLI, XLK, XLP, XLRE, XLU, XLV, XLY |
-| `mag7` | AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA |
-| `semis` | NVDA, AMD, INTC, AVGO, QCOM, MU, AMAT, LRCX, KLAC, TSM |
-| `emerging` | EEM, EWZ, EWY, EWT, INDA, FXI, EWW, ILF |
-| `china` | BABA, JD, PDD, BIDU, NIO, XPEV, LI, FXI, KWEB |
-| `energy` | XOM, CVX, COP, SLB, EOG, PXD, OXY |
-| `financials` | JPM, BAC, WFC, GS, MS, C, BLK, SCHW |
+| Preset       | Tickers                                                |
+| ------------ | ------------------------------------------------------ |
+| `sectors`    | XLB, XLC, XLE, XLF, XLI, XLK, XLP, XLRE, XLU, XLV, XLY |
+| `mag7`       | AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA              |
+| `semis`      | NVDA, AMD, INTC, AVGO, QCOM, MU, AMAT, LRCX, KLAC, TSM |
+| `emerging`   | EEM, EWZ, EWY, EWT, INDA, FXI, EWW, ILF                |
+| `china`      | BABA, JD, PDD, BIDU, NIO, XPEV, LI, FXI, KWEB          |
+| `energy`     | XOM, CVX, COP, SLB, EOG, PXD, OXY                      |
+| `financials` | JPM, BAC, WFC, GS, MS, C, BLK, SCHW                    |
 
 ---
 
@@ -293,44 +295,44 @@ When a structural catalyst elevates realized volatility in a sector, individual 
 
 ### Signal Criteria
 
-| Criterion | Threshold |
-|-----------|-----------|
-| IV/HV60 divergence (leader vs lagger) | ≥ 0.15 |
-| Lagger HV20 − LEAP IV | ≥ +10 points |
-| Shared vol driver | Same fundamental catalyst |
-| Lagger IV rank | < 50th percentile |
-| Lagger has LEAPs | OI > 100 |
+| Criterion                             | Threshold                 |
+| ------------------------------------- | ------------------------- |
+| IV/HV60 divergence (leader vs lagger) | ≥ 0.15                    |
+| Lagger HV20 − LEAP IV                 | ≥ +10 points              |
+| Shared vol driver                     | Same fundamental catalyst |
+| Lagger IV rank                        | < 50th percentile         |
+| Lagger has LEAPs                      | OI > 100                  |
 
 ### Signal Strength
 
-| Tier | Conditions | Action |
-|------|-----------|--------|
-| Strong | Divergence ≥ 0.30, HV gap ≥ 20, IV rank < 30% | Full size (2.5%) |
+| Tier     | Conditions                                    | Action            |
+| -------- | --------------------------------------------- | ----------------- |
+| Strong   | Divergence ≥ 0.30, HV gap ≥ 20, IV rank < 30% | Full size (2.5%)  |
 | Moderate | Divergence ≥ 0.20, HV gap ≥ 15, IV rank < 40% | Half size (1.25%) |
-| Weak | Divergence ≥ 0.15, HV gap ≥ 10 | Monitor only |
+| Weak     | Divergence ≥ 0.15, HV gap ≥ 10                | Monitor only      |
 
 ### Scripts
 
 ```bash
 # ⭐ ALWAYS use the unified scanner
-python3.13 scripts/garch_convergence.py --preset all          # All 4 built-in presets (~3s)
-python3.13 scripts/garch_convergence.py --preset semis        # Semiconductors only
-python3.13 scripts/garch_convergence.py --preset mega-tech    # Mega-cap tech
-python3.13 scripts/garch_convergence.py --preset energy       # Energy sector
-python3.13 scripts/garch_convergence.py --preset china-etf    # China/Asia
-python3.13 scripts/garch_convergence.py --preset sp500-semiconductors  # File preset
-python3.13 scripts/garch_convergence.py NVDA AMD GOOGL META   # Ad-hoc pairs
-python3.13 scripts/garch_convergence.py --preset all --json   # JSON output
+xenon-garch --preset all          # All 4 built-in presets (~3s)
+xenon-garch --preset semis        # Semiconductors only
+xenon-garch --preset mega-tech    # Mega-cap tech
+xenon-garch --preset energy       # Energy sector
+xenon-garch --preset china-etf    # China/Asia
+xenon-garch --preset sp500-semiconductors  # File preset
+xenon-garch NVDA AMD GOOGL META   # Ad-hoc pairs
+xenon-garch --preset all --json   # JSON output
 ```
 
 ### Built-in Pair Presets
 
-| Preset | Pairs |
-|--------|-------|
-| `semis` | (NVDA,AMD), (TSM,ASML), (AVGO,QCOM), (MU,AMAT) |
-| `mega-tech` | (AAPL,MSFT), (GOOGL,META), (AMZN,NFLX) |
-| `energy` | (XOM,COP), (SLB,HAL), (XLE,OIH) |
-| `china-etf` | (FXI,BABA), (EWY,FXI) |
+| Preset      | Pairs                                          |
+| ----------- | ---------------------------------------------- |
+| `semis`     | (NVDA,AMD), (TSM,ASML), (AVGO,QCOM), (MU,AMAT) |
+| `mega-tech` | (AAPL,MSFT), (GOOGL,META), (AMZN,NFLX)         |
+| `energy`    | (XOM,COP), (SLB,HAL), (XLE,OIH)                |
+| `china-etf` | (FXI,BABA), (EWY,FXI)                          |
 
 Also supports any file preset from `data/presets/` (150+ presets with pairs).
 
@@ -360,25 +362,25 @@ This strategy involves selling naked options (short put for bullish, short call 
 
 ### Edge Source: IV Skew
 
-| Delta | Typical Put IV | Typical Call IV | Skew |
-|-------|---------------|----------------|------|
-| ~50Δ | 28-32% | 28-32% | 0% |
-| ~40Δ | 30-34% | 26-29% | +3-5% |
-| ~35Δ | 32-36% | 25-28% | +5-8% |
-| ~30Δ | 33-38% | 24-27% | +7-11% |
-| ~25Δ | 35-40% | 23-26% | +9-14% |
+| Delta | Typical Put IV | Typical Call IV | Skew   |
+| ----- | -------------- | --------------- | ------ |
+| ~50Δ  | 28-32%         | 28-32%          | 0%     |
+| ~40Δ  | 30-34%         | 26-29%          | +3-5%  |
+| ~35Δ  | 32-36%         | 25-28%          | +5-8%  |
+| ~30Δ  | 33-38%         | 24-27%          | +7-11% |
+| ~25Δ  | 35-40%         | 23-26%          | +9-14% |
 
 Skew is steeper during selloffs (when put demand surges) — exactly when contrarian bullish risk reversals are most attractive.
 
 ### Signal Criteria
 
-| Criterion | Requirement | Notes |
-|-----------|-------------|-------|
-| Operator direction | BULLISH or BEARISH | Manager's thesis, not auto-detected |
-| IV skew | ≥3% at target delta | Ensures structural edge on the trade |
-| Liquid options chain | Bid-ask ≤ $0.10 on target strikes | IWM, SPY, QQQ always qualify |
-| Net cost | Costless or small credit preferred | Maximum $0.50 debit |
-| DTE range | 14-60 days | Balance theta decay vs time for thesis |
+| Criterion            | Requirement                        | Notes                                  |
+| -------------------- | ---------------------------------- | -------------------------------------- |
+| Operator direction   | BULLISH or BEARISH                 | Manager's thesis, not auto-detected    |
+| IV skew              | ≥3% at target delta                | Ensures structural edge on the trade   |
+| Liquid options chain | Bid-ask ≤ $0.10 on target strikes  | IWM, SPY, QQQ always qualify           |
+| Net cost             | Costless or small credit preferred | Maximum $0.50 debit                    |
+| DTE range            | 14-60 days                         | Balance theta decay vs time for thesis |
 
 ### Supporting Signals (Context, Not Gates)
 
@@ -389,6 +391,7 @@ Skew is steeper during selloffs (when put demand surges) — exactly when contra
 ### Position Structure
 
 **Bullish Risk Reversal (default):**
+
 - **Sell**: OTM Put (25-50Δ) at bid
 - **Buy**: OTM Call (25-50Δ) at ask
 - Net: Costless or small credit
@@ -396,6 +399,7 @@ Skew is steeper during selloffs (when put demand surges) — exactly when contra
 - Loss: Stock assigned below put strike (undefined downside)
 
 **Bearish Risk Reversal (`--bearish` flag):**
+
 - **Sell**: OTM Call (25-50Δ) at bid
 - **Buy**: OTM Put (25-50Δ) at ask
 - Net: Costless or small credit
@@ -419,46 +423,47 @@ The script ranks combinations by:
 4. **Buffer from spot** — both strikes sufficiently OTM
 
 Three recommendations are generated:
+
 - **Primary**: Costless, balanced deltas, longer DTE
 - **Alternative**: Different expiration for faster/slower catalyst
 - **Aggressive**: Generates meaningful credit but tighter downside buffer
 
 ### Exit Criteria
 
-| Condition | Action |
-|-----------|--------|
+| Condition                        | Action                           |
+| -------------------------------- | -------------------------------- |
 | Underlying hits call strike + 5% | Close call for profit, close put |
-| Spread value reaches –$3.00 | Stop loss — close both legs |
-| DTE < 5 with no momentum | Close to avoid assignment risk |
-| Thesis invalidated | Close immediately |
-| DP flow reverses direction | Review thesis, consider closing |
+| Spread value reaches –$3.00      | Stop loss — close both legs      |
+| DTE < 5 with no momentum         | Close to avoid assignment risk   |
+| Thesis invalidated               | Close immediately                |
+| DP flow reverses direction       | Review thesis, consider closing  |
 
 ### Scripts
 
 ```bash
 # Bullish risk reversal on IWM (default)
-python3.13 scripts/risk_reversal.py IWM
+xenon-risk-reversal IWM
 
 # Bearish risk reversal
-python3.13 scripts/risk_reversal.py SPY --bearish
+xenon-risk-reversal SPY --bearish
 
 # Custom parameters
-python3.13 scripts/risk_reversal.py QQQ --bankroll 500000 --min-dte 21 --max-dte 45
+xenon-risk-reversal QQQ --bankroll 500000 --min-dte 21 --max-dte 45
 
 # Don't open browser
-python3.13 scripts/risk_reversal.py IWM --no-open
+xenon-risk-reversal IWM --no-open
 
 # JSON output (for programmatic use)
-python3.13 scripts/risk_reversal.py IWM --json
+xenon-risk-reversal IWM --json
 ```
 
 ### Tickers Best Suited
 
-| Type | Tickers | Why |
-|------|---------|-----|
-| **Index ETFs** | IWM, SPY, QQQ, DIA | Deepest skew, most liquid, no single-name risk |
-| **Sector ETFs** | XLK, XLE, XLF, EWY | Decent skew, diversified exposure |
-| **Large-cap stocks** | AAPL, MSFT, NVDA, AMZN | Liquid chains, but single-name risk applies |
+| Type                 | Tickers                | Why                                            |
+| -------------------- | ---------------------- | ---------------------------------------------- |
+| **Index ETFs**       | IWM, SPY, QQQ, DIA     | Deepest skew, most liquid, no single-name risk |
+| **Sector ETFs**      | XLK, XLE, XLF, EWY     | Decent skew, diversified exposure              |
+| **Large-cap stocks** | AAPL, MSFT, NVDA, AMZN | Liquid chains, but single-name risk applies    |
 
 **Avoid**: Small-caps, illiquid options, earnings-adjacent (IV crush kills both legs).
 
@@ -466,13 +471,13 @@ python3.13 scripts/risk_reversal.py IWM --json
 
 ## Strategy 5: Volatility-Credit Gap (VCG-R)
 
-*Strategy overhauled 2026-03-23. VIX gate inverted, HDR removed, severity tiers added. See full spec: [`strategy-vcg.md`](strategy-vcg.md)*
+_Strategy overhauled 2026-03-23. VIX gate inverted, HDR removed, severity tiers added. See full spec: [`strategy-vcg.md`](strategy-vcg.md)_
 
 ### Thesis
 
 The volatility complex (VIX/VVIX) reprices faster than cash credit (HYG, JNK, LQD). When **VIX is already elevated (> 28)** and credit markets have not yet repriced, an unresolved divergence exists — credit is artificially stable and catch-up risk is high. VCG-R detects this divergence using a rolling regression model and generates a risk-off overlay signal.
 
-**The edge is timing, not direction.** VCG-R is a risk-budget override — it identifies *when* credit is lagging a vol shock. Fires rarely (~0.26/year) with high conviction.
+**The edge is timing, not direction.** VCG-R is a risk-budget override — it identifies _when_ credit is lagging a vol shock. Fires rarely (~0.26/year) with high conviction.
 
 **Key revision from v1:** The original `VIX < 40` gate was backwards — it excluded the elevated-VIX window (28–40) where divergences are most actionable. VCG-R inverts the gate: `VIX > 28` is required. VVIX is now a severity amplifier (not a gate). The HDR three-gate conjunction is removed.
 
@@ -497,39 +502,39 @@ The VCG is the standardized residual (unchanged from v1):
 VCG_t = (ε_t - μ_ε) / σ_ε     (z-score over 63-day trailing window)
 ```
 
-| VCG Value | Interpretation |
-|-----------|---------------|
-| VCG > +2.5 | Credit significantly below vol-implied level (RO trigger with VIX > 28) |
-| VCG +2.0 to +2.5 | Divergence building — EDR watch state (with VIX > 25) |
-| VCG ±2.0 | Normal regime — no signal |
-| VCG < -3.5 | Credit overshot vol signal — BOUNCE (counter-signal) |
+| VCG Value        | Interpretation                                                          |
+| ---------------- | ----------------------------------------------------------------------- |
+| VCG > +2.5       | Credit significantly below vol-implied level (RO trigger with VIX > 28) |
+| VCG +2.0 to +2.5 | Divergence building — EDR watch state (with VIX > 25)                   |
+| VCG ±2.0         | Normal regime — no signal                                               |
+| VCG < -3.5       | Credit overshot vol signal — BOUNCE (counter-signal)                    |
 
 ### Signal Criteria
 
 **Risk-Off Trigger (RO):**
 
-| Criterion | Threshold | Notes |
-|-----------|-----------|-------|
-| VIX | > 28 | Volatility elevated — stress zone active |
-| VCG z-score | > 2.5σ | Statistical confirmation of divergence |
-| Sign discipline | Both β < 0 | Model consistent with economic prior |
+| Criterion       | Threshold  | Notes                                    |
+| --------------- | ---------- | ---------------------------------------- |
+| VIX             | > 28       | Volatility elevated — stress zone active |
+| VCG z-score     | > 2.5σ     | Statistical confirmation of divergence   |
+| Sign discipline | Both β < 0 | Model consistent with economic prior     |
 
 RO = 1 → actionable signal, size per tier.
 
 **Early Divergence Risk (EDR) — watch state:**
 
-| Criterion | Threshold | Notes |
-|-----------|-----------|-------|
-| VIX | > 25 | Approaching stress threshold |
-| VCG | 2.0 to 2.5σ | Divergence building but not confirmed |
+| Criterion | Threshold   | Notes                                 |
+| --------- | ----------- | ------------------------------------- |
+| VIX       | > 25        | Approaching stress threshold          |
+| VCG       | 2.0 to 2.5σ | Divergence building but not confirmed |
 
 EDR = 1 → half-Kelly position, monitor for RO.
 
 **Counter-Signal Bounce:**
 
-| Criterion | Threshold | Notes |
-|-----------|-----------|-------|
-| VCG | < -3.5σ | Credit substantially overshot vol model |
+| Criterion | Threshold | Notes                                   |
+| --------- | --------- | --------------------------------------- |
+| VCG       | < -3.5σ   | Credit substantially overshot vol model |
 
 BOUNCE = 1 → close HYG puts, consider small tactical long credit.
 
@@ -537,33 +542,34 @@ BOUNCE = 1 → close HYG puts, consider small tactical long credit.
 
 VVIX is a severity amplifier — it sets the tier, not the gate.
 
-| Tier | Label | VIX Gate | VVIX Level | Action Intensity |
-|------|-------|----------|-----------|-----------------|
-| **Tier 1** | Severe | VIX > 30 | VVIX > 120 | Maximum hedging — full Kelly, all instruments |
-| **Tier 2** | High | VIX > 28 | VVIX > 100 | Standard hedging — full Kelly, primary instruments |
-| **Tier 3 / EDR** | Elevated | VIX > 25 | VVIX > 90 | Watch / half-Kelly position |
+| Tier             | Label    | VIX Gate | VVIX Level | Action Intensity                                   |
+| ---------------- | -------- | -------- | ---------- | -------------------------------------------------- |
+| **Tier 1**       | Severe   | VIX > 30 | VVIX > 120 | Maximum hedging — full Kelly, all instruments      |
+| **Tier 2**       | High     | VIX > 28 | VVIX > 100 | Standard hedging — full Kelly, primary instruments |
+| **Tier 3 / EDR** | Elevated | VIX > 25 | VVIX > 90  | Watch / half-Kelly position                        |
 
 ### Regime Classification
 
-| VIX Range | Regime | Signal State |
-|-----------|--------|-------------|
-| < 25 | DIVERGENCE | No signal — vol not elevated enough |
-| 25–28 | WATCH | EDR possible — approaching RO threshold |
-| 28–40 | ACTIVE | Full RO and EDR operational |
-| 40–48 | TRANSITION | Signal valid, VCG adj dampened |
-| ≥ 48 | PANIC | VCG adj = 0 — panic suppression |
+| VIX Range | Regime     | Signal State                            |
+| --------- | ---------- | --------------------------------------- |
+| < 25      | DIVERGENCE | No signal — vol not elevated enough     |
+| 25–28     | WATCH      | EDR possible — approaching RO threshold |
+| 28–40     | ACTIVE     | Full RO and EDR operational             |
+| 40–48     | TRANSITION | Signal valid, VCG adj dampened          |
+| ≥ 48      | PANIC      | VCG adj = 0 — panic suppression         |
 
 The panic-adjusted signal: `VCG_adj = (1 - Π) × VCG` where Π ramps from 0→1 as VIX goes 40→48.
 
 ### Credit Proxies
 
-| Proxy | Type | Notes |
-|-------|------|-------|
-| HYG | iShares HY Corp Bond | **Primary** — most liquid, purest HY credit |
-| JNK | SPDR HY Bond | Alternative — similar exposure |
-| LQD | iShares IG Corp Bond | Requires rate-hedging (duration component) |
+| Proxy | Type                 | Notes                                       |
+| ----- | -------------------- | ------------------------------------------- |
+| HYG   | iShares HY Corp Bond | **Primary** — most liquid, purest HY credit |
+| JNK   | SPDR HY Bond         | Alternative — similar exposure              |
+| LQD   | iShares IG Corp Bond | Requires rate-hedging (duration component)  |
 
 For LQD, use Treasury-hedged excess returns to isolate pure credit:
+
 ```
 ΔC*_t = ΔC_t - Duration × ΔYield_UST
 ```
@@ -572,12 +578,12 @@ For LQD, use Treasury-hedged excess returns to isolate pure credit:
 
 **Action sequence when RO = 1:** reduce credit beta → raise quality → add convex hedges.
 
-| Tier | Primary | Alternative | Sizing |
-|------|---------|-------------|--------|
-| Tier 1 | ATM HYG puts, 2–3 week expiry | Bear put spreads on HYG | Full Kelly, ≤2.5% bankroll |
-| Tier 2 | OTM HYG puts (5% OTM), 1–2 week | Bear put spreads | Full Kelly, ≤2.5% bankroll |
-| Tier 3/EDR | Small HYG put position | — | Half-Kelly, ≤1.25% bankroll |
-| BOUNCE | HYG calls (2–3 week) | Close prior hedges | 25% of RO size |
+| Tier       | Primary                         | Alternative             | Sizing                      |
+| ---------- | ------------------------------- | ----------------------- | --------------------------- |
+| Tier 1     | ATM HYG puts, 2–3 week expiry   | Bear put spreads on HYG | Full Kelly, ≤2.5% bankroll  |
+| Tier 2     | OTM HYG puts (5% OTM), 1–2 week | Bear put spreads        | Full Kelly, ≤2.5% bankroll  |
+| Tier 3/EDR | Small HYG put position          | —                       | Half-Kelly, ≤1.25% bankroll |
+| BOUNCE     | HYG calls (2–3 week)            | Close prior hedges      | 25% of RO size              |
 
 ### Sizing
 
@@ -588,15 +594,15 @@ For LQD, use Treasury-hedged excess returns to isolate pure credit:
 
 ### Exit Criteria
 
-| Condition | Action |
-|-----------|--------|
-| VCG normalizes (< 1.0) | Close — divergence resolved |
-| VCG adj < 1.0 | Close — panic-adjusted divergence resolved |
-| Credit sells off (5d return < -1.5%) | Close — catch-up has occurred |
-| VIX > 48 | Close — panic regime, VCG adj = 0 |
-| Tier drops 1 → 2 | Reduce to Tier 2 sizing |
-| BOUNCE fires (VCG < -3.5) | Close puts, optional tactical long credit |
-| 5 trading days elapsed | Re-evaluate thesis |
+| Condition                            | Action                                     |
+| ------------------------------------ | ------------------------------------------ |
+| VCG normalizes (< 1.0)               | Close — divergence resolved                |
+| VCG adj < 1.0                        | Close — panic-adjusted divergence resolved |
+| Credit sells off (5d return < -1.5%) | Close — catch-up has occurred              |
+| VIX > 48                             | Close — panic regime, VCG adj = 0          |
+| Tier drops 1 → 2                     | Reduce to Tier 2 sizing                    |
+| BOUNCE fires (VCG < -3.5)            | Close puts, optional tactical long credit  |
+| 5 trading days elapsed               | Re-evaluate thesis                         |
 
 ### Production Refinements
 
@@ -608,19 +614,19 @@ For LQD, use Treasury-hedged excess returns to isolate pure credit:
 
 ```bash
 # Run VCG-R scan (check current divergence state)
-python3.13 scripts/vcg_scan.py
+xenon-vcg-scan
 
 # VCG with specific credit proxy
-python3.13 scripts/vcg_scan.py --proxy HYG
+xenon-vcg-scan --proxy HYG
 
 # VCG with LQD (rate-hedged)
-python3.13 scripts/vcg_scan.py --proxy LQD --rate-hedge
+xenon-vcg-scan --proxy LQD --rate-hedge
 
 # Historical backtest
-python3.13 scripts/vcg_scan.py --backtest --days 252
+xenon-vcg-scan --backtest --days 252
 
 # JSON output
-python3.13 scripts/vcg_scan.py --json
+xenon-vcg-scan --json
 ```
 
 ### Output Reference — Field Definitions
@@ -629,81 +635,81 @@ Every field in the VCG-R scan JSON output (`--json`) and HTML report is defined 
 
 #### Header / Top-Level Fields
 
-| Field | JSON Key | Definition |
-|-------|----------|------------|
-| **Scan Time** | `scan_time` | ISO 8601 timestamp when the scan ran |
-| **Market Open** | `market_open` | Whether US equity market was open at scan time. If `false`, data is from last available close. |
-| **Credit Proxy** | `credit_proxy` | The ETF used as the credit variable. Default: `HYG`. Alternatives: `JNK`, `LQD`. |
+| Field            | JSON Key       | Definition                                                                                     |
+| ---------------- | -------------- | ---------------------------------------------------------------------------------------------- |
+| **Scan Time**    | `scan_time`    | ISO 8601 timestamp when the scan ran                                                           |
+| **Market Open**  | `market_open`  | Whether US equity market was open at scan time. If `false`, data is from last available close. |
+| **Credit Proxy** | `credit_proxy` | The ETF used as the credit variable. Default: `HYG`. Alternatives: `JNK`, `LQD`.               |
 
 #### Signal Card Metrics
 
-| Metric | JSON Key | Definition |
-|--------|----------|------------|
-| **VCG (z-score)** | `signal.vcg` | Standardized residual. **> +2.5** with VIX > 28: risk-off trigger. **+2.0–2.5** with VIX > 25: EDR watch. **< -3.5**: BOUNCE (credit overshot). **±2.0**: normal. |
-| **VCG adj** | `signal.vcg_adj` | Panic-adjusted VCG: `(1 - Π) × VCG`. Π ramps 0→1 as VIX goes 40→48. Zero when VIX ≥ 48. Replaces `vcg_div` from v1. |
-| **VIX** | `signal.vix` | CBOE VIX — forward-looking 30-day SPX vol. VIX > 28 activates RO gate. |
-| **VVIX** | `signal.vvix` | CBOE VVIX — vol-of-vol. Severity amplifier (not a gate). |
-| **VVIX Severity** | `signal.vvix_severity` | EXTREME (>140) / VERY_HIGH (120–140) / HIGH (100–120) / ELEVATED (90–100) / NORMAL (<90) |
-| **Credit Price** | `signal.credit_price` | Last close of the credit proxy ETF. |
-| **5d Return** | `signal.credit_5d_return_pct` | 5-day simple return on credit proxy. Context only — no longer a gate in VCG-R. |
-| **Risk-Off (RO)** | `signal.ro` | Trade trigger. VIX > 28 AND VCG > 2.5 AND sign_ok. |
-| **EDR** | `signal.edr` | Early Divergence Risk. VIX > 25 AND 2.0 < VCG ≤ 2.5 AND sign_ok. |
-| **BOUNCE** | `signal.bounce` | Counter-signal: VCG < -3.5 AND sign_ok. Credit overshot. |
-| **Tier** | `signal.tier` | 1 = Severe (VIX>30, VVIX>120), 2 = High (VIX>28), 3 = Elevated (EDR). null = no signal. |
+| Metric            | JSON Key                      | Definition                                                                                                                                                        |
+| ----------------- | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **VCG (z-score)** | `signal.vcg`                  | Standardized residual. **> +2.5** with VIX > 28: risk-off trigger. **+2.0–2.5** with VIX > 25: EDR watch. **< -3.5**: BOUNCE (credit overshot). **±2.0**: normal. |
+| **VCG adj**       | `signal.vcg_adj`              | Panic-adjusted VCG: `(1 - Π) × VCG`. Π ramps 0→1 as VIX goes 40→48. Zero when VIX ≥ 48. Replaces `vcg_div` from v1.                                               |
+| **VIX**           | `signal.vix`                  | CBOE VIX — forward-looking 30-day SPX vol. VIX > 28 activates RO gate.                                                                                            |
+| **VVIX**          | `signal.vvix`                 | CBOE VVIX — vol-of-vol. Severity amplifier (not a gate).                                                                                                          |
+| **VVIX Severity** | `signal.vvix_severity`        | EXTREME (>140) / VERY_HIGH (120–140) / HIGH (100–120) / ELEVATED (90–100) / NORMAL (<90)                                                                          |
+| **Credit Price**  | `signal.credit_price`         | Last close of the credit proxy ETF.                                                                                                                               |
+| **5d Return**     | `signal.credit_5d_return_pct` | 5-day simple return on credit proxy. Context only — no longer a gate in VCG-R.                                                                                    |
+| **Risk-Off (RO)** | `signal.ro`                   | Trade trigger. VIX > 28 AND VCG > 2.5 AND sign_ok.                                                                                                                |
+| **EDR**           | `signal.edr`                  | Early Divergence Risk. VIX > 25 AND 2.0 < VCG ≤ 2.5 AND sign_ok.                                                                                                  |
+| **BOUNCE**        | `signal.bounce`               | Counter-signal: VCG < -3.5 AND sign_ok. Credit overshot.                                                                                                          |
+| **Tier**          | `signal.tier`                 | 1 = Severe (VIX>30, VVIX>120), 2 = High (VIX>28), 3 = Elevated (EDR). null = no signal.                                                                           |
 
 #### OLS Model Coefficients
 
-| Coefficient | JSON Key | Definition |
-|-------------|----------|------------|
-| **α (intercept)** | `signal.alpha` | Expected daily credit return when VIX and VVIX are unchanged. Near zero typically. |
-| **β₁ (VVIX)** | `signal.beta1_vvix` | Credit sensitivity to vol-of-vol. Expected: **negative**. Positive → sign_suppressed. |
-| **β₂ (VIX)** | `signal.beta2_vix` | Credit sensitivity to spot vol. Expected: **negative**. Positive → sign_suppressed. |
-| **Residual (ε)** | `signal.residual` | Raw gap: `ΔC_actual − (α + β₁·ΔVVIX + β₂·ΔVIX)`. Positive = credit stronger than vol implies. |
-| **Sign Discipline** | `signal.sign_ok`, `signal.sign_suppressed` | Both betas must be negative. If either flips positive, signal is suppressed. |
+| Coefficient         | JSON Key                                   | Definition                                                                                    |
+| ------------------- | ------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| **α (intercept)**   | `signal.alpha`                             | Expected daily credit return when VIX and VVIX are unchanged. Near zero typically.            |
+| **β₁ (VVIX)**       | `signal.beta1_vvix`                        | Credit sensitivity to vol-of-vol. Expected: **negative**. Positive → sign_suppressed.         |
+| **β₂ (VIX)**        | `signal.beta2_vix`                         | Credit sensitivity to spot vol. Expected: **negative**. Positive → sign_suppressed.           |
+| **Residual (ε)**    | `signal.residual`                          | Raw gap: `ΔC_actual − (α + β₁·ΔVVIX + β₂·ΔVIX)`. Positive = credit stronger than vol implies. |
+| **Sign Discipline** | `signal.sign_ok`, `signal.sign_suppressed` | Both betas must be negative. If either flips positive, signal is suppressed.                  |
 
 #### Attribution Split
 
-| Field | JSON Key | Definition |
-|-------|----------|------------|
-| **VVIX %** | `signal.attribution.vvix_pct` | % of model-implied credit move driven by VVIX (convexity demand) |
-| **VIX %** | `signal.attribution.vix_pct` | % of model-implied credit move driven by VIX (broad vol) |
-| **Model Implied** | `signal.attribution.model_implied` | Total model-predicted credit move |
+| Field             | JSON Key                           | Definition                                                       |
+| ----------------- | ---------------------------------- | ---------------------------------------------------------------- |
+| **VVIX %**        | `signal.attribution.vvix_pct`      | % of model-implied credit move driven by VVIX (convexity demand) |
+| **VIX %**         | `signal.attribution.vix_pct`       | % of model-implied credit move driven by VIX (broad vol)         |
+| **Model Implied** | `signal.attribution.model_implied` | Total model-predicted credit move                                |
 
 #### Regime & Panic Overlay
 
-| Field | JSON Key | Definition |
-|-------|----------|------------|
-| **Regime** | `signal.regime` | DIVERGENCE (VIX<25), WATCH (25–28), ACTIVE (28–40), TRANSITION (40–48), PANIC (≥48) |
-| **Π (Pi Panic)** | `signal.pi_panic` | `clamp((VIX-40)/8, 0, 1)`. 0 = full signal, 1 = panic suppressed. |
-| **Interpretation** | `signal.interpretation` | NORMAL / EDR / RISK_OFF_TIER_1 / RISK_OFF_TIER_2 / BOUNCE / SUPPRESSED |
+| Field              | JSON Key                | Definition                                                                          |
+| ------------------ | ----------------------- | ----------------------------------------------------------------------------------- |
+| **Regime**         | `signal.regime`         | DIVERGENCE (VIX<25), WATCH (25–28), ACTIVE (28–40), TRANSITION (40–48), PANIC (≥48) |
+| **Π (Pi Panic)**   | `signal.pi_panic`       | `clamp((VIX-40)/8, 0, 1)`. 0 = full signal, 1 = panic suppressed.                   |
+| **Interpretation** | `signal.interpretation` | NORMAL / EDR / RISK_OFF_TIER_1 / RISK_OFF_TIER_2 / BOUNCE / SUPPRESSED              |
 
 #### Rolling History Table (last 10 trading days)
 
-| Column | JSON Key | Definition |
-|--------|----------|------------|
-| **Date** | `history[].date` | Trading date |
-| **VIX** | `history[].vix` | VIX close |
-| **VVIX** | `history[].vvix` | VVIX close |
-| **Credit** | `history[].credit` | Credit proxy close |
-| **Residual** | `history[].residual` | Raw model residual ε |
-| **VCG** | `history[].vcg` | Standardized residual (z-score) |
-| **VCG adj** | `history[].vcg_adj` | Panic-adjusted VCG |
-| **β₁** | `history[].beta1` | Rolling 21-day VVIX coefficient |
-| **β₂** | `history[].beta2` | Rolling 21-day VIX coefficient |
+| Column       | JSON Key             | Definition                      |
+| ------------ | -------------------- | ------------------------------- |
+| **Date**     | `history[].date`     | Trading date                    |
+| **VIX**      | `history[].vix`      | VIX close                       |
+| **VVIX**     | `history[].vvix`     | VVIX close                      |
+| **Credit**   | `history[].credit`   | Credit proxy close              |
+| **Residual** | `history[].residual` | Raw model residual ε            |
+| **VCG**      | `history[].vcg`      | Standardized residual (z-score) |
+| **VCG adj**  | `history[].vcg_adj`  | Panic-adjusted VCG              |
+| **β₁**       | `history[].beta1`    | Rolling 21-day VVIX coefficient |
+| **β₂**       | `history[].beta2`    | Rolling 21-day VIX coefficient  |
 
 #### Model Parameters
 
-| Parameter | v1 Value | **VCG-R Value** | Why Changed |
-|-----------|----------|---------------------|-------------|
-| OLS window | 21 days | 21 days | Unchanged |
-| Z-score window | 63 days | 63 days | Unchanged |
-| **VCG trigger** | **> 2.0σ** | **> 2.5σ** | Reduces noise spikes |
-| **VIX gate** | **< 40** | **> 28** | Inverted — divergences occur with elevated VIX |
-| **VVIX gate** | **> 110 (hard gate)** | **Severity amplifier (no gate)** | Was overly restrictive |
-| **Credit 5d gate** | **> -0.5% (hard gate)** | **Removed (context only)** | Failed during stress events |
-| **HDR state flag** | **Required** | **Removed** | Replaced by VIX > 28 |
-| VIX panic threshold | 40–48 | 40–48 | Unchanged |
-| Sign discipline | Both β < 0 | Both β < 0 | Unchanged |
+| Parameter           | v1 Value                | **VCG-R Value**                  | Why Changed                                    |
+| ------------------- | ----------------------- | -------------------------------- | ---------------------------------------------- |
+| OLS window          | 21 days                 | 21 days                          | Unchanged                                      |
+| Z-score window      | 63 days                 | 63 days                          | Unchanged                                      |
+| **VCG trigger**     | **> 2.0σ**              | **> 2.5σ**                       | Reduces noise spikes                           |
+| **VIX gate**        | **< 40**                | **> 28**                         | Inverted — divergences occur with elevated VIX |
+| **VVIX gate**       | **> 110 (hard gate)**   | **Severity amplifier (no gate)** | Was overly restrictive                         |
+| **Credit 5d gate**  | **> -0.5% (hard gate)** | **Removed (context only)**       | Failed during stress events                    |
+| **HDR state flag**  | **Required**            | **Removed**                      | Replaced by VIX > 28                           |
+| VIX panic threshold | 40–48                   | 40–48                            | Unchanged                                      |
+| Sign discipline     | Both β < 0              | Both β < 0                       | Unchanged                                      |
 
 Full mathematical specification: [`strategy-vcg.md`](strategy-vcg.md)
 
@@ -728,21 +734,21 @@ Systematic CTA funds (~$400B AUM) use vol-targeting: they maintain 10% portfolio
 
 Four components, each scored 0-25:
 
-| Component | Inputs | 0 (Calm) | 25 (Crisis) |
-|-----------|--------|----------|-------------|
-| **VIX** | Level + 5d RoC | VIX < 15, flat | VIX > 40, rising fast |
-| **VVIX** | Level + VVIX/VIX ratio | VVIX < 90 | VVIX > 140, ratio > 8 |
-| **Correlation** | COR1M level + 5-session change | COR1M < 25 | COR1M > 70, spiking |
-| **Momentum** | SPX distance from 100d MA | Above MA | 10%+ below MA |
+| Component       | Inputs                         | 0 (Calm)       | 25 (Crisis)           |
+| --------------- | ------------------------------ | -------------- | --------------------- |
+| **VIX**         | Level + 5d RoC                 | VIX < 15, flat | VIX > 40, rising fast |
+| **VVIX**        | Level + VVIX/VIX ratio         | VVIX < 90      | VVIX > 140, ratio > 8 |
+| **Correlation** | COR1M level + 5-session change | COR1M < 25     | COR1M > 70, spiking   |
+| **Momentum**    | SPX distance from 100d MA      | Above MA       | 10%+ below MA         |
 
 ### Signal Levels
 
-| CRI Score | Level | Action |
-|-----------|-------|--------|
-| 0-24 | LOW | Normal regime, no systematic risk |
-| 25-49 | ELEVATED | One or more components stressed, monitor |
-| 50-74 | HIGH | Multiple triggered, CTA selling likely imminent |
-| 75-100 | CRITICAL | Full crash regime, active systematic deleveraging |
+| CRI Score | Level    | Action                                            |
+| --------- | -------- | ------------------------------------------------- |
+| 0-24      | LOW      | Normal regime, no systematic risk                 |
+| 25-49     | ELEVATED | One or more components stressed, monitor          |
+| 50-74     | HIGH     | Multiple triggered, CTA selling likely imminent   |
+| 75-100    | CRITICAL | Full crash regime, active systematic deleveraging |
 
 ### CTA Exposure Model
 
@@ -753,15 +759,16 @@ Est_selling = Forced_reduction × CTA_AUM (~$400B)
 ```
 
 | Realized Vol | Exposure | Reduction | Est. Selling |
-|-------------|----------|-----------|-------------|
-| 10% | 100% | 0% | $0B |
-| 20% | 50% | 50% | $200B |
-| 40% | 25% | 75% | $300B |
-| 80% | 12.5% | 87.5% | $350B |
+| ------------ | -------- | --------- | ------------ |
+| 10%          | 100%     | 0%        | $0B          |
+| 20%          | 50%      | 50%       | $200B        |
+| 40%          | 25%      | 75%       | $300B        |
+| 80%          | 12.5%    | 87.5%     | $350B        |
 
 ### Crash Trigger Rule
 
 All three must fire simultaneously:
+
 1. SPX < 100-day moving average
 2. 20d realized vol > 25% annualized
 3. COR1M implied correlation > 60
@@ -769,14 +776,16 @@ All three must fire simultaneously:
 ### COR1M Implied Correlation Signal
 
 The Cboe 1-Month Implied Correlation Index (COR1M) measures the market's expectation of how tightly the 50 largest stocks in the S&P 500 will move together over the next month.
-Implementation rule: `scripts/cri_scan.py` must fetch COR1M from IB first, then the official Cboe dashboard historical feed, and only then fall back to Yahoo Finance if both fail.
+Implementation rule: `src/xenon/scanners/cri.py` must fetch COR1M from IB first, then the official Cboe dashboard historical feed, and only then fall back to Yahoo Finance if both fail.
 
 **What it captures**:
+
 - **Market herding**: Higher COR1M means the market expects the largest SPX names to trade in lockstep.
 - **Diversification regime**: Lower COR1M means more single-name dispersion and better diversification potential.
 - **Relative options pricing**: COR1M reflects the spread between SPX implied volatility and the weighted average implied volatility of the largest underlying stocks.
 
 **How it is constructed**:
+
 - Uses one-month, approximately at-the-money options.
 - Compares SPX implied volatility to the market-cap-weighted implied volatilities of the 50 largest SPX constituents.
 - Solves for the average correlation coefficient that reconciles index variance with the weighted variance of the component stocks.
@@ -807,12 +816,12 @@ COR1M is the better crash-regime signal because it is:
 
 ### Exit Criteria
 
-| Condition | Action |
-|-----------|--------|
-| CRI normalizes (< 25) | Close hedges — crash risk subsided |
-| Realized vol drops below 20% | Close — vol-targeting pressure relieved |
-| COR1M < 40 | Close — implied diversification restored |
-| 5 trading days elapsed | Re-evaluate — CTA selling is time-bound |
+| Condition                    | Action                                   |
+| ---------------------------- | ---------------------------------------- |
+| CRI normalizes (< 25)        | Close hedges — crash risk subsided       |
+| Realized vol drops below 20% | Close — vol-targeting pressure relieved  |
+| COR1M < 40                   | Close — implied diversification restored |
+| 5 trading days elapsed       | Re-evaluate — CTA selling is time-bound  |
 
 ### MenthorQ CTA Positioning (Institutional Data Overlay)
 
@@ -829,6 +838,7 @@ The vol-targeting model estimates CTA exposure from realized vol. MenthorQ provi
 **Cache**: `data/menthorq_cache/cta_{DATE}.json` — one file per trading day.
 
 **Freshness contract**:
+
 - `data/menthorq_cache/health/cta-sync-latest.json` records the last CTA sync state (`syncing`, `healthy`, `degraded`), `target_date`, attempt count, sanitized error detail, and any captured artifact paths. `data/menthorq_cache/health/history/cta-sync-*.json` preserves the run history, and the latest record is mirrored to `data/service_health/cta-sync.json` for older tooling.
 - `/api/menthorq/cta` compares the freshest CTA cache date against the latest closed trading day and triggers one background CTA refresh when the cache is behind.
 - `/cta` now renders stale state explicitly. If the cache is behind or missing, the page shows which session is being displayed, which target session is missing, and the last CTA sync failure detail instead of silently presenting old data as current.
@@ -837,25 +847,25 @@ The vol-targeting model estimates CTA exposure from realized vol. MenthorQ provi
 
 ```bash
 # Run CRI scan (HTML report, includes MenthorQ data if cached)
-python3.13 scripts/cri_scan.py
+xenon-cri-scan
 
 # JSON output
-python3.13 scripts/cri_scan.py --json
+xenon-cri-scan --json
 
 # Don't open browser
-python3.13 scripts/cri_scan.py --no-open
+xenon-cri-scan --no-open
 
 # Fetch MenthorQ CTA data (requires login, ~40s)
-python3.13 scripts/fetch_menthorq_cta.py
+xenon-fetch-menthorq-cta
 
 # Run the hardened CTA sync runtime (used by launchd/service wrappers)
-python3.13 scripts/cta_sync_service.py --source manual
+xenon-cta-sync-service --source manual
 
 # MenthorQ JSON output
-python3.13 scripts/fetch_menthorq_cta.py --json
+xenon-fetch-menthorq-cta --json
 
 # MenthorQ specific date
-python3.13 scripts/fetch_menthorq_cta.py --date 2026-03-06
+xenon-fetch-menthorq-cta --date 2026-03-06
 ```
 
 **Cache behavior:** the CRI JSON cache now stores enough trailing SPY closes to reconstruct the prior 20 realized-vol sessions used by `/regime`. Scheduled CRI snapshots and the post-close data refresh both refresh `data/cri.json`, and the API backfills missing `history[].realized_vol` values from cached closes when a newer snapshot is less complete than the legacy cache. CTA sync now also keeps a machine-readable health file plus per-attempt log artifacts so stale MenthorQ data fails loudly and can self-heal through the dedicated sync runtime.
@@ -869,12 +879,12 @@ The `/regime` relationship panel adds a second layer on top of the raw 20-sessio
 
 The latest point is then classified as follows:
 
-| State | Classification Rule | Interpretation |
-|-------|---------------------|----------------|
-| **Systemic Panic** | `RVOL >= realized_vol_mean` and `COR1M >= cor1m_mean` | Broad realized stress plus elevated implied co-movement. Operators should read this as realized turbulence that the options market still expects to stay systemic. |
-| **Fragile Calm** | `RVOL < realized_vol_mean` and `COR1M >= cor1m_mean` | Tape calm, correlation fear elevated. The market may look orderly in realized terms while the options market still prices synchronized downside or crowding risk. |
-| **Stock Picker's Market** | `RVOL >= realized_vol_mean` and `COR1M < cor1m_mean` | Realized movement is elevated, but implied correlation remains contained. This is a higher-dispersion state where single-name differentiation still exists. |
-| **Goldilocks** | `RVOL < realized_vol_mean` and `COR1M < cor1m_mean` | Both realized volatility and implied correlation are below recent norms. This is the cleanest diversification backdrop in the relationship model. |
+| State                     | Classification Rule                                   | Interpretation                                                                                                                                                     |
+| ------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Systemic Panic**        | `RVOL >= realized_vol_mean` and `COR1M >= cor1m_mean` | Broad realized stress plus elevated implied co-movement. Operators should read this as realized turbulence that the options market still expects to stay systemic. |
+| **Fragile Calm**          | `RVOL < realized_vol_mean` and `COR1M >= cor1m_mean`  | Tape calm, correlation fear elevated. The market may look orderly in realized terms while the options market still prices synchronized downside or crowding risk.  |
+| **Stock Picker's Market** | `RVOL >= realized_vol_mean` and `COR1M < cor1m_mean`  | Realized movement is elevated, but implied correlation remains contained. This is a higher-dispersion state where single-name differentiation still exists.        |
+| **Goldilocks**            | `RVOL < realized_vol_mean` and `COR1M < cor1m_mean`   | Both realized volatility and implied correlation are below recent norms. This is the cleanest diversification backdrop in the relationship model.                  |
 
 **Implementation rule:** when `/regime` has intraday RVOL and/or a live IB COR1M quote, the latest relationship-state label uses those live values for the final point while keeping the rolling 20-session means anchored to the cached history window.
 
@@ -897,7 +907,7 @@ These strategies can be combined:
 
 4. **Convergence → LEAP**: If convergence resolves quickly, the lagger's IV may still be below long-term fair value → roll into LEAPS.
 
-5. **Position layering**: 
+5. **Position layering**:
    - Core: LEAP calls for vega exposure (months to years)
    - Tactical: Short-dated options on flow signals (weeks)
    - Relative value: Convergence spreads (weeks to months)
@@ -923,20 +933,21 @@ These strategies can be combined:
 
 ## Risk Management (All Strategies)
 
-| Rule | Limit |
-|------|-------|
-| Max position size | 2.5% of bankroll (premium or margin) |
-| Sizing method | Fractional Kelly (0.25x) for defined-risk; margin-based for undefined |
-| Risk type | Defined only (long options, spreads) — **unless manager override** |
-| Never | Naked short options, undefined risk — **unless manager override** |
-| Max concurrent | 6 positions |
-| Kelly > 20% | Restructure (insufficient convexity) |
+| Rule              | Limit                                                                 |
+| ----------------- | --------------------------------------------------------------------- |
+| Max position size | 2.5% of bankroll (premium or margin)                                  |
+| Sizing method     | Fractional Kelly (0.25x) for defined-risk; margin-based for undefined |
+| Risk type         | Defined only (long options, spreads) — **unless manager override**    |
+| Never             | Naked short options, undefined risk — **unless manager override**     |
+| Max concurrent    | 6 positions                                                           |
+| Kelly > 20%       | Restructure (insufficient convexity)                                  |
 
 ### Manager Override for Undefined Risk
 
 The "NEVER sell naked options" constraint can be overridden by the manager (human operator) for specific strategies that require it. Currently the only strategy with this override is **Risk Reversal** (Strategy 4).
 
 **Override conditions (ALL must be met):**
+
 1. Manager explicitly requests the structure (e.g., `risk-reversal IWM`)
 2. Underlying is a broad index ETF or highly liquid large-cap
 3. Position sized to 2.5% of bankroll in **margin**, not premium

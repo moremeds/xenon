@@ -23,7 +23,7 @@ Expected: all pass.
 
 ```bash
 set -a && source .env && set +a
-python3.13 scripts/fetchers/fetch_apex_data.py --mode full --dry-run --timeframes 1d --max-workers 3
+xenon-fetch-apex-data --mode full --dry-run --timeframes 1d --max-workers 3
 ```
 
 Expected: writes to `data/apex_mirror_preview/`. Verify schemas:
@@ -74,7 +74,7 @@ print('Data quality summary:', r2.get_json('meta/data_quality.json')['by_status'
 
 ```bash
 # Sync the fresh mirror and run the scanner locally
-python3.13 scripts/trend_scan.py --top 25 > /tmp/scan_new.json
+xenon-trend-scan --top 25 > /tmp/scan_new.json
 jq '.candidates | length, .stage_a_survivors, .stage_b_survivors' /tmp/scan_new.json
 ```
 

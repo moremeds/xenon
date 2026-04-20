@@ -1,7 +1,7 @@
 from datetime import datetime
 from unittest.mock import MagicMock
 
-from scripts.analysis.ticker_data import fetch_ticker_data
+from xenon.analysis.ticker_data import fetch_ticker_data
 
 
 def _make_mock_client(

@@ -6,7 +6,9 @@
 # cri_scan.py --json. Saves timestamped output to data/cri_scheduled/.
 #
 
-cd "$(dirname "$0")/.."
+PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$PROJECT_DIR"
+export PATH="$PROJECT_DIR/.venv/bin:$PATH"
 
 resolve_python() {
     local candidate
@@ -33,9 +35,8 @@ if [ -z "$PYTHON_BIN" ]; then
 fi
 
 # Check if today is a trading day (reuses market_holidays.json)
-IS_TRADING=$("$PYTHON_BIN" -c "
-import sys; sys.path.insert(0, 'scripts')
-from utils.market_calendar import _is_trading_day
+IS_TRADING=$("$PROJECT_DIR/.venv/bin/python" -c "
+from xenon.utils.market_calendar import _is_trading_day
 from datetime import datetime
 print('yes' if _is_trading_day(datetime.now()) else 'no')
 " 2>/dev/null || echo "yes")
@@ -50,7 +51,7 @@ TIMESTAMP=$(TZ=America/New_York date +"%Y-%m-%dT%H-%M")
 OUT_PATH="data/cri_scheduled/cri-${TIMESTAMP}.json"
 TMP_PATH=$(mktemp "data/cri_scheduled/.cri-${TIMESTAMP}.XXXXXX.tmp")
 echo "$(date): Running CRI scan..."
-"$PYTHON_BIN" scripts/cri_scan.py --json > "$TMP_PATH" 2>>"logs/cri-scan.err.log"
+"$PROJECT_DIR/.venv/bin/xenon-cri-scan" --json > "$TMP_PATH" 2>>"logs/cri-scan.err.log"
 EXIT_CODE=$?
 if [ "$EXIT_CODE" -eq 0 ]; then
     mv "$TMP_PATH" "$OUT_PATH"

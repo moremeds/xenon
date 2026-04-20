@@ -6,32 +6,33 @@ Policy rules (UI verification, calculation invariants, brand rules) live in `web
 
 `/api/regime` triggers `cri_scan.py` during market hours only. Logic: `web/lib/criStaleness.ts` (single source of truth). Tests: `web/tests/regime-cri-staleness.test.ts`.
 
-| Condition | Stale? | Action |
-|-----------|--------|--------|
-| `data.date !== today (ET)` | YES | Background scan |
-| `market_open + mtime > 60s` | YES | Background scan |
-| `market_open === false + date = today` | NO | Serve cached EOD |
+| Condition                              | Stale? | Action           |
+| -------------------------------------- | ------ | ---------------- |
+| `data.date !== today (ET)`             | YES    | Background scan  |
+| `market_open + mtime > 60s`            | YES    | Background scan  |
+| `market_open === false + date = today` | NO     | Serve cached EOD |
 
 ## VCG (Volatility-Credit Gap) Tab
 
 Tabbed into `/regime` page alongside CRI. Detects divergence between vol complex (VIX/VVIX) and credit markets (HYG).
 
-| Component | File |
-|-----------|------|
-| Hook | `web/lib/useVcg.ts` (`VcgData` type, adaptive polling) |
-| Staleness | `web/lib/vcgStaleness.ts` (anchored to `scan_time` age) |
-| API route | `web/app/api/vcg/route.ts` (GET cached + SWR) |
-| Panel | `web/components/VcgPanel.tsx` |
-| Scanner | `scripts/vcg_scan.py` (20-session history) |
-| Share | `scripts/generate_vcg_share.py` (4 cards + tweet) |
-| FastAPI | `POST /vcg/scan` (60s cooldown), `POST /vcg/share` |
-| Cache | `data/vcg.json` |
+| Component | File                                                       |
+| --------- | ---------------------------------------------------------- |
+| Hook      | `web/lib/useVcg.ts` (`VcgData` type, adaptive polling)     |
+| Staleness | `web/lib/vcgStaleness.ts` (anchored to `scan_time` age)    |
+| API route | `web/app/api/vcg/route.ts` (GET cached + SWR)              |
+| Panel     | `web/components/VcgPanel.tsx`                              |
+| Scanner   | `src/xenon/scanners/vcg.py` (20-session history)           |
+| Share     | `src/xenon/shares/generate_vcg_share.py` (4 cards + tweet) |
+| FastAPI   | `POST /vcg/scan` (60s cooldown), `POST /vcg/share`         |
+| Cache     | `data/vcg.json`                                            |
 
 **VCG-R thresholds:** RO = VIX > 28 + VCG > 2.5 + sign_ok. EDR = VIX > 25 + VCG 2.0–2.5. BOUNCE = VCG < -3.5. VVIX is severity amplifier (Tier 1/2/3), not a gate. HDR removed. Credit 5d gate removed. VCG adj replaces vcg_div.
 
 ## RegimePanel Market-Closed Rules
 
 When `market_open === false`:
+
 - Use `data.vix`/`data.vvix`/`data.spy` only (never WS `last`)
 - `activeCorr` = `data.cor1m` (not rebuilt from sector ETFs)
 - `liveCri` / `intradayRvol` = `null` (use `data.cri` / `data.realized_vol`)
@@ -44,13 +45,13 @@ Tests: `regime-market-closed-values.test.ts`, `regime-market-closed-eod.spec.ts`
 
 During market hours (`market_open === true`), the regime strip shows day change for live metrics:
 
-| Metric | Component | Source | Display |
-|--------|-----------|--------|---------|
-| VIX | `DayChange` | WS `last` vs WS `close` | `+1.50 (+6.25%) ↑` |
-| VVIX | `DayChange` | WS `last` vs WS `close` | `-5.00 (-4.35%) ↓` |
-| SPY | `DayChange` | WS `last` vs WS `close` | `$+0.47 (+0.07%) ↑` |
-| RVOL | `PointChange` | `intradayRvol - data.realized_vol` | `-0.01% intraday ↓` |
-| COR1M | strip value from WS `last` when available, otherwise `data.cor1m`; `PointChange` remains `data.cor1m_5d_change` | `37.25` + `-0.50 pts 5d chg ↓` |
+| Metric | Component                                                                                                       | Source                             | Display             |
+| ------ | --------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ------------------- |
+| VIX    | `DayChange`                                                                                                     | WS `last` vs WS `close`            | `+1.50 (+6.25%) ↑`  |
+| VVIX   | `DayChange`                                                                                                     | WS `last` vs WS `close`            | `-5.00 (-4.35%) ↓`  |
+| SPY    | `DayChange`                                                                                                     | WS `last` vs WS `close`            | `$+0.47 (+0.07%) ↑` |
+| RVOL   | `PointChange`                                                                                                   | `intradayRvol - data.realized_vol` | `-0.01% intraday ↓` |
+| COR1M  | strip value from WS `last` when available, otherwise `data.cor1m`; `PointChange` remains `data.cor1m_5d_change` | `37.25` + `-0.50 pts 5d chg ↓`     |
 
 **Arrow placement**: Arrow icon is always to the **right** of the change text. Uses `display: flex` with `gap: 4px` in `.regime-strip-day-chg`.
 
@@ -67,6 +68,7 @@ Price arrows in `PositionTable.tsx`/`WorkspaceSections.tsx`: `td.last-price-cell
 ## Options Chain Sticky Header
 
 `OptionsChainTab.tsx` — three required CSS rules:
+
 1. `background: var(--bg-panel-raised)` on `.chain-header` + `.chain-side-label`
 2. `position: sticky; top: 0` / `top: 24px`
 3. `.chain-grid thead { position: relative; z-index: 10 }`
@@ -76,6 +78,7 @@ All three required or overlap bug returns. Tests: `chain-sticky-header.test.ts` 
 ## WebSocket Connection State Machine (`usePrices.ts`)
 
 `idle → connecting → open → closed`. Key design:
+
 - `connStateRef` (ref) — `connect()` idempotent
 - `socketGenRef` — ignores stale socket events
 - Diff-based subscribe/unsubscribe over existing connection
@@ -87,6 +90,7 @@ Tests: `use-prices-ws-stability.test.ts` (25), `ws-connection-stability.spec.ts`
 ## Seasonality Fallback
 
 UW → EquityClock Vision → Cache. Route: `web/app/api/ticker/seasonality/route.ts`.
+
 1. Cache check (`data/seasonality_cache/{TICKER}.json`)
 2. UW API — all 12 months valid → done
 3. Missing months → EquityClock chart → Claude Haiku Vision extraction

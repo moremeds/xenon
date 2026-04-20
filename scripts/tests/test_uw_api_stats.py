@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from utils.uw_api_stats import UWApiStats, _extract_ticker, _normalize_endpoint
+from xenon.utils.uw_api_stats import UWApiStats, _extract_ticker, _normalize_endpoint
 
 # ── _extract_ticker ──────────────────────────────────────────────────
 

@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-MODULE_PATH = Path(__file__).resolve().parent.parent / "clients" / "ib_client.py"
+MODULE_PATH = Path(__file__).resolve().parent.parent.parent / "src" / "xenon" / "clients" / "ib_client.py"
 
 
 def _load_ib_client_module(module_name: str):

@@ -5,6 +5,7 @@
 **OI change analysis is a REQUIRED part of every evaluation, not just for external signals.**
 
 UW has two separate data sources:
+
 1. **Flow Alerts** (`/api/option-trades/flow-alerts`) — Filtered for "unusual" activity
 2. **OI Change** (`/api/stock/{ticker}/oi-change`) — Raw positioning changes
 
@@ -12,12 +13,13 @@ Flow alerts may miss large institutional trades that don't trigger their filters
 
 ## The Data Gap
 
-| Source | Shows | Misses |
-|--------|-------|--------|
-| UW Flow Alerts | "Unusual" daily activity | Large trades that don't trigger alerts |
-| UW OI Change | **All significant positioning** | Nothing — this is the source of truth |
+| Source         | Shows                           | Misses                                 |
+| -------------- | ------------------------------- | -------------------------------------- |
+| UW Flow Alerts | "Unusual" daily activity        | Large trades that don't trigger alerts |
+| UW OI Change   | **All significant positioning** | Nothing — this is the source of truth  |
 
 **Example:** The $95M MSFT LEAP call purchase did NOT appear in flow alerts but showed up clearly in OI change data:
+
 - $625 Call: +100,458 OI change, $51M premium
 - $575 Call: +50,443 OI change, $45M premium
 - $675 Call: +50,148 OI change, $15M premium
@@ -30,10 +32,10 @@ Flow alerts may miss large institutional trades that don't trigger their filters
 
 ```bash
 # Standard OI change analysis (ALWAYS run this)
-python3.13 scripts/fetch_oi_changes.py MSFT
+xenon-fetch-oi MSFT
 
 # Or with the options script
-python3.13 scripts/fetch_options.py MSFT --oi-changes
+xenon-fetch-options MSFT --oi-changes
 ```
 
 This uses UW's `/api/stock/{ticker}/oi-change` endpoint which shows ALL significant OI changes.
@@ -41,12 +43,14 @@ This uses UW's `/api/stock/{ticker}/oi-change` endpoint which shows ALL signific
 ### Step 2: Identify Large OI Changes
 
 Look for:
+
 - OI change > 10,000 contracts (significant size)
 - Premium > $1M (institutional size)
 - LEAPs with large OI change (long-term positioning)
 - OI change NOT accompanied by flow alert (hidden signal)
 
 **Example Output:**
+
 ```
 MSFT OI Changes:
 Symbol                    OI Change    Premium
@@ -57,20 +61,22 @@ MSFT270115C00675000       +50,148   $15,068,081  ← MASSIVE
 
 ### Step 3: Cross-Reference with Flow Alerts
 
-| Scenario | Interpretation |
-|----------|----------------|
-| Large OI change + Flow alert | ✅ Confirmed — UW flagged it |
+| Scenario                        | Interpretation                 |
+| ------------------------------- | ------------------------------ |
+| Large OI change + Flow alert    | ✅ Confirmed — UW flagged it   |
 | Large OI change + NO flow alert | ⚠️ Hidden signal — investigate |
-| Flow alert + Small OI change | Day trade, not positioning |
+| Flow alert + Small OI change    | Day trade, not positioning     |
 
 ### Step 4: Verify External Claims (If Applicable)
 
 When verifying screenshots/tweets:
+
 ```bash
-python3.13 scripts/verify_options_oi.py MSFT --expiry 2027-01-15 --verify "575:50000,625:100000"
+xenon-verify-options-oi MSFT --expiry 2027-01-15 --verify "575:50000,625:100000"
 ```
 
 **Verification Criteria:**
+
 - OI within 10% of claimed size → **VERIFIED**
 - OI significantly lower → **SUSPECT** (claim may be false)
 - OI near zero → **FALSE** (no position exists)
@@ -89,11 +95,13 @@ python3.13 scripts/verify_options_oi.py MSFT --expiry 2027-01-15 --verify "575:5
 **Milestone 3B: Options Flow Verification** (NEW)
 
 If evaluating based on external flow signal:
+
 ```bash
-python3.13 scripts/verify_options_oi.py [TICKER] --expiry [DATE] --strikes [S1,S2,S3]
+xenon-verify-options-oi [TICKER] --expiry [DATE] --strikes [S1,S2,S3]
 ```
 
 **Acceptance Criteria:**
+
 - OI matches claimed position size (within 10%)
 - Position is still open (OI > recent daily volume)
 - Multiple strikes corroborate the structure (spreads, etc.)
@@ -105,10 +113,11 @@ python3.13 scripts/verify_options_oi.py [TICKER] --expiry [DATE] --strikes [S1,S
 **Claim:** @SubuTrade screenshot showing $95M in MSFT Jan 2027 calls
 
 **Verification:**
+
 ```
 Strike   Claimed    Actual OI   Premium/Contract   Total Premium
 $575     50,000     51,005      $8.80              $44.9M
-$625     100,000    100,788     $5.05              $50.9M  
+$625     100,000    100,788     $5.05              $50.9M
 $675     -50,000    50,862      $3.00              -$15.3M (sold)
 ```
 
@@ -122,19 +131,20 @@ $675     -50,000    50,862      $3.00              -$15.3M (sold)
 
 ```bash
 # Basic usage
-python3.13 scripts/verify_options_oi.py MSFT --expiry 2027-01-15
+xenon-verify-options-oi MSFT --expiry 2027-01-15
 
 # Filter specific strikes
-python3.13 scripts/verify_options_oi.py MSFT --expiry 2027-01-15 --strikes 575,625,675
+xenon-verify-options-oi MSFT --expiry 2027-01-15 --strikes 575,625,675
 
 # High strikes only (for far OTM verification)
-python3.13 scripts/verify_options_oi.py MSFT --expiry 2027-01-15 --min-strike 500
+xenon-verify-options-oi MSFT --expiry 2027-01-15 --min-strike 500
 
 # JSON output for programmatic use
-python3.13 scripts/verify_options_oi.py MSFT --expiry 2027-01-15 --json
+xenon-verify-options-oi MSFT --expiry 2027-01-15 --json
 ```
 
 ### Output Includes:
+
 - Strike, Volume, Open Interest, Total Premium
 - OI change from previous day (if available)
 - Position age estimate (OI / avg daily volume)

@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch, MagicMock
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from monitor_daemon.handlers.fill_monitor import FillMonitorHandler
+from xenon.monitor_daemon.handlers.fill_monitor import FillMonitorHandler
 
 
 def make_mock_client(trades=None):
@@ -49,7 +49,7 @@ class TestFillMonitorExecute:
 
     def test_connects_to_ib(self):
         """Handler connects to IB via IBClient."""
-        with patch('monitor_daemon.handlers.fill_monitor.IBClient') as mock_cls:
+        with patch('xenon.monitor_daemon.handlers.fill_monitor.IBClient') as mock_cls:
             mock_client = make_mock_client()
             mock_cls.return_value = mock_client
 
@@ -60,7 +60,7 @@ class TestFillMonitorExecute:
 
     def test_fetches_open_orders(self):
         """Handler fetches open orders via IBClient.get_open_orders."""
-        with patch('monitor_daemon.handlers.fill_monitor.IBClient') as mock_cls:
+        with patch('xenon.monitor_daemon.handlers.fill_monitor.IBClient') as mock_cls:
             mock_client = make_mock_client()
             mock_cls.return_value = mock_client
 
@@ -71,7 +71,7 @@ class TestFillMonitorExecute:
 
     def test_detects_new_order(self):
         """Handler detects new orders."""
-        with patch('monitor_daemon.handlers.fill_monitor.IBClient') as mock_cls:
+        with patch('xenon.monitor_daemon.handlers.fill_monitor.IBClient') as mock_cls:
             # Mock a trade
             mock_trade = MagicMock()
             mock_trade.order.orderId = 5
@@ -97,7 +97,7 @@ class TestFillMonitorExecute:
 
     def test_detects_partial_fill(self):
         """Handler detects partial fills."""
-        with patch('monitor_daemon.handlers.fill_monitor.IBClient') as mock_cls:
+        with patch('xenon.monitor_daemon.handlers.fill_monitor.IBClient') as mock_cls:
             mock_trade = MagicMock()
             mock_trade.order.orderId = 5
             mock_trade.order.action = "BUY"
@@ -125,7 +125,7 @@ class TestFillMonitorExecute:
 
     def test_detects_complete_fill(self):
         """Handler detects complete fills (order no longer in open orders)."""
-        with patch('monitor_daemon.handlers.fill_monitor.IBClient') as mock_cls:
+        with patch('xenon.monitor_daemon.handlers.fill_monitor.IBClient') as mock_cls:
             # No open orders now
             mock_client = make_mock_client(trades=[])
             mock_cls.return_value = mock_client
@@ -150,7 +150,7 @@ class TestFillMonitorExecute:
 
     def test_disconnects_after_execution(self):
         """Handler disconnects from IB after execution."""
-        with patch('monitor_daemon.handlers.fill_monitor.IBClient') as mock_cls:
+        with patch('xenon.monitor_daemon.handlers.fill_monitor.IBClient') as mock_cls:
             mock_client = make_mock_client()
             mock_cls.return_value = mock_client
 
@@ -165,7 +165,7 @@ class TestFillMonitorNotifications:
 
     def test_sends_notification_on_fill(self):
         """Handler sends macOS notification on fill."""
-        with patch('monitor_daemon.handlers.fill_monitor.IBClient') as mock_cls, \
+        with patch('xenon.monitor_daemon.handlers.fill_monitor.IBClient') as mock_cls, \
              patch.object(FillMonitorHandler, '_send_notification') as mock_notify:
             mock_trade = MagicMock()
             mock_trade.order.orderId = 5

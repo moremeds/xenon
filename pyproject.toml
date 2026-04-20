@@ -9,14 +9,89 @@ requires-python = ">=3.13"
 description = "Market structure reconstruction system"
 readme = "README.md"
 dependencies = [
+    # Cloud / data
     "boto3>=1.42",
-    "pyarrow>=15.0",
     "botocore>=1.42",
+    "pyarrow>=15.0",
+    "duckdb>=1.2.0",
+    # Web framework
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
-    "python-dotenv",
-    "duckdb>=1.2.0",
+    "httpx>=0.27",
+    # Auth
+    "PyJWT>=2.9",
+    "cryptography>=43.0",
+    # HTTP + config
+    "requests>=2.28",
+    "python-dotenv>=1.0",
+    "pytz>=2024.1",
+    # Numerics
+    "pandas>=1.5",
+    "numpy>=1.26",
+    # Brokers
+    "ib_insync>=0.9.86",
+    "futu-api>=9.0",
+    # Browser automation (MenthorQ CTA scraping)
+    "playwright>=1.48",
 ]
+
+[project.scripts]
+xenon-api                   = "xenon.api.server:main"
+xenon-generate-cta-share    = "xenon.shares.generate_cta_share:main"
+xenon-generate-gex-share    = "xenon.shares.generate_gex_share:main"
+xenon-generate-regime-share = "xenon.shares.generate_regime_share:main"
+xenon-generate-vcg-share    = "xenon.shares.generate_vcg_share:main"
+xenon-blotter               = "xenon.trade_blotter.cli:main"
+xenon-blotter-history       = "xenon.trade_blotter.flex_query:main"
+xenon-market-hours          = "xenon.utils.market_hours:main"
+xenon-presets               = "xenon.utils.presets:main"
+xenon-monitor-daemon        = "xenon.monitor_daemon.run:main"
+xenon-cta-sync-service      = "xenon.services.cta_sync_service:main"
+xenon-preset-rebalance      = "xenon.monitor_daemon.handlers.preset_rebalance:main"
+xenon-fetch-flow            = "xenon.fetchers.fetch_flow:main"
+xenon-fetch-ticker          = "xenon.fetchers.fetch_ticker:main"
+xenon-fetch-options         = "xenon.fetchers.fetch_options:main"
+xenon-fetch-oi              = "xenon.fetchers.fetch_oi_changes:main"
+xenon-fetch-analyst         = "xenon.fetchers.fetch_analyst_ratings:main"
+xenon-fetch-news            = "xenon.fetchers.fetch_news:main"
+xenon-fetch-menthorq-cta    = "xenon.fetchers.fetch_menthorq_cta:main"
+xenon-fetch-menthorq-dashboard = "xenon.fetchers.fetch_menthorq_dashboard:main"
+xenon-fetch-x-watchlist     = "xenon.fetchers.fetch_x_watchlist:main"
+xenon-fetch-x-xai           = "xenon.fetchers.fetch_x_xai:main"
+xenon-fetch-apex-data       = "xenon.fetchers.fetch_apex_data:main"
+xenon-scan                  = "xenon.scanners.scanner:main"
+xenon-discover              = "xenon.scanners.discover:main"
+xenon-discover-forex        = "xenon.scanners.discover_forex:main"
+xenon-cri-scan              = "xenon.scanners.cri:main"
+xenon-vcg-scan              = "xenon.scanners.vcg:main"
+xenon-gex-scan              = "xenon.scanners.gex:main"
+xenon-leap-iv               = "xenon.scanners.leap_iv:main"
+xenon-leap-uw               = "xenon.scanners.leap_uw:main"
+xenon-trend-scan            = "xenon.scanners.trend.cli:main"
+xenon-uw-scan               = "xenon.scanners.uw.scan:main"
+xenon-uw-analyze            = "xenon.scanners.uw.analyze:main"
+xenon-repair-cri-rvol       = "xenon.scanners.repair_cri_rvol_cache:main"
+xenon-garch                 = "xenon.scanners.garch:main"
+xenon-ib-execute            = "xenon.execution.ib_execute:main"
+xenon-ib-place-order        = "xenon.execution.ib_place_order:main"
+xenon-ib-order-manage       = "xenon.execution.ib_order_manage:main"
+xenon-ib-orders             = "xenon.execution.ib_orders:main"
+xenon-ib-option-chain       = "xenon.execution.ib_option_chain:main"
+xenon-ib-reconcile          = "xenon.execution.ib_reconcile:main"
+xenon-ib-sync               = "xenon.execution.ib_sync:main"
+xenon-naked-short-audit     = "xenon.execution.naked_short_audit:main"
+xenon-futu-sync             = "xenon.execution.futu_sync:main"
+xenon-evaluate              = "xenon.reports.evaluate:main"
+xenon-kelly                 = "xenon.reports.kelly:main"
+xenon-risk-reversal         = "xenon.reports.risk_reversal:main"
+xenon-free-trade-analyzer   = "xenon.reports.free_trade_analyzer:main"
+xenon-verify-options-oi     = "xenon.reports.verify_options_oi:main"
+xenon-portfolio-report      = "xenon.reports.portfolio_report:main"
+xenon-portfolio-attrib      = "xenon.reports.portfolio_attribution:main"
+xenon-portfolio-perf        = "xenon.reports.portfolio_performance:main"
+xenon-perf-explainer        = "xenon.reports.performance_explainer_report:main"
+xenon-scenario              = "xenon.reports.scenario_analysis:main"
+xenon-scenario-report       = "xenon.reports.scenario_report:main"
 
 [project.optional-dependencies]
 test = [
@@ -29,6 +104,10 @@ test = [
 dev = [
     "ruff>=0.7",
     "mypy>=1.13",
+]
+extras = [
+    # Lazy-imported fallbacks inside fetchers — install only if those code paths are exercised.
+    "yfinance>=0.2",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -44,18 +123,13 @@ ignore = ["E501"]  # line length handled separately
 
 [tool.ruff.lint.isort]
 known-first-party = [
-    "utils",
-    "trade_blotter",
     "fetchers",
     "scanners",
     "execution",
     "reports",
-    "shares",
     "services",
     "ta",
     "infra",
-    "clients",
-    "analysis",
     "ta_lib",  # active — consumed by fetchers/fetch_apex_data, scanners/trend/cli, etc.
 ]
 

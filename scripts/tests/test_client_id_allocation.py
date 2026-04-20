@@ -28,19 +28,19 @@ class TestClientIdRanges:
     """Verify the ID range constants exist and don't overlap."""
 
     def test_pool_range_exists(self):
-        from clients.ib_client import POOL_ID_RANGE
+        from xenon.clients.ib_client import POOL_ID_RANGE
         assert POOL_ID_RANGE == (0, 9)
 
     def test_relay_range_exists(self):
-        from clients.ib_client import RELAY_ID_RANGE
+        from xenon.clients.ib_client import RELAY_ID_RANGE
         assert RELAY_ID_RANGE == (10, 19)
 
     def test_subprocess_range_exists(self):
-        from clients.ib_client import SUBPROCESS_ID_RANGE
+        from xenon.clients.ib_client import SUBPROCESS_ID_RANGE
         assert SUBPROCESS_ID_RANGE == (20, 49)
 
     def test_ranges_do_not_overlap(self):
-        from clients.ib_client import POOL_ID_RANGE, RELAY_ID_RANGE, SUBPROCESS_ID_RANGE
+        from xenon.clients.ib_client import POOL_ID_RANGE, RELAY_ID_RANGE, SUBPROCESS_ID_RANGE
         pool = set(range(POOL_ID_RANGE[0], POOL_ID_RANGE[1] + 1))
         relay = set(range(RELAY_ID_RANGE[0], RELAY_ID_RANGE[1] + 1))
         subproc = set(range(SUBPROCESS_ID_RANGE[0], SUBPROCESS_ID_RANGE[1] + 1))
@@ -49,13 +49,13 @@ class TestClientIdRanges:
         assert relay.isdisjoint(subproc), "Relay and subprocess ranges overlap"
 
     def test_pool_roles_use_pool_range(self):
-        from clients.ib_client import POOL_ROLES, POOL_ID_RANGE
+        from xenon.clients.ib_client import POOL_ROLES, POOL_ID_RANGE
         lo, hi = POOL_ID_RANGE
         for role, cid in POOL_ROLES.items():
             assert lo <= cid <= hi, f"Pool role '{role}' uses ID {cid} outside pool range {lo}-{hi}"
 
     def test_pool_roles_have_unique_ids(self):
-        from clients.ib_client import POOL_ROLES
+        from xenon.clients.ib_client import POOL_ROLES
         ids = list(POOL_ROLES.values())
         assert len(ids) == len(set(ids)), f"Duplicate pool role IDs: {ids}"
 
@@ -69,7 +69,7 @@ class TestSubprocessAutoAllocate:
 
     def test_connect_with_auto_allocate_uses_subprocess_range(self):
         """When client_id='auto', connect should try IDs from subprocess range."""
-        from clients.ib_client import IBClient, SUBPROCESS_ID_RANGE
+        from xenon.clients.ib_client import IBClient, SUBPROCESS_ID_RANGE
 
         client = IBClient()
         mock_ib = MagicMock()
@@ -87,7 +87,7 @@ class TestSubprocessAutoAllocate:
 
     def test_auto_allocate_retries_on_client_id_conflict(self):
         """When first ID is in use, auto-allocate should try a different one."""
-        from clients.ib_client import IBClient, SUBPROCESS_ID_RANGE
+        from xenon.clients.ib_client import IBClient, SUBPROCESS_ID_RANGE
 
         client = IBClient()
         mock_ib = MagicMock()
@@ -116,7 +116,7 @@ class TestSubprocessAutoAllocate:
 
     def test_auto_allocate_wraps_around_range(self):
         """When approaching range end, should wrap to start."""
-        from clients.ib_client import IBClient, SUBPROCESS_ID_RANGE
+        from xenon.clients.ib_client import IBClient, SUBPROCESS_ID_RANGE
 
         client = IBClient()
         mock_ib = MagicMock()
@@ -142,7 +142,7 @@ class TestSubprocessAutoAllocate:
 
     def test_auto_allocate_raises_when_range_exhausted(self):
         """When all IDs in range are taken, should raise IBConnectionError."""
-        from clients.ib_client import IBClient, IBConnectionError, SUBPROCESS_ID_RANGE
+        from xenon.clients.ib_client import IBClient, IBConnectionError, SUBPROCESS_ID_RANGE
 
         client = IBClient()
         mock_ib = MagicMock()
@@ -160,7 +160,7 @@ class TestSubprocessAutoAllocate:
 
     def test_auto_allocate_does_not_retry_non_conflict_errors(self):
         """Connection errors other than 'client id in use' should not trigger rotation."""
-        from clients.ib_client import IBClient, IBConnectionError
+        from xenon.clients.ib_client import IBClient, IBConnectionError
 
         client = IBClient()
         mock_ib = MagicMock()
@@ -183,7 +183,7 @@ class TestExplicitClientId:
     """Explicit integer client_id should bypass auto-allocation."""
 
     def test_explicit_int_id_used_directly(self):
-        from clients.ib_client import IBClient
+        from xenon.clients.ib_client import IBClient
 
         client = IBClient()
         mock_ib = MagicMock()
@@ -197,7 +197,7 @@ class TestExplicitClientId:
     @patch("time.sleep")
     def test_explicit_id_no_retry_on_conflict(self, _mock_sleep):
         """Explicit IDs should NOT auto-rotate — the caller chose that ID deliberately."""
-        from clients.ib_client import IBClient, IBConnectionError
+        from xenon.clients.ib_client import IBClient, IBConnectionError
 
         client = IBClient()
         mock_ib = MagicMock()
@@ -215,7 +215,7 @@ class TestExplicitClientId:
 
     def test_client_name_lookup_still_works(self):
         """client_name should resolve to the registry value."""
-        from clients.ib_client import IBClient, POOL_ROLES
+        from xenon.clients.ib_client import IBClient, POOL_ROLES
 
         client = IBClient()
         mock_ib = MagicMock()
@@ -239,7 +239,7 @@ class TestRandomizedStart:
 
     def test_auto_allocate_start_varies(self):
         """Multiple auto-allocate calls should not always start at the same ID."""
-        from clients.ib_client import IBClient, SUBPROCESS_ID_RANGE
+        from xenon.clients.ib_client import IBClient, SUBPROCESS_ID_RANGE
 
         observed_first_ids = set()
         for _ in range(20):
@@ -266,13 +266,13 @@ class TestPoolRoles:
     """The IB pool should use POOL_ROLES for its connections."""
 
     def test_pool_roles_exported(self):
-        from clients.ib_client import POOL_ROLES
+        from xenon.clients.ib_client import POOL_ROLES
         assert "sync" in POOL_ROLES
         assert "orders" in POOL_ROLES
         assert "data" in POOL_ROLES
 
     def test_pool_roles_in_pool_range(self):
-        from clients.ib_client import POOL_ROLES, POOL_ID_RANGE
+        from xenon.clients.ib_client import POOL_ROLES, POOL_ID_RANGE
         lo, hi = POOL_ID_RANGE
         for role, cid in POOL_ROLES.items():
             assert lo <= cid <= hi

@@ -3,7 +3,7 @@ import pytest
 from datetime import datetime
 from unittest.mock import patch, MagicMock
 
-from fetchers.fetch_flow import (
+from xenon.fetchers.fetch_flow import (
     is_market_open,
     get_last_n_trading_days,
     analyze_darkpool,
@@ -206,27 +206,27 @@ class TestAnalyzeOptionsFlow:
 class TestFetchFlowCombinedSignal:
     """Test the combined signal logic from fetch_flow() by mocking I/O."""
 
-    @patch("fetchers.fetch_flow.UWClient")
-    @patch("fetchers.fetch_flow.fetch_flow_alerts", return_value=[])
-    @patch("fetchers.fetch_flow.fetch_darkpool", return_value=[])
-    @patch("fetchers.fetch_flow.get_last_n_trading_days", return_value=["2026-03-02"])
+    @patch("xenon.fetchers.fetch_flow.UWClient")
+    @patch("xenon.fetchers.fetch_flow.fetch_flow_alerts", return_value=[])
+    @patch("xenon.fetchers.fetch_flow.fetch_darkpool", return_value=[])
+    @patch("xenon.fetchers.fetch_flow.get_last_n_trading_days", return_value=["2026-03-02"])
     def test_no_data_no_signal(self, mock_days, mock_dp, mock_flow, MockUWClient):
         mock_client = MagicMock()
         MockUWClient.return_value.__enter__ = MagicMock(return_value=mock_client)
         MockUWClient.return_value.__exit__ = MagicMock(return_value=False)
-        from fetch_flow import fetch_flow
+        from xenon.fetchers.fetch_flow import fetch_flow
         result = fetch_flow("AAPL", lookback_days=1)
         assert result["combined_signal"] == "NO_SIGNAL"
 
-    @patch("fetchers.fetch_flow.UWClient")
-    @patch("fetchers.fetch_flow.fetch_flow_alerts")
-    @patch("fetchers.fetch_flow.fetch_darkpool")
-    @patch("fetchers.fetch_flow.get_last_n_trading_days", return_value=["2026-03-02"])
+    @patch("xenon.fetchers.fetch_flow.UWClient")
+    @patch("xenon.fetchers.fetch_flow.fetch_flow_alerts")
+    @patch("xenon.fetchers.fetch_flow.fetch_darkpool")
+    @patch("xenon.fetchers.fetch_flow.get_last_n_trading_days", return_value=["2026-03-02"])
     def test_bullish_confluence(self, mock_days, mock_dp, mock_flow, MockUWClient):
         mock_client = MagicMock()
         MockUWClient.return_value.__enter__ = MagicMock(return_value=mock_client)
         MockUWClient.return_value.__exit__ = MagicMock(return_value=False)
-        from fetch_flow import fetch_flow
+        from xenon.fetchers.fetch_flow import fetch_flow
         # DP: strong buy -> ACCUMULATION
         mock_dp.return_value = [
             {"size": "5000", "price": "51", "premium": "255000",
@@ -240,15 +240,15 @@ class TestFetchFlowCombinedSignal:
         result = fetch_flow("AAPL", lookback_days=1)
         assert result["combined_signal"] == "STRONG_BULLISH_CONFLUENCE"
 
-    @patch("fetchers.fetch_flow.UWClient")
-    @patch("fetchers.fetch_flow.fetch_flow_alerts")
-    @patch("fetchers.fetch_flow.fetch_darkpool")
-    @patch("fetchers.fetch_flow.get_last_n_trading_days", return_value=["2026-03-02"])
+    @patch("xenon.fetchers.fetch_flow.UWClient")
+    @patch("xenon.fetchers.fetch_flow.fetch_flow_alerts")
+    @patch("xenon.fetchers.fetch_flow.fetch_darkpool")
+    @patch("xenon.fetchers.fetch_flow.get_last_n_trading_days", return_value=["2026-03-02"])
     def test_dp_only_signal(self, mock_days, mock_dp, mock_flow, MockUWClient):
         mock_client = MagicMock()
         MockUWClient.return_value.__enter__ = MagicMock(return_value=mock_client)
         MockUWClient.return_value.__exit__ = MagicMock(return_value=False)
-        from fetch_flow import fetch_flow
+        from xenon.fetchers.fetch_flow import fetch_flow
         mock_dp.return_value = [
             {"size": "5000", "price": "51", "premium": "255000",
              "nbbo_bid": "49", "nbbo_ask": "51"},

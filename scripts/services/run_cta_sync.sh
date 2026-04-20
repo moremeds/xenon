@@ -8,7 +8,9 @@
 # load-triggered execution backfills the missing session automatically.
 #
 
-cd "$(dirname "$0")/.."
+PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$PROJECT_DIR"
+export PATH="$PROJECT_DIR/.venv/bin:$PATH"
 
 _load_env() {
     local f="$1"
@@ -71,7 +73,7 @@ fi
 SOURCE="${XENON_CTA_SYNC_SOURCE:-${CTA_SYNC_TRIGGER:-launchd}}"
 
 echo "$(date): Running hardened CTA sync runtime (source=$SOURCE)..."
-"$PYTHON_BIN" scripts/cta_sync_service.py --source "$SOURCE" "$@"
+"$PROJECT_DIR/.venv/bin/xenon-cta-sync-service" --source "$SOURCE" "$@"
 EXIT_CODE=$?
 if [ "$EXIT_CODE" -eq 0 ]; then
     echo "$(date): CTA sync runtime complete (OK)"

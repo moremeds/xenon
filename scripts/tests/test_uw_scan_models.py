@@ -1,4 +1,4 @@
-from scripts.scanners.uw.models import SignalHit, ScanCandidate
+from xenon.scanners.uw.models import SignalHit, ScanCandidate
 
 
 def test_signal_hit_basic():

@@ -14,7 +14,7 @@ export async function scanner(
     args.push("--min-score", String(input.minScore));
   }
 
-  return runScript("scripts/scanner.py", {
+  return runScript("src/xenon/scanners/scanner.py", {
     args,
     timeout: 120_000, // Scanner iterates the full watchlist
     outputSchema: ScannerOutput,

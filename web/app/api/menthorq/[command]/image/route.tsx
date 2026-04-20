@@ -22,7 +22,7 @@ export type DashboardCache = {
 };
 
 async function loadLatestCache(
-  command: string
+  command: string,
 ): Promise<DashboardCache | null> {
   try {
     const files = await readdir(CACHE_DIR);
@@ -32,7 +32,7 @@ async function loadLatestCache(
     if (matching.length === 0) return null;
     const raw = await readFile(
       join(CACHE_DIR, matching[matching.length - 1]),
-      "utf-8"
+      "utf-8",
     );
     return JSON.parse(raw) as DashboardCache;
   } catch {
@@ -92,14 +92,7 @@ const NUMERIC_VALUE_KEYS = [
   "exposure",
   "score",
 ];
-const MATRIX_ROW_KEYS = [
-  "row",
-  "ticker",
-  "symbol",
-  "asset",
-  "pair",
-  "name",
-];
+const MATRIX_ROW_KEYS = ["row", "ticker", "symbol", "asset", "pair", "name"];
 const MATRIX_COL_KEYS = [
   "col",
   "metric",
@@ -141,10 +134,7 @@ function unique<T>(values: T[]): T[] {
 }
 
 function orderedKeys(rows: DashboardRow[], preferred: string[]): string[] {
-  return unique([
-    ...preferred,
-    ...rows.flatMap((row) => Object.keys(row)),
-  ]);
+  return unique([...preferred, ...rows.flatMap((row) => Object.keys(row))]);
 }
 
 function pickLabelKey(
@@ -198,7 +188,11 @@ function extractAnalyticalTimeSeries(
   if (rows.length === 0) return null;
 
   const labelKey = pickLabelKey(rows, ANALYTICAL_LABEL_KEYS);
-  const valueKey = pickNumericKey(rows, NUMERIC_VALUE_KEYS, labelKey ? [labelKey] : []);
+  const valueKey = pickNumericKey(
+    rows,
+    NUMERIC_VALUE_KEYS,
+    labelKey ? [labelKey] : [],
+  );
   if (!labelKey || !valueKey) return null;
 
   const series = rows
@@ -208,10 +202,17 @@ function extractAnalyticalTimeSeries(
       if (label == null || value == null) return null;
       return { label, value };
     })
-    .filter((point): point is { label: string; value: number } => point != null);
+    .filter(
+      (point): point is { label: string; value: number } => point != null,
+    );
 
   if (series.length < 2) return null;
-  if (!isTimeLikeLabelKey(labelKey, series.map((point) => point.label))) {
+  if (
+    !isTimeLikeLabelKey(
+      labelKey,
+      series.map((point) => point.label),
+    )
+  ) {
     return null;
   }
 
@@ -225,7 +226,11 @@ function extractDistributionBars(
   if (rows.length === 0) return null;
 
   const labelKey = pickLabelKey(rows, DISTRIBUTION_LABEL_KEYS);
-  const valueKey = pickNumericKey(rows, NUMERIC_VALUE_KEYS, labelKey ? [labelKey] : []);
+  const valueKey = pickNumericKey(
+    rows,
+    NUMERIC_VALUE_KEYS,
+    labelKey ? [labelKey] : [],
+  );
   if (!labelKey || !valueKey) return null;
 
   const bars = rows
@@ -257,12 +262,17 @@ function extractMatrixHeatmap(data: DashboardCache): {
       return { row: rowLabel, col: colLabel, value };
     })
     .filter(
-      (cell): cell is { row: string; col: string; value: number } => cell != null,
+      (cell): cell is { row: string; col: string; value: number } =>
+        cell != null,
     );
 
   const directRowValues = unique(directCells.map((cell) => cell.row));
   const directColValues = unique(directCells.map((cell) => cell.col));
-  if (directCells.length > 0 && directRowValues.length >= 2 && directColValues.length >= 2) {
+  if (
+    directCells.length > 0 &&
+    directRowValues.length >= 2 &&
+    directColValues.length >= 2
+  ) {
     return {
       data: directCells,
       rows: directRowValues,
@@ -288,7 +298,8 @@ function extractMatrixHeatmap(data: DashboardCache): {
       return { row: rowLabel, col: colLabel, value };
     })
     .filter(
-      (cell): cell is { row: string; col: string; value: number } => cell != null,
+      (cell): cell is { row: string; col: string; value: number } =>
+        cell != null,
     );
   const rowValues = unique(cells.map((cell) => cell.row));
   const colValues = unique(cells.map((cell) => cell.col));
@@ -365,7 +376,8 @@ function NoData({ command }: { command: string }) {
         fontSize: "13px",
       }}
     >
-      No data for {command.toUpperCase()}. Run: python3.13 scripts/fetch_menthorq_dashboard.py --command {command}
+      No data for {command.toUpperCase()}. Run: xenon-fetch-menthorq-dashboard
+      --command {command}
     </div>
   );
 }
@@ -464,7 +476,7 @@ export function resolveMenthorqRenderer(
 
 export async function GET(
   request: Request,
-  { params }: { params: Promise<{ command: string }> }
+  { params }: { params: Promise<{ command: string }> },
 ) {
   const { command } = await params;
 
@@ -486,41 +498,50 @@ export async function GET(
   const Renderer = selection.Renderer;
 
   return new ImageResponse(
-    (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        width: "100%",
+        height: "100%",
+        background: OG.bg,
+        fontFamily: OG.chart.axisFontFamily,
+        color: OG.text,
+        padding: `${OG.chart.padding}px`,
+      }}
+    >
+      {/* Title bar */}
       <div
         style={{
           display: "flex",
-          flexDirection: "column",
-          width: "100%",
-          height: "100%",
-          background: OG.bg,
-          fontFamily: OG.chart.axisFontFamily,
-          color: OG.text,
-          padding: `${OG.chart.padding}px`,
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: "16px",
+          paddingBottom: "10px",
+          minHeight: `${OG.chart.headerHeight}px`,
+          borderBottom: `1px solid ${OG.border}`,
         }}
       >
-        {/* Title bar */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: "16px",
-            paddingBottom: "10px",
-            minHeight: `${OG.chart.headerHeight}px`,
-            borderBottom: `1px solid ${OG.border}`,
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center" }}>
-            <span
-              style={{
-                fontSize: "14px",
-                fontWeight: 700,
-                letterSpacing: "0.1em",
-              }}
-            >
-              {command.toUpperCase()}
-            </span>
+        <div style={{ display: "flex", alignItems: "center" }}>
+          <span
+            style={{
+              fontSize: "14px",
+              fontWeight: 700,
+              letterSpacing: "0.1em",
+            }}
+          >
+            {command.toUpperCase()}
+          </span>
+          <span
+            style={{
+              fontSize: "11px",
+              color: OG.muted,
+              marginLeft: "12px",
+            }}
+          >
+            {data.date ?? "---"}
+          </span>
+          {data.title && (
             <span
               style={{
                 fontSize: "11px",
@@ -528,58 +549,47 @@ export async function GET(
                 marginLeft: "12px",
               }}
             >
-              {data.date ?? "---"}
+              {data.title}
             </span>
-            {data.title && (
-              <span
-                style={{
-                  fontSize: "11px",
-                  color: OG.muted,
-                  marginLeft: "12px",
-                }}
-              >
-                {data.title}
-              </span>
-            )}
-          </div>
-          <div
+          )}
+        </div>
+        <div
+          style={{
+            display: "flex",
+            gap: "8px",
+            alignItems: "center",
+          }}
+        >
+          <span
             style={{
-              display: "flex",
-              gap: "8px",
-              alignItems: "center",
+              fontSize: "11px",
+              color: OG.text,
+              border: `1px solid ${OG.border}`,
+              padding: "4px 8px",
             }}
           >
-            <span
-              style={{
-                fontSize: "11px",
-                color: OG.text,
-                border: `1px solid ${OG.border}`,
-                padding: "4px 8px",
-              }}
-            >
-              {selection.family.label.toUpperCase()}
-            </span>
-            <span
-              style={{
-                fontSize: "11px",
-                color: OG.muted,
-                border: `1px solid ${OG.border}`,
-                padding: "4px 8px",
-              }}
-            >
-              {selection.family.renderer.toUpperCase()}
-            </span>
-          </div>
+            {selection.family.label.toUpperCase()}
+          </span>
+          <span
+            style={{
+              fontSize: "11px",
+              color: OG.muted,
+              border: `1px solid ${OG.border}`,
+              padding: "4px 8px",
+            }}
+          >
+            {selection.family.renderer.toUpperCase()}
+          </span>
         </div>
-
-        {/* Chart */}
-        <Renderer data={data} />
       </div>
-    ),
+
+      {/* Chart */}
+      <Renderer data={data} />
+    </div>,
     {
       width: WIDTH,
       height: 500,
       fonts: fonts as any,
-    }
+    },
   );
 }

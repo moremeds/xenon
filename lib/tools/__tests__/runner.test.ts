@@ -22,7 +22,7 @@ describe("resolveProjectRoot", () => {
 
 describe("runScript", () => {
   it("returns ok: true with parsed JSON for a valid script", async () => {
-    const result = await runScript("scripts/kelly.py", {
+    const result = await runScript("src/xenon/reports/kelly.py", {
       args: ["--prob", "0.6", "--odds", "2.0"],
       timeout: 10_000,
     });
@@ -46,7 +46,7 @@ describe("runScript", () => {
 
   it("returns ok: false when script exits non-zero", async () => {
     // fetch_ticker exits 1 when ticker not verified — use a guaranteed-bad ticker
-    const result = await runScript("scripts/kelly.py", {
+    const result = await runScript("src/xenon/reports/kelly.py", {
       args: ["--prob", "not-a-number"],
       timeout: 10_000,
     });
@@ -55,7 +55,7 @@ describe("runScript", () => {
   });
 
   it("supports rawOutput mode (no JSON parsing)", async () => {
-    const result = await runScript("scripts/kelly.py", {
+    const result = await runScript("src/xenon/reports/kelly.py", {
       args: ["--prob", "0.6", "--odds", "2.0"],
       rawOutput: true,
       timeout: 10_000,
@@ -65,7 +65,7 @@ describe("runScript", () => {
     if (result.ok) {
       // rawOutput returns the string, not parsed JSON
       expect(typeof result.data).toBe("string");
-      expect((result.data as string)).toContain("full_kelly_pct");
+      expect(result.data as string).toContain("full_kelly_pct");
     }
   });
 
@@ -75,7 +75,7 @@ describe("runScript", () => {
       nonexistent_field: Type.String(),
     });
 
-    const result = await runScript("scripts/kelly.py", {
+    const result = await runScript("src/xenon/reports/kelly.py", {
       args: ["--prob", "0.6", "--odds", "2.0"],
       outputSchema: WrongSchema,
       timeout: 10_000,

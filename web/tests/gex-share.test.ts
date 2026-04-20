@@ -15,7 +15,8 @@ describe("generate_gex_share.py", () => {
   it("exists at scripts/shares/generate_gex_share.py", async () => {
     const p = path.join(
       PROJECT_ROOT,
-      "scripts",
+      "src",
+      "xenon",
       "shares",
       "generate_gex_share.py",
     );
@@ -25,7 +26,8 @@ describe("generate_gex_share.py", () => {
   it("uses from __future__ import annotations for Python 3.9 compat", async () => {
     const p = path.join(
       PROJECT_ROOT,
-      "scripts",
+      "src",
+      "xenon",
       "shares",
       "generate_gex_share.py",
     );
@@ -36,7 +38,8 @@ describe("generate_gex_share.py", () => {
   it("reads from data/gex.json", async () => {
     const p = path.join(
       PROJECT_ROOT,
-      "scripts",
+      "src",
+      "xenon",
       "shares",
       "generate_gex_share.py",
     );
@@ -47,7 +50,8 @@ describe("generate_gex_share.py", () => {
   it("generates exactly 4 cards", async () => {
     const p = path.join(
       PROJECT_ROOT,
-      "scripts",
+      "src",
+      "xenon",
       "shares",
       "generate_gex_share.py",
     );
@@ -62,7 +66,8 @@ describe("generate_gex_share.py", () => {
   it("outputs preview_path in JSON result", async () => {
     const p = path.join(
       PROJECT_ROOT,
-      "scripts",
+      "src",
+      "xenon",
       "shares",
       "generate_gex_share.py",
     );
@@ -73,7 +78,8 @@ describe("generate_gex_share.py", () => {
   it("builds tweet text with ticker, spot, net GEX, and xenon brand", async () => {
     const p = path.join(
       PROJECT_ROOT,
-      "scripts",
+      "src",
+      "xenon",
       "shares",
       "generate_gex_share.py",
     );
@@ -86,7 +92,8 @@ describe("generate_gex_share.py", () => {
   it("uses Xenon brand colours (#0a0f14, #05AD98)", async () => {
     const p = path.join(
       PROJECT_ROOT,
-      "scripts",
+      "src",
+      "xenon",
       "shares",
       "generate_gex_share.py",
     );
@@ -100,19 +107,19 @@ describe("generate_gex_share.py", () => {
 
 describe("POST /gex/share FastAPI endpoint", () => {
   it("is registered in server.py", async () => {
-    const p = path.join(PROJECT_ROOT, "scripts", "api", "server.py");
+    const p = path.join(PROJECT_ROOT, "src", "xenon", "api", "server.py");
     const content = await readFile(p, "utf-8");
     expect(content).toContain('"/gex/share"');
   });
 
   it("calls generate_gex_share.py", async () => {
-    const p = path.join(PROJECT_ROOT, "scripts", "api", "server.py");
+    const p = path.join(PROJECT_ROOT, "src", "xenon", "api", "server.py");
     const content = await readFile(p, "utf-8");
-    expect(content).toContain("generate_gex_share.py");
+    expect(content).toContain("xenon-generate-gex-share");
   });
 
   it("raises HTTPException on script failure", async () => {
-    const p = path.join(PROJECT_ROOT, "scripts", "api", "server.py");
+    const p = path.join(PROJECT_ROOT, "src", "xenon", "api", "server.py");
     const content = await readFile(p, "utf-8");
     // Verify same pattern as vcg/regime share — raises on not result.ok
     const gexShareIdx = content.indexOf('"/gex/share"');

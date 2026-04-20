@@ -12,7 +12,7 @@ import pytest
 
 # Prevent price_cache from creating dirs on import
 with patch("os.makedirs"):
-    from reports.portfolio_performance import (
+    from xenon.reports.portfolio_performance import (
         TradeFill,
         _fetch_all_histories,
         _fetch_option_history_safe,
@@ -236,23 +236,23 @@ def test_build_payload_exposes_expected_top_level_contract(monkeypatch):
         return marks, []
 
     monkeypatch.setattr(
-        "reports.portfolio_performance.load_portfolio_snapshot",
+        "xenon.reports.portfolio_performance.load_portfolio_snapshot",
         lambda: {
             "last_sync": "2026-01-06T16:00:00",
             "account_summary": {"net_liquidation": 2000.0},
             "bankroll": 2000.0,
         },
     )
-    monkeypatch.setattr("reports.portfolio_performance.fetch_ib_nav_series", lambda: None)
-    monkeypatch.setattr("reports.portfolio_performance.load_ib_nav_cache", lambda: None)
-    monkeypatch.setattr("reports.portfolio_performance.fetch_flex_trade_fills", lambda: (trades, "ib_flex"))
-    monkeypatch.setattr("reports.portfolio_performance.extract_fill_marks", lambda *a, **kw: {})
-    monkeypatch.setattr("reports.portfolio_performance.fetch_stock_history", fake_stock_history)
-    monkeypatch.setattr("reports.portfolio_performance._fetch_all_histories", fake_fetch_all)
-    monkeypatch.setattr("reports.portfolio_performance._fetch_stock_history_fallback", lambda s, st, en: (s, {}, "none"))
-    monkeypatch.setattr("reports.portfolio_performance.IBClient", DummyIBClient)
-    monkeypatch.setattr("reports.portfolio_performance.read_cache", lambda *a: None)
-    monkeypatch.setattr("reports.portfolio_performance.write_cache", lambda *a, **kw: None)
+    monkeypatch.setattr("xenon.reports.portfolio_performance.fetch_ib_nav_series", lambda: None)
+    monkeypatch.setattr("xenon.reports.portfolio_performance.load_ib_nav_cache", lambda: None)
+    monkeypatch.setattr("xenon.reports.portfolio_performance.fetch_flex_trade_fills", lambda: (trades, "ib_flex"))
+    monkeypatch.setattr("xenon.reports.portfolio_performance.extract_fill_marks", lambda *a, **kw: {})
+    monkeypatch.setattr("xenon.reports.portfolio_performance.fetch_stock_history", fake_stock_history)
+    monkeypatch.setattr("xenon.reports.portfolio_performance._fetch_all_histories", fake_fetch_all)
+    monkeypatch.setattr("xenon.reports.portfolio_performance._fetch_stock_history_fallback", lambda s, st, en: (s, {}, "none"))
+    monkeypatch.setattr("xenon.reports.portfolio_performance.IBClient", DummyIBClient)
+    monkeypatch.setattr("xenon.reports.portfolio_performance.read_cache", lambda *a: None)
+    monkeypatch.setattr("xenon.reports.portfolio_performance.write_cache", lambda *a, **kw: None)
 
     payload = build_payload()
 
@@ -295,30 +295,30 @@ def test_build_payload_warns_and_continues_when_option_history_is_rate_limited(m
         return {}, ["SPY260320C00570000"]
 
     monkeypatch.setattr(
-        "reports.portfolio_performance.load_portfolio_snapshot",
+        "xenon.reports.portfolio_performance.load_portfolio_snapshot",
         lambda: {
             "last_sync": "2026-01-06T16:00:00",
             "account_summary": {"net_liquidation": 1000.0},
             "bankroll": 1000.0,
         },
     )
-    monkeypatch.setattr("reports.portfolio_performance.fetch_ib_nav_series", lambda: None)
-    monkeypatch.setattr("reports.portfolio_performance.load_ib_nav_cache", lambda: None)
-    monkeypatch.setattr("reports.portfolio_performance.fetch_flex_trade_fills", lambda: (trades, "ib_flex"))
-    monkeypatch.setattr("reports.portfolio_performance.extract_fill_marks", lambda *a, **kw: {})
+    monkeypatch.setattr("xenon.reports.portfolio_performance.fetch_ib_nav_series", lambda: None)
+    monkeypatch.setattr("xenon.reports.portfolio_performance.load_ib_nav_cache", lambda: None)
+    monkeypatch.setattr("xenon.reports.portfolio_performance.fetch_flex_trade_fills", lambda: (trades, "ib_flex"))
+    monkeypatch.setattr("xenon.reports.portfolio_performance.extract_fill_marks", lambda *a, **kw: {})
     monkeypatch.setattr(
-        "reports.portfolio_performance.fetch_stock_history",
+        "xenon.reports.portfolio_performance.fetch_stock_history",
         lambda symbol, start_date, end_date, ib_client, uw_client: {
             "2026-01-02": 100.0,
             "2026-01-05": 101.0,
             "2026-01-06": 102.0,
         },
     )
-    monkeypatch.setattr("reports.portfolio_performance._fetch_all_histories", fake_fetch_all)
-    monkeypatch.setattr("reports.portfolio_performance._fetch_stock_history_fallback", lambda s, st, en: (s, {}, "none"))
-    monkeypatch.setattr("reports.portfolio_performance.IBClient", DummyIBClient)
-    monkeypatch.setattr("reports.portfolio_performance.read_cache", lambda *a: None)
-    monkeypatch.setattr("reports.portfolio_performance.write_cache", lambda *a, **kw: None)
+    monkeypatch.setattr("xenon.reports.portfolio_performance._fetch_all_histories", fake_fetch_all)
+    monkeypatch.setattr("xenon.reports.portfolio_performance._fetch_stock_history_fallback", lambda s, st, en: (s, {}, "none"))
+    monkeypatch.setattr("xenon.reports.portfolio_performance.IBClient", DummyIBClient)
+    monkeypatch.setattr("xenon.reports.portfolio_performance.read_cache", lambda *a: None)
+    monkeypatch.setattr("xenon.reports.portfolio_performance.write_cache", lambda *a, **kw: None)
 
     payload = build_payload()
 
@@ -399,16 +399,16 @@ class TestFetchStockHistoryIBOnly:
 
 
 class TestFetchStockHistoryFallback:
-    @patch("reports.portfolio_performance.read_cache")
+    @patch("xenon.reports.portfolio_performance.read_cache")
     def test_cache_hit(self, mock_read):
         mock_read.return_value = {"2026-01-02": 230.5}
         sym, history, source = _fetch_stock_history_fallback("SPY", "2026-01-01", "2026-03-17")
         assert history == {"2026-01-02": 230.5}
         assert source == "cache"
 
-    @patch("reports.portfolio_performance.write_cache")
-    @patch("reports.portfolio_performance.read_cache", return_value=None)
-    @patch("reports.portfolio_performance.UWClient")
+    @patch("xenon.reports.portfolio_performance.write_cache")
+    @patch("xenon.reports.portfolio_performance.read_cache", return_value=None)
+    @patch("xenon.reports.portfolio_performance.UWClient")
     def test_uw_success(self, mock_uw_cls, mock_read, mock_write):
         mock_uw = MagicMock()
         mock_uw.get_stock_ohlc.return_value = {"data": [{"date": "2026-01-02", "close": 230.5}]}
@@ -418,19 +418,19 @@ class TestFetchStockHistoryFallback:
         assert history == {"2026-01-02": 230.5}
         assert source == "uw"
 
-    @patch("reports.portfolio_performance.write_cache")
-    @patch("reports.portfolio_performance.read_cache", return_value=None)
-    @patch("reports.portfolio_performance.UWClient", side_effect=Exception("no token"))
-    @patch("reports.portfolio_performance._fetch_yahoo_chart")
+    @patch("xenon.reports.portfolio_performance.write_cache")
+    @patch("xenon.reports.portfolio_performance.read_cache", return_value=None)
+    @patch("xenon.reports.portfolio_performance.UWClient", side_effect=Exception("no token"))
+    @patch("xenon.reports.portfolio_performance._fetch_yahoo_chart")
     def test_yahoo_fallback(self, mock_yahoo, mock_uw_cls, mock_read, mock_write):
         mock_yahoo.return_value = [("2026-01-02", 230.5)]
         sym, history, source = _fetch_stock_history_fallback("SPY", "2026-01-01", "2026-03-17")
         assert history == {"2026-01-02": 230.5}
         assert source == "yahoo"
 
-    @patch("reports.portfolio_performance.read_cache", return_value=None)
-    @patch("reports.portfolio_performance.UWClient", side_effect=Exception("no token"))
-    @patch("reports.portfolio_performance._fetch_yahoo_chart", side_effect=Exception("network"))
+    @patch("xenon.reports.portfolio_performance.read_cache", return_value=None)
+    @patch("xenon.reports.portfolio_performance.UWClient", side_effect=Exception("no token"))
+    @patch("xenon.reports.portfolio_performance._fetch_yahoo_chart", side_effect=Exception("network"))
     def test_all_fail(self, mock_yahoo, mock_uw_cls, mock_read):
         sym, history, source = _fetch_stock_history_fallback("SPY", "2026-01-01", "2026-03-17")
         assert history == {}
@@ -438,16 +438,16 @@ class TestFetchStockHistoryFallback:
 
 
 class TestFetchOptionHistorySafe:
-    @patch("reports.portfolio_performance.read_cache")
+    @patch("xenon.reports.portfolio_performance.read_cache")
     def test_cache_hit(self, mock_read):
         mock_read.return_value = {"2026-02-15": 5.50}
         oid, history, warning = _fetch_option_history_safe("AAPL260321C00230000", "2026-01-01", "2026-03-17")
         assert history == {"2026-02-15": 5.50}
         assert warning is None
 
-    @patch("reports.portfolio_performance.write_cache")
-    @patch("reports.portfolio_performance.read_cache", return_value=None)
-    @patch("reports.portfolio_performance.UWClient")
+    @patch("xenon.reports.portfolio_performance.write_cache")
+    @patch("xenon.reports.portfolio_performance.read_cache", return_value=None)
+    @patch("xenon.reports.portfolio_performance.UWClient")
     def test_uw_success(self, mock_uw_cls, mock_read, mock_write):
         mock_uw = MagicMock()
         mock_uw.get_option_contract_historic.return_value = {
@@ -459,10 +459,10 @@ class TestFetchOptionHistorySafe:
         assert history == {"2026-02-15": 5.5}
         assert warning is None
 
-    @patch("reports.portfolio_performance.read_cache", return_value=None)
-    @patch("reports.portfolio_performance.UWClient")
+    @patch("xenon.reports.portfolio_performance.read_cache", return_value=None)
+    @patch("xenon.reports.portfolio_performance.UWClient")
     def test_rate_limit_skips(self, mock_uw_cls, mock_read):
-        from clients.uw_client import UWRateLimitError
+        from xenon.clients.uw_client import UWRateLimitError
 
         mock_uw = MagicMock()
         mock_uw.get_option_contract_historic.side_effect = UWRateLimitError("429")
@@ -472,8 +472,8 @@ class TestFetchOptionHistorySafe:
         assert history == {}
         assert "Rate limited" in warning
 
-    @patch("reports.portfolio_performance.read_cache", return_value=None)
-    @patch("reports.portfolio_performance.UWClient")
+    @patch("xenon.reports.portfolio_performance.read_cache", return_value=None)
+    @patch("xenon.reports.portfolio_performance.UWClient")
     def test_generic_exception(self, mock_uw_cls, mock_read):
         mock_uw = MagicMock()
         mock_uw.get_option_contract_historic.side_effect = Exception("network error")
@@ -497,11 +497,11 @@ class TestFetchAllHistories:
             option_id=option_id,
         )
 
-    @patch("reports.portfolio_performance.prune_cache")
-    @patch("reports.portfolio_performance._fetch_option_history_safe")
-    @patch("reports.portfolio_performance._fetch_stock_history_ib_only")
-    @patch("reports.portfolio_performance.read_cache", return_value=None)
-    @patch("reports.portfolio_performance.write_cache")
+    @patch("xenon.reports.portfolio_performance.prune_cache")
+    @patch("xenon.reports.portfolio_performance._fetch_option_history_safe")
+    @patch("xenon.reports.portfolio_performance._fetch_stock_history_ib_only")
+    @patch("xenon.reports.portfolio_performance.read_cache", return_value=None)
+    @patch("xenon.reports.portfolio_performance.write_cache")
     def test_parallel_execution(self, mock_wc, mock_read, mock_ib, mock_opt, mock_prune):
         mock_ib.return_value = ("AAPL", {"2026-01-15": 230.0})
         mock_opt.return_value = ("AAPL260321C00230000", {"2026-02-15": 5.5}, None)
@@ -518,11 +518,11 @@ class TestFetchAllHistories:
         assert "AAPL260321C00230000" in marks
         assert len(missing) == 0
 
-    @patch("reports.portfolio_performance.prune_cache")
-    @patch("reports.portfolio_performance._fetch_stock_history_fallback")
-    @patch("reports.portfolio_performance._fetch_stock_history_ib_only")
-    @patch("reports.portfolio_performance.read_cache", return_value=None)
-    @patch("reports.portfolio_performance.write_cache")
+    @patch("xenon.reports.portfolio_performance.prune_cache")
+    @patch("xenon.reports.portfolio_performance._fetch_stock_history_fallback")
+    @patch("xenon.reports.portfolio_performance._fetch_stock_history_ib_only")
+    @patch("xenon.reports.portfolio_performance.read_cache", return_value=None)
+    @patch("xenon.reports.portfolio_performance.write_cache")
     def test_ib_fail_triggers_fallback(self, mock_wc, mock_read, mock_ib, mock_fallback, mock_prune):
         mock_ib.return_value = ("AAPL", {})  # IB failure
         mock_fallback.return_value = ("AAPL", {"2026-01-15": 230.0}, "uw")
@@ -535,9 +535,9 @@ class TestFetchAllHistories:
         assert "STK:AAPL" in marks
         mock_fallback.assert_called_once()
 
-    @patch("reports.portfolio_performance.prune_cache")
-    @patch("reports.portfolio_performance._fetch_option_history_safe")
-    @patch("reports.portfolio_performance.read_cache", return_value=None)
+    @patch("xenon.reports.portfolio_performance.prune_cache")
+    @patch("xenon.reports.portfolio_performance._fetch_option_history_safe")
+    @patch("xenon.reports.portfolio_performance.read_cache", return_value=None)
     def test_option_warning_propagated(self, mock_read, mock_opt, mock_prune):
         mock_opt.return_value = ("OPT123", {}, "Rate limited fetching OPT123 — skipped")
 
@@ -549,9 +549,9 @@ class TestFetchAllHistories:
         assert "OPT123" in missing
         assert any("Rate limited" in w for w in warnings)
 
-    @patch("reports.portfolio_performance.prune_cache")
-    @patch("reports.portfolio_performance._fetch_stock_history_fallback")
-    @patch("reports.portfolio_performance.read_cache", return_value=None)
+    @patch("xenon.reports.portfolio_performance.prune_cache")
+    @patch("xenon.reports.portfolio_performance._fetch_stock_history_fallback")
+    @patch("xenon.reports.portfolio_performance.read_cache", return_value=None)
     def test_no_ib_client(self, mock_read, mock_fb, mock_prune):
         mock_fb.return_value = ("AAPL", {"2026-01-15": 230.0}, "yahoo")
         trades = [self._make_trade("STK", "AAPL")]
@@ -561,7 +561,7 @@ class TestFetchAllHistories:
 
         assert "STK:AAPL" in marks
 
-    @patch("reports.portfolio_performance.read_cache")
+    @patch("xenon.reports.portfolio_performance.read_cache")
     def test_cache_hit_skips_ib(self, mock_read):
         mock_read.return_value = {"2026-01-15": 230.0}
 

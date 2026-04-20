@@ -4,9 +4,9 @@ import pytest
 from datetime import datetime
 from unittest.mock import patch, MagicMock
 
-from clients.uw_client import UWNotFoundError, UWAPIError
+from xenon.clients.uw_client import UWNotFoundError, UWAPIError
 
-from fetchers.fetch_ticker import (
+from xenon.fetchers.fetch_ticker import (
     is_market_open,
     get_last_n_trading_days,
     load_cache,
@@ -21,20 +21,20 @@ from fetchers.fetch_ticker import (
 
 class TestCacheOperations:
     def test_load_cache_missing_file(self, tmp_path):
-        with patch("fetchers.fetch_ticker.CACHE_FILE", tmp_path / "missing.json"):
+        with patch("xenon.fetchers.fetch_ticker.CACHE_FILE", tmp_path / "missing.json"):
             result = load_cache()
             assert result == {"last_updated": None, "tickers": {}}
 
     def test_load_cache_corrupt_json(self, tmp_path):
         bad_file = tmp_path / "bad.json"
         bad_file.write_text("not json")
-        with patch("fetchers.fetch_ticker.CACHE_FILE", bad_file):
+        with patch("xenon.fetchers.fetch_ticker.CACHE_FILE", bad_file):
             result = load_cache()
             assert result == {"last_updated": None, "tickers": {}}
 
     def test_save_and_load_roundtrip(self, tmp_path):
         cache_file = tmp_path / "ticker_cache.json"
-        with patch("fetchers.fetch_ticker.CACHE_FILE", cache_file):
+        with patch("xenon.fetchers.fetch_ticker.CACHE_FILE", cache_file):
             cache_ticker("AAPL", "Apple Inc.", "Technology")
             result = get_cached_ticker("AAPL")
             assert result is not None
@@ -44,12 +44,12 @@ class TestCacheOperations:
     def test_get_cached_ticker_not_found(self, tmp_path):
         cache_file = tmp_path / "empty.json"
         cache_file.write_text(json.dumps({"last_updated": None, "tickers": {}}))
-        with patch("fetchers.fetch_ticker.CACHE_FILE", cache_file):
+        with patch("xenon.fetchers.fetch_ticker.CACHE_FILE", cache_file):
             assert get_cached_ticker("FAKE") is None
 
     def test_cache_ticker_uppercases(self, tmp_path):
         cache_file = tmp_path / "ticker_cache.json"
-        with patch("fetchers.fetch_ticker.CACHE_FILE", cache_file):
+        with patch("xenon.fetchers.fetch_ticker.CACHE_FILE", cache_file):
             cache_ticker("aapl", "Apple Inc.")
             result = get_cached_ticker("aapl")
             assert result is not None
@@ -76,8 +76,8 @@ class TestMarketCalendar:
 # ── fetch_ticker_info ───────────────────────────────────────────────
 
 class TestFetchTickerInfo:
-    @patch("fetchers.fetch_ticker.UWClient")
-    @patch("fetchers.fetch_ticker.get_cached_ticker", return_value=None)
+    @patch("xenon.fetchers.fetch_ticker.UWClient")
+    @patch("xenon.fetchers.fetch_ticker.get_cached_ticker", return_value=None)
     def test_ticker_not_found_404(self, mock_cache, MockUWClient):
         mock_client = MagicMock()
         MockUWClient.return_value.__enter__ = MagicMock(return_value=mock_client)
@@ -87,8 +87,8 @@ class TestFetchTickerInfo:
         assert result["verified"] is False
         assert "not found" in result["error"].lower()
 
-    @patch("fetchers.fetch_ticker.UWClient")
-    @patch("fetchers.fetch_ticker.get_cached_ticker", return_value=None)
+    @patch("xenon.fetchers.fetch_ticker.UWClient")
+    @patch("xenon.fetchers.fetch_ticker.get_cached_ticker", return_value=None)
     def test_valid_ticker_with_dp_data(self, mock_cache, MockUWClient):
         mock_client = MagicMock()
         MockUWClient.return_value.__enter__ = MagicMock(return_value=mock_client)
@@ -102,8 +102,8 @@ class TestFetchTickerInfo:
         assert result["current_price"] == 150.0
         assert result["options_available"] is True
 
-    @patch("fetchers.fetch_ticker.UWClient")
-    @patch("fetchers.fetch_ticker.get_cached_ticker", return_value=None)
+    @patch("xenon.fetchers.fetch_ticker.UWClient")
+    @patch("xenon.fetchers.fetch_ticker.get_cached_ticker", return_value=None)
     def test_no_dp_activity(self, mock_cache, MockUWClient):
         mock_client = MagicMock()
         MockUWClient.return_value.__enter__ = MagicMock(return_value=mock_client)
@@ -113,8 +113,8 @@ class TestFetchTickerInfo:
         assert result["verified"] is False
         assert "No dark pool activity" in result["error"]
 
-    @patch("fetchers.fetch_ticker.UWClient")
-    @patch("fetchers.fetch_ticker.get_cached_ticker", return_value=None)
+    @patch("xenon.fetchers.fetch_ticker.UWClient")
+    @patch("xenon.fetchers.fetch_ticker.get_cached_ticker", return_value=None)
     def test_liquidity_low(self, mock_cache, MockUWClient):
         mock_client = MagicMock()
         MockUWClient.return_value.__enter__ = MagicMock(return_value=mock_client)
@@ -127,8 +127,8 @@ class TestFetchTickerInfo:
         assert result["verified"] is True
         assert "LOW" in result.get("liquidity_warning", "")
 
-    @patch("fetchers.fetch_ticker.UWClient")
-    @patch("fetchers.fetch_ticker.get_cached_ticker", return_value=None)
+    @patch("xenon.fetchers.fetch_ticker.UWClient")
+    @patch("xenon.fetchers.fetch_ticker.get_cached_ticker", return_value=None)
     def test_liquidity_high(self, mock_cache, MockUWClient):
         mock_client = MagicMock()
         MockUWClient.return_value.__enter__ = MagicMock(return_value=mock_client)

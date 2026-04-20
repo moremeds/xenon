@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
-from clients.menthorq_client import (
+from xenon.clients.menthorq_client import (
     MenthorQClient,
     MenthorQError,
     MenthorQExtractionError,
@@ -207,7 +207,7 @@ class TestMenthorQIntegrationImage:
 
     def test_cta_downloads_s3_images(self, client, trading_date):
         """get_cta() downloads S3 images for all 4 CTA cards, not screenshots."""
-        from clients.menthorq_client import CTA_SLUGS
+        from xenon.clients.menthorq_client import CTA_SLUGS
 
         original_download = client._download_card_images.__func__
         download_results = []

@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from utils.uw_api_stats import UWApiStats
+from xenon.utils.uw_api_stats import UWApiStats
 
 # ── helpers ───────────────────────────────────────────────────────────
 

@@ -22,7 +22,10 @@ const DEFAULT_HOST = "127.0.0.1";
 const HEALTH_TIMEOUT_MS = 1_500;
 const START_TIMEOUT_MS = 20_000;
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
   return Promise.race([
     promise,
     delay(timeoutMs).then(() => {
@@ -33,7 +36,10 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 
 async function fetchHealth(baseUrl: string): Promise<HealthPayload | null> {
   try {
-    const res = await withTimeout(fetch(`${baseUrl}/health`), HEALTH_TIMEOUT_MS);
+    const res = await withTimeout(
+      fetch(`${baseUrl}/health`),
+      HEALTH_TIMEOUT_MS,
+    );
     if (!res.ok) return null;
     return (await res.json()) as HealthPayload;
   } catch {
@@ -54,7 +60,9 @@ async function reservePort(): Promise<number> {
     server.listen(0, DEFAULT_HOST, () => {
       const address = server.address();
       if (!address || typeof address === "string") {
-        server.close(() => reject(new Error("Failed to reserve test FastAPI port")));
+        server.close(() =>
+          reject(new Error("Failed to reserve test FastAPI port")),
+        );
         return;
       }
       const { port } = address;
@@ -66,7 +74,10 @@ async function reservePort(): Promise<number> {
   });
 }
 
-async function waitForHealth(baseUrl: string, timeoutMs: number): Promise<boolean> {
+async function waitForHealth(
+  baseUrl: string,
+  timeoutMs: number,
+): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await isReusableTestServer(baseUrl)) {
@@ -77,7 +88,9 @@ async function waitForHealth(baseUrl: string, timeoutMs: number): Promise<boolea
   return false;
 }
 
-async function stopProcess(child: ChildProcessWithoutNullStreams): Promise<void> {
+async function stopProcess(
+  child: ChildProcessWithoutNullStreams,
+): Promise<void> {
   if (child.exitCode != null || child.killed) return;
   child.kill("SIGTERM");
   const exited = await Promise.race([
@@ -91,8 +104,9 @@ async function stopProcess(child: ChildProcessWithoutNullStreams): Promise<void>
 }
 
 export async function ensureTestFastApi(): Promise<FastApiHarness> {
-  const explicitBaseUrl = process.env.XENON_TEST_FASTAPI_URL ?? process.env.XENON_API_URL;
-  if (explicitBaseUrl && await isReusableTestServer(explicitBaseUrl)) {
+  const explicitBaseUrl =
+    process.env.XENON_TEST_FASTAPI_URL ?? process.env.XENON_API_URL;
+  if (explicitBaseUrl && (await isReusableTestServer(explicitBaseUrl))) {
     process.env.XENON_API_URL = explicitBaseUrl;
     return {
       available: true,
@@ -105,17 +119,15 @@ export async function ensureTestFastApi(): Promise<FastApiHarness> {
   const port = await reservePort();
   const baseUrl = `http://${DEFAULT_HOST}:${port}`;
   const child = spawn(
-    "python3.13",
+    ".venv/bin/python",
     [
       "-m",
       "uvicorn",
-      "scripts.api.server:app",
+      "xenon.api.server:app",
       "--host",
       DEFAULT_HOST,
       "--port",
       String(port),
-      "--app-dir",
-      ".",
     ],
     {
       cwd: PROJECT_ROOT,

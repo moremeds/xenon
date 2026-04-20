@@ -1,1 +1,0 @@
-services/run_data_refresh.sh

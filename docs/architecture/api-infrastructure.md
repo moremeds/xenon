@@ -8,32 +8,32 @@ Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xeno
 
 ### Three-Service Dev Stack (`npm run dev`)
 
-| Service | Port |
-|---------|------|
-| Next.js | 3000 |
+| Service     | Port |
+| ----------- | ---- |
+| Next.js     | 3000 |
 | IB WS relay | 8765 |
-| FastAPI | 8321 |
+| FastAPI     | 8321 |
 
 ### Files
 
-| File | Purpose |
-|------|---------|
-| `server.py` | 26 endpoints, CORS, Clerk JWT auth middleware, IB pool, health, auto-restart. `POST /performance/background` = fire-and-forget, 202, dedup |
-| `auth.py` | Clerk JWT verification — JWKS validation, single-tenant allowlist (`ALLOWED_USER_IDS`), graceful bypass when unconfigured |
-| `ws_ticket.py` | Short-lived single-use WS tickets (30s TTL) — avoids passing JWTs in WebSocket URLs |
-| `ib_pool.py` | Role-based IB pool (sync/orders/data), auto-reconnect |
-| `ib_gateway.py` | Health check + auto-restart via IBC launchd. Detects CLOSE_WAIT (upstream dead) |
-| `subprocess.py` | Async `run_script()`, `run_module()` — uses `sys.executable` (not `python3`) to match server interpreter |
-| `routes/historical.py` | Machine-to-machine historical data endpoints (X-API-Key auth) |
+| File                   | Purpose                                                                                                                                    |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `server.py`            | 26 endpoints, CORS, Clerk JWT auth middleware, IB pool, health, auto-restart. `POST /performance/background` = fire-and-forget, 202, dedup |
+| `auth.py`              | Clerk JWT verification — JWKS validation, single-tenant allowlist (`ALLOWED_USER_IDS`), graceful bypass when unconfigured                  |
+| `ws_ticket.py`         | Short-lived single-use WS tickets (30s TTL) — avoids passing JWTs in WebSocket URLs                                                        |
+| `ib_pool.py`           | Role-based IB pool (sync/orders/data), auto-reconnect                                                                                      |
+| `ib_gateway.py`        | Health check + auto-restart via IBC launchd. Detects CLOSE_WAIT (upstream dead)                                                            |
+| `subprocess.py`        | Async `run_script()`, `run_module()` — uses `sys.executable` (not `python3`) to match server interpreter                                   |
+| `routes/historical.py` | Machine-to-machine historical data endpoints (X-API-Key auth)                                                                              |
 
 ### Graceful Degradation
 
-| Scenario | Behavior |
-|----------|----------|
-| FastAPI + IB up | Normal |
-| FastAPI up, IB down | Auto-restart Gateway, retry once, else 503 + cached |
+| Scenario                  | Behavior                                                                     |
+| ------------------------- | ---------------------------------------------------------------------------- |
+| FastAPI + IB up           | Normal                                                                       |
+| FastAPI up, IB down       | Auto-restart Gateway, retry once, else 503 + cached                          |
 | FastAPI up, IB CLOSE_WAIT | Detected at startup + script errors; auto-restart + kill lingering processes |
-| FastAPI down | Cached from disk, `is_stale: true` |
+| FastAPI down              | Cached from disk, `is_stale: true`                                           |
 
 No spawn fallback. Always try FastAPI first.
 
@@ -41,15 +41,15 @@ No spawn fallback. Always try FastAPI first.
 
 All FastAPI routes are protected by Clerk JWT middleware. Next.js routes are protected by Clerk middleware (`web/middleware.ts`). WebSocket connections use a ticket-based flow to avoid leaking JWTs in URLs.
 
-| Component | File | Purpose |
-|-----------|------|---------|
-| FastAPI auth middleware | `scripts/api/auth.py` | Validates Clerk JWTs via JWKS, enforces `ALLOWED_USER_IDS` allowlist |
-| FastAPI auth dependency | `scripts/api/auth.py` | `verify_clerk_jwt` — used by `/ws-ticket` endpoint via `Depends()` |
-| WS ticket service | `scripts/api/ws_ticket.py` | Issues 30s single-use tickets for WS auth |
-| WS ticket proxy | `web/app/api/ib/ws-ticket/route.ts` | Next.js route proxies to FastAPI (same-origin for browser) |
-| Next.js middleware | `web/middleware.ts` | Clerk `auth.protect()` on all routes except public share pages |
-| WS ticket client | `web/lib/wsTicket.ts` | Browser calls `/api/ib/ws-ticket` (same-origin) before WS connect |
-| `xenonApi.ts` | `web/lib/xenonApi.ts` | Attaches Clerk Bearer token to all `xenonFetch()` calls |
+| Component               | File                                | Purpose                                                              |
+| ----------------------- | ----------------------------------- | -------------------------------------------------------------------- |
+| FastAPI auth middleware | `src/xenon/api/auth.py`             | Validates Clerk JWTs via JWKS, enforces `ALLOWED_USER_IDS` allowlist |
+| FastAPI auth dependency | `src/xenon/api/auth.py`             | `verify_clerk_jwt` — used by `/ws-ticket` endpoint via `Depends()`   |
+| WS ticket service       | `src/xenon/api/ws_ticket.py`        | Issues 30s single-use tickets for WS auth                            |
+| WS ticket proxy         | `web/app/api/ib/ws-ticket/route.ts` | Next.js route proxies to FastAPI (same-origin for browser)           |
+| Next.js middleware      | `web/middleware.ts`                 | Clerk `auth.protect()` on all routes except public share pages       |
+| WS ticket client        | `web/lib/wsTicket.ts`               | Browser calls `/api/ib/ws-ticket` (same-origin) before WS connect    |
+| `xenonApi.ts`           | `web/lib/xenonApi.ts`               | Attaches Clerk Bearer token to all `xenonFetch()` calls              |
 
 **Public share routes:** `/api/regime/share`, `/api/vcg/share`, `/api/internals/share`, `/api/menthorq/cta/share` are public (no auth).
 
@@ -84,14 +84,14 @@ Gateway runs on a Hetzner VM accessible via Tailscale MagicDNS at `ib-gateway:40
 
 **Management commands** (local Mac via Tailscale SSH, or directly on VPS):
 
-| Command | Action |
-|---------|--------|
-| `ibstart` | Start container, wait for port 4001 |
-| `ibstop` | Stop and remove container |
-| `ibrestart` | Restart, wait for port 4001 |
-| `ibstatus` | Container state, port, connections |
-| `iblogs` | Last 50 lines (`iblogs 100`) |
-| `ibhealth` | Docker healthcheck status |
+| Command     | Action                              |
+| ----------- | ----------------------------------- |
+| `ibstart`   | Start container, wait for port 4001 |
+| `ibstop`    | Stop and remove container           |
+| `ibrestart` | Restart, wait for port 4001         |
+| `ibstatus`  | Container state, port, connections  |
+| `iblogs`    | Last 50 lines (`iblogs 100`)        |
+| `ibhealth`  | Docker healthcheck status           |
 
 VPS script: `/usr/local/bin/ibgw`. Local: `ibgw()` in `~/.zshrc` wraps SSH.
 
@@ -99,13 +99,13 @@ VPS script: `/usr/local/bin/ibgw`. Local: `ibgw()` in `~/.zshrc` wraps SSH.
 
 Image: `ghcr.io/gnzsnz/ib-gateway` (pinned to digest). Config: `docker/ib-gateway/`.
 
-| Command | Action |
-|---------|--------|
-| `scripts/docker_ib_gateway.sh start` | Start (validates secrets, checks launchd not running) |
-| `scripts/docker_ib_gateway.sh stop` | Stop |
-| `scripts/docker_ib_gateway.sh restart` | Restart |
-| `scripts/docker_ib_gateway.sh status` | Status |
-| `npm run ib:start` (from web/) | Convenience alias |
+| Command                                | Action                                                |
+| -------------------------------------- | ----------------------------------------------------- |
+| `scripts/docker_ib_gateway.sh start`   | Start (validates secrets, checks launchd not running) |
+| `scripts/docker_ib_gateway.sh stop`    | Stop                                                  |
+| `scripts/docker_ib_gateway.sh restart` | Restart                                               |
+| `scripts/docker_ib_gateway.sh status`  | Status                                                |
+| `npm run ib:start` (from web/)         | Convenience alias                                     |
 
 Docker handles reliability via `restart: unless-stopped` + healthcheck. `READ_ONLY_API=no` (Xenon places orders). Password via Docker secrets (`docker/ib-gateway/secrets/ib_password.txt`, chmod 600).
 
@@ -113,45 +113,45 @@ Docker handles reliability via `restart: unless-stopped` + healthcheck. `READ_ON
 
 Global service: `local.ibc-gateway`. Install: `~/ibc-install/`, config: `~/ibc/`. Credentials in macOS Keychain.
 
-| Command | Action |
-|---------|--------|
-| `~/ibc/bin/start-secure-ibc-service.sh` | Start |
-| `~/ibc/bin/stop-secure-ibc-service.sh` | Stop |
+| Command                                   | Action  |
+| ----------------------------------------- | ------- |
+| `~/ibc/bin/start-secure-ibc-service.sh`   | Start   |
+| `~/ibc/bin/stop-secure-ibc-service.sh`    | Stop    |
 | `~/ibc/bin/restart-secure-ibc-service.sh` | Restart |
-| `~/ibc/bin/status-secure-ibc-service.sh` | Status |
+| `~/ibc/bin/status-secure-ibc-service.sh`  | Status  |
 
 **Lifecycle:** Mon-Fri 00:00 start → 2FA approve on IBKR Mobile → 11:58 PM daily restart (no 2FA) → Sunday 07:05 cold restart (2FA).
 
 ### Gateway Environment Variables
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `IB_GATEWAY_MODE` | `docker` | `docker`, `cloud` (remote, no restart), or `launchd` |
-| `IB_GATEWAY_HOST` | `127.0.0.1` | Gateway host (`ib-gateway` for cloud mode) |
-| `IB_GATEWAY_PORT` | `4001` | Gateway port |
+| Variable          | Default     | Purpose                                              |
+| ----------------- | ----------- | ---------------------------------------------------- |
+| `IB_GATEWAY_MODE` | `docker`    | `docker`, `cloud` (remote, no restart), or `launchd` |
+| `IB_GATEWAY_HOST` | `127.0.0.1` | Gateway host (`ib-gateway` for cloud mode)           |
+| `IB_GATEWAY_PORT` | `4001`      | Gateway port                                         |
 
 ### Ports
 
-| Port | Service |
-|------|---------|
-| 3000 | Next.js |
-| 8321 | FastAPI |
-| 8765 | IB WS relay |
-| 4001 | IB Gateway Live |
-| 4002 | IB Gateway Paper |
-| 7496/7497 | TWS Live/Paper |
-| 7462 | IBC Command Server |
+| Port      | Service            |
+| --------- | ------------------ |
+| 3000      | Next.js            |
+| 8321      | FastAPI            |
+| 8765      | IB WS relay        |
+| 4001      | IB Gateway Live    |
+| 4002      | IB Gateway Paper   |
+| 7496/7497 | TWS Live/Paper     |
+| 7462      | IBC Command Server |
 
 ### Client ID Ranges
 
-| Range | Usage |
-|-------|-------|
-| 0-9 | FastAPI IBPool (sync=3, orders=4, data=5) |
-| 10-19 | WS relay (rotates on conflict) |
-| 20-49 | Subprocess scripts (`client_id="auto"`) |
-| 50-69 | Scanners (CRI/VCG rotating) |
-| 70-89 | Daemons (fill=70, exit=71) |
-| 90-99 | CLI/standalone |
+| Range | Usage                                     |
+| ----- | ----------------------------------------- |
+| 0-9   | FastAPI IBPool (sync=3, orders=4, data=5) |
+| 10-19 | WS relay (rotates on conflict)            |
+| 20-49 | Subprocess scripts (`client_id="auto"`)   |
+| 50-69 | Scanners (CRI/VCG rotating)               |
+| 70-89 | Daemons (fill=70, exit=71)                |
+| 90-99 | CLI/standalone                            |
 
 Tests: `test_client_id_allocation.py` (17). IB error `10358` = Reuters inactive → auto-fallback.
 

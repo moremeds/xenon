@@ -3,14 +3,14 @@ import math
 import pytest
 from unittest.mock import MagicMock
 
-from execution.ib_orders import (
+from xenon.execution.ib_orders import (
     safe_float,
     format_contract,
     serialize_contract,
     build_orders_data,
     IB_SENTINEL,
 )
-from execution.ib_sync import (
+from xenon.execution.ib_sync import (
     detect_structure_type,
     format_structure_description,
     _normalize_market_price,

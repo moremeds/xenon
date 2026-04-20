@@ -24,20 +24,18 @@ PLIST_SRC="$PROJECT_DIR/config/$PLIST_NAME"
 PLIST_DST="$HOME/Library/LaunchAgents/$PLIST_NAME"
 LABEL="com.xenon.cri-scan"
 LOG_DIR="$PROJECT_DIR/logs"
-WRAPPER="$PROJECT_DIR/scripts/run_cri_scan.sh"
+WRAPPER="$PROJECT_DIR/scripts/services/run_cri_scan.sh"
 
 # --- Helpers ---
 
 generate_plist() {
     local entries
-    entries=$(PROJECT_DIR_ENV="$PROJECT_DIR" python3.13 - <<'PY'
+    entries=$(PROJECT_DIR_ENV="$PROJECT_DIR" "$PROJECT_DIR/.venv/bin/python" - <<'PY'
 import os
-import sys
 
 project_dir = os.environ["PROJECT_DIR_ENV"]
-sys.path.insert(0, os.path.join(project_dir, "scripts"))
 
-from utils.launchd_calendar import build_local_calendar_entries, render_calendar_interval_xml
+from xenon.utils.launchd_calendar import build_local_calendar_entries, render_calendar_interval_xml
 
 slots = [(4, 5)]
 for hour in range(4, 21):
@@ -106,9 +104,9 @@ install() {
     fi
     chmod +x "$WRAPPER"
 
-    # 2. Verify cri_scan.py exists
-    if [[ ! -f "$PROJECT_DIR/scripts/cri_scan.py" ]]; then
-        echo "ERROR: cri_scan.py not found"
+    # 2. Verify cri scanner module exists
+    if [[ ! -f "$PROJECT_DIR/src/xenon/scanners/cri.py" ]]; then
+        echo "ERROR: xenon.scanners.cri module not found"
         exit 1
     fi
 

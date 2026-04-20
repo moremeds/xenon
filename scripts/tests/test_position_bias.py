@@ -5,7 +5,7 @@ canonicalization (IB structure_type vs Futu normalized dict), and non-
 directional structures (iron condor, collar, straddle).
 """
 
-from utils.position_bias import position_bias
+from xenon.utils.position_bias import position_bias
 
 
 def _ib(structure, structure_type, direction="LONG", legs=None):

@@ -12,11 +12,11 @@ from pathlib import Path
 
 import pytest
 
-
 SCRIPTS_DIR = Path(__file__).parent.parent
 
 
 # ── _safe_value tests ──────────────────────────────────────────────
+
 
 class TestSafeValue:
     """Tests for IBRealtimeServer._safe_value helper."""
@@ -62,24 +62,28 @@ class TestSafeValue:
 
 # ── Import sanity checks ──────────────────────────────────────────
 
+
 class TestImports:
     """Verify key modules can be imported without side effects."""
 
     def test_fetch_ticker_importable(self):
-        import fetch_ticker  # noqa: F401
+        from xenon.fetchers import fetch_ticker  # noqa: F401
 
     def test_fetch_ticker_has_main(self):
-        import fetch_ticker
+        from xenon.fetchers import fetch_ticker
+
         assert hasattr(fetch_ticker, "main")
         assert callable(fetch_ticker.main)
 
     def test_fetch_ticker_has_fetch_ticker_info(self):
-        import fetch_ticker
+        from xenon.fetchers import fetch_ticker
+
         assert hasattr(fetch_ticker, "fetch_ticker_info")
         assert callable(fetch_ticker.fetch_ticker_info)
 
 
 # ── No bare except: clauses ───────────────────────────────────────
+
 
 def _collect_python_files():
     """Return all .py files under scripts/, excluding tests and __pycache__."""

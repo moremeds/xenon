@@ -218,7 +218,7 @@ def price_history():
 # Module-level import for the evaluate module
 # ---------------------------------------------------------------------------
 
-from reports.evaluate import (
+from xenon.reports.evaluate import (
     EvaluationResult,
     MilestoneResult,
     compute_sustained_days,
@@ -422,14 +422,14 @@ class TestDetermineEdge:
 class TestRunEvaluation:
     """The main orchestrator runs milestones in parallel, then sequential."""
 
-    @patch("reports.evaluate.fetch_ticker_info")
-    @patch("reports.evaluate.fetch_flow")
-    @patch("reports.evaluate.fetch_options")
-    @patch("reports.evaluate.fetch_ticker_oi_changes")
-    @patch("reports.evaluate.fetch_analyst_ratings")
-    @patch("reports.evaluate.fetch_seasonality")
-    @patch("reports.evaluate.fetch_news")
-    @patch("reports.evaluate.fetch_price_history")
+    @patch("xenon.reports.evaluate.fetch_ticker_info")
+    @patch("xenon.reports.evaluate.fetch_flow")
+    @patch("xenon.reports.evaluate.fetch_options")
+    @patch("xenon.reports.evaluate.fetch_ticker_oi_changes")
+    @patch("xenon.reports.evaluate.fetch_analyst_ratings")
+    @patch("xenon.reports.evaluate.fetch_seasonality")
+    @patch("xenon.reports.evaluate.fetch_news")
+    @patch("xenon.reports.evaluate.fetch_price_history")
     def test_invalid_ticker_aborts_immediately(
         self, mock_price, mock_news, mock_season, mock_analyst, mock_oi,
         mock_options, mock_flow, mock_ticker
@@ -451,14 +451,14 @@ class TestRunEvaluation:
         assert result.decision == "NO_TRADE"
         assert result.failing_gate == "TICKER_VALIDATION"
 
-    @patch("reports.evaluate.fetch_ticker_info")
-    @patch("reports.evaluate.fetch_flow")
-    @patch("reports.evaluate.fetch_options")
-    @patch("reports.evaluate.fetch_ticker_oi_changes")
-    @patch("reports.evaluate.fetch_analyst_ratings")
-    @patch("reports.evaluate.fetch_seasonality")
-    @patch("reports.evaluate.fetch_news")
-    @patch("reports.evaluate.fetch_price_history")
+    @patch("xenon.reports.evaluate.fetch_ticker_info")
+    @patch("xenon.reports.evaluate.fetch_flow")
+    @patch("xenon.reports.evaluate.fetch_options")
+    @patch("xenon.reports.evaluate.fetch_ticker_oi_changes")
+    @patch("xenon.reports.evaluate.fetch_analyst_ratings")
+    @patch("xenon.reports.evaluate.fetch_seasonality")
+    @patch("xenon.reports.evaluate.fetch_news")
+    @patch("xenon.reports.evaluate.fetch_price_history")
     def test_fading_signal_stops_at_edge(
         self, mock_price, mock_news, mock_season, mock_analyst, mock_oi,
         mock_options, mock_flow, mock_ticker,
@@ -484,14 +484,14 @@ class TestRunEvaluation:
         assert "M3B" in result.milestones
         assert result.milestones["M1"].passed is True
 
-    @patch("reports.evaluate.fetch_ticker_info")
-    @patch("reports.evaluate.fetch_flow")
-    @patch("reports.evaluate.fetch_options")
-    @patch("reports.evaluate.fetch_ticker_oi_changes")
-    @patch("reports.evaluate.fetch_analyst_ratings")
-    @patch("reports.evaluate.fetch_seasonality")
-    @patch("reports.evaluate.fetch_news")
-    @patch("reports.evaluate.fetch_price_history")
+    @patch("xenon.reports.evaluate.fetch_ticker_info")
+    @patch("xenon.reports.evaluate.fetch_flow")
+    @patch("xenon.reports.evaluate.fetch_options")
+    @patch("xenon.reports.evaluate.fetch_ticker_oi_changes")
+    @patch("xenon.reports.evaluate.fetch_analyst_ratings")
+    @patch("xenon.reports.evaluate.fetch_seasonality")
+    @patch("xenon.reports.evaluate.fetch_news")
+    @patch("xenon.reports.evaluate.fetch_price_history")
     def test_strong_signal_reaches_structure(
         self, mock_price, mock_news, mock_season, mock_analyst, mock_oi,
         mock_options, mock_flow, mock_ticker,
@@ -512,14 +512,14 @@ class TestRunEvaluation:
         assert "M4" in result.milestones
         assert result.milestones["M4"].passed is True
 
-    @patch("reports.evaluate.fetch_ticker_info")
-    @patch("reports.evaluate.fetch_flow")
-    @patch("reports.evaluate.fetch_options")
-    @patch("reports.evaluate.fetch_ticker_oi_changes")
-    @patch("reports.evaluate.fetch_analyst_ratings")
-    @patch("reports.evaluate.fetch_seasonality")
-    @patch("reports.evaluate.fetch_news")
-    @patch("reports.evaluate.fetch_price_history")
+    @patch("xenon.reports.evaluate.fetch_ticker_info")
+    @patch("xenon.reports.evaluate.fetch_flow")
+    @patch("xenon.reports.evaluate.fetch_options")
+    @patch("xenon.reports.evaluate.fetch_ticker_oi_changes")
+    @patch("xenon.reports.evaluate.fetch_analyst_ratings")
+    @patch("xenon.reports.evaluate.fetch_seasonality")
+    @patch("xenon.reports.evaluate.fetch_news")
+    @patch("xenon.reports.evaluate.fetch_price_history")
     def test_no_options_aborts(
         self, mock_price, mock_news, mock_season, mock_analyst, mock_oi,
         mock_options, mock_flow, mock_ticker,
@@ -540,15 +540,15 @@ class TestRunEvaluation:
         assert result.decision == "NO_TRADE"
         assert result.failing_gate == "TICKER_VALIDATION"
 
-    @patch("reports.evaluate.datetime")
-    @patch("reports.evaluate.fetch_ticker_info")
-    @patch("reports.evaluate.fetch_flow")
-    @patch("reports.evaluate.fetch_options")
-    @patch("reports.evaluate.fetch_ticker_oi_changes")
-    @patch("reports.evaluate.fetch_analyst_ratings")
-    @patch("reports.evaluate.fetch_seasonality")
-    @patch("reports.evaluate.fetch_news")
-    @patch("reports.evaluate.fetch_price_history")
+    @patch("xenon.reports.evaluate.datetime")
+    @patch("xenon.reports.evaluate.fetch_ticker_info")
+    @patch("xenon.reports.evaluate.fetch_flow")
+    @patch("xenon.reports.evaluate.fetch_options")
+    @patch("xenon.reports.evaluate.fetch_ticker_oi_changes")
+    @patch("xenon.reports.evaluate.fetch_analyst_ratings")
+    @patch("xenon.reports.evaluate.fetch_seasonality")
+    @patch("xenon.reports.evaluate.fetch_news")
+    @patch("xenon.reports.evaluate.fetch_price_history")
     def test_today_included_in_flow(
         self, mock_price, mock_news, mock_season, mock_analyst, mock_oi,
         mock_options, mock_flow, mock_ticker, mock_datetime,
@@ -689,13 +689,13 @@ class TestOICategorization:
     """OI changes are categorized by premium size."""
 
     def test_massive_oi_flagged(self, oi_data_massive):
-        from evaluate import categorize_oi_signals
+        from xenon.reports.evaluate import categorize_oi_signals
         cats = categorize_oi_signals(oi_data_massive)
         assert cats["massive_count"] >= 1
         assert cats["total_premium"] > 10_000_000
 
     def test_empty_oi(self):
-        from evaluate import categorize_oi_signals
+        from xenon.reports.evaluate import categorize_oi_signals
         cats = categorize_oi_signals([])
         assert cats["massive_count"] == 0
         assert cats["total_premium"] == 0
@@ -709,18 +709,18 @@ class TestSeasonality:
     """Seasonality is context, not a gate — but needs to be parsed."""
 
     def test_favorable_rating(self):
-        from evaluate import rate_seasonality
+        from xenon.reports.evaluate import rate_seasonality
         assert rate_seasonality(65, 5.5) == "FAVORABLE"
 
     def test_neutral_rating(self):
-        from evaluate import rate_seasonality
+        from xenon.reports.evaluate import rate_seasonality
         assert rate_seasonality(55, 2.0) == "NEUTRAL"
 
     def test_unfavorable_rating(self):
-        from evaluate import rate_seasonality
+        from xenon.reports.evaluate import rate_seasonality
         assert rate_seasonality(40, -1.0) == "UNFAVORABLE"
 
     def test_edge_case_boundary(self):
-        from evaluate import rate_seasonality
+        from xenon.reports.evaluate import rate_seasonality
         # 60% and 5% exactly → boundary check
         assert rate_seasonality(60, 5.0) in ("FAVORABLE", "NEUTRAL")

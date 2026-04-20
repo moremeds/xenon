@@ -48,7 +48,12 @@ describe("flex_token_config.json", () => {
 describe("flex_token_check daemon handler", () => {
   it("handler file exists", async () => {
     const p = path.join(
-      PROJECT_ROOT, "scripts", "monitor_daemon", "handlers", "flex_token_check.py"
+      PROJECT_ROOT,
+      "src",
+      "xenon",
+      "monitor_daemon",
+      "handlers",
+      "flex_token_check.py",
     );
     const content = await readFile(p, "utf-8");
     expect(content).toContain("class FlexTokenCheck");
@@ -56,7 +61,12 @@ describe("flex_token_check daemon handler", () => {
 
   it("inherits from BaseHandler", async () => {
     const p = path.join(
-      PROJECT_ROOT, "scripts", "monitor_daemon", "handlers", "flex_token_check.py"
+      PROJECT_ROOT,
+      "src",
+      "xenon",
+      "monitor_daemon",
+      "handlers",
+      "flex_token_check.py",
     );
     const content = await readFile(p, "utf-8");
     expect(content).toContain("BaseHandler");
@@ -64,7 +74,12 @@ describe("flex_token_check daemon handler", () => {
 
   it("reads flex_token_config.json", async () => {
     const p = path.join(
-      PROJECT_ROOT, "scripts", "monitor_daemon", "handlers", "flex_token_check.py"
+      PROJECT_ROOT,
+      "src",
+      "xenon",
+      "monitor_daemon",
+      "handlers",
+      "flex_token_check.py",
     );
     const content = await readFile(p, "utf-8");
     expect(content).toContain("flex_token_config.json");
@@ -72,14 +87,25 @@ describe("flex_token_check daemon handler", () => {
 
   it("checks reminder thresholds 30/14/7/1", async () => {
     const p = path.join(
-      PROJECT_ROOT, "scripts", "monitor_daemon", "handlers", "flex_token_check.py"
+      PROJECT_ROOT,
+      "src",
+      "xenon",
+      "monitor_daemon",
+      "handlers",
+      "flex_token_check.py",
     );
     const content = await readFile(p, "utf-8");
     expect(content).toContain("reminder_days");
   });
 
   it("is registered in daemon run.py", async () => {
-    const p = path.join(PROJECT_ROOT, "scripts", "monitor_daemon", "run.py");
+    const p = path.join(
+      PROJECT_ROOT,
+      "src",
+      "xenon",
+      "monitor_daemon",
+      "run.py",
+    );
     const content = await readFile(p, "utf-8");
     expect(content).toContain("FlexTokenCheck");
   });
@@ -90,7 +116,12 @@ describe("flex_token_check daemon handler", () => {
 describe("GET /api/flex-token API route", () => {
   it("route file exists", async () => {
     const p = path.join(
-      PROJECT_ROOT, "web", "app", "api", "flex-token", "route.ts"
+      PROJECT_ROOT,
+      "web",
+      "app",
+      "api",
+      "flex-token",
+      "route.ts",
     );
     const content = await readFile(p, "utf-8");
     expect(content).toContain("GET");
@@ -98,7 +129,12 @@ describe("GET /api/flex-token API route", () => {
 
   it("reads flex_token_config.json", async () => {
     const p = path.join(
-      PROJECT_ROOT, "web", "app", "api", "flex-token", "route.ts"
+      PROJECT_ROOT,
+      "web",
+      "app",
+      "api",
+      "flex-token",
+      "route.ts",
     );
     const content = await readFile(p, "utf-8");
     expect(content).toContain("flex_token_config");
@@ -106,7 +142,12 @@ describe("GET /api/flex-token API route", () => {
 
   it("computes days_remaining", async () => {
     const p = path.join(
-      PROJECT_ROOT, "web", "app", "api", "flex-token", "route.ts"
+      PROJECT_ROOT,
+      "web",
+      "app",
+      "api",
+      "flex-token",
+      "route.ts",
     );
     const content = await readFile(p, "utf-8");
     expect(content).toContain("days_remaining");
@@ -114,7 +155,12 @@ describe("GET /api/flex-token API route", () => {
 
   it("returns should_warn boolean", async () => {
     const p = path.join(
-      PROJECT_ROOT, "web", "app", "api", "flex-token", "route.ts"
+      PROJECT_ROOT,
+      "web",
+      "app",
+      "api",
+      "flex-token",
+      "route.ts",
     );
     const content = await readFile(p, "utf-8");
     expect(content).toContain("should_warn");
@@ -126,7 +172,10 @@ describe("GET /api/flex-token API route", () => {
 describe("FlexTokenBanner component", () => {
   it("component file exists", async () => {
     const p = path.join(
-      PROJECT_ROOT, "web", "components", "FlexTokenBanner.tsx"
+      PROJECT_ROOT,
+      "web",
+      "components",
+      "FlexTokenBanner.tsx",
     );
     const content = await readFile(p, "utf-8");
     expect(content).toContain("FlexTokenBanner");
@@ -134,7 +183,10 @@ describe("FlexTokenBanner component", () => {
 
   it("fetches /api/flex-token", async () => {
     const p = path.join(
-      PROJECT_ROOT, "web", "components", "FlexTokenBanner.tsx"
+      PROJECT_ROOT,
+      "web",
+      "components",
+      "FlexTokenBanner.tsx",
     );
     const content = await readFile(p, "utf-8");
     expect(content).toContain("/api/flex-token");
@@ -142,7 +194,10 @@ describe("FlexTokenBanner component", () => {
 
   it("shows renewal URL", async () => {
     const p = path.join(
-      PROJECT_ROOT, "web", "components", "FlexTokenBanner.tsx"
+      PROJECT_ROOT,
+      "web",
+      "components",
+      "FlexTokenBanner.tsx",
     );
     const content = await readFile(p, "utf-8");
     expect(content).toContain("renewal_url");
@@ -150,7 +205,10 @@ describe("FlexTokenBanner component", () => {
 
   it("shows days remaining", async () => {
     const p = path.join(
-      PROJECT_ROOT, "web", "components", "FlexTokenBanner.tsx"
+      PROJECT_ROOT,
+      "web",
+      "components",
+      "FlexTokenBanner.tsx",
     );
     const content = await readFile(p, "utf-8");
     expect(content).toContain("days_remaining");
@@ -158,7 +216,10 @@ describe("FlexTokenBanner component", () => {
 
   it("only renders when should_warn is true", async () => {
     const p = path.join(
-      PROJECT_ROOT, "web", "components", "FlexTokenBanner.tsx"
+      PROJECT_ROOT,
+      "web",
+      "components",
+      "FlexTokenBanner.tsx",
     );
     const content = await readFile(p, "utf-8");
     expect(content).toContain("should_warn");

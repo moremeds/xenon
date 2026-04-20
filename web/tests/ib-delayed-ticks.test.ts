@@ -14,25 +14,44 @@
 import { describe, it, expect } from "vitest";
 
 // Dynamic import of ESM module from scripts/
-const handlerPath = new URL("../../scripts/ib_tick_handler.js", import.meta.url).pathname;
-const { createPriceData, updatePriceFromTickPrice, updatePriceFromTickSize } = await import(handlerPath);
+const handlerPath = new URL(
+  "../../scripts/infra/ib_realtime/ib_tick_handler.js",
+  import.meta.url,
+).pathname;
+const { createPriceData, updatePriceFromTickPrice, updatePriceFromTickSize } =
+  await import(handlerPath);
 
 // IB TICK_TYPE constants (verified via node --input-type=module)
 const TICK = {
   // Live
-  BID: 1, ASK: 2, LAST: 4, HIGH: 6, LOW: 7, VOLUME: 8, CLOSE: 9, OPEN: 14, BID_SIZE: 0, ASK_SIZE: 3,
+  BID: 1,
+  ASK: 2,
+  LAST: 4,
+  HIGH: 6,
+  LOW: 7,
+  VOLUME: 8,
+  CLOSE: 9,
+  OPEN: 14,
+  BID_SIZE: 0,
+  ASK_SIZE: 3,
   // Delayed
-  DELAYED_BID: 66, DELAYED_ASK: 67, DELAYED_LAST: 68,
-  DELAYED_BID_SIZE: 69, DELAYED_ASK_SIZE: 70,
-  DELAYED_HIGH: 72, DELAYED_LOW: 73,
-  DELAYED_VOLUME: 74, DELAYED_CLOSE: 75, DELAYED_OPEN: 76,
+  DELAYED_BID: 66,
+  DELAYED_ASK: 67,
+  DELAYED_LAST: 68,
+  DELAYED_BID_SIZE: 69,
+  DELAYED_ASK_SIZE: 70,
+  DELAYED_HIGH: 72,
+  DELAYED_LOW: 73,
+  DELAYED_VOLUME: 74,
+  DELAYED_CLOSE: 75,
+  DELAYED_OPEN: 76,
 };
 
 describe("updatePriceFromTickPrice — live tick types (regression)", () => {
   it("BID (1) sets bid", () => {
     const d = createPriceData("SPY");
-    updatePriceFromTickPrice(d, TICK.BID, 560.10);
-    expect(d.bid).toBe(560.10);
+    updatePriceFromTickPrice(d, TICK.BID, 560.1);
+    expect(d.bid).toBe(560.1);
   });
 
   it("ASK (2) sets ask", () => {
@@ -50,10 +69,10 @@ describe("updatePriceFromTickPrice — live tick types (regression)", () => {
 
   it("CLOSE (9) sets close and derives last via updateDerivedLast", () => {
     const d = createPriceData("VIX");
-    updatePriceFromTickPrice(d, TICK.CLOSE, 18.50);
-    expect(d.close).toBe(18.50);
+    updatePriceFromTickPrice(d, TICK.CLOSE, 18.5);
+    expect(d.close).toBe(18.5);
     // VIX has no bid/ask — derived last should fall back to close
-    expect(d.last).toBe(18.50);
+    expect(d.last).toBe(18.5);
     expect(d.lastIsCalculated).toBe(true);
   });
 });
@@ -61,33 +80,33 @@ describe("updatePriceFromTickPrice — live tick types (regression)", () => {
 describe("updatePriceFromTickPrice — delayed tick types (VIX/VVIX bug fix)", () => {
   it("DELAYED_BID (66) sets bid", () => {
     const d = createPriceData("VIX");
-    updatePriceFromTickPrice(d, TICK.DELAYED_BID, 18.40);
-    expect(d.bid).toBe(18.40);
+    updatePriceFromTickPrice(d, TICK.DELAYED_BID, 18.4);
+    expect(d.bid).toBe(18.4);
   });
 
   it("DELAYED_ASK (67) sets ask", () => {
     const d = createPriceData("VIX");
-    updatePriceFromTickPrice(d, TICK.DELAYED_ASK, 18.60);
-    expect(d.ask).toBe(18.60);
+    updatePriceFromTickPrice(d, TICK.DELAYED_ASK, 18.6);
+    expect(d.ask).toBe(18.6);
   });
 
   it("DELAYED_LAST (68) sets last and clears lastIsCalculated", () => {
     const d = createPriceData("VIX");
-    updatePriceFromTickPrice(d, TICK.DELAYED_LAST, 18.50);
-    expect(d.last).toBe(18.50);
+    updatePriceFromTickPrice(d, TICK.DELAYED_LAST, 18.5);
+    expect(d.last).toBe(18.5);
     expect(d.lastIsCalculated).toBe(false);
   });
 
   it("DELAYED_HIGH (72) sets high", () => {
     const d = createPriceData("VIX");
-    updatePriceFromTickPrice(d, TICK.DELAYED_HIGH, 20.10);
-    expect(d.high).toBe(20.10);
+    updatePriceFromTickPrice(d, TICK.DELAYED_HIGH, 20.1);
+    expect(d.high).toBe(20.1);
   });
 
   it("DELAYED_LOW (73) sets low", () => {
     const d = createPriceData("VIX");
-    updatePriceFromTickPrice(d, TICK.DELAYED_LOW, 17.20);
-    expect(d.low).toBe(17.20);
+    updatePriceFromTickPrice(d, TICK.DELAYED_LOW, 17.2);
+    expect(d.low).toBe(17.2);
   });
 
   it("DELAYED_VOLUME (74) sets volume", () => {
@@ -98,10 +117,10 @@ describe("updatePriceFromTickPrice — delayed tick types (VIX/VVIX bug fix)", (
 
   it("DELAYED_CLOSE (75) sets close and derives last for cash indexes", () => {
     const d = createPriceData("VIX");
-    updatePriceFromTickPrice(d, TICK.DELAYED_CLOSE, 18.50);
-    expect(d.close).toBe(18.50);
+    updatePriceFromTickPrice(d, TICK.DELAYED_CLOSE, 18.5);
+    expect(d.close).toBe(18.5);
     // No bid/ask → derived last falls back to close
-    expect(d.last).toBe(18.50);
+    expect(d.last).toBe(18.5);
     expect(d.lastIsCalculated).toBe(true);
   });
 
@@ -115,8 +134,8 @@ describe("updatePriceFromTickPrice — delayed tick types (VIX/VVIX bug fix)", (
 
   it("DELAYED_OPEN (76) sets open", () => {
     const d = createPriceData("VIX");
-    updatePriceFromTickPrice(d, TICK.DELAYED_OPEN, 17.80);
-    expect(d.open).toBe(17.80);
+    updatePriceFromTickPrice(d, TICK.DELAYED_OPEN, 17.8);
+    expect(d.open).toBe(17.8);
   });
 
   it("DELAYED_CLOSE + DELAYED_BID + DELAYED_ASK: derived last uses mid, not close", () => {

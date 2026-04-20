@@ -6,7 +6,7 @@
 
 **Parallel scanning:** `scanner.py` (15 workers), `discover.py` (10 workers). `--workers N` CLI. `UWRateLimitError` skips ticker, doesn't crash batch.
 
-**Atomic state:** `scripts/utils/atomic_io.py` — `atomic_save()` (temp + `os.replace()` + SHA-256), `verified_load()`. Writers: `ib_sync.py`. Readers: reconcile, flow, free_trade, performance, leap scanner.
+**Atomic state:** `src/xenon/utils/atomic_io.py` — `atomic_save()` (temp + `os.replace()` + SHA-256), `verified_load()`. Writers: `ib_sync.py`. Readers: reconcile, flow, free_trade, performance, leap scanner.
 
 **Batched WS relay:** `ib_realtime_server.js` — per-client last-write-wins, 100ms flush. 5000 msg/s → 10 batched/s. Initial state immediate.
 
@@ -14,13 +14,14 @@
 
 **Vectorized math:** `kelly_size_batch()` (NumPy), `portfolio_greeks_vectorized()`. Cross-validated with TS `approxDelta()` to 10⁻¹².
 
-**Resilient IBClient** (`scripts/clients/ib_client.py`): Subscription tracking, disconnect recovery (5 attempts, 2ⁿs capped 30s), pacing violations (162/366: 10s backoff, 3 retries), invalid contracts (200/354: no retry, added to `_failed_contracts`).
+**Resilient IBClient** (`src/xenon/clients/ib_client.py`): Subscription tracking, disconnect recovery (5 attempts, 2ⁿs capped 30s), pacing violations (162/366: 10s backoff, 3 retries), invalid contracts (200/354: no retry, added to `_failed_contracts`).
 
-**Incremental sync:** `scripts/utils/incremental_sync.py` — diff by `(ticker, expiry)` + contract count, skip full sync when unchanged.
+**Incremental sync:** `src/xenon/utils/incremental_sync.py` — diff by `(ticker, expiry)` + contract count, skip full sync when unchanged.
 
 ## Performance Page Optimization
 
-`scripts/portfolio_performance.py` — two-phase parallel fetch:
+`src/xenon/reports/portfolio_performance.py` — two-phase parallel fetch:
+
 - **Phase A** (sequential): IB stock history + cache checks
 - **Phase B** (ThreadPoolExecutor): UW/Yahoo fallbacks + option history. Per-worker `UWClient`.
 

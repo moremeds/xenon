@@ -25,7 +25,7 @@ class TestCoveredCallDetection_IBSync:
 
     def test_short_call_alone_is_undefined(self):
         """A standalone short call with no stock is still undefined risk."""
-        from ib_sync import detect_structure_type
+        from xenon.execution.ib_sync import detect_structure_type
         legs = [{'secType': 'OPT', 'right': 'C', 'position': -40, 'strike': 60.0}]
         structure, risk = detect_structure_type(legs)
         assert structure == "Short Call"
@@ -33,7 +33,7 @@ class TestCoveredCallDetection_IBSync:
 
     def test_long_stock_plus_short_call_is_covered_call(self):
         """Stock + short call in same ticker = covered call = DEFINED risk."""
-        from ib_sync import detect_structure_type
+        from xenon.execution.ib_sync import detect_structure_type
         legs = [
             {'secType': 'STK', 'right': '', 'position': 4000, 'strike': 0},
             {'secType': 'OPT', 'right': 'C', 'position': -40, 'strike': 60.0},
@@ -44,7 +44,7 @@ class TestCoveredCallDetection_IBSync:
 
     def test_partially_covered_call_is_undefined(self):
         """Stock covers only part of short calls = still undefined for uncovered portion."""
-        from ib_sync import detect_structure_type
+        from xenon.execution.ib_sync import detect_structure_type
         # 1000 shares only covers 10 contracts, but 40 are short
         legs = [
             {'secType': 'STK', 'right': '', 'position': 1000, 'strike': 0},
@@ -56,7 +56,7 @@ class TestCoveredCallDetection_IBSync:
 
     def test_short_put_with_stock_is_not_covered(self):
         """Stock + short put is NOT a covered call — it's a different structure."""
-        from ib_sync import detect_structure_type
+        from xenon.execution.ib_sync import detect_structure_type
         legs = [
             {'secType': 'STK', 'right': '', 'position': 4000, 'strike': 0},
             {'secType': 'OPT', 'right': 'P', 'position': -40, 'strike': 50.0},
@@ -67,7 +67,7 @@ class TestCoveredCallDetection_IBSync:
 
     def test_collapse_merges_stock_and_short_call_across_expiry_groups(self):
         """collapse_positions should merge separate (sym, expiry) groups for covered calls."""
-        from ib_sync import collapse_positions
+        from xenon.execution.ib_sync import collapse_positions
 
         # Simulate what IB returns: stock and option as separate positions
         positions = [
@@ -101,7 +101,7 @@ class TestCoveredCallDetection_IBSync:
 
     def test_collapse_does_not_merge_unrelated_stock_and_option(self):
         """Stock in AAPL + short call in MSFT should NOT be merged."""
-        from ib_sync import collapse_positions
+        from xenon.execution.ib_sync import collapse_positions
 
         positions = [
             {
@@ -137,7 +137,7 @@ class TestCoveredCallDetection_PortfolioReport:
 
     def test_portfolio_report_detects_covered_call(self):
         """Portfolio report grouping should merge stock + short call into covered call."""
-        from portfolio_report import group_positions
+        from xenon.reports.portfolio_report import group_positions
 
         # Simulate flattened positions from IB
         positions = [

@@ -10,7 +10,7 @@ import time
 import pytest
 from unittest.mock import MagicMock, patch, PropertyMock
 
-from clients.uw_client import (
+from xenon.clients.uw_client import (
     UWClient,
     UWAPIError,
     UWAuthError,

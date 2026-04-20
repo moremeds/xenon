@@ -2,7 +2,9 @@ import { runScript, type ScriptResult } from "../runner";
 import { KellyOutput, type KellyInput } from "../schemas/kelly";
 import type { Static } from "@sinclair/typebox";
 
-export async function kelly(input: KellyInput): Promise<ScriptResult<Static<typeof KellyOutput>>> {
+export async function kelly(
+  input: KellyInput,
+): Promise<ScriptResult<Static<typeof KellyOutput>>> {
   const args = ["--prob", String(input.prob), "--odds", String(input.odds)];
 
   if (input.fraction != null) {
@@ -12,7 +14,7 @@ export async function kelly(input: KellyInput): Promise<ScriptResult<Static<type
     args.push("--bankroll", String(input.bankroll));
   }
 
-  return runScript("scripts/kelly.py", {
+  return runScript(".venv/bin/xenon-kelly", {
     args,
     outputSchema: KellyOutput,
   });

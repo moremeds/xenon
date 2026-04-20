@@ -15,7 +15,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
-from execution.ib_sync import detect_structure_type, format_structure_description
+from xenon.execution.ib_sync import detect_structure_type, format_structure_description
 
 
 class TestRatioDetection:

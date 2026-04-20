@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from utils.cta_sync_health import (
+from xenon.utils.cta_sync_health import (
     classify_sync_error,
     latest_available_cta_date,
     load_cta_sync_status,
@@ -15,7 +15,9 @@ from utils.cta_sync_health import (
 
 
 def test_classify_auth_rejection():
-    stderr = "ERROR: Login failed — still on login page after submit. page_excerpt=Your username or password was incorrect"
+    stderr = (
+        "ERROR: Login failed — still on login page after submit. page_excerpt=Your username or password was incorrect"
+    )
     error_type, message = classify_sync_error(stderr)
     assert error_type == "auth_rejected"
     assert "username or password was incorrect" in message
@@ -148,13 +150,15 @@ def test_latest_available_cta_date_only_non_date_json_returns_none(tmp_path: Pat
 
 def test_cta_sync_lock_clears_stale_lock_and_acquires(tmp_path: Path):
     """Lock held by a dead PID must be cleared so a new run can acquire it."""
-    from cta_sync_service import CtaSyncLockError, cta_sync_lock
+    from xenon.services.cta_sync_service import CtaSyncLockError, cta_sync_lock
 
     lock_dir = tmp_path / "cta-sync.lock"
     lock_dir.mkdir()
     dead_pid = 99999  # almost certainly not a real process
     (lock_dir / "lock.json").write_text(
-        json.dumps({"pid": dead_pid, "run_id": "old", "target_date": "2026-03-18", "started_at": "2026-03-18T03:00:00Z"})
+        json.dumps(
+            {"pid": dead_pid, "run_id": "old", "target_date": "2026-03-18", "started_at": "2026-03-18T03:00:00Z"}
+        )
     )
     assert lock_dir.exists()
 
@@ -168,16 +172,19 @@ def test_cta_sync_lock_clears_stale_lock_and_acquires(tmp_path: Path):
 
 def test_cta_sync_lock_raises_when_live_pid_holds_lock(tmp_path: Path):
     """Lock held by the current (live) process must not be stolen."""
-    from cta_sync_service import CtaSyncLockError, cta_sync_lock
+    from xenon.services.cta_sync_service import CtaSyncLockError, cta_sync_lock
 
     lock_dir = tmp_path / "cta-sync.lock"
     lock_dir.mkdir()
     live_pid = os.getpid()
     (lock_dir / "lock.json").write_text(
-        json.dumps({"pid": live_pid, "run_id": "active", "target_date": "2026-03-19", "started_at": "2026-03-19T03:00:00Z"})
+        json.dumps(
+            {"pid": live_pid, "run_id": "active", "target_date": "2026-03-19", "started_at": "2026-03-19T03:00:00Z"}
+        )
     )
 
     import pytest
+
     with pytest.raises(CtaSyncLockError):
         with cta_sync_lock(target_date="2026-03-19", run_id="interloper", lock_dir=lock_dir):
             pass

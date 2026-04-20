@@ -1,4 +1,4 @@
-from scripts.analysis.gates import earnings_gate, liquidity_gate, regime_gate
+from xenon.analysis.gates import earnings_gate, liquidity_gate, regime_gate
 
 
 def test_earnings_gate_blocks_within_window():

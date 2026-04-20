@@ -19,7 +19,7 @@ export async function ibOrders(
   if (input.port != null) args.push("--port", String(input.port));
   if (input.clientId != null) args.push("--client-id", String(input.clientId));
 
-  const result = await runScript("scripts/ib_orders.py", {
+  const result = await runScript("src/xenon/execution/ib_orders.py", {
     args,
     timeout: 30_000,
     rawOutput: true,

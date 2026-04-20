@@ -1,1 +1,0 @@
-services/run_cta_sync.sh
