@@ -1,6 +1,6 @@
-# scripts/ — CLAUDE.md
+# src/xenon/ — CLAUDE.md
 
-Python pipelines, scanners, clients, commands. Root `CLAUDE.md` is authoritative for policy; `src/xenon/api/CLAUDE.md` covers FastAPI/IB Gateway infra.
+Python pipelines, scanners, clients, commands — the installable `xenon` package. Root `CLAUDE.md` is authoritative for policy; `src/xenon/api/CLAUDE.md` covers FastAPI/IB Gateway infra.
 
 **Reference (not inline):** `docs/architecture/architecture.md` (high-throughput, perf), `docs/trading/intraday-interpolation.md` (dark pool), `docs/trading/signal-thresholds.md` (P/C, flow, analyst), `docs/architecture/data-files.md` (data/ catalog), `docs/runbooks/ops.md` (logs), `docs/reference/unusual_whales_api.md` (UW endpoints), `docs/trading/options-structures.md` (structure classification).
 

@@ -27,7 +27,7 @@ Xenon detects institutional positioning through dark pool flow, volatility signa
 | **3. Risk**            | Fractional Kelly. Hard cap: 2.5% of bankroll per position.                       |
 | **4. No Naked Shorts** | Every short call must be covered by long shares (1:100). Violations auto-cancel. |
 
-Any gate fails → stop. Full enforcement matrix: [`scripts/CLAUDE.md`](scripts/CLAUDE.md).
+Any gate fails → stop. Full enforcement matrix: [`src/xenon/CLAUDE.md`](src/xenon/CLAUDE.md).
 
 ## Strategies
 
@@ -121,7 +121,7 @@ Component-level reference: [`docs/reference/web-ui-reference.md`](docs/reference
 **Portfolio:** `portfolio` · `free-trade` · `journal` · `sync` · `blotter` · `blotter-history`
 **Research:** `strategies` · `menthorq-cta` · `x-scan` · `commands`
 
-Full table with descriptions: [`scripts/CLAUDE.md`](scripts/CLAUDE.md).
+Full table with descriptions: [`src/xenon/CLAUDE.md`](src/xenon/CLAUDE.md).
 
 ## Architecture
 
