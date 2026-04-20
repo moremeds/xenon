@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate Regime/CRI share cards + preview page for X.
+generate_regime_share — Generate Regime/CRI share cards + preview page for X.
 Reads from the latest CRI scheduled cache, produces 4 PNG cards
 and a self-contained HTML preview page.
 

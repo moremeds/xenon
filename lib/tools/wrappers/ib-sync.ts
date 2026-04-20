@@ -20,7 +20,7 @@ export async function ibSync(
   if (input.clientId != null) args.push("--client-id", String(input.clientId));
   if (input.noPrices) args.push("--no-prices");
 
-  const result = await runScript("scripts/ib_sync.py", {
+  const result = await runScript("src/xenon/execution/ib_sync.py", {
     args,
     timeout: 30_000,
     rawOutput: true,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate VCG (Volatility-Credit Gap) share cards + preview page for X.
+generate_vcg_share — Generate VCG (Volatility-Credit Gap) share cards + preview page for X.
 Reads from data/vcg.json, produces 4 PNG cards and a self-contained HTML preview.
 
 Cards:

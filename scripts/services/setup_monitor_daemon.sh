@@ -25,26 +25,42 @@ OLD_PLIST_DST="$HOME/Library/LaunchAgents/$OLD_PLIST_NAME"
 
 install() {
     echo "Installing Monitor Daemon service..."
-    
-    # Create logs directory
+
     mkdir -p "$LOG_DIR"
-    
-    # Unload old service if exists
+
+    local WRAPPER="$PROJECT_DIR/scripts/services/run_monitor_daemon.sh"
+    if [ ! -f "$WRAPPER" ]; then
+        echo "ERROR: Wrapper script not found at $WRAPPER"
+        exit 1
+    fi
+    chmod +x "$WRAPPER"
+    if [ ! -x "$PROJECT_DIR/.venv/bin/xenon-monitor-daemon" ]; then
+        echo "ERROR: xenon-monitor-daemon not found in .venv/bin — run 'uv sync' first"
+        exit 1
+    fi
+
     if [ -f "$OLD_PLIST_DST" ]; then
         echo "Removing old exit-order-service..."
         launchctl unload "$OLD_PLIST_DST" 2>/dev/null || true
         rm -f "$OLD_PLIST_DST"
     fi
-    
-    # Unload if already loaded
+
     launchctl unload "$PLIST_DST" 2>/dev/null || true
-    
-    # Copy plist
-    cp "$PLIST_SRC" "$PLIST_DST"
-    
-    # Load service
+
+    # Regenerate plist from checked-in template, substituting the current checkout path
+    local TMP_PLIST
+    TMP_PLIST=$(mktemp)
+    sed "s|__PROJECT_DIR__|$PROJECT_DIR|g" "$PLIST_SRC" > "$TMP_PLIST"
+    if ! plutil -lint "$TMP_PLIST" > /dev/null 2>&1; then
+        echo "ERROR: Generated plist failed plutil lint"
+        plutil -lint "$TMP_PLIST"
+        rm -f "$TMP_PLIST"
+        exit 1
+    fi
+    mv "$TMP_PLIST" "$PLIST_DST"
+
     launchctl load "$PLIST_DST"
-    
+
     echo "✓ Service installed and started"
     echo ""
     status

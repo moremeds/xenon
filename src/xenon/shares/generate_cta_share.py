@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate CTA share cards + preview page for X.
+generate_cta_share — Generate CTA share cards + preview page for X.
 Reads from the latest MenthorQ CTA cache, produces 4 PNG cards
 and a self-contained HTML preview page.
 
