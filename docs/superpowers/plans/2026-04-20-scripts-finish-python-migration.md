@@ -6,7 +6,7 @@
 
 **Architecture:** Structural migration, not a feature build. No runtime data-flow changes — only import paths move. Follows the zero-break phased-shim pattern from Phase 1 and Phase 2: move code, leave a thin re-export at the old path, update known callers, migrate tests, remove shim in a follow-up PR after one soak cycle.
 
-**Tech Stack:** Python 3.13, `uv`/`hatchling` packaging, pytest, bash smoke harness (`scripts/infra/dev/smoke_phase1_shims.sh`).
+**Tech Stack:** Python 3.13, `uv`/`hatchling` packaging, pytest (run via `python3.13 -m pytest`; `.venv/bin/pytest` not installed since pytest is not a declared dep).
 
 ---
 
@@ -60,8 +60,8 @@ Spec lives at `docs/superpowers/specs/2026-04-20-scripts-finish-python-migration
 git status                                     # must be clean working tree on master (or a fresh feature branch)
 git log --oneline -1                           # last commit should be 5ba9bbee or descendant
 uv sync --frozen                               # exit 0
-.venv/bin/pytest scripts/tests/ -x --no-header -q 2>&1 | tail -5   # green
-bash scripts/infra/dev/smoke_phase1_shims.sh  # 26/26 OK
+python3.13 -m pytest scripts/tests/ -x --no-header -q 2>&1 | tail -5   # green
+echo "skip: smoke harness removed in PR #20 (commit b6753784)"
 ```
 
 Expected: all four commands exit 0. If pytest or smoke are red on master, STOP — do not start this PR, fix the master-state regression first.
@@ -193,12 +193,12 @@ Expected sentence after edit:
 
 - [ ] **Step 1.7a: Pytest still green**
 
-Run: `uv sync --frozen && .venv/bin/pytest scripts/tests/ -x --no-header -q`
+Run: `uv sync --frozen && python3.13 -m pytest scripts/tests/ -x --no-header -q`
 Expected: all green (nothing runtime changed, but we re-ran as a baseline).
 
 - [ ] **Step 1.7b: Smoke still green**
 
-Run: `bash scripts/infra/dev/smoke_phase1_shims.sh`
+Run: `echo "skip: smoke harness removed in PR #20 (commit b6753784)"
 Expected: `26/26 OK`.
 
 - [ ] **Step 1.7c: `scoped pytest runner` still callable at its real home**
@@ -421,7 +421,7 @@ Expected: prints `ok`, exit 0. Any failure here means the shim is malformed.
 
 - [ ] **Step 2.5a: Pytest green**
 
-Run: `.venv/bin/pytest scripts/tests/ -x --no-header -q`
+Run: `python3.13 -m pytest scripts/tests/ -x --no-header -q`
 Expected: green. Tests still import via `scripts.ta_lib.*` in this task (migrated in Task 4); the shim is specifically what keeps them working right now.
 
 - [ ] **Step 2.5b: Scanner CLIs still work**
@@ -437,7 +437,7 @@ Expected: both exit 0, help text printed. `trend-scan` still imports `scripts.ta
 
 - [ ] **Step 2.5c: Shim smoke**
 
-Run: `bash scripts/infra/dev/smoke_phase1_shims.sh`
+Run: `echo "skip: smoke harness removed in PR #20 (commit b6753784)"
 Expected: `26/26 OK`.
 
 ### Step 2.6 — Commit
@@ -611,7 +611,7 @@ Expected: both exit 0.
 
 - [ ] **Step 3.3a: Pytest green**
 
-Run: `.venv/bin/pytest scripts/tests/ -x --no-header -q`
+Run: `python3.13 -m pytest scripts/tests/ -x --no-header -q`
 Expected: green. Tests still import via `scripts.ta_lib.*` — shim carries them.
 
 - [ ] **Step 3.3b: `src/` has zero `scripts.ta_lib` references**
@@ -626,7 +626,7 @@ Expected: **zero hits**. This is the end-state for `src/` — no Python under `s
 
 - [ ] **Step 3.3c: Smoke green**
 
-Run: `bash scripts/infra/dev/smoke_phase1_shims.sh`
+Run: `echo "skip: smoke harness removed in PR #20 (commit b6753784)"
 Expected: `26/26 OK`.
 
 ### Step 3.4 — Commit
@@ -713,7 +713,7 @@ If the first grep returns hits (e.g., `patch("scripts.api.X")` — different mod
 
 - [ ] **Step 4.3a: Full pytest**
 
-Run: `.venv/bin/pytest scripts/tests/ -x --no-header -q`
+Run: `python3.13 -m pytest scripts/tests/ -x --no-header -q`
 Expected: green. If any fails with `ModuleNotFoundError: No module named 'scripts.ta_lib'`, the sed missed a file — re-run Step 4.1b.
 
 - [ ] **Step 4.3b: Run only the migrated test files as a focused check**
@@ -721,7 +721,7 @@ Expected: green. If any fails with `ModuleNotFoundError: No module named 'script
 Run:
 
 ```bash
-.venv/bin/pytest \
+python3.13 -m pytest \
   scripts/tests/test_r2_store.py \
   scripts/tests/test_apex_sync.py \
   scripts/tests/test_apex_refresh.py \
@@ -813,7 +813,7 @@ Expected: exit 0.
 
 - [ ] **Step 5.3b: Pytest green**
 
-Run: `.venv/bin/pytest scripts/tests/ -x --no-header -q`
+Run: `python3.13 -m pytest scripts/tests/ -x --no-header -q`
 Expected: all green.
 
 - [ ] **Step 5.3c: Scanner CLIs green**
@@ -830,7 +830,7 @@ Expected: `--help` calls that support it exit 0; ones that don't still print usa
 
 - [ ] **Step 5.3d: Shim smoke harness**
 
-Run: `bash scripts/infra/dev/smoke_phase1_shims.sh`
+Run: `echo "skip: smoke harness removed in PR #20 (commit b6753784)"
 Expected: `26/26 OK`.
 
 - [ ] **Step 5.3e: Both old and new ta_lib paths still resolve**
