@@ -13,7 +13,7 @@ from typing import Any
 
 import pandas as pd
 
-from scripts.ta_lib.parquet_store import read_indicators, read_ohlcv
+from xenon.ta_lib.parquet_store import read_indicators, read_ohlcv
 
 logger = logging.getLogger(__name__)
 

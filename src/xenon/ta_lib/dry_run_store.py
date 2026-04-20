@@ -30,7 +30,7 @@ class DryRunStore:
     def get_object(self, key: str) -> bytes:
         path = self._path(key)
         if not path.exists():
-            from scripts.ta_lib.r2_store import R2NotFoundError
+            from xenon.ta_lib.r2_store import R2NotFoundError
 
             raise R2NotFoundError(key)
         return path.read_bytes()

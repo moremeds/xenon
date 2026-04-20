@@ -128,12 +128,12 @@ def sync_if_stale(
     force: bool = False,
     max_workers: int = 10,
 ) -> SyncResult:
-    from scripts.ta_lib.r2_store import R2Error
+    from xenon.ta_lib.r2_store import R2Error
 
     mirror_dir = Path(mirror_dir)
     _recover_from_interrupted_swap(mirror_dir)  # T3
     if r2 is None:
-        from scripts.ta_lib.r2_store import R2Store
+        from xenon.ta_lib.r2_store import R2Store
 
         r2 = R2Store()
 
