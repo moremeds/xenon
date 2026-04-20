@@ -1,4 +1,4 @@
-"""Unit tests for scripts.ta_lib.r2_store. All S3 calls mocked via moto."""
+"""Unit tests for xenon.ta_lib.r2_store. All S3 calls mocked via moto."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from scripts.ta_lib.r2_store import R2NotFoundError, R2PreconditionError, R2Store, _Config
+from xenon.ta_lib.r2_store import R2NotFoundError, R2PreconditionError, R2Store, _Config
 
 
 @pytest.fixture
@@ -86,7 +86,7 @@ def test_delete_object_roundtrip(r2_env):
 
     boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="apex-data")
 
-    from scripts.ta_lib.r2_store import R2NotFoundError, R2Store
+    from xenon.ta_lib.r2_store import R2NotFoundError, R2Store
 
     r2 = R2Store()
     r2.put_object("meta/test.bin", b"xyz")
@@ -104,6 +104,6 @@ def test_delete_object_missing_is_noop(r2_env):
 
     boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="apex-data")
 
-    from scripts.ta_lib.r2_store import R2Store
+    from xenon.ta_lib.r2_store import R2Store
 
     R2Store().delete_object("does/not/exist")  # must not raise

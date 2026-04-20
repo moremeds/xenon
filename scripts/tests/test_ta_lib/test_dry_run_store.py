@@ -1,11 +1,11 @@
-"""Tests for scripts.ta_lib.dry_run_store."""
+"""Tests for xenon.ta_lib.dry_run_store."""
 
 from __future__ import annotations
 
 
 def test_list_objects_emits_posix_paths(tmp_path):
     """C9: keys returned from list_objects must use forward slashes regardless of OS."""
-    from scripts.ta_lib.dry_run_store import DryRunStore
+    from xenon.ta_lib.dry_run_store import DryRunStore
 
     r2 = DryRunStore(tmp_path / "preview")
     r2.put_object("parquet/historical/1d/AAPL.parquet", b"x")
@@ -17,7 +17,7 @@ def test_list_objects_emits_posix_paths(tmp_path):
 
 
 def test_put_then_get_roundtrip(tmp_path):
-    from scripts.ta_lib.dry_run_store import DryRunStore
+    from xenon.ta_lib.dry_run_store import DryRunStore
 
     r2 = DryRunStore(tmp_path / "preview")
     r2.put_object("meta/test.bin", b"payload")
@@ -25,8 +25,8 @@ def test_put_then_get_roundtrip(tmp_path):
 
 
 def test_delete_object_roundtrip(tmp_path):
-    from scripts.ta_lib.dry_run_store import DryRunStore
-    from scripts.ta_lib.r2_store import R2NotFoundError
+    from xenon.ta_lib.dry_run_store import DryRunStore
+    from xenon.ta_lib.r2_store import R2NotFoundError
 
     r2 = DryRunStore(tmp_path / "preview")
     r2.put_object("meta/test.bin", b"payload")
@@ -38,7 +38,7 @@ def test_delete_object_roundtrip(tmp_path):
 
 
 def test_delete_missing_key_is_noop(tmp_path):
-    from scripts.ta_lib.dry_run_store import DryRunStore
+    from xenon.ta_lib.dry_run_store import DryRunStore
 
     r2 = DryRunStore(tmp_path / "preview")
     r2.delete_object("does/not/exist")  # must not raise

@@ -130,7 +130,7 @@ def test_refresh_one_incremental_reads_existing_and_dedupes():
     import pandas as pd
 
     from xenon.fetchers.fetch_apex_data import refresh_one
-    from scripts.ta_lib.parquet_store import write_ohlcv
+    from xenon.ta_lib.parquet_store import write_ohlcv
 
     # Build an existing parquet (300 bars ending 2025-10-26)
     n = 300
@@ -184,7 +184,7 @@ def test_refresh_one_incremental_cold_start_when_no_existing():
     import pandas as pd
 
     from xenon.fetchers.fetch_apex_data import refresh_one
-    from scripts.ta_lib.r2_store import R2NotFoundError
+    from xenon.ta_lib.r2_store import R2NotFoundError
 
     r2 = MagicMock()
     r2.get_object.side_effect = R2NotFoundError("missing")
@@ -226,7 +226,7 @@ def test_refresh_one_hourly_incremental_uses_same_date_start():
     import pandas as pd
 
     from xenon.fetchers.fetch_apex_data import refresh_one
-    from scripts.ta_lib.parquet_store import write_ohlcv
+    from xenon.ta_lib.parquet_store import write_ohlcv
 
     # Existing file: hourly bars up to 2025-10-26 15:00 ET (last trading hour)
     existing = pd.DataFrame(
@@ -373,7 +373,7 @@ def test_compute_indicators_adapter_includes_a3_fields():
 
 def test_dry_run_store_writes_to_local_filesystem(tmp_path):
     """A17: DryRunStore must write to a directory under tmp, not R2."""
-    from scripts.ta_lib.dry_run_store import DryRunStore
+    from xenon.ta_lib.dry_run_store import DryRunStore
 
     r2 = DryRunStore(tmp_path / "preview")
     r2.put_object("meta/test.json", b'{"ok": true}')
@@ -384,8 +384,8 @@ def test_dry_run_store_writes_to_local_filesystem(tmp_path):
 
 def test_dry_run_store_get_object_raises_r2_not_found_on_missing(tmp_path):
     """A17: DryRunStore uses the same exception type as R2Store so callers are interchangeable."""
-    from scripts.ta_lib.dry_run_store import DryRunStore
-    from scripts.ta_lib.r2_store import R2NotFoundError
+    from xenon.ta_lib.dry_run_store import DryRunStore
+    from xenon.ta_lib.r2_store import R2NotFoundError
 
     r2 = DryRunStore(tmp_path / "preview")
     with pytest.raises(R2NotFoundError):
@@ -523,7 +523,7 @@ def test_update_manifest_with_retry_retries_on_precondition_failure():
     from unittest.mock import MagicMock, patch
 
     from xenon.fetchers.fetch_apex_data import _update_manifest_with_retry
-    from scripts.ta_lib.r2_store import R2PreconditionError
+    from xenon.ta_lib.r2_store import R2PreconditionError
 
     r2 = MagicMock()
     r2.head.return_value = {"ETag": '"etag1"'}
@@ -543,7 +543,7 @@ def test_update_manifest_with_retry_raises_after_max_attempts():
     from unittest.mock import MagicMock, patch
 
     from xenon.fetchers.fetch_apex_data import _update_manifest_with_retry
-    from scripts.ta_lib.r2_store import R2PreconditionError
+    from xenon.ta_lib.r2_store import R2PreconditionError
 
     r2 = MagicMock()
     r2.head.return_value = None
