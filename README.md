@@ -169,7 +169,7 @@ Futu support is intentionally observe-only: `src/xenon/clients/futu_client.py` f
 - **E2E:** `Playwright` — browser workflows
 
 ```bash
-python3.13 scripts/run_pytest_affected.py    # scoped — only affected tests
+python3.13 scripts/infra/dev/run_pytest_affected.py    # scoped — only affected tests
 cd web && npm test                            # Vitest
 cd web && npx playwright test                 # E2E
 ```

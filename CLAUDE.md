@@ -2,12 +2,12 @@
 
 Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` files:
 
-| Area                                             | File                    |
-| ------------------------------------------------ | ----------------------- |
-| Frontend, pricing, P&L, share cards, reports     | `web/CLAUDE.md`         |
-| Python pipelines, scanners, commands, data files | `scripts/CLAUDE.md`     |
-| FastAPI, Clerk auth, IB Gateway, order lifecycle | `scripts/api/CLAUDE.md` |
-| Brand tokens, typography, spectrum, UI rules     | `brand/CLAUDE.md`       |
+| Area                                             | File                      |
+| ------------------------------------------------ | ------------------------- |
+| Frontend, pricing, P&L, share cards, reports     | `web/CLAUDE.md`           |
+| Python pipelines, scanners, commands, data files | `scripts/CLAUDE.md`       |
+| FastAPI, Clerk auth, IB Gateway, order lifecycle | `src/xenon/api/CLAUDE.md` |
+| Brand tokens, typography, spectrum, UI rules     | `brand/CLAUDE.md`         |
 
 ## Brokers
 
@@ -88,7 +88,7 @@ Env vars (read per-call, runtime tunable):
 - `XENON_UW_TTL_OPEN_S` (default `1800`) — snapshot TTL during open hours
 - `XENON_UW_TTL_CLOSED_S` (default `3600`) — TTL for user-initiated fetches when market is closed
 
-The closed-market gate lives inside `UwAnalyzeCache.get_or_run()` and also covers the separate on-demand OI fetch in `_process_ticker`. See `scripts/api/services/uw_analyze_cache.py` + `scripts/api/routes/uw_analyze.py` for the implementation.
+The closed-market gate lives inside `UwAnalyzeCache.get_or_run()` and also covers the separate on-demand OI fetch in `_process_ticker`. See `src/xenon/api/services/uw_analyze_cache.py` + `src/xenon/api/routes/uw_analyze.py` for the implementation.
 
 ## Output Rules
 
@@ -113,7 +113,7 @@ The closed-market gate lives inside `UwAnalyzeCache.get_or_run()` and also cover
 ## Tests
 
 ```bash
-python3.13 scripts/run_pytest_affected.py                          # scoped Python tests (preferred)
+python3.13 scripts/infra/dev/run_pytest_affected.py                 # scoped Python tests (preferred)
 cd web && npm test                                                  # Vitest
 cd web && npx playwright test                                       # E2E
 python3.13 -m pytest scripts/tests/test_foo.py::test_name -xvs      # single test
