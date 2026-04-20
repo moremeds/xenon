@@ -5,7 +5,7 @@ Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` fi
 | Area                                             | File                      |
 | ------------------------------------------------ | ------------------------- |
 | Frontend, pricing, P&L, share cards, reports     | `web/CLAUDE.md`           |
-| Python pipelines, scanners, commands, data files | `scripts/CLAUDE.md`       |
+| Python pipelines, scanners, commands, data files | `src/xenon/CLAUDE.md`     |
 | FastAPI, Clerk auth, IB Gateway, order lifecycle | `src/xenon/api/CLAUDE.md` |
 | Brand tokens, typography, spectrum, UI rules     | `brand/CLAUDE.md`         |
 
@@ -56,7 +56,7 @@ GATE 3 — RISK MGMT      : Fractional Kelly sizing. Hard cap: 2.5% of bankroll 
 GATE 4 — NO NAKED SHORTS: Never naked short stock, calls, futures, or bonds. Every short call must be fully covered by long shares (1 contract = 100 shares). Violation = immediate cancel.
 ```
 
-**Any gate fails → stop. No rationalization.** Enforcement details: `scripts/CLAUDE.md` (naked-short table + combo guardrails).
+**Any gate fails → stop. No rationalization.** Enforcement details: `src/xenon/CLAUDE.md` (naked-short table + combo guardrails).
 
 ## Credentials
 
