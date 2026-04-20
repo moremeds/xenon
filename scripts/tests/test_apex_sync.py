@@ -1,4 +1,4 @@
-"""Unit tests for scripts.ta_lib.apex_sync."""
+"""Unit tests for xenon.ta_lib.apex_sync."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pytest
 
 
 def test_sync_skips_when_local_fresh(tmp_path: Path):
-    from scripts.ta_lib.apex_sync import sync_if_stale
+    from xenon.ta_lib.apex_sync import sync_if_stale
 
     remote_ts = "2026-04-16T00:00:00+00:00"
     tmp_path.mkdir(exist_ok=True)
@@ -26,7 +26,7 @@ def test_sync_skips_when_local_fresh(tmp_path: Path):
 
 
 def test_sync_downloads_when_remote_newer(tmp_path: Path):
-    from scripts.ta_lib.apex_sync import sync_if_stale
+    from xenon.ta_lib.apex_sync import sync_if_stale
 
     (tmp_path / ".last_sync.json").write_text(
         json.dumps(
@@ -55,7 +55,7 @@ def test_sync_downloads_when_remote_newer(tmp_path: Path):
 
 
 def test_sync_rejects_unknown_schema_version(tmp_path: Path):
-    from scripts.ta_lib.apex_sync import SchemaVersionError, sync_if_stale
+    from xenon.ta_lib.apex_sync import SchemaVersionError, sync_if_stale
 
     r2 = MagicMock()
     r2.get_json.return_value = {
@@ -69,8 +69,8 @@ def test_sync_rejects_unknown_schema_version(tmp_path: Path):
 
 def test_sync_a15_r2_outage_falls_back_to_local_mirror(tmp_path: Path):
     """A15: R2Error on manifest GET + existing local mirror → synced=False with warning."""
-    from scripts.ta_lib.apex_sync import sync_if_stale
-    from scripts.ta_lib.r2_store import R2Error
+    from xenon.ta_lib.apex_sync import sync_if_stale
+    from xenon.ta_lib.r2_store import R2Error
 
     # Set up a local mirror with at least meta/universe.json
     (tmp_path / "meta").mkdir(parents=True)
@@ -88,8 +88,8 @@ def test_sync_a15_r2_outage_falls_back_to_local_mirror(tmp_path: Path):
 
 def test_sync_a15_r2_outage_hard_fails_without_local_mirror(tmp_path: Path):
     """A15: R2Error + no local mirror = raise."""
-    from scripts.ta_lib.apex_sync import sync_if_stale
-    from scripts.ta_lib.r2_store import R2Error
+    from xenon.ta_lib.apex_sync import sync_if_stale
+    from xenon.ta_lib.r2_store import R2Error
 
     r2 = MagicMock()
     r2.get_json.side_effect = R2Error("network down")
@@ -106,7 +106,7 @@ def test_sync_a13_atomic_swap_on_success(tmp_path: Path):
     so we verify the tmp directory does NOT exist after a successful sync, and
     that existing mirror files survive.
     """
-    from scripts.ta_lib.apex_sync import sync_if_stale
+    from xenon.ta_lib.apex_sync import sync_if_stale
 
     # Pre-populate a file that should survive the sync (copied into .tmp then
     # swapped back). This exercises the shutil.copytree(mirror, tmp) path.
@@ -139,7 +139,7 @@ def test_sync_a13_atomic_swap_on_success(tmp_path: Path):
 def test_sync_a14_partial_failure_leaves_mirror_untouched(tmp_path: Path):
     """A14: if any download errors, do NOT swap — existing mirror stays as-is,
     .last_sync.json is NOT updated, tmp is cleaned up, synced=False returned."""
-    from scripts.ta_lib.apex_sync import sync_if_stale
+    from xenon.ta_lib.apex_sync import sync_if_stale
 
     # Pre-populate existing mirror + .last_sync with yesterday's ts
     (tmp_path / "parquet" / "historical" / "1d").mkdir(parents=True)
@@ -179,7 +179,7 @@ def test_sync_a14_partial_failure_leaves_mirror_untouched(tmp_path: Path):
 
 
 def test_sync_force_overrides_freshness(tmp_path: Path):
-    from scripts.ta_lib.apex_sync import sync_if_stale
+    from xenon.ta_lib.apex_sync import sync_if_stale
 
     remote_ts = "2026-04-16T00:00:00+00:00"
     (tmp_path / ".last_sync.json").write_text(
@@ -197,7 +197,7 @@ def test_sync_force_overrides_freshness(tmp_path: Path):
 
 def test_sync_downloads_universe_metadata(tmp_path: Path):
     """meta/universe.json must be downloaded so Stage A can join against it."""
-    from scripts.ta_lib.apex_sync import sync_if_stale
+    from xenon.ta_lib.apex_sync import sync_if_stale
 
     r2 = MagicMock()
     r2.get_json.return_value = {
@@ -218,7 +218,7 @@ def test_download_prefix_counter_deterministic_under_concurrency(tmp_path):
     import shutil
     from unittest.mock import MagicMock
 
-    from scripts.ta_lib.apex_sync import _download_prefix
+    from xenon.ta_lib.apex_sync import _download_prefix
 
     n_keys = 200
     keys = [(f"parquet/historical/1d/T{i:03d}.parquet", 100, None) for i in range(n_keys)]
@@ -244,7 +244,7 @@ def test_download_prefix_counts_successes_ignores_errors(tmp_path):
     """T6: when some gets raise, downloaded must equal the success count only."""
     from unittest.mock import MagicMock
 
-    from scripts.ta_lib.apex_sync import _download_prefix
+    from xenon.ta_lib.apex_sync import _download_prefix
 
     r2 = MagicMock()
     keys = [(f"parquet/historical/1d/T{i}.parquet", 100, None) for i in range(10)]
@@ -272,7 +272,7 @@ def test_sync_recovers_from_interrupted_swap_where_only_old_exists(tmp_path):
     import shutil
     from unittest.mock import MagicMock
 
-    from scripts.ta_lib.apex_sync import sync_if_stale
+    from xenon.ta_lib.apex_sync import sync_if_stale
 
     # Simulate interrupted swap: only .old exists, live mirror gone
     old_dir = tmp_path.with_name(tmp_path.name + ".old")
@@ -312,7 +312,7 @@ def test_sync_recovers_from_interrupted_swap_where_only_tmp_exists(tmp_path):
     import shutil
     from unittest.mock import MagicMock
 
-    from scripts.ta_lib.apex_sync import sync_if_stale
+    from xenon.ta_lib.apex_sync import sync_if_stale
 
     tmp_dir = tmp_path.with_name(tmp_path.name + ".tmp")
     (tmp_dir / "meta").mkdir(parents=True, exist_ok=True)
@@ -347,7 +347,7 @@ def test_sync_leaves_mirror_alone_when_already_present(tmp_path):
     import json
     from unittest.mock import MagicMock
 
-    from scripts.ta_lib.apex_sync import sync_if_stale
+    from xenon.ta_lib.apex_sync import sync_if_stale
 
     (tmp_path / ".last_sync.json").write_text(
         json.dumps(

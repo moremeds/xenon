@@ -18,8 +18,6 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
 
 logger = logging.getLogger(__name__)
 
@@ -80,16 +78,16 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 
-from scripts.ta_lib.bars import fetch_bars
-from scripts.ta_lib.parquet_store import (
+from xenon.clients.massive_client import MassiveClient
+from xenon.ta_lib.bars import fetch_bars
+from xenon.ta_lib.parquet_store import (
     INDICATOR_COLUMNS,
     dedupe_concat,
     read_ohlcv,
     write_indicators,
     write_ohlcv,
 )
-from scripts.ta_lib.r2_store import R2NotFoundError
-from xenon.clients.massive_client import MassiveClient
+from xenon.ta_lib.r2_store import R2NotFoundError
 
 _FULL_LOOKBACK_DAYS = 730  # 2 years for cold-start / full refresh
 
@@ -122,7 +120,7 @@ def _compute_indicators_adapter(ohlcv: pd.DataFrame) -> pd.DataFrame:
     'close', 'volume']. Uses full rolling min_periods (A10) so warmup rows are
     NaN. Includes A3 scanner-contract derived fields.
     """
-    from scripts.ta_lib.indicators import compute_all
+    from xenon.ta_lib.indicators import compute_all
 
     working = ohlcv.set_index("timestamp").copy()
     enriched = compute_all(working).reset_index()
@@ -262,7 +260,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
-from scripts.ta_lib.r2_store import R2PreconditionError
+from xenon.ta_lib.r2_store import R2PreconditionError
 
 _FAILURE_RATIO_ABORT = 0.50
 _SCHEMA_VERSION = 1
@@ -427,12 +425,12 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.dry_run:
-        from scripts.ta_lib.dry_run_store import DryRunStore
+        from xenon.ta_lib.dry_run_store import DryRunStore
 
         r2 = DryRunStore(_PROJECT_ROOT / "data" / "apex_mirror_preview")
         logger.info("Dry-run mode: writing to %s", r2.bucket)
     else:
-        from scripts.ta_lib.r2_store import R2Store
+        from xenon.ta_lib.r2_store import R2Store
 
         r2 = R2Store()
 

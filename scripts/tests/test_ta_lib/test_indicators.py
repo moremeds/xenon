@@ -28,7 +28,7 @@ def _make_ohlcv_df(n: int = 260, base_close: float = 100.0) -> pd.DataFrame:
 
 class TestComputeAll:
     def test_sma_columns_present(self):
-        from scripts.ta_lib.indicators import compute_all
+        from xenon.ta_lib.indicators import compute_all
 
         df = _make_ohlcv_df()
         result = compute_all(df)
@@ -37,7 +37,7 @@ class TestComputeAll:
         assert "sma_200" in result.columns
 
     def test_sma_20_value(self):
-        from scripts.ta_lib.indicators import compute_all
+        from xenon.ta_lib.indicators import compute_all
 
         df = _make_ohlcv_df()
         result = compute_all(df)
@@ -46,7 +46,7 @@ class TestComputeAll:
         assert result["sma_20"].iloc[-1] == pytest.approx(expected, rel=1e-6)
 
     def test_sma_warmup_is_nan(self):
-        from scripts.ta_lib.indicators import compute_all
+        from xenon.ta_lib.indicators import compute_all
 
         df = _make_ohlcv_df()
         result = compute_all(df)
@@ -57,7 +57,7 @@ class TestComputeAll:
 
 class TestRsiEdgeCases:
     def test_flat_series_rsi_is_50(self):
-        from scripts.ta_lib.indicators import compute_all
+        from xenon.ta_lib.indicators import compute_all
 
         df = _make_ohlcv_df()
         # Make all closes identical
@@ -76,7 +76,7 @@ class TestRsiEdgeCases:
         Wilder's smoothing remembers the old loss — RSI=0 is correct here,
         not 50. Regression test for false-positive coercion bug.
         """
-        from scripts.ta_lib.indicators import compute_all
+        from xenon.ta_lib.indicators import compute_all
 
         df = _make_ohlcv_df()
         # 200 bars at 100, then drop to 50, then flat at 50
@@ -91,7 +91,7 @@ class TestRsiEdgeCases:
         assert last_rsi < 5.0, f"RSI should stay near 0 after drop+flat, got {last_rsi}"
 
     def test_all_up_rsi_near_100(self):
-        from scripts.ta_lib.indicators import compute_all
+        from xenon.ta_lib.indicators import compute_all
 
         df = _make_ohlcv_df()
         # Monotonically increasing closes
@@ -104,7 +104,7 @@ class TestRsiEdgeCases:
         assert last_rsi > 95.0
 
     def test_all_down_rsi_near_0(self):
-        from scripts.ta_lib.indicators import compute_all
+        from xenon.ta_lib.indicators import compute_all
 
         df = _make_ohlcv_df()
         # Monotonically decreasing closes
@@ -119,7 +119,7 @@ class TestRsiEdgeCases:
 
 class TestDerivedColumns:
     def test_bb_width_computed(self):
-        from scripts.ta_lib.indicators import compute_all
+        from xenon.ta_lib.indicators import compute_all
 
         df = _make_ohlcv_df()
         result = compute_all(df)
@@ -128,7 +128,7 @@ class TestDerivedColumns:
         assert last > 0  # uptrend with variance → positive bb_width
 
     def test_bb_width_matches_manual(self):
-        from scripts.ta_lib.indicators import compute_all
+        from xenon.ta_lib.indicators import compute_all
 
         df = _make_ohlcv_df()
         result = compute_all(df)
@@ -137,7 +137,7 @@ class TestDerivedColumns:
         assert row["bb_width"] == pytest.approx(expected, rel=1e-6)
 
     def test_all_indicator_columns_present(self):
-        from scripts.ta_lib.indicators import compute_all
+        from xenon.ta_lib.indicators import compute_all
 
         df = _make_ohlcv_df()
         result = compute_all(df)
@@ -159,7 +159,7 @@ class TestDerivedColumns:
         assert expected_cols.issubset(set(result.columns))
 
     def test_short_series_all_nan(self):
-        from scripts.ta_lib.indicators import compute_all
+        from xenon.ta_lib.indicators import compute_all
 
         df = _make_ohlcv_df(n=10)
         result = compute_all(df)

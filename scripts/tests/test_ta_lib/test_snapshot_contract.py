@@ -35,7 +35,7 @@ REQUIRED_KEYS = {
 def _build_mirror(tmp_path: Path, ticker: str = "AAPL", n: int = 260) -> Path:
     """Populate a parquet mirror with one ticker's OHLCV + computed indicators."""
     from xenon.fetchers.fetch_apex_data import _compute_indicators_adapter
-    from scripts.ta_lib.parquet_store import write_indicators, write_ohlcv
+    from xenon.ta_lib.parquet_store import write_indicators, write_ohlcv
 
     np.random.seed(42)
     ts = pd.date_range("2024-01-01", periods=n, freq="B", tz="UTC")  # B = business days
@@ -63,7 +63,7 @@ def _build_mirror(tmp_path: Path, ticker: str = "AAPL", n: int = 260) -> Path:
 
 
 def test_snapshot_includes_all_required_keys(tmp_path):
-    from scripts.ta_lib.service import TAService
+    from xenon.ta_lib.service import TAService
 
     mirror = _build_mirror(tmp_path)
     svc = TAService(mirror_dir=mirror)
@@ -74,7 +74,7 @@ def test_snapshot_includes_all_required_keys(tmp_path):
 
 
 def test_snapshot_scalar_invariants(tmp_path):
-    from scripts.ta_lib.service import TAService
+    from xenon.ta_lib.service import TAService
 
     mirror = _build_mirror(tmp_path)
     svc = TAService(mirror_dir=mirror)
@@ -90,7 +90,7 @@ def test_snapshot_scalar_invariants(tmp_path):
 
 
 def test_snapshot_ma_20_series_is_list_of_last_5(tmp_path):
-    from scripts.ta_lib.service import TAService
+    from xenon.ta_lib.service import TAService
 
     mirror = _build_mirror(tmp_path)
     svc = TAService(mirror_dir=mirror)
@@ -102,7 +102,7 @@ def test_snapshot_ma_20_series_is_list_of_last_5(tmp_path):
 
 
 def test_snapshot_high_low_and_up_ratio_present(tmp_path):
-    from scripts.ta_lib.service import TAService
+    from xenon.ta_lib.service import TAService
 
     mirror = _build_mirror(tmp_path)
     svc = TAService(mirror_dir=mirror)
@@ -113,7 +113,7 @@ def test_snapshot_high_low_and_up_ratio_present(tmp_path):
 
 
 def test_snapshot_returns_none_for_missing_ticker(tmp_path):
-    from scripts.ta_lib.service import TAService
+    from xenon.ta_lib.service import TAService
 
     mirror = _build_mirror(tmp_path)
     svc = TAService(mirror_dir=mirror)
@@ -121,7 +121,7 @@ def test_snapshot_returns_none_for_missing_ticker(tmp_path):
 
 
 def test_get_indicators_returns_dataframe(tmp_path):
-    from scripts.ta_lib.service import TAService
+    from xenon.ta_lib.service import TAService
 
     mirror = _build_mirror(tmp_path)
     svc = TAService(mirror_dir=mirror)

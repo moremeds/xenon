@@ -10,7 +10,7 @@ import pytest
 
 def _write_minimal_parquet(mirror: Path, ticker: str = "AAPL", timeframe: str = "1d", n: int = 260):
     from xenon.fetchers.fetch_apex_data import _compute_indicators_adapter
-    from scripts.ta_lib.parquet_store import write_indicators, write_ohlcv
+    from xenon.ta_lib.parquet_store import write_indicators, write_ohlcv
 
     ts = pd.date_range("2024-01-01", periods=n, freq="B", tz="UTC")
     close = [100.0 + i * 0.1 for i in range(n)]
@@ -34,14 +34,14 @@ def _write_minimal_parquet(mirror: Path, ticker: str = "AAPL", timeframe: str = 
 
 
 def test_get_ohlcv_returns_none_when_missing(tmp_path):
-    from scripts.ta_lib.service import TAService
+    from xenon.ta_lib.service import TAService
 
     svc = TAService(mirror_dir=tmp_path)
     assert svc.get_ohlcv("AAPL") is None
 
 
 def test_get_indicators_returns_none_when_missing(tmp_path):
-    from scripts.ta_lib.service import TAService
+    from xenon.ta_lib.service import TAService
 
     svc = TAService(mirror_dir=tmp_path)
     assert svc.get_indicators("AAPL") is None
@@ -49,8 +49,8 @@ def test_get_indicators_returns_none_when_missing(tmp_path):
 
 def test_get_snapshot_returns_none_when_only_ohlcv_present(tmp_path):
     """If indicators parquet is absent, get_snapshot returns None (not a partial dict)."""
-    from scripts.ta_lib.parquet_store import write_ohlcv
-    from scripts.ta_lib.service import TAService
+    from xenon.ta_lib.parquet_store import write_ohlcv
+    from xenon.ta_lib.service import TAService
 
     ts = pd.date_range("2024-01-01", periods=30, freq="B", tz="UTC")
     ohlcv = pd.DataFrame(
@@ -72,7 +72,7 @@ def test_get_snapshot_returns_none_when_only_ohlcv_present(tmp_path):
 
 
 def test_get_ohlcv_returns_dataframe_when_present(tmp_path):
-    from scripts.ta_lib.service import TAService
+    from xenon.ta_lib.service import TAService
 
     _write_minimal_parquet(tmp_path)
     svc = TAService(mirror_dir=tmp_path)
@@ -84,7 +84,7 @@ def test_get_ohlcv_returns_dataframe_when_present(tmp_path):
 
 def test_rename_map_applied_in_snapshot(tmp_path):
     """Scanner expects 'rsi' not 'rsi_14', 'ma_20' not 'sma_20', 'bbw' not 'bb_width'."""
-    from scripts.ta_lib.service import TAService
+    from xenon.ta_lib.service import TAService
 
     _write_minimal_parquet(tmp_path)
     svc = TAService(mirror_dir=tmp_path)

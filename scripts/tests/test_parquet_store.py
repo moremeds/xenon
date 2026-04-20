@@ -1,4 +1,4 @@
-"""Unit tests for scripts.ta_lib.parquet_store."""
+"""Unit tests for xenon.ta_lib.parquet_store."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def _sample_indicators_utc() -> pd.DataFrame:
 
 
 def test_write_then_read_ohlcv_roundtrip():
-    from scripts.ta_lib.parquet_store import read_ohlcv, write_ohlcv
+    from xenon.ta_lib.parquet_store import read_ohlcv, write_ohlcv
 
     df = _sample_ohlcv_utc()
     buf = io.BytesIO()
@@ -76,7 +76,7 @@ def test_write_then_read_ohlcv_roundtrip():
 
 
 def test_write_enforces_utc_timezone():
-    from scripts.ta_lib.parquet_store import write_ohlcv
+    from xenon.ta_lib.parquet_store import write_ohlcv
 
     df = _sample_ohlcv_utc()
     buf = io.BytesIO()
@@ -88,7 +88,7 @@ def test_write_enforces_utc_timezone():
 
 def test_daily_bars_normalized_to_utc_midnight():
     """Amendment A9: daily bars land at 00:00:00 UTC regardless of source tz."""
-    from scripts.ta_lib.parquet_store import read_ohlcv, write_ohlcv
+    from xenon.ta_lib.parquet_store import read_ohlcv, write_ohlcv
 
     # Input has 04:00 UTC timestamps (i.e. midnight ET on a standard-time day)
     df = pd.DataFrame(
@@ -111,7 +111,7 @@ def test_daily_bars_normalized_to_utc_midnight():
 
 def test_hourly_bars_preserve_hour():
     """Hourly bars keep the true UTC hour."""
-    from scripts.ta_lib.parquet_store import read_ohlcv, write_ohlcv
+    from xenon.ta_lib.parquet_store import read_ohlcv, write_ohlcv
 
     df = pd.DataFrame(
         {
@@ -156,7 +156,7 @@ def _write_hkt_fixture(timestamps: list[pd.Timestamp]) -> io.BytesIO:
 def test_read_normalizes_hkt_to_utc_reinterpreting_as_et():
     """Existing bucket has tz=Asia/Hong_Kong with wall-clock values that are actually ET.
     read_ohlcv must strip HKT, localize as America/New_York, then convert to UTC."""
-    from scripts.ta_lib.parquet_store import read_ohlcv
+    from xenon.ta_lib.parquet_store import read_ohlcv
 
     buf = _write_hkt_fixture([pd.Timestamp("2025-11-28 09:30:00"), pd.Timestamp("2025-11-28 10:30:00")])
     df = read_ohlcv(buf)
@@ -169,7 +169,7 @@ def test_read_normalizes_hkt_to_utc_reinterpreting_as_et():
 def test_read_handles_dst_spring_forward_nonexistent_time():
     """Amendment A8: 2024-03-10 02:30:00 ET doesn't exist (spring-forward gap).
     With nonexistent='shift_forward', it shifts to 03:00 ET = 07:00 UTC (EDT)."""
-    from scripts.ta_lib.parquet_store import read_ohlcv
+    from xenon.ta_lib.parquet_store import read_ohlcv
 
     buf = _write_hkt_fixture([pd.Timestamp("2024-03-10 02:30:00")])
     df = read_ohlcv(buf)  # must NOT raise
@@ -183,7 +183,7 @@ def test_read_handles_dst_fall_back_ambiguous_time():
     """Amendment A8: 2024-11-03 01:30:00 ET is ambiguous (fall-back hour).
     With ambiguous=False, ambiguous times are treated as standard time (EST),
     i.e. the second occurrence after the clock fell back. Must not raise."""
-    from scripts.ta_lib.parquet_store import read_ohlcv
+    from xenon.ta_lib.parquet_store import read_ohlcv
 
     buf = _write_hkt_fixture([pd.Timestamp("2024-11-03 01:30:00"), pd.Timestamp("2024-11-03 02:30:00")])
     df = read_ohlcv(buf)  # must NOT raise
@@ -197,7 +197,7 @@ def test_read_normalizes_real_producer_file_format():
     """Regression: the real R2 producer files display wall-clock like '09:30+0800'.
     Ensure _normalize_timestamp handles that form (NOT the pyarrow-synthetic form).
     """
-    from scripts.ta_lib.parquet_store import read_ohlcv
+    from xenon.ta_lib.parquet_store import read_ohlcv
 
     buf = _write_hkt_fixture([pd.Timestamp("2025-11-28 09:30:00")])
     df = read_ohlcv(buf)
@@ -209,7 +209,7 @@ def test_read_normalizes_real_producer_file_format():
 
 def test_read_drops_index_level_0_column():
     """Existing producer emits __index_level_0__ from pandas reset_index. Drop it."""
-    from scripts.ta_lib.parquet_store import read_ohlcv
+    from xenon.ta_lib.parquet_store import read_ohlcv
 
     tbl = pa.table(
         {
@@ -231,7 +231,7 @@ def test_read_drops_index_level_0_column():
 
 
 def test_dedupe_on_append_with_overlap():
-    from scripts.ta_lib.parquet_store import dedupe_concat
+    from xenon.ta_lib.parquet_store import dedupe_concat
 
     base = _sample_ohlcv_utc()
     overlap = pd.DataFrame(
@@ -251,7 +251,7 @@ def test_dedupe_on_append_with_overlap():
 
 
 def test_write_rejects_missing_columns():
-    from scripts.ta_lib.parquet_store import write_ohlcv
+    from xenon.ta_lib.parquet_store import write_ohlcv
 
     bad = pd.DataFrame({"timestamp": [], "open": []})
     buf = io.BytesIO()
@@ -261,7 +261,7 @@ def test_write_rejects_missing_columns():
 
 def test_indicators_schema_roundtrip_includes_a3_fields():
     """Amendment A3: INDICATOR_COLUMNS extended with scanner-contract derived fields."""
-    from scripts.ta_lib.parquet_store import (
+    from xenon.ta_lib.parquet_store import (
         INDICATOR_COLUMNS,
         read_indicators,
         write_indicators,

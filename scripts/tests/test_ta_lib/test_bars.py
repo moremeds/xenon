@@ -1,4 +1,4 @@
-"""Tests for scripts.ta_lib.bars — producer-side Massive→OHLCV adapter."""
+"""Tests for xenon.ta_lib.bars — producer-side Massive→OHLCV adapter."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def _massive_aggregates_response() -> pd.DataFrame:
 
 
 def test_fetch_bars_calls_get_aggregates_with_iso_dates():
-    from scripts.ta_lib.bars import fetch_bars
+    from xenon.ta_lib.bars import fetch_bars
 
     client = MagicMock()
     client.get_aggregates.return_value = _massive_aggregates_response()
@@ -37,7 +37,7 @@ def test_fetch_bars_calls_get_aggregates_with_iso_dates():
 
 
 def test_fetch_bars_renames_date_to_timestamp():
-    from scripts.ta_lib.bars import fetch_bars
+    from xenon.ta_lib.bars import fetch_bars
 
     client = MagicMock()
     client.get_aggregates.return_value = _massive_aggregates_response()
@@ -49,7 +49,7 @@ def test_fetch_bars_renames_date_to_timestamp():
 
 
 def test_fetch_bars_drops_vwap_and_tx_count():
-    from scripts.ta_lib.bars import fetch_bars
+    from xenon.ta_lib.bars import fetch_bars
 
     client = MagicMock()
     client.get_aggregates.return_value = _massive_aggregates_response()
@@ -60,7 +60,7 @@ def test_fetch_bars_drops_vwap_and_tx_count():
 
 
 def test_fetch_bars_returns_columns_in_canonical_order():
-    from scripts.ta_lib.bars import fetch_bars
+    from xenon.ta_lib.bars import fetch_bars
 
     client = MagicMock()
     client.get_aggregates.return_value = _massive_aggregates_response()
@@ -72,7 +72,7 @@ def test_fetch_bars_returns_columns_in_canonical_order():
 
 def test_fetch_bars_preserves_tz_aware_timestamps():
     """The MassiveClient returns ET-aware timestamps. Adapter must not strip the tz."""
-    from scripts.ta_lib.bars import fetch_bars
+    from xenon.ta_lib.bars import fetch_bars
 
     client = MagicMock()
     client.get_aggregates.return_value = _massive_aggregates_response()
@@ -85,7 +85,7 @@ def test_fetch_bars_preserves_tz_aware_timestamps():
 def test_fetch_bars_propagates_massive_errors():
     """MassiveNoDataError / MassiveAuthError should not be swallowed."""
     from xenon.clients.massive_client import MassiveNoDataError
-    from scripts.ta_lib.bars import fetch_bars
+    from xenon.ta_lib.bars import fetch_bars
 
     client = MagicMock()
     client.get_aggregates.side_effect = MassiveNoDataError("UNKNOWN")

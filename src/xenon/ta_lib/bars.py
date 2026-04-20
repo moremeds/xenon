@@ -15,7 +15,7 @@ from datetime import date
 import pandas as pd
 
 from xenon.clients.massive_client import MassiveClient
-from scripts.ta_lib.parquet_store import OHLCV_COLUMNS
+from xenon.ta_lib.parquet_store import OHLCV_COLUMNS
 
 
 def fetch_bars(
