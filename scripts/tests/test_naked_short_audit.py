@@ -14,12 +14,23 @@ from xenon.execution.naked_short_audit import cancel_violations, find_naked_shor
 
 
 def make_order(
-    order_id, perm_id, symbol, sec_type, action, qty, status="Submitted", right="?", strike=0.0, expiry=None
+    order_id,
+    perm_id,
+    symbol,
+    sec_type,
+    action,
+    qty,
+    status="Submitted",
+    right="?",
+    strike=0.0,
+    expiry=None,
+    order_ref=None,
 ):
     return {
         "orderId": order_id,
         "permId": perm_id,
         "symbol": symbol,
+        "orderRef": order_ref,
         "contract": {
             "conId": 100000 + order_id,
             "symbol": symbol,
@@ -58,13 +69,14 @@ def make_stock_position(ticker, shares):
     }
 
 
-def make_option_position(ticker, direction, opt_type, contracts, strike=100.0):
+def make_option_position(ticker, direction, opt_type, contracts, strike=100.0, expiry=None):
     """Build an option position (e.g. SHORT call leg in portfolio)."""
     return {
         "ticker": ticker,
         "structure_type": "Long Call" if direction == "LONG" else "Short Call",
         "contracts": contracts,
         "direction": direction,
+        "expiry": expiry,
         "legs": [
             {
                 "direction": direction,
