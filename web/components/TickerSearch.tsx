@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import { createReconnectStrategy, type ReconnectState } from "@/lib/reconnectStrategy";
+import { resolveBrowserIbRealtimeWsUrl } from "@/lib/ibRealtimeWsClient";
 
 type SearchResult = {
   conId: number;
@@ -24,9 +25,6 @@ type TickerSearchProps = {
   placeholder?: string;
   className?: string;
 };
-
-const WS_URL =
-  process.env.NEXT_PUBLIC_IB_REALTIME_WS_URL ?? "ws://localhost:8765";
 
 const MAX_RESULTS = 10;
 const DEBOUNCE_MS = 200;
@@ -74,64 +72,68 @@ const TickerSearch = forwardRef<HTMLInputElement, TickerSearchProps>(
       }
 
       try {
-        const ws = new WebSocket(WS_URL);
-        wsRef.current = ws;
-
-        ws.onopen = () => {
-          if (!mountedRef.current) {
-            ws.close();
-            return;
-          }
-          setWsReady(true);
-          reconnectStrategyRef.current.reset();
-
-          // If a search was attempted while WS was down, fire it now
-          if (pendingPatternRef.current) {
-            const pattern = pendingPatternRef.current;
-            pendingPatternRef.current = null;
-            ws.send(JSON.stringify({ action: "search", pattern }));
-          }
-        };
-
-        ws.onmessage = (event) => {
+        void (async () => {
+          const wsUrl = await resolveBrowserIbRealtimeWsUrl();
           if (!mountedRef.current) return;
-          try {
-            const data = JSON.parse(event.data);
-            if (data.type === "ping") {
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ action: "pong" }));
-              }
+          const ws = new WebSocket(wsUrl);
+          wsRef.current = ws;
+
+          ws.onopen = () => {
+            if (!mountedRef.current) {
+              ws.close();
               return;
             }
-            if (data.type === "searchResults") {
-              const filtered: SearchResult[] = (data.results ?? [])
-                .filter((r: SearchResult) => ALLOWED_SEC_TYPES.has(r.secType))
-                .slice(0, MAX_RESULTS);
-              setResults(filtered);
-              setActiveIndex(-1);
-              setLoading(false);
+            setWsReady(true);
+            reconnectStrategyRef.current.reset();
+
+            // If a search was attempted while WS was down, fire it now
+            if (pendingPatternRef.current) {
+              const pattern = pendingPatternRef.current;
+              pendingPatternRef.current = null;
+              ws.send(JSON.stringify({ action: "search", pattern }));
             }
-          } catch {
-            // ignore non-JSON or irrelevant messages
-          }
-        };
+          };
 
-        ws.onclose = () => {
-          if (!mountedRef.current) return;
-          setWsReady(false);
-          wsRef.current = null;
-          // Reconnect with exponential backoff
-          const strategy = reconnectStrategyRef.current;
-          if (strategy.canRetry()) {
-            const delay = strategy.nextDelay();
-            reconnectTimerRef.current = setTimeout(connectWs, delay);
-          }
-        };
+          ws.onmessage = (event) => {
+            if (!mountedRef.current) return;
+            try {
+              const data = JSON.parse(event.data);
+              if (data.type === "ping") {
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ action: "pong" }));
+                }
+                return;
+              }
+              if (data.type === "searchResults") {
+                const filtered: SearchResult[] = (data.results ?? [])
+                  .filter((r: SearchResult) => ALLOWED_SEC_TYPES.has(r.secType))
+                  .slice(0, MAX_RESULTS);
+                setResults(filtered);
+                setActiveIndex(-1);
+                setLoading(false);
+              }
+            } catch {
+              // ignore non-JSON or irrelevant messages
+            }
+          };
 
-        ws.onerror = () => {
-          // onclose will fire after onerror — reconnect handled there
-          ws.close();
-        };
+          ws.onclose = () => {
+            if (!mountedRef.current) return;
+            setWsReady(false);
+            wsRef.current = null;
+            // Reconnect with exponential backoff
+            const strategy = reconnectStrategyRef.current;
+            if (strategy.canRetry()) {
+              const delay = strategy.nextDelay();
+              reconnectTimerRef.current = setTimeout(connectWs, delay);
+            }
+          };
+
+          ws.onerror = () => {
+            // onclose will fire after onerror — reconnect handled there
+            ws.close();
+          };
+        })();
       } catch {
         // setTimeout fallback if constructor throws
         const strategy = reconnectStrategyRef.current;

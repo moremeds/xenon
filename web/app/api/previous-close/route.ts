@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { WebSocket } from "ws";
+import { resolveServerIbRealtimeWsUrl } from "@/lib/server/ibRealtimeRuntime";
 
 /**
  * Fetch previous-day closing prices for stock symbols.
@@ -19,22 +20,22 @@ function cacheKey(symbol: string): string {
 
 /* ── IB source (via WebSocket snapshot) ─────────────────── */
 
-const IB_WS_URL = process.env.IB_REALTIME_WS_URL || "ws://localhost:8765";
 const XENON_API = process.env.XENON_API_URL || "http://localhost:8321";
 
 async function buildWsUrl(token: string | null): Promise<string> {
-  if (!token) return IB_WS_URL;
+  const ibWsUrl = resolveServerIbRealtimeWsUrl();
+  if (!token) return ibWsUrl;
   try {
     const res = await fetch(`${XENON_API}/ws-ticket`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     });
-    if (!res.ok) return IB_WS_URL;
+    if (!res.ok) return ibWsUrl;
     const { ticket } = await res.json();
-    const sep = IB_WS_URL.includes("?") ? "&" : "?";
-    return `${IB_WS_URL}${sep}ticket=${ticket}`;
+    const sep = ibWsUrl.includes("?") ? "&" : "?";
+    return `${ibWsUrl}${sep}ticket=${ticket}`;
   } catch {
-    return IB_WS_URL;
+    return ibWsUrl;
   }
 }
 

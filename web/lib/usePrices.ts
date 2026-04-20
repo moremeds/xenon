@@ -14,6 +14,7 @@ import {
   optionKey,
 } from "./pricesProtocol";
 import { createReconnectStrategy, type ReconnectState } from "./reconnectStrategy";
+import { resolveBrowserIbRealtimeWsUrl } from "./ibRealtimeWsClient";
 
 export type PriceUpdate = {
   symbol: string;
@@ -156,11 +157,6 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
   onPriceUpdateRef.current = onPriceUpdate;
   onConnectionChangeRef.current = onConnectionChange;
   getTokenRef.current = getToken;
-
-  const socketUrl =
-    process.env.NEXT_PUBLIC_IB_REALTIME_WS_URL ??
-    process.env.IB_REALTIME_WS_URL ??
-    "ws://localhost:8765";
 
   // ---------------------------------------------------------------------------
   // Helpers
@@ -351,6 +347,7 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
     }
 
     (async () => {
+      const socketUrl = await resolveBrowserIbRealtimeWsUrl();
       const url = await buildAuthenticatedUrl(socketUrl);
       if (gen !== socketGenRef.current) return; // stale connect attempt
 
@@ -466,7 +463,7 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
       ws.close();
     };
     })();
-  }, [enabled, socketUrl, clearReconnectTimer, clearStalenessTimer, syncSubscriptions, buildAuthenticatedUrl]);
+  }, [enabled, clearReconnectTimer, clearStalenessTimer, syncSubscriptions, buildAuthenticatedUrl]);
 
   // Wire scheduleReconnect via ref to avoid circular dep
   const scheduleReconnect = useCallback(() => {
@@ -513,49 +510,52 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
       }
 
       return new Promise<Record<string, PriceData>>((resolve, reject) => {
-        const ws = new WebSocket(socketUrl);
-        const results: Record<string, PriceData> = {};
-        const pending = new Set(symbolsToRequest);
+        void (async () => {
+          const socketUrl = await resolveBrowserIbRealtimeWsUrl();
+          const ws = new WebSocket(socketUrl);
+          const results: Record<string, PriceData> = {};
+          const pending = new Set(symbolsToRequest);
 
-        const timeout = setTimeout(() => {
-          ws.close();
-          resolve(results);
-        }, 5000);
+          const timeout = setTimeout(() => {
+            ws.close();
+            resolve(results);
+          }, 5000);
 
-        ws.onopen = () => {
-          ws.send(
-            JSON.stringify({ action: "snapshot", symbols: symbolsToRequest }),
-          );
-        };
+          ws.onopen = () => {
+            ws.send(
+              JSON.stringify({ action: "snapshot", symbols: symbolsToRequest }),
+            );
+          };
 
-        ws.onmessage = (event) => {
-          try {
-            const message = JSON.parse(event.data as string) as WSMessage;
-            if (message.type === "snapshot") {
-              const symbol = message.data.symbol.toUpperCase();
-              results[symbol] = message.data;
-              pending.delete(symbol);
+          ws.onmessage = (event) => {
+            try {
+              const message = JSON.parse(event.data as string) as WSMessage;
+              if (message.type === "snapshot") {
+                const symbol = message.data.symbol.toUpperCase();
+                results[symbol] = message.data;
+                pending.delete(symbol);
 
-              if (pending.size === 0) {
+                if (pending.size === 0) {
+                  clearTimeout(timeout);
+                  ws.close();
+                  resolve(results);
+                }
+              } else if (message.type === "error") {
                 clearTimeout(timeout);
                 ws.close();
-                resolve(results);
+                reject(new Error(message.message));
               }
-            } else if (message.type === "error") {
-              clearTimeout(timeout);
-              ws.close();
-              reject(new Error(message.message));
+            } catch (e) {
+              console.error("Failed to parse message:", e);
             }
-          } catch (e) {
-            console.error("Failed to parse message:", e);
-          }
-        };
+          };
 
-        ws.onerror = () => {
-          clearTimeout(timeout);
-          ws.close();
-          reject(new Error("Failed to connect to price server"));
-        };
+          ws.onerror = () => {
+            clearTimeout(timeout);
+            ws.close();
+            reject(new Error("Failed to connect to price server"));
+          };
+        })().catch(reject);
       }).catch((error_) => {
         setError(
           error_ instanceof Error ? error_.message : "Failed to get snapshot",
@@ -564,7 +564,7 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
         return {};
       });
     },
-    [socketUrl],
+    [],
   );
 
   // ---------------------------------------------------------------------------

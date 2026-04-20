@@ -11,6 +11,7 @@ import {
 } from "react";
 import { useAuth } from "@clerk/nextjs";
 import { createReconnectStrategy, type ReconnectState } from "./reconnectStrategy";
+import { resolveBrowserIbRealtimeWsUrl } from "./ibRealtimeWsClient";
 
 /* ─── Types ───────────────────────────────────────────── */
 
@@ -68,11 +69,6 @@ export function IBStatusProvider({ children }: { children: ReactNode }) {
     createReconnectStrategy({ maxAttempts: 0 }) // unlimited for status
   );
 
-  const socketUrl =
-    process.env.NEXT_PUBLIC_IB_REALTIME_WS_URL ??
-    process.env.IB_REALTIME_WS_URL ??
-    "ws://localhost:8765";
-
   const clearReconnectTimer = useCallback(() => {
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
@@ -117,6 +113,7 @@ export function IBStatusProvider({ children }: { children: ReactNode }) {
     const gen = ++socketGenRef.current;
 
     (async () => {
+      const socketUrl = await resolveBrowserIbRealtimeWsUrl();
       const url = await buildAuthenticatedUrl(socketUrl);
       if (gen !== socketGenRef.current) return; // stale connect attempt
 
@@ -195,7 +192,7 @@ export function IBStatusProvider({ children }: { children: ReactNode }) {
       ws.close();
     };
     })();
-  }, [socketUrl, clearReconnectTimer, clearStalenessTimer, buildAuthenticatedUrl]);
+  }, [clearReconnectTimer, clearStalenessTimer, buildAuthenticatedUrl]);
 
   useEffect(() => {
     mountedRef.current = true;

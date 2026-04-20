@@ -20,7 +20,7 @@ import path from "node:path";
 import http from "node:http";
 import net from "node:net";
 import { execSync } from "node:child_process";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { WebSocketServer } from "ws";
 import IB from "ib";
 import { classifyIBConnectionError } from "./ib_connection_status.js";
@@ -181,7 +181,11 @@ function parseActionMessage(raw) {
 
 const cli = parseArgs(process.argv.slice(2));
 const WS_HOST = "0.0.0.0";
-const wsUrl = `ws://${WS_HOST}:${cli.port}`;
+const LOOPBACK_HOST = "127.0.0.1";
+const wsUrl = () => `ws://${WS_HOST}:${cli.port}`;
+const RUNTIME_FILE_PATH =
+  process.env.IB_REALTIME_RUNTIME_FILE ||
+  path.join(tmpdir(), "xenon-ib-realtime.json");
 
 function verbose(...args) {
   if (cli.verbose) console.log(`\x1b[90m[verbose]\x1b[0m`, ...args);
@@ -229,12 +233,109 @@ async function isPortAvailable(host, port) {
   });
 }
 
-if (!(await isPortAvailable(WS_HOST, cli.port))) {
-  console.log(
-    `WebSocket port already in use at ${wsUrl}; assuming an existing IB realtime server and skipping duplicate startup.`,
+async function isExistingXenonRelay(port) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1_000);
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/`, {
+      method: "GET",
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    return res.status === 426 && text.includes("WebSocket upgrade required");
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function findAvailablePort(startPort, endPort = startPort + 50) {
+  for (let port = startPort; port <= endPort; port += 1) {
+    const loopbackAvailable = await isPortAvailable(LOOPBACK_HOST, port);
+    const wildcardAvailable = await isPortAvailable(WS_HOST, port);
+    if (loopbackAvailable && wildcardAvailable) return port;
+  }
+  throw new Error(
+    `Unable to find an available websocket port in ${startPort}-${endPort}`,
   );
-  console.log(`IB target ${cli.ibHost}:${cli.ibPort}`);
-  process.exit(0);
+}
+
+async function findExistingXenonRelay(startPort, endPort = startPort + 50) {
+  for (let port = startPort; port <= endPort; port += 1) {
+    if (await isPortAvailable(WS_HOST, port)) continue;
+    if (await isExistingXenonRelay(port)) return port;
+  }
+  return null;
+}
+
+function writeRuntimeConfig(port) {
+  try {
+    fs.mkdirSync(path.dirname(RUNTIME_FILE_PATH), { recursive: true });
+    fs.writeFileSync(
+      RUNTIME_FILE_PATH,
+      JSON.stringify(
+        {
+          port,
+          pid: process.pid,
+          started_at: new Date().toISOString(),
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+  } catch (error) {
+    console.error(
+      `Failed to write IB realtime runtime file ${RUNTIME_FILE_PATH}:`,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+function removeRuntimeConfigIfOwned() {
+  try {
+    if (!fs.existsSync(RUNTIME_FILE_PATH)) return;
+    const data = JSON.parse(fs.readFileSync(RUNTIME_FILE_PATH, "utf8"));
+    if (data?.pid === process.pid) {
+      fs.unlinkSync(RUNTIME_FILE_PATH);
+    }
+  } catch {
+    // Best-effort cleanup only.
+  }
+}
+
+const loopbackAvailable = await isPortAvailable(LOOPBACK_HOST, cli.port);
+const wildcardAvailable = await isPortAvailable(WS_HOST, cli.port);
+
+if (!loopbackAvailable || !wildcardAvailable) {
+  console.log(
+    `WebSocket port already in use at ${wsUrl()}`,
+  );
+  if (await isExistingXenonRelay(cli.port)) {
+    console.log(
+      "Detected an existing Xenon IB realtime server; skipping duplicate startup.",
+    );
+    writeRuntimeConfig(cli.port);
+    console.log(`IB target ${cli.ibHost}:${cli.ibPort}`);
+    process.exit(0);
+  }
+
+  const existingFallbackRelay = await findExistingXenonRelay(cli.port + 1);
+  if (existingFallbackRelay != null) {
+    console.log(
+      `Detected an existing Xenon IB realtime server on fallback port ${existingFallbackRelay}; skipping duplicate startup.`,
+    );
+    writeRuntimeConfig(existingFallbackRelay);
+    console.log(`IB target ${cli.ibHost}:${cli.ibPort}`);
+    process.exit(0);
+  }
+
+  const fallbackPort = await findAvailablePort(cli.port + 1);
+  console.log(
+    `Port ${cli.port} is occupied by a non-Xenon service; using fallback port ${fallbackPort}.`,
+  );
+  cli.port = fallbackPort;
 }
 
 // Create HTTP server for WebSocket upgrade with ticket validation
@@ -1451,6 +1552,7 @@ staleCheckTimer = setInterval(() => {
 process.on("SIGINT", () => {
   if (shuttingDown) process.exit(0);
   shuttingDown = true;
+  removeRuntimeConfigIfOwned();
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
   }
@@ -1502,7 +1604,8 @@ process.on("SIGTERM", () => {
 });
 
 httpServer.on("listening", () => {
+  writeRuntimeConfig(cli.port);
   console.log(`WebSocket server listening on ${WS_HOST}:${cli.port}`);
 });
-console.log(`IB realtime server listening on ${wsUrl}`);
+console.log(`IB realtime server listening on ${wsUrl()}`);
 console.log(`IB target ${cli.ibHost}:${cli.ibPort}`);
