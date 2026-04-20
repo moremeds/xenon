@@ -1,9 +1,9 @@
-"""Code quality tests for scripts/ directory.
+"""Code quality tests for scripts/ and src/xenon/ directories.
 
 Verifies:
   - _safe_value handles NaN, None, and valid values correctly
   - fetch_ticker.py can be imported without errors
-  - No bare except: clauses exist in any script file
+  - No bare except: clauses exist in any project Python file
 """
 
 import ast
@@ -12,7 +12,9 @@ from pathlib import Path
 
 import pytest
 
-SCRIPTS_DIR = Path(__file__).parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+SCRIPTS_DIR = PROJECT_ROOT / "scripts"
+SRC_XENON_DIR = PROJECT_ROOT / "src" / "xenon"
 
 
 # ── _safe_value tests ──────────────────────────────────────────────
@@ -86,13 +88,13 @@ class TestImports:
 
 
 def _collect_python_files():
-    """Return all .py files under scripts/, excluding tests and __pycache__."""
+    """Return all .py files under scripts/ and src/xenon/, excluding __pycache__."""
     files = []
-    for py_file in SCRIPTS_DIR.rglob("*.py"):
-        # Skip test files and __pycache__
-        if "__pycache__" in str(py_file):
-            continue
-        files.append(py_file)
+    for root in (SCRIPTS_DIR, SRC_XENON_DIR):
+        for py_file in root.rglob("*.py"):
+            if "__pycache__" in str(py_file):
+                continue
+            files.append(py_file)
     return files
 
 
@@ -114,7 +116,7 @@ class TestNoBareExcept:
     @pytest.mark.parametrize(
         "py_file",
         _collect_python_files(),
-        ids=lambda p: str(p.relative_to(SCRIPTS_DIR)),
+        ids=lambda p: str(p.relative_to(PROJECT_ROOT)),
     )
     def test_no_bare_except(self, py_file: Path):
         source = py_file.read_text()
