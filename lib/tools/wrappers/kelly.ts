@@ -14,7 +14,7 @@ export async function kelly(
     args.push("--bankroll", String(input.bankroll));
   }
 
-  return runScript("src/xenon/reports/kelly.py", {
+  return runScript(".venv/bin/xenon-kelly", {
     args,
     outputSchema: KellyOutput,
   });

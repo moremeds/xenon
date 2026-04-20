@@ -389,7 +389,7 @@ const executeScan = async (
     "--min-score": (value) => parseFlagInt(value, "min-score"),
   });
 
-  const commandArgs = [path.join("scripts", "scanner.py")];
+  const commandArgs = [".venv/bin/xenon-scan"];
   if (parsed.parsed["top"]) {
     commandArgs.push("--top", parsed.parsed["top"]);
   }
@@ -420,7 +420,7 @@ const executeDiscover = async (
     throw new Error("discover does not accept positional tickers");
   }
 
-  const commandArgs = [path.join("scripts", "discover.py")];
+  const commandArgs = [".venv/bin/xenon-discover"];
   if (integerFlags.parsed["min-premium"])
     commandArgs.push("--min-premium", integerFlags.parsed["min-premium"]);
   if (integerFlags.parsed["min-alerts"])
