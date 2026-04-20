@@ -25,7 +25,7 @@ class UniverseEntry:
 def _make_entry(
     ticker: str,
     *,
-    type: str,
+    asset_type: str,
     is_index: bool,
     cash_settled: bool,
     multiplier: int = 100,
@@ -33,7 +33,7 @@ def _make_entry(
 ) -> UniverseEntry:
     return UniverseEntry(
         ticker=ticker,
-        type=type,
+        type=asset_type,
         is_index=is_index,
         cash_settled=cash_settled,
         multiplier=multiplier,
@@ -42,21 +42,21 @@ def _make_entry(
 
 
 _RAW: dict[str, UniverseEntry] = {
-    "SPX": _make_entry("SPX", type="INDEX", is_index=True, cash_settled=True),
-    "NDX": _make_entry("NDX", type="INDEX", is_index=True, cash_settled=True),
-    "RUT": _make_entry("RUT", type="INDEX", is_index=True, cash_settled=True),
-    "SPY": _make_entry("SPY", type="ETF", is_index=False, cash_settled=False),
-    "QQQ": _make_entry("QQQ", type="ETF", is_index=False, cash_settled=False),
-    "IWM": _make_entry("IWM", type="ETF", is_index=False, cash_settled=False),
-    "GLD": _make_entry("GLD", type="ETF", is_index=False, cash_settled=False),
-    "USO": _make_entry("USO", type="ETF", is_index=False, cash_settled=False, k1=True),
-    "SIL": _make_entry("SIL", type="ETF", is_index=False, cash_settled=False),
+    "SPX": _make_entry("SPX", asset_type="INDEX", is_index=True, cash_settled=True),
+    "NDX": _make_entry("NDX", asset_type="INDEX", is_index=True, cash_settled=True),
+    "RUT": _make_entry("RUT", asset_type="INDEX", is_index=True, cash_settled=True),
+    "SPY": _make_entry("SPY", asset_type="ETF", is_index=False, cash_settled=False),
+    "QQQ": _make_entry("QQQ", asset_type="ETF", is_index=False, cash_settled=False),
+    "IWM": _make_entry("IWM", asset_type="ETF", is_index=False, cash_settled=False),
+    "GLD": _make_entry("GLD", asset_type="ETF", is_index=False, cash_settled=False),
+    "USO": _make_entry("USO", asset_type="ETF", is_index=False, cash_settled=False, k1=True),
+    "SIL": _make_entry("SIL", asset_type="ETF", is_index=False, cash_settled=False),
 }
 
 # Read-only public view.
 UNIVERSE: MappingProxyType[str, UniverseEntry] = MappingProxyType(_RAW)
 
-INDEX_UNIVERSE: frozenset[str] = frozenset(t for t, e in _RAW.items() if e.is_index)
+INDEX_UNIVERSE: frozenset[str] = frozenset(t for t, e in UNIVERSE.items() if e.is_index)
 
 
 def is_known(ticker: str) -> bool:
