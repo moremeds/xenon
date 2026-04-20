@@ -18,6 +18,38 @@ type MetricCardsProps = {
   section?: string;
 };
 
+export function getAccountDayPnlFormula(source: PortfolioData["source"] = "ib"): string {
+  if (source === "futu") {
+    return (
+      "Day P&L = SUM( current_price − yesterday_close ) × position_size for positions with live price data\n" +
+      "Source: Futu positions + live realtime prices + previous close\n" +
+      "Note: Excludes positions that do not have intraday current-price and close data"
+    );
+  }
+
+  return (
+    "Day P&L = SUM( current_price − yesterday_close ) × position_size\n" +
+    "Source: Interactive Brokers reqPnL() — account-level, updated in real-time\n" +
+    "Note: Includes all open positions across stocks, options, and other instruments"
+  );
+}
+
+export function resolveAccountDayPnlValue(
+  portfolio: PortfolioData,
+  prices?: Record<string, PriceData>,
+): number | null {
+  const acct = portfolio.account_summary;
+  if (!acct) return null;
+
+  if (portfolio.source === "futu") {
+    if (!prices || Object.keys(prices).length === 0) return null;
+    const intraday = computeTodayUnrealizedPnl(portfolio, prices);
+    return intraday.positionsWithData > 0 ? intraday.pnl : null;
+  }
+
+  return acct.daily_pnl;
+}
+
 const fmt = (n: number) =>
   n >= 1_000_000
     ? `$${(n / 1_000_000).toFixed(2)}M`
@@ -107,6 +139,7 @@ function SectionHeader({ label, collapsed, onToggle }: { label: string; collapse
 
 function AccountRow({
   acct,
+  dayPnl,
   collapsed,
   onToggle,
   onNetLiqClick,
@@ -115,6 +148,7 @@ function AccountRow({
   onDividendsClick,
 }: {
   acct: AccountSummary;
+  dayPnl: number | null;
   collapsed: boolean;
   onToggle: () => void;
   onNetLiqClick: () => void;
@@ -122,7 +156,7 @@ function AccountRow({
   onUnrealizedClick: () => void;
   onDividendsClick: () => void;
 }) {
-  const dailyAvailable = acct.daily_pnl != null;
+  const dailyAvailable = dayPnl != null;
   return (
     <>
       <SectionHeader label="ACCOUNT" collapsed={collapsed} onToggle={onToggle} />
@@ -132,7 +166,7 @@ function AccountRow({
           onClick={onNetLiqClick}
         />
         <MetricCard
-          card={{ label: "Day P&L", value: dailyAvailable ? fmtSignedExact(acct.daily_pnl!) : "---", change: dailyAvailable ? "TODAY" : "MARKET CLOSED", tone: dailyAvailable ? tone(acct.daily_pnl!) : "neutral" }}
+          card={{ label: "Day P&L", value: dailyAvailable ? fmtSignedExact(dayPnl!) : "---", change: dailyAvailable ? "TODAY" : "MARKET CLOSED", tone: dailyAvailable ? tone(dayPnl!) : "neutral" }}
           onClick={onDayPnlClick}
         />
         <MetricCard
@@ -513,6 +547,9 @@ export default function MetricCards({ portfolio, prices, realizedPnl, executedOr
   const total = unrealized + realized;
 
   const acct = portfolio.account_summary;
+  const accountDayPnl = acct
+    ? resolveAccountDayPnlValue(portfolio, prices)
+    : null;
 
   // Breakdown rows (computed lazily — only used when modals open)
   const unrealizedBreakdownRows = unrealizedModalOpen
@@ -530,6 +567,7 @@ export default function MetricCards({ portfolio, prices, realizedPnl, executedOr
       {acct ? (
         <AccountRow
           acct={acct}
+          dayPnl={accountDayPnl}
           collapsed={collapsed.account}
           onToggle={() => toggle("account")}
           onNetLiqClick={() => setNetLiqModalOpen(true)}
@@ -670,12 +708,8 @@ export default function MetricCards({ portfolio, prices, realizedPnl, executedOr
         <AccountMetricModal
           open={dayPnlModalOpen}
           title="Day P&L"
-          value={acct.daily_pnl != null ? fmtSignedExact(acct.daily_pnl) : "---"}
-          formula={
-            "Day P&L = SUM( current_price − yesterday_close ) × position_size\n" +
-            "Source: Interactive Brokers reqPnL() — account-level, updated in real-time\n" +
-            "Note: Includes all open positions across stocks, options, and other instruments"
-          }
+          value={accountDayPnl != null ? fmtSignedExact(accountDayPnl) : "---"}
+          formula={getAccountDayPnlFormula(portfolio?.source)}
           onClose={() => setDayPnlModalOpen(false)}
         />
       )}

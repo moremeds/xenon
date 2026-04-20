@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import {
   futuToPortfolioData,
@@ -11,6 +11,101 @@ import {
 const REAL_JSON_PATH = join(__dirname, "..", "..", "data", "futu_portfolio.json");
 
 function loadReal(): FutuPortfolioEnvelope {
+  if (!existsSync(REAL_JSON_PATH)) {
+    return {
+      ok: true,
+      fetched_at: "2026-04-20T14:54:40.996Z",
+      data_as_of: "2026-04-20T14:54:40.996Z",
+      account_id: "acct",
+      source: "futu",
+      is_stale: false,
+      warnings: [],
+      count: 3,
+      positions: [
+        {
+          futu_code: "US.TSLA",
+          normalized: {
+            kind: "STK",
+            symbol: "TSLA",
+            exchange: "SMART",
+            currency: "USD",
+            live_data: true,
+          },
+          quantity: 100,
+          avg_cost: 300,
+          market_price: 320,
+          market_value: 32000,
+          unrealized_pnl: 2000,
+          unrealized_pnl_pct: 6.67,
+          currency: "USD",
+          position_side: "LONG",
+        },
+        {
+          futu_code: "US.TSLA270117C400000",
+          normalized: {
+            kind: "OPT",
+            symbol: "TSLA",
+            expiry: "20270117",
+            strike: 400,
+            right: "C",
+            exchange: "SMART",
+            currency: "USD",
+            trading_class: null,
+            live_data: false,
+          },
+          quantity: 1,
+          avg_cost: 12.5,
+          market_price: 13.1,
+          market_value: 1310,
+          unrealized_pnl: 60,
+          unrealized_pnl_pct: 4.8,
+          currency: "USD",
+          position_side: "LONG",
+        },
+        {
+          futu_code: "US.TSLA270117P300000",
+          normalized: {
+            kind: "OPT",
+            symbol: "TSLA",
+            expiry: "20270117",
+            strike: 300,
+            right: "P",
+            exchange: "SMART",
+            currency: "USD",
+            trading_class: null,
+            live_data: false,
+          },
+          quantity: -1,
+          avg_cost: 8.25,
+          market_price: 6.9,
+          market_value: -690,
+          unrealized_pnl: 135,
+          unrealized_pnl_pct: 16.36,
+          currency: "USD",
+          position_side: "SHORT",
+        },
+      ],
+      account_summary: {
+        net_liquidation: 100_000,
+        equity_with_loan: 100_000,
+        cash: 10_000,
+        settled_cash: 10_000,
+        buying_power: 20_000,
+        available_funds: 20_000,
+        initial_margin: 5_000,
+        maintenance_margin: 4_000,
+        excess_liquidity: 16_000,
+        gross_position_value: 34_000,
+        unrealized_pnl: 2_195,
+        daily_pnl: 100,
+        realized_pnl: 0,
+        dividends: null,
+        previous_day_ewl: null,
+        reg_t_equity: null,
+        sma: null,
+      },
+    };
+  }
   return JSON.parse(readFileSync(REAL_JSON_PATH, "utf-8"));
 }
 
@@ -102,6 +197,69 @@ describe("futuToPortfolioData — position classification", () => {
     if (opt) {
       expect(opt.expiry).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     }
+  });
+
+  it("preserves short option credit sign in entry_cost so headline P&L stays correct", () => {
+    const env: FutuPortfolioEnvelope = {
+      ok: true,
+      fetched_at: "2026-04-20T14:54:40.996Z",
+      data_as_of: "2026-04-20T14:54:40.996Z",
+      account_id: "acct",
+      source: "futu",
+      is_stale: false,
+      warnings: [],
+      count: 1,
+      positions: [
+        {
+          futu_code: "US.TSLA270115P400000",
+          normalized: {
+            kind: "OPT",
+            symbol: "TSLA",
+            expiry: "20270115",
+            strike: 400,
+            right: "P",
+            exchange: "SMART",
+            currency: "USD",
+            trading_class: null,
+            live_data: false,
+          },
+          quantity: -1,
+          avg_cost: 2.0,
+          market_price: 1.7,
+          market_value: -170,
+          unrealized_pnl: 30,
+          unrealized_pnl_pct: 15,
+          currency: "USD",
+          position_side: "SHORT",
+        },
+      ],
+      account_summary: {
+        net_liquidation: 100_000,
+        equity_with_loan: 100_000,
+        cash: 10_000,
+        settled_cash: 10_000,
+        buying_power: 20_000,
+        available_funds: 20_000,
+        initial_margin: 5_000,
+        maintenance_margin: 4_000,
+        excess_liquidity: 16_000,
+        gross_position_value: 170,
+        unrealized_pnl: 30,
+        daily_pnl: 10,
+        realized_pnl: 0,
+        dividends: null,
+        previous_day_ewl: null,
+        reg_t_equity: null,
+        sma: null,
+      },
+    };
+
+    const data = futuToPortfolioData(env);
+    const pos = data.positions[0];
+    expect(pos.entry_cost).toBe(-200);
+    expect(pos.legs[0].entry_cost).toBe(-200);
+    expect(pos.market_value).toBe(-170);
+    expect(pos.market_value! - pos.entry_cost).toBe(30);
   });
 });
 

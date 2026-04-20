@@ -11,6 +11,7 @@
 
 import { describe, test, expect, vi } from "vitest";
 import type { AccountSummary } from "../lib/types";
+import { getAccountDayPnlFormula } from "../components/MetricCards";
 
 // ── Shared mock account summary ──────────────────────────────────────────────
 
@@ -46,10 +47,7 @@ const NET_LIQ_CONFIG: AccountModalConfig = {
 
 const DAY_PNL_CONFIG: AccountModalConfig = {
   title: "Day P&L",
-  formula:
-    "Day P&L = SUM( current_price − yesterday_close ) × position_size\n" +
-    "Source: Interactive Brokers reqPnL() — account-level, updated in real-time\n" +
-    "Note: Includes all open positions across stocks, options, and other instruments",
+  formula: getAccountDayPnlFormula("ib"),
   getValue: (acct) => (acct.daily_pnl != null ? String(acct.daily_pnl) : null),
 };
 
@@ -135,6 +133,13 @@ describe("AccountMetricModal — config data", () => {
 
     test("formula mentions real-time update", () => {
       expect(DAY_PNL_CONFIG.formula).toContain("real-time");
+    });
+
+    test("futu formula describes live-price intraday math instead of IB reqPnL", () => {
+      const formula = getAccountDayPnlFormula("futu");
+      expect(formula).toContain("current_price");
+      expect(formula).toContain("Futu positions + live realtime prices");
+      expect(formula).not.toContain("Interactive Brokers reqPnL()");
     });
 
     test("getValue returns null when daily_pnl is null", () => {

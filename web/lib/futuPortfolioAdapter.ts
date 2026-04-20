@@ -144,6 +144,7 @@ export function futuToPortfolioData(env: FutuPortfolioEnvelope): PortfolioData {
   const undefinedCount = positions.filter((p) => p.risk_profile === "undefined").length;
 
   return {
+    source: "futu",
     bankroll,
     peak_value: bankroll, // Futu doesn't track peak; use current NLV
     last_sync: env.fetched_at,
@@ -194,9 +195,10 @@ function futuPositionToPortfolioPosition(
   const direction: "LONG" | "SHORT" = p.quantity >= 0 ? "LONG" : "SHORT";
   const contracts = Math.abs(p.quantity);
   const multiplier = type === "Stock" ? 1 : 100;
-  // Futu reports market_value already sign-adjusted (negative for shorts).
-  // entry_cost for display is the absolute dollar basis.
-  const entryCost = Math.abs(p.avg_cost * contracts * multiplier);
+  // Preserve the opening cashflow sign so downstream P&L math stays correct:
+  // long positions pay debit (+entry cost), short positions collect credit
+  // (-entry cost). Futu already signs market_value this way.
+  const entryCost = p.avg_cost * p.quantity * multiplier;
 
   const leg: PortfolioLeg = {
     direction,

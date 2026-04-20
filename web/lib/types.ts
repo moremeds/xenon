@@ -192,6 +192,7 @@ export type AccountSummary = {
 };
 
 export type PortfolioData = {
+  source?: "ib" | "futu";
   bankroll: number;
   peak_value: number;
   last_sync: string;
