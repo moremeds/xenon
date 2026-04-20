@@ -2,6 +2,10 @@
 
 Date: 2026-04-20
 Status: Draft v0.2 (post-tribunal), awaiting review
+Depends on: completion of `docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md`
+(phases F0–F7) plus a ≥7-day clean live burn-in. Phases W1–W6 of
+`docs/superpowers/plans/2026-04-20-order-execution-foundation-master.md`
+implement this spec.
 Related code: `src/xenon/execution/`, `src/xenon/monitor_daemon/handlers/`,
 `web/lib/order/`, `web/components/ticker-detail/OrderTab.tsx`,
 `src/xenon/api/routes/`, `docs/trading/options-structures.json`,
@@ -414,6 +418,14 @@ All authed via Clerk bearer + `ALLOWED_USER_IDS`.
 ## 11. Gates, guardrails & pre-V1 prerequisites
 
 ### 11.1 Pre-V1 required extensions
+
+**Ownership note.** The bullets below are the authoritative requirement
+source. They are implemented by **phase F1** of the Order Execution
+Foundation master plan
+(`docs/superpowers/plans/2026-04-20-order-execution-foundation-master.md`).
+When the F1 sub-plan is written, these bullets migrate verbatim into it
+and this section can collapse to a pointer. Until then, requirements
+live here.
 
 These must land **before P1**:
 
