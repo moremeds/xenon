@@ -85,7 +85,9 @@ const resolveProjectPaths = (): Paths => {
     const scriptsDir = path.join(candidate, "scripts");
     const dataDir = path.join(candidate, "data");
     if (
-      existsSync(path.join(scriptsDir, "run_pytest_affected.py")) &&
+      existsSync(
+        path.join(scriptsDir, "infra", "dev", "run_pytest_affected.py"),
+      ) &&
       existsSync(path.join(dataDir, "portfolio.json"))
     ) {
       return { cwd: candidate, scriptsDir, dataDir };
