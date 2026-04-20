@@ -8,8 +8,11 @@ Spec: docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md §9
 """
 
 import datetime as _dt
+import re
 
 from xenon.execution.universe import get_multiplier, is_known
+
+_ASCII_8DIGITS = re.compile(r"^[0-9]{8}$")
 
 
 class NormalizationError(ValueError):
@@ -27,15 +30,15 @@ def normalize_expiry(value: str | None) -> str:
         raise NormalizationError(f"expiry must be a non-empty string, got {value!r}")
 
     cleaned = value.strip().replace("-", "").replace("/", "")
-    if len(cleaned) != 8:
-        raise NormalizationError(f"expiry must be 8 digits after cleaning, got {cleaned!r}")
+    if not _ASCII_8DIGITS.match(cleaned):
+        raise NormalizationError(f"expiry must be 8 ASCII digits after cleaning, got {cleaned!r}")
 
     try:
-        _dt.date(int(cleaned[0:4]), int(cleaned[4:6]), int(cleaned[6:8]))
+        parsed = _dt.date(int(cleaned[0:4]), int(cleaned[4:6]), int(cleaned[6:8]))
     except ValueError as e:
         raise NormalizationError(f"invalid calendar date {cleaned!r}: {e}") from e
 
-    return cleaned
+    return parsed.strftime("%Y%m%d")
 
 
 def normalize_ticker(value: str | None) -> str:

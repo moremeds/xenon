@@ -1,6 +1,7 @@
 """Tests for contract normalization helpers."""
 
 import pytest
+
 from xenon.execution.contract_normalize import (
     NormalizationError,
     normalize_expiry,
@@ -60,6 +61,28 @@ def test_normalize_expiry_accepts_feb_29_leap():
 def test_normalize_expiry_rejects_feb_29_non_leap():
     with pytest.raises(NormalizationError):
         normalize_expiry("20230229")
+
+
+def test_normalize_expiry_rejects_inner_whitespace():
+    """Inner whitespace like '2026 117' must not be silently accepted."""
+    with pytest.raises(NormalizationError):
+        normalize_expiry("2026 117")
+
+
+def test_normalize_expiry_rejects_inner_tab():
+    with pytest.raises(NormalizationError):
+        normalize_expiry("2026\t117")
+
+
+def test_normalize_expiry_rejects_unicode_digits():
+    """Fullwidth Unicode digits must not leak through — downstream IB calls require ASCII."""
+    with pytest.raises(NormalizationError):
+        normalize_expiry("２０２６０１１７")
+
+
+def test_normalize_expiry_canonicalizes_leap_date():
+    """Leap-day input is returned as canonical ASCII YYYYMMDD."""
+    assert normalize_expiry("2024-02-29") == "20240229"
 
 
 # --- normalize_ticker ---
