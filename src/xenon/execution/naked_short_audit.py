@@ -23,6 +23,18 @@ logger = logging.getLogger(__name__)
 ACTIVE_STATUSES = {"Submitted", "PreSubmitted"}
 DATA_DIR = Path(__file__).resolve().parents[3] / "data"
 
+WIZARD_TAG_PREFIX = "leg_wizard:"
+
+
+def _order_is_wizard_tagged(order: dict) -> bool:
+    """True if the order is owned by the leg-wizard and should be skipped by the audit.
+
+    The wizard applies server-side Gate 4 per-leg (see Wiz spec §11.1); the post-sync
+    audit must not race the wizard by cancelling in-flight wizard legs.
+    """
+    ref = order.get("orderRef") or ""
+    return isinstance(ref, str) and ref.startswith(WIZARD_TAG_PREFIX)
+
 
 def _get_stock_shares(positions: list, ticker: str) -> int:
     """Sum shares held for a ticker across all Stock positions."""
@@ -121,6 +133,9 @@ def find_naked_short_violations(orders: list, positions: list) -> list:
     for order in orders:
         # Only check active orders
         if order.get("status") not in ACTIVE_STATUSES:
+            continue
+
+        if _order_is_wizard_tagged(order):
             continue
 
         action = order.get("action", "").upper()

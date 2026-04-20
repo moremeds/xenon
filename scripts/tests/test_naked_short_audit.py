@@ -382,3 +382,59 @@ def test_short_call_exact_match_sell_to_close_not_violation():
     violations = find_naked_short_violations(orders, positions)
 
     assert violations == []
+
+
+# ---------------------------------------------------------------------------
+# F1: leg_wizard tag skip (wizard-owned orders are governed server-side)
+# ---------------------------------------------------------------------------
+
+
+def test_leg_wizard_tagged_order_is_skipped():
+    """Order with orderRef starting 'leg_wizard:' is skipped even if apparently naked."""
+    orders = [
+        make_order(
+            10, 2001, "SPY", "OPT", "SELL", 1,
+            right="C", strike=510.0, expiry="20260620",
+            order_ref="leg_wizard:session_abc123",
+        ),
+    ]
+    positions = []  # no cover — would normally violate
+
+    violations = find_naked_short_violations(orders, positions)
+
+    assert violations == [], (
+        "Wizard-tagged orders are governed by server-side Gate 4; "
+        "the post-sync audit must skip them per spec Wiz §11.1"
+    )
+
+
+def test_non_wizard_order_still_checked():
+    """Control: same naked order without the tag is still flagged."""
+    orders = [
+        make_order(
+            11, 2002, "SPY", "OPT", "SELL", 1,
+            right="C", strike=510.0, expiry="20260620",
+            order_ref=None,
+        ),
+    ]
+    positions = []
+
+    violations = find_naked_short_violations(orders, positions)
+
+    assert len(violations) == 1
+
+
+def test_leg_wizard_tag_prefix_must_match_exactly():
+    """orderRef must start with literal 'leg_wizard:' — partial matches don't skip."""
+    orders = [
+        make_order(
+            12, 2003, "SPY", "OPT", "SELL", 1,
+            right="C", strike=510.0, expiry="20260620",
+            order_ref="manual_leg_wizard_misleading",
+        ),
+    ]
+    positions = []
+
+    violations = find_naked_short_violations(orders, positions)
+
+    assert len(violations) == 1, "Only exact 'leg_wizard:' prefix skips"
