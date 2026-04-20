@@ -33,6 +33,7 @@ Spec lives at `docs/superpowers/specs/2026-04-20-scripts-finish-python-migration
 **Files modified:**
 
 - `CLAUDE.md` (root) — lines 9, 91, 116
+- `README.md` — one shim-path reference discovered via Step 1.1a grep (same semantic update as the CLAUDE.md edits)
 - `scripts/CLAUDE.md` — lines 3, 26
 - `src/xenon/api/CLAUDE.md` — line 28
 - `scripts/ta_lib/__init__.py` (after `git mv` in Task 2 — rewritten to a shim at the old path)
