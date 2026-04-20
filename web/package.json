@@ -20,7 +20,12 @@
     "test:ib": "python3.13 ../scripts/infra/ib_realtime/test_ib_realtime.py",
     "ib:start": "bash ../scripts/infra/docker_ib_gateway.sh start",
     "ib:stop": "bash ../scripts/infra/docker_ib_gateway.sh stop",
-    "ib:status": "bash ../scripts/infra/docker_ib_gateway.sh status"
+    "ib:status": "bash ../scripts/infra/docker_ib_gateway.sh status",
+    "universe:gen": "python3.13 ../scripts/infra/dev/generate_universe_ts.py",
+    "predev": "npm run universe:gen",
+    "prebuild": "npm run universe:gen",
+    "pretest": "npm run universe:gen",
+    "pretypecheck": "npm run universe:gen"
   },
   "dependencies": {
     "@clerk/nextjs": "^7.0.7",
