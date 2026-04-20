@@ -7,19 +7,13 @@ stop reimplementing these locally.
 Spec: docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md §9
 """
 
-from __future__ import annotations
-
 import datetime as _dt
-import re
 
-from xenon.execution.universe import UNIVERSE, is_known
+from xenon.execution.universe import get_multiplier, is_known
 
 
 class NormalizationError(ValueError):
     """Raised when input cannot be normalized to a canonical form."""
-
-
-_EXPIRY_RX = re.compile(r"^\d{8}$")
 
 
 def normalize_expiry(value: str | None) -> str:
@@ -32,8 +26,8 @@ def normalize_expiry(value: str | None) -> str:
     if not value or not isinstance(value, str):
         raise NormalizationError(f"expiry must be a non-empty string, got {value!r}")
 
-    cleaned = value.replace("-", "").replace("/", "").strip()
-    if not _EXPIRY_RX.match(cleaned):
+    cleaned = value.strip().replace("-", "").replace("/", "")
+    if len(cleaned) != 8:
         raise NormalizationError(f"expiry must be 8 digits after cleaning, got {cleaned!r}")
 
     try:
@@ -64,6 +58,7 @@ def resolve_multiplier(ticker: str) -> int:
 
     Raises NormalizationError if the ticker is unknown.
     """
-    if not is_known(ticker):
-        raise NormalizationError(f"ticker {ticker!r} not in V1 universe")
-    return UNIVERSE[ticker].multiplier
+    try:
+        return get_multiplier(ticker)
+    except KeyError as e:
+        raise NormalizationError(f"ticker {ticker!r} not in V1 universe") from e
