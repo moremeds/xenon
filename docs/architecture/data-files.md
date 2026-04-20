@@ -24,6 +24,6 @@
   - `meta/universe.json`, `meta/last_updated.json` — R2-authoritative metadata (read-only in scanner)
   - `.last_sync.json` — local sync sentinel (not uploaded; consumed by `apex_sync.sync_if_stale`)
 
-  Refreshed by `scripts/ta_lib/apex_sync.sync_if_stale()` at scanner startup. Nightly producer is `.github/workflows/apex-data-refresh.yml`.
+  Refreshed by `src/xenon/ta_lib/apex_sync.sync_if_stale()` at scanner startup. Nightly producer is `.github/workflows/apex-data-refresh.yml`.
 
 - `data/apex_mirror_preview/` — `--dry-run` output of `xenon-fetch-apex-data` (`src/xenon/fetchers/fetch_apex_data.py`). Created on demand; safe to delete.
