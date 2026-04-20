@@ -280,3 +280,105 @@ class TestDryRun:
                 mock_ib.assert_not_called()
                 assert result["violations_found"] == 1
                 assert result["cancelled"] == 0
+
+
+# ---------------------------------------------------------------------------
+# F1: long-call cover at same expiry (parity with nakedShortGuard.ts:254-260)
+# ---------------------------------------------------------------------------
+
+
+def test_short_call_with_long_call_same_expiry_not_violation():
+    """Parity with TS guard: long call at same expiry (any strike) covers short call."""
+    orders = [
+        make_order(
+            1,
+            1001,
+            "SPY",
+            "OPT",
+            "SELL",
+            1,
+            right="C",
+            strike=510.0,
+            expiry="20260620",
+        ),
+    ]
+    positions = [
+        make_option_position(
+            "SPY",
+            direction="LONG",
+            opt_type="Call",
+            contracts=1,
+            strike=500.0,
+            expiry="20260620",
+        ),
+    ]
+
+    violations = find_naked_short_violations(orders, positions)
+
+    assert violations == [], (
+        "SPY short call with SPY long call same expiry (vertical spread) "
+        "must not be flagged as naked — parity with nakedShortGuard.ts"
+    )
+
+
+def test_short_call_with_long_call_different_expiry_still_violation():
+    """Different-expiry long call is NOT cover — still violation."""
+    orders = [
+        make_order(
+            2,
+            1002,
+            "SPY",
+            "OPT",
+            "SELL",
+            1,
+            right="C",
+            strike=510.0,
+            expiry="20260620",
+        ),
+    ]
+    positions = [
+        make_option_position(
+            "SPY",
+            direction="LONG",
+            opt_type="Call",
+            contracts=1,
+            strike=500.0,
+            expiry="20260718",  # different expiry
+        ),
+    ]
+
+    violations = find_naked_short_violations(orders, positions)
+
+    assert len(violations) == 1
+    assert violations[0]["symbol"] == "SPY"
+
+
+def test_short_call_exact_match_sell_to_close_not_violation():
+    """Selling exactly the long call you hold (same strike+expiry) is a close, not a naked short."""
+    orders = [
+        make_order(
+            3,
+            1003,
+            "SPY",
+            "OPT",
+            "SELL",
+            1,
+            right="C",
+            strike=500.0,
+            expiry="20260620",
+        ),
+    ]
+    positions = [
+        make_option_position(
+            "SPY",
+            direction="LONG",
+            opt_type="Call",
+            contracts=1,
+            strike=500.0,
+            expiry="20260620",
+        ),
+    ]
+
+    violations = find_naked_short_violations(orders, positions)
+
+    assert violations == []

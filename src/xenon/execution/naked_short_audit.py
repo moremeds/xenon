@@ -48,6 +48,64 @@ def _get_short_call_contracts(positions: list, ticker: str) -> int:
     return total
 
 
+def _normalize_expiry(expiry: str | None) -> str | None:
+    """Canonicalize expiry to YYYYMMDD. Returns None if missing or wrong shape."""
+    if not expiry:
+        return None
+    clean = expiry.replace("-", "")
+    return clean if len(clean) == 8 and clean.isdigit() else None
+
+
+def _count_long_calls_at_expiry(positions: list, ticker: str, expiry: str | None) -> int:
+    """Sum LONG call contracts for ticker at the given expiry (any strike).
+
+    Matches web/lib/nakedShortGuard.ts countLongCallsAtExpiry() for parity.
+    """
+    normalized = _normalize_expiry(expiry)
+    if normalized is None:
+        return 0
+
+    total = 0
+    for pos in positions:
+        if pos.get("ticker", pos.get("symbol", "")).upper() != ticker.upper():
+            continue
+        if _normalize_expiry(pos.get("expiry")) != normalized:
+            continue
+        for leg in pos.get("legs", []):
+            if leg.get("direction") == "LONG" and leg.get("type") == "Call":
+                total += int(leg.get("contracts", 0))
+    return total
+
+
+def _count_matching_long_options(
+    positions: list, ticker: str, expiry: str | None, strike: float | None, right: str
+) -> int:
+    """Sum LONG option contracts for the exact (expiry, strike, right) — selling-to-close detector.
+
+    Matches web/lib/nakedShortGuard.ts countMatchingLongOptionContracts() for parity.
+    `right` is the IB single-letter: "C" or "P".
+    """
+    normalized = _normalize_expiry(expiry)
+    if normalized is None or strike is None or right not in ("C", "P"):
+        return 0
+
+    expected_type = "Call" if right == "C" else "Put"
+    total = 0
+    for pos in positions:
+        if pos.get("ticker", pos.get("symbol", "")).upper() != ticker.upper():
+            continue
+        if _normalize_expiry(pos.get("expiry")) != normalized:
+            continue
+        for leg in pos.get("legs", []):
+            if (
+                leg.get("direction") == "LONG"
+                and leg.get("type") == expected_type
+                and float(leg.get("strike", 0.0)) == float(strike)
+            ):
+                total += int(leg.get("contracts", 0))
+    return total
+
+
 def find_naked_short_violations(orders: list, positions: list) -> list:
     """Pure function: detect naked short violations in open orders.
 
@@ -106,41 +164,62 @@ def find_naked_short_violations(orders: list, positions: list) -> list:
         # SELL option
         if sec_type == "OPT":
             right = contract.get("right", "").upper()
+            expiry = contract.get("expiry")
+            strike = contract.get("strike")
 
             # SELL put is cash-secured — never a violation
             if right == "P":
                 continue
 
-            # SELL call — must be covered by stock
+            # SELL call — parity with web/lib/nakedShortGuard.ts
             if right == "C":
+                # 1. Sell-to-close exact match → allowed
+                closing_long = _count_matching_long_options(positions, symbol, expiry, strike, "C")
+                remaining_after_close = max(qty - closing_long, 0)
+                if remaining_after_close == 0:
+                    continue
+
+                # 2. Vertical spread cover: long calls at same expiry, any strike
+                long_calls_at_expiry = _count_long_calls_at_expiry(positions, symbol, expiry)
+                spread_cover = max(long_calls_at_expiry - closing_long, 0)
+                remaining_after_spread = max(remaining_after_close - spread_cover, 0)
+                if remaining_after_spread == 0:
+                    continue
+
+                # 3. Fall back to stock cover
                 shares_held = _get_stock_shares(positions, symbol)
-                if shares_held == 0:
+                if shares_held == 0 and spread_cover == 0:
                     violations.append(
                         {
                             "order_id": order_id,
                             "perm_id": perm_id,
                             "symbol": symbol,
-                            "reason": (f"SELL {qty} call(s) on {symbol}: no LONG stock position — naked short call"),
+                            "reason": (
+                                f"SELL {qty} call(s) on {symbol}: no long stock or "
+                                f"vertical-spread cover at expiry {expiry} — naked short call"
+                            ),
                         }
                     )
-                else:
-                    existing_short_calls = _get_short_call_contracts(positions, symbol)
-                    total_short_calls = existing_short_calls + qty
-                    shares_needed = total_short_calls * 100
-                    if shares_needed > shares_held:
-                        violations.append(
-                            {
-                                "order_id": order_id,
-                                "perm_id": perm_id,
-                                "symbol": symbol,
-                                "reason": (
-                                    f"SELL {qty} call(s) on {symbol}: "
-                                    f"total short calls ({total_short_calls}) * 100 = "
-                                    f"{shares_needed} shares needed, "
-                                    f"only {shares_held} held — under-covered"
-                                ),
-                            }
-                        )
+                    continue
+
+                existing_short_calls = _get_short_call_contracts(positions, symbol)
+                total_short_contracts = existing_short_calls + remaining_after_spread
+                covered_contracts = shares_held // 100
+
+                if total_short_contracts > covered_contracts:
+                    violations.append(
+                        {
+                            "order_id": order_id,
+                            "perm_id": perm_id,
+                            "symbol": symbol,
+                            "reason": (
+                                f"SELL {qty} call(s) on {symbol}: total short "
+                                f"({total_short_contracts}) exceeds stock cover "
+                                f"({covered_contracts}) after vertical-spread accounting — "
+                                f"under-covered"
+                            ),
+                        }
+                    )
             continue
 
     return violations
