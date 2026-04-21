@@ -447,6 +447,40 @@
         ]
       },
       "expected": { "accept": true, "reason_code": null }
+    },
+    {
+      "name": "spy_sell_two_calls_one_long_cover_no_shares_blocks_tail",
+      "request": {
+        "type": "option",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 2,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 510.0,
+        "multiplier": 100,
+        "limitPrice": 2.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPY",
+            "structure_type": "Long Call",
+            "direction": "LONG",
+            "contracts": 1,
+            "expiry": "20260620",
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Call",
+                "contracts": 1,
+                "strike": 500.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": false, "reason_code": "ETF_CALL_UNCOVERED" }
     }
   ]
 }

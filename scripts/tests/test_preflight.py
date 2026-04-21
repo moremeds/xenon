@@ -284,6 +284,55 @@ def test_sell_to_close_exact_match_ok():
     assert v.accept is True
 
 
+def test_etf_sell_two_calls_one_long_cover_no_shares_blocks_tail():
+    """Regression for Codex pass-2 P1 #1: selling 2 calls with only 1 long-call
+    cover and 0 shares must BLOCK the uncovered tail. Prior logic added
+    long_cover_available back into total_cover after already consuming it in
+    remaining_after_spread, so the 2nd short call incorrectly passed.
+    """
+    v = evaluate(
+        _make_request(
+            ticker="SPY",
+            security_type="OPT",
+            action="SELL",
+            quantity=2,
+            right="C",
+            expiry="20260620",
+            strike=510.0,
+            limit_price=2.0,
+        ),
+        PortfolioView(positions=[_long_call_position("SPY", 500.0, "20260620")]),
+    )
+    assert v.accept is False
+    assert v.reason_code == ReasonCode.ETF_CALL_UNCOVERED
+
+
+def test_portfolio_accepts_debit_direction():
+    """Regression for Codex pass-2 P1 #2: real portfolio.json positions carry
+    direction=DEBIT/CREDIT/COMBO on spread structures. PortfolioPosition.direction
+    must accept those strings, otherwise pydantic ValidationError fails the
+    snapshot load and the gate silently goes open.
+    """
+    portfolio = PortfolioView(
+        positions=[
+            {
+                "ticker": "SPX",
+                "structure_type": "Bear Put Spread",
+                "direction": "DEBIT",
+                "contracts": 1,
+                "expiry": "20260501",
+                "legs": [
+                    {"direction": "SHORT", "type": "Put", "contracts": 1, "strike": 7065.0},
+                    {"direction": "LONG", "type": "Put", "contracts": 1, "strike": 7070.0},
+                ],
+            },
+        ]
+    )
+    # Validation succeeded; verify evaluate() still works
+    v = evaluate(_make_request(ticker="SPY", security_type="STK", action="BUY", quantity=1), portfolio)
+    assert v.accept is True
+
+
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gate4_parity.json"
 
 

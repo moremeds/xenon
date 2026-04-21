@@ -61,7 +61,12 @@ class PortfolioLeg(BaseModel):
 class PortfolioPosition(BaseModel):
     ticker: str
     structure_type: str
-    direction: Literal["LONG", "SHORT"] = "LONG"
+    # The portfolio.json producer emits LONG / SHORT for single legs and
+    # DEBIT / CREDIT / COMBO for spreads and multi-leg structures. preflight
+    # never reads position-level direction (all counting walks `legs`), so
+    # we accept any string here — a Literal restriction would cause
+    # ValidationError on real snapshots and fail-open the gate entirely.
+    direction: str = "LONG"
     contracts: int
     expiry: str | None = None
     legs: list[PortfolioLeg]
@@ -241,21 +246,25 @@ def evaluate(
                 ),
             )
 
-        # ETF: fall back to stock cover
+        # ETF: fall back to stock cover. Long calls at this expiry were ALREADY
+        # consumed when computing remaining_after_spread above — do not count
+        # them a second time in total_cover (matches web/lib/nakedShortGuard.ts
+        # lines 273-283). `remaining_after_spread` is the uncovered-tail count
+        # that still needs share cover.
         existing_short = _count_existing_short_calls(portfolio.positions, req.ticker)
         shares = _count_long_shares(portfolio.positions, req.ticker)
         share_cover_units = max(shares - reservations.stock_sell_qty, 0) // req.multiplier
 
-        total_cover = share_cover_units + long_cover_available
         total_short_after = existing_short + reservations.short_call_qty + remaining_after_spread
-        if total_cover < total_short_after:
+        if share_cover_units < total_short_after:
             return Verdict(
                 accept=False,
                 reason_code=ReasonCode.ETF_CALL_UNCOVERED,
                 reason_detail=(
-                    f"SELL {req.quantity} {req.ticker} call(s): total short after fill "
-                    f"({total_short_after}) exceeds cover ({total_cover}) — "
-                    f"{share_cover_units} from shares + {long_cover_available} from long calls"
+                    f"SELL {req.quantity} {req.ticker} call(s): uncovered tail after "
+                    f"spread accounting is {remaining_after_spread}, existing short "
+                    f"calls {existing_short} — total {total_short_after} exceeds "
+                    f"{share_cover_units} share-cover units"
                 ),
             )
         return Verdict(accept=True)
