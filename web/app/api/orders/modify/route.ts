@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { readDataFile } from "@tools/data-reader";
 import { OrdersData } from "@tools/schemas/ib-orders";
 import { xenonFetch } from "@/lib/xenonApi";
+import { passThroughXenonError } from "@/lib/passThroughXenonError";
+import { getRequestId } from "@/lib/apiContracts";
 import type { ModifyCancelTarget, ReplaceComboOrder } from "@/lib/orderModify";
 
 export const runtime = "nodejs";
@@ -16,14 +18,11 @@ type ModifyBody = {
   replaceOrder?: ReplaceComboOrder;
 };
 
-function findOpenOrder(
-  orders: OrdersData,
-  orderId: number,
-  permId: number,
-) {
-  return orders.open_orders.find((order) =>
-    (permId > 0 && order.permId === permId)
-    || (orderId > 0 && order.orderId === orderId),
+function findOpenOrder(orders: OrdersData, orderId: number, permId: number) {
+  return orders.open_orders.find(
+    (order) =>
+      (permId > 0 && order.permId === permId) ||
+      (orderId > 0 && order.orderId === orderId),
   );
 }
 
@@ -37,10 +36,11 @@ function isModifyConfirmed(
   const order = findOpenOrder(orders, orderId, permId);
   if (!order) return false;
 
-  const priceConfirmed = newPrice == null
-    || (order.limitPrice != null && Math.abs(order.limitPrice - newPrice) < 0.001);
-  const quantityConfirmed = newQuantity == null
-    || order.totalQuantity === newQuantity;
+  const priceConfirmed =
+    newPrice == null ||
+    (order.limitPrice != null && Math.abs(order.limitPrice - newPrice) < 0.001);
+  const quantityConfirmed =
+    newQuantity == null || order.totalQuantity === newQuantity;
 
   return priceConfirmed && quantityConfirmed;
 }
@@ -75,6 +75,7 @@ function normalizeCancelTargets(
 }
 
 export async function POST(request: Request): Promise<Response> {
+  const requestId = getRequestId();
   try {
     const body = (await request.json()) as ModifyBody;
     const orderId = body.orderId ?? 0;
@@ -92,13 +93,13 @@ export async function POST(request: Request): Promise<Response> {
 
     if (replaceOrder) {
       if (
-        replaceOrder.type !== "combo"
-        || !replaceOrder.symbol
-        || !replaceOrder.action
-        || !replaceOrder.quantity
-        || !replaceOrder.limitPrice
-        || !replaceOrder.legs
-        || replaceOrder.legs.length < 2
+        replaceOrder.type !== "combo" ||
+        !replaceOrder.symbol ||
+        !replaceOrder.action ||
+        !replaceOrder.quantity ||
+        !replaceOrder.limitPrice ||
+        !replaceOrder.legs ||
+        replaceOrder.legs.length < 2
       ) {
         return NextResponse.json(
           { error: "Invalid combo replacement payload" },
@@ -106,10 +107,17 @@ export async function POST(request: Request): Promise<Response> {
         );
       }
 
-      const cancelTargets = normalizeCancelTargets(body.cancelOrders, orderId, permId);
+      const cancelTargets = normalizeCancelTargets(
+        body.cancelOrders,
+        orderId,
+        permId,
+      );
       if (cancelTargets.length === 0) {
         return NextResponse.json(
-          { error: "Must provide at least one order to cancel before combo replacement" },
+          {
+            error:
+              "Must provide at least one order to cancel before combo replacement",
+          },
           { status: 400 },
         );
       }
@@ -123,15 +131,21 @@ export async function POST(request: Request): Promise<Response> {
         });
       }
 
-      const result = await xenonFetch<Record<string, unknown>>("/orders/place", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(replaceOrder),
-        timeout: 20_000,
-      });
+      const result = await xenonFetch<Record<string, unknown>>(
+        "/orders/place",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(replaceOrder),
+          timeout: 20_000,
+        },
+      );
 
       try {
-        await xenonFetch("/orders/refresh", { method: "POST", timeout: 10_000 });
+        await xenonFetch("/orders/refresh", {
+          method: "POST",
+          timeout: 10_000,
+        });
       } catch {
         // Non-fatal
       }
@@ -148,7 +162,10 @@ export async function POST(request: Request): Promise<Response> {
 
     if (newPrice == null && newQuantity == null && body.outsideRth == null) {
       return NextResponse.json(
-        { error: "Must provide at least one modify field: newPrice, newQuantity, or outsideRth" },
+        {
+          error:
+            "Must provide at least one modify field: newPrice, newQuantity, or outsideRth",
+        },
         { status: 400 },
       );
     }
@@ -195,7 +212,15 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    if (!isModifyConfirmed(ordersResult.data, orderId, permId, newPrice, newQuantity)) {
+    if (
+      !isModifyConfirmed(
+        ordersResult.data,
+        orderId,
+        permId,
+        newPrice,
+        newQuantity,
+      )
+    ) {
       return NextResponse.json(
         {
           error: "Modify not confirmed by refreshed orders",
@@ -211,7 +236,6 @@ export async function POST(request: Request): Promise<Response> {
       orders: ordersResult.data,
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Modify failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return passThroughXenonError(error, requestId);
   }
 }

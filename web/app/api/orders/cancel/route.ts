@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { readDataFile } from "@tools/data-reader";
 import { OrdersData } from "@tools/schemas/ib-orders";
-import { XenonApiError, xenonFetch } from "@/lib/xenonApi";
+import { xenonFetch } from "@/lib/xenonApi";
+import { passThroughXenonError } from "@/lib/passThroughXenonError";
+import { getRequestId } from "@/lib/apiContracts";
 
 export const runtime = "nodejs";
 
@@ -11,6 +13,7 @@ type CancelBody = {
 };
 
 export async function POST(request: Request): Promise<Response> {
+  const requestId = getRequestId();
   try {
     const body = (await request.json()) as CancelBody;
     const orderId = body.orderId ?? 0;
@@ -44,10 +47,6 @@ export async function POST(request: Request): Promise<Response> {
       orders: ordersResult.ok ? ordersResult.data : null,
     });
   } catch (error) {
-    if (error instanceof XenonApiError) {
-      return NextResponse.json({ error: error.detail }, { status: error.status });
-    }
-    const message = error instanceof Error ? error.message : "Cancel failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return passThroughXenonError(error, requestId);
   }
 }
