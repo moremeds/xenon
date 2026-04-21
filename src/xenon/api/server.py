@@ -18,6 +18,7 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
@@ -42,6 +43,13 @@ from xenon.api.routes.uw_stats import router as uw_stats_router
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
+from xenon.execution import preflight
+from xenon.execution.preflight import (
+    PortfolioView,
+    PreflightRequest,
+    ReasonCode,
+    Verdict,
+)
 
 # Load .env from project root for Python scripts
 try:
@@ -1137,10 +1145,66 @@ async def orders_refresh():
 # ---------------------------------------------------------------------------
 
 
+def _load_portfolio_view() -> PortfolioView:
+    """Load portfolio snapshot for preflight. Matches TS guard's data/portfolio.json source.
+
+    F5 will replace this with a live IB-pool call per SL spec §5.2.
+    """
+    data_dir = Path(os.environ.get("XENON_DATA_DIR", str(DATA_DIR)))
+    pf_file = data_dir / "portfolio.json"
+    if not pf_file.exists():
+        return PortfolioView(positions=[])
+    raw = json.loads(pf_file.read_text())
+    return PortfolioView.model_validate(raw)
+
+
+def _body_to_preflight_request(body: dict) -> PreflightRequest:
+    """Translate /orders/place body to PreflightRequest. Combo (BAG) orders are skipped
+    by preflight in F2 — the TS guard still gates them; server-side BAG gate is scoped
+    out of PR-A."""
+    sec_type = "STK" if body.get("type") == "stock" else "OPT"
+    right_raw = (body.get("right") or "").upper()
+    right = right_raw if right_raw in ("C", "P") else None
+    limit = body.get("limitPrice")
+    return PreflightRequest(
+        ticker=str(body.get("symbol", "")).upper(),
+        security_type=sec_type,
+        action=str(body.get("action", "")).upper(),
+        quantity=int(body.get("quantity", 0)),
+        right=right,
+        expiry=body.get("expiry"),
+        strike=Decimal(str(body["strike"])) if body.get("strike") is not None else None,
+        multiplier=int(body.get("multiplier", 100)),
+        limit_price=Decimal(str(limit)) if limit is not None else Decimal("0"),
+    )
+
+
+def _run_preflight(body: dict) -> Verdict:
+    # Skip combo orders in F2 — the Next.js TS guard still covers them; server-side
+    # BAG preflight is tracked separately (not a PR-A deliverable).
+    if body.get("type") == "combo":
+        return Verdict(accept=True)
+    req = _body_to_preflight_request(body)
+    portfolio = _load_portfolio_view()
+    return preflight.evaluate(req, portfolio)
+
+
 @app.post("/orders/place")
 async def orders_place(request: Request):
     """Place an order via IB (on-demand connection, client_id=26)."""
     body = await request.json()
+
+    # F2: server-side Gate 4. Run preflight before any subprocess invocation.
+    verdict = _run_preflight(body)
+    if not verdict.accept:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "reason_code": verdict.reason_code.value if verdict.reason_code else None,
+                "reason_detail": verdict.reason_detail,
+            },
+        )
+
     if test_mode:
         order_id, perm_id = _next_test_order_ids()
         return {
