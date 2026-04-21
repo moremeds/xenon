@@ -289,13 +289,12 @@ FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gate4_parity.json"
 
 def _request_from_fixture(case: dict) -> PreflightRequest:
     r = case["request"]
-    right_map = {"C": "C", "P": "P", None: None}
     return PreflightRequest(
         ticker=r["symbol"],
         security_type="STK" if r["type"] == "stock" else "OPT",
         action=r["action"],
         quantity=r["quantity"],
-        right=right_map.get(r.get("right")),
+        right=r.get("right"),
         expiry=r.get("expiry"),
         strike=Decimal(str(r["strike"])) if r.get("strike") is not None else None,
         multiplier=r.get("multiplier", 100),

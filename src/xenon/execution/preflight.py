@@ -55,7 +55,7 @@ class PortfolioLeg(BaseModel):
     direction: Literal["LONG", "SHORT"]
     type: Literal["Stock", "Call", "Put"]
     contracts: int
-    strike: float = 0.0
+    strike: Decimal = Decimal("0")
 
 
 class PortfolioPosition(BaseModel):
@@ -145,7 +145,7 @@ def _count_matching_long_options(
         if _normalize_expiry(pos.expiry) != normalized:
             continue
         for leg in pos.legs:
-            if leg.direction == "LONG" and leg.type == expected and Decimal(str(leg.strike)) == strike:
+            if leg.direction == "LONG" and leg.type == expected and leg.strike == strike:
                 total += leg.contracts
     return total
 
