@@ -3,15 +3,9 @@
 import { useTickerNav } from "@/lib/useTickerNav";
 
 /**
- * Renders a ticker symbol. When `disabled=true` (e.g. inside a read-only
- * Futu-tab PositionTable), renders as a non-interactive `<span>` with
- * `aria-disabled="true"` — preserves keyboard tab-order (unlike a disabled
- * button which drops out of focus entirely) while providing zero navigation
- * path to IB-scoped order surfaces.
- *
- * Load-bearing safety control (tribunal T7): disabled=true is the sole
- * guarantee that clicking a Futu position's ticker cell cannot reach
- * `/api/orders/place`.
+ * Renders a ticker symbol. Read-only contexts may still navigate to the
+ * ticker workspace; execution surfaces are gated deeper in the order/modal
+ * flows rather than by suppressing navigation here.
  */
 export default function TickerLink({
   ticker,
@@ -24,23 +18,15 @@ export default function TickerLink({
 }) {
   const { navigateToTicker } = useTickerNav();
 
-  if (disabled) {
-    return (
-      <span
-        className="ticker-link ticker-link-disabled"
-        aria-disabled="true"
-        aria-label={`${ticker} — read-only (Futu account)`}
-      >
-        {ticker}
-      </span>
-    );
-  }
-
   return (
     <button
       className="ticker-link"
       onClick={() => navigateToTicker(ticker, positionId)}
-      aria-label={`View details for ${ticker}`}
+      aria-label={
+        disabled
+          ? `View read-only details for ${ticker}`
+          : `View details for ${ticker}`
+      }
     >
       {ticker}
     </button>
