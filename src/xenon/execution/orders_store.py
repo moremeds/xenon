@@ -70,6 +70,14 @@ def _resolve_path(db_path: Path | str | None) -> Path:
     return Path(env) if env else Path("data/orders.duckdb")
 
 
+_MIGRATIONS = [
+    # F5.3: monotonic modify_sequence gate. Non-destructive additive migration.
+    # DuckDB rejects NOT NULL in ADD COLUMN; DEFAULT 0 backfills existing rows and
+    # new inserts omit modify_sequence, so NULLs cannot arise in practice.
+    "ALTER TABLE orders_submissions ADD COLUMN IF NOT EXISTS modify_sequence INTEGER DEFAULT 0;",
+]
+
+
 def init_store(db_path: Path | str | None = None) -> Path:
     path = _resolve_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -79,9 +87,53 @@ def init_store(db_path: Path | str | None = None) -> Path:
         con.execute(_CREATE_EVENTS)
         for stmt in _CREATE_INDEXES:
             con.execute(stmt)
+        for stmt in _MIGRATIONS:
+            con.execute(stmt)
     finally:
         con.close()
     return path
+
+
+def apply_modify(
+    order_id: str,
+    sequence: int,
+    db_path: Path | str | None = None,
+) -> dict:
+    """Monotonic modify_sequence gate keyed by ib_order_id.
+
+    Returns:
+        {"applied": True, "current_sequence": <sequence>} if the proposed sequence is
+        strictly greater than the stored value (update committed).
+        {"applied": False, "current_sequence": <stored>} if the proposed sequence is
+        stale (<= stored).
+        {"applied": False, "current_sequence": -1} if the ib_order_id is unknown.
+        The -1 sentinel lets the route distinguish "not found" (404) from "stale" (409).
+    """
+    path = _resolve_path(db_path)
+    with _WRITE_LOCK:
+        con = duckdb.connect(str(path))
+        try:
+            updated = con.execute(
+                """
+                UPDATE orders_submissions
+                   SET modify_sequence = ?, updated_at = ?
+                 WHERE ib_order_id = ? AND modify_sequence < ?
+                 RETURNING modify_sequence
+                """,
+                [sequence, datetime.now(timezone.utc), order_id, sequence],
+            ).fetchone()
+            if updated is not None:
+                return {"applied": True, "current_sequence": int(updated[0])}
+
+            row = con.execute(
+                "SELECT modify_sequence FROM orders_submissions WHERE ib_order_id = ?",
+                [order_id],
+            ).fetchone()
+            if row is None:
+                return {"applied": False, "current_sequence": -1}
+            return {"applied": False, "current_sequence": int(row[0])}
+        finally:
+            con.close()
 
 
 class RequestRow(BaseModel):
