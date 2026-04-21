@@ -18,6 +18,7 @@ import {
 import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
 import { fmtSignedPrice, toneClass } from "@/lib/format";
 import { useClientAttemptId } from "./useClientAttemptId";
+import { useQuoteToken } from "./useQuoteToken";
 
 type OrderTabProps = {
   ticker: string;
@@ -285,6 +286,11 @@ function NewOrderForm({
   const [tif, setTif] = useState<"DAY" | "GTC">("DAY");
 
   const attemptId = useClientAttemptId({ ticker });
+  const quote = useQuoteToken({
+    ticker,
+    conId: 0,
+    expiry: position?.expiry ?? null,
+  });
   const setAction = (v: OrderAction) => {
     attemptId.onFieldEdit("action");
     _setAction(v);
@@ -381,7 +387,11 @@ function NewOrderForm({
       const res = await fetch("/api/orders/place", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...payload, client_attempt_id: attemptId.id }),
+        body: JSON.stringify({
+          ...payload,
+          client_attempt_id: attemptId.id,
+          quote_token: quote.token,
+        }),
       });
       const json = await res.json();
       if (!res.ok) {
