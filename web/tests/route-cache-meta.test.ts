@@ -90,32 +90,9 @@ async function callPOST(mod: { POST: () => Promise<Response> }) {
 // Note: /api/flow-analysis no longer reads a stale JSON cache file from disk —
 // it proxies to FastAPI /flow-analysis which reads from the shared uw-analyze
 // LRU cache. cache_meta is now derived from the analysis_time timestamp the
-// backend emits rather than from statSync(mtime). The cache-meta tests that
-// mocked the filesystem were removed as part of the flow-analysis overhaul.
-describe.skip("GET /api/flow-analysis — cache_meta (removed)", () => {
-  const validCacheData = JSON.stringify({
-    analysis_time: "2026-03-09T14:00:00Z",
-    positions_scanned: 5,
-    supports: [],
-    against: [],
-    mixed: [],
-    non_directional: [],
-    neutral: [],
-  });
-
-  beforeEach(() => {
-    vi.resetModules();
-    vi.mocked(readFile).mockResolvedValue(validCacheData as unknown as string);
-  });
-
-  afterEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it.skip("removed: file-based cache_meta", async () => {
-    // placeholder — tests live on via FastAPI integration only
-  });
-});
+// backend emits rather than from statSync(mtime). The filesystem-based
+// cache-meta tests for this route were removed during the flow-analysis
+// overhaul; surviving coverage lives in the FastAPI integration tests.
 
 // ---------------------------------------------------------------------------
 // scanner route
