@@ -120,3 +120,165 @@ def test_stock_sell_exceeds_held_blocks():
     )
     assert v.accept is False
     assert v.reason_code == ReasonCode.INSUFFICIENT_SHARES
+
+
+def test_sell_put_cash_secured_ok():
+    v = evaluate(
+        _make_request(
+            ticker="SPY",
+            security_type="OPT",
+            action="SELL",
+            quantity=1,
+            right="P",
+            expiry="20260620",
+            strike=480.0,
+            limit_price=5.0,
+        ),
+        PortfolioView(positions=[]),
+    )
+    assert v.accept is True
+
+
+def test_index_short_call_no_cover_blocks():
+    v = evaluate(
+        _make_request(
+            ticker="SPX",
+            security_type="OPT",
+            action="SELL",
+            quantity=1,
+            right="C",
+            expiry="20260620",
+            strike=5100.0,
+            limit_price=10.0,
+        ),
+        PortfolioView(positions=[]),
+    )
+    assert v.accept is False
+    assert v.reason_code == ReasonCode.INDEX_CALL_UNCOVERED
+
+
+def test_index_short_call_with_same_expiry_long_call_ok():
+    v = evaluate(
+        _make_request(
+            ticker="SPX",
+            security_type="OPT",
+            action="SELL",
+            quantity=1,
+            right="C",
+            expiry="20260620",
+            strike=5100.0,
+            limit_price=10.0,
+        ),
+        PortfolioView(positions=[_long_call_position("SPX", 5000.0, "20260620")]),
+    )
+    assert v.accept is True
+
+
+def test_index_short_call_different_expiry_long_call_blocks():
+    v = evaluate(
+        _make_request(
+            ticker="SPX",
+            security_type="OPT",
+            action="SELL",
+            quantity=1,
+            right="C",
+            expiry="20260620",
+            strike=5100.0,
+            limit_price=10.0,
+        ),
+        PortfolioView(positions=[_long_call_position("SPX", 5000.0, "20260718")]),
+    )
+    assert v.accept is False
+    assert v.reason_code == ReasonCode.INDEX_CALL_UNCOVERED
+
+
+def test_etf_short_call_no_cover_blocks():
+    v = evaluate(
+        _make_request(
+            ticker="SPY",
+            security_type="OPT",
+            action="SELL",
+            quantity=1,
+            right="C",
+            expiry="20260620",
+            strike=500.0,
+            limit_price=5.0,
+        ),
+        PortfolioView(positions=[]),
+    )
+    assert v.accept is False
+    assert v.reason_code == ReasonCode.ETF_CALL_UNCOVERED
+
+
+def test_etf_short_call_100_shares_ok():
+    v = evaluate(
+        _make_request(
+            ticker="SPY",
+            security_type="OPT",
+            action="SELL",
+            quantity=1,
+            right="C",
+            expiry="20260620",
+            strike=500.0,
+            limit_price=5.0,
+        ),
+        PortfolioView(positions=[_stock_position("SPY", 100)]),
+    )
+    assert v.accept is True
+
+
+def test_etf_short_call_existing_short_exhausts_cover_blocks():
+    v = evaluate(
+        _make_request(
+            ticker="SPY",
+            security_type="OPT",
+            action="SELL",
+            quantity=1,
+            right="C",
+            expiry="20260620",
+            strike=500.0,
+            limit_price=5.0,
+        ),
+        PortfolioView(
+            positions=[
+                _stock_position("SPY", 100),
+                _short_call_position("SPY", 510.0, "20260515"),
+            ]
+        ),
+    )
+    assert v.accept is False
+    assert v.reason_code == ReasonCode.ETF_CALL_UNCOVERED
+
+
+def test_etf_short_call_vertical_spread_ok():
+    v = evaluate(
+        _make_request(
+            ticker="SPY",
+            security_type="OPT",
+            action="SELL",
+            quantity=1,
+            right="C",
+            expiry="20260620",
+            strike=510.0,
+            limit_price=2.0,
+        ),
+        PortfolioView(positions=[_long_call_position("SPY", 500.0, "20260620")]),
+    )
+    assert v.accept is True
+
+
+def test_sell_to_close_exact_match_ok():
+    v = evaluate(
+        _make_request(
+            ticker="SPY",
+            security_type="OPT",
+            action="SELL",
+            quantity=1,
+            right="C",
+            expiry="20260620",
+            strike=500.0,
+            limit_price=5.0,
+        ),
+        PortfolioView(positions=[_long_call_position("SPY", 500.0, "20260620")]),
+    )
+    assert v.accept is True
