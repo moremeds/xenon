@@ -179,3 +179,117 @@ def reserve_attempt(
             )
         finally:
             con.close()
+
+
+@dataclass
+class SubmissionRow:
+    submission_id: str
+    user_id: str
+    ticker: str
+    state: str
+    ib_order_id: str | None
+    perm_id: str | None
+    placing_client_id: int | None
+    reason_code: str | None
+    quantity: int
+    action: str
+    security_type: str
+    right: str | None
+    expiry: str | None
+
+
+def mark_submitted(
+    *,
+    submission_id: str,
+    ib_order_id: str,
+    perm_id: str | None,
+    placing_client_id: int | None,
+    db_path: Path | str | None = None,
+) -> None:
+    now = datetime.now(timezone.utc)
+    with _WRITE_LOCK:
+        con = duckdb.connect(str(_resolve_path(db_path)))
+        try:
+            con.execute(
+                """
+                UPDATE orders_submissions
+                   SET ib_order_id = ?, perm_id = ?, placing_client_id = ?,
+                       state = 'WORKING', updated_at = ?
+                 WHERE submission_id = ?
+                """,
+                [ib_order_id, perm_id, placing_client_id, now, submission_id],
+            )
+        finally:
+            con.close()
+
+
+def mark_terminal(
+    *,
+    submission_id: str,
+    state: Literal["FILLED", "REJECTED", "CANCELLED", "FAILED", "PARTIALLY_FILLED"],
+    reason_code: str | None,
+    filled_qty: int,
+    avg_fill_price: Decimal | None,
+    db_path: Path | str | None = None,
+) -> None:
+    now = datetime.now(timezone.utc)
+    with _WRITE_LOCK:
+        con = duckdb.connect(str(_resolve_path(db_path)))
+        try:
+            con.execute(
+                """
+                UPDATE orders_submissions
+                   SET state = ?, reason_code = ?, filled_qty = ?,
+                       avg_fill_price = ?, updated_at = ?
+                 WHERE submission_id = ?
+                """,
+                [
+                    state, reason_code, filled_qty,
+                    str(avg_fill_price) if avg_fill_price is not None else None,
+                    now, submission_id,
+                ],
+            )
+        finally:
+            con.close()
+
+
+def record_event(
+    submission_id: str,
+    kind: str,
+    detail: dict,
+    db_path: Path | str | None = None,
+) -> None:
+    import json as _json
+    eid = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    with _WRITE_LOCK:
+        con = duckdb.connect(str(_resolve_path(db_path)))
+        try:
+            con.execute(
+                'INSERT INTO orders_events (event_id, submission_id, kind, detail, "at") VALUES (?, ?, ?, ?, ?)',
+                [eid, submission_id, kind, _json.dumps(detail), now],
+            )
+        finally:
+            con.close()
+
+
+def lookup_by_attempt(
+    user_id: str, client_attempt_id: str, db_path: Path | str | None = None
+) -> SubmissionRow | None:
+    con = duckdb.connect(str(_resolve_path(db_path)))
+    try:
+        row = con.execute(
+            """
+            SELECT submission_id, user_id, ticker, state, ib_order_id, perm_id,
+                   placing_client_id, reason_code, quantity, action, security_type,
+                   "right", expiry
+              FROM orders_submissions
+             WHERE user_id = ? AND client_attempt_id = ?
+            """,
+            [user_id, client_attempt_id],
+        ).fetchone()
+    finally:
+        con.close()
+    if row is None:
+        return None
+    return SubmissionRow(*row)

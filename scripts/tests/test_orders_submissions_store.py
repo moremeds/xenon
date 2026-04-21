@@ -124,3 +124,62 @@ def test_reserve_attempt_concurrent_only_one_winner(db_path):
     assert len(winners) == 1
     assert len(dupes) == 7
     assert all(d.submission_id == winners[0].submission_id for d in dupes)
+
+
+from xenon.execution.orders_store import (
+    lookup_by_attempt,
+    mark_submitted,
+    mark_terminal,
+    record_event,
+)
+
+
+def test_mark_submitted_stamps_ib_order_id(db_path):
+    init_store(db_path)
+    win = reserve_attempt("local", "cid-S", _req(), db_path=db_path)
+    mark_submitted(
+        submission_id=win.submission_id,
+        ib_order_id="5001",
+        perm_id="9901",
+        placing_client_id=26,
+        db_path=db_path,
+    )
+    row = lookup_by_attempt("local", "cid-S", db_path=db_path)
+    assert row.ib_order_id == "5001"
+    assert row.perm_id == "9901"
+    assert row.placing_client_id == 26
+    assert row.state == "WORKING"
+
+
+def test_mark_terminal_sets_reason_code(db_path):
+    init_store(db_path)
+    win = reserve_attempt("local", "cid-T", _req(), db_path=db_path)
+    mark_terminal(
+        submission_id=win.submission_id,
+        state="REJECTED",
+        reason_code="IB_REJECT_201",
+        filled_qty=0,
+        avg_fill_price=None,
+        db_path=db_path,
+    )
+    row = lookup_by_attempt("local", "cid-T", db_path=db_path)
+    assert row.state == "REJECTED"
+    assert row.reason_code == "IB_REJECT_201"
+
+    out = reserve_attempt("local", "cid-T", _req(), db_path=db_path)
+    assert out.status == "terminal"
+    assert out.reason_code == "IB_REJECT_201"
+
+
+def test_record_event_appends_row(db_path):
+    init_store(db_path)
+    win = reserve_attempt("local", "cid-E", _req(), db_path=db_path)
+    record_event(win.submission_id, "PREFLIGHT_ACK_LIMIT", {"override": True}, db_path=db_path)
+
+    con = duckdb.connect(str(db_path))
+    rows = con.execute(
+        "SELECT kind FROM orders_events WHERE submission_id = ?",
+        [win.submission_id],
+    ).fetchall()
+    con.close()
+    assert rows == [("PREFLIGHT_ACK_LIMIT",)]
