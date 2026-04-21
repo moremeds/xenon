@@ -44,7 +44,7 @@ from xenon.api.routes.uw_stats import router as uw_stats_router
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
-from xenon.execution import orders_store, preflight, quote_tokens
+from xenon.execution import orders_store, preflight, quote_guard, quote_tokens
 from xenon.execution.preflight import (
     PortfolioView,
     PreflightRequest,
@@ -1216,6 +1216,18 @@ def _run_preflight(body: dict, user_id: str = "local") -> Verdict:
     return preflight.evaluate(req, portfolio, reservations=reservations)
 
 
+def _lookup_min_tick_via_pool(con_id: int) -> Decimal:
+    """Real-path minTick lookup via ib_pool 'data' role. Tests replace
+    `_tick_rule_cache` with a deterministic fake."""
+    raise HTTPException(status_code=503, detail="IB data role not ready")
+
+
+_tick_rule_cache = quote_guard.TickRuleCache(
+    source=_lookup_min_tick_via_pool,
+    ttl_seconds=24 * 3600,
+)
+
+
 def _fetch_quote_snapshot(ticker: str, con_id: int) -> dict:
     """Fetch a bid/ask snapshot from the ib_pool 'data' role.
 
@@ -1276,6 +1288,38 @@ async def orders_place(request: Request):
                 "reason_detail": verdict.reason_detail,
             },
         )
+
+    # F3: quote-token + tick-grid + limit-band + market-hours
+    if body.get("type") != "combo":
+        token = body.get("quote_token")
+        if not token:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "quote_token is required",
+                    "reason_code": ReasonCode.STALE_QUOTE.value,
+                },
+            )
+        qv = quote_guard.check(
+            token=token,
+            token_secret=os.environ.get("XENON_QUOTE_TOKEN_SECRET", ""),
+            con_id=int(body.get("con_id") or 0),
+            ticker=str(body.get("symbol", "")).upper(),
+            security_type="STK" if body.get("type") == "stock" else "OPT",
+            action=str(body.get("action", "")).upper(),
+            limit_price=Decimal(str(body.get("limitPrice", "0"))),
+            now=datetime.now(tz=timezone.utc),
+            tick_rule_lookup=_tick_rule_cache.get,
+        )
+        if not qv.accept:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": qv.reason_detail,
+                    "reason_code": qv.reason_code.value if qv.reason_code else None,
+                    "reason_detail": qv.reason_detail,
+                },
+            )
 
     if test_mode:
         order_id, perm_id = _next_test_order_ids()

@@ -90,11 +90,21 @@ def test_spy_buy_passes_preflight(client):
             "limitPrice": 500.0,
         },
     )
-    # Preflight blocks would return 400 with a reason_code. A 200/500 from
-    # the stubbed subprocess layer both prove we got past preflight. The
-    # one outcome we reject here is 400 with a preflight reason_code.
-    assert resp.status_code != 400 or "reason_code" not in resp.json(), (
-        f"SPY BUY should not be blocked by preflight; got {resp.status_code} {resp.json()}"
+    # Preflight blocks would return 400 with a preflight reason_code.
+    # A 200/500 means we reached the post-preflight path. A 400 with a
+    # non-preflight reason (e.g. STALE_QUOTE from F3) also means preflight
+    # ACCEPTed — we only reject preflight-origin codes here.
+    preflight_codes = {
+        "UNIVERSE_UNKNOWN",
+        "INDEX_HAS_NO_STOCK",
+        "INSUFFICIENT_SHARES",
+        "INSUFFICIENT_CASH",
+        "INDEX_CALL_UNCOVERED",
+        "ETF_CALL_UNCOVERED",
+    }
+    body_json = resp.json() if resp.status_code == 400 else {}
+    assert body_json.get("reason_code") not in preflight_codes, (
+        f"SPY BUY should not be blocked by preflight; got {resp.status_code} {body_json}"
     )
 
 
@@ -165,8 +175,17 @@ def test_missing_portfolio_fails_open(monkeypatch, tmp_path):
             "limitPrice": 500.0,
         },
     )
-    assert resp.status_code != 400 or "reason_code" not in resp.json(), (
-        f"Missing portfolio.json must fail open (match TS guard); got {resp.status_code} {resp.json()}"
+    preflight_codes = {
+        "UNIVERSE_UNKNOWN",
+        "INDEX_HAS_NO_STOCK",
+        "INSUFFICIENT_SHARES",
+        "INSUFFICIENT_CASH",
+        "INDEX_CALL_UNCOVERED",
+        "ETF_CALL_UNCOVERED",
+    }
+    body_json = resp.json() if resp.status_code == 400 else {}
+    assert body_json.get("reason_code") not in preflight_codes, (
+        f"Missing portfolio.json must fail open (match TS guard); got {resp.status_code} {body_json}"
     )
 
 
@@ -176,30 +195,47 @@ def test_insufficient_shares_when_working_sell_exists(client, monkeypatch, tmp_p
     store, a new SELL 1 SPY must BLOCK with INSUFFICIENT_SHARES.
     """
     import json as _json
+
     pf = tmp_path / "portfolio.json"
-    pf.write_text(_json.dumps({
-        "positions": [{
-            "ticker": "SPY",
-            "structure_type": "Stock",
-            "direction": "LONG",
-            "contracts": 100,
-            "legs": [{"direction": "LONG", "type": "Stock", "contracts": 100, "strike": 0.0}]
-        }],
-        "available_funds": 0
-    }))
+    pf.write_text(
+        _json.dumps(
+            {
+                "positions": [
+                    {
+                        "ticker": "SPY",
+                        "structure_type": "Stock",
+                        "direction": "LONG",
+                        "contracts": 100,
+                        "legs": [{"direction": "LONG", "type": "Stock", "contracts": 100, "strike": 0.0}],
+                    }
+                ],
+                "available_funds": 0,
+            }
+        )
+    )
     monkeypatch.setenv("XENON_DATA_DIR", str(tmp_path))
 
     from decimal import Decimal
+
     from xenon.execution import orders_store
+
     db = tmp_path / "orders.duckdb"
     monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
     orders_store.init_store(db)
     orders_store.reserve_attempt(
-        "local", "seeded-cid",
+        "local",
+        "seeded-cid",
         orders_store.RequestRow(
-            ticker="SPY", security_type="STK", action="SELL",
-            quantity=100, expiry=None, strike=None, right=None,
-            multiplier=100, con_id=756733, limit_price=Decimal("500.15"),
+            ticker="SPY",
+            security_type="STK",
+            action="SELL",
+            quantity=100,
+            expiry=None,
+            strike=None,
+            right=None,
+            multiplier=100,
+            con_id=756733,
+            limit_price=Decimal("500.15"),
         ),
         db_path=db,
     )
@@ -207,8 +243,11 @@ def test_insufficient_shares_when_working_sell_exists(client, monkeypatch, tmp_p
     resp = client.post(
         "/orders/place",
         json={
-            "type": "stock", "symbol": "SPY", "action": "SELL",
-            "quantity": 1, "limitPrice": 500.15,
+            "type": "stock",
+            "symbol": "SPY",
+            "action": "SELL",
+            "quantity": 1,
+            "limitPrice": 500.15,
             "client_attempt_id": "new-cid-1",
         },
     )
