@@ -74,71 +74,121 @@ const PRICES = {
     symbol: "GOOG",
     last: 307.84,
     lastIsCalculated: false,
-    bid: 307.80,
+    bid: 307.8,
     ask: 307.88,
     bidSize: 100,
     askSize: 80,
     volume: 15_000_000,
-    high: 310.50,
-    low: 305.20,
-    open: 306.00,
-    close: 308.10,
-    week52High: null, week52Low: null, avgVolume: null,
-    delta: null, gamma: null, theta: null, vega: null, impliedVol: null, undPrice: null,
+    high: 310.5,
+    low: 305.2,
+    open: 306.0,
+    close: 308.1,
+    week52High: null,
+    week52Low: null,
+    avgVolume: null,
+    delta: null,
+    gamma: null,
+    theta: null,
+    vega: null,
+    impliedVol: null,
+    undPrice: null,
     timestamp: new Date().toISOString(),
   },
-  "GOOG_20260320_315_C": {
+  GOOG_20260320_315_C: {
     symbol: "GOOG_20260320_315_C",
     last: 8.65,
     lastIsCalculated: false,
-    bid: 8.50,
-    ask: 8.80,
+    bid: 8.5,
+    ask: 8.8,
     bidSize: 20,
     askSize: 15,
     volume: 500,
-    high: null, low: null, open: null, close: 9.00,
-    week52High: null, week52Low: null, avgVolume: null,
-    delta: 0.55, gamma: 0.02, theta: -0.15, vega: 0.30, impliedVol: 0.35, undPrice: 307.84,
+    high: null,
+    low: null,
+    open: null,
+    close: 9.0,
+    week52High: null,
+    week52Low: null,
+    avgVolume: null,
+    delta: 0.55,
+    gamma: 0.02,
+    theta: -0.15,
+    vega: 0.3,
+    impliedVol: 0.35,
+    undPrice: 307.84,
     timestamp: new Date().toISOString(),
   },
-  "GOOG_20260320_340_C": {
+  GOOG_20260320_340_C: {
     symbol: "GOOG_20260320_340_C",
-    last: 4.10,
+    last: 4.1,
     lastIsCalculated: false,
-    bid: 4.00,
-    ask: 4.20,
+    bid: 4.0,
+    ask: 4.2,
     bidSize: 25,
     askSize: 18,
     volume: 300,
-    high: null, low: null, open: null, close: 4.50,
-    week52High: null, week52Low: null, avgVolume: null,
-    delta: 0.30, gamma: 0.015, theta: -0.10, vega: 0.25, impliedVol: 0.33, undPrice: 307.84,
+    high: null,
+    low: null,
+    open: null,
+    close: 4.5,
+    week52High: null,
+    week52Low: null,
+    avgVolume: null,
+    delta: 0.3,
+    gamma: 0.015,
+    theta: -0.1,
+    vega: 0.25,
+    impliedVol: 0.33,
+    undPrice: 307.84,
     timestamp: new Date().toISOString(),
   },
 };
 
 function stubApis(page: import("@playwright/test").Page) {
   page.route("**/api/portfolio", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(PORTFOLIO_WITH_SPREAD) }),
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(PORTFOLIO_WITH_SPREAD),
+    }),
   );
   page.route("**/api/orders", (route) =>
     route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ last_sync: new Date().toISOString(), open_orders: [], executed_orders: [], open_count: 0, executed_count: 0 }),
+      body: JSON.stringify({
+        last_sync: new Date().toISOString(),
+        open_orders: [],
+        executed_orders: [],
+        open_count: 0,
+        executed_count: 0,
+      }),
     }),
   );
   page.route("**/api/regime", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ score: 15, cri: { score: 15 } }) }),
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ score: 15, cri: { score: 15 } }),
+    }),
   );
   page.route("**/api/ib-status", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ connected: false }) }),
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ connected: false }),
+    }),
   );
   page.route("**/api/blotter", (route) =>
     route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ as_of: new Date().toISOString(), summary: { realized_pnl: 0 }, closed_trades: [], open_trades: [] }),
+      body: JSON.stringify({
+        as_of: new Date().toISOString(),
+        summary: { realized_pnl: 0 },
+        closed_trades: [],
+        open_trades: [],
+      }),
     }),
   );
   page.route("**/api/ticker/**", (route) =>
@@ -146,7 +196,11 @@ function stubApis(page: import("@playwright/test").Page) {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        uw_info: { name: "Alphabet Inc.", sector: "Technology", description: "Test" },
+        uw_info: {
+          name: "Alphabet Inc.",
+          sector: "Technology",
+          description: "Test",
+        },
         stock_state: {},
         profile: {},
         stats: {},
@@ -157,68 +211,16 @@ function stubApis(page: import("@playwright/test").Page) {
 }
 
 test.describe("Spread PriceBar — net pricing from per-leg WS data", () => {
-  // FIXME: Needs WS mock fixture — page navigation resets React state, so
-  // injected ws-price custom events no longer flow to usePrices on the ticker page.
-  test.fixme("shows net spread bid/ask/last instead of underlying stock prices", async ({ page }) => {
-    await page.unrouteAll({ behavior: "ignoreErrors" });
-    stubApis(page);
+  // The positive-case test ("shows net spread bid/ask/last…") was a
+  // test.fixme stub that required a WS mock fixture surviving navigation.
+  // Net spread pricing is asserted in the Vitest unit tests
+  // web/tests/spread-price-bar.test.ts and web/tests/order-reliability.test.ts
+  // ("ComboOrderForm net price calculation"), so dropping the E2E stub
+  // doesn't reduce coverage.
 
-    await page.goto("/portfolio");
-
-    // Inject WS prices for underlying + both option legs
-    await page.evaluate((prices) => {
-      for (const [, priceData] of Object.entries(prices)) {
-        window.dispatchEvent(
-          new CustomEvent("ws-price", { detail: { type: "price", symbol: (priceData as { symbol: string }).symbol, data: priceData } }),
-        );
-      }
-    }, PRICES);
-
-    // Open the ticker detail page for GOOG
-    const googLink = page.locator('[aria-label="View details for GOOG"]').first();
-    await googLink.waitFor({ timeout: 10_000 });
-    await googLink.click();
-    await page.waitForURL("**/GOOG**", { timeout: 5_000 });
-
-    const detail = page.locator(".ticker-detail-page");
-    await detail.waitFor({ timeout: 5_000 });
-
-    // Re-inject WS prices after page navigation (prices lost on route change)
-    await page.evaluate((prices) => {
-      for (const [, priceData] of Object.entries(prices)) {
-        window.dispatchEvent(
-          new CustomEvent("ws-price", { detail: { type: "price", symbol: (priceData as { symbol: string }).symbol, data: priceData } }),
-        );
-      }
-    }, PRICES);
-
-    // The PriceBar should NOT show "GOOG (underlying)"
-    const priceBar = detail.locator(".price-bar");
-    await priceBar.waitFor({ timeout: 5_000 });
-    const label = priceBar.locator(".price-bar-label").first();
-    const labelText = await label.textContent();
-
-    // Should NOT contain "(underlying)" — should show spread structure
-    await expect(priceBar).not.toContainText("(underlying)");
-
-    // Verify the BID value is the net spread bid (~$4.50), NOT the stock bid (~$307.80)
-    const bidValue = priceBar.locator(".price-bar-item").filter({ hasText: "BID" }).locator(".price-bar-value");
-    const bidText = await bidValue.textContent();
-    // The spread net bid should be around $4.50, definitely not $307+
-    expect(parseFloat(bidText!.replace("$", "").replace(",", ""))).toBeLessThan(20);
-
-    // Verify ASK is also spread-level
-    const askValue = priceBar.locator(".price-bar-item").filter({ hasText: "ASK" }).locator(".price-bar-value");
-    const askText = await askValue.textContent();
-    expect(parseFloat(askText!.replace("$", "").replace(",", ""))).toBeLessThan(20);
-
-    // Verify LAST is also spread-level
-    const lastValue = priceBar.locator(".price-bar-item").filter({ hasText: "LAST" }).locator(".price-bar-value");
-    const lastText = await lastValue.textContent();
-    expect(parseFloat(lastText!.replace("$", "").replace(",", ""))).toBeLessThan(20);
-  });
-
-  test("falls back to underlying when per-leg prices are unavailable", async ({ page }) => {
+  test("falls back to underlying when per-leg prices are unavailable", async ({
+    page,
+  }) => {
     await page.unrouteAll({ behavior: "ignoreErrors" });
     stubApis(page);
 
@@ -227,11 +229,15 @@ test.describe("Spread PriceBar — net pricing from per-leg WS data", () => {
     // Only inject underlying price, NOT leg prices
     await page.evaluate((price) => {
       window.dispatchEvent(
-        new CustomEvent("ws-price", { detail: { type: "price", symbol: price.symbol, data: price } }),
+        new CustomEvent("ws-price", {
+          detail: { type: "price", symbol: price.symbol, data: price },
+        }),
       );
     }, PRICES.GOOG);
 
-    const googLink = page.locator('[aria-label="View details for GOOG"]').first();
+    const googLink = page
+      .locator('[aria-label="View details for GOOG"]')
+      .first();
     await googLink.waitFor({ timeout: 10_000 });
     await googLink.click();
     await page.waitForURL("**/GOOG**", { timeout: 5_000 });
@@ -242,7 +248,9 @@ test.describe("Spread PriceBar — net pricing from per-leg WS data", () => {
     // Re-inject underlying price only after page navigation
     await page.evaluate((price) => {
       window.dispatchEvent(
-        new CustomEvent("ws-price", { detail: { type: "price", symbol: price.symbol, data: price } }),
+        new CustomEvent("ws-price", {
+          detail: { type: "price", symbol: price.symbol, data: price },
+        }),
       );
     }, PRICES.GOOG);
 
