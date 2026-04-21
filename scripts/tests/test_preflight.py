@@ -5,6 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+
 from xenon.execution.preflight import (
     PortfolioView,
     PreflightRequest,
@@ -85,3 +86,37 @@ def test_index_stk_sell_blocks():
     )
     assert verdict.accept is False
     assert verdict.reason_code == ReasonCode.INDEX_HAS_NO_STOCK
+
+
+def test_stock_buy_always_ok():
+    v = evaluate(
+        _make_request(ticker="SPY", security_type="STK", action="BUY", quantity=100),
+        PortfolioView(positions=[]),
+    )
+    assert v.accept is True
+
+
+def test_stock_sell_no_shares_blocks():
+    v = evaluate(
+        _make_request(ticker="SPY", security_type="STK", action="SELL", quantity=100),
+        PortfolioView(positions=[]),
+    )
+    assert v.accept is False
+    assert v.reason_code == ReasonCode.INSUFFICIENT_SHARES
+
+
+def test_stock_sell_within_held_ok():
+    v = evaluate(
+        _make_request(ticker="SPY", security_type="STK", action="SELL", quantity=100),
+        PortfolioView(positions=[_stock_position("SPY", 100)]),
+    )
+    assert v.accept is True
+
+
+def test_stock_sell_exceeds_held_blocks():
+    v = evaluate(
+        _make_request(ticker="SPY", security_type="STK", action="SELL", quantity=200),
+        PortfolioView(positions=[_stock_position("SPY", 100)]),
+    )
+    assert v.accept is False
+    assert v.reason_code == ReasonCode.INSUFFICIENT_SHARES
