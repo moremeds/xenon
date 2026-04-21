@@ -1428,6 +1428,47 @@ async def orders_place(request: Request):
     return result.data
 
 
+# F5.4 — cancel/modify failure classification
+# ib_reject codes that mean "order vanished" map to 404 so the UI can
+# distinguish from a hard reject. All other ib_reject codes are 400.
+_IB_REJECT_NOT_FOUND_CODES = {"10147", "10148"}
+
+
+def _map_ib_reject_status(upstream_code: Any) -> int:
+    code = str(upstream_code) if upstream_code is not None else ""
+    return 404 if code in _IB_REJECT_NOT_FOUND_CODES else 400
+
+
+def _classify_to_http(data: dict) -> tuple[int, str]:
+    """Map subprocess classification → (http_status, reason_code)."""
+    classification = data.get("classification")
+    if classification == "connection":
+        return 503, ReasonCode.IB_CONNECTION.value
+    if classification == "ownership":
+        return 409, ReasonCode.OWNERSHIP.value
+    if classification == "ib_reject":
+        upstream = data.get("upstream") or {}
+        return _map_ib_reject_status(upstream.get("code")), ReasonCode.IB_REJECT.value
+    # Unknown/missing classification — fall back to 502 with a generic code.
+    return 502, ReasonCode.IB_REJECT.value
+
+
+def _record_manage_event(ib_order_id: str, kind: str, detail: dict) -> None:
+    """Write orders_events row for a cancel/modify attempt.
+
+    Looks up submission by ib_order_id. If no submission exists (order placed
+    pre-F4, or before a reserve_attempt row was created), the event is
+    skipped — orders_events.submission_id is NOT NULL and has no synthetic
+    parent row available. This is documented behaviour for legacy orders.
+    """
+    try:
+        sid = orders_store.lookup_submission_id_by_ib_order_id(ib_order_id)
+        if sid:
+            orders_store.record_event(sid, kind, detail)
+    except Exception:  # pragma: no cover — event writes are best-effort
+        logger.warning("Failed to record %s event for order %s", kind, ib_order_id, exc_info=True)
+
+
 @app.post("/orders/cancel")
 async def orders_cancel(request: Request):
     """Cancel an open order via subprocess.
@@ -1435,6 +1476,12 @@ async def orders_cancel(request: Request):
     IB scopes cancelOrder by clientId — only the clientId that placed the
     order can cancel it. The subprocess detects the original clientId and
     reconnects as that client before cancelling.
+
+    F5.4 classifies subprocess failures into HTTP statuses:
+      classification=connection → 503 IB_CONNECTION
+      classification=ownership  → 409 OWNERSHIP
+      classification=ib_reject  → 400 (or 404 for 10147/10148) IB_REJECT
+    The full upstream payload (code + message) is preserved in detail.
     """
     body = await request.json()
     if test_mode:
@@ -1455,10 +1502,33 @@ async def orders_cancel(request: Request):
 
     result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=15)
     if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
-    if result.data and result.data.get("status") == "error":
-        raise HTTPException(status_code=502, detail=result.data.get("message", "Cancel failed"))
-    return result.data
+        detail = {
+            "reason_code": ReasonCode.IB_CONNECTION.value,
+            "message": result.error or "Subprocess failed",
+            "http_status": 503,
+        }
+        _record_manage_event(str(order_id or ""), "CANCEL", detail)
+        raise HTTPException(status_code=503, detail=detail)
+
+    data = result.data or {}
+    if data.get("status") == "error":
+        http_status, reason_code = _classify_to_http(data)
+        detail = {
+            "reason_code": reason_code,
+            "classification": data.get("classification"),
+            "message": data.get("message"),
+            "upstream": data.get("upstream"),
+            "http_status": http_status,
+        }
+        _record_manage_event(str(order_id or ""), "CANCEL", detail)
+        raise HTTPException(status_code=http_status, detail=detail)
+
+    _record_manage_event(
+        str(order_id or ""),
+        "CANCEL",
+        {"status": data.get("status"), "message": data.get("message"), "http_status": 200},
+    )
+    return data
 
 
 @app.post("/orders/modify")
@@ -1467,8 +1537,13 @@ async def orders_modify(request: Request):
 
     Modify requires the original clientId that placed the order (IB scopes
     placeOrder by clientId). The subprocess detects the original clientId
-    and reconnects as that client before modifying. Cancel can use the pool
-    (master clientId=0 can cancel anything), but modify cannot.
+    and reconnects as that client before modifying.
+
+    F5.4: modifySequence monotonic gate runs BEFORE the subprocess.
+      - missing modifySequence → 400 MODIFY_SEQUENCE_REQUIRED
+      - unknown ib_order_id     → 404 ORDER_NOT_FOUND
+      - stale sequence          → 409 MODIFY_STALE (detail.applied=<current>)
+    Subprocess failures classified the same as cancel.
     """
     body = await request.json()
     if test_mode:
@@ -1483,6 +1558,51 @@ async def orders_modify(request: Request):
     new_price = body.get("newPrice")
     new_quantity = body.get("newQuantity")
     outside_rth = body.get("outsideRth")
+    modify_sequence = body.get("modifySequence")
+
+    if modify_sequence is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason_code": ReasonCode.MODIFY_SEQUENCE_REQUIRED.value,
+                "message": "modifySequence is required",
+                "http_status": 400,
+            },
+        )
+    try:
+        modify_sequence = int(modify_sequence)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason_code": ReasonCode.MODIFY_SEQUENCE_REQUIRED.value,
+                "message": "modifySequence must be an integer",
+                "http_status": 400,
+            },
+        )
+
+    # Apply sequence gate BEFORE spawning the subprocess
+    seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence)
+    if not seq_outcome["applied"]:
+        current = seq_outcome["current_sequence"]
+        if current == -1:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "reason_code": ReasonCode.ORDER_NOT_FOUND.value,
+                    "message": f"Order {order_id} not found",
+                    "http_status": 404,
+                },
+            )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason_code": ReasonCode.MODIFY_STALE.value,
+                "message": f"modifySequence {modify_sequence} is stale; current is {current}",
+                "applied": current,
+                "http_status": 409,
+            },
+        )
 
     args = ["modify"]
     if order_id:
@@ -1500,10 +1620,48 @@ async def orders_modify(request: Request):
 
     result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=15)
     if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
-    if result.data and result.data.get("status") == "error":
-        raise HTTPException(status_code=502, detail=result.data.get("message", "Modify failed"))
-    return result.data
+        # DB sequence is already advanced; don't roll back — prevents
+        # double-apply on a retry. Log and surface to caller.
+        logger.warning(
+            "Modify subprocess failed after apply_modify(order=%s, seq=%s): %s",
+            order_id,
+            modify_sequence,
+            result.error,
+        )
+        detail = {
+            "reason_code": ReasonCode.IB_CONNECTION.value,
+            "message": result.error or "Subprocess failed",
+            "applied_sequence": modify_sequence,
+            "http_status": 503,
+        }
+        _record_manage_event(str(order_id or ""), "MODIFY", detail)
+        raise HTTPException(status_code=503, detail=detail)
+
+    data = result.data or {}
+    if data.get("status") == "error":
+        http_status, reason_code = _classify_to_http(data)
+        detail = {
+            "reason_code": reason_code,
+            "classification": data.get("classification"),
+            "message": data.get("message"),
+            "upstream": data.get("upstream"),
+            "applied_sequence": modify_sequence,
+            "http_status": http_status,
+        }
+        _record_manage_event(str(order_id or ""), "MODIFY", detail)
+        raise HTTPException(status_code=http_status, detail=detail)
+
+    _record_manage_event(
+        str(order_id or ""),
+        "MODIFY",
+        {
+            "status": data.get("status"),
+            "message": data.get("message"),
+            "applied_sequence": modify_sequence,
+            "http_status": 200,
+        },
+    )
+    return data
 
 
 # ---------------------------------------------------------------------------

@@ -338,6 +338,26 @@ def record_event(
             con.close()
 
 
+def lookup_submission_id_by_ib_order_id(ib_order_id: str, db_path: Path | str | None = None) -> str | None:
+    """Return submission_id for a given ib_order_id, or None if not found.
+
+    Used by the cancel/modify routes to locate the orders_submissions row for
+    orders_events attribution. Orders placed before F4 won't have a row — in
+    that case the caller skips the event write.
+    """
+    if not ib_order_id:
+        return None
+    con = duckdb.connect(str(_resolve_path(db_path)))
+    try:
+        row = con.execute(
+            "SELECT submission_id FROM orders_submissions WHERE ib_order_id = ?",
+            [ib_order_id],
+        ).fetchone()
+    finally:
+        con.close()
+    return row[0] if row else None
+
+
 def lookup_by_attempt(user_id: str, client_attempt_id: str, db_path: Path | str | None = None) -> SubmissionRow | None:
     con = duckdb.connect(str(_resolve_path(db_path)))
     try:
