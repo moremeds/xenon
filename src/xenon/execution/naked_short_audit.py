@@ -204,6 +204,7 @@ def find_naked_short_violations(orders: list, positions: list) -> list:
                 # 3. Fall back to stock cover
                 shares_held = _get_stock_shares(positions, symbol)
                 if shares_held == 0 and spread_cover == 0:
+                    expiry_label = expiry or "<unknown>"
                     violations.append(
                         {
                             "order_id": order_id,
@@ -211,7 +212,7 @@ def find_naked_short_violations(orders: list, positions: list) -> list:
                             "symbol": symbol,
                             "reason": (
                                 f"SELL {qty} call(s) on {symbol}: no long stock or "
-                                f"vertical-spread cover at expiry {expiry} — naked short call"
+                                f"vertical-spread cover at expiry {expiry_label} — naked short call"
                             ),
                         }
                     )
