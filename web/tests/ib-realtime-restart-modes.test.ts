@@ -54,8 +54,13 @@ describe("ib_realtime_server.js stale-data restart modes", () => {
         /else \{\n    \/\/ LaunchD mode — shell out to restart IBC service[\s\S]*?\n  \}/,
       )?.[0] ?? "";
 
-    expect(source).toContain('import { execSync } from "node:child_process";');
-    expect(source).toContain('import { homedir } from "node:os";');
+    // Allow additional named imports from these modules (e.g. tmpdir alongside
+    // homedir) — the contract is "ESM import, not require()", not an exact
+    // import list.
+    expect(source).toMatch(
+      /import \{[^}]*\bexecSync\b[^}]*\} from "node:child_process";/,
+    );
+    expect(source).toMatch(/import \{[^}]*\bhomedir\b[^}]*\} from "node:os";/);
     expect(source).not.toContain('require("child_process")');
     expect(source).not.toContain('require("os")');
     expect(launchdBlock).toContain("execSync(`");
