@@ -149,3 +149,32 @@ def test_crossed_or_zero_size_rejects_as_STALE_QUOTE():
     )
     assert v.accept is False
     assert v.reason_code == ReasonCode.STALE_QUOTE
+
+
+def test_tick_rule_cache_hits_second_call():
+    calls = {"n": 0}
+
+    def source(con_id: int) -> Decimal:
+        calls["n"] += 1
+        return Decimal("0.01")
+
+    cache = quote_guard.TickRuleCache(source=source, ttl_seconds=3600)
+    assert cache.get(756733) == Decimal("0.01")
+    assert cache.get(756733) == Decimal("0.01")
+    assert calls["n"] == 1
+
+
+def test_tick_rule_cache_refreshes_after_ttl(monkeypatch):
+    calls = {"n": 0}
+
+    def source(con_id: int) -> Decimal:
+        calls["n"] += 1
+        return Decimal("0.01")
+
+    t = {"now": 1000.0}
+    monkeypatch.setattr(quote_guard.time, "monotonic", lambda: t["now"])
+    cache = quote_guard.TickRuleCache(source=source, ttl_seconds=60)
+    cache.get(1)
+    t["now"] += 61
+    cache.get(1)
+    assert calls["n"] == 2

@@ -5,8 +5,10 @@ Spec: docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md §7.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from decimal import Decimal
+from threading import Lock
 from typing import Callable, Literal
 
 from pydantic import BaseModel
@@ -100,3 +102,23 @@ def check(
             )
 
     return QuoteVerdict(accept=True)
+
+
+class TickRuleCache:
+    """Per-con_id minTick cache with TTL (default 24h per SL §7)."""
+
+    def __init__(self, source: Callable[[int], Decimal], ttl_seconds: int = 24 * 3600):
+        self._source = source
+        self._ttl = ttl_seconds
+        self._lock = Lock()
+        self._cache: dict[int, tuple[float, Decimal]] = {}
+
+    def get(self, con_id: int) -> Decimal:
+        with self._lock:
+            entry = self._cache.get(con_id)
+            now = time.monotonic()
+            if entry is not None and (now - entry[0]) < self._ttl:
+                return entry[1]
+            value = self._source(con_id)
+            self._cache[con_id] = (now, value)
+            return value
