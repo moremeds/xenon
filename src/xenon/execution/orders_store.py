@@ -402,6 +402,26 @@ def lookup_submission_id_by_ib_order_id(ib_order_id: str, db_path: Path | str | 
     return row[0] if row else None
 
 
+def lookup_submission_id_by_perm_id(perm_id: str, db_path: Path | str | None = None) -> str | None:
+    """Return submission_id for a given perm_id, or None if not found.
+
+    Mirror of ``lookup_submission_id_by_ib_order_id`` for the permId-only
+    modify/cancel path (UI-initiated requests often ship ``orderId=0`` and
+    identify the order by permId alone).
+    """
+    if not perm_id:
+        return None
+    con = _connect_utc(_resolve_path(db_path))
+    try:
+        row = con.execute(
+            "SELECT submission_id FROM orders_submissions WHERE perm_id = ? LIMIT 1",
+            [perm_id],
+        ).fetchone()
+    finally:
+        con.close()
+    return row[0] if row else None
+
+
 def lookup_by_attempt(user_id: str, client_attempt_id: str, db_path: Path | str | None = None) -> SubmissionRow | None:
     con = _connect_utc(_resolve_path(db_path))
     try:

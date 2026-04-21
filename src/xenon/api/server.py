@@ -1661,20 +1661,36 @@ def _classify_to_http(data: dict) -> tuple[int, str]:
     return 502, ReasonCode.IB_REJECT.value
 
 
-def _record_manage_event(ib_order_id: str, kind: str, detail: dict) -> None:
+def _record_manage_event(
+    ib_order_id: str,
+    kind: str,
+    detail: dict,
+    perm_id: str = "",
+) -> None:
     """Write orders_events row for a cancel/modify attempt.
 
-    Looks up submission by ib_order_id. If no submission exists (order placed
-    pre-F4, or before a reserve_attempt row was created), the event is
-    skipped — orders_events.submission_id is NOT NULL and has no synthetic
-    parent row available. This is documented behaviour for legacy orders.
+    Resolves the submission by ib_order_id when present, else falls back to
+    perm_id (UI-initiated cancel/modify often carries ``orderId=0`` and only
+    a permId). If no submission exists (order placed pre-F4, or before a
+    reserve_attempt row was created), the event is skipped — orders_events
+    .submission_id is NOT NULL and has no synthetic parent row available.
     """
     try:
-        sid = orders_store.lookup_submission_id_by_ib_order_id(ib_order_id)
+        sid: str | None = None
+        if ib_order_id:
+            sid = orders_store.lookup_submission_id_by_ib_order_id(ib_order_id)
+        if sid is None and perm_id:
+            sid = orders_store.lookup_submission_id_by_perm_id(perm_id)
         if sid:
             orders_store.record_event(sid, kind, detail)
     except Exception:  # pragma: no cover — event writes are best-effort
-        logger.warning("Failed to record %s event for order %s", kind, ib_order_id, exc_info=True)
+        logger.warning(
+            "Failed to record %s event for order=%s perm=%s",
+            kind,
+            ib_order_id,
+            perm_id,
+            exc_info=True,
+        )
 
 
 @app.post("/orders/cancel")
@@ -1715,7 +1731,7 @@ async def orders_cancel(request: Request):
             "message": result.error or "Subprocess failed",
             "http_status": 503,
         }
-        _record_manage_event(str(order_id or ""), "CANCEL", detail)
+        _record_manage_event(str(order_id or ""), "CANCEL", detail, perm_id=str(perm_id or ""))
         raise HTTPException(status_code=503, detail=detail)
 
     data = result.data or {}
@@ -1728,13 +1744,14 @@ async def orders_cancel(request: Request):
             "upstream": data.get("upstream"),
             "http_status": http_status,
         }
-        _record_manage_event(str(order_id or ""), "CANCEL", detail)
+        _record_manage_event(str(order_id or ""), "CANCEL", detail, perm_id=str(perm_id or ""))
         raise HTTPException(status_code=http_status, detail=detail)
 
     _record_manage_event(
         str(order_id or ""),
         "CANCEL",
         {"status": data.get("status"), "message": data.get("message"), "http_status": 200},
+        perm_id=str(perm_id or ""),
     )
     return data
 
@@ -1856,7 +1873,7 @@ async def orders_modify(request: Request):
             "applied_sequence": modify_sequence,
             "http_status": 503,
         }
-        _record_manage_event(str(order_id or ""), "MODIFY", detail)
+        _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""))
         raise HTTPException(status_code=503, detail=detail)
 
     data = result.data or {}
@@ -1870,7 +1887,7 @@ async def orders_modify(request: Request):
             "applied_sequence": modify_sequence,
             "http_status": http_status,
         }
-        _record_manage_event(str(order_id or ""), "MODIFY", detail)
+        _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""))
         raise HTTPException(status_code=http_status, detail=detail)
 
     _record_manage_event(
@@ -1882,6 +1899,7 @@ async def orders_modify(request: Request):
             "applied_sequence": modify_sequence,
             "http_status": 200,
         },
+        perm_id=str(perm_id or ""),
     )
     # Echo the applied sequence so the UI can anchor its per-order counter.
     return {**data, "applied_sequence": modify_sequence}

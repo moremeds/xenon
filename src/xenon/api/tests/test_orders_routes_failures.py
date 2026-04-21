@@ -299,6 +299,121 @@ def test_modify_503_echoes_applied_sequence(client, tmp_db, monkeypatch):
     assert detail["reason_code"] == "IB_CONNECTION"
 
 
+def _seed_permid_submission(tmp_db: Path, perm_id: str = "P42") -> str:
+    """Insert a submissions row that has a perm_id but NO ib_order_id.
+
+    Models the UI-initiated modify/cancel path where the client only knows
+    the permId (placement hasn't populated ib_order_id yet, or the UI dropped
+    orderId on a reconnect).
+    """
+    import duckdb
+
+    sid = "sub-permevt-1"
+    con = duckdb.connect(str(tmp_db))
+    try:
+        con.execute(
+            """
+            INSERT INTO orders_submissions (
+                submission_id, user_id, client_attempt_id, ticker, security_type,
+                action, quantity, multiplier, limit_price, state, ib_order_id,
+                perm_id, modify_sequence, submitted_at, updated_at
+            ) VALUES (?, 'local', 'cid-perm-evt', 'AAPL', 'STK', 'BUY', 1, 100, '1.23',
+                      'WORKING', ?, ?, 0, NOW(), NOW())
+            """,
+            [sid, "ib-" + perm_id, perm_id],
+        )
+    finally:
+        con.close()
+    return sid
+
+
+def _fetch_events(tmp_db: Path, submission_id: str) -> list[tuple[str, str]]:
+    """Return (kind, detail_json) rows for the given submission in insertion order."""
+    import duckdb
+
+    con = duckdb.connect(str(tmp_db))
+    try:
+        rows = con.execute(
+            'SELECT kind, detail FROM orders_events WHERE submission_id = ? ORDER BY "at"',
+            [submission_id],
+        ).fetchall()
+    finally:
+        con.close()
+    return [(r[0], r[1]) for r in rows]
+
+
+def test_modify_permid_only_writes_event(client, tmp_db, monkeypatch):
+    """D1 — permId-only success modify must write an orders_events MODIFY row."""
+    sid = _seed_permid_submission(tmp_db, perm_id="42")
+
+    async def fake_runner(entry, args, timeout=30):
+        return ScriptResult(ok=True, data={"status": "ok", "message": "Modified"})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post(
+        "/orders/modify",
+        json={"orderId": 0, "permId": 42, "newPrice": 1.50, "modifySequence": 1},
+    )
+    assert resp.status_code == 200
+
+    events = _fetch_events(tmp_db, sid)
+    assert len(events) == 1
+    kind, detail_json = events[0]
+    assert kind == "MODIFY"
+    assert '"http_status": 200' in detail_json
+    assert '"applied_sequence": 1' in detail_json
+
+
+def test_modify_permid_only_writes_failure_event(client, tmp_db, monkeypatch):
+    """D1 — permId-only failure modify must still write an orders_events row."""
+    sid = _seed_permid_submission(tmp_db, perm_id="42")
+
+    async def fake_runner(entry, args, timeout=30):
+        return ScriptResult(
+            ok=True,
+            data={
+                "status": "error",
+                "classification": "connection",
+                "message": "IB gateway unreachable",
+            },
+        )
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post(
+        "/orders/modify",
+        json={"orderId": 0, "permId": 42, "newPrice": 1.50, "modifySequence": 1},
+    )
+    assert resp.status_code == 503
+
+    events = _fetch_events(tmp_db, sid)
+    assert len(events) == 1
+    kind, detail_json = events[0]
+    assert kind == "MODIFY"
+    assert '"reason_code": "IB_CONNECTION"' in detail_json
+    assert '"applied_sequence": 1' in detail_json
+
+
+def test_cancel_permid_only_writes_event(client, tmp_db, monkeypatch):
+    """D1 — permId-only cancel must write an orders_events CANCEL row."""
+    sid = _seed_permid_submission(tmp_db, perm_id="42")
+
+    async def fake_runner(entry, args, timeout=30):
+        return ScriptResult(ok=True, data={"status": "ok", "message": "Cancelled"})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post("/orders/cancel", json={"orderId": 0, "permId": 42})
+    assert resp.status_code == 200
+
+    events = _fetch_events(tmp_db, sid)
+    assert len(events) == 1
+    kind, detail_json = events[0]
+    assert kind == "CANCEL"
+    assert '"http_status": 200' in detail_json
+
+
 def test_dev_probe_not_in_auth_exempt_paths():
     """B3 — defense in depth: Clerk middleware must still cover the probe."""
     assert "/dev/rehydrate/synthetic" not in server_mod.AUTH_EXEMPT_PATHS
