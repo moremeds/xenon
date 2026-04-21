@@ -18,7 +18,7 @@ const source = readFileSync(
 );
 
 describe("ib_realtime_server.js preserves typed contracts for cold-start restore", () => {
-  it("seeds stock, option, and index subscriptions with their IB contract before the ibConnected gate", () => {
+  it("seeds stock, option, and index subscriptions with fully specified IB contracts before the ibConnected gate", () => {
     expect(source).toContain("function ensureSymbolState");
 
     const stockBlock =
@@ -34,8 +34,8 @@ describe("ib_realtime_server.js preserves typed contracts for cold-start restore
       source.match(
         /\/\/ Option contract subscriptions[\s\S]*?\/\/ Index subscriptions/s,
       )?.[0] ?? "";
-    expect(optionBlock).toContain(
-      "const ibContract = ib.contract.option(c.symbol, c.expiry, c.strike, c.right);",
+    expect(optionBlock).toMatch(
+      /const ibContract = ib\.contract\.option\(\s*c\.symbol,\s*c\.expiry,\s*c\.strike,\s*c\.right,\s*"SMART",\s*"USD",?\s*\);/s,
     );
     expect(optionBlock).toContain("ensureSymbolState(key, ibContract);");
 
