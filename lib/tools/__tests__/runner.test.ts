@@ -1,10 +1,13 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { runScript, resolveProjectRoot, _resetRootCache } from "../runner";
 
 describe("resolveProjectRoot", () => {
+  const originalCwd = process.cwd();
+
   beforeEach(() => _resetRootCache());
+  afterEach(() => process.chdir(originalCwd));
 
   it("returns a path containing scripts/ and data/", () => {
     const root = resolveProjectRoot();
@@ -17,6 +20,13 @@ describe("resolveProjectRoot", () => {
     const first = resolveProjectRoot();
     const second = resolveProjectRoot();
     expect(first).toBe(second);
+  });
+
+  it("does not depend on the process working directory", () => {
+    process.chdir("/tmp");
+    const root = resolveProjectRoot();
+    expect(existsSync(join(root, "scripts"))).toBe(true);
+    expect(existsSync(join(root, "data"))).toBe(true);
   });
 });
 

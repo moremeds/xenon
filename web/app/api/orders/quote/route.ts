@@ -13,15 +13,8 @@ export async function GET(req: Request) {
       { status: 400 },
     );
   }
-  const upstream = await xenonFetch(
+  const quote = await xenonFetch(
     `/orders/quote?ticker=${encodeURIComponent(ticker)}&con_id=${encodeURIComponent(conId)}`,
   );
-  const body = await upstream.text();
-  return new NextResponse(body, {
-    status: upstream.status,
-    headers: {
-      "content-type":
-        upstream.headers.get("content-type") ?? "application/json",
-    },
-  });
+  return NextResponse.json(quote);
 }

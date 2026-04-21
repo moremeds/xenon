@@ -3,17 +3,14 @@ import { describe, test, expect, vi } from "vitest";
 vi.mock("@/lib/xenonApi", () => ({
   xenonFetch: vi.fn(async (path: string) => {
     expect(path).toMatch(/^\/orders\/quote\?ticker=SPY&con_id=756733$/);
-    return new Response(
-      JSON.stringify({
-        token: "stub.token",
-        bid: "500.10",
-        ask: "500.20",
-        bid_size: 100,
-        ask_size: 120,
-        ts_server_ms: 1,
-      }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    );
+    return {
+      token: "stub.token",
+      bid: "500.10",
+      ask: "500.20",
+      bid_size: 100,
+      ask_size: 120,
+      ts_server_ms: 1,
+    };
   }),
 }));
 

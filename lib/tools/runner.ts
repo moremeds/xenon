@@ -8,6 +8,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Value } from "@sinclair/typebox/value";
 import type { TSchema, Static } from "@sinclair/typebox";
 
@@ -43,6 +44,8 @@ export interface RunScriptOptions<S extends TSchema | undefined = undefined> {
 // ── Project root resolution ───────────────────────────────────────────
 
 let _cachedRoot: string | null = null;
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const STATIC_PROJECT_ROOT = path.resolve(MODULE_DIR, "..", "..");
 
 /**
  * Walk up from cwd looking for the project root.
@@ -52,23 +55,15 @@ let _cachedRoot: string | null = null;
 export function resolveProjectRoot(): string {
   if (_cachedRoot) return _cachedRoot;
 
-  const candidates = [
-    process.cwd(),
-    path.resolve(process.cwd(), ".."),
-    path.resolve(process.cwd(), "..", ".."),
-  ];
-
-  for (const candidate of candidates) {
-    if (
-      existsSync(path.join(candidate, "scripts")) &&
-      existsSync(path.join(candidate, "data"))
-    ) {
-      _cachedRoot = candidate;
-      return candidate;
-    }
+  if (
+    existsSync(path.join(STATIC_PROJECT_ROOT, "scripts")) &&
+    existsSync(path.join(STATIC_PROJECT_ROOT, "data"))
+  ) {
+    _cachedRoot = STATIC_PROJECT_ROOT;
+    return STATIC_PROJECT_ROOT;
   }
 
-  // Fallback — best effort
+  // Fallback — best effort for unexpected layouts in tests or local scripts.
   return process.cwd();
 }
 

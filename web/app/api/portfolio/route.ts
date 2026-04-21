@@ -2,8 +2,8 @@ import { NextResponse } from "next/server";
 import { readFile, stat } from "fs/promises";
 import { join } from "path";
 import { readDataFile } from "@tools/data-reader";
-import { PortfolioData } from "@tools/schemas/ib-sync";
 import { xenonFetch } from "@/lib/xenonApi";
+import { PortfolioDataSchema } from "@/lib/portfolioDataSchema";
 import {
   getRequestId,
   jsonApiError,
@@ -80,7 +80,7 @@ export async function GET(): Promise<Response> {
   }
 
   try {
-    const result = await readDataFile("data/portfolio.json", PortfolioData);
+    const result = await readDataFile("data/portfolio.json", PortfolioDataSchema);
     if (!result.ok) {
       return setNoStoreResponseHeaders(
         jsonApiError({
@@ -119,7 +119,7 @@ export async function POST(): Promise<Response> {
     return setNoStoreResponseHeaders(response, requestId);
   } catch {
     // Sync failed — fall back to cached data file
-    const cached = await readDataFile("data/portfolio.json", PortfolioData);
+    const cached = await readDataFile("data/portfolio.json", PortfolioDataSchema);
     if (cached.ok) {
       console.warn("[Portfolio] Sync failed, serving cached data");
       const tradeLogDates = await loadTradeLogDates();
