@@ -18,12 +18,14 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 # Project paths — file lives at src/xenon/api/server.py
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -42,6 +44,13 @@ from xenon.api.routes.uw_stats import router as uw_stats_router
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
+from xenon.execution import preflight
+from xenon.execution.preflight import (
+    PortfolioView,
+    PreflightRequest,
+    ReasonCode,
+    Verdict,
+)
 
 # Load .env from project root for Python scripts
 try:
@@ -1137,10 +1146,94 @@ async def orders_refresh():
 # ---------------------------------------------------------------------------
 
 
+def _load_portfolio_view() -> PortfolioView | None:
+    """Load portfolio snapshot for preflight. Matches TS guard's data/portfolio.json source.
+
+    Returns None when the snapshot is missing or unreadable — the caller
+    must fail OPEN in that case to match web/app/api/orders/place/route.ts
+    which logs and skips enforcement rather than blocking every SELL on
+    a fresh/cleaned environment. F5 will replace this with a live IB-pool
+    call per SL spec §5.2, at which point the fail-open branch disappears.
+    """
+    data_dir = Path(os.environ.get("XENON_DATA_DIR", str(DATA_DIR)))
+    pf_file = data_dir / "portfolio.json"
+    if not pf_file.exists():
+        return None
+    try:
+        raw = json.loads(pf_file.read_text())
+        return PortfolioView.model_validate(raw)
+    except (OSError, ValueError, ValidationError) as exc:
+        logger.warning("[preflight] Could not load portfolio.json: %s", exc)
+        return None
+
+
+def _body_to_preflight_request(body: dict) -> PreflightRequest:
+    """Translate /orders/place body to PreflightRequest. Combo (BAG) orders are skipped
+    by preflight in F2 — the TS guard still gates them; server-side BAG gate is scoped
+    out of PR-A."""
+    from xenon.execution.universe import UNIVERSE, get_multiplier
+
+    sec_type = "STK" if body.get("type") == "stock" else "OPT"
+    right_raw = (body.get("right") or "").upper()
+    right = right_raw if right_raw in ("C", "P") else None
+    limit = body.get("limitPrice")
+    ticker = str(body.get("symbol", "")).upper()
+    # SECURITY: multiplier MUST come from server-side universe metadata, never
+    # from request body. A client posting `multiplier: 1` would otherwise
+    # inflate share-cover units 100x and bypass Gate 4. Unknown tickers fall
+    # back to 100 so the universe check can produce UNIVERSE_UNKNOWN rather
+    # than a KeyError.
+    multiplier = get_multiplier(ticker) if ticker in UNIVERSE else 100
+    return PreflightRequest(
+        ticker=ticker,
+        security_type=sec_type,
+        action=str(body.get("action", "")).upper(),
+        quantity=int(body.get("quantity", 0)),
+        right=right,
+        expiry=body.get("expiry"),
+        strike=Decimal(str(body["strike"])) if body.get("strike") is not None else None,
+        multiplier=multiplier,
+        limit_price=Decimal(str(limit)) if limit is not None else Decimal("0"),
+    )
+
+
+def _run_preflight(body: dict) -> Verdict:
+    # Skip combo orders in F2 — the Next.js TS guard still covers them; server-side
+    # BAG preflight is tracked separately (not a PR-A deliverable).
+    if body.get("type") == "combo":
+        return Verdict(accept=True)
+    portfolio = _load_portfolio_view()
+    if portfolio is None:
+        # Fail OPEN to match TS guard (route.ts:183-185). Without a portfolio
+        # snapshot we can't distinguish covered from naked shorts; blocking
+        # every SELL would regress fresh-start workflows. F5 (live IB pool)
+        # removes this branch.
+        return Verdict(accept=True)
+    req = _body_to_preflight_request(body)
+    return preflight.evaluate(req, portfolio)
+
+
 @app.post("/orders/place")
 async def orders_place(request: Request):
     """Place an order via IB (on-demand connection, client_id=26)."""
     body = await request.json()
+
+    # F2: server-side Gate 4. Run preflight before any subprocess invocation.
+    verdict = _run_preflight(body)
+    if not verdict.accept:
+        code = verdict.reason_code.value if verdict.reason_code else None
+        # `detail` is the field web/lib/xenonApi.ts:39 reads for human-
+        # readable error copy; include the reason_code fields too so F6
+        # can drive structured UI toast mapping.
+        return JSONResponse(
+            status_code=400,
+            content={
+                "detail": verdict.reason_detail or code or "Preflight blocked",
+                "reason_code": code,
+                "reason_detail": verdict.reason_detail,
+            },
+        )
+
     if test_mode:
         order_id, perm_id = _next_test_order_ids()
         return {

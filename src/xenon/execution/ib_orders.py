@@ -176,6 +176,9 @@ def fetch_open_orders(client: IBClient) -> list:
                 "remaining": float(status.remaining),
                 "avgFillPrice": safe_float(status.avgFillPrice),
                 "tif": order.tif,  # DAY, GTC, IOC, etc.
+                # Surface IB's orderRef so the naked-short audit can detect
+                # leg_wizard-tagged orders and skip them (Wiz spec §11.1).
+                "orderRef": getattr(order, "orderRef", None) or None,
             }
         )
 

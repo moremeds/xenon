@@ -1,0 +1,486 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "universe_unknown_ticker_blocks",
+      "request": {
+        "type": "stock",
+        "symbol": "AAPL",
+        "action": "BUY",
+        "quantity": 1,
+        "right": null,
+        "expiry": null,
+        "strike": null,
+        "multiplier": 100,
+        "limitPrice": 180.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": false, "reason_code": "UNIVERSE_UNKNOWN" }
+    },
+    {
+      "name": "spx_stk_buy_blocks",
+      "request": {
+        "type": "stock",
+        "symbol": "SPX",
+        "action": "BUY",
+        "quantity": 1,
+        "right": null,
+        "expiry": null,
+        "strike": null,
+        "multiplier": 100,
+        "limitPrice": 5000.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": false, "reason_code": "INDEX_HAS_NO_STOCK" }
+    },
+    {
+      "name": "spx_stk_sell_blocks",
+      "request": {
+        "type": "stock",
+        "symbol": "SPX",
+        "action": "SELL",
+        "quantity": 1,
+        "right": null,
+        "expiry": null,
+        "strike": null,
+        "multiplier": 100,
+        "limitPrice": 5000.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": false, "reason_code": "INDEX_HAS_NO_STOCK" }
+    },
+    {
+      "name": "spy_buy_always_ok",
+      "request": {
+        "type": "stock",
+        "symbol": "SPY",
+        "action": "BUY",
+        "quantity": 100,
+        "right": null,
+        "expiry": null,
+        "strike": null,
+        "multiplier": 100,
+        "limitPrice": 500.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": true, "reason_code": null }
+    },
+    {
+      "name": "spy_sell_stock_no_shares_blocks",
+      "request": {
+        "type": "stock",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 100,
+        "right": null,
+        "expiry": null,
+        "strike": null,
+        "multiplier": 100,
+        "limitPrice": 500.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": false, "reason_code": "INSUFFICIENT_SHARES" }
+    },
+    {
+      "name": "spy_sell_stock_exceeds_held_blocks",
+      "request": {
+        "type": "stock",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 200,
+        "right": null,
+        "expiry": null,
+        "strike": null,
+        "multiplier": 100,
+        "limitPrice": 500.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPY",
+            "structure_type": "Stock",
+            "direction": "LONG",
+            "contracts": 100,
+            "expiry": null,
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Stock",
+                "contracts": 100,
+                "strike": 0.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": false, "reason_code": "INSUFFICIENT_SHARES" }
+    },
+    {
+      "name": "spy_sell_stock_within_held_ok",
+      "request": {
+        "type": "stock",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 100,
+        "right": null,
+        "expiry": null,
+        "strike": null,
+        "multiplier": 100,
+        "limitPrice": 500.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPY",
+            "structure_type": "Stock",
+            "direction": "LONG",
+            "contracts": 100,
+            "expiry": null,
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Stock",
+                "contracts": 100,
+                "strike": 0.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": true, "reason_code": null }
+    },
+    {
+      "name": "spy_sell_put_cash_secured_ok",
+      "request": {
+        "type": "option",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "P",
+        "expiry": "20260620",
+        "strike": 480.0,
+        "multiplier": 100,
+        "limitPrice": 5.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": true, "reason_code": null }
+    },
+    {
+      "name": "spx_sell_call_no_cover_blocks",
+      "request": {
+        "type": "option",
+        "symbol": "SPX",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 5100.0,
+        "multiplier": 100,
+        "limitPrice": 10.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": false, "reason_code": "INDEX_CALL_UNCOVERED" }
+    },
+    {
+      "name": "spx_sell_call_with_long_call_same_expiry_diff_strike_ok",
+      "request": {
+        "type": "option",
+        "symbol": "SPX",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 5100.0,
+        "multiplier": 100,
+        "limitPrice": 10.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPX",
+            "structure_type": "Long Call",
+            "direction": "LONG",
+            "contracts": 1,
+            "expiry": "20260620",
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Call",
+                "contracts": 1,
+                "strike": 5000.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": true, "reason_code": null }
+    },
+    {
+      "name": "spx_sell_call_long_call_different_expiry_blocks",
+      "request": {
+        "type": "option",
+        "symbol": "SPX",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 5100.0,
+        "multiplier": 100,
+        "limitPrice": 10.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPX",
+            "structure_type": "Long Call",
+            "direction": "LONG",
+            "contracts": 1,
+            "expiry": "20260718",
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Call",
+                "contracts": 1,
+                "strike": 5000.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": false, "reason_code": "INDEX_CALL_UNCOVERED" }
+    },
+    {
+      "name": "spy_sell_call_no_cover_blocks",
+      "request": {
+        "type": "option",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 500.0,
+        "multiplier": 100,
+        "limitPrice": 5.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": false, "reason_code": "ETF_CALL_UNCOVERED" }
+    },
+    {
+      "name": "spy_sell_call_with_100_shares_ok",
+      "request": {
+        "type": "option",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 500.0,
+        "multiplier": 100,
+        "limitPrice": 5.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPY",
+            "structure_type": "Stock",
+            "direction": "LONG",
+            "contracts": 100,
+            "expiry": null,
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Stock",
+                "contracts": 100,
+                "strike": 0.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": true, "reason_code": null }
+    },
+    {
+      "name": "spy_sell_call_100_shares_but_existing_short_exhausts_cover_blocks",
+      "request": {
+        "type": "option",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 500.0,
+        "multiplier": 100,
+        "limitPrice": 5.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPY",
+            "structure_type": "Stock",
+            "direction": "LONG",
+            "contracts": 100,
+            "expiry": null,
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Stock",
+                "contracts": 100,
+                "strike": 0.0
+              }
+            ]
+          },
+          {
+            "ticker": "SPY",
+            "structure_type": "Short Call",
+            "direction": "SHORT",
+            "contracts": 1,
+            "expiry": "20260515",
+            "legs": [
+              {
+                "direction": "SHORT",
+                "type": "Call",
+                "contracts": 1,
+                "strike": 510.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": false, "reason_code": "ETF_CALL_UNCOVERED" }
+    },
+    {
+      "name": "spy_sell_call_with_long_call_vertical_ok",
+      "request": {
+        "type": "option",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 510.0,
+        "multiplier": 100,
+        "limitPrice": 2.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPY",
+            "structure_type": "Long Call",
+            "direction": "LONG",
+            "contracts": 1,
+            "expiry": "20260620",
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Call",
+                "contracts": 1,
+                "strike": 500.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": true, "reason_code": null }
+    },
+    {
+      "name": "qqq_sell_put_cash_secured_ok",
+      "request": {
+        "type": "option",
+        "symbol": "QQQ",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "P",
+        "expiry": "20260620",
+        "strike": 400.0,
+        "multiplier": 100,
+        "limitPrice": 3.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": true, "reason_code": null }
+    },
+    {
+      "name": "spy_buy_call_always_ok",
+      "request": {
+        "type": "option",
+        "symbol": "SPY",
+        "action": "BUY",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 500.0,
+        "multiplier": 100,
+        "limitPrice": 5.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": true, "reason_code": null }
+    },
+    {
+      "name": "spy_sell_to_close_exact_match_ok",
+      "request": {
+        "type": "option",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 500.0,
+        "multiplier": 100,
+        "limitPrice": 5.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPY",
+            "structure_type": "Long Call",
+            "direction": "LONG",
+            "contracts": 1,
+            "expiry": "20260620",
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Call",
+                "contracts": 1,
+                "strike": 500.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": true, "reason_code": null }
+    },
+    {
+      "name": "spy_sell_two_calls_one_long_cover_no_shares_blocks_tail",
+      "request": {
+        "type": "option",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 2,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 510.0,
+        "multiplier": 100,
+        "limitPrice": 2.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPY",
+            "structure_type": "Long Call",
+            "direction": "LONG",
+            "contracts": 1,
+            "expiry": "20260620",
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Call",
+                "contracts": 1,
+                "strike": 500.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": false, "reason_code": "ETF_CALL_UNCOVERED" }
+    }
+  ]
+}
