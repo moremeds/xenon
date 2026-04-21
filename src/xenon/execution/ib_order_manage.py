@@ -195,6 +195,7 @@ def cancel_order(client: IBClient, order_id: int, perm_id: int, host: str, port:
             "error",
             f"Trade not found (orderId={order_id}, permId={perm_id})",
             classification="ib_reject",
+            upstream={"code": 10147, "message": "Order not found (local lookup)"},
         )
 
     status = trade.orderStatus.status
@@ -216,6 +217,7 @@ def cancel_order(client: IBClient, order_id: int, perm_id: int, host: str, port:
                 "error",
                 "Trade not found after reconnect as original clientId",
                 classification="ib_reject",
+                upstream={"code": 10147, "message": "Order not found (local lookup)"},
             )
 
     # Capture IB error events during the cancel attempt
@@ -298,6 +300,7 @@ def modify_order(
             "error",
             f"Trade not found (orderId={order_id}, permId={perm_id})",
             classification="ib_reject",
+            upstream={"code": 10147, "message": "Order not found (local lookup)"},
         )
 
     status = trade.orderStatus.status
@@ -335,6 +338,7 @@ def modify_order(
                 "error",
                 "Trade not found after reconnect as original clientId",
                 classification="ib_reject",
+                upstream={"code": 10147, "message": "Order not found (local lookup)"},
             )
 
     # Capture IB error events during the modify attempt

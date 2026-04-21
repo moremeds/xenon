@@ -1091,8 +1091,9 @@ async def dev_rehydrate_synthetic():
 
     # Backdate submitted_at past the PENDING timeout so the reconcile decision
     # is deterministic (FAILED / PENDING_TIMEOUT). Inline UPDATE — probe-specific.
+    # Use the UTC-session helper so the naive round-trip preserves the epoch.
     backdated = _dt.now(_tz.utc) - _td(seconds=PENDING_TIMEOUT_SECONDS + 5)
-    con = _duckdb.connect(str(db_path))
+    con = _orders_store_mod._connect_utc(db_path)
     try:
         con.execute(
             "UPDATE orders_submissions SET submitted_at = ? WHERE submission_id = ?",
@@ -1755,8 +1756,22 @@ async def orders_modify(request: Request):
             },
         )
 
-    # Apply sequence gate BEFORE spawning the subprocess
-    seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence)
+    # Apply sequence gate BEFORE spawning the subprocess. If only permId is
+    # supplied (UI-initiated modifies often have orderId=0), route through the
+    # perm_id variant so we can still find the submissions row.
+    if not order_id and not perm_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason_code": ReasonCode.ORDER_IDENTIFIER_REQUIRED.value,
+                "message": "Modify request must include orderId or permId.",
+                "http_status": 400,
+            },
+        )
+    if not order_id and perm_id:
+        seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence)
+    else:
+        seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence)
     if not seq_outcome["applied"]:
         current = seq_outcome["current_sequence"]
         if current == -1:
@@ -1835,7 +1850,8 @@ async def orders_modify(request: Request):
             "http_status": 200,
         },
     )
-    return data
+    # Echo the applied sequence so the UI can anchor its per-order counter.
+    return {**data, "applied_sequence": modify_sequence}
 
 
 # ---------------------------------------------------------------------------

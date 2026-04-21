@@ -111,6 +111,37 @@ def test_apply_modify_unknown_order_id(db_path):
     assert out == {"applied": False, "current_sequence": -1}
 
 
+def test_apply_modify_by_perm_id_monotonic(db_path):
+    """A4: apply_modify_by_perm_id resolves ib_order_id and applies the same gate."""
+    from xenon.execution.orders_store import apply_modify_by_perm_id, mark_submitted
+
+    outcome = reserve_attempt("u1", "a-perm", _req(), db_path=db_path)
+    mark_submitted(
+        submission_id=outcome.submission_id,
+        ib_order_id="77",
+        perm_id="P77",
+        placing_client_id=1,
+        db_path=db_path,
+    )
+
+    first = apply_modify_by_perm_id(perm_id="P77", sequence=1, db_path=db_path)
+    assert first == {"applied": True, "current_sequence": 1}
+
+    second = apply_modify_by_perm_id(perm_id="P77", sequence=1, db_path=db_path)
+    assert second == {"applied": False, "current_sequence": 1}
+
+    third = apply_modify_by_perm_id(perm_id="P77", sequence=2, db_path=db_path)
+    assert third == {"applied": True, "current_sequence": 2}
+
+
+def test_apply_modify_by_perm_id_unknown_returns_sentinel(db_path):
+    """A4: unknown perm_id returns the -1 sentinel so the route can 404."""
+    from xenon.execution.orders_store import apply_modify_by_perm_id
+
+    out = apply_modify_by_perm_id(perm_id="P-nope", sequence=1, db_path=db_path)
+    assert out == {"applied": False, "current_sequence": -1}
+
+
 def test_migration_idempotent(db_path):
     # Second init_store call on the same path must not error (ADD COLUMN IF NOT EXISTS).
     init_store(db_path)

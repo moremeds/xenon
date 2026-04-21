@@ -194,6 +194,62 @@ def test_modify_unknown_order_returns_404(client, tmp_db, monkeypatch):
     assert body["reason_code"] == "ORDER_NOT_FOUND"
 
 
+def test_modify_by_perm_id_with_known_row_advances_sequence(client, tmp_db, monkeypatch):
+    """A4: when orderId=0 but permId is known, resolve via perm_id and succeed."""
+    import duckdb
+
+    sid = "sub-perm-1"
+    con = duckdb.connect(str(tmp_db))
+    try:
+        con.execute(
+            """
+            INSERT INTO orders_submissions (
+                submission_id, user_id, client_attempt_id, ticker, security_type,
+                action, quantity, multiplier, limit_price, state, ib_order_id,
+                perm_id, modify_sequence, submitted_at, updated_at
+            ) VALUES (?, 'local', 'cid-perm', 'AAPL', 'STK', 'BUY', 1, 100, '1.23',
+                      'WORKING', '99', '42', 0, NOW(), NOW())
+            """,
+            [sid],
+        )
+    finally:
+        con.close()
+
+    async def fake_runner(entry, args, timeout=30):
+        return ScriptResult(ok=True, data={"status": "ok", "message": "Modified"})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post(
+        "/orders/modify",
+        json={"orderId": 0, "permId": 42, "newPrice": 1.50, "modifySequence": 1},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body.get("applied_sequence") == 1
+    # Sequence should now be 1 in DB
+    outcome = orders_store.apply_modify("99", 1)
+    assert outcome == {"applied": False, "current_sequence": 1}
+
+
+def test_modify_without_any_identifier_400s(client, tmp_db, monkeypatch):
+    """A4: neither orderId nor permId → 400 ORDER_IDENTIFIER_REQUIRED."""
+
+    async def fake_runner(entry, args, timeout=30):
+        raise AssertionError("subprocess must not run without identifier")
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post(
+        "/orders/modify",
+        json={"orderId": 0, "permId": 0, "newPrice": 1.50, "modifySequence": 1},
+    )
+    assert resp.status_code == 400
+    body = resp.json()["detail"]
+    assert body["reason_code"] == "ORDER_IDENTIFIER_REQUIRED"
+
+
 def test_modify_happy_path_advances_sequence_and_runs_subprocess(client, tmp_db, monkeypatch):
     _seed_submission(tmp_db, ib_order_id="42")
     called = {}

@@ -336,6 +336,30 @@ class TestMainConnectionClassification:
         assert sleep_mock.call_count == 1
         assert sleep_mock.call_args_list == [call(0.5)]
 
+    def test_trade_not_found_classifies_upstream_10147(self, capsys, monkeypatch):
+        """A7: when find_trade returns None (no open orders match), the output
+        must carry ``upstream={code:10147,...}`` so the route maps it to 404."""
+        fake_client = make_client()
+        fake_client.ib.client.clientId = 0
+        # Empty open orders for both the initial lookup and any refresh.
+        fake_client.get_open_orders.return_value = []
+
+        monkeypatch.setattr(ib_order_manage.time, "sleep", lambda *_a, **_k: None)
+        monkeypatch.setattr(ib_order_manage, "IBClient", lambda: fake_client)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["ib_order_manage", "cancel", "--order-id", "10", "--perm-id", "12345"],
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            ib_order_manage.main()
+        assert exc.value.code == 1
+        data = json.loads(capsys.readouterr().out)
+        assert data["status"] == "error"
+        assert data["classification"] == "ib_reject"
+        assert data["upstream"]["code"] == 10147
+
     def test_trade_not_found_after_reconnect(self, capsys, monkeypatch):
         """Reconnect succeeds, but post-reconnect find_trade returns None -> ib_reject."""
         t = make_trade(status="Submitted", client_id=9)

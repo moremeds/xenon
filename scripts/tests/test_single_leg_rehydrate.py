@@ -11,14 +11,14 @@ from decimal import Decimal
 
 import duckdb
 import pytest
+
+from xenon.execution import orders_store, single_leg_rehydrate
+from xenon.execution.orders_store import RequestRow, init_store, reserve_attempt
 from xenon.execution.single_leg_rehydrate import (
     ReconcileDecision,
     _reconcile_from_three_sources,
     rehydrate_on_boot,
 )
-
-from xenon.execution import orders_store, single_leg_rehydrate
-from xenon.execution.orders_store import RequestRow, init_store, reserve_attempt
 
 # ---------------------------------------------------------------------------
 # Fake IB client
@@ -85,7 +85,7 @@ def _make_working_row(
         ),
         db_path=db_path,
     )
-    con = duckdb.connect(str(db_path))
+    con = orders_store._connect_utc(db_path)
     try:
         if state == "WORKING":
             con.execute(
@@ -110,7 +110,7 @@ def _make_working_row(
 
 
 def _fetch_row(db_path, submission_id):
-    con = duckdb.connect(str(db_path))
+    con = orders_store._connect_utc(db_path)
     try:
         row = con.execute(
             "SELECT state, filled_qty, avg_fill_price, reason_code, client_attempt_id FROM orders_submissions WHERE submission_id=?",
@@ -122,7 +122,7 @@ def _fetch_row(db_path, submission_id):
 
 
 def _fetch_events(db_path, submission_id):
-    con = duckdb.connect(str(db_path))
+    con = orders_store._connect_utc(db_path)
     try:
         rows = con.execute(
             'SELECT kind, detail FROM orders_events WHERE submission_id=? ORDER BY "at"',
@@ -274,6 +274,117 @@ def test_reconcile_helper_is_pure_working():
     assert isinstance(d, ReconcileDecision)
     assert d.to_state == "WORKING"
     assert d.event_kind == "REHYDRATE_RECONCILED"
+
+
+def test_build_positions_snapshot_from_list():
+    """A3: list input from ib.positions() is normalized to the snapshot dict shape."""
+    from types import SimpleNamespace
+
+    from xenon.execution.single_leg_rehydrate import _build_positions_snapshot
+
+    rows = [
+        {"ticker": "SPY", "con_id": 111},
+        {"ticker": "QQQ", "con_id": 222},
+    ]
+    pos_list = [
+        SimpleNamespace(contract=SimpleNamespace(symbol="SPY", conId=111)),
+        SimpleNamespace(contract=SimpleNamespace(symbol="QQQ", conId=222)),
+    ]
+    snap = _build_positions_snapshot(pos_list, rows)
+    assert isinstance(snap, dict)
+    assert snap[("SPY", 111)] == {"changed": None}
+    assert snap[("QQQ", 222)] == {"changed": None}
+
+
+def test_build_positions_snapshot_passes_dict_through():
+    """A3 back-compat: a dict input is returned unchanged."""
+    from xenon.execution.single_leg_rehydrate import _build_positions_snapshot
+
+    d = {("SPY", 999): {"changed": True}}
+    assert _build_positions_snapshot(d, []) is d
+
+
+def test_rehydrate_handles_list_positions_end_to_end(db_path):
+    """A3: when get_positions() returns a list, rehydrate does not crash and
+    routes no-baseline rows to UNKNOWN (REHYDRATE_UNCERTAIN)."""
+    from types import SimpleNamespace
+
+    sid = _make_working_row(db_path, perm_id="P-list", ib_order_id="33", con_id=500)
+    ib = FakeIBClient(
+        open_orders=[],
+        executions=[],
+        positions=[SimpleNamespace(contract=SimpleNamespace(symbol="SPY", conId=500))],
+    )
+    rehydrate_on_boot(lambda: ib, orders_store, now=lambda: 1_000_000_000)
+    state, *_ = _fetch_row(db_path, sid)
+    assert state == "UNKNOWN"
+    events = _fetch_events(db_path, sid)
+    assert any(k == "REHYDRATE_UNCERTAIN" for k, _ in events)
+
+
+def test_submitted_at_epoch_is_utc_regardless_of_tz(db_path, monkeypatch):
+    """A5: naive datetimes read from DuckDB must be interpreted as UTC.
+
+    Simulate a PST server and verify the epoch matches the UTC wall time,
+    not offset by ±8h.
+    """
+    import os
+    import time as time_mod
+
+    from xenon.execution.single_leg_rehydrate import _submitted_at_epoch
+
+    # Known UTC moment
+    known = datetime(2026, 4, 21, 12, 0, 0, tzinfo=timezone.utc)
+    sid = _make_working_row(db_path, perm_id="P-utc", ib_order_id="44")
+    con = orders_store._connect_utc(db_path)
+    try:
+        con.execute(
+            "UPDATE orders_submissions SET submitted_at=? WHERE submission_id=?",
+            [known.replace(tzinfo=None), sid],
+        )
+        row = con.execute(
+            "SELECT submitted_at FROM orders_submissions WHERE submission_id=?",
+            [sid],
+        ).fetchone()
+    finally:
+        con.close()
+
+    naive_read_back = row[0]
+    assert naive_read_back.tzinfo is None  # confirm DuckDB strips tz
+
+    original_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "America/Los_Angeles"
+        if hasattr(time_mod, "tzset"):
+            time_mod.tzset()
+        epoch = _submitted_at_epoch(naive_read_back)
+        assert abs(epoch - known.timestamp()) < 1.0
+    finally:
+        if original_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_tz
+        if hasattr(time_mod, "tzset"):
+            time_mod.tzset()
+
+
+def test_partially_filled_persists_fill_data(db_path):
+    """A6: rehydrated PARTIALLY_FILLED must persist filled_qty + avg_fill_price.
+
+    With a partial open-order status AND executions present, the reconcile
+    decision carries fill data, and the dispatch routes through mark_terminal
+    so those fields reach the DB.
+    """
+    sid = _make_working_row(db_path, perm_id="P42", ib_order_id="142")
+    ib = FakeIBClient(
+        open_orders=[{"perm_id": "P42", "status": "PartiallyFilled"}],
+        executions=[{"perm_id": "P42", "shares": 50, "avg_price": 1.50}],
+    )
+    rehydrate_on_boot(lambda: ib, orders_store, now=lambda: 1_000_000_000)
+    state, filled_qty, avg_fill, _reason, _cai = _fetch_row(db_path, sid)
+    assert state == "PARTIALLY_FILLED"
+    assert filled_qty == 50
+    assert Decimal(str(avg_fill)) == Decimal("1.50")
 
 
 def test_reconcile_helper_pending_timeout_pure():

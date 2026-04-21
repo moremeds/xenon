@@ -28,4 +28,5 @@ export type ModifyOrderRequest = {
   outsideRth?: boolean;
   cancelOrders?: ModifyCancelTarget[];
   replaceOrder?: ReplaceComboOrder;
+  modifySequence?: number;
 };

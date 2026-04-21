@@ -63,6 +63,10 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
     copy: "Modify requires a sequence number.",
   },
   ORDER_NOT_FOUND: { severity: "error", copy: "Order no longer exists." },
+  ORDER_IDENTIFIER_REQUIRED: {
+    severity: "error",
+    copy: "Modify request must include orderId or permId.",
+  },
   // F7 — pending timeout
   PENDING_TIMEOUT: {
     severity: "warn",

@@ -70,6 +70,24 @@ def _resolve_path(db_path: Path | str | None) -> Path:
     return Path(env) if env else Path("data/orders.duckdb")
 
 
+def _connect_utc(path: Path | str) -> duckdb.DuckDBPyConnection:
+    """Connect to DuckDB with the session TimeZone pinned to UTC.
+
+    ``orders_store`` writes ``datetime.now(timezone.utc)``; DuckDB normally
+    converts aware values to the local TZ before stripping tzinfo. Pinning
+    TimeZone='UTC' keeps the naive wall-clock aligned with UTC, so the
+    single_leg_rehydrate reader can safely interpret naive values as UTC.
+    """
+    con = duckdb.connect(str(path))
+    try:
+        con.execute("SET TimeZone='UTC'")
+    except duckdb.Error:
+        # Older DuckDB builds without the ICU extension silently support
+        # TimeZone='UTC' but fail on other values; UTC should always work.
+        pass
+    return con
+
+
 _MIGRATIONS = [
     # F5.3: monotonic modify_sequence gate. Non-destructive additive migration.
     # DuckDB rejects NOT NULL in ADD COLUMN; DEFAULT 0 backfills existing rows and
@@ -81,7 +99,7 @@ _MIGRATIONS = [
 def init_store(db_path: Path | str | None = None) -> Path:
     path = _resolve_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(str(path))
+    con = _connect_utc(path)
     try:
         con.execute(_CREATE_SUBMISSIONS)
         con.execute(_CREATE_EVENTS)
@@ -111,7 +129,7 @@ def apply_modify(
     """
     path = _resolve_path(db_path)
     with _WRITE_LOCK:
-        con = duckdb.connect(str(path))
+        con = _connect_utc(path)
         try:
             updated = con.execute(
                 """
@@ -134,6 +152,32 @@ def apply_modify(
             return {"applied": False, "current_sequence": int(row[0])}
         finally:
             con.close()
+
+
+def apply_modify_by_perm_id(
+    perm_id: str,
+    sequence: int,
+    db_path: Path | str | None = None,
+) -> dict:
+    """Variant of apply_modify keyed by perm_id.
+
+    When a modify arrives with only permId (no ib orderId, e.g. because the
+    UI only tracks permId), resolve the ib_order_id first, then delegate to
+    ``apply_modify``. Matches the same return shape so the route can share the
+    same downstream handling.
+    """
+    path = _resolve_path(db_path)
+    con = _connect_utc(path)
+    try:
+        row = con.execute(
+            "SELECT ib_order_id FROM orders_submissions WHERE perm_id = ?",
+            [perm_id],
+        ).fetchone()
+    finally:
+        con.close()
+    if row is None or not row[0]:
+        return {"applied": False, "current_sequence": -1}
+    return apply_modify(str(row[0]), sequence, db_path=db_path)
 
 
 class RequestRow(BaseModel):
@@ -173,7 +217,7 @@ def reserve_attempt(
     sid = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     with _WRITE_LOCK:
-        con = duckdb.connect(str(path))
+        con = _connect_utc(path)
         try:
             inserted = con.execute(
                 """
@@ -269,7 +313,7 @@ def mark_submitted(
 ) -> None:
     now = datetime.now(timezone.utc)
     with _WRITE_LOCK:
-        con = duckdb.connect(str(_resolve_path(db_path)))
+        con = _connect_utc(_resolve_path(db_path))
         try:
             con.execute(
                 """
@@ -295,7 +339,7 @@ def mark_terminal(
 ) -> None:
     now = datetime.now(timezone.utc)
     with _WRITE_LOCK:
-        con = duckdb.connect(str(_resolve_path(db_path)))
+        con = _connect_utc(_resolve_path(db_path))
         try:
             con.execute(
                 """
@@ -328,7 +372,7 @@ def record_event(
     eid = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     with _WRITE_LOCK:
-        con = duckdb.connect(str(_resolve_path(db_path)))
+        con = _connect_utc(_resolve_path(db_path))
         try:
             con.execute(
                 'INSERT INTO orders_events (event_id, submission_id, kind, detail, "at") VALUES (?, ?, ?, ?, ?)',
@@ -347,7 +391,7 @@ def lookup_submission_id_by_ib_order_id(ib_order_id: str, db_path: Path | str | 
     """
     if not ib_order_id:
         return None
-    con = duckdb.connect(str(_resolve_path(db_path)))
+    con = _connect_utc(_resolve_path(db_path))
     try:
         row = con.execute(
             "SELECT submission_id FROM orders_submissions WHERE ib_order_id = ?",
@@ -359,7 +403,7 @@ def lookup_submission_id_by_ib_order_id(ib_order_id: str, db_path: Path | str | 
 
 
 def lookup_by_attempt(user_id: str, client_attempt_id: str, db_path: Path | str | None = None) -> SubmissionRow | None:
-    con = duckdb.connect(str(_resolve_path(db_path)))
+    con = _connect_utc(_resolve_path(db_path))
     try:
         row = con.execute(
             """
@@ -386,7 +430,7 @@ _ACTIVE_STATES = ("PENDING", "WORKING", "PARTIALLY_FILLED")
 def working_reservations_for(user_id: str, ticker: str, db_path: Path | str | None = None) -> WorkingReservations:
     path = _resolve_path(db_path)
     init_store(path)
-    con = duckdb.connect(str(path))
+    con = _connect_utc(path)
     try:
         stock_sell = con.execute(
             """

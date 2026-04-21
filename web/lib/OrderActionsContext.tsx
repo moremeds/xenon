@@ -12,6 +12,7 @@ import {
 import type { OpenOrder, OrdersData } from "@/lib/types";
 import type { ModifyOrderRequest } from "@/lib/orderModify";
 import { getReasonToast } from "@/lib/orderReasonCodes";
+import { readReasonCode } from "@/lib/readReasonCode";
 
 /** Result surfaced to callers of requestCancel/requestModify so the row can
  *  render a FAILED pill (F6.2). `status` is the HTTP status from the Next.js
@@ -83,6 +84,7 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
   const notificationsRef = useRef<Notification[]>([]);
   const ordersUpdaterRef = useRef<((data: OrdersData) => void) | null>(null);
   const pendingModifiesRef = useRef<Map<number, PendingModify>>(new Map());
+  const modifySeqCountsRef = useRef<Map<number, number>>(new Map());
 
   // Keep ref in sync with state for use inside interval callbacks
   useEffect(() => {
@@ -216,8 +218,7 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
           // F6.2: on 503/409 the server refused authoritatively — DO NOT
           // optimistically mark the order cancelled. Surface reason-code copy
           // and let the caller render a FAILED pill; the button re-enables.
-          const reasonCode =
-            typeof json?.reason_code === "string" ? json.reason_code : null;
+          const reasonCode = readReasonCode(json);
           const message = reasonCode
             ? getReasonToast(reasonCode).copy
             : json?.error || "Cancel failed";
@@ -339,6 +340,8 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
     ): Promise<ActionResult> => {
       try {
         const { outsideRth, ...requestBody } = request;
+        const nextSeq = (modifySeqCountsRef.current.get(order.permId) ?? 0) + 1;
+        modifySeqCountsRef.current.set(order.permId, nextSeq);
         const res = await fetch("/api/orders/modify", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -347,17 +350,37 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
             permId: order.permId,
             ...requestBody,
             outsideRth,
+            modifySequence: nextSeq,
           }),
         });
         const json = await res.json().catch(() => ({}));
         if (!res.ok) {
-          const reasonCode =
-            typeof json?.reason_code === "string" ? json.reason_code : null;
+          const reasonCode = readReasonCode(json);
+          // On MODIFY_STALE the server echoes the current sequence under
+          // detail.applied — sync our local counter so the next attempt is
+          // (applied + 1) instead of fighting the server.
+          if (reasonCode === "MODIFY_STALE") {
+            const detail = (json as { detail?: unknown })?.detail;
+            const applied =
+              detail && typeof detail === "object"
+                ? (detail as Record<string, unknown>).applied
+                : undefined;
+            if (typeof applied === "number") {
+              modifySeqCountsRef.current.set(order.permId, applied);
+            }
+          }
           const message = reasonCode
             ? getReasonToast(reasonCode).copy
             : json?.error || "Modify failed";
           pushNotification({ type: "error", message });
           return { ok: false, status: res.status, reasonCode, message };
+        }
+        // Server may echo the applied sequence on success; if so, anchor
+        // the local counter to it so subsequent attempts stay monotonic.
+        const appliedSeq = (json as { applied_sequence?: unknown })
+          ?.applied_sequence;
+        if (typeof appliedSeq === "number") {
+          modifySeqCountsRef.current.set(order.permId, appliedSeq);
         }
         if (request.newPrice != null || request.newQuantity != null) {
           const pm: PendingModify = {

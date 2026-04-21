@@ -55,15 +55,19 @@ class ReconcileDecision:
 def _submitted_at_epoch(val: Any) -> float:
     """Return epoch seconds for a submitted_at value read back from DuckDB.
 
-    DuckDB TIMESTAMP columns strip tzinfo on write (aware values are converted
-    to local wall-clock time then the tz is dropped). Calling ``.timestamp()``
-    on the naive value recovers the correct epoch because Python treats naive
-    datetimes as local time. Aware values are handled directly.
+    ``orders_store`` writes ``datetime.now(timezone.utc)``. DuckDB's TIMESTAMP
+    column strips tzinfo; with a UTC session TimeZone (set in orders_store
+    writes), the stored naive wall-clock equals the UTC wall-clock. The
+    reader must therefore treat naive values as UTC — relying on Python's
+    local-time interpretation breaks on non-UTC servers (PR-C/D review A5).
     """
     if isinstance(val, datetime):
+        if val.tzinfo is None:
+            return val.replace(tzinfo=timezone.utc).timestamp()
         return val.timestamp()
-    # Defensive path for ISO strings
     dt = datetime.fromisoformat(str(val))
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc).timestamp()
     return dt.timestamp()
 
 
@@ -126,13 +130,24 @@ def _reconcile_from_three_sources(
         oo = open_orders_by_perm[perm_id] or {}
         oo_status = str(oo.get("status", "")).lower()
         to_state: ReconcileState = "PARTIALLY_FILLED" if "partial" in oo_status else "WORKING"
+        filled_qty_out: int | None = None
+        avg_dec_out: Decimal | None = None
+        if to_state == "PARTIALLY_FILLED" and perm_id in execs_by_perm:
+            ex = execs_by_perm[perm_id]
+            filled_qty_out = int(ex.get("shares") or ex.get("filled_qty") or 0)
+            avg = ex.get("avg_price") or ex.get("avg_fill_price")
+            avg_dec_out = Decimal(str(avg)) if avg is not None else None
         return ReconcileDecision(
             to_state=to_state,
+            filled_qty=filled_qty_out,
+            avg_fill_price=avg_dec_out,
             event_kind="REHYDRATE_RECONCILED",
             detail={
                 "from_state": state,
                 "to_state": to_state,
                 "sources": sources,
+                **({"filled_qty": filled_qty_out} if filled_qty_out is not None else {}),
+                **({"avg_fill_price": str(avg_dec_out)} if avg_dec_out is not None else {}),
             },
         )
 
@@ -188,7 +203,7 @@ def _reconcile_from_three_sources(
 def _list_unresolved(db_path: Path | str | None = None) -> list[dict]:
     path = _orders_store_mod._resolve_path(db_path)
     _orders_store_mod.init_store(path)
-    con = duckdb.connect(str(path))
+    con = _orders_store_mod._connect_utc(path)
     try:
         rows = con.execute(
             """
@@ -263,6 +278,31 @@ def _index_executions(execs: list) -> dict:
     return agg
 
 
+def _build_positions_snapshot(
+    ib_positions: list | dict | None,
+    rows: list[dict],
+) -> dict[tuple[str, int | None], dict]:
+    """Normalize ``ib.positions()`` output to the snapshot dict shape the
+    reconcile helper consumes.
+
+    ``IBClient.get_positions()`` returns ib_insync ``Position`` objects in a
+    list; older call sites pass a preformed dict. We accept either form.
+
+    v1 has no baseline to diff against, so every row's (ticker, con_id) is
+    marked ``{"changed": None}`` — this routes to UNKNOWN (REHYDRATE_UNCERTAIN)
+    rather than auto-CANCELLED, which is the safe bias per SL §11.
+    """
+    if isinstance(ib_positions, dict):
+        return ib_positions  # back-compat for tests supplying a dict
+    # List form (or None) → build an "unknown per row" map so unresolved rows
+    # don't accidentally match an empty dict and infer CANCELLED.
+    snapshot: dict[tuple[str, int | None], dict] = {}
+    for row in rows:
+        key = (row.get("ticker"), row.get("con_id"))
+        snapshot[key] = {"changed": None}
+    return snapshot
+
+
 def _positions_changed(positions_snapshot: dict, ticker: str, con_id: int | None) -> bool | None:
     """v1 heuristic: the snapshot is a dict keyed by (ticker, con_id) with a
     per-entry ``{"changed": bool}`` marker. In production, the caller builds
@@ -300,7 +340,8 @@ def rehydrate_on_boot(
     ib = ib_client_factory()
     open_orders = ib.get_open_orders() or []
     execs = ib.get_executions() or []
-    positions = ib.get_positions() or {}
+    positions_raw = ib.get_positions() or []
+    positions = _build_positions_snapshot(positions_raw, rows)
 
     open_idx = _index_open_orders(open_orders)
     exec_idx = _index_executions(execs)
@@ -324,7 +365,7 @@ def rehydrate_on_boot(
         # Apply side effects. WORKING→WORKING is still recorded as an event
         # for observability but does not need a DB state change.
         if decision.to_state != row["state"]:
-            if decision.to_state in ("WORKING", "PARTIALLY_FILLED"):
+            if decision.to_state == "WORKING":
                 # No dedicated helper; use a direct UPDATE via DuckDB for state shift.
                 _update_state_only(row["submission_id"], decision.to_state, db_path=db_path)
             elif decision.to_state in (
@@ -359,7 +400,7 @@ def rehydrate_on_boot(
 def _update_state_only(submission_id: str, state: str, db_path: Path | str | None = None) -> None:
     path = _orders_store_mod._resolve_path(db_path)
     now = datetime.now(timezone.utc)
-    con = duckdb.connect(str(path))
+    con = _orders_store_mod._connect_utc(path)
     try:
         con.execute(
             "UPDATE orders_submissions SET state=?, updated_at=? WHERE submission_id=?",

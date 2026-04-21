@@ -16,6 +16,7 @@ type ModifyBody = {
   outsideRth?: boolean;
   cancelOrders?: ModifyCancelTarget[];
   replaceOrder?: ReplaceComboOrder;
+  modifySequence?: number;
 };
 
 function findOpenOrder(orders: OrdersData, orderId: number, permId: number) {
@@ -193,6 +194,7 @@ export async function POST(request: Request): Promise<Response> {
         newPrice,
         newQuantity,
         outsideRth: body.outsideRth,
+        modifySequence: body.modifySequence,
       }),
       timeout: 20_000,
     });
