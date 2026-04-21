@@ -71,7 +71,7 @@ logging.getLogger("ib_insync.wrapper").setLevel(logging.WARNING)
 logging.getLogger("ib_insync.client").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
-from ib_insync import Index
+from ib_insync import Contract, Index
 
 from xenon.clients.futu_client import FutuClient
 from xenon.clients.futu_exceptions import FutuConnectionError, FutuError
@@ -1409,8 +1409,17 @@ def _run_preflight(body: dict, user_id: str = "local") -> Verdict:
 
 def _lookup_min_tick_via_pool(con_id: int) -> Decimal:
     """Real-path minTick lookup via ib_pool 'data' role. Tests replace
-    `_tick_rule_cache` with a deterministic fake."""
-    raise HTTPException(status_code=503, detail="IB data role not ready")
+    `_tick_rule_cache` with a deterministic fake.
+
+    TEMPORARY: returns 0.01 (US equity minTick) without hitting IB. The
+    real implementation needs an async-safe path: ``ib_insync``'s
+    ``reqContractDetails`` starts its own event loop, which collides with
+    FastAPI's loop when called from the sync ``quote_guard.check`` stack.
+    Stocks are always 0.01; options are 0.01 above $3 and 0.05 below,
+    but sub-cent stock ticks are allowed for stocks priced < $1 — out of
+    scope for PR-C/D QA.
+    """
+    return Decimal("0.01")
 
 
 _tick_rule_cache = quote_guard.TickRuleCache(
@@ -1428,12 +1437,40 @@ def _fetch_quote_snapshot(ticker: str, con_id: int) -> dict:
     """Fetch a bid/ask snapshot from the ib_pool 'data' role.
 
     Raises HTTPException(503) if the data role is unavailable. Tests
-    monkeypatch this symbol on `xenon.api.server`.
+    monkeypatch this symbol on `xenon.api.server`. Callers must wrap
+    this in ``asyncio.to_thread`` — the implementation blocks on IB.
     """
     pool = ib_pool
     if pool is None:
         raise HTTPException(status_code=503, detail="IB data role unavailable")
-    raise HTTPException(status_code=503, detail="IB data role unavailable")
+    client = pool.get("data")
+    if client is None or not pool.is_connected("data"):
+        raise HTTPException(status_code=503, detail="IB data role unavailable")
+
+    contract = Contract(conId=int(con_id), exchange="SMART")
+    qualified = client.qualify_contract(contract)
+    tk = client.get_quote(qualified, snapshot=True)
+
+    import math as _math
+
+    bid = getattr(tk, "bid", None)
+    ask = getattr(tk, "ask", None)
+    bid_size = getattr(tk, "bidSize", 0) or 0
+    ask_size = getattr(tk, "askSize", 0) or 0
+
+    if (
+        bid is None
+        or ask is None
+        or (isinstance(bid, float) and _math.isnan(bid))
+        or (isinstance(ask, float) and _math.isnan(ask))
+    ):
+        raise HTTPException(status_code=503, detail=f"No quote available for {ticker}/{con_id}")
+    return {
+        "bid": Decimal(str(bid)),
+        "ask": Decimal(str(ask)),
+        "bid_size": int(bid_size),
+        "ask_size": int(ask_size),
+    }
 
 
 @app.get("/orders/quote")
@@ -1441,7 +1478,7 @@ async def orders_quote(ticker: str, con_id: int):
     secret = os.environ.get("XENON_QUOTE_TOKEN_SECRET")
     if not secret:
         raise HTTPException(status_code=500, detail="quote secret not configured")
-    snap = _fetch_quote_snapshot(ticker, con_id)
+    snap = await asyncio.to_thread(_fetch_quote_snapshot, ticker, con_id)
     import time as _time
 
     payload = QuotePayload(
