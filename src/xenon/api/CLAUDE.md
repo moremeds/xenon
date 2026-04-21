@@ -67,6 +67,10 @@ On-demand scripts MUST use `client_id="auto"` (range 20-49). Never hardcode — 
 
 Component map, files, ticket flow: `docs/architecture/api-infrastructure.md`.
 
+## Dev probes (never enabled in production)
+
+- `POST /dev/rehydrate/synthetic` — injects a synthetic PENDING row, runs rehydrate, returns event count. Gated on `XENON_API_TEST_MODE=1` OR `DEV_PROBES=1`. Used for observability readiness check before burn-in. Hidden from `/openapi.json` (`include_in_schema=False`); the gate is the real protection.
+
 ## Health Check
 
 ```bash

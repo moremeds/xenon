@@ -425,7 +425,13 @@ app.add_middleware(
 )
 
 # Auth middleware — protect all routes except /health and internal ticket validation
-AUTH_EXEMPT_PATHS = {"/health", "/ws-ticket/validate", "/docs", "/openapi.json"}
+AUTH_EXEMPT_PATHS = {
+    "/health",
+    "/ws-ticket/validate",
+    "/docs",
+    "/openapi.json",
+    "/dev/rehydrate/synthetic",
+}
 
 
 @app.middleware("http")
@@ -1006,6 +1012,126 @@ async def health():
         "ib_pool": ib_pool.status() if ib_pool else {},
         "uw": uw_available,
         "futu": _compute_futu_health(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Dev probes — gated on XENON_API_TEST_MODE or DEV_PROBES=1. Never in prod.
+# ---------------------------------------------------------------------------
+
+
+def _dev_probes_enabled() -> bool:
+    """True iff test_mode is on OR DEV_PROBES=1 is set in the environment."""
+    return bool(test_mode) or os.environ.get("DEV_PROBES", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+class _FakeEmptyIBClient:
+    """Stand-in IB client with no open orders / executions / positions.
+
+    Used by the synthetic rehydrate probe so a backdated PENDING row
+    deterministically reconciles to FAILED/PENDING_TIMEOUT.
+    """
+
+    def get_open_orders(self):
+        return []
+
+    def get_executions(self):
+        return []
+
+    def get_positions(self):
+        return {}
+
+
+@app.post("/dev/rehydrate/synthetic", include_in_schema=False)
+async def dev_rehydrate_synthetic():
+    """Inject a synthetic PENDING row, run rehydrate_on_boot, return event count.
+
+    Dev-only. Verifies the rehydrate path end-to-end (reservation → backdate →
+    reconcile → orders_events) without needing a live IB Gateway. Used as a
+    burn-in / observability readiness check.
+    """
+    if not _dev_probes_enabled():
+        raise HTTPException(status_code=404)
+
+    import uuid as _uuid
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+    from datetime import timezone as _tz
+    from decimal import Decimal as _Dec
+
+    import duckdb as _duckdb
+
+    from xenon.execution import orders_store as _orders_store_mod
+    from xenon.execution import single_leg_rehydrate as _rehydrate_mod
+    from xenon.execution.single_leg_rehydrate import PENDING_TIMEOUT_SECONDS
+
+    db_path = os.environ.get("XENON_ORDERS_DB_PATH") or str(_orders_store_mod._resolve_path(None))
+    _orders_store_mod.init_store(db_path)
+
+    client_attempt_id = f"synthetic-{_uuid.uuid4()}"
+    reservation = _orders_store_mod.reserve_attempt(
+        user_id="dev-probe",
+        client_attempt_id=client_attempt_id,
+        request=_orders_store_mod.RequestRow(
+            ticker="SPY",
+            security_type="STK",
+            action="BUY",
+            quantity=1,
+            multiplier=1,
+            limit_price=_Dec("500"),
+        ),
+        db_path=db_path,
+    )
+    submission_id = reservation.submission_id
+
+    # Backdate submitted_at past the PENDING timeout so the reconcile decision
+    # is deterministic (FAILED / PENDING_TIMEOUT). Inline UPDATE — probe-specific.
+    backdated = _dt.now(_tz.utc) - _td(seconds=PENDING_TIMEOUT_SECONDS + 5)
+    con = _duckdb.connect(str(db_path))
+    try:
+        con.execute(
+            "UPDATE orders_submissions SET submitted_at = ? WHERE submission_id = ?",
+            [backdated, submission_id],
+        )
+    finally:
+        con.close()
+
+    decisions = await asyncio.to_thread(
+        _rehydrate_mod.rehydrate_on_boot,
+        ib_client_factory=lambda: _FakeEmptyIBClient(),
+        orders_store=_orders_store_mod,
+        db_path=db_path,
+    )
+
+    # Count events written for this submission
+    con = _duckdb.connect(str(db_path))
+    try:
+        row = con.execute(
+            "SELECT COUNT(*) FROM orders_events WHERE submission_id = ?",
+            [submission_id],
+        ).fetchone()
+    finally:
+        con.close()
+    events_count = int(row[0]) if row else 0
+
+    summary = [
+        {
+            "to_state": d.to_state,
+            "reason_code": d.reason_code,
+            "event_kind": d.event_kind,
+        }
+        for d in decisions
+    ]
+
+    return {
+        "submission_id": submission_id,
+        "events_added": events_count,
+        "decisions": summary,
     }
 
 
