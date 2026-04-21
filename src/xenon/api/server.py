@@ -44,7 +44,7 @@ from xenon.api.routes.uw_stats import router as uw_stats_router
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
-from xenon.execution import preflight
+from xenon.execution import orders_store, preflight
 from xenon.execution.preflight import (
     PortfolioView,
     PreflightRequest,
@@ -160,6 +160,7 @@ async def lifespan(app: FastAPI):
     if test_mode:
         logger.info("Xenon API starting in test mode; IB Gateway and pool startup are disabled")
         uw_available = bool(os.environ.get("UW_TOKEN"))
+        orders_store.init_store()
         yield
         logger.info("Xenon API test mode shut down")
         return
@@ -173,6 +174,8 @@ async def lifespan(app: FastAPI):
     app.state.ib_pool = ib_pool
     pool_status = await ib_pool.connect_all()
     logger.info("IB pool status: %s", pool_status)
+
+    orders_store.init_store()
 
     # UW client — just verify token exists
     uw_available = bool(os.environ.get("UW_TOKEN"))
@@ -1197,9 +1200,7 @@ def _body_to_preflight_request(body: dict) -> PreflightRequest:
     )
 
 
-def _run_preflight(body: dict) -> Verdict:
-    # Skip combo orders in F2 — the Next.js TS guard still covers them; server-side
-    # BAG preflight is tracked separately (not a PR-A deliverable).
+def _run_preflight(body: dict, user_id: str = "local") -> Verdict:
     if body.get("type") == "combo":
         return Verdict(accept=True)
     portfolio = _load_portfolio_view()
@@ -1210,7 +1211,8 @@ def _run_preflight(body: dict) -> Verdict:
         # removes this branch.
         return Verdict(accept=True)
     req = _body_to_preflight_request(body)
-    return preflight.evaluate(req, portfolio)
+    reservations = orders_store.working_reservations_for(user_id, req.ticker)
+    return preflight.evaluate(req, portfolio, reservations=reservations)
 
 
 @app.post("/orders/place")

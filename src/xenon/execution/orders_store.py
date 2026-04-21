@@ -135,12 +135,21 @@ def reserve_attempt(
                 RETURNING submission_id;
                 """,
                 [
-                    sid, user_id, client_attempt_id,
-                    request.ticker, request.security_type, request.action, request.quantity,
+                    sid,
+                    user_id,
+                    client_attempt_id,
+                    request.ticker,
+                    request.security_type,
+                    request.action,
+                    request.quantity,
                     request.expiry,
                     str(request.strike) if request.strike is not None else None,
-                    request.right, request.multiplier, request.con_id,
-                    str(request.limit_price), now, now,
+                    request.right,
+                    request.multiplier,
+                    request.con_id,
+                    str(request.limit_price),
+                    now,
+                    now,
                 ],
             ).fetchone()
             if inserted is not None:
@@ -244,9 +253,12 @@ def mark_terminal(
                  WHERE submission_id = ?
                 """,
                 [
-                    state, reason_code, filled_qty,
+                    state,
+                    reason_code,
+                    filled_qty,
                     str(avg_fill_price) if avg_fill_price is not None else None,
-                    now, submission_id,
+                    now,
+                    submission_id,
                 ],
             )
         finally:
@@ -260,6 +272,7 @@ def record_event(
     db_path: Path | str | None = None,
 ) -> None:
     import json as _json
+
     eid = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     with _WRITE_LOCK:
@@ -273,9 +286,7 @@ def record_event(
             con.close()
 
 
-def lookup_by_attempt(
-    user_id: str, client_attempt_id: str, db_path: Path | str | None = None
-) -> SubmissionRow | None:
+def lookup_by_attempt(user_id: str, client_attempt_id: str, db_path: Path | str | None = None) -> SubmissionRow | None:
     con = duckdb.connect(str(_resolve_path(db_path)))
     try:
         row = con.execute(
@@ -300,10 +311,10 @@ from xenon.execution.preflight import WorkingReservations
 _ACTIVE_STATES = ("PENDING", "WORKING", "PARTIALLY_FILLED")
 
 
-def working_reservations_for(
-    user_id: str, ticker: str, db_path: Path | str | None = None
-) -> WorkingReservations:
-    con = duckdb.connect(str(_resolve_path(db_path)))
+def working_reservations_for(user_id: str, ticker: str, db_path: Path | str | None = None) -> WorkingReservations:
+    path = _resolve_path(db_path)
+    init_store(path)
+    con = duckdb.connect(str(path))
     try:
         stock_sell = con.execute(
             """
