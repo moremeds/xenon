@@ -91,7 +91,25 @@ async def run_entry_point(
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
 
+        json_start = stdout.find("{")
+        parsed_data: Optional[dict] = None
+        if json_start != -1:
+            try:
+                candidate = json.loads(stdout[json_start:])
+                if isinstance(candidate, dict):
+                    parsed_data = candidate
+            except json.JSONDecodeError:
+                parsed_data = None
+
         if proc.returncode != 0:
+            # Structured subprocess errors emit JSON with ``status`` and
+            # classification on stdout but exit non-zero (convention:
+            # exit(1) on error, exit(0) on success). Surface the parsed
+            # payload so the route can classify — otherwise every
+            # classified failure collapses to a generic 503.
+            if parsed_data is not None and "status" in parsed_data:
+                return ScriptResult(ok=True, data=parsed_data, exit_code=proc.returncode)
+
             err_msg = _extract_error_message(
                 stdout,
                 stderr,
@@ -100,12 +118,9 @@ async def run_entry_point(
             logger.warning("Entry point %s failed (code %d): %s", entry, proc.returncode, err_msg)
             return ScriptResult(ok=False, error=err_msg, exit_code=proc.returncode)
 
-        json_start = stdout.find("{")
-        if json_start == -1:
+        if parsed_data is None:
             return ScriptResult(ok=True, data={})
-
-        data = json.loads(stdout[json_start:])
-        return ScriptResult(ok=True, data=data)
+        return ScriptResult(ok=True, data=parsed_data)
 
     except asyncio.TimeoutError:
         logger.error("Entry point %s timed out after %.0fs", entry, timeout)
