@@ -13,19 +13,107 @@ Usage:
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
 DEFAULT_CLIENT_ID = CLIENT_IDS["ib_order_manage"]
 
+# IB semantic reject codes: 201 (rejected), 202 (cancelled by exchange),
+# 103 (duplicate order id), 321 (VOL field invalid), 10147 (order not found),
+# 10148 (cannot modify). 326 is "client id in use" — ownership, not reject.
+_IB_REJECT_CODES = {103, 201, 202, 321, 10147, 10148}
+
+
+def classify_failure(
+    error_code: Optional[int] = None,
+    exc: Optional[BaseException] = None,
+) -> Literal["connection", "ownership", "ib_reject"]:
+    """Classify an IB failure per SL §8.
+
+    - connection: no socket / gateway down / handshake reject -> HTTP 503
+    - ownership:  IB 326 clientId in use -> HTTP 409
+    - ib_reject:  semantic reject (201/202/103/321/10147/10148/...) -> HTTP 4xx
+
+    Unknown failures fall back to ``connection`` (fail-safe to 503).
+    """
+    if exc is not None:
+        if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+            return "connection"
+        msg = str(exc).lower()
+        if "326" in msg or "client id is already in use" in msg:
+            return "ownership"
+    if error_code == 326:
+        return "ownership"
+    if error_code in _IB_REJECT_CODES:
+        return "ib_reject"
+    if error_code is not None:
+        # Unknown IB code but we have a code — treat as semantic reject
+        # rather than connection (code implies the socket was alive).
+        return "ib_reject"
+    return "connection"
+
+
+def _is_clientid_in_use(exc: BaseException) -> bool:
+    """True iff *exc* looks like IB Error 326 (clientId already in use)."""
+    msg = str(exc).lower()
+    return "326" in msg or "client id is already in use" in msg
+
 
 def output(status: str, message: str, **extra):
-    """Print JSON result and exit."""
+    """Print JSON result and exit.
+
+    ``classification`` (when present in *extra*) is one of
+    ``connection`` | ``ownership`` | ``ib_reject`` — consumed by the
+    FastAPI route to map to HTTP 503 / 409 / 4xx (F5.4).
+    """
     print(json.dumps({"status": status, "message": message, **extra}))
     sys.exit(0 if status == "ok" else 1)
+
+
+def _reconnect_as_owner(client: "IBClient", host: str, port: int, original_client_id: int) -> None:
+    """Reconnect the subprocess as *original_client_id*.
+
+    Retries up to 3 times on IB Error 326 with a 0.5s backoff, always using
+    the same ``original_client_id`` (never rotated — ownership invariant
+    from src/xenon/api/CLAUDE.md §"Cancel / Modify Failure Propagation").
+
+    On persistent 326, emits JSON with ``classification="ownership"``.
+    On other connection failures, emits ``classification="connection"``.
+    """
+    last_exc: Optional[BaseException] = None
+    for attempt in range(3):
+        try:
+            client.disconnect()
+            client.connect(host=host, port=port, client_id=original_client_id)
+            return
+        except Exception as exc:  # noqa: BLE001 — classify below
+            last_exc = exc
+            if _is_clientid_in_use(exc):
+                if attempt < 2:
+                    time.sleep(0.5)
+                    continue
+                output(
+                    "error",
+                    f"IB clientId {original_client_id} still in use after 3 retries: {exc}",
+                    classification="ownership",
+                    originalClientId=original_client_id,
+                )
+            # Non-326 failure: classify & exit.
+            output(
+                "error",
+                f"IB reconnect as clientId {original_client_id} failed: {exc}",
+                classification=classify_failure(None, exc),
+            )
+    # Should be unreachable — loop always exits via return or output().
+    output(
+        "error",
+        f"IB reconnect exhausted: {last_exc}",
+        classification="ownership",
+    )
 
 
 def json_number(value):
@@ -89,20 +177,32 @@ def cancel_order(client: IBClient, order_id: int, perm_id: int, host: str, port:
     """
     trade = find_trade(client, order_id, perm_id)
     if trade is None:
-        output("error", f"Trade not found (orderId={order_id}, permId={perm_id})")
+        output(
+            "error",
+            f"Trade not found (orderId={order_id}, permId={perm_id})",
+            classification="ib_reject",
+        )
 
     status = trade.orderStatus.status
     if status in ("Filled", "Cancelled", "ApiCancelled"):
-        output("error", f"Order already {status} — cannot cancel")
+        output(
+            "error",
+            f"Order already {status} — cannot cancel",
+            classification="ib_reject",
+        )
 
-    # Reconnect as the original placer if needed (fixes Error 10147)
+    # Reconnect as the original placer if needed (fixes Error 10147).
+    # _reconnect_as_owner handles 326-retry + emits classified output on failure.
     original_client_id = trade.order.clientId
     if client.ib.client.clientId != original_client_id:
-        client.disconnect()
-        client.connect(host=host, port=port, client_id=original_client_id)
+        _reconnect_as_owner(client, host, port, original_client_id)
         trade = find_trade(client, order_id, perm_id)
         if trade is None:
-            output("error", "Trade not found after reconnect as original clientId")
+            output(
+                "error",
+                "Trade not found after reconnect as original clientId",
+                classification="ib_reject",
+            )
 
     # Capture IB error events during the cancel attempt
     error_msgs = []
@@ -144,11 +244,20 @@ def cancel_order(client: IBClient, order_id: int, perm_id: int, host: str, port:
         # Check for fatal errors (10147=order not found, 201=rejected)
         fatal = [e for e in error_msgs if e[0] in (10147, 201)]
         if fatal:
-            finish("error", f"IB rejected cancel: {fatal[0][1]}")
+            finish(
+                "error",
+                f"IB rejected cancel: {fatal[0][1]}",
+                classification=classify_failure(fatal[0][0]),
+                upstream={"code": fatal[0][0], "message": fatal[0][1]},
+            )
 
     final_status = latest_trade.orderStatus.status if latest_trade is not None else trade.orderStatus.status
     finish(
-        "error", f"Cancel failed — order still {final_status}", orderId=trade.order.orderId, finalStatus=final_status
+        "error",
+        f"Cancel failed — order still {final_status}",
+        orderId=trade.order.orderId,
+        finalStatus=final_status,
+        classification="ib_reject",
     )
 
 
@@ -171,32 +280,48 @@ def modify_order(
     """
     trade = find_trade(client, order_id, perm_id)
     if trade is None:
-        output("error", f"Trade not found (orderId={order_id}, permId={perm_id})")
+        output(
+            "error",
+            f"Trade not found (orderId={order_id}, permId={perm_id})",
+            classification="ib_reject",
+        )
 
     status = trade.orderStatus.status
     if status in ("Filled", "Cancelled", "ApiCancelled"):
-        output("error", f"Order already {status} — cannot modify")
+        output(
+            "error",
+            f"Order already {status} — cannot modify",
+            classification="ib_reject",
+        )
 
     order_type = trade.order.orderType
     if order_type not in ("LMT", "STP LMT"):
-        output("error", f"Cannot modify price on {order_type} order — only LMT and STP LMT supported")
+        output(
+            "error",
+            f"Cannot modify price on {order_type} order — only LMT and STP LMT supported",
+            classification="ib_reject",
+        )
 
     if new_price is None and new_quantity is None and outside_rth is None:
-        output("error", "Must provide at least one modify field")
+        output("error", "Must provide at least one modify field", classification="ib_reject")
 
     if new_price is not None and new_price <= 0:
-        output("error", "New price must be > 0")
+        output("error", "New price must be > 0", classification="ib_reject")
     if new_quantity is not None and new_quantity <= 0:
-        output("error", "New quantity must be > 0")
+        output("error", "New quantity must be > 0", classification="ib_reject")
 
-    # Reconnect as the original placer if needed (fixes Error 103)
+    # Reconnect as the original placer if needed (fixes Error 103).
+    # _reconnect_as_owner handles 326-retry + emits classified output on failure.
     original_client_id = trade.order.clientId
     if client.ib.client.clientId != original_client_id:
-        client.disconnect()
-        client.connect(host=host, port=port, client_id=original_client_id)
+        _reconnect_as_owner(client, host, port, original_client_id)
         trade = find_trade(client, order_id, perm_id)
         if trade is None:
-            output("error", "Trade not found after reconnect as original clientId")
+            output(
+                "error",
+                "Trade not found after reconnect as original clientId",
+                classification="ib_reject",
+            )
 
     # Capture IB error events during the modify attempt
     error_msgs = []
@@ -250,7 +375,12 @@ def modify_order(
         fatal = [e for e in error_msgs if e[0] in (103, 201, 202)]
         if fatal:
             client.ib.errorEvent -= on_error
-            output("error", f"IB rejected modify: {fatal[0][1]}")
+            output(
+                "error",
+                f"IB rejected modify: {fatal[0][1]}",
+                classification=classify_failure(fatal[0][0]),
+                upstream={"code": fatal[0][0], "message": fatal[0][1]},
+            )
 
     client.ib.errorEvent -= on_error
 
@@ -267,6 +397,7 @@ def modify_order(
             currentPrice=latest_price,
             currentQuantity=latest_quantity,
             finalStatus=latest_status,
+            classification="ib_reject",
         )
 
     final_status = confirmed_trade.orderStatus.status
@@ -320,13 +451,17 @@ def main():
     args = parser.parse_args()
 
     if args.order_id == 0 and args.perm_id == 0:
-        output("error", "Must provide --order-id or --perm-id")
+        output("error", "Must provide --order-id or --perm-id", classification="ib_reject")
 
     client = IBClient()
     try:
         client.connect(host=args.host, port=args.port, client_id="auto")
     except Exception as e:
-        output("error", f"IB connection failed: {e}")
+        output(
+            "error",
+            f"IB connection failed: {e}",
+            classification=classify_failure(None, e),
+        )
 
     try:
         if args.action == "cancel":
