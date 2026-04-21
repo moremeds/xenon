@@ -6,9 +6,16 @@ Spec: docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md §12.
 from __future__ import annotations
 
 import os
+import threading
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 
 import duckdb
+from pydantic import BaseModel, Field
 
 _CREATE_SUBMISSIONS = """
 CREATE TABLE IF NOT EXISTS orders_submissions (
@@ -75,3 +82,100 @@ def init_store(db_path: Path | str | None = None) -> Path:
     finally:
         con.close()
     return path
+
+
+class RequestRow(BaseModel):
+    ticker: str
+    security_type: Literal["STK", "OPT"]
+    action: Literal["BUY", "SELL"]
+    quantity: int = Field(gt=0)
+    expiry: str | None = None
+    strike: Decimal | None = None
+    right: Literal["C", "P"] | None = None
+    multiplier: int
+    con_id: int | None = None
+    limit_price: Decimal
+
+
+@dataclass
+class ReservationOutcome:
+    status: Literal["winner", "duplicate", "terminal"]
+    submission_id: str
+    state: str
+    duplicate_of: str | None
+    reason_code: str | None
+
+
+_TERMINAL_STATES = {"REJECTED", "CANCELLED", "FAILED"}
+_WRITE_LOCK = threading.Lock()
+
+
+def reserve_attempt(
+    user_id: str,
+    client_attempt_id: str,
+    request: RequestRow,
+    db_path: Path | str | None = None,
+) -> ReservationOutcome:
+    """Atomically reserve a submission slot keyed by (user_id, client_attempt_id)."""
+    path = _resolve_path(db_path)
+    sid = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    with _WRITE_LOCK:
+        con = duckdb.connect(str(path))
+        try:
+            inserted = con.execute(
+                """
+                INSERT INTO orders_submissions (
+                    submission_id, user_id, client_attempt_id,
+                    ticker, security_type, action, quantity,
+                    expiry, strike, "right", multiplier, con_id,
+                    limit_price, state, submitted_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+                ON CONFLICT (user_id, client_attempt_id) DO NOTHING
+                RETURNING submission_id;
+                """,
+                [
+                    sid, user_id, client_attempt_id,
+                    request.ticker, request.security_type, request.action, request.quantity,
+                    request.expiry,
+                    str(request.strike) if request.strike is not None else None,
+                    request.right, request.multiplier, request.con_id,
+                    str(request.limit_price), now, now,
+                ],
+            ).fetchone()
+            if inserted is not None:
+                return ReservationOutcome(
+                    status="winner",
+                    submission_id=sid,
+                    state="PENDING",
+                    duplicate_of=None,
+                    reason_code=None,
+                )
+
+            row = con.execute(
+                """
+                SELECT submission_id, state, ib_order_id, reason_code
+                FROM orders_submissions
+                WHERE user_id = ? AND client_attempt_id = ?
+                """,
+                [user_id, client_attempt_id],
+            ).fetchone()
+            assert row is not None, "ON CONFLICT hit but row not found"
+            existing_sid, state, ib_order_id, reason_code = row
+            if state in _TERMINAL_STATES:
+                return ReservationOutcome(
+                    status="terminal",
+                    submission_id=existing_sid,
+                    state=state,
+                    duplicate_of=None,
+                    reason_code=reason_code,
+                )
+            return ReservationOutcome(
+                status="duplicate",
+                submission_id=existing_sid,
+                state=state,
+                duplicate_of=ib_order_id,
+                reason_code=None,
+            )
+        finally:
+            con.close()
