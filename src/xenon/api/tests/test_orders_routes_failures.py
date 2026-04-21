@@ -273,3 +273,40 @@ def test_modify_happy_path_advances_sequence_and_runs_subprocess(client, tmp_db,
     outcome = orders_store.apply_modify("42", 7)  # same sequence → not applied
     assert outcome["applied"] is False
     assert outcome["current_sequence"] == 7
+
+
+def test_modify_503_echoes_applied_sequence(client, tmp_db, monkeypatch):
+    """B2 — after DB sequence advances, a 503 must echo applied_sequence so
+    the client's modifySeqCountsRef can sync and avoid a MODIFY_STALE loop."""
+    _seed_submission(tmp_db, ib_order_id="42")
+
+    async def fake_runner(entry, args, timeout=30):
+        return ScriptResult(
+            ok=False,
+            data=None,
+            error="IB gateway unreachable",
+        )
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post(
+        "/orders/modify",
+        json={"orderId": 42, "permId": 0, "newPrice": 1.50, "modifySequence": 9},
+    )
+    assert resp.status_code == 503
+    detail = resp.json()["detail"]
+    assert detail["applied_sequence"] == 9
+    assert detail["reason_code"] == "IB_CONNECTION"
+
+
+def test_dev_probe_not_in_auth_exempt_paths():
+    """B3 — defense in depth: Clerk middleware must still cover the probe."""
+    assert "/dev/rehydrate/synthetic" not in server_mod.AUTH_EXEMPT_PATHS
+
+
+def test_place_reason_code_constants_exist():
+    """B5 + B6 — preflight enum carries the literals we write from place()."""
+    from xenon.execution.preflight import ReasonCode
+
+    assert ReasonCode.IB_REJECT.value == "IB_REJECT"
+    assert ReasonCode.SUBPROCESS_ERROR.value == "SUBPROCESS_ERROR"

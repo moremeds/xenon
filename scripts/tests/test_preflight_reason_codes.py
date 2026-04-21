@@ -14,3 +14,5 @@ def test_new_reason_codes_present():
     assert "MODIFY_STALE" in names
     assert "MODIFY_SEQUENCE_REQUIRED" in names
     assert "ORDER_NOT_FOUND" in names
+    # B5 — hard subprocess failure (place)
+    assert "SUBPROCESS_ERROR" in names

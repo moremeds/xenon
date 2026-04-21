@@ -72,6 +72,11 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
     severity: "warn",
     copy: "Order submission timed out before IB acknowledged.",
   },
+  // B5 — hard subprocess failure on place (FastAPI runner returned non-2xx).
+  SUBPROCESS_ERROR: {
+    severity: "error",
+    copy: "Order service unreachable — retry in a moment.",
+  },
 };
 
 const FALLBACK: ReasonToast = {

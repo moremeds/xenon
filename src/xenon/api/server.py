@@ -175,6 +175,19 @@ async def _run_rehydrate_on_boot() -> None:
 
     db_path = os.environ.get("XENON_ORDERS_DB_PATH") or str(_orders_store_mod._resolve_path(None))
 
+    # B1 — in test_mode, refuse to touch the real data/orders.duckdb. A pytest
+    # TestClient(app) without XENON_ORDERS_DB_PATH would otherwise read/write
+    # the prod DuckDB file. Require the env var to enable rehydrate under
+    # test_mode so tests can opt in explicitly via a tmp_path fixture.
+    if test_mode:
+        env_override = os.environ.get("XENON_ORDERS_DB_PATH")
+        # Compare against the literal default string — don't call _resolve_path
+        # here because it would round-trip through the env var we're checking.
+        default_prod_path = "data/orders.duckdb"
+        if not env_override or env_override == default_prod_path:
+            logger.info("test_mode: skipping rehydrate (set XENON_ORDERS_DB_PATH to enable)")
+            return
+
     try:
         await asyncio.wait_for(
             asyncio.to_thread(
@@ -430,7 +443,10 @@ AUTH_EXEMPT_PATHS = {
     "/ws-ticket/validate",
     "/docs",
     "/openapi.json",
-    "/dev/rehydrate/synthetic",
+    # B3 — /dev/rehydrate/synthetic intentionally NOT listed here. The route
+    # is protected by the _dev_probes_enabled() gate (DEV_PROBES/test_mode),
+    # the localhost-bypass below, and standard Clerk auth. Exempting it would
+    # expose a public write endpoint if DEV_PROBES=1 leaked into a non-local env.
 }
 
 
@@ -1585,14 +1601,31 @@ async def orders_place(request: Request):
         )
         raise HTTPException(status_code=502, detail=result.error)
     if result.data and result.data.get("status") == "error":
+        # B6 — always write the literal "IB_REJECT" as reason_code so the UI
+        # toast map resolves. The raw IB numeric code + message go into the
+        # orders_events audit row so we don't lose the info.
+        ib_code = result.data.get("code")
+        ib_message = result.data.get("message", "Order failed")
         orders_store.mark_terminal(
             submission_id=submission_id,
             state="REJECTED",
-            reason_code=str(result.data.get("code") or "IB_REJECT"),
+            reason_code=ReasonCode.IB_REJECT.value,
             filled_qty=0,
             avg_fill_price=None,
         )
-        raise HTTPException(status_code=502, detail=result.data.get("message", "Order failed"))
+        try:
+            orders_store.record_event(
+                submission_id,
+                "IB_REJECT",
+                {"ib_code": ib_code, "ib_message": ib_message},
+            )
+        except Exception:  # pragma: no cover — event writes are best-effort
+            logger.warning(
+                "Failed to record IB_REJECT event for submission %s",
+                submission_id,
+                exc_info=True,
+            )
+        raise HTTPException(status_code=502, detail=ib_message)
     if result.data:
         orders_store.mark_submitted(
             submission_id=submission_id,

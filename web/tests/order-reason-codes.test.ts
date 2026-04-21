@@ -28,6 +28,8 @@ const PYTHON_REASON_CODES = [
   "ORDER_IDENTIFIER_REQUIRED",
   // F7 — pending timeout
   "PENDING_TIMEOUT",
+  // B5 — place subprocess hard failure
+  "SUBPROCESS_ERROR",
 ];
 
 describe("orderReasonCodes parity", () => {

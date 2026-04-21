@@ -50,6 +50,9 @@ Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xeno
    - Python/unit coverage for refreshed open-order confirmation semantics
    - route coverage for upstream status/detail propagation
    - browser coverage for the visible toast/error state
+7. **Modify route advances `modify_sequence` BEFORE subprocess; on subprocess failure, the error response includes `applied_sequence` so the client counter can sync.**
+   - Both the `result.ok=False` (503 `IB_CONNECTION`) and `status=="error"` (4xx/5xx by classification) branches echo `applied_sequence: <N>` in the HTTPException detail.
+   - Without this, a client retry at the old N loses to the advanced DB counter → `MODIFY_STALE` loop.
 
 ## Client ID Allocation Rule
 

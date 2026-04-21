@@ -50,6 +50,8 @@ class ReasonCode(StrEnum):
     ORDER_IDENTIFIER_REQUIRED = "ORDER_IDENTIFIER_REQUIRED"
     # F7 — pending timeout (PR-D)
     PENDING_TIMEOUT = "PENDING_TIMEOUT"
+    # B5 — hard subprocess failure on /orders/place (non-2xx from runner).
+    SUBPROCESS_ERROR = "SUBPROCESS_ERROR"
 
 
 class PreflightRequest(BaseModel):
