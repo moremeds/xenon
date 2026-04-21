@@ -7,6 +7,15 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ### Changed
 
+- **Futu ticker navigation (feat/futu-ticker-chain-fixes).** `TickerLink` no longer short-circuits to a non-interactive `<span>` in read-only contexts — Futu rows now route into the ticker workspace like IB rows. Execution surfaces (order modal, order API) stay guarded deeper in the flow; the label on Futu rows still signals read-only via `aria-label`.
+- **IB option subscriptions (feat/futu-ticker-chain-fixes).** `ib_realtime_server.js` now qualifies option contracts with `exchange="SMART"` and `currency="USD"` when subscribing. Fixes empty Delta/IV/Gamma columns in the options chain caused by node-ib rejecting under-specified option contracts.
+
+### Added
+
+- `web/tests/options-chain-0dte-selection.test.tsx` — documents the current contract: default expiry skips same-day options; manually selecting a 0DTE expiry loads the chain.
+
+### Changed
+
 - **Apex R2 ETL (feat/apex-r2-etl).** Historical OHLCV + TA-indicator computation moved out of the trend scanner into a nightly GitHub Action (`apex-data-refresh`). Scanner now reads pre-computed Parquet from Cloudflare R2 `apex-data` bucket via a local mirror at `data/apex_mirror/`. No Massive or UW calls at scan time for Stage A.
 - New dependencies: `boto3`, `pyarrow`, `moto[s3]` (test). See `pyproject.toml`.
 - New tribunal amendments A1–A22 shipped inline; see `docs/superpowers/plans/2026-04-16-apex-r2-etl.md` on `trend-scan-cleanup` anchor branch for the full audit trail.
