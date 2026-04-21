@@ -12,10 +12,11 @@ Usage:
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal, NoReturn, Optional
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 
@@ -43,8 +44,7 @@ def classify_failure(
     if exc is not None:
         if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
             return "connection"
-        msg = str(exc).lower()
-        if "326" in msg or "client id is already in use" in msg:
+        if _is_clientid_in_use(exc):
             return "ownership"
     if error_code == 326:
         return "ownership"
@@ -57,13 +57,22 @@ def classify_failure(
     return "connection"
 
 
+# IB Error 326 detection. Must match standalone "326" (word boundary) AND
+# the phrase "client id" to avoid false positives on messages like
+# "order 3261 rejected". The canonical ib_insync surface text is
+# "client id is already in use"; we keep compatibility with that phrasing.
+_CLIENTID_IN_USE_RE = re.compile(r"\b326\b")
+
+
 def _is_clientid_in_use(exc: BaseException) -> bool:
     """True iff *exc* looks like IB Error 326 (clientId already in use)."""
     msg = str(exc).lower()
-    return "326" in msg or "client id is already in use" in msg
+    if "client id is already in use" in msg:
+        return True
+    return bool(_CLIENTID_IN_USE_RE.search(msg)) and "client id" in msg
 
 
-def output(status: str, message: str, **extra):
+def output(status: str, message: str, **extra) -> NoReturn:
     """Print JSON result and exit.
 
     ``classification`` (when present in *extra*) is one of
@@ -90,25 +99,30 @@ def _reconnect_as_owner(client: "IBClient", host: str, port: int, original_clien
             client.disconnect()
             client.connect(host=host, port=port, client_id=original_client_id)
             return
-        except Exception as exc:  # noqa: BLE001 — classify below
+        except (ConnectionError, OSError, TimeoutError, RuntimeError) as exc:
+            # IBClient.connect surfaces 326 as RuntimeError (string-wrapped).
+            # Socket / gateway failures arrive as ConnectionError/OSError/TimeoutError.
+            # Programmer errors (AttributeError, TypeError) deliberately propagate.
             last_exc = exc
+            if _is_clientid_in_use(exc) and attempt < 2:
+                time.sleep(0.5)
+                continue
+            # Not retryable (or retries exhausted) — classify & exit.
             if _is_clientid_in_use(exc):
-                if attempt < 2:
-                    time.sleep(0.5)
-                    continue
                 output(
                     "error",
                     f"IB clientId {original_client_id} still in use after 3 retries: {exc}",
                     classification="ownership",
                     originalClientId=original_client_id,
                 )
-            # Non-326 failure: classify & exit.
+                return  # unreachable: output() is NoReturn
             output(
                 "error",
                 f"IB reconnect as clientId {original_client_id} failed: {exc}",
                 classification=classify_failure(None, exc),
             )
-    # Should be unreachable — loop always exits via return or output().
+            return  # unreachable: output() is NoReturn
+    # Unreachable — the loop always either returns (success) or falls into output().
     output(
         "error",
         f"IB reconnect exhausted: {last_exc}",

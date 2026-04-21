@@ -7,7 +7,7 @@ distinguishing connection / ownership / ib_reject failures per SL §8.
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -219,8 +219,8 @@ class TestMainConnectionClassification:
         def connect_side_effect(*args, **kwargs):
             cid = kwargs.get("client_id")
             if cid == 9:
-                # IB 326 surfaces as exception containing "client id is already in use"
-                raise Exception("TWS API Error 326: client id is already in use")
+                # IB 326 surfaces as RuntimeError (IBClient wraps string errors)
+                raise RuntimeError("TWS API Error 326: client id is already in use")
             # initial auto connect
             return None
 
@@ -244,3 +244,138 @@ class TestMainConnectionClassification:
         # 3 retries, always with the SAME original_client_id
         reconnect_calls = [c for c in fake_client.connect.call_args_list if c.kwargs.get("client_id") == 9]
         assert len(reconnect_calls) == 3, f"expected 3 retries with client_id=9, got {len(reconnect_calls)}"
+
+    def test_clientid_in_use_sleep_count_exactly_two(self, capsys, monkeypatch):
+        """Three 326 failures -> sleep called exactly twice (between retries) at 0.5s."""
+        t = make_trade(status="Submitted", client_id=9)
+        fake_client = make_client([t])
+        fake_client.ib.client.clientId = 0
+
+        def connect_side_effect(*args, **kwargs):
+            if kwargs.get("client_id") == 9:
+                raise RuntimeError("TWS API Error 326: client id is already in use")
+            return None
+
+        fake_client.connect.side_effect = connect_side_effect
+        fake_client.disconnect = MagicMock()
+
+        sleep_mock = MagicMock()
+        monkeypatch.setattr(ib_order_manage.time, "sleep", sleep_mock)
+        monkeypatch.setattr(ib_order_manage, "IBClient", lambda: fake_client)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["ib_order_manage", "cancel", "--order-id", "10", "--perm-id", "12345"],
+        )
+
+        with pytest.raises(SystemExit):
+            ib_order_manage.main()
+
+        # First retry failed -> sleep; second retry failed -> sleep; third -> no sleep.
+        assert sleep_mock.call_count == 2
+        assert sleep_mock.call_args_list == [call(0.5), call(0.5)]
+
+    def test_clientid_in_use_first_retry_succeeds(self, capsys, monkeypatch):
+        """326 on first reconnect, success on second -> cancel completes, one sleep."""
+        t = make_trade(status="Submitted", client_id=9)
+
+        # After reconnect, find_trade should still return the trade with clientId=9.
+        # We then need cancel to proceed — simulate successful cancel via refreshed-trade=None.
+        fake_client = make_client([t])
+        fake_client.ib.client.clientId = 0  # mismatch forces reconnect
+
+        # get_open_orders sequence:
+        # 1) cancel_order initial find_trade -> [t]
+        # 2) after reconnect find_trade -> [t]
+        # 3+) refreshed lookups inside cancel loop -> [] (trade gone = cancelled)
+        fake_client.get_open_orders.side_effect = [[t], [t]] + [[]] * 10
+
+        connect_calls = {"n": 0}
+
+        def connect_side_effect(*args, **kwargs):
+            cid = kwargs.get("client_id")
+            if cid == 9:
+                connect_calls["n"] += 1
+                if connect_calls["n"] == 1:
+                    raise RuntimeError("TWS API Error 326: client id is already in use")
+                # After successful reconnect, emulate ib.client.clientId flipping.
+                fake_client.ib.client.clientId = 9
+                return None
+            return None
+
+        fake_client.connect.side_effect = connect_side_effect
+        fake_client.disconnect = MagicMock()
+
+        # errorEvent plumbing
+        class ErrorEvent:
+            def __iadd__(self, handler):
+                return self
+
+            def __isub__(self, handler):
+                return self
+
+        fake_client.ib.errorEvent = ErrorEvent()
+        fake_client.cancel_order = MagicMock()
+        fake_client.sleep = MagicMock()
+
+        sleep_mock = MagicMock()
+        monkeypatch.setattr(ib_order_manage.time, "sleep", sleep_mock)
+        monkeypatch.setattr(ib_order_manage, "IBClient", lambda: fake_client)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["ib_order_manage", "cancel", "--order-id", "10", "--perm-id", "12345"],
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            ib_order_manage.main()
+        assert exc.value.code == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["status"] == "ok"
+        # Exactly one backoff sleep between the two reconnect attempts.
+        assert sleep_mock.call_count == 1
+        assert sleep_mock.call_args_list == [call(0.5)]
+
+    def test_trade_not_found_after_reconnect(self, capsys, monkeypatch):
+        """Reconnect succeeds, but post-reconnect find_trade returns None -> ib_reject."""
+        t = make_trade(status="Submitted", client_id=9)
+        fake_client = make_client()
+        fake_client.ib.client.clientId = 0
+
+        # 1) initial find_trade -> [t]; 2) post-reconnect find_trade -> []
+        fake_client.get_open_orders.side_effect = [[t], []]
+
+        def connect_side_effect(*args, **kwargs):
+            if kwargs.get("client_id") == 9:
+                fake_client.ib.client.clientId = 9
+            return None
+
+        fake_client.connect.side_effect = connect_side_effect
+        fake_client.disconnect = MagicMock()
+
+        class ErrorEvent:
+            def __iadd__(self, handler):
+                return self
+
+            def __isub__(self, handler):
+                return self
+
+        fake_client.ib.errorEvent = ErrorEvent()
+
+        monkeypatch.setattr(ib_order_manage.time, "sleep", lambda *_a, **_k: None)
+        monkeypatch.setattr(ib_order_manage, "IBClient", lambda: fake_client)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["ib_order_manage", "cancel", "--order-id", "10", "--perm-id", "12345"],
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            ib_order_manage.main()
+        assert exc.value.code == 1
+        data = json.loads(capsys.readouterr().out)
+        assert data["status"] == "error"
+        # Current behavior: post-reconnect missing trade is classified as ib_reject
+        # (the trade vanished on the broker side; semantic not connectivity).
+        assert data["classification"] == "ib_reject"
+        assert "not found after reconnect" in data["message"].lower()
