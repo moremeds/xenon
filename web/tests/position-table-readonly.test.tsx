@@ -12,11 +12,16 @@ vi.mock("@/components/InstrumentDetailModal", () => ({
   default: () => <div data-testid="instrument-detail-modal">MODAL</div>,
 }));
 
+const navigateToTicker = vi.fn();
+
 vi.mock("@/lib/useTickerNav", () => ({
-  useTickerNav: () => ({ navigateToTicker: vi.fn() }),
+  useTickerNav: () => ({ navigateToTicker }),
 }));
 
-afterEach(() => cleanup());
+afterEach(() => {
+  navigateToTicker.mockReset();
+  cleanup();
+});
 
 const stockPosition: PortfolioPosition = {
   id: 1,
@@ -51,19 +56,24 @@ const stockPosition: PortfolioPosition = {
 };
 
 describe("PositionTable readonly mode", () => {
-  it("renders ticker as non-interactive span when readonly=true", () => {
+  it("renders ticker as a button when readonly=true", () => {
     const { container } = render(
       <PositionTable positions={[stockPosition]} readonly={true} />,
     );
-    // The ticker cell should be a span with aria-disabled, not a button.
-    const tickerSpans = container.querySelectorAll("span.ticker-link-disabled");
-    expect(tickerSpans.length).toBeGreaterThan(0);
-    const span = tickerSpans[0];
-    expect(span.getAttribute("aria-disabled")).toBe("true");
-    expect(span.tagName).toBe("SPAN");
-    // And NO interactive button with class ticker-link should be present
     const tickerButtons = container.querySelectorAll("button.ticker-link");
-    expect(tickerButtons.length).toBe(0);
+    expect(tickerButtons.length).toBeGreaterThan(0);
+    const disabled = container.querySelectorAll(".ticker-link-disabled");
+    expect(disabled.length).toBe(0);
+  });
+
+  it("navigates to ticker detail when readonly=true", () => {
+    const { getByRole } = render(
+      <PositionTable positions={[stockPosition]} readonly={true} />,
+    );
+
+    fireEvent.click(getByRole("button", { name: /TSLA/i }));
+
+    expect(navigateToTicker).toHaveBeenCalledWith("TSLA", stockPosition.id);
   });
 
   it("renders ticker as button when readonly=false (default)", () => {

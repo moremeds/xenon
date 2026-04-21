@@ -161,6 +161,57 @@ async function installMocks(page: Page) {
   await page.route('**/api/orders/place', async (route) => {
     throw new Error('FATAL: code path reached /api/orders/place from Futu tab');
   });
+  await page.route('**/api/regime', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ score: 15, cri: { score: 15 } }),
+    });
+  });
+  await page.route('**/api/blotter', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        as_of: new Date().toISOString(),
+        summary: { realized_pnl: 0 },
+        closed_trades: [],
+        open_trades: [],
+      }),
+    });
+  });
+  await page.route('**/api/ticker/**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        uw_info: { name: 'Tesla, Inc.', sector: 'Automotive', description: 'EV' },
+        stock_state: {},
+        profile: {},
+        stats: {},
+      }),
+    });
+  });
+  await page.route('**/api/options/expirations*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ symbol: 'TSLA', expirations: ['20260515', '20260619'] }),
+    });
+  });
+  await page.route('**/api/options/chain*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        symbol: 'TSLA',
+        expiry: '20260515',
+        exchange: 'SMART',
+        strikes: [300, 310, 320, 330, 340],
+        multiplier: '100',
+      }),
+    });
+  });
 }
 
 test.describe('Futu tab read-only safety (T7)', () => {
@@ -173,30 +224,22 @@ test.describe('Futu tab read-only safety (T7)', () => {
     await futuTab.click();
   });
 
-  test('ticker cell renders as a non-interactive span with aria-disabled', async ({ page }) => {
-    const tslaSpan = page
-      .locator('span.ticker-link-disabled')
-      .filter({ hasText: 'TSLA' })
-      .first();
-    await expect(tslaSpan).toBeVisible();
-    await expect(tslaSpan).toHaveAttribute('aria-disabled', 'true');
-    // Must NOT be a button
+  test('ticker cell renders as a navigable button on the Futu tab', async ({ page }) => {
     const tslaButton = page
       .locator('button.ticker-link')
-      .filter({ hasText: 'TSLA' });
-    await expect(tslaButton).toHaveCount(0);
-  });
-
-  test('clicking the TSLA ticker does not navigate to /TSLA', async ({ page }) => {
-    const urlBefore = page.url();
-    const tslaSpan = page
-      .locator('span.ticker-link-disabled')
       .filter({ hasText: 'TSLA' })
       .first();
-    await tslaSpan.click({ force: true });
-    // Short delay to allow any async navigation
-    await page.waitForTimeout(300);
-    expect(page.url()).toBe(urlBefore);
+    await expect(tslaButton).toBeVisible();
+  });
+
+  test('clicking the TSLA ticker navigates to /TSLA', async ({ page }) => {
+    const tslaButton = page
+      .locator('button.ticker-link')
+      .filter({ hasText: 'TSLA' })
+      .first();
+    await tslaButton.click();
+    await page.waitForURL('**/TSLA', { timeout: 5000 });
+    await expect(page.locator('.ticker-detail-page')).toBeVisible();
   });
 
   test('InstrumentDetailModal never appears while on FUTU tab', async ({ page }) => {

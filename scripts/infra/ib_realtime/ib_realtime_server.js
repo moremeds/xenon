@@ -1102,6 +1102,8 @@ async function handleClientMessage(client, data) {
           c.expiry,
           c.strike,
           c.right,
+          "SMART",
+          "USD",
         );
         ensureSymbolState(key, ibContract);
         if (ibConnected) {
