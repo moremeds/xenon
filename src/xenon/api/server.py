@@ -1321,8 +1321,56 @@ async def orders_place(request: Request):
                 },
             )
 
+    # F4: atomic reservation
+    cid = body.get("client_attempt_id")
+    if not cid:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "client_attempt_id is required"},
+        )
+    user_id = "local"
+    req_row = orders_store.RequestRow(
+        ticker=str(body.get("symbol", "")).upper(),
+        security_type="STK" if body.get("type") == "stock" else "OPT",
+        action=str(body.get("action", "")).upper(),
+        quantity=int(body.get("quantity", 0)),
+        expiry=body.get("expiry"),
+        strike=Decimal(str(body["strike"])) if body.get("strike") is not None else None,
+        right=(body.get("right") or "").upper() or None,
+        multiplier=int(body.get("multiplier", 100)),
+        con_id=int(body.get("con_id") or 0) or None,
+        limit_price=Decimal(str(body.get("limitPrice", "0"))),
+    )
+    outcome = orders_store.reserve_attempt(user_id, cid, req_row)
+    if outcome.status == "terminal":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": f"attempt {cid} already in terminal state {outcome.state}",
+                "reason_code": ReasonCode.ATTEMPT_ID_TERMINAL.value,
+                "state": outcome.state,
+                "prior_reason_code": outcome.reason_code,
+            },
+        )
+    if outcome.status == "duplicate":
+        return JSONResponse(
+            status_code=200,
+            content={
+                "duplicate_of": outcome.duplicate_of,
+                "state": outcome.state,
+                "submission_id": outcome.submission_id,
+            },
+        )
+    submission_id = outcome.submission_id
+
     if test_mode:
         order_id, perm_id = _next_test_order_ids()
+        orders_store.mark_submitted(
+            submission_id=submission_id,
+            ib_order_id=str(order_id),
+            perm_id=str(perm_id),
+            placing_client_id=26,
+        )
         return {
             "status": "ok",
             "orderId": order_id,
@@ -1330,14 +1378,36 @@ async def orders_place(request: Request):
             "initialStatus": "Submitted",
             "message": "Order accepted in test mode",
             "echo": body,
+            "submission_id": submission_id,
         }
 
     order_json = json.dumps(body)
     result = await _run_ib_script_with_recovery("xenon-ib-place-order", ["--json", order_json], timeout=15)
     if not result.ok:
+        orders_store.mark_terminal(
+            submission_id=submission_id,
+            state="FAILED",
+            reason_code="SUBPROCESS_ERROR",
+            filled_qty=0,
+            avg_fill_price=None,
+        )
         raise HTTPException(status_code=502, detail=result.error)
     if result.data and result.data.get("status") == "error":
+        orders_store.mark_terminal(
+            submission_id=submission_id,
+            state="REJECTED",
+            reason_code=str(result.data.get("code") or "IB_REJECT"),
+            filled_qty=0,
+            avg_fill_price=None,
+        )
         raise HTTPException(status_code=502, detail=result.data.get("message", "Order failed"))
+    if result.data:
+        orders_store.mark_submitted(
+            submission_id=submission_id,
+            ib_order_id=str(result.data.get("orderId") or ""),
+            perm_id=str(result.data.get("permId") or ""),
+            placing_client_id=int(result.data.get("clientId") or 26),
+        )
     return result.data
 
 
