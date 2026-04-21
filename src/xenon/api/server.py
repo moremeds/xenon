@@ -1171,19 +1171,28 @@ def _body_to_preflight_request(body: dict) -> PreflightRequest:
     """Translate /orders/place body to PreflightRequest. Combo (BAG) orders are skipped
     by preflight in F2 — the TS guard still gates them; server-side BAG gate is scoped
     out of PR-A."""
+    from xenon.execution.universe import UNIVERSE, get_multiplier
+
     sec_type = "STK" if body.get("type") == "stock" else "OPT"
     right_raw = (body.get("right") or "").upper()
     right = right_raw if right_raw in ("C", "P") else None
     limit = body.get("limitPrice")
+    ticker = str(body.get("symbol", "")).upper()
+    # SECURITY: multiplier MUST come from server-side universe metadata, never
+    # from request body. A client posting `multiplier: 1` would otherwise
+    # inflate share-cover units 100x and bypass Gate 4. Unknown tickers fall
+    # back to 100 so the universe check can produce UNIVERSE_UNKNOWN rather
+    # than a KeyError.
+    multiplier = get_multiplier(ticker) if ticker in UNIVERSE else 100
     return PreflightRequest(
-        ticker=str(body.get("symbol", "")).upper(),
+        ticker=ticker,
         security_type=sec_type,
         action=str(body.get("action", "")).upper(),
         quantity=int(body.get("quantity", 0)),
         right=right,
         expiry=body.get("expiry"),
         strike=Decimal(str(body["strike"])) if body.get("strike") is not None else None,
-        multiplier=int(body.get("multiplier", 100)),
+        multiplier=multiplier,
         limit_price=Decimal(str(limit)) if limit is not None else Decimal("0"),
     )
 

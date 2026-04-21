@@ -98,6 +98,48 @@ def test_spy_buy_passes_preflight(client):
     )
 
 
+def test_spoofed_multiplier_cannot_bypass_gate(client, monkeypatch, tmp_path):
+    """Codex pass-3 P2: attacker posts multiplier=1 to turn 100 SPY shares into
+    100 cover units, bypassing Gate 4 on a SELL call. The server must derive
+    multiplier from universe.py, not the request body.
+    """
+    # Portfolio with 100 SPY shares → 1 contract of cover at multiplier=100
+    portfolio = {
+        "positions": [
+            {
+                "ticker": "SPY",
+                "structure_type": "Stock",
+                "direction": "LONG",
+                "contracts": 100,
+                "expiry": None,
+                "legs": [{"direction": "LONG", "type": "Stock", "contracts": 100, "strike": 0.0}],
+            }
+        ]
+    }
+    pf_path = tmp_path / "nodata_multiplier"
+    pf_path.mkdir()
+    (pf_path / "portfolio.json").write_text(json.dumps(portfolio))
+    monkeypatch.setenv("XENON_DATA_DIR", str(pf_path))
+
+    # 2 short calls with spoofed multiplier=1 — would bypass the gate if trusted
+    resp = client.post(
+        "/orders/place",
+        json={
+            "type": "option",
+            "symbol": "SPY",
+            "action": "SELL",
+            "quantity": 2,
+            "right": "C",
+            "expiry": "20260620",
+            "strike": 500.0,
+            "multiplier": 1,  # malicious value
+            "limitPrice": 5.0,
+        },
+    )
+    assert resp.status_code == 400, f"spoofed multiplier=1 must not bypass Gate 4; got {resp.status_code} {resp.json()}"
+    assert resp.json()["reason_code"] == "ETF_CALL_UNCOVERED"
+
+
 def test_missing_portfolio_fails_open(monkeypatch, tmp_path):
     """Codex P1 #1: TS guard at web/app/api/orders/place/route.ts:183-185 fails
     OPEN when portfolio.json is absent (logs + skips enforcement). Preflight
