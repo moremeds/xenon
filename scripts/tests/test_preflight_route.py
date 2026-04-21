@@ -51,6 +51,12 @@ def test_spx_stock_buy_blocked_by_preflight(client):
     assert resp.status_code == 400
     body = resp.json()
     assert body["reason_code"] == "INDEX_HAS_NO_STOCK"
+    # xenonApi.ts reads body.detail for human-readable error copy. Without it
+    # xenonFetch falls through to JSON.stringify(body), which surfaces as an
+    # unreadable blob in the UI.
+    assert "detail" in body and body["detail"], (
+        f"block response must include human-readable `detail` for xenonFetch; got {body}"
+    )
 
 
 def test_unknown_ticker_blocked_by_preflight(client):
@@ -89,4 +95,34 @@ def test_spy_buy_passes_preflight(client):
     # one outcome we reject here is 400 with a preflight reason_code.
     assert resp.status_code != 400 or "reason_code" not in resp.json(), (
         f"SPY BUY should not be blocked by preflight; got {resp.status_code} {resp.json()}"
+    )
+
+
+def test_missing_portfolio_fails_open(monkeypatch, tmp_path):
+    """Codex P1 #1: TS guard at web/app/api/orders/place/route.ts:183-185 fails
+    OPEN when portfolio.json is absent (logs + skips enforcement). Preflight
+    must match that behavior — otherwise a fresh server start blocks every SELL.
+    """
+    # Override the autouse fixture's data dir with one that has NO portfolio file.
+    empty_dir = tmp_path / "nodata"
+    empty_dir.mkdir()
+    monkeypatch.setenv("XENON_DATA_DIR", str(empty_dir))
+
+    from xenon.api.server import app
+
+    client = TestClient(app)
+    # A SELL that would be blocked as INSUFFICIENT_SHARES with an empty portfolio
+    # should pass preflight when the portfolio file is missing (fail-open).
+    resp = client.post(
+        "/orders/place",
+        json={
+            "type": "stock",
+            "symbol": "SPY",
+            "action": "SELL",
+            "quantity": 100,
+            "limitPrice": 500.0,
+        },
+    )
+    assert resp.status_code != 400 or "reason_code" not in resp.json(), (
+        f"Missing portfolio.json must fail open (match TS guard); got {resp.status_code} {resp.json()}"
     )
