@@ -183,3 +183,47 @@ def test_record_event_appends_row(db_path):
     ).fetchall()
     con.close()
     assert rows == [("PREFLIGHT_ACK_LIMIT",)]
+
+
+from xenon.execution.orders_store import working_reservations_for
+
+
+def test_working_reservations_sums_active_sell_rows(db_path):
+    init_store(db_path)
+    reserve_attempt("local", "cid-W1", _req(quantity=100), db_path=db_path)
+    r2 = reserve_attempt("local", "cid-W2", _req(quantity=50), db_path=db_path)
+    mark_submitted(
+        submission_id=r2.submission_id,
+        ib_order_id="6001",
+        perm_id="8001",
+        placing_client_id=26,
+        db_path=db_path,
+    )
+    r3 = reserve_attempt("local", "cid-W3", _req(quantity=77), db_path=db_path)
+    mark_terminal(
+        submission_id=r3.submission_id,
+        state="CANCELLED",
+        reason_code=None,
+        filled_qty=0,
+        avg_fill_price=None,
+        db_path=db_path,
+    )
+    res = working_reservations_for("local", "SPY", db_path=db_path)
+    assert res.stock_sell_qty == 150
+    assert res.short_call_qty == 0
+    assert res.long_call_close_qty_same_exp == 0
+
+
+def test_working_reservations_counts_short_call_only_when_sell_call(db_path):
+    init_store(db_path)
+    reserve_attempt(
+        "local", "cid-C1",
+        _req(
+            security_type="OPT", action="SELL", right="C",
+            expiry="20260620", strike=Decimal("500"), quantity=3,
+        ),
+        db_path=db_path,
+    )
+    res = working_reservations_for("local", "SPY", db_path=db_path)
+    assert res.short_call_qty == 3
+    assert res.stock_sell_qty == 0

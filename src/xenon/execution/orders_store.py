@@ -293,3 +293,42 @@ def lookup_by_attempt(
     if row is None:
         return None
     return SubmissionRow(*row)
+
+
+from xenon.execution.preflight import WorkingReservations
+
+_ACTIVE_STATES = ("PENDING", "WORKING", "PARTIALLY_FILLED")
+
+
+def working_reservations_for(
+    user_id: str, ticker: str, db_path: Path | str | None = None
+) -> WorkingReservations:
+    con = duckdb.connect(str(_resolve_path(db_path)))
+    try:
+        stock_sell = con.execute(
+            """
+            SELECT COALESCE(SUM(quantity - filled_qty), 0)
+              FROM orders_submissions
+             WHERE user_id = ? AND ticker = ? AND security_type = 'STK'
+               AND action = 'SELL' AND state IN ('PENDING', 'WORKING', 'PARTIALLY_FILLED')
+            """,
+            [user_id, ticker],
+        ).fetchone()[0]
+        short_call = con.execute(
+            """
+            SELECT COALESCE(SUM(quantity - filled_qty), 0)
+              FROM orders_submissions
+             WHERE user_id = ? AND ticker = ? AND security_type = 'OPT'
+               AND action = 'SELL' AND "right" = 'C'
+               AND state IN ('PENDING', 'WORKING', 'PARTIALLY_FILLED')
+            """,
+            [user_id, ticker],
+        ).fetchone()[0]
+    finally:
+        con.close()
+    return WorkingReservations(
+        stock_sell_qty=int(stock_sell),
+        short_call_qty=int(short_call),
+        short_put_cash_required=Decimal("0"),
+        long_call_close_qty_same_exp=0,
+    )
