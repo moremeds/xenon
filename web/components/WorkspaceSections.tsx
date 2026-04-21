@@ -2674,23 +2674,29 @@ function OrdersSections({
   const handleCancel = useCallback(async () => {
     if (!cancelTarget) return;
     setActionLoading(true);
-    await requestCancel(cancelTarget);
+    const result = await requestCancel(cancelTarget);
     setActionLoading(false);
-    setCancelTarget(null);
+    // B4 — keep modal open on failure so the user sees the FAILED pill on the
+    // row and the toast. Only dismiss on a clean 2xx.
+    if (result.ok) {
+      setCancelTarget(null);
+    }
   }, [cancelTarget, requestCancel]);
 
   const handleModify = useCallback(
     async (request: ModifyOrderRequest) => {
       if (!modifyTarget) return;
       setActionLoading(true);
-      await requestModify(
+      const result = await requestModify(
         modifyTarget.requestOrder,
         modifyTarget.cancelOrders?.length
           ? { ...request, cancelOrders: modifyTarget.cancelOrders }
           : request,
       );
       setActionLoading(false);
-      setModifyTarget(null);
+      if (result.ok) {
+        setModifyTarget(null);
+      }
     },
     [modifyTarget, requestModify],
   );

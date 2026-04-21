@@ -9,11 +9,65 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Dict, Optional
+import threading
+import time
+from contextlib import contextmanager
+from typing import Dict, Iterator, Optional
 
 logger = logging.getLogger("xenon.ib_pool")
 
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST, POOL_ROLES, IBClient
+
+# ---------------------------------------------------------------------------
+# Owner-clientId registry (F5)
+#
+# Serializes short-lived IB connections that share a clientId slot — notably the
+# naked-short audit (clientId 25) and cancel subprocess (20-49 range). Two
+# concurrent connects on the same clientId would collide at the IB Gateway.
+# This registry lets a caller claim a clientId slot in-process before
+# attempting a connect, and blocks other callers from racing the same slot.
+# ---------------------------------------------------------------------------
+
+_busy_owners: set[int] = set()
+_busy_owners_lock = threading.RLock()
+
+
+class ClientIdBusy(Exception):
+    """Raised when acquire_owner cannot claim the requested clientId before the deadline."""
+
+    def __init__(self, client_id: int, message: Optional[str] = None) -> None:
+        self.client_id = client_id
+        super().__init__(message or f"clientId {client_id} is busy")
+
+
+@contextmanager
+def acquire_owner(client_id: int, timeout_ms: int = 2000) -> Iterator[None]:
+    """Claim `client_id` for the duration of the `with` block.
+
+    Polls the module-level registry every 50ms until either:
+      - the slot is free (claimed, yield)
+      - the deadline expires (raise ClientIdBusy)
+
+    Thread-safe via an RLock; nested claims on *different* ids from the same
+    thread are allowed. Nested claims on the *same* id will deadlock-then-raise
+    because the slot is already held.
+    """
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
+    poll_interval = 0.05  # 50ms
+    while True:
+        with _busy_owners_lock:
+            if client_id not in _busy_owners:
+                _busy_owners.add(client_id)
+                break
+        if time.monotonic() >= deadline:
+            raise ClientIdBusy(client_id)
+        time.sleep(poll_interval)
+
+    try:
+        yield
+    finally:
+        with _busy_owners_lock:
+            _busy_owners.discard(client_id)
 
 
 def _connect_in_thread(host: str, port: int, client_id: int, timeout: int = 5) -> IBClient:

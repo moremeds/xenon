@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { readDataFile } from "@tools/data-reader";
 import { OrdersData } from "@tools/schemas/ib-orders";
-import { XenonApiError, xenonFetch } from "@/lib/xenonApi";
+import { xenonFetch } from "@/lib/xenonApi";
+import { passThroughXenonError } from "@/lib/passThroughXenonError";
 import { checkNakedShortRisk } from "@/lib/nakedShortGuard";
 import type { NakedShortPortfolio } from "@/lib/nakedShortGuard";
 import {
@@ -295,34 +296,8 @@ export async function POST(request: Request): Promise<Response> {
     });
     return setNoStoreResponseHeaders(response, requestId);
   } catch (error) {
-    if (error instanceof XenonApiError) {
-      // Pass structured upstream JSON verbatim so the frontend sees
-      // reason_code (STALE_QUOTE / LIMIT_OUT_OF_BAND / ATTEMPT_ID_TERMINAL).
-      if (error.body && typeof error.body === "object") {
-        return setNoStoreResponseHeaders(
-          NextResponse.json(error.body, { status: error.status }),
-          requestId,
-        );
-      }
-      return setNoStoreResponseHeaders(
-        jsonApiError({
-          message: error.detail,
-          status: error.status,
-          code: error.status >= 500 ? "UPSTREAM_ERROR" : undefined,
-          requestId,
-        }),
-        requestId,
-      );
-    }
-    const message =
-      error instanceof Error ? error.message : "Order placement failed";
     return setNoStoreResponseHeaders(
-      jsonApiError({
-        message,
-        status: 500,
-        code: "INTERNAL_ERROR",
-        requestId,
-      }),
+      passThroughXenonError(error, requestId),
       requestId,
     );
   }

@@ -40,6 +40,18 @@ class ReasonCode(StrEnum):
     LIMIT_OFF_TICK = "LIMIT_OFF_TICK"
     # F4 — idempotency (PR-B)
     ATTEMPT_ID_TERMINAL = "ATTEMPT_ID_TERMINAL"
+    # F5 — cancel/modify failure classification (PR-C)
+    IB_CONNECTION = "IB_CONNECTION"
+    OWNERSHIP = "OWNERSHIP"
+    IB_REJECT = "IB_REJECT"
+    MODIFY_STALE = "MODIFY_STALE"
+    MODIFY_SEQUENCE_REQUIRED = "MODIFY_SEQUENCE_REQUIRED"
+    ORDER_NOT_FOUND = "ORDER_NOT_FOUND"
+    ORDER_IDENTIFIER_REQUIRED = "ORDER_IDENTIFIER_REQUIRED"
+    # F7 — pending timeout (PR-D)
+    PENDING_TIMEOUT = "PENDING_TIMEOUT"
+    # B5 — hard subprocess failure on /orders/place (non-2xx from runner).
+    SUBPROCESS_ERROR = "SUBPROCESS_ERROR"
 
 
 class PreflightRequest(BaseModel):

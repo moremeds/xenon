@@ -56,6 +56,60 @@ class TestRunModule:
         assert result.error is not None
 
 
+class TestRunEntryPointClassifiedError:
+    """Regression for F5 integration bug: classified subprocess errors emit JSON
+    with ``status`` on stdout but exit non-zero. ``run_entry_point`` must surface
+    the parsed payload (ok=True, data=...) so the route can classify to 4xx/404
+    instead of collapsing everything to 503 IB_CONNECTION."""
+
+    def test_nonzero_exit_with_status_json_surfaces_data(self, tmp_path, monkeypatch):
+        import stat as _stat
+
+        from xenon.api import subprocess as sp
+
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        entry = fake_bin / "fake-classified-error"
+        entry.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "print(json.dumps({'status':'error','message':'x',"
+            "'classification':'ib_reject','upstream':{'code':10147,'message':'y'}}))\n"
+            "sys.exit(1)\n"
+        )
+        entry.chmod(entry.stat().st_mode | _stat.S_IXUSR | _stat.S_IXGRP | _stat.S_IXOTH)
+
+        monkeypatch.setattr(sp, "VENV_BIN", fake_bin)
+        result = asyncio.run(sp.run_entry_point("fake-classified-error"))
+
+        assert result.ok is True
+        assert result.data is not None
+        assert result.data.get("status") == "error"
+        assert result.data.get("classification") == "ib_reject"
+        assert result.data.get("upstream", {}).get("code") == 10147
+        assert result.exit_code == 1
+
+    def test_nonzero_exit_without_json_still_fails(self, tmp_path, monkeypatch):
+        import stat as _stat
+
+        from xenon.api import subprocess as sp
+
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        entry = fake_bin / "fake-crashed"
+        entry.write_text(
+            "#!/usr/bin/env python3\nimport sys\nprint('Traceback: something broke', file=sys.stderr)\nsys.exit(2)\n"
+        )
+        entry.chmod(entry.stat().st_mode | _stat.S_IXUSR | _stat.S_IXGRP | _stat.S_IXOTH)
+
+        monkeypatch.setattr(sp, "VENV_BIN", fake_bin)
+        result = asyncio.run(sp.run_entry_point("fake-crashed"))
+
+        assert result.ok is False
+        assert result.error is not None
+        assert result.exit_code == 2
+
+
 class TestScriptResult:
     """Tests for ScriptResult dataclass."""
 

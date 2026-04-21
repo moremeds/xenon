@@ -17,8 +17,27 @@ import {
 } from "@/lib/nakedShortGuard";
 import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
 import { fmtSignedPrice, toneClass } from "@/lib/format";
+import { getReasonToast } from "@/lib/orderReasonCodes";
 import { useClientAttemptId } from "./useClientAttemptId";
 import { useQuoteToken } from "./useQuoteToken";
+
+/** Derive a user-facing error string from a /api/orders/* JSON body. */
+function errorFromResponseBody(
+  body: Record<string, unknown> | null | undefined,
+  fallback: string,
+): string {
+  if (body && typeof body === "object") {
+    const code = (body as { reason_code?: unknown }).reason_code;
+    if (typeof code === "string" && code.length > 0) {
+      return getReasonToast(code).copy;
+    }
+    const err = (body as { error?: unknown }).error;
+    if (typeof err === "string" && err.length > 0) return err;
+    const detail = (body as { detail?: unknown }).detail;
+    if (typeof detail === "string" && detail.length > 0) return detail;
+  }
+  return fallback;
+}
 
 type OrderTabProps = {
   ticker: string;
@@ -93,13 +112,22 @@ function ExistingOrderRow({
   order,
   prices,
   onModify,
+  modifyFailure,
 }: {
   order: OpenOrder;
   prices: Record<string, PriceData>;
   onModify: (order: OpenOrder) => void;
+  /** Last modify failure for this permId, surfaced from OrderTab. */
+  modifyFailure?: { message: string } | null;
 }) {
   const { pendingCancels, pendingModifies, requestCancel } = useOrderActions();
   const [actionLoading, setActionLoading] = useState(false);
+  // F6.2: on 503/409 from cancel route, do NOT mark the order cancelled
+  // optimistically. Surface a FAILED pill with the reason-code copy and
+  // re-enable the button so the user can retry.
+  const [cancelFailure, setCancelFailure] = useState<{
+    message: string;
+  } | null>(null);
 
   const isPendingCancel = pendingCancels.has(order.permId);
   const isPendingModify = pendingModifies.has(order.permId);
@@ -110,9 +138,15 @@ function ExistingOrderRow({
 
   const handleCancel = useCallback(async () => {
     setActionLoading(true);
-    await requestCancel(order);
+    setCancelFailure(null);
+    const result = await requestCancel(order);
     setActionLoading(false);
+    if (!result.ok) {
+      setCancelFailure({ message: result.message });
+    }
   }, [order, requestCancel]);
+
+  const failure = cancelFailure ?? modifyFailure ?? null;
 
   // Contract description
   const c = order.contract;
@@ -145,8 +179,23 @@ function ExistingOrderRow({
                 ? "Modifying..."
                 : order.status}
           </span>
+          {failure && !isPending && (
+            <span
+              className="pill distrib"
+              style={{ fontSize: "9px", marginLeft: 6 }}
+              role="status"
+              data-testid="order-failed-pill"
+            >
+              FAILED
+            </span>
+          )}
         </div>
       </div>
+      {failure && !isPending && (
+        <div className="order-error" role="alert">
+          <div className="order-error-summary">{failure.message}</div>
+        </div>
+      )}
 
       <div className="existing-order-details">
         <div className="existing-order-detail">
@@ -395,7 +444,7 @@ function NewOrderForm({
       });
       const json = await res.json();
       if (!res.ok) {
-        setError(json.error || json.detail || "Order placement failed");
+        setError(errorFromResponseBody(json, "Order placement failed"));
         attemptId.markTerminal();
       } else {
         setSuccess(
@@ -765,7 +814,7 @@ function ComboOrderForm({
       });
       const json = await res.json();
       if (!res.ok) {
-        setError(json.error || "Order placement failed");
+        setError(errorFromResponseBody(json, "Order placement failed"));
       } else {
         setSuccess(
           `Combo order placed: ${action} ${parsedQty}x ${position.structure} @ ${fmtSignedPrice(parsedPrice)}`,
@@ -1099,14 +1148,34 @@ export default function OrderTab({
   const { requestModify } = useOrderActions();
   const [modifyTarget, setModifyTarget] = useState<OpenOrder | null>(null);
   const [modifyLoading, setModifyLoading] = useState(false);
+  // F6.2: track modify failures per-order so the row renders a FAILED pill.
+  const [modifyFailures, setModifyFailures] = useState<
+    Map<number, { message: string }>
+  >(new Map());
 
   const handleModifyConfirm = useCallback(
     async (request: ModifyOrderRequest) => {
       if (!modifyTarget) return;
       setModifyLoading(true);
-      await requestModify(modifyTarget, request);
+      const result = await requestModify(modifyTarget, request);
       setModifyLoading(false);
-      setModifyTarget(null);
+      if (result.ok) {
+        // Clear any prior failure for this order on success.
+        setModifyFailures((prev) => {
+          if (!prev.has(modifyTarget.permId)) return prev;
+          const next = new Map(prev);
+          next.delete(modifyTarget.permId);
+          return next;
+        });
+        setModifyTarget(null);
+      } else {
+        // On 503/409 (or any non-OK), keep the modal closed and let the row
+        // surface the FAILED pill. Do not optimistically mark success.
+        setModifyFailures((prev) =>
+          new Map(prev).set(modifyTarget.permId, { message: result.message }),
+        );
+        setModifyTarget(null);
+      }
     },
     [modifyTarget, requestModify],
   );
@@ -1164,6 +1233,7 @@ export default function OrderTab({
                 order={o}
                 prices={prices}
                 onModify={setModifyTarget}
+                modifyFailure={modifyFailures.get(o.permId) ?? null}
               />
             ))}
           </div>

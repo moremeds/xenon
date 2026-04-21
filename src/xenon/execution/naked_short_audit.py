@@ -16,6 +16,7 @@ import logging
 import sys
 from pathlib import Path
 
+from xenon.api.ib_pool import ClientIdBusy, acquire_owner
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 
 logger = logging.getLogger(__name__)
@@ -332,18 +333,26 @@ def main(argv=None):
         return summary
 
     # Live mode: connect and cancel
-    client = IBClient()
+    audit_client_id = CLIENT_IDS.get("ib_order_manage", 25)
     try:
-        client.connect(host=args.host, port=args.port, client_id=CLIENT_IDS.get("ib_order_manage", 25))
-        summary["cancelled"] = cancel_violations(client, violations)
-    except Exception as e:
-        logger.error("IB connection failed: %s", e)
-        summary["error"] = str(e)
-    finally:
-        try:
-            client.disconnect()
-        except Exception:
-            pass
+        with acquire_owner(audit_client_id, timeout_ms=5000):
+            client = IBClient()
+            try:
+                client.connect(host=args.host, port=args.port, client_id=audit_client_id)
+                summary["cancelled"] = cancel_violations(client, violations)
+            except Exception as e:
+                logger.error("IB connection failed: %s", e)
+                summary["error"] = str(e)
+            finally:
+                try:
+                    client.disconnect()
+                except Exception:
+                    pass
+    except ClientIdBusy as e:
+        logger.error("audit deferred: clientId %d busy", e.client_id)
+        summary["error"] = f"audit deferred: clientId {e.client_id} busy"
+        print(json.dumps(summary, indent=2))
+        sys.exit(2)
 
     print(json.dumps(summary, indent=2))
     return summary

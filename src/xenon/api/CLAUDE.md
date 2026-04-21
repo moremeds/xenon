@@ -50,6 +50,9 @@ Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xeno
    - Python/unit coverage for refreshed open-order confirmation semantics
    - route coverage for upstream status/detail propagation
    - browser coverage for the visible toast/error state
+7. **Modify route advances `modify_sequence` BEFORE subprocess; on subprocess failure, the error response includes `applied_sequence` so the client counter can sync.**
+   - Both the `result.ok=False` (503 `IB_CONNECTION`) and `status=="error"` (4xx/5xx by classification) branches echo `applied_sequence: <N>` in the HTTPException detail.
+   - Without this, a client retry at the old N loses to the advanced DB counter → `MODIFY_STALE` loop.
 
 ## Client ID Allocation Rule
 
@@ -66,6 +69,30 @@ On-demand scripts MUST use `client_id="auto"` (range 20-49). Never hardcode — 
 **Public share routes** (no auth): `/api/regime/share`, `/api/vcg/share`, `/api/internals/share`, `/api/menthorq/cta/share`.
 
 Component map, files, ticket flow: `docs/architecture/api-infrastructure.md`.
+
+## Dev probes (never enabled in production)
+
+- `POST /dev/rehydrate/synthetic` — injects a synthetic PENDING row, runs rehydrate, returns event count. Gated on `XENON_API_TEST_MODE=1` OR `DEV_PROBES=1`. Used for observability readiness check before burn-in. Hidden from `/openapi.json` (`include_in_schema=False`); the gate is the real protection.
+
+## DuckDB timestamp migration (one-time)
+
+Prior to PR-C/D the `orders_store` writer did not pin the DuckDB session `TimeZone`. On non-UTC hosts, aware `datetime.now(timezone.utc)` values were converted to local wall-clock before being stripped of tzinfo — so pre-patch rows in `orders_submissions` are stored as _local_ wall-clock timestamps, while the post-patch `_submitted_at_epoch` reader treats every naive value as UTC.
+
+Left unmigrated, the reader mis-ages those pre-patch PENDING rows by the host's UTC offset (e.g. +7h for America/Los_Angeles), which can cause fresh rows to be auto-`FAILED` with `PENDING_TIMEOUT`.
+
+Run the one-time migration once per orders DB. Dry-run first:
+
+```bash
+python3.13 scripts/migrations/2026_04_21_orders_submitted_at_to_utc.py \
+    --from-tz America/Los_Angeles            # or whatever the host TZ was
+
+# Review the preview, then:
+cp data/orders.duckdb data/orders.duckdb.bak
+python3.13 scripts/migrations/2026_04_21_orders_submitted_at_to_utc.py \
+    --from-tz America/Los_Angeles --apply
+```
+
+The script is **not idempotent** — it writes a sentinel `orders_events` row (`kind='MIGRATION_TZ_UTC_V1'`) on success and aborts on a second `--apply` run. Only servers deployed before the PR-C/D landing need this; new deploys start with the UTC-pinned writer.
 
 ## Health Check
 

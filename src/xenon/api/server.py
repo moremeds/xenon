@@ -71,7 +71,7 @@ logging.getLogger("ib_insync.wrapper").setLevel(logging.WARNING)
 logging.getLogger("ib_insync.client").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
-from ib_insync import Index
+from ib_insync import Contract, Index
 
 from xenon.clients.futu_client import FutuClient
 from xenon.clients.futu_exceptions import FutuConnectionError, FutuError
@@ -153,6 +153,58 @@ async def _trend_scan_premarket_loop():
             logger.warning("Pre-market trend scan error", exc_info=True)
 
 
+async def _run_rehydrate_on_boot() -> None:
+    """F7.2 — reconcile unresolved single-leg orders against IB on boot.
+
+    Blocks boot for up to 10s. On timeout or failure, log and continue —
+    serving with a potentially-stale orders view is preferable to refusing
+    to boot. Uses the IB pool's ``sync`` role; if the pool has no sync
+    client (test mode or gateway down), ``rehydrate_on_boot`` will raise
+    and we swallow silently.
+    """
+    from xenon.execution import orders_store as _orders_store_mod
+    from xenon.execution import single_leg_rehydrate as _rehydrate_mod
+
+    def _ib_client_factory():
+        if ib_pool is None:
+            raise RuntimeError("ib_pool not initialized")
+        client = ib_pool.get("sync")
+        if client is None:
+            raise RuntimeError("ib_pool sync role has no client")
+        return client
+
+    db_path = os.environ.get("XENON_ORDERS_DB_PATH") or str(_orders_store_mod._resolve_path(None))
+
+    # B1 — in test_mode, refuse to touch the real data/orders.duckdb. A pytest
+    # TestClient(app) without XENON_ORDERS_DB_PATH would otherwise read/write
+    # the prod DuckDB file. Require the env var to enable rehydrate under
+    # test_mode so tests can opt in explicitly via a tmp_path fixture.
+    if test_mode:
+        env_override = os.environ.get("XENON_ORDERS_DB_PATH")
+        # Compare against the literal default string — don't call _resolve_path
+        # here because it would round-trip through the env var we're checking.
+        default_prod_path = "data/orders.duckdb"
+        if not env_override or env_override == default_prod_path:
+            logger.info("test_mode: skipping rehydrate (set XENON_ORDERS_DB_PATH to enable)")
+            return
+
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                _rehydrate_mod.rehydrate_on_boot,
+                ib_client_factory=_ib_client_factory,
+                orders_store=_orders_store_mod,
+                db_path=db_path,
+            ),
+            timeout=10.0,
+        )
+        logger.info("single_leg rehydrate completed on boot")
+    except asyncio.TimeoutError:
+        logger.warning("single_leg rehydrate timed out after 10s; continuing to serve")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("single_leg rehydrate failed on boot; continuing to serve: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start IB pool and UW client on startup, tear down on shutdown."""
@@ -162,6 +214,7 @@ async def lifespan(app: FastAPI):
         logger.info("Xenon API starting in test mode; IB Gateway and pool startup are disabled")
         uw_available = bool(os.environ.get("UW_TOKEN"))
         orders_store.init_store()
+        await _run_rehydrate_on_boot()
         yield
         logger.info("Xenon API test mode shut down")
         return
@@ -296,6 +349,14 @@ async def lifespan(app: FastAPI):
     if os.environ.get("XENON_DAILY_JOB_WORKER_ID", "0") == "0":
         _trend_scan_task = asyncio.create_task(_trend_scan_premarket_loop())
 
+    # F7.2 — single-leg three-source rehydrate. Runs synchronously before
+    # the server starts serving so our view of in-flight orders is accurate
+    # on first request. Failures are logged + swallowed so boot cannot be
+    # blocked by a transient IB hiccup. Known limitation: positions_changed
+    # heuristic has no persisted baseline on boot, so unknowns map to
+    # UNKNOWN rather than auto-CANCELLED (per F7.1 design).
+    await _run_rehydrate_on_boot()
+
     try:
         yield
     finally:
@@ -377,7 +438,16 @@ app.add_middleware(
 )
 
 # Auth middleware — protect all routes except /health and internal ticket validation
-AUTH_EXEMPT_PATHS = {"/health", "/ws-ticket/validate", "/docs", "/openapi.json"}
+AUTH_EXEMPT_PATHS = {
+    "/health",
+    "/ws-ticket/validate",
+    "/docs",
+    "/openapi.json",
+    # B3 — /dev/rehydrate/synthetic intentionally NOT listed here. The route
+    # is protected by the _dev_probes_enabled() gate (DEV_PROBES/test_mode),
+    # the localhost-bypass below, and standard Clerk auth. Exempting it would
+    # expose a public write endpoint if DEV_PROBES=1 leaked into a non-local env.
+}
 
 
 @app.middleware("http")
@@ -961,6 +1031,127 @@ async def health():
     }
 
 
+# ---------------------------------------------------------------------------
+# Dev probes — gated on XENON_API_TEST_MODE or DEV_PROBES=1. Never in prod.
+# ---------------------------------------------------------------------------
+
+
+def _dev_probes_enabled() -> bool:
+    """True iff test_mode is on OR DEV_PROBES=1 is set in the environment."""
+    return bool(test_mode) or os.environ.get("DEV_PROBES", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+class _FakeEmptyIBClient:
+    """Stand-in IB client with no open orders / executions / positions.
+
+    Used by the synthetic rehydrate probe so a backdated PENDING row
+    deterministically reconciles to FAILED/PENDING_TIMEOUT.
+    """
+
+    def get_open_orders(self):
+        return []
+
+    def get_executions(self):
+        return []
+
+    def get_positions(self):
+        return {}
+
+
+@app.post("/dev/rehydrate/synthetic", include_in_schema=False)
+async def dev_rehydrate_synthetic():
+    """Inject a synthetic PENDING row, run rehydrate_on_boot, return event count.
+
+    Dev-only. Verifies the rehydrate path end-to-end (reservation → backdate →
+    reconcile → orders_events) without needing a live IB Gateway. Used as a
+    burn-in / observability readiness check.
+    """
+    if not _dev_probes_enabled():
+        raise HTTPException(status_code=404)
+
+    import uuid as _uuid
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+    from datetime import timezone as _tz
+    from decimal import Decimal as _Dec
+
+    import duckdb as _duckdb
+
+    from xenon.execution import orders_store as _orders_store_mod
+    from xenon.execution import single_leg_rehydrate as _rehydrate_mod
+    from xenon.execution.single_leg_rehydrate import PENDING_TIMEOUT_SECONDS
+
+    db_path = os.environ.get("XENON_ORDERS_DB_PATH") or str(_orders_store_mod._resolve_path(None))
+    _orders_store_mod.init_store(db_path)
+
+    client_attempt_id = f"synthetic-{_uuid.uuid4()}"
+    reservation = _orders_store_mod.reserve_attempt(
+        user_id="dev-probe",
+        client_attempt_id=client_attempt_id,
+        request=_orders_store_mod.RequestRow(
+            ticker="SPY",
+            security_type="STK",
+            action="BUY",
+            quantity=1,
+            multiplier=1,
+            limit_price=_Dec("500"),
+        ),
+        db_path=db_path,
+    )
+    submission_id = reservation.submission_id
+
+    # Backdate submitted_at past the PENDING timeout so the reconcile decision
+    # is deterministic (FAILED / PENDING_TIMEOUT). Inline UPDATE — probe-specific.
+    # Use the UTC-session helper so the naive round-trip preserves the epoch.
+    backdated = _dt.now(_tz.utc) - _td(seconds=PENDING_TIMEOUT_SECONDS + 5)
+    con = _orders_store_mod._connect_utc(db_path)
+    try:
+        con.execute(
+            "UPDATE orders_submissions SET submitted_at = ? WHERE submission_id = ?",
+            [backdated, submission_id],
+        )
+    finally:
+        con.close()
+
+    decisions = await asyncio.to_thread(
+        _rehydrate_mod.rehydrate_on_boot,
+        ib_client_factory=lambda: _FakeEmptyIBClient(),
+        orders_store=_orders_store_mod,
+        db_path=db_path,
+    )
+
+    # Count events written for this submission
+    con = _duckdb.connect(str(db_path))
+    try:
+        row = con.execute(
+            "SELECT COUNT(*) FROM orders_events WHERE submission_id = ?",
+            [submission_id],
+        ).fetchone()
+    finally:
+        con.close()
+    events_count = int(row[0]) if row else 0
+
+    summary = [
+        {
+            "to_state": d.to_state,
+            "reason_code": d.reason_code,
+            "event_kind": d.event_kind,
+        }
+        for d in decisions
+    ]
+
+    return {
+        "submission_id": submission_id,
+        "events_added": events_count,
+        "decisions": summary,
+    }
+
+
 @app.post("/ws-ticket")
 async def get_ws_ticket(payload: dict = Depends(verify_clerk_jwt)):
     """Issue a short-lived ticket for WebSocket authentication."""
@@ -1218,8 +1409,17 @@ def _run_preflight(body: dict, user_id: str = "local") -> Verdict:
 
 def _lookup_min_tick_via_pool(con_id: int) -> Decimal:
     """Real-path minTick lookup via ib_pool 'data' role. Tests replace
-    `_tick_rule_cache` with a deterministic fake."""
-    raise HTTPException(status_code=503, detail="IB data role not ready")
+    `_tick_rule_cache` with a deterministic fake.
+
+    TEMPORARY: returns 0.01 (US equity minTick) without hitting IB. The
+    real implementation needs an async-safe path: ``ib_insync``'s
+    ``reqContractDetails`` starts its own event loop, which collides with
+    FastAPI's loop when called from the sync ``quote_guard.check`` stack.
+    Stocks are always 0.01; options are 0.01 above $3 and 0.05 below,
+    but sub-cent stock ticks are allowed for stocks priced < $1 — out of
+    scope for PR-C/D QA.
+    """
+    return Decimal("0.01")
 
 
 _tick_rule_cache = quote_guard.TickRuleCache(
@@ -1237,12 +1437,40 @@ def _fetch_quote_snapshot(ticker: str, con_id: int) -> dict:
     """Fetch a bid/ask snapshot from the ib_pool 'data' role.
 
     Raises HTTPException(503) if the data role is unavailable. Tests
-    monkeypatch this symbol on `xenon.api.server`.
+    monkeypatch this symbol on `xenon.api.server`. Callers must wrap
+    this in ``asyncio.to_thread`` — the implementation blocks on IB.
     """
     pool = ib_pool
     if pool is None:
         raise HTTPException(status_code=503, detail="IB data role unavailable")
-    raise HTTPException(status_code=503, detail="IB data role unavailable")
+    client = pool.get("data")
+    if client is None or not pool.is_connected("data"):
+        raise HTTPException(status_code=503, detail="IB data role unavailable")
+
+    contract = Contract(conId=int(con_id), exchange="SMART")
+    qualified = client.qualify_contract(contract)
+    tk = client.get_quote(qualified, snapshot=True)
+
+    import math as _math
+
+    bid = getattr(tk, "bid", None)
+    ask = getattr(tk, "ask", None)
+    bid_size = getattr(tk, "bidSize", 0) or 0
+    ask_size = getattr(tk, "askSize", 0) or 0
+
+    if (
+        bid is None
+        or ask is None
+        or (isinstance(bid, float) and _math.isnan(bid))
+        or (isinstance(ask, float) and _math.isnan(ask))
+    ):
+        raise HTTPException(status_code=503, detail=f"No quote available for {ticker}/{con_id}")
+    return {
+        "bid": Decimal(str(bid)),
+        "ask": Decimal(str(ask)),
+        "bid_size": int(bid_size),
+        "ask_size": int(ask_size),
+    }
 
 
 @app.get("/orders/quote")
@@ -1250,7 +1478,7 @@ async def orders_quote(ticker: str, con_id: int):
     secret = os.environ.get("XENON_QUOTE_TOKEN_SECRET")
     if not secret:
         raise HTTPException(status_code=500, detail="quote secret not configured")
-    snap = _fetch_quote_snapshot(ticker, con_id)
+    snap = await asyncio.to_thread(_fetch_quote_snapshot, ticker, con_id)
     import time as _time
 
     payload = QuotePayload(
@@ -1410,14 +1638,31 @@ async def orders_place(request: Request):
         )
         raise HTTPException(status_code=502, detail=result.error)
     if result.data and result.data.get("status") == "error":
+        # B6 — always write the literal "IB_REJECT" as reason_code so the UI
+        # toast map resolves. The raw IB numeric code + message go into the
+        # orders_events audit row so we don't lose the info.
+        ib_code = result.data.get("code")
+        ib_message = result.data.get("message", "Order failed")
         orders_store.mark_terminal(
             submission_id=submission_id,
             state="REJECTED",
-            reason_code=str(result.data.get("code") or "IB_REJECT"),
+            reason_code=ReasonCode.IB_REJECT.value,
             filled_qty=0,
             avg_fill_price=None,
         )
-        raise HTTPException(status_code=502, detail=result.data.get("message", "Order failed"))
+        try:
+            orders_store.record_event(
+                submission_id,
+                "IB_REJECT",
+                {"ib_code": ib_code, "ib_message": ib_message},
+            )
+        except Exception:  # pragma: no cover — event writes are best-effort
+            logger.warning(
+                "Failed to record IB_REJECT event for submission %s",
+                submission_id,
+                exc_info=True,
+            )
+        raise HTTPException(status_code=502, detail=ib_message)
     if result.data:
         orders_store.mark_submitted(
             submission_id=submission_id,
@@ -1428,6 +1673,63 @@ async def orders_place(request: Request):
     return result.data
 
 
+# F5.4 — cancel/modify failure classification
+# ib_reject codes that mean "order vanished" map to 404 so the UI can
+# distinguish from a hard reject. All other ib_reject codes are 400.
+_IB_REJECT_NOT_FOUND_CODES = {"10147", "10148"}
+
+
+def _map_ib_reject_status(upstream_code: Any) -> int:
+    code = str(upstream_code) if upstream_code is not None else ""
+    return 404 if code in _IB_REJECT_NOT_FOUND_CODES else 400
+
+
+def _classify_to_http(data: dict) -> tuple[int, str]:
+    """Map subprocess classification → (http_status, reason_code)."""
+    classification = data.get("classification")
+    if classification == "connection":
+        return 503, ReasonCode.IB_CONNECTION.value
+    if classification == "ownership":
+        return 409, ReasonCode.OWNERSHIP.value
+    if classification == "ib_reject":
+        upstream = data.get("upstream") or {}
+        return _map_ib_reject_status(upstream.get("code")), ReasonCode.IB_REJECT.value
+    # Unknown/missing classification — fall back to 502 with a generic code.
+    return 502, ReasonCode.IB_REJECT.value
+
+
+def _record_manage_event(
+    ib_order_id: str,
+    kind: str,
+    detail: dict,
+    perm_id: str = "",
+) -> None:
+    """Write orders_events row for a cancel/modify attempt.
+
+    Resolves the submission by ib_order_id when present, else falls back to
+    perm_id (UI-initiated cancel/modify often carries ``orderId=0`` and only
+    a permId). If no submission exists (order placed pre-F4, or before a
+    reserve_attempt row was created), the event is skipped — orders_events
+    .submission_id is NOT NULL and has no synthetic parent row available.
+    """
+    try:
+        sid: str | None = None
+        if ib_order_id:
+            sid = orders_store.lookup_submission_id_by_ib_order_id(ib_order_id)
+        if sid is None and perm_id:
+            sid = orders_store.lookup_submission_id_by_perm_id(perm_id)
+        if sid:
+            orders_store.record_event(sid, kind, detail)
+    except Exception:  # pragma: no cover — event writes are best-effort
+        logger.warning(
+            "Failed to record %s event for order=%s perm=%s",
+            kind,
+            ib_order_id,
+            perm_id,
+            exc_info=True,
+        )
+
+
 @app.post("/orders/cancel")
 async def orders_cancel(request: Request):
     """Cancel an open order via subprocess.
@@ -1435,6 +1737,12 @@ async def orders_cancel(request: Request):
     IB scopes cancelOrder by clientId — only the clientId that placed the
     order can cancel it. The subprocess detects the original clientId and
     reconnects as that client before cancelling.
+
+    F5.4 classifies subprocess failures into HTTP statuses:
+      classification=connection → 503 IB_CONNECTION
+      classification=ownership  → 409 OWNERSHIP
+      classification=ib_reject  → 400 (or 404 for 10147/10148) IB_REJECT
+    The full upstream payload (code + message) is preserved in detail.
     """
     body = await request.json()
     if test_mode:
@@ -1455,10 +1763,34 @@ async def orders_cancel(request: Request):
 
     result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=15)
     if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
-    if result.data and result.data.get("status") == "error":
-        raise HTTPException(status_code=502, detail=result.data.get("message", "Cancel failed"))
-    return result.data
+        detail = {
+            "reason_code": ReasonCode.IB_CONNECTION.value,
+            "message": result.error or "Subprocess failed",
+            "http_status": 503,
+        }
+        _record_manage_event(str(order_id or ""), "CANCEL", detail, perm_id=str(perm_id or ""))
+        raise HTTPException(status_code=503, detail=detail)
+
+    data = result.data or {}
+    if data.get("status") == "error":
+        http_status, reason_code = _classify_to_http(data)
+        detail = {
+            "reason_code": reason_code,
+            "classification": data.get("classification"),
+            "message": data.get("message"),
+            "upstream": data.get("upstream"),
+            "http_status": http_status,
+        }
+        _record_manage_event(str(order_id or ""), "CANCEL", detail, perm_id=str(perm_id or ""))
+        raise HTTPException(status_code=http_status, detail=detail)
+
+    _record_manage_event(
+        str(order_id or ""),
+        "CANCEL",
+        {"status": data.get("status"), "message": data.get("message"), "http_status": 200},
+        perm_id=str(perm_id or ""),
+    )
+    return data
 
 
 @app.post("/orders/modify")
@@ -1467,8 +1799,13 @@ async def orders_modify(request: Request):
 
     Modify requires the original clientId that placed the order (IB scopes
     placeOrder by clientId). The subprocess detects the original clientId
-    and reconnects as that client before modifying. Cancel can use the pool
-    (master clientId=0 can cancel anything), but modify cannot.
+    and reconnects as that client before modifying.
+
+    F5.4: modifySequence monotonic gate runs BEFORE the subprocess.
+      - missing modifySequence → 400 MODIFY_SEQUENCE_REQUIRED
+      - unknown ib_order_id     → 404 ORDER_NOT_FOUND
+      - stale sequence          → 409 MODIFY_STALE (detail.applied=<current>)
+    Subprocess failures classified the same as cancel.
     """
     body = await request.json()
     if test_mode:
@@ -1483,6 +1820,65 @@ async def orders_modify(request: Request):
     new_price = body.get("newPrice")
     new_quantity = body.get("newQuantity")
     outside_rth = body.get("outsideRth")
+    modify_sequence = body.get("modifySequence")
+
+    if modify_sequence is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason_code": ReasonCode.MODIFY_SEQUENCE_REQUIRED.value,
+                "message": "modifySequence is required",
+                "http_status": 400,
+            },
+        )
+    try:
+        modify_sequence = int(modify_sequence)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason_code": ReasonCode.MODIFY_SEQUENCE_REQUIRED.value,
+                "message": "modifySequence must be an integer",
+                "http_status": 400,
+            },
+        )
+
+    # Apply sequence gate BEFORE spawning the subprocess. If only permId is
+    # supplied (UI-initiated modifies often have orderId=0), route through the
+    # perm_id variant so we can still find the submissions row.
+    if not order_id and not perm_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason_code": ReasonCode.ORDER_IDENTIFIER_REQUIRED.value,
+                "message": "Modify request must include orderId or permId.",
+                "http_status": 400,
+            },
+        )
+    if not order_id and perm_id:
+        seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence)
+    else:
+        seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence)
+    if not seq_outcome["applied"]:
+        current = seq_outcome["current_sequence"]
+        if current == -1:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "reason_code": ReasonCode.ORDER_NOT_FOUND.value,
+                    "message": f"Order {order_id} not found",
+                    "http_status": 404,
+                },
+            )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason_code": ReasonCode.MODIFY_STALE.value,
+                "message": f"modifySequence {modify_sequence} is stale; current is {current}",
+                "applied": current,
+                "http_status": 409,
+            },
+        )
 
     args = ["modify"]
     if order_id:
@@ -1500,10 +1896,50 @@ async def orders_modify(request: Request):
 
     result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=15)
     if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
-    if result.data and result.data.get("status") == "error":
-        raise HTTPException(status_code=502, detail=result.data.get("message", "Modify failed"))
-    return result.data
+        # DB sequence is already advanced; don't roll back — prevents
+        # double-apply on a retry. Log and surface to caller.
+        logger.warning(
+            "Modify subprocess failed after apply_modify(order=%s, seq=%s): %s",
+            order_id,
+            modify_sequence,
+            result.error,
+        )
+        detail = {
+            "reason_code": ReasonCode.IB_CONNECTION.value,
+            "message": result.error or "Subprocess failed",
+            "applied_sequence": modify_sequence,
+            "http_status": 503,
+        }
+        _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""))
+        raise HTTPException(status_code=503, detail=detail)
+
+    data = result.data or {}
+    if data.get("status") == "error":
+        http_status, reason_code = _classify_to_http(data)
+        detail = {
+            "reason_code": reason_code,
+            "classification": data.get("classification"),
+            "message": data.get("message"),
+            "upstream": data.get("upstream"),
+            "applied_sequence": modify_sequence,
+            "http_status": http_status,
+        }
+        _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""))
+        raise HTTPException(status_code=http_status, detail=detail)
+
+    _record_manage_event(
+        str(order_id or ""),
+        "MODIFY",
+        {
+            "status": data.get("status"),
+            "message": data.get("message"),
+            "applied_sequence": modify_sequence,
+            "http_status": 200,
+        },
+        perm_id=str(perm_id or ""),
+    )
+    # Echo the applied sequence so the UI can anchor its per-order counter.
+    return {**data, "applied_sequence": modify_sequence}
 
 
 # ---------------------------------------------------------------------------
