@@ -153,6 +153,45 @@ async def _trend_scan_premarket_loop():
             logger.warning("Pre-market trend scan error", exc_info=True)
 
 
+async def _run_rehydrate_on_boot() -> None:
+    """F7.2 — reconcile unresolved single-leg orders against IB on boot.
+
+    Blocks boot for up to 10s. On timeout or failure, log and continue —
+    serving with a potentially-stale orders view is preferable to refusing
+    to boot. Uses the IB pool's ``sync`` role; if the pool has no sync
+    client (test mode or gateway down), ``rehydrate_on_boot`` will raise
+    and we swallow silently.
+    """
+    from xenon.execution import orders_store as _orders_store_mod
+    from xenon.execution import single_leg_rehydrate as _rehydrate_mod
+
+    def _ib_client_factory():
+        if ib_pool is None:
+            raise RuntimeError("ib_pool not initialized")
+        client = ib_pool.get("sync")
+        if client is None:
+            raise RuntimeError("ib_pool sync role has no client")
+        return client
+
+    db_path = os.environ.get("XENON_ORDERS_DB_PATH") or str(_orders_store_mod._resolve_path(None))
+
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                _rehydrate_mod.rehydrate_on_boot,
+                ib_client_factory=_ib_client_factory,
+                orders_store=_orders_store_mod,
+                db_path=db_path,
+            ),
+            timeout=10.0,
+        )
+        logger.info("single_leg rehydrate completed on boot")
+    except asyncio.TimeoutError:
+        logger.warning("single_leg rehydrate timed out after 10s; continuing to serve")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("single_leg rehydrate failed on boot; continuing to serve: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start IB pool and UW client on startup, tear down on shutdown."""
@@ -162,6 +201,7 @@ async def lifespan(app: FastAPI):
         logger.info("Xenon API starting in test mode; IB Gateway and pool startup are disabled")
         uw_available = bool(os.environ.get("UW_TOKEN"))
         orders_store.init_store()
+        await _run_rehydrate_on_boot()
         yield
         logger.info("Xenon API test mode shut down")
         return
@@ -295,6 +335,14 @@ async def lifespan(app: FastAPI):
     _trend_scan_task = None
     if os.environ.get("XENON_DAILY_JOB_WORKER_ID", "0") == "0":
         _trend_scan_task = asyncio.create_task(_trend_scan_premarket_loop())
+
+    # F7.2 — single-leg three-source rehydrate. Runs synchronously before
+    # the server starts serving so our view of in-flight orders is accurate
+    # on first request. Failures are logged + swallowed so boot cannot be
+    # blocked by a transient IB hiccup. Known limitation: positions_changed
+    # heuristic has no persisted baseline on boot, so unknowns map to
+    # UNKNOWN rather than auto-CANCELLED (per F7.1 design).
+    await _run_rehydrate_on_boot()
 
     try:
         yield
