@@ -44,13 +44,14 @@ from xenon.api.routes.uw_stats import router as uw_stats_router
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
-from xenon.execution import orders_store, preflight
+from xenon.execution import orders_store, preflight, quote_tokens
 from xenon.execution.preflight import (
     PortfolioView,
     PreflightRequest,
     ReasonCode,
     Verdict,
 )
+from xenon.execution.quote_tokens import QuotePayload
 
 # Load .env from project root for Python scripts
 try:
@@ -1213,6 +1214,46 @@ def _run_preflight(body: dict, user_id: str = "local") -> Verdict:
     req = _body_to_preflight_request(body)
     reservations = orders_store.working_reservations_for(user_id, req.ticker)
     return preflight.evaluate(req, portfolio, reservations=reservations)
+
+
+def _fetch_quote_snapshot(ticker: str, con_id: int) -> dict:
+    """Fetch a bid/ask snapshot from the ib_pool 'data' role.
+
+    Raises HTTPException(503) if the data role is unavailable. Tests
+    monkeypatch this symbol on `xenon.api.server`.
+    """
+    pool = ib_pool
+    if pool is None:
+        raise HTTPException(status_code=503, detail="IB data role unavailable")
+    raise HTTPException(status_code=503, detail="IB data role unavailable")
+
+
+@app.get("/orders/quote")
+async def orders_quote(ticker: str, con_id: int):
+    secret = os.environ.get("XENON_QUOTE_TOKEN_SECRET")
+    if not secret:
+        raise HTTPException(status_code=500, detail="quote secret not configured")
+    snap = _fetch_quote_snapshot(ticker, con_id)
+    import time as _time
+
+    payload = QuotePayload(
+        con_id=con_id,
+        ticker=ticker.upper(),
+        bid=snap["bid"],
+        ask=snap["ask"],
+        bid_size=snap["bid_size"],
+        ask_size=snap["ask_size"],
+        ts_server_ms=int(_time.time() * 1000),
+    )
+    token = quote_tokens.mint(payload, secret)
+    return {
+        "token": token,
+        "bid": str(payload.bid),
+        "ask": str(payload.ask),
+        "bid_size": payload.bid_size,
+        "ask_size": payload.ask_size,
+        "ts_server_ms": payload.ts_server_ms,
+    }
 
 
 @app.post("/orders/place")
