@@ -150,7 +150,11 @@ function renderSection() {
   return render(<WorkspaceSections section="uw-analyze" />);
 }
 
-describe("UwAnalyzeSections — tiered layout", () => {
+// Heavy component test: renders both UwAnalyzeSections and WorkspaceSections
+// with a realistic portfolio. In isolation each test lands around 1-2s, but
+// under full-suite parallel pressure they occasionally push past vitest's
+// default 5s cap. Bump the ceiling rather than chase per-test slowdowns.
+describe("UwAnalyzeSections — tiered layout", { timeout: 15_000 }, () => {
   beforeEach(() => {
     currentPortfolio = null;
     refreshOne.mockClear();
