@@ -98,3 +98,33 @@ def test_fresh_token_reaches_idempotency_layer(client):
         },
     )
     assert resp.status_code == 200, resp.text
+
+
+def test_limit_override_records_PREFLIGHT_ACK_LIMIT_event(client, monkeypatch):
+    import os
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    import duckdb
+
+    from xenon.api import server
+
+    midday = datetime(2026, 4, 22, 13, 0, tzinfo=ZoneInfo("America/New_York"))
+    monkeypatch.setattr(server, "_now", lambda: midday, raising=False)
+
+    token = _mint_token(bid="9.50", ask="10.00")
+    resp = client.post(
+        "/orders/place",
+        json={
+            "type": "option", "symbol": "SPY", "action": "BUY",
+            "quantity": 1, "right": "C", "strike": 500, "expiry": "20260620",
+            "limitPrice": 12.00,
+            "acknowledge_limit_override": True,
+            "client_attempt_id": "ack-1",
+            "quote_token": token, "con_id": 756733,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    con = duckdb.connect(os.environ["XENON_ORDERS_DB_PATH"])
+    rows = con.execute("SELECT kind FROM orders_events").fetchall()
+    con.close()
+    assert ("PREFLIGHT_ACK_LIMIT",) in rows

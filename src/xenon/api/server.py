@@ -1228,6 +1228,11 @@ _tick_rule_cache = quote_guard.TickRuleCache(
 )
 
 
+def _now() -> datetime:
+    """Test seam: override via monkeypatch to inject a fixed RTH timestamp."""
+    return datetime.now(tz=timezone.utc)
+
+
 def _fetch_quote_snapshot(ticker: str, con_id: int) -> dict:
     """Fetch a bid/ask snapshot from the ib_pool 'data' role.
 
@@ -1308,18 +1313,27 @@ async def orders_place(request: Request):
             security_type="STK" if body.get("type") == "stock" else "OPT",
             action=str(body.get("action", "")).upper(),
             limit_price=Decimal(str(body.get("limitPrice", "0"))),
-            now=datetime.now(tz=timezone.utc),
+            now=_now(),
             tick_rule_lookup=_tick_rule_cache.get,
         )
+        _override_detail = None
         if not qv.accept:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "detail": qv.reason_detail,
-                    "reason_code": qv.reason_code.value if qv.reason_code else None,
+            if qv.reason_code == ReasonCode.LIMIT_OUT_OF_BAND and body.get("acknowledge_limit_override") is True:
+                _override_detail = {
                     "reason_detail": qv.reason_detail,
-                },
-            )
+                    "limit_price": body.get("limitPrice"),
+                }
+            else:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "detail": qv.reason_detail,
+                        "reason_code": qv.reason_code.value if qv.reason_code else None,
+                        "reason_detail": qv.reason_detail,
+                    },
+                )
+    else:
+        _override_detail = None
 
     # F4: atomic reservation
     cid = body.get("client_attempt_id")
@@ -1362,6 +1376,9 @@ async def orders_place(request: Request):
             },
         )
     submission_id = outcome.submission_id
+
+    if _override_detail is not None:
+        orders_store.record_event(submission_id, "PREFLIGHT_ACK_LIMIT", _override_detail)
 
     if test_mode:
         order_id, perm_id = _next_test_order_ids()

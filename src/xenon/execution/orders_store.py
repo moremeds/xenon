@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS orders_submissions (
 _CREATE_EVENTS = """
 CREATE TABLE IF NOT EXISTS orders_events (
     event_id      TEXT PRIMARY KEY,
-    submission_id TEXT NOT NULL REFERENCES orders_submissions(submission_id),
+    submission_id TEXT NOT NULL,
     kind          TEXT NOT NULL,
     detail        JSON,
     "at"          TIMESTAMP NOT NULL
