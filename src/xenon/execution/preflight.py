@@ -47,6 +47,8 @@ class ReasonCode(StrEnum):
     MODIFY_STALE = "MODIFY_STALE"
     MODIFY_SEQUENCE_REQUIRED = "MODIFY_SEQUENCE_REQUIRED"
     ORDER_NOT_FOUND = "ORDER_NOT_FOUND"
+    # F7 — pending timeout (PR-D)
+    PENDING_TIMEOUT = "PENDING_TIMEOUT"
 
 
 class PreflightRequest(BaseModel):
