@@ -178,3 +178,42 @@ def test_tick_rule_cache_refreshes_after_ttl(monkeypatch):
     t["now"] += 61
     cache.get(1)
     assert calls["n"] == 2
+
+
+def test_invalid_token_signature_rejects_as_STALE_QUOTE():
+    token = quote_tokens.mint(_payload(), SECRET)
+    bad = token[:-4] + "AAAA"
+    v = quote_guard.check(
+        token=bad, token_secret=SECRET,
+        con_id=756733, ticker="SPY", security_type="STK",
+        action="BUY", limit_price=Decimal("500.20"),
+        now=MIDDAY_RTH, tick_rule_lookup=_tick_rule,
+    )
+    assert v.accept is False
+    assert v.reason_code == ReasonCode.STALE_QUOTE
+    assert "invalid" in (v.reason_detail or "")
+
+
+def test_token_contract_mismatch_rejects():
+    token = quote_tokens.mint(_payload(ticker="SPY", con_id=756733), SECRET)
+    v = quote_guard.check(
+        token=token, token_secret=SECRET,
+        con_id=999999, ticker="QQQ", security_type="STK",
+        action="BUY", limit_price=Decimal("500.20"),
+        now=MIDDAY_RTH, tick_rule_lookup=_tick_rule,
+    )
+    assert v.accept is False
+    assert v.reason_code == ReasonCode.STALE_QUOTE
+    assert "mismatch" in (v.reason_detail or "")
+
+
+def test_sell_below_floor_rejects_with_LIMIT_OUT_OF_BAND():
+    token = quote_tokens.mint(_payload(bid=Decimal("500.10"), ask=Decimal("500.20")), SECRET)
+    v = quote_guard.check(
+        token=token, token_secret=SECRET,
+        con_id=756733, ticker="SPY", security_type="STK",
+        action="SELL", limit_price=Decimal("400.00"),
+        now=MIDDAY_RTH, tick_rule_lookup=_tick_rule,
+    )
+    assert v.accept is False
+    assert v.reason_code == ReasonCode.LIMIT_OUT_OF_BAND
