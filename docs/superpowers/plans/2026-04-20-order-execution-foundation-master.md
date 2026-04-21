@@ -69,23 +69,23 @@ Each phase has (or will have) a dedicated sub-plan at
 Sub-plans are **written at phase kickoff**, not upfront, so they reflect
 the actual state of the codebase when work begins.
 
-| Phase            | Sub-plan file                                        | Status                                        | Spec ref          | Blocks             |
-| ---------------- | ---------------------------------------------------- | --------------------------------------------- | ----------------- | ------------------ |
-| **F0**           | `f0-universe-normalize.md`                           | **written** (see companion file)              | SL §2, §9         | F1, F2, everything |
-| **F1**           | `2026-04-20-order-execution-pr-a-audit-preflight.md` | **bundled into PR-A** (written; see sub-plan) | SL §13, Wiz §11.1 | F2, W1             |
-| **F2**           | `2026-04-20-order-execution-pr-a-audit-preflight.md` | **bundled into PR-A** (written; see sub-plan) | SL §5             | F3, F5, W1         |
-| **F3**           | `f3-quote-tokens.md`                                 | TBD — write at F2 complete                    | SL §7             | F5, W2             |
-| **F4**           | `f4-atomic-idempotency.md`                           | TBD — write at F3 complete                    | SL §5.3, §12      | F5, W5             |
-| **F5**           | `f5-cancel-modify-failure.md`                        | TBD — write at F4 complete                    | SL §8             | W2                 |
-| **F6**           | `f6-error-propagation-ui.md`                         | TBD — write at F5 complete                    | SL §6, §10        | user-facing done   |
-| **F7**           | `f7-rehydrate.md`                                    | TBD — write at F6 complete                    | SL §11            | W5                 |
-| **BURN-IN GATE** | —                                                    | ≥1 week live with no critical regressions     | —                 | W1                 |
-| **W1**           | `w1-wizard-planner.md`                               | TBD — write at burn-in clear                  | Wiz P1            | W2                 |
-| **W2**           | `w2-wizard-api.md`                                   | TBD                                           | Wiz P2            | W3                 |
-| **W3**           | `w3-wizard-modal.md`                                 | TBD                                           | Wiz P3            | W4                 |
-| **W4**           | `w4-wizard-protection.md`                            | TBD                                           | Wiz P4            | W5                 |
-| **W5**           | `w5-wizard-close-residual.md`                        | TBD                                           | Wiz P5            | W6                 |
-| **W6**           | `w6-wizard-mode-b.md`                                | TBD                                           | Wiz P6            | —                  |
+| Phase            | Sub-plan file                                                 | Status                                        | Spec ref          | Blocks             |
+| ---------------- | ------------------------------------------------------------- | --------------------------------------------- | ----------------- | ------------------ |
+| **F0**           | `f0-universe-normalize.md`                                    | **written** (see companion file)              | SL §2, §9         | F1, F2, everything |
+| **F1**           | `2026-04-20-order-execution-pr-a-audit-preflight.md`          | **bundled into PR-A** (written; see sub-plan) | SL §13, Wiz §11.1 | F2, W1             |
+| **F2**           | `2026-04-20-order-execution-pr-a-audit-preflight.md`          | **bundled into PR-A** (written; see sub-plan) | SL §5             | F3, F5, W1         |
+| **F3**           | `2026-04-21-order-execution-pr-b-quote-tokens-idempotency.md` | **bundled into PR-B** (written; see sub-plan) | SL §7             | F5, W2             |
+| **F4**           | `2026-04-21-order-execution-pr-b-quote-tokens-idempotency.md` | **bundled into PR-B** (written; see sub-plan) | SL §5.3, §12      | F5, W5             |
+| **F5**           | `f5-cancel-modify-failure.md`                                 | TBD — write at F4 complete                    | SL §8             | W2                 |
+| **F6**           | `f6-error-propagation-ui.md`                                  | TBD — write at F5 complete                    | SL §6, §10        | user-facing done   |
+| **F7**           | `f7-rehydrate.md`                                             | TBD — write at F6 complete                    | SL §11            | W5                 |
+| **BURN-IN GATE** | —                                                             | ≥1 week live with no critical regressions     | —                 | W1                 |
+| **W1**           | `w1-wizard-planner.md`                                        | TBD — write at burn-in clear                  | Wiz P1            | W2                 |
+| **W2**           | `w2-wizard-api.md`                                            | TBD                                           | Wiz P2            | W3                 |
+| **W3**           | `w3-wizard-modal.md`                                          | TBD                                           | Wiz P3            | W4                 |
+| **W4**           | `w4-wizard-protection.md`                                     | TBD                                           | Wiz P4            | W5                 |
+| **W5**           | `w5-wizard-close-residual.md`                                 | TBD                                           | Wiz P5            | W6                 |
+| **W6**           | `w6-wizard-mode-b.md`                                         | TBD                                           | Wiz P6            | —                  |
 
 **Rationale for deferred sub-plans:** writing-plans requires
 placeholder-free, fully-stepped TDD plans. A plan written today for W5
@@ -97,6 +97,13 @@ that are better made with fresh context.
 single coordinated PR. Both target Gate 4 parity (F1 in the post-sync audit,
 F2 as a pre-submit gate) so they share fixture infrastructure and a
 semantic seam. F3–F7 remain separate phases.
+
+**PR-B bundling (post-kickoff decision, 2026-04-21):** F3 (quote tokens +
+limit band) and F4 (atomic idempotency + `orders_submissions`) ship together.
+F4 lands first so the DuckDB schema and `orders_events` journal are in place
+when F3 writes `PREFLIGHT_ACK_LIMIT` override rows. F3 and F4 touch disjoint
+modules (§dep graph above) so merge conflicts are minimal. F5–F7 remain
+separate phases.
 
 ## Phase dependency graph (v0.2 — split into "may start" vs "may release")
 

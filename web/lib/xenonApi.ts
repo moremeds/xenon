@@ -11,6 +11,7 @@ export class XenonApiError extends Error {
   constructor(
     public readonly status: number,
     public readonly detail: string,
+    public readonly body: Record<string, unknown> | null = null,
   ) {
     super(`Xenon API ${status}: ${detail}`);
     this.name = "XenonApiError";
@@ -34,13 +35,15 @@ export async function xenonFetch<T = Record<string, unknown>>(
   });
   if (!res.ok) {
     let detail: string;
+    let bodyJson: Record<string, unknown> | null = null;
     try {
       const body = await res.json();
+      bodyJson = body && typeof body === "object" ? body : null;
       detail = body.detail ?? body.error ?? JSON.stringify(body);
     } catch {
       detail = await res.text().catch(() => `HTTP ${res.status}`);
     }
-    throw new XenonApiError(res.status, detail);
+    throw new XenonApiError(res.status, detail, bodyJson);
   }
   return res.json();
 }

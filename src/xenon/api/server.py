@@ -44,13 +44,14 @@ from xenon.api.routes.uw_stats import router as uw_stats_router
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
-from xenon.execution import preflight
+from xenon.execution import orders_store, preflight, quote_guard, quote_tokens
 from xenon.execution.preflight import (
     PortfolioView,
     PreflightRequest,
     ReasonCode,
     Verdict,
 )
+from xenon.execution.quote_tokens import QuotePayload
 
 # Load .env from project root for Python scripts
 try:
@@ -160,6 +161,7 @@ async def lifespan(app: FastAPI):
     if test_mode:
         logger.info("Xenon API starting in test mode; IB Gateway and pool startup are disabled")
         uw_available = bool(os.environ.get("UW_TOKEN"))
+        orders_store.init_store()
         yield
         logger.info("Xenon API test mode shut down")
         return
@@ -173,6 +175,8 @@ async def lifespan(app: FastAPI):
     app.state.ib_pool = ib_pool
     pool_status = await ib_pool.connect_all()
     logger.info("IB pool status: %s", pool_status)
+
+    orders_store.init_store()
 
     # UW client — just verify token exists
     uw_available = bool(os.environ.get("UW_TOKEN"))
@@ -1197,9 +1201,7 @@ def _body_to_preflight_request(body: dict) -> PreflightRequest:
     )
 
 
-def _run_preflight(body: dict) -> Verdict:
-    # Skip combo orders in F2 — the Next.js TS guard still covers them; server-side
-    # BAG preflight is tracked separately (not a PR-A deliverable).
+def _run_preflight(body: dict, user_id: str = "local") -> Verdict:
     if body.get("type") == "combo":
         return Verdict(accept=True)
     portfolio = _load_portfolio_view()
@@ -1210,7 +1212,65 @@ def _run_preflight(body: dict) -> Verdict:
         # removes this branch.
         return Verdict(accept=True)
     req = _body_to_preflight_request(body)
-    return preflight.evaluate(req, portfolio)
+    reservations = orders_store.working_reservations_for(user_id, req.ticker)
+    return preflight.evaluate(req, portfolio, reservations=reservations)
+
+
+def _lookup_min_tick_via_pool(con_id: int) -> Decimal:
+    """Real-path minTick lookup via ib_pool 'data' role. Tests replace
+    `_tick_rule_cache` with a deterministic fake."""
+    raise HTTPException(status_code=503, detail="IB data role not ready")
+
+
+_tick_rule_cache = quote_guard.TickRuleCache(
+    source=_lookup_min_tick_via_pool,
+    ttl_seconds=24 * 3600,
+)
+
+
+def _now() -> datetime:
+    """Test seam: override via monkeypatch to inject a fixed RTH timestamp."""
+    return datetime.now(tz=timezone.utc)
+
+
+def _fetch_quote_snapshot(ticker: str, con_id: int) -> dict:
+    """Fetch a bid/ask snapshot from the ib_pool 'data' role.
+
+    Raises HTTPException(503) if the data role is unavailable. Tests
+    monkeypatch this symbol on `xenon.api.server`.
+    """
+    pool = ib_pool
+    if pool is None:
+        raise HTTPException(status_code=503, detail="IB data role unavailable")
+    raise HTTPException(status_code=503, detail="IB data role unavailable")
+
+
+@app.get("/orders/quote")
+async def orders_quote(ticker: str, con_id: int):
+    secret = os.environ.get("XENON_QUOTE_TOKEN_SECRET")
+    if not secret:
+        raise HTTPException(status_code=500, detail="quote secret not configured")
+    snap = _fetch_quote_snapshot(ticker, con_id)
+    import time as _time
+
+    payload = QuotePayload(
+        con_id=con_id,
+        ticker=ticker.upper(),
+        bid=snap["bid"],
+        ask=snap["ask"],
+        bid_size=snap["bid_size"],
+        ask_size=snap["ask_size"],
+        ts_server_ms=int(_time.time() * 1000),
+    )
+    token = quote_tokens.mint(payload, secret)
+    return {
+        "token": token,
+        "bid": str(payload.bid),
+        "ask": str(payload.ask),
+        "bid_size": payload.bid_size,
+        "ask_size": payload.ask_size,
+        "ts_server_ms": payload.ts_server_ms,
+    }
 
 
 @app.post("/orders/place")
@@ -1234,8 +1294,100 @@ async def orders_place(request: Request):
             },
         )
 
+    # F3: quote-token + tick-grid + limit-band + market-hours
+    if body.get("type") != "combo":
+        token = body.get("quote_token")
+        if not token:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "quote_token is required",
+                    "reason_code": ReasonCode.STALE_QUOTE.value,
+                },
+            )
+        qv = quote_guard.check(
+            token=token,
+            token_secret=os.environ.get("XENON_QUOTE_TOKEN_SECRET", ""),
+            con_id=int(body.get("con_id") or 0),
+            ticker=str(body.get("symbol", "")).upper(),
+            security_type="STK" if body.get("type") == "stock" else "OPT",
+            action=str(body.get("action", "")).upper(),
+            limit_price=Decimal(str(body.get("limitPrice", "0"))),
+            now=_now(),
+            tick_rule_lookup=_tick_rule_cache.get,
+        )
+        _override_detail = None
+        if not qv.accept:
+            if qv.reason_code == ReasonCode.LIMIT_OUT_OF_BAND and body.get("acknowledge_limit_override") is True:
+                _override_detail = {
+                    "reason_detail": qv.reason_detail,
+                    "limit_price": body.get("limitPrice"),
+                }
+            else:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "detail": qv.reason_detail,
+                        "reason_code": qv.reason_code.value if qv.reason_code else None,
+                        "reason_detail": qv.reason_detail,
+                    },
+                )
+    else:
+        _override_detail = None
+
+    # F4: atomic reservation
+    cid = body.get("client_attempt_id")
+    if not cid:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "client_attempt_id is required"},
+        )
+    user_id = "local"
+    req_row = orders_store.RequestRow(
+        ticker=str(body.get("symbol", "")).upper(),
+        security_type="STK" if body.get("type") == "stock" else "OPT",
+        action=str(body.get("action", "")).upper(),
+        quantity=int(body.get("quantity", 0)),
+        expiry=body.get("expiry"),
+        strike=Decimal(str(body["strike"])) if body.get("strike") is not None else None,
+        right=(body.get("right") or "").upper() or None,
+        multiplier=int(body.get("multiplier", 100)),
+        con_id=int(body.get("con_id") or 0) or None,
+        limit_price=Decimal(str(body.get("limitPrice", "0"))),
+    )
+    outcome = orders_store.reserve_attempt(user_id, cid, req_row)
+    if outcome.status == "terminal":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": f"attempt {cid} already in terminal state {outcome.state}",
+                "reason_code": ReasonCode.ATTEMPT_ID_TERMINAL.value,
+                "state": outcome.state,
+                "prior_reason_code": outcome.reason_code,
+            },
+        )
+    if outcome.status == "duplicate":
+        return JSONResponse(
+            status_code=200,
+            content={
+                "duplicate_of": outcome.duplicate_of,
+                "state": outcome.state,
+                "submission_id": outcome.submission_id,
+            },
+        )
+    submission_id = outcome.submission_id
+
+    if _override_detail is not None:
+        orders_store.record_event(submission_id, "PREFLIGHT_ACK_LIMIT", _override_detail)
+
     if test_mode:
         order_id, perm_id = _next_test_order_ids()
+        orders_store.mark_submitted(
+            submission_id=submission_id,
+            ib_order_id=str(order_id),
+            perm_id=str(perm_id),
+            placing_client_id=26,
+        )
         return {
             "status": "ok",
             "orderId": order_id,
@@ -1243,14 +1395,36 @@ async def orders_place(request: Request):
             "initialStatus": "Submitted",
             "message": "Order accepted in test mode",
             "echo": body,
+            "submission_id": submission_id,
         }
 
     order_json = json.dumps(body)
     result = await _run_ib_script_with_recovery("xenon-ib-place-order", ["--json", order_json], timeout=15)
     if not result.ok:
+        orders_store.mark_terminal(
+            submission_id=submission_id,
+            state="FAILED",
+            reason_code="SUBPROCESS_ERROR",
+            filled_qty=0,
+            avg_fill_price=None,
+        )
         raise HTTPException(status_code=502, detail=result.error)
     if result.data and result.data.get("status") == "error":
+        orders_store.mark_terminal(
+            submission_id=submission_id,
+            state="REJECTED",
+            reason_code=str(result.data.get("code") or "IB_REJECT"),
+            filled_qty=0,
+            avg_fill_price=None,
+        )
         raise HTTPException(status_code=502, detail=result.data.get("message", "Order failed"))
+    if result.data:
+        orders_store.mark_submitted(
+            submission_id=submission_id,
+            ib_order_id=str(result.data.get("orderId") or ""),
+            perm_id=str(result.data.get("permId") or ""),
+            placing_client_id=int(result.data.get("clientId") or 26),
+        )
     return result.data
 
 

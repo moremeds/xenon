@@ -36,6 +36,10 @@ type PlaceBody = {
   strike?: number;
   right?: "C" | "P";
   legs?: ComboLeg[];
+  client_attempt_id?: string;
+  quote_token?: string;
+  con_id?: number;
+  acknowledge_limit_override?: boolean;
 };
 
 export async function POST(request: Request): Promise<Response> {
@@ -56,7 +60,11 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
       return setNoStoreResponseHeaders(
         jsonApiError({
           message: "Request body must be a JSON object",
@@ -109,7 +117,11 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     // Validate quantity: must be positive integer
-    if (body.quantity == null || body.quantity <= 0 || !Number.isFinite(body.quantity)) {
+    if (
+      body.quantity == null ||
+      body.quantity <= 0 ||
+      !Number.isFinite(body.quantity)
+    ) {
       return setNoStoreResponseHeaders(
         jsonApiError({
           message: "quantity must be a positive number",
@@ -125,8 +137,12 @@ export async function POST(request: Request): Promise<Response> {
     // Single-leg stock/option orders must remain strictly positive.
     const comboSignedPrice = body.type === "combo";
     const limitPriceInvalid = comboSignedPrice
-      ? body.limitPrice == null || body.limitPrice === 0 || !Number.isFinite(body.limitPrice)
-      : body.limitPrice == null || body.limitPrice <= 0 || !Number.isFinite(body.limitPrice);
+      ? body.limitPrice == null ||
+        body.limitPrice === 0 ||
+        !Number.isFinite(body.limitPrice)
+      : body.limitPrice == null ||
+        body.limitPrice <= 0 ||
+        !Number.isFinite(body.limitPrice);
     if (limitPriceInvalid) {
       return setNoStoreResponseHeaders(
         jsonApiError({
@@ -141,7 +157,10 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    if (body.type === "option" && (!body.expiry || !body.strike || !body.right)) {
+    if (
+      body.type === "option" &&
+      (!body.expiry || !body.strike || !body.right)
+    ) {
       return setNoStoreResponseHeaders(
         jsonApiError({
           message: "Options require: expiry, strike, right",
@@ -168,7 +187,10 @@ export async function POST(request: Request): Promise<Response> {
     // Naked short guard — block orders that would create naked short exposure
     const portfolioResult = await readDataFile("data/portfolio.json");
     if (portfolioResult?.ok) {
-      const guard = checkNakedShortRisk(body, portfolioResult.data as NakedShortPortfolio);
+      const guard = checkNakedShortRisk(
+        body,
+        portfolioResult.data as NakedShortPortfolio,
+      );
       if (!guard.allowed) {
         return setNoStoreResponseHeaders(
           jsonApiError({
@@ -181,7 +203,10 @@ export async function POST(request: Request): Promise<Response> {
         );
       }
     } else {
-      console.warn("[orders/place] Could not load portfolio for naked short guard:", portfolioResult?.error ?? "unknown error");
+      console.warn(
+        "[orders/place] Could not load portfolio for naked short guard:",
+        portfolioResult?.error ?? "unknown error",
+      );
     }
 
     const orderPayload = {
@@ -191,7 +216,9 @@ export async function POST(request: Request): Promise<Response> {
       quantity: body.quantity,
       limitPrice: body.limitPrice,
       tif: body.tif || "DAY",
-      ...(body.type === "option" ? { expiry: body.expiry, strike: body.strike, right: body.right } : {}),
+      ...(body.type === "option"
+        ? { expiry: body.expiry, strike: body.strike, right: body.right }
+        : {}),
       ...(body.type === "combo" && body.legs
         ? {
             legs: body.legs.map((l) => ({
@@ -204,22 +231,39 @@ export async function POST(request: Request): Promise<Response> {
             })),
           }
         : {}),
+      ...(body.client_attempt_id
+        ? { client_attempt_id: body.client_attempt_id }
+        : {}),
+      ...(body.quote_token ? { quote_token: body.quote_token } : {}),
+      ...(body.con_id != null ? { con_id: body.con_id } : {}),
+      ...(body.acknowledge_limit_override === true
+        ? { acknowledge_limit_override: true }
+        : {}),
     };
 
-    const orderResult = await xenonFetch<Record<string, unknown>>("/orders/place", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(orderPayload),
-      timeout: 20_000,
-    });
+    const orderResult = await xenonFetch<Record<string, unknown>>(
+      "/orders/place",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(orderPayload),
+        timeout: 20_000,
+      },
+    );
 
     // IB silent rejection: order was submitted but immediately cancelled/inactive.
-    const REJECTED_STATUSES = new Set(["Cancelled", "ApiCancelled", "Inactive", "Unknown"]);
+    const REJECTED_STATUSES = new Set([
+      "Cancelled",
+      "ApiCancelled",
+      "Inactive",
+      "Unknown",
+    ]);
     const initialStatus = orderResult.initialStatus as string | undefined;
     if (initialStatus && REJECTED_STATUSES.has(initialStatus)) {
-      const reason = initialStatus === "Unknown"
-        ? `no acknowledgement (${initialStatus}) — order may not have reached IB`
-        : initialStatus;
+      const reason =
+        initialStatus === "Unknown"
+          ? `no acknowledgement (${initialStatus}) — order may not have reached IB`
+          : initialStatus;
       return setNoStoreResponseHeaders(
         jsonApiError({
           message: `Order rejected by IB: ${reason}`,
@@ -252,6 +296,14 @@ export async function POST(request: Request): Promise<Response> {
     return setNoStoreResponseHeaders(response, requestId);
   } catch (error) {
     if (error instanceof XenonApiError) {
+      // Pass structured upstream JSON verbatim so the frontend sees
+      // reason_code (STALE_QUOTE / LIMIT_OUT_OF_BAND / ATTEMPT_ID_TERMINAL).
+      if (error.body && typeof error.body === "object") {
+        return setNoStoreResponseHeaders(
+          NextResponse.json(error.body, { status: error.status }),
+          requestId,
+        );
+      }
       return setNoStoreResponseHeaders(
         jsonApiError({
           message: error.detail,
@@ -262,7 +314,8 @@ export async function POST(request: Request): Promise<Response> {
         requestId,
       );
     }
-    const message = error instanceof Error ? error.message : "Order placement failed";
+    const message =
+      error instanceof Error ? error.message : "Order placement failed";
     return setNoStoreResponseHeaders(
       jsonApiError({
         message,

@@ -10,9 +10,15 @@ import { fmtPrice, legPriceKey, resolveEntryCost } from "@/lib/positionUtils";
 import ModifyOrderModal from "@/components/ModifyOrderModal";
 import OrderErrorBanner from "@/components/OrderErrorBanner";
 import type { ModifyOrderRequest } from "@/lib/orderModify";
-import { checkNakedShortRisk, type NakedShortPortfolio, type OrderPayload } from "@/lib/nakedShortGuard";
+import {
+  checkNakedShortRisk,
+  type NakedShortPortfolio,
+  type OrderPayload,
+} from "@/lib/nakedShortGuard";
 import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
 import { fmtSignedPrice, toneClass } from "@/lib/format";
+import { useClientAttemptId } from "./useClientAttemptId";
+import { useQuoteToken } from "./useQuoteToken";
 
 type OrderTabProps = {
   ticker: string;
@@ -26,7 +32,9 @@ type OrderTabProps = {
 
 /* ─── Convert PortfolioData to NakedShortPortfolio ─── */
 
-function toNakedShortPortfolio(portfolio: PortfolioData | null | undefined): NakedShortPortfolio {
+function toNakedShortPortfolio(
+  portfolio: PortfolioData | null | undefined,
+): NakedShortPortfolio {
   if (!portfolio) return { positions: [] };
   return {
     positions: portfolio.positions.map((p) => ({
@@ -47,7 +55,10 @@ function toNakedShortPortfolio(portfolio: PortfolioData | null | undefined): Nak
 
 /* ─── Resolve price data for an order's contract ─── */
 
-function resolveOrderPriceData(order: OpenOrder, prices: Record<string, PriceData>): PriceData | null {
+function resolveOrderPriceData(
+  order: OpenOrder,
+  prices: Record<string, PriceData>,
+): PriceData | null {
   const c = order.contract;
   if (c.secType === "STK") return prices[c.symbol] ?? null;
   if (c.secType === "OPT" && c.strike != null && c.right && c.expiry) {
@@ -65,7 +76,10 @@ function resolveOrderPriceData(order: OpenOrder, prices: Record<string, PriceDat
   return null;
 }
 
-function comboQuoteClass(value: number | null, label: "bid" | "mid" | "ask"): string {
+function comboQuoteClass(
+  value: number | null,
+  label: "bid" | "mid" | "ask",
+): string {
   if (value == null) return "";
   if (value < 0) return "negative";
   if (label === "bid") return "spread-price-bid";
@@ -102,15 +116,21 @@ function ExistingOrderRow({
 
   // Contract description
   const c = order.contract;
-  const desc = c.secType === "OPT"
-    ? `${c.symbol} ${c.expiry ?? ""} $${c.strike ?? ""} ${c.right ?? ""}`
-    : c.symbol;
+  const desc =
+    c.secType === "OPT"
+      ? `${c.symbol} ${c.expiry ?? ""} $${c.strike ?? ""} ${c.right ?? ""}`
+      : c.symbol;
 
   return (
-    <div className={`existing-order ${isPendingCancel ? "existing-order-cancelling" : isPendingModify ? "existing-order-modifying" : ""}`}>
+    <div
+      className={`existing-order ${isPendingCancel ? "existing-order-cancelling" : isPendingModify ? "existing-order-modifying" : ""}`}
+    >
       <div className="existing-order-header">
         <div className="existing-order-info">
-          <span className={`pill ${order.action === "BUY" ? "accum" : "distrib"}`} style={{ fontSize: "9px" }}>
+          <span
+            className={`pill ${order.action === "BUY" ? "accum" : "distrib"}`}
+            style={{ fontSize: "9px" }}
+          >
             {order.action}
           </span>
           <span className="existing-order-desc">{desc}</span>
@@ -119,7 +139,11 @@ function ExistingOrderRow({
         <div className="existing-order-status">
           {isPending && <Loader2 size={12} className="cancel-spinner" />}
           <span className="existing-order-status-text">
-            {isPendingCancel ? "Cancelling..." : isPendingModify ? "Modifying..." : order.status}
+            {isPendingCancel
+              ? "Cancelling..."
+              : isPendingModify
+                ? "Modifying..."
+                : order.status}
           </span>
         </div>
       </div>
@@ -131,7 +155,9 @@ function ExistingOrderRow({
         </div>
         <div className="existing-order-detail">
           <span className="pos-stat-label">LIMIT</span>
-          <span className="pos-stat-value">{order.limitPrice != null ? fmtPrice(order.limitPrice) : "---"}</span>
+          <span className="pos-stat-value">
+            {order.limitPrice != null ? fmtPrice(order.limitPrice) : "---"}
+          </span>
         </div>
         <div className="existing-order-detail">
           <span className="pos-stat-label">TIF</span>
@@ -139,7 +165,9 @@ function ExistingOrderRow({
         </div>
         <div className="existing-order-detail">
           <span className="pos-stat-label">LAST</span>
-          <span className="pos-stat-value">{priceData?.last != null ? fmtPrice(priceData.last) : "---"}</span>
+          <span className="pos-stat-value">
+            {priceData?.last != null ? fmtPrice(priceData.last) : "---"}
+          </span>
         </div>
       </div>
 
@@ -149,7 +177,11 @@ function ExistingOrderRow({
           <button
             className="btn-order-action btn-modify"
             disabled={!canModify}
-            title={canModify ? "Modify limit price" : "Only LMT orders can be modified"}
+            title={
+              canModify
+                ? "Modify limit price"
+                : "Only LMT orders can be modified"
+            }
             onClick={() => onModify(order)}
           >
             MODIFY
@@ -244,13 +276,33 @@ function NewOrderForm({
   const mid = bid != null && ask != null ? (bid + ask) / 2 : null;
 
   const defaultAction: OrderAction = position != null ? "SELL" : "BUY";
-  const [action, setAction] = useState<OrderAction>(defaultAction);
-  const [quantity, setQuantity] = useState(() => {
-    if (position && position.structure_type === "Stock") return String(position.contracts);
+  const [action, _setAction] = useState<OrderAction>(defaultAction);
+  const [quantity, _setQuantity] = useState(() => {
+    if (position && position.structure_type === "Stock")
+      return String(position.contracts);
     return "";
   });
-  const [limitPrice, setLimitPrice] = useState("");
+  const [limitPrice, _setLimitPrice] = useState("");
   const [tif, setTif] = useState<"DAY" | "GTC">("DAY");
+
+  const attemptId = useClientAttemptId({ ticker });
+  const quote = useQuoteToken({
+    ticker,
+    conId: 0,
+    expiry: position?.expiry ?? null,
+  });
+  const setAction = (v: OrderAction) => {
+    attemptId.onFieldEdit("action");
+    _setAction(v);
+  };
+  const setQuantity = (v: string) => {
+    attemptId.onFieldEdit("quantity");
+    _setQuantity(v);
+  };
+  const setLimitPrice = (v: string) => {
+    attemptId.onFieldEdit("limitPrice");
+    _setLimitPrice(v);
+  };
   const [confirmStep, setConfirmStep] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -258,18 +310,22 @@ function NewOrderForm({
 
   const parsedQty = parseInt(quantity, 10);
   const parsedPrice = parseFloat(limitPrice);
-  const isValid = !isNaN(parsedQty) && parsedQty > 0 && !isNaN(parsedPrice) && parsedPrice > 0;
+  const isValid =
+    !isNaN(parsedQty) &&
+    parsedQty > 0 &&
+    !isNaN(parsedPrice) &&
+    parsedPrice > 0;
 
   // Calculate order summary for confirmation (single leg: stock or single option)
   const orderSummary: OrderSummary | null = useMemo(() => {
     if (!isValid) return null;
-    
+
     const isOption = position?.legs?.length === 1;
     const multiplier = isOption ? 100 : 1;
     const totalCost = parsedQty * parsedPrice * multiplier;
-    const type = isOption ? position?.structure ?? "Option" : "Stock";
+    const type = isOption ? (position?.structure ?? "Option") : "Stock";
     const description = `${action} ${parsedQty}${isOption ? "x" : ""} ${ticker} ${type} @ ${fmtPrice(parsedPrice)}`;
-    
+
     return {
       description,
       totalCost: action === "SELL" ? -totalCost : totalCost,
@@ -292,7 +348,7 @@ function NewOrderForm({
     });
     const guardPortfolio = toNakedShortPortfolio(portfolio);
     const result = checkNakedShortRisk(payload as OrderPayload, guardPortfolio);
-    return result.allowed ? null : result.reason ?? null;
+    return result.allowed ? null : (result.reason ?? null);
   }, [action, parsedQty, ticker, position, portfolio]);
 
   const handlePlace = useCallback(async () => {
@@ -317,24 +373,36 @@ function NewOrderForm({
 
       // Final naked short guard check before submission
       const guardPortfolio = toNakedShortPortfolio(portfolio);
-      const guardResult = checkNakedShortRisk(payload as OrderPayload, guardPortfolio);
+      const guardResult = checkNakedShortRisk(
+        payload as OrderPayload,
+        guardPortfolio,
+      );
       if (!guardResult.allowed) {
         setError(guardResult.reason ?? "Order blocked: naked short exposure");
         setLoading(false);
         return;
       }
 
+      attemptId.markSubmitted();
       const res = await fetch("/api/orders/place", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          ...payload,
+          client_attempt_id: attemptId.id,
+          quote_token: quote.token,
+        }),
       });
       const json = await res.json();
       if (!res.ok) {
-        setError(json.error || "Order placement failed");
+        setError(json.error || json.detail || "Order placement failed");
+        attemptId.markTerminal();
       } else {
-        setSuccess(`Order placed: ${action} ${parsedQty} ${ticker} @ ${fmtPrice(parsedPrice)}`);
+        setSuccess(
+          `Order placed: ${action} ${parsedQty} ${ticker} @ ${fmtPrice(parsedPrice)}`,
+        );
         setConfirmStep(false);
+        attemptId.markTerminal();
         onOrderPlaced?.();
       }
     } catch {
@@ -342,7 +410,17 @@ function NewOrderForm({
     } finally {
       setLoading(false);
     }
-  }, [confirmStep, ticker, action, parsedQty, parsedPrice, tif, position, portfolio, onOrderPlaced]);
+  }, [
+    confirmStep,
+    ticker,
+    action,
+    parsedQty,
+    parsedPrice,
+    tif,
+    position,
+    portfolio,
+    onOrderPlaced,
+  ]);
 
   return (
     <div className="order-form">
@@ -351,13 +429,19 @@ function NewOrderForm({
         <div className="order-action-buttons">
           <button
             className={`order-action-btn ${action === "BUY" ? "order-action-active order-action-buy" : ""}`}
-            onClick={() => { setAction("BUY"); setConfirmStep(false); }}
+            onClick={() => {
+              setAction("BUY");
+              setConfirmStep(false);
+            }}
           >
             BUY
           </button>
           <button
             className={`order-action-btn ${action === "SELL" ? "order-action-active order-action-sell" : ""}`}
-            onClick={() => { setAction("SELL"); setConfirmStep(false); }}
+            onClick={() => {
+              setAction("SELL");
+              setConfirmStep(false);
+            }}
           >
             SELL
           </button>
@@ -372,7 +456,10 @@ function NewOrderForm({
           min="1"
           step="1"
           value={quantity}
-          onChange={(e) => { setQuantity(e.target.value); setConfirmStep(false); }}
+          onChange={(e) => {
+            setQuantity(e.target.value);
+            setConfirmStep(false);
+          }}
           placeholder="Shares"
         />
       </div>
@@ -387,27 +474,76 @@ function NewOrderForm({
             step="0.01"
             min="0.01"
             value={limitPrice}
-            onChange={(e) => { setLimitPrice(e.target.value); setConfirmStep(false); }}
+            onChange={(e) => {
+              setLimitPrice(e.target.value);
+              setConfirmStep(false);
+            }}
             placeholder="0.00"
           />
         </div>
         <div className="modify-quick-buttons">
-          <button className="btn-quick" disabled={bid == null} onClick={() => { if (bid != null) { setLimitPrice(bid.toFixed(2)); setConfirmStep(false); } }}>BID</button>
-          <button className="btn-quick" disabled={mid == null} onClick={() => { if (mid != null) { setLimitPrice(mid.toFixed(2)); setConfirmStep(false); } }}>MID</button>
-          <button className="btn-quick" disabled={ask == null} onClick={() => { if (ask != null) { setLimitPrice(ask.toFixed(2)); setConfirmStep(false); } }}>ASK</button>
+          <button
+            className="btn-quick"
+            disabled={bid == null}
+            onClick={() => {
+              if (bid != null) {
+                setLimitPrice(bid.toFixed(2));
+                setConfirmStep(false);
+              }
+            }}
+          >
+            BID
+          </button>
+          <button
+            className="btn-quick"
+            disabled={mid == null}
+            onClick={() => {
+              if (mid != null) {
+                setLimitPrice(mid.toFixed(2));
+                setConfirmStep(false);
+              }
+            }}
+          >
+            MID
+          </button>
+          <button
+            className="btn-quick"
+            disabled={ask == null}
+            onClick={() => {
+              if (ask != null) {
+                setLimitPrice(ask.toFixed(2));
+                setConfirmStep(false);
+              }
+            }}
+          >
+            ASK
+          </button>
         </div>
       </div>
 
       <div className="order-field">
         <label className="order-label">Time in Force</label>
         <div className="order-action-buttons">
-          <button className={`order-action-btn ${tif === "DAY" ? "order-action-active" : ""}`} onClick={() => setTif("DAY")}>DAY</button>
-          <button className={`order-action-btn ${tif === "GTC" ? "order-action-active" : ""}`} onClick={() => setTif("GTC")}>GTC</button>
+          <button
+            className={`order-action-btn ${tif === "DAY" ? "order-action-active" : ""}`}
+            onClick={() => setTif("DAY")}
+          >
+            DAY
+          </button>
+          <button
+            className={`order-action-btn ${tif === "GTC" ? "order-action-active" : ""}`}
+            onClick={() => setTif("GTC")}
+          >
+            GTC
+          </button>
         </div>
       </div>
 
       {nakedShortWarning && (
-        <div className="order-error" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <div
+          className="order-error"
+          style={{ display: "flex", alignItems: "center", gap: 6 }}
+        >
           <AlertTriangle size={14} />
           <span>{nakedShortWarning}</span>
         </div>
@@ -424,7 +560,13 @@ function NewOrderForm({
       <div className="order-submit">
         {confirmStep ? (
           <div className="order-confirm-row">
-            <button className="btn-secondary" onClick={() => setConfirmStep(false)} disabled={loading}>Back</button>
+            <button
+              className="btn-secondary"
+              onClick={() => setConfirmStep(false)}
+              disabled={loading}
+            >
+              Back
+            </button>
             <button
               className={`btn-primary ${action === "SELL" ? "btn-danger" : ""}`}
               onClick={handlePlace}
@@ -434,7 +576,12 @@ function NewOrderForm({
             </button>
           </div>
         ) : (
-          <button className="btn-primary" onClick={handlePlace} disabled={!isValid || loading || !!nakedShortWarning} style={{ width: "100%" }}>
+          <button
+            className="btn-primary"
+            onClick={handlePlace}
+            disabled={!isValid || loading || !!nakedShortWarning}
+            style={{ width: "100%" }}
+          >
             Place Order
           </button>
         )}
@@ -474,10 +621,16 @@ function ComboOrderForm({
   // Order.action (BUY/SELL) controls open vs close.
   const legsWithActions = useMemo(() => {
     return position.legs.map((leg) => {
-      const legAction: "BUY" | "SELL" = leg.direction === "LONG" ? "BUY" : "SELL";
+      const legAction: "BUY" | "SELL" =
+        leg.direction === "LONG" ? "BUY" : "SELL";
       const right = leg.type === "Call" ? "C" : "P";
       const expiryClean = position.expiry.replace(/-/g, "");
-      return { ...leg, legAction, right: right as "C" | "P", expiry: expiryClean };
+      return {
+        ...leg,
+        legAction,
+        right: right as "C" | "P",
+        expiry: expiryClean,
+      };
     });
   }, [position]);
 
@@ -497,13 +650,20 @@ function ComboOrderForm({
 
     for (const leg of position.legs) {
       const key = legPriceKey(ticker, position.expiry, leg);
-      if (!key) { allAvailable = false; break; }
+      if (!key) {
+        allAvailable = false;
+        break;
+      }
       const lp = prices[key];
-      if (!lp || lp.bid == null || lp.ask == null) { allAvailable = false; break; }
+      if (!lp || lp.bid == null || lp.ask == null) {
+        allAvailable = false;
+        break;
+      }
 
       // Effective execution after IB's reversal:
-      const effectivelySelling = (action === "SELL") === (leg.direction === "LONG");
-      
+      const effectivelySelling =
+        (action === "SELL") === (leg.direction === "LONG");
+
       if (effectivelySelling) {
         // We're selling this leg → receive BID
         netBid += lp.bid;
@@ -524,7 +684,11 @@ function ComboOrderForm({
 
   const parsedQty = parseInt(quantity, 10);
   const parsedPrice = parseFloat(limitPrice);
-  const isValid = !isNaN(parsedQty) && parsedQty > 0 && Number.isFinite(parsedPrice) && parsedPrice !== 0;
+  const isValid =
+    !isNaN(parsedQty) &&
+    parsedQty > 0 &&
+    Number.isFinite(parsedPrice) &&
+    parsedPrice !== 0;
 
   // Naked short guard — reactive warning for combo orders
   const nakedShortWarning = useMemo(() => {
@@ -547,7 +711,7 @@ function ComboOrderForm({
     };
     const guardPortfolio = toNakedShortPortfolio(portfolio);
     const result = checkNakedShortRisk(payload, guardPortfolio);
-    return result.allowed ? null : result.reason ?? null;
+    return result.allowed ? null : (result.reason ?? null);
   }, [action, parsedQty, ticker, legsWithActions, portfolio]);
 
   const handlePlace = useCallback(async () => {
@@ -603,7 +767,9 @@ function ComboOrderForm({
       if (!res.ok) {
         setError(json.error || "Order placement failed");
       } else {
-        setSuccess(`Combo order placed: ${action} ${parsedQty}x ${position.structure} @ ${fmtSignedPrice(parsedPrice)}`);
+        setSuccess(
+          `Combo order placed: ${action} ${parsedQty}x ${position.structure} @ ${fmtSignedPrice(parsedPrice)}`,
+        );
         setConfirmStep(false);
         onOrderPlaced?.();
       }
@@ -612,33 +778,48 @@ function ComboOrderForm({
     } finally {
       setLoading(false);
     }
-  }, [confirmStep, ticker, action, parsedQty, parsedPrice, tif, legsWithActions, position.structure, portfolio, onOrderPlaced]);
+  }, [
+    confirmStep,
+    ticker,
+    action,
+    parsedQty,
+    parsedPrice,
+    tif,
+    legsWithActions,
+    position.structure,
+    portfolio,
+    onOrderPlaced,
+  ]);
 
   // Calculate spread width for display
-  const spreadWidth = netPrices.bid != null && netPrices.ask != null 
-    ? (netPrices.ask - netPrices.bid).toFixed(2) 
-    : null;
-  const spreadPct = netPrices.mid != null && spreadWidth != null
-    ? ((parseFloat(spreadWidth) / Math.abs(netPrices.mid)) * 100).toFixed(1)
-    : null;
+  const spreadWidth =
+    netPrices.bid != null && netPrices.ask != null
+      ? (netPrices.ask - netPrices.bid).toFixed(2)
+      : null;
+  const spreadPct =
+    netPrices.mid != null && spreadWidth != null
+      ? ((parseFloat(spreadWidth) / Math.abs(netPrices.mid)) * 100).toFixed(1)
+      : null;
 
   // Calculate order summary for confirmation
   const orderSummary: OrderSummary | null = useMemo(() => {
     if (!isValid) return null;
-    
+
     const totalCost = parsedQty * parsedPrice * 100;
     const description = `${action} ${parsedQty}x ${position.structure} @ ${fmtSignedPrice(parsedPrice)}`;
-    
+
     // For vertical spreads, calculate max gain/loss
     // Bull Call Spread: LONG lower strike call, SHORT higher strike call
     // Bear Put Spread: LONG higher strike put, SHORT lower strike put
-    const strikes = position.legs.map((l) => l.strike).filter((s): s is number => s != null);
+    const strikes = position.legs
+      .map((l) => l.strike)
+      .filter((s): s is number => s != null);
     const hasSpread = strikes.length === 2 && position.legs.length === 2;
-    
+
     if (hasSpread) {
       const width = Math.abs(strikes[0] - strikes[1]);
       const maxWidth = width * parsedQty * 100;
-      
+
       // For a held combo, SELL is the close/flatten path. Show close-specific
       // cash-flow semantics instead of generic opening-spread payoff terms.
       if (action === "SELL") {
@@ -660,7 +841,7 @@ function ComboOrderForm({
         };
       }
     }
-    
+
     return {
       description,
       totalCost: action === "SELL" ? -totalCost : totalCost,
@@ -673,19 +854,25 @@ function ComboOrderForm({
       <div className="spread-price-strip">
         <div className="spread-price-item">
           <span className="spread-price-label">BID</span>
-          <span className={`spread-price-value ${comboQuoteClass(netPrices.bid, "bid")}`}>
+          <span
+            className={`spread-price-value ${comboQuoteClass(netPrices.bid, "bid")}`}
+          >
             {fmtSignedPrice(netPrices.bid)}
           </span>
         </div>
         <div className="spread-price-item">
           <span className="spread-price-label">MID</span>
-          <span className={`spread-price-value ${comboQuoteClass(netPrices.mid, "mid")}`}>
+          <span
+            className={`spread-price-value ${comboQuoteClass(netPrices.mid, "mid")}`}
+          >
             {fmtSignedPrice(netPrices.mid)}
           </span>
         </div>
         <div className="spread-price-item">
           <span className="spread-price-label">ASK</span>
-          <span className={`spread-price-value ${comboQuoteClass(netPrices.ask, "ask")}`}>
+          <span
+            className={`spread-price-value ${comboQuoteClass(netPrices.ask, "ask")}`}
+          >
             {fmtSignedPrice(netPrices.ask)}
           </span>
         </div>
@@ -693,7 +880,9 @@ function ComboOrderForm({
           <span className="spread-price-label">SPREAD</span>
           <span className="spread-price-value">
             {spreadWidth != null ? `$${spreadWidth}` : "---"}
-            {spreadPct != null && <span className="spread-pct"> ({spreadPct}%)</span>}
+            {spreadPct != null && (
+              <span className="spread-pct"> ({spreadPct}%)</span>
+            )}
           </span>
         </div>
       </div>
@@ -703,9 +892,16 @@ function ComboOrderForm({
         <label className="order-label">Legs</label>
         <div className="combo-legs-pills">
           {legsWithActions.map((leg, i) => (
-            <div key={i} className={`combo-leg-pill ${leg.direction === "LONG" ? "combo-leg-long" : "combo-leg-short"}`}>
-              <span className="combo-leg-dir">{leg.direction === "LONG" ? "+" : "−"}</span>
-              <span className="combo-leg-strike">${leg.strike} {leg.type}</span>
+            <div
+              key={i}
+              className={`combo-leg-pill ${leg.direction === "LONG" ? "combo-leg-long" : "combo-leg-short"}`}
+            >
+              <span className="combo-leg-dir">
+                {leg.direction === "LONG" ? "+" : "−"}
+              </span>
+              <span className="combo-leg-strike">
+                ${leg.strike} {leg.type}
+              </span>
             </div>
           ))}
         </div>
@@ -717,13 +913,19 @@ function ComboOrderForm({
         <div className="order-action-buttons">
           <button
             className={`order-action-btn ${action === "BUY" ? "order-action-active order-action-buy" : ""}`}
-            onClick={() => { setAction("BUY"); setConfirmStep(false); }}
+            onClick={() => {
+              setAction("BUY");
+              setConfirmStep(false);
+            }}
           >
             BUY
           </button>
           <button
             className={`order-action-btn ${action === "SELL" ? "order-action-active order-action-sell" : ""}`}
-            onClick={() => { setAction("SELL"); setConfirmStep(false); }}
+            onClick={() => {
+              setAction("SELL");
+              setConfirmStep(false);
+            }}
           >
             SELL
           </button>
@@ -739,7 +941,10 @@ function ComboOrderForm({
           min="1"
           step="1"
           value={quantity}
-          onChange={(e) => { setQuantity(e.target.value); setConfirmStep(false); }}
+          onChange={(e) => {
+            setQuantity(e.target.value);
+            setConfirmStep(false);
+          }}
           placeholder="Contracts"
         />
       </div>
@@ -748,24 +953,58 @@ function ComboOrderForm({
       <div className="order-field">
         <label className="order-label">Net Limit Price</label>
         <div className="modify-price-input-row">
-          <span className={`modify-price-prefix ${Number.isFinite(parsedPrice) && parsedPrice < 0 ? "negative" : ""}`}>$</span>
+          <span
+            className={`modify-price-prefix ${Number.isFinite(parsedPrice) && parsedPrice < 0 ? "negative" : ""}`}
+          >
+            $
+          </span>
           <input
             className={`modify-price-input ${Number.isFinite(parsedPrice) && parsedPrice < 0 ? "negative" : toneClass(parsedPrice) === "positive" ? "positive" : ""}`}
             type="number"
             step="0.01"
             value={limitPrice}
-            onChange={(e) => { setLimitPrice(e.target.value); setConfirmStep(false); }}
+            onChange={(e) => {
+              setLimitPrice(e.target.value);
+              setConfirmStep(false);
+            }}
             placeholder="0.00"
           />
         </div>
         <div className="modify-quick-buttons">
-          <button className="btn-quick" disabled={netPrices.bid == null} onClick={() => { if (netPrices.bid != null) { setLimitPrice(netPrices.bid.toFixed(2)); setConfirmStep(false); } }}>
+          <button
+            className="btn-quick"
+            disabled={netPrices.bid == null}
+            onClick={() => {
+              if (netPrices.bid != null) {
+                setLimitPrice(netPrices.bid.toFixed(2));
+                setConfirmStep(false);
+              }
+            }}
+          >
             BID{netPrices.bid != null ? ` ${netPrices.bid.toFixed(2)}` : ""}
           </button>
-          <button className="btn-quick" disabled={netPrices.mid == null} onClick={() => { if (netPrices.mid != null) { setLimitPrice(netPrices.mid.toFixed(2)); setConfirmStep(false); } }}>
+          <button
+            className="btn-quick"
+            disabled={netPrices.mid == null}
+            onClick={() => {
+              if (netPrices.mid != null) {
+                setLimitPrice(netPrices.mid.toFixed(2));
+                setConfirmStep(false);
+              }
+            }}
+          >
             MID{netPrices.mid != null ? ` ${netPrices.mid.toFixed(2)}` : ""}
           </button>
-          <button className="btn-quick" disabled={netPrices.ask == null} onClick={() => { if (netPrices.ask != null) { setLimitPrice(netPrices.ask.toFixed(2)); setConfirmStep(false); } }}>
+          <button
+            className="btn-quick"
+            disabled={netPrices.ask == null}
+            onClick={() => {
+              if (netPrices.ask != null) {
+                setLimitPrice(netPrices.ask.toFixed(2));
+                setConfirmStep(false);
+              }
+            }}
+          >
             ASK{netPrices.ask != null ? ` ${netPrices.ask.toFixed(2)}` : ""}
           </button>
         </div>
@@ -775,13 +1014,26 @@ function ComboOrderForm({
       <div className="order-field">
         <label className="order-label">Time in Force</label>
         <div className="order-action-buttons">
-          <button className={`order-action-btn ${tif === "DAY" ? "order-action-active" : ""}`} onClick={() => setTif("DAY")}>DAY</button>
-          <button className={`order-action-btn ${tif === "GTC" ? "order-action-active" : ""}`} onClick={() => setTif("GTC")}>GTC</button>
+          <button
+            className={`order-action-btn ${tif === "DAY" ? "order-action-active" : ""}`}
+            onClick={() => setTif("DAY")}
+          >
+            DAY
+          </button>
+          <button
+            className={`order-action-btn ${tif === "GTC" ? "order-action-active" : ""}`}
+            onClick={() => setTif("GTC")}
+          >
+            GTC
+          </button>
         </div>
       </div>
 
       {nakedShortWarning && (
-        <div className="order-error" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <div
+          className="order-error"
+          style={{ display: "flex", alignItems: "center", gap: 6 }}
+        >
           <AlertTriangle size={14} />
           <span>{nakedShortWarning}</span>
         </div>
@@ -799,7 +1051,13 @@ function ComboOrderForm({
       <div className="order-submit">
         {confirmStep ? (
           <div className="order-confirm-row">
-            <button className="btn-secondary" onClick={() => setConfirmStep(false)} disabled={loading}>Back</button>
+            <button
+              className="btn-secondary"
+              onClick={() => setConfirmStep(false)}
+              disabled={loading}
+            >
+              Back
+            </button>
             <button
               className={`btn-primary ${action === "SELL" ? "btn-danger" : ""}`}
               onClick={handlePlace}
@@ -809,7 +1067,12 @@ function ComboOrderForm({
             </button>
           </div>
         ) : (
-          <button className="btn-primary" onClick={handlePlace} disabled={!isValid || loading || !!nakedShortWarning} style={{ width: "100%" }}>
+          <button
+            className="btn-primary"
+            onClick={handlePlace}
+            disabled={!isValid || loading || !!nakedShortWarning}
+            style={{ width: "100%" }}
+          >
             Place Combo Order
           </button>
         )}
@@ -820,20 +1083,33 @@ function ComboOrderForm({
 
 /* ─── Main OrderTab ─── */
 
-export default function OrderTab({ ticker, position, portfolio, prices, openOrders = [], tickerPriceData }: OrderTabProps) {
-  const isCombo = position != null && position.legs.length > 1 && position.structure_type !== "Stock";
+export default function OrderTab({
+  ticker,
+  position,
+  portfolio,
+  prices,
+  openOrders = [],
+  tickerPriceData,
+}: OrderTabProps) {
+  const isCombo =
+    position != null &&
+    position.legs.length > 1 &&
+    position.structure_type !== "Stock";
 
   const { requestModify } = useOrderActions();
   const [modifyTarget, setModifyTarget] = useState<OpenOrder | null>(null);
   const [modifyLoading, setModifyLoading] = useState(false);
 
-  const handleModifyConfirm = useCallback(async (request: ModifyOrderRequest) => {
-    if (!modifyTarget) return;
-    setModifyLoading(true);
-    await requestModify(modifyTarget, request);
-    setModifyLoading(false);
-    setModifyTarget(null);
-  }, [modifyTarget, requestModify]);
+  const handleModifyConfirm = useCallback(
+    async (request: ModifyOrderRequest) => {
+      if (!modifyTarget) return;
+      setModifyLoading(true);
+      await requestModify(modifyTarget, request);
+      setModifyLoading(false);
+      setModifyTarget(null);
+    },
+    [modifyTarget, requestModify],
+  );
 
   return (
     <>
@@ -852,24 +1128,43 @@ export default function OrderTab({ ticker, position, portfolio, prices, openOrde
         {isCombo && (
           <div className="new-order-section-top">
             <div className="existing-orders-title">Close Position</div>
-            <ComboOrderForm ticker={ticker} position={position!} portfolio={portfolio} prices={prices} />
+            <ComboOrderForm
+              ticker={ticker}
+              position={position!}
+              portfolio={portfolio}
+              prices={prices}
+            />
           </div>
         )}
 
         {/* Stock / single-leg order form */}
         {!isCombo && (
           <div className="new-order-section-top">
-            <div className="existing-orders-title">{position ? "Close Position" : "New Order"}</div>
-            <NewOrderForm ticker={ticker} position={position} portfolio={portfolio} tickerPriceData={tickerPriceData} />
+            <div className="existing-orders-title">
+              {position ? "Close Position" : "New Order"}
+            </div>
+            <NewOrderForm
+              ticker={ticker}
+              position={position}
+              portfolio={portfolio}
+              tickerPriceData={tickerPriceData}
+            />
           </div>
         )}
 
         {/* Existing open orders for this ticker — below the form */}
         {openOrders.length > 0 && (
           <div className="existing-orders-section">
-            <div className="existing-orders-title">Open Orders ({openOrders.length})</div>
+            <div className="existing-orders-title">
+              Open Orders ({openOrders.length})
+            </div>
             {openOrders.map((o) => (
-              <ExistingOrderRow key={o.permId || o.orderId} order={o} prices={prices} onModify={setModifyTarget} />
+              <ExistingOrderRow
+                key={o.permId || o.orderId}
+                order={o}
+                prices={prices}
+                onModify={setModifyTarget}
+              />
             ))}
           </div>
         )}

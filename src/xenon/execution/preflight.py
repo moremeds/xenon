@@ -22,19 +22,24 @@ from xenon.execution.universe import UNIVERSE, is_index, is_known
 
 
 class ReasonCode(StrEnum):
-    """Preflight block reasons. UI copy maps these in F6.
+    """Preflight / submit-gate block reasons. UI copy maps these in F6.
 
-    Only codes relevant to F2 are defined here. F3 adds STALE_QUOTE /
-    LIMIT_OUT_OF_BAND / LIMIT_OFF_TICK; F4 adds ATTEMPT_ID_TERMINAL;
     F5 adds IB_CONNECTION / OWNERSHIP; F6 adds MODIFY_STALE.
     """
 
+    # F2 — preflight (PR-A)
     UNIVERSE_UNKNOWN = "UNIVERSE_UNKNOWN"
     INDEX_HAS_NO_STOCK = "INDEX_HAS_NO_STOCK"
     INSUFFICIENT_SHARES = "INSUFFICIENT_SHARES"
     INSUFFICIENT_CASH = "INSUFFICIENT_CASH"
     INDEX_CALL_UNCOVERED = "INDEX_CALL_UNCOVERED"
     ETF_CALL_UNCOVERED = "ETF_CALL_UNCOVERED"
+    # F3 — quote gate (PR-B)
+    STALE_QUOTE = "STALE_QUOTE"
+    LIMIT_OUT_OF_BAND = "LIMIT_OUT_OF_BAND"
+    LIMIT_OFF_TICK = "LIMIT_OFF_TICK"
+    # F4 — idempotency (PR-B)
+    ATTEMPT_ID_TERMINAL = "ATTEMPT_ID_TERMINAL"
 
 
 class PreflightRequest(BaseModel):
