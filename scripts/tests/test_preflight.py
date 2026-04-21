@@ -282,3 +282,42 @@ def test_sell_to_close_exact_match_ok():
         PortfolioView(positions=[_long_call_position("SPY", 500.0, "20260620")]),
     )
     assert v.accept is True
+
+
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gate4_parity.json"
+
+
+def _request_from_fixture(case: dict) -> PreflightRequest:
+    r = case["request"]
+    right_map = {"C": "C", "P": "P", None: None}
+    return PreflightRequest(
+        ticker=r["symbol"],
+        security_type="STK" if r["type"] == "stock" else "OPT",
+        action=r["action"],
+        quantity=r["quantity"],
+        right=right_map.get(r.get("right")),
+        expiry=r.get("expiry"),
+        strike=Decimal(str(r["strike"])) if r.get("strike") is not None else None,
+        multiplier=r.get("multiplier", 100),
+        limit_price=Decimal(str(r["limitPrice"])),
+    )
+
+
+def _portfolio_from_fixture(case: dict) -> PortfolioView:
+    return PortfolioView(**case["portfolio"])
+
+
+@pytest.mark.parametrize("case", json.loads(FIXTURE_PATH.read_text())["cases"], ids=lambda c: c["name"])
+def test_parity_fixture(case):
+    req = _request_from_fixture(case)
+    portfolio = _portfolio_from_fixture(case)
+    verdict = evaluate(req, portfolio)
+
+    expected = case["expected"]
+    assert verdict.accept == expected["accept"], (
+        f"{case['name']}: expected accept={expected['accept']}, got {verdict.accept} (reason={verdict.reason_code})"
+    )
+    if expected["reason_code"] is None:
+        assert verdict.reason_code is None
+    else:
+        assert verdict.reason_code == ReasonCode(expected["reason_code"])
