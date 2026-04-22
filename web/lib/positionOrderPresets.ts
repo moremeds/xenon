@@ -2,11 +2,9 @@ import type { PortfolioPosition } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 import { legPriceKey } from "@/lib/positionUtils";
 
-/**
- * Payload shape matches POST /api/orders/place. Mirrors the shapes produced
- * by `buildSingleLegOrderPayload` and the combo form in OrderTab.tsx.
- */
-export type ClosePayload =
+export type Intent = "close" | "add";
+
+export type TicketPayload =
   | {
       type: "stock";
       symbol: string;
@@ -22,7 +20,7 @@ export type ClosePayload =
       quantity: number;
       limitPrice: number;
       tif: "DAY" | "GTC";
-      expiry: string; // YYYYMMDD
+      expiry: string;
       strike: number;
       right: "C" | "P";
     }
@@ -34,7 +32,7 @@ export type ClosePayload =
       limitPrice: number;
       tif: "DAY" | "GTC";
       legs: Array<{
-        expiry: string; // YYYYMMDD
+        expiry: string;
         strike: number;
         right: "C" | "P";
         action: "BUY" | "SELL";
@@ -42,50 +40,66 @@ export type ClosePayload =
       }>;
     };
 
-export type CloseTicketDraft = {
-  payload: ClosePayload;
-  /** Midpoint reference for UI display (may differ from payload.limitPrice after edits). */
+export type TicketDraft = {
+  payload: TicketPayload;
+  /** Reference values for the UI's BID/MID/ASK quick buttons. May be null when quotes incomplete. */
+  referenceBid: number | null;
   referenceMid: number | null;
+  referenceAsk: number | null;
 };
 
-function midFromQuote(p: PriceData | undefined | null): number | null {
-  if (!p) return null;
-  // Prefer bid/ask mid (accepts valid 0-bid OTM options where bid=0, ask>0).
-  if (
-    p.bid != null &&
-    p.ask != null &&
-    Number.isFinite(p.bid) &&
-    Number.isFinite(p.ask) &&
-    p.bid >= 0 &&
-    p.ask > 0
-  ) {
-    return (p.bid + p.ask) / 2;
-  }
-  if (p.last != null && Number.isFinite(p.last) && p.last > 0) return p.last;
-  return null;
+function pickStockBidAsk(p: PriceData | undefined | null): {
+  bid: number | null;
+  ask: number | null;
+  mid: number | null;
+  last: number | null;
+} {
+  if (!p) return { bid: null, ask: null, mid: null, last: null };
+  const bid =
+    p.bid != null && Number.isFinite(p.bid) && p.bid >= 0 ? p.bid : null;
+  const ask =
+    p.ask != null && Number.isFinite(p.ask) && p.ask > 0 ? p.ask : null;
+  const last =
+    p.last != null && Number.isFinite(p.last) && p.last > 0 ? p.last : null;
+  const mid = bid != null && ask != null ? (bid + ask) / 2 : last;
+  return { bid, ask, mid, last };
 }
 
-export function buildCloseTicket(
+function round2(x: number): number {
+  return Math.round(x * 100) / 100;
+}
+
+export function seedTicketFromPosition(
   position: PortfolioPosition,
+  intent: Intent,
   prices: Record<string, PriceData>,
-): CloseTicketDraft {
+): TicketDraft {
+  const sameDirection = intent === "add"; // add = same as position direction; close = opposite
   const isStock = position.structure_type === "Stock";
+  const baseContracts = Math.abs(position.contracts);
 
   if (isStock) {
-    const action: "BUY" | "SELL" =
-      position.direction === "LONG" ? "SELL" : "BUY";
-    const mid = midFromQuote(prices[position.ticker]);
-    const limitPrice = mid ?? 0;
+    const action: "BUY" | "SELL" = sameDirection
+      ? position.direction === "LONG"
+        ? "BUY"
+        : "SELL"
+      : position.direction === "LONG"
+        ? "SELL"
+        : "BUY";
+    const q = pickStockBidAsk(prices[position.ticker]);
+    const limitPrice = q.last ?? q.mid ?? 0;
     return {
       payload: {
         type: "stock",
         symbol: position.ticker,
         action,
-        quantity: Math.abs(position.contracts),
+        quantity: baseContracts,
         limitPrice,
         tif: "DAY",
       },
-      referenceMid: mid,
+      referenceBid: q.bid,
+      referenceMid: q.mid,
+      referenceAsk: q.ask,
     };
   }
 
@@ -93,86 +107,107 @@ export function buildCloseTicket(
     position.legs.length === 1 &&
     position.legs[0].type !== "Stock" &&
     position.legs[0].strike != null;
-
   if (isSingleLegOption) {
     const leg = position.legs[0];
     const right: "C" | "P" = leg.type === "Call" ? "C" : "P";
     const expiry = position.expiry.replace(/-/g, "");
-    const action: "BUY" | "SELL" =
-      position.direction === "LONG" ? "SELL" : "BUY";
-    // Use the shared helper so the key matches `legPriceKey(...)` used
-    // elsewhere in the app (underscore-joined SYMBOL_YYYYMMDD_STRIKE_RIGHT).
+    const action: "BUY" | "SELL" = sameDirection
+      ? position.direction === "LONG"
+        ? "BUY"
+        : "SELL"
+      : position.direction === "LONG"
+        ? "SELL"
+        : "BUY";
     const key = legPriceKey(position.ticker, position.expiry, leg);
-    const mid = key ? midFromQuote(prices[key]) : null;
+    const q = pickStockBidAsk(key ? prices[key] : null);
     return {
       payload: {
         type: "option",
         symbol: position.ticker,
         action,
-        quantity: Math.abs(position.contracts),
-        limitPrice: mid ?? 0,
+        quantity: baseContracts,
+        limitPrice: q.mid ?? 0,
         tif: "DAY",
         expiry,
         strike: leg.strike!,
         right,
       },
-      referenceMid: mid,
+      referenceBid: q.bid,
+      referenceMid: q.mid,
+      referenceAsk: q.ask,
     };
   }
 
-  // Combo (multi-leg)
-  // NOTE: Covered Call / Collar / Synthetic include a Stock leg. The /api/orders/place
-  // combo payload schema cannot express a stock leg (requires strike/expiry/right),
-  // and the IB BAG builder only qualifies option legs. Reject up-front — a future
-  // plan can add a hybrid stock+BAG ticket.
+  // Combo
   const hasStockLeg = position.legs.some((l) => l.type === "Stock");
   if (hasStockLeg) {
     throw new Error(
-      "Close tickets for stock+option structures (Covered Call, Collar, Synthetic) are not yet supported",
+      "Close/Add tickets for stock+option structures (Covered Call, Collar, Synthetic) are not yet supported",
     );
   }
 
   const expiry = position.expiry.replace(/-/g, "");
-  const baseContracts = Math.abs(position.contracts);
   const comboLegs = position.legs.map((leg) => {
     const right: "C" | "P" = leg.type === "Call" ? "C" : "P";
-    // Per web/CLAUDE.md "IB Combo (BAG) Order Leg Convention":
-    // ComboLeg.action = spread structure (LONG → BUY, SHORT → SELL), NOT trade direction.
+    // ComboLeg.action = spread structure, NOT trade direction. LONG → BUY, SHORT → SELL.
     const legAction: "BUY" | "SELL" = leg.direction === "LONG" ? "BUY" : "SELL";
-    // Ratio is per-leg contracts / structure contracts. Guards 1×2s etc.
-    const legContracts = Math.abs(leg.contracts);
     const ratio =
       baseContracts > 0
-        ? Math.max(1, Math.round(legContracts / baseContracts))
+        ? Math.max(1, Math.round(Math.abs(leg.contracts) / baseContracts))
         : 1;
-    return {
-      expiry,
-      strike: leg.strike!,
-      right,
-      action: legAction,
-      ratio,
-    };
+    return { expiry, strike: leg.strike!, right, action: legAction, ratio };
   });
 
-  // Order.action: reverse of the structure's net direction.
-  const orderAction: "BUY" | "SELL" =
-    position.direction === "LONG" ? "SELL" : "BUY";
+  // Order.action: for "close" reverse the structure direction; for "add" match it.
+  const orderAction: "BUY" | "SELL" = sameDirection
+    ? position.direction === "LONG"
+      ? "BUY"
+      : "SELL"
+    : position.direction === "LONG"
+      ? "SELL"
+      : "BUY";
 
-  // Net mid: sum of sign × leg_mid, where sign comes from the position (LONG=+1, SHORT=-1).
-  // Keep in mind net can be negative (credit).
-  let netMid: number | null = 0;
+  // Natural-market combo bid/ask. Always compute the BUY-combo cost and SELL-combo proceeds
+  // from the structure's nominal LONG perspective (negate leg sign if position.direction is SHORT)
+  // so that referenceMid is always the positive nominal value of the structure (debit/credit
+  // both surface as positive prices; the Order.action carries the trade direction).
+  const structureFlip = position.direction === "SHORT" ? -1 : 1;
+  let buyComboCost = 0; // cost to BUY the (LONG-perspective) structure at market
+  let sellComboProceeds = 0; // proceeds from SELLing the (LONG-perspective) structure at market
   let missing = false;
   for (const leg of position.legs) {
     const key = legPriceKey(position.ticker, position.expiry, leg);
-    const legMid = key ? midFromQuote(prices[key]) : null;
-    if (legMid == null) {
+    const lp = key ? prices[key] : null;
+    if (!lp || lp.bid == null || lp.ask == null) {
       missing = true;
       break;
     }
-    const sign = leg.direction === "LONG" ? 1 : -1;
-    netMid = (netMid as number) + sign * legMid;
+    // Effective leg direction relative to the LONG perspective of the structure.
+    const effectiveLong =
+      (leg.direction === "LONG" ? 1 : -1) * structureFlip > 0;
+    if (effectiveLong) {
+      buyComboCost += lp.ask;
+      sellComboProceeds += lp.bid;
+    } else {
+      buyComboCost -= lp.bid;
+      sellComboProceeds -= lp.ask;
+    }
   }
-  const referenceMid = missing ? null : (netMid as number);
+
+  let referenceBid: number | null = null;
+  let referenceAsk: number | null = null;
+  let referenceMid: number | null = null;
+  if (!missing) {
+    const lo = Math.min(sellComboProceeds, buyComboCost);
+    const hi = Math.max(sellComboProceeds, buyComboCost);
+    referenceBid = round2(lo);
+    referenceAsk = round2(hi);
+    referenceMid = round2((lo + hi) / 2);
+  }
+
+  // Seed limitPrice with the net mid. Combos may legitimately resolve to negative
+  // (credit spreads) — the server route accepts non-zero numbers for combos.
+  const limitPrice = referenceMid ?? 0;
 
   return {
     payload: {
@@ -180,11 +215,13 @@ export function buildCloseTicket(
       symbol: position.ticker,
       action: orderAction,
       quantity: baseContracts,
-      limitPrice: referenceMid ?? 0,
+      limitPrice,
       tif: "DAY",
       legs: comboLegs,
     },
+    referenceBid,
     referenceMid,
+    referenceAsk,
   };
 }
 
