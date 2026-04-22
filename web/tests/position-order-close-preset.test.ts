@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildCloseTicket } from "@/lib/positionOrderPresets";
+import { buildCloseTicket, applyQtyChip } from "@/lib/positionOrderPresets";
 import type { PortfolioPosition } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 import { legPriceKey } from "@/lib/positionUtils";
@@ -316,5 +316,24 @@ describe("buildCloseTicket — combo (bull call spread)", () => {
       expect(leg200.action).toBe("SELL"); // SHORT leg → SELL
       expect(leg210.action).toBe("BUY"); // LONG leg → BUY
     }
+  });
+});
+
+describe("applyQtyChip", () => {
+  it("100% returns full qty", () => {
+    expect(applyQtyChip(7, 1.0)).toBe(7);
+  });
+  it("50% rounds half-up", () => {
+    expect(applyQtyChip(7, 0.5)).toBe(4);
+  });
+  it("25% rounds half-up", () => {
+    expect(applyQtyChip(7, 0.25)).toBe(2);
+  });
+  it("clamps zero to 1 (so chip never yields 0)", () => {
+    expect(applyQtyChip(1, 0.25)).toBe(1);
+    expect(applyQtyChip(2, 0.25)).toBe(1);
+  });
+  it("handles 0 contracts by returning 0 (nothing to close)", () => {
+    expect(applyQtyChip(0, 1.0)).toBe(0);
   });
 });

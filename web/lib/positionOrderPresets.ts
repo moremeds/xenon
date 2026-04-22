@@ -187,3 +187,14 @@ export function buildCloseTicket(
     referenceMid,
   };
 }
+
+/**
+ * Apply a percentage chip to a qty, rounding half-up, with a min-1 clamp
+ * when the source qty is non-zero. A 25% chip on 2 contracts would otherwise
+ * round to 0, which would submit an empty order.
+ */
+export function applyQtyChip(fullQty: number, pct: number): number {
+  if (fullQty <= 0) return 0;
+  const raw = Math.round(fullQty * pct);
+  return Math.max(1, raw);
+}
