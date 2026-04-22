@@ -1,41 +1,20 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { PortfolioPosition } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 import Modal from "./Modal";
-import { buildCloseTicket, applyQtyChip } from "@/lib/positionOrderPresets";
+import { ModifyOrderQuoteTelemetry } from "./QuoteTelemetry";
+import { fmtPrice } from "@/lib/positionUtils";
+import { OrderLegPills, type OrderLeg as UnifiedOrderLeg } from "@/lib/order";
 import { useClientAttemptId } from "@/components/ticker-detail/useClientAttemptId";
 import { getReasonToast } from "@/lib/orderReasonCodes";
-
-type Preset = "close" | "trailing_sl" | "trailing_tp" | "roll";
-
-const PRESETS: ReadonlyArray<{
-  id: Preset;
-  label: string;
-  disabled: boolean;
-  tooltip?: string;
-}> = [
-  { id: "close", label: "Close", disabled: false },
-  {
-    id: "trailing_sl",
-    label: "Trailing Stop Loss",
-    disabled: true,
-    tooltip: "Coming soon — requires TRAIL order support",
-  },
-  {
-    id: "trailing_tp",
-    label: "Trailing Take Profit",
-    disabled: true,
-    tooltip: "Coming soon — requires TRAIL order support",
-  },
-  {
-    id: "roll",
-    label: "Roll",
-    disabled: true,
-    tooltip: "Coming soon — restructuring ticket in follow-up spec",
-  },
-];
+import {
+  seedTicketFromPosition,
+  applyQtyChip,
+  type Intent,
+  type TicketDraft,
+} from "@/lib/positionOrderPresets";
 
 type Props = {
   position: PortfolioPosition;
@@ -44,62 +23,14 @@ type Props = {
   onSubmitted?: (orderId: string) => void;
 };
 
-export default function PositionOrderModal({
-  position,
-  prices,
-  onClose,
-  onSubmitted,
-}: Props) {
-  const [active, setActive] = useState<Preset>("close");
-
-  return (
-    <Modal
-      open={true}
-      onClose={onClose}
-      title={`Order — ${position.ticker} ${position.structure}`}
-    >
-      <div
-        className="position-order-preset-bar"
-        role="group"
-        aria-label="Order presets"
-      >
-        {PRESETS.map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            onClick={() => !p.disabled && setActive(p.id)}
-            disabled={p.disabled}
-            aria-pressed={active === p.id}
-            title={p.tooltip}
-            className={`preset-tile ${active === p.id ? "active" : ""}`}
-          >
-            {p.label}
-          </button>
-        ))}
-      </div>
-      {active === "close" && (
-        <div data-testid="close-preset-panel">
-          <ClosePresetForm
-            position={position}
-            prices={prices}
-            onClose={onClose}
-            onSubmitted={onSubmitted}
-          />
-        </div>
-      )}
-    </Modal>
-  );
-}
-
 function errorFromResponseBody(
   body: Record<string, unknown> | null | undefined,
   fallback: string,
 ): string {
   if (body && typeof body === "object") {
     const code = (body as { reason_code?: unknown }).reason_code;
-    if (typeof code === "string" && code.length > 0) {
+    if (typeof code === "string" && code.length > 0)
       return getReasonToast(code).copy;
-    }
     const err = (body as { error?: unknown }).error;
     if (typeof err === "string" && err.length > 0) return err;
     const detail = (body as { detail?: unknown }).detail;
@@ -108,46 +39,93 @@ function errorFromResponseBody(
   return fallback;
 }
 
-function ClosePresetForm({
+function unifiedLegsFromPosition(pos: PortfolioPosition): UnifiedOrderLeg[] {
+  return pos.legs
+    .filter((l) => l.type !== "Stock" && l.strike != null)
+    .map((leg, i) => ({
+      id: `leg-${i}`,
+      action: leg.direction === "LONG" ? "BUY" : "SELL",
+      direction: leg.direction,
+      strike: leg.strike!,
+      type: leg.type === "Call" ? "Call" : "Put",
+      expiry: pos.expiry.replace(/-/g, ""),
+      quantity: Math.abs(leg.contracts),
+    }));
+}
+
+export default function PositionOrderModal({
   position,
   prices,
   onClose,
   onSubmitted,
-}: {
-  position: PortfolioPosition;
-  prices: Record<string, PriceData>;
-  onClose: () => void;
-  onSubmitted?: (orderId: string) => void;
-}) {
-  const draft = useMemo(
-    () => buildCloseTicket(position, prices),
-    [position, prices],
+}: Props) {
+  const [intent, setIntent] = useState<Intent>("close");
+
+  const draft: TicketDraft = useMemo(
+    () => seedTicketFromPosition(position, intent, prices),
+    [position, intent, prices],
   );
+
   const fullQty = Math.abs(position.contracts);
-  const [qty, setQty] = useState<number>(fullQty);
-  const [limitPrice, setLimitPrice] = useState<number>(
-    draft.payload.limitPrice,
+  const isCombo = draft.payload.type === "combo";
+
+  const [qtyText, setQtyText] = useState<string>(String(fullQty));
+  const [priceText, setPriceText] = useState<string>(
+    Number.isFinite(draft.payload.limitPrice)
+      ? draft.payload.limitPrice.toFixed(2)
+      : "",
   );
+  const [outsideRth, setOutsideRth] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
   const attemptId = useClientAttemptId({ ticker: position.ticker });
 
-  const handleChip = (pct: number) => setQty(applyQtyChip(fullQty, pct));
+  // Reseed price when intent or seeded mid changes (live WS updates).
+  useEffect(() => {
+    if (Number.isFinite(draft.payload.limitPrice)) {
+      setPriceText(draft.payload.limitPrice.toFixed(2));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [intent, draft.referenceMid]);
+
+  const parsedQty =
+    qtyText.trim() === ""
+      ? NaN
+      : position.structure_type === "Stock"
+        ? parseFloat(qtyText)
+        : parseInt(qtyText, 10);
+  const parsedPrice =
+    priceText.trim() === "" || priceText.trim() === "-"
+      ? NaN
+      : parseFloat(priceText);
+  const isValidQty = Number.isFinite(parsedQty) && parsedQty > 0;
+  const isValidPrice =
+    Number.isFinite(parsedPrice) &&
+    (isCombo ? parsedPrice !== 0 : parsedPrice > 0);
+
+  const handleChip = (pct: number) => {
+    const next = applyQtyChip(fullQty, pct);
+    setQtyText(String(next));
+    attemptId.onFieldEdit("quantity");
+  };
 
   const handleSubmit = async () => {
-    if (submitting) return;
+    if (submitting || !isValidQty || !isValidPrice) return;
     setSubmitting(true);
     setError(null);
     try {
-      // Clamp qty into [1, fullQty] so a manual over-type cannot flip a close
-      // into an opening trade that slips past the server naked-short guard.
-      const clampedQty = Math.max(1, Math.min(fullQty, qty));
+      const clampedQty =
+        intent === "close"
+          ? Math.max(1, Math.min(fullQty, parsedQty))
+          : Math.max(1, parsedQty);
       attemptId.markSubmitted();
       const body = {
         ...draft.payload,
         quantity: clampedQty,
-        limitPrice,
+        limitPrice: parsedPrice,
         client_attempt_id: attemptId.id,
+        ...(outsideRth && !isCombo ? { outsideRth: true } : {}),
       };
       const res = await fetch("/api/orders/place", {
         method: "POST",
@@ -172,65 +150,305 @@ function ClosePresetForm({
     }
   };
 
-  const partial = qty < fullQty;
+  const submitLabel = submitting
+    ? intent === "close"
+      ? "Submitting close…"
+      : "Submitting add…"
+    : intent === "close"
+      ? "Submit close"
+      : "Submit add";
+
+  const priceData: PriceData | null = useMemo(() => {
+    if (draft.referenceBid == null || draft.referenceAsk == null) return null;
+    return {
+      symbol: position.ticker,
+      last: draft.referenceMid ?? null,
+      lastIsCalculated: true,
+      bid: draft.referenceBid,
+      ask: draft.referenceAsk,
+      bidSize: null,
+      askSize: null,
+      volume: null,
+      high: null,
+      low: null,
+      open: null,
+      close: null,
+      week52High: null,
+      week52Low: null,
+      avgVolume: null,
+      delta: null,
+      gamma: null,
+      theta: null,
+      vega: null,
+      impliedVol: null,
+      undPrice: null,
+      timestamp: new Date().toISOString(),
+    } as unknown as PriceData;
+  }, [
+    draft.referenceBid,
+    draft.referenceMid,
+    draft.referenceAsk,
+    position.ticker,
+  ]);
+
+  const partial = intent === "close" && isValidQty && parsedQty < fullQty;
+
+  const unifiedLegs = useMemo(
+    () => unifiedLegsFromPosition(position),
+    [position],
+  );
 
   return (
-    <div className="position-order-close-form">
-      <div className="chip-row" role="group" aria-label="Close size chips">
-        <button type="button" onClick={() => handleChip(1.0)}>
-          100%
-        </button>
-        <button type="button" onClick={() => handleChip(0.5)}>
-          50%
-        </button>
-        <button type="button" onClick={() => handleChip(0.25)}>
-          25%
-        </button>
+    <Modal
+      open={true}
+      onClose={onClose}
+      title={`Order — ${position.ticker} ${position.structure}`}
+      className={
+        isCombo
+          ? "modify-order-modal modify-order-modal-combo"
+          : "modify-order-modal"
+      }
+    >
+      <div className={`modify-dialog${isCombo ? " modify-dialog-combo" : ""}`}>
+        <div className="modify-order-info">
+          <strong>{position.ticker}</strong>
+          <span
+            className={`pill ${position.direction === "LONG" ? "accum" : "distrib"}`}
+          >
+            {position.direction}
+          </span>
+          <span>{position.structure}</span>
+          <span>{fullQty}x</span>
+        </div>
+
+        <div
+          className="position-order-intent-bar"
+          role="group"
+          aria-label="Order intent"
+        >
+          <button
+            type="button"
+            className={`preset-tile ${intent === "close" ? "active" : ""}`}
+            aria-pressed={intent === "close"}
+            onClick={() => {
+              setIntent("close");
+              attemptId.onFieldEdit("intent");
+            }}
+          >
+            Close
+          </button>
+          <button
+            type="button"
+            className={`preset-tile ${intent === "add" ? "active" : ""}`}
+            aria-pressed={intent === "add"}
+            onClick={() => {
+              setIntent("add");
+              attemptId.onFieldEdit("intent");
+            }}
+          >
+            Add
+          </button>
+        </div>
+
+        <div
+          className={`modify-layout${isCombo ? " modify-layout-combo" : ""}`}
+        >
+          <div className="modify-primary-panel">
+            <ModifyOrderQuoteTelemetry priceData={priceData} />
+
+            <div className="modify-price-section">
+              <div
+                className={`modify-field-grid${isCombo ? " modify-field-grid-combo" : ""}`}
+              >
+                <label className="modify-field" htmlFor="position-order-qty">
+                  <span className="modify-price-label">Quantity</span>
+                  <div className="modify-price-input-row">
+                    <input
+                      id="position-order-qty"
+                      className="modify-price-input"
+                      type="text"
+                      inputMode="decimal"
+                      value={qtyText}
+                      onChange={(e) => {
+                        setQtyText(e.target.value);
+                        attemptId.onFieldEdit("quantity");
+                      }}
+                    />
+                  </div>
+                </label>
+
+                <label className="modify-field" htmlFor="position-order-price">
+                  <span className="modify-price-label">
+                    {isCombo ? "Net Limit Price" : "Limit Price"}
+                  </span>
+                  <div className="modify-price-input-row">
+                    <span className="modify-price-prefix">$</span>
+                    <input
+                      id="position-order-price"
+                      className="modify-price-input"
+                      type="text"
+                      inputMode="decimal"
+                      value={priceText}
+                      onChange={(e) => {
+                        setPriceText(e.target.value);
+                        attemptId.onFieldEdit("limitPrice");
+                      }}
+                      autoFocus
+                    />
+                  </div>
+                </label>
+              </div>
+
+              {intent === "close" && (
+                <div
+                  className="position-order-chip-row"
+                  role="group"
+                  aria-label="Close size chips"
+                >
+                  <button
+                    type="button"
+                    className="btn-quick"
+                    onClick={() => handleChip(1.0)}
+                  >
+                    100%
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-quick"
+                    onClick={() => handleChip(0.5)}
+                  >
+                    50%
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-quick"
+                    onClick={() => handleChip(0.25)}
+                  >
+                    25%
+                  </button>
+                </div>
+              )}
+
+              <div className="modify-quick-section">
+                <span className="modify-price-label">Reference Price</span>
+                <div className="modify-quick-buttons">
+                  <button
+                    className="btn-quick"
+                    disabled={draft.referenceBid == null}
+                    onClick={() => {
+                      if (draft.referenceBid != null) {
+                        setPriceText(draft.referenceBid.toFixed(2));
+                        attemptId.onFieldEdit("limitPrice");
+                      }
+                    }}
+                  >
+                    BID
+                    {draft.referenceBid != null
+                      ? ` ${draft.referenceBid.toFixed(2)}`
+                      : ""}
+                  </button>
+                  <button
+                    className="btn-quick"
+                    disabled={draft.referenceMid == null}
+                    onClick={() => {
+                      if (draft.referenceMid != null) {
+                        setPriceText(draft.referenceMid.toFixed(2));
+                        attemptId.onFieldEdit("limitPrice");
+                      }
+                    }}
+                  >
+                    MID
+                    {draft.referenceMid != null
+                      ? ` ${draft.referenceMid.toFixed(2)}`
+                      : ""}
+                  </button>
+                  <button
+                    className="btn-quick"
+                    disabled={draft.referenceAsk == null}
+                    onClick={() => {
+                      if (draft.referenceAsk != null) {
+                        setPriceText(draft.referenceAsk.toFixed(2));
+                        attemptId.onFieldEdit("limitPrice");
+                      }
+                    }}
+                  >
+                    ASK
+                    {draft.referenceAsk != null
+                      ? ` ${draft.referenceAsk.toFixed(2)}`
+                      : ""}
+                  </button>
+                </div>
+              </div>
+
+              {!isCombo && (
+                <label className="modify-rth-toggle">
+                  <input
+                    type="checkbox"
+                    checked={outsideRth}
+                    onChange={(e) => setOutsideRth(e.target.checked)}
+                  />
+                  <span className="modify-rth-label">FILL OUTSIDE RTH</span>
+                  <span className="modify-rth-hint">
+                    Pre-market &amp; after hours
+                  </span>
+                </label>
+              )}
+
+              {partial && (
+                <p className="partial-close-note">
+                  Partial close — {parsedQty} of {fullQty} contracts
+                </p>
+              )}
+
+              {isValidPrice &&
+                draft.referenceMid != null &&
+                Math.abs(parsedPrice - draft.referenceMid) >= 0.005 && (
+                  <div
+                    className={`modify-delta ${parsedPrice - draft.referenceMid > 0 ? "positive" : "negative"}`}
+                  >
+                    {parsedPrice - draft.referenceMid > 0 ? "+" : ""}
+                    {fmtPrice(Math.abs(parsedPrice - draft.referenceMid))} from
+                    mid {fmtPrice(draft.referenceMid)}
+                  </div>
+                )}
+
+              {error && <p className="order-error">{error}</p>}
+            </div>
+          </div>
+
+          {isCombo && unifiedLegs.length > 0 && (
+            <div className="modify-secondary-panel">
+              <div style={{ marginBottom: "12px" }}>
+                <OrderLegPills legs={unifiedLegs} />
+              </div>
+              <div className="modify-section-heading">
+                <span className="modify-price-label">Legs</span>
+                <span className="modify-section-hint">
+                  Read-only — leg editing comes in a follow-up
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="modify-actions">
+          <button
+            className="btn-secondary"
+            onClick={onClose}
+            disabled={submitting}
+          >
+            Cancel
+          </button>
+          <button
+            className="btn-primary"
+            onClick={handleSubmit}
+            disabled={submitting || !isValidQty || !isValidPrice}
+            aria-label={submitLabel}
+          >
+            {submitLabel}
+          </button>
+        </div>
       </div>
-
-      <label>
-        Quantity
-        <input
-          type="number"
-          min={1}
-          max={fullQty}
-          value={qty}
-          onChange={(e) => {
-            const raw = e.target.value;
-            if (raw === "") return;
-            const parsed = parseInt(raw, 10);
-            if (!Number.isFinite(parsed)) return;
-            setQty(Math.max(1, Math.min(fullQty, parsed)));
-          }}
-        />
-      </label>
-
-      {partial && (
-        <p className="partial-close-note">
-          Partial close — {qty} of {fullQty} contracts
-        </p>
-      )}
-
-      <label>
-        Limit Price
-        <input
-          type="number"
-          step="0.01"
-          value={limitPrice}
-          onChange={(e) => setLimitPrice(parseFloat(e.target.value) || 0)}
-        />
-      </label>
-
-      {error && <p className="order-error">{error}</p>}
-
-      <button
-        type="button"
-        onClick={handleSubmit}
-        disabled={submitting || qty <= 0 || limitPrice <= 0}
-        aria-label="Submit close"
-      >
-        {submitting ? "Submitting…" : "Submit close"}
-      </button>
-    </div>
+    </Modal>
   );
 }

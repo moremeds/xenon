@@ -12,18 +12,26 @@ vi.mock("@/components/Modal", () => ({
   ),
 }));
 
+const markSubmitted = vi.fn();
+const markTerminal = vi.fn();
+const onFieldEdit = vi.fn();
 vi.mock("@/components/ticker-detail/useClientAttemptId", () => ({
   useClientAttemptId: () => ({
     id: "test-attempt-id-123",
-    markSubmitted: vi.fn(),
-    markTerminal: vi.fn(),
-    onFieldEdit: vi.fn(),
+    markSubmitted,
+    markTerminal,
+    onFieldEdit,
   }),
 }));
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  markSubmitted.mockReset();
+  markTerminal.mockReset();
+  onFieldEdit.mockReset();
+});
 
-const pos: PortfolioPosition = {
+const stockPos: PortfolioPosition = {
   id: 1,
   ticker: "TSLA",
   structure: "Stock",
@@ -55,86 +63,176 @@ const pos: PortfolioPosition = {
   entry_date: "",
 };
 
-describe("PositionOrderModal — Close form", () => {
-  it("shows default qty equal to full position.contracts", () => {
+describe("PositionOrderModal — Close/Add toggle", () => {
+  it("defaults to Close intent for a LONG stock → action SELL", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ orderId: "abc", status: "ok" }),
+    });
+    (global as any).fetch = fetchMock;
+    const { getByRole } = render(
+      <PositionOrderModal
+        position={stockPos}
+        prices={{ TSLA: { last: 350, bid: 349.9, ask: 350.1 } as any }}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(getByRole("button", { name: /^Submit/i }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const body = JSON.parse((fetchMock.mock.calls[0] as any)[1].body);
+    expect(body.action).toBe("SELL");
+    expect(body.client_attempt_id).toBe("test-attempt-id-123");
+  });
+
+  it("switching to Add toggles action to BUY for the same LONG stock", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ orderId: "abc", status: "ok" }),
+    });
+    (global as any).fetch = fetchMock;
+    const { getByRole } = render(
+      <PositionOrderModal
+        position={stockPos}
+        prices={{ TSLA: { last: 350, bid: 349.9, ask: 350.1 } as any }}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(getByRole("button", { name: /^Add$/i }));
+    fireEvent.click(getByRole("button", { name: /^Submit/i }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const body = JSON.parse((fetchMock.mock.calls[0] as any)[1].body);
+    expect(body.action).toBe("BUY");
+  });
+});
+
+describe("PositionOrderModal — BID / MID / ASK quick buttons", () => {
+  it("clicking BID sets limit price to bid", () => {
+    const { getByRole, getByLabelText } = render(
+      <PositionOrderModal
+        position={stockPos}
+        prices={{ TSLA: { last: 350, bid: 349.5, ask: 350.5 } as any }}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(getByRole("button", { name: /^BID/i }));
+    const price = getByLabelText(/Limit Price/i) as HTMLInputElement;
+    expect(price.value).toBe("349.50");
+  });
+
+  it("clicking ASK sets limit price to ask", () => {
+    const { getByRole, getByLabelText } = render(
+      <PositionOrderModal
+        position={stockPos}
+        prices={{ TSLA: { last: 350, bid: 349.5, ask: 350.5 } as any }}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(getByRole("button", { name: /^ASK/i }));
+    const price = getByLabelText(/Limit Price/i) as HTMLInputElement;
+    expect(price.value).toBe("350.50");
+  });
+});
+
+describe("PositionOrderModal — input UX", () => {
+  it("user can clear the qty input via backspace and retype", () => {
     const { getByLabelText } = render(
       <PositionOrderModal
-        position={pos}
-        prices={{ TSLA: { last: 350 } as any }}
+        position={stockPos}
+        prices={{ TSLA: { last: 350, bid: 349.9, ask: 350.1 } as any }}
         onClose={() => {}}
       />,
     );
     const qty = getByLabelText(/Quantity/i) as HTMLInputElement;
-    expect(qty.value).toBe("300");
+    fireEvent.change(qty, { target: { value: "" } });
+    expect(qty.value).toBe("");
+    fireEvent.change(qty, { target: { value: "42" } });
+    expect(qty.value).toBe("42");
   });
 
-  it("50% chip halves qty and shows partial-close note", () => {
-    const { getByRole, getByText } = render(
+  it("user can type a minus sign in limit price (combo credit spread)", () => {
+    const { getByLabelText } = render(
       <PositionOrderModal
-        position={pos}
-        prices={{ TSLA: { last: 350 } as any }}
+        position={stockPos}
+        prices={{ TSLA: { last: 350, bid: 349.9, ask: 350.1 } as any }}
         onClose={() => {}}
       />,
     );
-    fireEvent.click(getByRole("button", { name: /^50%$/ }));
-    expect(getByText(/Partial close — 150 of 300/)).toBeTruthy();
+    const price = getByLabelText(/Limit Price/i) as HTMLInputElement;
+    fireEvent.change(price, { target: { value: "-" } });
+    expect(price.value).toBe("-");
   });
 
-  it("submits POST /api/orders/place with close payload and closes modal on 200", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ orderId: "abc123", status: "ok" }),
-    });
+  it("editing qty after a submit attempt rolls the client_attempt_id (calls onFieldEdit)", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: false, json: async () => ({ error: "bad" }) });
     (global as any).fetch = fetchMock;
-
-    const onClose = vi.fn();
-    const onSubmitted = vi.fn();
-    const { getByRole } = render(
+    const { getByRole, getByLabelText } = render(
       <PositionOrderModal
-        position={pos}
-        prices={{ TSLA: { last: 350 } as any }}
-        onClose={onClose}
-        onSubmitted={onSubmitted}
+        position={stockPos}
+        prices={{ TSLA: { last: 350, bid: 349.9, ask: 350.1 } as any }}
+        onClose={() => {}}
       />,
     );
-    fireEvent.click(getByRole("button", { name: /Submit close/i }));
-
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-    const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe("/api/orders/place");
-    const body = JSON.parse((init as any).body);
-    expect(body).toMatchObject({
-      type: "stock",
-      symbol: "TSLA",
-      action: "SELL",
-      quantity: 300,
-      tif: "DAY",
-    });
-    expect(typeof body.client_attempt_id).toBe("string");
-    expect(body.client_attempt_id.length).toBeGreaterThan(0);
-    await waitFor(() => expect(onSubmitted).toHaveBeenCalledWith("abc123"));
-    expect(onClose).toHaveBeenCalled();
+    fireEvent.click(getByRole("button", { name: /^Submit/i }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    fireEvent.change(getByLabelText(/Quantity/i), { target: { value: "100" } });
+    expect(onFieldEdit).toHaveBeenCalledWith("quantity");
   });
 });
 
-describe("PositionOrderModal — preset tiles", () => {
-  it("renders four preset tiles: Close active, others disabled", () => {
-    const { getByRole } = render(
+describe("PositionOrderModal — leg pills (combo)", () => {
+  const bullCallSpread: PortfolioPosition = {
+    id: 2,
+    ticker: "SPY",
+    structure: "Bull Call Spread",
+    structure_type: "BullCallSpread",
+    risk_profile: "defined",
+    expiry: "2026-06-19",
+    contracts: 4,
+    direction: "LONG",
+    entry_cost: 1200,
+    max_risk: 1200,
+    market_value: 1400,
+    legs: [
+      {
+        direction: "LONG",
+        contracts: 4,
+        type: "Call",
+        strike: 200,
+        entry_cost: 1800,
+        avg_cost: 4.5,
+        market_price: 5,
+        market_value: 2000,
+        market_price_is_calculated: false,
+      },
+      {
+        direction: "SHORT",
+        contracts: 4,
+        type: "Call",
+        strike: 210,
+        entry_cost: -600,
+        avg_cost: 1.5,
+        market_price: 1.5,
+        market_value: -600,
+        market_price_is_calculated: false,
+      },
+    ],
+    ib_daily_pnl: null,
+    kelly_optimal: null,
+    target: null,
+    stop: null,
+    entry_date: "",
+  };
+
+  it("renders the OrderLegPills strip for a combo position", () => {
+    const { container } = render(
       <PositionOrderModal
-        position={pos}
-        prices={{ TSLA: { last: 350 } as any }}
+        position={bullCallSpread}
+        prices={{}}
         onClose={() => {}}
       />,
     );
-    const close = getByRole("button", { name: /^Close$/ });
-    const tsl = getByRole("button", { name: /Trailing Stop Loss/i });
-    const ttp = getByRole("button", { name: /Trailing Take Profit/i });
-    const roll = getByRole("button", { name: /^Roll$/ });
-    expect(close.getAttribute("aria-pressed")).toBe("true");
-    expect(tsl.hasAttribute("disabled")).toBe(true);
-    expect(ttp.hasAttribute("disabled")).toBe(true);
-    expect(roll.hasAttribute("disabled")).toBe(true);
-    expect(tsl.getAttribute("title")).toMatch(/coming soon/i);
-    expect(roll.getAttribute("title")).toMatch(/coming soon/i);
+    expect(container.querySelector(".order-leg-pills")).toBeTruthy();
   });
 });
