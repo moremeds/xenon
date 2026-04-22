@@ -1,20 +1,17 @@
 import { test, expect, type Page } from "@playwright/test";
 
 /**
- * Task 9 — Position-row ⚡ order button: structural E2E checks.
+ * Position-row ⚡ order button: structural E2E checks.
  *
- * Covers:
+ * Covers (post-rework):
  *  1. ⚡ button renders on IB tab position rows (stock + spread)
- *  2. Clicking ⚡ opens the modal — four preset tiles; Close is aria-pressed="true";
- *     the three others are disabled with title attributes matching /coming soon/i
- *  3. Close form shows — Quantity input defaulting to position.contracts; Submit close button
- *  4. 50% chip updates quantity to half and shows the "Partial close — N of M contracts" note
+ *  2. Clicking ⚡ opens the modal with Close/Add intent bar; Close defaults active
+ *  3. Modal shows Quantity input defaulting to position.contracts and Submit close button
+ *  4. 50% chip updates quantity to half and shows the partial-close note
  *  5. Futu tab hides ⚡ — no .position-order-btn exists
  *  6. Close button closes the modal (cleanup check)
- *
- * NOT covered here (left to manual PR test plan):
- *  - Live order submission
- *  - Hover tooltips rendering
+ *  7. POST /api/orders/place — close payload shape (action SELL for LONG stock)
+ *  8. Close/Add toggle switches submit label and payload action (BUY for LONG stock + Add)
  */
 
 const IB_FIXTURE = {
@@ -270,7 +267,6 @@ test.describe("Position-row ⚡ order button", () => {
   test.beforeEach(async ({ page }) => {
     await installMocks(page);
     await page.goto("/portfolio");
-    // Wait for IB positions to render
     await page.waitForSelector(".position-order-btn", { timeout: 10_000 });
   });
 
@@ -278,58 +274,36 @@ test.describe("Position-row ⚡ order button", () => {
     page,
   }) => {
     const buttons = page.locator(".position-order-btn");
-    // At least two rows: TSLA stock row + SPY spread row
     await expect(buttons).toHaveCount(2);
   });
 
-  test("2. clicking ⚡ opens modal with four preset tiles; Close is active; others disabled with coming-soon title", async ({
+  test("2. clicking ⚡ opens modal with Close/Add intent bar; Close defaults active", async ({
     page,
   }) => {
-    // Click the first ⚡ button (TSLA stock row)
     await page.locator(".position-order-btn").first().click();
 
-    // Modal should appear — look for the preset bar
-    const presetBar = page.locator('[aria-label="Order presets"]');
-    await expect(presetBar).toBeVisible({ timeout: 5_000 });
+    const intentBar = page.locator('[aria-label="Order intent"]');
+    await expect(intentBar).toBeVisible({ timeout: 5_000 });
 
-    const tiles = presetBar.locator(".preset-tile");
-    await expect(tiles).toHaveCount(4);
+    const tiles = intentBar.locator(".preset-tile");
+    await expect(tiles).toHaveCount(2);
 
-    // Close tile is active (aria-pressed=true)
     const closeTile = tiles.filter({ hasText: "Close" });
     await expect(closeTile).toHaveAttribute("aria-pressed", "true");
-
-    // The other three are disabled with coming-soon titles.
-    // Use nth-based access: tiles 1,2,3 (0-indexed) are the non-Close ones.
-    const presets = [
-      { label: "Trailing Stop Loss" },
-      { label: "Trailing Take Profit" },
-      { label: "Roll" },
-    ];
-    for (const { label } of presets) {
-      const tile = tiles.filter({ hasText: label });
-      await expect(tile).toBeDisabled();
-      await expect(tile).toHaveAttribute("aria-pressed", "false");
-      const title = await tile.getAttribute("title");
-      expect(title).toMatch(/coming soon/i);
-    }
+    const addTile = tiles.filter({ hasText: "Add" });
+    await expect(addTile).toHaveAttribute("aria-pressed", "false");
   });
 
-  test("3. Close form shows Quantity input defaulting to position.contracts and Submit close button", async ({
+  test("3. modal shows Quantity input defaulting to position.contracts and Submit close button", async ({
     page,
   }) => {
     await page.locator(".position-order-btn").first().click();
 
-    // Close preset panel
-    const panel = page.locator('[data-testid="close-preset-panel"]');
-    await expect(panel).toBeVisible({ timeout: 5_000 });
-
-    // Quantity input defaults to position.contracts (100 for TSLA)
-    const qtyInput = panel.locator('input[type="number"]').first();
+    const qtyInput = page.locator("#position-order-qty");
+    await expect(qtyInput).toBeVisible({ timeout: 5_000 });
     await expect(qtyInput).toHaveValue("100");
 
-    // Submit close button exists
-    const submitBtn = panel.getByRole("button", { name: /submit close/i });
+    const submitBtn = page.getByRole("button", { name: /submit close/i });
     await expect(submitBtn).toBeVisible();
   });
 
@@ -337,58 +311,48 @@ test.describe("Position-row ⚡ order button", () => {
     page,
   }) => {
     await page.locator(".position-order-btn").first().click();
+    await page.waitForSelector("#position-order-qty", { timeout: 5_000 });
 
-    const panel = page.locator('[data-testid="close-preset-panel"]');
-    await expect(panel).toBeVisible({ timeout: 5_000 });
-
-    // Click 50% chip
-    const chipRow = panel.locator('[aria-label="Close size chips"]');
+    const chipRow = page.locator('[aria-label="Close size chips"]');
     await chipRow.getByRole("button", { name: "50%" }).click();
 
-    // Quantity should be 50 (half of 100)
-    const qtyInput = panel.locator('input[type="number"]').first();
+    const qtyInput = page.locator("#position-order-qty");
     await expect(qtyInput).toHaveValue("50");
 
-    // Partial close note appears
-    const note = panel.locator(".partial-close-note");
+    const note = page.locator(".partial-close-note");
     await expect(note).toBeVisible();
     await expect(note).toHaveText(/partial close — 50 of 100 contracts/i);
   });
 
   test("5. Futu tab hides ⚡ buttons", async ({ page }) => {
-    // Switch to FUTU tab
     const futuTab = page.getByRole("button", {
       name: /Switch to FUTU account/,
     });
     await futuTab.waitFor({ timeout: 5_000 });
     await futuTab.click();
 
-    // Wait for Futu content to render (TSLA row from FUTU_FIXTURE)
     await page.waitForSelector("button.ticker-link", { timeout: 5_000 });
 
-    // No ⚡ buttons on the Futu tab
     await expect(page.locator(".position-order-btn")).toHaveCount(0);
   });
 
   test("6. modal close button dismisses the modal", async ({ page }) => {
     await page.locator(".position-order-btn").first().click();
 
-    const presetBar = page.locator('[aria-label="Order presets"]');
-    await expect(presetBar).toBeVisible({ timeout: 5_000 });
+    const intentBar = page.locator('[aria-label="Order intent"]');
+    await expect(intentBar).toBeVisible({ timeout: 5_000 });
 
-    // Close the modal via the dedicated modal close button (aria-label="Close")
     const closeBtn = page.locator("button.modal-close");
     await closeBtn.click();
 
-    await expect(presetBar).not.toBeVisible({ timeout: 3_000 });
+    await expect(intentBar).not.toBeVisible({ timeout: 3_000 });
   });
 
-  test("POST /api/orders/place payload shape (intercepted — no live submission)", async ({
+  test("7. POST /api/orders/place payload shape (close — action SELL for LONG stock)", async ({
     page,
   }) => {
     let capturedBody: Record<string, unknown> | null = null;
 
-    // Override orders/place to capture payload and return mock 200
     await page.route("**/api/orders/place", async (route) => {
       const req = route.request();
       try {
@@ -404,27 +368,17 @@ test.describe("Position-row ⚡ order button", () => {
     });
 
     await page.locator(".position-order-btn").first().click();
+    await page.waitForSelector("#position-order-price", { timeout: 5_000 });
 
-    const panel = page.locator('[data-testid="close-preset-panel"]');
-    await expect(panel).toBeVisible({ timeout: 5_000 });
-
-    // No WS prices in test env — limitPrice defaults to 0, which disables the
-    // Submit button. Type a valid limit price so the button becomes enabled.
-    const limitInput = panel
-      .locator("label")
-      .filter({ hasText: "Limit Price" })
-      .locator("input");
+    const limitInput = page.locator("#position-order-price");
     await limitInput.fill("350");
 
-    // Submit the close order
-    const submitBtn = panel.getByRole("button", { name: /submit close/i });
+    const submitBtn = page.getByRole("button", { name: /submit close/i });
     await expect(submitBtn).toBeEnabled({ timeout: 2_000 });
     await submitBtn.click();
 
-    // Wait for the route intercept to fire (modal should close on success)
-    await page.waitForFunction(() => true); // flush microtasks
+    await page.waitForFunction(() => true);
 
-    // Verify payload shape
     expect(capturedBody).not.toBeNull();
     expect(capturedBody!.type).toBe("stock");
     expect(capturedBody!.symbol).toBe("TSLA");
@@ -435,5 +389,57 @@ test.describe("Position-row ⚡ order button", () => {
       0,
     );
     expect(capturedBody!.tif).toBe("DAY");
+  });
+
+  test("8. Close/Add toggle switches the submit button label and the payload action", async ({
+    page,
+  }) => {
+    let capturedBody: Record<string, unknown> | null = null;
+
+    await page.route("**/api/orders/place", async (route) => {
+      const req = route.request();
+      try {
+        capturedBody = JSON.parse(req.postData() ?? "{}");
+      } catch {
+        capturedBody = null;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ orderId: "mock-order-456" }),
+      });
+    });
+
+    await page.locator(".position-order-btn").first().click();
+    await page.waitForSelector("#position-order-price", { timeout: 5_000 });
+
+    const intentBar = page.locator('[aria-label="Order intent"]');
+    await expect(
+      intentBar.getByRole("button", { name: /^Close$/ }),
+    ).toHaveAttribute("aria-pressed", "true");
+    await expect(
+      page.getByRole("button", { name: /Submit close/i }),
+    ).toBeVisible();
+
+    await intentBar.getByRole("button", { name: /^Add$/ }).click();
+    await expect(
+      intentBar.getByRole("button", { name: /^Add$/ }),
+    ).toHaveAttribute("aria-pressed", "true");
+    await expect(
+      page.getByRole("button", { name: /Submit add/i }),
+    ).toBeVisible();
+
+    const limitInput = page.locator("#position-order-price");
+    await limitInput.fill("350");
+
+    const submitBtn = page.getByRole("button", { name: /submit add/i });
+    await expect(submitBtn).toBeEnabled({ timeout: 2_000 });
+    await submitBtn.click();
+
+    await page.waitForFunction(() => true);
+
+    expect(capturedBody).not.toBeNull();
+    expect(capturedBody!.action).toBe("BUY");
+    expect(capturedBody!.symbol).toBe("TSLA");
   });
 });
