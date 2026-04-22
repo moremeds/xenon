@@ -93,12 +93,18 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     if (replaceOrder) {
+      // Validation. Note: combo limitPrice may be negative (credit spread closes,
+      // credit-spread modifies). The route accepts any non-zero finite number.
+      const limitPriceValid =
+        replaceOrder.limitPrice != null &&
+        Number.isFinite(replaceOrder.limitPrice) &&
+        replaceOrder.limitPrice !== 0;
       if (
         replaceOrder.type !== "combo" ||
         !replaceOrder.symbol ||
         !replaceOrder.action ||
         !replaceOrder.quantity ||
-        !replaceOrder.limitPrice ||
+        !limitPriceValid ||
         !replaceOrder.legs ||
         replaceOrder.legs.length < 2
       ) {
@@ -123,6 +129,10 @@ export async function POST(request: Request): Promise<Response> {
         );
       }
 
+      // Cancel-then-place is unavoidable here (IB has no atomic restructure for
+      // combo legs), but we wrap in try/catch so a place failure surfaces a
+      // CRITICAL error that names the data-loss situation explicitly. The user
+      // sees exactly what happened: original cancelled, replacement failed.
       for (const cancelTarget of cancelTargets) {
         await xenonFetch<Record<string, unknown>>("/orders/cancel", {
           method: "POST",
@@ -132,15 +142,37 @@ export async function POST(request: Request): Promise<Response> {
         });
       }
 
-      const result = await xenonFetch<Record<string, unknown>>(
-        "/orders/place",
-        {
+      let result: Record<string, unknown>;
+      try {
+        result = await xenonFetch<Record<string, unknown>>("/orders/place", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(replaceOrder),
           timeout: 20_000,
-        },
-      );
+        });
+      } catch (placeErr) {
+        // Refresh so the UI sees the cancelled state.
+        try {
+          await xenonFetch("/orders/refresh", {
+            method: "POST",
+            timeout: 10_000,
+          });
+        } catch {
+          /* non-fatal */
+        }
+        const ordersResult = await readDataFile("data/orders.json", OrdersData);
+        const placeMsg =
+          placeErr instanceof Error ? placeErr.message : String(placeErr);
+        return NextResponse.json(
+          {
+            error:
+              "CRITICAL: Original order cancelled, replacement FAILED. Place a new order manually.",
+            detail: { placeError: placeMsg, requestId },
+            orders: ordersResult.ok ? ordersResult.data : null,
+          },
+          { status: 502 },
+        );
+      }
 
       try {
         await xenonFetch("/orders/refresh", {
