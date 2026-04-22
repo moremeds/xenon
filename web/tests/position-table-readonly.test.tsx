@@ -94,3 +94,17 @@ describe("PositionTable readonly mode", () => {
     expect(queryByTestId("instrument-detail-modal")).toBeNull();
   });
 });
+
+describe("PositionTable — order button", () => {
+  it("renders the order button when readonly=false", () => {
+    const { container } = render(<PositionTable positions={[stockPosition]} />);
+    expect(container.querySelector("button.position-order-btn")).not.toBeNull();
+  });
+
+  it("does NOT render the order button when readonly=true", () => {
+    const { container } = render(
+      <PositionTable positions={[stockPosition]} readonly={true} />,
+    );
+    expect(container.querySelector("button.position-order-btn")).toBeNull();
+  });
+});
