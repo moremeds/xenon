@@ -120,5 +120,70 @@ export function buildCloseTicket(
     };
   }
 
-  throw new Error("Combo close tickets not yet implemented");
+  // Combo (multi-leg)
+  // NOTE: Covered Call / Collar / Synthetic include a Stock leg. The /api/orders/place
+  // combo payload schema cannot express a stock leg (requires strike/expiry/right),
+  // and the IB BAG builder only qualifies option legs. Reject up-front — a future
+  // plan can add a hybrid stock+BAG ticket.
+  const hasStockLeg = position.legs.some((l) => l.type === "Stock");
+  if (hasStockLeg) {
+    throw new Error(
+      "Close tickets for stock+option structures (Covered Call, Collar, Synthetic) are not yet supported",
+    );
+  }
+
+  const expiry = position.expiry.replace(/-/g, "");
+  const baseContracts = Math.abs(position.contracts);
+  const comboLegs = position.legs.map((leg) => {
+    const right: "C" | "P" = leg.type === "Call" ? "C" : "P";
+    // Per web/CLAUDE.md "IB Combo (BAG) Order Leg Convention":
+    // ComboLeg.action = spread structure (LONG → BUY, SHORT → SELL), NOT trade direction.
+    const legAction: "BUY" | "SELL" = leg.direction === "LONG" ? "BUY" : "SELL";
+    // Ratio is per-leg contracts / structure contracts. Guards 1×2s etc.
+    const legContracts = Math.abs(leg.contracts);
+    const ratio =
+      baseContracts > 0
+        ? Math.max(1, Math.round(legContracts / baseContracts))
+        : 1;
+    return {
+      expiry,
+      strike: leg.strike!,
+      right,
+      action: legAction,
+      ratio,
+    };
+  });
+
+  // Order.action: reverse of the structure's net direction.
+  const orderAction: "BUY" | "SELL" =
+    position.direction === "LONG" ? "SELL" : "BUY";
+
+  // Net mid: sum of sign × leg_mid, where sign comes from the position (LONG=+1, SHORT=-1).
+  // Keep in mind net can be negative (credit).
+  let netMid: number | null = 0;
+  let missing = false;
+  for (const leg of position.legs) {
+    const key = legPriceKey(position.ticker, position.expiry, leg);
+    const legMid = key ? midFromQuote(prices[key]) : null;
+    if (legMid == null) {
+      missing = true;
+      break;
+    }
+    const sign = leg.direction === "LONG" ? 1 : -1;
+    netMid = (netMid as number) + sign * legMid;
+  }
+  const referenceMid = missing ? null : (netMid as number);
+
+  return {
+    payload: {
+      type: "combo",
+      symbol: position.ticker,
+      action: orderAction,
+      quantity: baseContracts,
+      limitPrice: referenceMid ?? 0,
+      tif: "DAY",
+      legs: comboLegs,
+    },
+    referenceMid,
+  };
 }
