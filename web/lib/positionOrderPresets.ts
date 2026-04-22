@@ -1,5 +1,6 @@
 import type { PortfolioPosition } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
+import { legPriceKey } from "@/lib/positionUtils";
 
 /**
  * Payload shape matches POST /api/orders/place. Mirrors the shapes produced
@@ -88,5 +89,36 @@ export function buildCloseTicket(
     };
   }
 
-  throw new Error("Non-stock close tickets not yet implemented");
+  const isSingleLegOption =
+    position.legs.length === 1 &&
+    position.legs[0].type !== "Stock" &&
+    position.legs[0].strike != null;
+
+  if (isSingleLegOption) {
+    const leg = position.legs[0];
+    const right: "C" | "P" = leg.type === "Call" ? "C" : "P";
+    const expiry = position.expiry.replace(/-/g, "");
+    const action: "BUY" | "SELL" =
+      position.direction === "LONG" ? "SELL" : "BUY";
+    // Use the shared helper so the key matches `legPriceKey(...)` used
+    // elsewhere in the app (underscore-joined SYMBOL_YYYYMMDD_STRIKE_RIGHT).
+    const key = legPriceKey(position.ticker, position.expiry, leg);
+    const mid = key ? midFromQuote(prices[key]) : null;
+    return {
+      payload: {
+        type: "option",
+        symbol: position.ticker,
+        action,
+        quantity: Math.abs(position.contracts),
+        limitPrice: mid ?? 0,
+        tif: "DAY",
+        expiry,
+        strike: leg.strike!,
+        right,
+      },
+      referenceMid: mid,
+    };
+  }
+
+  throw new Error("Combo close tickets not yet implemented");
 }
