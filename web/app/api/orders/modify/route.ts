@@ -85,6 +85,21 @@ export async function POST(request: Request): Promise<Response> {
     const newQuantity = body.newQuantity;
     const replaceOrder = body.replaceOrder;
 
+    // [modify-debug] Remove after diagnosis. Dumps the inbound payload so we can
+    // see exactly what the UI is sending vs what the FastAPI route receives.
+    console.log("[modify-debug] inbound", {
+      requestId,
+      orderId,
+      permId,
+      newPrice,
+      newQuantity,
+      outsideRth: body.outsideRth,
+      modifySequence: body.modifySequence,
+      hasReplaceOrder: !!replaceOrder,
+      replaceOrderType: replaceOrder?.type,
+      replaceOrderLegs: replaceOrder?.legs?.length,
+    });
+
     if (orderId === 0 && permId === 0) {
       return NextResponse.json(
         { error: "Must provide orderId or permId" },
@@ -217,19 +232,40 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    const result = await xenonFetch<Record<string, unknown>>("/orders/modify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        orderId,
-        permId,
-        newPrice,
-        newQuantity,
-        outsideRth: body.outsideRth,
-        modifySequence: body.modifySequence,
-      }),
-      timeout: 20_000,
-    });
+    const fastapiBody = {
+      orderId,
+      permId,
+      newPrice,
+      newQuantity,
+      outsideRth: body.outsideRth,
+      modifySequence: body.modifySequence,
+    };
+    // [modify-debug] Remove after diagnosis.
+    console.log("[modify-debug] → FastAPI /orders/modify body:", fastapiBody);
+    let result: Record<string, unknown>;
+    try {
+      result = await xenonFetch<Record<string, unknown>>("/orders/modify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(fastapiBody),
+        timeout: 20_000,
+      });
+      // [modify-debug] Remove after diagnosis.
+      console.log("[modify-debug] ← FastAPI /orders/modify result:", result);
+    } catch (err) {
+      // [modify-debug] Remove after diagnosis.
+      console.log(
+        "[modify-debug] ← FastAPI /orders/modify THREW:",
+        err instanceof Error
+          ? {
+              name: err.name,
+              message: err.message,
+              stack: err.stack?.split("\n").slice(0, 5),
+            }
+          : err,
+      );
+      throw err;
+    }
 
     // Refresh orders after modify
     try {
