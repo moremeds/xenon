@@ -39,7 +39,7 @@ const PORTFOLIO_WITH_RISK_REVERSAL = {
       contracts: 1,
       expiry: "2026-04-17",
       entry_date: "2026-03-01",
-      entry_cost: -50,        // net credit received
+      entry_cost: -50, // net credit received
       market_value: null,
       market_price: null,
       market_price_is_calculated: false,
@@ -82,15 +82,15 @@ const PRICES_MID_ONLY = {
     symbol: "AAPL",
     last: null,
     lastIsCalculated: false,
-    bid: 268.50,
-    ask: 268.80,
+    bid: 268.5,
+    ask: 268.8,
     bidSize: 5,
     askSize: 3,
     volume: 8500000,
-    high: 272.10,
-    low: 265.20,
-    open: 267.00,
-    close: 266.90,
+    high: 272.1,
+    low: 265.2,
+    open: 267.0,
+    close: 266.9,
     delta: null,
     gamma: null,
     theta: null,
@@ -103,19 +103,19 @@ const PRICES_MID_ONLY = {
     timestamp: new Date().toISOString(),
   },
   // Short put leg: AAPL_20260417_220_P
-  "AAPL_20260417_220_P": {
+  AAPL_20260417_220_P: {
     symbol: "AAPL_20260417_220_P",
     last: null,
     lastIsCalculated: false,
-    bid: 1.80,
-    ask: 2.10,
+    bid: 1.8,
+    ask: 2.1,
     bidSize: 10,
     askSize: 8,
     volume: 0,
     high: null,
     low: null,
     open: null,
-    close: 1.90,
+    close: 1.9,
     delta: -0.12,
     gamma: 0.003,
     theta: -0.04,
@@ -125,19 +125,19 @@ const PRICES_MID_ONLY = {
     timestamp: new Date().toISOString(),
   },
   // Long call leg: AAPL_20260417_280_C
-  "AAPL_20260417_280_C": {
+  AAPL_20260417_280_C: {
     symbol: "AAPL_20260417_280_C",
     last: null,
     lastIsCalculated: false,
-    bid: 1.10,
-    ask: 1.40,
+    bid: 1.1,
+    ask: 1.4,
     bidSize: 15,
     askSize: 12,
     volume: 0,
     high: null,
     low: null,
     open: null,
-    close: 1.20,
+    close: 1.2,
     delta: 0.09,
     gamma: 0.002,
     theta: -0.03,
@@ -221,55 +221,17 @@ function stubApis(page: import("@playwright/test").Page) {
 // ---------------------------------------------------------------------------
 
 test.describe("Risk reversal chart — mid-price fallback", () => {
-  // FIXME: Needs WS mock fixture — page navigation resets React state, so
-  // injected ws-price custom events no longer flow to usePrices on the ticker page.
-  test.fixme("shows MIDPRICE badge when last=null but bid/ask are available", async ({ page }) => {
-    await page.unrouteAll({ behavior: "ignoreErrors" });
-    stubApis(page);
+  // The positive-case test for the MIDPRICE badge was a test.fixme stub that
+  // required a WS mock fixture surviving route navigation — infra we don't
+  // have, so it never ran. PriceChart's badge-rendering behavior for
+  // isMid=true is asserted in the Vitest unit test
+  // web/tests/price-chart-shell.test.ts; the integration path through
+  // TickerDetailContent + navigation + live price selection is currently
+  // uncovered and will stay that way until the WS fixture is built.
 
-    await page.goto("/portfolio");
-
-    // Inject mid-only prices by overriding the prices state via window helper
-    // (The app re-renders on price updates via usePrices hook; we simulate by
-    //  dispatching a custom price message event that the hook listens to.)
-    await page.evaluate((prices) => {
-      // Dispatch a synthetic ws-price event for each symbol.
-      // The prices WebSocket listener in usePrices dispatches "ws-price" events.
-      for (const [, priceData] of Object.entries(prices)) {
-        window.dispatchEvent(
-          new CustomEvent("ws-price", { detail: { type: "price", symbol: (priceData as { symbol: string }).symbol, data: priceData } }),
-        );
-      }
-    }, PRICES_MID_ONLY);
-
-    // Open the ticker detail page for AAPL
-    const aaplLink = page.locator('[aria-label="View details for AAPL"]').first();
-    await aaplLink.waitFor({ timeout: 10_000 });
-    await aaplLink.click();
-    await page.waitForURL("**/AAPL**", { timeout: 5_000 });
-
-    // Page should be visible
-    const detail = page.locator(".ticker-detail-page");
-    await detail.waitFor({ timeout: 5_000 });
-
-    // Re-inject prices after page navigation (prices lost on route change)
-    await page.evaluate((prices) => {
-      for (const [, priceData] of Object.entries(prices)) {
-        window.dispatchEvent(
-          new CustomEvent("ws-price", { detail: { type: "price", symbol: (priceData as { symbol: string }).symbol, data: priceData } }),
-        );
-      }
-    }, PRICES_MID_ONLY);
-
-    // The MIDPRICE badge must appear in the chart area
-    const midBadge = detail.locator(".price-chart-mid-badge");
-    await midBadge.waitFor({ timeout: 5_000 });
-
-    await expect(midBadge).toBeVisible();
-    await expect(midBadge).toHaveText("MIDPRICE");
-  });
-
-  test("does NOT show MIDPRICE badge when last-trade prices are available", async ({ page }) => {
+  test("does NOT show MIDPRICE badge when last-trade prices are available", async ({
+    page,
+  }) => {
     await page.unrouteAll({ behavior: "ignoreErrors" });
     stubApis(page);
 
@@ -283,12 +245,20 @@ test.describe("Risk reversal chart — mid-price fallback", () => {
     await page.evaluate((prices) => {
       for (const [, priceData] of Object.entries(prices)) {
         window.dispatchEvent(
-          new CustomEvent("ws-price", { detail: { type: "price", symbol: (priceData as { symbol: string }).symbol, data: priceData } }),
+          new CustomEvent("ws-price", {
+            detail: {
+              type: "price",
+              symbol: (priceData as { symbol: string }).symbol,
+              data: priceData,
+            },
+          }),
         );
       }
     }, pricesWithLast);
 
-    const aaplLink = page.locator('[aria-label="View details for AAPL"]').first();
+    const aaplLink = page
+      .locator('[aria-label="View details for AAPL"]')
+      .first();
     await aaplLink.waitFor({ timeout: 10_000 });
     await aaplLink.click();
     await page.waitForURL("**/AAPL**", { timeout: 5_000 });
@@ -300,7 +270,13 @@ test.describe("Risk reversal chart — mid-price fallback", () => {
     await page.evaluate((prices) => {
       for (const [, priceData] of Object.entries(prices)) {
         window.dispatchEvent(
-          new CustomEvent("ws-price", { detail: { type: "price", symbol: (priceData as { symbol: string }).symbol, data: priceData } }),
+          new CustomEvent("ws-price", {
+            detail: {
+              type: "price",
+              symbol: (priceData as { symbol: string }).symbol,
+              data: priceData,
+            },
+          }),
         );
       }
     }, pricesWithLast);
