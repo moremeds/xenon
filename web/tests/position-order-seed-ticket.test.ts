@@ -320,6 +320,242 @@ describe("seedTicketFromPosition — guards", () => {
   });
 });
 
+// ────────────────────────────────────────────────────────────────────────────
+// Regression: position.direction can be "DEBIT" or "CREDIT" for spreads, not
+// just "LONG"/"SHORT". The backend (src/xenon/execution/ib_sync.py) tags
+// spreads by net entry cost. Pre-fix, these structures fell into the wrong
+// branch and produced BUY-on-close for a long debit spread (which IB then
+// hit with error 201 if the user already had a SELL closing order open).
+// ────────────────────────────────────────────────────────────────────────────
+
+function bearPutSpreadDebitPos(): PortfolioPosition {
+  // Mirror of the live data row that triggered the bug:
+  //   SPX | dir=DEBIT | contracts=32 | Bear Put Spread | legs=[SHORT 32 Put, LONG 32 Put]
+  // A bear put spread is net LONG (you paid debit, you profit if underlying drops).
+  return {
+    id: 99,
+    ticker: "SPX",
+    structure: "Bear Put Spread",
+    structure_type: "BearPutSpread",
+    risk_profile: "defined",
+    expiry: "2026-06-19",
+    contracts: 32,
+    direction: "DEBIT",
+    entry_cost: 6400,
+    max_risk: 6400,
+    market_value: 7200,
+    legs: [
+      {
+        direction: "SHORT",
+        contracts: 32,
+        type: "Put",
+        strike: 4500,
+        entry_cost: -3200,
+        avg_cost: 1.0,
+        market_price: 1.1,
+        market_value: -3520,
+        market_price_is_calculated: false,
+      },
+      {
+        direction: "LONG",
+        contracts: 32,
+        type: "Put",
+        strike: 4600,
+        entry_cost: 9600,
+        avg_cost: 3.0,
+        market_price: 3.35,
+        market_value: 10720,
+        market_price_is_calculated: false,
+      },
+    ],
+    ib_daily_pnl: null,
+    kelly_optimal: null,
+    target: null,
+    stop: null,
+    entry_date: "",
+  };
+}
+
+function ironCondorCreditPos(): PortfolioPosition {
+  // Net SHORT: you collected credit on entry. Close = BUY combo to flatten.
+  return {
+    id: 100,
+    ticker: "SPY",
+    structure: "Iron Condor",
+    structure_type: "IronCondor",
+    risk_profile: "defined",
+    expiry: "2026-05-15",
+    contracts: 5,
+    direction: "CREDIT",
+    entry_cost: -500, // received
+    max_risk: 4500,
+    market_value: -300,
+    legs: [
+      {
+        direction: "LONG",
+        contracts: 5,
+        type: "Put",
+        strike: 480,
+        entry_cost: 250,
+        avg_cost: 0.5,
+        market_price: 0.4,
+        market_value: 200,
+        market_price_is_calculated: false,
+      },
+      {
+        direction: "SHORT",
+        contracts: 5,
+        type: "Put",
+        strike: 490,
+        entry_cost: -750,
+        avg_cost: 1.5,
+        market_price: 1.2,
+        market_value: -600,
+        market_price_is_calculated: false,
+      },
+      {
+        direction: "SHORT",
+        contracts: 5,
+        type: "Call",
+        strike: 510,
+        entry_cost: -750,
+        avg_cost: 1.5,
+        market_price: 1.2,
+        market_value: -600,
+        market_price_is_calculated: false,
+      },
+      {
+        direction: "LONG",
+        contracts: 5,
+        type: "Call",
+        strike: 520,
+        entry_cost: 250,
+        avg_cost: 0.5,
+        market_price: 0.4,
+        market_value: 200,
+        market_price_is_calculated: false,
+      },
+    ],
+    ib_daily_pnl: null,
+    kelly_optimal: null,
+    target: null,
+    stop: null,
+    entry_date: "",
+  };
+}
+
+describe("seedTicketFromPosition — direction normalization (regression for IB error 201)", () => {
+  it("DEBIT spread + close → SELL combo (was incorrectly BUY pre-fix)", () => {
+    const pos = bearPutSpreadDebitPos();
+    const draft = seedTicketFromPosition(pos, "close", {});
+    expect(draft.payload.action).toBe("SELL");
+    expect(draft.payload.type).toBe("combo");
+  });
+
+  it("DEBIT spread + add → BUY combo (was incorrectly SELL pre-fix)", () => {
+    const pos = bearPutSpreadDebitPos();
+    const draft = seedTicketFromPosition(pos, "add", {});
+    expect(draft.payload.action).toBe("BUY");
+  });
+
+  it("DEBIT spread per-leg ComboLeg.action stays LONG=BUY, SHORT=SELL on close", () => {
+    // Load-bearing IB Combo (BAG) leg convention guard — flipping per-leg
+    // action when Order.action flips causes IB error 201 (double-reversal).
+    const pos = bearPutSpreadDebitPos();
+    const draft = seedTicketFromPosition(pos, "close", {});
+    if (draft.payload.type === "combo") {
+      const longLeg = draft.payload.legs.find((l) => l.strike === 4600)!;
+      const shortLeg = draft.payload.legs.find((l) => l.strike === 4500)!;
+      expect(longLeg.action).toBe("BUY"); // LONG leg → BUY (structure-side, not trade-side)
+      expect(shortLeg.action).toBe("SELL"); // SHORT leg → SELL
+    }
+  });
+
+  it("CREDIT spread + close → BUY combo (BUY-to-close a credit spread)", () => {
+    const pos = ironCondorCreditPos();
+    const draft = seedTicketFromPosition(pos, "close", {});
+    expect(draft.payload.action).toBe("BUY");
+  });
+
+  it("CREDIT spread + add → SELL combo (sell more to grow the credit position)", () => {
+    const pos = ironCondorCreditPos();
+    const draft = seedTicketFromPosition(pos, "add", {});
+    expect(draft.payload.action).toBe("SELL");
+  });
+
+  it("lowercase 'long' falls back to leg-sign sum and resolves to LONG", () => {
+    const pos: PortfolioPosition = { ...stockPos(), direction: "long" };
+    const draft = seedTicketFromPosition(pos, "close", {
+      TSLA: { last: 350, bid: 349.9, ask: 350.1 } as PriceData,
+    });
+    expect(draft.payload.action).toBe("SELL");
+  });
+
+  it("unknown direction string falls back to leg-sign sum (LONG-dominant legs → LONG)", () => {
+    const pos: PortfolioPosition = {
+      ...bullCallSpreadPos(),
+      direction: "MYSTERY",
+    };
+    const draft = seedTicketFromPosition(pos, "close", {});
+    // Bull call spread legs: LONG 4 + SHORT 4 = 0 → fallback returns LONG (sum >= 0).
+    // Closing a LONG bull call spread = SELL combo.
+    expect(draft.payload.action).toBe("SELL");
+  });
+
+  it("empty direction string falls back to leg-sign sum (DEBIT spread shape)", () => {
+    const pos: PortfolioPosition = {
+      ...bearPutSpreadDebitPos(),
+      direction: "",
+    };
+    const draft = seedTicketFromPosition(pos, "close", {});
+    // Legs: SHORT 32 + LONG 32 → 0 → fallback returns LONG → close → SELL.
+    expect(draft.payload.action).toBe("SELL");
+  });
+
+  it("LONG/SHORT remain unchanged after normalization (no regression on existing flows)", () => {
+    // Stock LONG close → SELL
+    const longStock = seedTicketFromPosition(
+      stockPos({ direction: "LONG", contracts: 100 }),
+      "close",
+      { TSLA: { last: 350, bid: 349.9, ask: 350.1 } as PriceData },
+    );
+    expect(longStock.payload.action).toBe("SELL");
+    // Stock SHORT close → BUY
+    const shortStock = seedTicketFromPosition(
+      stockPos({ direction: "SHORT", contracts: 100 }),
+      "close",
+      { TSLA: { last: 350, bid: 349.9, ask: 350.1 } as PriceData },
+    );
+    expect(shortStock.payload.action).toBe("BUY");
+    // Single-leg LONG call close → SELL
+    const longCall = seedTicketFromPosition(
+      singleLegOptionPos({
+        direction: "LONG",
+        type: "Call",
+        strike: 200,
+        expiry: "2026-06-19",
+        contracts: 1,
+      }),
+      "close",
+      {},
+    );
+    expect(longCall.payload.action).toBe("SELL");
+    // Single-leg SHORT put close → BUY-to-close
+    const shortPut = seedTicketFromPosition(
+      singleLegOptionPos({
+        direction: "SHORT",
+        type: "Put",
+        strike: 180,
+        expiry: "2026-06-19",
+        contracts: 1,
+      }),
+      "close",
+      {},
+    );
+    expect(shortPut.payload.action).toBe("BUY");
+  });
+});
+
 describe("applyQtyChip", () => {
   it("100% returns full qty", () => {
     expect(applyQtyChip(7, 1.0)).toBe(7);

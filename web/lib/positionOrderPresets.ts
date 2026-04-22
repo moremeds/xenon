@@ -69,6 +69,26 @@ function round2(x: number): number {
   return Math.round(x * 100) / 100;
 }
 
+/**
+ * Normalize position.direction to LONG|SHORT.
+ *
+ * Backend (`src/xenon/execution/ib_sync.py`) tags spreads as "DEBIT" or
+ * "CREDIT" based on net entry cost — DEBIT means we paid net, so we are LONG
+ * the structure; CREDIT means we received net, so we are SHORT. Anything
+ * unrecognized falls back to summing leg signs × |contracts| for a net.
+ */
+function normalizeDirection(pos: PortfolioPosition): "LONG" | "SHORT" {
+  const d = (pos.direction ?? "").toUpperCase();
+  if (d === "LONG" || d === "DEBIT") return "LONG";
+  if (d === "SHORT" || d === "CREDIT") return "SHORT";
+  // Fallback: sign sum of legs.
+  let sum = 0;
+  for (const leg of pos.legs) {
+    sum += (leg.direction === "LONG" ? 1 : -1) * Math.abs(leg.contracts);
+  }
+  return sum >= 0 ? "LONG" : "SHORT";
+}
+
 export function seedTicketFromPosition(
   position: PortfolioPosition,
   intent: Intent,
@@ -77,13 +97,14 @@ export function seedTicketFromPosition(
   const sameDirection = intent === "add"; // add = same as position direction; close = opposite
   const isStock = position.structure_type === "Stock";
   const baseContracts = Math.abs(position.contracts);
+  const netDirection = normalizeDirection(position);
 
   if (isStock) {
     const action: "BUY" | "SELL" = sameDirection
-      ? position.direction === "LONG"
+      ? netDirection === "LONG"
         ? "BUY"
         : "SELL"
-      : position.direction === "LONG"
+      : netDirection === "LONG"
         ? "SELL"
         : "BUY";
     const q = pickStockBidAsk(prices[position.ticker]);
@@ -112,10 +133,10 @@ export function seedTicketFromPosition(
     const right: "C" | "P" = leg.type === "Call" ? "C" : "P";
     const expiry = position.expiry.replace(/-/g, "");
     const action: "BUY" | "SELL" = sameDirection
-      ? position.direction === "LONG"
+      ? netDirection === "LONG"
         ? "BUY"
         : "SELL"
-      : position.direction === "LONG"
+      : netDirection === "LONG"
         ? "SELL"
         : "BUY";
     const key = legPriceKey(position.ticker, position.expiry, leg);
@@ -160,10 +181,10 @@ export function seedTicketFromPosition(
 
   // Order.action: for "close" reverse the structure direction; for "add" match it.
   const orderAction: "BUY" | "SELL" = sameDirection
-    ? position.direction === "LONG"
+    ? netDirection === "LONG"
       ? "BUY"
       : "SELL"
-    : position.direction === "LONG"
+    : netDirection === "LONG"
       ? "SELL"
       : "BUY";
 
@@ -171,7 +192,7 @@ export function seedTicketFromPosition(
   // from the structure's nominal LONG perspective (negate leg sign if position.direction is SHORT)
   // so that referenceMid is always the positive nominal value of the structure (debit/credit
   // both surface as positive prices; the Order.action carries the trade direction).
-  const structureFlip = position.direction === "SHORT" ? -1 : 1;
+  const structureFlip = netDirection === "SHORT" ? -1 : 1;
   let buyComboCost = 0; // cost to BUY the (LONG-perspective) structure at market
   let sellComboProceeds = 0; // proceeds from SELLing the (LONG-perspective) structure at market
   let missing = false;
