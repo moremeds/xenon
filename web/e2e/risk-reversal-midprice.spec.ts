@@ -223,9 +223,11 @@ function stubApis(page: import("@playwright/test").Page) {
 test.describe("Risk reversal chart — mid-price fallback", () => {
   // The positive-case test for the MIDPRICE badge was a test.fixme stub that
   // required a WS mock fixture surviving route navigation — infra we don't
-  // have. Badge-rendering behavior is asserted in the Vitest unit test
-  // web/tests/price-chart-shell.test.ts (searches for "MIDPRICE" in the
-  // rendered HTML), so dropping the E2E stub doesn't reduce coverage.
+  // have, so it never ran. PriceChart's badge-rendering behavior for
+  // isMid=true is asserted in the Vitest unit test
+  // web/tests/price-chart-shell.test.ts; the integration path through
+  // TickerDetailContent + navigation + live price selection is currently
+  // uncovered and will stay that way until the WS fixture is built.
 
   test("does NOT show MIDPRICE badge when last-trade prices are available", async ({
     page,
