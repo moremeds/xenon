@@ -95,14 +95,24 @@ const PRICES: Record<string, PriceData> = {
   },
 };
 
-describe("MetricCards Futu account Day P&L", () => {
+// Heavy render: MetricCards with a full Futu portfolio + prices map. Passes in
+// isolation (~500ms) but saturates past the 5s default under full-suite
+// parallelism. Bump the describe timeout rather than reshape the fixture.
+describe("MetricCards Futu account Day P&L", { timeout: 15_000 }, () => {
   it("shows computed intraday day pnl instead of snapshot unrealized pnl and explains the live-price source", () => {
     const { container } = render(
-      <MetricCards portfolio={FUTU_PORTFOLIO} prices={PRICES} realizedPnl={0} executedOrders={[]} section="portfolio" />,
+      <MetricCards
+        portfolio={FUTU_PORTFOLIO}
+        prices={PRICES}
+        realizedPnl={0}
+        executedOrders={[]}
+        section="portfolio"
+      />,
     );
 
-    const dayPnlCard = Array.from(container.querySelectorAll(".metric-card"))
-      .find((el) => el.textContent?.includes("Day P&L"));
+    const dayPnlCard = Array.from(
+      container.querySelectorAll(".metric-card"),
+    ).find((el) => el.textContent?.includes("Day P&L"));
     expect(dayPnlCard).toBeTruthy();
     expect(dayPnlCard?.textContent).toContain("+$300.00");
     expect(dayPnlCard?.textContent).not.toContain("+$9,288.00");
@@ -112,13 +122,16 @@ describe("MetricCards Futu account Day P&L", () => {
     const modal = screen.getByRole("dialog");
     expect(modal.textContent).toContain("+$300.00");
     expect(modal.textContent).toContain("current_price");
-    expect(modal.textContent).toContain("Futu positions + live realtime prices");
+    expect(modal.textContent).toContain(
+      "Futu positions + live realtime prices",
+    );
 
     const todayPnlSection = screen.getByText("TODAY'S P&L").closest("div");
     expect(todayPnlSection).toBeTruthy();
 
-    const dayMoveCard = Array.from(container.querySelectorAll(".metric-card"))
-      .find((el) => el.textContent?.includes("Day Move"));
+    const dayMoveCard = Array.from(
+      container.querySelectorAll(".metric-card"),
+    ).find((el) => el.textContent?.includes("Day Move"));
     expect(dayMoveCard?.textContent).toContain("+$300");
   });
 });

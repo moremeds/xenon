@@ -59,7 +59,11 @@ describe("POST /api/orders/place upstream error propagation", () => {
 
     expect(res.status).toBe(502);
     const body = await res.json();
-    expect(body.error).toBe("IB error 201: Order rejected - reason:YOUR ORDER IS NOT ACCEPTED.");
-    expect(body.error).not.toContain("Xenon API 502:");
+    // passThroughXenonError exposes XenonApiError.detail under `detail` when the
+    // upstream response carried no JSON body (string-only constructor).
+    expect(body.detail).toBe(
+      "IB error 201: Order rejected - reason:YOUR ORDER IS NOT ACCEPTED.",
+    );
+    expect(body.detail).not.toContain("Xenon API 502:");
   });
 });

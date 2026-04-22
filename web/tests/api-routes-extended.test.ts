@@ -21,6 +21,8 @@ vi.mock("fs", () => ({
     writeFile: mockWriteFile,
     mkdir: mockMkdir,
   },
+  existsSync: () => false,
+  readFileSync: () => "",
 }));
 
 // Mock fs/promises (blotter, discover, journal use `import { readFile } from "fs/promises"`)
@@ -730,7 +732,10 @@ describe("POST /api/orders/cancel — extended", () => {
     expect(res.status).toBe(500);
 
     const body = await res.json();
-    expect(body.error).toContain("conn refused");
+    // passThroughXenonError collapses non-XenonApiError to { error:"internal", request_id }.
+    // The original message is logged but not leaked to clients.
+    expect(body.error).toBe("internal");
+    expect(body.request_id).toBeTypeOf("string");
   });
 
   it("preserves upstream 502 detail when FastAPI cancel fails", async () => {
@@ -753,7 +758,9 @@ describe("POST /api/orders/cancel — extended", () => {
     expect(res.status).toBe(502);
 
     const body = await res.json();
-    expect(body.error).toContain(
+    // passThroughXenonError exposes XenonApiError.detail under `detail` when the
+    // upstream response had no JSON body (the mock constructor here takes a plain string).
+    expect(body.detail).toContain(
       "Cancel not confirmed by refreshed IB open orders",
     );
   });
@@ -843,7 +850,8 @@ describe("POST /api/orders/modify — extended", () => {
     expect(res.status).toBe(500);
 
     const body = await res.json();
-    expect(body.error).toContain("connection timeout");
+    expect(body.error).toBe("internal");
+    expect(body.request_id).toBeTypeOf("string");
   });
 
   it("returns 400 when neither orderId nor permId provided", async () => {
@@ -1128,7 +1136,8 @@ describe("POST /api/orders/place — extended", () => {
     expect(res.status).toBe(500);
 
     const body = await res.json();
-    expect(body.error).toContain("IB Gateway");
+    expect(body.error).toBe("internal");
+    expect(body.request_id).toBeTypeOf("string");
   });
 
   it("returns 400 when required fields are missing", async () => {
