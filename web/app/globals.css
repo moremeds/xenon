@@ -6644,3 +6644,19 @@ tr {
   color: var(--text-secondary);
   margin: 4px 0;
 }
+
+/* Anchor the order modal near the top of the viewport so live price ticks don't
+   re-center it vertically on every WS update. Tabular numerals keep BID/MID/ASK
+   button widths stable when digits change. */
+.modify-order-modal .modal-content,
+.modify-order-modal-combo .modal-content {
+  align-self: flex-start;
+  margin-top: 8vh;
+}
+
+.modify-order-modal .modify-quick-buttons .btn-quick,
+.modify-order-modal-combo .modify-quick-buttons .btn-quick {
+  font-variant-numeric: tabular-nums;
+  min-width: 96px;
+  justify-content: center;
+}

@@ -81,13 +81,16 @@ export default function PositionOrderModal({
 
   const attemptId = useClientAttemptId({ ticker: position.ticker });
 
-  // Reseed price when intent or seeded mid changes (live WS updates).
+  // Reseed price ONLY when intent toggles (Close ↔ Add). We deliberately do NOT
+  // reseed on live mid changes — that would clobber whatever the user has typed
+  // every time the WS tick lands. The live mid keeps ticking in the BID/MID/ASK
+  // reference row at the bottom; the input is the user's to edit.
   useEffect(() => {
     if (Number.isFinite(draft.payload.limitPrice)) {
       setPriceText(draft.payload.limitPrice.toFixed(2));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [intent, draft.referenceMid]);
+  }, [intent]);
 
   const parsedQty =
     qtyText.trim() === ""
