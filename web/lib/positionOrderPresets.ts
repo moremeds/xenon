@@ -191,14 +191,15 @@ export function seedTicketFromPosition(
     };
   });
 
-  // Order.action: for "close" reverse the structure direction; for "add" match it.
-  const orderAction: "BUY" | "SELL" = sameDirection
-    ? netDirection === "LONG"
-      ? "BUY"
-      : "SELL"
-    : netDirection === "LONG"
-      ? "SELL"
-      : "BUY";
+  // Order.action for BAG: envelope is purely intent-driven and NEVER depends on
+  // netDirection. Per web/CLAUDE.md "IB Combo (BAG) Order Leg Convention",
+  // ComboLeg.action already carries structure (LONG→BUY, SHORT→SELL); the
+  // envelope only toggles open vs. close. envelope=BUY executes legs as-labeled
+  // (opens/adds the structure); envelope=SELL reverses all legs (closes it).
+  // Mixing netDirection back in would double-encode direction — e.g. a close on
+  // a SHORT credit spread would emit envelope=BUY on structural legs [SELL,BUY],
+  // which IB would execute as a new short spread instead of closing.
+  const orderAction: "BUY" | "SELL" = intent === "add" ? "BUY" : "SELL";
 
   // Natural-market combo bid/ask. Always compute the BUY-combo cost and SELL-combo proceeds
   // from the structure's nominal LONG perspective (negate leg sign if position.direction is SHORT)

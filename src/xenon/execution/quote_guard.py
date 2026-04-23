@@ -236,7 +236,11 @@ def check_combo(
     # +27 fat-finger through on a ~2.70 debit close.
     abs_net = abs(exec_net)
     abs_limit = abs(limit_price)
-    tolerance = abs_net * Decimal("0.05")
+    # 5% of net, floored at $0.05 so cheap spreads still get at least one
+    # min-tick of slack (a 20-cent close spread needs more than 1 cent of
+    # leeway for a legitimate penny sweep). Matches the $0.05 absolute
+    # tolerance used on the exec_net==0 branch below for continuity.
+    tolerance = max(abs_net * Decimal("0.05"), Decimal("0.05"))
 
     if exec_net > 0:
         cap = abs_net + tolerance

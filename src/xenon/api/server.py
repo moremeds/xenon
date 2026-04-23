@@ -1689,10 +1689,32 @@ async def orders_place(request: Request):
                 {"leg_count": _combo_leg_count, "limit_price": str(body.get("limitPrice"))},
             )
         else:
+            # Hard-reject: if a combo reaches us without quote_tokens, the
+            # F3 quote-band check cannot run. Soft-accepting here meant a
+            # client regression that stopped minting tokens would silently
+            # disable the whole protection in production. Fail loudly.
             orders_store.record_event(
                 submission_id,
-                "QUOTE_TOKEN_MISSING_SOFT",
-                {"leg_count": _combo_leg_count},
+                "QUOTE_CHECK_FAIL",
+                {
+                    "reason_code": ReasonCode.STALE_QUOTE.value,
+                    "reason_detail": "combo order missing quote_tokens",
+                    "leg_count": _combo_leg_count,
+                },
+            )
+            orders_store.mark_terminal(
+                submission_id=submission_id,
+                state="FAILED",
+                reason_code=ReasonCode.STALE_QUOTE.value,
+                filled_qty=0,
+                avg_fill_price=None,
+            )
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "combo order missing quote_tokens",
+                    "reason_code": ReasonCode.STALE_QUOTE.value,
+                },
             )
 
     if _override_detail is not None:
