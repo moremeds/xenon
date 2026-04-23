@@ -1562,6 +1562,50 @@ async def orders_place(request: Request):
                 )
     else:
         _override_detail = None
+        quote_tokens_map = body.get("quote_tokens")
+        legs_in = body.get("legs") or []
+        symbol = str(body.get("symbol", "")).upper()
+        envelope = str(body.get("action", "")).upper()
+        if quote_tokens_map:
+            try:
+                check_legs = [
+                    quote_guard.CheckComboLeg(
+                        token=quote_tokens_map[str(leg["con_id"])],
+                        con_id=int(leg["con_id"]),
+                        ticker=symbol,
+                        action=str(leg["action"]).upper(),
+                        right=str(leg.get("right") or "STK").upper(),
+                        ratio=int(leg.get("ratio", 1)),
+                    )
+                    for leg in legs_in
+                ]
+            except KeyError as exc:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "detail": f"quote_tokens missing entry for leg con_id={exc}",
+                        "reason_code": ReasonCode.STALE_QUOTE.value,
+                    },
+                )
+            qv = quote_guard.check_combo(
+                legs=check_legs,
+                envelope_action=envelope,  # type: ignore[arg-type]
+                limit_price=Decimal(str(body.get("limitPrice", "0"))),
+                token_secret=os.environ.get("XENON_QUOTE_TOKEN_SECRET", ""),
+                now=_now(),
+            )
+            if not qv.accept:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "detail": qv.reason_detail,
+                        "reason_code": qv.reason_code.value if qv.reason_code else None,
+                        "reason_detail": qv.reason_detail,
+                    },
+                )
+            _combo_leg_count = len(check_legs)
+        else:
+            _combo_leg_count = len(legs_in)
 
     # F4: atomic reservation
     cid = body.get("client_attempt_id")
@@ -1604,6 +1648,20 @@ async def orders_place(request: Request):
             },
         )
     submission_id = outcome.submission_id
+
+    if body.get("type") == "combo":
+        if body.get("quote_tokens"):
+            orders_store.record_event(
+                submission_id,
+                "QUOTE_CHECK_PASS",
+                {"leg_count": _combo_leg_count, "limit_price": str(body.get("limitPrice"))},
+            )
+        else:
+            orders_store.record_event(
+                submission_id,
+                "QUOTE_TOKEN_MISSING_SOFT",
+                {"leg_count": _combo_leg_count},
+            )
 
     if _override_detail is not None:
         orders_store.record_event(submission_id, "PREFLIGHT_ACK_LIMIT", _override_detail)
