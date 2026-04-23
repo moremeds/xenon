@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 type Options = { ticker: string; conId: number; expiry: string | null };
 
@@ -35,11 +35,16 @@ type Leg = { ticker: string; conId: number | null; expiry: string | null };
 type TokensResult = {
   tokens: Record<string, string> | null;
   error: string | null;
+  /** Force a re-mint of all tokens; use when a transient fetch failure
+   *  disables submit and the user wants to retry without reopening the
+   *  modal. Resets tokens/error state before retrying. */
+  reload: () => void;
 };
 
 export function useQuoteTokens({ legs }: { legs: Leg[] }): TokensResult {
   const [tokens, setTokens] = useState<Record<string, string> | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const legsKey = JSON.stringify(
     legs.map((l) => [l.ticker, l.conId, l.expiry]),
   );
@@ -76,7 +81,9 @@ export function useQuoteTokens({ legs }: { legs: Leg[] }): TokensResult {
     return () => {
       cancelled = true;
     };
-  }, [legsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [legsKey, reloadNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { tokens, error };
+  const reload = useCallback(() => setReloadNonce((n) => n + 1), []);
+
+  return { tokens, error, reload };
 }

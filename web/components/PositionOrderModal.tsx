@@ -99,7 +99,11 @@ export default function PositionOrderModal({
     ];
   }, [draft.payload, position.ticker, position.expiry]);
 
-  const { tokens: quoteTokens, error: quoteError } = useQuoteTokens({
+  const {
+    tokens: quoteTokens,
+    error: quoteError,
+    reload: reloadQuoteTokens,
+  } = useQuoteTokens({
     legs: quoteLegs,
   });
   const tokensReady = quoteTokens !== null;
@@ -450,7 +454,14 @@ export default function PositionOrderModal({
               {error && <p className="order-error">{error}</p>}
               {quoteError && (
                 <div className="text-err mono text-xs">
-                  Quote unavailable: {quoteError}
+                  Quote unavailable: {quoteError}{" "}
+                  <button
+                    type="button"
+                    onClick={reloadQuoteTokens}
+                    className="underline"
+                  >
+                    Retry
+                  </button>
                 </div>
               )}
             </div>
