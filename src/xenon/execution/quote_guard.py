@@ -122,3 +122,111 @@ class TickRuleCache:
             value = self._source(con_id)
             self._cache[con_id] = (now, value)
             return value
+
+
+class CheckComboLeg(BaseModel):
+    token: str
+    con_id: int
+    ticker: str
+    action: Literal["BUY", "SELL"]
+    right: Literal["C", "P", "STK"]
+    ratio: int = 1
+
+
+def _compute_combo_nets(
+    leg_payloads: list[tuple["quote_tokens.QuotePayload", str, int]],
+) -> tuple[Decimal, Decimal]:
+    """Return (net_ask, net_bid) for the structural (BUY-envelope) combo.
+
+    Per web/CLAUDE.md "Combo Natural Market Bid/Ask":
+        net_ask = Σ(BUY leg ask × r) − Σ(SELL leg bid × r)
+        net_bid = Σ(BUY leg bid × r) − Σ(SELL leg ask × r)
+
+    These nets describe the combo's natural market regardless of envelope
+    direction — envelope_action only selects cap (BUY) vs floor (SELL).
+    """
+    net_ask = Decimal("0")
+    net_bid = Decimal("0")
+    for payload, leg_action, ratio in leg_payloads:
+        r = Decimal(ratio)
+        if leg_action == "BUY":
+            net_ask += payload.ask * r
+            net_bid += payload.bid * r
+        else:
+            net_ask -= payload.bid * r
+            net_bid -= payload.ask * r
+    return net_ask, net_bid
+
+
+def check_combo(
+    *,
+    legs: list[CheckComboLeg],
+    envelope_action: Literal["BUY", "SELL"],
+    limit_price: Decimal,
+    token_secret: str,
+    now: datetime,
+) -> QuoteVerdict:
+    if not legs:
+        return QuoteVerdict(
+            accept=False,
+            reason_code=ReasonCode.STALE_QUOTE,
+            reason_detail="no legs",
+        )
+    if any(leg.right in ("C", "P") for leg in legs) and not is_opt_tradeable(now):
+        return QuoteVerdict(
+            accept=False,
+            reason_code=ReasonCode.STALE_QUOTE,
+            reason_detail="equity-option market closed (09:30-16:00 ET weekdays)",
+        )
+
+    max_age = _MAX_AGE_RTH_MS
+    leg_payloads: list[tuple[quote_tokens.QuotePayload, str, int]] = []
+    for leg in legs:
+        try:
+            payload = quote_tokens.verify(leg.token, token_secret, max_age_ms=max_age)
+        except quote_tokens.QuoteTokenExpired as exc:
+            return QuoteVerdict(
+                accept=False,
+                reason_code=ReasonCode.STALE_QUOTE,
+                reason_detail=f"leg {leg.con_id}: {exc}",
+            )
+        except quote_tokens.QuoteTokenInvalid as exc:
+            return QuoteVerdict(
+                accept=False,
+                reason_code=ReasonCode.STALE_QUOTE,
+                reason_detail=f"leg {leg.con_id}: token invalid: {exc}",
+            )
+        if payload.ticker.upper() != leg.ticker.upper() or payload.con_id != leg.con_id:
+            return QuoteVerdict(
+                accept=False,
+                reason_code=ReasonCode.STALE_QUOTE,
+                reason_detail=f"leg {leg.con_id}: token contract mismatch",
+            )
+        if payload.bid > payload.ask or payload.bid_size <= 0 or payload.ask_size <= 0:
+            return QuoteVerdict(
+                accept=False,
+                reason_code=ReasonCode.STALE_QUOTE,
+                reason_detail=f"leg {leg.con_id}: crossed or zero-size quote",
+            )
+        leg_payloads.append((payload, leg.action, leg.ratio))
+
+    net_ask, net_bid = _compute_combo_nets(leg_payloads)
+
+    if envelope_action == "BUY":
+        cap = net_ask * Decimal("1.05")
+        if limit_price > cap:
+            return QuoteVerdict(
+                accept=False,
+                reason_code=ReasonCode.LIMIT_OUT_OF_BAND,
+                reason_detail=f"BUY limit {limit_price} > cap {cap} (net_ask {net_ask})",
+            )
+    else:
+        floor = net_bid * Decimal("0.95")
+        if limit_price < floor:
+            return QuoteVerdict(
+                accept=False,
+                reason_code=ReasonCode.LIMIT_OUT_OF_BAND,
+                reason_detail=f"SELL limit {limit_price} < floor {floor} (net_bid {net_bid})",
+            )
+
+    return QuoteVerdict(accept=True)
