@@ -1,6 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 
 const PortfolioLegSchema = Type.Object({
+  conId: Type.Union([Type.Number(), Type.Null()]),
   direction: Type.Union([Type.Literal("LONG"), Type.Literal("SHORT")]),
   contracts: Type.Number(),
   type: Type.Union([
