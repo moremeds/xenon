@@ -1833,7 +1833,7 @@ def _try_register_order_from_snapshot(*, perm_id: int, order_id: int) -> bool:
         )
     except Exception as exc:
         logger.warning(
-            "[modify-debug] register_from_snapshot failed for perm_id=%s: %s",
+            "register_from_snapshot failed for perm_id=%s: %s",
             perm_id,
             exc,
         )
@@ -1868,18 +1868,6 @@ async def orders_modify(request: Request):
     new_quantity = body.get("newQuantity")
     outside_rth = body.get("outsideRth")
     modify_sequence = body.get("modifySequence")
-
-    # [modify-debug] Remove after diagnosis.
-    logger.warning(
-        "[modify-debug] /orders/modify received: order_id=%s perm_id=%s "
-        "new_price=%s new_quantity=%s outside_rth=%s modify_sequence=%s",
-        order_id,
-        perm_id,
-        new_price,
-        new_quantity,
-        outside_rth,
-        modify_sequence,
-    )
 
     if modify_sequence is None:
         raise HTTPException(
@@ -1918,33 +1906,16 @@ async def orders_modify(request: Request):
         seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence)
     else:
         seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence)
-    # [modify-debug] Remove after diagnosis. Tells us whether the rejection
-    # comes from the orders_store sequence gate (and which exact branch).
-    logger.warning(
-        "[modify-debug] orders_store.apply_modify outcome: %s (used perm_id branch: %s)",
-        seq_outcome,
-        not order_id and bool(perm_id),
-    )
     # If the perm_id is unknown to orders_store but exists in the IB snapshot,
     # lazy-register it and retry. Covers orders placed before orders_store
     # tracking existed or by an external client (the snapshot reconstruction
     # gives us synthetic ib_order_id like -5 plus the real perm_id).
     if not seq_outcome["applied"] and seq_outcome["current_sequence"] == -1:
-        registered = _try_register_order_from_snapshot(perm_id=perm_id, order_id=order_id)
-        if registered:
-            logger.warning(
-                "[modify-debug] lazy-registered snapshot order perm_id=%s order_id=%s; retrying apply",
-                perm_id,
-                order_id,
-            )
+        if _try_register_order_from_snapshot(perm_id=perm_id, order_id=order_id):
             if not order_id and perm_id:
                 seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence)
             else:
                 seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence)
-            logger.warning(
-                "[modify-debug] post-register apply_modify outcome: %s",
-                seq_outcome,
-            )
 
     if not seq_outcome["applied"]:
         current = seq_outcome["current_sequence"]
@@ -1981,16 +1952,7 @@ async def orders_modify(request: Request):
     elif outside_rth is False:
         args.append("--no-outside-rth")
 
-    # [modify-debug] Remove after diagnosis.
-    logger.warning("[modify-debug] subprocess args: %s", args)
     result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=15)
-    # [modify-debug] Remove after diagnosis.
-    logger.warning(
-        "[modify-debug] subprocess result: ok=%s error=%s data=%s",
-        result.ok,
-        result.error,
-        result.data,
-    )
     if not result.ok:
         # DB sequence is already advanced; don't roll back — prevents
         # double-apply on a retry. Log and surface to caller.

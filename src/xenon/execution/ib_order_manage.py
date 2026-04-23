@@ -406,10 +406,10 @@ def modify_order(
         latest_status = latest_trade.orderStatus.status if latest_trade is not None else "Unknown"
         latest_price = latest_trade.order.lmtPrice if latest_trade is not None else None
         latest_quantity = json_number(latest_trade.order.totalQuantity) if latest_trade is not None else None
-        # [modify-debug] Surface ALL IB error events captured during the attempt.
-        # The "fatal" filter above only catches 103/201/202; non-fatal codes
-        # like 10147 (order not found), 326 (clientId in use), or even
-        # successful warnings get swallowed otherwise.
+        # Surface ALL IB error events captured during the attempt. The "fatal"
+        # filter above only catches 103/201/202; non-fatal codes like 10147
+        # (order not found), 326 (clientId in use), or warnings would be
+        # swallowed otherwise — but they're often the actual rejection reason.
         captured_errors = [{"code": code, "message": msg} for (code, msg) in error_msgs]
         output(
             "error",
