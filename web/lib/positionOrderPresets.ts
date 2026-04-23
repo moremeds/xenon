@@ -8,6 +8,7 @@ export type TicketPayload =
   | {
       type: "stock";
       symbol: string;
+      conId: number | null;
       action: "BUY" | "SELL";
       quantity: number;
       limitPrice: number;
@@ -16,6 +17,7 @@ export type TicketPayload =
   | {
       type: "option";
       symbol: string;
+      conId: number | null;
       action: "BUY" | "SELL";
       quantity: number;
       limitPrice: number;
@@ -32,6 +34,7 @@ export type TicketPayload =
       limitPrice: number;
       tif: "DAY" | "GTC";
       legs: Array<{
+        conId: number | null;
         expiry: string;
         strike: number;
         right: "C" | "P";
@@ -113,6 +116,7 @@ export function seedTicketFromPosition(
       payload: {
         type: "stock",
         symbol: position.ticker,
+        conId: position.legs[0]?.conId ?? null,
         action,
         quantity: baseContracts,
         limitPrice,
@@ -145,6 +149,7 @@ export function seedTicketFromPosition(
       payload: {
         type: "option",
         symbol: position.ticker,
+        conId: position.legs[0]?.conId ?? null,
         action,
         quantity: baseContracts,
         limitPrice: q.mid ?? 0,
@@ -176,7 +181,14 @@ export function seedTicketFromPosition(
       baseContracts > 0
         ? Math.max(1, Math.round(Math.abs(leg.contracts) / baseContracts))
         : 1;
-    return { expiry, strike: leg.strike!, right, action: legAction, ratio };
+    return {
+      conId: leg.conId ?? null,
+      expiry,
+      strike: leg.strike!,
+      right,
+      action: legAction,
+      ratio,
+    };
   });
 
   // Order.action: for "close" reverse the structure direction; for "add" match it.
