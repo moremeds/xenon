@@ -6589,3 +6589,74 @@ tr {
     grid-template-columns: 1fr;
   }
 }
+
+.position-order-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 4px;
+  padding: 0;
+  border: 1px solid var(--border-dim);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.position-order-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.position-order-intent-bar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.position-order-intent-bar .preset-tile {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.position-order-intent-bar .preset-tile.active {
+  background: var(--bg-panel-raised);
+  color: var(--text-primary);
+  border-color: var(--accent-bg);
+}
+
+.position-order-chip-row {
+  display: flex;
+  gap: 4px;
+  margin: 8px 0;
+}
+
+.partial-close-note {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin: 4px 0;
+}
+
+/* Anchor the order modal near the top of the viewport so live price ticks don't
+   re-center it vertically on every WS update. Tabular numerals keep BID/MID/ASK
+   button widths stable when digits change. */
+.modify-order-modal .modal-content,
+.modify-order-modal-combo .modal-content {
+  align-self: flex-start;
+  margin-top: 8vh;
+}
+
+.modify-order-modal .modify-quick-buttons .btn-quick,
+.modify-order-modal-combo .modify-quick-buttons .btn-quick {
+  font-variant-numeric: tabular-nums;
+  min-width: 96px;
+  justify-content: center;
+}

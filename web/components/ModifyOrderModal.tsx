@@ -10,7 +10,11 @@ import { getQuoteMetrics } from "@/lib/quoteTelemetry";
 import { applyRestingLimitToQuote } from "@/lib/modifyOrderQuote";
 import { fmtPrice, legPriceKey } from "@/lib/positionUtils";
 import { ModifyOrderQuoteTelemetry } from "./QuoteTelemetry";
-import { OrderPriceStrip, OrderLegPills, type OrderLeg as UnifiedOrderLeg } from "@/lib/order";
+import {
+  OrderPriceStrip,
+  OrderLegPills,
+  type OrderLeg as UnifiedOrderLeg,
+} from "@/lib/order";
 
 type EditableComboLeg = {
   action: "BUY" | "SELL";
@@ -59,13 +63,20 @@ function buildEditableComboLegs(order: OpenOrder | null): EditableComboLeg[] {
 }
 
 function comboUnderlyingSymbol(order: OpenOrder): string {
-  const comboSymbol = order.contract.comboLegs?.find((leg) => leg.symbol)?.symbol;
+  const comboSymbol = order.contract.comboLegs?.find(
+    (leg) => leg.symbol,
+  )?.symbol;
   if (comboSymbol) return comboSymbol.toUpperCase();
 
-  const contractSymbol = order.contract.symbol?.replace(/\s+spread$/i, "").trim();
+  const contractSymbol = order.contract.symbol
+    ?.replace(/\s+spread$/i, "")
+    .trim();
   if (contractSymbol) return contractSymbol.toUpperCase();
 
-  return order.symbol.replace(/\s+spread$/i, "").trim().toUpperCase();
+  return order.symbol
+    .replace(/\s+spread$/i, "")
+    .trim()
+    .toUpperCase();
 }
 
 function normalizeComboLegs(legs: EditableComboLeg[]): ModifyComboLeg[] | null {
@@ -73,7 +84,13 @@ function normalizeComboLegs(legs: EditableComboLeg[]): ModifyComboLeg[] | null {
     const strike = Number.parseFloat(leg.strike);
     const ratio = Number.parseInt(leg.ratio, 10);
     const expiry = leg.expiry.replace(/-/g, "");
-    if (!Number.isFinite(strike) || strike <= 0 || !Number.isFinite(ratio) || ratio <= 0 || expiry.length !== 8) {
+    if (
+      !Number.isFinite(strike) ||
+      strike <= 0 ||
+      !Number.isFinite(ratio) ||
+      ratio <= 0 ||
+      expiry.length !== 8
+    ) {
       return null;
     }
     return {
@@ -85,7 +102,9 @@ function normalizeComboLegs(legs: EditableComboLeg[]): ModifyComboLeg[] | null {
     } satisfies ModifyComboLeg;
   });
 
-  return normalized.every((leg): leg is ModifyComboLeg => leg != null) ? normalized : null;
+  return normalized.every((leg): leg is ModifyComboLeg => leg != null)
+    ? normalized
+    : null;
 }
 
 function resolveOrderPriceData(
@@ -134,11 +153,22 @@ function resolveOrderPriceData(
           break;
         }
         const expiryClean = cl.expiry.replace(/-/g, "");
-        if (expiryClean.length !== 8) { allAvailable = false; break; }
-        const right = cl.right === "C" || cl.right === "P"
-          ? cl.right
-          : cl.right === "CALL" ? "C" : cl.right === "PUT" ? "P" : null;
-        if (!right) { allAvailable = false; break; }
+        if (expiryClean.length !== 8) {
+          allAvailable = false;
+          break;
+        }
+        const right =
+          cl.right === "C" || cl.right === "P"
+            ? cl.right
+            : cl.right === "CALL"
+              ? "C"
+              : cl.right === "PUT"
+                ? "P"
+                : null;
+        if (!right) {
+          allAvailable = false;
+          break;
+        }
         const key = optionKey({
           symbol: cl.symbol.toUpperCase(),
           expiry: expiryClean,
@@ -146,15 +176,18 @@ function resolveOrderPriceData(
           right,
         });
         const lp = prices[key];
-        if (!lp || lp.bid == null || lp.ask == null) { allAvailable = false; break; }
-        
+        if (!lp || lp.bid == null || lp.ask == null) {
+          allAvailable = false;
+          break;
+        }
+
         // Natural market: BUY leg = pay ask / receive bid, SELL leg = receive bid / pay ask
         if (cl.action === "BUY") {
-          netAsk += lp.ask;  // To BUY combo: pay ask on BUY legs
-          netBid += lp.bid;  // To SELL combo: receive bid on BUY legs
+          netAsk += lp.ask; // To BUY combo: pay ask on BUY legs
+          netBid += lp.bid; // To SELL combo: receive bid on BUY legs
         } else {
-          netAsk -= lp.bid;  // To BUY combo: receive bid on SELL legs
-          netBid -= lp.ask;  // To SELL combo: pay ask on SELL legs
+          netAsk -= lp.bid; // To BUY combo: receive bid on SELL legs
+          netBid -= lp.ask; // To SELL combo: pay ask on SELL legs
         }
         const sign = cl.action === "BUY" ? 1 : -1;
         netLast += sign * (lp.last ?? (lp.bid + lp.ask) / 2);
@@ -174,17 +207,23 @@ function resolveOrderPriceData(
         let allAvailable = true;
         for (const leg of pos.legs) {
           const key = legPriceKey(pos.ticker, pos.expiry, leg);
-          if (!key) { allAvailable = false; break; }
+          if (!key) {
+            allAvailable = false;
+            break;
+          }
           const lp = prices[key];
-          if (!lp || lp.bid == null || lp.ask == null) { allAvailable = false; break; }
-          
+          if (!lp || lp.bid == null || lp.ask == null) {
+            allAvailable = false;
+            break;
+          }
+
           // Natural market: LONG leg = pay ask / receive bid, SHORT leg = receive bid / pay ask
           if (leg.direction === "LONG") {
-            netAsk += lp.ask;  // To BUY combo: pay ask on LONG legs
-            netBid += lp.bid;  // To SELL combo: receive bid on LONG legs
+            netAsk += lp.ask; // To BUY combo: pay ask on LONG legs
+            netBid += lp.bid; // To SELL combo: receive bid on LONG legs
           } else {
-            netAsk -= lp.bid;  // To BUY combo: receive bid on SHORT legs
-            netBid -= lp.ask;  // To SELL combo: pay ask on SHORT legs
+            netAsk -= lp.bid; // To BUY combo: receive bid on SHORT legs
+            netBid -= lp.ask; // To SELL combo: pay ask on SHORT legs
           }
           const sign = leg.direction === "LONG" ? 1 : -1;
           netLast += sign * (lp.last ?? (lp.bid + lp.ask) / 2);
@@ -228,7 +267,14 @@ function resolveOrderPriceData(
   return null;
 }
 
-export default function ModifyOrderModal({ order, loading, prices, portfolio, onConfirm, onClose }: ModifyOrderModalProps) {
+export default function ModifyOrderModal({
+  order,
+  loading,
+  prices,
+  portfolio,
+  onConfirm,
+  onClose,
+}: ModifyOrderModalProps) {
   const [newPrice, setNewPrice] = useState("");
   const [newQuantity, setNewQuantity] = useState("");
   const [outsideRth, setOutsideRth] = useState(false);
@@ -254,11 +300,12 @@ export default function ModifyOrderModal({ order, loading, prices, portfolio, on
   );
 
   const priceData = useMemo(
-    () => applyRestingLimitToQuote({
-      priceData: marketPriceData,
-      action: order?.action,
-      limitPrice: order?.limitPrice,
-    }),
+    () =>
+      applyRestingLimitToQuote({
+        priceData: marketPriceData,
+        action: order?.action,
+        limitPrice: order?.limitPrice,
+      }),
     [marketPriceData, order?.action, order?.limitPrice],
   );
 
@@ -269,32 +316,51 @@ export default function ModifyOrderModal({ order, loading, prices, portfolio, on
   const parsedNew = parseFloat(newPrice);
   const parsedQuantity = Number.parseInt(newQuantity, 10);
   const isValidPrice = !Number.isNaN(parsedNew) && parsedNew > 0;
-  const isValidQuantity = Number.isInteger(parsedQuantity) && parsedQuantity > 0;
-  const isComboOrder = order.contract.secType === "BAG" && editableLegs.length >= 2;
+  const isValidQuantity =
+    Number.isInteger(parsedQuantity) && parsedQuantity > 0;
+  const isComboOrder =
+    order.contract.secType === "BAG" && editableLegs.length >= 2;
   const normalizedLegs = normalizeComboLegs(editableLegs);
   const originalLegsSnapshot = JSON.stringify(buildEditableComboLegs(order));
   const currentLegsSnapshot = JSON.stringify(editableLegs);
-  const priceChanged = isValidPrice && Math.abs(parsedNew - currentPrice) >= 0.005;
+  const priceChanged =
+    isValidPrice && Math.abs(parsedNew - currentPrice) >= 0.005;
   const quantityChanged = isValidQuantity && parsedQuantity !== currentQuantity;
-  const legsChanged = isComboOrder && currentLegsSnapshot !== originalLegsSnapshot;
-  const canSubmit = !loading && (
-    isComboOrder
-      ? Boolean(isValidPrice && isValidQuantity && normalizedLegs && (priceChanged || quantityChanged || legsChanged))
-      : Boolean((priceChanged || quantityChanged || outsideRth) && isValidPrice && isValidQuantity)
-  );
+  const legsChanged =
+    isComboOrder && currentLegsSnapshot !== originalLegsSnapshot;
+  const canSubmit =
+    !loading &&
+    (isComboOrder
+      ? Boolean(
+          isValidPrice &&
+          isValidQuantity &&
+          normalizedLegs &&
+          (priceChanged || quantityChanged || legsChanged),
+        )
+      : Boolean(
+          (priceChanged || quantityChanged || outsideRth) &&
+          isValidPrice &&
+          isValidQuantity,
+        ));
 
   const delta = isValidPrice ? parsedNew - currentPrice : 0;
   const hasPriceData = priceData?.bid != null && priceData?.ask != null;
 
   const { bid, mid, ask } = getQuoteMetrics(priceData);
   const handleLegChange = (index: number, patch: Partial<EditableComboLeg>) => {
-    setEditableLegs((prev) => prev.map((leg, legIndex) => (legIndex === index ? { ...leg, ...patch } : leg)));
+    setEditableLegs((prev) =>
+      prev.map((leg, legIndex) =>
+        legIndex === index ? { ...leg, ...patch } : leg,
+      ),
+    );
   };
 
   const submitModify = () => {
     if (!canSubmit) return;
 
-    if (isComboOrder && normalizedLegs) {
+    // Combo with leg-structure change → cancel+place is unavoidable (IB has no
+    // atomic API for restructuring the legs of an existing BAG order).
+    if (isComboOrder && normalizedLegs && legsChanged) {
       onConfirm({
         replaceOrder: {
           type: "combo",
@@ -309,10 +375,13 @@ export default function ModifyOrderModal({ order, loading, prices, portfolio, on
       return;
     }
 
+    // Price/qty-only modify (works for stock, single-leg option, AND combo).
+    // FastAPI's `modify_order` re-uses the same orderId via IB's placeOrder
+    // semantics — atomic, no cancel needed, no IB-201 risk.
     const request: ModifyOrderRequest = {};
     if (priceChanged) request.newPrice = parsedNew;
     if (quantityChanged) request.newQuantity = parsedQuantity;
-    if (outsideRth) request.outsideRth = true;
+    if (outsideRth && !isComboOrder) request.outsideRth = true;
     onConfirm(request);
   };
 
@@ -321,12 +390,20 @@ export default function ModifyOrderModal({ order, loading, prices, portfolio, on
       open={!!order}
       onClose={onClose}
       title="Modify Order"
-      className={isComboOrder ? "modify-order-modal modify-order-modal-combo" : "modify-order-modal"}
+      className={
+        isComboOrder
+          ? "modify-order-modal modify-order-modal-combo"
+          : "modify-order-modal"
+      }
     >
-      <div className={`modify-dialog${isComboOrder ? " modify-dialog-combo" : ""}`}>
+      <div
+        className={`modify-dialog${isComboOrder ? " modify-dialog-combo" : ""}`}
+      >
         <div className="modify-order-info">
           <strong>{order.symbol}</strong>
-          <span className={`pill ${order.action === "BUY" ? "accum" : "distrib"}`}>
+          <span
+            className={`pill ${order.action === "BUY" ? "accum" : "distrib"}`}
+          >
             {order.action}
           </span>
           <span>{order.orderType}</span>
@@ -334,34 +411,44 @@ export default function ModifyOrderModal({ order, loading, prices, portfolio, on
           <span>{order.totalQuantity}x</span>
         </div>
 
-        <div className={`modify-layout${isComboOrder ? " modify-layout-combo" : ""}`}>
+        <div
+          className={`modify-layout${isComboOrder ? " modify-layout-combo" : ""}`}
+        >
           <div className="modify-primary-panel">
             <ModifyOrderQuoteTelemetry priceData={priceData} />
 
             {/* Price strip for combo orders */}
-            {isComboOrder && hasPriceData && bid != null && ask != null && mid != null && (
-              <OrderPriceStrip
-                prices={{
-                  bid,
-                  mid,
-                  ask,
-                  spread: ask - bid,
-                  spreadPct: mid > 0 ? ((ask - bid) / mid) * 100 : null,
-                  available: true,
-                }}
-                compact
-              />
-            )}
+            {isComboOrder &&
+              hasPriceData &&
+              bid != null &&
+              ask != null &&
+              mid != null && (
+                <OrderPriceStrip
+                  prices={{
+                    bid,
+                    mid,
+                    ask,
+                    spread: ask - bid,
+                    spreadPct: mid > 0 ? ((ask - bid) / mid) * 100 : null,
+                    available: true,
+                  }}
+                  compact
+                />
+              )}
 
             {order.orderType === "STP LMT" && order.auxPrice != null && (
               <div className="modify-stop-row">
                 <span className="modify-market-label">STOP PRICE</span>
-                <span className="modify-market-value">{fmtPrice(order.auxPrice)}</span>
+                <span className="modify-market-value">
+                  {fmtPrice(order.auxPrice)}
+                </span>
               </div>
             )}
 
             <div className="modify-price-section">
-              <div className={`modify-field-grid${isComboOrder ? " modify-field-grid-combo" : ""}`}>
+              <div
+                className={`modify-field-grid${isComboOrder ? " modify-field-grid-combo" : ""}`}
+              >
                 <label className="modify-field" htmlFor="modify-quantity-input">
                   <span className="modify-price-label">New Quantity</span>
                   <div className="modify-price-input-row">
@@ -378,7 +465,9 @@ export default function ModifyOrderModal({ order, loading, prices, portfolio, on
                 </label>
 
                 <label className="modify-field" htmlFor="modify-price-input">
-                  <span className="modify-price-label">{isComboOrder ? "New Net Price" : "New Limit Price"}</span>
+                  <span className="modify-price-label">
+                    {isComboOrder ? "New Net Price" : "New Limit Price"}
+                  </span>
                   <div className="modify-price-input-row">
                     <span className="modify-price-prefix">$</span>
                     <input
@@ -430,13 +519,19 @@ export default function ModifyOrderModal({ order, loading, prices, portfolio, on
                     onChange={(e) => setOutsideRth(e.target.checked)}
                   />
                   <span className="modify-rth-label">FILL OUTSIDE RTH</span>
-                  <span className="modify-rth-hint">Pre-market &amp; after hours</span>
+                  <span className="modify-rth-hint">
+                    Pre-market &amp; after hours
+                  </span>
                 </label>
               )}
 
               {isValidPrice && delta !== 0 && (
-                <div className={`modify-delta ${delta > 0 ? "positive" : "negative"}`}>
-                  {delta > 0 ? "+" : ""}{fmtPrice(Math.abs(delta))} from current {fmtPrice(currentPrice)}
+                <div
+                  className={`modify-delta ${delta > 0 ? "positive" : "negative"}`}
+                >
+                  {delta > 0 ? "+" : ""}
+                  {fmtPrice(Math.abs(delta))} from current{" "}
+                  {fmtPrice(currentPrice)}
                 </div>
               )}
             </div>
@@ -446,15 +541,18 @@ export default function ModifyOrderModal({ order, loading, prices, portfolio, on
             <div className="modify-secondary-panel">
               {/* Leg pills summary (read-only view) */}
               {(() => {
-                const unifiedLegs: UnifiedOrderLeg[] = editableLegs.map((leg, i) => ({
-                  id: `leg-${i}`,
-                  action: leg.action,
-                  direction: leg.action === "BUY" ? "LONG" : "SHORT" as const,
-                  strike: Number.parseFloat(leg.strike) || 0,
-                  type: leg.right === "C" ? "Call" : "Put" as const,
-                  expiry: leg.expiry,
-                  quantity: Number.parseInt(leg.ratio, 10) || 1,
-                }));
+                const unifiedLegs: UnifiedOrderLeg[] = editableLegs.map(
+                  (leg, i) => ({
+                    id: `leg-${i}`,
+                    action: leg.action,
+                    direction:
+                      leg.action === "BUY" ? "LONG" : ("SHORT" as const),
+                    strike: Number.parseFloat(leg.strike) || 0,
+                    type: leg.right === "C" ? "Call" : ("Put" as const),
+                    expiry: leg.expiry,
+                    quantity: Number.parseInt(leg.ratio, 10) || 1,
+                  }),
+                );
                 return (
                   <div style={{ marginBottom: "12px" }}>
                     <OrderLegPills legs={unifiedLegs} />
@@ -464,22 +562,36 @@ export default function ModifyOrderModal({ order, loading, prices, portfolio, on
 
               <div className="modify-section-heading">
                 <span className="modify-price-label">Edit Legs</span>
-                <span className="modify-section-hint">Modify each leg before replacing the order</span>
+                <span className="modify-section-hint">
+                  Modify each leg before replacing the order
+                </span>
               </div>
 
               <div className="modify-combo-legs">
                 {editableLegs.map((leg, index) => (
-                  <section className="modify-combo-leg-card" key={`${order.permId}-leg-${index}`}>
-                    <div className="modify-combo-leg-title">Leg {index + 1}</div>
+                  <section
+                    className="modify-combo-leg-card"
+                    key={`${order.permId}-leg-${index}`}
+                  >
+                    <div className="modify-combo-leg-title">
+                      Leg {index + 1}
+                    </div>
                     <div className="modify-combo-leg-grid">
-                      <label className="modify-field" htmlFor={`modify-leg-${index}-action`}>
+                      <label
+                        className="modify-field"
+                        htmlFor={`modify-leg-${index}-action`}
+                      >
                         <span className="modify-price-label">Action</span>
                         <div className="modify-price-input-row">
                           <select
                             id={`modify-leg-${index}-action`}
                             className="modify-price-input"
                             value={leg.action}
-                            onChange={(e) => handleLegChange(index, { action: normalizeLegAction(e.target.value) })}
+                            onChange={(e) =>
+                              handleLegChange(index, {
+                                action: normalizeLegAction(e.target.value),
+                              })
+                            }
                           >
                             <option value="BUY">BUY</option>
                             <option value="SELL">SELL</option>
@@ -487,14 +599,21 @@ export default function ModifyOrderModal({ order, loading, prices, portfolio, on
                         </div>
                       </label>
 
-                      <label className="modify-field" htmlFor={`modify-leg-${index}-right`}>
+                      <label
+                        className="modify-field"
+                        htmlFor={`modify-leg-${index}-right`}
+                      >
                         <span className="modify-price-label">Type</span>
                         <div className="modify-price-input-row">
                           <select
                             id={`modify-leg-${index}-right`}
                             className="modify-price-input"
                             value={leg.right}
-                            onChange={(e) => handleLegChange(index, { right: normalizeLegRight(e.target.value) })}
+                            onChange={(e) =>
+                              handleLegChange(index, {
+                                right: normalizeLegRight(e.target.value),
+                              })
+                            }
                           >
                             <option value="C">CALL</option>
                             <option value="P">PUT</option>
@@ -502,7 +621,10 @@ export default function ModifyOrderModal({ order, loading, prices, portfolio, on
                         </div>
                       </label>
 
-                      <label className="modify-field" htmlFor={`modify-leg-${index}-strike`}>
+                      <label
+                        className="modify-field"
+                        htmlFor={`modify-leg-${index}-strike`}
+                      >
                         <span className="modify-price-label">Strike</span>
                         <div className="modify-price-input-row">
                           <input
@@ -512,12 +634,17 @@ export default function ModifyOrderModal({ order, loading, prices, portfolio, on
                             step="0.01"
                             min="0.01"
                             value={leg.strike}
-                            onChange={(e) => handleLegChange(index, { strike: e.target.value })}
+                            onChange={(e) =>
+                              handleLegChange(index, { strike: e.target.value })
+                            }
                           />
                         </div>
                       </label>
 
-                      <label className="modify-field" htmlFor={`modify-leg-${index}-expiry`}>
+                      <label
+                        className="modify-field"
+                        htmlFor={`modify-leg-${index}-expiry`}
+                      >
                         <span className="modify-price-label">Expiry</span>
                         <div className="modify-price-input-row">
                           <input
@@ -525,12 +652,17 @@ export default function ModifyOrderModal({ order, loading, prices, portfolio, on
                             className="modify-price-input"
                             type="date"
                             value={leg.expiry}
-                            onChange={(e) => handleLegChange(index, { expiry: e.target.value })}
+                            onChange={(e) =>
+                              handleLegChange(index, { expiry: e.target.value })
+                            }
                           />
                         </div>
                       </label>
 
-                      <label className="modify-field" htmlFor={`modify-leg-${index}-ratio`}>
+                      <label
+                        className="modify-field"
+                        htmlFor={`modify-leg-${index}-ratio`}
+                      >
                         <span className="modify-price-label">Ratio</span>
                         <div className="modify-price-input-row">
                           <input
@@ -540,7 +672,9 @@ export default function ModifyOrderModal({ order, loading, prices, portfolio, on
                             step="1"
                             min="1"
                             value={leg.ratio}
-                            onChange={(e) => handleLegChange(index, { ratio: e.target.value })}
+                            onChange={(e) =>
+                              handleLegChange(index, { ratio: e.target.value })
+                            }
                           />
                         </div>
                       </label>
@@ -553,10 +687,18 @@ export default function ModifyOrderModal({ order, loading, prices, portfolio, on
         </div>
 
         <div className="modify-actions">
-          <button className="btn-secondary" onClick={onClose} disabled={loading}>
+          <button
+            className="btn-secondary"
+            onClick={onClose}
+            disabled={loading}
+          >
             Cancel
           </button>
-          <button className="btn-primary" onClick={submitModify} disabled={!canSubmit}>
+          <button
+            className="btn-primary"
+            onClick={submitModify}
+            disabled={!canSubmit}
+          >
             {loading ? "Modifying..." : "Modify Order"}
           </button>
         </div>

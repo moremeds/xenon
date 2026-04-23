@@ -1793,6 +1793,53 @@ async def orders_cancel(request: Request):
     return data
 
 
+def _try_register_order_from_snapshot(*, perm_id: int, order_id: int) -> bool:
+    """Lazy-register a snapshot-only order in orders_store so the modify gate
+    can apply. Returns True on insert, False if the order isn't in the
+    snapshot or is already registered.
+
+    Source of truth is ``data/orders.json`` — the same file the UI reads.
+    Synthetic ib_order_id values (e.g. -5 from snapshot reconstruction) are
+    preserved as-is; the modify subprocess uses perm_id as the primary key.
+    """
+    cache = _read_cache(DATA_DIR / "orders.json")
+    if not cache:
+        return False
+    open_orders = cache.get("open_orders") or []
+    target = None
+    for o in open_orders:
+        if perm_id and o.get("permId") == perm_id:
+            target = o
+            break
+        if order_id and o.get("orderId") == order_id:
+            target = o
+            break
+    if target is None:
+        return False
+    contract = target.get("contract") or {}
+    sec_type = contract.get("secType") or "STK"
+    # Multiplier: BAG/OPT default to 100, STK to 1.
+    multiplier = 100 if sec_type in ("OPT", "BAG") else 1
+    try:
+        return orders_store.register_from_snapshot(
+            perm_id=str(target.get("permId") or perm_id),
+            ib_order_id=str(target.get("orderId") or order_id),
+            ticker=str(target.get("symbol") or contract.get("symbol") or ""),
+            security_type=sec_type,
+            action=str(target.get("action") or "BUY"),
+            quantity=int(target.get("totalQuantity") or 0),
+            limit_price=float(target.get("limitPrice") or 0.0),
+            multiplier=multiplier,
+        )
+    except Exception as exc:
+        logger.warning(
+            "register_from_snapshot failed for perm_id=%s: %s",
+            perm_id,
+            exc,
+        )
+        return False
+
+
 @app.post("/orders/modify")
 async def orders_modify(request: Request):
     """Modify an open order via subprocess.
@@ -1859,6 +1906,17 @@ async def orders_modify(request: Request):
         seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence)
     else:
         seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence)
+    # If the perm_id is unknown to orders_store but exists in the IB snapshot,
+    # lazy-register it and retry. Covers orders placed before orders_store
+    # tracking existed or by an external client (the snapshot reconstruction
+    # gives us synthetic ib_order_id like -5 plus the real perm_id).
+    if not seq_outcome["applied"] and seq_outcome["current_sequence"] == -1:
+        if _try_register_order_from_snapshot(perm_id=perm_id, order_id=order_id):
+            if not order_id and perm_id:
+                seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence)
+            else:
+                seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence)
+
     if not seq_outcome["applied"]:
         current = seq_outcome["current_sequence"]
         if current == -1:

@@ -177,10 +177,18 @@ export type CloseTicketDraft = {
 
 function midFromQuote(p: PriceData | undefined | null): number | null {
   if (!p) return null;
-  if (p.last != null && Number.isFinite(p.last) && p.last > 0) return p.last;
-  if (p.bid != null && p.ask != null && p.bid > 0 && p.ask > 0) {
+  // Prefer bid/ask mid (accepts valid 0-bid OTM options where bid=0, ask>0).
+  if (
+    p.bid != null &&
+    p.ask != null &&
+    Number.isFinite(p.bid) &&
+    Number.isFinite(p.ask) &&
+    p.bid >= 0 &&
+    p.ask > 0
+  ) {
     return (p.bid + p.ask) / 2;
   }
+  if (p.last != null && Number.isFinite(p.last) && p.last > 0) return p.last;
   return null;
 }
 
@@ -238,7 +246,7 @@ git commit -m "feat(orders): buildCloseTicket for stock positions"
 Append to `web/tests/position-order-close-preset.test.ts`:
 
 ```ts
-import { optionKey } from "@/lib/pricesProtocol";
+import { legPriceKey } from "@/lib/positionUtils";
 
 function singleLegOptionPos(overrides: {
   direction: "LONG" | "SHORT";
@@ -290,7 +298,7 @@ describe("buildCloseTicket — single-leg option", () => {
     expiry,
     contracts: 5,
   });
-  const key = optionKey("AAPL", expiry.replace(/-/g, ""), 200, "C");
+  const key = legPriceKey("AAPL", expiry, pos.legs[0])!;
   const prices: Record<string, PriceData> = {
     [key]: { last: 6, bid: 5.9, ask: 6.1, close: 5 } as PriceData,
   };
@@ -316,7 +324,7 @@ describe("buildCloseTicket — single-leg option", () => {
       expiry,
       contracts: 2,
     });
-    const k = optionKey("AAPL", "20260619", 180, "P");
+    const k = legPriceKey("AAPL", expiry, shortPut.legs[0])!;
     const draft = buildCloseTicket(shortPut, {
       [k]: { last: 3, bid: 2.9, ask: 3.1, close: 3.2 } as PriceData,
     });
@@ -341,16 +349,19 @@ Replace the `throw` in `buildCloseTicket` with:
 
 ```ts
 const isSingleLegOption =
-  position.legs.length === 1 && position.legs[0].strike != null;
+  position.legs.length === 1 &&
+  position.legs[0].type !== "Stock" &&
+  position.legs[0].strike != null;
 
 if (isSingleLegOption) {
   const leg = position.legs[0];
   const right: "C" | "P" = leg.type === "Call" ? "C" : "P";
   const expiry = position.expiry.replace(/-/g, "");
   const action: "BUY" | "SELL" = position.direction === "LONG" ? "SELL" : "BUY";
-  // Price lookup uses the option-level WS key.
-  const key = `${position.ticker}:${expiry}:${leg.strike}:${right}`;
-  const mid = midFromQuote(prices[key]);
+  // Use the shared helper so the key matches `legPriceKey(...)` used
+  // elsewhere in the app (underscore-joined SYMBOL_YYYYMMDD_STRIKE_RIGHT).
+  const key = legPriceKey(position.ticker, position.expiry, leg);
+  const mid = key ? midFromQuote(prices[key]) : null;
   return {
     payload: {
       type: "option",
@@ -373,10 +384,8 @@ throw new Error("Combo close tickets not yet implemented");
 Add import at top:
 
 ```ts
-import { optionKey } from "@/lib/pricesProtocol";
+import { legPriceKey } from "@/lib/positionUtils";
 ```
-
-Replace the inline key string with `optionKey(position.ticker, expiry, leg.strike!, right)` to stay consistent with the rest of the codebase.
 
 - [ ] **Step 4: Run tests — expect pass**
 
@@ -404,7 +413,7 @@ git commit -m "feat(orders): buildCloseTicket for single-leg options"
 Append to `web/tests/position-order-close-preset.test.ts`:
 
 ```ts
-import { legPriceKey } from "@/lib/positionUtils";
+// `legPriceKey` is already imported in Task 2 — do not re-import.
 
 function bullCallSpreadPos(): PortfolioPosition {
   // LONG $200C, SHORT $210C — net LONG (debit paid)
@@ -494,6 +503,49 @@ describe("buildCloseTicket — combo (bull call spread)", () => {
     }
   });
 
+  it("ratio spread — per-leg ratio = leg.contracts / position.contracts", () => {
+    // 1x2: LONG 1 × $200C, SHORT 2 × $210C. position.contracts = 1.
+    const ratioSpread: PortfolioPosition = {
+      ...pos,
+      contracts: 1,
+      legs: [
+        { ...pos.legs[0], contracts: 1 },
+        { ...pos.legs[1], contracts: 2 },
+      ],
+    };
+    const draft = buildCloseTicket(ratioSpread, prices);
+    if (draft.payload.type === "combo") {
+      expect(draft.payload.quantity).toBe(1);
+      expect(draft.payload.legs.find((l) => l.strike === 200)!.ratio).toBe(1);
+      expect(draft.payload.legs.find((l) => l.strike === 210)!.ratio).toBe(2);
+    }
+  });
+
+  it("rejects covered-call / collar structures that include a Stock leg", () => {
+    const coveredCall: PortfolioPosition = {
+      ...pos,
+      structure: "Covered Call",
+      structure_type: "CoveredCall",
+      legs: [
+        {
+          direction: "LONG",
+          contracts: 100,
+          type: "Stock",
+          strike: null,
+          entry_cost: 30000,
+          avg_cost: 300,
+          market_price: 305,
+          market_value: 30500,
+          market_price_is_calculated: false,
+        },
+        { ...pos.legs[1] },
+      ],
+    };
+    expect(() => buildCloseTicket(coveredCall, prices)).toThrow(
+      /stock\+option/i,
+    );
+  });
+
   it("net direction derived from leg signs, not P&L", () => {
     // Invert: SHORT the spread (credit spread). Order.action should become BUY to close.
     const shortSpread: PortfolioPosition = {
@@ -519,7 +571,7 @@ describe("buildCloseTicket — combo (bull call spread)", () => {
 - [ ] **Step 2: Run tests — expect failure**
 
 Run: `cd web && npm test -- position-order-close-preset.test.ts`
-Expected: 3 new tests FAIL ("Combo close tickets not yet implemented").
+Expected: 5 new tests FAIL ("Combo close tickets not yet implemented" / covered-call test throws a different error, etc.).
 
 - [ ] **Step 3: Implement combo branch**
 
@@ -527,18 +579,36 @@ Append to `buildCloseTicket` (before the final throw):
 
 ```ts
 // Combo (multi-leg)
+// NOTE: Covered Call / Collar / Synthetic include a Stock leg. The /api/orders/place
+// combo payload schema cannot express a stock leg (requires strike/expiry/right),
+// and the IB BAG builder only qualifies option legs. Reject up-front — a future
+// plan can add a hybrid stock+BAG ticket.
+const hasStockLeg = position.legs.some((l) => l.type === "Stock");
+if (hasStockLeg) {
+  throw new Error(
+    "Close tickets for stock+option structures (Covered Call, Collar, Synthetic) are not yet supported",
+  );
+}
+
 const expiry = position.expiry.replace(/-/g, "");
+const baseContracts = Math.abs(position.contracts);
 const comboLegs = position.legs.map((leg) => {
   const right: "C" | "P" = leg.type === "Call" ? "C" : "P";
   // Per web/CLAUDE.md "IB Combo (BAG) Order Leg Convention":
   // ComboLeg.action = spread structure (LONG → BUY, SHORT → SELL), NOT trade direction.
   const legAction: "BUY" | "SELL" = leg.direction === "LONG" ? "BUY" : "SELL";
+  // Ratio is per-leg contracts / structure contracts. Guards 1×2s etc.
+  const legContracts = Math.abs(leg.contracts);
+  const ratio =
+    baseContracts > 0
+      ? Math.max(1, Math.round(legContracts / baseContracts))
+      : 1;
   return {
     expiry,
     strike: leg.strike!,
     right,
     action: legAction,
-    ratio: 1,
+    ratio,
   };
 });
 
@@ -547,13 +617,12 @@ const orderAction: "BUY" | "SELL" =
   position.direction === "LONG" ? "SELL" : "BUY";
 
 // Net mid: sum of sign × leg_mid, where sign comes from the position (LONG=+1, SHORT=-1).
-// This matches computeNetOptionQuote's definition — keep in mind net can be negative (credit).
+// Keep in mind net can be negative (credit).
 let netMid: number | null = 0;
 let missing = false;
 for (const leg of position.legs) {
-  const right: "C" | "P" = leg.type === "Call" ? "C" : "P";
-  const key = optionKey(position.ticker, expiry, leg.strike!, right);
-  const legMid = midFromQuote(prices[key]);
+  const key = legPriceKey(position.ticker, position.expiry, leg);
+  const legMid = key ? midFromQuote(prices[key]) : null;
   if (legMid == null) {
     missing = true;
     break;
@@ -568,7 +637,7 @@ return {
     type: "combo",
     symbol: position.ticker,
     action: orderAction,
-    quantity: Math.abs(position.contracts),
+    quantity: baseContracts,
     limitPrice: referenceMid ?? 0,
     tif: "DAY",
     legs: comboLegs,
@@ -582,7 +651,7 @@ Remove the trailing `throw new Error("Combo close tickets not yet implemented");
 - [ ] **Step 4: Run tests — expect pass**
 
 Run: `cd web && npm test -- position-order-close-preset.test.ts`
-Expected: 8 PASS.
+Expected: 10 PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -652,7 +721,7 @@ export function applyQtyChip(fullQty: number, pct: number): number {
 - [ ] **Step 4: Run — expect pass**
 
 Run: `cd web && npm test -- position-order-close-preset.test.ts`
-Expected: 13 PASS total.
+Expected: 15 PASS total.
 
 - [ ] **Step 5: Commit**
 
@@ -897,7 +966,7 @@ describe("PositionOrderModal — Close form", () => {
   it("submits POST /api/orders/place with close payload and closes modal on 200", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ order_id: "abc123" }),
+      json: async () => ({ orderId: "abc123", status: "ok" }),
     });
     (global as any).fetch = fetchMock;
 
@@ -924,6 +993,8 @@ describe("PositionOrderModal — Close form", () => {
       quantity: 300,
       tif: "DAY",
     });
+    expect(typeof body.client_attempt_id).toBe("string");
+    expect(body.client_attempt_id.length).toBeGreaterThan(0);
     await waitFor(() => expect(onSubmitted).toHaveBeenCalledWith("abc123"));
     expect(onClose).toHaveBeenCalled();
   });
@@ -957,7 +1028,14 @@ Add imports at top of the file:
 ```tsx
 import { useMemo } from "react";
 import { buildCloseTicket, applyQtyChip } from "@/lib/positionOrderPresets";
+import { errorFromResponseBody } from "@/lib/orderErrors";
+import { useAttemptId } from "@/lib/useAttemptId";
 ```
+
+If `useAttemptId` / `errorFromResponseBody` live under different paths in this
+project, locate them with `grep -rln "useAttemptId\|errorFromResponseBody" web/`
+before proceeding and update the imports accordingly. `OrderTab.tsx` is the
+reference caller.
 
 Append component at bottom of the file:
 
@@ -986,13 +1064,23 @@ function ClosePresetForm({
   const [error, setError] = useState<string | null>(null);
 
   const handleChip = (pct: number) => setQty(applyQtyChip(fullQty, pct));
+  const attemptId = useAttemptId();
 
   const handleSubmit = async () => {
     if (submitting) return;
     setSubmitting(true);
     setError(null);
     try {
-      const body = { ...draft.payload, quantity: qty, limitPrice };
+      // Clamp qty into [1, fullQty] so a manual over-type cannot flip a close
+      // into an opening trade that slips past the server naked-short guard.
+      const clampedQty = Math.max(1, Math.min(fullQty, qty));
+      attemptId.markSubmitted();
+      const body = {
+        ...draft.payload,
+        quantity: clampedQty,
+        limitPrice,
+        client_attempt_id: attemptId.id,
+      };
       const res = await fetch("/api/orders/place", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1000,16 +1088,17 @@ function ClosePresetForm({
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(
-          typeof json.detail === "string"
-            ? json.detail
-            : "Order placement failed",
-        );
+        setError(errorFromResponseBody(json, "Order placement failed"));
+        attemptId.markTerminal();
         return;
       }
-      const orderId = typeof json.order_id === "string" ? json.order_id : "";
+      const orderId = typeof json.orderId === "string" ? json.orderId : "";
+      attemptId.markTerminal();
       onSubmitted?.(orderId);
       onClose();
+    } catch {
+      setError("Network error placing order");
+      attemptId.markTerminal();
     } finally {
       setSubmitting(false);
     }
@@ -1038,9 +1127,15 @@ function ClosePresetForm({
           min={1}
           max={fullQty}
           value={qty}
-          onChange={(e) =>
-            setQty(Math.max(1, parseInt(e.target.value, 10) || 1))
-          }
+          onChange={(e) => {
+            // Allow the user to clear the field mid-edit — don't snap to 1 on
+            // empty string. Clamp to [1, fullQty] for any parsed integer.
+            const raw = e.target.value;
+            if (raw === "") return; // keep prior qty; user is mid-edit
+            const parsed = parseInt(raw, 10);
+            if (!Number.isFinite(parsed)) return;
+            setQty(Math.max(1, Math.min(fullQty, parsed)));
+          }}
         />
       </label>
 
@@ -1130,7 +1225,10 @@ import { Zap } from "lucide-react";
 import PositionOrderModal from "./PositionOrderModal";
 ```
 
-In the top-level `PositionTable` component (around line 604), add state:
+In the top-level `PositionTable` component (around line 604), add state and
+(if missing) an `onOrderPlaced?: (orderId: string) => void` prop so the
+parent (`WorkspaceSections` / `PortfolioByStructure`) can refresh orders or
+surface a toast. If the prop already exists, reuse it.
 
 ```tsx
 const [activeOrderPosition, setActiveOrderPosition] =
@@ -1152,6 +1250,13 @@ Render the modal below the existing `InstrumentDetailModal` block:
       position={activeOrderPosition}
       prices={prices}
       onClose={() => setActiveOrderPosition(null)}
+      onSubmitted={(orderId) => {
+        // Match the OrderTab success pattern: close modal + fire a refresh
+        // so the Orders tab picks up the new order. If a project-wide toast
+        // hook exists (grep `showToast\|useToast`), fire it here too.
+        setActiveOrderPosition(null);
+        onOrderPlaced?.(orderId);
+      }}
     />
   );
 }
@@ -1408,3 +1513,26 @@ EOF
 **Type consistency:** `ClosePayload` / `CloseTicketDraft` / `buildCloseTicket` / `applyQtyChip` — names stay identical from Task 1 through Task 7. `PositionOrderModal` props `{ position, prices, onClose, onSubmitted }` consistent across Tasks 5-7.
 
 **Load-bearing test:** Task 3's "per-leg ComboLeg.action stays LONG=BUY, SHORT=SELL" is the regression guard for IB error 201. Marked inline so an out-of-order reader understands its importance.
+
+## Post-tribunal revisions (2026-04-22)
+
+Applied after `codex-review` ran on this plan. Summary of what changed and what was deferred:
+
+**Fixed in this plan**
+
+- `optionKey` positional-call bug → replaced with `legPriceKey(ticker, expiry, leg)` everywhere (tests + impl). Matches `web/lib/positionUtils.ts`.
+- Response field `order_id` → `orderId` (camelCase, matches `web/app/api/orders/place/route.ts`).
+- Combo with Stock leg (Covered Call / Collar / Synthetic) now throws up-front instead of sending a payload the server-side TypeBox schema would reject.
+- Combo `ratio` computed from `leg.contracts / position.contracts` (1×2 spreads close correctly).
+- `client_attempt_id` plumbed via `useAttemptId` (matches `OrderTab.tsx` convention).
+- Submit-time qty clamp `Math.min(fullQty, qty)` — prevents a manual over-type from flipping a close into an opening trade.
+- Error extraction uses `errorFromResponseBody` so `reason_code`/`error` messages surface instead of only `detail`.
+- `midFromQuote` accepts `bid=0, ask>0` (valid deep-OTM). Bid/ask mid preferred over `last` to match `computeNetOptionQuote` intent.
+- `PositionTable` wires `onSubmitted` to clear modal state + fire `onOrderPlaced` for orders-tab refresh.
+
+**Deliberately deferred (documented, not blocking)**
+
+- `quote_token` — this entry surface has no interactive quote-request step (WS snapshot only). Revisit once `preflight.evaluate` exposes a token-minting path for snapshot quotes.
+- OrderPriceStrip / OrderLegPills reuse — architecture paragraph overclaims. Acceptable V1: raw inputs. Follow-up plan can reskin once the Close-preset UX is validated with users.
+- `limitPrice` does not re-sync when realtime prices tick after mount. User has manual input; `useEffect` resync is a V2 polish.
+- Empty-string qty edit: `onChange` ignores empty strings so React's controlled input snaps back to the last valid qty. Full "allow mid-edit blanks" requires tracking raw-string state — out of scope.

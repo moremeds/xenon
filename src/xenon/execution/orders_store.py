@@ -154,6 +154,76 @@ def apply_modify(
             con.close()
 
 
+def register_from_snapshot(
+    perm_id: str,
+    ib_order_id: str,
+    ticker: str,
+    security_type: str,
+    action: str,
+    quantity: int,
+    limit_price: float,
+    multiplier: int = 1,
+    user_id: str = "snapshot",
+    db_path: Path | str | None = None,
+) -> bool:
+    """Insert a minimal orders_submissions row for an order that exists in IB
+    (via the orders.json snapshot) but was not placed via the FastAPI flow.
+
+    Used by the modify route when ``apply_modify_by_perm_id`` returns the
+    ``current_sequence == -1`` sentinel — i.e. the perm_id is unknown to
+    orders_store. After registration the modify can proceed through the
+    normal sequence gate.
+
+    Idempotent: keyed by a deterministic ``submission_id = "snapshot-<perm_id>"``,
+    so repeated calls with the same perm_id are no-ops.
+
+    Returns True if a new row was inserted, False if a row already existed.
+    """
+    submission_id = f"snapshot-{perm_id}"
+    client_attempt_id = f"snapshot-{perm_id}"
+    now = datetime.now(timezone.utc)
+    path = _resolve_path(db_path)
+    with _WRITE_LOCK:
+        con = _connect_utc(path)
+        try:
+            existing = con.execute(
+                "SELECT 1 FROM orders_submissions WHERE submission_id = ?",
+                [submission_id],
+            ).fetchone()
+            if existing is not None:
+                return False
+            con.execute(
+                """
+                INSERT INTO orders_submissions (
+                    submission_id, user_id, client_attempt_id,
+                    ticker, security_type, action, quantity, multiplier,
+                    ib_order_id, perm_id, limit_price,
+                    state, submitted_at, updated_at, modify_sequence
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    submission_id,
+                    user_id,
+                    client_attempt_id,
+                    ticker,
+                    security_type,
+                    action,
+                    quantity,
+                    multiplier,
+                    ib_order_id,
+                    perm_id,
+                    limit_price,
+                    "SUBMITTED",
+                    now,
+                    now,
+                    0,
+                ],
+            )
+            return True
+        finally:
+            con.close()
+
+
 def apply_modify_by_perm_id(
     perm_id: str,
     sequence: int,

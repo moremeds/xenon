@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, ChevronDown, ChevronUp } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, Zap } from "lucide-react";
 import type { PortfolioLeg, PortfolioPosition } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 import InstrumentDetailModal from "./InstrumentDetailModal";
+import PositionOrderModal from "./PositionOrderModal";
 import { useSort, type SortDirection } from "@/lib/useSort";
 import TickerLink from "./TickerLink";
 import {
@@ -321,6 +322,7 @@ function PositionRow({
   realtimePrice,
   prices,
   onLegClick,
+  onOrderClick,
   readonly = false,
 }: {
   pos: PortfolioPosition;
@@ -329,6 +331,7 @@ function PositionRow({
   realtimePrice?: PriceData | null;
   prices?: Record<string, PriceData>;
   onLegClick?: (leg: PortfolioLeg, pos: PortfolioPosition) => void;
+  onOrderClick?: (pos: PortfolioPosition) => void;
   readonly?: boolean;
 }) {
   const [legsExpanded, setLegsExpanded] = useState(false);
@@ -451,6 +454,16 @@ function PositionRow({
                 positionId={pos.id}
                 disabled={readonly}
               />
+              {!readonly && onOrderClick && (
+                <button
+                  type="button"
+                  className="position-order-btn"
+                  aria-label={`Create order for ${pos.ticker} position`}
+                  onClick={() => onOrderClick(pos)}
+                >
+                  <Zap size={12} />
+                </button>
+              )}
               <button
                 className="leg-toggle-btn"
                 onClick={() => setLegsExpanded((v) => !v)}
@@ -465,11 +478,23 @@ function PositionRow({
               </button>
             </span>
           ) : (
-            <TickerLink
-              ticker={pos.ticker}
-              positionId={pos.id}
-              disabled={readonly}
-            />
+            <span className="ticker-with-chevron">
+              <TickerLink
+                ticker={pos.ticker}
+                positionId={pos.id}
+                disabled={readonly}
+              />
+              {!readonly && onOrderClick && (
+                <button
+                  type="button"
+                  className="position-order-btn"
+                  aria-label={`Create order for ${pos.ticker} position`}
+                  onClick={() => onOrderClick(pos)}
+                >
+                  <Zap size={12} />
+                </button>
+              )}
+            </span>
           )}
         </td>
         <td>{structureDisplay}</td>
@@ -583,6 +608,7 @@ export default function PositionTable({
   prices,
   readonly = false,
   hideHeader = false,
+  onOrderPlaced,
 }: {
   positions: PortfolioPosition[];
   showExpiry?: boolean;
@@ -600,6 +626,7 @@ export default function PositionTable({
    * though it renders several sub-tables (stock + per-category-pair).
    */
   hideHeader?: boolean;
+  onOrderPlaced?: (orderId: string) => void;
 }) {
   const positionExtract = useMemo(() => makePositionExtract(prices), [prices]);
   const { sorted, sort, toggle } = useSort(positions, positionExtract);
@@ -610,6 +637,10 @@ export default function PositionTable({
     ticker: string;
     expiry: string;
   } | null>(null);
+
+  // Order modal state
+  const [activeOrderPosition, setActiveOrderPosition] =
+    useState<PortfolioPosition | null>(null);
 
   const handleLegClick = useCallback(
     (leg: PortfolioLeg, pos: PortfolioPosition) => {
@@ -760,6 +791,9 @@ export default function PositionTable({
               realtimePrice={prices?.[pos.ticker]}
               prices={prices}
               onLegClick={handleLegClick}
+              onOrderClick={
+                readonly ? undefined : (p) => setActiveOrderPosition(p)
+              }
               readonly={readonly}
             />
           ))}
@@ -773,6 +807,17 @@ export default function PositionTable({
           expiry={activeInstrument.expiry}
           prices={prices}
           onClose={() => setActiveInstrument(null)}
+        />
+      )}
+      {!readonly && activeOrderPosition && prices && (
+        <PositionOrderModal
+          position={activeOrderPosition}
+          prices={prices}
+          onClose={() => setActiveOrderPosition(null)}
+          onSubmitted={(orderId) => {
+            setActiveOrderPosition(null);
+            onOrderPlaced?.(orderId);
+          }}
         />
       )}
     </>
