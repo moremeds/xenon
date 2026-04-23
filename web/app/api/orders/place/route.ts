@@ -24,6 +24,7 @@ type ComboLeg = {
   action: "BUY" | "SELL";
   ratio: number;
   limitPrice?: number;
+  conId?: number;
 };
 
 type PlaceBody = {
@@ -39,6 +40,7 @@ type PlaceBody = {
   legs?: ComboLeg[];
   client_attempt_id?: string;
   quote_token?: string;
+  quote_tokens?: Record<string, string>;
   con_id?: number;
   acknowledge_limit_override?: boolean;
 };
@@ -229,6 +231,7 @@ export async function POST(request: Request): Promise<Response> {
               action: l.action,
               ratio: l.ratio,
               ...(l.limitPrice != null ? { limitPrice: l.limitPrice } : {}),
+              ...(l.conId != null ? { con_id: l.conId } : {}),
             })),
           }
         : {}),
@@ -236,6 +239,7 @@ export async function POST(request: Request): Promise<Response> {
         ? { client_attempt_id: body.client_attempt_id }
         : {}),
       ...(body.quote_token ? { quote_token: body.quote_token } : {}),
+      ...(body.quote_tokens ? { quote_tokens: body.quote_tokens } : {}),
       ...(body.con_id != null ? { con_id: body.con_id } : {}),
       ...(body.acknowledge_limit_override === true
         ? { acknowledge_limit_override: true }
