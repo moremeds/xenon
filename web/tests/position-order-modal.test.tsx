@@ -31,6 +31,21 @@ afterEach(() => {
   onFieldEdit.mockReset();
 });
 
+/** Wrap a place-order fetch mock with a /api/orders/quote short-circuit. */
+function withQuoteMock(placeMock: ReturnType<typeof vi.fn>) {
+  return vi.fn(async (url: any, init?: any) => {
+    const u = String(url);
+    if (u.startsWith("/api/orders/quote")) {
+      const m = u.match(/con_id=(\d+)/);
+      return {
+        ok: true,
+        json: async () => ({ token: `tok-${m?.[1] ?? "x"}` }),
+      };
+    }
+    return (placeMock as any)(url, init);
+  });
+}
+
 const stockPos: PortfolioPosition = {
   id: 1,
   ticker: "TSLA",
@@ -45,7 +60,7 @@ const stockPos: PortfolioPosition = {
   market_value: 105000,
   legs: [
     {
-      conId: null,
+      conId: 42,
       direction: "LONG",
       contracts: 300,
       type: "Stock",
@@ -66,11 +81,11 @@ const stockPos: PortfolioPosition = {
 
 describe("PositionOrderModal — Close/Add toggle", () => {
   it("defaults to Close intent for a LONG stock → action SELL", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
+    const placeMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ orderId: "abc", status: "ok" }),
     });
-    (global as any).fetch = fetchMock;
+    (global as any).fetch = withQuoteMock(placeMock);
     const { getByRole } = render(
       <PositionOrderModal
         position={stockPos}
@@ -78,19 +93,25 @@ describe("PositionOrderModal — Close/Add toggle", () => {
         onClose={() => {}}
       />,
     );
+    await waitFor(() =>
+      expect(
+        (getByRole("button", { name: /^Submit/i }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false),
+    );
     fireEvent.click(getByRole("button", { name: /^Submit/i }));
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    const body = JSON.parse((fetchMock.mock.calls[0] as any)[1].body);
+    await waitFor(() => expect(placeMock).toHaveBeenCalled());
+    const body = JSON.parse((placeMock.mock.calls[0] as any)[1].body);
     expect(body.action).toBe("SELL");
     expect(body.client_attempt_id).toBe("test-attempt-id-123");
   });
 
   it("switching to Add toggles action to BUY for the same LONG stock", async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
+    const placeMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ orderId: "abc", status: "ok" }),
     });
-    (global as any).fetch = fetchMock;
+    (global as any).fetch = withQuoteMock(placeMock);
     const { getByRole } = render(
       <PositionOrderModal
         position={stockPos}
@@ -99,9 +120,15 @@ describe("PositionOrderModal — Close/Add toggle", () => {
       />,
     );
     fireEvent.click(getByRole("button", { name: /^Add$/i }));
+    await waitFor(() =>
+      expect(
+        (getByRole("button", { name: /^Submit/i }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false),
+    );
     fireEvent.click(getByRole("button", { name: /^Submit/i }));
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    const body = JSON.parse((fetchMock.mock.calls[0] as any)[1].body);
+    await waitFor(() => expect(placeMock).toHaveBeenCalled());
+    const body = JSON.parse((placeMock.mock.calls[0] as any)[1].body);
     expect(body.action).toBe("BUY");
   });
 });
@@ -164,10 +191,10 @@ describe("PositionOrderModal — input UX", () => {
   });
 
   it("editing qty after a submit attempt rolls the client_attempt_id (calls onFieldEdit)", async () => {
-    const fetchMock = vi
+    const placeMock = vi
       .fn()
       .mockResolvedValue({ ok: false, json: async () => ({ error: "bad" }) });
-    (global as any).fetch = fetchMock;
+    (global as any).fetch = withQuoteMock(placeMock);
     const { getByRole, getByLabelText } = render(
       <PositionOrderModal
         position={stockPos}
@@ -175,8 +202,14 @@ describe("PositionOrderModal — input UX", () => {
         onClose={() => {}}
       />,
     );
+    await waitFor(() =>
+      expect(
+        (getByRole("button", { name: /^Submit/i }) as HTMLButtonElement)
+          .disabled,
+      ).toBe(false),
+    );
     fireEvent.click(getByRole("button", { name: /^Submit/i }));
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await waitFor(() => expect(placeMock).toHaveBeenCalled());
     fireEvent.change(getByLabelText(/Quantity/i), { target: { value: "100" } });
     expect(onFieldEdit).toHaveBeenCalledWith("quantity");
   });
