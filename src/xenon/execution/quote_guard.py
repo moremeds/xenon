@@ -259,8 +259,9 @@ def check_combo(
                 reason_detail=f"credit limit |{limit_price}| < floor {floor} (|exec_net|={abs_net})",
             )
     # exec_net == 0 (crossed quotes net to zero): any non-tiny limit would
-    # be suspect. Cap at an absolute tolerance of 0.05 to reject spikes.
-    elif abs_limit > Decimal("0.05"):
+    # be suspect. Use the same tolerance floor ($0.05) as the non-zero
+    # branches for continuity.
+    elif abs_limit > tolerance:
         return QuoteVerdict(
             accept=False,
             reason_code=ReasonCode.LIMIT_OUT_OF_BAND,

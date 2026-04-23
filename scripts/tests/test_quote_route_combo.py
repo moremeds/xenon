@@ -56,30 +56,25 @@ def _combo_body(legs_tokens: dict[str, str] | None, limit_price: str = "2.70"):
     }
 
 
-def test_combo_missing_tokens_hard_rejects_with_telemetry(client):
-    """Missing combo quote_tokens must hard-reject, not soft-pass.
+def test_combo_missing_tokens_soft_fails_with_telemetry(client):
+    """Missing combo quote_tokens soft-fails with telemetry (known gap).
 
-    Regression: previously the server logged QUOTE_TOKEN_MISSING_SOFT and
-    continued to IB placement, which meant a client-side regression that
-    stopped minting tokens silently removed the F3 quote-band protection.
+    Several combo entry paths (ticker-detail OrderTab ComboOrderForm,
+    OptionsChainTab, InstrumentDetailModal) do not yet mint quote_tokens.
+    Hard-rejecting here would break those flows. Follow-up: wire tokens
+    into every combo entry path, then flip to hard-reject.
     """
     body = _combo_body(None)
     r = client.post("/orders/place", json=body)
-    assert r.status_code == 400, r.text
-    assert r.json()["reason_code"] == "STALE_QUOTE"
+    assert r.status_code == 200, r.text
     from xenon.execution import orders_store
 
     con = orders_store._connect_utc(orders_store._resolve_path(None))
     try:
-        rows = con.execute("SELECT kind, detail FROM orders_events WHERE kind='QUOTE_CHECK_FAIL'").fetchall()
+        rows = con.execute("SELECT kind FROM orders_events WHERE kind='QUOTE_TOKEN_MISSING_SOFT'").fetchall()
     finally:
         con.close()
     assert len(rows) == 1
-    import json as _json
-
-    detail = _json.loads(rows[0][1])
-    assert detail["reason_code"] == "STALE_QUOTE"
-    assert "missing quote_tokens" in detail["reason_detail"]
 
 
 def test_combo_in_band_tokens_pass(client):
