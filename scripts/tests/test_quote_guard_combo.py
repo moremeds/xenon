@@ -192,8 +192,15 @@ def test_short_call_vertical_close_debit_in_band_accepts():
     assert v.accept is True, v.reason_detail
 
 
-def test_short_call_vertical_close_fat_finger_low_rejects():
-    """Closing at <95% of market credit rejects (fat-finger down)."""
+def test_short_call_vertical_close_fat_finger_high_debit_rejects():
+    """Close of short credit spread is a DEBIT; fat-finger +27 must reject.
+
+    envelope=SELL + [SELL, BUY] → IB reverses → user pays ~2.70 debit.
+    The band must be a CAP (sign(exec_net)>0), not a floor keyed on
+    envelope=SELL. Gemini re-review ISSUE-1 flagged that the previous
+    envelope-keyed logic let this through by applying the SELL-side floor
+    (e.g. limit 27 ≥ 2.185 → accept) even though the trade was a debit.
+    """
     legs = [
         _leg(1, "SELL", _mint(1, "SPY", "4.50", "4.70")),
         _leg(2, "BUY", _mint(2, "SPY", "2.00", "2.20")),
@@ -201,7 +208,7 @@ def test_short_call_vertical_close_fat_finger_low_rejects():
     v = quote_guard.check_combo(
         legs=legs,
         envelope_action="SELL",
-        limit_price=Decimal("1.00"),
+        limit_price=Decimal("27.00"),
         token_secret=SECRET,
         now=MIDDAY_RTH,
     )
@@ -248,8 +255,16 @@ def test_short_call_vertical_open_credit_in_band_accepts():
     assert v.accept is True, v.reason_detail
 
 
-def test_credit_spread_fat_finger_large_debit_rejects():
-    """Fat-finger limit 27 on a ~2.30 credit trade rejects (cap)."""
+def test_credit_spread_open_fat_finger_low_credit_rejects():
+    """Opening a short credit spread is a CREDIT; fat-finger 0.01 rejects.
+
+    envelope=BUY + [SELL, BUY] → as-labeled execution: receive 4.50 bid,
+    pay 2.20 ask → credit ~2.30 (exec_net=-2.30). User accepting only 0.01
+    credit on a 2.30-credit market is a fat-finger down → floor rejects.
+    Gemini re-review ISSUE-1: previous envelope-keyed logic would apply
+    the BUY-side cap (limit 0.01 ≤ 2.415 → accept) even though the trade
+    was a credit receive — this case catches that.
+    """
     legs = [
         _leg(1, "SELL", _mint(1, "SPY", "4.50", "4.70")),
         _leg(2, "BUY", _mint(2, "SPY", "2.00", "2.20")),
@@ -257,7 +272,7 @@ def test_credit_spread_fat_finger_large_debit_rejects():
     v = quote_guard.check_combo(
         legs=legs,
         envelope_action="BUY",
-        limit_price=Decimal("27.00"),
+        limit_price=Decimal("0.01"),
         token_secret=SECRET,
         now=MIDDAY_RTH,
     )

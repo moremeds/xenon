@@ -224,33 +224,43 @@ def check_combo(
 
     exec_net = _compute_execution_net(leg_payloads, envelope_action)
 
-    # Band based on magnitude — user-entered combo limits are conventionally
-    # positive (absolute debit paid OR absolute credit received). Credit
-    # structures yield a negative exec_net; we compare |limit| to |exec_net|
-    # so the math is sign-agnostic.
+    # Which side of the band protects the user depends on the SIGN of
+    # exec_net (debit vs credit), NOT envelope_action directly.
+    #   exec_net > 0  → trade is a net debit; user pays.
+    #                    Cap limit at +5% to block fat-finger "paying too much".
+    #   exec_net < 0  → trade is a net credit; user receives.
+    #                    Floor limit at −5% to block fat-finger "accepting too little credit".
+    # The previous implementation keyed on envelope_action alone, which
+    # produced asymmetric holes: a short-credit close (envelope=SELL but
+    # exec_net>0 debit) got floor-checked instead of capped, letting a
+    # +27 fat-finger through on a ~2.70 debit close.
     abs_net = abs(exec_net)
     abs_limit = abs(limit_price)
     tolerance = abs_net * Decimal("0.05")
 
-    if envelope_action == "BUY":
-        # Combo BUY: user paying the net. Limit is the max debit they accept.
-        # Reject if user's limit is > 5% above market (fat-finger up).
+    if exec_net > 0:
         cap = abs_net + tolerance
         if abs_limit > cap:
             return QuoteVerdict(
                 accept=False,
                 reason_code=ReasonCode.LIMIT_OUT_OF_BAND,
-                reason_detail=f"BUY limit |{limit_price}| > cap {cap} (|exec_net|={abs_net})",
+                reason_detail=f"debit limit |{limit_price}| > cap {cap} (|exec_net|={abs_net})",
             )
-    else:
-        # Combo SELL: user receiving the net. Limit is the min credit they accept.
-        # Reject if user's limit is > 5% below market (fat-finger down).
+    elif exec_net < 0:
         floor = abs_net - tolerance
         if abs_limit < floor:
             return QuoteVerdict(
                 accept=False,
                 reason_code=ReasonCode.LIMIT_OUT_OF_BAND,
-                reason_detail=f"SELL limit |{limit_price}| < floor {floor} (|exec_net|={abs_net})",
+                reason_detail=f"credit limit |{limit_price}| < floor {floor} (|exec_net|={abs_net})",
             )
+    # exec_net == 0 (crossed quotes net to zero): any non-tiny limit would
+    # be suspect. Cap at an absolute tolerance of 0.05 to reject spikes.
+    elif abs_limit > Decimal("0.05"):
+        return QuoteVerdict(
+            accept=False,
+            reason_code=ReasonCode.LIMIT_OUT_OF_BAND,
+            reason_detail=f"exec_net=0 but limit |{limit_price}| is non-trivial",
+        )
 
     return QuoteVerdict(accept=True)
