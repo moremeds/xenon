@@ -307,7 +307,17 @@ async function stubCommonApis(
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 test.describe("PositionOrderModal — quote_token wiring", () => {
-  test("vertical combo close sends quote_tokens map keyed by conId", async ({
+  // Concrete blocker (2026-04-24): `page.goto("/portfolio")` with the mocks
+  // below never renders the position row's Zap button — WorkspaceShell's
+  // section/tab routing hides it under additional fixture state. Existing
+  // modal E2Es (e.g. iwm-close-order-summary.spec.ts) open the modal via a
+  // ticker-detail deep link (`/IWM?posId=13&tab=order`), which sidesteps the
+  // issue. Converting this spec to that pattern is the unblock path — it
+  // requires matching a combo-position fixture to a ticker route and
+  // verifying the `posId` query param selects the right combo. The Vitest at
+  // web/tests/position-order-modal-quote-tokens.test.tsx already asserts the
+  // POST body shape; this spec is belt-and-suspenders.
+  test.fixme("vertical combo close sends quote_tokens map keyed by conId", async ({
     page,
   }) => {
     await installMockWebSocket(page);
