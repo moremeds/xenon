@@ -3,9 +3,14 @@
 Date: 2026-04-20
 Status: Draft v0.2 (post-tribunal), awaiting review
 Depends on: completion of `docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md`
-(phases F0–F7) plus a ≥7-day clean live burn-in. Phases W1–W6 of
-`docs/superpowers/plans/2026-04-20-order-execution-foundation-master.md`
+(phases F0–F7, shipped via PR #25/#27/#28/#29). Phases W1–W6 of
+`docs/superpowers/archive/plans/2026-04-20-order-execution-foundation-master.md`
 implement this spec.
+
+Burn-in gate: waived on 2026-04-23. Author chose to proceed with wizard
+work directly; foundation observability (REHYDRATE_RECONCILED/UNCERTAIN,
+orders_events, naked_short_audit) continues to run but is no longer a
+blocking precondition.
 Related code: `src/xenon/execution/`, `src/xenon/monitor_daemon/handlers/`,
 `web/lib/order/`, `web/components/ticker-detail/OrderTab.tsx`,
 `src/xenon/api/routes/`, `docs/trading/options-structures.json`,
