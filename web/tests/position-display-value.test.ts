@@ -27,7 +27,7 @@ const STOCK: PortfolioPosition = {
   entry_cost: 468_000,
   market_value: 400_000,
   legs: [
-    { type: "Stock", direction: "LONG", strike: null, contracts: 1000, avg_cost: 468, entry_cost: 468_000, market_price: null, market_value: 400_000 },
+    { conId: null, type: "Stock", direction: "LONG", strike: null, contracts: 1000, avg_cost: 468, entry_cost: 468_000, market_price: null, market_value: 400_000 },
   ],
 };
 
@@ -43,8 +43,8 @@ const SPREAD: PortfolioPosition = {
   entry_cost: 40_100,
   market_value: 41_700,
   legs: [
-    { type: "Call", direction: "LONG", strike: 270, contracts: 100, avg_cost: 901, entry_cost: 90_100, market_price: null, market_value: 63_000 },
-    { type: "Call", direction: "SHORT", strike: 290, contracts: 100, avg_cost: -500, entry_cost: -50_000, market_price: null, market_value: -21_300 },
+    { conId: null, type: "Call", direction: "LONG", strike: 270, contracts: 100, avg_cost: 901, entry_cost: 90_100, market_price: null, market_value: 63_000 },
+    { conId: null, type: "Call", direction: "SHORT", strike: 290, contracts: 100, avg_cost: -500, entry_cost: -50_000, market_price: null, market_value: -21_300 },
   ],
 };
 
@@ -96,8 +96,8 @@ describe("getDisplayMarketValue — Covered Call (stock + option legs)", () => {
     entry_cost: 30_000, // 100 shares × $300 − $50 premium credit
     market_value: 35_200,
     legs: [
-      { type: "Stock", direction: "LONG", strike: null, contracts: 100, avg_cost: 300, entry_cost: 30_000, market_price: 350, market_value: 35_000 },
-      { type: "Call", direction: "SHORT", strike: 400, contracts: 1, avg_cost: -50, entry_cost: -50, market_price: -2, market_value: -200 },
+      { conId: null, type: "Stock", direction: "LONG", strike: null, contracts: 100, avg_cost: 300, entry_cost: 30_000, market_price: 350, market_value: 35_000 },
+      { conId: null, type: "Call", direction: "SHORT", strike: 400, contracts: 1, avg_cost: -50, entry_cost: -50, market_price: -2, market_value: -200 },
     ],
   };
 
@@ -155,7 +155,7 @@ describe("getDisplayTotalPnl", () => {
       entry_cost: -500, // collected $5 * 100
       market_value: -200,
       legs: [
-        { type: "Put", direction: "SHORT", strike: 440, contracts: 1, avg_cost: -500, entry_cost: -500, market_price: null, market_value: -200 },
+        { conId: null, type: "Put", direction: "SHORT", strike: 440, contracts: 1, avg_cost: -500, entry_cost: -500, market_price: null, market_value: -200 },
       ],
     };
     // With no price data: MV = resolveMarketValue = single-leg market_value = -200 (from pos.market_value)

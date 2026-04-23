@@ -30,8 +30,8 @@ const bullCallSpread: PortfolioPosition = {
   pnl: -3080,
   pnl_pct: -13.46,
   legs: [
-    { type: "Call", strike: 315, direction: "LONG", contracts: 44, entry_cost: 56760, market_value: 37400, market_price_is_calculated: false },
-    { type: "Call", strike: 340, direction: "SHORT", contracts: 44, entry_cost: 33880, market_value: 17600, market_price_is_calculated: false },
+    { conId: null, type: "Call", strike: 315, direction: "LONG", contracts: 44, entry_cost: 56760, market_value: 37400, market_price_is_calculated: false },
+    { conId: null, type: "Call", strike: 340, direction: "SHORT", contracts: 44, entry_cost: 33880, market_value: 17600, market_price_is_calculated: false },
   ],
 };
 
@@ -47,8 +47,8 @@ describe("resolveSpreadPriceData", () => {
       entry_cost: -579.79,
       market_value: 1800,
       legs: [
-        { type: "Call", strike: 247, direction: "LONG", contracts: 50, entry_cost: 17285.02, market_value: 17300, market_price_is_calculated: false },
-        { type: "Put", strike: 243, direction: "SHORT", contracts: 50, entry_cost: 17864.81, market_value: 16000, market_price_is_calculated: false },
+        { conId: null, type: "Call", strike: 247, direction: "LONG", contracts: 50, entry_cost: 17285.02, market_value: 17300, market_price_is_calculated: false },
+        { conId: null, type: "Put", strike: 243, direction: "SHORT", contracts: 50, entry_cost: 17864.81, market_value: 16000, market_price_is_calculated: false },
       ],
     };
 
@@ -160,8 +160,8 @@ describe("resolveSpreadPriceData", () => {
       ...bullCallSpread,
       structure: "DEBIT 10X BEAR PUT SPREAD $340.0/$315.0",
       legs: [
-        { type: "Put", strike: 340, direction: "LONG", contracts: 10, entry_cost: 20000, market_value: 18000, market_price_is_calculated: false },
-        { type: "Put", strike: 315, direction: "SHORT", contracts: 10, entry_cost: 8000, market_value: 6000, market_price_is_calculated: false },
+        { conId: null, type: "Put", strike: 340, direction: "LONG", contracts: 10, entry_cost: 20000, market_value: 18000, market_price_is_calculated: false },
+        { conId: null, type: "Put", strike: 315, direction: "SHORT", contracts: 10, entry_cost: 8000, market_value: 6000, market_price_is_calculated: false },
       ],
     };
     const prices: Record<string, PriceData> = {

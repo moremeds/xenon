@@ -24,6 +24,7 @@ function stockPos(
     market_value: 105000,
     legs: [
       {
+        conId: null,
         direction: "LONG",
         contracts: 300,
         type: "Stock",
@@ -66,6 +67,7 @@ function singleLegOptionPos(overrides: {
     market_value: 600,
     legs: [
       {
+        conId: null,
         direction,
         contracts,
         type,
@@ -100,6 +102,7 @@ function bullCallSpreadPos(): PortfolioPosition {
     market_value: 1400,
     legs: [
       {
+        conId: null,
         direction: "LONG",
         contracts: 4,
         type: "Call",
@@ -111,6 +114,7 @@ function bullCallSpreadPos(): PortfolioPosition {
         market_price_is_calculated: false,
       },
       {
+        conId: null,
         direction: "SHORT",
         contracts: 4,
         type: "Call",
@@ -298,6 +302,7 @@ describe("seedTicketFromPosition — guards", () => {
       structure_type: "CoveredCall",
       legs: [
         {
+          conId: null,
           direction: "LONG",
           contracts: 100,
           type: "Stock",
@@ -346,6 +351,7 @@ function bearPutSpreadDebitPos(): PortfolioPosition {
     market_value: 7200,
     legs: [
       {
+        conId: null,
         direction: "SHORT",
         contracts: 32,
         type: "Put",
@@ -357,6 +363,7 @@ function bearPutSpreadDebitPos(): PortfolioPosition {
         market_price_is_calculated: false,
       },
       {
+        conId: null,
         direction: "LONG",
         contracts: 32,
         type: "Put",
@@ -392,6 +399,7 @@ function ironCondorCreditPos(): PortfolioPosition {
     market_value: -300,
     legs: [
       {
+        conId: null,
         direction: "LONG",
         contracts: 5,
         type: "Put",
@@ -403,6 +411,7 @@ function ironCondorCreditPos(): PortfolioPosition {
         market_price_is_calculated: false,
       },
       {
+        conId: null,
         direction: "SHORT",
         contracts: 5,
         type: "Put",
@@ -414,6 +423,7 @@ function ironCondorCreditPos(): PortfolioPosition {
         market_price_is_calculated: false,
       },
       {
+        conId: null,
         direction: "SHORT",
         contracts: 5,
         type: "Call",
@@ -425,6 +435,7 @@ function ironCondorCreditPos(): PortfolioPosition {
         market_price_is_calculated: false,
       },
       {
+        conId: null,
         direction: "LONG",
         contracts: 5,
         type: "Call",

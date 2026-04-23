@@ -45,6 +45,7 @@ const stockPos: PortfolioPosition = {
   market_value: 105000,
   legs: [
     {
+      conId: null,
       direction: "LONG",
       contracts: 300,
       type: "Stock",
@@ -196,6 +197,7 @@ describe("PositionOrderModal — leg pills (combo)", () => {
     market_value: 1400,
     legs: [
       {
+        conId: null,
         direction: "LONG",
         contracts: 4,
         type: "Call",
@@ -207,6 +209,7 @@ describe("PositionOrderModal — leg pills (combo)", () => {
         market_price_is_calculated: false,
       },
       {
+        conId: null,
         direction: "SHORT",
         contracts: 4,
         type: "Call",

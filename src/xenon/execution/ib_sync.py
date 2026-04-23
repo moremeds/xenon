@@ -380,6 +380,31 @@ def _merge_covered_call_groups(groups: dict) -> dict:
     return merged
 
 
+def _format_position_legs(legs: list) -> list:
+    """Format raw IB position legs into the subtree shape consumed by the web client.
+
+    Emits `conId` so downstream consumers (quote-token minting, order routing) can
+    identify the exact contract without an additional lookup.
+    """
+    out = []
+    for leg in sorted(legs, key=lambda x: (x.get("right", "Z"), x.get("strike", 0))):
+        out.append(
+            {
+                "conId": leg.get("conId"),
+                "direction": "LONG" if leg["position"] > 0 else "SHORT",
+                "contracts": int(abs(leg["position"])),
+                "type": "Call" if leg.get("right") == "C" else ("Put" if leg.get("right") == "P" else "Stock"),
+                "strike": leg.get("strike"),
+                "entry_cost": leg["entry_cost"],
+                "avg_cost": leg["avgCost"],
+                "market_price": leg.get("marketPrice"),
+                "market_value": leg.get("marketValue"),
+                "market_price_is_calculated": bool(leg.get("marketPriceIsCalculated")),
+            }
+        )
+    return out
+
+
 def collapse_positions(positions: list) -> list:
     """
     Collapse individual legs into multi-leg structures.
@@ -467,21 +492,7 @@ def collapse_positions(positions: list) -> list:
             ib_daily_pnl = None
 
         # Format legs for subtree
-        formatted_legs = []
-        for leg in sorted(legs, key=lambda x: (x.get("right", "Z"), x.get("strike", 0))):
-            formatted_legs.append(
-                {
-                    "direction": "LONG" if leg["position"] > 0 else "SHORT",
-                    "contracts": int(abs(leg["position"])),
-                    "type": "Call" if leg.get("right") == "C" else ("Put" if leg.get("right") == "P" else "Stock"),
-                    "strike": leg.get("strike"),
-                    "entry_cost": leg["entry_cost"],
-                    "avg_cost": leg["avgCost"],
-                    "market_price": leg.get("marketPrice"),
-                    "market_value": leg.get("marketValue"),
-                    "market_price_is_calculated": bool(leg.get("marketPriceIsCalculated")),
-                }
-            )
+        formatted_legs = _format_position_legs(legs)
 
         collapsed.append(
             {

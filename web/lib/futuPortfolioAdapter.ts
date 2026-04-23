@@ -201,6 +201,7 @@ function futuPositionToPortfolioPosition(
   const entryCost = p.avg_cost * p.quantity * multiplier;
 
   const leg: PortfolioLeg = {
+    conId: null,
     direction,
     contracts,
     type,

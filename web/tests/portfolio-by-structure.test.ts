@@ -12,7 +12,14 @@ import type { PortfolioPosition, PortfolioLeg } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 
 function mkPrice(overrides: Partial<PriceData> = {}): PriceData {
-  return { last: null, bid: null, ask: null, close: null, volume: null, ...overrides };
+  return {
+    last: null,
+    bid: null,
+    ask: null,
+    close: null,
+    volume: null,
+    ...overrides,
+  };
 }
 
 let idCounter = 1000;
@@ -20,8 +27,14 @@ function nextId() {
   return ++idCounter;
 }
 
-function mkStock(ticker: string, contracts: number, marketValue: number | null, entryCost = 0): PortfolioPosition {
+function mkStock(
+  ticker: string,
+  contracts: number,
+  marketValue: number | null,
+  entryCost = 0,
+): PortfolioPosition {
   const leg: PortfolioLeg = {
+    conId: null,
     type: "Stock",
     direction: "LONG",
     strike: null,
@@ -46,7 +59,15 @@ function mkStock(ticker: string, contracts: number, marketValue: number | null, 
   };
 }
 
-function mkVertical(ticker: string, opts: { mv: number; ec: number; structure?: string; structure_type?: string } = { mv: 0, ec: 0 }): PortfolioPosition {
+function mkVertical(
+  ticker: string,
+  opts: {
+    mv: number;
+    ec: number;
+    structure?: string;
+    structure_type?: string;
+  } = { mv: 0, ec: 0 },
+): PortfolioPosition {
   return {
     id: nextId(),
     ticker,
@@ -59,8 +80,28 @@ function mkVertical(ticker: string, opts: { mv: number; ec: number; structure?: 
     entry_cost: opts.ec,
     market_value: opts.mv,
     legs: [
-      { type: "Call", direction: "LONG", strike: 100, contracts: 1, avg_cost: opts.ec, entry_cost: opts.ec, market_price: null, market_value: opts.mv },
-      { type: "Call", direction: "SHORT", strike: 110, contracts: 1, avg_cost: 0, entry_cost: 0, market_price: null, market_value: 0 },
+      {
+        conId: null,
+        type: "Call",
+        direction: "LONG",
+        strike: 100,
+        contracts: 1,
+        avg_cost: opts.ec,
+        entry_cost: opts.ec,
+        market_price: null,
+        market_value: opts.mv,
+      },
+      {
+        conId: null,
+        type: "Call",
+        direction: "SHORT",
+        strike: 110,
+        contracts: 1,
+        avg_cost: 0,
+        entry_cost: 0,
+        market_price: null,
+        market_value: 0,
+      },
     ],
   };
 }
@@ -78,7 +119,17 @@ function mkCovered(ticker: string): PortfolioPosition {
     entry_cost: -200,
     market_value: -100,
     legs: [
-      { type: "Call", direction: "SHORT", strike: 120, contracts: 1, avg_cost: -200, entry_cost: -200, market_price: null, market_value: -100 },
+      {
+        conId: null,
+        type: "Call",
+        direction: "SHORT",
+        strike: 120,
+        contracts: 1,
+        avg_cost: -200,
+        entry_cost: -200,
+        market_price: null,
+        market_value: -100,
+      },
     ],
   };
 }
@@ -147,7 +198,22 @@ describe("buildTickerGroups — aggregate null propagation", () => {
 
   it("all-null MV → agg.mv is null (NOT zero)", () => {
     const positions = [
-      { ...mkStock("Y", 10, null), legs: [{ type: "Stock" as const, direction: "LONG" as const, strike: null, contracts: 10, avg_cost: 0, entry_cost: 0, market_price: null, market_value: null }] },
+      {
+        ...mkStock("Y", 10, null),
+        legs: [
+          {
+            conId: null,
+            type: "Stock" as const,
+            direction: "LONG" as const,
+            strike: null,
+            contracts: 10,
+            avg_cost: 0,
+            entry_cost: 0,
+            market_price: null,
+            market_value: null,
+          },
+        ],
+      },
     ];
     const groups = buildTickerGroups(positions, {});
     expect(groups[0].agg.mv).toBe(null);
@@ -175,7 +241,17 @@ describe("buildTickerGroups — lookup + classifier regressions", () => {
       entry_cost: -500,
       market_value: -200,
       legs: [
-        { type: "Put", direction: "SHORT", strike: 440, contracts: 1, avg_cost: -500, entry_cost: -500, market_price: null, market_value: -200 },
+        {
+          conId: null,
+          type: "Put",
+          direction: "SHORT",
+          strike: 440,
+          contracts: 1,
+          avg_cost: -500,
+          entry_cost: -500,
+          market_price: null,
+          market_value: -200,
+        },
       ],
     };
     const groups = buildTickerGroups([pos], {});
@@ -209,7 +285,17 @@ describe("buildTickerGroups — lookup + classifier regressions", () => {
       entry_cost: -500,
       market_value: -200,
       legs: [
-        { type: "Put", direction: "SHORT", strike: 440, contracts: 1, avg_cost: -500, entry_cost: -500, market_price: null, market_value: -200 },
+        {
+          conId: null,
+          type: "Put",
+          direction: "SHORT",
+          strike: 440,
+          contracts: 1,
+          avg_cost: -500,
+          entry_cost: -500,
+          market_price: null,
+          market_value: -200,
+        },
       ],
     };
     // Long Call: paid $200, MV now $300
@@ -225,7 +311,17 @@ describe("buildTickerGroups — lookup + classifier regressions", () => {
       entry_cost: 200,
       market_value: 300,
       legs: [
-        { type: "Call", direction: "LONG", strike: 500, contracts: 1, avg_cost: 200, entry_cost: 200, market_price: null, market_value: 300 },
+        {
+          conId: null,
+          type: "Call",
+          direction: "LONG",
+          strike: 500,
+          contracts: 1,
+          avg_cost: 200,
+          entry_cost: 200,
+          market_price: null,
+          market_value: 300,
+        },
       ],
     };
     const groups = buildTickerGroups([shortPut, longCall], {});
@@ -242,7 +338,17 @@ describe("buildTickerGroups — lookup + classifier regressions", () => {
 });
 
 describe("buildTickerGroups — virtual combo detection (orphan single legs)", () => {
-  function mkSingle(ticker: string, opts: { type: "Call" | "Put"; dir: "LONG" | "SHORT"; strike: number; expiry?: string; mv?: number; ec?: number }): PortfolioPosition {
+  function mkSingle(
+    ticker: string,
+    opts: {
+      type: "Call" | "Put";
+      dir: "LONG" | "SHORT";
+      strike: number;
+      expiry?: string;
+      mv?: number;
+      ec?: number;
+    },
+  ): PortfolioPosition {
     const structureName = `${opts.dir === "LONG" ? "Long" : "Short"} ${opts.type}`;
     return {
       id: nextId(),
@@ -257,6 +363,7 @@ describe("buildTickerGroups — virtual combo detection (orphan single legs)", (
       market_value: opts.mv ?? (opts.dir === "LONG" ? 120 : -80),
       legs: [
         {
+          conId: null,
           type: opts.type,
           direction: opts.dir,
           strike: opts.strike,
@@ -272,8 +379,20 @@ describe("buildTickerGroups — virtual combo detection (orphan single legs)", (
 
   it("NVDA Long Put + Short Put same expiry → both reassigned to vertical (user-reported case)", () => {
     const positions = [
-      mkSingle("NVDA", { type: "Put", dir: "SHORT", strike: 175, mv: -7_538, ec: -9_285 }),
-      mkSingle("NVDA", { type: "Put", dir: "LONG", strike: 170, mv: 3_983, ec: 5_340 }),
+      mkSingle("NVDA", {
+        type: "Put",
+        dir: "SHORT",
+        strike: 175,
+        mv: -7_538,
+        ec: -9_285,
+      }),
+      mkSingle("NVDA", {
+        type: "Put",
+        dir: "LONG",
+        strike: 170,
+        mv: 3_983,
+        ec: 5_340,
+      }),
     ];
     const groups = buildTickerGroups(positions, {});
     const cats = groups[0].optionsByCategory;
@@ -316,8 +435,16 @@ describe("buildTickerGroups — virtual combo detection (orphan single legs)", (
       const label = groups[0].virtualPairs.get(v.id)?.label;
       if (label) pairLabels.add(label);
     }
-    expect(Array.from(pairLabels).some((l) => l.includes("$340") && l.includes("$350"))).toBe(true);
-    expect(Array.from(pairLabels).some((l) => l.includes("$360") && l.includes("$370"))).toBe(true);
+    expect(
+      Array.from(pairLabels).some(
+        (l) => l.includes("$340") && l.includes("$350"),
+      ),
+    ).toBe(true);
+    expect(
+      Array.from(pairLabels).some(
+        (l) => l.includes("$360") && l.includes("$370"),
+      ),
+    ).toBe(true);
   });
 
   it("Bull Call Spread via separate legs: Long Call + Short Call same expiry → vertical", () => {
@@ -325,7 +452,10 @@ describe("buildTickerGroups — virtual combo detection (orphan single legs)", (
       mkSingle("SPY", { type: "Call", dir: "LONG", strike: 500 }),
       mkSingle("SPY", { type: "Call", dir: "SHORT", strike: 520 }),
     ];
-    expect(buildTickerGroups(positions, {})[0].optionsByCategory.get("vertical")?.length).toBe(2);
+    expect(
+      buildTickerGroups(positions, {})[0].optionsByCategory.get("vertical")
+        ?.length,
+    ).toBe(2);
   });
 
   it("Long Call + Long Put same strike → straddle; different strikes → strangle", () => {
@@ -333,13 +463,17 @@ describe("buildTickerGroups — virtual combo detection (orphan single legs)", (
       mkSingle("X", { type: "Call", dir: "LONG", strike: 100 }),
       mkSingle("X", { type: "Put", dir: "LONG", strike: 100 }),
     ];
-    expect(buildTickerGroups(same, {})[0].optionsByCategory.get("straddle")?.length).toBe(2);
+    expect(
+      buildTickerGroups(same, {})[0].optionsByCategory.get("straddle")?.length,
+    ).toBe(2);
 
     const diff = [
       mkSingle("Y", { type: "Call", dir: "LONG", strike: 110 }),
       mkSingle("Y", { type: "Put", dir: "LONG", strike: 90 }),
     ];
-    expect(buildTickerGroups(diff, {})[0].optionsByCategory.get("strangle")?.length).toBe(2);
+    expect(
+      buildTickerGroups(diff, {})[0].optionsByCategory.get("strangle")?.length,
+    ).toBe(2);
   });
 
   it("Long Call + Short Put (risk reversal / synthetic long) → synthetic", () => {
@@ -347,13 +481,26 @@ describe("buildTickerGroups — virtual combo detection (orphan single legs)", (
       mkSingle("Z", { type: "Call", dir: "LONG", strike: 100 }),
       mkSingle("Z", { type: "Put", dir: "SHORT", strike: 100 }),
     ];
-    expect(buildTickerGroups(positions, {})[0].optionsByCategory.get("synthetic")?.length).toBe(2);
+    expect(
+      buildTickerGroups(positions, {})[0].optionsByCategory.get("synthetic")
+        ?.length,
+    ).toBe(2);
   });
 
   it("different expiries do NOT pair (one stays single)", () => {
     const positions = [
-      mkSingle("A", { type: "Put", dir: "LONG", strike: 100, expiry: "2026-05-15" }),
-      mkSingle("A", { type: "Put", dir: "SHORT", strike: 95, expiry: "2026-06-19" }),
+      mkSingle("A", {
+        type: "Put",
+        dir: "LONG",
+        strike: 100,
+        expiry: "2026-05-15",
+      }),
+      mkSingle("A", {
+        type: "Put",
+        dir: "SHORT",
+        strike: 95,
+        expiry: "2026-06-19",
+      }),
     ];
     const cats = buildTickerGroups(positions, {})[0].optionsByCategory;
     expect(cats.has("vertical")).toBe(false);
@@ -377,14 +524,34 @@ describe("buildTickerGroups — virtual combo detection (orphan single legs)", (
       ...mkSingle("X", { type: "Put", dir: "LONG", strike: 100 }),
       contracts: 10,
       legs: [
-        { type: "Put", direction: "LONG", strike: 100, contracts: 10, avg_cost: 100, entry_cost: 1000, market_price: null, market_value: 1200 },
+        {
+          conId: null,
+          type: "Put",
+          direction: "LONG",
+          strike: 100,
+          contracts: 10,
+          avg_cost: 100,
+          entry_cost: 1000,
+          market_price: null,
+          market_value: 1200,
+        },
       ],
     };
     const short5: PortfolioPosition = {
       ...mkSingle("X", { type: "Put", dir: "SHORT", strike: 110 }),
       contracts: 5,
       legs: [
-        { type: "Put", direction: "SHORT", strike: 110, contracts: 5, avg_cost: -200, entry_cost: -1000, market_price: null, market_value: -600 },
+        {
+          conId: null,
+          type: "Put",
+          direction: "SHORT",
+          strike: 110,
+          contracts: 5,
+          avg_cost: -200,
+          entry_cost: -1000,
+          market_price: null,
+          market_value: -600,
+        },
       ],
     };
     const cats = buildTickerGroups([long10, short5], {})[0].optionsByCategory;
@@ -396,7 +563,17 @@ describe("buildTickerGroups — virtual combo detection (orphan single legs)", (
     const nullStrike: PortfolioPosition = {
       ...mkSingle("X", { type: "Put", dir: "LONG", strike: 100 }),
       legs: [
-        { type: "Put", direction: "LONG", strike: null, contracts: 1, avg_cost: 100, entry_cost: 100, market_price: null, market_value: 120 },
+        {
+          conId: null,
+          type: "Put",
+          direction: "LONG",
+          strike: null,
+          contracts: 1,
+          avg_cost: 100,
+          entry_cost: 100,
+          market_price: null,
+          market_value: 120,
+        },
       ],
     };
     const real = mkSingle("X", { type: "Put", dir: "SHORT", strike: 110 });
@@ -421,7 +598,11 @@ describe("buildTickerGroups — virtual combo detection (orphan single legs)", (
     // Both distinct pair keys (not one merged pair)
     const pairs = new Set<string>();
     for (const pos of cats.get("straddle")!) {
-      const pk = (buildTickerGroups(positions, {})[0].virtualPairs.get(pos.id) as { pairKey: string })?.pairKey;
+      const pk = (
+        buildTickerGroups(positions, {})[0].virtualPairs.get(pos.id) as {
+          pairKey: string;
+        }
+      )?.pairKey;
       if (pk) pairs.add(pk);
     }
     expect(pairs.size).toBe(2);
@@ -442,8 +623,28 @@ describe("buildTickerGroups — virtual combo detection (orphan single legs)", (
       entry_cost: 500,
       market_value: 700,
       legs: [
-        { type: "Call", direction: "LONG", strike: 100, contracts: 1, avg_cost: 800, entry_cost: 800, market_price: null, market_value: 1000 },
-        { type: "Call", direction: "SHORT", strike: 110, contracts: 1, avg_cost: -300, entry_cost: -300, market_price: null, market_value: -300 },
+        {
+          conId: null,
+          type: "Call",
+          direction: "LONG",
+          strike: 100,
+          contracts: 1,
+          avg_cost: 800,
+          entry_cost: 800,
+          market_price: null,
+          market_value: 1000,
+        },
+        {
+          conId: null,
+          type: "Call",
+          direction: "SHORT",
+          strike: 110,
+          contracts: 1,
+          avg_cost: -300,
+          entry_cost: -300,
+          market_price: null,
+          market_value: -300,
+        },
       ],
     };
     const groups = buildTickerGroups([combo], {});
@@ -457,7 +658,19 @@ describe("buildTickerGroups — partial aggregation guards (tribunal fixes)", ()
     const ok = mkStock("Q", 10, 1_000, 900);
     const broken: PortfolioPosition = {
       ...mkStock("Q", 10, null, 500),
-      legs: [{ type: "Stock", direction: "LONG", strike: null, contracts: 10, avg_cost: 50, entry_cost: 500, market_price: null, market_value: null }],
+      legs: [
+        {
+          conId: null,
+          type: "Stock",
+          direction: "LONG",
+          strike: null,
+          contracts: 10,
+          avg_cost: 50,
+          entry_cost: 500,
+          market_price: null,
+          market_value: null,
+        },
+      ],
     };
     const groups = buildTickerGroups([ok, broken], {});
     const agg = groups[0].agg;
@@ -501,7 +714,17 @@ describe("buildTickerGroups — partial aggregation guards (tribunal fixes)", ()
       entry_cost: 100,
       market_value: 120,
       legs: [
-        { type: "Call", direction: "LONG", strike: 200, contracts: 1, avg_cost: 100, entry_cost: 100, market_price: null, market_value: 120 },
+        {
+          conId: null,
+          type: "Call",
+          direction: "LONG",
+          strike: 200,
+          contracts: 1,
+          avg_cost: 100,
+          entry_cost: 100,
+          market_price: null,
+          market_value: 120,
+        },
       ],
     };
     // No M spot at all → spot resolution fails for the single → missingLegs > 0
@@ -533,7 +756,10 @@ describe("buildTickerGroups — netDelta known/unknown", () => {
       KKK_20260515_100_C: mkPrice({ delta: 0.6 }),
       KKK_20260515_110_C: mkPrice({ delta: 0.3 }),
     };
-    const groups = buildTickerGroups([mkVertical("KKK", { mv: 100, ec: 90 })], prices);
+    const groups = buildTickerGroups(
+      [mkVertical("KKK", { mv: 100, ec: 90 })],
+      prices,
+    );
     expect(groups[0].agg.netDelta).not.toBe(null);
     // LONG 0.6*100 + SHORT -0.3*100 = 60 - 30 = 30
     expect(groups[0].agg.netDelta).toBeCloseTo(30, 5);

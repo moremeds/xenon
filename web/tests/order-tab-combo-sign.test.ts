@@ -45,6 +45,7 @@ const POSITION: PortfolioPosition = {
   entry_date: "2026-03-19",
   legs: [
     {
+      conId: null,
       direction: "LONG",
       contracts: 50,
       type: "Call",
@@ -56,6 +57,7 @@ const POSITION: PortfolioPosition = {
       market_price_is_calculated: false,
     },
     {
+      conId: null,
       direction: "SHORT",
       contracts: 50,
       type: "Put",

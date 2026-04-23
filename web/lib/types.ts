@@ -68,6 +68,7 @@ export type WorkspaceNavItem = {
 };
 
 export type PortfolioLeg = {
+  conId: number | null;
   direction: "LONG" | "SHORT";
   contracts: number;
   type: "Call" | "Put" | "Stock";

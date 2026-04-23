@@ -14,7 +14,8 @@ vi.mock("../components/PriceChart", () => ({
 }));
 
 vi.mock("../components/QuoteTelemetry", () => ({
-  TickerQuoteTelemetry: () => React.createElement("div", { "data-testid": "quote-telemetry" }),
+  TickerQuoteTelemetry: () =>
+    React.createElement("div", { "data-testid": "quote-telemetry" }),
 }));
 
 const PLTR_PRICE: PriceData = {
@@ -72,6 +73,7 @@ const PORTFOLIO: PortfolioData = {
       ib_daily_pnl: null,
       legs: [
         {
+          conId: null,
           direction: "LONG",
           contracts: 20,
           type: "Call",
@@ -83,6 +85,7 @@ const PORTFOLIO: PortfolioData = {
           market_price_is_calculated: false,
         },
         {
+          conId: null,
           direction: "SHORT",
           contracts: 20,
           type: "Put",
@@ -121,33 +124,66 @@ describe("Ticker chain position focus", () => {
         value: vi.fn(),
       });
     } else {
-      vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
+      vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(
+        () => {},
+      );
     }
 
     fetchMock.mockImplementation((input) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : String(input.url);
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : String(input.url);
       if (url.includes("/api/options/expirations")) {
         return Promise.resolve(
-          new Response(JSON.stringify({ symbol: "PLTR", expirations: ["20260327", "20260417"] }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
+          new Response(
+            JSON.stringify({
+              symbol: "PLTR",
+              expirations: ["20260327", "20260417"],
+            }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          ),
         );
       }
-      if (url.includes("/api/options/chain") && url.includes("expiry=20260327")) {
+      if (
+        url.includes("/api/options/chain") &&
+        url.includes("expiry=20260327")
+      ) {
         return Promise.resolve(
-          new Response(JSON.stringify({ symbol: "PLTR", expiry: "20260327", strikes: [150, 152.5, 155] }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
+          new Response(
+            JSON.stringify({
+              symbol: "PLTR",
+              expiry: "20260327",
+              strikes: [150, 152.5, 155],
+            }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          ),
         );
       }
-      if (url.includes("/api/options/chain") && url.includes("expiry=20260417")) {
+      if (
+        url.includes("/api/options/chain") &&
+        url.includes("expiry=20260417")
+      ) {
         return Promise.resolve(
-          new Response(JSON.stringify({ symbol: "PLTR", expiry: "20260417", strikes: [150, 152.5, 155] }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
+          new Response(
+            JSON.stringify({
+              symbol: "PLTR",
+              expiry: "20260417",
+              strikes: [150, 152.5, 155],
+            }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          ),
         );
       }
       throw new Error(`Unexpected fetch: ${url}`);
@@ -178,13 +214,17 @@ describe("Ticker chain position focus", () => {
       ),
     );
 
-    const expirySelect = (await screen.findAllByRole("combobox"))[0] as HTMLSelectElement;
+    const expirySelect = (
+      await screen.findAllByRole("combobox")
+    )[0] as HTMLSelectElement;
     await waitFor(() => {
       expect(expirySelect.value).toBe("20260327");
     });
 
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith("/api/options/chain?symbol=PLTR&expiry=20260327");
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/options/chain?symbol=PLTR&expiry=20260327",
+      );
     });
   });
 });
