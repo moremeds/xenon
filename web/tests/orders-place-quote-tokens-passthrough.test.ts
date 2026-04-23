@@ -69,4 +69,36 @@ describe("/api/orders/place — quote_tokens passthrough", () => {
     expect(forwardedBody.legs[0].con_id).toBe(111);
     expect(forwardedBody.legs[1].con_id).toBe(222);
   });
+
+  test("maps single-leg camelCase conId to snake_case con_id", async () => {
+    const body = {
+      type: "option",
+      symbol: "SPY",
+      action: "BUY",
+      quantity: 1,
+      limitPrice: 2.5,
+      tif: "DAY",
+      expiry: "2026-05-16",
+      strike: 500,
+      right: "C",
+      conId: 111222,
+      quote_token: "tok-111222",
+      client_attempt_id: "attempt-single-1",
+    };
+    const req = new Request("http://localhost/api/orders/place", {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: { "Content-Type": "application/json" },
+    });
+    const res = await POST(req);
+
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect(xenonApi.xenonFetch).toHaveBeenCalled();
+    const forwarded = (
+      xenonApi.xenonFetch as unknown as { mock: { calls: unknown[][] } }
+    ).mock.calls[0][1] as { body: string };
+    const forwardedBody = JSON.parse(forwarded.body);
+    expect(forwardedBody.con_id).toBe(111222);
+    expect(forwardedBody.quote_token).toBe("tok-111222");
+  });
 });
