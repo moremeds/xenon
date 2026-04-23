@@ -159,3 +159,107 @@ def test_token_contract_mismatch_rejects():
     )
     assert v.accept is False
     assert v.reason_code == ReasonCode.STALE_QUOTE
+
+
+# ---------- credit-structure coverage (ISSUE-1 regression) ----------
+
+# For a held SHORT credit vertical (sold 500C + bought 510C hedge):
+#   Structural legs: [500C action=SELL, 510C action=BUY] (LONG->BUY, SHORT->SELL).
+#   CLOSING a short structure requires envelope=SELL - IB reverses the legs,
+#   so the actual execution is: buy 500C (pay ask 4.70) + sell 510C (receive
+#   bid 2.00) -> net debit 2.70 paid by the user.
+# With envelope=BUY on the same structural legs, IB would *open* a new short
+# credit spread (as-labeled) - tests use envelope=SELL to exercise the close.
+
+
+def test_short_call_vertical_close_debit_in_band_accepts():
+    """Closing a short credit spread at market debit must pass.
+
+    Close via envelope=SELL so IB reverses to BUY 500C / SELL 510C.
+    Market debit-to-close = 4.70 - 2.00 = 2.70.
+    """
+    legs = [
+        _leg(1, "SELL", _mint(1, "SPY", "4.50", "4.70")),
+        _leg(2, "BUY", _mint(2, "SPY", "2.00", "2.20")),
+    ]
+    v = quote_guard.check_combo(
+        legs=legs,
+        envelope_action="SELL",
+        limit_price=Decimal("2.80"),
+        token_secret=SECRET,
+        now=MIDDAY_RTH,
+    )
+    assert v.accept is True, v.reason_detail
+
+
+def test_short_call_vertical_close_fat_finger_low_rejects():
+    """Closing at <95% of market credit rejects (fat-finger down)."""
+    legs = [
+        _leg(1, "SELL", _mint(1, "SPY", "4.50", "4.70")),
+        _leg(2, "BUY", _mint(2, "SPY", "2.00", "2.20")),
+    ]
+    v = quote_guard.check_combo(
+        legs=legs,
+        envelope_action="SELL",
+        limit_price=Decimal("1.00"),
+        token_secret=SECRET,
+        now=MIDDAY_RTH,
+    )
+    assert v.accept is False
+    assert v.reason_code == ReasonCode.LIMIT_OUT_OF_BAND
+
+
+def test_iron_condor_close_debit_in_band_accepts():
+    """Close of short iron condor (envelope=SELL -> IB reverses)."""
+    legs = [
+        _leg(1, "SELL", _mint(1, "SPY", "2.50", "2.60"), right="P"),
+        _leg(2, "BUY", _mint(2, "SPY", "1.20", "1.30"), right="P"),
+        _leg(3, "SELL", _mint(3, "SPY", "2.40", "2.50"), right="C"),
+        _leg(4, "BUY", _mint(4, "SPY", "1.10", "1.20"), right="C"),
+    ]
+    v = quote_guard.check_combo(
+        legs=legs,
+        envelope_action="SELL",
+        limit_price=Decimal("2.90"),
+        token_secret=SECRET,
+        now=MIDDAY_RTH,
+    )
+    assert v.accept is True, v.reason_detail
+
+
+def test_short_call_vertical_open_credit_in_band_accepts():
+    """Open short credit vertical: envelope=BUY, user accepts up to 2.40 credit.
+
+    Structural legs [SELL 500C, BUY 510C]; envelope=BUY executes as-labeled:
+    receive 4.50 bid, pay 2.20 ask -> net credit 2.30. exec_net=-2.30,
+    |exec_net|=2.30. User limit 2.40 is within band.
+    """
+    legs = [
+        _leg(1, "SELL", _mint(1, "SPY", "4.50", "4.70")),
+        _leg(2, "BUY", _mint(2, "SPY", "2.00", "2.20")),
+    ]
+    v = quote_guard.check_combo(
+        legs=legs,
+        envelope_action="BUY",
+        limit_price=Decimal("2.40"),
+        token_secret=SECRET,
+        now=MIDDAY_RTH,
+    )
+    assert v.accept is True, v.reason_detail
+
+
+def test_credit_spread_fat_finger_large_debit_rejects():
+    """Fat-finger limit 27 on a ~2.30 credit trade rejects (cap)."""
+    legs = [
+        _leg(1, "SELL", _mint(1, "SPY", "4.50", "4.70")),
+        _leg(2, "BUY", _mint(2, "SPY", "2.00", "2.20")),
+    ]
+    v = quote_guard.check_combo(
+        legs=legs,
+        envelope_action="BUY",
+        limit_price=Decimal("27.00"),
+        token_secret=SECRET,
+        now=MIDDAY_RTH,
+    )
+    assert v.accept is False
+    assert v.reason_code == ReasonCode.LIMIT_OUT_OF_BAND

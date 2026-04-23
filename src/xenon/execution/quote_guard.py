@@ -133,29 +133,41 @@ class CheckComboLeg(BaseModel):
     ratio: int = 1
 
 
-def _compute_combo_nets(
+def _compute_execution_net(
     leg_payloads: list[tuple["quote_tokens.QuotePayload", str, int]],
-) -> tuple[Decimal, Decimal]:
-    """Return (net_ask, net_bid) for the structural (BUY-envelope) combo.
+    envelope_action: str,
+) -> Decimal:
+    """Return the signed net price IB would execute this combo at.
 
-    Per web/CLAUDE.md "Combo Natural Market Bid/Ask":
-        net_ask = Σ(BUY leg ask × r) − Σ(SELL leg bid × r)
-        net_bid = Σ(BUY leg bid × r) − Σ(SELL leg ask × r)
+    IB semantics (per web/CLAUDE.md "IB Combo (BAG) Order Leg Convention"):
+      - envelope=BUY executes legs as-labeled (BUY leg pays ask,
+        SELL leg receives bid).
+      - envelope=SELL reverses leg actions (BUY leg receives bid,
+        SELL leg pays ask).
 
-    These nets describe the combo's natural market regardless of envelope
-    direction — envelope_action only selects cap (BUY) vs floor (SELL).
+    Returned sign convention: positive = user pays (debit), negative =
+    user receives (credit). This matches "pay ask on effective-BUY legs,
+    receive bid on effective-SELL legs".
+
+    For LONG debit spread open (BUY env on [BUY,SELL]) → positive debit.
+    For LONG debit spread close (SELL env on [BUY,SELL]) → negative credit.
+    For SHORT credit spread open (SELL env on [SELL,BUY]) → positive debit
+      of the SHORT structure as-reversed, i.e. the debit user pays when
+      IB reverses the legs (equivalent to the debit to CLOSE, not open) —
+      except here envelope SELL means the user sold the (as-labeled) combo
+      at a net they'd accept.
+    Callers should take abs() of this value and compare to abs(limit_price)
+    when banding, since user-entered limits are conventionally positive.
     """
-    net_ask = Decimal("0")
-    net_bid = Decimal("0")
+    exec_net = Decimal("0")
     for payload, leg_action, ratio in leg_payloads:
         r = Decimal(ratio)
-        if leg_action == "BUY":
-            net_ask += payload.ask * r
-            net_bid += payload.bid * r
+        # Effective direction after envelope: match = pay ask, mismatch = receive bid.
+        if envelope_action == leg_action:
+            exec_net += payload.ask * r
         else:
-            net_ask -= payload.bid * r
-            net_bid -= payload.ask * r
-    return net_ask, net_bid
+            exec_net -= payload.bid * r
+    return exec_net
 
 
 def check_combo(
@@ -210,23 +222,35 @@ def check_combo(
             )
         leg_payloads.append((payload, leg.action, leg.ratio))
 
-    net_ask, net_bid = _compute_combo_nets(leg_payloads)
+    exec_net = _compute_execution_net(leg_payloads, envelope_action)
+
+    # Band based on magnitude — user-entered combo limits are conventionally
+    # positive (absolute debit paid OR absolute credit received). Credit
+    # structures yield a negative exec_net; we compare |limit| to |exec_net|
+    # so the math is sign-agnostic.
+    abs_net = abs(exec_net)
+    abs_limit = abs(limit_price)
+    tolerance = abs_net * Decimal("0.05")
 
     if envelope_action == "BUY":
-        cap = net_ask * Decimal("1.05")
-        if limit_price > cap:
+        # Combo BUY: user paying the net. Limit is the max debit they accept.
+        # Reject if user's limit is > 5% above market (fat-finger up).
+        cap = abs_net + tolerance
+        if abs_limit > cap:
             return QuoteVerdict(
                 accept=False,
                 reason_code=ReasonCode.LIMIT_OUT_OF_BAND,
-                reason_detail=f"BUY limit {limit_price} > cap {cap} (net_ask {net_ask})",
+                reason_detail=f"BUY limit |{limit_price}| > cap {cap} (|exec_net|={abs_net})",
             )
     else:
-        floor = net_bid * Decimal("0.95")
-        if limit_price < floor:
+        # Combo SELL: user receiving the net. Limit is the min credit they accept.
+        # Reject if user's limit is > 5% below market (fat-finger down).
+        floor = abs_net - tolerance
+        if abs_limit < floor:
             return QuoteVerdict(
                 accept=False,
                 reason_code=ReasonCode.LIMIT_OUT_OF_BAND,
-                reason_detail=f"SELL limit {limit_price} < floor {floor} (net_bid {net_bid})",
+                reason_detail=f"SELL limit |{limit_price}| < floor {floor} (|exec_net|={abs_net})",
             )
 
     return QuoteVerdict(accept=True)
