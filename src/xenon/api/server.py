@@ -1562,50 +1562,9 @@ async def orders_place(request: Request):
                 )
     else:
         _override_detail = None
-        quote_tokens_map = body.get("quote_tokens")
-        legs_in = body.get("legs") or []
-        symbol = str(body.get("symbol", "")).upper()
-        envelope = str(body.get("action", "")).upper()
-        if quote_tokens_map:
-            try:
-                check_legs = [
-                    quote_guard.CheckComboLeg(
-                        token=quote_tokens_map[str(leg["con_id"])],
-                        con_id=int(leg["con_id"]),
-                        ticker=symbol,
-                        action=str(leg["action"]).upper(),
-                        right=str(leg.get("right") or "STK").upper(),
-                        ratio=int(leg.get("ratio", 1)),
-                    )
-                    for leg in legs_in
-                ]
-            except KeyError as exc:
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        "detail": f"quote_tokens missing entry for leg con_id={exc}",
-                        "reason_code": ReasonCode.STALE_QUOTE.value,
-                    },
-                )
-            qv = quote_guard.check_combo(
-                legs=check_legs,
-                envelope_action=envelope,  # type: ignore[arg-type]
-                limit_price=Decimal(str(body.get("limitPrice", "0"))),
-                token_secret=os.environ.get("XENON_QUOTE_TOKEN_SECRET", ""),
-                now=_now(),
-            )
-            if not qv.accept:
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        "detail": qv.reason_detail,
-                        "reason_code": qv.reason_code.value if qv.reason_code else None,
-                        "reason_detail": qv.reason_detail,
-                    },
-                )
-            _combo_leg_count = len(check_legs)
-        else:
-            _combo_leg_count = len(legs_in)
+        # Defer check_combo until after reserve_attempt so we have a
+        # submission_id to attach QUOTE_CHECK_FAIL telemetry to on failure.
+        _combo_leg_count = len(body.get("legs") or [])
 
     # F4: atomic reservation
     cid = body.get("client_attempt_id")
@@ -1650,7 +1609,80 @@ async def orders_place(request: Request):
     submission_id = outcome.submission_id
 
     if body.get("type") == "combo":
-        if body.get("quote_tokens"):
+        quote_tokens_map = body.get("quote_tokens")
+        if quote_tokens_map:
+            legs_in = body.get("legs") or []
+            symbol = str(body.get("symbol", "")).upper()
+            envelope = str(body.get("action", "")).upper()
+            try:
+                check_legs = [
+                    quote_guard.CheckComboLeg(
+                        token=quote_tokens_map[str(leg["con_id"])],
+                        con_id=int(leg["con_id"]),
+                        ticker=symbol,
+                        action=str(leg["action"]).upper(),
+                        right=str(leg.get("right") or "STK").upper(),
+                        ratio=int(leg.get("ratio", 1)),
+                    )
+                    for leg in legs_in
+                ]
+            except KeyError as exc:
+                orders_store.record_event(
+                    submission_id,
+                    "QUOTE_CHECK_FAIL",
+                    {
+                        "reason_code": ReasonCode.STALE_QUOTE.value,
+                        "reason_detail": f"quote_tokens missing entry for leg con_id={exc}",
+                        "leg_count": _combo_leg_count,
+                    },
+                )
+                orders_store.mark_terminal(
+                    submission_id=submission_id,
+                    state="FAILED",
+                    reason_code=ReasonCode.STALE_QUOTE.value,
+                    filled_qty=0,
+                    avg_fill_price=None,
+                )
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "detail": f"quote_tokens missing entry for leg con_id={exc}",
+                        "reason_code": ReasonCode.STALE_QUOTE.value,
+                    },
+                )
+            qv = quote_guard.check_combo(
+                legs=check_legs,
+                envelope_action=envelope,  # type: ignore[arg-type]
+                limit_price=Decimal(str(body.get("limitPrice", "0"))),
+                token_secret=os.environ.get("XENON_QUOTE_TOKEN_SECRET", ""),
+                now=_now(),
+            )
+            if not qv.accept:
+                rc = qv.reason_code.value if qv.reason_code else None
+                orders_store.record_event(
+                    submission_id,
+                    "QUOTE_CHECK_FAIL",
+                    {
+                        "reason_code": rc,
+                        "reason_detail": qv.reason_detail,
+                        "leg_count": _combo_leg_count,
+                    },
+                )
+                orders_store.mark_terminal(
+                    submission_id=submission_id,
+                    state="FAILED",
+                    reason_code=rc,
+                    filled_qty=0,
+                    avg_fill_price=None,
+                )
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "detail": qv.reason_detail,
+                        "reason_code": rc,
+                        "reason_detail": qv.reason_detail,
+                    },
+                )
             orders_store.record_event(
                 submission_id,
                 "QUOTE_CHECK_PASS",
