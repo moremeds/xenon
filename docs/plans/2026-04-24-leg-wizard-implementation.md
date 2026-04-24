@@ -441,6 +441,34 @@ git add src/xenon/execution/combo_wizard/protect.py src/xenon/execution/combo_wi
 git commit -m "feat: add combo wizard protection and restart safety"
 ```
 
+### Task 5.5: Concrete IB Adapter And Lifespan Wiring (pre-merge blocker)
+
+Task 5 shipped logic-only. `protect.py` and `rehydrate.py` take abstract
+handles; no concrete adapter wires to `ib_insync`. Before Task 6 verification
+can trust the protection / rehydrate paths in production:
+
+**Files:**
+
+- Create: `src/xenon/execution/combo_wizard/ib_adapter.py` — concrete
+  adapter exposing `place_combo_tp`, `register_risk_alert`,
+  `get_executions`, `get_open_orders`, `get_positions`. Every ib_insync
+  API call must be citation-backed (file:line under
+  `.venv/lib/python3.13/site-packages/ib_insync/` or IBKR docs URL) —
+  no guessing broker signatures.
+- Modify: `src/xenon/api/server.py` — invoke `rehydrate_combo_sessions`
+  in the FastAPI lifespan alongside `single_leg_rehydrate`.
+- Modify: `src/xenon/monitor_daemon/handlers/wizard_stop_monitor.py` —
+  wire `quote_fn` to `combo_quotes.compute_combo_quote` fed by fresh
+  IB leg ticks (respect spec §10 freshness gates).
+- Create: `scripts/tests/test_combo_wizard_ib_adapter.py` — contract
+  tests with stubbed ib_insync objects (no live broker).
+
+**Gate:** Paper-account dry-run per spec §13 must pass before landing:
+combo submit → reprice (modify live BAG) → abort → fresh submit →
+partial leg fill → restart/rehydrate. Record paper session id in PR.
+Follow the `feedback_broker_bugs_paper_first` rule — diagnose against
+paper, never real money.
+
 ### Task 6: Full Verification And Release Readiness
 
 **Files:**
