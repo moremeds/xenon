@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv python install 3.13
+      - run: uv sync --frozen --extra test
+      - run: uv run pytest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm install --no-audit --no-fund --legacy-peer-deps
+      - run: cd web && npm install --no-audit --no-fund --legacy-peer-deps
+      - run: cd web && npm run typecheck
+      - run: cd web && npm run lint
+      # Match ci.yml web-tests: exclude order-e2e.test.ts (pre-existing schema
+      # drift tracked in #41). Regenerate universe fixtures like CI does.
+      - name: Run vitest suite
+        run: |
+          cd web && npm run universe:gen
+          cd .. && NODE_ENV=test ASSISTANT_MOCK=1 npx vitest run --config vitest.config.ts web/tests \
+            --exclude 'web/tests/order-e2e.test.ts'
+      - run: python3.13 scripts/release/version_sync_check.py
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract CHANGELOG section
+        id: changelog
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          source scripts/release/_lib.sh
+          {
+            echo 'body<<EOF'
+            extract_changelog_section CHANGELOG.md "$VERSION"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body: ${{ steps.changelog.outputs.body }}
+          draft: false
+          prerelease: false
+          make_latest: true

@@ -5,6 +5,12 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.0.1] — 2026-04-24
+
+- Versioning reset. Begin semver from `0.0.1` as part of introducing the CI/release/deploy pipeline.
+
+## [Pre-0.0.1 history]
+
 ### Changed
 
 - **Futu ticker navigation (feat/futu-ticker-chain-fixes).** `TickerLink` no longer short-circuits to a non-interactive `<span>` in read-only contexts — Futu rows now route into the ticker workspace like IB rows. Execution surfaces (order modal, order API) stay guarded deeper in the flow; the label on Futu rows still signals read-only via `aria-label`.
@@ -43,13 +49,13 @@ All notable changes to Xenon are documented here. Format loosely based on
 - Update `docs/superpowers/specs/2026-04-16-apex-r2-etl-design.md` (on `trend-scan-cleanup` anchor) §6 to state the RSI threshold is `rsi > 40 / rsi < 60` (matching the implementation in `scripts/trend_scan_lib/stages/ta_prefilter.py:157,169`), not `rsi > 50` as originally written. This is amendment **A20**; documented here because the spec file itself is not on this branch.
 - Retire `trend-scan-cleanup` branch after one clean week of the new pipeline.
 
-## [0.1.1] - 2026-04-16
+### Previously [0.1.1] - 2026-04-16
 
-### Fixed — UW portfolio SSE cache preservation + daily stats reset at 8PM ET
+#### Fixed — UW portfolio SSE cache preservation + daily stats reset at 8PM ET
 
 Two coupled fixes to the Unusual Whales telemetry path.
 
-#### SSE streaming no longer wipes cached tiles
+##### SSE streaming no longer wipes cached tiles
 
 `useUwPortfolio` now uses a two-Map architecture during streaming: SSE rows
 accumulate independently, and the displayed state is a merge of cached tickers
@@ -61,7 +67,7 @@ visible ticker count never decreases during a stream. On a valid `done` event,
 the snapshot cache is finalized to the SSE-only set (authoritative); incomplete
 streams preserve the merged view so remounts don't drop tiles.
 
-#### Daily stats aligned to UW's 8PM ET quota boundary
+##### Daily stats aligned to UW's 8PM ET quota boundary
 
 New `get_stats_with_daily()` and `get_daily_stats()` on the process-wide
 `UWApiStats` singleton expose counters for the current UW daily quota window,
@@ -72,7 +78,7 @@ budget ceiling. Boundary computation uses `ZoneInfo("America/New_York")` for
 DST-correct wall-clock math. The `/uw-stats` endpoint returns session + daily
 under a single lock to prevent torn snapshots under concurrent writes.
 
-#### Tests
+##### Tests
 
 - `test_uw_api_stats_history.py`: 40 tests covering hour-boundary correctness,
   DST transitions in both directions, cache-hit exclusion from request count,
@@ -81,15 +87,15 @@ under a single lock to prevent torn snapshots under concurrent writes.
   streaming, SSE-wins-on-conflict merge, `done`-gated finalization, and
   incomplete-stream cache behavior.
 
-## [0.1.0] - 2026-04-15
+### Previously [0.1.0] - 2026-04-15
 
-### Added — Trend Scanner: bearish pipeline, catalyst stage, pre-market prep
+#### Added — Trend Scanner: bearish pipeline, catalyst stage, pre-market prep
 
 Fourteen-commit feature branch addressing all nine findings from the
 Codex+Gemini+Claude tribunal review of `feat/ta-integration`. Plan:
 `docs/superpowers/plans/2026-04-14-trend-scanner-tribunal-fixes.md`.
 
-#### Signal accuracy
+##### Signal accuracy
 
 - Breakout detection now requires `close >= high_20d` — consolidation
   narrowness alone no longer flags as breakout (Finding #3).
@@ -102,7 +108,7 @@ Codex+Gemini+Claude tribunal review of `feat/ta-integration`. Plan:
 - Snapshot exposes `high_20d`, `low_20d`, `low_52w`, `up_day_volume_ratio`
   — additive schema change, enables both breakout gate and bearish mirror.
 
-#### Scope expansion
+##### Scope expansion
 
 - **Bearish pipeline** runs alongside bullish (Finding #1). Stage A split
   into direction-neutral data fetch + direction-specific gate. Mirrored
@@ -121,7 +127,7 @@ catalyst: 0.10}`.
   schema + TypeScript types + web components kept in lockstep
   (Finding #2).
 
-#### Defensive hardening
+##### Defensive hardening
 
 - SPY pre-cache crash guard: scan no longer aborts when SPY is cold
   and IB is unavailable (Finding #7).
@@ -138,7 +144,7 @@ catalyst: 0.10}`.
 - UW client cleanup symmetric with IB disconnect; refresh phase wrapped
   in try/finally.
 
-### Fixed
+#### Fixed
 
 - `fetch_catalysts` tolerates `earnings_days=None` (UW may not resolve
   earnings date for every ticker) — was raising `TypeError` on the
@@ -147,7 +153,7 @@ catalyst: 0.10}`.
   future regressions surface at stderr instead of being silently
   flattened to a one-line message.
 
-### Known follow-ups (documented, not blocking)
+#### Known follow-ups (documented, not blocking)
 
 See `docs/superpowers/plans/2026-04-15-trend-scanner-post-verification-followups.md`:
 
@@ -158,11 +164,11 @@ See `docs/superpowers/plans/2026-04-15-trend-scanner-post-verification-followups
 - SPY/VIX should be prioritized first in refresh ordering so
   `market_context.regime` isn't `unknown` on partial refreshes.
 
-### Test coverage
+#### Test coverage
 
 2220 passed / 90 skipped / 0 failed across `scripts/tests/` at the tip
 of the branch.
 
-## [0.0.1] - Initial
+### Previously [0.0.1] - Initial
 
 Project scaffold prior to this changelog.
