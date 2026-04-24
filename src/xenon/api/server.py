@@ -41,6 +41,7 @@ from xenon.api.pool_order_manage import pool_cancel_order, pool_modify_order
 from xenon.api.routes.historical import router as historical_router
 from xenon.api.routes.uw_analyze import router as uw_analyze_router
 from xenon.api.routes.uw_stats import router as uw_stats_router
+from xenon.api.routes.wizard import router as wizard_router
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
@@ -440,6 +441,7 @@ app = FastAPI(title="Xenon API", version="1.0.0", lifespan=lifespan)
 app.include_router(historical_router)
 app.include_router(uw_analyze_router)
 app.include_router(uw_stats_router)
+app.include_router(wizard_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1516,7 +1518,10 @@ async def orders_quote(ticker: str, con_id: int):
 async def orders_place(request: Request):
     """Place an order via IB (on-demand connection, client_id=26)."""
     body = await request.json()
+    return await _orders_place_from_body(body)
 
+
+async def _orders_place_from_body(body: dict):
     # F2: server-side Gate 4. Run preflight before any subprocess invocation.
     verdict = _run_preflight(body)
     if not verdict.accept:
@@ -1866,6 +1871,10 @@ async def orders_modify(request: Request):
     Subprocess failures classified the same as cancel.
     """
     body = await request.json()
+    return await _orders_modify_from_body(body)
+
+
+async def _orders_modify_from_body(body: dict):
     if _is_test_mode():
         return {
             "status": "ok",
