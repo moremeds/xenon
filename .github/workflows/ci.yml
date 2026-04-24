@@ -12,9 +12,9 @@ concurrency:
 
 jobs:
   web-typecheck:
-    # Advisory until pre-existing tsc errors are fixed. Tracking issue: see PR description.
-    # Pre-existing failures include TS7053 on e2e specs and TS2307 for root-level deps.
-    continue-on-error: true
+    # Scope: app code only. `web/tests/**` and `web/e2e/**` have pre-existing
+    # TS errors (type drift in test fixtures, loose Playwright types) tracked
+    # in a follow-up PR. See web/tsconfig.json exclude list.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
