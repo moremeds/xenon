@@ -1,7 +1,11 @@
 import { Type, type Static } from "@sinclair/typebox";
 
 const PortfolioLegSchema = Type.Object({
-  conId: Type.Union([Type.Number(), Type.Null()]),
+  // Optional: legacy cached portfolio.json files written before
+  // `feat(sync): emit conId on portfolio legs` (commit fe8e3fcb) do not
+  // contain this key at all. Downstream consumers handle `undefined` as
+  // "conId unknown" the same way they handle explicit `null`.
+  conId: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
   direction: Type.Union([Type.Literal("LONG"), Type.Literal("SHORT")]),
   contracts: Type.Number(),
   type: Type.Union([

@@ -103,6 +103,7 @@ export default function PositionOrderModal({
     tokens: quoteTokens,
     error: quoteError,
     reload: reloadQuoteTokens,
+    mintNow: mintQuoteTokens,
   } = useQuoteTokens({
     legs: quoteLegs,
   });
@@ -150,12 +151,22 @@ export default function PositionOrderModal({
           ? Math.max(1, Math.min(fullQty, parsedQty))
           : Math.max(1, parsedQty);
       attemptId.markSubmitted();
+      // Re-mint tokens at submit time, not modal-open time. The server
+      // enforces a 500ms TTL; cached tokens from useEffect will reliably
+      // be STALE_QUOTE on any user-interaction latency.
+      let freshTokens: Record<string, string> | null = null;
+      try {
+        freshTokens = await mintQuoteTokens();
+      } catch {
+        freshTokens = null;
+      }
       const tokenBag =
         draft.payload.type === "combo"
-          ? { quote_tokens: quoteTokens ?? {} }
+          ? { quote_tokens: freshTokens ?? quoteTokens ?? {} }
           : (() => {
               const cid = String(draft.payload.conId ?? "");
-              const t = cid && quoteTokens ? quoteTokens[cid] : undefined;
+              const bag = freshTokens ?? quoteTokens;
+              const t = cid && bag ? bag[cid] : undefined;
               return t ? { quote_token: t } : {};
             })();
       const body = {

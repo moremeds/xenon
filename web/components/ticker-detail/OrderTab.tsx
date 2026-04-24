@@ -19,7 +19,7 @@ import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
 import { fmtSignedPrice, toneClass } from "@/lib/format";
 import { getReasonToast } from "@/lib/orderReasonCodes";
 import { useClientAttemptId } from "./useClientAttemptId";
-import { useQuoteToken } from "./useQuoteToken";
+import { useQuoteToken, useQuoteTokens } from "./useQuoteToken";
 
 /** Derive a user-facing error string from a /api/orders/* JSON body. */
 function errorFromResponseBody(
@@ -683,6 +683,19 @@ function ComboOrderForm({
     });
   }, [position]);
 
+  // Quote-token minting for combo legs (F3). Legs come from position.legs
+  // which already carry conId via the ib_sync pipeline.
+  const comboQuoteLegs = useMemo(
+    () =>
+      legsWithActions.map((l) => ({
+        ticker,
+        conId: l.conId ?? null,
+        expiry: l.expiry ?? null,
+      })),
+    [legsWithActions, ticker],
+  );
+  const { mintNow: mintComboTokens } = useQuoteTokens({ legs: comboQuoteLegs });
+
   // Compute net BID / ASK / MID for the combo using natural market prices.
   // IB reverses leg actions when Order.action = SELL, so the EFFECTIVE
   // execution direction depends on the combo action:
@@ -775,6 +788,7 @@ function ComboOrderForm({
 
     try {
       const legs = legsWithActions.map((leg) => ({
+        conId: leg.conId ?? undefined,
         expiry: leg.expiry,
         strike: leg.strike!,
         right: leg.right,
@@ -799,6 +813,13 @@ function ComboOrderForm({
         return;
       }
 
+      // Mint fresh quote tokens at submit time (500ms server TTL).
+      let quoteTokens: Record<string, string> | null = null;
+      try {
+        quoteTokens = await mintComboTokens();
+      } catch {
+        quoteTokens = null;
+      }
       const res = await fetch("/api/orders/place", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -810,6 +831,7 @@ function ComboOrderForm({
           limitPrice: parsedPrice,
           tif,
           legs,
+          ...(quoteTokens ? { quote_tokens: quoteTokens } : {}),
         }),
       });
       const json = await res.json();
@@ -835,6 +857,7 @@ function ComboOrderForm({
     parsedPrice,
     tif,
     legsWithActions,
+    mintComboTokens,
     position.structure,
     portfolio,
     onOrderPlaced,

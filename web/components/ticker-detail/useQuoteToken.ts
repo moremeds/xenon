@@ -33,13 +33,40 @@ export function useQuoteToken({ ticker, conId, expiry }: Options) {
 type Leg = { ticker: string; conId: number | null; expiry: string | null };
 
 type TokensResult = {
+  /** Cached tokens from modal open; used to gate the UI submit button.
+   *  DO NOT submit these — the server enforces a 500ms TTL, so tokens
+   *  older than half a second will be rejected as STALE_QUOTE. Call
+   *  mintNow() at submit time for a fresh bag instead. */
   tokens: Record<string, string> | null;
   error: string | null;
   /** Force a re-mint of all tokens; use when a transient fetch failure
    *  disables submit and the user wants to retry without reopening the
    *  modal. Resets tokens/error state before retrying. */
   reload: () => void;
+  /** Fetch a fresh token bag synchronously right before POST. Bypasses
+   *  the state cache — returns the freshly-minted tokens. The server's
+   *  500ms token TTL means cached tokens from modal open will reliably
+   *  reject on any user interaction latency; always submit with
+   *  mintNow() rather than `tokens`. Returns null on leg/error
+   *  preconditions. */
+  mintNow: () => Promise<Record<string, string> | null>;
 };
+
+async function mintLegs(legs: Leg[]): Promise<Record<string, string> | null> {
+  if (legs.length === 0) return null;
+  if (legs.some((l) => l.conId == null)) return null;
+  const results = await Promise.all(
+    legs.map(async (l) => {
+      const res = await fetch(
+        `/api/orders/quote?ticker=${encodeURIComponent(l.ticker)}&con_id=${l.conId}`,
+      );
+      if (!res.ok) throw new Error(`quote ${res.status} for ${l.conId}`);
+      const j = await res.json();
+      return [String(l.conId), j.token as string] as const;
+    }),
+  );
+  return Object.fromEntries(results);
+}
 
 export function useQuoteTokens({ legs }: { legs: Leg[] }): TokensResult {
   const [tokens, setTokens] = useState<Record<string, string> | null>(null);
@@ -60,19 +87,8 @@ export function useQuoteTokens({ legs }: { legs: Leg[] }): TokensResult {
         return;
       }
       try {
-        const results = await Promise.all(
-          legs.map(async (l) => {
-            const res = await fetch(
-              `/api/orders/quote?ticker=${encodeURIComponent(l.ticker)}&con_id=${l.conId}`,
-            );
-            if (!res.ok) throw new Error(`quote ${res.status} for ${l.conId}`);
-            const j = await res.json();
-            return [String(l.conId), j.token as string] as const;
-          }),
-        );
-        if (!cancelled) {
-          setTokens(Object.fromEntries(results));
-        }
+        const bag = await mintLegs(legs);
+        if (!cancelled && bag) setTokens(bag);
       } catch (e) {
         if (!cancelled) setError(String(e));
       }
@@ -84,6 +100,7 @@ export function useQuoteTokens({ legs }: { legs: Leg[] }): TokensResult {
   }, [legsKey, reloadNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const reload = useCallback(() => setReloadNonce((n) => n + 1), []);
+  const mintNow = useCallback(() => mintLegs(legs), [legsKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { tokens, error, reload };
+  return { tokens, error, reload, mintNow };
 }
