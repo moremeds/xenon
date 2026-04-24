@@ -61,12 +61,13 @@ def test_lifespan_preloads_uw_analyze_cache(tmp_path, monkeypatch):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    from xenon.api import server as server_mod
     from fastapi import FastAPI
+
+    from xenon.api import server as server_mod
 
     # Force non-test-mode so the lifespan preload branch runs. Stub out
     # the heavy IB/UW steps so we don't need a real gateway.
-    monkeypatch.setattr(server_mod, "test_mode", False)
+    monkeypatch.setenv("XENON_API_TEST_MODE", "0")
 
     async def _fake_ensure_gw():
         return {"ok": True}

@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # Boot the server in test mode so lifespan skips IB pool startup.
-os.environ["XENON_TEST_MODE"] = "1"
+os.environ["XENON_API_TEST_MODE"] = "1"
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -40,6 +40,7 @@ def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 @pytest.fixture()
 def client(isolated_data_dir: Path) -> TestClient:
     from xenon.api import server  # type: ignore
+
     return TestClient(server.app)
 
 
@@ -48,9 +49,7 @@ def client(isolated_data_dir: Path) -> TestClient:
 # ──────────────────────────────────────────────────────────────────────
 
 
-def test_get_futu_portfolio_returns_200_never_synced_when_no_cache(
-    client: TestClient, isolated_data_dir: Path
-) -> None:
+def test_get_futu_portfolio_returns_200_never_synced_when_no_cache(client: TestClient, isolated_data_dir: Path) -> None:
     # No cache file exists in tmp_path
     resp = client.get("/futu/portfolio")
     assert resp.status_code == 200
@@ -64,9 +63,7 @@ def test_get_futu_portfolio_returns_200_never_synced_when_no_cache(
     assert body["data_as_of"] is None
 
 
-def test_get_futu_portfolio_returns_cached_with_ok_true(
-    client: TestClient, isolated_data_dir: Path
-) -> None:
+def test_get_futu_portfolio_returns_cached_with_ok_true(client: TestClient, isolated_data_dir: Path) -> None:
     cache = {
         "fetched_at": "2026-04-07T12:00:00.000Z",
         "data_as_of": "2026-04-07T12:00:00.000Z",
@@ -94,9 +91,7 @@ def test_get_futu_portfolio_returns_cached_with_ok_true(
 # ──────────────────────────────────────────────────────────────────────
 
 
-def test_health_includes_futu_block_with_never_synced(
-    client: TestClient, isolated_data_dir: Path
-) -> None:
+def test_health_includes_futu_block_with_never_synced(client: TestClient, isolated_data_dir: Path) -> None:
     resp = client.get("/health")
     assert resp.status_code == 200
     body = resp.json()
@@ -108,9 +103,7 @@ def test_health_includes_futu_block_with_never_synced(
     assert futu["last_sync_age_s"] is None
 
 
-def test_health_futu_block_surfaces_last_sync_when_cache_exists(
-    client: TestClient, isolated_data_dir: Path
-) -> None:
+def test_health_futu_block_surfaces_last_sync_when_cache_exists(client: TestClient, isolated_data_dir: Path) -> None:
     cache = {
         "fetched_at": "2026-04-07T12:00:00.000Z",
         "positions": [],

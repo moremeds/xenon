@@ -19,13 +19,6 @@ def _test_mode(monkeypatch, tmp_path):
     pf_file = tmp_path / "portfolio.json"
     pf_file.write_text(json.dumps(portfolio))
     monkeypatch.setenv("XENON_DATA_DIR", str(tmp_path))
-    # server.test_mode is captured at module import — force it on in case the
-    # server module was imported before this test (e.g. by another test file
-    # earlier in the session) without the env var set. Prevents CI flakiness
-    # from test-ordering changes.
-    import xenon.api.server as server_module
-
-    monkeypatch.setattr(server_module, "test_mode", True, raising=False)
     yield
 
 

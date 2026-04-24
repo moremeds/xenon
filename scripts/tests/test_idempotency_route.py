@@ -14,9 +14,6 @@ def _env(monkeypatch, tmp_path):
     monkeypatch.setenv("XENON_QUOTE_TOKEN_SECRET", SECRET)
     monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
     monkeypatch.setenv("XENON_DATA_DIR", str(tmp_path))
-    import xenon.api.server as server_module
-
-    monkeypatch.setattr(server_module, "test_mode", True, raising=False)
     yield
 
 

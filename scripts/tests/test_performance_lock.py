@@ -47,12 +47,20 @@ async def client():
         # Must import after patching
         from xenon.api.server import app
 
+        # app.router.lifespan_context is a module-singleton mutation — save and
+        # restore it so downstream tests still see the real lifespan. Without
+        # this, any test that runs AFTER this fixture sees a no-op lifespan
+        # and skips real startup (IB pool init, rehydrate hook, etc.).
+        prior_lifespan = app.router.lifespan_context
         app.router.lifespan_context = mock_lifespan
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://test",
-        ) as c:
-            yield c
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://test",
+            ) as c:
+                yield c
+        finally:
+            app.router.lifespan_context = prior_lifespan
 
 
 FAKE_PERF_DATA = {

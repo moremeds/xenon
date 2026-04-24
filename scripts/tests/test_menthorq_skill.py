@@ -20,6 +20,15 @@ SKILL_MD = SKILL_DIR / "SKILL.md"
 COMMANDS_JSON = PROJECT_ROOT / ".pi" / "commands.json"
 PROMPTS_MD = PROJECT_ROOT / "docs" / "reference" / "menthorq-prompts.md"
 
+# The .pi/skills/menthorq/ directory is user-local (PI framework state, not
+# checked into the repo). Skip the whole module when it's absent — this keeps
+# the file useful for developers who have the PI skill installed locally
+# without breaking CI, where no such directory exists.
+pytestmark = pytest.mark.skipif(
+    not SKILL_DIR.is_dir(),
+    reason="PI skill dir not present (.pi/skills/menthorq/); runs only on dev machines with local PI setup",
+)
+
 
 # ── SKILL.md existence & frontmatter ────────────────────────────────
 
