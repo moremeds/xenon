@@ -110,13 +110,81 @@ The closed-market gate lives inside `UwAnalyzeCache.get_or_run()` and also cover
 - [ ] X scan if >12h stale
 - [ ] Check market hours
 
+## Serena (symbol-aware code tools)
+
+Serena MCP is configured and onboarded (5 project memories indexed; python + typescript LSPs). **Use it — don't default to Read/Grep for symbol work.**
+
+Per-session bootstrap (cheap, idempotent):
+
+1. `mcp__plugin_serena_serena__activate_project` → `/Users/chenxi/projects/xenon`
+2. `mcp__plugin_serena_serena__check_onboarding_performed` (should already be true)
+
+**Use Serena when:**
+
+- Renaming a symbol used in >1 file → `rename_symbol` (LSP-accurate, beats `grep`/`sed` on false positives in strings/comments)
+- Finding all callers before a refactor → `find_referencing_symbols`
+- Replacing a whole function/class body → `replace_symbol_body`
+- Exploring an unfamiliar module → `get_symbols_overview` + `find_symbol` (depth=1) before reading bodies
+- Safe deletion of dead symbols → `safe_delete_symbol` (checks references first)
+- Cross-session notes about architecture decisions → `write_memory` / `read_memory`
+
+**Skip Serena (use Read/Edit/Grep) when:**
+
+- Editing a known file at a known location
+- Markdown, JSON, YAML, config, or non-code edits
+- Single-file scope with no cross-references
+- Anything where `grep` is faster than indexing
+
+**Gotchas:**
+
+- Serena line numbers are **0-based** (Read is 1-based — don't mix).
+- Symbol edits are trusted (don't re-read to verify — the LSP confirms).
+- After any Serena refactor that crosses type boundaries, still run `uv run pytest` + `cd web && npm test` per the usual gates.
+
+## Python: `uv` for everything
+
+**All Python invocations go through `uv`.** Never call bare `python3.13`, `python`, `pip`, or activate `.venv` manually. `uv` resolves the interpreter from `.python-version` + `pyproject.toml` and keeps the lockfile authoritative.
+
+| Action                | Command                                               |
+| --------------------- | ----------------------------------------------------- |
+| Install / sync deps   | `uv sync --extra test`                                |
+| Run a CLI entry point | `uv run xenon-trend-scan ...`                         |
+| Run a one-off script  | `uv run python scripts/foo.py`                        |
+| Run pytest            | `uv run pytest ...`                                   |
+| Add a dep             | `uv add <pkg>` (updates `pyproject.toml` + `uv.lock`) |
+
+CI is consistent: `uv sync --frozen --extra test` → `uv run pytest`. `release.yml` uses the same. If you see `python3.13 ...` anywhere in docs or scripts, treat it as stale — rewrite to `uv run`.
+
 ## Tests
 
+Locally:
+
 ```bash
-python3.13 scripts/infra/dev/run_pytest_affected.py                 # scoped Python tests (preferred)
+uv sync --extra test                                                # one-time / after dep changes
+uv run python scripts/infra/dev/run_pytest_affected.py              # scoped Python tests (preferred)
+uv run pytest scripts/tests/test_foo.py::test_name -xvs             # single test
+uv run pytest                                                       # full suite
 cd web && npm test                                                  # Vitest
 cd web && npx playwright test                                       # E2E
-python3.13 -m pytest scripts/tests/test_foo.py::test_name -xvs      # single test
 ```
 
 Order-route integration tests use `web/tests/fastapiHarness.ts` with `XENON_API_TEST_MODE` to stub broker calls — no live IB required.
+
+## CI / Release
+
+`.github/workflows/`:
+
+- `ci.yml` — PR + master push. Runs `web-typecheck`, `web-lint`, `web-tests` (full Vitest against real `.venv` CLIs), `python-tests` (affected on PR, full on master), `version-sync` (VERSION ↔ `package.json`).
+- `release.yml` — triggered on tag `v*`. Full verify (pytest + vitest + typecheck + lint) → publish GitHub Release from `CHANGELOG.md`.
+- `nightly.yml` — 9 AM UTC Playwright E2E, auto-comments failures on a tracking issue.
+- `apex-data-refresh.yml` — nightly R2 OHLCV/TA refresh.
+
+**Release cut** (operator-run, does NOT push):
+
+```bash
+./scripts/release/cut.sh            # interactive: patch/minor/major/custom
+                                    # rewrites VERSION + package.json + CHANGELOG, commits, tags
+git push origin master --follow-tags   # operator pushes manually → release.yml fires
+```
+
+`VERSION` (root) is the source of truth; `scripts/release/version_sync_check.py` enforces parity with `package.json` in CI.
