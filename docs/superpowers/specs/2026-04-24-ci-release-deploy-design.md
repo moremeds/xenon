@@ -148,7 +148,7 @@ Then re-run `cut.sh`. Documented in `docs/runbooks/release.md`.
   .git-cache/                # bare bookkeeping repo for fast fetches
 ```
 
-Releases are full checkouts. `current` is a symlink, swapped atomically with `mv -Tf`. `shared/` persists across releases — secrets and data are never clobbered. `venv/` and `web-node_modules/` are shared because lockfile-unchanged reinstalls are wasteful.
+Releases are full extractions (`git archive` — no `.git`). `current` is a symlink, swapped atomically with `ln -sfn <target> current` (macOS-safe: `ln -sfn` replaces an existing symlink via `rename(2)`; the GNU-only `mv -Tf` is not available on BSD). `shared/` persists across releases — secrets and data are never clobbered. `venv/` and `web-node_modules/` are shared because lockfile-unchanged reinstalls are wasteful. Each release directory carries a `REVISION` file (the tag's SHA) and `DEPLOYED_AT` file (ISO8601 UTC) written at extraction time — `GET /version` reads these, since the archive has no `.git` metadata.
 
 ### Deploy script
 
@@ -163,9 +163,9 @@ Sequence:
    - `cd web && npm ci && npm run build` (npm ci no-ops when lockfile matches).
    - `source /opt/xenon/shared/venv/bin/activate && pip install -r requirements.txt`.
 5. **Pre-swap health check on alternate ports.** Launch the stack with `XENON_API_PORT=8322`, `PORT=3001`. Poll `/health` on the API and `/` on Next.js for up to 60s. On failure → abort, leave `current` untouched.
-6. **Atomic swap:** `ln -sfn releases/vX.Y.Z current.new && mv -Tf current.new current`.
+6. **Atomic swap:** `ln -sfn releases/vX.Y.Z current`. (Before swap, capture `readlink current` so rollback targets the exact previous release, not an mtime-sorted guess.)
 7. **Restart app services via launchd:** `launchctl kickstart -k gui/$UID/xenon.web`, `xenon.api`, `xenon.ib-realtime`. **Do not touch `xenon.ib-gateway`** — decoupled lifecycle.
-8. **Post-swap verification:** poll real ports (`:8321/health`), assert `ib_gateway.port_listening: true`, assert `GET /version` returns the new tag. (A new endpoint on FastAPI — see "New code required" below.)
+8. **Post-swap verification:** poll `:8321/version` and assert it returns the new tag; curl the web root on `:3000/` for a 200. Gateway state (`ib_gateway.port_listening` from `/health`) is recorded as telemetry only — **not** a rollback trigger. Coupling deploy success to gateway health would undo the decoupling design goal (a temporarily-down gateway would auto-rollback every otherwise-clean app deploy).
 9. **On success:** prune to last 3 releases. Append a record to `shared/logs/deploys.jsonl`: `{ts, version, previous, actor, outcome}`.
 10. **On failure after swap:** auto-rollback — re-point `current` at previous release, kickstart services, exit non-zero with the failure reason.
 
@@ -178,20 +178,30 @@ Sequence:
 Plists checked into `deploy/launchd/`, installed once via the bootstrap script.
 
 - `xenon.web.plist` — `WorkingDirectory: /opt/xenon/current/web`, `ProgramArguments: [npm, run, start]`, `KeepAlive: true`, stdout/stderr to `shared/logs/web.log`.
-- `xenon.api.plist` — `/opt/xenon/shared/venv/bin/python3.13 -m uvicorn xenon.api.server:app --host 127.0.0.1 --port 8321 --app-dir /opt/xenon/current/src`.
+- `xenon.api.plist` — `WorkingDirectory: /opt/xenon/current/src`, runs `/opt/xenon/shared/venv/bin/python3.13 -m uvicorn xenon.api.server:app --host 127.0.0.1 --port 8321`.
 - `xenon.ib-realtime.plist` — `node /opt/xenon/current/scripts/infra/ib_realtime/ib_realtime_server.js`.
-- `xenon.ib-gateway.plist` — `docker compose -f /opt/xenon/ib-gateway/docker-compose.yml up`. Independent of app deploys.
+- `xenon.ib-gateway.plist` — `/opt/homebrew/bin/docker compose -f /opt/xenon/ib-gateway/docker-compose.yml -f /opt/xenon/ib-gateway/docker-compose.prod.yml up`. Independent of app deploys.
 
 `EnvironmentVariables` loaded via a small shim that sources `/opt/xenon/shared/.env` (launchd doesn't parse `.env` natively).
 
 ### IB Gateway on LAN
 
-`ib-gateway/docker-compose.override.yml` binds `4002:4002` to `0.0.0.0` (default was `127.0.0.1`). Dev laptop reaches IB Gateway at `xenon-mini.local:4002` or its Tailscale IP. `scripts/cloud.sh` on the laptop is updated to point at the new host.
+The actual compose file at `docker/ib-gateway/docker-compose.yml` already publishes host `4002:4004` (paper) and `4001:4003` (live) — the container ports are 4004/4003, not 4002/4001. A naïve `4002:4002` override would expose an unused container port. The prod override at `docker/ib-gateway/docker-compose.prod.yml` preserves the real container-port mapping and just rebinds the interface to `0.0.0.0`:
+
+```yaml
+services:
+  ib-gateway:
+    ports:
+      - "0.0.0.0:${IB_PAPER_PORT:-4002}:4004"
+      - "0.0.0.0:${IB_LIVE_PORT:-4001}:4003"
+```
+
+Dev laptop reaches IB Gateway at `xenon-mini.local:4002` (paper) or its Tailscale IP. `scripts/infra/cloud.sh` on the laptop is updated to point at the new host.
 
 ### New code required
 
-- **`GET /version`** on FastAPI — reads `/opt/xenon/current/VERSION`, returns `{version, commit, deployed_at}`. Load-bearing: without it, post-swap verification cannot distinguish "new release live" from "old release happens to be healthy."
-- **`web/package.json` must have `"start": "next start"`** — confirm in Phase 3 prerequisites; add if absent.
+- **`GET /version`** on FastAPI — reads `VERSION`, `REVISION`, and `DEPLOYED_AT` files at the repo root, returns `{version, commit, deployed_at}`. Must be added to `AUTH_EXEMPT_PATHS` in `server.py` alongside `/health` so deploy verification can reach it without a Clerk JWT. Load-bearing: without it, post-swap verification cannot distinguish "new release live" from "old release happens to be healthy."
+- **`web/package.json`** — already has `"start": "next start"` in the current tree; verify, don't override (a hardcoded `-p 3000` collides with the `PORT=3001` preview helper).
 - **`xenon.version` helper** in Python and a matching Node read — both resolve `VERSION` at the repo root.
 
 ### Bootstrap (one-time, per Mac mini)

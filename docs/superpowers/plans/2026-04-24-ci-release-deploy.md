@@ -40,27 +40,27 @@
 
 ### Phase 3 — Deploy to Mac mini (PR 3)
 
-| Path                                     | Purpose                                                                  | Status |
-| ---------------------------------------- | ------------------------------------------------------------------------ | ------ |
-| `src/xenon/api/routes/version.py`        | `GET /version` → `{version, commit, deployed_at}`                        | Create |
-| `src/xenon/api/server.py`                | Register version route                                                   | Modify |
-| `src/xenon/version.py`                   | Python helper: read repo-root `VERSION`                                  | Create |
-| `scripts/tests/test_version_route.py`    | Test for `/version`                                                      | Create |
-| `web/package.json`                       | Add `"start": "next start"` if missing                                   | Modify |
-| `deploy/launchd/xenon.web.plist`         | launchd for Next.js                                                      | Create |
-| `deploy/launchd/xenon.api.plist`         | launchd for FastAPI (uvicorn)                                            | Create |
-| `deploy/launchd/xenon.ib-realtime.plist` | launchd for `ib_realtime_server.js`                                      | Create |
-| `deploy/launchd/xenon.ib-gateway.plist`  | launchd for IB Gateway docker-compose (decoupled)                        | Create |
-| `deploy/launchd/load-env.sh`             | Sources `shared/.env` for launchd (launchd can't parse `.env` natively)  | Create |
-| `scripts/deploy/mac-mini.sh`             | Push-based deploy orchestrator (laptop → Mac mini via Tailscale)         | Create |
-| `scripts/deploy/mac-mini-bootstrap.sh`   | One-time bootstrap: brew deps, `/opt/xenon/` layout, install plists      | Create |
-| `scripts/deploy/_remote.sh`              | The script that runs ON the Mac mini (invoked over SSH by `mac-mini.sh`) | Create |
-| `scripts/deploy/_preflight.sh`           | Laptop-side preflight (clean tree, tag exists, release published)        | Create |
-| `ib-gateway/docker-compose.override.yml` | Bind `4002:4002` to `0.0.0.0` for LAN exposure                           | Modify |
-| `scripts/cloud.sh`                       | Repoint Tailscale target from VPS to `xenon-mini.local`                  | Modify |
-| `docs/runbooks/mac-mini-provision.md`    | One-time provisioning runbook                                            | Create |
-| `docs/runbooks/deploy.md`                | Deploy + rollback runbook                                                | Create |
-| `scripts/tests/test_deploy_preflight.py` | Test preflight abort conditions (mocked git/gh)                          | Create |
+| Path                                        | Purpose                                                                                     | Status |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------- | ------ |
+| `src/xenon/api/routes/version.py`           | `GET /version` → `{version, commit, deployed_at}`                                           | Create |
+| `src/xenon/api/server.py`                   | Register version route                                                                      | Modify |
+| `src/xenon/version.py`                      | Python helper: read repo-root `VERSION`                                                     | Create |
+| `scripts/tests/test_version_route.py`       | Test for `/version`                                                                         | Create |
+| `web/package.json`                          | Add `"start": "next start"` if missing                                                      | Modify |
+| `deploy/launchd/xenon.web.plist`            | launchd for Next.js                                                                         | Create |
+| `deploy/launchd/xenon.api.plist`            | launchd for FastAPI (uvicorn)                                                               | Create |
+| `deploy/launchd/xenon.ib-realtime.plist`    | launchd for `ib_realtime_server.js`                                                         | Create |
+| `deploy/launchd/xenon.ib-gateway.plist`     | launchd for IB Gateway docker-compose (decoupled)                                           | Create |
+| `deploy/launchd/load-env.sh`                | Sources `shared/.env` for launchd (launchd can't parse `.env` natively)                     | Create |
+| `scripts/deploy/mac-mini.sh`                | Push-based deploy orchestrator (laptop → Mac mini via Tailscale)                            | Create |
+| `scripts/deploy/mac-mini-bootstrap.sh`      | One-time bootstrap: brew deps, `/opt/xenon/` layout, install plists                         | Create |
+| `scripts/deploy/_remote.sh`                 | The script that runs ON the Mac mini (invoked over SSH by `mac-mini.sh`)                    | Create |
+| `scripts/deploy/_preflight.sh`              | Laptop-side preflight (clean tree, tag exists, release published)                           | Create |
+| `docker/ib-gateway/docker-compose.prod.yml` | Prod override: publish paper `4002:4004` and live `4001:4003` to `0.0.0.0` for LAN exposure | Create |
+| `scripts/infra/cloud.sh`                    | Repoint Tailscale target from VPS to `xenon-mini.local`                                     | Modify |
+| `docs/runbooks/mac-mini-provision.md`       | One-time provisioning runbook                                                               | Create |
+| `docs/runbooks/deploy.md`                   | Deploy + rollback runbook                                                                   | Create |
+| `scripts/tests/test_deploy_preflight.py`    | Test preflight abort conditions (mocked git/gh)                                             | Create |
 
 ---
 
@@ -211,17 +211,19 @@ git push
 
 If it fails because tests silently require secrets, fix the tests (skip when env absent) in follow-up commits on the same PR — do not add secrets to CI.
 
-### Task 1.4: Add dead-code advisory job
+### Task 1.4: Add dead-code advisory job — CONDITIONAL
 
-**Files:**
+The repo does not currently have `scripts/infra/dev/dead_code_scan.py` (the UserPromptSubmit hook runs dead-code findings through a different path that isn't an invokable CLI command). Do NOT wire this job into CI if the script doesn't exist — a permanently red advisory job is noise.
 
-- Modify: `.github/workflows/ci.yml`
+- [ ] **Step 1: Check for the script**
 
-- [ ] **Step 1: Identify the dead-code command**
+```bash
+ls scripts/infra/dev/dead_code_scan.py scripts/infra/dead_code*.py 2>&1 | head
+```
 
-The UserPromptSubmit hook surfaces dead-code findings. Locate the script (likely under `scripts/infra/dev/` — inspect files matching `dead*` or `deadcode*`). If the script doesn't exist as an invokable command yet, this job stays out of CI and we track adding it as a follow-up issue.
+- [ ] **Step 2: If a CLI exists, add advisory job; otherwise SKIP this task entirely**
 
-- [ ] **Step 2: Add advisory job (fails-soft for 2 weeks)**
+If found, add:
 
 ```yaml
 dead-code:
@@ -230,18 +232,11 @@ dead-code:
   steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
-      with:
-        python-version: "3.13"
-    - run: python3.13 scripts/infra/dev/dead_code_scan.py # adjust to actual path
+      with: { python-version: "3.13" }
+    - run: python3.13 <actual-path-from-step-1>
 ```
 
-- [ ] **Step 3: Commit**
-
-```bash
-git add .github/workflows/ci.yml
-git commit -m "ci: add dead-code job (advisory until backlog drained)"
-git push
-```
+If no CLI exists, open a follow-up issue: "Extract dead-code hook into a standalone CLI for CI." Do not commit a broken job.
 
 ### Task 1.5: Add nightly Playwright workflow
 
@@ -280,22 +275,24 @@ jobs:
         with:
           name: playwright-report
           path: web/playwright-report/
-      - name: Open issue on failure
+      - name: Comment on (or open) the canonical tracking issue
         if: failure()
         uses: actions/github-script@v7
         with:
           script: |
-            const title = `Nightly Playwright failed: ${context.runId}`;
-            const body = `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const existing = await github.rest.issues.listForRepo({
-              owner: context.repo.owner, repo: context.repo.repo,
-              labels: 'nightly-playwright', state: 'open'
+            const { owner, repo } = context.repo;
+            const title = 'Nightly Playwright failures';
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const body = `Run failed: ${runUrl}`;
+            // Paginate fully — listForRepo defaults to 30 per page, so quick-succession
+            // failures before we comment would otherwise create duplicate issues.
+            const existing = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, labels: 'nightly-playwright', state: 'open', per_page: 100,
             });
-            if (existing.data.length === 0) {
-              await github.rest.issues.create({
-                owner: context.repo.owner, repo: context.repo.repo,
-                title, body, labels: ['nightly-playwright']
-              });
+            if (existing.length === 0) {
+              await github.rest.issues.create({ owner, repo, title, body, labels: ['nightly-playwright'] });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: existing[0].number, body });
             }
 ```
 
@@ -328,7 +325,7 @@ gh api -X PUT repos/moremeds/xenon/branches/master/protection \
 JSON
 ```
 
-Expected: `gh api ... /protection | jq .required_status_checks.contexts` lists the four jobs. `dead-code` is intentionally absent (advisory).
+Expected: `gh api ... /protection | jq .required_status_checks.contexts` lists the four jobs. `dead-code` is intentionally absent (advisory). `version-sync` will be added in Task 2.2 — it doesn't exist yet in this PR, so adding it here would block merge.
 
 - [ ] **Step 2: Mark the PR ready for review, merge when green**
 
@@ -386,6 +383,25 @@ Replace `## [Unreleased]` and all prior entries with:
 ```bash
 git add VERSION package.json CHANGELOG.md
 git commit -m "release: reset versioning to 0.0.1"
+```
+
+- [ ] **Step 6: Tag `v0.0.1` after PR-2 merges to master**
+
+This is done AFTER all Phase-2 PR tasks are merged (Tasks 2.1–2.7). Without this tag, Phase 3's dry-run rollback (`scripts/deploy/mac-mini.sh v0.0.1`) has no target. The tag points at the release-reset commit on master.
+
+```bash
+git checkout master && git pull
+# Confirm HEAD matches the release-reset commit:
+git log --oneline -1 | grep "release: reset versioning to 0.0.1" || {
+  echo "Expected HEAD to be the reset commit — abort tagging" >&2; exit 1; }
+git tag -a v0.0.1 -m "v0.0.1 — versioning reset (baseline for CI/release/deploy pipeline)"
+git push origin v0.0.1
+```
+
+Then create a GitHub Release (the release workflow doesn't auto-fire because this tag was created manually against an older commit pattern):
+
+```bash
+gh release create v0.0.1 --title "v0.0.1" --notes "Baseline — versioning reset to 0.0.1."
 ```
 
 ### Task 2.2: Write version_sync_check.py and add CI lint
@@ -493,6 +509,27 @@ git add scripts/release/version_sync_check.py \
 git commit -m "release: add VERSION↔package.json sync check"
 ```
 
+- [ ] **Step 7: Update branch protection to require `version-sync` (run AFTER this PR merges)**
+
+Branch protection was set up in Task 1.6 without `version-sync` because the job didn't exist yet. After this PR merges and the job is confirmed green on master, add it to required checks:
+
+```bash
+gh api -X PUT repos/moremeds/xenon/branches/master/protection \
+  --input - <<'JSON'
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": ["web-typecheck", "web-lint", "web-tests", "python-tests", "version-sync"]
+  },
+  "enforce_admins": false,
+  "required_pull_request_reviews": null,
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+JSON
+```
+
 ### Task 2.3: Write shared shell helpers (`_lib.sh`)
 
 **Files:**
@@ -565,13 +602,15 @@ bump_semver() {
 
 # extract_changelog_section <file> <version>
 # Prints the body of `## [<version>] — …` up to (but not including) the next `## [` heading.
+# Patterns anchored at line start (^## \[) so in-body text that happens to contain
+# "## [" (e.g. inside a fenced code block) cannot terminate the section early.
 extract_changelog_section() {
   local file="$1" version="$2"
   awk -v v="$version" '
     BEGIN { in_section = 0 }
     /^## \[/ {
       if (in_section) { exit }
-      if ($0 ~ "\\[" v "\\]") { in_section = 1; next }
+      if ($0 ~ "^## \\[" v "\\]") { in_section = 1; next }
     }
     in_section { print }
   ' "$file" | sed -e '/./,$!d' | sed -e ':a' -e '/^$/{$d;N;ba' -e '}'
@@ -625,9 +664,12 @@ git diff --quiet && git diff --cached --quiet || die "working tree dirty"
 git fetch origin master >/dev/null
 [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/master)" ]] || die "local master not synced with origin"
 
-say "Checking CI status on origin/master"
-conclusion="$(gh run list --branch master --limit 1 --json conclusion --jq '.[0].conclusion')"
-[[ "$conclusion" == "success" ]] || die "latest CI run on master is '$conclusion', not 'success'"
+say "Checking CI status for origin/master HEAD"
+head_sha="$(git rev-parse origin/master)"
+# Target the CI workflow specifically on the exact SHA we're about to release.
+# Plain `--branch master --limit 1` can return unrelated workflow runs or stale results.
+conclusion="$(gh run list --workflow CI --commit "$head_sha" --limit 1 --json conclusion --jq '.[0].conclusion // "missing"')"
+[[ "$conclusion" == "success" ]] || die "CI run for $head_sha is '$conclusion' (need 'success')"
 
 grep -q '^## \[Unreleased\]' CHANGELOG.md || die "CHANGELOG missing [Unreleased] section"
 unreleased_body="$(awk '/^## \[Unreleased\]/{flag=1; next} /^## \[/{flag=0} flag' CHANGELOG.md | sed '/^$/d')"
@@ -682,46 +724,30 @@ print(json.dumps(data, indent=2))
 PY
 mv "$tmp" package.json
 
-# CHANGELOG rewrite: insert new section heading after Unreleased
+# CHANGELOG rewrite — single deterministic pass.
+# Move the body currently under ## [Unreleased] to a new ## [X.Y.Z] — DATE heading,
+# leave [Unreleased] empty. Preserves the rest of the file verbatim.
 python3.13 - "$next" "$today" <<'PY'
 import re, sys
 nxt, today = sys.argv[1], sys.argv[2]
-with open("CHANGELOG.md") as f:
+path = "CHANGELOG.md"
+with open(path) as f:
     text = f.read()
-pattern = r"(## \[Unreleased\]\s*\n)"
-replacement = rf"\1\n## [{nxt}] — {today}\n"
-new = re.sub(pattern, replacement, text, count=1)
-assert new != text, "Unreleased heading not found"
-with open("CHANGELOG.md", "w") as f:
-    f.write(new)
-PY
 
-# Move bullets: we inserted a blank heading. Manually reorganize:
-# anything between the new [X.Y.Z] heading and the [Unreleased] heading above it
-# should be moved UNDER the new heading. The simpler path: we just leave the
-# Unreleased bullets where they are — they already describe the new release —
-# and clear them from Unreleased. Do that:
-python3.13 - "$next" <<'PY'
-import re, sys
-nxt = sys.argv[1]
-with open("CHANGELOG.md") as f:
-    text = f.read()
-# Grab body between [Unreleased] and [nxt]
+# Match [Unreleased] heading, capture body up to the next ^## [  heading (or EOF).
 m = re.search(
-    r"(## \[Unreleased\]\s*\n)(.*?)(\n## \[" + re.escape(nxt) + r"\])",
-    text, flags=re.DOTALL,
+    r"^(## \[Unreleased\]\s*?\n)(.*?)(?=^## \[|\Z)",
+    text, flags=re.MULTILINE | re.DOTALL,
 )
-assert m, "Expected Unreleased + new version structure"
-body = m.group(2).strip("\n")
-new = (
-    text[:m.start()] +
-    "## [Unreleased]\n\n" +
-    f"## [{nxt}]" + text[m.end(3):m.end(3)]  # keep heading line
-)
-# reinsert body under the new version heading
-new = new.replace(f"## [{nxt}]", f"## [{nxt}]\n\n{body}", 1) if body else new
-with open("CHANGELOG.md", "w") as f:
-    f.write(new)
+assert m, "CHANGELOG missing [Unreleased] section"
+body = m.group(2).rstrip() + "\n" if m.group(2).strip() else ""
+new_section = f"## [Unreleased]\n\n## [{nxt}] — {today}\n\n{body}"
+updated = text[:m.start()] + new_section + text[m.end():]
+assert updated != text, "CHANGELOG rewrite produced no change"
+# Sanity: the rest of the file (post-new-section) must be unchanged.
+assert text[m.end():] in updated, "CHANGELOG tail was altered"
+with open(path, "w") as f:
+    f.write(updated)
 PY
 
 git add VERSION package.json CHANGELOG.md
@@ -854,6 +880,14 @@ git commit -m "release: tag-triggered verify + GitHub Release workflow"
 
 ````markdown
 # Release Runbook
+
+## Prerequisites (laptop)
+
+- `git` and `gh` (GitHub CLI) installed. Authenticate `gh` once: `gh auth login`.
+- `python3.13` on PATH (used by `cut.sh` to rewrite `package.json` and `CHANGELOG.md`).
+- Clean working tree on `master`, synced with `origin/master`.
+
+`cut.sh` will abort with a clear message if any of these are missing.
 
 ## Cutting a release
 
@@ -1022,6 +1056,8 @@ Expected: 404.
 
 - [ ] **Step 3: Implement the route**
 
+Deployed releases are created via `git archive` and have no `.git` metadata. The deploy script writes `REVISION` and `DEPLOYED_AT` files into each release directory — the route reads those files, not git. On dev checkouts where those files are absent, fall back to `git rev-parse` and file mtime.
+
 ```python
 # src/xenon/api/routes/version.py
 from __future__ import annotations
@@ -1037,10 +1073,14 @@ router = APIRouter()
 
 @lru_cache(maxsize=1)
 def _commit() -> str:
+    revision_file = REPO_ROOT / "REVISION"
+    if revision_file.is_file():
+        return revision_file.read_text().strip()
     try:
         return subprocess.check_output(
             ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
             text=True,
+            stderr=subprocess.DEVNULL,
         ).strip()
     except Exception:
         return "unknown"
@@ -1048,10 +1088,12 @@ def _commit() -> str:
 
 @lru_cache(maxsize=1)
 def _deployed_at() -> str:
-    # Set by the deploy script; falls back to mtime of VERSION.
     env = os.environ.get("XENON_DEPLOYED_AT")
     if env:
         return env
+    deployed_file = REPO_ROOT / "DEPLOYED_AT"
+    if deployed_file.is_file():
+        return deployed_file.read_text().strip()
     try:
         ts = (REPO_ROOT / "VERSION").stat().st_mtime
         import datetime as dt
@@ -1069,14 +1111,30 @@ def version():
     }
 ```
 
-- [ ] **Step 4: Register the route**
+- [ ] **Step 4: Register the route AND add to `AUTH_EXEMPT_PATHS`**
 
-In `src/xenon/api/server.py`, find the block that includes other routers (search for `include_router`) and add:
+In `src/xenon/api/server.py`:
+
+1. Near the other `include_router` calls:
 
 ```python
 from xenon.api.routes import version as version_route
 app.include_router(version_route.router)
 ```
+
+2. Add `/version` to `AUTH_EXEMPT_PATHS` so the deploy verification can curl it from outside localhost without a Clerk JWT:
+
+```python
+AUTH_EXEMPT_PATHS = {
+    "/health",
+    "/version",       # <-- add this
+    "/ws-ticket/validate",
+    "/docs",
+    "/openapi.json",
+}
+```
+
+3. Add a test that verifies the exemption works even when `CLERK_JWKS_URL` is set (mocking Clerk to reject all tokens). Use the existing auth-test pattern in `src/xenon/api/tests/` as a model.
 
 - [ ] **Step 5: Run, verify passes**
 
@@ -1091,34 +1149,17 @@ git add src/xenon/api/routes/version.py src/xenon/api/server.py scripts/tests/te
 git commit -m "feat(api): GET /version endpoint"
 ```
 
-### Task 3.3: Add `next start` to web/package.json
+### Task 3.3: Verify `next start` is available (no changes expected)
 
-**Files:**
+`web/package.json` already has `"start": "next start"` in the current tree. Do NOT override it with `-p 3000` — the pre-swap preview helper sets `PORT=3001`, and a hardcoded `-p 3000` would collide with the live port during pre-swap checks.
 
-- Modify: `web/package.json`
-
-- [ ] **Step 1: Check current scripts**
+- [ ] **Step 1: Verify present**
 
 ```bash
-jq '.scripts.start' web/package.json
+jq -r '.scripts.start' web/package.json
 ```
 
-- [ ] **Step 2: If null, add it**
-
-Add `"start": "next start -p 3000"` under `"scripts"`. Verify `next build && next start` works locally:
-
-```bash
-cd web && npm run build && timeout 5s npm run start || true
-```
-
-Expected: Next.js boots, prints "Local: http://localhost:3000", timeout kills it.
-
-- [ ] **Step 3: Commit (if modified)**
-
-```bash
-git add web/package.json
-git commit -m "web: add next start script for production"
-```
+Expected: `next start`. If missing, add exactly `"start": "next start"` and commit. Otherwise, skip.
 
 ### Task 3.4: launchd plists
 
@@ -1185,7 +1226,9 @@ chmod +x deploy/launchd/load-env.sh
 <plist version="1.0">
 <dict>
     <key>Label</key><string>xenon.api</string>
-    <key>WorkingDirectory</key><string>/opt/xenon/current</string>
+    <!-- Set WorkingDirectory to the Python app root so relative-path file accesses
+         resolve predictably. Since we cd into src, --app-dir becomes redundant. -->
+    <key>WorkingDirectory</key><string>/opt/xenon/current/src</string>
     <key>ProgramArguments</key>
     <array>
       <string>/opt/xenon/current/deploy/launchd/load-env.sh</string>
@@ -1194,7 +1237,6 @@ chmod +x deploy/launchd/load-env.sh
       <string>xenon.api.server:app</string>
       <string>--host</string><string>127.0.0.1</string>
       <string>--port</string><string>8321</string>
-      <string>--app-dir</string><string>/opt/xenon/current/src</string>
     </array>
     <key>KeepAlive</key><true/>
     <key>RunAtLoad</key><true/>
@@ -1238,7 +1280,7 @@ chmod +x deploy/launchd/load-env.sh
     <key>WorkingDirectory</key><string>/opt/xenon/ib-gateway</string>
     <key>ProgramArguments</key>
     <array>
-      <string>/usr/local/bin/docker</string>
+      <string>/opt/homebrew/bin/docker</string>
       <string>compose</string><string>up</string>
     </array>
     <key>KeepAlive</key><true/>
@@ -1258,33 +1300,40 @@ git commit -m "deploy: launchd plists for web, api, ib-realtime, ib-gateway"
 
 ### Task 3.5: IB Gateway LAN exposure override
 
+The actual compose file lives at `docker/ib-gateway/docker-compose.yml` and publishes ports `127.0.0.1:${IB_PAPER_PORT:-4002}:4004` (paper) and `127.0.0.1:${IB_LIVE_PORT:-4001}:4003` (live) — note the host:container mismatch (4002 → 4004, 4001 → 4003). The LAN override must preserve that mapping; naïvely writing `4002:4002` would publish an unused container port and the Mac mini would not actually serve IB.
+
 **Files:**
 
-- Modify: `ib-gateway/docker-compose.override.yml` (or create a prod-specific override)
+- Create: `docker/ib-gateway/docker-compose.prod.yml`
 
-- [ ] **Step 1: Read current override**
+- [ ] **Step 1: Read current compose to confirm ports**
 
 ```bash
-cat ib-gateway/docker-compose.override.yml 2>/dev/null || cat docker-compose.override.yml
+grep -A3 'ports:' docker/ib-gateway/docker-compose.yml
 ```
 
-- [ ] **Step 2: Add a prod-only override file**
+Expected to show the `4002:4004` and `4001:4003` mappings.
 
-Create `ib-gateway/docker-compose.prod.yml` so the LAN binding isn't accidentally applied on laptops:
+- [ ] **Step 2: Create the prod override (preserves real container ports)**
+
+Create `docker/ib-gateway/docker-compose.prod.yml`:
 
 ```yaml
 services:
   ib-gateway:
     ports:
-      - "0.0.0.0:4002:4002"
+      # Expose paper (container 4004) on host 4002, bound to all interfaces.
+      - "0.0.0.0:${IB_PAPER_PORT:-4002}:4004"
+      # Expose live (container 4003) on host 4001, LAN-wide.
+      - "0.0.0.0:${IB_LIVE_PORT:-4001}:4003"
 ```
 
-The Mac mini's `xenon.ib-gateway.plist` uses `docker compose -f docker-compose.yml -f docker-compose.prod.yml up`. Update `ProgramArguments` in the plist from Task 3.4 accordingly.
+The Mac mini's `xenon.ib-gateway.plist` must `docker compose -f docker-compose.yml -f docker-compose.prod.yml up` inside `/opt/xenon/ib-gateway/`. Update `ProgramArguments` in that plist from Task 3.4 accordingly.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add ib-gateway/docker-compose.prod.yml deploy/launchd/xenon.ib-gateway.plist
+git add docker/ib-gateway/docker-compose.prod.yml deploy/launchd/xenon.ib-gateway.plist
 git commit -m "deploy: LAN-exposed IB Gateway override for Mac mini"
 ```
 
@@ -1354,7 +1403,14 @@ preflight_tag() {
 }
 
 preflight_clean_tree() {
-  git diff --quiet && git diff --cached --quiet || { echo "working tree dirty" >&2; return 1; }
+  # `git diff` alone ignores untracked files. porcelain=v1 catches tracked changes AND untracked.
+  local status
+  status="$(git status --porcelain=v1)"
+  if [[ -n "$status" ]]; then
+    echo "working tree not clean:" >&2
+    echo "$status" >&2
+    return 1
+  fi
 }
 ```
 
@@ -1391,22 +1447,43 @@ TAG="${1:?usage: _remote.sh <tag>}"
 ROOT="/opt/xenon"
 CACHE="$ROOT/.git-cache"
 RELEASE="$ROOT/releases/$TAG"
+RELEASE_TMP="$ROOT/releases/.${TAG}.tmp"
 SHARED="$ROOT/shared"
 CURRENT_LINK="$ROOT/current"
+WEB_PORT=3000
+API_PORT=8321
 
 say() { printf '\033[1;34m[remote] %s\033[0m\n' "$*"; }
 die() { printf '\033[1;31m[remote] FAIL: %s\033[0m\n' "$*" >&2; exit 1; }
+
+# Capture the symlink target BEFORE any swap so rollback is deterministic.
+# ls-based mtime sorting can pick the wrong release if directories were touched.
+PREV_RELEASE=""
+if [[ -L "$CURRENT_LINK" ]]; then
+  PREV_RELEASE="$(readlink "$CURRENT_LINK")"
+  [[ "$PREV_RELEASE" = /* ]] || PREV_RELEASE="$ROOT/$PREV_RELEASE"
+fi
 
 # 1. Fetch tag into bookkeeping repo
 say "Fetching $TAG into $CACHE"
 git -C "$CACHE" fetch --tags origin
 
-# 2. Materialize release worktree
+# 2. Materialize release worktree — extract to temp, rename on success.
+# A crash mid-extraction must not leave a half-populated $RELEASE that a later
+# deploy silently reuses.
 if [[ ! -d "$RELEASE" ]]; then
-  say "Creating worktree at $RELEASE"
-  mkdir -p "$RELEASE"
-  git -C "$CACHE" archive "$TAG" | tar -x -C "$RELEASE"
-  echo "$(git -C "$CACHE" rev-parse "$TAG")" > "$RELEASE/.git-sha"
+  say "Creating release at $RELEASE (via tmp $RELEASE_TMP)"
+  rm -rf "$RELEASE_TMP"
+  mkdir -p "$RELEASE_TMP"
+  git -C "$CACHE" archive "$TAG" | tar -x -C "$RELEASE_TMP"
+  # Minimum-viable sanity check: required files must be present.
+  for required in VERSION package.json src/xenon/api/server.py web/package.json; do
+    [[ -e "$RELEASE_TMP/$required" ]] || { rm -rf "$RELEASE_TMP"; die "extract missing $required"; }
+  done
+  # Write immutable release metadata (read by GET /version — no .git in archive output).
+  git -C "$CACHE" rev-parse "$TAG" > "$RELEASE_TMP/REVISION"
+  date -u +"%Y-%m-%dT%H:%M:%SZ" > "$RELEASE_TMP/DEPLOYED_AT"
+  mv "$RELEASE_TMP" "$RELEASE"
 fi
 
 # 3. Symlink shared state
@@ -1427,79 +1504,119 @@ say "pip install"
 . "$SHARED/venv/bin/activate"
 pip install -q -r "$RELEASE/requirements.txt"
 
-# 5. Pre-swap health check on alt ports
+# 5. Pre-swap health check on alt ports — use the helper FROM THE RELEASE we're
+# about to ship, not a persistent copy. The release payload is the source of truth.
 say "Pre-swap health check on alt ports (3001/8322)"
 XENON_API_PORT=8322 PORT=3001 \
   "$RELEASE/scripts/deploy/_health_preview.sh" "$RELEASE" \
   || die "pre-swap health check failed"
 
-# 6. Atomic swap
+# 6. Atomic swap — macOS-safe. `mv -T` is GNU-only; BSD mv (macOS) rejects it.
+# `ln -sfn` replaces an existing symlink atomically because ln calls rename(2)
+# on the underlying inode. The intermediate `.new` name is unnecessary here.
 say "Atomic symlink swap"
-ln -sfn "$RELEASE" "$CURRENT_LINK.new"
-mv -Tf "$CURRENT_LINK.new" "$CURRENT_LINK"
+ln -sfn "$RELEASE" "$CURRENT_LINK"
 
-# 7. Restart app services (NOT ib-gateway)
+# 7. Restart app services (NOT ib-gateway — decoupled lifecycle)
 say "Restarting app services"
 for svc in xenon.web xenon.api xenon.ib-realtime; do
   launchctl kickstart -k "gui/$UID/$svc" || die "failed to kickstart $svc"
 done
 
-# 8. Post-swap verify
-say "Post-swap verification"
+# 8. Post-swap verify. App services only — ib-gateway is intentionally
+# decoupled, so do NOT treat its state as a rollback trigger. Record it as
+# telemetry only.
+say "Post-swap verification (app services only)"
+verify_ok=0
 for i in {1..30}; do
-  if curl -fsS "http://localhost:8321/health" >/dev/null && \
-     [[ "$(curl -fsS http://localhost:8321/version | jq -r .version)" == "${TAG#v}" ]]; then
-    say "OK — $TAG is live"
-    # prune old releases
-    ls -1dt "$ROOT/releases"/v* | tail -n +4 | xargs -r rm -rf
-    printf '{"ts":"%s","version":"%s","outcome":"ok"}\n' \
-      "$(date -u +%FT%TZ)" "$TAG" >> "$SHARED/logs/deploys.jsonl"
-    exit 0
+  # API responds + reports this exact version.
+  api_version="$(curl -fsS "http://localhost:$API_PORT/version" 2>/dev/null | jq -r .version 2>/dev/null || true)"
+  # Web front-door reachable.
+  web_ok=0
+  curl -fsS "http://localhost:$WEB_PORT/" >/dev/null 2>&1 && web_ok=1
+  if [[ "$api_version" == "${TAG#v}" && "$web_ok" == "1" ]]; then
+    verify_ok=1
+    break
   fi
   sleep 2
 done
 
-# 9. Auto-rollback
+if [[ "$verify_ok" == "1" ]]; then
+  # Gateway state is informational only.
+  gw_state="$(curl -fsS "http://localhost:$API_PORT/health" 2>/dev/null | jq -r '.ib_gateway.port_listening // "unknown"')"
+  say "OK — $TAG is live (ib_gateway.port_listening=$gw_state)"
+  # Prune old releases. macOS `xargs` has no `-r`; guard with explicit empty check.
+  to_prune="$(ls -1dt "$ROOT/releases"/v* 2>/dev/null | tail -n +4)"
+  if [[ -n "$to_prune" ]]; then
+    echo "$to_prune" | xargs rm -rf
+  fi
+  printf '{"ts":"%s","version":"%s","outcome":"ok","ib_gateway":"%s"}\n' \
+    "$(date -u +%FT%TZ)" "$TAG" "$gw_state" >> "$SHARED/logs/deploys.jsonl"
+  exit 0
+fi
+
+# 9. Auto-rollback — use the exact previous target we captured, not mtime-sorted guesses.
 say "Post-swap health check failed — rolling back"
-PREV="$(ls -1dt "$ROOT/releases"/v* | sed -n '2p')"
-[[ -n "$PREV" ]] || die "no previous release to roll back to"
-ln -sfn "$PREV" "$CURRENT_LINK.new"
-mv -Tf "$CURRENT_LINK.new" "$CURRENT_LINK"
+[[ -n "$PREV_RELEASE" && -d "$PREV_RELEASE" ]] || die "no previous release to roll back to"
+ln -sfn "$PREV_RELEASE" "$CURRENT_LINK"
 for svc in xenon.web xenon.api xenon.ib-realtime; do
   launchctl kickstart -k "gui/$UID/$svc" || true
 done
 printf '{"ts":"%s","version":"%s","outcome":"rolled-back","previous":"%s"}\n' \
-  "$(date -u +%FT%TZ)" "$TAG" "$(basename "$PREV")" >> "$SHARED/logs/deploys.jsonl"
+  "$(date -u +%FT%TZ)" "$TAG" "$(basename "$PREV_RELEASE")" >> "$SHARED/logs/deploys.jsonl"
 exit 1
 ```
 
 - [ ] **Step 2: Create the preview health-check helper**
 
 ```bash
-# scripts/deploy/_health_preview.sh
 #!/usr/bin/env bash
+# scripts/deploy/_health_preview.sh
+# Stands up API + Web + ib_realtime on alternate ports and verifies each process
+# reaches ready state. Must exercise every service that the real deploy will restart —
+# otherwise a broken ib_realtime passes preview and fails immediately after swap.
 set -euo pipefail
 RELEASE="${1:?usage: _health_preview.sh <release-dir>}"
 API_PORT="${XENON_API_PORT:-8322}"
 WEB_PORT="${PORT:-3001}"
 
-cleanup() { kill "${pids[@]}" 2>/dev/null || true; }
+pids=()
+cleanup() {
+  for pid in "${pids[@]:-}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+}
 trap cleanup EXIT
+
+# Source env so ib_realtime has its IB credentials.
+set -a
+. /opt/xenon/shared/.env
+set +a
 
 # shellcheck disable=SC1091
 . /opt/xenon/shared/venv/bin/activate
-pids=()
+
+# API
 python3.13 -m uvicorn xenon.api.server:app --host 127.0.0.1 --port "$API_PORT" \
   --app-dir "$RELEASE/src" &
 pids+=($!)
 
+# Web
 (cd "$RELEASE/web" && PORT="$WEB_PORT" npm run start) &
 pids+=($!)
 
+# ib_realtime — sanity-check that node imports and boots. We don't bind a port
+# for it here; we just require the process to stay alive for >5s (a syntax/import
+# error on the file would exit immediately).
+node "$RELEASE/scripts/infra/ib_realtime/ib_realtime_server.js" &
+IB_PID=$!
+pids+=($IB_PID)
+
 for i in {1..30}; do
   sleep 2
-  if curl -fsS "http://127.0.0.1:$API_PORT/health" >/dev/null && \
-     curl -fsS "http://127.0.0.1:$WEB_PORT/" >/dev/null; then
+  if curl -fsS "http://127.0.0.1:$API_PORT/health" >/dev/null \
+     && curl -fsS "http://127.0.0.1:$WEB_PORT/" >/dev/null \
+     && kill -0 "$IB_PID" 2>/dev/null; then
     echo "preview OK"
     exit 0
   fi
@@ -1541,10 +1658,25 @@ preflight_clean_tree
 preflight_tag "$TAG"
 
 echo "Deploying $TAG to $HOST"
-ssh "$HOST" "/opt/xenon/.git-cache/../shared/bin/_remote.sh $TAG"
+# Run _remote.sh FROM THE RELEASE PAYLOAD we're about to ship, not from a persistent
+# shared/bin copy — a stale shared/bin drifts from the repo and silently runs old
+# deploy logic against new releases. Two-step: fetch+extract the tag, then execute
+# the freshly-extracted _remote.sh.
+ssh "$HOST" "bash -s" <<SSH
+set -euo pipefail
+ROOT=/opt/xenon
+CACHE="\$ROOT/.git-cache"
+# Ensure the tag is in the cache so the remote script can archive it.
+git -C "\$CACHE" fetch --tags origin
+# Quick-extract JUST the deploy scripts to a scratch dir so we can invoke them.
+STAGE="\$(mktemp -d -t xenon-deploy)"
+trap 'rm -rf "\$STAGE"' EXIT
+git -C "\$CACHE" archive "$TAG" scripts/deploy | tar -x -C "\$STAGE"
+bash "\$STAGE/scripts/deploy/_remote.sh" "$TAG"
+SSH
 ```
 
-Note: the remote script is installed under `/opt/xenon/shared/bin/` by the bootstrap — that way it survives release rollbacks. Bootstrap copies it; we don't SCP on each deploy.
+Note: `_remote.sh` runs from a scratch extraction of the target tag's `scripts/deploy/` tree. The full release extraction inside `_remote.sh` is unchanged; only the deploy-logic invocation path is corrected. No persistent `shared/bin/` copies of `_remote.sh` — drift-prone.
 
 - [ ] **Step 2: Commit**
 
@@ -1580,8 +1712,7 @@ say() { printf '\033[1;34m[bootstrap] %s\033[0m\n' "$*"; }
 sudo mkdir -p "$ROOT"
 sudo chown "$USER" "$ROOT"
 mkdir -p "$ROOT/releases" "$ROOT/ib-gateway" \
-         "$SHARED/data" "$SHARED/logs" "$SHARED/web" \
-         "$SHARED/bin"
+         "$SHARED/data" "$SHARED/logs" "$SHARED/web"
 
 # 2. Homebrew deps
 say "Installing deps via brew"
@@ -1611,19 +1742,20 @@ for f in "$SHARED/.env" "$SHARED/web/.env"; do
   fi
 done
 
-# 6. Install the remote script
-# Assumes bootstrap was run from a fresh clone OR the remote script was scp'd.
-if [[ -f "$(dirname "$0")/_remote.sh" ]]; then
-  cp "$(dirname "$0")/_remote.sh" "$SHARED/bin/_remote.sh"
-  cp "$(dirname "$0")/_health_preview.sh" "$SHARED/bin/_health_preview.sh"
-  chmod +x "$SHARED/bin/"*.sh
-fi
+# 6. (Deploy scripts are NOT copied to a persistent location. Each deploy
+# extracts _remote.sh fresh from the target tag — see Task 3.8 — so bootstrap
+# only needs to ensure the bookkeeping repo exists, which it does in step 4.)
 
-# 7. IB Gateway compose files
-if [[ ! -f "$ROOT/ib-gateway/docker-compose.yml" ]]; then
-  cp "$(dirname "$0")/../../docker/ib-gateway/docker-compose.yml" "$ROOT/ib-gateway/" 2>/dev/null || \
-    echo "Copy docker-compose.yml into $ROOT/ib-gateway/ manually"
-fi
+# 7. IB Gateway compose files — copy both the base compose and the prod override.
+mkdir -p "$ROOT/ib-gateway"
+for f in docker-compose.yml docker-compose.prod.yml; do
+  src="$(dirname "$0")/../../docker/ib-gateway/$f"
+  if [[ -f "$src" ]]; then
+    cp "$src" "$ROOT/ib-gateway/"
+  else
+    echo "WARN: $src missing — copy into $ROOT/ib-gateway/ manually before first deploy" >&2
+  fi
+done
 
 # 8. Install launchd plists
 PLISTS_DIR="$HOME/Library/LaunchAgents"
@@ -1759,16 +1891,16 @@ git add docs/runbooks/deploy.md
 git commit -m "docs: deploy + rollback runbook"
 ````
 
-### Task 3.11: Update `scripts/cloud.sh` to point at Mac mini
+### Task 3.11: Update `scripts/infra/cloud.sh` to point at Mac mini
 
 **Files:**
 
-- Modify: `scripts/cloud.sh`
+- Modify: `scripts/infra/cloud.sh`
 
 - [ ] **Step 1: Read current**
 
 ```bash
-cat scripts/cloud.sh
+cat scripts/infra/cloud.sh
 ```
 
 - [ ] **Step 2: Replace the VPS hostname / Tailscale target with `xenon-mini.local` (or the Mac mini's Tailscale IP)**
@@ -1782,7 +1914,7 @@ Ensure the IB Gateway port matches the LAN-exposed `4002`.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add scripts/cloud.sh
+git add scripts/infra/cloud.sh
 git commit -m "dev: cloud.sh points at Mac mini IB Gateway"
 ```
 
@@ -1840,4 +1972,49 @@ Ran against the spec:
 - **Placeholder scan:** No TBD / "add error handling" / "similar to above". Every code step has full code. ✓
 - **Type consistency:** `get_version()`, `_commit()`, `_deployed_at()` consistent across tasks. Script names consistent (`_remote.sh`, `_preflight.sh`, `cut.sh`, `_lib.sh`). ✓
 
-Gap identified and fixed inline: original Task 3.8 called `_remote.sh` from the release checkout, but release directories don't exist until deploy runs the remote. Fixed by installing `_remote.sh` into `/opt/xenon/shared/bin/` from bootstrap (persistent across releases).
+Gap identified and fixed inline: original Task 3.8 called `_remote.sh` from the release checkout, but release directories don't exist until deploy runs the remote. Now fixed: `mac-mini.sh` does a scratch extract of `scripts/deploy/` from the target tag and invokes `_remote.sh` from there — guaranteed to match the release being shipped, no persistent drift.
+
+---
+
+## Codex-Review Fixes Applied (2026-04-24)
+
+Tribunal review (Codex + Gemini + Claude) surfaced 27 issues against an earlier draft. Applied inline. Summary:
+
+### CRITICAL (resolved)
+
+1. **CHANGELOG rewrite destroys file** (Codex, Gemini, Claude unanimous). Replaced the two chained Python regexes in Task 2.4 with a single deterministic rewrite that preserves the tail of the file and asserts post-conditions.
+2. **IB Gateway port mapping wrong** (Codex). Real compose maps paper `4002:4004` and live `4001:4003`. Task 3.5 now emits a prod override that matches, including both lines.
+3. **`mv -Tf` is GNU-only** (Codex). BSD `mv` on macOS rejects `-T`. `_remote.sh` now uses a single `ln -sfn` which is atomic via `rename(2)` — no `.new` intermediate needed.
+4. **/version used `git rev-parse` on archive-extracted dir** (Codex). `_remote.sh` now writes `REVISION` and `DEPLOYED_AT` files into each release, and the route reads those files first.
+5. **Deploy failure coupled to IB Gateway health despite the decoupling design intent** (Codex, overriding Gemini's opposite suggestion). Post-swap verification now checks API `/version` + web root only; gateway state is recorded as telemetry.
+6. **`/version` needs to be in `AUTH_EXEMPT_PATHS`** (Claude, from reading `server.py`). Task 3.2 Step 4 adds `/version` to the exempt set and requires a test that verifies exemption even when `CLERK_JWKS_URL` is set.
+
+### IMPORTANT (resolved)
+
+7. Interrupted extraction could leave a half-populated release dir (Codex) — extract to `.${TAG}.tmp` and `mv` on success.
+8. Rollback used `ls -t | sed -n '2p'` which picks by mtime — could skip to the wrong release if dirs were touched. Now uses `readlink $CURRENT_LINK` captured BEFORE swap.
+9. Persistent `shared/bin/_remote.sh` would drift from the repo (Codex) — `mac-mini.sh` now extracts deploy scripts fresh from the target tag each deploy.
+10. `preflight_clean_tree` missed untracked files — now uses `git status --porcelain=v1`.
+11. Path mismatches: `scripts/cloud.sh` → `scripts/infra/cloud.sh`; `ib-gateway/docker-compose.prod.yml` → `docker/ib-gateway/docker-compose.prod.yml`. File Structure table + all references updated.
+12. `gh run list --branch master --limit 1` doesn't guarantee the right commit — now uses `--workflow CI --commit <sha>`.
+13. Preview health check didn't exercise `ib_realtime_server.js` — now starts it and verifies the process stays alive.
+14. Task 3.3's proposed `"start": "next start -p 3000"` would collide with `PORT=3001` preview — Task 3.3 now just verifies the existing `"next start"` script (which is already in `web/package.json`).
+15. Post-swap verification didn't curl the web front door (Gemini) — now required before marking deploy OK.
+16. `xenon.api.plist` `WorkingDirectory` set to `/opt/xenon/current` with `--app-dir src` was fragile (Gemini) — now `WorkingDirectory=/opt/xenon/current/src` and `--app-dir` dropped.
+17. Nightly-Playwright issue creation raced with quick-succession failures and was not paginated (Gemini) — now paginates and comments on the canonical tracking issue instead of creating duplicates.
+18. `extract_changelog_section` awk pattern wasn't line-anchored (Gemini) — now `^## \[` prevents premature exits on in-body text.
+19. `version-sync` job was added but not actually required by branch protection (Codex + Claude) — Task 2.2 Step 7 updates branch protection AFTER the PR merges.
+20. Dry-run rollback referenced `v0.0.1` but no such tag was ever created (Claude) — Task 2.1 Step 6 now tags `v0.0.1` on the reset commit and creates a baseline GitHub Release.
+21. `scripts/infra/dev/dead_code_scan.py` assumed in Task 1.4 but doesn't exist (Claude) — task now conditional; if the CLI doesn't exist, skip and open a follow-up issue.
+22. Release runbook didn't list prereqs like `gh` (Gemini) — added a Prerequisites section.
+
+### MINOR (resolved)
+
+23. `xenon.ib-gateway.plist` hardcoded `/usr/local/bin/docker` (Codex + Gemini) — now `/opt/homebrew/bin/docker`, consistent with the rest of the brew-installed tools.
+24. `xargs -r` is a GNU extension; macOS `xargs` lacks it (Gemini) — pruning now guards with `[[ -n "$to_prune" ]]`.
+25. Unquoted `$ROOT` etc. would break with spaces in paths (Gemini) — all `_remote.sh` / `mac-mini.sh` path references already quoted in the revised code.
+
+### Dismissed
+
+- **Gemini-4** (post-deploy should assert `ib_gateway.port_listening: true`) — directly contradicts the spec's explicit "gateway lifecycle decoupled" design. Codex caught this correctly; Claude arbitrated in Codex's favor.
+- **Review of existing `v0.1.0` / `v0.1.2` tags in the remote.** Cosmetic only — those tags are orthogonal to the new `0.0.x` line and don't block anything.
