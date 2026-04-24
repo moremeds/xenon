@@ -318,6 +318,91 @@ describe("fuseVirtualPair", () => {
     expect(fused.structure).toBe("TSLA Synthetic $400 · 2027-01-15");
   });
 
+  it("derives risk_profile from structure, not from leg order", () => {
+    // Verticals: defined risk regardless of which leg is passed first.
+    const longPut = mkPos(
+      30,
+      mkLeg({
+        direction: "LONG",
+        type: "Put",
+        strike: 400,
+        contracts: 1,
+        entry_cost: 500,
+        market_value: 450,
+      }),
+    );
+    const shortPut = mkPos(
+      31,
+      mkLeg({
+        direction: "SHORT",
+        type: "Put",
+        strike: 390,
+        contracts: 1,
+        entry_cost: -200,
+        market_value: -180,
+      }),
+    );
+    // Simulate Futu adapter's per-leg risk_profile (LONG→defined, SHORT→undefined).
+    longPut.risk_profile = "defined";
+    shortPut.risk_profile = "undefined";
+
+    const vertical1 = fuseVirtualPair(
+      longPut,
+      shortPut,
+      { pairKey: "vp-rp-1", label: "Bear Put Spread $390/$400 · 2027-01-15" },
+      20,
+    );
+    const vertical2 = fuseVirtualPair(
+      shortPut,
+      longPut,
+      { pairKey: "vp-rp-2", label: "Bear Put Spread $390/$400 · 2027-01-15" },
+      21,
+    );
+    expect(vertical1.risk_profile).toBe("defined");
+    expect(vertical2.risk_profile).toBe("defined"); // order-independent
+
+    // Synthetic (Long Call + Short Put): undefined risk, regardless of leg order.
+    const longCall = mkPos(
+      32,
+      mkLeg({
+        direction: "LONG",
+        type: "Call",
+        strike: 400,
+        contracts: 1,
+        entry_cost: 300,
+        market_value: 350,
+      }),
+    );
+    const shortPut2 = mkPos(
+      33,
+      mkLeg({
+        direction: "SHORT",
+        type: "Put",
+        strike: 400,
+        contracts: 1,
+        entry_cost: -200,
+        market_value: -180,
+      }),
+    );
+    longCall.risk_profile = "defined";
+    shortPut2.risk_profile = "undefined";
+
+    const syn1 = fuseVirtualPair(
+      longCall,
+      shortPut2,
+      { pairKey: "vp-rp-3", label: "Synthetic $400 · 2027-01-15" },
+      22,
+    );
+    const syn2 = fuseVirtualPair(
+      shortPut2,
+      longCall,
+      { pairKey: "vp-rp-4", label: "Synthetic $400 · 2027-01-15" },
+      23,
+    );
+    expect(syn1.risk_profile).toBe("undefined");
+    expect(syn2.risk_profile).toBe("undefined");
+  });
+
   it("throws when given an invalid leg combination (same type + same direction)", () => {
     const a = mkPos(24, mkLeg({ direction: "LONG", type: "Put", strike: 400 }));
     const b = mkPos(25, mkLeg({ direction: "LONG", type: "Put", strike: 390 }));

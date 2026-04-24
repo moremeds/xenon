@@ -340,6 +340,23 @@ function deriveFusedStructureType(a: PortfolioLeg, b: PortfolioLeg): string {
   );
 }
 
+/**
+ * Risk classification for a fused virtual pair. Verticals (all four
+ * variants) are defined-risk; straddles / strangles / synthetics /
+ * risk reversals are undefined-risk. Deriving from structure — not from
+ * whichever leg the caller happened to pass first — ensures the pill
+ * badge on the combo row agrees with the structure name.
+ */
+function deriveFusedRiskProfile(structureType: string): string {
+  if (
+    structureType.endsWith("Put Spread") ||
+    structureType.endsWith("Call Spread")
+  ) {
+    return "defined";
+  }
+  return "undefined";
+}
+
 function orderFusedLegs(
   a: PortfolioLeg,
   b: PortfolioLeg,
@@ -399,7 +416,7 @@ export function fuseVirtualPair(
     ticker: a.ticker,
     structure,
     structure_type: structureType,
-    risk_profile: a.risk_profile || b.risk_profile || "",
+    risk_profile: deriveFusedRiskProfile(structureType),
     expiry: a.expiry,
     contracts: a.legs[0].contracts,
     direction,
@@ -455,6 +472,7 @@ export function buildTickerGroups(
     // as separate positions (e.g. Long Put + Short Put same expiry → vertical).
     const combos = detectVirtualCombos(b.options);
     const virtualPairs = new Map<number, VirtualPair>();
+    const fusedCategoryById = new Map<number, CategoryKey>();
 
     if (opts?.fuseVirtualPairs) {
       // Group pair members by pairKey, synthesize fused multi-leg positions,
@@ -482,6 +500,11 @@ export function buildTickerGroups(
         );
         fusedPositions.push(fused);
         virtualPairs.set(fused.id, detection.pair);
+        // Preserve the detector's category for the fused position so the
+        // sub-grouping loop below lands it under the correct catalog bucket
+        // (e.g. "synthetic" for Synthetic / Risk Reversal, which have no
+        // catalog entry by name and would otherwise fall through to "other").
+        fusedCategoryById.set(fused.id, detection.category);
         consumedLegIds.add(members[0].id);
         consumedLegIds.add(members[1].id);
       }
@@ -501,7 +524,9 @@ export function buildTickerGroups(
     for (const pos of b.options) {
       const override = combos.get(pos.id);
       const category =
-        override?.category ?? getStructureCategory(resolveStructureKey(pos));
+        override?.category ??
+        fusedCategoryById.get(pos.id) ??
+        getStructureCategory(resolveStructureKey(pos));
       let list = byCategory.get(category);
       if (!list) {
         list = [];

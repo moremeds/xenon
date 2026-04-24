@@ -901,4 +901,38 @@ describe("buildTickerGroups with fuseVirtualPairs: true", () => {
       [longPut.id, shortPut.id].sort(),
     );
   });
+
+  it("lands a fused Synthetic under the 'synthetic' category (not 'other')", () => {
+    // Long Call + Short Put at the same strike & expiry → detector
+    // classifies this as category "synthetic", but the fused structure_type
+    // "Synthetic" has no catalog entry. The fusion path must preserve the
+    // detector's category so the row doesn't fall through to "other".
+    const longCall = mkSingle("TSLA", {
+      type: "Call",
+      dir: "LONG",
+      strike: 400,
+      expiry: "2027-01-15",
+      mv: 350,
+      ec: 300,
+    });
+    const shortPut = mkSingle("TSLA", {
+      type: "Put",
+      dir: "SHORT",
+      strike: 400,
+      expiry: "2027-01-15",
+      mv: -180,
+      ec: -200,
+    });
+    shortPut.legs[0].contracts = longCall.legs[0].contracts;
+    shortPut.contracts = longCall.contracts;
+
+    const [group] = buildTickerGroups([longCall, shortPut], undefined, {
+      fuseVirtualPairs: true,
+    });
+    const synthetic = group.optionsByCategory.get("synthetic") ?? [];
+    const other = group.optionsByCategory.get("other") ?? [];
+    expect(synthetic).toHaveLength(1);
+    expect(synthetic[0].structure_type).toBe("Synthetic");
+    expect(other).toHaveLength(0);
+  });
 });
