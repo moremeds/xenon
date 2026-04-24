@@ -46,17 +46,27 @@ jobs:
       - run: cd web && npm install --no-audit --no-fund --legacy-peer-deps
       - run: cd web && npm run lint
 
-  web-tests-unit:
-    # Runs the full vitest suite EXCLUDING tests that shell out to live services
-    # (FastAPI on :8321, `pi` CLI) or require populated `data/*.json` fixtures.
-    # Those tests run in `web-tests-integration` as advisory — they reflect
-    # dev-env expectations that don't port to a fresh CI runner.
+  web-tests:
+    # Unified vitest job — runs the full suite, including tests that spawn
+    # xenon-* CLIs from .venv/. Only `order-e2e` is excluded: it exercises the
+    # FastAPI /orders/* contract and currently exposes a real schema drift
+    # (reverted PR #34 aftermath). Tracked in #41 — fix the drift, then drop
+    # the exclude.
+    #
+    # Fixtures: minimal data/*.json stubs are seeded by vitest globalSetup at
+    # web/tests/setup/seed-fixtures.ts (portfolio.json, trade_log.json,
+    # flex_token_config.json). Only written when absent, so dev machines with
+    # real state aren't touched.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv python install 3.13
+      - name: Sync Python deps (provides .venv/ + xenon-* CLIs for integration tests)
+        run: uv sync --frozen --extra test
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -64,36 +74,11 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm install --no-audit --no-fund --legacy-peer-deps
       - run: cd web && npm install --no-audit --no-fund --legacy-peer-deps
-      - name: Run unit tests (exclude tests requiring live CLI / FastAPI)
-        # Remaining excludes (#39): spawn real CLIs or a FastAPI harness, deferred
-        # until CI installs the Python toolchain + xenon-* entry points.
-        # `cta-*-freshness` and `flex-token-expiry` moved back to unit: the first
-        # two mock fs internally, the third is covered by vitest globalSetup at
-        # web/tests/setup/seed-fixtures.ts.
+      - name: Run vitest suite
         run: |
           cd web && npm run universe:gen
           cd .. && NODE_ENV=test ASSISTANT_MOCK=1 npx vitest run --config vitest.config.ts web/tests \
-            --exclude 'web/tests/integration.test.ts' \
-            --exclude 'web/tests/menthorq-cta-route.test.ts' \
             --exclude 'web/tests/order-e2e.test.ts'
-
-  web-tests-integration:
-    # Advisory: tests that require live FastAPI / `pi` CLI / populated fixtures.
-    continue-on-error: true
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - run: npm install --no-audit --no-fund --legacy-peer-deps
-      - run: cd web && npm install --no-audit --no-fund --legacy-peer-deps
-      - run: cd web && npm test
 
   python-tests:
     runs-on: ubuntu-latest
