@@ -169,3 +169,6 @@ data/
 .serena/
 scripts/data/
 .gstack/
+
+# Scratch test/run artifacts
+output/
