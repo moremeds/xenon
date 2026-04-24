@@ -216,6 +216,25 @@ async def _run_rehydrate_on_boot() -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("single_leg rehydrate failed on boot; continuing to serve: %s", exc)
 
+    # Combo wizard rehydrate — Task 5.5. Same test-mode guard semantics as
+    # single_leg (gated by XENON_ORDERS_DB_PATH when running in test mode).
+    try:
+        from xenon.execution.combo_wizard import rehydrate as _combo_rehydrate_mod
+
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                _combo_rehydrate_mod.rehydrate_combo_sessions,
+                ib_client_factory=_ib_client_factory,
+                db_path=db_path,
+            ),
+            timeout=10.0,
+        )
+        logger.info("combo wizard rehydrate completed on boot")
+    except asyncio.TimeoutError:
+        logger.warning("combo wizard rehydrate timed out after 10s; continuing to serve")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("combo wizard rehydrate failed on boot; continuing to serve: %s", exc)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
