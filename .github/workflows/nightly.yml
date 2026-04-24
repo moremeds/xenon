@@ -1,0 +1,48 @@
+name: Nightly Playwright
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+jobs:
+  playwright:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: cd web && npm install --no-audit --no-fund --legacy-peer-deps
+      - name: Install Playwright browsers
+        run: cd web && npx playwright install --with-deps chromium
+      - name: Run Playwright tests
+        run: cd web && npx playwright test
+      - name: Upload report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+      - name: Comment on (or open) the canonical tracking issue
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const title = 'Nightly Playwright failures';
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const body = `Run failed: ${runUrl}`;
+            const existing = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, labels: 'nightly-playwright', state: 'open', per_page: 100,
+            });
+            if (existing.length === 0) {
+              await github.rest.issues.create({ owner, repo, title, body, labels: ['nightly-playwright'] });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: existing[0].number, body });
+            }
