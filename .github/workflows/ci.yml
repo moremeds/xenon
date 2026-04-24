@@ -64,23 +64,38 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm install --no-audit --no-fund --legacy-peer-deps
       - run: cd web && npm install --no-audit --no-fund --legacy-peer-deps
-      - name: Run unit tests (exclude API/fixture-dependent)
+      - name: Run unit tests (exclude tests requiring live CLI, FastAPI, or data/ fixtures)
+        # Excluded tests:
+        #   integration.test.ts          — spawns `pi`, `kelly` CLIs
+        #   menthorq-cta-route.test.ts   — spawns CLI + reads data/
+        #   cta-route-freshness.test.ts  — reads data/
+        #   cta-page-freshness.test.ts   — reads data/
+        #   flex-token-expiry.test.ts    — reads data/flex-token-expiry.json
+        #   order-e2e.test.ts            — requires FastAPI via ensureTestFastApi
+        # All others run — local verification on 2026-04-24 showed 123/128 pass
+        # with just mocks (the 5 failing are all order-e2e). See follow-up issue
+        # for enabling data-fixture tests via seeded JSON.
         run: |
           cd web && npm run universe:gen
           cd .. && NODE_ENV=test ASSISTANT_MOCK=1 npx vitest run --config vitest.config.ts web/tests \
-            --exclude 'web/tests/api-routes.test.ts' \
             --exclude 'web/tests/cta-route-freshness.test.ts' \
             --exclude 'web/tests/cta-page-freshness.test.ts' \
             --exclude 'web/tests/flex-token-expiry.test.ts' \
-            --exclude 'web/tests/ib-realtime-port-conflict.test.ts' \
-            --exclude 'web/tests/ib-realtime-restart-modes.test.ts' \
             --exclude 'web/tests/integration.test.ts' \
             --exclude 'web/tests/menthorq-cta-route.test.ts' \
-            --exclude 'web/tests/order-e2e.test.ts' \
-            --exclude 'web/tests/regime-route-cache-selection.test.ts' \
-            --exclude 'web/tests/route-cache-meta.test.ts' \
-            --exclude 'web/tests/sync-hooks.test.ts' \
-            --exclude 'web/tests/xenon-api.test.ts'
+            --exclude 'web/tests/order-e2e.test.ts'
+
+  dead-code:
+    # Advisory: runs the existing audit script at .claude/hooks/audit-dead-code.sh,
+    # surfaces findings in the job log. Failure here doesn't block merges.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run dead-code audit
+        run: |
+          chmod +x .claude/hooks/audit-dead-code.sh
+          .claude/hooks/audit-dead-code.sh
 
   web-tests-integration:
     # Advisory: tests that require live FastAPI / `pi` CLI / populated fixtures.
