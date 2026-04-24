@@ -55,7 +55,7 @@ Full specs: [`docs/trading/strategies.md`](docs/trading/strategies.md) · VCG ma
 ```bash
 git clone https://github.com/moremeds/xenon.git
 cd xenon
-pip install -r requirements.txt
+uv sync --extra test
 cd web && npm install && cd ..
 
 # Dev (default: local services + VPS IB Gateway via Tailscale)

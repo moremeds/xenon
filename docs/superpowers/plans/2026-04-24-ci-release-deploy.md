@@ -184,20 +184,20 @@ python-tests:
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0
-    - uses: actions/setup-python@v5
+    - uses: astral-sh/setup-uv@v5
       with:
-        python-version: "3.13"
-        cache: pip
-        cache-dependency-path: |
-          requirements.txt
-          pyproject.toml
-    - run: pip install -r requirements.txt
+        enable-cache: true
+        cache-dependency-glob: uv.lock
+    - run: uv python install 3.13
+    - run: uv sync --frozen --extra test
+    - name: Collection smoke test (import-level guard)
+      run: uv run pytest --collect-only -q
     - name: Run pytest (affected on PR, full on master push)
       run: |
         if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-          python3.13 scripts/infra/dev/run_pytest_affected.py --base origin/${{ github.base_ref }}
+          uv run python scripts/infra/dev/run_pytest_affected.py --base origin/${{ github.base_ref }}
         else
-          python3.13 -m pytest
+          uv run pytest
         fi
 ```
 
@@ -816,15 +816,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: actions/setup-python@v5
-        with:
-          {
-            python-version: "3.13",
-            cache: pip,
-            cache-dependency-path: requirements.txt,
-          }
-      - run: pip install -r requirements.txt
-      - run: python3.13 -m pytest
+      - uses: astral-sh/setup-uv@v5
+        with: { enable-cache: true, cache-dependency-glob: uv.lock }
+      - run: uv python install 3.13
+      - run: uv sync --frozen --extra test
+      - run: uv run pytest
       - uses: actions/setup-node@v4
         with:
           {
@@ -1226,13 +1222,14 @@ chmod +x deploy/launchd/load-env.sh
 <plist version="1.0">
 <dict>
     <key>Label</key><string>xenon.api</string>
-    <!-- Set WorkingDirectory to the Python app root so relative-path file accesses
-         resolve predictably. Since we cd into src, --app-dir becomes redundant. -->
-    <key>WorkingDirectory</key><string>/opt/xenon/current/src</string>
+    <!-- WorkingDirectory is the release root; the per-release .venv/ lives at
+         /opt/xenon/current/.venv (materialized by `uv sync --frozen` at deploy
+         time). Python resolves xenon.api.server from src/ via the installed package. -->
+    <key>WorkingDirectory</key><string>/opt/xenon/current</string>
     <key>ProgramArguments</key>
     <array>
       <string>/opt/xenon/current/deploy/launchd/load-env.sh</string>
-      <string>/opt/xenon/shared/venv/bin/python3.13</string>
+      <string>/opt/xenon/current/.venv/bin/python</string>
       <string>-m</string><string>uvicorn</string>
       <string>xenon.api.server:app</string>
       <string>--host</string><string>127.0.0.1</string>
@@ -1499,10 +1496,8 @@ ln -sfn "$SHARED/web-node_modules" "$RELEASE/web/node_modules"
 say "npm ci && npm run build"
 (cd "$RELEASE/web" && npm ci && npm run build)
 
-say "pip install"
-# shellcheck disable=SC1091
-. "$SHARED/venv/bin/activate"
-pip install -q -r "$RELEASE/requirements.txt"
+say "uv sync (per-release .venv, hardlinks from global uv cache)"
+(cd "$RELEASE" && uv sync --frozen)
 
 # 5. Pre-swap health check on alt ports — use the helper FROM THE RELEASE we're
 # about to ship, not a persistent copy. The release payload is the source of truth.
@@ -1593,11 +1588,8 @@ set -a
 . /opt/xenon/shared/.env
 set +a
 
-# shellcheck disable=SC1091
-. /opt/xenon/shared/venv/bin/activate
-
-# API
-python3.13 -m uvicorn xenon.api.server:app --host 127.0.0.1 --port "$API_PORT" \
+# API — use the per-release .venv materialized by uv sync
+"$RELEASE/.venv/bin/python" -m uvicorn xenon.api.server:app --host 127.0.0.1 --port "$API_PORT" \
   --app-dir "$RELEASE/src" &
 pids+=($!)
 
@@ -1721,11 +1713,10 @@ if ! command -v brew >/dev/null; then
 fi
 brew install node python@3.13 jq git gh docker cloudflared tailscale
 
-# 3. Python venv
-if [[ ! -d "$SHARED/venv" ]]; then
-  say "Creating shared venv"
-  /opt/homebrew/bin/python3.13 -m venv "$SHARED/venv"
-  "$SHARED/venv/bin/pip" install --upgrade pip
+# 3. Python toolchain (uv manages per-release .venv/ at deploy time; no shared venv)
+if ! command -v uv >/dev/null 2>&1; then
+  say "Installing uv via Homebrew"
+  /opt/homebrew/bin/brew install uv
 fi
 
 # 4. Bookkeeping repo

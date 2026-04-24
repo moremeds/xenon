@@ -9,7 +9,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-import talib
+
+talib = pytest.importorskip("talib")
 
 
 def _make_price_series(n: int = 260, seed: int = 42) -> pd.DataFrame:
