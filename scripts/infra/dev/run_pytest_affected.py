@@ -187,7 +187,11 @@ def main(argv: list[str] | None = None) -> int:
         extra_args = extra_args[1:]
 
     cmd = [sys.executable, "-m", "pytest", *targets, *extra_args]
-    return subprocess.run(cmd, cwd=ROOT).returncode
+    rc = subprocess.run(cmd, cwd=ROOT).returncode
+    # Exit 5 = "no tests collected" (e.g., all targets skipped at module level
+    # via pytest.importorskip for an optional native dep). Not a failure —
+    # the diff simply didn't map to any runnable test in this environment.
+    return 0 if rc == 5 else rc
 
 
 if __name__ == "__main__":
