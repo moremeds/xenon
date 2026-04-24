@@ -54,6 +54,7 @@ const STOCK_POSITION: PortfolioPosition = {
   entry_date: "2026-03-19",
   legs: [
     {
+      conId: null,
       direction: "LONG",
       contracts: 100,
       type: "Stock",

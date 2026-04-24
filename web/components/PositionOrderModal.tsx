@@ -8,6 +8,7 @@ import { ModifyOrderQuoteTelemetry } from "./QuoteTelemetry";
 import { fmtPrice } from "@/lib/positionUtils";
 import { OrderLegPills, type OrderLeg as UnifiedOrderLeg } from "@/lib/order";
 import { useClientAttemptId } from "@/components/ticker-detail/useClientAttemptId";
+import { useQuoteTokens } from "@/components/ticker-detail/useQuoteToken";
 import { getReasonToast } from "@/lib/orderReasonCodes";
 import {
   seedTicketFromPosition,
@@ -81,6 +82,33 @@ export default function PositionOrderModal({
 
   const attemptId = useClientAttemptId({ ticker: position.ticker });
 
+  const quoteLegs = useMemo(() => {
+    if (draft.payload.type === "combo") {
+      return draft.payload.legs.map((l) => ({
+        ticker: position.ticker,
+        conId: l.conId,
+        expiry: l.expiry ?? null,
+      }));
+    }
+    return [
+      {
+        ticker: position.ticker,
+        conId: draft.payload.conId,
+        expiry: position.expiry || null,
+      },
+    ];
+  }, [draft.payload, position.ticker, position.expiry]);
+
+  const {
+    tokens: quoteTokens,
+    error: quoteError,
+    reload: reloadQuoteTokens,
+    mintNow: mintQuoteTokens,
+  } = useQuoteTokens({
+    legs: quoteLegs,
+  });
+  const tokensReady = quoteTokens !== null;
+
   // Reseed price ONLY when intent toggles (Close ↔ Add). We deliberately do NOT
   // reseed on live mid changes — that would clobber whatever the user has typed
   // every time the WS tick lands. The live mid keeps ticking in the BID/MID/ASK
@@ -114,7 +142,7 @@ export default function PositionOrderModal({
   };
 
   const handleSubmit = async () => {
-    if (submitting || !isValidQty || !isValidPrice) return;
+    if (submitting || !isValidQty || !isValidPrice || !tokensReady) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -123,12 +151,31 @@ export default function PositionOrderModal({
           ? Math.max(1, Math.min(fullQty, parsedQty))
           : Math.max(1, parsedQty);
       attemptId.markSubmitted();
+      // Re-mint tokens at submit time, not modal-open time. The server
+      // enforces a 500ms TTL; cached tokens from useEffect will reliably
+      // be STALE_QUOTE on any user-interaction latency.
+      let freshTokens: Record<string, string> | null = null;
+      try {
+        freshTokens = await mintQuoteTokens();
+      } catch {
+        freshTokens = null;
+      }
+      const tokenBag =
+        draft.payload.type === "combo"
+          ? { quote_tokens: freshTokens ?? quoteTokens ?? {} }
+          : (() => {
+              const cid = String(draft.payload.conId ?? "");
+              const bag = freshTokens ?? quoteTokens;
+              const t = cid && bag ? bag[cid] : undefined;
+              return t ? { quote_token: t } : {};
+            })();
       const body = {
         ...draft.payload,
         quantity: clampedQty,
         limitPrice: parsedPrice,
         client_attempt_id: attemptId.id,
         ...(outsideRth && !isCombo ? { outsideRth: true } : {}),
+        ...tokenBag,
       };
       const res = await fetch("/api/orders/place", {
         method: "POST",
@@ -416,6 +463,18 @@ export default function PositionOrderModal({
                 )}
 
               {error && <p className="order-error">{error}</p>}
+              {quoteError && (
+                <div className="text-err mono text-xs">
+                  Quote unavailable: {quoteError}{" "}
+                  <button
+                    type="button"
+                    onClick={reloadQuoteTokens}
+                    className="underline"
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
@@ -445,7 +504,9 @@ export default function PositionOrderModal({
           <button
             className="btn-primary"
             onClick={handleSubmit}
-            disabled={submitting || !isValidQty || !isValidPrice}
+            disabled={
+              submitting || !isValidQty || !isValidPrice || !tokensReady
+            }
             aria-label={submitLabel}
           >
             {submitLabel}

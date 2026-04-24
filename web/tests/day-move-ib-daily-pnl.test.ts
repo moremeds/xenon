@@ -57,6 +57,7 @@ const portfolio: PortfolioData = {
       ib_daily_pnl: -3_405.31,
       legs: [
         {
+          conId: null,
           direction: "LONG",
           contracts: 77,
           type: "Call",

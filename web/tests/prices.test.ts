@@ -112,6 +112,7 @@ describe("Portfolio calculation flags", () => {
   const buildLeg = (
     marketPriceIsCalculated?: boolean
   ): PortfolioPosition["legs"][number] => ({
+    conId: null,
     direction: "LONG",
     contracts: 1,
     type: "Stock",

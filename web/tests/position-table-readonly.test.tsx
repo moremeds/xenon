@@ -37,6 +37,7 @@ const stockPosition: PortfolioPosition = {
   market_value: 105502.5,
   legs: [
     {
+      conId: null,
       direction: "LONG",
       contracts: 300,
       type: "Stock",

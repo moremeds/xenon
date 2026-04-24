@@ -8,6 +8,7 @@ export type TicketPayload =
   | {
       type: "stock";
       symbol: string;
+      conId: number | null;
       action: "BUY" | "SELL";
       quantity: number;
       limitPrice: number;
@@ -16,6 +17,7 @@ export type TicketPayload =
   | {
       type: "option";
       symbol: string;
+      conId: number | null;
       action: "BUY" | "SELL";
       quantity: number;
       limitPrice: number;
@@ -32,6 +34,7 @@ export type TicketPayload =
       limitPrice: number;
       tif: "DAY" | "GTC";
       legs: Array<{
+        conId: number | null;
         expiry: string;
         strike: number;
         right: "C" | "P";
@@ -113,6 +116,7 @@ export function seedTicketFromPosition(
       payload: {
         type: "stock",
         symbol: position.ticker,
+        conId: position.legs[0]?.conId ?? null,
         action,
         quantity: baseContracts,
         limitPrice,
@@ -145,6 +149,7 @@ export function seedTicketFromPosition(
       payload: {
         type: "option",
         symbol: position.ticker,
+        conId: position.legs[0]?.conId ?? null,
         action,
         quantity: baseContracts,
         limitPrice: q.mid ?? 0,
@@ -176,17 +181,25 @@ export function seedTicketFromPosition(
       baseContracts > 0
         ? Math.max(1, Math.round(Math.abs(leg.contracts) / baseContracts))
         : 1;
-    return { expiry, strike: leg.strike!, right, action: legAction, ratio };
+    return {
+      conId: leg.conId ?? null,
+      expiry,
+      strike: leg.strike!,
+      right,
+      action: legAction,
+      ratio,
+    };
   });
 
-  // Order.action: for "close" reverse the structure direction; for "add" match it.
-  const orderAction: "BUY" | "SELL" = sameDirection
-    ? netDirection === "LONG"
-      ? "BUY"
-      : "SELL"
-    : netDirection === "LONG"
-      ? "SELL"
-      : "BUY";
+  // Order.action for BAG: envelope is purely intent-driven and NEVER depends on
+  // netDirection. Per web/CLAUDE.md "IB Combo (BAG) Order Leg Convention",
+  // ComboLeg.action already carries structure (LONG→BUY, SHORT→SELL); the
+  // envelope only toggles open vs. close. envelope=BUY executes legs as-labeled
+  // (opens/adds the structure); envelope=SELL reverses all legs (closes it).
+  // Mixing netDirection back in would double-encode direction — e.g. a close on
+  // a SHORT credit spread would emit envelope=BUY on structural legs [SELL,BUY],
+  // which IB would execute as a new short spread instead of closing.
+  const orderAction: "BUY" | "SELL" = intent === "add" ? "BUY" : "SELL";
 
   // Natural-market combo bid/ask. Always compute the BUY-combo cost and SELL-combo proceeds
   // from the structure's nominal LONG perspective (negate leg sign if position.direction is SHORT)

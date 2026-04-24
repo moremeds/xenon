@@ -286,6 +286,7 @@ describe("Share PnL - Entry/Exit Price and Time", () => {
           market_value: 20125,
           legs: [
             {
+              conId: null,
               direction: "LONG",
               contracts: 25,
               type: "Call",

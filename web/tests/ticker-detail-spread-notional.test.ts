@@ -26,14 +26,17 @@ vi.mock("../components/ticker-detail/RatingsTab", () => ({
 }));
 
 vi.mock("../components/ticker-detail/SeasonalityTab", () => ({
-  default: () => createElement("div", { "data-testid": "mock-seasonality-tab" }),
+  default: () =>
+    createElement("div", { "data-testid": "mock-seasonality-tab" }),
 }));
 
 vi.mock("../components/ticker-detail/CompanyTab", () => ({
   default: () => createElement("div", { "data-testid": "mock-company-tab" }),
 }));
 
-function makePriceData(overrides: Partial<PriceData> & { symbol: string }): PriceData {
+function makePriceData(
+  overrides: Partial<PriceData> & { symbol: string },
+): PriceData {
   return {
     last: null,
     lastIsCalculated: false,
@@ -93,6 +96,7 @@ const portfolio: PortfolioData = {
       stop: null,
       legs: [
         {
+          conId: null,
           direction: "LONG",
           contracts: 20,
           type: "Call",
