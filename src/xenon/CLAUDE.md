@@ -90,6 +90,30 @@ New scanners compose `_shared` primitives — do not reimplement universe/execut
 6. Kelly sizing — enforce 2.5% cap
 7. Log → `trade_log.json` or `docs/status.md`
 
+## Order Execution Modules
+
+`src/xenon/execution/` — all IB order/fill logic:
+
+- `ib_place_order.py`, `ib_order_manage.py` (cancel/modify via subprocess; see `api/CLAUDE.md`)
+- `orders_store.py` — DuckDB orders journal (UTC-pinned writer; see api/CLAUDE.md migration notes)
+- `single_leg_rehydrate.py` — three-source reconcile (orders DB, IB open orders, CRI monitor). Invoked in FastAPI lifespan on boot; exposed for testing via `POST /dev/rehydrate/synthetic`.
+- `naked_short_audit.py` — Gate-4 post-sync enforcement
+- `quote_guard.py`, `contract_normalize.py`, `preflight.py` — order-path safety layers
+
+**Note:** `quote_tokens.py` exists but the integration flow (#34) was reverted (#35) — the F3 regression is still open; do not wire it back into `/orders/quote` without re-reviewing.
+
+## Dev Environment
+
+Python deps via **`uv`** (not pip). `pyproject.toml` defines `[project.optional-dependencies].test` (pytest + pytest-asyncio) and `.extras`. Locally:
+
+```bash
+uv sync --extra test             # install deps incl. test
+uv run xenon-trend-scan --top 25 # run any CLI entry point
+uv run pytest -xvs <path>        # single test
+```
+
+CI uses `uv sync --frozen --extra test` then `uv run pytest` — affected-on-PR, full-on-master.
+
 ## Append-only data files
 
 - `data/portfolio.json` — open positions, bankroll, exposure

@@ -1,570 +1,553 @@
-# Leg-by-Leg Order Wizard — Design
+# Combo-First Spread Execution Wizard — Design
 
 Date: 2026-04-20
-Status: Draft v0.2 (post-tribunal), awaiting review
+Status: Reviewed v0.4 (combo-first revision on 2026-04-24)
 Depends on: completion of `docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md`
-(phases F0–F7, shipped via PR #25/#27/#28/#29). Phases W1–W6 of
+(phases F0–F7, shipped via PR #25/#27/#28/#29). The archived master plan at
 `docs/superpowers/archive/plans/2026-04-20-order-execution-foundation-master.md`
-implement this spec.
+is historical context only; active implementation is driven by the current
+execution plan for this spec.
 
-Burn-in gate: waived on 2026-04-23. Author chose to proceed with wizard
-work directly; foundation observability (REHYDRATE_RECONCILED/UNCERTAIN,
-orders_events, naked_short_audit) continues to run but is no longer a
-blocking precondition.
-Related code: `src/xenon/execution/`, `src/xenon/monitor_daemon/handlers/`,
-`web/lib/order/`, `web/components/ticker-detail/OrderTab.tsx`,
-`src/xenon/api/routes/`, `docs/trading/options-structures.json`,
-`src/xenon/execution/naked_short_audit.py`, `web/lib/nakedShortGuard.ts`
+Burn-in gate: waived on 2026-04-23. Foundation observability
+(`REHYDRATE_RECONCILED` / `REHYDRATE_UNCERTAIN`, `orders_events`,
+`naked_short_audit`) remains active and is reused by this design.
 
-Changelog v0.1 → v0.2: applied 15 fixes from Codex + Claude tribunal review
-(partial fills, naked-short audit extension, atomic protection state,
-SL semantics rename, TP math, jade-lizard whatIf, calendar/diagonal risk
-reclass, residual BAG, BWB sequencing, quote freshness, rehydrate
-reconciler, idempotency keys, test matrix extension, server-side Gate 4,
-new `wizard_stop_monitor.py` handler).
+Related code: `src/xenon/execution/`, `src/xenon/api/server.py`,
+`src/xenon/api/routes/`, `src/xenon/monitor_daemon/run.py`,
+`src/xenon/monitor_daemon/handlers/`, `web/lib/order/`,
+`web/lib/optionsChainUtils.ts`, `web/components/ticker-detail/OrderTab.tsx`,
+`web/components/ticker-detail/OptionsChainTab.tsx`,
+`web/app/api/orders/place/route.ts`, `web/app/api/orders/modify/route.ts`,
+`docs/trading/options-structures.json`, `src/xenon/execution/naked_short_audit.py`,
+`web/lib/nakedShortGuard.ts`
+
+Changelog v0.3 → v0.4: replaced the leg-by-leg V1 premise with a
+combo-first execution model for defined-risk spreads; repositioned the popup as
+a combo execution assistant instead of a per-leg sequencer; removed leg-by-leg
+placement from the default path; aligned execution to natural/mid laddering;
+kept Xenon’s mandatory BAG semantics (preserve sign and per-leg actions; do not
+flip BAG structure by net debit/credit); retained the popup modal and compact
+resume strip as the UI shape.
 
 ## 1. Purpose & non-goals
 
-**Purpose.** Place multi-leg option structures as **sequenced individual
-legs** rather than a single IB BAG combo order, capturing better fills than
-the synthetic combo market provides — while holding the existing Gate 1–4
-guarantees across leg-risk windows, partial fills, and failure recovery.
+**Purpose.** Execute defined-risk spreads as a **single combo/BAG order**
+instead of sequencing legs individually, reducing legging risk while preserving
+existing Xenon guarantees around signed pricing, Gate 4, idempotency,
+rehydration, and operator-visible failure handling.
+
+The primary risk reduction is straightforward: a supported spread should be
+priced, submitted, and modified as one structure so the operator is not exposed
+to the default V1 failure mode of getting one leg filled while the rest of the
+position is still unhedged.
 
 **Non-goals.**
 
 - Not a replacement for single-leg or stock order entry.
 - Not a scanner or idea generator.
 - Not a naked-short enabler. Gate 4 remains authoritative and is enforced
-  **server-side** by the wizard planner, not just by the UI guard.
-- Not a smart-order-router (SMART still routes each individual leg).
-- **Does not guarantee loss containment** — see §8 "Risk Alert" semantics.
+  server-side.
+- Not a leg-by-leg default workflow for defined-risk spreads.
+- Not a guarantee of loss containment. Risk Alert remains assisted-exit logic.
+- Not a rewrite of Xenon’s existing BAG semantics.
 
-## 2. Scope
+## 2. Core execution rule
 
-| In V1                                                                                              | Out of V1                                                       |
-| -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| Opens + closes                                                                                     | Rolls (combined close+open)                                     |
-| Structures: vertical, long/iron butterfly, BWB, iron condor, calendar, diagonal, **jade lizard**   | Stock+option combos (collars, covered-call overwrite) — phase 2 |
-| Mode A (decision-support; user clicks each leg)                                                    | Mode B (semi-auto anchor placement) — graduation                |
-| Per-structure TP policy (fixed-risk spreads only); SL = "Risk Alert" assisted exit                 | Auto-chase, auto-convert-to-BAG, true auto-SL — graduation      |
-| Dry-run / paper mode via `XENON_API_TEST_MODE`                                                     | Back-testing the legging algorithm                              |
-| Sequencing: γ rule (SAFETY default; LIQUIDITY opt-in only for structures with **zero short legs**) | Algorithmic model-based TP for calendars/diagonals              |
+### 2.1 Default rule
 
-## 3. Structure risk classification
+For **defined-risk spreads**, Xenon should:
 
-"Contains short legs" and "risk class" are independent axes.
+- build the trade as **one combo/BAG order**
+- show **natural / mid / ladder** guidance
+- submit and modify the **combo as a whole**
+- avoid leg-by-leg sequencing unless the user explicitly chooses an advanced
+  legging mode in a future phase
 
-| Risk       | Structures                                                                                                     | Has short leg?  | Gate Notes                                                                                                                       |
-| ---------- | -------------------------------------------------------------------------------------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| **Low**    | long vertical debit, long (debit) butterfly                                                                    | No              | Max loss = net debit                                                                                                             |
-| **Medium** | short vertical, iron condor, iron butterfly, broken-wing butterfly (BWB), **long calendar**, **long diagonal** | Yes             | Defined risk; short legs hedged within structure or by opposite-expiry long. Calendars/diagonals have a short near-dated leg.    |
-| **High**   | jade lizard                                                                                                    | Yes (short put) | Short put bounded only by cash collateral; must pass IB `whatIf` margin check (see §11). Requires explicit user acknowledgement. |
+This applies to both **opening** and **closing** defined-risk spreads.
 
-**LIQUIDITY sequencing opt-in is gated on "has short leg = No"** — that
-excludes calendars, diagonals, BWB, and every Medium/High structure.
+The UI and API should treat combo placement as the lower-risk default for these
+structures. If a structure is eligible for combo-first V1 support, Xenon should
+not route the operator into a sequenced-leg path.
 
-Risk-level badge is rendered in the plan-review step. **High** gates the
-first-leg action behind a checkbox: _"I accept the cash-secured downside on
-this structure."_ Acknowledgement is appended to the session audit log as a
-`SessionEvent`.
+### 2.2 Xenon BAG semantics remain mandatory
 
-## 4. High-level architecture
+The external trading premise is directionally correct on risk, but Xenon must
+still obey the project’s mandatory combo-order rules:
 
+- Do **not** derive BAG `Order.action` from net debit vs net credit.
+- Preserve the intended per-leg `BUY` / `SELL` actions.
+- Preserve signed combo prices end-to-end.
+- Never use `Math.abs()` or equivalent to erase credit/debit sign.
+
+For Xenon order payloads, the BAG envelope must continue to follow the existing
+house convention already encoded in `web/lib/optionsChainUtils.ts`,
+`web/components/ticker-detail/OrderTab.tsx`, and the order-route tests.
+
+The project-wide BAG guardrails in `CLAUDE.md` (src/xenon) are authoritative and
+apply to the wizard without modification:
+
+1. Never map combo `Order.action` from debit vs credit — envelope stays `BUY`,
+   per-leg actions carry the structure.
+2. On any **single-leg → combo** transition in the parent order surface, the
+   stale top-level manual net price must be cleared and recomputed from the
+   normalized combo quote. The wizard inherits this rule for any single-to-combo
+   handoff (e.g. operator opens the popup from a single-leg builder state).
+3. Required regressions for combo-entry bugs: a unit test for combo
+   action/ratio/net-price semantics **and** a browser test for displayed combo
+   net price + submitted payload.
+
+**Implication:** this design is **combo-first**, but it is **not** a naive
+adoption of generic IB ticket examples that would flip the spread or re-create
+the known BAG reversal bug.
+
+## 3. Scope
+
+| In V1                                                                         | Out of V1                                                                           |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| Opens + closes for defined-risk spreads as one combo order                    | Leg-by-leg default execution                                                        |
+| Structures: verticals, iron condors, iron butterflies, long butterflies, BWBs | Standalone legging workflows for standard spreads                                   |
+| Combo execution popup with natural/mid ladder guidance                        | Dedicated wizard page                                                               |
+| Combo modify-in-place repricing workflow                                      | Drawer / slide-over UI                                                              |
+| Protection for supported defined-risk combo structures                        | Calendars / diagonals / jade lizard until combo-first rules are separately reviewed |
+| Compact parent-session strip with `Resume Wizard`                             | Auto-chase / unattended repricing                                                   |
+| Dry-run / paper mode via `XENON_API_TEST_MODE`                                | Auto-legging or smart leg sequencing                                                |
+
+## 4. Pricing framework
+
+### 4.1 Displayed prices
+
+The popup must present three concepts clearly:
+
+- **Natural**: executable anchor now
+- **Mid**: fair negotiation start
+- **Ladder**: controlled movement from mid toward natural
+
+### 4.2 Natural quote math
+
+Natural pricing must use cross-fields, not mid-mid:
+
+```text
+BUY combo  -> pay ASK on BUY legs, receive BID on SELL legs
+SELL combo -> receive BID on BUY legs, pay ASK on SELL legs
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  Frontend (web/)                                             │
-│  WizardModal ── useWizardSession() ── SSE /wizard/stream    │
-│     ▲                                                        │
-│     │   /api/wizard/*  (Next.js route → xenonFetch)         │
-└─────│────────────────────────────────────────────────────────┘
-      │
-┌─────▼────────────────────────────────────────────────────────┐
-│  FastAPI (src/xenon/api/routes/wizard.py)                    │
-│  plan / sessions / place-next / resolve-stall / abort        │
-│  protect / stream / reconcile                                │
-└─────│────────────────────────────────────────────────────────┘
-      │
-┌─────▼────────────────────────────────────────────────────────┐
-│  Core engine (src/xenon/execution/leg_wizard/)               │
-│  ├ planner.py        — structure → ordered leg plan (γ rule) │
-│  │                    SERVER-SIDE Gate 4 + Gate 1 enforcement│
-│  ├ session.py        — session state machine + audit log     │
-│  ├ sequencer.py      — drives per-leg placement, partial-fill│
-│  │                    tracking, reprices                     │
-│  ├ residual_planner.py — residual-BAG builder (§7.3)         │
-│  ├ protect.py        — TP attach + Risk-Alert registration   │
-│  ├ quote_guard.py    — fresh-quote / crossed-quote gates     │
-│  ├ rehydrate.py      — restart reconciler (exec-first)       │
-│  └ store.py          — DuckDB-backed session store           │
-│         data/leg_wizard.duckdb                               │
-│                                                              │
-│  New sibling handler:                                        │
-│  src/xenon/monitor_daemon/handlers/wizard_stop_monitor.py    │
-│    (NOT a change to exit_orders.py — it keeps its current    │
-│     PENDING_MANUAL trade_log.json responsibility intact)     │
-│                                                              │
-│  Extended (required before V1 ships):                        │
-│  src/xenon/execution/naked_short_audit.py                    │
-│    + wizard-session awareness (tag-based skip + per-leg      │
-│      long-option coverage check in position ledger)          │
-└─────│────────────────────────────────────────────────────────┘
-      │
-      ├──► ib_place_order.py (single-leg + BAG)
-      ├──► ib_order_manage.py (modify / cancel)
-      ├──► IB whatIf (jade-lizard margin preview)
-      ├──► IB executionDetails / positions (rehydrate.py)
-      └──► IB Gateway
+
+This must match the existing combo quote semantics already enforced in
+`computeNetOptionQuote()` and the project rules.
+
+### 4.3 Ladder behavior
+
+For liquid defined-risk spreads:
+
+- Start at `mid` by default when the quoted width is reasonable.
+- Walk toward `natural` in small increments.
+- Suggested step sizes:
+  - many equity spreads: `$0.02` to `$0.05`
+  - wider/index products such as SPX: `$0.05` to `$0.10`
+
+Execution ladder is operator-assisted:
+
+- `MID`
+- `MID ± step`
+- `MID ± 2 * step`
+- `NATURAL`
+
+The actual sign/direction of the adjustment depends on whether the operator is
+trying to receive more credit or pay less debit, but the UI should present this
+in combo terms, not in per-leg math.
+
+## 5. Architecture
+
+```text
+Frontend
+  OptionsChainTab > OrderBuilder
+  OrderTab > ComboOrderForm
+    -> "Place via Wizard" opens popup modal
+    -> compact session strip shows status/resume outside the modal
+    -> Next.js /api/wizard/* proxies + SSE
+
+FastAPI
+  src/xenon/api/routes/wizard.py
+    -> plan / sessions / submit / reprice / abort / protect / stream / reconcile
+  mounted from src/xenon/api/server.py
+
+Execution core
+  src/xenon/execution/combo_wizard/
+    planner.py
+    combo_quotes.py
+    session.py
+    protect.py
+    rehydrate.py
+    store.py
+
+Reused foundation
+  orders_store.py
+  quote_guard.py
+  single_leg_rehydrate.py
+  preflight.py
+  ib_place_order.py
+  ib_order_manage.py
 ```
 
-Entry point: **modal launched from `OrderTab`** alongside the existing
-`ComboOrderForm`. No standalone route.
+### 5.1 Reuse, not fork
 
-## 5. Data model
+- Persist wizard session state in the same `data/orders.duckdb` file used by
+  `orders_store`.
+- Reuse `orders_submissions` / `orders_events` for actual combo submission and
+  modify flows.
+- Wizard submit must reuse the **same place-order code path and semantics** as
+  `/orders/place` with `type: "combo"` (today routed to
+  `src/xenon/execution/ib_place_order.py`, which already handles BAG +
+  `NonGuaranteed=1`). Wizard reprice must reuse the **same modify-order code
+  path and semantics** as `/orders/modify` (`ib_order_manage.py`, which
+  re-applies `smartComboRoutingParams` for BAG modifies). This is a reuse-path
+  requirement, not a loopback-HTTP requirement inside FastAPI. The wizard
+  module MUST NOT edit `ib_place_order.py` or `ib_order_manage.py` — both
+  files are shipped, hardened, and combo-aware today. Any per-leg construction
+  logic lives behind them, not in `combo_wizard/`.
+- Reuse `single_leg_rehydrate.py` decision logic where attempt/order-level
+  reconcile semantics overlap, but combo rehydrate has a **BAG-specific**
+  branch: IB reports per-leg executions under one parent `permId`, so
+  reconciliation must sum executions against the combo attempt, not compare
+  a single fill record to a single contract.
+- Quote math: `web/lib/optionsChainUtils.ts::computeNetOptionQuote` remains the
+  canonical signed-combo-quote source. The Python `combo_quotes.py` in the
+  wizard is a **mirror** for server-side planning, and must carry a parity
+  test that asserts identical outputs to the TS implementation for a fixed
+  fixture set.
+
+### 5.2 No V1 leg sequencer
+
+The prior `place-next` per-leg state machine is removed from the default V1
+design. V1 tracks a **combo order session**, not a list of released legs.
+
+## 6. Data model
 
 ```python
-# src/xenon/execution/leg_wizard/models.py
-
-class LegAttempt(BaseModel):
-    attempt_id: str             # UUID; part of idempotency key
+class ComboAttempt(BaseModel):
+    attempt_id: str
+    client_attempt_id: str
     ib_order_id: str | None
     perm_id: str | None
+    intent: Literal["OPEN", "CLOSE"]
     target_price: Decimal
-    price_basis: Literal["BID", "MID", "ASK", "CUSTOM"]
+    price_basis: Literal["NATURAL", "MID", "STEP", "CUSTOM"]
+    ladder_step: Decimal | None
     submitted_at: datetime
-    filled_qty: int             # 0..requested_for_attempt
-    avg_fill_price: Decimal | None
     terminal_state: Literal[
         "PENDING", "WORKING", "FILLED", "PARTIALLY_FILLED",
         "CANCELLED", "REJECTED"
     ]
-    ib_reject_code: int | None  # e.g. 201
+    filled_qty: int
+    avg_fill_price: Decimal | None
+    ib_reject_code: int | None
     ib_reject_text: str | None
 
-class LegPlan(BaseModel):
-    leg_id: str
-    order_index: int
-    contract: OptionContract
-    action: Literal["BUY", "SELL"]
-    ratio: int
-    requested_qty: int          # = ratio * structure_count
-    filled_qty: int             # SUM across attempts
-    remaining_qty: int          # = requested_qty - filled_qty
-    avg_fill_price: Decimal | None
-    risk_class: Literal["RISK_REDUCING", "RISK_INCREASING"]
-    max_permitted_qty_now: int  # ≤ currently-hedged qty if RISK_INCREASING
-    attempts: list[LegAttempt]
 
 class BracketConfig(BaseModel):
-    # TP policy is per-structure-class (§8.1)
     tp_enabled: bool
-    tp_pct_of_max_profit: Decimal | None   # fixed-risk spreads only
-    tp_ib_order_id: str | None             # after attach
-    # Risk Alert (formerly "SL"); does NOT guarantee loss containment
+    tp_target_price: Decimal | None
+    tp_ib_order_id: str | None
     alert_enabled: bool
-    alert_net_mid_threshold: Decimal | None  # signed
-    alert_virtual_id: str | None             # wizard_stop_monitor id
+    alert_net_mid_threshold: Decimal | None
+    alert_virtual_id: str | None
     time_stop_dte: int | None
 
+
 class SessionState(str, Enum):
-    PLANNED             = "planned"
-    IN_PROGRESS         = "in_progress"
-    STALLED             = "stalled"
-    REJECTED            = "rejected"           # IB hard-reject path
-    PROTECTION_PENDING  = "protection_pending" # last fill done, bracket attaching
-    PROTECTION_FAILED   = "protection_failed"  # bracket attach retries exhausted
-    PROTECTED           = "protected"          # TP armed + Risk Alert armed
-    ABORTED             = "aborted"            # no legs filled
-    ROLLED_BACK         = "rolled_back"        # filled legs unwound via tiered limits
+    PLANNED = "planned"
+    SUBMITTING = "submitting"
+    WORKING = "working"
+    REPRICE_PENDING = "reprice_pending"
+    STALLED = "stalled"
+    FILLED = "filled"
+    REJECTED = "rejected"
+    PROTECTION_PENDING = "protection_pending"
+    PROTECTION_FAILED = "protection_failed"
+    PROTECTED = "protected"
+    ABORTED = "aborted"
+
 
 class WizardSession(BaseModel):
     session_id: str
     ticker: str
-    structure_name: str                  # catalog "name" field, NOT "id"
-    risk_level: Literal["LOW", "MEDIUM", "HIGH"]
-    has_short_leg: bool
+    structure_name: str
+    risk_level: Literal["LOW", "MEDIUM"]
     intent: Literal["OPEN", "CLOSE"]
-    mode: Literal["A"]                   # V1 only
-    sequencing: Literal["SAFETY", "LIQUIDITY"]
-    net_target: Decimal                  # signed: debit +, credit −
-    max_slippage: Decimal
-    legs: list[LegPlan]
+    mode: Literal["COMBO"]
+    net_target: Decimal
+    ladder_step: Decimal
+    natural_price: Decimal | None
+    mid_price: Decimal | None
+    best_price: Decimal | None
+    attempts: list[ComboAttempt]
     brackets: BracketConfig | None
     state: SessionState
-    events: list[SessionEvent]           # append-only audit log
-    tag: str                             # stable tag for IB orders + audit skip
     created_at: datetime
     updated_at: datetime
 ```
 
-**Idempotency key for `/place-next`**: `(session_id, leg_id, attempt_id)`
-where `attempt_id` is supplied by the client on each call. Server rejects
-duplicate `attempt_id`s; retries with new `attempt_id` are explicit.
+Persistence shape:
 
-## 6. Planner (planner.py)
+- `wizard_sessions`
+- `wizard_combo_attempts`
+- `wizard_session_events`
+- `wizard_protection`
 
-### 6.1 Leg ordering (γ rule)
+All live in `data/orders.duckdb`, not a parallel DB.
 
-```
-plan(structure_name, intent, legs, prices, sequencing=SAFETY) -> Plan:
-    # Step 1. Classify each leg vs post-fill position:
-    #   RISK_REDUCING   = Gate-4 and max-loss posture ≥ pre-fill after this leg
-    #   RISK_INCREASING = otherwise
-    # Step 2. Structure-specific sequencing rules (§6.2)
-    #         fall back to SAFETY-with-widest-bid-ask tie-breaker
-    # Step 3. If sequencing == LIQUIDITY:
-    #   REJECT if has_short_leg is True (Gate-4 safety; no naked window)
-    # Step 4. Per-leg default target_price:
-    #   BUY  -> MID, capped at ASK-1tick
-    #   SELL -> MID, floored at BID+1tick
-    # Step 5. Compute net_target (signed)
-    # Step 6. Gate 1 check (max_gain / max_loss ≥ 2); require acknowledge
-    #         if fails. Gate 4 server-side check on the *full* plan.
-```
+## 7. Planner
 
-### 6.2 Structure-specific sequencing rules
+The planner no longer computes a leg release order for V1. It now computes:
 
-Stored as a `sequencing_rules` block per structure in a new sibling file
-`docs/trading/options-structures-sequencing.json` (keyed by catalog
-`name`). Required for: BWB, iron condor, iron butterfly, jade lizard,
-calendar, diagonal. Each rule specifies:
+- supported structure classification
+- operator-facing risk level
+- signed `natural`, `mid`, and ladder anchors
+- recommended default ladder step
+- whether the structure is eligible for V1 combo-first execution
 
-- Explicit leg order by role (e.g. BWB: `far_long_wing → near_long_wing →
-short_1 → short_2`, with short-leg quantity capped by realized
-  long-wing qty).
-- Partial-fill policy: if long wing fills 7/10, short-leg submissions
-  are capped at 7 until the wing fills more.
+If a structure is **not** in the defined-risk combo-first set, the wizard must
+not silently fall back to legging. It should block with explicit copy such as:
 
-### 6.3 Server-side Gate-4 enforcement
+`This structure is not in combo-first V1. Use the standard order form or wait for advanced mode.`
 
-Before `/place-next` releases an order to IB, a Gate-4 check runs against
-**current live positions + all in-flight wizard leg fills**:
+## 8. Session state machine
 
-- Port `web/lib/nakedShortGuard.ts` logic into
-  `src/xenon/execution/leg_wizard/gate4.py`.
-- Treats long calls on the same underlying+expiry as valid cover for
-  short calls (vertical coverage), in addition to stock.
-- Treats long puts on same underlying+expiry as valid for short puts
-  (cash-secured not required when a vertical put spread covers).
+```text
+PLANNED
+  -> SUBMITTING
+  -> WORKING
+     -> FILLED
+     -> REPRICE_PENDING
+     -> STALLED
+     -> REJECTED
+     -> ABORTED
 
-This is the authoritative guard. UI check remains for UX speed but is
-advisory.
-
-## 7. Execution state machine (sequencer.py)
-
-### 7.1 Transitions
-
-```
-PLANNED ─confirm plan─▶ IN_PROGRESS (leg 0 placed at IB)
-                            │
-                            ├─ leg fills fully ─▶ next leg eligible
-                            │                     (user click in Mode A)
-                            │                     loop until remaining_qty==0
-                            │                     on ALL legs
-                            │                     ──▶ PROTECTION_PENDING
-                            │
-                            ├─ leg partially fills ─▶ re-plan:
-                            │     risk-increasing legs' max_permitted_qty_now
-                            │     is recomputed against currently-hedged qty;
-                            │     wizard may proceed with CAPPED qty
-                            │     instead of stalling
-                            │
-                            ├─ leg rejected by IB (201 / margin / contract)
-                            │     ──▶ REJECTED
-                            │     user must choose: retry-reprice | abort
-                            │     (rollback if any legs filled)
-                            │
-                            ├─ leg working > T (default 60s) ─▶ STALLED
-                            │     resolve via §7.2
-                            │
-                            └─ user aborts ─▶
-                                 if any leg filled: ROLLED_BACK
-                                   (tiered limit unwind, §7.4)
-                                 else:            ABORTED
-
-PROTECTION_PENDING ─attach_ok──▶ PROTECTED
-                  ─retries exhausted──▶ PROTECTION_FAILED
-                                         user notified to manually exit
+FILLED
+  -> PROTECTION_PENDING
+  -> PROTECTED
+  -> PROTECTION_FAILED
 ```
 
-### 7.2 Stall resolution menu
+State meanings:
 
-Shown when STALLED:
+- `PLANNED`: plan exists, no live combo submitted
+- `SUBMITTING`: combo order being placed through shared order path
+- `WORKING`: combo live at IB
+- `REPRICE_PENDING`: operator requested a ladder step / modify
+- `STALLED`: combo has not filled within operator-defined tolerance
+- `REJECTED`: combo was rejected
+- `FILLED`: combo entry/exit completed
+- `PROTECTION_PENDING`: protection workflow running after fill
+- `PROTECTED`: TP + Risk Alert armed where applicable
+- `PROTECTION_FAILED`: operator must intervene
+- `ABORTED`: combo cancelled / abandoned without a filled structure change
 
-- **Retry at new price** — user-entered limit; creates new `LegAttempt`
-  with fresh `attempt_id`.
-- **Tiered-limit unwind & abort** — unwinds filled legs via progressive
-  limit prices (§7.4). No market orders offered.
-- **Residual BAG** — see §7.3.
+## 9. Protection
 
-### 7.3 Residual BAG (residual_planner.py)
+### 9.1 Supported V1 protection
 
-When the user selects "convert remainder to BAG", the planner:
+For supported defined-risk spreads:
 
-1. Reads current filled quantities per leg from the wizard session.
-2. Computes `target_structure − filled = residual legs` (may differ from
-   original plan in both quantity and composition).
-3. Builds a fresh BAG with `Order.action=BUY` envelope and per-leg
-   `ComboLeg.action` set per the Xenon convention (LONG→BUY, SHORT→SELL),
-   **never flipping Order.action** to encode direction.
-4. Submits via existing `xenon-ib-place-order --type combo`.
-5. On fill: reconciles into the session as a single composite fill
-   event; transitions to PROTECTION_PENDING.
+- Attach broker-side combo TP where the payoff definition is stable enough.
+- Attach Risk Alert assisted-exit where operator confirmation is still required.
 
-### 7.4 Tiered-limit unwind (replaces the removed "market-close" option)
+### 9.2 Risk Alert naming
 
-To unwind filled legs safely after abort or REJECTED:
+This remains a _Risk Alert → Assisted Exit_, not a stop-loss. The popup must
+say that explicitly.
 
-1. Start at **current mid**.
-2. If no fill in 20s, move to **mid ± 10%** (toward natural market).
-3. If no fill in 40s, move to **mid ± 25%**.
-4. If no fill in 60s, **prompt user** with current market + explicit
-   "Accept unbounded slippage (market order)" button. Never auto-market.
+## 10. Quote freshness & combo math
 
-All unwind orders run through Gate 4: closing a short leg while a long
-wing remains is always allowed (reduces risk); closing the long wing
-first while a short remains open is blocked.
+Any wizard price suggestion or Risk Alert threshold check must require:
 
-## 8. Protection (protect.py)
+- non-crossed quotes
+- non-zero bid/ask sizes
+- no null / NaN values
+- cross-field combo math
+- fresh quote timestamps
 
-### 8.1 Per-structure TP policy
+Implementation split:
 
-| Structure class                                                 | TP policy                                                                                                                   |
-| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Fixed-risk debit (long vertical, long butterfly, BWB)           | Broker GTC BAG limit at `entry_net + tp_pct × max_profit` (signed, tested both directions)                                  |
-| Fixed-risk credit (short vertical, iron condor, iron butterfly) | Broker GTC BAG limit at `entry_net − tp_pct × max_profit` (signed)                                                          |
-| **Calendar, diagonal**                                          | **Broker TP forbidden in V1** (max profit depends on IV/DTE, no closed-form). Alert-only at user-entered net-mid threshold. |
-| **Jade lizard**                                                 | Broker GTC BAG limit at configured % of credit received.                                                                    |
+- `quote_guard.py` remains authoritative for single-order submission gates
+  already used by the existing order APIs.
+- `combo_quotes.py` handles structure-level natural/mid math and freshness
+  decisions for the popup session model.
 
-Closing BAGs always use `Order.action=BUY` envelope with per-leg
-`ComboLeg.action` inverted at the leg level (LONG entry leg → SELL in
-close BAG → encoded as `ComboLeg.action=SELL` because the catalog action
-flips). **Never** encode direction via `Order.action=SELL` — per
-`src/xenon/CLAUDE.md` this reverses the spread and triggers known
-error-201 bugs.
+## 11. API surface
 
-Regression: unit test + browser test for every structure's entry→close
-BAG pair, verifying the IB payload matches expected leg actions and that
-sign is preserved end-to-end.
+### 11.1 FastAPI
 
-### 8.2 Risk Alert (formerly "SL")
+| Method | Path                              | Purpose                                                 |
+| ------ | --------------------------------- | ------------------------------------------------------- |
+| POST   | `/wizard/plan`                    | Build combo-first plan with natural/mid/ladder guidance |
+| POST   | `/wizard/sessions`                | Persist session in `PLANNED`                            |
+| POST   | `/wizard/sessions/{id}/submit`    | Submit combo order through shared combo path            |
+| POST   | `/wizard/sessions/{id}/reprice`   | Modify combo order to next/selected ladder price        |
+| POST   | `/wizard/sessions/{id}/abort`     | Cancel combo order and close session flow               |
+| POST   | `/wizard/sessions/{id}/protect`   | Attach TP + Risk Alert after fill                       |
+| GET    | `/wizard/sessions/{id}`           | Fetch session snapshot                                  |
+| GET    | `/wizard/stream?session_id=…`     | SSE session updates                                     |
+| POST   | `/wizard/sessions/{id}/reconcile` | Force reconcile from IB state                           |
 
-**Naming:** this feature is a _Risk Alert → Assisted Exit_, not a
-stop-loss. Loss containment is **not guaranteed** in V1. UI and
-documentation must say this explicitly. Users seeking hard SL use IB's
-broker-side stop on their own (out of scope).
+### 11.2 Next.js proxy
 
-**Behaviour:**
+Mirror the above under `web/app/api/wizard/…` using the same `xenonFetch()`
+and SSE proxy pattern Xenon already uses.
 
-1. On transition to PROTECTED, a row is written to the new
-   `wizard_stop_monitor.py` handler (NOT `exit_orders.py`).
-2. Handler polls structure net-mid via the existing `quote_guard.py`
-   freshness rules (§9).
-3. When threshold is breached for N-of-M consecutive samples with all
-   quotes fresh:
-   - A desktop + email notification fires.
-   - A new close-intent `WizardSession` is auto-created in PLANNED state
-     with a pre-populated legging plan.
-   - User must confirm to execute. If no confirmation within
-     `risk_alert_ack_timeout` (default 60s), a **badge escalates**;
-     there is no auto-execution.
+## 12. Gates & guardrails
 
-### 8.3 Atomic protection
+- **Gate 1** remains server-authoritative.
+- **Gate 4** remains server-authoritative.
+- **Signed combo pricing** remains mandatory.
+- **Combo entry/exit must use BAG as a whole**, not manual legging, for V1
+  supported defined-risk spreads.
+- **Market hours**: actual combo submission / repricing must respect the same
+  option-tradeability window enforced elsewhere in the execution stack.
+- **Advanced legging mode** is explicitly out of V1 scope.
 
-`PROTECTION_PENDING` is entered atomically with final fill. Transition
-to `PROTECTED` requires:
+## 13. Rehydration
 
-- TP IB order id present AND acknowledged by IB open-orders.
-- Risk Alert row persisted and picked up by the monitor loop.
+On restart, for every `SUBMITTING`, `WORKING`, `REPRICE_PENDING`,
+`PROTECTION_PENDING`, or `PROTECTED` session:
 
-If any sub-step fails, retry with exponential backoff (max 5 attempts
-over 30s), then move to `PROTECTION_FAILED`. A banner prompts the user
-to manually register exits; the session remains PROTECTION_FAILED until
-user resolves.
+1. Fetch IB open orders, executions, and positions.
+2. Reconcile the combo order attempt against executions first. Because IB
+   reports combo fills as **per-leg executions sharing one parent `permId`**,
+   reconcile by grouping executions on the attempt's `permId` and checking
+   that every leg reached the expected ratio — do not treat a single-leg
+   execution row as a combo fill.
+3. Re-register Risk Alert rows for protected sessions.
+4. Retry unfinished protection attachment.
+5. Log any disagreement as a session event.
 
-### 8.4 OCA link (Xenon-managed)
+Paper-first gate: modify and abort behavior for BAG combos MUST be verified
+against an IB paper account before any wizard modify/abort code lands on
+master. This follows the project rule recorded in
+`feedback_broker_bugs_paper_first` — broker modify/cancel bugs are diagnosed
+against paper, never live money.
 
-- `tp_fill_watcher` (polls `ib_sync`) cancels the Risk Alert row when TP
-  fills.
-- `wizard_stop_monitor` cancels the TP IB order when Risk Alert fires
-  and the user confirms the unwind.
+## 14. Frontend surface
 
-## 9. Quote freshness (quote_guard.py)
+### 14.1 Entry points
 
-Any net-mid evaluation (Risk Alert trigger, stall detection, TP
-suggested default) must pass:
+- `OptionsChainTab > OrderBuilder`: primary OPEN flow
+- `OrderTab > ComboOrderForm`: OPEN/CLOSE flow for existing combo positions
 
-- Per-leg quote `ts` within `max_age_ms` (default 1500ms during market
-  hours).
-- Non-zero `bid_size` and `ask_size`.
-- No crossed book (`bid <= ask`).
-- No `NaN` / null fields.
-- Cross-quote net-mid (BUY legs use ASK, SELL legs use BID — **not**
-  mid-mid) per `web/CLAUDE.md` convention.
+### 14.2 Popup modal requirement
 
-Risk Alert additionally requires **N-of-M** consecutive samples
-(default 3-of-5) above threshold before firing.
+- The wizard is an **in-app popup modal dialog**.
+- It is **not** a page route.
+- It is **not** a drawer / slide-over.
+- The underlying ticker page remains visible beneath the scrim.
 
-## 10. API surface
+### 14.3 Parent session strip
 
-| Method | Path                                      | Purpose                                                                                                                            |
-| ------ | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| POST   | `/api/wizard/plan`                        | Build a plan; no side effects. Server-side Gate checks applied.                                                                    |
-| POST   | `/api/wizard/sessions`                    | Persist plan; move to `PLANNED`.                                                                                                   |
-| POST   | `/api/wizard/sessions/{id}/place-next`    | Body: `{leg_id, attempt_id, target_price}`. Idempotent on `(session_id, leg_id, attempt_id)`. Returns IB order id + session state. |
-| POST   | `/api/wizard/sessions/{id}/resolve-stall` | `{action: "retry"\|"abort"\|"bag", price?, attempt_id?}`.                                                                          |
-| POST   | `/api/wizard/sessions/{id}/abort`         | Cancel open legs; triggers tiered-limit unwind for filled legs.                                                                    |
-| POST   | `/api/wizard/sessions/{id}/protect`       | Attach TP + Risk Alert after final fill. Triggered automatically by sequencer; exposed for manual retry from PROTECTION_FAILED.    |
-| GET    | `/api/wizard/sessions/{id}`               | Full session state.                                                                                                                |
-| GET    | `/api/wizard/stream?session_id=…`         | SSE: session events.                                                                                                               |
-| POST   | `/api/wizard/sessions/{id}/reconcile`     | Force rehydrate from IB executions (used by restart reconciler + manual debug).                                                    |
+When a wizard session exists, show a compact status strip in the parent order
+surface:
 
-All authed via Clerk bearer + `ALLOWED_USER_IDS`.
+- `WIZARD SESSION`
+- structure / state / current price anchor
+- last event
+- `Resume Wizard`
+- `Abort` when valid
 
-## 11. Gates, guardrails & pre-V1 prerequisites
+This strip is monitor/resume UI only. The workflow itself remains in the popup.
 
-### 11.1 Pre-V1 required extensions
+### 14.4 Visual spec
 
-**Ownership note.** The bullets below are the authoritative requirement
-source. They are implemented by **phase F1** of the Order Execution
-Foundation master plan
-(`docs/superpowers/plans/2026-04-20-order-execution-foundation-master.md`).
-When the F1 sub-plan is written, these bullets migrate verbatim into it
-and this section can collapse to a pointer. Until then, requirements
-live here.
+**Modal box**
 
-These must land **before P1**:
+- Width: `min(960px, calc(100vw - 32px))`
+- Max height: `min(820px, calc(100vh - 48px))`
+- Background: `bg.panel`
+- Border: `1px solid line.grid`
+- Radius: `4px`
+- Shadow: none
 
-1. **`naked_short_audit.py` extended** to:
-   - Recognise a `leg_wizard` order tag and skip orders under active
-     wizard protection (they're governed by server-side Gate 4).
-   - For non-tagged OPT orders, add long-option coverage check
-     (vertical pairing), not just stock coverage.
-   - Regression: `scripts/tests/test_naked_short_audit.py` expanded with
-     wizard-tagged short call + long call position → not flagged.
+**Header rail**
 
-### 11.2 Runtime gates
+- `COMBO WIZARD`
+- `MODE COMBO · NATURAL/MID LADDER · SERVER AUTHORITY · SESSION ID`
+- IBM Plex Mono telemetry styling
 
-- **Gate 1 (convexity)**: planner rejects `max_gain / max_loss < 2`
-  unless user acknowledges; written into `events`.
-- **Gate 4 (no naked)**: server-side `gate4.py` evaluates full plan
-  at `/plan` and every `/place-next`. LIQUIDITY sequencing rejected
-  when `has_short_leg=True`.
-- **Jade-lizard cash-secured check**: IB `whatIf` preview on the
-  short-put leg immediately before each submission; compare against
-  current `availableFunds` and `excessLiquidity`; persist the preview
-  in `events`. Re-check before every subsequent leg (margin shifts on
-  prior fills).
-- **Slippage cap**: realized + expected > `max_slippage` →
-  auto-`STALLED`.
-- **Market hours**: session creation blocked outside 9:30–16:00 ET
-  weekdays unless `user_initiated=True` on the plan call (mirrors
-  `UwAnalyzeCache`).
+**Body**
 
-## 12. Rehydration on FastAPI restart (rehydrate.py)
+- Step strip:
+  `STRUCTURE · PRICE PLAN · EXECUTE · PROTECT · RESULT`
+- Desktop:
+  - left: main workflow
+  - right: telemetry rail
+- Mobile:
+  - single-column collapse
 
-On boot, for every session in `IN_PROGRESS`, `STALLED`,
-`PROTECTION_PENDING`, or `PROTECTED`:
+**Main workflow content**
 
-1. Fetch IB open orders **and** `executionDetails` **and** current
-   positions — three independent sources.
-2. Reconcile per-leg fill state against **executions first**, not
-   from open-order disappearance (disappearance can mean fill or
-   cancel; executions are authoritative).
-3. Re-register wizard_stop_monitor rows for PROTECTED sessions.
-4. For PROTECTION_PENDING: attempt bracket attach again; move to
-   PROTECTION_FAILED after retries exhausted.
-5. Never infer state from a single source; log any source
-   disagreement as a SessionEvent.
+- `Structure`: structure, leg pills, signed natural/mid, risk badge, gate rows
+- `Price Plan`: natural, mid, ladder buttons, chosen target
+- `Execute`: current combo state, working price, modify controls
+- `Protect`: TP + Risk Alert configuration
+- `Result`: achieved fill, slippage, final state
 
-## 13. Frontend surface
+**Telemetry rail**
 
-Entry: "Place via Wizard" button inside `ComboOrderForm`, visible only
-when staged combo matches a V1 structure.
+- ticker
+- structure
+- session state
+- current working price
+- quote freshness
+- last event
+- signed net target / achieved
 
-Steps:
+**Footer rail**
 
-1. **Structure confirm** — detected name from catalog, leg pills, signed
-   net mid, **risk badge**. Gate 1 + Gate 4 banner.
-2. **Plan review** — ordered leg list with per-leg target price
-   (BID/MID/ASK quick-fill), net target, max-slippage budget, risk
-   acknowledgement checkbox when **High**.
-3. **Bracket setup (opens only)** — TP policy dropdown (disabled for
-   calendar/diagonal), Risk Alert threshold, time-stop DTE (default
-   none). Copy clearly states Risk Alert is **assisted-exit**, not a
-   stop-loss.
-4. **Execute** — live leg list; next-to-place highlighted. Placed legs
-   show IB order id, filled_qty/requested_qty, avg fill price.
-   SSE-driven.
-5. **Stalled / Rejected view** — menu from §7.2. Market orders are not
-   listed; tiered-limit unwind is the default safe path.
-6. **Result** — net achieved vs target, total slippage, session id,
-   state (PROTECTED / PROTECTION_FAILED), links to TP + Risk Alert.
+- left: `Abort`, `Back`, `Reprice`
+- right: `Submit Combo`, `Move Toward Natural`, `Confirm Protection`, `Done`
+- footer remains visible while the body scrolls
 
-UI must tolerate SSE disconnect (badge + retry) and browser tab close
-(session state is server-authoritative; reopen resumes from current
-state).
+### 14.5 Page alignment
 
-All colors via brand tokens; panels ≤4px radius (per `brand/CLAUDE.md`).
+This UI must align with the overall Xenon page design:
 
-## 14. Testing
+- use `docs/reference/brand-identity.md`
+- use Xenon panel surfaces, hairline borders, and telemetry rails
+- use Inter + IBM Plex Mono
+- no soft rounded consumer modal styling
+- no heavy shadows
+- no decorative gradients
 
-### 14.1 Mandatory regressions
+## 15. Testing
 
-- Partial 1/N long-wing fill → short-leg submission capped at 1.
-- Short-leg REJECTED (IB 201) after long wing filled → state machine
-  reaches REJECTED; tiered-limit unwind offered; Gate 4 passes on
-  unwind.
-- Restart mid-IN_PROGRESS → rehydrate via executions (not
-  open-order disappearance).
-- Browser tab close + reopen mid-execute → UI resumes from server state.
-- Duplicate `place-next` with same `(session, leg, attempt_id)` →
-  second request is a no-op, not a duplicate IB submission.
-- Stale-leg quote causing false-positive Risk Alert threshold breach →
-  quote_guard suppresses until N-of-M fresh samples.
-- TP attach failure (IB reject) → PROTECTION_PENDING → retry → eventual
-  PROTECTION_FAILED → manual protect button works.
-- Residual BAG after 1/4 iron condor fill → payload has correct
-  residual legs + ratios, Order.action=BUY, ComboLeg.action LONG→BUY
-  SHORT→SELL.
-- Sign preservation through TP limit price for credit structures
-  (regression against `Math.abs` pipeline).
-- Jade-lizard whatIf rejected by insufficient excess liquidity →
-  short-put leg refused; planner state stays pre-placement.
-- naked_short_audit does NOT cancel a wizard-tagged short call when
-  its long-call cover is already filled.
+### 15.1 Mandatory regressions
 
-### 14.2 Test surfaces
+- Combo natural quote math uses cross-fields, not mid-mid
+- Signed credit/debit is preserved through popup, routes, and payloads
+- Combo submit uses the whole BAG order, not per-leg release
+- Reprice modifies the live combo order instead of replacing it with manual legs
+- Restart rehydrates combo session from executions/open orders
+- Risk Alert copy says assisted-exit, not stop-loss
+- Popup resumes server-authoritative session after close/reopen
+- Parent session strip appears in both Order Builder and Order Tab
 
-- **Unit (Python)**: planner, sequencer, residual_planner, gate4,
-  quote_guard, protect.
-- **Integration (Python)**: `scripts/tests/test_leg_wizard/` with
-  `FakeIBClient`; simulates partial fills, rejects, stalls, restart
-  recovery, whatIf flows.
-- **Frontend unit (Vitest)**: `useWizardSession` reducer, modal state.
-- **E2E (Playwright)**: full opens (vertical, iron condor, jade
-  lizard with ack), full closes, stall→residual-BAG, REJECTED unwind,
-  Risk Alert escalation.
-- **Coverage target**: 95% per Xenon policy.
+### 15.2 Test surfaces
 
-## 15. Ship plan (phased)
+- Python unit: planner, combo quotes, protection, rehydrate
+- Python API: wizard routes
+- Frontend unit: modal layout, session strip, session hook
+- Playwright: popup open, combo submit, reprice ladder, resume flow, Risk Alert
 
-| Phase  | Deliverable                                                                                                           | Blocking prereqs |
-| ------ | --------------------------------------------------------------------------------------------------------------------- | ---------------- |
-| **P0** | Extend `naked_short_audit.py` (§11.1) with wizard-tag skip + long-option coverage. Ship to prod ahead of wizard code. | none             |
-| **P1** | planner + gate4 + session store + `FakeIBClient` integration tests; no IB, no UI.                                     | P0               |
-| **P2** | FastAPI routes + SSE + IB integration behind `XENON_API_TEST_MODE`; paper-only.                                       | P1               |
-| **P3** | `WizardModal` over OrderTab. Opens only. No brackets yet.                                                             | P2               |
-| **P4** | Protection: TP broker GTC + `wizard_stop_monitor.py` handler + atomic PROTECTION_PENDING/PROTECTED.                   | P3               |
-| **P5** | Close flow (`intent=CLOSE`), residual-BAG builder, REJECTED / tiered-unwind paths.                                    | P4               |
-| **P6** | Graduation: mode B auto-anchor, auto-chase, auto-convert-BAG, true auto-SL — all behind flags, default off.           | P5               |
+## 16. Ship plan
 
-## 16. Open questions / deferred
+| Phase | Deliverable                                                          |
+| ----- | -------------------------------------------------------------------- |
+| P1    | combo-first planner, store, and quote math                           |
+| P2    | FastAPI + Next.js wizard session routes wired to combo submit/modify |
+| P3    | popup modal + parent session strip in both order surfaces            |
+| P4    | protection, restart reconcile, daemon registration                   |
+| P5    | release verification and operator docs                               |
 
-- Multi-account support: V1 = default IB account only.
-- Exchange pinning per leg: V1 always SMART; revisit if specific
-  exchanges improve individual leg fills materially.
-- Roll flow: out of V1; schema supports future `intent="ROLL"` without
-  breakage.
-- True auto-SL (daemon-enforced bounded-slippage unwind): P6 graduation,
-  requires product-side policy decision on whose loss this is when a
-  bounded unwind fails.
+## 17. Deferred
+
+- Advanced legging mode
+- Calendars / diagonals / jade lizard combo-first review
+- Auto-chase
+- Dedicated performance analytics for ladder effectiveness
