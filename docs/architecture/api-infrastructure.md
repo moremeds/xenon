@@ -175,7 +175,7 @@ When deployed on the Hetzner VPS via xenon-cloud:
 - **Clerk middleware**: API routes (`/api/*`) are excluded from Next.js Clerk middleware `protect()`. Server-side fetches from pages don't carry session cookies, so middleware must not block them. Auth is handled by FastAPI for external API access.
 - **`NEXT_PUBLIC_*` env vars**: Baked at build time. After changing `.env`, rebuild Next.js: `cd web && npm run build`
 - **Root `node_modules`**: The root `package.json` has shared deps (`@sinclair/typebox`) used by `lib/tools/`. Must be installed before `web/` build.
-- **`requirements.txt`**: Includes `cryptography` (needed by PyJWT for RS256), `fastapi`, `uvicorn`, `python-dotenv`, `numpy`, `pytz`, `playwright`.
+- **Python deps**: Managed by `uv` — `pyproject.toml` is the source of truth, `uv.lock` is the pinned graph. Includes `cryptography` (PyJWT RS256), `fastapi`, `uvicorn`, `httpx`, `python-dotenv`, `numpy`, `pytz`, `playwright`. Install via `uv sync --frozen --extra test`.
 - **`@sinclair/typebox`**: Pinned to exact `0.34.48` in both root and web `package.json` to prevent version mismatch build failures.
 - **Production Clerk**: Uses different user IDs than dev. `ALLOWED_USER_IDS` must be updated.
 - **CI/CD**: Push to `main` triggers GitHub Actions → SSH → `deploy.sh` on VPS. IB Gateway is not restarted. Auto-rollback on health check failure.

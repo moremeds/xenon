@@ -48,13 +48,13 @@ Versioning restarts at `0.0.1`. `VERSION` is the single source of truth; `packag
 
 ### Jobs (parallel, `ubuntu-latest`)
 
-| Job             | Command                                                                                                           | Notes                                                                                                                                |
-| --------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `python-tests`  | PR: `python3.13 scripts/infra/dev/run_pytest_affected.py --base origin/master`. Master push: full `pytest` suite. | `fetch-depth: 0` for diff. Pip cache keyed on `requirements.txt` + `pyproject.toml` hash.                                            |
-| `web-tests`     | `cd web && npm test`                                                                                              | Vitest. `ASSISTANT_MOCK=1` already in the npm script. npm cache keyed on `web/package-lock.json` hash.                               |
-| `web-typecheck` | `cd web && npm run typecheck`                                                                                     | `tsc --noEmit`.                                                                                                                      |
-| `web-lint`      | `cd web && npm run lint`                                                                                          | ESLint on `app components lib`.                                                                                                      |
-| `dead-code`     | Existing dead-code scan                                                                                           | **Advisory for 2 weeks** (`continue-on-error: true`). Flip to required once the 174-item backlog is drained or `.deadcodeignore`-ed. |
+| Job             | Command                                                                                                                                                                 | Notes                                                                                                                                |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `python-tests`  | PR: `uv run python scripts/infra/dev/run_pytest_affected.py --base origin/master`. Master push: `uv run pytest`. Both preceded by `uv run pytest --collect-only` smoke. | `fetch-depth: 0` for diff. uv manages its own cache via `astral-sh/setup-uv@v5`, keyed on `uv.lock`.                                 |
+| `web-tests`     | `cd web && npm test`                                                                                                                                                    | Vitest. `ASSISTANT_MOCK=1` already in the npm script. npm cache keyed on `web/package-lock.json` hash.                               |
+| `web-typecheck` | `cd web && npm run typecheck`                                                                                                                                           | `tsc --noEmit`.                                                                                                                      |
+| `web-lint`      | `cd web && npm run lint`                                                                                                                                                | ESLint on `app components lib`.                                                                                                      |
+| `dead-code`     | Existing dead-code scan                                                                                                                                                 | **Advisory for 2 weeks** (`continue-on-error: true`). Flip to required once the 174-item backlog is drained or `.deadcodeignore`-ed. |
 
 ### Branch protection on master
 
@@ -142,13 +142,12 @@ Then re-run `cut.sh`. Documented in `docs/runbooks/release.md`.
     web/.env                 # web secrets (ANTHROPIC, UW_TOKEN, EXA, CEREBRAS, CLERK)
     data/                    # trend_scan.duckdb, trade_log.json, reconciliation.json
     logs/
-    venv/                    # persistent Python venv
     web-node_modules/        # persistent node_modules (symlinked into each release)
   ib-gateway/                # separate docker-compose project, independent lifecycle
   .git-cache/                # bare bookkeeping repo for fast fetches
 ```
 
-Releases are full extractions (`git archive` — no `.git`). `current` is a symlink, swapped atomically with `ln -sfn <target> current` (macOS-safe: `ln -sfn` replaces an existing symlink via `rename(2)`; the GNU-only `mv -Tf` is not available on BSD). `shared/` persists across releases — secrets and data are never clobbered. `venv/` and `web-node_modules/` are shared because lockfile-unchanged reinstalls are wasteful. Each release directory carries a `REVISION` file (the tag's SHA) and `DEPLOYED_AT` file (ISO8601 UTC) written at extraction time — `GET /version` reads these, since the archive has no `.git` metadata.
+Releases are full extractions (`git archive` — no `.git`). `current` is a symlink, swapped atomically with `ln -sfn <target> current` (macOS-safe: `ln -sfn` replaces an existing symlink via `rename(2)`; the GNU-only `mv -Tf` is not available on BSD). `shared/` persists across releases — secrets and data are never clobbered. `web-node_modules/` is shared because lockfile-unchanged reinstalls are wasteful. The Python venv is NOT shared: `uv sync --frozen` hardlinks from uv's global cache (`~/.cache/uv/`), so a per-release `.venv/` is near-free and keeps each release self-contained. Each release directory carries a `REVISION` file (the tag's SHA) and `DEPLOYED_AT` file (ISO8601 UTC) written at extraction time — `GET /version` reads these, since the archive has no `.git` metadata.
 
 ### Deploy script
 
@@ -158,10 +157,10 @@ Sequence:
 
 1. **Verify tag published.** `gh release view vX.Y.Z` succeeds; abort otherwise.
 2. **Fetch into bookkeeping repo** at `/opt/xenon/.git-cache`, check out worktree to `releases/vX.Y.Z/`.
-3. **Symlink shared state:** `.env`, `web/.env`, `data/`, `logs/`, `web/node_modules`, and `venv/` symlinked from `shared/` into the new release.
+3. **Symlink shared state:** `.env`, `web/.env`, `data/`, `logs/`, and `web/node_modules` symlinked from `shared/` into the new release. (Python venv is per-release, not shared — materialized in step 4.)
 4. **Build deps:**
    - `cd web && npm ci && npm run build` (npm ci no-ops when lockfile matches).
-   - `source /opt/xenon/shared/venv/bin/activate && pip install -r requirements.txt`.
+   - `uv sync --frozen` in the release directory. uv materializes a per-release `.venv/` from the global uv cache — hardlinked, typically <2s when lock is unchanged. No shared `venv/` under `shared/`; each release is self-contained.
 5. **Pre-swap health check on alternate ports.** Launch the stack with `XENON_API_PORT=8322`, `PORT=3001`. Poll `/health` on the API and `/` on Next.js for up to 60s. On failure → abort, leave `current` untouched.
 6. **Atomic swap:** `ln -sfn releases/vX.Y.Z current`. (Before swap, capture `readlink current` so rollback targets the exact previous release, not an mtime-sorted guess.)
 7. **Restart app services via launchd:** `launchctl kickstart -k gui/$UID/xenon.web`, `xenon.api`, `xenon.ib-realtime`. **Do not touch `xenon.ib-gateway`** — decoupled lifecycle.
@@ -178,7 +177,7 @@ Sequence:
 Plists checked into `deploy/launchd/`, installed once via the bootstrap script.
 
 - `xenon.web.plist` — `WorkingDirectory: /opt/xenon/current/web`, `ProgramArguments: [npm, run, start]`, `KeepAlive: true`, stdout/stderr to `shared/logs/web.log`.
-- `xenon.api.plist` — `WorkingDirectory: /opt/xenon/current/src`, runs `/opt/xenon/shared/venv/bin/python3.13 -m uvicorn xenon.api.server:app --host 127.0.0.1 --port 8321`.
+- `xenon.api.plist` — `WorkingDirectory: /opt/xenon/current`, runs `/opt/xenon/current/.venv/bin/python -m uvicorn xenon.api.server:app --host 127.0.0.1 --port 8321`. (Per-release `.venv/` populated by `uv sync --frozen` in step 4 of the deploy script.)
 - `xenon.ib-realtime.plist` — `node /opt/xenon/current/scripts/infra/ib_realtime/ib_realtime_server.js`.
 - `xenon.ib-gateway.plist` — `/opt/homebrew/bin/docker compose -f /opt/xenon/ib-gateway/docker-compose.yml -f /opt/xenon/ib-gateway/docker-compose.prod.yml up`. Independent of app deploys.
 
@@ -206,7 +205,7 @@ Dev laptop reaches IB Gateway at `xenon-mini.local:4002` (paper) or its Tailscal
 
 ### Bootstrap (one-time, per Mac mini)
 
-`scripts/deploy/mac-mini-bootstrap.sh`. Installs Homebrew deps (node, python@3.13, docker, cloudflared, tailscale), creates `/opt/xenon/` layout, installs launchd plists, prompts for `.env` paths to copy into `shared/`. Re-runnable (idempotent). Documented in `docs/runbooks/mac-mini-provision.md`, which also lists every required env var and its source.
+`scripts/deploy/mac-mini-bootstrap.sh`. Installs Homebrew deps (node, python@3.13, uv, docker, cloudflared, tailscale), creates `/opt/xenon/` layout, installs launchd plists, prompts for `.env` paths to copy into `shared/`. Re-runnable (idempotent). Documented in `docs/runbooks/mac-mini-provision.md`, which also lists every required env var and its source.
 
 ---
 
