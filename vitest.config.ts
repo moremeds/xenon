@@ -18,6 +18,7 @@ export default defineConfig({
       "web/tests/**/*.test.ts",
       "web/tests/**/*.test.tsx",
     ],
+    globalSetup: ["web/tests/setup/seed-fixtures.ts"],
     environment: "node",
     coverage: {
       provider: "v8",
