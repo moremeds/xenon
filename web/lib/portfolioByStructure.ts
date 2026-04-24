@@ -421,6 +421,7 @@ export function fuseVirtualPair(
 export function buildTickerGroups(
   positions: PortfolioPosition[],
   prices?: Record<string, PriceData>,
+  opts?: { fuseVirtualPairs?: boolean },
 ): TickerGroup[] {
   // Phase 1: bucket by ticker
   const buckets = new Map<string, Bucket>();
@@ -454,8 +455,45 @@ export function buildTickerGroups(
     // as separate positions (e.g. Long Put + Short Put same expiry → vertical).
     const combos = detectVirtualCombos(b.options);
     const virtualPairs = new Map<number, VirtualPair>();
-    for (const [posId, detection] of combos.entries()) {
-      virtualPairs.set(posId, detection.pair);
+
+    if (opts?.fuseVirtualPairs) {
+      // Group pair members by pairKey, synthesize fused multi-leg positions,
+      // and rewrite b.options so downstream sub-grouping sees combos, not legs.
+      const byPairKey = new Map<string, PortfolioPosition[]>();
+      for (const pos of b.options) {
+        const detection = combos.get(pos.id);
+        if (!detection) continue;
+        const list = byPairKey.get(detection.pair.pairKey) ?? [];
+        list.push(pos);
+        byPairKey.set(detection.pair.pairKey, list);
+      }
+
+      const fusedPositions: PortfolioPosition[] = [];
+      const consumedLegIds = new Set<number>();
+      let fuseSeq = 0;
+      for (const [, members] of byPairKey) {
+        if (members.length !== 2) continue; // defensive — pair detector always emits 2
+        const detection = combos.get(members[0].id)!;
+        const fused = fuseVirtualPair(
+          members[0],
+          members[1],
+          detection.pair,
+          fuseSeq++,
+        );
+        fusedPositions.push(fused);
+        virtualPairs.set(fused.id, detection.pair);
+        consumedLegIds.add(members[0].id);
+        consumedLegIds.add(members[1].id);
+      }
+
+      b.options = [
+        ...b.options.filter((p) => !consumedLegIds.has(p.id)),
+        ...fusedPositions,
+      ];
+    } else {
+      for (const [posId, detection] of combos.entries()) {
+        virtualPairs.set(posId, detection.pair);
+      }
     }
 
     // Sub-group options by category, preserving CATEGORY_ORDER
