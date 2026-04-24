@@ -33,7 +33,10 @@ type Props = {
   lastSync: string;
 };
 
-function fmtSigned(n: number | null, fmt: (x: number) => string = fmtUsd): string {
+function fmtSigned(
+  n: number | null,
+  fmt: (x: number) => string = fmtUsd,
+): string {
   if (n == null) return "—";
   const sign = n >= 0 ? "+" : "−";
   return `${sign}${fmt(Math.abs(n))}`;
@@ -56,7 +59,13 @@ export default function PortfolioByStructure({
   activeAccount,
   lastSync,
 }: Props) {
-  const groups = useMemo(() => buildTickerGroups(positions, prices), [positions, prices]);
+  const groups = useMemo(
+    () =>
+      buildTickerGroups(positions, prices, {
+        fuseVirtualPairs: activeAccount === "futu",
+      }),
+    [positions, prices, activeAccount],
+  );
 
   // Ephemeral collapse state, namespaced by activeAccount:ticker:category
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
@@ -76,7 +85,9 @@ export default function PortfolioByStructure({
     return (
       <div className="section">
         <div className="section-body">
-          <div className="alert-item">No positions match the current filter.</div>
+          <div className="alert-item">
+            No positions match the current filter.
+          </div>
         </div>
       </div>
     );
@@ -85,7 +96,8 @@ export default function PortfolioByStructure({
   return (
     <>
       {groups.map((group) => {
-        const { ticker, stock, optionsByCategory, agg, last, dayChgPct } = group;
+        const { ticker, stock, optionsByCategory, agg, last, dayChgPct } =
+          group;
         const hasDelta = agg.netDelta != null;
 
         // Track whether the card has already rendered its column header row.
@@ -104,21 +116,50 @@ export default function PortfolioByStructure({
               <div className="section-title">
                 <span style={{ fontWeight: 600 }}>{ticker}</span>
                 <span className="cell-muted">
-                  {fmtPrice(last)} {dayChgPct != null ? `(${fmtPct(dayChgPct)})` : ""}
+                  {fmtPrice(last)}{" "}
+                  {dayChgPct != null ? `(${fmtPct(dayChgPct)})` : ""}
                 </span>
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "12px",
+                  flexWrap: "wrap",
+                }}
+              >
                 <span className="cell-muted">
                   MV {agg.mv != null ? fmtUsd(agg.mv) : "—"}
                 </span>
-                <span className={agg.dayPnl != null ? (agg.dayPnl >= 0 ? "positive" : "negative") : "cell-muted"}>
+                <span
+                  className={
+                    agg.dayPnl != null
+                      ? agg.dayPnl >= 0
+                        ? "positive"
+                        : "negative"
+                      : "cell-muted"
+                  }
+                >
                   Day {fmtSigned(agg.dayPnl)}
                 </span>
-                <span className={agg.totalPnl != null ? (agg.totalPnl >= 0 ? "positive" : "negative") : "cell-muted"}>
+                <span
+                  className={
+                    agg.totalPnl != null
+                      ? agg.totalPnl >= 0
+                        ? "positive"
+                        : "negative"
+                      : "cell-muted"
+                  }
+                >
                   P&amp;L {fmtSigned(agg.totalPnl)}
-                  {agg.totalPnlPct != null ? ` (${fmtPct(agg.totalPnlPct)})` : ""}
+                  {agg.totalPnlPct != null
+                    ? ` (${fmtPct(agg.totalPnlPct)})`
+                    : ""}
                 </span>
-                <span className={`pill ${hasDelta ? "neutral" : "neutral"}`} aria-label="net delta">
+                <span
+                  className={`pill ${hasDelta ? "neutral" : "neutral"}`}
+                  aria-label="net delta"
+                >
                   Δ {hasDelta ? agg.netDelta!.toFixed(0) : "—"}
                 </span>
               </div>
@@ -134,81 +175,121 @@ export default function PortfolioByStructure({
                   hideHeader={takeHeaderSlot()}
                 />
               )}
-              {Array.from(optionsByCategory.entries()).map(([category, rows]) => {
-                const key = `${activeAccount}:${ticker}:${category}`;
-                const isCollapsed = Boolean(collapsed[key]);
-                const label = CATEGORY_LABELS[category as CategoryKey];
+              {Array.from(optionsByCategory.entries()).map(
+                ([category, rows]) => {
+                  const key = `${activeAccount}:${ticker}:${category}`;
+                  const isCollapsed = Boolean(collapsed[key]);
+                  const label = CATEGORY_LABELS[category as CategoryKey];
 
-                // Sub-group rows by virtual-pair key. Unpaired positions get
-                // a synthetic key so they render in their own sub-block.
-                const subGroups: Array<{ pairKey: string; label: string | null; positions: PortfolioPosition[] }> = [];
-                const byPair = new Map<string, { label: string | null; positions: PortfolioPosition[] }>();
-                for (const row of rows) {
-                  const pair = group.virtualPairs.get(row.id);
-                  const pairKey = pair?.pairKey ?? `solo-${row.id}`;
-                  let entry = byPair.get(pairKey);
-                  if (!entry) {
-                    entry = { label: pair?.label ?? null, positions: [] };
-                    byPair.set(pairKey, entry);
-                    subGroups.push({ pairKey, label: entry.label, positions: entry.positions });
+                  // Sub-group rows by virtual-pair key. Unpaired positions get
+                  // a synthetic key so they render in their own sub-block.
+                  const subGroups: Array<{
+                    pairKey: string;
+                    label: string | null;
+                    positions: PortfolioPosition[];
+                  }> = [];
+                  const byPair = new Map<
+                    string,
+                    { label: string | null; positions: PortfolioPosition[] }
+                  >();
+                  for (const row of rows) {
+                    const pair = group.virtualPairs.get(row.id);
+                    const pairKey = pair?.pairKey ?? `solo-${row.id}`;
+                    let entry = byPair.get(pairKey);
+                    if (!entry) {
+                      entry = { label: pair?.label ?? null, positions: [] };
+                      byPair.set(pairKey, entry);
+                      subGroups.push({
+                        pairKey,
+                        label: entry.label,
+                        positions: entry.positions,
+                      });
+                    }
+                    entry.positions.push(row);
                   }
-                  entry.positions.push(row);
-                }
 
-                return (
-                  <div key={category} data-category={category}>
-                    <button
-                      type="button"
-                      className="section-title"
-                      onClick={() => toggleCollapse(key)}
-                      aria-expanded={!isCollapsed}
-                      aria-controls={`group-${ticker}-${category}`}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "6px",
-                        background: "none",
-                        border: "none",
-                        padding: "8px 0",
-                        cursor: "pointer",
-                        width: "100%",
-                        textAlign: "left",
-                      }}
-                    >
-                      {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-                      <span style={{ fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                        {label}
-                      </span>
-                      <span className="cell-muted" style={{ fontSize: "11px" }}>
-                        {rows.length}
-                      </span>
-                    </button>
-                    {!isCollapsed && (
-                      <div id={`group-${ticker}-${category}`}>
-                        {subGroups.map((sg) => (
-                          <div key={sg.pairKey} data-pair-key={sg.pairKey}>
-                            {sg.label ? (
-                              <div
-                                className="cell-muted"
-                                style={{ fontSize: "11px", padding: "6px 0 2px 18px", letterSpacing: "0.02em" }}
-                              >
-                                {sg.label}
+                  return (
+                    <div key={category} data-category={category}>
+                      <button
+                        type="button"
+                        className="section-title"
+                        onClick={() => toggleCollapse(key)}
+                        aria-expanded={!isCollapsed}
+                        aria-controls={`group-${ticker}-${category}`}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "6px",
+                          background: "none",
+                          border: "none",
+                          padding: "8px 0",
+                          cursor: "pointer",
+                          width: "100%",
+                          textAlign: "left",
+                        }}
+                      >
+                        {isCollapsed ? (
+                          <ChevronRight size={12} />
+                        ) : (
+                          <ChevronDown size={12} />
+                        )}
+                        <span
+                          style={{
+                            fontSize: "11px",
+                            textTransform: "uppercase",
+                            letterSpacing: "0.05em",
+                          }}
+                        >
+                          {label}
+                        </span>
+                        <span
+                          className="cell-muted"
+                          style={{ fontSize: "11px" }}
+                        >
+                          {rows.length}
+                        </span>
+                      </button>
+                      {!isCollapsed && (
+                        <div id={`group-${ticker}-${category}`}>
+                          {subGroups.map((sg) => {
+                            // When fusion is on, a virtual pair appears in `sg.positions` as a single
+                            // multi-leg PortfolioPosition — the combo row already displays the pair
+                            // label, so the standalone text header above would be redundant.
+                            const isFusedCombo =
+                              sg.positions.length === 1 &&
+                              sg.positions[0].legs.length === 2 &&
+                              group.virtualPairs.has(sg.positions[0].id);
+                            const showLabel = sg.label && !isFusedCombo;
+                            return (
+                              <div key={sg.pairKey} data-pair-key={sg.pairKey}>
+                                {showLabel ? (
+                                  <div
+                                    className="cell-muted"
+                                    style={{
+                                      fontSize: "11px",
+                                      padding: "6px 0 2px 18px",
+                                      letterSpacing: "0.02em",
+                                    }}
+                                  >
+                                    {sg.label}
+                                  </div>
+                                ) : null}
+                                <PositionTable
+                                  positions={sg.positions}
+                                  showUnderlying={true}
+                                  prices={prices}
+                                  readonly={readonly}
+                                  hideHeader={takeHeaderSlot()}
+                                />
                               </div>
-                            ) : null}
-                            <PositionTable
-                              positions={sg.positions}
-                              showUnderlying={true}
-                              prices={prices}
-                              readonly={readonly}
-                              hideHeader={takeHeaderSlot()}
-                            />
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                },
+              )}
             </div>
           </div>
         );
@@ -216,7 +297,8 @@ export default function PortfolioByStructure({
 
       <div className="section">
         <div className="report-meta">
-          Last Sync: {new Date(lastSync).toLocaleString()} • Source: {activeAccount === "futu" ? "Futu OpenD" : "IB Gateway"}
+          Last Sync: {new Date(lastSync).toLocaleString()} • Source:{" "}
+          {activeAccount === "futu" ? "Futu OpenD" : "IB Gateway"}
         </div>
       </div>
     </>

@@ -1,7 +1,12 @@
 "use client";
 
 import { useMemo } from "react";
-import type { OpenOrder, PortfolioPosition, PortfolioData, OrdersData } from "@/lib/types";
+import type {
+  OpenOrder,
+  PortfolioPosition,
+  PortfolioData,
+  OrdersData,
+} from "@/lib/types";
 import type { PriceData, FundamentalsData } from "@/lib/pricesProtocol";
 import { legPriceKey, resolveSpreadPriceData } from "@/lib/positionUtils";
 import PriceChart from "./PriceChart";
@@ -15,7 +20,15 @@ import { TickerQuoteTelemetry } from "./QuoteTelemetry";
 import BookTab from "./ticker-detail/BookTab";
 import OptionsChainTab from "./ticker-detail/OptionsChainTab";
 
-type TabId = "company" | "book" | "chain" | "position" | "order" | "news" | "ratings" | "seasonality";
+type TabId =
+  | "company"
+  | "book"
+  | "chain"
+  | "position"
+  | "order"
+  | "news"
+  | "ratings"
+  | "seasonality";
 
 /**
  * Resolve the best price data for the shared ticker quote telemetry wrapper.
@@ -83,8 +96,12 @@ export default function TickerDetailContent({
 }: TickerDetailContentProps) {
   const position: PortfolioPosition | null = useMemo(() => {
     if (!portfolio) return null;
-    if (positionId != null) {
-      return portfolio.positions.find((p) => p.id === positionId) ?? null;
+    // Synthetic ids (negative) come from the fused virtual-pair path in
+    // buildTickerGroups — they don't exist in portfolio.positions, so skip
+    // the id-exact search and fall through to the ticker match.
+    if (positionId != null && positionId >= 0) {
+      const exact = portfolio.positions.find((p) => p.id === positionId);
+      if (exact) return exact;
     }
     return portfolio.positions.find((p) => p.ticker === ticker) ?? null;
   }, [ticker, positionId, portfolio]);
@@ -94,12 +111,27 @@ export default function TickerDetailContent({
     return orders.open_orders.filter((o) => o.contract.symbol === ticker);
   }, [ticker, orders]);
 
-  const { priceData, label: priceLabel, priceKey: chartPriceKey } = useMemo(
+  const {
+    priceData,
+    label: priceLabel,
+    priceKey: chartPriceKey,
+  } = useMemo(
     () => resolveTickerQuoteTelemetry(ticker, position, prices),
     [ticker, position, prices],
   );
 
-  const resolvedTab: TabId = (["company", "book", "chain", "position", "order", "news", "ratings", "seasonality"] as TabId[]).includes(activeTab as TabId)
+  const resolvedTab: TabId = (
+    [
+      "company",
+      "book",
+      "chain",
+      "position",
+      "order",
+      "news",
+      "ratings",
+      "seasonality",
+    ] as TabId[]
+  ).includes(activeTab as TabId)
     ? (activeTab as TabId)
     : "company";
 
@@ -108,7 +140,11 @@ export default function TickerDetailContent({
     { id: "book", label: "Book" },
     { id: "chain", label: "Chain" },
     { id: "position", label: "Position", hidden: !position },
-    { id: "order", label: tickerOrders.length > 0 ? `Orders (${tickerOrders.length})` : "Order" },
+    {
+      id: "order",
+      label:
+        tickerOrders.length > 0 ? `Orders (${tickerOrders.length})` : "Order",
+    },
     { id: "news", label: "News" },
     { id: "ratings", label: "Ratings" },
     { id: "seasonality", label: "Seasonal" },
@@ -124,34 +160,49 @@ export default function TickerDetailContent({
       <div className="ticker-detail-hero">
         <div className="ticker-detail-hero-left">
           <div className="ticker-detail-header">
-            <span className={`pill ${position ? "defined" : "neutral"}`} style={{ fontSize: "9px" }}>
+            <span
+              className={`pill ${position ? "defined" : "neutral"}`}
+              style={{ fontSize: "9px" }}
+            >
               {positionSummary}
             </span>
           </div>
           <TickerQuoteTelemetry priceData={priceData} label={priceLabel} />
         </div>
         <div className="ticker-detail-hero-right">
-          <PriceChart ticker={ticker} prices={prices} priceKey={chartPriceKey} theme={theme} />
+          <PriceChart
+            ticker={ticker}
+            prices={prices}
+            priceKey={chartPriceKey}
+            theme={theme}
+          />
         </div>
       </div>
 
       {/* Tab bar */}
       <div className="ticker-tabs">
-        {tabs.filter((t) => !t.hidden).map((tab) => (
-          <button
-            key={tab.id}
-            className={`ticker-tab ${resolvedTab === tab.id ? "active" : ""}`}
-            onClick={() => onTabChange(tab.id)}
-          >
-            {tab.label}
-          </button>
-        ))}
+        {tabs
+          .filter((t) => !t.hidden)
+          .map((tab) => (
+            <button
+              key={tab.id}
+              className={`ticker-tab ${resolvedTab === tab.id ? "active" : ""}`}
+              onClick={() => onTabChange(tab.id)}
+            >
+              {tab.label}
+            </button>
+          ))}
       </div>
 
       {/* Tab content */}
       <div className="ticker-tab-content">
         {resolvedTab === "company" && (
-          <CompanyTab ticker={ticker} active={resolvedTab === "company"} priceData={prices[ticker] ?? null} fundamentals={fundamentals[ticker] ?? null} />
+          <CompanyTab
+            ticker={ticker}
+            active={resolvedTab === "company"}
+            priceData={prices[ticker] ?? null}
+            fundamentals={fundamentals[ticker] ?? null}
+          />
         )}
         {resolvedTab === "book" && (
           <BookTab

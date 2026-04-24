@@ -19,7 +19,7 @@
  * order preserved via Array.sort stability, first-seen wins).
  */
 
-import type { PortfolioPosition } from "@/lib/types";
+import type { PortfolioPosition, PortfolioLeg } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 import {
   getDisplayMarketValue,
@@ -123,7 +123,9 @@ function verticalLabel(
   return `${name} ${fmtStrike(lo)}/${fmtStrike(hi)} · ${expiry}`;
 }
 
-function detectVirtualCombos(options: PortfolioPosition[]): Map<number, ComboDetection> {
+function detectVirtualCombos(
+  options: PortfolioPosition[],
+): Map<number, ComboDetection> {
   const overrides = new Map<number, ComboDetection>();
   let pairSeq = 0;
   // Only single-leg option positions with a resolvable strike are candidates.
@@ -176,15 +178,25 @@ function detectVirtualCombos(options: PortfolioPosition[]): Map<number, ComboDet
     sideBFilter: (p: PortfolioPosition) => boolean,
     onMatch: (a: PortfolioPosition, b: PortfolioPosition) => void,
   ) => {
-    const sideA = group.filter((p) => available.has(p.id) && sideAFilter(p)).sort(byStrike);
-    const sideB = group.filter((p) => available.has(p.id) && sideBFilter(p)).sort(byStrike);
+    const sideA = group
+      .filter((p) => available.has(p.id) && sideAFilter(p))
+      .sort(byStrike);
+    const sideB = group
+      .filter((p) => available.has(p.id) && sideBFilter(p))
+      .sort(byStrike);
     let i = 0;
     let j = 0;
     while (i < sideA.length && j < sideB.length) {
       const a = sideA[i];
       const b = sideB[j];
-      if (!available.has(a.id)) { i++; continue; }
-      if (!available.has(b.id)) { j++; continue; }
+      if (!available.has(a.id)) {
+        i++;
+        continue;
+      }
+      if (!available.has(b.id)) {
+        j++;
+        continue;
+      }
       if (!contractsEqual(a, b)) {
         // Skip the smaller side so the larger one can try the next partner.
         if (a.legs[0].contracts < b.legs[0].contracts) i++;
@@ -210,7 +222,12 @@ function detectVirtualCombos(options: PortfolioPosition[]): Map<number, ComboDet
         (p) => p.legs[0].type === type && p.legs[0].direction === "LONG",
         (p) => p.legs[0].type === type && p.legs[0].direction === "SHORT",
         (long, short) => {
-          const label = verticalLabel(type, long.legs[0].strike, short.legs[0].strike, expiry);
+          const label = verticalLabel(
+            type,
+            long.legs[0].strike,
+            short.legs[0].strike,
+            expiry,
+          );
           markPair(long, short, "vertical", label);
         },
       );
@@ -232,13 +249,21 @@ function detectVirtualCombos(options: PortfolioPosition[]): Map<number, ComboDet
           const name = sameStrike
             ? `${dir === "LONG" ? "Long" : "Short"} Straddle ${fmtStrike(cs)}`
             : `${dir === "LONG" ? "Long" : "Short"} Strangle ${fmtStrike(lo)}/${fmtStrike(hi)}`;
-          markPair(c, p, sameStrike ? "straddle" : "strangle", `${name} · ${expiry}`);
+          markPair(
+            c,
+            p,
+            sameStrike ? "straddle" : "strangle",
+            `${name} · ${expiry}`,
+          );
         },
       );
     }
 
     // Pass 3 — synthetic / risk reversal (strike-sorted)
-    const buildSynthetic = (longLeg: PortfolioPosition, shortLeg: PortfolioPosition) => {
+    const buildSynthetic = (
+      longLeg: PortfolioPosition,
+      shortLeg: PortfolioPosition,
+    ) => {
       const ls = longLeg.legs[0].strike;
       const ss = shortLeg.legs[0].strike;
       const base = ls === ss ? "Synthetic" : "Risk Reversal";
@@ -279,9 +304,141 @@ function sumOrNull(values: (number | null)[]): number | null {
   return any ? acc : null;
 }
 
+/**
+ * Structure-type derivation from a virtual pair's two legs. Returns the
+ * canonical catalog name so downstream consumers (label, structureCatalog
+ * lookup) round-trip cleanly.
+ *
+ * Verticals are classified by STRIKE comparison (the structural definition),
+ * not by credit/debit. This matches `verticalLabel()` above so the pair's
+ * label string and the fused `structure_type` never disagree.
+ */
+function deriveFusedStructureType(a: PortfolioLeg, b: PortfolioLeg): string {
+  const sameType = a.type === b.type;
+  const sameDir = a.direction === b.direction;
+
+  if (sameType && !sameDir && (a.type === "Put" || a.type === "Call")) {
+    const longLeg = a.direction === "LONG" ? a : b;
+    const shortLeg = a.direction === "LONG" ? b : a;
+    const ls = longLeg.strike ?? 0;
+    const ss = shortLeg.strike ?? 0;
+    if (a.type === "Put")
+      return ls < ss ? "Bull Put Spread" : "Bear Put Spread";
+    return ls < ss ? "Bull Call Spread" : "Bear Call Spread";
+  }
+  if (!sameType && sameDir) {
+    const sameStrike = a.strike === b.strike;
+    const prefix = a.direction === "LONG" ? "Long" : "Short";
+    return sameStrike ? `${prefix} Straddle` : `${prefix} Strangle`;
+  }
+  if (!sameType && !sameDir) {
+    const sameStrike = a.strike === b.strike;
+    return sameStrike ? "Synthetic" : "Risk Reversal";
+  }
+  throw new Error(
+    `fuseVirtualPair: unexpected leg combination (same type + same direction) — this indicates a mismatch between detectVirtualCombos and fuseVirtualPair; caller contract broken.`,
+  );
+}
+
+/**
+ * Risk classification for a fused virtual pair. Verticals (all four
+ * variants) are defined-risk; straddles / strangles / synthetics /
+ * risk reversals are undefined-risk. Deriving from structure — not from
+ * whichever leg the caller happened to pass first — ensures the pill
+ * badge on the combo row agrees with the structure name.
+ */
+function deriveFusedRiskProfile(structureType: string): string {
+  if (
+    structureType.endsWith("Put Spread") ||
+    structureType.endsWith("Call Spread")
+  ) {
+    return "defined";
+  }
+  return "undefined";
+}
+
+function orderFusedLegs(
+  a: PortfolioLeg,
+  b: PortfolioLeg,
+): [PortfolioLeg, PortfolioLeg] {
+  // Verticals / synthetics: LONG before SHORT.
+  if (a.direction !== b.direction) {
+    return a.direction === "LONG" ? [a, b] : [b, a];
+  }
+  // Straddle / strangle (same direction): strike ascending.
+  const as = a.strike ?? 0;
+  const bs = b.strike ?? 0;
+  return as <= bs ? [a, b] : [b, a];
+}
+
+/**
+ * Synthesize a multi-leg PortfolioPosition from a detected virtual pair.
+ * Caller guarantees: same ticker, same expiry, 1 leg each, equal contracts.
+ *
+ * Sign convention (verified in futuPortfolioAdapter.ts): SHORT legs carry
+ * negative entry_cost and negative market_value. Simple summation yields
+ * correct net DEBIT/CREDIT sign with no abs() calls.
+ */
+/** Synthetic ids are negative to avoid collisions with real broker-assigned
+ *  position ids (IB and Futu both assign positive ids). The 1_000_000 offset
+ *  leaves room below 0 for any future negative-id reservation. */
+const SYNTHETIC_PAIR_ID_BASE = -1_000_000;
+
+export function fuseVirtualPair(
+  a: PortfolioPosition,
+  b: PortfolioPosition,
+  pair: VirtualPair,
+  syntheticIdSeq: number,
+): PortfolioPosition {
+  const [legA, legB] = orderFusedLegs(a.legs[0], b.legs[0]);
+  const entryCost = a.entry_cost + b.entry_cost;
+  const structureType = deriveFusedStructureType(a.legs[0], b.legs[0]);
+  const structure = `${a.ticker} ${pair.label}`;
+  const marketValue = sumOrNull([a.market_value, b.market_value]);
+  const ibDailyPnl = sumOrNull([
+    a.ib_daily_pnl ?? null,
+    b.ib_daily_pnl ?? null,
+  ]);
+
+  let direction: "DEBIT" | "CREDIT" | "FLAT";
+  if (entryCost > 0) direction = "DEBIT";
+  else if (entryCost < 0) direction = "CREDIT";
+  else direction = "FLAT";
+
+  // entry_date is ISO-8601 (YYYY-MM-DD or full timestamp) — lexical sort == chronological.
+  const dates = [a.entry_date, b.entry_date]
+    .filter((s) => s && s.length > 0)
+    .sort();
+  const entryDate = dates[0] ?? "";
+
+  return {
+    id: SYNTHETIC_PAIR_ID_BASE - syntheticIdSeq,
+    ticker: a.ticker,
+    structure,
+    structure_type: structureType,
+    risk_profile: deriveFusedRiskProfile(structureType),
+    expiry: a.expiry,
+    contracts: a.legs[0].contracts,
+    direction,
+    entry_cost: entryCost,
+    max_risk: null,
+    market_value: marketValue,
+    legs: [legA, legB],
+    market_price_is_calculated:
+      a.market_price_is_calculated === true ||
+      b.market_price_is_calculated === true,
+    ib_daily_pnl: ibDailyPnl,
+    kelly_optimal: null,
+    target: null,
+    stop: null,
+    entry_date: entryDate,
+  };
+}
+
 export function buildTickerGroups(
   positions: PortfolioPosition[],
   prices?: Record<string, PriceData>,
+  opts?: { fuseVirtualPairs?: boolean },
 ): TickerGroup[] {
   // Phase 1: bucket by ticker
   const buckets = new Map<string, Bucket>();
@@ -315,15 +472,61 @@ export function buildTickerGroups(
     // as separate positions (e.g. Long Put + Short Put same expiry → vertical).
     const combos = detectVirtualCombos(b.options);
     const virtualPairs = new Map<number, VirtualPair>();
-    for (const [posId, detection] of combos.entries()) {
-      virtualPairs.set(posId, detection.pair);
+    const fusedCategoryById = new Map<number, CategoryKey>();
+
+    if (opts?.fuseVirtualPairs) {
+      // Group pair members by pairKey, synthesize fused multi-leg positions,
+      // and rewrite b.options so downstream sub-grouping sees combos, not legs.
+      const byPairKey = new Map<string, PortfolioPosition[]>();
+      for (const pos of b.options) {
+        const detection = combos.get(pos.id);
+        if (!detection) continue;
+        const list = byPairKey.get(detection.pair.pairKey) ?? [];
+        list.push(pos);
+        byPairKey.set(detection.pair.pairKey, list);
+      }
+
+      const fusedPositions: PortfolioPosition[] = [];
+      const consumedLegIds = new Set<number>();
+      let fuseSeq = 0;
+      for (const [, members] of byPairKey) {
+        if (members.length !== 2) continue; // defensive — pair detector always emits 2
+        const detection = combos.get(members[0].id)!;
+        const fused = fuseVirtualPair(
+          members[0],
+          members[1],
+          detection.pair,
+          fuseSeq++,
+        );
+        fusedPositions.push(fused);
+        virtualPairs.set(fused.id, detection.pair);
+        // Preserve the detector's category for the fused position so the
+        // sub-grouping loop below lands it under the correct catalog bucket
+        // (e.g. "synthetic" for Synthetic / Risk Reversal, which have no
+        // catalog entry by name and would otherwise fall through to "other").
+        fusedCategoryById.set(fused.id, detection.category);
+        consumedLegIds.add(members[0].id);
+        consumedLegIds.add(members[1].id);
+      }
+
+      b.options = [
+        ...b.options.filter((p) => !consumedLegIds.has(p.id)),
+        ...fusedPositions,
+      ];
+    } else {
+      for (const [posId, detection] of combos.entries()) {
+        virtualPairs.set(posId, detection.pair);
+      }
     }
 
     // Sub-group options by category, preserving CATEGORY_ORDER
     const byCategory = new Map<CategoryKey, PortfolioPosition[]>();
     for (const pos of b.options) {
       const override = combos.get(pos.id);
-      const category = override?.category ?? getStructureCategory(resolveStructureKey(pos));
+      const category =
+        override?.category ??
+        fusedCategoryById.get(pos.id) ??
+        getStructureCategory(resolveStructureKey(pos));
       let list = byCategory.get(category);
       if (!list) {
         list = [];
@@ -345,7 +548,12 @@ export function buildTickerGroups(
       p.structure_type === "Stock"
         ? (() => {
             const lp = prices?.[p.ticker];
-            if (lp?.last != null && lp.last > 0 && lp.close != null && lp.close > 0) {
+            if (
+              lp?.last != null &&
+              lp.last > 0 &&
+              lp.close != null &&
+              lp.close > 0
+            ) {
               return (lp.last - lp.close) * p.contracts;
             }
             return null;
@@ -387,7 +595,8 @@ export function buildTickerGroups(
     // Underlying spot + day chg%
     const underlyingLast = prices?.[b.ticker]?.last ?? null;
     const underlyingClose = prices?.[b.ticker]?.close ?? null;
-    const last = underlyingLast != null && underlyingLast > 0 ? underlyingLast : null;
+    const last =
+      underlyingLast != null && underlyingLast > 0 ? underlyingLast : null;
     const dayChgPct =
       last != null && underlyingClose != null && underlyingClose > 0
         ? ((last - underlyingClose) / underlyingClose) * 100
