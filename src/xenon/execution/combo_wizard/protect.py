@@ -261,6 +261,10 @@ def attach_protection(
             db_path,
         )
     else:
+        # Import lazily to avoid a top-level cycle — ib_adapter imports
+        # _uncovered_short_calls from this module.
+        from xenon.execution.combo_wizard.ib_adapter import NakedShortGuardError
+
         last_err: Exception | None = None
         for i in range(max_attempts):
             attempts = i + 1
@@ -284,6 +288,24 @@ def attach_protection(
                     db_path,
                 )
                 break
+            except NakedShortGuardError as exc:
+                # Gate-4 / IB-201 style terminal refusal. Retrying will not
+                # change the outcome — short-circuit the retry loop and route
+                # to the existing "tp refused, arm Risk Alert" path (same
+                # idiom as the pre-check branch above).
+                tp_refused_reason = "NAKED_SHORT_GUARD"
+                _record_event(
+                    session_id,
+                    "PROTECTION_TP_REFUSED",
+                    {
+                        "reason": tp_refused_reason,
+                        "attempt": attempts,
+                        "error": str(exc),
+                        "legs": legs,
+                    },
+                    db_path,
+                )
+                break
             except Exception as exc:  # noqa: BLE001 — retry everything
                 last_err = exc
                 _record_event(
@@ -294,7 +316,7 @@ def attach_protection(
                 )
                 if i < max_attempts - 1:
                     sleep(base_backoff * (2**i))
-        if not tp_attached:
+        if not tp_attached and tp_refused_reason is None:
             # Terminal failure — do NOT arm the alert or mark PROTECTED. Leave
             # the session in PROTECTION_PENDING; the daemon will re-drive.
             _set_state(session_id, "PROTECTION_PENDING", db_path)

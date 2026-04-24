@@ -551,3 +551,7 @@ This UI must align with the overall Xenon page design:
 - Calendars / diagonals / jade lizard combo-first review
 - Auto-chase
 - Dedicated performance analytics for ladder effectiveness
+
+## 18. Implementation status
+
+Tasks 1–5.5 shipped in PR #46 (feat/combo-wizard) on 2026-04-25. Pre-merge gates: live dry-run per §13, plus protect.py except narrowing, combo_quote_source TTL + subscription reuse, and the two Playwright test.fixme flips.

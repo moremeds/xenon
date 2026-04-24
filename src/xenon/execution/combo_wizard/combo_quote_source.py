@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -38,7 +39,11 @@ from .models import ComboLegQuote, ComboLegSpec
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TICK_TTL_S = 30.0
+# Read-once at import time. Frozen / delayed market-data modes need a longer
+# TTL than the 30s default (otherwise every tick fails the freshness gate
+# forever). Override via env before importing this module:
+#   XENON_WIZARD_QUOTE_TTL_S=120  # 2 minutes
+DEFAULT_TICK_TTL_S = float(os.environ.get("XENON_WIZARD_QUOTE_TTL_S", "30.0"))
 
 
 def _isnanlike(x: Any) -> bool:
@@ -102,19 +107,81 @@ def _session_legs(session_id: str, db_path: Path | str | None) -> list[dict]:
     return list(payload.get("legs") or [])
 
 
+class _TickerCache:
+    """Session-scoped cache of streaming ib_insync Tickers keyed by conId.
+
+    First access for a conId calls ``IBClient.get_quote(contract)`` which
+    wraps ``ib_insync.IB.reqMktData(contract, ..., snapshot=False)``; the
+    returned ``Ticker`` is retained. Subsequent accesses re-read the same
+    ``Ticker`` instance — ib_insync live-updates ``bid/ask/bidSize/askSize/time``
+    on the object as new ticks arrive (see
+    ``.venv/lib/python3.13/site-packages/ib_insync/ib.py:1181`` —
+    ``reqMktData`` returns a ticker that is updated in-place).
+
+    Prevents the subscription leak where a long-running monitor otherwise
+    appends to ``IBClient._subscriptions`` on every tick.
+
+    Not thread-safe. The monitor daemon runs handlers sequentially.
+    """
+
+    def __init__(self) -> None:
+        self._tickers: dict[int, tuple[Any, Any]] = {}  # conId -> (contract, ticker)
+
+    def get(self, ib: Any, contract: Any) -> Any:
+        con_id = int(getattr(contract, "conId", 0) or 0)
+        if con_id and con_id in self._tickers:
+            return self._tickers[con_id][1]
+        ticker = ib.get_quote(contract, snapshot=False)
+        if con_id:
+            self._tickers[con_id] = (contract, ticker)
+        return ticker
+
+    def cleanup(self, ib: Any) -> None:
+        """Cancel every retained subscription.
+
+        Delegates to ``ib_insync.IB.cancelMktData(contract)``
+        (``.venv/lib/python3.13/site-packages/ib_insync/ib.py:1241`` —
+        ``def cancelMktData(self, contract: Contract)``; unsubscribes
+        realtime streaming tick data for the exact contract that was used
+        to subscribe). We access it as ``ib.ib.cancelMktData`` because
+        ``ib`` here is the Xenon ``IBClient`` wrapper; ``.ib`` is the
+        underlying ``ib_insync.IB`` instance.
+        """
+        inner = getattr(ib, "ib", None)
+        for _con_id, (contract, _ticker) in list(self._tickers.items()):
+            try:
+                if inner is not None and hasattr(inner, "cancelMktData"):
+                    inner.cancelMktData(contract)
+            except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+                logger.warning("cancelMktData failed: %s", exc)
+        self._tickers.clear()
+
+
 def build_default_quote_fn(
     ib_client_factory: Callable[[], Any],
     *,
     db_path: Path | str | None = None,
-    ttl_s: float = DEFAULT_TICK_TTL_S,
+    ttl_s: float | None = None,
     now_fn: Callable[[], datetime] | None = None,
+    ticker_cache: _TickerCache | None = None,
 ) -> Callable[[str], Optional[Decimal]]:
     """Build the ``quote_fn(session_id)`` that the wizard stop monitor calls.
 
     Returns a signed Decimal combo mid, or ``None`` if any freshness gate
     fails for any leg (fail-closed — a stale tick must NOT fire an alert).
+
+    ``ttl_s`` defaults to ``DEFAULT_TICK_TTL_S`` (read at import time from
+    ``XENON_WIZARD_QUOTE_TTL_S``). Pass explicitly to override per-caller.
+
+    ``ticker_cache`` — optional. When provided, ticker subscriptions are
+    reused across ticks (see ``_TickerCache``). The default builds a fresh
+    cache per call so legacy callers continue to work; production callers
+    should pass a long-lived cache and call ``cache.cleanup(ib)`` on
+    session terminal transitions.
     """
     _now = now_fn or (lambda: datetime.now(timezone.utc))
+    effective_ttl = DEFAULT_TICK_TTL_S if ttl_s is None else float(ttl_s)
+    cache = ticker_cache if ticker_cache is not None else _TickerCache()
 
     def quote_fn(session_id: str) -> Optional[Decimal]:
         legs = _session_legs(session_id, db_path)
@@ -145,17 +212,25 @@ def build_default_quote_fn(
                 exchange="SMART",
                 currency="USD",
             )
+            # Stamp the conId so the ticker cache keys correctly.
+            try:
+                contract.conId = int(con_id)
+            except (TypeError, ValueError):
+                pass
 
             # IBClient.get_quote wraps ib.reqMktData (NOT reqTickersAsync,
             # which hangs on index options — per feedback memory).
             # Citation: src/xenon/clients/ib_client.py:696 — get_quote.
+            # The _TickerCache only calls get_quote once per conId; subsequent
+            # ticks re-read the retained Ticker whose bid/ask/time fields are
+            # live-updated in place by ib_insync (ib.py:1181 reqMktData).
             try:
-                ticker = ib.get_quote(contract, snapshot=False)
+                ticker = cache.get(ib, contract)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("get_quote failed for leg %s of %s: %s", con_id, session_id, exc)
                 return None
 
-            if not _ticker_is_fresh(ticker, now=now, ttl_s=ttl_s):
+            if not _ticker_is_fresh(ticker, now=now, ttl_s=effective_ttl):
                 logger.debug(
                     "quote_fn: freshness gate failed for session=%s leg=%s",
                     session_id,
@@ -188,4 +263,8 @@ def build_default_quote_fn(
         # in signed space per combo_quotes.signed_mid. No abs().
         return combo_quote.signed_mid
 
+    # Attach the cache so callers can invoke cleanup on terminal session
+    # transitions (ABORTED / FILLED_AND_CLOSED / PROTECTION_REFUSED).
+    # e.g. `getattr(quote_fn, "ticker_cache").cleanup(ib)`.
+    setattr(quote_fn, "ticker_cache", cache)
     return quote_fn

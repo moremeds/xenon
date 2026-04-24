@@ -62,17 +62,22 @@ class WizardStopMonitorHandler(BaseHandler):
         notify_fn: Optional[Callable[[dict], None]] = None,
         db_path: Path | str | None = None,
         ib_client_factory: Optional[Callable[[], object]] = None,
+        ttl_s: float | None = None,
     ):
         super().__init__()
         # If no quote_fn is injected but we have an ib_client_factory, wire the
         # real combo-quote source (spec §10 freshness gates). Tests inject a
         # fake quote_fn directly.
+        #
+        # ttl_s=None → combo_quote_source falls back to DEFAULT_TICK_TTL_S
+        # (read at import time from XENON_WIZARD_QUOTE_TTL_S env var).
+        self._ib_client_factory = ib_client_factory
         if quote_fn is None and ib_client_factory is not None:
             from xenon.execution.combo_wizard.combo_quote_source import (
                 build_default_quote_fn,
             )
 
-            quote_fn = build_default_quote_fn(ib_client_factory, db_path=db_path)
+            quote_fn = build_default_quote_fn(ib_client_factory, db_path=db_path, ttl_s=ttl_s)
         self._quote_fn = quote_fn
         self._notify_fn = notify_fn or _default_notify
         self._db_path = db_path

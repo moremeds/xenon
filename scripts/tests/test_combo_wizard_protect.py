@@ -243,6 +243,65 @@ def test_risk_alert_copy_never_says_stop_loss():
     assert "stop loss" not in low
 
 
+def test_naked_short_guard_error_short_circuits_retry_loop(tmp_path, monkeypatch):
+    """If the adapter raises NakedShortGuardError (e.g., IB-201 terminal
+    broker reject), the retry loop must NOT re-invoke the adapter 3x —
+    retrying a terminal Gate-4 refusal wastes 14+ seconds. The session
+    should land in the terminal refused state on the first attempt and
+    the Risk Alert path should still arm."""
+    from xenon.execution.combo_wizard.ib_adapter import NakedShortGuardError
+
+    db = tmp_path / "orders.duckdb"
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
+    sid = _init_session(db, state="FILLED")
+
+    calls: list[dict] = []
+
+    class _RaisingIB:
+        def place_combo_tp(self, **kwargs):
+            calls.append(kwargs)
+            raise NakedShortGuardError("IB error 201: terminal reject")
+
+        def register_risk_alert(self, **kwargs):
+            return {"virtual_id": "alert-1"}
+
+    sleeps: list[float] = []
+    result = protect.attach_protection(
+        sid,
+        ib=_RaisingIB(),
+        tp_target_price=Decimal("3.50"),
+        alert_net_mid_threshold=Decimal("1.25"),
+        polarity="DEBIT",
+        sleep=sleeps.append,
+        max_attempts=3,
+        base_backoff=2.0,
+    )
+
+    # Adapter must be called exactly once — retries are wasted on a
+    # terminal Gate-4 refusal.
+    assert len(calls) == 1
+    # No backoff sleeps were taken (loop exited on first attempt).
+    assert sleeps == []
+    assert result["tp_attached"] is False
+    assert result["tp_refused_reason"] == "NAKED_SHORT_GUARD"
+    # Alert still armed → session is in the terminal refused state
+    # (protect.py's existing idiom: PROTECTED when alert armed, since
+    # the operator retains the Risk Alert safety net).
+    assert result["alert_armed"] is True
+    assert result["state"] == "PROTECTED"
+
+    con = duckdb.connect(str(db))
+    try:
+        events = con.execute(
+            "SELECT kind FROM wizard_session_events WHERE session_id=?",
+            [sid],
+        ).fetchall()
+    finally:
+        con.close()
+    kinds = [row[0] for row in events]
+    assert "PROTECTION_TP_REFUSED" in kinds
+
+
 def test_signed_combo_pricing_preserved_for_credit(tmp_path, monkeypatch):
     """CREDIT spreads have negative net prices — protect must not apply abs()."""
     db = tmp_path / "orders.duckdb"
