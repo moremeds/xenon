@@ -22,10 +22,10 @@ from xenon.api import server as server_mod  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _force_test_mode_on(monkeypatch):
-    prior = server_mod.test_mode
-    server_mod.test_mode = True
+    # Env-var based — _is_test_mode() re-reads on every call, so import
+    # order can't freeze a stale value from another test.
+    monkeypatch.setenv("XENON_API_TEST_MODE", "1")
     yield
-    server_mod.test_mode = prior
 
 
 def test_rehydrate_runs_on_startup(monkeypatch):

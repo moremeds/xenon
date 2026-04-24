@@ -35,7 +35,7 @@ def _isolated_db(tmp_path, monkeypatch):
 def test_synthetic_probe_writes_event(monkeypatch, _isolated_db):
     """Probe should insert a PENDING row, run rehydrate, record an event."""
     monkeypatch.setenv("DEV_PROBES", "1")
-    monkeypatch.setattr(server_mod, "test_mode", True)
+    monkeypatch.setenv("XENON_API_TEST_MODE", "1")
 
     with TestClient(server_mod.app) as client:
         r = client.post("/dev/rehydrate/synthetic")
@@ -61,7 +61,7 @@ def test_synthetic_probe_writes_event(monkeypatch, _isolated_db):
 def test_synthetic_probe_disabled_in_production(monkeypatch):
     """When test_mode is off AND DEV_PROBES unset, the probe returns 404."""
     monkeypatch.delenv("DEV_PROBES", raising=False)
-    monkeypatch.setattr(server_mod, "test_mode", False)
+    monkeypatch.setenv("XENON_API_TEST_MODE", "0")
 
     with TestClient(server_mod.app) as client:
         r = client.post("/dev/rehydrate/synthetic")

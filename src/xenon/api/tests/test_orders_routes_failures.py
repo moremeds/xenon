@@ -12,10 +12,7 @@ from pathlib import Path
 
 import pytest
 
-# test_mode must be False so the real classification logic runs. Set BEFORE
-# importing the server module so the module-level flag reads the right env.
-os.environ["XENON_API_TEST_MODE"] = "0"
-
+# test_mode must be False so the real classification logic runs.
 from fastapi.testclient import TestClient  # noqa: E402
 
 from xenon.api import server as server_mod  # noqa: E402
@@ -24,11 +21,10 @@ from xenon.execution import orders_store  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def _force_test_mode_off():
-    prior = server_mod.test_mode
-    server_mod.test_mode = False
+def _force_test_mode_off(monkeypatch):
+    # Env-var based — _is_test_mode() re-reads on every call.
+    monkeypatch.setenv("XENON_API_TEST_MODE", "0")
     yield
-    server_mod.test_mode = prior
 
 
 @pytest.fixture

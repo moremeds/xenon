@@ -114,7 +114,18 @@ def _get_futu_client() -> FutuClient:
 # ---------------------------------------------------------------------------
 ib_pool: Optional[IBPool] = None
 uw_available: bool = False
-test_mode: bool = os.environ.get("XENON_API_TEST_MODE", "").lower() in {"1", "true", "yes", "on"}
+
+
+def _is_test_mode() -> bool:
+    # Read at call time so tests that set XENON_API_TEST_MODE after server
+    # has been imported (common when other tests imported server first
+    # without the flag) still see the flag on.
+    return os.environ.get("XENON_API_TEST_MODE", "").lower() in {"1", "true", "yes", "on"}
+
+
+# Module-level snapshot, kept only for the /health payload. Runtime behavior
+# gates MUST call _is_test_mode() — do not branch on this value.
+test_mode: bool = _is_test_mode()
 test_order_counter: int = 900000
 
 
@@ -179,7 +190,7 @@ async def _run_rehydrate_on_boot() -> None:
     # TestClient(app) without XENON_ORDERS_DB_PATH would otherwise read/write
     # the prod DuckDB file. Require the env var to enable rehydrate under
     # test_mode so tests can opt in explicitly via a tmp_path fixture.
-    if test_mode:
+    if _is_test_mode():
         env_override = os.environ.get("XENON_ORDERS_DB_PATH")
         # Compare against the literal default string — don't call _resolve_path
         # here because it would round-trip through the env var we're checking.
@@ -210,7 +221,7 @@ async def lifespan(app: FastAPI):
     """Start IB pool and UW client on startup, tear down on shutdown."""
     global ib_pool, uw_available
 
-    if test_mode:
+    if _is_test_mode():
         logger.info("Xenon API starting in test mode; IB Gateway and pool startup are disabled")
         uw_available = bool(os.environ.get("UW_TOKEN"))
         orders_store.init_store()
@@ -1023,7 +1034,7 @@ async def health():
     gw = await check_ib_gateway()
     return {
         "status": "ok",
-        "test_mode": test_mode,
+        "test_mode": _is_test_mode(),
         "ib_gateway": gw,
         "ib_pool": ib_pool.status() if ib_pool else {},
         "uw": uw_available,
@@ -1038,7 +1049,7 @@ async def health():
 
 def _dev_probes_enabled() -> bool:
     """True iff test_mode is on OR DEV_PROBES=1 is set in the environment."""
-    return bool(test_mode) or os.environ.get("DEV_PROBES", "").lower() in {
+    return _is_test_mode() or os.environ.get("DEV_PROBES", "").lower() in {
         "1",
         "true",
         "yes",
@@ -1321,7 +1332,7 @@ async def orders_refresh():
     Scripts auto-allocate client IDs from subprocess range (20-49).
     Auto-restarts IB Gateway on ECONNREFUSED and retries once.
     """
-    if test_mode:
+    if _is_test_mode():
         return {"status": "ok", "orders": []}
 
     result = await _run_ib_script_with_recovery(
@@ -1608,7 +1619,7 @@ async def orders_place(request: Request):
     if _override_detail is not None:
         orders_store.record_event(submission_id, "PREFLIGHT_ACK_LIMIT", _override_detail)
 
-    if test_mode:
+    if _is_test_mode():
         order_id, perm_id = _next_test_order_ids()
         orders_store.mark_submitted(
             submission_id=submission_id,
@@ -1745,7 +1756,7 @@ async def orders_cancel(request: Request):
     The full upstream payload (code + message) is preserved in detail.
     """
     body = await request.json()
-    if test_mode:
+    if _is_test_mode():
         return {
             "status": "ok",
             "message": "Cancel accepted in test mode",
@@ -1855,7 +1866,7 @@ async def orders_modify(request: Request):
     Subprocess failures classified the same as cancel.
     """
     body = await request.json()
-    if test_mode:
+    if _is_test_mode():
         return {
             "status": "ok",
             "message": "Modify accepted in test mode",

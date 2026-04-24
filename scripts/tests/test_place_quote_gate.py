@@ -13,9 +13,6 @@ def _env(monkeypatch, tmp_path):
     monkeypatch.setenv("XENON_QUOTE_TOKEN_SECRET", SECRET)
     monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
     monkeypatch.setenv("XENON_DATA_DIR", str(tmp_path))
-    import xenon.api.server as server_module
-
-    monkeypatch.setattr(server_module, "test_mode", True, raising=False)
     yield
 
 
@@ -104,6 +101,7 @@ def test_limit_override_records_PREFLIGHT_ACK_LIMIT_event(client, monkeypatch):
     import os
     from datetime import datetime
     from zoneinfo import ZoneInfo
+
     import duckdb
 
     from xenon.api import server
@@ -115,12 +113,18 @@ def test_limit_override_records_PREFLIGHT_ACK_LIMIT_event(client, monkeypatch):
     resp = client.post(
         "/orders/place",
         json={
-            "type": "option", "symbol": "SPY", "action": "BUY",
-            "quantity": 1, "right": "C", "strike": 500, "expiry": "20260620",
+            "type": "option",
+            "symbol": "SPY",
+            "action": "BUY",
+            "quantity": 1,
+            "right": "C",
+            "strike": 500,
+            "expiry": "20260620",
             "limitPrice": 12.00,
             "acknowledge_limit_override": True,
             "client_attempt_id": "ack-1",
-            "quote_token": token, "con_id": 756733,
+            "quote_token": token,
+            "con_id": 756733,
         },
     )
     assert resp.status_code == 200, resp.text
