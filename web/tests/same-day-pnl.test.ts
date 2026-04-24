@@ -47,7 +47,6 @@ const btuPut: PortfolioPosition = {
   stop: null,
   entry_date: todayET(), // opened today
   legs: [{
-    conId: null,
     direction: "LONG" as const,
     contracts: 100,
     type: "Put" as const,
@@ -91,7 +90,6 @@ const pltrRiskReversal: PortfolioPosition = {
   entry_date: todayET(),
   legs: [
     {
-      conId: null,
       direction: "LONG" as const,
       contracts: 20,
       type: "Call" as const,
@@ -102,7 +100,6 @@ const pltrRiskReversal: PortfolioPosition = {
       market_value: 4960,
     },
     {
-      conId: null,
       direction: "SHORT" as const,
       contracts: 20,
       type: "Put" as const,

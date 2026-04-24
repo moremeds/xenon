@@ -17,8 +17,6 @@ export const PlaceOrderComboLegSchema = Type.Object({
   action: Type.Union([Type.Literal("BUY"), Type.Literal("SELL")]),
   ratio: Type.Number(),
   limitPrice: Type.Optional(Type.Number()),
-  /** IB contract id — forwarded to FastAPI as `con_id` for quote-token binding */
-  conId: Type.Optional(Type.Number()),
   /** Echoed from chain builder — ignored by IB bridge after normalization */
   symbol: Type.Optional(Type.String()),
   secType: Type.Optional(Type.String()),
@@ -26,13 +24,11 @@ export const PlaceOrderComboLegSchema = Type.Object({
 
 /** Top-level place-order body (structural validation only — business rules stay in the route). */
 export const PlaceOrderBodySchema = Type.Object({
-  type: Type.Optional(
-    Type.Union([
-      Type.Literal("stock"),
-      Type.Literal("option"),
-      Type.Literal("combo"),
-    ]),
-  ),
+  type: Type.Optional(Type.Union([
+    Type.Literal("stock"),
+    Type.Literal("option"),
+    Type.Literal("combo"),
+  ])),
   symbol: Type.String({ minLength: 1 }),
   action: Type.Union([Type.Literal("BUY"), Type.Literal("SELL")]),
   quantity: Type.Number(),

@@ -40,7 +40,6 @@ function makePriceData(overrides: Partial<PriceData> & { symbol: string }): Pric
 describe("InstrumentDetailModal spread telemetry", () => {
   it("shows raw spread dollars and percent", () => {
     const leg: PortfolioLeg = {
-      conId: null,
       direction: "LONG",
       contracts: 25,
       type: "Call",

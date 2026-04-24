@@ -629,7 +629,6 @@ function makeOptionPosition(
     market_value: 5000,
     legs: [
       {
-        conId: null,
         direction: "LONG",
         contracts: 10,
         type,

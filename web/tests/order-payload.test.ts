@@ -21,7 +21,6 @@ function makePutPosition(overrides: Partial<PortfolioPosition> = {}): PortfolioP
     market_value: 13500,
     legs: [
       {
-        conId: null,
         direction: "LONG",
         contracts: 100,
         type: "Put",
@@ -55,7 +54,6 @@ function makeCallPosition(overrides: Partial<PortfolioPosition> = {}): Portfolio
     market_value: 87000,
     legs: [
       {
-        conId: null,
         direction: "LONG",
         contracts: 100,
         type: "Call",
@@ -89,7 +87,6 @@ function makeStockPosition(overrides: Partial<PortfolioPosition> = {}): Portfoli
     market_value: 22500,
     legs: [
       {
-        conId: null,
         direction: "LONG",
         contracts: 100,
         type: "Stock",

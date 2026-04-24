@@ -87,7 +87,6 @@ const POSITIONS: PortfolioPosition[] = [
     entry_date: "2026-03-19",
     legs: [
       {
-        conId: null,
         direction: "LONG",
         contracts: 1,
         type: "Call",
@@ -98,7 +97,6 @@ const POSITIONS: PortfolioPosition[] = [
         market_value: 450,
       },
       {
-        conId: null,
         direction: "SHORT",
         contracts: 1,
         type: "Call",
