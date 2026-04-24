@@ -9,25 +9,22 @@ triage. Archive lives in `docs/{plans,superpowers/{plans,specs}}/archive/`.
 
 ### P0
 
-1. **Position-order modal follow-up triage.** _(resolved 2026-04-23)_
+1. **Position-order modal follow-up triage.**
    PR #33 shipped both `position-row-order-button.md` and
-   `position-order-modal-rework.md`. The safety item is now shipped on
-   branch `feat/position-order-quote-token` (P1 #1 below); the feature
-   backlog stays at P3 #1.
+   `position-order-modal-rework.md`. What remains from the rework plan's
+   "out of scope" list splits into one safety item and a feature backlog
+   (see P1 #1 and P3 #1). Decision needed: do we ship the safety item
+   standalone or bundle it with the first wizard PR?
 
 ### P1
 
-1. **`quote_token` integration for position close/add.** _(shipped
-   2026-04-23, awaiting burn-in)_ Spec
-   `docs/superpowers/specs/2026-04-23-position-order-quote-token-design.md`
-   - plan `docs/superpowers/plans/2026-04-23-position-order-quote-token.md`.
-     End-to-end: `ib_sync` emits `conId` per leg → `PortfolioLeg` +
-     `TicketPayload` carry it → `useQuoteTokens` mints N parallel tokens →
-     `PositionOrderModal` attaches `quote_token` (single) or `quote_tokens`
-     (combo) → Next.js route forwards → FastAPI runs `quote_guard.check_combo`
-     on combos, records `QUOTE_CHECK_PASS` / `QUOTE_TOKEN_MISSING_SOFT`
-     telemetry. Missing tokens on combo soft-fail during one-week burn-in,
-     then flip to hard (see new P2 #3 below).
+1. **`quote_token` integration for position close/add.**
+   The rework explicitly skipped this — v1 proceeds without a token and
+   the `/orders/place` route accepts missing token. Consequence: position
+   close/add orders bypass the F3 limit-band safety that every other
+   submit path enforces. Needs per-leg `con_id` resolution then plugs into
+   existing `quote_guard.check`. Estimate: ~1 day. File new plan when
+   wizard work allows a pause.
 
 2. **PR-C/D leftovers audit.**
    Memory note `project_pr_cd_handover.md` claims "options tick grid +
@@ -47,13 +44,6 @@ triage. Archive lives in `docs/{plans,superpowers/{plans,specs}}/archive/`.
    unbounded caches and report-path materialization. `uw_analyze_cache`
    already has entry caps, so no incident. Pick the next-biggest offender
    and cap it; skip the rest until RSS pressure returns.
-
-3. **Flip combo `quote_tokens` missing → hard-reject.**
-   After the `feat/position-order-quote-token` branch merges, watch
-   `orders_events` for one burn-in week. If zero `QUOTE_TOKEN_MISSING_SOFT`
-   rows originate from web clients, remove the soft-fail branch in
-   `src/xenon/api/server.py` combo path and require `quote_tokens` in
-   schema. Trivial one-line PR.
 
 ### P3
 

@@ -70,7 +70,7 @@ function makeLongCallPosition(): PortfolioPosition {
     max_risk: null,
     market_value: 0,
     legs: [
-      { conId: null, direction: "LONG", contracts: 50, type: "Call", strike: 105, entry_cost: 0, avg_cost: 0, market_price: 0, market_value: 0 },
+      { direction: "LONG", contracts: 50, type: "Call", strike: 105, entry_cost: 0, avg_cost: 0, market_price: 0, market_value: 0 },
     ],
     ib_daily_pnl: null,
     kelly_optimal: null,

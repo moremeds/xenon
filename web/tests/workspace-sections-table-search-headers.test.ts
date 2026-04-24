@@ -2,20 +2,13 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import {
-  cleanup,
-  render,
-  screen,
-  within,
-  waitFor,
-} from "@testing-library/react";
+import { cleanup, render, screen, within, waitFor } from "@testing-library/react";
 import React from "react";
 import WorkspaceSections from "../components/WorkspaceSections";
 import type { PortfolioData, PortfolioPosition, TradeEntry } from "@/lib/types";
 
 vi.mock("../components/TickerLink", () => ({
-  default: (props: { ticker: string }) =>
-    React.createElement("span", null, props.ticker),
+  default: (props: { ticker: string }) => React.createElement("span", null, props.ticker),
 }));
 
 const useJournalMock = vi.fn();
@@ -24,20 +17,7 @@ vi.mock("@/lib/useJournal", () => ({
   useJournal: () => useJournalMock(),
 }));
 
-const basePosition: Omit<
-  PortfolioPosition,
-  | "risk_profile"
-  | "id"
-  | "ticker"
-  | "expiry"
-  | "contracts"
-  | "structure"
-  | "direction"
-  | "entry_cost"
-  | "max_risk"
-  | "market_value"
-  | "legs"
-> = {
+const basePosition: Omit<PortfolioPosition, "risk_profile" | "id" | "ticker" | "expiry" | "contracts" | "structure" | "direction" | "entry_cost" | "max_risk" | "market_value" | "legs"> = {
   structure_type: "OPTION",
   kelly_optimal: null,
   target: null,
@@ -49,24 +29,14 @@ const basePosition: Omit<
 
 const memStore = new Map<string, string>();
 const fakeLocalStorage: Storage = {
-  get length() {
-    return memStore.size;
-  },
+  get length() { return memStore.size; },
   clear: () => memStore.clear(),
   getItem: (k) => memStore.get(k) ?? null,
   key: (i) => Array.from(memStore.keys())[i] ?? null,
-  removeItem: (k) => {
-    memStore.delete(k);
-  },
-  setItem: (k, v) => {
-    memStore.set(k, String(v));
-  },
+  removeItem: (k) => { memStore.delete(k); },
+  setItem: (k, v) => { memStore.set(k, String(v)); },
 };
-Object.defineProperty(window, "localStorage", {
-  value: fakeLocalStorage,
-  writable: true,
-  configurable: true,
-});
+Object.defineProperty(window, "localStorage", { value: fakeLocalStorage, writable: true, configurable: true });
 
 beforeEach(() => {
   memStore.clear();
@@ -148,43 +118,26 @@ describe("WorkspaceSections table search placement", () => {
       avg_kelly_optimal: null,
     };
 
-    render(
-      React.createElement(WorkspaceSections, {
-        section: "portfolio",
-        portfolio,
-      }),
-    );
+    render(React.createElement(WorkspaceSections, {
+      section: "portfolio",
+      portfolio,
+    }));
 
     await waitFor(() => {
       expect(screen.getByText("Defined Risk Positions")).toBeTruthy();
     });
 
-    const definedHeader = screen
-      .getByText("Defined Risk Positions")
-      .closest(".section")
-      ?.querySelector(".section-header");
-    const undefinedHeader = screen
-      .getByText("Undefined Risk Positions")
-      .closest(".section")
-      ?.querySelector(".section-header");
-    const equityHeader = screen
-      .getByText("Equity Positions")
-      .closest(".section")
-      ?.querySelector(".section-header");
+    const definedHeader = screen.getByText("Defined Risk Positions").closest(".section")?.querySelector(".section-header");
+    const undefinedHeader = screen.getByText("Undefined Risk Positions").closest(".section")?.querySelector(".section-header");
+    const equityHeader = screen.getByText("Equity Positions").closest(".section")?.querySelector(".section-header");
 
     expect(definedHeader).toBeTruthy();
     expect(undefinedHeader).toBeTruthy();
     expect(equityHeader).toBeTruthy();
 
-    expect(
-      within(definedHeader!).getByPlaceholderText("Filter positions..."),
-    ).toBeTruthy();
-    expect(
-      within(undefinedHeader!).getByPlaceholderText("Filter positions..."),
-    ).toBeTruthy();
-    expect(
-      within(equityHeader!).getByPlaceholderText("Filter positions..."),
-    ).toBeTruthy();
+    expect(within(definedHeader!).getByPlaceholderText("Filter positions...")).toBeTruthy();
+    expect(within(undefinedHeader!).getByPlaceholderText("Filter positions...")).toBeTruthy();
+    expect(within(equityHeader!).getByPlaceholderText("Filter positions...")).toBeTruthy();
 
     const definedSearch = within(definedHeader!).getByRole("textbox");
     expect(definedHeader!.contains(definedSearch)).toBe(true);
@@ -203,19 +156,7 @@ describe("WorkspaceSections table search placement", () => {
         entry_cost: 100,
         max_risk: 100,
         market_value: 120,
-        legs: [
-          {
-            conId: null,
-            type: "Call",
-            direction: "LONG",
-            strike: 100,
-            contracts: 1,
-            avg_cost: 100,
-            entry_cost: 100,
-            market_price: null,
-            market_value: 120,
-          },
-        ],
+        legs: [{ type: "Call", direction: "LONG", strike: 100, contracts: 1, avg_cost: 100, entry_cost: 100, market_price: null, market_value: 120 }],
         risk_profile: "defined",
       },
     ];
@@ -234,12 +175,7 @@ describe("WorkspaceSections table search placement", () => {
     };
 
     // Empty localStorage → default is "structure"
-    render(
-      React.createElement(WorkspaceSections, {
-        section: "portfolio",
-        portfolio,
-      }),
-    );
+    render(React.createElement(WorkspaceSections, { section: "portfolio", portfolio }));
 
     // Wait for hydration effect to settle
     await waitFor(() => {
@@ -255,9 +191,7 @@ describe("WorkspaceSections table search placement", () => {
 
     // Exactly ONE portfolio-level filter placeholder (inside the toggle header)
     const toggleHeader = screen.getByTestId("portfolio-view-toggle");
-    expect(
-      within(toggleHeader).getByPlaceholderText("Filter positions..."),
-    ).toBeTruthy();
+    expect(within(toggleHeader).getByPlaceholderText("Filter positions...")).toBeTruthy();
   });
 
   it("renders journal filter inside the trade journal header", () => {
@@ -280,19 +214,12 @@ describe("WorkspaceSections table search placement", () => {
       lastSyncResult: null,
     });
 
-    render(
-      React.createElement(WorkspaceSections, {
-        section: "journal",
-      }),
-    );
+    render(React.createElement(WorkspaceSections, {
+      section: "journal",
+    }));
 
-    const journalHeader = screen
-      .getByText("Trade Journal")
-      .closest(".section")
-      ?.querySelector(".section-header");
+    const journalHeader = screen.getByText("Trade Journal").closest(".section")?.querySelector(".section-header");
     expect(journalHeader).toBeTruthy();
-    expect(
-      within(journalHeader!).getByPlaceholderText("Filter trades..."),
-    ).toBeTruthy();
+    expect(within(journalHeader!).getByPlaceholderText("Filter trades...")).toBeTruthy();
   });
 });

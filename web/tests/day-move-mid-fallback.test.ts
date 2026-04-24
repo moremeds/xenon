@@ -146,7 +146,6 @@ const makeOptionPosition = (overrides: Partial<PortfolioData["positions"][number
   market_value: null,
   legs: [
     {
-      conId: null,
       direction: "LONG",
       contracts: 1,
       type: "Call",
@@ -332,7 +331,6 @@ describe("computeDayMoveBreakdown — option mid fallback", () => {
       contracts: 77,
       legs: [
         {
-          conId: null,
           direction: "LONG",
           contracts: 77,
           type: "Call",
@@ -377,7 +375,6 @@ describe("computeDayMoveBreakdown — option mid fallback", () => {
       ib_daily_pnl: -3688.02,
       legs: [
         {
-          conId: null,
           direction: "LONG",
           contracts: 77,
           type: "Call",

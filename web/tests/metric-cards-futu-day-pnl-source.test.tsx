@@ -31,7 +31,6 @@ const FUTU_PORTFOLIO: PortfolioData = {
       market_value: 105501,
       legs: [
         {
-          conId: null,
           direction: "LONG",
           contracts: 300,
           type: "Stock",

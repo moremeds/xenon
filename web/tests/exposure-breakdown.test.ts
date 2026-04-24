@@ -28,8 +28,8 @@ const SPREAD_POSITION: PortfolioData = {
       expiry: "2026-04-17",
       market_value: 41_700,
       legs: [
-        { conId: null, type: "Call", direction: "LONG", strike: 270, contracts: 100, avg_cost: 901, market_value: 63_000 },
-        { conId: null, type: "Call", direction: "SHORT", strike: 290, contracts: 100, avg_cost: -500, market_value: -21_300 },
+        { type: "Call", direction: "LONG", strike: 270, contracts: 100, avg_cost: 901, market_value: 63_000 },
+        { type: "Call", direction: "SHORT", strike: 290, contracts: 100, avg_cost: -500, market_value: -21_300 },
       ],
     },
   ],
@@ -100,7 +100,7 @@ describe("Exposure breakdown — short leg delta sign", () => {
           expiry: "N/A",
           market_value: 400_000,
           legs: [
-            { conId: null, type: "Stock", direction: "LONG", strike: null, contracts: 1000, avg_cost: 468_000, market_value: 400_000 },
+            { type: "Stock", direction: "LONG", strike: null, contracts: 1000, avg_cost: 468_000, market_value: 400_000 },
           ],
         },
       ],

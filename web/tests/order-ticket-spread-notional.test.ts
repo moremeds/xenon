@@ -44,7 +44,6 @@ function makePriceData(overrides: Partial<PriceData> & { symbol: string }): Pric
 }
 
 const shortCallLeg: PortfolioLeg = {
-  conId: null,
   direction: "SHORT",
   contracts: 25,
   type: "Call",

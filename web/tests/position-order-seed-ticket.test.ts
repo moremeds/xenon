@@ -24,7 +24,6 @@ function stockPos(
     market_value: 105000,
     legs: [
       {
-        conId: null,
         direction: "LONG",
         contracts: 300,
         type: "Stock",
@@ -67,7 +66,6 @@ function singleLegOptionPos(overrides: {
     market_value: 600,
     legs: [
       {
-        conId: null,
         direction,
         contracts,
         type,
@@ -102,7 +100,6 @@ function bullCallSpreadPos(): PortfolioPosition {
     market_value: 1400,
     legs: [
       {
-        conId: null,
         direction: "LONG",
         contracts: 4,
         type: "Call",
@@ -114,7 +111,6 @@ function bullCallSpreadPos(): PortfolioPosition {
         market_price_is_calculated: false,
       },
       {
-        conId: null,
         direction: "SHORT",
         contracts: 4,
         type: "Call",
@@ -243,7 +239,7 @@ describe("seedTicketFromPosition — natural-market combo pricing", () => {
     expect(draft.referenceBid).not.toBeCloseTo(draft.referenceAsk!, 2);
   });
 
-  it("credit spread close: SELL envelope + positive referenceMid (IB reverses legs to close at debit)", () => {
+  it("credit spread close: positive limit (BUY-to-close at debit)", () => {
     const shortSpread: PortfolioPosition = {
       ...bullCallSpreadPos(),
       direction: "SHORT",
@@ -266,7 +262,7 @@ describe("seedTicketFromPosition — natural-market combo pricing", () => {
       } as PriceData,
     };
     const draft = seedTicketFromPosition(shortSpread, "close", prices);
-    expect(draft.payload.action).toBe("SELL");
+    expect(draft.payload.action).toBe("BUY");
     expect(draft.referenceMid).toBeGreaterThan(0);
   });
 });
@@ -302,7 +298,6 @@ describe("seedTicketFromPosition — guards", () => {
       structure_type: "CoveredCall",
       legs: [
         {
-          conId: null,
           direction: "LONG",
           contracts: 100,
           type: "Stock",
@@ -351,7 +346,6 @@ function bearPutSpreadDebitPos(): PortfolioPosition {
     market_value: 7200,
     legs: [
       {
-        conId: null,
         direction: "SHORT",
         contracts: 32,
         type: "Put",
@@ -363,7 +357,6 @@ function bearPutSpreadDebitPos(): PortfolioPosition {
         market_price_is_calculated: false,
       },
       {
-        conId: null,
         direction: "LONG",
         contracts: 32,
         type: "Put",
@@ -399,7 +392,6 @@ function ironCondorCreditPos(): PortfolioPosition {
     market_value: -300,
     legs: [
       {
-        conId: null,
         direction: "LONG",
         contracts: 5,
         type: "Put",
@@ -411,7 +403,6 @@ function ironCondorCreditPos(): PortfolioPosition {
         market_price_is_calculated: false,
       },
       {
-        conId: null,
         direction: "SHORT",
         contracts: 5,
         type: "Put",
@@ -423,7 +414,6 @@ function ironCondorCreditPos(): PortfolioPosition {
         market_price_is_calculated: false,
       },
       {
-        conId: null,
         direction: "SHORT",
         contracts: 5,
         type: "Call",
@@ -435,7 +425,6 @@ function ironCondorCreditPos(): PortfolioPosition {
         market_price_is_calculated: false,
       },
       {
-        conId: null,
         direction: "LONG",
         contracts: 5,
         type: "Call",
@@ -482,41 +471,16 @@ describe("seedTicketFromPosition — direction normalization (regression for IB 
     }
   });
 
-  it("CREDIT spread + close → SELL combo (IB reverses legs; user pays debit to close)", () => {
-    // Per web/CLAUDE.md BAG convention: ComboLeg.action is structural
-    // (LONG→BUY, SHORT→SELL); Order.action=SELL reverses legs so IB executes
-    // the close. The previous encoding (close+SHORT→BUY) opened another
-    // short spread instead of closing — CRITICAL wrong-fill bug.
+  it("CREDIT spread + close → BUY combo (BUY-to-close a credit spread)", () => {
     const pos = ironCondorCreditPos();
     const draft = seedTicketFromPosition(pos, "close", {});
-    expect(draft.payload.action).toBe("SELL");
-  });
-
-  it("CREDIT spread + add → BUY combo (execute structural legs as-labeled to add the short)", () => {
-    // Structural legs for a short credit vertical are [SELL, BUY]; with
-    // envelope=BUY IB executes them as-is, receiving the original credit
-    // again and growing the SHORT position. envelope=SELL would reverse,
-    // opening a LONG debit spread instead.
-    const pos = ironCondorCreditPos();
-    const draft = seedTicketFromPosition(pos, "add", {});
     expect(draft.payload.action).toBe("BUY");
   });
 
-  it("CREDIT spread close keeps ComboLeg.action structural (LONG=BUY, SHORT=SELL)", () => {
-    // Envelope flips (close=SELL), but per-leg actions remain the SAME
-    // structural values — never flip both, that causes IB error 201.
+  it("CREDIT spread + add → SELL combo (sell more to grow the credit position)", () => {
     const pos = ironCondorCreditPos();
-    const draft = seedTicketFromPosition(pos, "close", {});
-    if (draft.payload.type === "combo") {
-      for (const posLeg of pos.legs) {
-        const outLeg = draft.payload.legs.find(
-          (l) => l.strike === posLeg.strike,
-        )!;
-        expect(outLeg.action).toBe(
-          posLeg.direction === "LONG" ? "BUY" : "SELL",
-        );
-      }
-    }
+    const draft = seedTicketFromPosition(pos, "add", {});
+    expect(draft.payload.action).toBe("SELL");
   });
 
   it("lowercase 'long' falls back to leg-sign sum and resolves to LONG", () => {
