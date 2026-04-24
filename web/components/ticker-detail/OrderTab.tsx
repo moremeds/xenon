@@ -20,6 +20,10 @@ import { fmtSignedPrice, toneClass } from "@/lib/format";
 import { getReasonToast } from "@/lib/orderReasonCodes";
 import { useClientAttemptId } from "./useClientAttemptId";
 import { useQuoteToken } from "./useQuoteToken";
+import WizardModal from "@/components/ticker-detail/WizardModal";
+import WizardSessionStrip from "@/components/ticker-detail/WizardSessionStrip";
+import { useWizardLauncher } from "@/lib/useWizardLauncher";
+import { useWizardSession } from "@/lib/useWizardSession";
 
 /** Derive a user-facing error string from a /api/orders/* JSON body. */
 function errorFromResponseBody(
@@ -663,6 +667,8 @@ function ComboOrderForm({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const wizardLauncher = useWizardLauncher();
+  const wizardSession = useWizardSession(wizardLauncher.sessionId);
 
   // Combo leg actions define the SPREAD STRUCTURE, not the trade direction.
   // IB reverses all leg actions when Order.action = SELL.
@@ -899,6 +905,37 @@ function ComboOrderForm({
 
   return (
     <div className="order-form">
+      <WizardSessionStrip
+        sessionId={wizardLauncher.sessionId}
+        session={wizardSession}
+        onResume={wizardLauncher.resume}
+      />
+      <WizardModal
+        open={wizardLauncher.isOpen}
+        sessionId={wizardLauncher.sessionId}
+        ticker={ticker}
+        session={wizardSession}
+        onClose={wizardLauncher.close}
+      />
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "flex-end",
+          marginBottom: "8px",
+        }}
+      >
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={() => {
+            // TODO(task-5): call /api/wizard/session then wizardLauncher.launch(id)
+            wizardLauncher.launch();
+          }}
+          style={{ fontSize: "10px", padding: "2px 8px" }}
+        >
+          Open Wizard
+        </button>
+      </div>
       {/* Spread price strip — always visible at top */}
       <div className="spread-price-strip">
         <div className="spread-price-item">
