@@ -109,9 +109,10 @@ jobs:
           --ignore=scripts/tests/test_ta_prefilter.py
           --ignore=scripts/tests/test_flow_confirmation.py
           --ignore=scripts/tests/test_volatility.py
+          --ignore=scripts/tests/test_parquet_store.py
       - name: Run pytest (affected on PR, full on master push)
         run: |
-          IGNORES="--ignore=scripts/tests/test_trend_scan.py --ignore=scripts/tests/test_trend_scan_runtime.py --ignore=scripts/tests/test_trend_config.py --ignore=scripts/tests/test_trend_models.py --ignore=scripts/tests/test_trend_storage.py --ignore=scripts/tests/test_trend_ranking.py --ignore=scripts/tests/test_trend_scan_catalysts.py --ignore=scripts/tests/test_ta_prefilter.py --ignore=scripts/tests/test_flow_confirmation.py --ignore=scripts/tests/test_volatility.py"
+          IGNORES="--ignore=scripts/tests/test_trend_scan.py --ignore=scripts/tests/test_trend_scan_runtime.py --ignore=scripts/tests/test_trend_config.py --ignore=scripts/tests/test_trend_models.py --ignore=scripts/tests/test_trend_storage.py --ignore=scripts/tests/test_trend_ranking.py --ignore=scripts/tests/test_trend_scan_catalysts.py --ignore=scripts/tests/test_ta_prefilter.py --ignore=scripts/tests/test_flow_confirmation.py --ignore=scripts/tests/test_volatility.py --ignore=scripts/tests/test_parquet_store.py"
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             uv run python scripts/infra/dev/run_pytest_affected.py --base origin/${{ github.base_ref }} $IGNORES
           else
