@@ -1,4 +1,9 @@
-"""Trend scanner CLI and pipeline orchestration."""
+"""DEPRECATED — Trend scanner CLI and pipeline orchestration.
+
+The R2/ta_lib data source was removed 2026-04-26. This module's imports
+from xenon.ta_lib will fail at runtime. Retained for future repurposing
+with a different data source.
+"""
 
 from __future__ import annotations
 

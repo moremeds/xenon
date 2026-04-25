@@ -1,6 +1,10 @@
-"""Massive.com REST client for historical OHLCV aggregates.
+"""DEPRECATED — Massive.com REST client for historical OHLCV aggregates.
 
-Scope (v1): /v2/aggs/ticker/{T}/range/{m}/{timespan}/{from}/{to}
+The R2 pipeline that consumed this client was removed 2026-04-26.
+This module is retained for future repurposing. Imports will still work
+but the client is not called by any active code path.
+
+Original scope (v1): /v2/aggs/ticker/{T}/range/{m}/{timespan}/{from}/{to}
 Timeframes: 1d, 1h. Returns ET-normalized OHLCV + VWAP + tx_count.
 """
 
