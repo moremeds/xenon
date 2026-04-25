@@ -22,17 +22,21 @@ def _reload(monkeypatch, mode_value: str | None):
 
 @pytest.fixture(autouse=True)
 def _reset_trading_mode_modules(monkeypatch):
-    """Restore trading_mode to baseline before and after each test.
+    """Restore trading_mode + ib_client to baseline state after each test.
 
     `importlib.reload` is NOT reverted by monkeypatch, so without this fixture
-    the modules would leak whatever the last test's reload left them at,
-    polluting other test files that share the session.
+    the modules would leak whatever the last test's reload left them at.
 
-    Only tm is reset here; ib_client is left alone to avoid breaking exception
-    class identity in other test files.
+    ib_client is reloaded ONLY IN TEARDOWN so that by the time test_ib_client.py
+    tests run, they import a reloaded but stable ibc. Do not reload ibc during
+    test teardown if another test in this file will reload it again (except the
+    last teardown), to avoid excessive reloads that create many exception classes.
+
+    Use a module-level flag to reload ibc only at the very end, after all tests.
     """
     # Cleanup before test to ensure clean slate
     monkeypatch.delenv("XENON_TRADING_MODE", raising=False)
+    monkeypatch.delenv("IB_GATEWAY_PORT", raising=False)
     import xenon.api.trading_mode as tm
 
     importlib.reload(tm)
@@ -41,6 +45,7 @@ def _reset_trading_mode_modules(monkeypatch):
 
     # Cleanup after test to prevent pollution to subsequent tests
     monkeypatch.delenv("XENON_TRADING_MODE", raising=False)
+    monkeypatch.delenv("IB_GATEWAY_PORT", raising=False)
     importlib.reload(tm)
 
 
@@ -110,7 +115,11 @@ def test_default_gateway_port_follows_mode_paper(monkeypatch):
     import xenon.api.trading_mode as tm
 
     importlib.reload(tm)
-    assert tm.EXPECTED_PORT == 4002
+    # tm must reload first; ibc binds EXPECTED_PORT at import time.
+    import xenon.clients.ib_client as ibc
+
+    importlib.reload(ibc)
+    assert ibc.DEFAULT_GATEWAY_PORT == 4002
 
 
 def test_default_gateway_port_follows_mode_live(monkeypatch):
@@ -119,7 +128,11 @@ def test_default_gateway_port_follows_mode_live(monkeypatch):
     import xenon.api.trading_mode as tm
 
     importlib.reload(tm)
-    assert tm.EXPECTED_PORT == 4001
+    # tm must reload first; ibc binds EXPECTED_PORT at import time.
+    import xenon.clients.ib_client as ibc
+
+    importlib.reload(ibc)
+    assert ibc.DEFAULT_GATEWAY_PORT == 4001
 
 
 def test_ib_gateway_port_env_var_is_ignored(monkeypatch):
@@ -129,4 +142,8 @@ def test_ib_gateway_port_env_var_is_ignored(monkeypatch):
     import xenon.api.trading_mode as tm
 
     importlib.reload(tm)
-    assert tm.EXPECTED_PORT == 4002  # mode wins, env var ignored
+    # tm must reload first; ibc binds EXPECTED_PORT at import time.
+    import xenon.clients.ib_client as ibc
+
+    importlib.reload(ibc)
+    assert ibc.DEFAULT_GATEWAY_PORT == 4002  # mode wins, env var ignored
