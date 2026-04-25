@@ -58,7 +58,6 @@ xenon-fetch-menthorq-cta    = "xenon.fetchers.fetch_menthorq_cta:main"
 xenon-fetch-menthorq-dashboard = "xenon.fetchers.fetch_menthorq_dashboard:main"
 xenon-fetch-x-watchlist     = "xenon.fetchers.fetch_x_watchlist:main"
 xenon-fetch-x-xai           = "xenon.fetchers.fetch_x_xai:main"
-xenon-fetch-apex-data       = "xenon.fetchers.fetch_apex_data:main"
 xenon-scan                  = "xenon.scanners.scanner:main"
 xenon-discover              = "xenon.scanners.discover:main"
 xenon-discover-forex        = "xenon.scanners.discover_forex:main"
@@ -100,7 +99,6 @@ test = [
     "pytest-asyncio>=0.24",
     "responses>=0.25",
     "freezegun>=1.5",
-    "ta-lib>=0.4",
 ]
 dev = [
     "ruff>=0.7",
@@ -131,7 +129,6 @@ known-first-party = [
     "services",
     "ta",
     "infra",
-    "ta_lib",  # active — consumed by fetchers/fetch_apex_data, scanners/trend/cli, etc.
 ]
 
 [tool.pytest.ini_options]
