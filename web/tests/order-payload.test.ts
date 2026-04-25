@@ -39,7 +39,12 @@ function makePutPosition(overrides: Partial<PortfolioPosition> = {}): PortfolioP
   };
 }
 
-function makeCallPosition(overrides: Partial<PortfolioPosition> = {}): PortfolioPosition {
+function makeCallPosition(
+  overrides: Partial<PortfolioPosition> & {
+    legOverrides?: Partial<PortfolioPosition["legs"][number]>;
+  } = {},
+): PortfolioPosition {
+  const { legOverrides, ...positionOverrides } = overrides;
   return {
     id: 2,
     ticker: "AAOI",
@@ -62,13 +67,14 @@ function makeCallPosition(overrides: Partial<PortfolioPosition> = {}): Portfolio
         avg_cost: 909.7,
         market_price: 8.7,
         market_value: 87000,
+        ...legOverrides,
       },
     ],
     kelly_optimal: null,
     target: null,
     stop: null,
     entry_date: "2026-03-09",
-    ...overrides,
+    ...positionOverrides,
   };
 }
 
@@ -208,6 +214,19 @@ describe("buildSingleLegOrderPayload — single-leg call option", () => {
     expect(payload.quantity).toBe(10);
     expect(payload.limitPrice).toBe(7.5);
     expect(payload.tif).toBe("GTC");
+  });
+
+  it("includes con_id for single-leg option positions", () => {
+    const payload = buildSingleLegOrderPayload({
+      ticker: "AAOI",
+      action: "SELL",
+      quantity: 1,
+      limitPrice: 9.0,
+      tif: "DAY",
+      position: makeCallPosition({ legOverrides: { conId: 861001 } }),
+    });
+
+    expect(payload.con_id).toBe(861001);
   });
 });
 

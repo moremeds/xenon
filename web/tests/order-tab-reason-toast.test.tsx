@@ -58,10 +58,43 @@ const STOCK_POSITION: PortfolioPosition = {
       contracts: 100,
       type: "Stock",
       strike: null,
+      conId: 265598,
       entry_cost: 15000,
       avg_cost: 150,
       market_price: 160,
       market_value: 16000,
+      market_price_is_calculated: false,
+    },
+  ],
+};
+
+const OPTION_POSITION: PortfolioPosition = {
+  id: 2,
+  ticker: "AAOI",
+  structure: "Long Call",
+  structure_type: "LongCall",
+  risk_profile: "defined",
+  expiry: "2026-03-20",
+  contracts: 1,
+  direction: "LONG",
+  entry_cost: 900,
+  max_risk: 900,
+  market_value: 950,
+  kelly_optimal: null,
+  target: null,
+  stop: null,
+  entry_date: "2026-03-19",
+  legs: [
+    {
+      direction: "LONG",
+      contracts: 1,
+      type: "Call",
+      strike: 105,
+      conId: 861001,
+      entry_cost: 900,
+      avg_cost: 9,
+      market_price: 9.5,
+      market_value: 950,
       market_price_is_calculated: false,
     },
   ],
@@ -92,6 +125,11 @@ const PORTFOLIO: PortfolioData = {
   },
 };
 
+const OPTION_PORTFOLIO: PortfolioData = {
+  ...PORTFOLIO,
+  positions: [OPTION_POSITION],
+};
+
 const PRICES: Record<string, PriceData> = {
   AAPL: {
     symbol: "AAPL",
@@ -106,6 +144,33 @@ const PRICES: Record<string, PriceData> = {
     low: null,
     open: null,
     close: 159,
+    week52High: null,
+    week52Low: null,
+    avgVolume: null,
+    delta: null,
+    gamma: null,
+    theta: null,
+    vega: null,
+    impliedVol: null,
+    undPrice: null,
+    timestamp: new Date().toISOString(),
+  },
+};
+
+const OPTION_PRICES: Record<string, PriceData> = {
+  AAOI_20260320_105_C: {
+    symbol: "AAOI_20260320_105_C",
+    last: 9.5,
+    lastIsCalculated: false,
+    bid: 9.4,
+    ask: 9.6,
+    bidSize: 1,
+    askSize: 1,
+    volume: 10,
+    high: null,
+    low: null,
+    open: null,
+    close: 9.3,
     week52High: null,
     week52Low: null,
     avgVolume: null,
@@ -165,6 +230,12 @@ describe("OrderTab reason-code toast", () => {
       }),
     );
 
+    await waitFor(() =>
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.stringContaining("/api/orders/quote?ticker=AAPL&con_id=265598"),
+      ),
+    );
+
     // Fill limit price (quantity is pre-populated from position.contracts)
     const limitInput = container.querySelector(
       ".modify-price-input",
@@ -198,5 +269,115 @@ describe("OrderTab reason-code toast", () => {
       }
     }
     expect(failures).toEqual([]);
+  });
+
+  it("requests and submits the real con_id for single-leg option orders", async () => {
+    let placeBody: Record<string, unknown> | null = null;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(((
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/api/orders/quote")) return quoteOk();
+      if (url.includes("/api/orders/place")) {
+        placeBody = JSON.parse(String(init?.body ?? "{}")) as Record<
+          string,
+          unknown
+        >;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ status: "ok", orderId: "abc" }),
+        }) as unknown as Promise<Response>;
+      }
+      return quoteOk();
+    }) as typeof fetch);
+
+    const { container, getByRole } = render(
+      React.createElement(OrderTab, {
+        ticker: "AAOI",
+        position: OPTION_POSITION,
+        portfolio: OPTION_PORTFOLIO,
+        prices: OPTION_PRICES,
+        openOrders: [],
+        tickerPriceData: OPTION_PRICES.AAOI_20260320_105_C,
+      }),
+    );
+
+    await waitFor(() =>
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.stringContaining("/api/orders/quote?ticker=AAOI&con_id=861001"),
+      ),
+    );
+
+    const quantityInput = container.querySelector(
+      ".order-input",
+    ) as HTMLInputElement;
+    fireEvent.change(quantityInput, { target: { value: "1" } });
+    const limitInput = container.querySelector(
+      ".modify-price-input",
+    ) as HTMLInputElement;
+    fireEvent.change(limitInput, { target: { value: "9.50" } });
+
+    fireEvent.click(getByRole("button", { name: "Place Order" }));
+    fireEvent.click(getByRole("button", { name: "Confirm Order" }));
+
+    await waitFor(() => expect(placeBody).not.toBeNull());
+    expect(placeBody?.con_id).toBe(861001);
+  });
+
+  it("surfaces quote fetch failure instead of falling through to STALE_QUOTE", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(((
+      input: RequestInfo | URL,
+    ) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/api/orders/quote")) {
+        return Promise.resolve({
+          ok: false,
+          status: 503,
+          json: async () => ({ detail: "IB data role unavailable" }),
+        }) as unknown as Promise<Response>;
+      }
+      if (url.includes("/api/orders/place")) {
+        throw new Error("place should not be called");
+      }
+      return quoteOk();
+    }) as typeof fetch);
+
+    const { container, getByRole, findByText } = render(
+      React.createElement(OrderTab, {
+        ticker: "AAOI",
+        position: OPTION_POSITION,
+        portfolio: OPTION_PORTFOLIO,
+        prices: OPTION_PRICES,
+        openOrders: [],
+        tickerPriceData: OPTION_PRICES.AAOI_20260320_105_C,
+      }),
+    );
+
+    await waitFor(() =>
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.stringContaining("/api/orders/quote?ticker=AAOI&con_id=861001"),
+      ),
+    );
+
+    const quantityInput = container.querySelector(
+      ".order-input",
+    ) as HTMLInputElement;
+    fireEvent.change(quantityInput, { target: { value: "1" } });
+    const limitInput = container.querySelector(
+      ".modify-price-input",
+    ) as HTMLInputElement;
+    fireEvent.change(limitInput, { target: { value: "9.50" } });
+
+    fireEvent.click(getByRole("button", { name: "Place Order" }));
+    fireEvent.click(getByRole("button", { name: "Confirm Order" }));
+
+    expect(await findByText("Quote unavailable: IB data role unavailable.")).toBeTruthy();
+    expect(
+      fetchSpy.mock.calls.some((call) =>
+        String(call[0]).includes("/api/orders/place"),
+      ),
+    ).toBe(false);
   });
 });

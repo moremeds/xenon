@@ -72,6 +72,7 @@ export type PortfolioLeg = {
   contracts: number;
   type: "Call" | "Put" | "Stock";
   strike: number | null;
+  conId?: number | null;
   entry_cost: number;
   avg_cost: number;
   market_price: number | null;
