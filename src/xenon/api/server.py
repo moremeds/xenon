@@ -34,6 +34,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 INTERNALS_SKEW_CACHE_DIR = DATA_DIR / "cache"
 INTERNALS_SKEW_CACHE_TTL_SECONDS = 60 * 15
 
+from xenon.api import trading_mode
 from xenon.api.auth import verify_api_key, verify_clerk_jwt
 from xenon.api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_mode, is_docker_mode, restart_ib_gateway
 from xenon.api.ib_pool import IBPool
@@ -236,6 +237,25 @@ async def _run_rehydrate_on_boot() -> None:
         logger.warning("combo wizard rehydrate failed on boot; continuing to serve: %s", exc)
 
 
+def _get_managed_account_for_health() -> str:
+    """Return the first managedAccount from the IB pool's sync client.
+
+    Returns "" when the pool isn't connected (test mode, Gateway down, etc.).
+    Pulled out as a module-level function so tests can monkeypatch it
+    without booting a real IB connection.
+    """
+    if ib_pool is None:
+        return ""
+    client = ib_pool.get("sync")
+    if client is None:
+        return ""
+    try:
+        accounts = client.ib.managedAccounts()
+    except Exception:  # noqa: BLE001
+        return ""
+    return accounts[0] if accounts else ""
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start IB pool and UW client on startup, tear down on shutdown."""
@@ -246,6 +266,11 @@ async def lifespan(app: FastAPI):
         uw_available = bool(os.environ.get("UW_TOKEN"))
         orders_store.init_store()
         await _run_rehydrate_on_boot()
+        app.state.trading_mode = trading_mode.MODE
+        # Tests monkeypatch _get_managed_account_for_health; honor that.
+        account = _get_managed_account_for_health()
+        app.state.account = account
+        app.state.mode_verified = trading_mode.verify_account(account)
         yield
         logger.info("Xenon API test mode shut down")
         return
@@ -259,6 +284,26 @@ async def lifespan(app: FastAPI):
     app.state.ib_pool = ib_pool
     pool_status = await ib_pool.connect_all()
     logger.info("IB pool status: %s", pool_status)
+
+    # Trading-mode prefix guard — verify Gateway login matches XENON_TRADING_MODE.
+    # Failure does not abort startup; it sets app.state.mode_verified=False
+    # and the order routes refuse to serve until .env + Gateway are aligned.
+    account = await asyncio.to_thread(_get_managed_account_for_health)
+    verified = trading_mode.verify_account(account)
+    app.state.trading_mode = trading_mode.MODE
+    app.state.account = account
+    app.state.mode_verified = verified
+    if not verified:
+        logger.error(
+            "TRADING MODE MISMATCH — declared=%s, account=%r (expected prefix %r). "
+            "Order routes will return 503 until .env XENON_TRADING_MODE matches "
+            "the IB Gateway login.",
+            trading_mode.MODE,
+            account,
+            trading_mode.EXPECTED_PREFIX,
+        )
+    else:
+        logger.info("Trading mode verified: %s account=%s", trading_mode.MODE, account)
 
     orders_store.init_store()
 
@@ -1060,6 +1105,9 @@ async def health():
         "ib_pool": ib_pool.status() if ib_pool else {},
         "uw": uw_available,
         "futu": _compute_futu_health(),
+        "trading_mode": getattr(app.state, "trading_mode", trading_mode.MODE),
+        "account": getattr(app.state, "account", ""),
+        "mode_verified": getattr(app.state, "mode_verified", False),
     }
 
 
