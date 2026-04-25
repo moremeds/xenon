@@ -78,3 +78,40 @@ def test_verify_account_empty_is_false(monkeypatch):
     tm = _reload(monkeypatch, "live")
     assert tm.verify_account("") is False
     assert tm.verify_account(None) is False  # type: ignore[arg-type]
+
+
+def test_default_gateway_port_follows_mode_paper(monkeypatch):
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.delenv("IB_GATEWAY_PORT", raising=False)
+    import xenon.api.trading_mode as tm
+
+    importlib.reload(tm)
+    import xenon.clients.ib_client as ibc
+
+    importlib.reload(ibc)
+    assert ibc.DEFAULT_GATEWAY_PORT == 4002
+
+
+def test_default_gateway_port_follows_mode_live(monkeypatch):
+    monkeypatch.setenv("XENON_TRADING_MODE", "live")
+    monkeypatch.delenv("IB_GATEWAY_PORT", raising=False)
+    import xenon.api.trading_mode as tm
+
+    importlib.reload(tm)
+    import xenon.clients.ib_client as ibc
+
+    importlib.reload(ibc)
+    assert ibc.DEFAULT_GATEWAY_PORT == 4001
+
+
+def test_ib_gateway_port_env_var_is_ignored(monkeypatch):
+    """Spec: IB_GATEWAY_PORT is no longer consulted; mode wins."""
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("IB_GATEWAY_PORT", "9999")
+    import xenon.api.trading_mode as tm
+
+    importlib.reload(tm)
+    import xenon.clients.ib_client as ibc
+
+    importlib.reload(ibc)
+    assert ibc.DEFAULT_GATEWAY_PORT == 4002  # mode wins, env var ignored

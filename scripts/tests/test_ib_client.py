@@ -12,10 +12,10 @@ from unittest.mock import MagicMock, PropertyMock, call, patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helpers — build mock IB objects
 # ---------------------------------------------------------------------------
+
 
 def _make_position(symbol="AAPL", sec_type="STK", position=100, avg_cost=150.0):
     """Create a mock Position object."""
@@ -143,22 +143,22 @@ def _make_contract_details():
 # ---------------------------------------------------------------------------
 
 from xenon.clients.ib_client import (
+    CLIENT_IDS,
+    DEFAULT_GATEWAY_PORT,
+    DEFAULT_HOST,
+    DEFAULT_TWS_PORT,
     IBClient,
     IBConnectionError,
     IBContractError,
     IBError,
     IBOrderError,
     IBTimeoutError,
-    CLIENT_IDS,
-    DEFAULT_GATEWAY_PORT,
-    DEFAULT_HOST,
-    DEFAULT_TWS_PORT,
 )
-
 
 # ===========================================================================
 # EXCEPTION HIERARCHY
 # ===========================================================================
+
 
 class TestExceptionHierarchy:
     """Verify exception classes exist and inherit properly."""
@@ -184,6 +184,7 @@ class TestExceptionHierarchy:
 # CONSTANTS
 # ===========================================================================
 
+
 class TestConstants:
     """Verify exported constants match the existing registry."""
 
@@ -197,13 +198,16 @@ class TestConstants:
     def test_default_ports(self):
         # DEFAULT_HOST comes from env/dotenv — verify it's a non-empty string
         assert isinstance(DEFAULT_HOST, str) and len(DEFAULT_HOST) > 0
-        assert DEFAULT_GATEWAY_PORT == 4001
+        # DEFAULT_GATEWAY_PORT now derives from XENON_TRADING_MODE;
+        # defaults to paper mode (4002) when unset
+        assert DEFAULT_GATEWAY_PORT in (4001, 4002)
         assert DEFAULT_TWS_PORT == 7497
 
 
 # ===========================================================================
 # CONNECTION LIFECYCLE
 # ===========================================================================
+
 
 class TestConnection:
     """Test connect, disconnect, reconnect, and context manager."""
@@ -229,9 +233,7 @@ class TestConnection:
         client.connect(client_name="ib_sync")
 
         expected_id = CLIENT_IDS["ib_sync"]
-        mock_ib.connect.assert_called_once_with(
-            DEFAULT_HOST, DEFAULT_GATEWAY_PORT, clientId=expected_id, timeout=3
-        )
+        mock_ib.connect.assert_called_once_with(DEFAULT_HOST, DEFAULT_GATEWAY_PORT, clientId=expected_id, timeout=3)
 
     @patch("xenon.clients.ib_client.IB")
     def test_connect_unknown_client_name_raises(self, MockIB):
@@ -341,6 +343,7 @@ class TestConnection:
 # PORTFOLIO OPERATIONS
 # ===========================================================================
 
+
 class TestPortfolioOperations:
     """Test get_positions, get_portfolio, get_account_summary."""
 
@@ -437,6 +440,7 @@ class TestPortfolioOperations:
 # ===========================================================================
 # ORDER OPERATIONS
 # ===========================================================================
+
 
 class TestOrderOperations:
     """Test place_order, cancel_order, modify_order, get_open_orders, get_order_status."""
@@ -625,6 +629,7 @@ class TestOrderOperations:
 # MARKET DATA
 # ===========================================================================
 
+
 class TestMarketData:
     """Test get_quote, get_option_chain, get_option_price, qualify_contract."""
 
@@ -789,6 +794,7 @@ class TestMarketData:
 # EXECUTION / FILL OPERATIONS
 # ===========================================================================
 
+
 class TestExecutionOperations:
     """Test get_executions, get_fills, wait_for_fill."""
 
@@ -905,6 +911,7 @@ class TestExecutionOperations:
 # FLEX QUERY
 # ===========================================================================
 
+
 class TestFlexQuery:
     """Test Flex Query execution."""
 
@@ -942,6 +949,7 @@ class TestFlexQuery:
 # ===========================================================================
 # ERROR HANDLING — KNOWN IB ERRORS
 # ===========================================================================
+
 
 class TestErrorHandling:
     """Test handling of known IB error codes."""
@@ -1002,6 +1010,7 @@ class TestErrorHandling:
 # RETRY LOGIC
 # ===========================================================================
 
+
 class TestFastTimeout:
     """IBClient.connect() defaults to 3s timeout for fast failure."""
 
@@ -1015,7 +1024,10 @@ class TestFastTimeout:
         client.connect(host="127.0.0.1", port=4001, client_id=1)
 
         mock_ib.connect.assert_called_once_with(
-            "127.0.0.1", 4001, clientId=1, timeout=3,
+            "127.0.0.1",
+            4001,
+            clientId=1,
+            timeout=3,
         )
 
     @patch("xenon.clients.ib_client.IB")
@@ -1028,7 +1040,10 @@ class TestFastTimeout:
         client.connect(host="127.0.0.1", port=4001, client_id=1, timeout=10)
 
         mock_ib.connect.assert_called_once_with(
-            "127.0.0.1", 4001, clientId=1, timeout=10,
+            "127.0.0.1",
+            4001,
+            clientId=1,
+            timeout=10,
         )
 
 
@@ -1068,6 +1083,7 @@ class TestRetryLogic:
 # LOGGING
 # ===========================================================================
 
+
 class TestLogging:
     """Test that structured logging is present."""
 
@@ -1105,6 +1121,7 @@ class TestLogging:
 # HISTORICAL DATA
 # ===========================================================================
 
+
 class TestHistoricalData:
     """Test historical data retrieval."""
 
@@ -1135,6 +1152,7 @@ class TestHistoricalData:
 # CONTRACT DETAILS
 # ===========================================================================
 
+
 class TestContractDetails:
     """Test contract details retrieval."""
 
@@ -1158,6 +1176,7 @@ class TestContractDetails:
 # ===========================================================================
 # SLEEP / UTILITY
 # ===========================================================================
+
 
 class TestUtilities:
     """Test utility methods."""
@@ -1184,6 +1203,7 @@ class TestUtilities:
 # ===========================================================================
 # OPEN TRADES
 # ===========================================================================
+
 
 class TestOpenTrades:
     """Test open trades retrieval."""
