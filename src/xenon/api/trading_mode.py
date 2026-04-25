@@ -18,6 +18,8 @@ import os
 from pathlib import Path
 from typing import Literal
 
+from fastapi import HTTPException, Request
+
 # Load repo `.env` BEFORE reading XENON_TRADING_MODE, otherwise downstream
 # imports (ib_client, ib_connection, ib_gateway) bind their port constants
 # from a stale environment because they import this module before any other
@@ -68,3 +70,41 @@ def verify_account(account: str | None) -> bool:
         return account.startswith("DU")
     # live: starts with U but NOT DU
     return account.startswith("U") and not account.startswith("DU")
+
+
+def mask_account(account: str | None) -> str:
+    """Mask all but the last 4 chars of an account number for public display.
+
+    Used by /health (auth-exempt path). Empty/short values are returned as-is
+    so the caller can still distinguish "unknown" from a real account.
+    """
+    if not account:
+        return ""
+    if len(account) <= 4:
+        return account
+    return account[:2] + "***" + account[-4:]
+
+
+def require_mode_verified(request: Request) -> None:
+    """FastAPI dependency: reject order-mutating requests when mode is unverified.
+
+    Reads `app.state.{trading_mode,account,mode_verified}` populated by the
+    server lifespan guard. Returns 503 with both the declared mode and the
+    observed account in the body so the operator can fix the mismatch
+    (edit .env or relog Gateway). Lives here (not in server.py) so wizard
+    routes can apply it without circular imports.
+    """
+    state = request.app.state
+    if getattr(state, "mode_verified", False):
+        return
+    declared = getattr(state, "trading_mode", MODE)
+    observed = getattr(state, "account", "")
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            f"Trading mode mismatch: .env declares XENON_TRADING_MODE={declared!r} "
+            f"but IB Gateway is logged in as account={observed!r} "
+            f"(expected prefix {EXPECTED_PREFIX!r}). "
+            f"Fix: align .env with the Gateway login and restart."
+        ),
+    )

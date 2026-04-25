@@ -29,7 +29,7 @@ def test_health_includes_trading_mode_fields(client_in_test_mode):
     assert r.status_code == 200
     body = r.json()
     assert body["trading_mode"] == "paper"
-    assert body["account"] == "DU9999999"
+    assert body["account"] == "DU***9999"
     assert body["mode_verified"] is True
 
 
@@ -47,5 +47,5 @@ def test_health_mode_verified_false_on_mismatch(monkeypatch):
         r = c.get("/health")
         body = r.json()
         assert body["trading_mode"] == "live"
-        assert body["account"] == "DU9999999"
+        assert body["account"] == "DU***9999"
         assert body["mode_verified"] is False
