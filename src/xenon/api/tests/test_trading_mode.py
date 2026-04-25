@@ -109,41 +109,30 @@ def test_verify_account_empty_is_false(monkeypatch):
     assert tm.verify_account(None) is False  # type: ignore[arg-type]
 
 
-def test_default_gateway_port_follows_mode_paper(monkeypatch):
-    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
-    monkeypatch.delenv("IB_GATEWAY_PORT", raising=False)
-    import xenon.api.trading_mode as tm
+def test_ib_client_default_port_wired_to_trading_mode():
+    """Static cross-module wiring check.
 
-    importlib.reload(tm)
-    # tm must reload first; ibc binds EXPECTED_PORT at import time.
-    import xenon.clients.ib_client as ibc
+    Proves `ibc.DEFAULT_GATEWAY_PORT` is bound to `tm.EXPECTED_PORT` without
+    reloading either module — because reloading `ibc` mid-session creates
+    new class objects that break `@patch` decorators in `test_ib_client.py`.
+    The mode→port mapping itself is covered by `test_parse_paper`/`test_parse_live`.
+    """
+    from xenon.api import trading_mode as tm
+    from xenon.clients import ib_client as ibc
 
-    importlib.reload(ibc)
-    assert ibc.DEFAULT_GATEWAY_PORT == 4002
-
-
-def test_default_gateway_port_follows_mode_live(monkeypatch):
-    monkeypatch.setenv("XENON_TRADING_MODE", "live")
-    monkeypatch.delenv("IB_GATEWAY_PORT", raising=False)
-    import xenon.api.trading_mode as tm
-
-    importlib.reload(tm)
-    # tm must reload first; ibc binds EXPECTED_PORT at import time.
-    import xenon.clients.ib_client as ibc
-
-    importlib.reload(ibc)
-    assert ibc.DEFAULT_GATEWAY_PORT == 4001
+    assert ibc.DEFAULT_GATEWAY_PORT == tm.EXPECTED_PORT
 
 
 def test_ib_gateway_port_env_var_is_ignored(monkeypatch):
-    """Spec: IB_GATEWAY_PORT is no longer consulted; mode wins."""
+    """Spec: IB_GATEWAY_PORT is no longer consulted; mode wins.
+
+    Verifies via the trading_mode module only. The downstream binding to
+    `ibc.DEFAULT_GATEWAY_PORT` is covered by
+    `test_ib_client_default_port_wired_to_trading_mode`.
+    """
     monkeypatch.setenv("XENON_TRADING_MODE", "paper")
     monkeypatch.setenv("IB_GATEWAY_PORT", "9999")
     import xenon.api.trading_mode as tm
 
     importlib.reload(tm)
-    # tm must reload first; ibc binds EXPECTED_PORT at import time.
-    import xenon.clients.ib_client as ibc
-
-    importlib.reload(ibc)
-    assert ibc.DEFAULT_GATEWAY_PORT == 4002  # mode wins, env var ignored
+    assert tm.EXPECTED_PORT == 4002  # mode wins, env var ignored
