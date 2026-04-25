@@ -17,7 +17,7 @@ Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` fi
 ## Scanner Hierarchy
 
 - `src/xenon/scanners/_shared/` — shared foundation (cache, executor, models, scoring, universe)
-- `src/xenon/scanners/trend/` (entry: `xenon-trend-scan`) — 3-stage pre-market trend scanner, DuckDB-backed (`data/trend_scan.duckdb`). Auto-runs 8:30 AM ET weekdays via the FastAPI scheduler.
+- `src/xenon/scanners/trend/` (entry: `xenon-trend-scan`) — **DEPRECATED.** Code retained for repurposing; R2/ta_lib data source removed 2026-04-26. Scheduler removed from server.py.
 - `src/xenon/scanners/uw/` (entries: `xenon-uw-scan`, `xenon-uw-analyze`) — tiered UW signal scanner with Type F confluence
 
 New scanners MUST build on `src/xenon/scanners/_shared/` — do not duplicate universe/executor/scoring logic.
@@ -25,12 +25,10 @@ New scanners MUST build on `src/xenon/scanners/_shared/` — do not duplicate un
 ## Data Source Priority
 
 1. Interactive Brokers — real-time quotes, chains, execution, live portfolio
-2. **Cloudflare R2 `apex-data` bucket** — pre-computed OHLCV + TA indicators (nightly, via GitHub Action `apex-data-refresh`). Read-only in the scanner.
-3. Massive.com — historical OHLCV source. Action-side only; the trend scanner never calls Massive directly at scan time.
-4. Unusual Whales (`$UW_TOKEN`) — dark pool, sweeps, alerts (Stage B/C).
-5. Web scrape — last resort.
+2. Unusual Whales (`$UW_TOKEN`) — dark pool, sweeps, alerts (Stage B/C).
+3. Web scrape — last resort.
 
-**Never use Yahoo Finance.** Historical data flows Massive → R2 → scanner.
+**Never use Yahoo Finance.**
 
 ## ⛔ Mandatory Rules
 
@@ -106,7 +104,6 @@ The closed-market gate lives inside `UwAnalyzeCache.get_or_run()` and also cover
 - [ ] Reconciliation auto-runs → `data/reconciliation.json`
 - [ ] Exit order service auto-runs (PENDING_MANUAL)
 - [ ] CRI scan service running (30-min intervals)
-- [ ] Pre-market trend scan runs 8:30 AM ET weekdays → `data/trend_scan.json`
 - [ ] X scan if >12h stale
 - [ ] Check market hours
 
@@ -177,7 +174,6 @@ Order-route integration tests use `web/tests/fastapiHarness.ts` with `XENON_API_
 - `ci.yml` — PR + master push. Runs `web-typecheck`, `web-lint`, `web-tests` (full Vitest against real `.venv` CLIs), `python-tests` (affected on PR, full on master), `version-sync` (VERSION ↔ `package.json`).
 - `release.yml` — triggered on tag `v*`. Full verify (pytest + vitest + typecheck + lint) → publish GitHub Release from `CHANGELOG.md`.
 - `nightly.yml` — 9 AM UTC Playwright E2E, auto-comments failures on a tracking issue.
-- `apex-data-refresh.yml` — nightly R2 OHLCV/TA refresh.
 
 **Release cut** (operator-run, does NOT push):
 

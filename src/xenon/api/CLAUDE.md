@@ -8,7 +8,7 @@ Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xeno
 
 ## Module Layout
 
-- `server.py` — endpoint dispatch, IB pool lifecycle, background schedulers (pre-market trend scan 8:30 AM ET, CTA sync)
+- `server.py` — endpoint dispatch, IB pool lifecycle, background schedulers (CTA sync)
 - `routes/` — per-topic FastAPI routers, included from `server.py`:
   - `uw_analyze.py` — `/uw-analyze/*` (portfolio bias, refresh, SSE streaming for progressive enrichment)
   - `uw_stats.py` — `/uw-stats`, `/uw-stats/reset`
@@ -25,7 +25,6 @@ Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xeno
 
 ## Background Tasks
 
-- **Pre-market trend scan** — 8:30 AM ET weekdays, `xenon-trend-scan --top 25`, writes `data/trend_scan.json`. Defined as an asyncio loop started in the lifespan handler (`_trend_scan_premarket_loop`).
 - **Futu singleton** — lazy-initialized on first `/futu/sync` call so the server boots even when OpenD is down. asyncio singleflight lock collapses concurrent fetches. 10s cooldown gate. **Uses a `None` sentinel (not `0.0`) for last-sync** — near process start `time.monotonic() - 0.0` would look recently-synced and serve stale cache.
 - **Single-leg rehydrate on boot (F7)** — `_run_rehydrate_on_boot()` runs synchronously inside the FastAPI `lifespan` before the server begins serving. Calls `xenon.execution.single_leg_rehydrate.rehydrate_on_boot()` (three-source reconcile: orders DB, IB open orders, CRI monitor) with a 10s timeout; on timeout or failure we log a warning and continue. Skipped in test mode unless `XENON_ORDERS_DB_PATH` is set (prevents polluting the prod DuckDB during pytest). Observability readiness check: `POST /dev/rehydrate/synthetic`.
 

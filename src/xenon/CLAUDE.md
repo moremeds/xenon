@@ -7,12 +7,10 @@ Python pipelines, scanners, clients, commands — the installable `xenon` packag
 ## Data Source Priority
 
 1. Interactive Brokers (TWS/Gateway) — real-time quotes, chains, execution, live portfolio
-2. Cloudflare R2 `apex-data` bucket — pre-computed OHLCV + TA indicators (read-only for scanner; written by nightly GitHub Action)
-3. Massive.com (`$MASSIVE_API_KEY`) — historical OHLCV source, Action-side only
-4. Unusual Whales (`$UW_TOKEN`) — dark pool, sweeps, alerts
-5. Web scrape — last resort
+2. Unusual Whales (`$UW_TOKEN`) — dark pool, sweeps, alerts
+3. Web scrape — last resort
 
-**Never use Yahoo Finance.** Scanner never calls Massive directly.
+**Never use Yahoo Finance.**
 
 **Clients:** `src/xenon/clients/` — `IBClient`, `UWClient`, `MenthorQClient`, `FutuClient`. Legacy `src/xenon/utils/{ib_connection,uw_api}.py` preserved; new code uses clients.
 
@@ -21,9 +19,8 @@ Python pipelines, scanners, clients, commands — the installable `xenon` packag
 ## Scanner Libs — Shared Foundation
 
 - `src/xenon/scanners/_shared/` — `cache`, `executor` (parallel_fetch), `models`, `scoring`, `universe`. Every scanner builds on this.
-- `src/xenon/scanners/trend/` — 3-stage pre-market trend scanner (entry: `xenon-trend-scan`). Stages: `ta_prefilter` → `options_structure` + `volatility` + `flow_confirmation`. Config: `config.py`. Storage: DuckDB (`data/trend_scan.duckdb`) via `storage.py` — `duckdb` package imported lazily so scanners that don't need persistence still run.
+- `src/xenon/scanners/trend/` — **DEPRECATED.** Code retained for repurposing; R2/ta_lib data source removed 2026-04-26.
 - `src/xenon/scanners/uw/` — tiered UW signal scanner (entries: `xenon-uw-scan`, `xenon-uw-analyze`). Signals: `dark_pool_accumulation`, `deep_conviction_flow`, `earnings_iv_crush`, `gex_pinning`. Context: `pcr_sentiment`. Confluence ranking: `ranking.py` + `confluence.py`.
-- `src/xenon/ta_lib/` — Cloudflare R2 parquet-mirror reader. `r2_store.py` (sole owner of boto3 S3 calls), `parquet_store.py` (pyarrow I/O, UTC enforcement, HKT→UTC legacy normalization, daily-bar UTC-midnight per spec), `apex_sync.py` (scanner-side R2 mirror download gated by `meta/last_updated.json`, atomic tmp→rename swap, R2-outage fallback), `dry_run_store.py` (local-filesystem stand-in for `--dry-run`), `service.py` (`TAService` read-through view; full snapshot contract preserved). `indicators.py` (TA-Lib wrappers) and `bars.py` (Massive→OHLCV adapter) run in the GitHub Action, not the scanner. Mirror on disk: `data/apex_mirror/`.
 
 New scanners compose `_shared` primitives — do not reimplement universe/executor/scoring logic.
 
@@ -108,7 +105,7 @@ Python deps via **`uv`** (not pip). `pyproject.toml` defines `[project.optional-
 
 ```bash
 uv sync --extra test             # install deps incl. test
-uv run xenon-trend-scan --top 25 # run any CLI entry point
+uv run xenon-uw-scan --top 25    # run any CLI entry point
 uv run pytest -xvs <path>        # single test
 ```
 
@@ -123,31 +120,30 @@ Full data catalog: `docs/architecture/data-files.md`.
 
 ## Commands
 
-| Command                          | Action                                                                                                                                                                                                                                     |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `scan`                           | Watchlist dark pool scan (legacy HTML scanner, `src/xenon/scanners/scanner.py`)                                                                                                                                                            |
-| `discover`                       | Market-wide flow for new candidates                                                                                                                                                                                                        |
-| `uw-scan`                        | Tiered UW signal scanner with Type F confluence detection (distinct from `scan`)                                                                                                                                                           |
-| `uw-analyze [TICKER]`            | Per-ticker deep-dive: VRP state, regime, 4-bucket composite score (chained in-process by `uw-scan --analyze-top N`)                                                                                                                        |
-| `trend-scan`                     | 3-stage pre-market trend scanner (TA prefilter → structure/vol/flow). DuckDB-backed. Auto-runs 8:30 AM ET weekdays.                                                                                                                        |
-| `futu-sync`                      | Pull read-only positions from local Futu OpenD (no orders, no market data)                                                                                                                                                                 |
-| `evaluate [TICKER]`              | Full 7-milestone eval                                                                                                                                                                                                                      |
-| `portfolio`                      | Positions, exposure, capacity                                                                                                                                                                                                              |
-| `journal`                        | Recent trade log                                                                                                                                                                                                                           |
-| `sync`                           | Pull live portfolio from IB                                                                                                                                                                                                                |
-| `blotter`                        | Today's fills + P&L                                                                                                                                                                                                                        |
-| `blotter-history`                | Historical trades (Flex Query)                                                                                                                                                                                                             |
-| `leap-scan [TICKERS]`            | LEAP IV mispricing                                                                                                                                                                                                                         |
-| `garch-convergence [TICKERS]`    | Cross-asset GARCH vol divergence                                                                                                                                                                                                           |
-| `seasonal [TICKERS]`             | Monthly seasonality                                                                                                                                                                                                                        |
-| `x-scan [@ACCOUNT]`              | X post sentiment                                                                                                                                                                                                                           |
-| `analyst-ratings [TICKERS]`      | Ratings + targets                                                                                                                                                                                                                          |
-| `vcg-scan`                       | Vol-credit gap divergence                                                                                                                                                                                                                  |
-| `cri-scan`                       | Crash Risk Index (CTA deleveraging)                                                                                                                                                                                                        |
-| `menthorq-cta`                   | MenthorQ CTA positioning                                                                                                                                                                                                                   |
-| `menthorq-dashboard [CMD]`       | Dashboard image (vol/forex/eod/intraday/futures/cryptos_technical/cryptos_options). `--ticker` for eod/intraday/futures/crypto (16 tickers)                                                                                                |
-| `menthorq-screener [CAT] [SLUG]` | Screener (6 categories, 45 sub-screeners)                                                                                                                                                                                                  |
-| `menthorq-forex`                 | Forex gamma levels + blindspot (14 pairs)                                                                                                                                                                                                  |
-| `menthorq-summary [CAT]`         | Summary tables (futures: 93 rows, cryptos: 16)                                                                                                                                                                                             |
-| `menthorq-quin [PROMPT]`         | QUIN AI screener. Presets: `docs/reference/menthorq-prompts.md`                                                                                                                                                                            |
-| `apex-refresh`                   | Apex R2 ETL entrypoint. Nightly GitHub Action (`.github/workflows/apex-data-refresh.yml`). Local dry-run: `xenon-fetch-apex-data --mode full --dry-run --timeframes 1d,1h`. Writes OHLCV + TA-indicator parquets to R2 `apex-data` bucket. |
+| Command                          | Action                                                                                                                                      |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scan`                           | Watchlist dark pool scan (legacy HTML scanner, `src/xenon/scanners/scanner.py`)                                                             |
+| `discover`                       | Market-wide flow for new candidates                                                                                                         |
+| `uw-scan`                        | Tiered UW signal scanner with Type F confluence detection (distinct from `scan`)                                                            |
+| `uw-analyze [TICKER]`            | Per-ticker deep-dive: VRP state, regime, 4-bucket composite score (chained in-process by `uw-scan --analyze-top N`)                         |
+| `trend-scan`                     | **DEPRECATED.** Code retained for repurposing; R2/ta_lib data source removed 2026-04-26.                                                    |
+| `futu-sync`                      | Pull read-only positions from local Futu OpenD (no orders, no market data)                                                                  |
+| `evaluate [TICKER]`              | Full 7-milestone eval                                                                                                                       |
+| `portfolio`                      | Positions, exposure, capacity                                                                                                               |
+| `journal`                        | Recent trade log                                                                                                                            |
+| `sync`                           | Pull live portfolio from IB                                                                                                                 |
+| `blotter`                        | Today's fills + P&L                                                                                                                         |
+| `blotter-history`                | Historical trades (Flex Query)                                                                                                              |
+| `leap-scan [TICKERS]`            | LEAP IV mispricing                                                                                                                          |
+| `garch-convergence [TICKERS]`    | Cross-asset GARCH vol divergence                                                                                                            |
+| `seasonal [TICKERS]`             | Monthly seasonality                                                                                                                         |
+| `x-scan [@ACCOUNT]`              | X post sentiment                                                                                                                            |
+| `analyst-ratings [TICKERS]`      | Ratings + targets                                                                                                                           |
+| `vcg-scan`                       | Vol-credit gap divergence                                                                                                                   |
+| `cri-scan`                       | Crash Risk Index (CTA deleveraging)                                                                                                         |
+| `menthorq-cta`                   | MenthorQ CTA positioning                                                                                                                    |
+| `menthorq-dashboard [CMD]`       | Dashboard image (vol/forex/eod/intraday/futures/cryptos_technical/cryptos_options). `--ticker` for eod/intraday/futures/crypto (16 tickers) |
+| `menthorq-screener [CAT] [SLUG]` | Screener (6 categories, 45 sub-screeners)                                                                                                   |
+| `menthorq-forex`                 | Forex gamma levels + blindspot (14 pairs)                                                                                                   |
+| `menthorq-summary [CAT]`         | Summary tables (futures: 93 rows, cryptos: 16)                                                                                              |
+| `menthorq-quin [PROMPT]`         | QUIN AI screener. Presets: `docs/reference/menthorq-prompts.md`                                                                             |
