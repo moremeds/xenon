@@ -33,6 +33,8 @@ def client_with_mismatch(monkeypatch):
     "path,body",
     [
         ("/wizard/sessions/abc/submit", {}),
+        ("/wizard/sessions/abc/reprice", {"target_price": "1.00"}),
+        ("/wizard/sessions/abc/abort", {}),
         (
             "/wizard/sessions/abc/protect",
             {

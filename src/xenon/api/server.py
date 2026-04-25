@@ -36,6 +36,7 @@ INTERNALS_SKEW_CACHE_TTL_SECONDS = 60 * 15
 
 from xenon.api import trading_mode
 from xenon.api.auth import verify_api_key, verify_clerk_jwt
+from xenon.api.guards import mask_account, require_mode_verified
 from xenon.api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_mode, is_docker_mode, restart_ib_gateway
 from xenon.api.ib_pool import IBPool
 from xenon.api.pool_order_manage import pool_cancel_order, pool_modify_order
@@ -1109,7 +1110,7 @@ async def health():
         # /health is auth-exempt — mask the IB account so the public payload
         # does not leak the full identifier. The raw value stays on app.state
         # for the require_mode_verified 503 detail (which is auth-gated).
-        "account": trading_mode.mask_account(getattr(app.state, "account", "")),
+        "account": mask_account(getattr(app.state, "account", "")),
         "mode_verified": getattr(app.state, "mode_verified", False),
     }
 
@@ -1397,7 +1398,7 @@ async def _bg_sync_via_subprocess():
         logger.error("Background portfolio sync failed: %s", result.error)
 
 
-@app.post("/orders/refresh", dependencies=[Depends(trading_mode.require_mode_verified)])
+@app.post("/orders/refresh", dependencies=[Depends(require_mode_verified)])
 async def orders_refresh():
     """Sync orders from IB via subprocess.
 
@@ -1601,7 +1602,7 @@ async def orders_quote(ticker: str, con_id: int):
     }
 
 
-@app.post("/orders/place", dependencies=[Depends(trading_mode.require_mode_verified)])
+@app.post("/orders/place", dependencies=[Depends(require_mode_verified)])
 async def orders_place(request: Request):
     """Place an order via IB (on-demand connection, client_id=26)."""
     body = await request.json()
@@ -1833,7 +1834,7 @@ def _record_manage_event(
         )
 
 
-@app.post("/orders/cancel", dependencies=[Depends(trading_mode.require_mode_verified)])
+@app.post("/orders/cancel", dependencies=[Depends(require_mode_verified)])
 async def orders_cancel(request: Request):
     """Cancel an open order via subprocess.
 
@@ -1947,7 +1948,7 @@ def _try_register_order_from_snapshot(*, perm_id: int, order_id: int) -> bool:
         return False
 
 
-@app.post("/orders/modify", dependencies=[Depends(trading_mode.require_mode_verified)])
+@app.post("/orders/modify", dependencies=[Depends(require_mode_verified)])
 async def orders_modify(request: Request):
     """Modify an open order via subprocess.
 

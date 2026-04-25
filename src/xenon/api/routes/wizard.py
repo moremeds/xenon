@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from xenon.api.trading_mode import require_mode_verified
+from xenon.api.guards import require_mode_verified
 from xenon.execution.combo_wizard import session as combo_session
 
 router = APIRouter()
@@ -96,7 +96,10 @@ async def wizard_submit(session_id: str, body: SubmitRequest) -> dict[str, Any]:
         raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
-@router.post("/wizard/sessions/{session_id}/reprice")
+@router.post(
+    "/wizard/sessions/{session_id}/reprice",
+    dependencies=[Depends(require_mode_verified)],
+)
 async def wizard_reprice(session_id: str, body: RepriceRequest) -> dict[str, Any]:
     try:
         return await combo_session.reprice_combo(session_id, body.model_dump(mode="json"))
@@ -104,7 +107,10 @@ async def wizard_reprice(session_id: str, body: RepriceRequest) -> dict[str, Any
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/wizard/sessions/{session_id}/abort")
+@router.post(
+    "/wizard/sessions/{session_id}/abort",
+    dependencies=[Depends(require_mode_verified)],
+)
 async def wizard_abort(session_id: str) -> dict[str, Any]:
     try:
         return await combo_session.abort_session(session_id)
