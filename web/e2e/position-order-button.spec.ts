@@ -37,6 +37,7 @@ const IB_FIXTURE = {
           contracts: 100,
           type: "Stock",
           strike: null,
+          conId: 265598,
           entry_cost: 32000,
           avg_cost: 320,
           market_price: 350,
@@ -373,6 +374,10 @@ test.describe("Position-row ⚡ order button", () => {
     const limitInput = page.locator("#position-order-price");
     await limitInput.fill("350");
 
+    const tifGroup = page.getByRole("group", { name: "Time in force" });
+    await expect(tifGroup).toBeVisible();
+    await tifGroup.getByRole("button", { name: "GTC" }).click();
+
     const submitBtn = page.getByRole("button", { name: /submit close/i });
     await expect(submitBtn).toBeEnabled({ timeout: 2_000 });
     await submitBtn.click();
@@ -388,7 +393,7 @@ test.describe("Position-row ⚡ order button", () => {
     expect((capturedBody!.client_attempt_id as string).length).toBeGreaterThan(
       0,
     );
-    expect(capturedBody!.tif).toBe("DAY");
+    expect(capturedBody!.tif).toBe("GTC");
   });
 
   test("8. Close/Add toggle switches the submit button label and the payload action", async ({

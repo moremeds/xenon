@@ -294,8 +294,19 @@ export function buildSingleLegOrderPayload(params: {
       expiry,
       strike: leg.strike,
       right,
+      ...(typeof leg.conId === "number" && leg.conId > 0
+        ? { con_id: leg.conId }
+        : {}),
     };
   }
+
+  const stockConId =
+    position?.structure_type === "Stock" &&
+    position.legs.length === 1 &&
+    typeof position.legs[0].conId === "number" &&
+    position.legs[0].conId > 0
+      ? position.legs[0].conId
+      : null;
 
   return {
     type: "stock",
@@ -304,7 +315,14 @@ export function buildSingleLegOrderPayload(params: {
     quantity,
     limitPrice,
     tif,
+    ...(stockConId != null ? { con_id: stockConId } : {}),
   };
+}
+
+function singleLegConId(position: PortfolioPosition | null): number | null {
+  if (position == null || position.legs.length !== 1) return null;
+  const conId = position.legs[0].conId;
+  return typeof conId === "number" && conId > 0 ? conId : null;
 }
 
 /* ─── New order form ─── */
@@ -339,9 +357,10 @@ function NewOrderForm({
   const [tif, setTif] = useState<"DAY" | "GTC">("DAY");
 
   const attemptId = useClientAttemptId({ ticker });
+  const quoteConId = singleLegConId(position);
   const quote = useQuoteToken({
     ticker,
-    conId: 0,
+    conId: quoteConId,
     expiry: position?.expiry ?? null,
   });
   const setAction = (v: OrderAction) => {
@@ -436,6 +455,17 @@ function NewOrderForm({
         return;
       }
 
+      if (quote.error) {
+        setError(`Quote unavailable: ${quote.error}`);
+        setLoading(false);
+        return;
+      }
+      if (payload.type !== "combo" && !quote.token) {
+        setError("Quote unavailable: waiting for latest IB quote");
+        setLoading(false);
+        return;
+      }
+
       attemptId.markSubmitted();
       const res = await fetch("/api/orders/place", {
         method: "POST",
@@ -472,6 +502,8 @@ function NewOrderForm({
     tif,
     position,
     portfolio,
+    quote.error,
+    quote.token,
     onOrderPlaced,
   ]);
 
