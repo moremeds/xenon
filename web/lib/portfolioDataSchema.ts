@@ -9,6 +9,7 @@ const PortfolioLegSchema = Type.Object({
     Type.Literal("Stock"),
   ]),
   strike: Type.Union([Type.Number(), Type.Null()]),
+  conId: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
   entry_cost: Type.Number(),
   avg_cost: Type.Number(),
   market_price: Type.Union([Type.Number(), Type.Null()]),

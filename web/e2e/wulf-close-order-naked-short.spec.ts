@@ -30,6 +30,7 @@ const PORTFOLIO_MOCK = {
           contracts: 77,
           type: "Call",
           strike: 17,
+          conId: 777001,
           entry_cost: 40_076.51,
           avg_cost: 520.4741844,
           market_price: 4.475,
@@ -176,7 +177,14 @@ async function installMockWebSocket(page: import("@playwright/test").Page) {
   }, PRICE_FIXTURES);
 }
 
-async function stubApis(page: import("@playwright/test").Page) {
+async function stubApis(
+  page: import("@playwright/test").Page,
+  handlers: {
+    onQuoteUrl?: (url: string) => void;
+    onPlaceBody?: (payload: Record<string, unknown>) => void;
+    quoteStatus?: number;
+  } = {},
+) {
   await page.unrouteAll({ behavior: "ignoreErrors" });
 
   await page.route("**/api/portfolio", (route) =>
@@ -193,8 +201,22 @@ async function stubApis(page: import("@playwright/test").Page) {
       body: JSON.stringify(ORDERS_EMPTY),
     }),
   );
+  await page.route("**/api/orders/quote**", async (route) => {
+    handlers.onQuoteUrl?.(route.request().url());
+    const status = handlers.quoteStatus ?? 200;
+    await route.fulfill({
+      status,
+      contentType: "application/json",
+      body: JSON.stringify(
+        status === 200
+          ? { token: "quote-token", bid: "4.20", ask: "4.75" }
+          : { detail: "IB data role unavailable" },
+      ),
+    });
+  });
   await page.route("**/api/orders/place", async (route) => {
     const payload = await route.request().postDataJSON();
+    handlers.onPlaceBody?.(payload);
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -239,7 +261,16 @@ async function stubApis(page: import("@playwright/test").Page) {
 
 test("WULF close-position order tab does not show a false naked-short warning", async ({ page }) => {
   await installMockWebSocket(page);
-  await stubApis(page);
+  let quoteUrl = "";
+  let placeBody: Record<string, unknown> | null = null;
+  await stubApis(page, {
+    onQuoteUrl: (url) => {
+      quoteUrl = url;
+    },
+    onPlaceBody: (payload) => {
+      placeBody = payload;
+    },
+  });
 
   await page.goto("/WULF?posId=23&tab=order");
 
@@ -260,4 +291,38 @@ test("WULF close-position order tab does not show a false naked-short warning", 
 
   await expect(page.locator(".order-success")).toContainText(/Order placed: SELL 77 WULF/i);
   await expect(page.locator(".order-error").filter({ hasText: /Naked short call/i })).toHaveCount(0);
+  expect(quoteUrl).toContain("con_id=777001");
+  expect(placeBody?.con_id).toBe(777001);
+});
+
+test("WULF close-position order tab surfaces quote failures before submit", async ({
+  page,
+}) => {
+  await installMockWebSocket(page);
+  let placeCalled = false;
+  await stubApis(page, {
+    quoteStatus: 503,
+    onPlaceBody: () => {
+      placeCalled = true;
+    },
+  });
+
+  await page.goto("/WULF?posId=23&tab=order");
+
+  await page.getByRole("button", { name: "SELL" }).click();
+  await page.locator(".order-input").fill("77");
+  await page.locator(".modify-price-input").fill("4.47");
+
+  const placeButton = page.getByRole("button", { name: "Place Order" });
+  await expect(placeButton).toBeEnabled();
+  await placeButton.click();
+
+  const confirmButton = page.getByRole("button", { name: "Confirm Order" });
+  await expect(confirmButton).toBeEnabled();
+  await confirmButton.click();
+
+  await expect(page.locator(".order-error")).toContainText(
+    /Quote unavailable: IB data role unavailable/i,
+  );
+  expect(placeCalled).toBe(false);
 });

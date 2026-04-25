@@ -76,6 +76,9 @@ export default function PositionOrderModal({
       : "",
   );
   const [outsideRth, setOutsideRth] = useState(false);
+  const [tif, setTif] = useState<"DAY" | "GTC">(
+    draft.payload.tif ?? "DAY",
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -127,6 +130,7 @@ export default function PositionOrderModal({
         ...draft.payload,
         quantity: clampedQty,
         limitPrice: parsedPrice,
+        tif,
         client_attempt_id: attemptId.id,
         ...(outsideRth && !isCombo ? { outsideRth: true } : {}),
       };
@@ -384,17 +388,69 @@ export default function PositionOrderModal({
               </div>
 
               {!isCombo && (
-                <label className="modify-rth-toggle">
-                  <input
-                    type="checkbox"
-                    checked={outsideRth}
-                    onChange={(e) => setOutsideRth(e.target.checked)}
-                  />
-                  <span className="modify-rth-label">FILL OUTSIDE RTH</span>
-                  <span className="modify-rth-hint">
-                    Pre-market &amp; after hours
-                  </span>
-                </label>
+                <>
+                  <div className="modify-quick-section">
+                    <span className="modify-price-label">Time in Force</span>
+                    <div
+                      className="modify-quick-buttons"
+                      role="group"
+                      aria-label="Time in force"
+                    >
+                      {(["DAY", "GTC"] as const).map((value) => (
+                        <button
+                          key={value}
+                          type="button"
+                          className={`btn-quick ${tif === value ? "active" : ""}`}
+                          aria-pressed={tif === value}
+                          onClick={() => {
+                            setTif(value);
+                            attemptId.onFieldEdit("tif");
+                          }}
+                        >
+                          {value}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <label className="modify-rth-toggle">
+                    <input
+                      type="checkbox"
+                      checked={outsideRth}
+                      onChange={(e) => setOutsideRth(e.target.checked)}
+                    />
+                    <span className="modify-rth-label">FILL OUTSIDE RTH</span>
+                    <span className="modify-rth-hint">
+                      Pre-market &amp; after hours
+                    </span>
+                  </label>
+                </>
+              )}
+
+              {isCombo && (
+                <div className="modify-quick-section">
+                  <span className="modify-price-label">Time in Force</span>
+                  <div
+                    className="modify-quick-buttons"
+                    role="group"
+                    aria-label="Time in force"
+                  >
+                    {(["DAY", "GTC"] as const).map((value) => (
+                      <button
+                        key={value}
+                        type="button"
+                        className={`btn-quick ${tif === value ? "active" : ""}`}
+                        aria-pressed={tif === value}
+                        onClick={() => {
+                          setTif(value);
+                          attemptId.onFieldEdit("tif");
+                        }}
+                      >
+                        {value}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               )}
 
               {partial && (

@@ -1,11 +1,17 @@
 # Status & Decision Log
 
 ## Last Updated
+
 2026-03-25T07:31:12-07:00
+
+## Current Work
+
+**Combo Wizard V1** — supported defined-risk spreads execute as BAG combos by default. Popup modal verified from both Order Builder and Order Tab. (Shipped 2026-04-25, PR #46. Merge blocked on live dry-run per spec §13.)
 
 ## Recent Evaluations
 
 ### TSLA — 2026-03-25 ⛔ NO_TRADE
+
 - **Decision**: NO_TRADE
 - **Failing Gate**: TICKER_VALIDATION
 - **📊 Data as of**: 2026-03-25 07:31 AM PT (LIVE)
@@ -13,6 +19,7 @@
 - **Status**: Evaluation stopped at Gate 1; no fresh options flow / OI / options-flow data fetched.
 
 ### AAPL — 2026-03-25 ⛔ NO_TRADE
+
 - **Decision**: NO_TRADE
 - **Failing Gate**: EDGE (Milestone 4)
 - **📊 Data as of**: 2026-03-25 06:40 AM PT (LIVE)
@@ -29,6 +36,7 @@
 - **News**: BEARISH sentiment (-0.25), catalysts: AI_CATALYST(8), PRODUCT_LAUNCH(2), REGULATORY(2), LEGAL(2), DEAL(1)
 
 ### TSLA — 2026-03-24 ⛔ NO_TRADE
+
 - **Decision**: NO_TRADE
 - **Failing Gate**: EDGE (Milestone 4)
 - **📊 Data as of**: 2026-03-24 08:27 PM PT (LIVE)
@@ -44,6 +52,7 @@
 - **News**: BEARISH sentiment (-0.15), catalysts: AI_CATALYST(4), PRODUCT_LAUNCH(2), GUIDANCE(1)
 
 ### CRWV — 2026-03-24 ⛔ NO_TRADE
+
 - **Decision**: NO_TRADE
 - **Failing Gate**: EDGE (Milestone 4)
 - **📊 Data as of**: 2026-03-24 08:26 PM PT (LIVE)
@@ -59,6 +68,7 @@
 - **News**: BEARISH sentiment (-0.25), catalysts: EARNINGS_BEAT, AI_CATALYST, REGULATORY
 
 ### IREN — 2026-03-24 ⛔ NO_TRADE
+
 - **Decision**: NO_TRADE
 - **Failing Gate**: EDGE (Milestone 4)
 - **📊 Data as of**: 2026-03-24 08:24 PM PT (LIVE)

@@ -475,6 +475,7 @@ def collapse_positions(positions: list) -> list:
                     "contracts": int(abs(leg["position"])),
                     "type": "Call" if leg.get("right") == "C" else ("Put" if leg.get("right") == "P" else "Stock"),
                     "strike": leg.get("strike"),
+                    "conId": leg.get("conId"),
                     "entry_cost": leg["entry_cost"],
                     "avg_cost": leg["avgCost"],
                     "market_price": leg.get("marketPrice"),

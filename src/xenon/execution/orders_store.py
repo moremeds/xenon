@@ -109,6 +109,9 @@ def init_store(db_path: Path | str | None = None) -> Path:
             con.execute(stmt)
     finally:
         con.close()
+    from xenon.execution.combo_wizard import store as wizard_store
+
+    wizard_store.init_store(path)
     return path
 
 

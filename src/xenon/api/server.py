@@ -41,6 +41,7 @@ from xenon.api.pool_order_manage import pool_cancel_order, pool_modify_order
 from xenon.api.routes.historical import router as historical_router
 from xenon.api.routes.uw_analyze import router as uw_analyze_router
 from xenon.api.routes.uw_stats import router as uw_stats_router
+from xenon.api.routes.wizard import router as wizard_router
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
@@ -214,6 +215,25 @@ async def _run_rehydrate_on_boot() -> None:
         logger.warning("single_leg rehydrate timed out after 10s; continuing to serve")
     except Exception as exc:  # noqa: BLE001
         logger.warning("single_leg rehydrate failed on boot; continuing to serve: %s", exc)
+
+    # Combo wizard rehydrate — Task 5.5. Same test-mode guard semantics as
+    # single_leg (gated by XENON_ORDERS_DB_PATH when running in test mode).
+    try:
+        from xenon.execution.combo_wizard import rehydrate as _combo_rehydrate_mod
+
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                _combo_rehydrate_mod.rehydrate_combo_sessions,
+                ib_client_factory=_ib_client_factory,
+                db_path=db_path,
+            ),
+            timeout=10.0,
+        )
+        logger.info("combo wizard rehydrate completed on boot")
+    except asyncio.TimeoutError:
+        logger.warning("combo wizard rehydrate timed out after 10s; continuing to serve")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("combo wizard rehydrate failed on boot; continuing to serve: %s", exc)
 
 
 @asynccontextmanager
@@ -440,6 +460,7 @@ app = FastAPI(title="Xenon API", version="1.0.0", lifespan=lifespan)
 app.include_router(historical_router)
 app.include_router(uw_analyze_router)
 app.include_router(uw_stats_router)
+app.include_router(wizard_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1444,24 +1465,14 @@ def _now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
-def _fetch_quote_snapshot(ticker: str, con_id: int) -> dict:
-    """Fetch a bid/ask snapshot from the ib_pool 'data' role.
+def _ensure_thread_event_loop() -> None:
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
-    Raises HTTPException(503) if the data role is unavailable. Tests
-    monkeypatch this symbol on `xenon.api.server`. Callers must wrap
-    this in ``asyncio.to_thread`` — the implementation blocks on IB.
-    """
-    pool = ib_pool
-    if pool is None:
-        raise HTTPException(status_code=503, detail="IB data role unavailable")
-    client = pool.get("data")
-    if client is None or not pool.is_connected("data"):
-        raise HTTPException(status_code=503, detail="IB data role unavailable")
 
-    contract = Contract(conId=int(con_id), exchange="SMART")
-    qualified = client.qualify_contract(contract)
-    tk = client.get_quote(qualified, snapshot=True)
-
+def _ticker_to_quote_snapshot(ticker: str, con_id: int, tk: Any) -> dict:
     import math as _math
 
     bid = getattr(tk, "bid", None)
@@ -1484,12 +1495,39 @@ def _fetch_quote_snapshot(ticker: str, con_id: int) -> dict:
     }
 
 
+def _fetch_quote_snapshot_with_client(client: Any, ticker: str, con_id: int) -> dict:
+    """Run blocking ib_insync quote work in a worker thread that owns a loop."""
+    _ensure_thread_event_loop()
+    contract = Contract(conId=int(con_id), exchange="SMART")
+    qualified = client.qualify_contract(contract)
+    tk = client.get_quote(qualified, snapshot=True)
+    return _ticker_to_quote_snapshot(ticker, con_id, tk)
+
+
+async def _fetch_quote_snapshot(ticker: str, con_id: int) -> dict:
+    """Fetch a bid/ask snapshot from the serialized ib_pool 'data' role."""
+    pool = ib_pool
+    if pool is None:
+        raise HTTPException(status_code=503, detail="IB data role unavailable")
+
+    try:
+        async with pool.acquire("data") as client:
+            return await asyncio.to_thread(
+                _fetch_quote_snapshot_with_client,
+                client,
+                ticker,
+                con_id,
+            )
+    except ConnectionError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @app.get("/orders/quote")
 async def orders_quote(ticker: str, con_id: int):
     secret = os.environ.get("XENON_QUOTE_TOKEN_SECRET")
     if not secret:
         raise HTTPException(status_code=500, detail="quote secret not configured")
-    snap = await asyncio.to_thread(_fetch_quote_snapshot, ticker, con_id)
+    snap = await _fetch_quote_snapshot(ticker, con_id)
     import time as _time
 
     payload = QuotePayload(
@@ -1516,7 +1554,10 @@ async def orders_quote(ticker: str, con_id: int):
 async def orders_place(request: Request):
     """Place an order via IB (on-demand connection, client_id=26)."""
     body = await request.json()
+    return await _orders_place_from_body(body)
 
+
+async def _orders_place_from_body(body: dict):
     # F2: server-side Gate 4. Run preflight before any subprocess invocation.
     verdict = _run_preflight(body)
     if not verdict.accept:
@@ -1756,6 +1797,10 @@ async def orders_cancel(request: Request):
     The full upstream payload (code + message) is preserved in detail.
     """
     body = await request.json()
+    return await _orders_cancel_from_body(body)
+
+
+async def _orders_cancel_from_body(body: dict):
     if _is_test_mode():
         return {
             "status": "ok",
@@ -1866,6 +1911,10 @@ async def orders_modify(request: Request):
     Subprocess failures classified the same as cancel.
     """
     body = await request.json()
+    return await _orders_modify_from_body(body)
+
+
+async def _orders_modify_from_body(body: dict):
     if _is_test_mode():
         return {
             "status": "ok",

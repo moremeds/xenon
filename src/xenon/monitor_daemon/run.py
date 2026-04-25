@@ -28,6 +28,7 @@ from pathlib import Path
 from xenon.monitor_daemon.daemon import MonitorDaemon
 from xenon.monitor_daemon.handlers import ExitOrdersHandler, FillMonitorHandler, PresetRebalanceHandler
 from xenon.monitor_daemon.handlers.flex_token_check import FlexTokenCheck
+from xenon.monitor_daemon.handlers.wizard_stop_monitor import WizardStopMonitorHandler
 
 # Paths — repo root is 4 parents up (src/xenon/monitor_daemon/run.py → repo root)
 PROJECT_DIR = Path(__file__).resolve().parent.parent.parent.parent
@@ -76,6 +77,8 @@ def create_daemon() -> MonitorDaemon:
     daemon.register(PresetRebalanceHandler())
 
     daemon.register(FlexTokenCheck())
+
+    daemon.register(WizardStopMonitorHandler())
 
     # Load previous state
     daemon.load_state()

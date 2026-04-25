@@ -105,6 +105,30 @@ describe("PositionOrderModal — Close/Add toggle", () => {
   });
 });
 
+describe("PositionOrderModal — time in force", () => {
+  it("submits selected GTC time-in-force", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ orderId: "abc", status: "ok" }),
+    });
+    (global as any).fetch = fetchMock;
+    const { getByRole } = render(
+      <PositionOrderModal
+        position={stockPos}
+        prices={{ TSLA: { last: 350, bid: 349.9, ask: 350.1 } as any }}
+        onClose={() => {}}
+      />,
+    );
+
+    fireEvent.click(getByRole("button", { name: "GTC" }));
+    fireEvent.click(getByRole("button", { name: /^Submit/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const body = JSON.parse((fetchMock.mock.calls[0] as any)[1].body);
+    expect(body.tif).toBe("GTC");
+  });
+});
+
 describe("PositionOrderModal — BID / MID / ASK quick buttons", () => {
   it("clicking BID sets limit price to bid", () => {
     const { getByRole, getByLabelText } = render(

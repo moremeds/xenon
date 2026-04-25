@@ -113,6 +113,12 @@ JSON data files: always `"ticker"`. IB contracts: `"symbol"`. Read defensively: 
 
 `AccountTabBar.tsx` — switches between IB (live trading) and Futu (read-only positions snapshot). Futu is observe-only: never send orders, never treat as a quote source. Adapter: `futuPortfolioAdapter.ts`. Sync hook: `useFutuPortfolio.ts` — **POST polling** (`/futu/sync`), not GET; the GET endpoint returns cached data and was causing stale-snapshot bugs (commit 1be17ea).
 
+**Futu combo parity (#36):** Matched long+short pairs on the same ticker fuse into visual combo rows so the Futu tab renders with the same structure as IB. Fusion is presentation-only — the underlying positions remain separate read-only rows. Ticker navigation works from Futu rows even though they're read-only (commit 9eaf1e6c).
+
+## Position-Row Order Button (IB tab)
+
+Each IB position row exposes a direct order-entry button (commit a7cbbbc4). Clicking pre-fills the Order tab with the selected leg(s). Quote resolution goes through the real IB snapshot via `/orders/quote` (commit 8ef479ab); option contracts are qualified with `SMART/USD` before quoting (commit b3605cfc). Note: the `quote_token` flow (#34) was reverted (#35) — do not re-ship as-is.
+
 ## uw-analyze — Cache-First Loading
 
 `/uw-analyze` loads from disk cache instantly on page open, then refreshes in background via SSE. Do not block initial render on a fresh fetch. Hook: `useUwAnalyze.ts`. Cross-mount snapshot cache keeps tickers warm across route changes (commit 6cd7b49). Last-known-good merge preserves sticky enrichment fields across refreshes (commit 1faa663). Contract tests: `web/tests/uw-analyze-*.test.ts`.

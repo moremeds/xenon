@@ -50,8 +50,9 @@ function singleLegOptionPos(overrides: {
   strike: number;
   expiry: string;
   contracts: number;
+  conId?: number;
 }): PortfolioPosition {
-  const { direction, type, strike, expiry, contracts } = overrides;
+  const { direction, type, strike, expiry, contracts, conId } = overrides;
   return {
     id: 2,
     ticker: "AAPL",
@@ -75,6 +76,7 @@ function singleLegOptionPos(overrides: {
         market_price: 6,
         market_value: 600,
         market_price_is_calculated: false,
+        conId: conId ?? null,
       },
     ],
     ib_daily_pnl: null,
@@ -155,6 +157,19 @@ describe("seedTicketFromPosition — close intent", () => {
 });
 
 describe("seedTicketFromPosition — add intent", () => {
+  it("keeps the IB conId on single-leg option positions", () => {
+    const pos = singleLegOptionPos({
+      direction: "LONG",
+      type: "Call",
+      strike: 200,
+      expiry: "2026-06-19",
+      contracts: 5,
+      conId: 861001,
+    });
+
+    expect(pos.legs[0].conId).toBe(861001);
+  });
+
   it("LONG stock + add → BUY (same direction as the existing position)", () => {
     const draft = seedTicketFromPosition(
       stockPos({ direction: "LONG", contracts: 300 }),
