@@ -38,15 +38,16 @@ esac
 
 log_info "Trading mode: $MODE  →  IB Gateway port $PORT"
 
-# 2. Probe the Gateway port. Bail out with a clear message if not listening.
-if ! (exec 3<>/dev/tcp/127.0.0.1/"$PORT") 2>/dev/null; then
-  log_err "IB Gateway is NOT listening on 127.0.0.1:$PORT."
-  log_err "Launch IB Gateway in '$MODE' mode (Login → ${MODE^^}) and re-run."
-  exit 3
+# 2. Probe the Gateway port. Warn if it's not up, but don't block — the user
+# may want to start the dev stack for frontend work without IB Gateway running.
+if (exec 3<>/dev/tcp/127.0.0.1/"$PORT") 2>/dev/null; then
+  exec 3<&- 2>/dev/null || true
+  exec 3>&- 2>/dev/null || true
+  log_info "IB Gateway port $PORT is listening."
+else
+  log_warn "IB Gateway is NOT listening on 127.0.0.1:$PORT."
+  log_warn "Continuing anyway — start IB Gateway in '$MODE' mode when you need broker calls."
 fi
-exec 3<&- 2>/dev/null || true
-exec 3>&- 2>/dev/null || true
-log_info "IB Gateway port $PORT is listening."
 
 # 3. Export the resolved mode so child processes (uvicorn, Next, the Node
 # realtime relay) all see the same value — without this, a per-invocation

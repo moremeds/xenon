@@ -3,6 +3,7 @@
 import { useRef, useEffect, useCallback, type ReactNode } from "react";
 import { Maximize2, Minimize2, Moon, Sun } from "lucide-react";
 import TickerSearch from "./TickerSearch";
+import TradingModeBadge from "./TradingModeBadge";
 import { useTickerNav } from "@/lib/useTickerNav";
 
 type HeaderProps = {
@@ -50,6 +51,7 @@ export default function Header({
         WORKSPACE / <span>{activeLabel.toUpperCase()}</span>
       </div>
       <div className="header-actions" suppressHydrationWarning>
+        <TradingModeBadge />
         {children}
         <TickerSearch
           ref={searchRef}
@@ -70,7 +72,9 @@ export default function Header({
           suppressHydrationWarning
           className="theme-toggle"
           onClick={onToggleTheme}
-          title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          title={
+            theme === "dark" ? "Switch to light mode" : "Switch to dark mode"
+          }
           aria-label="Toggle theme"
         >
           {theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
