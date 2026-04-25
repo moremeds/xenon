@@ -19,7 +19,6 @@ import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
 import { fmtSignedPrice, toneClass } from "@/lib/format";
 import { getReasonToast } from "@/lib/orderReasonCodes";
 import { useClientAttemptId } from "./useClientAttemptId";
-import { useQuoteToken } from "./useQuoteToken";
 import WizardModal from "@/components/ticker-detail/WizardModal";
 import WizardSessionStrip from "@/components/ticker-detail/WizardSessionStrip";
 import { useWizardLauncher } from "@/lib/useWizardLauncher";
@@ -319,12 +318,6 @@ export function buildSingleLegOrderPayload(params: {
   };
 }
 
-function singleLegConId(position: PortfolioPosition | null): number | null {
-  if (position == null || position.legs.length !== 1) return null;
-  const conId = position.legs[0].conId;
-  return typeof conId === "number" && conId > 0 ? conId : null;
-}
-
 /* ─── New order form ─── */
 
 type OrderAction = "BUY" | "SELL";
@@ -357,12 +350,6 @@ function NewOrderForm({
   const [tif, setTif] = useState<"DAY" | "GTC">("DAY");
 
   const attemptId = useClientAttemptId({ ticker });
-  const quoteConId = singleLegConId(position);
-  const quote = useQuoteToken({
-    ticker,
-    conId: quoteConId,
-    expiry: position?.expiry ?? null,
-  });
   const setAction = (v: OrderAction) => {
     attemptId.onFieldEdit("action");
     _setAction(v);
@@ -455,17 +442,6 @@ function NewOrderForm({
         return;
       }
 
-      if (quote.error) {
-        setError(`Quote unavailable: ${quote.error}`);
-        setLoading(false);
-        return;
-      }
-      if (payload.type !== "combo" && !quote.token) {
-        setError("Quote unavailable: waiting for latest IB quote");
-        setLoading(false);
-        return;
-      }
-
       attemptId.markSubmitted();
       const res = await fetch("/api/orders/place", {
         method: "POST",
@@ -473,7 +449,6 @@ function NewOrderForm({
         body: JSON.stringify({
           ...payload,
           client_attempt_id: attemptId.id,
-          quote_token: quote.token,
         }),
       });
       const json = await res.json();
@@ -502,8 +477,6 @@ function NewOrderForm({
     tif,
     position,
     portfolio,
-    quote.error,
-    quote.token,
     onOrderPlaced,
   ]);
 
@@ -1094,18 +1067,16 @@ function ComboOrderForm({
   const wizardIsTerminal = wizardTerminalStates.includes(wizardState);
   const wizardCanSubmit = Boolean(
     wizardLauncher.sessionId &&
-      wizardState === "PLANNED" &&
-      !wizardSession.session?.current_attempt_id,
+    wizardState === "PLANNED" &&
+    !wizardSession.session?.current_attempt_id,
   );
   const wizardCanReprice = Boolean(
     wizardLauncher.sessionId &&
-      wizardSession.session?.current_attempt_id &&
-      !wizardIsTerminal &&
-      ["WORKING", "REPRICE_PENDING"].includes(wizardState),
+    wizardSession.session?.current_attempt_id &&
+    !wizardIsTerminal &&
+    ["WORKING", "REPRICE_PENDING"].includes(wizardState),
   );
-  const wizardCanAbort = Boolean(
-    wizardLauncher.sessionId && !wizardIsTerminal,
-  );
+  const wizardCanAbort = Boolean(wizardLauncher.sessionId && !wizardIsTerminal);
 
   return (
     <div className="order-form">
@@ -1121,7 +1092,9 @@ function ComboOrderForm({
         session={wizardSession}
         onClose={wizardLauncher.close}
         onSubmit={wizardCanSubmit ? handleWizardSubmit : undefined}
-        onRepriceNatural={wizardCanReprice ? handleWizardRepriceNatural : undefined}
+        onRepriceNatural={
+          wizardCanReprice ? handleWizardRepriceNatural : undefined
+        }
         onAbort={wizardCanAbort ? handleWizardAbort : undefined}
       />
       <div
