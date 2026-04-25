@@ -15,7 +15,22 @@ Spec: docs/superpowers/specs/2026-04-25-paper-live-mode-switch-design.md
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Literal
+
+# Load repo `.env` BEFORE reading XENON_TRADING_MODE, otherwise downstream
+# imports (ib_client, ib_connection, ib_gateway) bind their port constants
+# from a stale environment because they import this module before any other
+# entry point has called load_dotenv(). MODE is bound at import time;
+# changing XENON_TRADING_MODE requires a process restart.
+try:
+    from dotenv import load_dotenv
+
+    _PROJECT_ROOT = Path(__file__).resolve().parents[3]
+    load_dotenv(_PROJECT_ROOT / ".env")
+except ImportError:
+    pass
+
 
 Mode = Literal["paper", "live"]
 
