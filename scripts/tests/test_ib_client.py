@@ -155,30 +155,6 @@ from xenon.clients.ib_client import (
     IBTimeoutError,
 )
 
-
-@pytest.fixture(autouse=True)
-def _reset_trading_mode_modules_after_test(monkeypatch):
-    """Reset trading_mode to baseline before and after each test.
-
-    test_default_ports reloads modules to verify port derivation, which can pollute
-    the session if not cleaned up. Only tm is reset via fixture; test_default_ports
-    resets ibc itself in a try/finally to avoid breaking @patch decorators.
-    """
-    import importlib
-
-    import xenon.api.trading_mode as tm
-
-    # Clean before test
-    monkeypatch.delenv("XENON_TRADING_MODE", raising=False)
-    importlib.reload(tm)
-
-    yield
-
-    # Clean after test
-    monkeypatch.delenv("XENON_TRADING_MODE", raising=False)
-    importlib.reload(tm)
-
-
 # ===========================================================================
 # EXCEPTION HIERARCHY
 # ===========================================================================
@@ -219,27 +195,13 @@ class TestConstants:
         assert "ib_execute" in CLIENT_IDS
         assert "ib_order_manage" in CLIENT_IDS
 
-    def test_default_ports(self, monkeypatch):
+    def test_default_ports(self):
         # DEFAULT_HOST comes from env/dotenv — verify it's a non-empty string
         assert isinstance(DEFAULT_HOST, str) and len(DEFAULT_HOST) > 0
         assert DEFAULT_TWS_PORT == 7497
-
-        # DEFAULT_GATEWAY_PORT derives from XENON_TRADING_MODE; verify both modes by
-        # checking tm.EXPECTED_PORT directly (not ibc.DEFAULT_GATEWAY_PORT) to avoid
-        # reloading ibc and breaking exception class identity in subsequent tests.
-        import importlib
-
-        import xenon.api.trading_mode as tm
-
-        # Verify live mode port
-        monkeypatch.setenv("XENON_TRADING_MODE", "live")
-        importlib.reload(tm)
-        assert tm.EXPECTED_PORT == 4001
-
-        # Verify paper mode port
-        monkeypatch.setenv("XENON_TRADING_MODE", "paper")
-        importlib.reload(tm)
-        assert tm.EXPECTED_PORT == 4002
+        # DEFAULT_GATEWAY_PORT derives from XENON_TRADING_MODE; mode→port
+        # mapping and the cross-module wiring are covered by
+        # src/xenon/api/tests/test_trading_mode.py (subprocess-isolated).
 
 
 # ===========================================================================

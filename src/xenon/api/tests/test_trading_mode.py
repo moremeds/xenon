@@ -6,6 +6,7 @@ Each test reloads the module so module-level constants pick up the patched env.
 from __future__ import annotations
 
 import importlib
+import os
 
 import pytest
 
@@ -22,19 +23,14 @@ def _reload(monkeypatch, mode_value: str | None):
 
 @pytest.fixture(autouse=True)
 def _reset_trading_mode_modules(monkeypatch):
-    """Restore trading_mode + ib_client to baseline state after each test.
+    """Reset XENON_TRADING_MODE / IB_GATEWAY_PORT and reload trading_mode around each test.
 
     `importlib.reload` is NOT reverted by monkeypatch, so without this fixture
-    the modules would leak whatever the last test's reload left them at.
-
-    ib_client is reloaded ONLY IN TEARDOWN so that by the time test_ib_client.py
-    tests run, they import a reloaded but stable ibc. Do not reload ibc during
-    test teardown if another test in this file will reload it again (except the
-    last teardown), to avoid excessive reloads that create many exception classes.
-
-    Use a module-level flag to reload ibc only at the very end, after all tests.
+    the trading_mode module would leak whatever the last test's reload left
+    its module-level constants set to. Only `xenon.api.trading_mode` is
+    reloaded — ib_client must NOT be reloaded mid-session because it would
+    invalidate the @patch decorators used by scripts/tests/test_ib_client.py.
     """
-    # Cleanup before test to ensure clean slate
     monkeypatch.delenv("XENON_TRADING_MODE", raising=False)
     monkeypatch.delenv("IB_GATEWAY_PORT", raising=False)
     import xenon.api.trading_mode as tm
@@ -43,7 +39,6 @@ def _reset_trading_mode_modules(monkeypatch):
 
     yield
 
-    # Cleanup after test to prevent pollution to subsequent tests
     monkeypatch.delenv("XENON_TRADING_MODE", raising=False)
     monkeypatch.delenv("IB_GATEWAY_PORT", raising=False)
     importlib.reload(tm)
@@ -109,18 +104,36 @@ def test_verify_account_empty_is_false(monkeypatch):
     assert tm.verify_account(None) is False  # type: ignore[arg-type]
 
 
-def test_ib_client_default_port_wired_to_trading_mode():
-    """Static cross-module wiring check.
+@pytest.mark.parametrize(
+    "mode,expected_port",
+    [("paper", 4002), ("live", 4001)],
+)
+def test_ib_client_default_port_wired_to_trading_mode(mode, expected_port):
+    """Subprocess-isolated wiring check for both modes.
 
-    Proves `ibc.DEFAULT_GATEWAY_PORT` is bound to `tm.EXPECTED_PORT` without
-    reloading either module — because reloading `ibc` mid-session creates
-    new class objects that break `@patch` decorators in `test_ib_client.py`.
-    The mode→port mapping itself is covered by `test_parse_paper`/`test_parse_live`.
+    A simple in-process `assert ibc.DEFAULT_GATEWAY_PORT == tm.EXPECTED_PORT`
+    only proves equality under the test session's default mode (paper) —
+    a hardcoded `4002` in `ib_client.py` would silently pass. We can't
+    `importlib.reload(ibc)` either, since that breaks `@patch` decorators
+    in `scripts/tests/test_ib_client.py`. Subprocess gives a fresh interpreter
+    that imports `ib_client` from scratch under the patched env, so a
+    hardcoded port in either direction fails.
     """
-    from xenon.api import trading_mode as tm
-    from xenon.clients import ib_client as ibc
+    import subprocess
+    import sys
 
-    assert ibc.DEFAULT_GATEWAY_PORT == tm.EXPECTED_PORT
+    env = dict(os.environ)
+    env["XENON_TRADING_MODE"] = mode
+    env.pop("IB_GATEWAY_PORT", None)
+
+    result = subprocess.run(
+        [sys.executable, "-c", "from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT; print(DEFAULT_GATEWAY_PORT)"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    assert int(result.stdout.strip()) == expected_port
 
 
 def test_ib_gateway_port_env_var_is_ignored(monkeypatch):
