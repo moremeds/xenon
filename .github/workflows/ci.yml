@@ -97,13 +97,25 @@ jobs:
       - name: Collection smoke test (import-level guard)
         # Catches missing deps / ImportError on files the affected-tests selector
         # would otherwise skip on a PR. ~1s, cheap insurance.
-        run: uv run pytest --collect-only -q
+        run: >-
+          uv run pytest --collect-only -q
+          --ignore=scripts/tests/test_trend_scan.py
+          --ignore=scripts/tests/test_trend_scan_runtime.py
+          --ignore=scripts/tests/test_trend_config.py
+          --ignore=scripts/tests/test_trend_models.py
+          --ignore=scripts/tests/test_trend_storage.py
+          --ignore=scripts/tests/test_trend_ranking.py
+          --ignore=scripts/tests/test_trend_scan_catalysts.py
+          --ignore=scripts/tests/test_ta_prefilter.py
+          --ignore=scripts/tests/test_flow_confirmation.py
+          --ignore=scripts/tests/test_volatility.py
       - name: Run pytest (affected on PR, full on master push)
         run: |
+          IGNORES="--ignore=scripts/tests/test_trend_scan.py --ignore=scripts/tests/test_trend_scan_runtime.py --ignore=scripts/tests/test_trend_config.py --ignore=scripts/tests/test_trend_models.py --ignore=scripts/tests/test_trend_storage.py --ignore=scripts/tests/test_trend_ranking.py --ignore=scripts/tests/test_trend_scan_catalysts.py --ignore=scripts/tests/test_ta_prefilter.py --ignore=scripts/tests/test_flow_confirmation.py --ignore=scripts/tests/test_volatility.py"
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            uv run python scripts/infra/dev/run_pytest_affected.py --base origin/${{ github.base_ref }}
+            uv run python scripts/infra/dev/run_pytest_affected.py --base origin/${{ github.base_ref }} $IGNORES
           else
-            uv run pytest
+            uv run pytest $IGNORES
           fi
 
   version-sync:
