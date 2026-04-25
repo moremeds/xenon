@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from decimal import Decimal
 from pathlib import Path
+
+import pytest
 
 from xenon.execution.combo_wizard.combo_quotes import compute_combo_quote
 from xenon.execution.combo_wizard.models import ComboLegQuote, ComboLegSpec
@@ -214,6 +217,9 @@ def _money(value: float | None) -> Decimal | None:
 
 
 def test_compute_combo_quote_matches_typescript_reference_fixture_set():
+    loader = _repo_root() / "web" / "node_modules" / "tsx" / "dist" / "loader.mjs"
+    if shutil.which("node") is None or not loader.is_file():
+        pytest.skip("web/node_modules/tsx not installed; cross-runtime check skipped")
     fixtures = _fixtures()
     ts_reference = _load_ts_reference(fixtures)
 
