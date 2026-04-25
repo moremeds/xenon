@@ -33,7 +33,7 @@ from ib_insync import IB, FlexReport, Option
 
 from xenon.api.trading_mode import EXPECTED_PORT as _EXPECTED_PORT
 
-# Load root .env so IB_GATEWAY_HOST/PORT are available before defaults are computed
+# Load root .env so IB_GATEWAY_HOST is available before DEFAULT_HOST is computed
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
 

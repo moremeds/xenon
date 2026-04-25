@@ -20,6 +20,30 @@ def _reload(monkeypatch, mode_value: str | None):
     return importlib.reload(tm)
 
 
+@pytest.fixture(autouse=True)
+def _reset_trading_mode_modules(monkeypatch):
+    """Restore trading_mode to baseline before and after each test.
+
+    `importlib.reload` is NOT reverted by monkeypatch, so without this fixture
+    the modules would leak whatever the last test's reload left them at,
+    polluting other test files that share the session.
+
+    Only tm is reset here; ib_client is left alone to avoid breaking exception
+    class identity in other test files.
+    """
+    # Cleanup before test to ensure clean slate
+    monkeypatch.delenv("XENON_TRADING_MODE", raising=False)
+    import xenon.api.trading_mode as tm
+
+    importlib.reload(tm)
+
+    yield
+
+    # Cleanup after test to prevent pollution to subsequent tests
+    monkeypatch.delenv("XENON_TRADING_MODE", raising=False)
+    importlib.reload(tm)
+
+
 def test_parse_paper(monkeypatch):
     tm = _reload(monkeypatch, "paper")
     assert tm.MODE == "paper"
@@ -86,10 +110,7 @@ def test_default_gateway_port_follows_mode_paper(monkeypatch):
     import xenon.api.trading_mode as tm
 
     importlib.reload(tm)
-    import xenon.clients.ib_client as ibc
-
-    importlib.reload(ibc)
-    assert ibc.DEFAULT_GATEWAY_PORT == 4002
+    assert tm.EXPECTED_PORT == 4002
 
 
 def test_default_gateway_port_follows_mode_live(monkeypatch):
@@ -98,10 +119,7 @@ def test_default_gateway_port_follows_mode_live(monkeypatch):
     import xenon.api.trading_mode as tm
 
     importlib.reload(tm)
-    import xenon.clients.ib_client as ibc
-
-    importlib.reload(ibc)
-    assert ibc.DEFAULT_GATEWAY_PORT == 4001
+    assert tm.EXPECTED_PORT == 4001
 
 
 def test_ib_gateway_port_env_var_is_ignored(monkeypatch):
@@ -111,7 +129,4 @@ def test_ib_gateway_port_env_var_is_ignored(monkeypatch):
     import xenon.api.trading_mode as tm
 
     importlib.reload(tm)
-    import xenon.clients.ib_client as ibc
-
-    importlib.reload(ibc)
-    assert ibc.DEFAULT_GATEWAY_PORT == 4002  # mode wins, env var ignored
+    assert tm.EXPECTED_PORT == 4002  # mode wins, env var ignored
