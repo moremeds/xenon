@@ -195,13 +195,26 @@ class TestConstants:
         assert "ib_execute" in CLIENT_IDS
         assert "ib_order_manage" in CLIENT_IDS
 
-    def test_default_ports(self):
+    def test_default_ports(self, monkeypatch):
         # DEFAULT_HOST comes from env/dotenv — verify it's a non-empty string
         assert isinstance(DEFAULT_HOST, str) and len(DEFAULT_HOST) > 0
-        # DEFAULT_GATEWAY_PORT now derives from XENON_TRADING_MODE;
-        # defaults to paper mode (4002) when unset
-        assert DEFAULT_GATEWAY_PORT in (4001, 4002)
         assert DEFAULT_TWS_PORT == 7497
+
+        # DEFAULT_GATEWAY_PORT derives from XENON_TRADING_MODE; verify both modes.
+        import importlib
+
+        import xenon.api.trading_mode as tm
+        import xenon.clients.ib_client as ibc
+
+        monkeypatch.setenv("XENON_TRADING_MODE", "live")
+        importlib.reload(tm)
+        importlib.reload(ibc)
+        assert ibc.DEFAULT_GATEWAY_PORT == 4001
+
+        monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+        importlib.reload(tm)
+        importlib.reload(ibc)
+        assert ibc.DEFAULT_GATEWAY_PORT == 4002
 
 
 # ===========================================================================
