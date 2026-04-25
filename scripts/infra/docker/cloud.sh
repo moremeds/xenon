@@ -16,8 +16,11 @@ log_warn()  { echo -e "${YELLOW}[cloud]${NC} $*"; }
 log_error() { echo -e "${RED}[cloud]${NC} $*"; }
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Script lives at scripts/infra/docker/cloud.sh — repo root is three levels up.
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 ENV_FILE="$PROJECT_ROOT/.env"
+# docker_ib_gateway.sh stayed at scripts/infra/ when cloud/local.sh moved here.
+GATEWAY_HELPER="$SCRIPT_DIR/../docker_ib_gateway.sh"
 
 # -- Step 1: Verify Tailscale connectivity -----------------------------------
 
@@ -45,7 +48,7 @@ fi
 
 if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "ib-gateway"; then
   log_info "Stopping local Docker IB Gateway..."
-  "$SCRIPT_DIR/docker_ib_gateway.sh" stop
+  "$GATEWAY_HELPER" stop
 fi
 
 # -- Step 4: Switch .env to cloud mode --------------------------------------

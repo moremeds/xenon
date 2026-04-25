@@ -16,8 +16,11 @@ log_warn()  { echo -e "${YELLOW}[local]${NC} $*"; }
 log_error() { echo -e "${RED}[local]${NC} $*"; }
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Script lives at scripts/infra/docker/local.sh — repo root is three levels up.
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 ENV_FILE="$PROJECT_ROOT/.env"
+# docker_ib_gateway.sh stayed at scripts/infra/ when cloud/local.sh moved here.
+GATEWAY_HELPER="$SCRIPT_DIR/../docker_ib_gateway.sh"
 
 # -- Step 1: Switch .env to local Docker mode --------------------------------
 
@@ -38,7 +41,7 @@ fi
 # -- Step 3: Start local Docker gateway --------------------------------------
 
 log_info "Starting local Docker IB Gateway..."
-"$SCRIPT_DIR/docker_ib_gateway.sh" start
+"$GATEWAY_HELPER" start
 
 log_warn "Approve 2FA on IBKR mobile app now."
 log_info "Waiting for container to become healthy..."
@@ -51,7 +54,7 @@ for i in $(seq 1 24); do
   fi
   if [[ $i -eq 24 ]]; then
     log_error "Container did not become healthy after 120s. Check 2FA and logs."
-    "$SCRIPT_DIR/docker_ib_gateway.sh" status
+    "$GATEWAY_HELPER" status
     exit 1
   fi
   sleep 5

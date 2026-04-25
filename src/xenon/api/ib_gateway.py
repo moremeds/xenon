@@ -25,8 +25,10 @@ logger = logging.getLogger("xenon.ib_gateway")
 # Configuration
 # ---------------------------------------------------------------------------
 
+from xenon.api.trading_mode import EXPECTED_PORT as _EXPECTED_PORT
+
 IB_HOST = os.environ.get("IB_GATEWAY_HOST", "127.0.0.1")
-IB_PORT = int(os.environ.get("IB_GATEWAY_PORT", "4001"))
+IB_PORT = _EXPECTED_PORT
 GATEWAY_MODE = os.environ.get("IB_GATEWAY_MODE", "docker")  # "docker", "cloud", or "launchd"
 
 # LaunchD paths

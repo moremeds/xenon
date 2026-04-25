@@ -34,7 +34,9 @@ DATA_DIR = PROJECT_ROOT / "data"
 INTERNALS_SKEW_CACHE_DIR = DATA_DIR / "cache"
 INTERNALS_SKEW_CACHE_TTL_SECONDS = 60 * 15
 
+from xenon.api import trading_mode
 from xenon.api.auth import verify_api_key, verify_clerk_jwt
+from xenon.api.guards import mask_account, require_mode_verified
 from xenon.api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_mode, is_docker_mode, restart_ib_gateway
 from xenon.api.ib_pool import IBPool
 from xenon.api.pool_order_manage import pool_cancel_order, pool_modify_order
@@ -236,6 +238,25 @@ async def _run_rehydrate_on_boot() -> None:
         logger.warning("combo wizard rehydrate failed on boot; continuing to serve: %s", exc)
 
 
+def _get_managed_account_for_health() -> str:
+    """Return the first managedAccount from the IB pool's sync client.
+
+    Returns "" when the pool isn't connected (test mode, Gateway down, etc.).
+    Pulled out as a module-level function so tests can monkeypatch it
+    without booting a real IB connection.
+    """
+    if ib_pool is None:
+        return ""
+    client = ib_pool.get("sync")
+    if client is None:
+        return ""
+    try:
+        accounts = client.ib.managedAccounts()
+    except Exception:  # noqa: BLE001
+        return ""
+    return accounts[0] if accounts else ""
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start IB pool and UW client on startup, tear down on shutdown."""
@@ -246,6 +267,11 @@ async def lifespan(app: FastAPI):
         uw_available = bool(os.environ.get("UW_TOKEN"))
         orders_store.init_store()
         await _run_rehydrate_on_boot()
+        app.state.trading_mode = trading_mode.MODE
+        # Tests monkeypatch _get_managed_account_for_health; honor that.
+        account = _get_managed_account_for_health()
+        app.state.account = account
+        app.state.mode_verified = trading_mode.verify_account(account)
         yield
         logger.info("Xenon API test mode shut down")
         return
@@ -259,6 +285,26 @@ async def lifespan(app: FastAPI):
     app.state.ib_pool = ib_pool
     pool_status = await ib_pool.connect_all()
     logger.info("IB pool status: %s", pool_status)
+
+    # Trading-mode prefix guard — verify Gateway login matches XENON_TRADING_MODE.
+    # Failure does not abort startup; it sets app.state.mode_verified=False
+    # and the order routes refuse to serve until .env + Gateway are aligned.
+    account = await asyncio.to_thread(_get_managed_account_for_health)
+    verified = trading_mode.verify_account(account)
+    app.state.trading_mode = trading_mode.MODE
+    app.state.account = account
+    app.state.mode_verified = verified
+    if not verified:
+        logger.error(
+            "TRADING MODE MISMATCH — declared=%s, account=%r (expected prefix %r). "
+            "Order routes will return 503 until .env XENON_TRADING_MODE matches "
+            "the IB Gateway login.",
+            trading_mode.MODE,
+            account,
+            trading_mode.EXPECTED_PREFIX,
+        )
+    else:
+        logger.info("Trading mode verified: %s account=%s", trading_mode.MODE, account)
 
     orders_store.init_store()
 
@@ -1060,6 +1106,12 @@ async def health():
         "ib_pool": ib_pool.status() if ib_pool else {},
         "uw": uw_available,
         "futu": _compute_futu_health(),
+        "trading_mode": getattr(app.state, "trading_mode", trading_mode.MODE),
+        # /health is auth-exempt — mask the IB account so the public payload
+        # does not leak the full identifier. The raw value stays on app.state
+        # for the require_mode_verified 503 detail (which is auth-gated).
+        "account": mask_account(getattr(app.state, "account", "")),
+        "mode_verified": getattr(app.state, "mode_verified", False),
     }
 
 
@@ -1346,7 +1398,7 @@ async def _bg_sync_via_subprocess():
         logger.error("Background portfolio sync failed: %s", result.error)
 
 
-@app.post("/orders/refresh")
+@app.post("/orders/refresh", dependencies=[Depends(require_mode_verified)])
 async def orders_refresh():
     """Sync orders from IB via subprocess.
 
@@ -1550,7 +1602,7 @@ async def orders_quote(ticker: str, con_id: int):
     }
 
 
-@app.post("/orders/place")
+@app.post("/orders/place", dependencies=[Depends(require_mode_verified)])
 async def orders_place(request: Request):
     """Place an order via IB (on-demand connection, client_id=26)."""
     body = await request.json()
@@ -1782,7 +1834,7 @@ def _record_manage_event(
         )
 
 
-@app.post("/orders/cancel")
+@app.post("/orders/cancel", dependencies=[Depends(require_mode_verified)])
 async def orders_cancel(request: Request):
     """Cancel an open order via subprocess.
 
@@ -1896,7 +1948,7 @@ def _try_register_order_from_snapshot(*, perm_id: int, order_id: int) -> bool:
         return False
 
 
-@app.post("/orders/modify")
+@app.post("/orders/modify", dependencies=[Depends(require_mode_verified)])
 async def orders_modify(request: Request):
     """Modify an open order via subprocess.
 

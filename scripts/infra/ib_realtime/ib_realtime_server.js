@@ -36,7 +36,16 @@ import { RateLimiter } from "../../lib/rate-limiter.js";
 
 const DEFAULT_WS_PORT = 8765;
 const DEFAULT_IB_HOST = process.env.IB_GATEWAY_HOST || "127.0.0.1";
-const DEFAULT_IB_PORT = parseInt(process.env.IB_GATEWAY_PORT || "4001", 10);
+
+// IB Gateway port follows XENON_TRADING_MODE: paper→4002, live→4001.
+// Mirrors src/xenon/api/trading_mode.py so the realtime relay and the Python
+// API target the same Gateway. IB_GATEWAY_PORT is intentionally not consulted.
+function resolveIbPort() {
+  const raw = (process.env.XENON_TRADING_MODE || "").trim().toLowerCase();
+  const mode = raw === "live" ? "live" : "paper"; // default + invalid → paper
+  return mode === "live" ? 4001 : 4002;
+}
+const DEFAULT_IB_PORT = resolveIbPort();
 const RECONNECT_MS = 5000;
 const SNAPSHOT_TIMEOUT_MS = 5000;
 
@@ -309,9 +318,7 @@ const loopbackAvailable = await isPortAvailable(LOOPBACK_HOST, cli.port);
 const wildcardAvailable = await isPortAvailable(WS_HOST, cli.port);
 
 if (!loopbackAvailable || !wildcardAvailable) {
-  console.log(
-    `WebSocket port already in use at ${wsUrl()}`,
-  );
+  console.log(`WebSocket port already in use at ${wsUrl()}`);
   if (await isExistingXenonRelay(cli.port)) {
     console.log(
       "Detected an existing Xenon IB realtime server; skipping duplicate startup.",

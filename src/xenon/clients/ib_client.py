@@ -31,7 +31,9 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Union
 from dotenv import load_dotenv
 from ib_insync import IB, FlexReport, Option
 
-# Load root .env so IB_GATEWAY_HOST/PORT are available before defaults are computed
+from xenon.api.trading_mode import EXPECTED_PORT as _EXPECTED_PORT
+
+# Load root .env so IB_GATEWAY_HOST is available before DEFAULT_HOST is computed
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
@@ -91,59 +93,69 @@ POOL_ROLES: dict = {
 
 # Legacy registry — kept for backward compat with scripts that use client_name
 CLIENT_IDS: dict = {
-    "ib_order_manage": 20,     # subprocess range (auto-allocate preferred)
-    "ib_sync": 3,              # pool role
-    "ib_orders": 4,            # pool role
-    "ib_reconcile": 21,        # subprocess range
-    "ib_order": 22,            # subprocess range
-    "ib_execute": 23,          # subprocess range
-    "ib_fill_monitor": 70,     # daemon range
+    "ib_order_manage": 20,  # subprocess range (auto-allocate preferred)
+    "ib_sync": 3,  # pool role
+    "ib_orders": 4,  # pool role
+    "ib_reconcile": 21,  # subprocess range
+    "ib_order": 22,  # subprocess range
+    "ib_execute": 23,  # subprocess range
+    "ib_fill_monitor": 70,  # daemon range
     "exit_order_service": 71,  # daemon range
-    "fetch_analyst_ratings": 90, # standalone CLI range
-    "ib_place_order": 24,      # subprocess range
-    "vcg_scanner": 50,         # scanner range
-    "cri_scanner": 5,          # pool data role
+    "fetch_analyst_ratings": 90,  # standalone CLI range
+    "ib_place_order": 24,  # subprocess range
+    "vcg_scanner": 50,  # scanner range
+    "cri_scanner": 5,  # pool data role
     "ib_realtime_server": 10,  # relay range
 }
 
 DEFAULT_HOST = os.environ.get("IB_GATEWAY_HOST", "127.0.0.1")
-DEFAULT_GATEWAY_PORT = int(os.environ.get("IB_GATEWAY_PORT", "4001"))
+DEFAULT_GATEWAY_PORT = _EXPECTED_PORT
 DEFAULT_TWS_PORT = 7497
 
 # IB error codes that are informational / non-critical
-_INFO_CODES = frozenset({
-    2104,  # Market data farm connection is OK
-    2106,  # HMDS data farm connection is OK
-    2108,  # Market data farm connection is inactive
-    2158,  # Sec-def data farm connection is OK
-})
+_INFO_CODES = frozenset(
+    {
+        2104,  # Market data farm connection is OK
+        2106,  # HMDS data farm connection is OK
+        2108,  # Market data farm connection is inactive
+        2158,  # Sec-def data farm connection is OK
+    }
+)
 
 # IB error codes that should be silently ignored (not user-relevant)
-_IGNORE_CODES = frozenset({
-    10358,  # Reuters Fundamentals subscription inactive — auto-fallback
-})
+_IGNORE_CODES = frozenset(
+    {
+        10358,  # Reuters Fundamentals subscription inactive — auto-fallback
+    }
+)
 
 # IB error codes indicating connectivity issues
-_CONNECTIVITY_CODES = frozenset({
-    1100,  # Connectivity between IB and TWS has been lost
-    1101,  # Connectivity restored — data lost
-    1102,  # Connectivity restored — data maintained
-})
+_CONNECTIVITY_CODES = frozenset(
+    {
+        1100,  # Connectivity between IB and TWS has been lost
+        1101,  # Connectivity restored — data lost
+        1102,  # Connectivity restored — data maintained
+    }
+)
 
 # IB error codes for pacing violations — retry with exponential backoff
-_PACING_CODES = frozenset({
-    162,   # Historical market data pacing violation
-    366,   # No historical data query found for ticker id
-})
+_PACING_CODES = frozenset(
+    {
+        162,  # Historical market data pacing violation
+        366,  # No historical data query found for ticker id
+    }
+)
 
 # Max retries per reqId for pacing violations
 _MAX_PACING_RETRIES = 3
 
 # IB error codes for invalid contracts — don't retry
-_INVALID_CONTRACT_CODES = frozenset({
-    200,   # No security definition has been found
-    354,   # Requested market data is not subscribed
-})
+_INVALID_CONTRACT_CODES = frozenset(
+    {
+        200,  # No security definition has been found
+        354,  # Requested market data is not subscribed
+    }
+)
 
 # Reconnection constants
 MAX_RECONNECT_ATTEMPTS = 5
@@ -268,25 +280,29 @@ class IBClient:
                 self._ib.connect(host, port, clientId=client_id, timeout=timeout)
                 self.logger.info(
                     "Connected to IB on %s:%s (clientId=%s)",
-                    host, port, client_id,
+                    host,
+                    port,
+                    client_id,
                 )
                 return
             except Exception as exc:
                 last_exc = exc
                 self.logger.warning(
                     "Connection attempt %d/%d failed: %s",
-                    attempt, max_retries, exc,
+                    attempt,
+                    max_retries,
+                    exc,
                 )
                 if attempt < max_retries:
                     time.sleep(min(attempt, 5))
 
-        raise IBConnectionError(
-            f"Failed to connect to IB on {host}:{port} after "
-            f"{max_retries} attempt(s): {last_exc}"
-        )
+        raise IBConnectionError(f"Failed to connect to IB on {host}:{port} after {max_retries} attempt(s): {last_exc}")
 
     def _connect_auto_allocate(
-        self, host: str, port: int, timeout: int,
+        self,
+        host: str,
+        port: int,
+        timeout: int,
     ) -> None:
         """Try each ID in SUBPROCESS_ID_RANGE starting from a random offset.
 
@@ -309,25 +325,22 @@ class IBClient:
                 self._last_timeout = timeout
                 self.logger.info(
                     "Connected to IB on %s:%s (clientId=%s, auto-allocated)",
-                    host, port, cid,
+                    host,
+                    port,
+                    cid,
                 )
                 return
             except Exception as exc:
                 if "client id is already in use" in str(exc).lower():
                     self.logger.debug(
-                        "Client ID %d in use, trying next", cid,
+                        "Client ID %d in use, trying next",
+                        cid,
                     )
                     continue
                 # Non-conflict error — don't rotate, just fail
-                raise IBConnectionError(
-                    f"Failed to connect to IB on {host}:{port} after "
-                    f"1 attempt(s): {exc}"
-                ) from exc
+                raise IBConnectionError(f"Failed to connect to IB on {host}:{port} after 1 attempt(s): {exc}") from exc
 
-        raise IBConnectionError(
-            f"Failed to connect to IB on {host}:{port}: "
-            f"all client IDs {lo}-{hi} in use"
-        )
+        raise IBConnectionError(f"Failed to connect to IB on {host}:{port}: all client IDs {lo}-{hi} in use")
 
     def disconnect(self) -> None:
         """Disconnect from IB. Safe to call when not connected."""
@@ -396,12 +409,18 @@ class IBClient:
                 self._pacing_retries[rid] = current + 1
                 self.logger.warning(
                     "IB pacing violation %d (reqId=%s, retry %d/%d): %s",
-                    code, rid, current + 1, _MAX_PACING_RETRIES, errorString,
+                    code,
+                    rid,
+                    current + 1,
+                    _MAX_PACING_RETRIES,
+                    errorString,
                 )
             else:
                 self.logger.error(
                     "IB pacing violation %d (reqId=%s) — max retries exhausted: %s",
-                    code, rid, errorString,
+                    code,
+                    rid,
+                    errorString,
                 )
             return
 
@@ -411,7 +430,10 @@ class IBClient:
                 self._failed_contracts.add(contract)
             self.logger.warning(
                 "IB invalid contract %d (reqId=%s): %s (contract=%s)",
-                code, reqId, errorString, contract,
+                code,
+                reqId,
+                errorString,
+                contract,
             )
             return
 
@@ -433,7 +455,7 @@ class IBClient:
         try:
             connected = False
             for attempt in range(MAX_RECONNECT_ATTEMPTS):
-                delay = min(2 ** attempt, MAX_RECONNECT_BACKOFF)
+                delay = min(2**attempt, MAX_RECONNECT_BACKOFF)
                 try:
                     self._ib.connect(
                         self._last_host,
@@ -443,20 +465,25 @@ class IBClient:
                     )
                     self.logger.info(
                         "Reconnected to IB on attempt %d/%d",
-                        attempt + 1, MAX_RECONNECT_ATTEMPTS,
+                        attempt + 1,
+                        MAX_RECONNECT_ATTEMPTS,
                     )
                     connected = True
                     break
                 except Exception as exc:
                     self.logger.warning(
                         "Reconnect attempt %d/%d failed: %s — waiting %ds",
-                        attempt + 1, MAX_RECONNECT_ATTEMPTS, exc, delay,
+                        attempt + 1,
+                        MAX_RECONNECT_ATTEMPTS,
+                        exc,
+                        delay,
                     )
                     time.sleep(delay)
 
             if not connected:
                 self.logger.error(
-                    "Failed to reconnect after %d attempts", MAX_RECONNECT_ATTEMPTS,
+                    "Failed to reconnect after %d attempts",
+                    MAX_RECONNECT_ATTEMPTS,
                 )
                 return
 
@@ -476,12 +503,14 @@ class IBClient:
                     failed += 1
                     self.logger.warning(
                         "Failed to restore subscription for %s: %s",
-                        sub["contract"], exc,
+                        sub["contract"],
+                        exc,
                     )
 
             self.logger.info(
                 "Subscription restoration complete: %d restored, %d failed",
-                restored, failed,
+                restored,
+                failed,
             )
 
         finally:
@@ -583,7 +612,11 @@ class IBClient:
         self._require_connection()
         try:
             bracket = self._ib.bracketOrder(
-                action, quantity, limit_price, take_profit_price, stop_loss_price,
+                action,
+                quantity,
+                limit_price,
+                take_profit_price,
+                stop_loss_price,
             )
             trades = []
             for order in bracket:
@@ -591,8 +624,12 @@ class IBClient:
                 trades.append(trade)
             self.logger.info(
                 "Placed bracket order: %s %s %s limit=%.2f TP=%.2f SL=%.2f",
-                action, quantity, contract.symbol if hasattr(contract, "symbol") else contract,
-                limit_price, take_profit_price, stop_loss_price,
+                action,
+                quantity,
+                contract.symbol if hasattr(contract, "symbol") else contract,
+                limit_price,
+                take_profit_price,
+                stop_loss_price,
             )
             return trades
         except Exception as exc:
@@ -667,7 +704,9 @@ class IBClient:
         return self._ib.trades()
 
     def get_order_status(
-        self, order_id: Optional[int] = None, perm_id: Optional[int] = None,
+        self,
+        order_id: Optional[int] = None,
+        perm_id: Optional[int] = None,
     ) -> Optional[Any]:
         """Look up a trade by order ID or permanent ID.
 
@@ -707,10 +746,12 @@ class IBClient:
             self._ib.sleep(2)
         else:
             # Track streaming subscription for recovery after disconnect
-            self._subscriptions.append({
-                "contract": contract,
-                "generic_ticks": generic_ticks,
-            })
+            self._subscriptions.append(
+                {
+                    "contract": contract,
+                    "generic_ticks": generic_ticks,
+                }
+            )
         return ticker
 
     def cancel_market_data(self, contract: Any) -> None:
@@ -733,8 +774,13 @@ class IBClient:
         return self._ib.reqSecDefOptParams(symbol, exchange, sec_type, 0)
 
     def get_option_price(
-        self, symbol: str, expiry: str, strike: float, right: str,
-        exchange: str = "SMART", currency: str = "USD",
+        self,
+        symbol: str,
+        expiry: str,
+        strike: float,
+        right: str,
+        exchange: str = "SMART",
+        currency: str = "USD",
     ) -> Any:
         """Get a quote for a specific option contract.
 
@@ -751,9 +797,7 @@ class IBClient:
         )
         qualified = self._ib.qualifyContracts(contract)
         if not qualified:
-            raise IBContractError(
-                f"Could not qualify option: {symbol} {expiry} ${strike} {right}"
-            )
+            raise IBContractError(f"Could not qualify option: {symbol} {expiry} ${strike} {right}")
         ticker = self._ib.reqMktData(qualified[0], "", False, False)
         self._ib.sleep(2)
         return ticker
@@ -767,9 +811,7 @@ class IBClient:
         self._require_connection()
         results = self._ib.qualifyContracts(contract)
         if not results:
-            raise IBContractError(
-                f"Failed to qualify contract: {contract}"
-            )
+            raise IBContractError(f"Failed to qualify contract: {contract}")
         return results[0]
 
     def qualify_contracts(self, *contracts: Any) -> list:
@@ -823,9 +865,7 @@ class IBClient:
                 return trade
 
             if status in ("Cancelled", "ApiCancelled"):
-                raise IBOrderError(
-                    f"Order cancelled (orderId={trade.order.orderId}): {status}"
-                )
+                raise IBOrderError(f"Order cancelled (orderId={trade.order.orderId}): {status}")
 
             if status == "Inactive":
                 self.logger.warning(
@@ -834,8 +874,7 @@ class IBClient:
                 )
 
         raise IBTimeoutError(
-            f"Order not filled within {timeout}s (orderId={trade.order.orderId}, "
-            f"status={trade.orderStatus.status})"
+            f"Order not filled within {timeout}s (orderId={trade.order.orderId}, status={trade.orderStatus.status})"
         )
 
     # -- historical data ----------------------------------------------------

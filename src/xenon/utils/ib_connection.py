@@ -2,14 +2,18 @@
 
 New code should prefer ``clients.ib_client.IBClient``.
 """
+
 from __future__ import annotations
 
 import os
-from ib_insync import IB
 from typing import Optional
 
+from ib_insync import IB
+
+from xenon.api.trading_mode import EXPECTED_PORT as _EXPECTED_PORT
+
 DEFAULT_HOST = os.environ.get("IB_GATEWAY_HOST", "127.0.0.1")
-DEFAULT_GATEWAY_PORT = int(os.environ.get("IB_GATEWAY_PORT", "4001"))
+DEFAULT_GATEWAY_PORT = _EXPECTED_PORT
 DEFAULT_TWS_PORT = 7497
 
 # Legacy registry values preserved exactly for compatibility tests.
