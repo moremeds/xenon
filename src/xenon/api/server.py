@@ -1394,7 +1394,31 @@ async def _bg_sync_via_subprocess():
         logger.error("Background portfolio sync failed: %s", result.error)
 
 
-@app.post("/orders/refresh")
+def require_mode_verified(request: Request) -> None:
+    """Reject order-mutating requests when trading mode is unverified.
+
+    The check reads app.state populated by the lifespan guard. Returns 503
+    with a body that names both the declared mode and the observed account
+    so the operator can fix the mismatch (edit .env or relog Gateway).
+    """
+    state = request.app.state
+    verified = getattr(state, "mode_verified", False)
+    if verified:
+        return
+    declared = getattr(state, "trading_mode", trading_mode.MODE)
+    observed = getattr(state, "account", "")
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            f"Trading mode mismatch: .env declares XENON_TRADING_MODE={declared!r} "
+            f"but IB Gateway is logged in as account={observed!r} "
+            f"(expected prefix {trading_mode.EXPECTED_PREFIX!r}). "
+            f"Fix: align .env with the Gateway login and restart."
+        ),
+    )
+
+
+@app.post("/orders/refresh", dependencies=[Depends(require_mode_verified)])
 async def orders_refresh():
     """Sync orders from IB via subprocess.
 
@@ -1598,7 +1622,7 @@ async def orders_quote(ticker: str, con_id: int):
     }
 
 
-@app.post("/orders/place")
+@app.post("/orders/place", dependencies=[Depends(require_mode_verified)])
 async def orders_place(request: Request):
     """Place an order via IB (on-demand connection, client_id=26)."""
     body = await request.json()
@@ -1830,7 +1854,7 @@ def _record_manage_event(
         )
 
 
-@app.post("/orders/cancel")
+@app.post("/orders/cancel", dependencies=[Depends(require_mode_verified)])
 async def orders_cancel(request: Request):
     """Cancel an open order via subprocess.
 
@@ -1944,7 +1968,7 @@ def _try_register_order_from_snapshot(*, perm_id: int, order_id: int) -> bool:
         return False
 
 
-@app.post("/orders/modify")
+@app.post("/orders/modify", dependencies=[Depends(require_mode_verified)])
 async def orders_modify(request: Request):
     """Modify an open order via subprocess.
 
