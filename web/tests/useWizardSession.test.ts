@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 
 import { useWizardSession } from "@/lib/useWizardSession";
 
@@ -55,5 +55,53 @@ describe("useWizardSession", () => {
     });
     expect(result.current.session?.structure_name).toBe("Bull Call Spread");
     expect(result.current.error).toBeNull();
+  });
+
+  it("refreshes the one-shot wizard stream on demand", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        mockSseResponse(
+          buildSse([
+            {
+              type: "session",
+              data: {
+                session_id: "wiz-1",
+                state: "planned",
+                structure_name: "Bull Call Spread",
+              },
+            },
+          ]),
+        ),
+      )
+      .mockResolvedValueOnce(
+        mockSseResponse(
+          buildSse([
+            {
+              type: "session",
+              data: {
+                session_id: "wiz-1",
+                state: "working",
+                structure_name: "Bull Call Spread",
+                current_attempt_id: "attempt-1",
+              },
+            },
+          ]),
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useWizardSession("wiz-1"));
+    await waitFor(() => {
+      expect(result.current.session?.state).toBe("planned");
+    });
+
+    act(() => result.current.refresh());
+
+    await waitFor(() => {
+      expect(result.current.session?.state).toBe("working");
+    });
+    expect(result.current.session?.current_attempt_id).toBe("attempt-1");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

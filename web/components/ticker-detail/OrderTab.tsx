@@ -846,6 +846,151 @@ function ComboOrderForm({
     onOrderPlaced,
   ]);
 
+  const handleOpenWizard = useCallback(async () => {
+    if (netPrices.mid == null) {
+      setError("A priced combo is required before opening the wizard");
+      return;
+    }
+    const wizardLimitPrice = Number.isFinite(parsedPrice)
+      ? parsedPrice
+      : netPrices.mid;
+    setLoading(true);
+    setError(null);
+    try {
+      const planLegs = legsWithActions.map((leg) => ({
+        contract_id: `${ticker}_${leg.expiry}_${leg.strike}_${leg.right}`,
+        action: leg.legAction,
+        right: leg.right,
+        strike: String(leg.strike),
+        expiry: leg.expiry,
+        quantity: 1,
+      }));
+      const quotes: Record<string, { bid: string; ask: string }> = {};
+      for (const leg of legsWithActions) {
+        const key = legPriceKey(ticker, position.expiry, leg);
+        const pd = key ? prices[key] : null;
+        if (pd?.bid == null || pd.ask == null) {
+          throw new Error("Every wizard leg needs a bid/ask quote");
+        }
+        quotes[`${ticker}_${leg.expiry}_${leg.strike}_${leg.right}`] = {
+          bid: String(pd.bid),
+          ask: String(pd.ask),
+        };
+      }
+
+      const orderPayload = {
+        type: "combo",
+        symbol: ticker,
+        action,
+        quantity: parsedQty,
+        limitPrice: wizardLimitPrice,
+        tif,
+        legs: legsWithActions.map((leg) => ({
+          symbol: ticker,
+          expiry: leg.expiry,
+          strike: leg.strike!,
+          right: leg.right,
+          action: leg.legAction,
+          ratio: 1,
+        })),
+      };
+
+      const res = await fetch("/api/wizard/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ticker,
+          intent: action === "SELL" ? "CLOSE" : "OPEN",
+          legs: planLegs,
+          quotes,
+          order_payload: orderPayload,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setError(errorFromResponseBody(json, "Wizard planning failed"));
+        return;
+      }
+      wizardLauncher.launch(json.session_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Wizard planning failed");
+    } finally {
+      setLoading(false);
+    }
+  }, [
+    action,
+    legsWithActions,
+    netPrices.mid,
+    parsedPrice,
+    parsedQty,
+    position.expiry,
+    prices,
+    ticker,
+    tif,
+    wizardLauncher,
+  ]);
+
+  const handleWizardSubmit = useCallback(async () => {
+    if (!wizardLauncher.sessionId) return;
+    const submitTargetPrice = Number.isFinite(parsedPrice)
+      ? parsedPrice
+      : netPrices.mid;
+    if (submitTargetPrice == null) return;
+    const res = await fetch(
+      `/api/wizard/sessions/${wizardLauncher.sessionId}/submit`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_price: submitTargetPrice,
+          price_basis: "CUSTOM",
+        }),
+      },
+    );
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(errorFromResponseBody(json, "Wizard submit failed"));
+      return;
+    }
+    wizardSession.refresh();
+  }, [netPrices.mid, parsedPrice, wizardLauncher.sessionId, wizardSession]);
+
+  const handleWizardRepriceNatural = useCallback(async () => {
+    if (!wizardLauncher.sessionId || netPrices.ask == null) return;
+    const res = await fetch(
+      `/api/wizard/sessions/${wizardLauncher.sessionId}/reprice`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target_price: netPrices.ask }),
+      },
+    );
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(errorFromResponseBody(json, "Wizard reprice failed"));
+      return;
+    }
+    wizardSession.refresh();
+  }, [netPrices.ask, wizardLauncher.sessionId, wizardSession]);
+
+  const handleWizardAbort = useCallback(async () => {
+    if (!wizardLauncher.sessionId) return;
+    const res = await fetch(
+      `/api/wizard/sessions/${wizardLauncher.sessionId}/abort`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(errorFromResponseBody(json, "Wizard abort failed"));
+      return;
+    }
+    wizardSession.refresh();
+  }, [wizardLauncher.sessionId, wizardSession]);
+
   // Calculate spread width for display
   const spreadWidth =
     netPrices.bid != null && netPrices.ask != null
@@ -903,6 +1048,33 @@ function ComboOrderForm({
     };
   }, [isValid, parsedQty, parsedPrice, action, position]);
 
+  const wizardState = String(wizardSession.session?.state ?? "").toUpperCase();
+  const wizardTerminalStates = [
+    "ABORTED",
+    "FILLED",
+    "PARTIALLY_FILLED",
+    "DONE",
+    "COMPLETE",
+    "COMPLETED",
+    "PROTECTION_PENDING",
+    "PROTECTED",
+  ];
+  const wizardIsTerminal = wizardTerminalStates.includes(wizardState);
+  const wizardCanSubmit = Boolean(
+    wizardLauncher.sessionId &&
+      wizardState === "PLANNED" &&
+      !wizardSession.session?.current_attempt_id,
+  );
+  const wizardCanReprice = Boolean(
+    wizardLauncher.sessionId &&
+      wizardSession.session?.current_attempt_id &&
+      !wizardIsTerminal &&
+      ["WORKING", "REPRICE_PENDING"].includes(wizardState),
+  );
+  const wizardCanAbort = Boolean(
+    wizardLauncher.sessionId && !wizardIsTerminal,
+  );
+
   return (
     <div className="order-form">
       <WizardSessionStrip
@@ -916,6 +1088,9 @@ function ComboOrderForm({
         ticker={ticker}
         session={wizardSession}
         onClose={wizardLauncher.close}
+        onSubmit={wizardCanSubmit ? handleWizardSubmit : undefined}
+        onRepriceNatural={wizardCanReprice ? handleWizardRepriceNatural : undefined}
+        onAbort={wizardCanAbort ? handleWizardAbort : undefined}
       />
       <div
         style={{
@@ -927,10 +1102,7 @@ function ComboOrderForm({
         <button
           type="button"
           className="btn-secondary"
-          onClick={() => {
-            // TODO(task-5): call /api/wizard/session then wizardLauncher.launch(id)
-            wizardLauncher.launch();
-          }}
+          onClick={handleOpenWizard}
           style={{ fontSize: "10px", padding: "2px 8px" }}
         >
           Open Wizard

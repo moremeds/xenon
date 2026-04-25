@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export type WizardSessionState = {
   session_id: string;
@@ -13,13 +13,18 @@ export type UseWizardSessionResult = {
   session: WizardSessionState | null;
   loading: boolean;
   error: string | null;
+  refresh: () => void;
 };
 
 export function useWizardSession(sessionId: string | null): UseWizardSessionResult {
   const [session, setSession] = useState<WizardSessionState | null>(null);
   const [loading, setLoading] = useState(Boolean(sessionId));
   const [error, setError] = useState<string | null>(null);
+  const [refreshSeq, setRefreshSeq] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
+  const refresh = useCallback(() => {
+    setRefreshSeq((value) => value + 1);
+  }, []);
 
   useEffect(() => {
     if (!sessionId) {
@@ -93,7 +98,7 @@ export function useWizardSession(sessionId: string | null): UseWizardSessionResu
 
     void run();
     return () => controller.abort();
-  }, [sessionId]);
+  }, [sessionId, refreshSeq]);
 
-  return { session, loading, error };
+  return { session, loading, error, refresh };
 }

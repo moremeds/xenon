@@ -58,9 +58,11 @@ const STATE_TO_STEP_ID: Record<string, StepId> = {
   PROTECT: "protect",
   PROTECTING: "protect",
   PROTECT_PENDING: "protect",
+  PROTECTION_PENDING: "protect",
   FILL: "fill",
   FILLED: "fill",
   FILLING: "fill",
+  PARTIALLY_FILLED: "fill",
   DONE: "fill",
   COMPLETE: "fill",
   COMPLETED: "fill",
@@ -69,7 +71,8 @@ const STATE_TO_STEP_ID: Record<string, StepId> = {
 const warnedStates = new Set<string>();
 
 function resolveActiveStep(state: string): StepId {
-  const mapped = STATE_TO_STEP_ID[state];
+  const normalizedState = state.toUpperCase();
+  const mapped = STATE_TO_STEP_ID[normalizedState];
   if (mapped) return mapped;
   if (process.env.NODE_ENV !== "production" && !warnedStates.has(state)) {
     warnedStates.add(state);

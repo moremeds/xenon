@@ -242,6 +242,8 @@ def attach_protection(
             "alert_armed": True,
             "attempts": 0,
         }
+    if session["state"].upper() != "FILLED":
+        raise ValueError(f"Wizard session {session_id} cannot protect from state {session['state']}")
 
     legs = session.get("payload", {}).get("legs", [])
     quantity = int(session.get("payload", {}).get("quantity", 1))
@@ -390,12 +392,14 @@ def attach_protection(
     )
 
     # Determine final state.
-    if tp_refused_reason == "NAKED_SHORT_GUARD":
+    if not alert_armed:
+        final_state = "PROTECTION_PENDING"
+    elif tp_refused_reason == "NAKED_SHORT_GUARD":
         # TP refused but alert armed → session is "PROTECTED" in the sense that
         # the operator has the Risk Alert safety net; controller flow labels
         # this as PROTECTED to close out the workflow, with the refusal
         # recorded as an event.
-        final_state = "PROTECTED" if alert_armed else "PROTECTION_PENDING"
+        final_state = "PROTECTED"
     else:
         final_state = "PROTECTED"
     _set_state(session_id, final_state, db_path)

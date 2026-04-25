@@ -49,6 +49,19 @@ type ChainStrike = {
   putKey: string;
 };
 
+function errorFromResponseBody(
+  body: Record<string, unknown> | null | undefined,
+  fallback: string,
+): string {
+  if (body && typeof body === "object") {
+    const detail = body.detail;
+    if (typeof detail === "string" && detail.length > 0) return detail;
+    const error = body.error;
+    if (typeof error === "string" && error.length > 0) return error;
+  }
+  return fallback;
+}
+
 /* ─── Chain Strike Row ─── */
 
 function StrikeRow({
@@ -396,6 +409,161 @@ function OrderBuilder({
     signedLimitPrice,
   ]);
 
+  const handleOpenWizard = useCallback(async () => {
+    if (!isCombo || !normalizedOrder || signedNetPrices.mid == null) {
+      setError("Build a priced combo before opening the wizard");
+      return;
+    }
+    const wizardLimitPrice = Number.isFinite(signedLimitPrice)
+      ? signedLimitPrice
+      : signedNetPrices.mid;
+    setLoading(true);
+    setError(null);
+    try {
+      const comboOrder = normalizedOrder;
+      const planLegs = comboOrder.legs.map((leg) => ({
+        contract_id: leg.id,
+        action: leg.action,
+        right: leg.right,
+        strike: String(leg.strike),
+        expiry: normalizeOptionExpiry(leg.expiry) ?? leg.expiry,
+        quantity: leg.quantity,
+      }));
+      const quotes: Record<string, { bid: string; ask: string }> = {};
+      for (const leg of comboOrder.legs) {
+        const key = optionKey({
+          symbol: ticker,
+          expiry: leg.expiry,
+          strike: leg.strike,
+          right: leg.right,
+        });
+        const pd = prices[key];
+        const bid = pd?.bid ?? leg.limitPrice;
+        const ask = pd?.ask ?? leg.limitPrice;
+        if (bid == null || ask == null) {
+          throw new Error("Every wizard leg needs a bid/ask quote");
+        }
+        quotes[leg.id] = { bid: String(bid), ask: String(ask) };
+      }
+
+      const orderPayload = {
+        type: "combo",
+        symbol: ticker,
+        action: getComboEntryAction(comboOrder.legs),
+        quantity: totalQty,
+        limitPrice: wizardLimitPrice,
+        tif,
+        legs: comboOrder.legs.map((leg) => ({
+          symbol: ticker,
+          expiry: normalizeOptionExpiry(leg.expiry) ?? leg.expiry,
+          strike: leg.strike,
+          right: leg.right,
+          action: leg.action,
+          ratio: leg.quantity,
+          ...(leg.limitPrice != null ? { limitPrice: leg.limitPrice } : {}),
+        })),
+      };
+
+      const res = await fetch("/api/wizard/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ticker,
+          intent: "OPEN",
+          legs: planLegs,
+          quotes,
+          order_payload: orderPayload,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setError(errorFromResponseBody(json, "Wizard planning failed"));
+        return;
+      }
+      wizardLauncher.launch(json.session_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Wizard planning failed");
+    } finally {
+      setLoading(false);
+    }
+  }, [
+    isCombo,
+    normalizedOrder,
+    signedNetPrices.mid,
+    prices,
+    ticker,
+    totalQty,
+    signedLimitPrice,
+    tif,
+    wizardLauncher,
+  ]);
+
+  const handleWizardSubmit = useCallback(async () => {
+    if (!wizardLauncher.sessionId) return;
+    const submitTargetPrice = Number.isFinite(signedLimitPrice)
+      ? signedLimitPrice
+      : signedNetPrices.mid;
+    if (submitTargetPrice == null) return;
+    const res = await fetch(
+      `/api/wizard/sessions/${wizardLauncher.sessionId}/submit`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_price: submitTargetPrice,
+          price_basis: "CUSTOM",
+        }),
+      },
+    );
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(errorFromResponseBody(json, "Wizard submit failed"));
+      return;
+    }
+    wizardSession.refresh();
+  }, [
+    signedLimitPrice,
+    signedNetPrices.mid,
+    wizardLauncher.sessionId,
+    wizardSession,
+  ]);
+
+  const handleWizardRepriceNatural = useCallback(async () => {
+    if (!wizardLauncher.sessionId || signedNetPrices.ask == null) return;
+    const res = await fetch(
+      `/api/wizard/sessions/${wizardLauncher.sessionId}/reprice`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target_price: signedNetPrices.ask }),
+      },
+    );
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(errorFromResponseBody(json, "Wizard reprice failed"));
+      return;
+    }
+    wizardSession.refresh();
+  }, [signedNetPrices.ask, wizardLauncher.sessionId, wizardSession]);
+
+  const handleWizardAbort = useCallback(async () => {
+    if (!wizardLauncher.sessionId) return;
+    const res = await fetch(
+      `/api/wizard/sessions/${wizardLauncher.sessionId}/abort`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+    );
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(errorFromResponseBody(json, "Wizard abort failed"));
+      return;
+    }
+    wizardSession.refresh();
+  }, [wizardLauncher.sessionId, wizardSession]);
+
   // Convert chain legs to unified OrderLeg format for pills
   const unifiedLegs: UnifiedOrderLeg[] = useMemo(() => {
     return legs.map((leg) => {
@@ -440,6 +608,33 @@ function OrderBuilder({
 
   if (legs.length === 0) return null;
 
+  const wizardState = String(wizardSession.session?.state ?? "").toUpperCase();
+  const wizardTerminalStates = [
+    "ABORTED",
+    "FILLED",
+    "PARTIALLY_FILLED",
+    "DONE",
+    "COMPLETE",
+    "COMPLETED",
+    "PROTECTION_PENDING",
+    "PROTECTED",
+  ];
+  const wizardIsTerminal = wizardTerminalStates.includes(wizardState);
+  const wizardCanSubmit = Boolean(
+    wizardLauncher.sessionId &&
+      wizardState === "PLANNED" &&
+      !wizardSession.session?.current_attempt_id,
+  );
+  const wizardCanReprice = Boolean(
+    wizardLauncher.sessionId &&
+      wizardSession.session?.current_attempt_id &&
+      !wizardIsTerminal &&
+      ["WORKING", "REPRICE_PENDING"].includes(wizardState),
+  );
+  const wizardCanAbort = Boolean(
+    wizardLauncher.sessionId && !wizardIsTerminal,
+  );
+
   return (
     <div className="order-builder">
       <WizardSessionStrip
@@ -453,6 +648,9 @@ function OrderBuilder({
         ticker={ticker}
         session={wizardSession}
         onClose={wizardLauncher.close}
+        onSubmit={wizardCanSubmit ? handleWizardSubmit : undefined}
+        onRepriceNatural={wizardCanReprice ? handleWizardRepriceNatural : undefined}
+        onAbort={wizardCanAbort ? handleWizardAbort : undefined}
       />
       <div className="order-builder-header">
         <span
@@ -469,10 +667,7 @@ function OrderBuilder({
         <button
           type="button"
           className="btn-secondary"
-          onClick={() => {
-            // TODO(task-5): call /api/wizard/session then wizardLauncher.launch(id)
-            wizardLauncher.launch();
-          }}
+          onClick={handleOpenWizard}
           style={{ fontSize: "10px", padding: "2px 8px" }}
         >
           Open Wizard

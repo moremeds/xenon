@@ -191,6 +191,27 @@ def test_protection_idempotent_on_already_protected(tmp_path, monkeypatch):
     assert ib.alert_calls == []
 
 
+def test_protection_rejects_non_filled_session(tmp_path, monkeypatch):
+    db = tmp_path / "orders.duckdb"
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
+    sid = _init_session(db, state="working")
+
+    ib = _StubIB(tp_acks=[{"order_id": 9001}], alert_acks=[{"virtual_id": "alert-1"}])
+
+    with pytest.raises(ValueError, match="cannot protect from state working"):
+        protect.attach_protection(
+            sid,
+            ib=ib,
+            tp_target_price=Decimal("3.50"),
+            alert_net_mid_threshold=Decimal("1.25"),
+            polarity="DEBIT",
+            sleep=lambda _s: None,
+        )
+
+    assert ib.tp_calls == []
+    assert ib.alert_calls == []
+
+
 def test_naked_short_guard_refuses_tp_but_arms_alert(tmp_path, monkeypatch):
     """If the TP would short an uncovered call leg, we skip the TP and route
     to Risk Alert only. This keeps Gate-4 intact."""
@@ -300,6 +321,52 @@ def test_naked_short_guard_error_short_circuits_retry_loop(tmp_path, monkeypatch
         con.close()
     kinds = [row[0] for row in events]
     assert "PROTECTION_TP_REFUSED" in kinds
+
+
+def test_risk_alert_failure_keeps_session_pending(tmp_path, monkeypatch):
+    """A TP alone is not enough for the wizard's assisted-exit contract.
+
+    If Risk Alert registration fails, the session must not be marked
+    PROTECTED because the stop monitor only polls alert_enabled rows.
+    """
+    db = tmp_path / "orders.duckdb"
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
+    sid = _init_session(db, state="FILLED")
+
+    class _AlertFailingIB:
+        def place_combo_tp(self, **kwargs):
+            return {"order_id": "tp-1", "perm_id": "tp-perm-1"}
+
+        def register_risk_alert(self, **kwargs):
+            raise RuntimeError("alert store unavailable")
+
+    result = protect.attach_protection(
+        sid,
+        ib=_AlertFailingIB(),
+        tp_target_price=Decimal("3.50"),
+        alert_net_mid_threshold=Decimal("1.25"),
+        polarity="DEBIT",
+    )
+
+    assert result["tp_attached"] is True
+    assert result["alert_armed"] is False
+    assert result["state"] == "PROTECTION_PENDING"
+
+    con = duckdb.connect(str(db))
+    try:
+        row = con.execute(
+            "SELECT state FROM wizard_sessions WHERE session_id=?",
+            [sid],
+        ).fetchone()
+        protection = con.execute(
+            "SELECT tp_enabled, alert_enabled FROM wizard_protection WHERE session_id=?",
+            [sid],
+        ).fetchone()
+    finally:
+        con.close()
+
+    assert row[0] == "PROTECTION_PENDING"
+    assert protection == (True, False)
 
 
 def test_signed_combo_pricing_preserved_for_credit(tmp_path, monkeypatch):

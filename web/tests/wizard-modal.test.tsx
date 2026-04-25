@@ -18,12 +18,14 @@ const sessionActive: UseWizardSessionResult = {
   },
   loading: false,
   error: null,
+  refresh: () => {},
 };
 
 const sessionEmpty: UseWizardSessionResult = {
   session: null,
   loading: false,
   error: null,
+  refresh: () => {},
 };
 
 describe("WizardModal", () => {
@@ -66,6 +68,69 @@ describe("WizardModal", () => {
       />,
     );
     expect(screen.queryByRole("dialog", { name: /combo wizard/i })).toBeNull();
+  });
+
+  it("maps PROTECTION_PENDING to the protect step", () => {
+    render(
+      <WizardModal
+        open={true}
+        sessionId="wiz-1"
+        ticker="AAPL"
+        session={{
+          ...sessionActive,
+          session: {
+            ...sessionActive.session!,
+            state: "PROTECTION_PENDING",
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole("listitem", { current: "step" }).textContent).toBe(
+      "Protect",
+    );
+  });
+
+  it("normalizes lowercase backend states before resolving the active step", () => {
+    render(
+      <WizardModal
+        open={true}
+        sessionId="wiz-1"
+        ticker="AAPL"
+        session={{
+          ...sessionActive,
+          session: {
+            ...sessionActive.session!,
+            state: "working",
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole("listitem", { current: "step" }).textContent).toBe(
+      "Submit",
+    );
+  });
+
+  it("maps partially filled sessions to the fill step", () => {
+    render(
+      <WizardModal
+        open={true}
+        sessionId="wiz-1"
+        ticker="AAPL"
+        session={{
+          ...sessionActive,
+          session: {
+            ...sessionActive.session!,
+            state: "partially_filled",
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole("listitem", { current: "step" }).textContent).toBe(
+      "Fill",
+    );
   });
 });
 

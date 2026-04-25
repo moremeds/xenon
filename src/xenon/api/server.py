@@ -1780,6 +1780,10 @@ async def orders_cancel(request: Request):
     The full upstream payload (code + message) is preserved in detail.
     """
     body = await request.json()
+    return await _orders_cancel_from_body(body)
+
+
+async def _orders_cancel_from_body(body: dict):
     if _is_test_mode():
         return {
             "status": "ok",

@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS wizard_combo_attempts (
     avg_fill_price      DECIMAL(18,4),
     ib_reject_code      INTEGER,
     ib_reject_text      TEXT,
+    modify_sequence     INTEGER NOT NULL DEFAULT 0,
     created_at          TIMESTAMP NOT NULL,
     updated_at          TIMESTAMP NOT NULL,
     UNIQUE (session_id, client_attempt_id)
@@ -72,6 +73,10 @@ _CREATE_INDEXES = [
     'CREATE INDEX IF NOT EXISTS ix_wizard_events_session ON wizard_session_events(session_id, "at");',
 ]
 
+_MIGRATIONS = [
+    "ALTER TABLE wizard_combo_attempts ADD COLUMN IF NOT EXISTS modify_sequence INTEGER DEFAULT 0;",
+]
+
 
 def init_store(db_path: Path | str | None = None) -> Path:
     path = _resolve_path(db_path)
@@ -83,6 +88,8 @@ def init_store(db_path: Path | str | None = None) -> Path:
         con.execute(_CREATE_EVENTS)
         con.execute(_CREATE_PROTECTION)
         for stmt in _CREATE_INDEXES:
+            con.execute(stmt)
+        for stmt in _MIGRATIONS:
             con.execute(stmt)
     finally:
         con.close()
