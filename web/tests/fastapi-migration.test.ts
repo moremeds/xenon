@@ -104,68 +104,6 @@ beforeEach(() => {
 });
 
 // =============================================================================
-// POST /api/scanner — success + cache fallback
-// =============================================================================
-
-describe("POST /api/scanner (via xenonFetch)", () => {
-  it("returns data on success", async () => {
-    const scanData = {
-      scan_id: "trend_20260314",
-      scan_timestamp: "2026-03-14",
-      market_context: { spy_close: 520, vix_close: 17, regime: "bullish" },
-      universe_size: 500,
-      stage_a_survivors: 100,
-      stage_b_survivors: 50,
-      candidates: [],
-    };
-    mockXenonFetch.mockResolvedValue(scanData);
-    mockStatSync.mockReturnValue({ mtime: new Date() });
-
-    const { POST } = await import("../app/api/scanner/route");
-    const res = await POST();
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.universe_size).toBe(500);
-    expect(body.cache_meta).toBeDefined();
-  });
-
-  it("falls back to cached data on xenonFetch failure", async () => {
-    mockXenonFetch.mockRejectedValue(new Error("Connection refused"));
-    mockReadFile.mockResolvedValue(
-      JSON.stringify({
-        scan_id: "trend_20260313",
-        scan_timestamp: "2026-03-13",
-        market_context: { spy_close: 520, vix_close: 17, regime: "bullish" },
-        universe_size: 400,
-        stage_a_survivors: 80,
-        stage_b_survivors: 40,
-        candidates: [],
-      }),
-    );
-    mockStatSync.mockReturnValue({ mtime: new Date(Date.now() - 900_000) });
-
-    const { POST } = await import("../app/api/scanner/route");
-    const res = await POST();
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.universe_size).toBe(400);
-    expect(body.is_stale).toBe(true);
-    expect(res.headers.get("X-Sync-Warning")).toContain("cached");
-  });
-
-  it("returns 502 on failure when no cache exists", async () => {
-    mockXenonFetch.mockRejectedValue(new Error("Connection refused"));
-    mockReadFile.mockRejectedValue(new Error("ENOENT"));
-
-    const { POST } = await import("../app/api/scanner/route");
-    const res = await POST();
-    expect(res.status).toBe(502);
-    const body = await res.json();
-    expect(body.error).toBeDefined();
-  });
-});
-
-// =============================================================================
 // POST /api/discover — success + cache fallback
 // =============================================================================
 

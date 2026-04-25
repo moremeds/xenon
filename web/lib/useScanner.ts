@@ -7,6 +7,7 @@ import type { ScannerData } from "./types";
 const config = {
   endpoint: "/api/scanner",
   extractTimestamp: (d: ScannerData) => d.scan_timestamp || null,
+  hasPost: false,
 };
 
 export function useScanner(active: boolean): UseSyncReturn<ScannerData> {
