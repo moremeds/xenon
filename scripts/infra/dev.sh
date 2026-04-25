@@ -48,22 +48,15 @@ exec 3<&- 2>/dev/null || true
 exec 3>&- 2>/dev/null || true
 log_info "IB Gateway port $PORT is listening."
 
-# 3. Start FastAPI + Next dev. The Python service is run in the foreground
-# so Ctrl-C tears it down; Next is started in the background and killed on
-# exit via trap.
+# 3. Export the resolved mode so child processes (uvicorn, Next, the Node
+# realtime relay) all see the same value — without this, a per-invocation
+# arg override would silently desync from .env.
+export XENON_TRADING_MODE="$MODE"
 
-cleanup() {
-  if [[ -n "${NEXT_PID:-}" ]] && kill -0 "$NEXT_PID" 2>/dev/null; then
-    log_info "Stopping Next dev (pid $NEXT_PID)…"
-    kill "$NEXT_PID" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT INT TERM
-
-log_info "Starting Next dev (background)…"
-( cd "$REPO_ROOT/web" && npm run dev ) &
-NEXT_PID=$!
-
-log_info "Starting FastAPI on 127.0.0.1:8321 (foreground)…"
-cd "$REPO_ROOT"
-exec uv run uvicorn xenon.api.server:app --host 127.0.0.1 --port 8321 --reload
+# 4. Delegate to web/package.json's `dev` script, which already orchestrates
+# `next dev`, the IB realtime relay, AND uvicorn via concurrently. Running a
+# separate uvicorn here would race for 127.0.0.1:8321. The npm script inherits
+# our exported XENON_TRADING_MODE.
+log_info "Starting next dev + ib realtime + uvicorn (via npm run dev)…"
+cd "$REPO_ROOT/web"
+exec npm run dev
