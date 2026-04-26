@@ -934,18 +934,14 @@ def main():
 
     # Also write to Postgres
     try:
-        url = os.environ.get("DATABASE_URL")
-        if url:
-            from sqlalchemy import create_engine as _cse
-            from sqlalchemy import insert
+        from sqlalchemy import insert
 
-            from xenon.db.schema import scan_results
+        from xenon.db.engine import get_sync_engine
+        from xenon.db.schema import scan_results
 
-            sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
-            _eng = _cse(sync_url)
-            with _eng.begin() as conn:
-                conn.execute(insert(scan_results).values(scan_type="gex", payload=result))
-            _eng.dispose()
+        engine = get_sync_engine()
+        with engine.begin() as conn:
+            conn.execute(insert(scan_results).values(scan_type="gex", payload=result))
     except Exception as exc:
         print(f"  Warning: Postgres scan write failed: {exc}", file=sys.stderr)
 

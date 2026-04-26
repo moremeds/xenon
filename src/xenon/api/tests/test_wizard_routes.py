@@ -38,14 +38,12 @@ def _truncate(engine):
 
 @pytest.fixture(autouse=True)
 def _setup_pg(monkeypatch):
-    """Point get_sync_engine() and orders_store._pg_engine at the test DB."""
+    """Point get_sync_engine() at the test DB."""
     monkeypatch.setenv("DATABASE_URL", _SYNC_URL)
 
     import xenon.db.engine as eng_mod
-    import xenon.execution.orders_store as os_mod
 
     monkeypatch.setattr(eng_mod, "_sync_engine", None)
-    monkeypatch.setattr(os_mod, "_pg_engine", None)
 
     engine = _pg_engine()
     _truncate(engine)

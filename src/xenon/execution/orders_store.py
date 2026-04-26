@@ -8,7 +8,6 @@ Spec: docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md §12.
 
 from __future__ import annotations
 
-import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,27 +16,11 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine as _create_sync_engine
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from xenon.db.engine import get_sync_engine
 from xenon.db.schema import order_events, order_submissions
-
-# ── Postgres sync engine ──
-
-_pg_engine = None
-
-
-def _get_pg_engine():
-    global _pg_engine
-    if _pg_engine is None:
-        url = os.environ.get("DATABASE_URL")
-        if not url:
-            raise RuntimeError("DATABASE_URL not set — no silent fallback post-migration.")
-        sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
-        _pg_engine = _create_sync_engine(sync_url)
-    return _pg_engine
-
 
 # ── Schema init ──
 
@@ -104,7 +87,7 @@ def reserve_attempt(
     """Atomically reserve a submission slot keyed by (user_id, client_attempt_id)."""
     sid = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
-    engine = _get_pg_engine()
+    engine = get_sync_engine()
     with engine.begin() as conn:
         stmt = pg_insert(order_submissions).values(
             submission_id=sid,
@@ -173,7 +156,7 @@ def apply_modify(
     db_path: Path | str | None = None,
 ) -> dict:
     """Monotonic modify_sequence gate keyed by ib_order_id."""
-    engine = _get_pg_engine()
+    engine = get_sync_engine()
     with engine.begin() as conn:
         result = conn.execute(
             update(order_submissions)
@@ -218,7 +201,7 @@ def register_from_snapshot(
     submission_id = f"snapshot-{perm_id}"
     client_attempt_id = f"snapshot-{perm_id}"
     now = datetime.now(timezone.utc)
-    engine = _get_pg_engine()
+    engine = get_sync_engine()
     with engine.begin() as conn:
         existing = conn.execute(
             select(order_submissions.c.submission_id).where(order_submissions.c.submission_id == submission_id)
@@ -253,7 +236,7 @@ def apply_modify_by_perm_id(
     db_path: Path | str | None = None,
 ) -> dict:
     """Variant of apply_modify keyed by perm_id."""
-    engine = _get_pg_engine()
+    engine = get_sync_engine()
     with engine.connect() as conn:
         row = conn.execute(
             select(order_submissions.c.ib_order_id).where(order_submissions.c.perm_id == str(perm_id))
@@ -272,7 +255,7 @@ def mark_submitted(
     db_path: Path | str | None = None,
 ) -> None:
     now = datetime.now(timezone.utc)
-    engine = _get_pg_engine()
+    engine = get_sync_engine()
     with engine.begin() as conn:
         conn.execute(
             update(order_submissions)
@@ -297,7 +280,7 @@ def mark_terminal(
     db_path: Path | str | None = None,
 ) -> None:
     now = datetime.now(timezone.utc)
-    engine = _get_pg_engine()
+    engine = get_sync_engine()
     with engine.begin() as conn:
         conn.execute(
             update(order_submissions)
@@ -318,7 +301,7 @@ def record_event(
     detail: dict,
     db_path: Path | str | None = None,
 ) -> None:
-    engine = _get_pg_engine()
+    engine = get_sync_engine()
     with engine.begin() as conn:
         conn.execute(
             insert(order_events).values(
@@ -332,7 +315,7 @@ def record_event(
 def lookup_submission_id_by_ib_order_id(ib_order_id: str, db_path: Path | str | None = None) -> str | None:
     if not ib_order_id:
         return None
-    engine = _get_pg_engine()
+    engine = get_sync_engine()
     with engine.connect() as conn:
         row = conn.execute(
             select(order_submissions.c.submission_id).where(order_submissions.c.ib_order_id == str(ib_order_id))
@@ -343,7 +326,7 @@ def lookup_submission_id_by_ib_order_id(ib_order_id: str, db_path: Path | str | 
 def lookup_submission_id_by_perm_id(perm_id: str, db_path: Path | str | None = None) -> str | None:
     if not perm_id:
         return None
-    engine = _get_pg_engine()
+    engine = get_sync_engine()
     with engine.connect() as conn:
         row = conn.execute(
             select(order_submissions.c.submission_id).where(order_submissions.c.perm_id == str(perm_id)).limit(1)
@@ -352,7 +335,7 @@ def lookup_submission_id_by_perm_id(perm_id: str, db_path: Path | str | None = N
 
 
 def lookup_by_attempt(user_id: str, client_attempt_id: str, db_path: Path | str | None = None) -> SubmissionRow | None:
-    engine = _get_pg_engine()
+    engine = get_sync_engine()
     with engine.connect() as conn:
         row = conn.execute(
             select(
@@ -388,7 +371,7 @@ _ACTIVE_STATES = ("PENDING", "WORKING", "PARTIALLY_FILLED")
 
 
 def working_reservations_for(user_id: str, ticker: str, db_path: Path | str | None = None) -> WorkingReservations:
-    engine = _get_pg_engine()
+    engine = get_sync_engine()
     with engine.connect() as conn:
         stock_sell = conn.execute(
             select(func.coalesce(func.sum(order_submissions.c.quantity - order_submissions.c.filled_qty), 0)).where(

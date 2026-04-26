@@ -53,12 +53,11 @@ def db_path(tmp_path):
 
 
 def _fetch_scalar(sql: str, params: dict | None = None):
-    engine = create_engine(orders_store._get_pg_engine().url)
-    try:
-        with engine.connect() as conn:
-            return conn.execute(text(sql), params or {}).scalar()
-    finally:
-        engine.dispose()
+    from xenon.db.engine import get_sync_engine
+
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        return conn.execute(text(sql), params or {}).scalar()
 
 
 def test_applies_monotonic_modify_sequence(db_path):

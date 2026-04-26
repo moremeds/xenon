@@ -398,21 +398,14 @@ class FlowLog:
 
     def _load_from_postgres(self) -> None:
         try:
-            url = os.environ.get("DATABASE_URL")
-            if not url:
-                return
-            from sqlalchemy import create_engine as _cse
             from sqlalchemy import select
 
+            from xenon.db.engine import get_sync_engine
             from xenon.db.schema import uw_flow_events
 
-            sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
-            engine = _cse(sync_url)
-            try:
-                with engine.connect() as conn:
-                    rows = conn.execute(select(uw_flow_events)).fetchall()
-            finally:
-                engine.dispose()
+            engine = get_sync_engine()
+            with engine.connect() as conn:
+                rows = conn.execute(select(uw_flow_events)).fetchall()
             for row in rows:
                 data = dict(row._mapping)
                 payload = {
@@ -496,16 +489,12 @@ class FlowLog:
 
     def _save_to_postgres(self) -> None:
         try:
-            url = os.environ.get("DATABASE_URL")
-            if not url:
-                return
-            from sqlalchemy import create_engine as _cse
             from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+            from xenon.db.engine import get_sync_engine
             from xenon.db.schema import uw_flow_events
 
-            sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
-            engine = _cse(sync_url)
+            engine = get_sync_engine()
             with engine.begin() as conn:
                 for ev in self._events.values():
                     detected = datetime.fromisoformat(ev.detected_at) if ev.detected_at else datetime.now(timezone.utc)
@@ -557,7 +546,6 @@ class FlowLog:
                         },
                     )
                     conn.execute(stmt)
-            engine.dispose()
         except Exception as exc:  # noqa: BLE001
             logger.warning("flow_log Postgres save failed: %s", exc)
 

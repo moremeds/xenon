@@ -461,18 +461,14 @@ class UWApiStats:
 
     def _write_history_to_postgres(self, payload: Dict[str, Any]) -> None:
         try:
-            url = os.environ.get("DATABASE_URL")
-            if not url:
-                return
             from decimal import Decimal
 
-            from sqlalchemy import create_engine as _cse
             from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+            from xenon.db.engine import get_sync_engine
             from xenon.db.schema import uw_api_stats as uw_stats_table
 
-            sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
-            engine = _cse(sync_url)
+            engine = get_sync_engine()
             buckets = payload.get("buckets") or {}
             with engine.begin() as conn:
                 for hour_key, b in buckets.items():
@@ -495,7 +491,6 @@ class UWApiStats:
                         set_={k: stmt.excluded[k] for k in values if k != "bucket_hour"},
                     )
                     conn.execute(stmt)
-            engine.dispose()
         except Exception as exc:  # noqa: BLE001
             logger.warning("uw_api_stats Postgres write failed: %s", exc)
 
@@ -546,22 +541,17 @@ class UWApiStats:
 
     def _load_history_from_postgres(self) -> bool:
         try:
-            url = os.environ.get("DATABASE_URL")
-            if not url:
-                return False
+            from datetime import timedelta
 
-            from sqlalchemy import create_engine as _cse
             from sqlalchemy import select
 
+            from xenon.db.engine import get_sync_engine
             from xenon.db.schema import uw_api_stats as uw_stats_table
 
-            sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
-            engine = _cse(sync_url)
-            try:
-                with engine.connect() as conn:
-                    rows = conn.execute(select(uw_stats_table)).fetchall()
-            finally:
-                engine.dispose()
+            engine = get_sync_engine()
+            cutoff = datetime.fromtimestamp(self._now_fn(), tz=timezone.utc) - timedelta(hours=96)
+            with engine.connect() as conn:
+                rows = conn.execute(select(uw_stats_table).where(uw_stats_table.c.bucket_hour >= cutoff)).fetchall()
             if not rows:
                 return False
 

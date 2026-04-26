@@ -30,27 +30,13 @@ except ImportError:
     sys.exit(1)
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
+from xenon.db.engine import get_sync_engine
 
 # Default connection settings
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
 DEFAULT_CLIENT_ID = CLIENT_IDS["ib_sync"]
 
 PORTFOLIO_PATH = Path(__file__).resolve().parents[3] / "data" / "portfolio.json"
-
-_sync_engine = None
-
-
-def _get_sync_engine():
-    global _sync_engine
-    if _sync_engine is None:
-        url = os.environ.get("DATABASE_URL")
-        if not url:
-            raise RuntimeError("DATABASE_URL not set — no silent fallback to JSON files post-migration.")
-        from sqlalchemy import create_engine as _create_sync_engine
-
-        sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
-        _sync_engine = _create_sync_engine(sync_url)
-    return _sync_engine
 
 
 def connect_ib(host: str, port: int, client_id="auto") -> IBClient:
@@ -1065,7 +1051,7 @@ def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
     nav_val = Decimal(str(round(net_liq, 2)))
     pnl_val = Decimal(str(round(float(daily_pnl), 2))) if daily_pnl is not None else None
 
-    engine = _get_sync_engine()
+    engine = get_sync_engine()
     with engine.begin() as conn:
         stmt = pg_insert(nav_history).values(date=today, nav=nav_val, daily_pnl=pnl_val)
         stmt = stmt.on_conflict_do_update(
@@ -1083,7 +1069,7 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
 
     from xenon.db.schema import account_snapshots, positions
 
-    engine = _get_sync_engine()
+    engine = get_sync_engine()
     with engine.begin() as conn:
         conn.execute(delete(positions).where(positions.c.account == "IB"))
 

@@ -54,10 +54,8 @@ def _postgres_orders_test_db(monkeypatch):
 
     try:
         import xenon.db.engine as engine_mod
-        import xenon.execution.orders_store as orders_store_mod
 
         monkeypatch.setattr(engine_mod, "_sync_engine", None)
-        monkeypatch.setattr(orders_store_mod, "_pg_engine", None)
     except Exception:
         pass
 

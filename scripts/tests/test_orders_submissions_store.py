@@ -38,12 +38,11 @@ def db_path(tmp_path, monkeypatch):
 
 
 def _fetch_all(sql: str, params: dict | None = None):
-    engine = create_engine(orders_store._get_pg_engine().url)
-    try:
-        with engine.connect() as conn:
-            return conn.execute(text(sql), params or {}).fetchall()
-    finally:
-        engine.dispose()
+    from xenon.db.engine import get_sync_engine
+
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        return conn.execute(text(sql), params or {}).fetchall()
 
 
 def test_orders_store_has_no_duckdb_compat_symbols():
@@ -94,9 +93,7 @@ def test_reserve_attempt_concurrent_only_one_winner(db_path):
 
     def _go():
         barrier.wait()
-        outcomes.append(
-            reserve_attempt("local", "cid-C", _req(), db_path=db_path)
-        )
+        outcomes.append(reserve_attempt("local", "cid-C", _req(), db_path=db_path))
 
     threads = [threading.Thread(target=_go) for _ in range(8)]
     for t in threads:
@@ -200,10 +197,15 @@ def test_working_reservations_sums_active_sell_rows(db_path):
 def test_working_reservations_counts_short_call_only_when_sell_call(db_path):
     init_store(db_path)
     reserve_attempt(
-        "local", "cid-C1",
+        "local",
+        "cid-C1",
         _req(
-            security_type="OPT", action="SELL", right="C",
-            expiry="20260620", strike=Decimal("500"), quantity=3,
+            security_type="OPT",
+            action="SELL",
+            right="C",
+            expiry="20260620",
+            strike=Decimal("500"),
+            quantity=3,
         ),
         db_path=db_path,
     )

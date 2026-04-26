@@ -45,26 +45,12 @@ except ImportError:
     sys.exit(1)
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
+from xenon.db.engine import get_sync_engine
 
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
 DEFAULT_CLIENT_ID = CLIENT_IDS.get("ib_execute", 25)
 DEFAULT_TIMEOUT = 60  # 1 minute default monitor timeout
 DEFAULT_INTERVAL = 3  # Check every 3 seconds
-
-_sync_engine = None
-
-
-def _get_sync_engine():
-    global _sync_engine
-    if _sync_engine is None:
-        url = os.environ.get("DATABASE_URL")
-        if not url:
-            raise RuntimeError("DATABASE_URL not set — no silent fallback to JSON files post-migration.")
-        from sqlalchemy import create_engine as _create_sync_engine
-
-        sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
-        _sync_engine = _create_sync_engine(sync_url)
-    return _sync_engine
 
 
 class OrderExecutor:
@@ -334,7 +320,7 @@ class OrderExecutor:
 
             from xenon.db.schema import trades
 
-            engine = _get_sync_engine()
+            engine = get_sync_engine()
             with engine.begin() as conn:
                 conn.execute(
                     insert(trades).values(
