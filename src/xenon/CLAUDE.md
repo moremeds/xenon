@@ -51,6 +51,28 @@ Add or update the matching `src/xenon/db/queries/` module in the same change. Us
 
 Database events use `events.py` plus the Postgres outbox trigger. Emit durable events by writing outbox rows; subscribe with the LISTEN/NOTIFY helpers for reactive services.
 
+### Broker Account Scope
+
+All execution and portfolio tables carry `broker`, `account_env`,
+`broker_account` columns so paper/live data never blends in a shared
+Postgres. Full policy: `docs/architecture/production-database-strategy.md`.
+Key rules:
+
+- Every write must include scope — never rely on `server_default` for new
+  rows. New scoped tables: `order_submissions`, `trades`, `wizard_sessions`,
+  `wizard_combo_attempts`, `positions`, `account_snapshots`, `nav_history`.
+- Every query in an active workflow (rehydrate, monitor, working-orders)
+  must filter by scope.
+- `legacy_unknown` rows are excluded from active flows when scope filters
+  are active.
+- Order idempotency key is
+  `(broker, account_env, broker_account, user_id, client_attempt_id)`.
+- `nav_history` PK is `(broker, account_env, broker_account, date)`.
+- Use `AccountScope` from `src/xenon/execution/account_scope.py` —
+  never hardcode scope values in query code.
+- FastAPI: depend on `xenon.api.guards.get_account_scope`.
+- Sync subprocesses: env vars `XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`.
+
 ## Combo / BAG Order Guardrails
 
 1. **Never map combo `Order.action` from debit vs credit.**
