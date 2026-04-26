@@ -314,11 +314,30 @@ class OrderExecutor:
             "fills": result.get("fills", []),
         }
 
-        # Write to Postgres
+        # Write to Postgres. Resolve scope strictly when env is set:
+        # if XENON_TRADING_MODE is present, validate XENON_BROKER_ACCOUNT
+        # matches it via resolve_from_env(); fail loud on mismatch instead
+        # of silently writing under a wrong account_env. With no env set,
+        # fall back to legacy_unknown defaults (e.g. ad-hoc CLI usage).
         try:
             from sqlalchemy import insert
 
             from xenon.db.schema import trades
+            from xenon.execution.account_scope import resolve_from_env
+
+            if os.environ.get("XENON_TRADING_MODE") and os.environ.get("XENON_BROKER_ACCOUNT"):
+                scope = resolve_from_env()
+                scope_kwargs = {
+                    "broker": scope.broker,
+                    "account_env": scope.account_env,
+                    "broker_account": scope.broker_account,
+                }
+            else:
+                scope_kwargs = {
+                    "broker": os.environ.get("XENON_BROKER", "IB"),
+                    "account_env": "legacy_unknown",
+                    "broker_account": "legacy_unknown",
+                }
 
             engine = get_sync_engine()
             with engine.begin() as conn:
@@ -335,9 +354,7 @@ class OrderExecutor:
                         opened_at=now_utc if side == "BUY" else None,
                         closed_at=now_utc if side == "SELL" else None,
                         metadata=trade_entry,
-                        broker=os.environ.get("XENON_BROKER", "IB"),
-                        account_env=os.environ.get("XENON_TRADING_MODE", "legacy_unknown"),
-                        broker_account=os.environ.get("XENON_BROKER_ACCOUNT", "legacy_unknown"),
+                        **scope_kwargs,
                     )
                 )
             print("✓ Trade logged to Postgres")

@@ -51,9 +51,22 @@ async def append_trade(
     return result.scalar()
 
 
-async def get_journal(conn: AsyncConnection, *, ticker: str | None = None) -> list[dict]:
+async def get_journal(
+    conn: AsyncConnection,
+    *,
+    ticker: str | None = None,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
+) -> list[dict]:
     stmt = select(trades).order_by(trades.c.id)
     if ticker:
         stmt = stmt.where(trades.c.ticker == ticker)
+    if broker is not None:
+        stmt = stmt.where(trades.c.broker == broker)
+    if account_env is not None:
+        stmt = stmt.where(trades.c.account_env == account_env)
+    if broker_account is not None:
+        stmt = stmt.where(trades.c.broker_account == broker_account)
     result = await conn.execute(stmt)
     return [dict(row._mapping) for row in result]

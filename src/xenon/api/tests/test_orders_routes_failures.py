@@ -6,16 +6,16 @@ asserts the route maps them to the correct HTTP status + reason_code.
 
 from __future__ import annotations
 
-import os
 import json
+import os
 import tempfile
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, text
 
 # test_mode must be False so the real classification logic runs.
 from fastapi.testclient import TestClient  # noqa: E402
+from sqlalchemy import create_engine, text
 
 from xenon.api import server as server_mod  # noqa: E402
 from xenon.api.subprocess import ScriptResult  # noqa: E402
@@ -129,7 +129,12 @@ def test_cancel_ib_reject_generic_code_returns_400(client, tmp_db, monkeypatch):
 
 
 def _seed_submission(tmp_db: Path, ib_order_id: str = "42") -> str:
-    """Create an orders_submissions row so apply_modify has something to key on."""
+    """Create an orders_submissions row so apply_modify has something to key on.
+
+    Stamps the row with the test harness's scope (paper/DU0000000 from
+    scripts/tests/conftest.py + src/xenon/api/tests/conftest.py) so the
+    scope-filtered apply_modify in /orders/modify finds it.
+    """
     sid = "sub-test-1"
     engine = _pg_engine()
     try:
@@ -140,9 +145,11 @@ def _seed_submission(tmp_db: Path, ib_order_id: str = "42") -> str:
             INSERT INTO xenon.order_submissions (
                 submission_id, user_id, client_attempt_id, ticker, security_type,
                 action, quantity, multiplier, limit_price, state, ib_order_id,
-                modify_sequence, submitted_at, updated_at
+                modify_sequence, submitted_at, updated_at,
+                broker, account_env, broker_account
             ) VALUES (:submission_id, 'local', 'cid-1', 'AAPL', 'STK', 'BUY', 1, 100, '1.23',
-                      'WORKING', :ib_order_id, 5, NOW(), NOW())
+                      'WORKING', :ib_order_id, 5, NOW(), NOW(),
+                      'IB', 'paper', 'DU0000000')
             """,
                 ),
                 {"submission_id": sid, "ib_order_id": ib_order_id},
@@ -213,9 +220,11 @@ def test_modify_by_perm_id_with_known_row_advances_sequence(client, tmp_db, monk
             INSERT INTO xenon.order_submissions (
                 submission_id, user_id, client_attempt_id, ticker, security_type,
                 action, quantity, multiplier, limit_price, state, ib_order_id,
-                perm_id, modify_sequence, submitted_at, updated_at
+                perm_id, modify_sequence, submitted_at, updated_at,
+                broker, account_env, broker_account
             ) VALUES (:submission_id, 'local', 'cid-perm', 'AAPL', 'STK', 'BUY', 1, 100, '1.23',
-                      'WORKING', '99', '42', 0, NOW(), NOW())
+                      'WORKING', '99', '42', 0, NOW(), NOW(),
+                      'IB', 'paper', 'DU0000000')
             """,
                 ),
                 {"submission_id": sid},
@@ -324,9 +333,11 @@ def _seed_permid_submission(tmp_db: Path, perm_id: str = "P42") -> str:
             INSERT INTO xenon.order_submissions (
                 submission_id, user_id, client_attempt_id, ticker, security_type,
                 action, quantity, multiplier, limit_price, state, ib_order_id,
-                perm_id, modify_sequence, submitted_at, updated_at
+                perm_id, modify_sequence, submitted_at, updated_at,
+                broker, account_env, broker_account
             ) VALUES (:submission_id, 'local', 'cid-perm-evt', 'AAPL', 'STK', 'BUY', 1, 100, '1.23',
-                      'WORKING', :ib_order_id, :perm_id, 0, NOW(), NOW())
+                      'WORKING', :ib_order_id, :perm_id, 0, NOW(), NOW(),
+                      'IB', 'paper', 'DU0000000')
             """,
                 ),
                 {"submission_id": sid, "ib_order_id": "ib-" + perm_id, "perm_id": perm_id},
@@ -342,10 +353,7 @@ def _fetch_events(tmp_db: Path, submission_id: str) -> list[tuple[str, str]]:
     try:
         with engine.connect() as con:
             rows = con.execute(
-                text(
-                    'SELECT kind, detail FROM xenon.order_events '
-                    'WHERE submission_id = :submission_id ORDER BY "at"'
-                ),
+                text('SELECT kind, detail FROM xenon.order_events WHERE submission_id = :submission_id ORDER BY "at"'),
                 {"submission_id": submission_id},
             ).fetchall()
     finally:

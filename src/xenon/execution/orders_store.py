@@ -165,8 +165,24 @@ def apply_modify(
     order_id: str,
     sequence: int,
     db_path: Path | str | None = None,
+    *,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
 ) -> dict:
-    """Monotonic modify_sequence gate keyed by ib_order_id."""
+    """Monotonic modify_sequence gate keyed by ib_order_id.
+
+    `ib_order_id` is unique only within an IB account session, so when scope
+    is provided we filter on it to avoid colliding with rows from a different
+    paper/live account.
+    """
+    scope_conds: list = []
+    if broker is not None:
+        scope_conds.append(order_submissions.c.broker == broker)
+    if account_env is not None:
+        scope_conds.append(order_submissions.c.account_env == account_env)
+    if broker_account is not None:
+        scope_conds.append(order_submissions.c.broker_account == broker_account)
     engine = get_sync_engine()
     with engine.begin() as conn:
         result = conn.execute(
@@ -174,6 +190,7 @@ def apply_modify(
             .where(
                 order_submissions.c.ib_order_id == str(order_id),
                 order_submissions.c.modify_sequence < sequence,
+                *scope_conds,
             )
             .values(
                 modify_sequence=sequence,
@@ -186,7 +203,10 @@ def apply_modify(
             return {"applied": True, "current_sequence": int(updated[0])}
 
         row = conn.execute(
-            select(order_submissions.c.modify_sequence).where(order_submissions.c.ib_order_id == str(order_id))
+            select(order_submissions.c.modify_sequence).where(
+                order_submissions.c.ib_order_id == str(order_id),
+                *scope_conds,
+            )
         ).first()
         if row is None:
             return {"applied": False, "current_sequence": -1}
@@ -250,16 +270,31 @@ def apply_modify_by_perm_id(
     perm_id: str,
     sequence: int,
     db_path: Path | str | None = None,
+    *,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
 ) -> dict:
     """Variant of apply_modify keyed by perm_id.
 
     Resolves ib_order_id from perm_id then delegates to apply_modify,
-    both within the same engine session to avoid TOCTOU.
+    both within the same engine session to avoid TOCTOU. Scope filters
+    isolate paper/live rows that may share a perm_id namespace.
     """
+    scope_conds: list = []
+    if broker is not None:
+        scope_conds.append(order_submissions.c.broker == broker)
+    if account_env is not None:
+        scope_conds.append(order_submissions.c.account_env == account_env)
+    if broker_account is not None:
+        scope_conds.append(order_submissions.c.broker_account == broker_account)
     engine = get_sync_engine()
     with engine.begin() as conn:
         row = conn.execute(
-            select(order_submissions.c.ib_order_id).where(order_submissions.c.perm_id == str(perm_id))
+            select(order_submissions.c.ib_order_id).where(
+                order_submissions.c.perm_id == str(perm_id),
+                *scope_conds,
+            )
         ).first()
         if row is None or not row[0]:
             return {"applied": False, "current_sequence": -1}
@@ -269,6 +304,7 @@ def apply_modify_by_perm_id(
             .where(
                 order_submissions.c.ib_order_id == ib_order_id,
                 order_submissions.c.modify_sequence < sequence,
+                *scope_conds,
             )
             .values(modify_sequence=sequence, updated_at=datetime.now(timezone.utc))
             .returning(order_submissions.c.modify_sequence)
@@ -277,7 +313,10 @@ def apply_modify_by_perm_id(
         if updated is not None:
             return {"applied": True, "current_sequence": int(updated[0])}
         cur = conn.execute(
-            select(order_submissions.c.modify_sequence).where(order_submissions.c.ib_order_id == ib_order_id)
+            select(order_submissions.c.modify_sequence).where(
+                order_submissions.c.ib_order_id == ib_order_id,
+                *scope_conds,
+            )
         ).first()
         return {"applied": False, "current_sequence": int(cur[0]) if cur else -1}
 
@@ -348,25 +387,49 @@ def record_event(
         )
 
 
-def lookup_submission_id_by_ib_order_id(ib_order_id: str, db_path: Path | str | None = None) -> str | None:
+def lookup_submission_id_by_ib_order_id(
+    ib_order_id: str,
+    db_path: Path | str | None = None,
+    *,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
+) -> str | None:
     if not ib_order_id:
         return None
+    conditions = [order_submissions.c.ib_order_id == str(ib_order_id)]
+    if broker is not None:
+        conditions.append(order_submissions.c.broker == broker)
+    if account_env is not None:
+        conditions.append(order_submissions.c.account_env == account_env)
+    if broker_account is not None:
+        conditions.append(order_submissions.c.broker_account == broker_account)
     engine = get_sync_engine()
     with engine.connect() as conn:
-        row = conn.execute(
-            select(order_submissions.c.submission_id).where(order_submissions.c.ib_order_id == str(ib_order_id))
-        ).first()
+        row = conn.execute(select(order_submissions.c.submission_id).where(*conditions)).first()
     return row[0] if row else None
 
 
-def lookup_submission_id_by_perm_id(perm_id: str, db_path: Path | str | None = None) -> str | None:
+def lookup_submission_id_by_perm_id(
+    perm_id: str,
+    db_path: Path | str | None = None,
+    *,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
+) -> str | None:
     if not perm_id:
         return None
+    conditions = [order_submissions.c.perm_id == str(perm_id)]
+    if broker is not None:
+        conditions.append(order_submissions.c.broker == broker)
+    if account_env is not None:
+        conditions.append(order_submissions.c.account_env == account_env)
+    if broker_account is not None:
+        conditions.append(order_submissions.c.broker_account == broker_account)
     engine = get_sync_engine()
     with engine.connect() as conn:
-        row = conn.execute(
-            select(order_submissions.c.submission_id).where(order_submissions.c.perm_id == str(perm_id)).limit(1)
-        ).first()
+        row = conn.execute(select(order_submissions.c.submission_id).where(*conditions).limit(1)).first()
     return row[0] if row else None
 
 
@@ -421,7 +484,27 @@ from xenon.execution.preflight import WorkingReservations
 _ACTIVE_STATES = ("PENDING", "WORKING", "PARTIALLY_FILLED")
 
 
-def working_reservations_for(user_id: str, ticker: str, db_path: Path | str | None = None) -> WorkingReservations:
+def working_reservations_for(
+    user_id: str,
+    ticker: str,
+    db_path: Path | str | None = None,
+    *,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
+) -> WorkingReservations:
+    """Aggregate active working-order quantities for preflight.
+
+    Scope kwargs are critical here: cross-account aggregation produces
+    incorrect naked-short / short-call coverage decisions in shared DB.
+    """
+    scope_conds: list = []
+    if broker is not None:
+        scope_conds.append(order_submissions.c.broker == broker)
+    if account_env is not None:
+        scope_conds.append(order_submissions.c.account_env == account_env)
+    if broker_account is not None:
+        scope_conds.append(order_submissions.c.broker_account == broker_account)
     engine = get_sync_engine()
     with engine.connect() as conn:
         stock_sell = conn.execute(
@@ -431,6 +514,7 @@ def working_reservations_for(user_id: str, ticker: str, db_path: Path | str | No
                 order_submissions.c.security_type == "STK",
                 order_submissions.c.action == "SELL",
                 order_submissions.c.state.in_(_ACTIVE_STATES),
+                *scope_conds,
             )
         ).scalar()
         short_call = conn.execute(
@@ -441,6 +525,7 @@ def working_reservations_for(user_id: str, ticker: str, db_path: Path | str | No
                 order_submissions.c.action == "SELL",
                 order_submissions.c.right == "C",
                 order_submissions.c.state.in_(_ACTIVE_STATES),
+                *scope_conds,
             )
         ).scalar()
     return WorkingReservations(

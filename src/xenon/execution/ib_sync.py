@@ -1202,6 +1202,13 @@ def main():
 
         accounts = client.ib.managedAccounts()
         ib_account = accounts[0] if accounts else ""
+        # Export the connected account ID so downstream DB writers
+        # (`_save_portfolio_to_postgres`, `_append_nav_snapshot`,
+        # `naked_short_audit` subprocess) stamp scope rows with the live
+        # account instead of the legacy_unknown env fallback. Per
+        # account_scope.py docstring: this is where the env var is set.
+        if ib_account:
+            os.environ["XENON_BROKER_ACCOUNT"] = ib_account
         pnl_obj = client.ib.reqPnL(ib_account) if ib_account else None
 
         # Fetch positions while PnL streams

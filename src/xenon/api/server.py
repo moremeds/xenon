@@ -1470,7 +1470,7 @@ def _run_preflight(body: dict, user_id: str = "local") -> Verdict:
         # removes this branch.
         return Verdict(accept=True)
     req = _body_to_preflight_request(body)
-    reservations = orders_store.working_reservations_for(user_id, req.ticker)
+    reservations = orders_store.working_reservations_for(user_id, req.ticker, **_resolve_scope_kwargs())
     return preflight.evaluate(req, portfolio, reservations=reservations)
 
 
@@ -1804,6 +1804,7 @@ def _record_manage_event(
     kind: str,
     detail: dict,
     perm_id: str = "",
+    scope: dict[str, str] | None = None,
 ) -> None:
     """Write orders_events row for a cancel/modify attempt.
 
@@ -1814,11 +1815,12 @@ def _record_manage_event(
     .submission_id is NOT NULL and has no synthetic parent row available.
     """
     try:
+        scope = scope or _resolve_scope_kwargs()
         sid: str | None = None
         if ib_order_id:
-            sid = orders_store.lookup_submission_id_by_ib_order_id(ib_order_id)
+            sid = orders_store.lookup_submission_id_by_ib_order_id(ib_order_id, **scope)
         if sid is None and perm_id:
-            sid = orders_store.lookup_submission_id_by_perm_id(perm_id)
+            sid = orders_store.lookup_submission_id_by_perm_id(perm_id, **scope)
         if sid:
             orders_store.record_event(sid, kind, detail)
     except Exception:  # pragma: no cover — event writes are best-effort
@@ -1935,6 +1937,7 @@ def _try_register_order_from_snapshot(*, perm_id: int, order_id: int) -> bool:
             quantity=int(target.get("totalQuantity") or 0),
             limit_price=float(target.get("limitPrice") or 0.0),
             multiplier=multiplier,
+            **_resolve_scope_kwargs(),
         )
     except Exception as exc:
         logger.warning(
@@ -2011,10 +2014,11 @@ async def _orders_modify_from_body(body: dict):
                 "http_status": 400,
             },
         )
+    _scope = _resolve_scope_kwargs()
     if not order_id and perm_id:
-        seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence)
+        seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence, **_scope)
     else:
-        seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence)
+        seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence, **_scope)
     # If the perm_id is unknown to orders_store but exists in the IB snapshot,
     # lazy-register it and retry. Covers orders placed before orders_store
     # tracking existed or by an external client (the snapshot reconstruction
@@ -2022,9 +2026,9 @@ async def _orders_modify_from_body(body: dict):
     if not seq_outcome["applied"] and seq_outcome["current_sequence"] == -1:
         if _try_register_order_from_snapshot(perm_id=perm_id, order_id=order_id):
             if not order_id and perm_id:
-                seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence)
+                seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence, **_scope)
             else:
-                seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence)
+                seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence, **_scope)
 
     if not seq_outcome["applied"]:
         current = seq_outcome["current_sequence"]
@@ -2077,7 +2081,7 @@ async def _orders_modify_from_body(body: dict):
             "applied_sequence": modify_sequence,
             "http_status": 503,
         }
-        _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""))
+        _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""), scope=_scope)
         raise HTTPException(status_code=503, detail=detail)
 
     data = result.data or {}
@@ -2091,7 +2095,7 @@ async def _orders_modify_from_body(body: dict):
             "applied_sequence": modify_sequence,
             "http_status": http_status,
         }
-        _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""))
+        _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""), scope=_scope)
         raise HTTPException(status_code=http_status, detail=detail)
 
     _record_manage_event(
@@ -2104,6 +2108,7 @@ async def _orders_modify_from_body(body: dict):
             "http_status": 200,
         },
         perm_id=str(perm_id or ""),
+        scope=_scope,
     )
     # Echo the applied sequence so the UI can anchor its per-order counter.
     return {**data, "applied_sequence": modify_sequence}

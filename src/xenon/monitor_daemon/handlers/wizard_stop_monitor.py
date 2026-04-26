@@ -88,15 +88,34 @@ class WizardStopMonitorHandler(BaseHandler):
     def _list_protected(self) -> list[dict[str, Any]]:
         """Return PROTECTED sessions with active alert from Postgres.
 
-        Filters by the daemon's broker account scope (env-resolved). Empty
-        env vars resolve to None → no filter, preserving legacy behavior.
+        Scope filter is all-or-nothing: when both `XENON_TRADING_MODE` and
+        `XENON_BROKER_ACCOUNT` are set, query both (with broker defaulting
+        to IB). When neither is set, run unscoped (legacy behavior). Setting
+        only one is misconfiguration — fail loud rather than silently
+        broaden the query to every account in that env.
         """
         from xenon.db.engine import get_sync_engine
         from xenon.db.queries import combo_wizard
 
-        broker = os.environ.get("XENON_BROKER") or None
-        account_env = os.environ.get("XENON_TRADING_MODE") or None
-        broker_account = os.environ.get("XENON_BROKER_ACCOUNT") or None
+        broker_env = os.environ.get("XENON_BROKER") or None
+        account_env_env = os.environ.get("XENON_TRADING_MODE") or None
+        broker_account_env = os.environ.get("XENON_BROKER_ACCOUNT") or None
+
+        if account_env_env or broker_account_env:
+            if not (account_env_env and broker_account_env):
+                raise RuntimeError(
+                    "wizard_stop_monitor: scope is partial — set both "
+                    "XENON_TRADING_MODE and XENON_BROKER_ACCOUNT, or neither. "
+                    f"Got XENON_TRADING_MODE={account_env_env!r}, "
+                    f"XENON_BROKER_ACCOUNT={broker_account_env!r}"
+                )
+            broker = broker_env or "IB"
+            account_env = account_env_env
+            broker_account = broker_account_env
+        else:
+            broker = None
+            account_env = None
+            broker_account = None
 
         engine = get_sync_engine()
         with engine.connect() as conn:

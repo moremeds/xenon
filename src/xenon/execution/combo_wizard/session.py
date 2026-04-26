@@ -196,6 +196,9 @@ def _claim_session_for_submit(session_id: str, attempt_id: str) -> dict[str, Any
                 "intent": row["intent"],
                 "payload": row["payload"] or {},
                 "current_attempt_id": row["current_attempt_id"],
+                "broker": row["broker"],
+                "account_env": row["account_env"],
+                "broker_account": row["broker_account"],
             }
 
         current = cwq.get_session(conn, session_id)
@@ -274,6 +277,26 @@ def plan_session(
 async def submit_combo(session_id: str, request: dict[str, Any]) -> dict[str, Any]:
     attempt_id = uuid.uuid4().hex
     session = _claim_session_for_submit(session_id, attempt_id)
+
+    # Scope-mismatch guard: a session planned in paper must not be submitted
+    # while the server is in live mode (and vice versa). Both rows
+    # (wizard_combo_attempts AND order_submissions) would otherwise carry
+    # different scope, breaking audit and isolation.
+    current_scope = _scope_kwargs()
+    session_scope = {
+        "broker": session.get("broker"),
+        "account_env": session.get("account_env"),
+        "broker_account": session.get("broker_account"),
+    }
+    # Allow legacy_unknown sessions to flow through under any scope
+    # (pre-migration sessions don't have a meaningful scope).
+    if session_scope["account_env"] not in (None, "legacy_unknown"):
+        if session_scope != current_scope:
+            _release_submit_claim(session_id, attempt_id)
+            raise ValueError(
+                f"Wizard session {session_id} scope mismatch: session={session_scope}, current={current_scope}"
+            )
+
     client_attempt_id = f"wiz:{session_id}:combo:{attempt_id}"
 
     payload = dict(session["payload"])
@@ -394,9 +417,22 @@ def _session_row_to_dict(row: dict) -> dict[str, Any]:
 
 
 def list_sessions() -> list[dict[str, Any]]:
+    """List wizard sessions for the current broker account scope.
+
+    Filters by app.state-resolved scope so a live-mode UI never shows
+    paper sessions and vice versa. legacy_unknown sessions are surfaced
+    only when no scope is resolvable (test mode without lifespan).
+    """
+    scope = _scope_kwargs()
+    # When scope resolves to legacy_unknown (test mode), don't filter —
+    # tests seed rows with default scope. In production lifespan
+    # populates scope, so this filter is active.
+    filter_kwargs: dict[str, str] = {}
+    if scope.get("account_env") and scope["account_env"] != "legacy_unknown":
+        filter_kwargs = scope
     engine = get_sync_engine()
     with engine.connect() as conn:
-        rows = cwq.list_sessions(conn, limit=50)
+        rows = cwq.list_sessions(conn, limit=50, **filter_kwargs)
     return [_session_row_to_dict(row) for row in rows]
 
 
