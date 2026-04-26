@@ -34,7 +34,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -56,6 +56,21 @@ DEFAULT_TIMEOUT = 60  # 1 minute default monitor timeout
 DEFAULT_INTERVAL = 3  # Check every 3 seconds
 
 TRADE_LOG_PATH = PROJECT_ROOT / "data" / "trade_log.json"
+
+_sync_engine = None
+
+
+def _get_sync_engine():
+    global _sync_engine
+    if _sync_engine is None:
+        url = os.environ.get("DATABASE_URL")
+        if not url:
+            raise RuntimeError("DATABASE_URL not set — no silent fallback to JSON files post-migration.")
+        from sqlalchemy import create_engine as _create_sync_engine
+
+        sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+        _sync_engine = _create_sync_engine(sync_url)
+    return _sync_engine
 
 
 class OrderExecutor:
@@ -274,8 +289,7 @@ class OrderExecutor:
     def log_trade(
         self, result: Dict[str, Any], contract, side: str, limit_price: float, thesis: str = "", notes: str = ""
     ) -> bool:
-        """
-        Log a filled trade to trade_log.json
+        """Log a filled trade to Postgres + trade_log.json.
 
         Returns True if successfully logged.
         """
@@ -283,20 +297,8 @@ class OrderExecutor:
             print(f"⚠️ Cannot log - order not filled (status: {result.get('status')})")
             return False
 
-        # Load existing trade log
-        if TRADE_LOG_PATH.exists():
-            with open(TRADE_LOG_PATH) as f:
-                trade_log = json.load(f)
-        else:
-            trade_log = {"trades": []}
-
-        # Get next ID
-        existing_ids = [t.get("id", 0) for t in trade_log.get("trades", [])]
-        next_id = max(existing_ids, default=0) + 1
-
         # Determine contract type and structure
         if hasattr(contract, "lastTradeDateOrContractMonth"):
-            # Option
             contract_type = "option"
             contract_str = f"{contract.symbol} {contract.lastTradeDateOrContractMonth} ${contract.strike} {'Call' if contract.right == 'C' else 'Put'}"
             structure = (
@@ -304,20 +306,17 @@ class OrderExecutor:
                 if side == "BUY"
                 else f"Short {'Call' if contract.right == 'C' else 'Put'}"
             )
-            multiplier = 100
         else:
-            # Stock
             contract_type = "stock"
             contract_str = contract.symbol
             structure = "Long Stock" if side == "BUY" else "Sold Stock"
-            multiplier = 1
 
-        # Create trade entry
-        now = datetime.now()
+        now_utc = datetime.now(timezone.utc)
+        now_local = datetime.now()
+
         trade_entry = {
-            "id": next_id,
-            "date": now.strftime("%Y-%m-%d"),
-            "time": now.strftime("%H:%M:%S"),
+            "date": now_local.strftime("%Y-%m-%d"),
+            "time": now_local.strftime("%H:%M:%S"),
             "ticker": result["symbol"],
             "contract_type": contract_type,
             "contract": contract_str,
@@ -335,14 +334,49 @@ class OrderExecutor:
             "fills": result.get("fills", []),
         }
 
-        # Add to log
-        trade_log["trades"].append(trade_entry)
+        # Write to Postgres
+        try:
+            from sqlalchemy import insert
 
-        # Save
+            from xenon.db.schema import trades
+
+            engine = _get_sync_engine()
+            with engine.begin() as conn:
+                conn.execute(
+                    insert(trades).values(
+                        ticker=result["symbol"],
+                        structure=structure,
+                        action=side,
+                        quantity=result["quantity"],
+                        entry_cost=Decimal(str(round(result["total_value"], 4))) if side == "BUY" else None,
+                        exit_cost=Decimal(str(round(result["total_value"], 4))) if side == "SELL" else None,
+                        edge=thesis or None,
+                        decision="EXECUTED",
+                        opened_at=now_utc if side == "BUY" else None,
+                        closed_at=now_utc if side == "SELL" else None,
+                        metadata=trade_entry,
+                    )
+                )
+            print("✓ Trade logged to Postgres")
+        except Exception as exc:
+            print(f"  Warning: Postgres trade log failed: {exc}")
+
+        # Keep JSON write — read paths not yet migrated
+        if TRADE_LOG_PATH.exists():
+            with open(TRADE_LOG_PATH) as f:
+                trade_log = json.load(f)
+        else:
+            trade_log = {"trades": []}
+
+        existing_ids = [t.get("id", 0) for t in trade_log.get("trades", [])]
+        next_id = max(existing_ids, default=0) + 1
+        trade_entry["id"] = next_id
+
+        trade_log["trades"].append(trade_entry)
         with open(TRADE_LOG_PATH, "w") as f:
             json.dump(trade_log, f, indent=2)
 
-        print(f"\n📝 Logged to trade_log.json (ID: {next_id})")
+        print(f"✓ Trade logged to {TRADE_LOG_PATH.name} (ID: {next_id})")
         return True
 
 
