@@ -203,13 +203,9 @@ def register_from_snapshot(
     now = datetime.now(timezone.utc)
     engine = get_sync_engine()
     with engine.begin() as conn:
-        existing = conn.execute(
-            select(order_submissions.c.submission_id).where(order_submissions.c.submission_id == submission_id)
-        ).first()
-        if existing is not None:
-            return False
-        conn.execute(
-            insert(order_submissions).values(
+        result = conn.execute(
+            pg_insert(order_submissions)
+            .values(
                 submission_id=submission_id,
                 user_id=user_id,
                 client_attempt_id=client_attempt_id,
@@ -226,8 +222,10 @@ def register_from_snapshot(
                 updated_at=now,
                 modify_sequence=0,
             )
+            .on_conflict_do_nothing(index_elements=["submission_id"])
+            .returning(order_submissions.c.submission_id)
         )
-        return True
+        return result.first() is not None
 
 
 def apply_modify_by_perm_id(
@@ -235,15 +233,35 @@ def apply_modify_by_perm_id(
     sequence: int,
     db_path: Path | str | None = None,
 ) -> dict:
-    """Variant of apply_modify keyed by perm_id."""
+    """Variant of apply_modify keyed by perm_id.
+
+    Resolves ib_order_id from perm_id then delegates to apply_modify,
+    both within the same engine session to avoid TOCTOU.
+    """
     engine = get_sync_engine()
-    with engine.connect() as conn:
+    with engine.begin() as conn:
         row = conn.execute(
             select(order_submissions.c.ib_order_id).where(order_submissions.c.perm_id == str(perm_id))
         ).first()
-    if row is None or not row[0]:
-        return {"applied": False, "current_sequence": -1}
-    return apply_modify(str(row[0]), sequence, db_path=db_path)
+        if row is None or not row[0]:
+            return {"applied": False, "current_sequence": -1}
+        ib_order_id = str(row[0])
+        result = conn.execute(
+            update(order_submissions)
+            .where(
+                order_submissions.c.ib_order_id == ib_order_id,
+                order_submissions.c.modify_sequence < sequence,
+            )
+            .values(modify_sequence=sequence, updated_at=datetime.now(timezone.utc))
+            .returning(order_submissions.c.modify_sequence)
+        )
+        updated = result.first()
+        if updated is not None:
+            return {"applied": True, "current_sequence": int(updated[0])}
+        cur = conn.execute(
+            select(order_submissions.c.modify_sequence).where(order_submissions.c.ib_order_id == ib_order_id)
+        ).first()
+        return {"applied": False, "current_sequence": int(cur[0]) if cur else -1}
 
 
 def mark_submitted(
