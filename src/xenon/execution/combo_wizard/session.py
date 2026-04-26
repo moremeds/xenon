@@ -20,6 +20,26 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _scope_kwargs() -> dict[str, str]:
+    """Resolve broker account scope from FastAPI app.state.
+
+    Wizard flows always run in-process inside the FastAPI app, so the
+    global server module's app.state is the source of truth. Falls back to
+    legacy_unknown if the lifespan didn't run (test mode without setup).
+    """
+    try:
+        from xenon.api import server as server_mod
+
+        state = server_mod.app.state
+        mode = getattr(state, "trading_mode", None)
+        account = getattr(state, "account", None)
+        if mode and account:
+            return {"broker": "IB", "account_env": mode, "broker_account": account}
+    except Exception:
+        pass
+    return {"broker": "IB", "account_env": "legacy_unknown", "broker_account": "legacy_unknown"}
+
+
 def _normalize_right(value: Any) -> str:
     right = str(value or "").upper()
     if right == "CALL":
@@ -127,6 +147,7 @@ def create_session(
             payload=payload,
             created_at=now,
             updated_at=now,
+            **_scope_kwargs(),
         )
     return {"session_id": session_id}
 
@@ -299,6 +320,7 @@ async def submit_combo(session_id: str, request: dict[str, Any]) -> dict[str, An
                 "intent": session["intent"],
                 "price_basis": price_basis,
             },
+            **_scope_kwargs(),
         )
         cwq.update_session(conn, session_id, state="working")
 

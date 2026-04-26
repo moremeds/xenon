@@ -29,6 +29,9 @@ def create_session(
     payload: dict | None = None,
     created_at: datetime | None = None,
     updated_at: datetime | None = None,
+    broker: str = "IB",
+    account_env: str = "legacy_unknown",
+    broker_account: str = "legacy_unknown",
 ) -> None:
     now = created_at or datetime.now(timezone.utc)
     conn.execute(
@@ -41,6 +44,9 @@ def create_session(
             payload=payload,
             created_at=now,
             updated_at=updated_at or now,
+            broker=broker,
+            account_env=account_env,
+            broker_account=broker_account,
         )
     )
 
@@ -50,8 +56,25 @@ def get_session(conn: Connection, session_id: str) -> dict | None:
     return dict(row._mapping) if row else None
 
 
-def list_sessions(conn: Connection, *, limit: int = 50) -> list[dict]:
-    result = conn.execute(select(wizard_sessions).order_by(wizard_sessions.c.updated_at.desc()).limit(limit))
+def list_sessions(
+    conn: Connection,
+    *,
+    limit: int = 50,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
+) -> list[dict]:
+    conditions = []
+    if broker is not None:
+        conditions.append(wizard_sessions.c.broker == broker)
+    if account_env is not None:
+        conditions.append(wizard_sessions.c.account_env == account_env)
+    if broker_account is not None:
+        conditions.append(wizard_sessions.c.broker_account == broker_account)
+    stmt = select(wizard_sessions).order_by(wizard_sessions.c.updated_at.desc()).limit(limit)
+    if conditions:
+        stmt = stmt.where(*conditions)
+    result = conn.execute(stmt)
     return [dict(r._mapping) for r in result]
 
 
@@ -92,12 +115,23 @@ def release_submit_claim(conn: Connection, session_id: str, attempt_id: str) -> 
     )
 
 
-def list_rehydratable(conn: Connection) -> list[dict]:
-    result = conn.execute(
-        select(wizard_sessions).where(
-            wizard_sessions.c.state.in_(["submitting", "working", "reprice_pending", "protection_pending", "protected"])
-        )
-    )
+def list_rehydratable(
+    conn: Connection,
+    *,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
+) -> list[dict]:
+    conditions = [
+        wizard_sessions.c.state.in_(["submitting", "working", "reprice_pending", "protection_pending", "protected"])
+    ]
+    if broker is not None:
+        conditions.append(wizard_sessions.c.broker == broker)
+    if account_env is not None:
+        conditions.append(wizard_sessions.c.account_env == account_env)
+    if broker_account is not None:
+        conditions.append(wizard_sessions.c.broker_account == broker_account)
+    result = conn.execute(select(wizard_sessions).where(*conditions))
     return [dict(r._mapping) for r in result]
 
 
@@ -105,6 +139,9 @@ def list_rehydratable(conn: Connection) -> list[dict]:
 
 
 def create_attempt(conn: Connection, **fields) -> None:
+    fields.setdefault("broker", "IB")
+    fields.setdefault("account_env", "legacy_unknown")
+    fields.setdefault("broker_account", "legacy_unknown")
     conn.execute(insert(wizard_combo_attempts).values(**fields))
 
 
@@ -165,17 +202,32 @@ def upsert_protection(conn: Connection, session_id: str, **fields) -> None:
         conn.execute(update(wizard_protection).where(wizard_protection.c.session_id == session_id).values(**fields))
 
 
-def list_protected_sessions(conn: Connection) -> list[dict]:
+def list_protected_sessions(
+    conn: Connection,
+    *,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
+) -> list[dict]:
     """Join wizard_sessions + wizard_protection for PROTECTED state with alert enabled."""
-    result = conn.execute(
-        text("""
-            SELECT s.session_id, s.ticker, s.payload, p.config, p.state as protection_state
-            FROM xenon.wizard_sessions s
-            JOIN xenon.wizard_protection p ON p.session_id = s.session_id
-            WHERE UPPER(s.state) = 'PROTECTED'
-              AND p.state = 'active'
-        """)
-    )
+    base_sql = """
+        SELECT s.session_id, s.ticker, s.payload, p.config, p.state as protection_state
+        FROM xenon.wizard_sessions s
+        JOIN xenon.wizard_protection p ON p.session_id = s.session_id
+        WHERE UPPER(s.state) = 'PROTECTED'
+          AND p.state = 'active'
+    """
+    params: dict = {}
+    if broker is not None:
+        base_sql += " AND s.broker = :broker"
+        params["broker"] = broker
+    if account_env is not None:
+        base_sql += " AND s.account_env = :account_env"
+        params["account_env"] = account_env
+    if broker_account is not None:
+        base_sql += " AND s.broker_account = :broker_account"
+        params["broker_account"] = broker_account
+    result = conn.execute(text(base_sql), params)
     return [dict(r._mapping) for r in result]
 
 

@@ -18,6 +18,9 @@ async def create_session(
     intent: str | None = None,
     payload: dict | None = None,
     current_attempt_id: str | None = None,
+    broker: str = "IB",
+    account_env: str = "legacy_unknown",
+    broker_account: str = "legacy_unknown",
 ) -> None:
     now = datetime.now(timezone.utc)
     await conn.execute(
@@ -31,6 +34,9 @@ async def create_session(
             current_attempt_id=current_attempt_id,
             created_at=now,
             updated_at=now,
+            broker=broker,
+            account_env=account_env,
+            broker_account=broker_account,
         )
     )
 
