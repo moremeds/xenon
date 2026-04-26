@@ -1168,6 +1168,7 @@ async def dev_rehydrate_synthetic():
             multiplier=1,
             limit_price=_Dec("500"),
         ),
+        **_resolve_scope_kwargs(),
     )
     submission_id = reservation.submission_id
 
@@ -1579,6 +1580,20 @@ async def orders_place(request: Request):
     return await _orders_place_from_body(body)
 
 
+def _resolve_scope_kwargs() -> dict[str, str]:
+    """Resolve broker account scope from app.state with safe fallback.
+
+    Lifespan populates `app.state.trading_mode` and `app.state.account`.
+    Tests that bypass lifespan get `legacy_unknown` defaults — this matches
+    the column server_default so existing test rows still pass CHECK.
+    """
+    mode = getattr(app.state, "trading_mode", None)
+    account = getattr(app.state, "account", None)
+    if mode and account:
+        return {"broker": "IB", "account_env": mode, "broker_account": account}
+    return {"broker": "IB", "account_env": "legacy_unknown", "broker_account": "legacy_unknown"}
+
+
 async def _orders_place_from_body(body: dict):
     # F2: server-side Gate 4. Run preflight before any subprocess invocation.
     verdict = _run_preflight(body)
@@ -1657,7 +1672,7 @@ async def _orders_place_from_body(body: dict):
         con_id=int(body.get("con_id") or 0) or None,
         limit_price=Decimal(str(body.get("limitPrice", "0"))),
     )
-    outcome = orders_store.reserve_attempt(user_id, cid, req_row)
+    outcome = orders_store.reserve_attempt(user_id, cid, req_row, **_resolve_scope_kwargs())
     if outcome.status == "terminal":
         return JSONResponse(
             status_code=409,

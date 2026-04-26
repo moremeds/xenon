@@ -23,6 +23,9 @@ async def append_trade(
     opened_at=None,
     closed_at=None,
     metadata: dict | None = None,
+    broker: str = "IB",
+    account_env: str = "legacy_unknown",
+    broker_account: str = "legacy_unknown",
 ) -> int:
     result = await conn.execute(
         insert(trades)
@@ -39,6 +42,9 @@ async def append_trade(
             opened_at=opened_at,
             closed_at=closed_at,
             metadata=metadata,
+            broker=broker,
+            account_env=account_env,
+            broker_account=broker_account,
         )
         .returning(trades.c.id)
     )
