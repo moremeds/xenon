@@ -555,6 +555,38 @@ def _write_cache(path: Path, data: dict) -> None:
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+_SCAN_TYPE_MAP = {
+    "scanner.json": "watchlist",
+    "discover.json": "discover",
+    "gex.json": "gex",
+    "vcg.json": "vcg",
+    "cri.json": "cri",
+}
+
+
+def _write_scan_to_postgres(filename: str, data: dict) -> None:
+    """Write a scanner result to Postgres scan_results table (best-effort)."""
+    scan_type = _SCAN_TYPE_MAP.get(filename)
+    if not scan_type:
+        return
+    try:
+        url = os.environ.get("DATABASE_URL")
+        if not url:
+            return
+        from sqlalchemy import create_engine as _cse
+        from sqlalchemy import insert
+
+        from xenon.db.schema import scan_results
+
+        sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+        engine = _cse(sync_url)
+        with engine.begin() as conn:
+            conn.execute(insert(scan_results).values(scan_type=scan_type, payload=data))
+        engine.dispose()
+    except Exception:
+        pass
         raise
 
 
@@ -1249,6 +1281,7 @@ async def scan():
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     _write_cache(DATA_DIR / "scanner.json", result.data)
+    _write_scan_to_postgres("scanner.json", result.data)
     return result.data
 
 
@@ -1261,6 +1294,7 @@ async def discover():
     if result.data and result.data.get("error"):
         raise HTTPException(status_code=400, detail=result.data["error"])
     _write_cache(DATA_DIR / "discover.json", result.data)
+    _write_scan_to_postgres("discover.json", result.data)
     return result.data
 
 
@@ -2090,6 +2124,7 @@ async def regime_scan():
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     _write_cache(DATA_DIR / "cri.json", result.data)
+    _write_scan_to_postgres("cri.json", result.data)
     return result.data
 
 
@@ -2122,6 +2157,7 @@ async def vcg_scan():
         if not result.ok:
             raise HTTPException(status_code=502, detail=result.error)
         _write_cache(DATA_DIR / "vcg.json", result.data)
+        _write_scan_to_postgres("vcg.json", result.data)
         _vcg_last_scan = _time.monotonic()
         return result.data
 
@@ -2314,6 +2350,7 @@ async def gex_scan(ticker: str = "SPX"):
         if not result.ok:
             raise HTTPException(status_code=502, detail=result.error)
         _write_cache(DATA_DIR / "gex.json", result.data)
+        _write_scan_to_postgres("gex.json", result.data)
         _gex_last_scan = _time.monotonic()
         return result.data
 

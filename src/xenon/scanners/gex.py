@@ -932,6 +932,23 @@ def main():
     atomic_save(str(cache_path), result)
     print(f"  Cache written: {cache_path}", file=sys.stderr)
 
+    # Also write to Postgres
+    try:
+        url = os.environ.get("DATABASE_URL")
+        if url:
+            from sqlalchemy import create_engine as _cse
+            from sqlalchemy import insert
+
+            from xenon.db.schema import scan_results
+
+            sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+            _eng = _cse(sync_url)
+            with _eng.begin() as conn:
+                conn.execute(insert(scan_results).values(scan_type="gex", payload=result))
+            _eng.dispose()
+    except Exception as exc:
+        print(f"  Warning: Postgres scan write failed: {exc}", file=sys.stderr)
+
 
 def _print_summary(result: Dict[str, Any]) -> None:
     """Print human-readable GEX summary."""
