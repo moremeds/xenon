@@ -1,4 +1,8 @@
-"""DuckDB-backed orders_submissions / orders_events store.
+"""Postgres-backed orders_submissions / orders_events store.
+
+Migrated from DuckDB. Preserves the same public API (function signatures,
+dataclasses, return types). Combo wizard modules still import _connect_utc /
+_resolve_path for their own DuckDB tables — removed in Task 21.
 
 Spec: docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md §12.
 """
@@ -16,6 +20,13 @@ from typing import Literal
 
 import duckdb
 from pydantic import BaseModel, Field
+from sqlalchemy import create_engine as _create_sync_engine
+from sqlalchemy import func, insert, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+from xenon.db.schema import order_events, order_submissions
+
+# ── DuckDB compat kept for combo_wizard (Task 21 removes) ──
 
 _CREATE_SUBMISSIONS = """
 CREATE TABLE IF NOT EXISTS orders_submissions (
@@ -62,8 +73,12 @@ _CREATE_INDEXES = [
     'CREATE INDEX IF NOT EXISTS ix_events_submission ON orders_events(submission_id, "at");',
 ]
 
+_MIGRATIONS = [
+    "ALTER TABLE orders_submissions ADD COLUMN IF NOT EXISTS modify_sequence INTEGER DEFAULT 0;",
+]
 
-def _resolve_path(db_path: Path | str | None) -> Path:
+
+def _resolve_path(db_path: Path | str | None = None) -> Path:
     if db_path is not None:
         return Path(db_path)
     env = os.environ.get("XENON_ORDERS_DB_PATH")
@@ -71,32 +86,37 @@ def _resolve_path(db_path: Path | str | None) -> Path:
 
 
 def _connect_utc(path: Path | str) -> duckdb.DuckDBPyConnection:
-    """Connect to DuckDB with the session TimeZone pinned to UTC.
-
-    ``orders_store`` writes ``datetime.now(timezone.utc)``; DuckDB normally
-    converts aware values to the local TZ before stripping tzinfo. Pinning
-    TimeZone='UTC' keeps the naive wall-clock aligned with UTC, so the
-    single_leg_rehydrate reader can safely interpret naive values as UTC.
-    """
     con = duckdb.connect(str(path))
     try:
         con.execute("SET TimeZone='UTC'")
     except duckdb.Error:
-        # Older DuckDB builds without the ICU extension silently support
-        # TimeZone='UTC' but fail on other values; UTC should always work.
         pass
     return con
 
 
-_MIGRATIONS = [
-    # F5.3: monotonic modify_sequence gate. Non-destructive additive migration.
-    # DuckDB rejects NOT NULL in ADD COLUMN; DEFAULT 0 backfills existing rows and
-    # new inserts omit modify_sequence, so NULLs cannot arise in practice.
-    "ALTER TABLE orders_submissions ADD COLUMN IF NOT EXISTS modify_sequence INTEGER DEFAULT 0;",
-]
+_WRITE_LOCK = threading.Lock()
+
+# ── Postgres sync engine ──
+
+_pg_engine = None
+
+
+def _get_pg_engine():
+    global _pg_engine
+    if _pg_engine is None:
+        url = os.environ.get("DATABASE_URL")
+        if not url:
+            raise RuntimeError("DATABASE_URL not set — no silent fallback post-migration.")
+        sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+        _pg_engine = _create_sync_engine(sync_url)
+    return _pg_engine
+
+
+# ── Schema init ──
 
 
 def init_store(db_path: Path | str | None = None) -> Path:
+    """Alembic manages Postgres schema. DuckDB tables kept for combo wizard."""
     path = _resolve_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     con = _connect_utc(path)
@@ -115,142 +135,7 @@ def init_store(db_path: Path | str | None = None) -> Path:
     return path
 
 
-def apply_modify(
-    order_id: str,
-    sequence: int,
-    db_path: Path | str | None = None,
-) -> dict:
-    """Monotonic modify_sequence gate keyed by ib_order_id.
-
-    Returns:
-        {"applied": True, "current_sequence": <sequence>} if the proposed sequence is
-        strictly greater than the stored value (update committed).
-        {"applied": False, "current_sequence": <stored>} if the proposed sequence is
-        stale (<= stored).
-        {"applied": False, "current_sequence": -1} if the ib_order_id is unknown.
-        The -1 sentinel lets the route distinguish "not found" (404) from "stale" (409).
-    """
-    path = _resolve_path(db_path)
-    with _WRITE_LOCK:
-        con = _connect_utc(path)
-        try:
-            updated = con.execute(
-                """
-                UPDATE orders_submissions
-                   SET modify_sequence = ?, updated_at = ?
-                 WHERE ib_order_id = ? AND modify_sequence < ?
-                 RETURNING modify_sequence
-                """,
-                [sequence, datetime.now(timezone.utc), order_id, sequence],
-            ).fetchone()
-            if updated is not None:
-                return {"applied": True, "current_sequence": int(updated[0])}
-
-            row = con.execute(
-                "SELECT modify_sequence FROM orders_submissions WHERE ib_order_id = ?",
-                [order_id],
-            ).fetchone()
-            if row is None:
-                return {"applied": False, "current_sequence": -1}
-            return {"applied": False, "current_sequence": int(row[0])}
-        finally:
-            con.close()
-
-
-def register_from_snapshot(
-    perm_id: str,
-    ib_order_id: str,
-    ticker: str,
-    security_type: str,
-    action: str,
-    quantity: int,
-    limit_price: float,
-    multiplier: int = 1,
-    user_id: str = "snapshot",
-    db_path: Path | str | None = None,
-) -> bool:
-    """Insert a minimal orders_submissions row for an order that exists in IB
-    (via the orders.json snapshot) but was not placed via the FastAPI flow.
-
-    Used by the modify route when ``apply_modify_by_perm_id`` returns the
-    ``current_sequence == -1`` sentinel — i.e. the perm_id is unknown to
-    orders_store. After registration the modify can proceed through the
-    normal sequence gate.
-
-    Idempotent: keyed by a deterministic ``submission_id = "snapshot-<perm_id>"``,
-    so repeated calls with the same perm_id are no-ops.
-
-    Returns True if a new row was inserted, False if a row already existed.
-    """
-    submission_id = f"snapshot-{perm_id}"
-    client_attempt_id = f"snapshot-{perm_id}"
-    now = datetime.now(timezone.utc)
-    path = _resolve_path(db_path)
-    with _WRITE_LOCK:
-        con = _connect_utc(path)
-        try:
-            existing = con.execute(
-                "SELECT 1 FROM orders_submissions WHERE submission_id = ?",
-                [submission_id],
-            ).fetchone()
-            if existing is not None:
-                return False
-            con.execute(
-                """
-                INSERT INTO orders_submissions (
-                    submission_id, user_id, client_attempt_id,
-                    ticker, security_type, action, quantity, multiplier,
-                    ib_order_id, perm_id, limit_price,
-                    state, submitted_at, updated_at, modify_sequence
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    submission_id,
-                    user_id,
-                    client_attempt_id,
-                    ticker,
-                    security_type,
-                    action,
-                    quantity,
-                    multiplier,
-                    ib_order_id,
-                    perm_id,
-                    limit_price,
-                    "SUBMITTED",
-                    now,
-                    now,
-                    0,
-                ],
-            )
-            return True
-        finally:
-            con.close()
-
-
-def apply_modify_by_perm_id(
-    perm_id: str,
-    sequence: int,
-    db_path: Path | str | None = None,
-) -> dict:
-    """Variant of apply_modify keyed by perm_id.
-
-    When a modify arrives with only permId (no ib orderId, e.g. because the
-    UI only tracks permId), resolve the ib_order_id first, then delegate to
-    ``apply_modify``. Matches the same return shape so the route can share the
-    same downstream handling.
-    """
-    path = _resolve_path(db_path)
-    con = _connect_utc(path)
-    try:
-        row = con.execute(
-            "SELECT ib_order_id FROM orders_submissions WHERE perm_id = ?",
-            [perm_id],
-        ).fetchone()
-    finally:
-        con.close()
-    if row is None or not row[0]:
-        return {"applied": False, "current_sequence": -1}
-    return apply_modify(str(row[0]), sequence, db_path=db_path)
+# ── Models ──
 
 
 class RequestRow(BaseModel):
@@ -276,87 +161,6 @@ class ReservationOutcome:
 
 
 _TERMINAL_STATES = {"REJECTED", "CANCELLED", "FAILED"}
-_WRITE_LOCK = threading.Lock()
-
-
-def reserve_attempt(
-    user_id: str,
-    client_attempt_id: str,
-    request: RequestRow,
-    db_path: Path | str | None = None,
-) -> ReservationOutcome:
-    """Atomically reserve a submission slot keyed by (user_id, client_attempt_id)."""
-    path = _resolve_path(db_path)
-    sid = str(uuid.uuid4())
-    now = datetime.now(timezone.utc)
-    with _WRITE_LOCK:
-        con = _connect_utc(path)
-        try:
-            inserted = con.execute(
-                """
-                INSERT INTO orders_submissions (
-                    submission_id, user_id, client_attempt_id,
-                    ticker, security_type, action, quantity,
-                    expiry, strike, "right", multiplier, con_id,
-                    limit_price, state, submitted_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
-                ON CONFLICT (user_id, client_attempt_id) DO NOTHING
-                RETURNING submission_id;
-                """,
-                [
-                    sid,
-                    user_id,
-                    client_attempt_id,
-                    request.ticker,
-                    request.security_type,
-                    request.action,
-                    request.quantity,
-                    request.expiry,
-                    str(request.strike) if request.strike is not None else None,
-                    request.right,
-                    request.multiplier,
-                    request.con_id,
-                    str(request.limit_price),
-                    now,
-                    now,
-                ],
-            ).fetchone()
-            if inserted is not None:
-                return ReservationOutcome(
-                    status="winner",
-                    submission_id=sid,
-                    state="PENDING",
-                    duplicate_of=None,
-                    reason_code=None,
-                )
-
-            row = con.execute(
-                """
-                SELECT submission_id, state, ib_order_id, reason_code
-                FROM orders_submissions
-                WHERE user_id = ? AND client_attempt_id = ?
-                """,
-                [user_id, client_attempt_id],
-            ).fetchone()
-            assert row is not None, "ON CONFLICT hit but row not found"
-            existing_sid, state, ib_order_id, reason_code = row
-            if state in _TERMINAL_STATES:
-                return ReservationOutcome(
-                    status="terminal",
-                    submission_id=existing_sid,
-                    state=state,
-                    duplicate_of=None,
-                    reason_code=reason_code,
-                )
-            return ReservationOutcome(
-                status="duplicate",
-                submission_id=existing_sid,
-                state=state,
-                duplicate_of=ib_order_id,
-                reason_code=None,
-            )
-        finally:
-            con.close()
 
 
 @dataclass
@@ -376,6 +180,177 @@ class SubmissionRow:
     expiry: str | None
 
 
+# ── Core functions (now Postgres-backed) ──
+
+
+def reserve_attempt(
+    user_id: str,
+    client_attempt_id: str,
+    request: RequestRow,
+    db_path: Path | str | None = None,
+) -> ReservationOutcome:
+    """Atomically reserve a submission slot keyed by (user_id, client_attempt_id)."""
+    sid = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    engine = _get_pg_engine()
+    with engine.begin() as conn:
+        stmt = pg_insert(order_submissions).values(
+            submission_id=sid,
+            user_id=user_id,
+            client_attempt_id=client_attempt_id,
+            ticker=request.ticker,
+            security_type=request.security_type,
+            action=request.action,
+            quantity=request.quantity,
+            expiry=request.expiry,
+            strike=request.strike,
+            right=request.right,
+            multiplier=request.multiplier,
+            con_id=request.con_id,
+            limit_price=request.limit_price,
+            state="PENDING",
+            submitted_at=now,
+            updated_at=now,
+        )
+        stmt = stmt.on_conflict_do_nothing(constraint="uq_order_sub_user_attempt")
+        stmt = stmt.returning(order_submissions.c.submission_id)
+        inserted = conn.execute(stmt).first()
+
+        if inserted is not None:
+            return ReservationOutcome(
+                status="winner",
+                submission_id=sid,
+                state="PENDING",
+                duplicate_of=None,
+                reason_code=None,
+            )
+
+        row = conn.execute(
+            select(
+                order_submissions.c.submission_id,
+                order_submissions.c.state,
+                order_submissions.c.ib_order_id,
+                order_submissions.c.reason_code,
+            ).where(
+                order_submissions.c.user_id == user_id,
+                order_submissions.c.client_attempt_id == client_attempt_id,
+            )
+        ).first()
+        assert row is not None, "ON CONFLICT hit but row not found"
+        existing_sid, state, ib_order_id, reason_code = row
+        if state in _TERMINAL_STATES:
+            return ReservationOutcome(
+                status="terminal",
+                submission_id=existing_sid,
+                state=state,
+                duplicate_of=None,
+                reason_code=reason_code,
+            )
+        return ReservationOutcome(
+            status="duplicate",
+            submission_id=existing_sid,
+            state=state,
+            duplicate_of=ib_order_id,
+            reason_code=None,
+        )
+
+
+def apply_modify(
+    order_id: str,
+    sequence: int,
+    db_path: Path | str | None = None,
+) -> dict:
+    """Monotonic modify_sequence gate keyed by ib_order_id."""
+    engine = _get_pg_engine()
+    with engine.begin() as conn:
+        result = conn.execute(
+            update(order_submissions)
+            .where(
+                order_submissions.c.ib_order_id == str(order_id),
+                order_submissions.c.modify_sequence < sequence,
+            )
+            .values(
+                modify_sequence=sequence,
+                updated_at=datetime.now(timezone.utc),
+            )
+            .returning(order_submissions.c.modify_sequence)
+        )
+        updated = result.first()
+        if updated is not None:
+            return {"applied": True, "current_sequence": int(updated[0])}
+
+        row = conn.execute(
+            select(order_submissions.c.modify_sequence).where(order_submissions.c.ib_order_id == str(order_id))
+        ).first()
+        if row is None:
+            return {"applied": False, "current_sequence": -1}
+        return {"applied": False, "current_sequence": int(row[0])}
+
+
+def register_from_snapshot(
+    perm_id: str,
+    ib_order_id: str,
+    ticker: str,
+    security_type: str,
+    action: str,
+    quantity: int,
+    limit_price: float,
+    multiplier: int = 1,
+    user_id: str = "snapshot",
+    db_path: Path | str | None = None,
+) -> bool:
+    """Insert a minimal row for an IB order not placed via the FastAPI flow.
+
+    Idempotent: keyed by submission_id = "snapshot-<perm_id>".
+    """
+    submission_id = f"snapshot-{perm_id}"
+    client_attempt_id = f"snapshot-{perm_id}"
+    now = datetime.now(timezone.utc)
+    engine = _get_pg_engine()
+    with engine.begin() as conn:
+        existing = conn.execute(
+            select(order_submissions.c.submission_id).where(order_submissions.c.submission_id == submission_id)
+        ).first()
+        if existing is not None:
+            return False
+        conn.execute(
+            insert(order_submissions).values(
+                submission_id=submission_id,
+                user_id=user_id,
+                client_attempt_id=client_attempt_id,
+                ticker=ticker,
+                security_type=security_type,
+                action=action,
+                quantity=quantity,
+                multiplier=multiplier,
+                ib_order_id=str(ib_order_id),
+                perm_id=str(perm_id),
+                limit_price=limit_price,
+                state="SUBMITTED",
+                submitted_at=now,
+                updated_at=now,
+                modify_sequence=0,
+            )
+        )
+        return True
+
+
+def apply_modify_by_perm_id(
+    perm_id: str,
+    sequence: int,
+    db_path: Path | str | None = None,
+) -> dict:
+    """Variant of apply_modify keyed by perm_id."""
+    engine = _get_pg_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(order_submissions.c.ib_order_id).where(order_submissions.c.perm_id == str(perm_id))
+        ).first()
+    if row is None or not row[0]:
+        return {"applied": False, "current_sequence": -1}
+    return apply_modify(str(row[0]), sequence, db_path=db_path)
+
+
 def mark_submitted(
     *,
     submission_id: str,
@@ -385,20 +360,19 @@ def mark_submitted(
     db_path: Path | str | None = None,
 ) -> None:
     now = datetime.now(timezone.utc)
-    with _WRITE_LOCK:
-        con = _connect_utc(_resolve_path(db_path))
-        try:
-            con.execute(
-                """
-                UPDATE orders_submissions
-                   SET ib_order_id = ?, perm_id = ?, placing_client_id = ?,
-                       state = 'WORKING', updated_at = ?
-                 WHERE submission_id = ?
-                """,
-                [ib_order_id, perm_id, placing_client_id, now, submission_id],
+    engine = _get_pg_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            update(order_submissions)
+            .where(order_submissions.c.submission_id == submission_id)
+            .values(
+                ib_order_id=str(ib_order_id),
+                perm_id=str(perm_id) if perm_id is not None else None,
+                placing_client_id=placing_client_id,
+                state="WORKING",
+                updated_at=now,
             )
-        finally:
-            con.close()
+        )
 
 
 def mark_terminal(
@@ -411,27 +385,19 @@ def mark_terminal(
     db_path: Path | str | None = None,
 ) -> None:
     now = datetime.now(timezone.utc)
-    with _WRITE_LOCK:
-        con = _connect_utc(_resolve_path(db_path))
-        try:
-            con.execute(
-                """
-                UPDATE orders_submissions
-                   SET state = ?, reason_code = ?, filled_qty = ?,
-                       avg_fill_price = ?, updated_at = ?
-                 WHERE submission_id = ?
-                """,
-                [
-                    state,
-                    reason_code,
-                    filled_qty,
-                    str(avg_fill_price) if avg_fill_price is not None else None,
-                    now,
-                    submission_id,
-                ],
+    engine = _get_pg_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            update(order_submissions)
+            .where(order_submissions.c.submission_id == submission_id)
+            .values(
+                state=state,
+                reason_code=reason_code,
+                filled_qty=filled_qty,
+                avg_fill_price=avg_fill_price,
+                updated_at=now,
             )
-        finally:
-            con.close()
+        )
 
 
 def record_event(
@@ -440,79 +406,68 @@ def record_event(
     detail: dict,
     db_path: Path | str | None = None,
 ) -> None:
-    import json as _json
-
-    eid = str(uuid.uuid4())
-    now = datetime.now(timezone.utc)
-    with _WRITE_LOCK:
-        con = _connect_utc(_resolve_path(db_path))
-        try:
-            con.execute(
-                'INSERT INTO orders_events (event_id, submission_id, kind, detail, "at") VALUES (?, ?, ?, ?, ?)',
-                [eid, submission_id, kind, _json.dumps(detail), now],
+    engine = _get_pg_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            insert(order_events).values(
+                submission_id=submission_id,
+                kind=kind,
+                detail=detail,
             )
-        finally:
-            con.close()
+        )
 
 
 def lookup_submission_id_by_ib_order_id(ib_order_id: str, db_path: Path | str | None = None) -> str | None:
-    """Return submission_id for a given ib_order_id, or None if not found.
-
-    Used by the cancel/modify routes to locate the orders_submissions row for
-    orders_events attribution. Orders placed before F4 won't have a row — in
-    that case the caller skips the event write.
-    """
     if not ib_order_id:
         return None
-    con = _connect_utc(_resolve_path(db_path))
-    try:
-        row = con.execute(
-            "SELECT submission_id FROM orders_submissions WHERE ib_order_id = ?",
-            [ib_order_id],
-        ).fetchone()
-    finally:
-        con.close()
+    engine = _get_pg_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(order_submissions.c.submission_id).where(order_submissions.c.ib_order_id == str(ib_order_id))
+        ).first()
     return row[0] if row else None
 
 
 def lookup_submission_id_by_perm_id(perm_id: str, db_path: Path | str | None = None) -> str | None:
-    """Return submission_id for a given perm_id, or None if not found.
-
-    Mirror of ``lookup_submission_id_by_ib_order_id`` for the permId-only
-    modify/cancel path (UI-initiated requests often ship ``orderId=0`` and
-    identify the order by permId alone).
-    """
     if not perm_id:
         return None
-    con = _connect_utc(_resolve_path(db_path))
-    try:
-        row = con.execute(
-            "SELECT submission_id FROM orders_submissions WHERE perm_id = ? LIMIT 1",
-            [perm_id],
-        ).fetchone()
-    finally:
-        con.close()
+    engine = _get_pg_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(order_submissions.c.submission_id).where(order_submissions.c.perm_id == str(perm_id)).limit(1)
+        ).first()
     return row[0] if row else None
 
 
 def lookup_by_attempt(user_id: str, client_attempt_id: str, db_path: Path | str | None = None) -> SubmissionRow | None:
-    con = _connect_utc(_resolve_path(db_path))
-    try:
-        row = con.execute(
-            """
-            SELECT submission_id, user_id, ticker, state, ib_order_id, perm_id,
-                   placing_client_id, reason_code, quantity, action, security_type,
-                   "right", expiry
-              FROM orders_submissions
-             WHERE user_id = ? AND client_attempt_id = ?
-            """,
-            [user_id, client_attempt_id],
-        ).fetchone()
-    finally:
-        con.close()
+    engine = _get_pg_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(
+                order_submissions.c.submission_id,
+                order_submissions.c.user_id,
+                order_submissions.c.ticker,
+                order_submissions.c.state,
+                order_submissions.c.ib_order_id,
+                order_submissions.c.perm_id,
+                order_submissions.c.placing_client_id,
+                order_submissions.c.reason_code,
+                order_submissions.c.quantity,
+                order_submissions.c.action,
+                order_submissions.c.security_type,
+                order_submissions.c.right,
+                order_submissions.c.expiry,
+            ).where(
+                order_submissions.c.user_id == user_id,
+                order_submissions.c.client_attempt_id == client_attempt_id,
+            )
+        ).first()
     if row is None:
         return None
-    return SubmissionRow(*row)
+    vals = list(row)
+    if vals[12] is not None and not isinstance(vals[12], str):
+        vals[12] = str(vals[12])
+    return SubmissionRow(*vals)
 
 
 from xenon.execution.preflight import WorkingReservations
@@ -521,31 +476,27 @@ _ACTIVE_STATES = ("PENDING", "WORKING", "PARTIALLY_FILLED")
 
 
 def working_reservations_for(user_id: str, ticker: str, db_path: Path | str | None = None) -> WorkingReservations:
-    path = _resolve_path(db_path)
-    init_store(path)
-    con = _connect_utc(path)
-    try:
-        stock_sell = con.execute(
-            """
-            SELECT COALESCE(SUM(quantity - filled_qty), 0)
-              FROM orders_submissions
-             WHERE user_id = ? AND ticker = ? AND security_type = 'STK'
-               AND action = 'SELL' AND state IN ('PENDING', 'WORKING', 'PARTIALLY_FILLED')
-            """,
-            [user_id, ticker],
-        ).fetchone()[0]
-        short_call = con.execute(
-            """
-            SELECT COALESCE(SUM(quantity - filled_qty), 0)
-              FROM orders_submissions
-             WHERE user_id = ? AND ticker = ? AND security_type = 'OPT'
-               AND action = 'SELL' AND "right" = 'C'
-               AND state IN ('PENDING', 'WORKING', 'PARTIALLY_FILLED')
-            """,
-            [user_id, ticker],
-        ).fetchone()[0]
-    finally:
-        con.close()
+    engine = _get_pg_engine()
+    with engine.connect() as conn:
+        stock_sell = conn.execute(
+            select(func.coalesce(func.sum(order_submissions.c.quantity - order_submissions.c.filled_qty), 0)).where(
+                order_submissions.c.user_id == user_id,
+                order_submissions.c.ticker == ticker,
+                order_submissions.c.security_type == "STK",
+                order_submissions.c.action == "SELL",
+                order_submissions.c.state.in_(_ACTIVE_STATES),
+            )
+        ).scalar()
+        short_call = conn.execute(
+            select(func.coalesce(func.sum(order_submissions.c.quantity - order_submissions.c.filled_qty), 0)).where(
+                order_submissions.c.user_id == user_id,
+                order_submissions.c.ticker == ticker,
+                order_submissions.c.security_type == "OPT",
+                order_submissions.c.action == "SELL",
+                order_submissions.c.right == "C",
+                order_submissions.c.state.in_(_ACTIVE_STATES),
+            )
+        ).scalar()
     return WorkingReservations(
         stock_sell_qty=int(stock_sell),
         short_call_qty=int(short_call),
