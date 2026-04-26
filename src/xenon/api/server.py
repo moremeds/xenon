@@ -167,12 +167,23 @@ async def _run_rehydrate_on_boot() -> None:
         logger.info("test_mode: skipping rehydrate")
         return
 
+    # Resolve scope from app.state populated earlier in lifespan. None values
+    # mean "no scope filter" — pre-scope rows still get reconciled.
+    _scope_account_env = getattr(app.state, "trading_mode", None)
+    _scope_account = getattr(app.state, "account", None)
+    _scope_kwargs = {
+        "broker": "IB" if _scope_account_env else None,
+        "account_env": _scope_account_env,
+        "broker_account": _scope_account or None,
+    }
+
     try:
         await asyncio.wait_for(
             asyncio.to_thread(
                 _rehydrate_mod.rehydrate_on_boot,
                 ib_client_factory=_ib_client_factory,
                 orders_store=_orders_store_mod,
+                **_scope_kwargs,
             ),
             timeout=10.0,
         )
@@ -192,6 +203,7 @@ async def _run_rehydrate_on_boot() -> None:
                 _combo_rehydrate_mod.rehydrate_combo_sessions,
                 ib_client_factory=_ib_client_factory,
                 db_path=db_path,
+                **_scope_kwargs,
             ),
             timeout=10.0,
         )

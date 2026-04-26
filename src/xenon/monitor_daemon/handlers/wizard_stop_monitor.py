@@ -14,6 +14,7 @@ Runtime fits the ``BaseHandler`` template under ``monitor_daemon/handlers/``.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from decimal import Decimal
 from pathlib import Path
@@ -85,13 +86,26 @@ class WizardStopMonitorHandler(BaseHandler):
     # -- helpers -----------------------------------------------------------
 
     def _list_protected(self) -> list[dict[str, Any]]:
-        """Return PROTECTED sessions with active alert from Postgres."""
+        """Return PROTECTED sessions with active alert from Postgres.
+
+        Filters by the daemon's broker account scope (env-resolved). Empty
+        env vars resolve to None → no filter, preserving legacy behavior.
+        """
         from xenon.db.engine import get_sync_engine
         from xenon.db.queries import combo_wizard
 
+        broker = os.environ.get("XENON_BROKER") or None
+        account_env = os.environ.get("XENON_TRADING_MODE") or None
+        broker_account = os.environ.get("XENON_BROKER_ACCOUNT") or None
+
         engine = get_sync_engine()
         with engine.connect() as conn:
-            rows = combo_wizard.list_protected_sessions(conn)
+            rows = combo_wizard.list_protected_sessions(
+                conn,
+                broker=broker,
+                account_env=account_env,
+                broker_account=broker_account,
+            )
 
         out: list[dict[str, Any]] = []
         for r in rows:

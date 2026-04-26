@@ -54,10 +54,20 @@ class WizardReconcileDecision:
     detail: dict = field(default_factory=dict)
 
 
-def _list_rehydratable() -> list[dict]:
+def _list_rehydratable(
+    *,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
+) -> list[dict]:
     engine = get_sync_engine()
     with engine.begin() as conn:
-        rows = combo_wizard.list_rehydratable(conn)
+        rows = combo_wizard.list_rehydratable(
+            conn,
+            broker=broker,
+            account_env=account_env,
+            broker_account=broker_account,
+        )
     # Ensure payload is always a dict (JSONB returns dict directly).
     for r in rows:
         if r.get("payload") is None:
@@ -164,8 +174,15 @@ def rehydrate_combo_sessions(
     *,
     ib_client_factory: Callable[[], Any],
     db_path: Any = None,  # deprecated, ignored — kept for call-site compat
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
 ) -> list[WizardReconcileDecision]:
-    sessions = _list_rehydratable()
+    sessions = _list_rehydratable(
+        broker=broker,
+        account_env=account_env,
+        broker_account=broker_account,
+    )
     if not sessions:
         return []
 

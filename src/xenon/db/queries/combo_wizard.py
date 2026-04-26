@@ -234,12 +234,23 @@ def list_protected_sessions(
 # ── orders_submissions helpers (for single_leg_rehydrate) ──
 
 
-def list_unresolved_orders(conn: Connection) -> list[dict]:
+def list_unresolved_orders(
+    conn: Connection,
+    *,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
+) -> list[dict]:
     from xenon.db.schema import order_submissions
 
-    result = conn.execute(
-        select(order_submissions).where(order_submissions.c.state.in_(["PENDING", "WORKING", "PARTIALLY_FILLED"]))
-    )
+    conditions = [order_submissions.c.state.in_(["PENDING", "WORKING", "PARTIALLY_FILLED"])]
+    if broker is not None:
+        conditions.append(order_submissions.c.broker == broker)
+    if account_env is not None:
+        conditions.append(order_submissions.c.account_env == account_env)
+    if broker_account is not None:
+        conditions.append(order_submissions.c.broker_account == broker_account)
+    result = conn.execute(select(order_submissions).where(*conditions))
     return [dict(r._mapping) for r in result]
 
 

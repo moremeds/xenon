@@ -48,6 +48,11 @@ def _cleanup(engine):
 def _setup_pg(monkeypatch):
     """Point get_sync_engine() at the test database and clean tables."""
     monkeypatch.setenv("DATABASE_URL", _SYNC_URL)
+    # Tests seed rows with default (legacy_unknown) scope. Clear scope env
+    # vars so the handler doesn't filter them out by inherited shell/.env state.
+    monkeypatch.delenv("XENON_BROKER", raising=False)
+    monkeypatch.delenv("XENON_TRADING_MODE", raising=False)
+    monkeypatch.delenv("XENON_BROKER_ACCOUNT", raising=False)
     import xenon.db.engine as eng_mod
 
     monkeypatch.setattr(eng_mod, "_sync_engine", None)

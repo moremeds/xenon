@@ -197,10 +197,21 @@ def _reconcile_from_three_sources(
 # ---------------------------------------------------------------------------
 
 
-def _list_unresolved(db_path: Path | str | None = None) -> list[dict]:
+def _list_unresolved(
+    db_path: Path | str | None = None,
+    *,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
+) -> list[dict]:
     engine = get_sync_engine()
     with engine.connect() as conn:
-        rows = combo_wizard.list_unresolved_orders(conn)
+        rows = combo_wizard.list_unresolved_orders(
+            conn,
+            broker=broker,
+            account_env=account_env,
+            broker_account=broker_account,
+        )
     # Postgres returns `expiry` as a date object; convert to str for compat.
     for r in rows:
         if isinstance(r.get("expiry"), date):
@@ -301,13 +312,26 @@ def rehydrate_on_boot(
     orders_store,
     now: Callable[[], float] = time.time,
     db_path: Path | str | None = None,
+    *,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
 ) -> list[ReconcileDecision]:
     """Reconcile all unresolved orders against IB state. Returns decisions made.
 
     ``orders_store`` is passed in (rather than imported) so tests can inject a
     stub if needed; we default to the real module in ``__init__`` semantics.
+
+    Scope filters (broker/account_env/broker_account) limit reconciliation to
+    rows owned by this broker account. Pass None to skip filtering (backward-
+    compatible with legacy callers).
     """
-    rows = _list_unresolved(db_path=db_path)
+    rows = _list_unresolved(
+        db_path=db_path,
+        broker=broker,
+        account_env=account_env,
+        broker_account=broker_account,
+    )
     if not rows:
         return []
 
