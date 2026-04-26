@@ -6,7 +6,7 @@
 
 **Architecture:** SQLAlchemy Core (async) + asyncpg for the connection pool, Alembic for migrations, LISTEN/NOTIFY + outbox table for reactive cross-service events. Four Postgres schemas (`xenon`, `signals`, `marketdata`, `events`) with role-based access. All portability in a single `DATABASE_URL` env var.
 
-**Tech Stack:** PostgreSQL 17, asyncpg, SQLAlchemy Core (async), Alembic
+**Tech Stack:** PostgreSQL 17, asyncpg, psycopg[binary], SQLAlchemy Core (async), Alembic
 
 **Spec:** `docs/superpowers/specs/2026-04-26-postgres-migration-design.md`
 
@@ -30,6 +30,7 @@ src/xenon/db/
 │   ├── trades.py          # trades
 │   ├── scans.py           # scan_results, cri_series
 │   ├── uw.py              # uw_snapshots, uw_flow_events, uw_api_stats
+│   ├── combo_wizard.py    # wizard_combo_attempts, wizard_protection
 │   └── cache.py           # ticker_cache
 └── migrations/
     ├── env.py             # Alembic env config
@@ -49,6 +50,12 @@ src/xenon/execution/ib_execute.py                 # Replace JSON append with db.
 src/xenon/api/services/uw_analyze_cache.py        # Replace file persist with db.queries.uw
 src/xenon/api/services/uw_analyze_flow_tracker.py # Replace JSON save with db.queries.uw
 src/xenon/utils/uw_api_stats.py                   # Replace JSON history with db.queries.uw
+src/xenon/execution/combo_wizard/store.py         # Replace DuckDB with db.queries.combo_wizard
+src/xenon/execution/combo_wizard/session.py       # Replace DuckDB with db.queries
+src/xenon/execution/combo_wizard/ib_adapter.py    # Replace DuckDB with db.queries
+src/xenon/execution/combo_wizard/rehydrate.py     # Replace DuckDB with db.queries
+src/xenon/execution/combo_wizard/protect.py       # Replace DuckDB with db.queries
+src/xenon/execution/single_leg_rehydrate.py       # Replace DuckDB with db.queries.orders
 src/xenon/api/tests/conftest.py                   # Replace DuckDB isolation with Postgres test db
 scripts/tests/conftest.py                         # Add Postgres test db fixture
 .env                                              # Add DATABASE_URL
@@ -88,6 +95,7 @@ In `pyproject.toml`, add to `[project.dependencies]`:
 ```toml
 "sqlalchemy[asyncio]>=2.0.30",
 "asyncpg>=0.30.0",
+"psycopg[binary]>=3.2.0",
 "alembic>=1.15.0",
 ```
 
@@ -166,8 +174,10 @@ DATABASE_URL_TEST=postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_
 
 - [ ] **Step 6: Commit**
 
+Do NOT commit .env — it contains secrets. DATABASE_URL is documented in the spec.
+
 ```bash
-git add pyproject.toml uv.lock .env
+git add pyproject.toml uv.lock
 git commit -m "feat(db): add sqlalchemy + asyncpg + alembic dependencies"
 ```
 
@@ -322,6 +332,7 @@ def test_xenon_metadata_has_expected_tables():
         "positions", "account_snapshots", "trades", "nav_history",
         "order_submissions", "order_events",
         "wizard_sessions", "wizard_events",
+        "wizard_combo_attempts", "wizard_protection",
         "scan_results", "cri_series",
         "uw_snapshots", "uw_flow_events", "uw_api_stats",
         "ticker_cache",
@@ -377,6 +388,7 @@ from sqlalchemy import (
     Numeric,
     Table,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
@@ -463,8 +475,8 @@ order_submissions = Table(
     Column("multiplier", Integer, server_default=text("100")),
     Column("con_id", BigInteger),
     Column("placing_client_id", Integer),
-    Column("ib_order_id", Integer),
-    Column("perm_id", BigInteger),
+    Column("ib_order_id", Text),
+    Column("perm_id", Text),
     Column("limit_price", Numeric(12, 4)),
     Column("state", Text, nullable=False),
     Column("reason_code", Text),
@@ -473,6 +485,7 @@ order_submissions = Table(
     Column("modify_sequence", Integer, server_default=text("0")),
     Column("submitted_at", TIMESTAMP(timezone=True), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    UniqueConstraint("user_id", "client_attempt_id", name="uq_order_sub_user_attempt"),
     Index("ix_order_sub_state_ticker", "state", "ticker"),
     Index("ix_order_sub_perm_id", "perm_id"),
     Index("ix_order_sub_ib_order_id", "ib_order_id"),
@@ -510,6 +523,41 @@ wizard_events = Table(
     Column("kind", Text, nullable=False),
     Column("detail", JSONB),
     Column("at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+)
+
+wizard_combo_attempts = Table(
+    "wizard_combo_attempts",
+    xenon_metadata,
+    Column("attempt_id", Text, primary_key=True),
+    Column("session_id", Text, ForeignKey(f"{XENON_SCHEMA}.wizard_sessions.session_id"), nullable=False),
+    Column("ticker", Text, nullable=False),
+    Column("structure_name", Text),
+    Column("legs", JSONB),
+    Column("combo_contract", JSONB),
+    Column("ib_order_id", Text),
+    Column("perm_id", Text),
+    Column("placing_client_id", Integer),
+    Column("limit_price", Numeric(12, 4)),
+    Column("state", Text, nullable=False),
+    Column("reason_code", Text),
+    Column("filled_qty", Integer, server_default=text("0")),
+    Column("avg_fill_price", Numeric(12, 4)),
+    Column("modify_sequence", Integer, server_default=text("0")),
+    Column("submitted_at", TIMESTAMP(timezone=True)),
+    Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+)
+
+wizard_protection = Table(
+    "wizard_protection",
+    xenon_metadata,
+    Column("protection_id", BigInteger, primary_key=True, autoincrement=True),
+    Column("session_id", Text, ForeignKey(f"{XENON_SCHEMA}.wizard_sessions.session_id"), nullable=False),
+    Column("attempt_id", Text, ForeignKey(f"{XENON_SCHEMA}.wizard_combo_attempts.attempt_id")),
+    Column("protection_type", Text, nullable=False),
+    Column("config", JSONB, nullable=False),
+    Column("state", Text, nullable=False, server_default=text("'active'")),
+    Column("triggered_at", TIMESTAMP(timezone=True)),
+    Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
 )
 
 # ---------- Scanner Results ----------
@@ -1071,7 +1119,7 @@ async def test_reserve_attempt(conn):
         limit_price=Decimal("150.00"),
     )
     assert result["submission_id"] == "sub-001"
-    assert result["state"] == "RESERVING"
+    assert result["state"] == "PENDING"
 
 
 @pytest.mark.asyncio
@@ -1200,7 +1248,7 @@ async def reserve_attempt(
         right=right,
         multiplier=multiplier,
         con_id=con_id,
-        state="RESERVING",
+        state="PENDING",
         submitted_at=now,
         updated_at=now,
     )
@@ -1265,15 +1313,32 @@ async def mark_terminal(
 
 async def apply_modify(
     conn: AsyncConnection, *, submission_id: str, modify_sequence: int
-) -> None:
-    await conn.execute(
+) -> dict:
+    result = await conn.execute(
         update(order_submissions)
-        .where(order_submissions.c.submission_id == submission_id)
+        .where(
+            order_submissions.c.submission_id == submission_id,
+            order_submissions.c.modify_sequence < modify_sequence,
+        )
         .values(
             modify_sequence=modify_sequence,
             updated_at=datetime.now(timezone.utc),
         )
+        .returning(order_submissions.c.modify_sequence)
     )
+    row = result.first()
+    if row:
+        return {"applied": True, "current_sequence": row[0]}
+    # Check if submission exists
+    existing = await conn.execute(
+        select(order_submissions.c.modify_sequence).where(
+            order_submissions.c.submission_id == submission_id
+        )
+    )
+    ex_row = existing.first()
+    if ex_row:
+        return {"applied": False, "current_sequence": ex_row[0]}
+    return {"applied": False, "current_sequence": -1}
 
 
 async def record_event(
@@ -1339,7 +1404,7 @@ async def working_orders_for(
     stmt = select(order_submissions).where(
         order_submissions.c.user_id == user_id,
         order_submissions.c.ticker == ticker,
-        order_submissions.c.state.in_(["RESERVING", "WORKING"]),
+        order_submissions.c.state.in_(["PENDING", "WORKING", "PARTIALLY_FILLED"]),
     )
     result = await conn.execute(stmt)
     return [dict(row._mapping) for row in result]
@@ -1717,7 +1782,7 @@ async def get_latest_scan(
     stmt = (
         select(scan_results)
         .where(scan_results.c.scan_type == scan_type)
-        .order_by(scan_results.c.scanned_at.desc())
+        .order_by(scan_results.c.scanned_at.desc(), scan_results.c.id.desc())
         .limit(1)
     )
     row = (await conn.execute(stmt)).first()
@@ -1869,7 +1934,7 @@ async def get_latest_snapshot(
     stmt = (
         select(uw_snapshots)
         .where(uw_snapshots.c.ticker == ticker)
-        .order_by(uw_snapshots.c.snapshot_at.desc())
+        .order_by(uw_snapshots.c.snapshot_at.desc(), uw_snapshots.c.id.desc())
         .limit(1)
     )
     row = (await conn.execute(stmt)).first()
@@ -2199,10 +2264,7 @@ async def emit(
         .returning(outbox.c.id)
     )
     event_id = result.scalar()
-    await conn.execute(
-        text("SELECT pg_notify(:channel, :event_id)"),
-        {"channel": channel, "event_id": str(event_id)},
-    )
+    # pg_notify is handled by the outbox_notify_trigger — no manual call needed
     return event_id
 
 
@@ -2238,6 +2300,7 @@ class EventSubscriber:
         self._callbacks.setdefault(channel, []).append(callback)
 
     async def start(self) -> None:
+        self._loop = asyncio.get_running_loop()
         raw_dsn = self._dsn.replace("+asyncpg", "").replace("postgresql+asyncpg", "postgresql")
         self._conn = await asyncpg.connect(raw_dsn)
         for ch in self._channels:
@@ -2246,7 +2309,7 @@ class EventSubscriber:
 
     def _on_notification(self, connection, pid, channel, payload):
         for cb in self._callbacks.get(channel, []):
-            asyncio.get_event_loop().call_soon(cb, channel, payload)
+            self._loop.call_soon_threadsafe(cb, channel, payload)
 
     async def stop(self) -> None:
         if self._conn:
@@ -2306,6 +2369,8 @@ git commit -m "feat(db): event bus with LISTEN/NOTIFY + outbox trigger"
 ---
 
 ## Task 14: FastAPI Lifespan Integration
+
+> **Execution order note:** After this task, run Task 15 (data migration) BEFORE Tasks 16-20 (read/write path replacement). The app reads from Postgres — the data must be there first.
 
 **Files:**
 
@@ -2383,7 +2448,7 @@ git commit -m "feat(db): wire Postgres engine into FastAPI lifespan"
 
 ---
 
-## Task 15: Migrate ib_sync.py (Portfolio + NAV)
+## Task 16: Migrate ib_sync.py (Portfolio + NAV)
 
 **Files:**
 
@@ -2425,14 +2490,15 @@ def _get_sync_engine():
     if _sync_engine is None:
         import os
         url = os.environ.get("DATABASE_URL")
-        if url:
-            from sqlalchemy import create_engine as create_sync_engine
-            sync_url = url.replace("+asyncpg", "")
-            _sync_engine = create_sync_engine(sync_url)
+        if not url:
+            raise RuntimeError("DATABASE_URL not set — no silent fallback to JSON files post-migration.")
+        from sqlalchemy import create_engine as create_sync_engine
+        sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+        _sync_engine = create_sync_engine(sync_url)
     return _sync_engine
 ```
 
-Modify `save_portfolio()` to write to Postgres using the sync engine, then fall back to file if no DATABASE_URL.
+Require DATABASE_URL. If absent, raise RuntimeError — no silent fallback to JSON files post-migration.
 
 - [ ] **Step 3: Modify \_append_nav_snapshot()**
 
@@ -2474,7 +2540,7 @@ git commit -m "feat(db): migrate ib_sync portfolio + NAV writes to Postgres"
 
 ---
 
-## Task 16: Migrate orders_store.py (DuckDB → Postgres)
+## Task 17: Migrate orders_store.py (DuckDB → Postgres)
 
 **Files:**
 
@@ -2505,12 +2571,7 @@ def init_store(db_path=None):
 
 - [ ] **Step 3: Replace each DuckDB function with Postgres equivalent**
 
-For each function in `orders_store.py`:
-
-- Remove `_connect_utc()` calls
-- Remove `_WRITE_LOCK` acquisitions (Postgres handles row-level locking)
-- Replace DuckDB SQL with calls to `xenon.db.queries.orders`
-- The functions must remain sync (they're called from sync contexts) — use `asyncio.run()` with a sync engine or convert to sync SQLAlchemy calls
+Keep orders_store.py as the public facade. Preserve all existing function signatures, dataclasses (RequestRow, ReservationOutcome, SubmissionRow, WorkingReservations), and return types. Replace only the DuckDB internals (\_connect_utc, raw SQL) with calls to xenon.db.queries.orders using a sync psycopg engine. The \_WRITE_LOCK can be removed — Postgres handles row-level locking.
 
 Key decision: since `orders_store.py` functions are called from both:
 
@@ -2548,7 +2609,7 @@ git commit -m "feat(db): migrate orders_store from DuckDB to Postgres"
 
 ---
 
-## Task 17: Migrate ib_execute.py (Trade Log)
+## Task 18: Migrate ib_execute.py (Trade Log)
 
 **Files:**
 
@@ -2603,7 +2664,7 @@ git commit -m "feat(db): migrate trade log from JSON to Postgres"
 
 ---
 
-## Task 18: Migrate UW Services
+## Task 19: Migrate UW Services
 
 **Files:**
 
@@ -2655,7 +2716,7 @@ git commit -m "feat(db): migrate UW services to Postgres"
 
 ---
 
-## Task 19: Migrate Scanner Cache Writes
+## Task 20: Migrate Scanner Cache Writes
 
 **Files:**
 
@@ -2706,7 +2767,9 @@ git commit -m "feat(db): migrate scanner results to Postgres"
 
 ---
 
-## Task 20: One-Time Data Migration Script
+## Task 15: One-Time Data Migration Script (RUN BEFORE TASKS 16-21)
+
+> **CRITICAL ORDERING:** This task MUST run before any read/write path replacement (Tasks 16-21). The app will read from Postgres after cutover — the data must be there first.
 
 **Files:**
 
@@ -2738,7 +2801,7 @@ from sqlalchemy import create_engine, text
 DATA_DIR = Path("data")
 
 def get_engine():
-    url = os.environ["DATABASE_URL"].replace("+asyncpg", "")
+    url = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql+psycopg://")
     return create_engine(url)
 
 
@@ -2915,9 +2978,9 @@ def migrate_orders_duckdb(engine):
         except duckdb.CatalogException:
             print("  SKIP wizard_sessions (table not found)")
 
-        # Wizard events
+        # Wizard events (DuckDB table is named wizard_session_events)
         try:
-            rows = duck.execute("SELECT * FROM wizard_events").fetchall()
+            rows = duck.execute("SELECT * FROM wizard_session_events").fetchall()
             cols = [desc[0] for desc in duck.description]
             for row in rows:
                 d = dict(zip(cols, row))
@@ -2934,10 +2997,72 @@ def migrate_orders_duckdb(engine):
                 })
                 count_we += 1
         except duckdb.CatalogException:
-            print("  SKIP wizard_events (table not found)")
+            print("  SKIP wizard_session_events (table not found)")
+
+        # Wizard combo attempts
+        count_wca = 0
+        try:
+            rows = duck.execute("SELECT * FROM wizard_combo_attempts").fetchall()
+            cols = [desc[0] for desc in duck.description]
+            for row in rows:
+                d = dict(zip(cols, row))
+                for json_col in ("legs", "combo_contract"):
+                    if isinstance(d.get(json_col), str):
+                        d[json_col] = json.loads(d[json_col]) if d[json_col] else None
+                conn.execute(text("""
+                    INSERT INTO xenon.wizard_combo_attempts (attempt_id, session_id, ticker, structure_name, legs, combo_contract, ib_order_id, perm_id, placing_client_id, limit_price, state, reason_code, filled_qty, avg_fill_price, modify_sequence, submitted_at, updated_at)
+                    VALUES (:attempt_id, :session_id, :ticker, :structure_name, :legs::jsonb, :combo_contract::jsonb, :ib_order_id, :perm_id, :placing_client_id, :limit_price, :state, :reason_code, :filled_qty, :avg_fill_price, :modify_sequence, :submitted_at, :updated_at)
+                    ON CONFLICT (attempt_id) DO NOTHING
+                """), {
+                    "attempt_id": d["attempt_id"],
+                    "session_id": d["session_id"],
+                    "ticker": d.get("ticker", ""),
+                    "structure_name": d.get("structure_name"),
+                    "legs": json.dumps(d.get("legs")) if d.get("legs") else None,
+                    "combo_contract": json.dumps(d.get("combo_contract")) if d.get("combo_contract") else None,
+                    "ib_order_id": d.get("ib_order_id"),
+                    "perm_id": d.get("perm_id"),
+                    "placing_client_id": d.get("placing_client_id"),
+                    "limit_price": d.get("limit_price"),
+                    "state": d.get("state", ""),
+                    "reason_code": d.get("reason_code"),
+                    "filled_qty": d.get("filled_qty", 0),
+                    "avg_fill_price": d.get("avg_fill_price"),
+                    "modify_sequence": d.get("modify_sequence", 0),
+                    "submitted_at": d.get("submitted_at"),
+                    "updated_at": d.get("updated_at"),
+                })
+                count_wca += 1
+        except duckdb.CatalogException:
+            print("  SKIP wizard_combo_attempts (table not found)")
+
+        # Wizard protection
+        count_wp = 0
+        try:
+            rows = duck.execute("SELECT * FROM wizard_protection").fetchall()
+            cols = [desc[0] for desc in duck.description]
+            for row in rows:
+                d = dict(zip(cols, row))
+                if isinstance(d.get("config"), str):
+                    d["config"] = json.loads(d["config"]) if d["config"] else {}
+                conn.execute(text("""
+                    INSERT INTO xenon.wizard_protection (session_id, attempt_id, protection_type, config, state, triggered_at, created_at)
+                    VALUES (:session_id, :attempt_id, :protection_type, :config::jsonb, :state, :triggered_at, :created_at)
+                """), {
+                    "session_id": d["session_id"],
+                    "attempt_id": d.get("attempt_id"),
+                    "protection_type": d.get("protection_type", ""),
+                    "config": json.dumps(d.get("config", {})),
+                    "state": d.get("state", "active"),
+                    "triggered_at": d.get("triggered_at"),
+                    "created_at": d.get("created_at"),
+                })
+                count_wp += 1
+        except duckdb.CatalogException:
+            print("  SKIP wizard_protection (table not found)")
 
     duck.close()
-    print(f"  orders.duckdb → {count_sub} submissions, {count_evt} events, {count_ws} wizard sessions, {count_we} wizard events")
+    print(f"  orders.duckdb → {count_sub} submissions, {count_evt} events, {count_ws} wizard sessions, {count_we} wizard events, {count_wca} combo attempts, {count_wp} protections")
     return count_sub + count_evt
 
 
@@ -3109,6 +3234,7 @@ def verify(engine):
             "xenon.positions", "xenon.account_snapshots", "xenon.trades",
             "xenon.nav_history", "xenon.order_submissions", "xenon.order_events",
             "xenon.wizard_sessions", "xenon.wizard_events",
+            "xenon.wizard_combo_attempts", "xenon.wizard_protection",
             "xenon.scan_results", "xenon.cri_series",
             "xenon.uw_snapshots", "xenon.uw_flow_events", "xenon.uw_api_stats",
             "xenon.ticker_cache",
@@ -3175,7 +3301,102 @@ git commit -m "feat(db): one-time data migration script (JSON/DuckDB → Postgre
 
 ---
 
-## Task 21: Cleanup
+## Task 21: Migrate Combo Wizard (DuckDB → Postgres)
+
+**Files:**
+
+- Create: `src/xenon/db/queries/combo_wizard.py`
+- Create: `src/xenon/db/tests/test_combo_wizard.py`
+- Modify: `src/xenon/execution/combo_wizard/store.py`
+- Modify: `src/xenon/execution/combo_wizard/session.py`
+- Modify: `src/xenon/execution/combo_wizard/ib_adapter.py`
+- Modify: `src/xenon/execution/combo_wizard/rehydrate.py`
+- Modify: `src/xenon/execution/combo_wizard/protect.py`
+- Modify: `src/xenon/execution/combo_wizard/combo_quote_source.py`
+- Modify: `src/xenon/execution/wizard_stop_monitor.py`
+- Modify: `src/xenon/execution/single_leg_rehydrate.py`
+
+These files all import `orders_store._connect_utc()` and execute raw DuckDB SQL against `wizard_sessions`, `wizard_session_events`, `wizard_combo_attempts`, and `wizard_protection` tables. They must be migrated to use `db.queries.combo_wizard` and `db.queries.wizard`.
+
+- [ ] **Step 1: Audit all DuckDB call sites in combo_wizard/**
+
+```bash
+grep -rn "_connect_utc\|duckdb\|\.execute(" src/xenon/execution/combo_wizard/ --include="*.py" | grep -v __pycache__
+grep -rn "_connect_utc\|duckdb\|\.execute(" src/xenon/execution/single_leg_rehydrate.py
+grep -rn "_connect_utc\|duckdb\|\.execute(" src/xenon/execution/wizard_stop_monitor.py
+```
+
+Document every raw SQL query. Each must be converted to a query function.
+
+- [ ] **Step 2: Write failing tests for combo_wizard query functions**
+
+Write tests in `src/xenon/db/tests/test_combo_wizard.py` covering:
+
+- `create_attempt()`, `get_attempt()`, `update_attempt_state()`
+- `create_protection()`, `get_protections_for_session()`
+- `get_attempts_for_session()`
+
+Follow the same pattern as `test_orders.py` — use the `conn` fixture, assert on returned dicts.
+
+- [ ] **Step 3: Run tests to verify they fail**
+
+Run: `uv run pytest src/xenon/db/tests/test_combo_wizard.py -xvs`
+Expected: FAIL
+
+- [ ] **Step 4: Implement combo_wizard query functions**
+
+Create `src/xenon/db/queries/combo_wizard.py` with functions matching the DuckDB SQL patterns found in Step 1. Key functions:
+
+- `create_attempt(conn, *, attempt_id, session_id, ticker, structure_name, legs, ...)` → INSERT
+- `get_attempt(conn, attempt_id)` → SELECT
+- `update_attempt_state(conn, *, attempt_id, state, ib_order_id, perm_id, ...)` → UPDATE
+- `mark_attempt_terminal(conn, *, attempt_id, state, filled_qty, avg_fill_price)` → UPDATE
+- `apply_attempt_modify(conn, *, attempt_id, modify_sequence)` → compare-and-swap UPDATE
+- `create_protection(conn, *, session_id, attempt_id, protection_type, config)` → INSERT
+- `get_protections_for_session(conn, session_id)` → SELECT
+- `update_protection_state(conn, *, protection_id, state)` → UPDATE
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `uv run pytest src/xenon/db/tests/test_combo_wizard.py -xvs`
+Expected: PASS
+
+- [ ] **Step 6: Migrate combo_wizard/store.py**
+
+Replace `_init_tables()` (DuckDB CREATE TABLE) with a no-op — Alembic manages schema.
+Replace all `_connect_utc()` + raw SQL with calls to `db.queries.combo_wizard` using a sync psycopg engine (same `_get_sync_engine()` pattern from Task 16).
+
+- [ ] **Step 7: Migrate remaining combo_wizard modules**
+
+For each of `session.py`, `ib_adapter.py`, `rehydrate.py`, `protect.py`, `combo_quote_source.py`:
+
+- Replace `from xenon.execution.orders_store import _connect_utc, _resolve_path` with sync engine
+- Replace all raw DuckDB SQL with query function calls
+- Preserve function signatures and return types
+
+For `single_leg_rehydrate.py` and `wizard_stop_monitor.py`:
+
+- Same pattern — replace DuckDB reads with Postgres query calls
+
+- [ ] **Step 8: Run existing combo wizard tests**
+
+```bash
+uv run pytest scripts/tests/ -k "wizard or combo" -xvs
+uv run pytest src/xenon/api/tests/ -k "wizard or combo" -xvs
+```
+
+Expected: All existing tests pass against Postgres.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/xenon/db/queries/combo_wizard.py src/xenon/db/tests/test_combo_wizard.py src/xenon/execution/combo_wizard/ src/xenon/execution/single_leg_rehydrate.py src/xenon/execution/wizard_stop_monitor.py
+git commit -m "feat(db): migrate combo wizard from DuckDB to Postgres"
+```
+
+---
+
+## Task 22: Cleanup
 
 **Files:**
 
@@ -3223,7 +3444,7 @@ git commit -m "chore(db): remove DuckDB dependency, clean up dead JSON persisten
 
 ---
 
-## Task 22: Update CLAUDE.md + Documentation
+## Task 23: Update CLAUDE.md + Documentation
 
 **Files:**
 

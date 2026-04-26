@@ -27,12 +27,13 @@ A runbook for the Mac Mini migration will be written separately.
 
 ### Tech Stack
 
-| Component         | Choice                  | Rationale                                                     |
-| ----------------- | ----------------------- | ------------------------------------------------------------- |
-| Driver            | asyncpg                 | Fastest async Postgres driver; matches existing raw SQL style |
-| Schema management | SQLAlchemy Core (async) | Schema-as-Python, composable query builder, no ORM overhead   |
-| Migrations        | Alembic                 | Autogenerate from table defs, versioned, reversible, portable |
-| Reactive events   | LISTEN/NOTIFY + outbox  | Sub-ms delivery, durable replay on restart, no Kafka/Redis    |
+| Component         | Choice                  | Rationale                                                         |
+| ----------------- | ----------------------- | ----------------------------------------------------------------- |
+| Driver (async)    | asyncpg                 | Fastest async Postgres driver; matches existing raw SQL style     |
+| Driver (sync)     | psycopg[binary]         | Sync Postgres driver for CLI scripts, migrations, one-off queries |
+| Schema management | SQLAlchemy Core (async) | Schema-as-Python, composable query builder, no ORM overhead       |
+| Migrations        | Alembic                 | Autogenerate from table defs, versioned, reversible, portable     |
+| Reactive events   | LISTEN/NOTIFY + outbox  | Sub-ms delivery, durable replay on restart, no Kafka/Redis        |
 
 ## 3. Database Architecture
 
@@ -128,7 +129,7 @@ Direct port from `data/orders.duckdb`.
 
 | Column            | Type                               | Notes |
 | ----------------- | ---------------------------------- | ----- |
-| submission_id     | UUID PK                            |       |
+| submission_id     | TEXT PK                            |       |
 | user_id           | TEXT                               |       |
 | client_attempt_id | TEXT                               |       |
 | ticker            | TEXT NOT NULL                      |       |
@@ -141,8 +142,8 @@ Direct port from `data/orders.duckdb`.
 | multiplier        | INTEGER DEFAULT 100                |       |
 | con_id            | BIGINT                             |       |
 | placing_client_id | INTEGER                            |       |
-| ib_order_id       | INTEGER                            |       |
-| perm_id           | BIGINT                             |       |
+| ib_order_id       | TEXT                               |       |
+| perm_id           | TEXT                               |       |
 | limit_price       | NUMERIC(12,4)                      |       |
 | state             | TEXT NOT NULL                      |       |
 | reason_code       | TEXT                               |       |
@@ -153,6 +154,8 @@ Direct port from `data/orders.duckdb`.
 | updated_at        | TIMESTAMPTZ NOT NULL DEFAULT now() |       |
 
 Indexes: `(state, ticker)`, `(perm_id)`, `(ib_order_id)`
+
+Constraint: `UNIQUE(user_id, client_attempt_id)` — idempotency key for reserve_attempt
 
 #### `xenon.order_events`
 
@@ -187,6 +190,41 @@ Indexes: `(state, ticker)`, `(perm_id)`, `(ib_order_id)`
 | kind       | TEXT NOT NULL                      |       |
 | detail     | JSONB                              |       |
 | at         | TIMESTAMPTZ NOT NULL DEFAULT now() |       |
+
+#### `xenon.wizard_combo_attempts`
+
+| Column            | Type                               | Notes |
+| ----------------- | ---------------------------------- | ----- |
+| attempt_id        | TEXT PK                            |       |
+| session_id        | TEXT FK → wizard_sessions NOT NULL |       |
+| ticker            | TEXT NOT NULL                      |       |
+| structure_name    | TEXT                               |       |
+| legs              | JSONB                              |       |
+| combo_contract    | JSONB                              |       |
+| ib_order_id       | TEXT                               |       |
+| perm_id           | TEXT                               |       |
+| placing_client_id | INTEGER                            |       |
+| limit_price       | NUMERIC(12,4)                      |       |
+| state             | TEXT NOT NULL                      |       |
+| reason_code       | TEXT                               |       |
+| filled_qty        | INTEGER DEFAULT 0                  |       |
+| avg_fill_price    | NUMERIC(12,4)                      |       |
+| modify_sequence   | INTEGER DEFAULT 0                  |       |
+| submitted_at      | TIMESTAMPTZ                        |       |
+| updated_at        | TIMESTAMPTZ NOT NULL DEFAULT now() |       |
+
+#### `xenon.wizard_protection`
+
+| Column          | Type                               | Notes                                    |
+| --------------- | ---------------------------------- | ---------------------------------------- |
+| protection_id   | BIGSERIAL PK                       |                                          |
+| session_id      | TEXT FK → wizard_sessions NOT NULL |                                          |
+| attempt_id      | TEXT FK → wizard_combo_attempts    |                                          |
+| protection_type | TEXT NOT NULL                      | take_profit, stop_loss, time_stop, alert |
+| config          | JSONB NOT NULL                     |                                          |
+| state           | TEXT NOT NULL DEFAULT 'active'     |                                          |
+| triggered_at    | TIMESTAMPTZ                        |                                          |
+| created_at      | TIMESTAMPTZ NOT NULL DEFAULT now() |                                          |
 
 ### 4C. Scanner Results & Signals (`xenon` schema)
 
@@ -300,7 +338,7 @@ Cross-service reactive event delivery via LISTEN/NOTIFY.
 
 Index: `(channel, emitted_at DESC)`
 
-Postgres trigger: `AFTER INSERT → pg_notify(channel, id::text)`
+Postgres trigger: `AFTER INSERT → pg_notify(channel, id::text)`. The trigger handles pg_notify; application code should NOT call pg_notify directly.
 
 Cleanup: nightly job truncates rows older than 7 days.
 
@@ -341,9 +379,11 @@ src/xenon/db/
 
 ### Dependencies
 
-New packages: `sqlalchemy[asyncio]`, `asyncpg`, `alembic`
+New packages: `sqlalchemy[asyncio]`, `asyncpg`, `psycopg[binary]`, `alembic`
 
 Removed packages: `duckdb` (after migration)
+
+orders_store.py is kept as the public facade -- its existing function signatures, dataclasses (RequestRow, ReservationOutcome, SubmissionRow, WorkingReservations), and return types are preserved. Only the DuckDB internals are replaced with calls to db.queries.orders.
 
 ## 6. Data Migration
 
@@ -373,13 +413,21 @@ One-time script: `scripts/migrations/migrate_to_postgres.py`
 
 ## 8. What Stays as Files
 
-| File/Dir                             | Reason                                        |
-| ------------------------------------ | --------------------------------------------- |
-| `data/apex_mirror/`                  | Parquet, bulk market data, read-only          |
-| `data/price_history_cache/*.parquet` | Same — bulk data, file-native format          |
-| `data/flex_token_config.json`        | Trivial UI reminder state                     |
-| `data/strategies.json`               | Manual config until strategy editor UI exists |
-| `data/ta.duckdb`                     | Deprecated, dead code                         |
+| File/Dir                             | Reason                                                                    |
+| ------------------------------------ | ------------------------------------------------------------------------- |
+| `data/apex_mirror/`                  | Parquet, bulk market data, read-only                                      |
+| `data/price_history_cache/*.parquet` | Same — bulk data, file-native format                                      |
+| `data/flex_token_config.json`        | Trivial UI reminder state                                                 |
+| `data/strategies.json`               | Manual config until strategy editor UI exists                             |
+| `data/ta.duckdb`                     | Deprecated, dead code                                                     |
+| `data/orders.json`                   | Read-only IB snapshot, regenerated every sync                             |
+| `data/futu_portfolio.json`           | Futu positions, regenerated by /futu/sync                                 |
+| `data/performance.json`              | Computed from portfolio data on demand                                    |
+| `data/watchlist.json`                | Manual config, referenced by 8+ scanner modules                           |
+| `data/reconciliation.json`           | Computed reconciliation output                                            |
+| `data/menthorq_cache/`               | MenthorQ scrape cache, ephemeral                                          |
+| `data/uw_analyze_history/`           | Per-ticker append-only archive (subsumed by uw_snapshots table over time) |
+| `data/flow_analysis.json`            | Computed portfolio bias, regenerated on demand                            |
 
 ## 9. Future Considerations
 
