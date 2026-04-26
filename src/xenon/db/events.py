@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Callable
 
 import asyncpg
@@ -12,6 +13,8 @@ from xenon.db.schema import outbox
 
 logger = logging.getLogger(__name__)
 
+_CHANNEL_RE = re.compile(r"^[a-z_][a-z0-9_.]{0,62}$")
+
 
 async def emit(
     conn: AsyncConnection,
@@ -20,6 +23,8 @@ async def emit(
     source: str,
     payload: dict,
 ) -> int:
+    if not _CHANNEL_RE.match(channel):
+        raise ValueError(f"Invalid NOTIFY channel: {channel!r}")
     result = await conn.execute(
         insert(outbox).values(channel=channel, source=source, payload=payload).returning(outbox.c.id)
     )
@@ -53,7 +58,7 @@ class EventSubscriber:
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
-        raw_dsn = self._dsn.replace("+asyncpg", "").replace("postgresql+asyncpg", "postgresql")
+        raw_dsn = re.sub(r"^postgresql\+\w+://", "postgresql://", self._dsn)
         self._conn = await asyncpg.connect(raw_dsn)
         for ch in self._channels:
             await self._conn.add_listener(ch, self._on_notification)

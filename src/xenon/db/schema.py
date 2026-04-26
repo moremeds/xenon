@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Column,
     Date,
     ForeignKey,
@@ -128,6 +129,7 @@ order_events = Table(
     Column("kind", Text, nullable=False),
     Column("detail", JSONB),
     Column("at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Index("ix_order_events_submission_at", "submission_id", "at"),
 )
 
 wizard_sessions = Table(
@@ -184,6 +186,7 @@ wizard_combo_attempts = Table(
     Column("modify_sequence", Integer, server_default=text("0")),
     Column("submitted_at", TIMESTAMP(timezone=True)),
     Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Index("ix_wizard_attempts_session_updated", "session_id", "updated_at"),
 )
 
 wizard_protection = Table(
@@ -206,6 +209,7 @@ wizard_protection = Table(
     Column("state", Text, nullable=False, server_default=text("'active'")),
     Column("triggered_at", TIMESTAMP(timezone=True)),
     Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    UniqueConstraint("session_id", name="uq_wizard_protection_session"),
 )
 
 # ---------- Scanner Results ----------
@@ -248,7 +252,7 @@ uw_flow_events = Table(
     "uw_flow_events",
     xenon_metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("flow_event_key", Text, unique=True),
+    Column("flow_event_key", Text, nullable=False, unique=True),
     Column("ticker", Text, nullable=False),
     Column("side", Text),
     Column("strike", Numeric(12, 2)),
@@ -298,5 +302,6 @@ outbox = Table(
     Column("payload", JSONB, nullable=False),
     Column("emitted_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
     Column("consumed_by", JSONB, server_default=text("'[]'::jsonb")),
+    CheckConstraint("length(channel) <= 63", name="ck_outbox_channel_length"),
     Index("ix_outbox_channel_time", "channel", "emitted_at"),
 )

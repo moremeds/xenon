@@ -55,6 +55,7 @@ async def get_snapshot_history(conn: AsyncConnection, *, ticker: str, limit: int
 async def save_flow_event(
     conn: AsyncConnection,
     *,
+    flow_event_key: str,
     ticker: str,
     side: str | None = None,
     strike: Decimal | None = None,
@@ -69,6 +70,7 @@ async def save_flow_event(
     result = await conn.execute(
         insert(uw_flow_events)
         .values(
+            flow_event_key=flow_event_key,
             ticker=ticker,
             side=side,
             strike=strike,

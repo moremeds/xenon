@@ -1065,12 +1065,13 @@ def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
 
 def _save_portfolio_to_postgres(portfolio: dict) -> None:
     """Write positions + account snapshot to Postgres."""
-    from sqlalchemy import delete, insert
+    from sqlalchemy import delete, insert, text
 
     from xenon.db.schema import account_snapshots, positions
 
     engine = get_sync_engine()
     with engine.begin() as conn:
+        conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('portfolio_sync'))"))
         conn.execute(delete(positions).where(positions.c.account == "IB"))
 
         for pos in portfolio.get("positions", []):

@@ -37,6 +37,7 @@ async def test_save_and_get_flow_event(conn):
 
     await save_flow_event(
         conn,
+        flow_event_key="test-evt-001",
         ticker="TSLA",
         side="call",
         strike=Decimal("250.00"),

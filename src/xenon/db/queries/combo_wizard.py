@@ -6,8 +6,6 @@ All functions take a sync sqlalchemy.Connection, not AsyncConnection.
 
 from __future__ import annotations
 
-import json
-import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import Connection, insert, select, text, update
