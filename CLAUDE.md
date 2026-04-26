@@ -60,7 +60,7 @@ GATE 4 — NO NAKED SHORTS: Never naked short stock, calls, futures, or bonds. E
 
 | File          | Loader          | Contains                                                                                                                                                                          |
 | ------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `.env` (root) | `python-dotenv` | `MENTHORQ_USER`, `MENTHORQ_PASS`, `MASSIVE_API_KEY`, `CLERK_JWKS_URL`, `CLERK_ISSUER`, `ALLOWED_USER_IDS`, `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` |
+| `.env` (root) | `python-dotenv` | `DATABASE_URL`, `DATABASE_URL_TEST`, `MENTHORQ_USER`, `MENTHORQ_PASS`, `MASSIVE_API_KEY`, `CLERK_JWKS_URL`, `CLERK_ISSUER`, `ALLOWED_USER_IDS`, `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` |
 | `web/.env`    | Next.js         | `ANTHROPIC_API_KEY`, `UW_TOKEN`, `EXA_API_KEY`, `CEREBRAS_API_KEY`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`                                                       |
 
 ## Market Hours
@@ -100,6 +100,7 @@ The closed-market gate lives inside `UwAnalyzeCache.get_or_run()` and also cover
 
 - [ ] `scripts/cloud.sh` (default — local dev services + VPS IB Gateway via Tailscale) — OR `scripts/local.sh` (fully local with Docker gateway)
 - [ ] If local mode: approve 2FA on IBKR mobile for cold start
+- [ ] `psql -h localhost -U xenon_app xenon_db -c "SELECT 1"` — verify Postgres accessible
 - [ ] `curl http://localhost:8321/health` — verify `ib_gateway.port_listening: true`
 - [ ] Reconciliation auto-runs → `data/reconciliation.json`
 - [ ] Exit order service auto-runs (PENDING_MANUAL)
