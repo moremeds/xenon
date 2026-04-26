@@ -510,6 +510,65 @@ def migrate_uw_data(engine):
     return count
 
 
+def migrate_uw_history(engine):
+    """Import uw_analyze_history/ archive into uw_snapshots."""
+    history_dir = DATA_DIR / "uw_analyze_history"
+    if not history_dir.exists():
+        print("  SKIP uw_analyze_history/ (not found)")
+        return 0
+
+    ticker_dirs = sorted(d for d in history_dir.iterdir() if d.is_dir())
+    total = 0
+    batch = []
+    BATCH_SIZE = 500
+
+    def flush(conn, batch):
+        if not batch:
+            return
+        conn.execute(
+            text("""
+            INSERT INTO xenon.uw_snapshots
+                (ticker, vrp_state, regime, flow_signals, portfolio_score, snapshot_at)
+            VALUES (:ticker, CAST(:vrp AS jsonb), CAST(:regime AS jsonb),
+                    CAST(:flow AS jsonb), :score, :snapshot_at)
+            """),
+            batch,
+        )
+        batch.clear()
+
+    with engine.begin() as conn:
+        for ticker_dir in ticker_dirs:
+            ticker = ticker_dir.name
+            files = sorted(ticker_dir.glob("*.json"))
+            for f in files:
+                try:
+                    with open(f) as fh:
+                        data = json.load(fh)
+                except (json.JSONDecodeError, OSError):
+                    continue
+                current = data.get("current", {})
+                if not isinstance(current, dict):
+                    continue
+                archived_at = data.get("archived_at")
+                batch.append(
+                    {
+                        "ticker": current.get("ticker", ticker),
+                        "vrp": json.dumps(current.get("vrp_state")),
+                        "regime": json.dumps(current.get("regime")),
+                        "flow": json.dumps(current.get("flow_signals")),
+                        "score": current.get("portfolio_score"),
+                        "snapshot_at": archived_at,
+                    }
+                )
+                total += 1
+                if len(batch) >= BATCH_SIZE:
+                    flush(conn, batch)
+        flush(conn, batch)
+
+    print(f"  uw_analyze_history/ → {total} snapshots ({len(ticker_dirs)} tickers)")
+    return total
+
+
 def migrate_caches(engine):
     count = 0
     with engine.begin() as conn:
@@ -619,6 +678,9 @@ def main():
 
     print("\nPhase 4: UW data")
     migrate_uw_data(engine)
+
+    print("\nPhase 4b: UW history archive")
+    migrate_uw_history(engine)
 
     print("\nPhase 5: Caches")
     migrate_caches(engine)
