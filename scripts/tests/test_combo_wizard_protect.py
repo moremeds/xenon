@@ -95,6 +95,35 @@ def _init_session(*, state: str = "FILLED", payload: dict | None = None) -> str:
     return session_id
 
 
+def _init_scoped_session(*, account_env: str, broker_account: str, state: str = "FILLED") -> str:
+    session_id = f"wiz-{uuid.uuid4().hex[:12]}"
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        cwq.create_session(
+            conn,
+            session_id=session_id,
+            ticker="AAPL",
+            state=state,
+            structure_name="Bull Call Spread",
+            intent="OPEN",
+            payload={
+                "symbol": "AAPL",
+                "type": "combo",
+                "action": "BUY",
+                "quantity": 1,
+                "legs": [
+                    {"conId": 1001, "action": "BUY", "ratio": 1},
+                    {"conId": 1002, "action": "SELL", "ratio": 1},
+                ],
+            },
+            broker="IB",
+            account_env=account_env,
+            broker_account=broker_account,
+        )
+    engine.dispose()
+    return session_id
+
+
 # --------------------------------------------------------------------------
 # IB stubs
 # --------------------------------------------------------------------------
@@ -129,6 +158,22 @@ class _StubIB:
 # --------------------------------------------------------------------------
 # Tests
 # --------------------------------------------------------------------------
+
+
+def test_protection_rejects_explicit_scope_mismatch():
+    sid = _init_scoped_session(account_env="live", broker_account="U1234567")
+    ib = _StubIB(tp_acks=[{"order_id": "tp-1"}], alert_acks=[{"virtual_id": "alert-1"}])
+
+    with pytest.raises(ValueError, match="scope mismatch"):
+        protect.attach_protection(
+            session_id=sid,
+            tp_target_price=Decimal("3.00"),
+            alert_net_mid_threshold=Decimal("1.25"),
+            ib=ib,
+        )
+
+    assert ib.tp_calls == []
+    assert ib.alert_calls == []
 
 
 def test_protection_success_transitions_protected(monkeypatch):

@@ -118,3 +118,26 @@ def test_submit_combo_persists_wizard_attempt_and_client_attempt_id(tmp_path, mo
     assert client_attempt_id is not None
     assert client_attempt_id.startswith(f"wiz:{planned['session_id']}:combo:")
     assert row[1] == str(result["orderId"])
+
+
+def test_get_session_rejects_explicit_scope_mismatch():
+    sid = "wiz-live-owned"
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO xenon.wizard_sessions
+                    (session_id, ticker, state, structure_name, intent, payload,
+                     broker, account_env, broker_account)
+                VALUES
+                    (:sid, 'AAPL', 'planned', 'Bull Call Spread', 'OPEN', '{}'::jsonb,
+                     'IB', 'live', 'U1234567')
+                """
+            ),
+            {"sid": sid},
+        )
+    engine.dispose()
+
+    with pytest.raises(ValueError, match="scope mismatch"):
+        session.get_session(sid)

@@ -25,6 +25,7 @@ from typing import Any, Callable
 
 from xenon.db.engine import get_sync_engine
 from xenon.db.queries import combo_wizard
+from xenon.execution.combo_wizard.session import _assert_session_scope
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ def _load_session(session_id: str) -> dict[str, Any]:
         row = combo_wizard.get_session(conn, session_id)
     if row is None:
         raise ValueError(f"Unknown wizard session {session_id}")
+    _assert_session_scope(session_id, row)
     # JSONB `payload` is returned as a dict directly — no json.loads needed.
     if row.get("payload") is None:
         row["payload"] = {}

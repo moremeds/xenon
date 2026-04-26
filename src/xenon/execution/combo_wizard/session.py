@@ -40,6 +40,21 @@ def _scope_kwargs() -> dict[str, str]:
     return {"broker": "IB", "account_env": "legacy_unknown", "broker_account": "legacy_unknown"}
 
 
+def _assert_session_scope(session_id: str, row: dict[str, Any]) -> None:
+    current_scope = _scope_kwargs()
+    if current_scope.get("account_env") == "legacy_unknown":
+        return
+    session_scope = {
+        "broker": row.get("broker"),
+        "account_env": row.get("account_env"),
+        "broker_account": row.get("broker_account"),
+    }
+    if session_scope["account_env"] in (None, "legacy_unknown"):
+        return
+    if session_scope != current_scope:
+        raise ValueError(f"Wizard session {session_id} scope mismatch: session={session_scope}, current={current_scope}")
+
+
 def _normalize_right(value: Any) -> str:
     right = str(value or "").upper()
     if right == "CALL":
@@ -158,6 +173,7 @@ def _load_session(session_id: str) -> dict[str, Any]:
         row = cwq.get_session(conn, session_id)
     if row is None:
         raise ValueError(f"Unknown wizard session {session_id}")
+    _assert_session_scope(session_id, row)
     return {
         "session_id": row["session_id"],
         "ticker": row["ticker"],
@@ -442,6 +458,7 @@ def get_session(session_id: str) -> dict[str, Any]:
         row = cwq.get_session(conn, session_id)
     if row is None:
         raise ValueError(f"Unknown wizard session {session_id}")
+    _assert_session_scope(session_id, row)
     return _session_row_to_dict(row)
 
 
