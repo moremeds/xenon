@@ -325,7 +325,7 @@ class OrderExecutor:
             from xenon.db.schema import trades
             from xenon.execution.account_scope import resolve_from_env
 
-            if os.environ.get("XENON_TRADING_MODE") and os.environ.get("XENON_BROKER_ACCOUNT"):
+            if os.environ.get("XENON_TRADING_MODE") or os.environ.get("XENON_BROKER_ACCOUNT"):
                 scope = resolve_from_env()
                 scope_kwargs = {
                     "broker": scope.broker,
@@ -360,6 +360,7 @@ class OrderExecutor:
             print("✓ Trade logged to Postgres")
         except Exception as exc:
             print(f"  Warning: Postgres trade log failed: {exc}")
+            return False
 
         return True
 
