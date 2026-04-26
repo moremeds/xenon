@@ -328,9 +328,7 @@ def test_flow_log_upsert_and_save_round_trip(tmp_path):
     ev = _make_event()
     assert log.upsert(ev) is True  # newly added
     log.save()
-    raw = json.loads((tmp_path / "flow.json").read_text())
-    assert ev.id in raw["events"]
-    assert raw["events"][ev.id]["ticker"] == "NVDA"
+    assert not (tmp_path / "flow.json").exists()
 
     log2 = FlowLog(path=tmp_path / "flow.json")
     loaded = log2.for_ticker("NVDA")
@@ -539,3 +537,55 @@ def test_classify_anomaly_closing_volume_dte_guard():
         )
     )
     assert classify_anomaly(ev) is None
+
+
+# ── Postgres upsert idempotency ──────────────────────────────────────────
+
+
+def test_postgres_double_save_produces_one_row(tmp_path, monkeypatch):
+    """Two saves of the same FlowEvent must produce exactly one Postgres row."""
+    import os
+
+    from sqlalchemy import create_engine, text
+
+    url = os.environ.get("DATABASE_URL_TEST", "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test")
+    sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+    monkeypatch.setenv("DATABASE_URL", url)
+
+    engine = create_engine(sync_url)
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM xenon.uw_flow_events WHERE flow_event_key LIKE 'test-%'"))
+
+    ev = FlowEvent(
+        id="test-upsert-idempotent",
+        ticker="ZZZZ",
+        side="call",
+        strike=100.0,
+        expiry="2026-12-18",
+        detected_at=datetime.now(timezone.utc).isoformat(),
+        initial=FlowInitial(premium_usd=50000, oi=1000, volume=500, mid=2.5, underlying_price=100),
+        status="open",
+    )
+
+    log = FlowLog(path=tmp_path / "flow_log.json")
+    log._loaded = True
+    log._events = {ev.id: ev}
+    log.save()
+
+    ev.status = "anomaly"
+    ev.anomaly_reason = "premium collapsed -65%"
+    log.save()
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT status, anomaly_reason FROM xenon.uw_flow_events WHERE flow_event_key = :k"),
+            {"k": "test-upsert-idempotent"},
+        ).fetchall()
+
+    assert len(rows) == 1, f"Expected 1 row, got {len(rows)}"
+    assert rows[0][0] == "anomaly"
+    assert rows[0][1] == "premium collapsed -65%"
+
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM xenon.uw_flow_events WHERE flow_event_key LIKE 'test-%'"))
+    engine.dispose()

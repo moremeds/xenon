@@ -1,9 +1,4 @@
-"""F7.2 — FastAPI lifespan integration for single-leg rehydrate.
-
-Verify that ``rehydrate_on_boot`` is invoked exactly once during FastAPI
-startup, and that its failure does not block the server from serving
-``/health``.
-"""
+"""FastAPI lifespan integration for single-leg rehydrate."""
 
 from __future__ import annotations
 
@@ -11,8 +6,7 @@ import os
 
 import pytest
 
-# Keep lifespan in test mode so IB Gateway / pool startup is skipped; the
-# rehydrate hook still runs in that branch.
+# Keep lifespan in test mode so IB Gateway / pool startup is skipped.
 os.environ["XENON_API_TEST_MODE"] = "1"
 
 from fastapi.testclient import TestClient  # noqa: E402
@@ -28,7 +22,7 @@ def _force_test_mode_on(monkeypatch):
     yield
 
 
-def test_rehydrate_runs_on_startup(monkeypatch):
+def test_rehydrate_skips_in_test_mode_startup(monkeypatch):
     called: list[dict] = []
 
     def fake_rehydrate(**kwargs):
@@ -43,11 +37,7 @@ def test_rehydrate_runs_on_startup(monkeypatch):
     with TestClient(server_mod.app):
         pass
 
-    assert len(called) == 1, f"expected 1 rehydrate invocation, got {len(called)}"
-    kwargs = called[0]
-    assert "db_path" in kwargs
-    assert "ib_client_factory" in kwargs
-    assert callable(kwargs["ib_client_factory"])
+    assert called == []
 
 
 def test_rehydrate_failure_does_not_block_boot(monkeypatch):

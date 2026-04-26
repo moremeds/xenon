@@ -30,6 +30,49 @@ New scanners compose `_shared` primitives — do not reimplement universe/execut
 
 `src/xenon/utils/uw_cache.py` is lock-protected because `UWClient._get` runs under `asyncio.to_thread()` and multiple evaluator threads hit the cache concurrently — **do not drop the lock**.
 
+## Database
+
+Postgres is the primary persistence layer. `src/xenon/db/` owns:
+
+- `engine.py` — async SQLAlchemy engine for FastAPI plus sync psycopg engine for subprocess callers
+- `schema.py` — SQLAlchemy Core table definitions for `xenon.*` and `events.*`
+- `queries/` — focused query modules for portfolio, orders, trades, scans, UW, wizard, combo wizard, and cache data
+- `events.py` — LISTEN/NOTIFY helpers and outbox consumption
+- `migrations/` — Alembic environment and migration versions
+
+Add a table by updating `schema.py`, then run:
+
+```bash
+uv run alembic revision --autogenerate -m "description"
+uv run alembic upgrade head
+```
+
+Add or update the matching `src/xenon/db/queries/` module in the same change. Use `get_engine()` in async FastAPI contexts after `init_engine()` has run. Use `get_sync_engine()` for subprocess/synchronous callers such as `ib_sync`, `ib_execute`, `orders_store`, and combo wizard code.
+
+Database events use `events.py` plus the Postgres outbox trigger. Emit durable events by writing outbox rows; subscribe with the LISTEN/NOTIFY helpers for reactive services.
+
+### Broker Account Scope
+
+All execution and portfolio tables carry `broker`, `account_env`,
+`broker_account` columns so paper/live data never blends in a shared
+Postgres. Full policy: `docs/architecture/production-database-strategy.md`.
+Key rules:
+
+- Every write must include scope — never rely on `server_default` for new
+  rows. New scoped tables: `order_submissions`, `trades`, `wizard_sessions`,
+  `wizard_combo_attempts`, `positions`, `account_snapshots`, `nav_history`.
+- Every query in an active workflow (rehydrate, monitor, working-orders)
+  must filter by scope.
+- `legacy_unknown` rows are excluded from active flows when scope filters
+  are active.
+- Order idempotency key is
+  `(broker, account_env, broker_account, user_id, client_attempt_id)`.
+- `nav_history` PK is `(broker, account_env, broker_account, date)`.
+- Use `AccountScope` from `src/xenon/execution/account_scope.py` —
+  never hardcode scope values in query code.
+- FastAPI: depend on `xenon.api.guards.get_account_scope`.
+- Sync subprocesses: env vars `XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`.
+
 ## Combo / BAG Order Guardrails
 
 1. **Never map combo `Order.action` from debit vs credit.**
@@ -92,7 +135,7 @@ New scanners compose `_shared` primitives — do not reimplement universe/execut
 `src/xenon/execution/` — all IB order/fill logic:
 
 - `ib_place_order.py`, `ib_order_manage.py` (cancel/modify via subprocess; see `api/CLAUDE.md`)
-- `orders_store.py` — DuckDB orders journal (UTC-pinned writer; see api/CLAUDE.md migration notes)
+- `orders_store.py` — Postgres-backed public facade for `order_submissions` and `order_events`; preserve its function signatures
 - `single_leg_rehydrate.py` — three-source reconcile (orders DB, IB open orders, CRI monitor). Invoked in FastAPI lifespan on boot; exposed for testing via `POST /dev/rehydrate/synthetic`.
 - `naked_short_audit.py` — Gate-4 post-sync enforcement
 - `quote_guard.py`, `contract_normalize.py`, `preflight.py` — order-path safety layers
@@ -111,12 +154,9 @@ uv run pytest -xvs <path>        # single test
 
 CI uses `uv sync --frozen --extra test` then `uv run pytest` — affected-on-PR, full-on-master.
 
-## Append-only data files
+## Legacy data files
 
-- `data/portfolio.json` — open positions, bankroll, exposure
-- `data/trade_log.json` — **append-only** trade journal
-
-Full data catalog: `docs/architecture/data-files.md`.
+Postgres is primary for portfolio, orders, NAV, trades, UW stats, flow events, and scanner archival. Files under `data/` are backup or cache inputs unless a module explicitly documents otherwise. Full data catalog: `docs/architecture/data-files.md`.
 
 ## Commands
 

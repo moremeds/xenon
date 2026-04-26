@@ -16,14 +16,59 @@ Uses stubbed ib_insync objects (no live broker). Covers:
 from __future__ import annotations
 
 import json
+import os
+import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-import duckdb
 import pytest
+from sqlalchemy import create_engine, text
 
+from xenon.db.queries import combo_wizard as cwq
 from xenon.execution import orders_store
 from xenon.execution.combo_wizard import ib_adapter as adapter_mod
+
+# --------------------------------------------------------------------------
+# Postgres helpers
+# --------------------------------------------------------------------------
+
+_TEST_DB_URL = os.environ.get(
+    "DATABASE_URL_TEST",
+    "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
+)
+_SYNC_URL = _TEST_DB_URL.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+
+
+def _pg_engine():
+    return create_engine(_SYNC_URL, pool_pre_ping=True)
+
+
+def _cleanup(engine):
+    with engine.begin() as conn:
+        conn.execute(text("TRUNCATE xenon.wizard_events CASCADE"))
+        conn.execute(text("TRUNCATE xenon.wizard_combo_attempts CASCADE"))
+        conn.execute(text("TRUNCATE xenon.wizard_sessions CASCADE"))
+
+
+@pytest.fixture(autouse=True)
+def _setup_pg(monkeypatch):
+    """Point get_sync_engine() at the test database and clean tables."""
+    monkeypatch.setenv("DATABASE_URL", _SYNC_URL)
+    # Reset the cached singleton so get_sync_engine() picks up the new URL.
+    import xenon.db.engine as eng_mod
+
+    monkeypatch.setattr(eng_mod, "_sync_engine", None)
+
+    engine = _pg_engine()
+    _cleanup(engine)
+    engine.dispose()
+    yield
+    # Post-test cleanup
+    engine = _pg_engine()
+    _cleanup(engine)
+    engine.dispose()
+
 
 # --------------------------------------------------------------------------
 # Stubs that look like ib_insync objects but don't import the real thing.
@@ -156,26 +201,21 @@ def _session_payload(*, uncovered_short_call: bool = False) -> dict:
     }
 
 
-def _seed_session(db_path: Path, *, uncovered_short_call: bool = False) -> str:
-    import uuid
-    from datetime import datetime, timezone
-
-    orders_store.init_store(db_path)
+def _seed_session(tmp_path: Path, *, uncovered_short_call: bool = False) -> str:
     sid = f"wiz-{uuid.uuid4().hex[:12]}"
     payload = _session_payload(uncovered_short_call=uncovered_short_call)
-    now = datetime.now(timezone.utc)
-    con = duckdb.connect(str(db_path))
-    try:
-        con.execute(
-            """
-            INSERT INTO wizard_sessions (session_id, ticker, state, structure_name,
-                intent, payload_json, created_at, updated_at)
-            VALUES (?, 'AAPL', 'FILLED', 'Bull Call Spread', 'OPEN', ?, ?, ?)
-            """,
-            [sid, json.dumps(payload), now, now],
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        cwq.create_session(
+            conn,
+            session_id=sid,
+            ticker="AAPL",
+            state="FILLED",
+            structure_name="Bull Call Spread",
+            intent="OPEN",
+            payload=payload,
         )
-    finally:
-        con.close()
+    engine.dispose()
     return sid
 
 
@@ -185,9 +225,8 @@ def _seed_session(db_path: Path, *, uncovered_short_call: bool = False) -> str:
 
 
 def test_place_combo_tp_builds_bag_with_sell_envelope(tmp_path, monkeypatch):
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _seed_session(db)
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid = _seed_session(tmp_path)
 
     ib = _StubIBClient(
         qualified=[_StubContract(conId=1001), _StubContract(conId=1002)],
@@ -243,9 +282,8 @@ def test_place_combo_tp_builds_bag_with_sell_envelope(tmp_path, monkeypatch):
 
 def test_place_combo_tp_preserves_signed_negative_price(tmp_path, monkeypatch):
     """Credit combos carry negative signed prices. TP must preserve the sign."""
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _seed_session(db)
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid = _seed_session(tmp_path)
 
     ib = _StubIBClient(
         qualified=[_StubContract(conId=1001), _StubContract(conId=1002)],
@@ -270,9 +308,8 @@ def test_place_combo_tp_preserves_signed_negative_price(tmp_path, monkeypatch):
 
 
 def test_place_combo_tp_refuses_naked_short(tmp_path, monkeypatch):
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _seed_session(db, uncovered_short_call=True)
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid = _seed_session(tmp_path, uncovered_short_call=True)
 
     ib = _StubIBClient()
     a = adapter_mod.ComboWizardIbAdapter(ib)
@@ -334,9 +371,8 @@ def test_get_open_orders_and_positions_delegate():
 
 
 def test_register_risk_alert_persists_event_no_broker_order(tmp_path, monkeypatch):
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _seed_session(db)
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid = _seed_session(tmp_path)
 
     ib = _StubIBClient()
     a = adapter_mod.ComboWizardIbAdapter(ib)
@@ -348,18 +384,18 @@ def test_register_risk_alert_persists_event_no_broker_order(tmp_path, monkeypatc
     assert ack["virtual_id"]
     assert ib.placed == []
 
-    con = duckdb.connect(str(db))
-    try:
-        rows = con.execute(
-            "SELECT kind, detail FROM wizard_session_events WHERE session_id=?",
-            [sid],
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT kind, detail FROM xenon.wizard_events WHERE session_id = :sid"),
+            {"sid": sid},
         ).fetchall()
-    finally:
-        con.close()
+    engine.dispose()
     kinds = [r[0] for r in rows]
     assert "RISK_ALERT_REGISTERED" in kinds
     # signed threshold preserved in the event detail
-    detail = next(json.loads(r[1]) for r in rows if r[0] == "RISK_ALERT_REGISTERED")
+    detail = next(r[1] for r in rows if r[0] == "RISK_ALERT_REGISTERED")
+    # detail is already a dict (JSONB)
     assert detail["threshold"] == "-0.25"
     assert detail["polarity"] == "CREDIT"
 
@@ -407,9 +443,8 @@ class _RacyIBClient(_StubIBClient):
 
 
 def test_place_combo_tp_polls_past_perm_id_race(tmp_path, monkeypatch):
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _seed_session(db)
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid = _seed_session(tmp_path)
 
     # Speed up polling for the test.
     monkeypatch.setattr(adapter_mod, "_PERM_ID_POLL_DEADLINE_S", 1.0)
@@ -442,9 +477,8 @@ def test_place_combo_tp_polls_past_perm_id_race(tmp_path, monkeypatch):
 def test_place_combo_tp_returns_none_perm_id_on_deadline(tmp_path, monkeypatch):
     """If permId stays 0 past the deadline, return None (caller falls back to
     order_id via `ack.get("perm_id") or ack.get("order_id")`)."""
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _seed_session(db)
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid = _seed_session(tmp_path)
 
     monkeypatch.setattr(adapter_mod, "_PERM_ID_POLL_DEADLINE_S", 0.05)
     monkeypatch.setattr(adapter_mod, "_PERM_ID_POLL_INTERVAL_S", 0.01)
@@ -488,9 +522,8 @@ class _ExplodingIBClient(_StubIBClient):
 
 
 def test_place_combo_tp_classifies_ib_error_201_as_naked_short(tmp_path, monkeypatch):
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _seed_session(db)
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid = _seed_session(tmp_path)
 
     # Mirror the IBClient.place_order wrapping: generic exception string
     # carrying "error 201" — our classifier keys off the message payload
@@ -511,14 +544,13 @@ def test_place_combo_tp_classifies_ib_error_201_as_naked_short(tmp_path, monkeyp
         )
 
     # Event recorded matches existing PROTECTION_TP_REFUSED_* style
-    con = duckdb.connect(str(db))
-    try:
-        rows = con.execute(
-            "SELECT kind FROM wizard_session_events WHERE session_id=?",
-            [sid],
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT kind FROM xenon.wizard_events WHERE session_id = :sid"),
+            {"sid": sid},
         ).fetchall()
-    finally:
-        con.close()
+    engine.dispose()
     kinds = [r[0] for r in rows]
     assert "PROTECTION_TP_REFUSED_BROKER_201" in kinds
 
@@ -526,9 +558,8 @@ def test_place_combo_tp_classifies_ib_error_201_as_naked_short(tmp_path, monkeyp
 def test_place_combo_tp_classifies_ib_error_201_via_code_attribute(tmp_path, monkeypatch):
     """If the underlying exception carries a .code attribute (e.g. some
     ib_insync error shapes), classify by code without relying on message."""
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _seed_session(db)
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid = _seed_session(tmp_path)
 
     class _Coded(RuntimeError):
         code = 201
@@ -552,9 +583,8 @@ def test_place_combo_tp_classifies_ib_error_201_via_code_attribute(tmp_path, mon
 def test_place_combo_tp_reraises_non_201_errors(tmp_path, monkeypatch):
     """Non-201 broker errors must re-raise unchanged so protect.py's retry
     loop still applies (network blips, pacing violations, etc.)."""
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _seed_session(db)
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid = _seed_session(tmp_path)
 
     exc = RuntimeError("Failed to place order: IB error 504: Not connected")
     ib = _ExplodingIBClient(
@@ -593,9 +623,8 @@ def test_place_combo_tp_reraises_non_201_errors(tmp_path, monkeypatch):
 def test_place_combo_tp_refuses_short_risk_reversal(tmp_path, monkeypatch):
     """Short risk reversal: SELL Call + BUY Put. The long put does NOT cover
     the short call — this is naked short call exposure. Must BLOCK."""
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _seed_session(db)
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid = _seed_session(tmp_path)
 
     ib = _StubIBClient()
     a = adapter_mod.ComboWizardIbAdapter(ib)
@@ -631,23 +660,21 @@ def test_place_combo_tp_refuses_short_risk_reversal(tmp_path, monkeypatch):
     assert ib.placed == []
 
     # PROTECTION_TP_REFUSED_ADAPTER event persisted
-    con = duckdb.connect(str(db))
-    try:
-        rows = con.execute(
-            "SELECT kind FROM wizard_session_events WHERE session_id=?",
-            [sid],
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT kind FROM xenon.wizard_events WHERE session_id = :sid"),
+            {"sid": sid},
         ).fetchall()
-    finally:
-        con.close()
+    engine.dispose()
     assert "PROTECTION_TP_REFUSED_ADAPTER" in [r[0] for r in rows]
 
 
 def test_place_combo_tp_refuses_1x2_ratio_spread(tmp_path, monkeypatch):
     """1x2 ratio spread: BUY 1 Call + SELL 2 Calls. One uncovered short call
     tail (sellCallRatio - buyCallRatio = 1). Must BLOCK."""
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _seed_session(db)
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid = _seed_session(tmp_path)
 
     ib = _StubIBClient()
     a = adapter_mod.ComboWizardIbAdapter(ib)
@@ -682,12 +709,11 @@ def test_place_combo_tp_refuses_1x2_ratio_spread(tmp_path, monkeypatch):
         )
     assert ib.placed == []
 
-    con = duckdb.connect(str(db))
-    try:
-        rows = con.execute(
-            "SELECT kind FROM wizard_session_events WHERE session_id=?",
-            [sid],
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT kind FROM xenon.wizard_events WHERE session_id = :sid"),
+            {"sid": sid},
         ).fetchall()
-    finally:
-        con.close()
+    engine.dispose()
     assert "PROTECTION_TP_REFUSED_ADAPTER" in [r[0] for r in rows]

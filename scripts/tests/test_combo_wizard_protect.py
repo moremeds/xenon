@@ -12,26 +12,62 @@ Covers:
 
 from __future__ import annotations
 
-import json
+import os
+import uuid
 from decimal import Decimal
-from pathlib import Path
 
-import duckdb
 import pytest
+from sqlalchemy import create_engine, text
 
-from xenon.execution import orders_store
+from xenon.db.queries import combo_wizard as cwq
 from xenon.execution.combo_wizard import protect
-from xenon.execution.combo_wizard import session as wiz_session
-from xenon.execution.combo_wizard import store as wiz_store
+
+# --------------------------------------------------------------------------
+# Postgres helpers (same pattern as test_combo_wizard_ib_adapter.py)
+# --------------------------------------------------------------------------
+
+_TEST_DB_URL = os.environ.get(
+    "DATABASE_URL_TEST",
+    "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
+)
+_SYNC_URL = _TEST_DB_URL.replace("postgresql+asyncpg://", "postgresql+psycopg://")
 
 
-def _init_session(db_path: Path, *, state: str = "FILLED", payload: dict | None = None) -> str:
-    orders_store.init_store(db_path)
-    # Seed a session directly so we don't need the full wiz_session.create_session
-    # fixture path (which requires XENON_API_TEST_MODE etc).
-    import uuid
-    from datetime import datetime, timezone
+def _pg_engine():
+    return create_engine(_SYNC_URL, pool_pre_ping=True)
 
+
+def _cleanup(engine):
+    with engine.begin() as conn:
+        conn.execute(text("TRUNCATE xenon.wizard_protection CASCADE"))
+        conn.execute(text("TRUNCATE xenon.wizard_events CASCADE"))
+        conn.execute(text("TRUNCATE xenon.wizard_combo_attempts CASCADE"))
+        conn.execute(text("TRUNCATE xenon.wizard_sessions CASCADE"))
+
+
+@pytest.fixture(autouse=True)
+def _setup_pg(monkeypatch):
+    """Point get_sync_engine() at the test database and clean tables."""
+    monkeypatch.setenv("DATABASE_URL", _SYNC_URL)
+    import xenon.db.engine as eng_mod
+
+    monkeypatch.setattr(eng_mod, "_sync_engine", None)
+
+    engine = _pg_engine()
+    _cleanup(engine)
+    engine.dispose()
+    yield
+    engine = _pg_engine()
+    _cleanup(engine)
+    engine.dispose()
+
+
+# --------------------------------------------------------------------------
+# Session seeding
+# --------------------------------------------------------------------------
+
+
+def _init_session(*, state: str = "FILLED", payload: dict | None = None) -> str:
     session_id = f"wiz-{uuid.uuid4().hex[:12]}"
     payload = payload or {
         "symbol": "AAPL",
@@ -44,20 +80,53 @@ def _init_session(db_path: Path, *, state: str = "FILLED", payload: dict | None 
             {"conId": 1002, "action": "SELL", "ratio": 1},
         ],
     }
-    now = datetime.now(timezone.utc)
-    con = duckdb.connect(str(db_path))
-    try:
-        con.execute(
-            """
-            INSERT INTO wizard_sessions (session_id, ticker, state, structure_name,
-                intent, payload_json, created_at, updated_at)
-            VALUES (?, 'AAPL', ?, 'Bull Call Spread', 'OPEN', ?, ?, ?)
-            """,
-            [session_id, state, json.dumps(payload), now, now],
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        cwq.create_session(
+            conn,
+            session_id=session_id,
+            ticker="AAPL",
+            state=state,
+            structure_name="Bull Call Spread",
+            intent="OPEN",
+            payload=payload,
         )
-    finally:
-        con.close()
+    engine.dispose()
     return session_id
+
+
+def _init_scoped_session(*, account_env: str, broker_account: str, state: str = "FILLED") -> str:
+    session_id = f"wiz-{uuid.uuid4().hex[:12]}"
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        cwq.create_session(
+            conn,
+            session_id=session_id,
+            ticker="AAPL",
+            state=state,
+            structure_name="Bull Call Spread",
+            intent="OPEN",
+            payload={
+                "symbol": "AAPL",
+                "type": "combo",
+                "action": "BUY",
+                "quantity": 1,
+                "legs": [
+                    {"conId": 1001, "action": "BUY", "ratio": 1},
+                    {"conId": 1002, "action": "SELL", "ratio": 1},
+                ],
+            },
+            broker="IB",
+            account_env=account_env,
+            broker_account=broker_account,
+        )
+    engine.dispose()
+    return session_id
+
+
+# --------------------------------------------------------------------------
+# IB stubs
+# --------------------------------------------------------------------------
 
 
 class _StubIB:
@@ -66,7 +135,6 @@ class _StubIB:
     """
 
     def __init__(self, *, tp_acks: list, alert_acks: list):
-        # Each ack is either a dict (success) or an Exception (failure).
         self._tp_acks = list(tp_acks)
         self._alert_acks = list(alert_acks)
         self.tp_calls: list = []
@@ -87,10 +155,29 @@ class _StubIB:
         return ack
 
 
-def test_protection_success_transitions_protected(tmp_path, monkeypatch):
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _init_session(db, state="FILLED")
+# --------------------------------------------------------------------------
+# Tests
+# --------------------------------------------------------------------------
+
+
+def test_protection_rejects_explicit_scope_mismatch():
+    sid = _init_scoped_session(account_env="live", broker_account="U1234567")
+    ib = _StubIB(tp_acks=[{"order_id": "tp-1"}], alert_acks=[{"virtual_id": "alert-1"}])
+
+    with pytest.raises(ValueError, match="scope mismatch"):
+        protect.attach_protection(
+            session_id=sid,
+            tp_target_price=Decimal("3.00"),
+            alert_net_mid_threshold=Decimal("1.25"),
+            ib=ib,
+        )
+
+    assert ib.tp_calls == []
+    assert ib.alert_calls == []
+
+
+def test_protection_success_transitions_protected(monkeypatch):
+    sid = _init_session(state="FILLED")
 
     ib = _StubIB(
         tp_acks=[{"order_id": 9001, "perm_id": "p-9001"}],
@@ -100,7 +187,7 @@ def test_protection_success_transitions_protected(tmp_path, monkeypatch):
     result = protect.attach_protection(
         sid,
         ib=ib,
-        tp_target_price=Decimal("3.50"),  # DEBIT close target for a BUY debit spread
+        tp_target_price=Decimal("3.50"),
         alert_net_mid_threshold=Decimal("1.25"),
         polarity="DEBIT",
         sleep=lambda _s: None,
@@ -111,27 +198,28 @@ def test_protection_success_transitions_protected(tmp_path, monkeypatch):
     assert result["alert_armed"] is True
     assert result["attempts"] == 1
 
-    con = duckdb.connect(str(db))
-    try:
-        state = con.execute("SELECT state FROM wizard_sessions WHERE session_id=?", [sid]).fetchone()[0]
-        prot = con.execute(
-            "SELECT tp_enabled, tp_target_price, alert_enabled, alert_net_mid_threshold "
-            "FROM wizard_protection WHERE session_id=?",
-            [sid],
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        session = conn.execute(
+            text("SELECT state FROM xenon.wizard_sessions WHERE session_id = :sid"),
+            {"sid": sid},
         ).fetchone()
-    finally:
-        con.close()
-    assert state == "PROTECTED"
+        prot = conn.execute(
+            text("SELECT config FROM xenon.wizard_protection WHERE session_id = :sid"),
+            {"sid": sid},
+        ).fetchone()
+    engine.dispose()
+
+    assert session[0] == "PROTECTED"
     assert prot is not None
-    assert bool(prot[0]) is True
-    assert Decimal(str(prot[1])) == Decimal("3.50")
-    assert bool(prot[2]) is True
+    config = prot[0]
+    assert config["tp_enabled"] is True
+    assert Decimal(config["tp_target_price"]) == Decimal("3.50")
+    assert config["alert_enabled"] is True
 
 
-def test_protection_pending_retries_then_fails_if_tp_attach_never_acks(tmp_path, monkeypatch):
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _init_session(db, state="FILLED")
+def test_protection_pending_retries_then_fails_if_tp_attach_never_acks(monkeypatch):
+    sid = _init_session(state="FILLED")
 
     ib = _StubIB(
         tp_acks=[RuntimeError("timeout"), RuntimeError("timeout"), RuntimeError("timeout")],
@@ -153,25 +241,27 @@ def test_protection_pending_retries_then_fails_if_tp_attach_never_acks(tmp_path,
     assert result["state"] == "PROTECTION_PENDING"
     assert result["tp_attached"] is False
     assert result["attempts"] == 3
-    # Exponential backoff: sleeps between attempts 1→2 and 2→3
     assert sleeps == [2.0, 4.0]
 
-    con = duckdb.connect(str(db))
-    try:
-        state = con.execute("SELECT state FROM wizard_sessions WHERE session_id=?", [sid]).fetchone()[0]
-        events = con.execute("SELECT kind FROM wizard_session_events WHERE session_id=?", [sid]).fetchall()
-    finally:
-        con.close()
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        state = conn.execute(
+            text("SELECT state FROM xenon.wizard_sessions WHERE session_id = :sid"),
+            {"sid": sid},
+        ).fetchone()[0]
+        events = conn.execute(
+            text("SELECT kind FROM xenon.wizard_events WHERE session_id = :sid"),
+            {"sid": sid},
+        ).fetchall()
+    engine.dispose()
+
     assert state == "PROTECTION_PENDING"
-    # A session event must be emitted on protection failure.
     kinds = [row[0] for row in events]
     assert any("PROTECTION" in k for k in kinds)
 
 
-def test_protection_idempotent_on_already_protected(tmp_path, monkeypatch):
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _init_session(db, state="PROTECTED")
+def test_protection_idempotent_on_already_protected(monkeypatch):
+    sid = _init_session(state="PROTECTED")
 
     ib = _StubIB(tp_acks=[], alert_acks=[])
 
@@ -186,15 +276,12 @@ def test_protection_idempotent_on_already_protected(tmp_path, monkeypatch):
 
     assert result["state"] == "PROTECTED"
     assert result.get("noop") is True
-    # No IB calls were made.
     assert ib.tp_calls == []
     assert ib.alert_calls == []
 
 
-def test_protection_rejects_non_filled_session(tmp_path, monkeypatch):
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _init_session(db, state="working")
+def test_protection_rejects_non_filled_session(monkeypatch):
+    sid = _init_session(state="working")
 
     ib = _StubIB(tp_acks=[{"order_id": 9001}], alert_acks=[{"virtual_id": "alert-1"}])
 
@@ -212,14 +299,9 @@ def test_protection_rejects_non_filled_session(tmp_path, monkeypatch):
     assert ib.alert_calls == []
 
 
-def test_naked_short_guard_refuses_tp_but_arms_alert(tmp_path, monkeypatch):
+def test_naked_short_guard_refuses_tp_but_arms_alert(monkeypatch):
     """If the TP would short an uncovered call leg, we skip the TP and route
     to Risk Alert only. This keeps Gate-4 intact."""
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    # Payload describes a short risk reversal: SELL C + BUY P (naked short call).
-    # This is a structure we would NOT have accepted at entry, but we still
-    # guard at protect-time to be defensive.
     payload = {
         "symbol": "AAPL",
         "type": "combo",
@@ -231,7 +313,7 @@ def test_naked_short_guard_refuses_tp_but_arms_alert(tmp_path, monkeypatch):
             {"conId": 2002, "action": "BUY", "ratio": 1, "right": "P", "strike": "180"},
         ],
     }
-    sid = _init_session(db, state="FILLED", payload=payload)
+    sid = _init_session(state="FILLED", payload=payload)
 
     ib = _StubIB(
         tp_acks=[{"order_id": 9001, "perm_id": "p"}],
@@ -250,31 +332,26 @@ def test_naked_short_guard_refuses_tp_but_arms_alert(tmp_path, monkeypatch):
     assert result["tp_attached"] is False
     assert result["tp_refused_reason"] == "NAKED_SHORT_GUARD"
     assert result["alert_armed"] is True
-    # TP must not have been sent to IB.
     assert ib.tp_calls == []
 
 
 def test_risk_alert_copy_never_says_stop_loss():
-    """Spec §9.2 — the popup must say Risk Alert → Assisted Exit, NOT stop-loss."""
-    text = protect.risk_alert_popup_copy()
-    low = text.lower()
+    """Spec section 9.2 -- the popup must say Risk Alert -> Assisted Exit, NOT stop-loss."""
+    text_out = protect.risk_alert_popup_copy()
+    low = text_out.lower()
     assert "risk alert" in low
     assert "assisted exit" in low
     assert "stop-loss" not in low
     assert "stop loss" not in low
 
 
-def test_naked_short_guard_error_short_circuits_retry_loop(tmp_path, monkeypatch):
+def test_naked_short_guard_error_short_circuits_retry_loop(monkeypatch):
     """If the adapter raises NakedShortGuardError (e.g., IB-201 terminal
-    broker reject), the retry loop must NOT re-invoke the adapter 3x —
-    retrying a terminal Gate-4 refusal wastes 14+ seconds. The session
-    should land in the terminal refused state on the first attempt and
-    the Risk Alert path should still arm."""
+    broker reject), the retry loop must NOT re-invoke the adapter 3x --
+    retrying a terminal Gate-4 refusal wastes 14+ seconds."""
     from xenon.execution.combo_wizard.ib_adapter import NakedShortGuardError
 
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _init_session(db, state="FILLED")
+    sid = _init_session(state="FILLED")
 
     calls: list[dict] = []
 
@@ -298,40 +375,32 @@ def test_naked_short_guard_error_short_circuits_retry_loop(tmp_path, monkeypatch
         base_backoff=2.0,
     )
 
-    # Adapter must be called exactly once — retries are wasted on a
-    # terminal Gate-4 refusal.
     assert len(calls) == 1
-    # No backoff sleeps were taken (loop exited on first attempt).
     assert sleeps == []
     assert result["tp_attached"] is False
     assert result["tp_refused_reason"] == "NAKED_SHORT_GUARD"
-    # Alert still armed → session is in the terminal refused state
-    # (protect.py's existing idiom: PROTECTED when alert armed, since
-    # the operator retains the Risk Alert safety net).
     assert result["alert_armed"] is True
     assert result["state"] == "PROTECTED"
 
-    con = duckdb.connect(str(db))
-    try:
-        events = con.execute(
-            "SELECT kind FROM wizard_session_events WHERE session_id=?",
-            [sid],
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        events = conn.execute(
+            text("SELECT kind FROM xenon.wizard_events WHERE session_id = :sid"),
+            {"sid": sid},
         ).fetchall()
-    finally:
-        con.close()
+    engine.dispose()
+
     kinds = [row[0] for row in events]
     assert "PROTECTION_TP_REFUSED" in kinds
 
 
-def test_risk_alert_failure_keeps_session_pending(tmp_path, monkeypatch):
+def test_risk_alert_failure_keeps_session_pending(monkeypatch):
     """A TP alone is not enough for the wizard's assisted-exit contract.
 
     If Risk Alert registration fails, the session must not be marked
     PROTECTED because the stop monitor only polls alert_enabled rows.
     """
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _init_session(db, state="FILLED")
+    sid = _init_session(state="FILLED")
 
     class _AlertFailingIB:
         def place_combo_tp(self, **kwargs):
@@ -352,35 +421,33 @@ def test_risk_alert_failure_keeps_session_pending(tmp_path, monkeypatch):
     assert result["alert_armed"] is False
     assert result["state"] == "PROTECTION_PENDING"
 
-    con = duckdb.connect(str(db))
-    try:
-        row = con.execute(
-            "SELECT state FROM wizard_sessions WHERE session_id=?",
-            [sid],
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT state FROM xenon.wizard_sessions WHERE session_id = :sid"),
+            {"sid": sid},
         ).fetchone()
-        protection = con.execute(
-            "SELECT tp_enabled, alert_enabled FROM wizard_protection WHERE session_id=?",
-            [sid],
+        prot = conn.execute(
+            text("SELECT config FROM xenon.wizard_protection WHERE session_id = :sid"),
+            {"sid": sid},
         ).fetchone()
-    finally:
-        con.close()
+    engine.dispose()
 
     assert row[0] == "PROTECTION_PENDING"
-    assert protection == (True, False)
+    config = prot[0]
+    assert config["tp_enabled"] is True
+    assert config["alert_enabled"] is False
 
 
-def test_signed_combo_pricing_preserved_for_credit(tmp_path, monkeypatch):
-    """CREDIT spreads have negative net prices — protect must not apply abs()."""
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _init_session(db, state="FILLED")
+def test_signed_combo_pricing_preserved_for_credit(monkeypatch):
+    """CREDIT spreads have negative net prices -- protect must not apply abs()."""
+    sid = _init_session(state="FILLED")
 
     ib = _StubIB(
         tp_acks=[{"order_id": 9001, "perm_id": "p"}],
         alert_acks=[{"virtual_id": "alert-1"}],
     )
 
-    # Negative signed target — a credit-spread close.
     signed_target = Decimal("-0.10")
     signed_threshold = Decimal("-0.45")
 
@@ -393,17 +460,17 @@ def test_signed_combo_pricing_preserved_for_credit(tmp_path, monkeypatch):
         sleep=lambda _s: None,
     )
 
-    # Target passed to IB must be the signed value (no abs() mangling).
     assert ib.tp_calls[0]["target_price"] == signed_target
     assert ib.alert_calls[0]["threshold"] == signed_threshold
 
-    con = duckdb.connect(str(db))
-    try:
-        stored = con.execute(
-            "SELECT tp_target_price, alert_net_mid_threshold FROM wizard_protection WHERE session_id=?",
-            [sid],
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        prot = conn.execute(
+            text("SELECT config FROM xenon.wizard_protection WHERE session_id = :sid"),
+            {"sid": sid},
         ).fetchone()
-    finally:
-        con.close()
-    assert Decimal(str(stored[0])) == signed_target
-    assert Decimal(str(stored[1])) == signed_threshold
+    engine.dispose()
+
+    config = prot[0]
+    assert Decimal(config["tp_target_price"]) == signed_target
+    assert Decimal(config["alert_net_mid_threshold"]) == signed_threshold

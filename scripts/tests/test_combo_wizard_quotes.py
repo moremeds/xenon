@@ -1,17 +1,59 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy import text as sa_text
 
 from xenon.execution.combo_wizard.combo_quotes import compute_combo_quote
 from xenon.execution.combo_wizard.models import ComboLegQuote, ComboLegSpec
 
 _CENT = Decimal("0.01")
+
+# --------------------------------------------------------------------------
+# Postgres helpers
+# --------------------------------------------------------------------------
+
+_TEST_DB_URL = os.environ.get(
+    "DATABASE_URL_TEST",
+    "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
+)
+_SYNC_URL = _TEST_DB_URL.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+
+
+def _pg_engine():
+    return create_engine(_SYNC_URL, pool_pre_ping=True)
+
+
+def _cleanup(engine):
+    with engine.begin() as conn:
+        conn.execute(sa_text("TRUNCATE xenon.wizard_protection CASCADE"))
+        conn.execute(sa_text("TRUNCATE xenon.wizard_events CASCADE"))
+        conn.execute(sa_text("TRUNCATE xenon.wizard_combo_attempts CASCADE"))
+        conn.execute(sa_text("TRUNCATE xenon.wizard_sessions CASCADE"))
+
+
+@pytest.fixture(autouse=True)
+def _setup_pg(monkeypatch):
+    """Point get_sync_engine() at the test database and clean tables."""
+    monkeypatch.setenv("DATABASE_URL", _SYNC_URL)
+    import xenon.db.engine as eng_mod
+
+    monkeypatch.setattr(eng_mod, "_sync_engine", None)
+
+    engine = _pg_engine()
+    _cleanup(engine)
+    engine.dispose()
+    yield
+    engine = _pg_engine()
+    _cleanup(engine)
+    engine.dispose()
 
 
 def _repo_root() -> Path:
@@ -277,30 +319,25 @@ def test_compute_combo_quote_preserves_signed_net_prices_for_credit_structure():
 
 
 def _seed_wizard_session(db_path: Path, legs: list[dict]) -> str:
-    import json as _json
+    """Seed a wizard session in Postgres. ``db_path`` is kept for signature compat."""
     import uuid
-    from datetime import datetime, timezone
 
-    import duckdb
+    from xenon.db.queries import combo_wizard as cwq
 
-    from xenon.execution import orders_store
-
-    orders_store.init_store(db_path)
     sid = f"wiz-{uuid.uuid4().hex[:12]}"
-    now = datetime.now(timezone.utc)
     payload = {"symbol": "AAPL", "type": "combo", "legs": legs}
-    con = duckdb.connect(str(db_path))
-    try:
-        con.execute(
-            """
-            INSERT INTO wizard_sessions (session_id, ticker, state, structure_name,
-                intent, payload_json, created_at, updated_at)
-            VALUES (?, 'AAPL', 'PROTECTED', 'Bull Call Spread', 'OPEN', ?, ?, ?)
-            """,
-            [sid, _json.dumps(payload), now, now],
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        cwq.create_session(
+            conn,
+            session_id=sid,
+            ticker="AAPL",
+            state="PROTECTED",
+            structure_name="Bull Call Spread",
+            intent="OPEN",
+            payload=payload,
         )
-    finally:
-        con.close()
+    engine.dispose()
     return sid
 
 

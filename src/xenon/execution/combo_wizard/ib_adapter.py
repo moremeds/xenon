@@ -28,7 +28,6 @@ installed source tree at `.venv/lib/python3.13/site-packages/ib_insync/`).
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -44,7 +43,7 @@ from typing import Any
 #   ib_insync/order.py:181    — class LimitOrder(action, totalQuantity, lmtPrice)
 from ib_insync import ComboLeg, Contract, LimitOrder, Option  # type: ignore
 
-from xenon.execution import orders_store
+from xenon.execution import orders_store  # noqa: F401 — kept for external import paths
 from xenon.execution.combo_wizard.protect import _uncovered_short_calls
 
 logger = logging.getLogger(__name__)
@@ -139,25 +138,17 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _connect(db_path: Path | str | None):
-    return orders_store._connect_utc(orders_store._resolve_path(db_path))
-
-
 def _record_event(session_id: str, kind: str, detail: dict, db_path: Path | str | None) -> None:
-    con = _connect(db_path)
+    """Persist a wizard session event to Postgres. ``db_path`` is ignored (kept for signature compat)."""
     try:
-        con.execute(
-            'INSERT INTO wizard_session_events (event_id, session_id, kind, detail, "at") VALUES (?, ?, ?, ?, ?)',
-            [
-                str(uuid.uuid4()),
-                session_id,
-                kind,
-                json.dumps(detail, default=str),
-                _now(),
-            ],
-        )
-    finally:
-        con.close()
+        from xenon.db.engine import get_sync_engine
+        from xenon.db.queries import combo_wizard
+
+        engine = get_sync_engine()
+        with engine.begin() as conn:
+            combo_wizard.record_event(conn, session_id=session_id, kind=kind, detail=detail)
+    except Exception:
+        pass
 
 
 def _fill_to_dict(fill: Any) -> dict:

@@ -18,10 +18,12 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
 import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import create_engine, text
 
 from xenon.utils.uw_api_stats import UWApiStats
 
@@ -53,6 +55,23 @@ def _make_stats(tmp_path, clock: Clock) -> UWApiStats:
         now_fn=clock.now,
         persist_throttle_seconds=30.0,
     )
+
+
+def _pg_bucket(hour: str) -> dict | None:
+    url = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql+psycopg://")
+    engine = create_engine(url, pool_pre_ping=True)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT status_2xx, status_4xx, status_5xx, cache_hits, latency_sum, latency_count "
+                    "FROM xenon.uw_api_stats WHERE bucket_hour = :bucket_hour"
+                ),
+                {"bucket_hour": hour},
+            ).mappings().fetchone()
+            return dict(row) if row else None
+    finally:
+        engine.dispose()
 
 
 # ── bucket categorization ────────────────────────────────────────────
@@ -244,29 +263,25 @@ class TestPersistence:
         # would normally block since it's <30s since init).
         clock.advance(3601)
         s.record("stock/AAPL/volatility", status=200, latency_ms=100.0)
-        assert s.history_path.exists()
-        payload = json.loads(s.history_path.read_text())
-        assert "buckets" in payload
-        assert "2026-04-10T14:00:00Z" in payload["buckets"]
-        assert "2026-04-10T15:00:00Z" in payload["buckets"]
+        assert _pg_bucket("2026-04-10T14:00:00Z") is not None
+        assert _pg_bucket("2026-04-10T15:00:00Z") is not None
 
     def test_throttle_blocks_rapid_writes(self, tmp_path):
         clock = Clock(datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc))
         s = _make_stats(tmp_path, clock)
         s.record("stock/AAPL/volatility", status=200, latency_ms=100.0)
-        first_mtime = s.history_path.stat().st_mtime_ns
+        assert _pg_bucket("2026-04-10T14:00:00Z")["status_2xx"] == 1
         # Additional records within throttle window → no new write.
         clock.advance(5)
         s.record("stock/AAPL/volatility", status=200, latency_ms=100.0)
         clock.advance(5)
         s.record("stock/AAPL/volatility", status=200, latency_ms=100.0)
-        # Still same write.
-        assert s.history_path.stat().st_mtime_ns == first_mtime
+        # Still same persisted row.
+        assert _pg_bucket("2026-04-10T14:00:00Z")["status_2xx"] == 1
         # After 30s another save should go through.
         clock.advance(25)
         s.record("stock/AAPL/volatility", status=200, latency_ms=100.0)
-        payload = json.loads(s.history_path.read_text())
-        assert payload["buckets"]["2026-04-10T14:00:00Z"]["requests_2xx"] == 4
+        assert _pg_bucket("2026-04-10T14:00:00Z")["status_2xx"] == 4
 
     def test_persist_load_round_trip(self, tmp_path):
         clock = Clock(datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc))
@@ -292,10 +307,9 @@ class TestPersistence:
         s = _make_stats(tmp_path, clock)
         # Force throttle window open, but flush_history should bypass it.
         s.record("stock/AAPL/volatility", status=200, latency_ms=100.0)
-        first_mtime = s.history_path.stat().st_mtime_ns
         clock.advance(1)
         s.flush_history()
-        assert s.history_path.stat().st_mtime_ns >= first_mtime
+        assert _pg_bucket("2026-04-10T14:00:00Z")["status_2xx"] == 1
 
     def test_load_missing_file_clean_start(self, tmp_path):
         clock = Clock(datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc))

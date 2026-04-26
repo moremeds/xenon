@@ -13,16 +13,14 @@ Runtime fits the ``BaseHandler`` template under ``monitor_daemon/handlers/``.
 
 from __future__ import annotations
 
-import json
 import logging
+import os
 import subprocess
-import uuid
-from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from xenon.execution import orders_store
+from xenon.execution import orders_store  # noqa: F401 — kept for external import paths
 from xenon.execution.combo_wizard.protect import risk_alert_popup_copy
 
 from .base import BaseHandler
@@ -87,53 +85,74 @@ class WizardStopMonitorHandler(BaseHandler):
 
     # -- helpers -----------------------------------------------------------
 
-    def _connect(self):
-        return orders_store._connect_utc(orders_store._resolve_path(self._db_path))
-
     def _list_protected(self) -> list[dict[str, Any]]:
-        orders_store.init_store(orders_store._resolve_path(self._db_path))
-        con = self._connect()
-        try:
-            rows = con.execute(
-                """
-                SELECT s.session_id, s.ticker, s.payload_json,
-                       p.alert_net_mid_threshold, p.alert_enabled
-                  FROM wizard_sessions s
-                  JOIN wizard_protection p ON p.session_id = s.session_id
-                 WHERE UPPER(s.state) = 'PROTECTED'
-                   AND p.alert_enabled = TRUE
-                """
-            ).fetchall()
-        finally:
-            con.close()
+        """Return PROTECTED sessions with active alert from Postgres.
+
+        Scope filter is all-or-nothing: when both `XENON_TRADING_MODE` and
+        `XENON_BROKER_ACCOUNT` are set, query both (with broker defaulting
+        to IB). When neither is set, run unscoped (legacy behavior). Setting
+        only one is misconfiguration — fail loud rather than silently
+        broaden the query to every account in that env.
+        """
+        from xenon.db.engine import get_sync_engine
+        from xenon.db.queries import combo_wizard
+
+        broker_env = os.environ.get("XENON_BROKER") or None
+        account_env_env = os.environ.get("XENON_TRADING_MODE") or None
+        broker_account_env = os.environ.get("XENON_BROKER_ACCOUNT") or None
+
+        if account_env_env or broker_account_env:
+            if not (account_env_env and broker_account_env):
+                raise RuntimeError(
+                    "wizard_stop_monitor: scope is partial — set both "
+                    "XENON_TRADING_MODE and XENON_BROKER_ACCOUNT, or neither. "
+                    f"Got XENON_TRADING_MODE={account_env_env!r}, "
+                    f"XENON_BROKER_ACCOUNT={broker_account_env!r}"
+                )
+            broker = broker_env or "IB"
+            account_env = account_env_env
+            broker_account = broker_account_env
+        else:
+            broker = None
+            account_env = None
+            broker_account = None
+
+        engine = get_sync_engine()
+        with engine.connect() as conn:
+            rows = combo_wizard.list_protected_sessions(
+                conn,
+                broker=broker,
+                account_env=account_env,
+                broker_account=broker_account,
+            )
+
         out: list[dict[str, Any]] = []
         for r in rows:
-            payload = json.loads(r[2]) if r[2] else {}
+            payload = r.get("payload") or {}
+            config = r.get("config") or {}
+            # Postgres stores alert fields inside config JSONB
+            alert_enabled = config.get("alert_enabled", False)
+            if not alert_enabled:
+                continue
+            threshold_raw = config.get("alert_net_mid_threshold")
             out.append(
                 {
-                    "session_id": r[0],
-                    "ticker": r[1],
+                    "session_id": r["session_id"],
+                    "ticker": r["ticker"],
                     "payload": payload,
-                    "threshold": Decimal(str(r[3])) if r[3] is not None else None,
+                    "threshold": Decimal(str(threshold_raw)) if threshold_raw is not None else None,
                 }
             )
         return out
 
     def _record_event(self, session_id: str, kind: str, detail: dict) -> None:
-        con = self._connect()
-        try:
-            con.execute(
-                'INSERT INTO wizard_session_events (event_id, session_id, kind, detail, "at") VALUES (?, ?, ?, ?, ?)',
-                [
-                    str(uuid.uuid4()),
-                    session_id,
-                    kind,
-                    json.dumps(detail, default=str),
-                    datetime.now(timezone.utc),
-                ],
-            )
-        finally:
-            con.close()
+        """Persist a wizard session event to Postgres."""
+        from xenon.db.engine import get_sync_engine
+        from xenon.db.queries import combo_wizard
+
+        engine = get_sync_engine()
+        with engine.begin() as conn:
+            combo_wizard.record_event(conn, session_id=session_id, kind=kind, detail=detail)
 
     @staticmethod
     def _crossed(quote: Decimal, threshold: Decimal) -> bool:

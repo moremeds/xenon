@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-import duckdb
-
+from xenon.db.engine import get_sync_engine
+from xenon.db.queries import combo_wizard
 from xenon.execution import orders_store as _orders_store_mod
 
 PENDING_TIMEOUT_SECONDS = 60
@@ -53,13 +53,10 @@ class ReconcileDecision:
 
 
 def _submitted_at_epoch(val: Any) -> float:
-    """Return epoch seconds for a submitted_at value read back from DuckDB.
+    """Return epoch seconds for a submitted_at value.
 
-    ``orders_store`` writes ``datetime.now(timezone.utc)``. DuckDB's TIMESTAMP
-    column strips tzinfo; with a UTC session TimeZone (set in orders_store
-    writes), the stored naive wall-clock equals the UTC wall-clock. The
-    reader must therefore treat naive values as UTC — relying on Python's
-    local-time interpretation breaks on non-UTC servers (PR-C/D review A5).
+    Postgres TIMESTAMP WITH TIME ZONE columns return timezone-aware datetimes.
+    For backwards compat, also handles naive datetimes (treated as UTC).
     """
     if isinstance(val, datetime):
         if val.tzinfo is None:
@@ -200,38 +197,26 @@ def _reconcile_from_three_sources(
 # ---------------------------------------------------------------------------
 
 
-def _list_unresolved(db_path: Path | str | None = None) -> list[dict]:
-    path = _orders_store_mod._resolve_path(db_path)
-    _orders_store_mod.init_store(path)
-    con = _orders_store_mod._connect_utc(path)
-    try:
-        rows = con.execute(
-            """
-            SELECT submission_id, user_id, client_attempt_id, ticker, security_type,
-                   action, quantity, con_id, ib_order_id, perm_id, state,
-                   filled_qty, submitted_at
-              FROM orders_submissions
-             WHERE state IN ('PENDING', 'WORKING', 'PARTIALLY_FILLED')
-            """
-        ).fetchall()
-    finally:
-        con.close()
-    keys = [
-        "submission_id",
-        "user_id",
-        "client_attempt_id",
-        "ticker",
-        "security_type",
-        "action",
-        "quantity",
-        "con_id",
-        "ib_order_id",
-        "perm_id",
-        "state",
-        "filled_qty",
-        "submitted_at",
-    ]
-    return [dict(zip(keys, r)) for r in rows]
+def _list_unresolved(
+    db_path: Path | str | None = None,
+    *,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
+) -> list[dict]:
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        rows = combo_wizard.list_unresolved_orders(
+            conn,
+            broker=broker,
+            account_env=account_env,
+            broker_account=broker_account,
+        )
+    # Postgres returns `expiry` as a date object; convert to str for compat.
+    for r in rows:
+        if isinstance(r.get("expiry"), date):
+            r["expiry"] = r["expiry"].isoformat()
+    return rows
 
 
 def _index_open_orders(open_orders: list) -> dict:
@@ -327,13 +312,26 @@ def rehydrate_on_boot(
     orders_store,
     now: Callable[[], float] = time.time,
     db_path: Path | str | None = None,
+    *,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
 ) -> list[ReconcileDecision]:
     """Reconcile all unresolved orders against IB state. Returns decisions made.
 
     ``orders_store`` is passed in (rather than imported) so tests can inject a
     stub if needed; we default to the real module in ``__init__`` semantics.
+
+    Scope filters (broker/account_env/broker_account) limit reconciliation to
+    rows owned by this broker account. Pass None to skip filtering (backward-
+    compatible with legacy callers).
     """
-    rows = _list_unresolved(db_path=db_path)
+    rows = _list_unresolved(
+        db_path=db_path,
+        broker=broker,
+        account_env=account_env,
+        broker_account=broker_account,
+    )
     if not rows:
         return []
 
@@ -366,7 +364,7 @@ def rehydrate_on_boot(
         # for observability but does not need a DB state change.
         if decision.to_state != row["state"]:
             if decision.to_state == "WORKING":
-                # No dedicated helper; use a direct UPDATE via DuckDB for state shift.
+                # No dedicated helper; use a direct UPDATE via Postgres for state shift.
                 _update_state_only(row["submission_id"], decision.to_state, db_path=db_path)
             elif decision.to_state in (
                 "FILLED",
@@ -398,13 +396,6 @@ def rehydrate_on_boot(
 
 
 def _update_state_only(submission_id: str, state: str, db_path: Path | str | None = None) -> None:
-    path = _orders_store_mod._resolve_path(db_path)
-    now = datetime.now(timezone.utc)
-    con = _orders_store_mod._connect_utc(path)
-    try:
-        con.execute(
-            "UPDATE orders_submissions SET state=?, updated_at=? WHERE submission_id=?",
-            [state, now, submission_id],
-        )
-    finally:
-        con.close()
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        combo_wizard.update_order_state(conn, submission_id, state)

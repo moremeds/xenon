@@ -6,7 +6,7 @@ subsequent EOD snapshots, classifying anomalies (premium collapse, OI
 evaporation, closing-volume spike) and closing it out when positioning unwinds
 or the contract expires.
 
-Storage: data/uw_unusual_flow_log.json (atomic writes via tmpfile + os.replace).
+Storage: Postgres ``xenon.uw_flow_events``.
 
 Spec: docs/superpowers/specs/2026-04-08-uw-analyze-overhaul-design.md
       §"Unusual flow lifecycle tracker"
@@ -19,7 +19,6 @@ import json
 import logging
 import os
 import sys
-import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -369,7 +368,7 @@ def progress_event(
 
 
 class FlowLog:
-    """Thin file-backed dict-of-events with atomic writes."""
+    """Thin in-memory dict-of-events with Postgres persistence."""
 
     def __init__(self, path: Optional[Path] = None) -> None:
         self.path = Path(path) if path else _DEFAULT_PATH
@@ -381,6 +380,7 @@ class FlowLog:
             return
         self._loaded = True
         if not self.path.exists():
+            self._load_from_postgres()
             return
         try:
             raw = json.loads(self.path.read_text())
@@ -395,6 +395,35 @@ class FlowLog:
                 self._events[eid] = _event_from_dict(payload)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("skipping malformed flow event %s: %s", eid, exc)
+
+    def _load_from_postgres(self) -> None:
+        try:
+            from sqlalchemy import select
+
+            from xenon.db.engine import get_sync_engine
+            from xenon.db.schema import uw_flow_events
+
+            engine = get_sync_engine()
+            with engine.connect() as conn:
+                rows = conn.execute(select(uw_flow_events)).fetchall()
+            for row in rows:
+                data = dict(row._mapping)
+                payload = {
+                    "id": data["flow_event_key"],
+                    "ticker": data["ticker"],
+                    "side": data["side"],
+                    "strike": float(data["strike"]) if data["strike"] is not None else 0.0,
+                    "expiry": data["expiry"].isoformat() if data["expiry"] else "",
+                    "detected_at": data["detected_at"].isoformat() if data["detected_at"] else "",
+                    "initial": data["initial"] or {},
+                    "daily_track": data["daily_track"] or [],
+                    "status": data["status"],
+                    "anomaly_reason": data["anomaly_reason"],
+                    "closed_at": data["closed_at"].isoformat() if data["closed_at"] else None,
+                }
+                self._events[payload["id"]] = _event_from_dict(payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("flow_log Postgres load failed: %s", exc)
 
     def all(self) -> list[FlowEvent]:
         self.load()
@@ -456,22 +485,69 @@ class FlowLog:
 
     def save(self) -> None:
         self.load()
-        payload = {
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "events": {eid: ev.to_dict() for eid, ev in self._events.items()},
-        }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_fd, tmp_path = tempfile.mkstemp(prefix=".uw_unusual_flow_log_", suffix=".json", dir=str(self.path.parent))
+        self._save_to_postgres()
+
+    def _save_to_postgres(self) -> None:
         try:
-            with os.fdopen(tmp_fd, "w") as fh:
-                json.dump(payload, fh, indent=2, default=str)
-            os.replace(tmp_path, self.path)
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+            from xenon.db.engine import get_sync_engine
+            from xenon.db.schema import uw_flow_events
+
+            engine = get_sync_engine()
+            with engine.begin() as conn:
+                for ev in self._events.values():
+                    detected = datetime.fromisoformat(ev.detected_at) if ev.detected_at else datetime.now(timezone.utc)
+                    closed = datetime.fromisoformat(ev.closed_at) if ev.closed_at else None
+                    expiry_d = None
+                    try:
+                        expiry_d = date.fromisoformat(ev.expiry) if ev.expiry else None
+                    except ValueError:
+                        pass
+                    initial_dict = {
+                        "premium_usd": ev.initial.premium_usd,
+                        "oi": ev.initial.oi,
+                        "volume": ev.initial.volume,
+                        "mid": ev.initial.mid,
+                        "underlying_price": ev.initial.underlying_price,
+                    }
+                    track_list = [
+                        {
+                            "date": r.date,
+                            "oi": r.oi,
+                            "mid": r.mid,
+                            "underlying_price": r.underlying_price,
+                            "pct_change_premium": r.pct_change_premium,
+                            "volume": r.volume,
+                        }
+                        for r in ev.daily_track
+                    ]
+                    values = {
+                        "flow_event_key": ev.id,
+                        "ticker": ev.ticker,
+                        "side": ev.side,
+                        "strike": ev.strike,
+                        "expiry": expiry_d,
+                        "detected_at": detected,
+                        "initial": initial_dict,
+                        "daily_track": track_list,
+                        "status": ev.status,
+                        "anomaly_reason": ev.anomaly_reason,
+                        "closed_at": closed,
+                    }
+                    stmt = pg_insert(uw_flow_events).values(**values)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=[uw_flow_events.c.flow_event_key],
+                        set_={
+                            "daily_track": stmt.excluded.daily_track,
+                            "status": stmt.excluded.status,
+                            "anomaly_reason": stmt.excluded.anomaly_reason,
+                            "closed_at": stmt.excluded.closed_at,
+                        },
+                    )
+                    conn.execute(stmt)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("flow_log Postgres save failed: %s", exc)
 
 
 def _event_from_dict(d: dict) -> FlowEvent:

@@ -26,6 +26,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Req
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+from sqlalchemy import func, select
 
 # Project paths — file lives at src/xenon/api/server.py
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -47,6 +48,8 @@ from xenon.api.routes.wizard import router as wizard_router
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
+from xenon.db.engine import dispose_engine, get_sync_engine, init_engine
+from xenon.db.schema import order_events, order_submissions
 from xenon.execution import orders_store, preflight, quote_guard, quote_tokens
 from xenon.execution.preflight import (
     PortfolioView,
@@ -160,20 +163,19 @@ async def _run_rehydrate_on_boot() -> None:
             raise RuntimeError("ib_pool sync role has no client")
         return client
 
-    db_path = os.environ.get("XENON_ORDERS_DB_PATH") or str(_orders_store_mod._resolve_path(None))
-
-    # B1 — in test_mode, refuse to touch the real data/orders.duckdb. A pytest
-    # TestClient(app) without XENON_ORDERS_DB_PATH would otherwise read/write
-    # the prod DuckDB file. Require the env var to enable rehydrate under
-    # test_mode so tests can opt in explicitly via a tmp_path fixture.
     if _is_test_mode():
-        env_override = os.environ.get("XENON_ORDERS_DB_PATH")
-        # Compare against the literal default string — don't call _resolve_path
-        # here because it would round-trip through the env var we're checking.
-        default_prod_path = "data/orders.duckdb"
-        if not env_override or env_override == default_prod_path:
-            logger.info("test_mode: skipping rehydrate (set XENON_ORDERS_DB_PATH to enable)")
-            return
+        logger.info("test_mode: skipping rehydrate")
+        return
+
+    # Resolve scope from app.state populated earlier in lifespan. None values
+    # mean "no scope filter" — pre-scope rows still get reconciled.
+    _scope_account_env = getattr(app.state, "trading_mode", None)
+    _scope_account = getattr(app.state, "account", None)
+    _scope_kwargs = {
+        "broker": "IB" if _scope_account_env else None,
+        "account_env": _scope_account_env,
+        "broker_account": _scope_account or None,
+    }
 
     try:
         await asyncio.wait_for(
@@ -181,7 +183,7 @@ async def _run_rehydrate_on_boot() -> None:
                 _rehydrate_mod.rehydrate_on_boot,
                 ib_client_factory=_ib_client_factory,
                 orders_store=_orders_store_mod,
-                db_path=db_path,
+                **_scope_kwargs,
             ),
             timeout=10.0,
         )
@@ -201,6 +203,7 @@ async def _run_rehydrate_on_boot() -> None:
                 _combo_rehydrate_mod.rehydrate_combo_sessions,
                 ib_client_factory=_ib_client_factory,
                 db_path=db_path,
+                **_scope_kwargs,
             ),
             timeout=10.0,
         )
@@ -239,6 +242,8 @@ async def lifespan(app: FastAPI):
         logger.info("Xenon API starting in test mode; IB Gateway and pool startup are disabled")
         uw_available = bool(os.environ.get("UW_TOKEN"))
         orders_store.init_store()
+        if os.environ.get("DATABASE_URL"):
+            app.state.db_engine = init_engine()
         await _run_rehydrate_on_boot()
         app.state.trading_mode = trading_mode.MODE
         # Tests monkeypatch _get_managed_account_for_health; honor that.
@@ -280,6 +285,7 @@ async def lifespan(app: FastAPI):
         logger.info("Trading mode verified: %s account=%s", trading_mode.MODE, account)
 
     orders_store.init_store()
+    app.state.db_engine = init_engine()
 
     # UW client — just verify token exists
     uw_available = bool(os.environ.get("UW_TOKEN"))
@@ -461,6 +467,7 @@ async def lifespan(app: FastAPI):
             _uw_stats.flush_history()
         except Exception as exc:  # noqa: BLE001
             logger.warning("uw_api_stats history flush on shutdown failed: %s", exc)
+        await dispose_engine()
         logger.info("Xenon API shut down")
 
 
@@ -550,7 +557,38 @@ def _write_cache(path: Path, data: dict) -> None:
             os.unlink(tmp_path)
         except OSError:
             pass
-        raise
+
+
+_SCAN_TYPE_MAP = {
+    "scanner.json": "watchlist",
+    "discover.json": "discover",
+    "gex.json": "gex",
+    "vcg.json": "vcg",
+    "cri.json": "cri",
+}
+
+
+def _write_scan_to_postgres(filename: str, data: dict) -> None:
+    """Write a scanner result to Postgres scan_results table (best-effort)."""
+    scan_type = _SCAN_TYPE_MAP.get(filename)
+    if not scan_type:
+        return
+    try:
+        url = os.environ.get("DATABASE_URL")
+        if not url:
+            return
+        from sqlalchemy import create_engine as _cse
+        from sqlalchemy import insert
+
+        from xenon.db.schema import scan_results
+
+        sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+        engine = _cse(sync_url)
+        with engine.begin() as conn:
+            conn.execute(insert(scan_results).values(scan_type=scan_type, payload=data))
+        engine.dispose()
+    except Exception:
+        logger.warning("scan archive to Postgres failed for %s", filename, exc_info=True)
 
 
 def _atomic_save(path: str, data: dict) -> str:
@@ -1126,14 +1164,9 @@ async def dev_rehydrate_synthetic():
     from datetime import timezone as _tz
     from decimal import Decimal as _Dec
 
-    import duckdb as _duckdb
-
     from xenon.execution import orders_store as _orders_store_mod
     from xenon.execution import single_leg_rehydrate as _rehydrate_mod
     from xenon.execution.single_leg_rehydrate import PENDING_TIMEOUT_SECONDS
-
-    db_path = os.environ.get("XENON_ORDERS_DB_PATH") or str(_orders_store_mod._resolve_path(None))
-    _orders_store_mod.init_store(db_path)
 
     client_attempt_id = f"synthetic-{_uuid.uuid4()}"
     reservation = _orders_store_mod.reserve_attempt(
@@ -1147,7 +1180,7 @@ async def dev_rehydrate_synthetic():
             multiplier=1,
             limit_price=_Dec("500"),
         ),
-        db_path=db_path,
+        **_resolve_scope_kwargs(),
     )
     submission_id = reservation.submission_id
 
@@ -1155,32 +1188,28 @@ async def dev_rehydrate_synthetic():
     # is deterministic (FAILED / PENDING_TIMEOUT). Inline UPDATE — probe-specific.
     # Use the UTC-session helper so the naive round-trip preserves the epoch.
     backdated = _dt.now(_tz.utc) - _td(seconds=PENDING_TIMEOUT_SECONDS + 5)
-    con = _orders_store_mod._connect_utc(db_path)
-    try:
-        con.execute(
-            "UPDATE orders_submissions SET submitted_at = ? WHERE submission_id = ?",
-            [backdated, submission_id],
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            order_submissions.update()
+            .where(order_submissions.c.submission_id == submission_id)
+            .values(submitted_at=backdated)
         )
-    finally:
-        con.close()
 
     decisions = await asyncio.to_thread(
         _rehydrate_mod.rehydrate_on_boot,
         ib_client_factory=lambda: _FakeEmptyIBClient(),
         orders_store=_orders_store_mod,
-        db_path=db_path,
     )
 
     # Count events written for this submission
-    con = _duckdb.connect(str(db_path))
-    try:
-        row = con.execute(
-            "SELECT COUNT(*) FROM orders_events WHERE submission_id = ?",
-            [submission_id],
-        ).fetchone()
-    finally:
-        con.close()
-    events_count = int(row[0]) if row else 0
+    with engine.connect() as conn:
+        events_count = int(
+            conn.execute(
+                select(func.count()).select_from(order_events).where(order_events.c.submission_id == submission_id)
+            ).scalar()
+            or 0
+        )
 
     summary = [
         {
@@ -1244,6 +1273,7 @@ async def scan():
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     _write_cache(DATA_DIR / "scanner.json", result.data)
+    _write_scan_to_postgres("scanner.json", result.data)
     return result.data
 
 
@@ -1256,6 +1286,7 @@ async def discover():
     if result.data and result.data.get("error"):
         raise HTTPException(status_code=400, detail=result.data["error"])
     _write_cache(DATA_DIR / "discover.json", result.data)
+    _write_scan_to_postgres("discover.json", result.data)
     return result.data
 
 
@@ -1439,7 +1470,7 @@ def _run_preflight(body: dict, user_id: str = "local") -> Verdict:
         # removes this branch.
         return Verdict(accept=True)
     req = _body_to_preflight_request(body)
-    reservations = orders_store.working_reservations_for(user_id, req.ticker)
+    reservations = orders_store.working_reservations_for(user_id, req.ticker, **_resolve_scope_kwargs())
     return preflight.evaluate(req, portfolio, reservations=reservations)
 
 
@@ -1561,6 +1592,20 @@ async def orders_place(request: Request):
     return await _orders_place_from_body(body)
 
 
+def _resolve_scope_kwargs() -> dict[str, str]:
+    """Resolve broker account scope from app.state with safe fallback.
+
+    Lifespan populates `app.state.trading_mode` and `app.state.account`.
+    Tests that bypass lifespan get `legacy_unknown` defaults — this matches
+    the column server_default so existing test rows still pass CHECK.
+    """
+    mode = getattr(app.state, "trading_mode", None)
+    account = getattr(app.state, "account", None)
+    if mode and account:
+        return {"broker": "IB", "account_env": mode, "broker_account": account}
+    return {"broker": "IB", "account_env": "legacy_unknown", "broker_account": "legacy_unknown"}
+
+
 async def _orders_place_from_body(body: dict):
     # F2: server-side Gate 4. Run preflight before any subprocess invocation.
     verdict = _run_preflight(body)
@@ -1639,7 +1684,7 @@ async def _orders_place_from_body(body: dict):
         con_id=int(body.get("con_id") or 0) or None,
         limit_price=Decimal(str(body.get("limitPrice", "0"))),
     )
-    outcome = orders_store.reserve_attempt(user_id, cid, req_row)
+    outcome = orders_store.reserve_attempt(user_id, cid, req_row, **_resolve_scope_kwargs())
     if outcome.status == "terminal":
         return JSONResponse(
             status_code=409,
@@ -1759,6 +1804,7 @@ def _record_manage_event(
     kind: str,
     detail: dict,
     perm_id: str = "",
+    scope: dict[str, str] | None = None,
 ) -> None:
     """Write orders_events row for a cancel/modify attempt.
 
@@ -1769,11 +1815,12 @@ def _record_manage_event(
     .submission_id is NOT NULL and has no synthetic parent row available.
     """
     try:
+        scope = scope or _resolve_scope_kwargs()
         sid: str | None = None
         if ib_order_id:
-            sid = orders_store.lookup_submission_id_by_ib_order_id(ib_order_id)
+            sid = orders_store.lookup_submission_id_by_ib_order_id(ib_order_id, **scope)
         if sid is None and perm_id:
-            sid = orders_store.lookup_submission_id_by_perm_id(perm_id)
+            sid = orders_store.lookup_submission_id_by_perm_id(perm_id, **scope)
         if sid:
             orders_store.record_event(sid, kind, detail)
     except Exception:  # pragma: no cover — event writes are best-effort
@@ -1890,6 +1937,7 @@ def _try_register_order_from_snapshot(*, perm_id: int, order_id: int) -> bool:
             quantity=int(target.get("totalQuantity") or 0),
             limit_price=float(target.get("limitPrice") or 0.0),
             multiplier=multiplier,
+            **_resolve_scope_kwargs(),
         )
     except Exception as exc:
         logger.warning(
@@ -1966,10 +2014,11 @@ async def _orders_modify_from_body(body: dict):
                 "http_status": 400,
             },
         )
+    _scope = _resolve_scope_kwargs()
     if not order_id and perm_id:
-        seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence)
+        seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence, **_scope)
     else:
-        seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence)
+        seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence, **_scope)
     # If the perm_id is unknown to orders_store but exists in the IB snapshot,
     # lazy-register it and retry. Covers orders placed before orders_store
     # tracking existed or by an external client (the snapshot reconstruction
@@ -1977,9 +2026,9 @@ async def _orders_modify_from_body(body: dict):
     if not seq_outcome["applied"] and seq_outcome["current_sequence"] == -1:
         if _try_register_order_from_snapshot(perm_id=perm_id, order_id=order_id):
             if not order_id and perm_id:
-                seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence)
+                seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence, **_scope)
             else:
-                seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence)
+                seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence, **_scope)
 
     if not seq_outcome["applied"]:
         current = seq_outcome["current_sequence"]
@@ -2032,7 +2081,7 @@ async def _orders_modify_from_body(body: dict):
             "applied_sequence": modify_sequence,
             "http_status": 503,
         }
-        _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""))
+        _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""), scope=_scope)
         raise HTTPException(status_code=503, detail=detail)
 
     data = result.data or {}
@@ -2046,7 +2095,7 @@ async def _orders_modify_from_body(body: dict):
             "applied_sequence": modify_sequence,
             "http_status": http_status,
         }
-        _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""))
+        _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""), scope=_scope)
         raise HTTPException(status_code=http_status, detail=detail)
 
     _record_manage_event(
@@ -2059,6 +2108,7 @@ async def _orders_modify_from_body(body: dict):
             "http_status": 200,
         },
         perm_id=str(perm_id or ""),
+        scope=_scope,
     )
     # Echo the applied sequence so the UI can anchor its per-order counter.
     return {**data, "applied_sequence": modify_sequence}
@@ -2085,6 +2135,7 @@ async def regime_scan():
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     _write_cache(DATA_DIR / "cri.json", result.data)
+    _write_scan_to_postgres("cri.json", result.data)
     return result.data
 
 
@@ -2117,6 +2168,7 @@ async def vcg_scan():
         if not result.ok:
             raise HTTPException(status_code=502, detail=result.error)
         _write_cache(DATA_DIR / "vcg.json", result.data)
+        _write_scan_to_postgres("vcg.json", result.data)
         _vcg_last_scan = _time.monotonic()
         return result.data
 
@@ -2309,6 +2361,7 @@ async def gex_scan(ticker: str = "SPX"):
         if not result.ok:
             raise HTTPException(status_code=502, detail=result.error)
         _write_cache(DATA_DIR / "gex.json", result.data)
+        _write_scan_to_postgres("gex.json", result.data)
         _gex_last_scan = _time.monotonic()
         return result.data
 

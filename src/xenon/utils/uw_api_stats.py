@@ -5,8 +5,8 @@ across all UWClient instances in the process. Singleton module-level
 instance — import ``stats`` and call ``stats.record()``.
 
 Also keeps a rolling 96-hour history of per-hour buckets (status-class
-breakdown + latency sum/count) persisted to ``data/uw_api_stats_history.json``
-so daily stats survive FastAPI restarts.
+breakdown + latency sum/count) persisted to Postgres so daily stats survive
+FastAPI restarts.
 
 Thread safety: all mutations protected by threading.Lock because
 UWClient._get() runs in concurrent threads via asyncio.to_thread().
@@ -18,7 +18,6 @@ import json
 import logging
 import os
 import re
-import tempfile
 import threading
 import time
 from collections import deque
@@ -457,33 +456,43 @@ class UWApiStats:
         }
 
     def _write_history_atomic(self, payload: Dict[str, Any]) -> None:
-        """Atomically persist the history payload to disk.
+        """Persist the history payload to Postgres."""
+        self._write_history_to_postgres(payload)
 
-        Mirrors the pattern from scripts/api/services/uw_analyze_cache.py —
-        tempfile in the same directory → fdopen write → os.replace. On
-        any exception unlinks the temp file. Must NOT be called under lock.
-        """
+    def _write_history_to_postgres(self, payload: Dict[str, Any]) -> None:
         try:
-            self.history_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_fd, tmp_path = tempfile.mkstemp(
-                prefix=".uw_api_stats_history_",
-                suffix=".json",
-                dir=str(self.history_path.parent),
-            )
-            try:
-                with os.fdopen(tmp_fd, "w") as fh:
-                    json.dump(payload, fh, indent=2)
-                os.replace(tmp_path, self.history_path)
-            except Exception:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
+            from decimal import Decimal
+
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+            from xenon.db.engine import get_sync_engine
+            from xenon.db.schema import uw_api_stats as uw_stats_table
+
+            engine = get_sync_engine()
+            buckets = payload.get("buckets") or {}
+            with engine.begin() as conn:
+                for hour_key, b in buckets.items():
+                    bucket_dt = datetime.strptime(hour_key, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                    values = dict(
+                        bucket_hour=bucket_dt,
+                        requests=int(b.get("requests_2xx", 0))
+                        + int(b.get("requests_4xx", 0))
+                        + int(b.get("requests_5xx", 0)),
+                        cache_hits=int(b.get("cached", 0)),
+                        latency_sum=Decimal(str(b.get("sum_latency_ms", 0.0))),
+                        latency_count=int(b.get("latency_count", 0)),
+                        status_2xx=int(b.get("requests_2xx", 0)),
+                        status_4xx=int(b.get("requests_4xx", 0)),
+                        status_5xx=int(b.get("requests_5xx", 0)),
+                    )
+                    stmt = pg_insert(uw_stats_table).values(**values)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=[uw_stats_table.c.bucket_hour],
+                        set_={k: stmt.excluded[k] for k in values if k != "bucket_hour"},
+                    )
+                    conn.execute(stmt)
         except Exception as exc:  # noqa: BLE001
-            # Never let persistence failure take down the caller — this
-            # is a best-effort observability feature.
-            logger.warning("uw_api_stats history write failed: %s", exc)
+            logger.warning("uw_api_stats Postgres write failed: %s", exc)
 
     def _load_history(self) -> None:
         """Read persisted history on startup. Tolerates every failure mode.
@@ -495,6 +504,8 @@ class UWApiStats:
         sum/count per hour, not the raw distribution — so ``latency_ms.p95``
         stays absent until the first new live sample arrives.
         """
+        if self._load_history_from_postgres():
+            return
         try:
             if not self.history_path.exists():
                 return
@@ -527,6 +538,44 @@ class UWApiStats:
                 exc,
             )
             self._hourly = {}
+
+    def _load_history_from_postgres(self) -> bool:
+        try:
+            from datetime import timedelta
+
+            from sqlalchemy import select
+
+            from xenon.db.engine import get_sync_engine
+            from xenon.db.schema import uw_api_stats as uw_stats_table
+
+            engine = get_sync_engine()
+            cutoff = datetime.fromtimestamp(self._now_fn(), tz=timezone.utc) - timedelta(hours=96)
+            with engine.connect() as conn:
+                rows = conn.execute(select(uw_stats_table).where(uw_stats_table.c.bucket_hour >= cutoff)).fetchall()
+            if not rows:
+                return False
+
+            loaded: Dict[str, Dict[str, Any]] = {}
+            for row in rows:
+                data = row._mapping
+                bucket_hour = data["bucket_hour"]
+                key = bucket_hour.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:00:00Z")
+                loaded[key] = {
+                    "requests_2xx": int(data.get("status_2xx") or 0),
+                    "requests_4xx": int(data.get("status_4xx") or 0),
+                    "requests_5xx": int(data.get("status_5xx") or 0),
+                    "cached": int(data.get("cache_hits") or 0),
+                    "sum_latency_ms": float(data.get("latency_sum") or 0.0),
+                    "latency_count": int(data.get("latency_count") or 0),
+                }
+            self._hourly = loaded
+            self._prune_history(now_ts=self._now_fn())
+            self._rehydrate_session_counters_from_history()
+            logger.info("uw_api_stats loaded %d hourly buckets from Postgres", len(self._hourly))
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("uw_api_stats Postgres history load failed: %s", exc)
+            return False
 
     def _rehydrate_session_counters_from_history(self) -> None:
         """Seed in-memory session counters from loaded hourly buckets.

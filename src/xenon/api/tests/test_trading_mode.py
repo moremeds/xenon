@@ -13,7 +13,7 @@ import pytest
 
 def _reload(monkeypatch, mode_value: str | None):
     if mode_value is None:
-        monkeypatch.delenv("XENON_TRADING_MODE", raising=False)
+        monkeypatch.setenv("XENON_TRADING_MODE", "")
     else:
         monkeypatch.setenv("XENON_TRADING_MODE", mode_value)
     import xenon.api.trading_mode as tm
@@ -31,7 +31,7 @@ def _reset_trading_mode_modules(monkeypatch):
     reloaded — ib_client must NOT be reloaded mid-session because it would
     invalidate the @patch decorators used by scripts/tests/test_ib_client.py.
     """
-    monkeypatch.delenv("XENON_TRADING_MODE", raising=False)
+    monkeypatch.setenv("XENON_TRADING_MODE", "")
     monkeypatch.delenv("IB_GATEWAY_PORT", raising=False)
     import xenon.api.trading_mode as tm
 
@@ -39,7 +39,7 @@ def _reset_trading_mode_modules(monkeypatch):
 
     yield
 
-    monkeypatch.delenv("XENON_TRADING_MODE", raising=False)
+    monkeypatch.setenv("XENON_TRADING_MODE", "")
     monkeypatch.delenv("IB_GATEWAY_PORT", raising=False)
     importlib.reload(tm)
 
@@ -58,7 +58,7 @@ def test_parse_live(monkeypatch):
     assert tm.EXPECTED_PREFIX == "U"
 
 
-def test_default_is_paper_when_unset(monkeypatch):
+def test_default_is_paper_when_blank(monkeypatch):
     tm = _reload(monkeypatch, None)
     assert tm.MODE == "paper"
     assert tm.EXPECTED_PORT == 4002

@@ -1,25 +1,60 @@
-"""Shared pytest fixtures for src/xenon/api/tests.
-
-B1 — isolate every test's DuckDB writes to a per-test tmp path so a
-TestClient(app) lifespan never touches the real data/orders.duckdb.
-"""
+"""Shared pytest fixtures for src/xenon/api/tests."""
 
 from __future__ import annotations
 
+import os
+
 import pytest
+from sqlalchemy import create_engine, text
 
 
 @pytest.fixture(autouse=True)
-def _isolate_orders_db(tmp_path_factory, monkeypatch):
-    """Redirect XENON_ORDERS_DB_PATH to a per-test tmp directory.
+def _postgres_orders_test_db(monkeypatch):
+    """Point sync Postgres callers at the test DB and clean order tables."""
+    url = os.environ.get(
+        "DATABASE_URL_TEST",
+        "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
+    )
+    monkeypatch.setenv("DATABASE_URL", url)
+    sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
 
-    The lifespan rehydrate hook reads XENON_ORDERS_DB_PATH; without this
-    fixture, tests that boot TestClient(app) in test_mode would hit the
-    shared prod DuckDB at data/orders.duckdb.
-    """
-    tmp_dir = tmp_path_factory.mktemp("orders")
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_dir / "orders.duckdb"))
+    try:
+        import xenon.db.engine as engine_mod
+
+        monkeypatch.setattr(engine_mod, "_sync_engine", None)
+    except Exception:
+        pass
+
+    def truncate() -> None:
+        engine = create_engine(sync_url, pool_pre_ping=True)
+        try:
+            with engine.begin() as conn:
+                for table in (
+                    "events.outbox",
+                    "xenon.order_events",
+                    "xenon.order_submissions",
+                    "xenon.wizard_protection",
+                    "xenon.wizard_events",
+                    "xenon.wizard_combo_attempts",
+                    "xenon.wizard_sessions",
+                    "xenon.uw_flow_events",
+                    "xenon.uw_api_stats",
+                    "xenon.uw_analyze_snapshots",
+                    "xenon.positions",
+                    "xenon.account_snapshots",
+                    "xenon.trades",
+                    "xenon.nav_history",
+                    "xenon.scan_results",
+                    "xenon.cri_series",
+                    "xenon.ticker_cache",
+                ):
+                    conn.execute(text(f"TRUNCATE {table} CASCADE"))
+        finally:
+            engine.dispose()
+
+    truncate()
     yield
+    truncate()
 
 
 @pytest.fixture(autouse=True)

@@ -6,6 +6,7 @@ asserts the route maps them to the correct HTTP status + reason_code.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -14,6 +15,7 @@ import pytest
 
 # test_mode must be False so the real classification logic runs.
 from fastapi.testclient import TestClient  # noqa: E402
+from sqlalchemy import create_engine, text
 
 from xenon.api import server as server_mod  # noqa: E402
 from xenon.api.subprocess import ScriptResult  # noqa: E402
@@ -46,6 +48,14 @@ def _patch_runner(monkeypatch, payload: dict | None, *, ok: bool = True, error: 
         return ScriptResult(ok=ok, data=payload, error=error)
 
     monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+
+def _pg_engine():
+    url = os.environ.get(
+        "DATABASE_URL_TEST",
+        "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
+    ).replace("postgresql+asyncpg://", "postgresql+psycopg://")
+    return create_engine(url, pool_pre_ping=True)
 
 
 def test_cancel_returns_503_on_connection(client, tmp_db, monkeypatch):
@@ -119,25 +129,33 @@ def test_cancel_ib_reject_generic_code_returns_400(client, tmp_db, monkeypatch):
 
 
 def _seed_submission(tmp_db: Path, ib_order_id: str = "42") -> str:
-    """Create an orders_submissions row so apply_modify has something to key on."""
-    import duckdb
+    """Create an orders_submissions row so apply_modify has something to key on.
 
+    Stamps the row with the test harness's scope (paper/DU0000000 from
+    scripts/tests/conftest.py + src/xenon/api/tests/conftest.py) so the
+    scope-filtered apply_modify in /orders/modify finds it.
+    """
     sid = "sub-test-1"
-    con = duckdb.connect(str(tmp_db))
+    engine = _pg_engine()
     try:
-        con.execute(
-            """
-            INSERT INTO orders_submissions (
+        with engine.begin() as con:
+            con.execute(
+                text(
+                    """
+            INSERT INTO xenon.order_submissions (
                 submission_id, user_id, client_attempt_id, ticker, security_type,
                 action, quantity, multiplier, limit_price, state, ib_order_id,
-                modify_sequence, submitted_at, updated_at
-            ) VALUES (?, 'local', 'cid-1', 'AAPL', 'STK', 'BUY', 1, 100, '1.23',
-                      'WORKING', ?, 5, NOW(), NOW())
+                modify_sequence, submitted_at, updated_at,
+                broker, account_env, broker_account
+            ) VALUES (:submission_id, 'local', 'cid-1', 'AAPL', 'STK', 'BUY', 1, 100, '1.23',
+                      'WORKING', :ib_order_id, 5, NOW(), NOW(),
+                      'IB', 'paper', 'DU0000000')
             """,
-            [sid, ib_order_id],
-        )
+                ),
+                {"submission_id": sid, "ib_order_id": ib_order_id},
+            )
     finally:
-        con.close()
+        engine.dispose()
     return sid
 
 
@@ -192,24 +210,27 @@ def test_modify_unknown_order_returns_404(client, tmp_db, monkeypatch):
 
 def test_modify_by_perm_id_with_known_row_advances_sequence(client, tmp_db, monkeypatch):
     """A4: when orderId=0 but permId is known, resolve via perm_id and succeed."""
-    import duckdb
-
     sid = "sub-perm-1"
-    con = duckdb.connect(str(tmp_db))
+    engine = _pg_engine()
     try:
-        con.execute(
-            """
-            INSERT INTO orders_submissions (
+        with engine.begin() as con:
+            con.execute(
+                text(
+                    """
+            INSERT INTO xenon.order_submissions (
                 submission_id, user_id, client_attempt_id, ticker, security_type,
                 action, quantity, multiplier, limit_price, state, ib_order_id,
-                perm_id, modify_sequence, submitted_at, updated_at
-            ) VALUES (?, 'local', 'cid-perm', 'AAPL', 'STK', 'BUY', 1, 100, '1.23',
-                      'WORKING', '99', '42', 0, NOW(), NOW())
+                perm_id, modify_sequence, submitted_at, updated_at,
+                broker, account_env, broker_account
+            ) VALUES (:submission_id, 'local', 'cid-perm', 'AAPL', 'STK', 'BUY', 1, 100, '1.23',
+                      'WORKING', '99', '42', 0, NOW(), NOW(),
+                      'IB', 'paper', 'DU0000000')
             """,
-            [sid],
-        )
+                ),
+                {"submission_id": sid},
+            )
     finally:
-        con.close()
+        engine.dispose()
 
     async def fake_runner(entry, args, timeout=30):
         return ScriptResult(ok=True, data={"status": "ok", "message": "Modified"})
@@ -302,40 +323,42 @@ def _seed_permid_submission(tmp_db: Path, perm_id: str = "P42") -> str:
     the permId (placement hasn't populated ib_order_id yet, or the UI dropped
     orderId on a reconnect).
     """
-    import duckdb
-
     sid = "sub-permevt-1"
-    con = duckdb.connect(str(tmp_db))
+    engine = _pg_engine()
     try:
-        con.execute(
-            """
-            INSERT INTO orders_submissions (
+        with engine.begin() as con:
+            con.execute(
+                text(
+                    """
+            INSERT INTO xenon.order_submissions (
                 submission_id, user_id, client_attempt_id, ticker, security_type,
                 action, quantity, multiplier, limit_price, state, ib_order_id,
-                perm_id, modify_sequence, submitted_at, updated_at
-            ) VALUES (?, 'local', 'cid-perm-evt', 'AAPL', 'STK', 'BUY', 1, 100, '1.23',
-                      'WORKING', ?, ?, 0, NOW(), NOW())
+                perm_id, modify_sequence, submitted_at, updated_at,
+                broker, account_env, broker_account
+            ) VALUES (:submission_id, 'local', 'cid-perm-evt', 'AAPL', 'STK', 'BUY', 1, 100, '1.23',
+                      'WORKING', :ib_order_id, :perm_id, 0, NOW(), NOW(),
+                      'IB', 'paper', 'DU0000000')
             """,
-            [sid, "ib-" + perm_id, perm_id],
-        )
+                ),
+                {"submission_id": sid, "ib_order_id": "ib-" + perm_id, "perm_id": perm_id},
+            )
     finally:
-        con.close()
+        engine.dispose()
     return sid
 
 
 def _fetch_events(tmp_db: Path, submission_id: str) -> list[tuple[str, str]]:
     """Return (kind, detail_json) rows for the given submission in insertion order."""
-    import duckdb
-
-    con = duckdb.connect(str(tmp_db))
+    engine = _pg_engine()
     try:
-        rows = con.execute(
-            'SELECT kind, detail FROM orders_events WHERE submission_id = ? ORDER BY "at"',
-            [submission_id],
-        ).fetchall()
+        with engine.connect() as con:
+            rows = con.execute(
+                text('SELECT kind, detail FROM xenon.order_events WHERE submission_id = :submission_id ORDER BY "at"'),
+                {"submission_id": submission_id},
+            ).fetchall()
     finally:
-        con.close()
-    return [(r[0], r[1]) for r in rows]
+        engine.dispose()
+    return [(r[0], json.dumps(r[1]) if isinstance(r[1], dict) else r[1]) for r in rows]
 
 
 def test_modify_permid_only_writes_event(client, tmp_db, monkeypatch):

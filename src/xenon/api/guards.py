@@ -10,6 +10,7 @@ from __future__ import annotations
 from fastapi import HTTPException, Request
 
 from xenon.api import trading_mode
+from xenon.execution.account_scope import AccountScope, resolve_from_app_state
 
 
 def mask_account(account: str | None) -> str:
@@ -53,3 +54,13 @@ def require_mode_verified(request: Request) -> None:
             f"Fix: align .env with the Gateway login and restart."
         ),
     )
+
+
+def get_account_scope(request: Request) -> AccountScope:
+    """FastAPI dependency: resolve the current broker account scope from app.state.
+
+    Populated by the server lifespan guard. Raises ValueError (→ 500) if the
+    lifespan didn't run — production callers should also depend on
+    `require_mode_verified` which produces the operator-friendly 503.
+    """
+    return resolve_from_app_state(request.app.state)

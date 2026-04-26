@@ -1,8 +1,8 @@
 import threading
 from decimal import Decimal
 
-import duckdb
 import pytest
+from sqlalchemy import create_engine, text
 
 from xenon.execution import orders_store
 from xenon.execution.orders_store import (
@@ -37,39 +37,23 @@ def db_path(tmp_path, monkeypatch):
     return p
 
 
-def test_init_store_creates_tables_and_indexes(db_path):
+def _fetch_all(sql: str, params: dict | None = None):
+    from xenon.db.engine import get_sync_engine
+
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        return conn.execute(text(sql), params or {}).fetchall()
+
+
+def test_orders_store_has_no_duckdb_compat_symbols():
+    assert "duckdb" not in orders_store.__dict__
+    assert not hasattr(orders_store, "_connect_utc")
+    assert not hasattr(orders_store, "_WRITE_LOCK")
+
+
+def test_init_store_is_backward_compatible_noop(db_path):
     orders_store.init_store(db_path)
-
-    con = duckdb.connect(str(db_path))
-    tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
-    assert {"orders_submissions", "orders_events"} <= tables
-
-    cols = {r[1] for r in con.execute("PRAGMA table_info('orders_submissions')").fetchall()}
-    expected = {
-        "submission_id",
-        "user_id",
-        "client_attempt_id",
-        "ticker",
-        "security_type",
-        "action",
-        "quantity",
-        "expiry",
-        "strike",
-        "right",
-        "multiplier",
-        "con_id",
-        "placing_client_id",
-        "ib_order_id",
-        "perm_id",
-        "limit_price",
-        "state",
-        "reason_code",
-        "filled_qty",
-        "avg_fill_price",
-        "submitted_at",
-        "updated_at",
-    }
-    assert expected <= cols, f"missing cols: {expected - cols}"
+    assert not db_path.exists()
 
 
 def test_init_store_is_idempotent(db_path):
@@ -109,9 +93,7 @@ def test_reserve_attempt_concurrent_only_one_winner(db_path):
 
     def _go():
         barrier.wait()
-        outcomes.append(
-            reserve_attempt("local", "cid-C", _req(), db_path=db_path)
-        )
+        outcomes.append(reserve_attempt("local", "cid-C", _req(), db_path=db_path))
 
     threads = [threading.Thread(target=_go) for _ in range(8)]
     for t in threads:
@@ -176,12 +158,10 @@ def test_record_event_appends_row(db_path):
     win = reserve_attempt("local", "cid-E", _req(), db_path=db_path)
     record_event(win.submission_id, "PREFLIGHT_ACK_LIMIT", {"override": True}, db_path=db_path)
 
-    con = duckdb.connect(str(db_path))
-    rows = con.execute(
-        "SELECT kind FROM orders_events WHERE submission_id = ?",
-        [win.submission_id],
-    ).fetchall()
-    con.close()
+    rows = _fetch_all(
+        "SELECT kind FROM xenon.order_events WHERE submission_id = :submission_id",
+        {"submission_id": win.submission_id},
+    )
     assert rows == [("PREFLIGHT_ACK_LIMIT",)]
 
 
@@ -217,10 +197,15 @@ def test_working_reservations_sums_active_sell_rows(db_path):
 def test_working_reservations_counts_short_call_only_when_sell_call(db_path):
     init_store(db_path)
     reserve_attempt(
-        "local", "cid-C1",
+        "local",
+        "cid-C1",
         _req(
-            security_type="OPT", action="SELL", right="C",
-            expiry="20260620", strike=Decimal("500"), quantity=3,
+            security_type="OPT",
+            action="SELL",
+            right="C",
+            expiry="20260620",
+            strike=Decimal("500"),
+            quantity=3,
         ),
         db_path=db_path,
     )
