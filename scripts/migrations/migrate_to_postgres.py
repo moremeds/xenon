@@ -13,8 +13,16 @@ import os
 import sys
 from pathlib import Path
 
-import duckdb
+try:
+    import duckdb
+except ImportError:
+    duckdb = None
+
+import logging
+
 from sqlalchemy import create_engine, text
+
+logger = logging.getLogger(__name__)
 
 DATA_DIR = Path("data")
 
@@ -37,6 +45,11 @@ def migrate_portfolio(engine):
     if not path.exists():
         print("  SKIP portfolio.json (not found)")
         return 0
+    with engine.connect() as conn:
+        existing = conn.execute(text("SELECT count(*) FROM xenon.positions")).scalar()
+        if existing > 0:
+            print(f"  SKIP portfolio.json (positions already has {existing} rows)")
+            return 0
     with open(path) as f:
         data = json.load(f)
     data.pop("_checksum", None)
@@ -117,6 +130,11 @@ def migrate_trade_log(engine):
     if not path.exists():
         print("  SKIP trade_log.json (not found)")
         return 0
+    with engine.connect() as conn:
+        existing = conn.execute(text("SELECT count(*) FROM xenon.trades")).scalar()
+        if existing > 0:
+            print(f"  SKIP trade_log.json (trades already has {existing} rows)")
+            return 0
     with open(path) as f:
         data = json.load(f)
     trades_list = data.get("trades", data) if isinstance(data, dict) else data
@@ -155,6 +173,9 @@ def migrate_orders_duckdb(engine):
     db_path = DATA_DIR / "orders.duckdb"
     if not db_path.exists():
         print("  SKIP orders.duckdb (not found)")
+        return 0
+    if duckdb is None:
+        print("  SKIP orders.duckdb (duckdb not installed — pip install duckdb)")
         return 0
 
     duck = duckdb.connect(str(db_path), read_only=True)
@@ -249,7 +270,7 @@ def migrate_orders_duckdb(engine):
                     },
                 )
                 count_ws += 1
-        except duckdb.CatalogException:
+        except Exception as _cat_exc:  # duckdb.CatalogException when table missing
             print("  SKIP wizard_sessions (table not found)")
 
         # Wizard events (DuckDB table is wizard_session_events)
@@ -273,7 +294,7 @@ def migrate_orders_duckdb(engine):
                     },
                 )
                 count_we += 1
-        except duckdb.CatalogException:
+        except Exception as _cat_exc:  # duckdb.CatalogException when table missing
             print("  SKIP wizard_session_events (table not found)")
 
         # Wizard combo attempts
@@ -321,7 +342,7 @@ def migrate_orders_duckdb(engine):
                     },
                 )
                 count_wca += 1
-        except duckdb.CatalogException:
+        except Exception as _cat_exc:  # duckdb.CatalogException when table missing
             print("  SKIP wizard_combo_attempts (table not found)")
 
         # Wizard protection
@@ -351,7 +372,7 @@ def migrate_orders_duckdb(engine):
                     },
                 )
                 count_wp += 1
-        except duckdb.CatalogException:
+        except Exception as _cat_exc:  # duckdb.CatalogException when table missing
             print("  SKIP wizard_protection (table not found)")
 
     duck.close()
@@ -364,6 +385,11 @@ def migrate_orders_duckdb(engine):
 
 
 def migrate_scan_results(engine):
+    with engine.connect() as conn:
+        existing = conn.execute(text("SELECT count(*) FROM xenon.scan_results")).scalar()
+        if existing > 0:
+            print(f"  SKIP scan results (already has {existing} rows)")
+            return 0
     count = 0
     with engine.begin() as conn:
         for scan_type, filename in [
@@ -443,25 +469,34 @@ def migrate_uw_data(engine):
                 )
                 count += 1
 
-        # UW flow events
+        # UW flow events — JSON format is {"events": {event_id: event_dict}}
         path = DATA_DIR / "uw_unusual_flow_log.json"
         if path.exists():
             with open(path) as f:
                 data = json.load(f)
-            events_list = data.get("events", data) if isinstance(data, dict) else data
-            if not isinstance(events_list, list):
+            events_raw = data.get("events", data) if isinstance(data, dict) else data
+            if isinstance(events_raw, dict):
+                events_list = []
+                for eid, evt in events_raw.items():
+                    evt.setdefault("id", eid)
+                    events_list.append(evt)
+            elif isinstance(events_raw, list):
+                events_list = events_raw
+            else:
                 events_list = []
             for evt in events_list:
                 conn.execute(
                     text("""
                     INSERT INTO xenon.uw_flow_events
-                        (ticker, side, strike, expiry, detected_at, initial,
+                        (flow_event_key, ticker, side, strike, expiry, detected_at, initial,
                          daily_track, status, anomaly_reason, closed_at)
-                    VALUES (:ticker, :side, :strike, :expiry, :detected_at,
+                    VALUES (:key, :ticker, :side, :strike, :expiry, :detected_at,
                             CAST(:initial AS jsonb), CAST(:track AS jsonb), :status,
                             :reason, :closed_at)
+                    ON CONFLICT (flow_event_key) DO NOTHING
                 """),
                     {
+                        "key": evt.get("id"),
                         "ticker": evt.get("ticker", ""),
                         "side": evt.get("side"),
                         "strike": evt.get("strike"),
@@ -476,17 +511,16 @@ def migrate_uw_data(engine):
                 )
                 count += 1
 
-        # UW API stats
+        # UW API stats — JSON format is {"buckets": {hour_key: bucket_dict}}
         path = DATA_DIR / "uw_api_stats_history.json"
         if path.exists():
             with open(path) as f:
                 data = json.load(f)
-            buckets = data.get("hourly_buckets", data) if isinstance(data, dict) else data
-            if not isinstance(buckets, list):
-                buckets = []
-            for bucket in buckets:
-                ts = bucket.get("timestamp") or bucket.get("bucket_hour")
-                if not ts:
+            buckets = data.get("buckets", {}) if isinstance(data, dict) else {}
+            if not isinstance(buckets, dict):
+                buckets = {}
+            for hour_key, bucket in buckets.items():
+                if not isinstance(bucket, dict):
                     continue
                 conn.execute(
                     text("""
@@ -498,14 +532,16 @@ def migrate_uw_data(engine):
                     ON CONFLICT (bucket_hour) DO NOTHING
                 """),
                     {
-                        "hour": ts,
-                        "req": bucket.get("requests", 0),
-                        "cache": bucket.get("cache_hits", 0),
-                        "lat_sum": bucket.get("latency_sum", 0),
-                        "lat_count": bucket.get("latency_count", 0),
-                        "s2xx": bucket.get("status_2xx", 0),
-                        "s4xx": bucket.get("status_4xx", 0),
-                        "s5xx": bucket.get("status_5xx", 0),
+                        "hour": hour_key,
+                        "req": int(bucket.get("requests_2xx", 0))
+                        + int(bucket.get("requests_4xx", 0))
+                        + int(bucket.get("requests_5xx", 0)),
+                        "cache": int(bucket.get("cached", 0)),
+                        "lat_sum": float(bucket.get("sum_latency_ms", 0.0)),
+                        "lat_count": int(bucket.get("latency_count", 0)),
+                        "s2xx": int(bucket.get("requests_2xx", 0)),
+                        "s4xx": int(bucket.get("requests_4xx", 0)),
+                        "s5xx": int(bucket.get("requests_5xx", 0)),
                     },
                 )
                 count += 1
