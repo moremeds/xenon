@@ -419,7 +419,11 @@ def migrate_uw_data(engine):
             with open(path) as f:
                 data = json.load(f)
             data.pop("_checksum", None)
-            for ticker, entry in data.items():
+            # Handle both flat {ticker: {...}} and nested {entries: {ticker: {...}}}
+            entries = data.get("entries", data) if isinstance(data, dict) else data
+            if not isinstance(entries, dict):
+                entries = {}
+            for ticker, entry in entries.items():
                 if ticker.startswith("_") or not isinstance(entry, dict):
                     continue
                 conn.execute(
