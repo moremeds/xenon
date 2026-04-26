@@ -33,6 +33,11 @@ dependencies = [
     "futu-api>=9.0",
     # Browser automation (MenthorQ CTA scraping)
     "playwright>=1.48",
+    # Database
+    "sqlalchemy[asyncio]>=2.0.30",
+    "asyncpg>=0.30.0",
+    "psycopg[binary]>=3.2.0",
+    "alembic>=1.15.0",
 ]
 
 [project.scripts]
