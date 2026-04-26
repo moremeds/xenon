@@ -1038,6 +1038,15 @@ def convert_to_portfolio_format(
     return result
 
 
+def _scope_from_env() -> tuple[str, str, str]:
+    """Resolve broker, account_env, broker_account from env. Sync subprocess scope."""
+    return (
+        os.environ.get("XENON_BROKER", "IB"),
+        os.environ.get("XENON_TRADING_MODE", "legacy_unknown"),
+        os.environ.get("XENON_BROKER_ACCOUNT", "legacy_unknown"),
+    )
+
+
 def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
     """Upsert today's NAV into Postgres nav_history."""
     import pytz
@@ -1050,12 +1059,25 @@ def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
 
     nav_val = Decimal(str(round(net_liq, 2)))
     pnl_val = Decimal(str(round(float(daily_pnl), 2))) if daily_pnl is not None else None
+    broker, account_env, broker_account = _scope_from_env()
 
     engine = get_sync_engine()
     with engine.begin() as conn:
-        stmt = pg_insert(nav_history).values(date=today, nav=nav_val, daily_pnl=pnl_val)
+        stmt = pg_insert(nav_history).values(
+            broker=broker,
+            account_env=account_env,
+            broker_account=broker_account,
+            date=today,
+            nav=nav_val,
+            daily_pnl=pnl_val,
+        )
         stmt = stmt.on_conflict_do_update(
-            index_elements=[nav_history.c.date],
+            index_elements=[
+                nav_history.c.broker,
+                nav_history.c.account_env,
+                nav_history.c.broker_account,
+                nav_history.c.date,
+            ],
             set_={"nav": stmt.excluded.nav, "daily_pnl": stmt.excluded.daily_pnl},
         )
         conn.execute(stmt)
@@ -1069,10 +1091,18 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
 
     from xenon.db.schema import account_snapshots, positions
 
+    broker, account_env, broker_account = _scope_from_env()
+
     engine = get_sync_engine()
     with engine.begin() as conn:
         conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('portfolio_sync'))"))
-        conn.execute(delete(positions).where(positions.c.account == "IB"))
+        conn.execute(
+            delete(positions).where(
+                positions.c.broker == broker,
+                positions.c.account_env == account_env,
+                positions.c.broker_account == broker_account,
+            )
+        )
 
         for pos in portfolio.get("positions", []):
             ticker = pos["ticker"]
@@ -1102,17 +1132,23 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
                         avg_cost=Decimal(str(leg.get("avg_cost", 0))),
                         current_price=Decimal(str(leg["market_price"])) if leg.get("market_price") else None,
                         unrealized_pnl=None,
-                        account="IB",
+                        account=broker_account,
+                        broker=broker,
+                        account_env=account_env,
+                        broker_account=broker_account,
                     )
                 )
 
         acct = portfolio.get("account_summary", {})
         conn.execute(
             insert(account_snapshots).values(
-                account="IB",
+                account=broker_account,
                 bankroll=Decimal(str(portfolio.get("bankroll", 0))),
                 peak_value=Decimal(str(portfolio.get("peak_value", 0))),
                 net_liquidation=Decimal(str(acct.get("net_liquidation", 0))),
+                broker=broker,
+                account_env=account_env,
+                broker_account=broker_account,
             )
         )
 
