@@ -27,6 +27,19 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path("data")
 
 
+def _migration_scope() -> dict[str, str]:
+    """Scope legacy backup data explicitly instead of relying on DB defaults."""
+    account_env = os.environ.get("XENON_TRADING_MODE", "").strip()
+    broker_account = os.environ.get("XENON_BROKER_ACCOUNT", "").strip()
+    if account_env or broker_account:
+        if not (account_env and broker_account):
+            raise ValueError("Set both XENON_TRADING_MODE and XENON_BROKER_ACCOUNT, or neither")
+    else:
+        account_env = "legacy_unknown"
+        broker_account = "legacy_unknown"
+    return {"broker": "IB", "account_env": account_env, "broker_account": broker_account}
+
+
 def _extract_cri_level(data: dict) -> float:
     """Extract numeric CRI level from various JSON shapes."""
     raw = data.get("cri_level", data.get("cri", 0))
@@ -53,15 +66,20 @@ def migrate_portfolio(engine):
     with open(path) as f:
         data = json.load(f)
     data.pop("_checksum", None)
+    scope = _migration_scope()
 
     count = 0
     with engine.begin() as conn:
         conn.execute(
             text("""
-            INSERT INTO xenon.account_snapshots (account, bankroll, peak_value, net_liquidation)
-            VALUES (:account, :bankroll, :peak_value, :net_liq)
+            INSERT INTO xenon.account_snapshots
+                (account, bankroll, peak_value, net_liquidation,
+                 broker, account_env, broker_account)
+            VALUES (:account, :bankroll, :peak_value, :net_liq,
+                    :broker, :account_env, :broker_account)
         """),
             {
+                **scope,
                 "account": "IB",
                 "bankroll": data.get("bankroll", 0),
                 "peak_value": data.get("peak_value"),
@@ -74,11 +92,14 @@ def migrate_portfolio(engine):
                 text("""
                 INSERT INTO xenon.positions
                     (ticker, security_type, expiry, strike, "right", quantity,
-                     avg_cost, current_price, unrealized_pnl, account)
+                     avg_cost, current_price, unrealized_pnl, account,
+                     broker, account_env, broker_account)
                 VALUES (:ticker, :sec_type, :expiry, :strike, :right, :qty,
-                        :avg_cost, :cur_price, :pnl, :account)
+                        :avg_cost, :cur_price, :pnl, :account,
+                        :broker, :account_env, :broker_account)
             """),
                 {
+                    **scope,
                     "ticker": pos.get("ticker", pos.get("symbol", "")),
                     "sec_type": pos.get("security_type", pos.get("secType", "STK")),
                     "expiry": pos.get("expiry"),
@@ -101,6 +122,7 @@ def migrate_nav_history(engine):
     if not path.exists():
         print("  SKIP nav_history.jsonl (not found)")
         return 0
+    scope = _migration_scope()
     count = 0
     with engine.begin() as conn:
         for line in open(path):
@@ -110,11 +132,14 @@ def migrate_nav_history(engine):
             entry = json.loads(line)
             conn.execute(
                 text("""
-                INSERT INTO xenon.nav_history (date, nav, daily_pnl)
-                VALUES (:date, :nav, :pnl)
-                ON CONFLICT (date) DO UPDATE SET nav = :nav, daily_pnl = :pnl
+                INSERT INTO xenon.nav_history
+                    (broker, account_env, broker_account, date, nav, daily_pnl)
+                VALUES (:broker, :account_env, :broker_account, :date, :nav, :pnl)
+                ON CONFLICT (broker, account_env, broker_account, date)
+                DO UPDATE SET nav = :nav, daily_pnl = :pnl
             """),
                 {
+                    **scope,
                     "date": entry["date"],
                     "nav": entry["nav"],
                     "pnl": entry.get("daily_pnl"),
@@ -140,6 +165,7 @@ def migrate_trade_log(engine):
     trades_list = data.get("trades", data) if isinstance(data, dict) else data
     if not isinstance(trades_list, list):
         trades_list = []
+    scope = _migration_scope()
     count = 0
     with engine.begin() as conn:
         for t in trades_list:
@@ -147,11 +173,14 @@ def migrate_trade_log(engine):
                 text("""
                 INSERT INTO xenon.trades
                     (ticker, structure, action, quantity, entry_cost, exit_cost,
-                     realized_pnl, edge, decision, metadata)
+                     realized_pnl, edge, decision, metadata,
+                     broker, account_env, broker_account)
                 VALUES (:ticker, :structure, :action, :quantity, :entry_cost,
-                        :exit_cost, :pnl, :edge, :decision, CAST(:meta AS jsonb))
+                        :exit_cost, :pnl, :edge, :decision, CAST(:meta AS jsonb),
+                        :broker, :account_env, :broker_account)
             """),
                 {
+                    **scope,
                     "ticker": t.get("ticker", ""),
                     "structure": t.get("structure"),
                     "action": t.get("action", t.get("side", "")),
