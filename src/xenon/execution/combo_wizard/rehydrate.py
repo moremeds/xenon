@@ -18,13 +18,12 @@ See spec §13 and plan lines 416-422 for the authoritative rule.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Callable
 
-from xenon.execution import orders_store
+from xenon.db.engine import get_sync_engine
+from xenon.db.queries import combo_wizard
 from xenon.execution.combo_wizard import protect as _protect_mod
 from xenon.execution.single_leg_rehydrate import (  # noqa: F401 — shared pattern
     _index_open_orders,
@@ -55,103 +54,43 @@ class WizardReconcileDecision:
     detail: dict = field(default_factory=dict)
 
 
-def _db_path(db_path: Path | str | None) -> Path:
-    return orders_store._resolve_path(db_path)
-
-
-def _connect(db_path: Path | str | None):
-    return orders_store._connect_utc(_db_path(db_path))
-
-
-def _list_rehydratable(db_path: Path | str | None) -> list[dict]:
-    orders_store.init_store(_db_path(db_path))
-    con = _connect(db_path)
-    try:
-        rows = con.execute(
-            """
-            SELECT session_id, ticker, state, structure_name, intent, payload_json,
-                   current_attempt_id
-              FROM wizard_sessions
-             WHERE UPPER(state) IN ('SUBMITTING','WORKING','REPRICE_PENDING',
-                                    'PROTECTION_PENDING','PROTECTED')
-            """
-        ).fetchall()
-    finally:
-        con.close()
-    out: list[dict] = []
+def _list_rehydratable() -> list[dict]:
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        rows = combo_wizard.list_rehydratable(conn)
+    # Ensure payload is always a dict (JSONB returns dict directly).
     for r in rows:
-        payload = json.loads(r[5]) if r[5] else {}
-        out.append(
-            {
-                "session_id": r[0],
-                "ticker": r[1],
-                "state": r[2],
-                "structure_name": r[3],
-                "intent": r[4],
-                "payload": payload,
-                "current_attempt_id": r[6],
-            }
-        )
-    return out
+        if r.get("payload") is None:
+            r["payload"] = {}
+    return rows
 
 
-def _load_latest_attempt(session_id: str, db_path: Path | str | None) -> dict[str, Any] | None:
-    con = _connect(db_path)
-    try:
-        row = con.execute(
-            """
-            SELECT attempt_id, ib_order_id, perm_id, terminal_state, filled_qty
-              FROM wizard_combo_attempts
-             WHERE session_id = ?
-             ORDER BY created_at DESC
-             LIMIT 1
-            """,
-            [session_id],
-        ).fetchone()
-    finally:
-        con.close()
+def _load_latest_attempt(session_id: str) -> dict[str, Any] | None:
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        row = combo_wizard.get_latest_attempt(conn, session_id)
     if row is None:
         return None
+    # Map Postgres column names to the dict keys used downstream.
     return {
-        "attempt_id": row[0],
-        "ib_order_id": row[1],
-        "perm_id": row[2],
-        "terminal_state": row[3],
-        "filled_qty": int(row[4] or 0),
+        "attempt_id": row["attempt_id"],
+        "ib_order_id": row.get("ib_order_id"),
+        "perm_id": row.get("perm_id"),
+        "terminal_state": row.get("state"),  # Postgres `state` → legacy `terminal_state`
+        "filled_qty": int(row.get("filled_qty") or 0),
     }
 
 
-def _set_session_state(session_id: str, state: str, db_path: Path | str | None) -> None:
-    from datetime import datetime, timezone
-
-    con = _connect(db_path)
-    try:
-        con.execute(
-            "UPDATE wizard_sessions SET state=?, updated_at=? WHERE session_id=?",
-            [state, datetime.now(timezone.utc), session_id],
-        )
-    finally:
-        con.close()
+def _set_session_state(session_id: str, state: str) -> None:
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        combo_wizard.update_session(conn, session_id, state=state)
 
 
-def _record_event(session_id: str, kind: str, detail: dict, db_path: Path | str | None) -> None:
-    import uuid
-    from datetime import datetime, timezone
-
-    con = _connect(db_path)
-    try:
-        con.execute(
-            'INSERT INTO wizard_session_events (event_id, session_id, kind, detail, "at") VALUES (?, ?, ?, ?, ?)',
-            [
-                str(uuid.uuid4()),
-                session_id,
-                kind,
-                json.dumps(detail, default=str),
-                datetime.now(timezone.utc),
-            ],
-        )
-    finally:
-        con.close()
+def _record_event(session_id: str, kind: str, detail: dict) -> None:
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        combo_wizard.record_event(conn, session_id=session_id, kind=kind, detail=detail)
 
 
 # ---------------------------------------------------------------------------
@@ -224,9 +163,9 @@ def _combo_fill_state(
 def rehydrate_combo_sessions(
     *,
     ib_client_factory: Callable[[], Any],
-    db_path: Path | str | None = None,
+    db_path: Any = None,  # deprecated, ignored — kept for call-site compat
 ) -> list[WizardReconcileDecision]:
-    sessions = _list_rehydratable(db_path)
+    sessions = _list_rehydratable()
     if not sessions:
         return []
 
@@ -265,11 +204,11 @@ def rehydrate_combo_sessions(
                     "note": reason,
                 },
             )
-            _record_event(sid, "REHYDRATE_RECONCILED", decision.detail, db_path)
+            _record_event(sid, "REHYDRATE_RECONCILED", decision.detail)
             decisions.append(decision)
             continue
 
-        attempt = _load_latest_attempt(sid, db_path)
+        attempt = _load_latest_attempt(sid)
         if attempt is None:
             decision = WizardReconcileDecision(
                 session_id=sid,
@@ -277,7 +216,7 @@ def rehydrate_combo_sessions(
                 to_state="UNKNOWN",
                 detail={"reason_code": "NO_ATTEMPT_ROW"},
             )
-            _record_event(sid, "REHYDRATE_UNCERTAIN", decision.detail, db_path)
+            _record_event(sid, "REHYDRATE_UNCERTAIN", decision.detail)
             decisions.append(decision)
             continue
 
@@ -293,9 +232,9 @@ def rehydrate_combo_sessions(
                 to_state="WORKING",
                 detail={"perm_id": perm_id, "sources": {"open_orders": True}},
             )
-            _record_event(sid, "REHYDRATE_RECONCILED", decision.detail, db_path)
+            _record_event(sid, "REHYDRATE_RECONCILED", decision.detail)
             if from_state.lower() != "working":
-                _set_session_state(sid, "working", db_path)
+                _set_session_state(sid, "working")
             decisions.append(decision)
             continue
 
@@ -319,8 +258,8 @@ def rehydrate_combo_sessions(
             "PARTIALLY_FILLED": "partially_filled",
             "WORKING": "working",
         }[to_state]
-        _set_session_state(sid, db_state, db_path)
-        _record_event(sid, "REHYDRATE_RECONCILED", detail, db_path)
+        _set_session_state(sid, db_state)
+        _record_event(sid, "REHYDRATE_RECONCILED", detail)
 
         decisions.append(
             WizardReconcileDecision(

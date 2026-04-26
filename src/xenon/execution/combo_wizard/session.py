@@ -1,28 +1,19 @@
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
 
 from starlette.responses import Response
 
-from xenon.execution import orders_store
+from xenon.db.engine import get_sync_engine
+from xenon.db.queries import combo_wizard as cwq
 from xenon.execution.combo_wizard import planner as combo_planner
 from xenon.execution.combo_wizard.models import ComboLegQuote, ComboLegSpec
 
 _REPRICEABLE_STATES = {"WORKING", "REPRICE_PENDING"}
 _ABORTABLE_LIVE_STATES = {"WORKING", "REPRICE_PENDING"}
-
-
-def _db_path() -> Path:
-    return orders_store._resolve_path(None)
-
-
-def _connect():
-    return orders_store._connect_utc(_db_path())
 
 
 def _now() -> datetime:
@@ -122,138 +113,85 @@ def create_session(
     structure_name: str,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    orders_store.init_store(_db_path())
     session_id = f"wiz-{uuid.uuid4().hex[:12]}"
     now = _now()
-    con = _connect()
-    try:
-        con.execute(
-            """
-            INSERT INTO wizard_sessions (
-                session_id, ticker, state, structure_name, intent, payload_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [session_id, ticker, "planned", structure_name, intent, json.dumps(payload), now, now],
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        cwq.create_session(
+            conn,
+            session_id=session_id,
+            ticker=ticker,
+            state="planned",
+            structure_name=structure_name,
+            intent=intent,
+            payload=payload,
+            created_at=now,
+            updated_at=now,
         )
-    finally:
-        con.close()
     return {"session_id": session_id}
 
 
 def _load_session(session_id: str) -> dict[str, Any]:
-    orders_store.init_store(_db_path())
-    con = _connect()
-    try:
-        row = con.execute(
-            """
-            SELECT session_id, ticker, state, structure_name, intent, payload_json, current_attempt_id
-              FROM wizard_sessions
-             WHERE session_id = ?
-            """,
-            [session_id],
-        ).fetchone()
-    finally:
-        con.close()
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        row = cwq.get_session(conn, session_id)
     if row is None:
         raise ValueError(f"Unknown wizard session {session_id}")
-    payload_json = row[5]
-    payload = json.loads(payload_json) if payload_json else {}
     return {
-        "session_id": row[0],
-        "ticker": row[1],
-        "state": row[2],
-        "structure_name": row[3],
-        "intent": row[4],
-        "payload": payload,
-        "current_attempt_id": row[6],
+        "session_id": row["session_id"],
+        "ticker": row["ticker"],
+        "state": row["state"],
+        "structure_name": row["structure_name"],
+        "intent": row["intent"],
+        "payload": row["payload"] or {},
+        "current_attempt_id": row["current_attempt_id"],
     }
 
 
 def _load_current_attempt(session_id: str) -> dict[str, Any]:
-    con = _connect()
-    try:
-        row = con.execute(
-            """
-            SELECT attempt_id, ib_order_id, perm_id, modify_sequence
-              FROM wizard_combo_attempts
-             WHERE session_id = ?
-             ORDER BY created_at DESC
-             LIMIT 1
-            """,
-            [session_id],
-        ).fetchone()
-    finally:
-        con.close()
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        row = cwq.get_latest_attempt(conn, session_id)
     if row is None:
         raise ValueError(f"No combo attempt found for session {session_id}")
     return {
-        "attempt_id": row[0],
-        "ib_order_id": row[1],
-        "perm_id": row[2],
-        "modify_sequence": int(row[3] or 0),
+        "attempt_id": row["attempt_id"],
+        "ib_order_id": row["ib_order_id"],
+        "perm_id": row["perm_id"],
+        "modify_sequence": int(row.get("modify_sequence") or 0),
     }
 
 
 def _claim_session_for_submit(session_id: str, attempt_id: str) -> dict[str, Any]:
-    orders_store.init_store(_db_path())
-    now = _now()
-    with orders_store._WRITE_LOCK:
-        con = _connect()
-        try:
-            row = con.execute(
-                """
-                UPDATE wizard_sessions
-                   SET state='submitting', current_attempt_id=?, updated_at=?
-                 WHERE session_id=?
-                   AND UPPER(state)='PLANNED'
-                   AND current_attempt_id IS NULL
-                 RETURNING session_id, ticker, state, structure_name, intent,
-                           payload_json, current_attempt_id
-                """,
-                [attempt_id, now, session_id],
-            ).fetchone()
-            if row is not None:
-                payload_json = row[5]
-                return {
-                    "session_id": row[0],
-                    "ticker": row[1],
-                    "state": row[2],
-                    "structure_name": row[3],
-                    "intent": row[4],
-                    "payload": json.loads(payload_json) if payload_json else {},
-                    "current_attempt_id": row[6],
-                }
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        row = cwq.claim_session_for_submit(conn, session_id, attempt_id)
+        if row is not None:
+            return {
+                "session_id": row["session_id"],
+                "ticker": row["ticker"],
+                "state": row["state"],
+                "structure_name": row["structure_name"],
+                "intent": row["intent"],
+                "payload": row["payload"] or {},
+                "current_attempt_id": row["current_attempt_id"],
+            }
 
-            current = con.execute(
-                "SELECT state, current_attempt_id FROM wizard_sessions WHERE session_id=?",
-                [session_id],
-            ).fetchone()
-        finally:
-            con.close()
+        current = cwq.get_session(conn, session_id)
 
     if current is None:
         raise ValueError(f"Unknown wizard session {session_id}")
-    state, current_attempt_id = current
+    state = current["state"]
+    current_attempt_id = current["current_attempt_id"]
     if current_attempt_id:
         raise ValueError(f"Wizard session {session_id} already has a submitted combo attempt")
     raise ValueError(f"Wizard session {session_id} cannot submit from state {state}")
 
 
 def _release_submit_claim(session_id: str, attempt_id: str) -> None:
-    con = _connect()
-    try:
-        con.execute(
-            """
-            UPDATE wizard_sessions
-               SET state='planned', current_attempt_id=NULL, updated_at=?
-             WHERE session_id=?
-               AND current_attempt_id=?
-               AND UPPER(state)='SUBMITTING'
-            """,
-            [_now(), session_id, attempt_id],
-        )
-    finally:
-        con.close()
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        cwq.release_submit_claim(conn, session_id, attempt_id)
 
 
 def _order_store_modify_sequence(current: dict[str, Any]) -> int:
@@ -261,38 +199,16 @@ def _order_store_modify_sequence(current: dict[str, Any]) -> int:
     perm_id = str(current.get("perm_id") or "")
     if not ib_order_id and not perm_id:
         return 0
-
-    con = _connect()
-    try:
-        row = con.execute(
-            """
-            SELECT modify_sequence
-              FROM orders_submissions
-             WHERE (? != '' AND ib_order_id = ?)
-                OR (? != '' AND perm_id = ?)
-             ORDER BY updated_at DESC
-             LIMIT 1
-            """,
-            [ib_order_id, ib_order_id, perm_id, perm_id],
-        ).fetchone()
-    finally:
-        con.close()
-    return int(row[0] or 0) if row is not None else 0
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        seq = cwq.get_order_modify_sequence(conn, ib_order_id=ib_order_id, perm_id=perm_id)
+    return seq or 0
 
 
 def _update_attempt_modify_sequence(attempt_id: str, sequence: int) -> None:
-    con = _connect()
-    try:
-        con.execute(
-            """
-            UPDATE wizard_combo_attempts
-               SET modify_sequence=?, updated_at=?
-             WHERE attempt_id=?
-            """,
-            [sequence, _now(), attempt_id],
-        )
-    finally:
-        con.close()
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        cwq.update_attempt(conn, attempt_id, modify_sequence=sequence)
 
 
 def plan_session(
@@ -307,10 +223,7 @@ def plan_session(
     plan = combo_planner.build_plan(
         ticker=ticker,
         legs=plan_legs,
-        quotes={
-            contract_id: ComboLegQuote.model_validate(quote)
-            for contract_id, quote in quotes.items()
-        },
+        quotes={contract_id: ComboLegQuote.model_validate(quote) for contract_id, quote in quotes.items()},
     )
     payload = _prepare_order_payload(
         ticker=ticker,
@@ -364,48 +277,30 @@ async def submit_combo(session_id: str, request: dict[str, Any]) -> dict[str, An
         raise ValueError("Order placement returned an invalid response")
 
     now = _now()
-    con = _connect()
-    try:
-        con.execute(
-            """
-            INSERT INTO wizard_combo_attempts (
-                attempt_id, session_id, client_attempt_id, ib_order_id, perm_id,
-                intent, target_price, price_basis, ladder_step, submitted_at,
-                terminal_state, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                attempt_id,
-                session_id,
-                client_attempt_id,
-                str(result.get("orderId") or ""),
-                str(result.get("permId") or ""),
-                session["intent"],
-                str(Decimal(str(target_price or payload.get("limitPrice") or "0"))),
-                str(request.get("price_basis") or "CUSTOM"),
-                None,
-                now,
-                "WORKING",
-                now,
-                now,
-            ],
-        )
-        row = con.execute(
-            """
-            UPDATE wizard_sessions
-               SET state = 'working', updated_at = ?
-             WHERE session_id = ?
-               AND current_attempt_id = ?
-               AND UPPER(state) = 'SUBMITTING'
-             RETURNING state
-            """,
-            [now, session_id, attempt_id],
-        ).fetchone()
-    finally:
-        con.close()
+    price_basis = str(request.get("price_basis") or "CUSTOM")
+    target = str(Decimal(str(target_price or payload.get("limitPrice") or "0")))
 
-    if row is None:
-        raise ValueError(f"Wizard session {session_id} submit finalization lost state claim")
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        cwq.create_attempt(
+            conn,
+            attempt_id=attempt_id,
+            session_id=session_id,
+            ticker=session["ticker"],
+            structure_name=session["structure_name"],
+            ib_order_id=str(result.get("orderId") or ""),
+            perm_id=str(result.get("permId") or ""),
+            limit_price=Decimal(target),
+            state="WORKING",
+            submitted_at=now,
+            updated_at=now,
+            combo_contract={
+                "client_attempt_id": client_attempt_id,
+                "intent": session["intent"],
+                "price_basis": price_basis,
+            },
+        )
+        cwq.update_session(conn, session_id, state="working")
 
     return {
         **result,
@@ -423,27 +318,21 @@ async def reprice_combo(session_id: str, request: dict[str, Any]) -> dict[str, A
 
     from xenon.api import server as server_mod
 
-    next_sequence = max(
-        int(current.get("modify_sequence") or 0),
-        _order_store_modify_sequence(current),
-    ) + 1
-    con = _connect()
-    try:
-        con.execute(
-            """
-            UPDATE wizard_combo_attempts
-               SET modify_sequence=?, target_price=?, updated_at=?
-             WHERE attempt_id=?
-            """,
-            [
-                next_sequence,
-                str(request["target_price"]),
-                _now(),
-                current["attempt_id"],
-            ],
+    next_sequence = (
+        max(
+            int(current.get("modify_sequence") or 0),
+            _order_store_modify_sequence(current),
         )
-    finally:
-        con.close()
+        + 1
+    )
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        cwq.update_attempt(
+            conn,
+            current["attempt_id"],
+            modify_sequence=next_sequence,
+            limit_price=Decimal(str(request["target_price"])),
+        )
     try:
         return await server_mod._orders_modify_from_body(
             {
@@ -465,54 +354,34 @@ async def reprice_combo(session_id: str, request: dict[str, Any]) -> dict[str, A
             raise
 
 
-def list_sessions() -> list[dict[str, Any]]:
-    orders_store.init_store(_db_path())
-    con = _connect()
-    try:
-        rows = con.execute(
-            """
-            SELECT session_id, ticker, state, structure_name, intent, payload_json,
-                   current_attempt_id, created_at, updated_at
-              FROM wizard_sessions
-             ORDER BY updated_at DESC
-             LIMIT 50
-            """
-        ).fetchall()
-    finally:
-        con.close()
-    return [_session_row_to_dict(row) for row in rows]
-
-
-def _session_row_to_dict(row: Any) -> dict[str, Any]:
-    payload = json.loads(row[5]) if row[5] else {}
+def _session_row_to_dict(row: dict) -> dict[str, Any]:
+    payload = row.get("payload") or {}
+    created = row.get("created_at")
+    updated = row.get("updated_at")
     return {
-        "session_id": row[0],
-        "ticker": row[1],
-        "state": row[2],
-        "structure_name": row[3],
-        "intent": row[4],
+        "session_id": row["session_id"],
+        "ticker": row["ticker"],
+        "state": row["state"],
+        "structure_name": row.get("structure_name"),
+        "intent": row.get("intent"),
         "payload": payload,
-        "current_attempt_id": row[6],
-        "created_at": row[7].isoformat() if hasattr(row[7], "isoformat") else row[7],
-        "updated_at": row[8].isoformat() if hasattr(row[8], "isoformat") else row[8],
+        "current_attempt_id": row.get("current_attempt_id"),
+        "created_at": created.isoformat() if hasattr(created, "isoformat") else created,
+        "updated_at": updated.isoformat() if hasattr(updated, "isoformat") else updated,
     }
 
 
+def list_sessions() -> list[dict[str, Any]]:
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        rows = cwq.list_sessions(conn, limit=50)
+    return [_session_row_to_dict(row) for row in rows]
+
+
 def get_session(session_id: str) -> dict[str, Any]:
-    orders_store.init_store(_db_path())
-    con = _connect()
-    try:
-        row = con.execute(
-            """
-            SELECT session_id, ticker, state, structure_name, intent, payload_json,
-                   current_attempt_id, created_at, updated_at
-              FROM wizard_sessions
-             WHERE session_id=?
-            """,
-            [session_id],
-        ).fetchone()
-    finally:
-        con.close()
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        row = cwq.get_session(conn, session_id)
     if row is None:
         raise ValueError(f"Unknown wizard session {session_id}")
     return _session_row_to_dict(row)
@@ -540,22 +409,8 @@ async def abort_session(session_id: str) -> dict[str, Any] | Response:
         if isinstance(cancel_result, Response):
             return cancel_result
 
-    now = _now()
-    con = _connect()
-    try:
-        con.execute(
-            """
-            UPDATE wizard_sessions
-               SET state='ABORTED', updated_at=?
-             WHERE session_id=?
-               AND UPPER(state)=?
-            """,
-            [now, session_id, upper],
-        )
-        con.execute(
-            'INSERT INTO wizard_session_events (event_id, session_id, kind, detail, "at") VALUES (?, ?, ?, ?, ?)',
-            [str(uuid.uuid4()), session_id, "ABORTED", json.dumps({}), now],
-        )
-    finally:
-        con.close()
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        cwq.update_session(conn, session_id, state="ABORTED")
+        cwq.record_event(conn, session_id=session_id, kind="ABORTED", detail={})
     return get_session(session_id)

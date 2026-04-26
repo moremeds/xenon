@@ -19,7 +19,6 @@ Returns ``None`` if any freshness gate fails — the stop monitor treats
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import os
@@ -32,7 +31,7 @@ from typing import Any, Callable, Optional
 #   ib_insync/contract.py:193 — class Option(Contract)
 from ib_insync import Option  # type: ignore
 
-from xenon.execution import orders_store
+from xenon.execution import orders_store  # noqa: F401 — kept for external import paths
 
 from .combo_quotes import compute_combo_quote
 from .models import ComboLegQuote, ComboLegSpec
@@ -92,18 +91,19 @@ def _ticker_is_fresh(
 
 
 def _session_legs(session_id: str, db_path: Path | str | None) -> list[dict]:
-    """Load the session's legs from the wizard_sessions payload_json."""
-    con = orders_store._connect_utc(orders_store._resolve_path(db_path))
-    try:
-        row = con.execute(
-            "SELECT payload_json FROM wizard_sessions WHERE session_id = ?",
-            [session_id],
-        ).fetchone()
-    finally:
-        con.close()
-    if row is None or not row[0]:
+    """Load the session's legs from the wizard_sessions payload (JSONB).
+
+    ``db_path`` is ignored (kept for signature compat) -- reads from Postgres.
+    """
+    from xenon.db.engine import get_sync_engine
+    from xenon.db.queries import combo_wizard
+
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        session = combo_wizard.get_session(conn, session_id)
+    if session is None:
         return []
-    payload = json.loads(row[0])
+    payload = session.get("payload") or {}
     return list(payload.get("legs") or [])
 
 

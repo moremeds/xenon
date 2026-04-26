@@ -1,3 +1,8 @@
+"""Combo wizard store — schema managed by Alembic for Postgres.
+
+DuckDB table creation kept for test fixture backward compat (removed in Task 22).
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -79,6 +84,7 @@ _MIGRATIONS = [
 
 
 def init_store(db_path: Path | str | None = None) -> Path:
+    """Alembic manages Postgres schema. DuckDB tables kept for test fixtures."""
     path = _resolve_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     con = _connect_utc(path)
@@ -97,6 +103,7 @@ def init_store(db_path: Path | str | None = None) -> Path:
 
 
 def list_tables(db_path: Path | str | None = None) -> set[str]:
+    """Return wizard tables via DuckDB (backward compat for tests)."""
     con = _connect_utc(_resolve_path(db_path))
     try:
         return {row[0] for row in con.execute("SHOW TABLES").fetchall()}

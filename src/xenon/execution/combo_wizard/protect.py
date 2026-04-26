@@ -18,15 +18,13 @@ combo price in this module — CREDIT spreads have negative net prices.
 
 from __future__ import annotations
 
-import json
 import logging
-import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, Callable
 
-from xenon.execution import orders_store
+from xenon.db.engine import get_sync_engine
+from xenon.db.queries import combo_wizard
 
 logger = logging.getLogger(__name__)
 
@@ -46,61 +44,28 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _db_path(db_path: Path | str | None) -> Path:
-    return orders_store._resolve_path(db_path)
-
-
-def _connect(db_path: Path | str | None):
-    return orders_store._connect_utc(_db_path(db_path))
-
-
-def _load_session(session_id: str, db_path: Path | str | None) -> dict[str, Any]:
-    orders_store.init_store(_db_path(db_path))
-    con = _connect(db_path)
-    try:
-        row = con.execute(
-            """
-            SELECT session_id, ticker, state, structure_name, intent, payload_json
-              FROM wizard_sessions
-             WHERE session_id = ?
-            """,
-            [session_id],
-        ).fetchone()
-    finally:
-        con.close()
+def _load_session(session_id: str) -> dict[str, Any]:
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        row = combo_wizard.get_session(conn, session_id)
     if row is None:
         raise ValueError(f"Unknown wizard session {session_id}")
-    payload = json.loads(row[5]) if row[5] else {}
-    return {
-        "session_id": row[0],
-        "ticker": row[1],
-        "state": row[2],
-        "structure_name": row[3],
-        "intent": row[4],
-        "payload": payload,
-    }
+    # JSONB `payload` is returned as a dict directly — no json.loads needed.
+    if row.get("payload") is None:
+        row["payload"] = {}
+    return row
 
 
-def _set_state(session_id: str, state: str, db_path: Path | str | None) -> None:
-    con = _connect(db_path)
-    try:
-        con.execute(
-            "UPDATE wizard_sessions SET state=?, updated_at=? WHERE session_id=?",
-            [state, _now(), session_id],
-        )
-    finally:
-        con.close()
+def _set_state(session_id: str, state: str) -> None:
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        combo_wizard.update_session(conn, session_id, state=state)
 
 
-def _record_event(session_id: str, kind: str, detail: dict, db_path: Path | str | None) -> None:
-    con = _connect(db_path)
-    try:
-        con.execute(
-            'INSERT INTO wizard_session_events (event_id, session_id, kind, detail, "at") VALUES (?, ?, ?, ?, ?)',
-            [str(uuid.uuid4()), session_id, kind, json.dumps(detail, default=str), _now()],
-        )
-    finally:
-        con.close()
+def _record_event(session_id: str, kind: str, detail: dict) -> None:
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        combo_wizard.record_event(conn, session_id=session_id, kind=kind, detail=detail)
 
 
 def _upsert_protection(
@@ -112,54 +77,18 @@ def _upsert_protection(
     alert_enabled: bool,
     alert_threshold: Decimal | None,
     alert_virtual_id: str | None,
-    db_path: Path | str | None,
 ) -> None:
-    now = _now()
-    con = _connect(db_path)
-    try:
-        existing = con.execute("SELECT session_id FROM wizard_protection WHERE session_id=?", [session_id]).fetchone()
-        if existing is None:
-            con.execute(
-                """
-                INSERT INTO wizard_protection (session_id, tp_enabled, tp_target_price,
-                    tp_ib_order_id, alert_enabled, alert_net_mid_threshold,
-                    alert_virtual_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    session_id,
-                    tp_enabled,
-                    str(tp_target_price) if tp_target_price is not None else None,
-                    tp_ib_order_id,
-                    alert_enabled,
-                    str(alert_threshold) if alert_threshold is not None else None,
-                    alert_virtual_id,
-                    now,
-                    now,
-                ],
-            )
-        else:
-            con.execute(
-                """
-                UPDATE wizard_protection
-                   SET tp_enabled=?, tp_target_price=?, tp_ib_order_id=?,
-                       alert_enabled=?, alert_net_mid_threshold=?,
-                       alert_virtual_id=?, updated_at=?
-                 WHERE session_id=?
-                """,
-                [
-                    tp_enabled,
-                    str(tp_target_price) if tp_target_price is not None else None,
-                    tp_ib_order_id,
-                    alert_enabled,
-                    str(alert_threshold) if alert_threshold is not None else None,
-                    alert_virtual_id,
-                    now,
-                    session_id,
-                ],
-            )
-    finally:
-        con.close()
+    config = {
+        "tp_enabled": tp_enabled,
+        "tp_target_price": str(tp_target_price) if tp_target_price is not None else None,
+        "tp_ib_order_id": tp_ib_order_id,
+        "alert_enabled": alert_enabled,
+        "alert_net_mid_threshold": str(alert_threshold) if alert_threshold is not None else None,
+        "alert_virtual_id": alert_virtual_id,
+    }
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        combo_wizard.upsert_protection(conn, session_id, config=config)
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +135,7 @@ def attach_protection(
     max_attempts: int = 3,
     base_backoff: float = 2.0,
     sleep: Callable[[float], None] | None = None,
-    db_path: Path | str | None = None,
+    db_path: Any = None,  # deprecated, ignored — kept for call-site compat
 ) -> dict[str, Any]:
     """Attach combo TP + Risk Alert after a filled wizard session.
 
@@ -233,7 +162,7 @@ def attach_protection(
 
         sleep = _time.sleep  # pragma: no cover (not exercised in tests)
 
-    session = _load_session(session_id, db_path)
+    session = _load_session(session_id)
     if session["state"].upper() == "PROTECTED":
         return {
             "state": "PROTECTED",
@@ -260,7 +189,6 @@ def attach_protection(
             session_id,
             "PROTECTION_TP_REFUSED",
             {"reason": tp_refused_reason, "legs": legs},
-            db_path,
         )
     else:
         # Import lazily to avoid a top-level cycle — ib_adapter imports
@@ -287,7 +215,6 @@ def attach_protection(
                         "tp_order_id": tp_order_id,
                         "target_price": str(tp_target_price),  # signed
                     },
-                    db_path,
                 )
                 break
             except NakedShortGuardError as exc:
@@ -305,7 +232,6 @@ def attach_protection(
                         "error": str(exc),
                         "legs": legs,
                     },
-                    db_path,
                 )
                 break
             except Exception as exc:  # noqa: BLE001 — retry everything
@@ -314,14 +240,13 @@ def attach_protection(
                     session_id,
                     "PROTECTION_TP_ATTACH_FAILED",
                     {"attempt": attempts, "error": str(exc)},
-                    db_path,
                 )
                 if i < max_attempts - 1:
                     sleep(base_backoff * (2**i))
         if not tp_attached and tp_refused_reason is None:
             # Terminal failure — do NOT arm the alert or mark PROTECTED. Leave
             # the session in PROTECTION_PENDING; the daemon will re-drive.
-            _set_state(session_id, "PROTECTION_PENDING", db_path)
+            _set_state(session_id, "PROTECTION_PENDING")
             _record_event(
                 session_id,
                 "PROTECTION_PENDING",
@@ -330,7 +255,6 @@ def attach_protection(
                     "attempts": attempts,
                     "last_error": str(last_err) if last_err else None,
                 },
-                db_path,
             )
             _upsert_protection(
                 session_id=session_id,
@@ -340,7 +264,6 @@ def attach_protection(
                 alert_enabled=False,
                 alert_threshold=alert_net_mid_threshold,
                 alert_virtual_id=None,
-                db_path=db_path,
             )
             return {
                 "state": "PROTECTION_PENDING",
@@ -370,14 +293,12 @@ def attach_protection(
                 "polarity": polarity,
                 "alert_virtual_id": alert_virtual_id,
             },
-            db_path,
         )
     except Exception as exc:  # noqa: BLE001
         _record_event(
             session_id,
             "PROTECTION_RISK_ALERT_FAILED",
             {"error": str(exc)},
-            db_path,
         )
 
     _upsert_protection(
@@ -388,7 +309,6 @@ def attach_protection(
         alert_enabled=alert_armed,
         alert_threshold=alert_net_mid_threshold,
         alert_virtual_id=alert_virtual_id,
-        db_path=db_path,
     )
 
     # Determine final state.
@@ -402,7 +322,7 @@ def attach_protection(
         final_state = "PROTECTED"
     else:
         final_state = "PROTECTED"
-    _set_state(session_id, final_state, db_path)
+    _set_state(session_id, final_state)
 
     out: dict[str, Any] = {
         "state": final_state,

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import os
 
+from sqlalchemy import Engine
+from sqlalchemy import create_engine as _create_sync_engine
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 _engine: AsyncEngine | None = None
+_sync_engine: Engine | None = None
 
 
 def create_engine(url: str | None = None, **kwargs) -> AsyncEngine:
@@ -38,3 +41,14 @@ async def dispose_engine() -> None:
     if _engine is not None:
         await _engine.dispose()
         _engine = None
+
+
+def get_sync_engine() -> Engine:
+    global _sync_engine
+    if _sync_engine is None:
+        url = os.environ.get("DATABASE_URL")
+        if not url:
+            raise RuntimeError("DATABASE_URL not set — no silent fallback post-migration.")
+        sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+        _sync_engine = _create_sync_engine(sync_url, pool_pre_ping=True)
+    return _sync_engine
