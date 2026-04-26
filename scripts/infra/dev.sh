@@ -52,7 +52,23 @@ esac
 
 log_info "Trading mode: $MODE  →  IB Gateway port $PORT"
 
-# 2. Probe the Gateway port. Warn if it's not up, but don't block — the user
+# 2. Apply pending Postgres migrations. Postgres is the primary persistence
+# layer — running new code against a stale schema causes obscure runtime
+# errors. `alembic upgrade head` is a no-op when the DB is already at head.
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source <(grep -E '^(DATABASE_URL|DATABASE_URL_TEST)=' "$ENV_FILE")
+  set +a
+fi
+if [[ -n "${DATABASE_URL:-}" ]]; then
+  log_info "Applying alembic migrations…"
+  (cd "$REPO_ROOT" && uv run alembic upgrade head)
+else
+  log_warn "DATABASE_URL not set — skipping alembic upgrade. Postgres-backed routes will fail."
+fi
+
+# 3. Probe the Gateway port. Warn if it's not up, but don't block — the user
 # may want to start the dev stack for frontend work without IB Gateway running.
 if (exec 3<>/dev/tcp/127.0.0.1/"$PORT") 2>/dev/null; then
   exec 3<&- 2>/dev/null || true
@@ -63,7 +79,7 @@ else
   log_warn "Continuing anyway — start IB Gateway in '$MODE' mode when you need broker calls."
 fi
 
-# 3. Export the resolved mode so child processes (uvicorn, Next, the Node
+# 4. Export the resolved mode so child processes (uvicorn, Next, the Node
 # realtime relay) all see the same value — without this, a per-invocation
 # arg override would silently desync from .env.
 export XENON_TRADING_MODE="$MODE"
@@ -75,7 +91,7 @@ if [[ "$NO_AUTH" == "1" ]]; then
   log_warn "Clerk auth bypassed for this session (XENON_DISABLE_AUTH=1)."
 fi
 
-# 4. Delegate to web/package.json's `dev` script, which already orchestrates
+# 5. Delegate to web/package.json's `dev` script, which already orchestrates
 # `next dev`, the IB realtime relay, AND uvicorn via concurrently. Running a
 # separate uvicorn here would race for 127.0.0.1:8321. The npm script inherits
 # our exported XENON_TRADING_MODE.
