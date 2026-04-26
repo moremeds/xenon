@@ -335,6 +335,9 @@ class OrderExecutor:
                         opened_at=now_utc if side == "BUY" else None,
                         closed_at=now_utc if side == "SELL" else None,
                         metadata=trade_entry,
+                        broker=os.environ.get("XENON_BROKER", "IB"),
+                        account_env=os.environ.get("XENON_TRADING_MODE", "legacy_unknown"),
+                        broker_account=os.environ.get("XENON_BROKER_ACCOUNT", "legacy_unknown"),
                     )
                 )
             print("✓ Trade logged to Postgres")

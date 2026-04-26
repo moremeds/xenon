@@ -83,8 +83,13 @@ def reserve_attempt(
     client_attempt_id: str,
     request: RequestRow,
     db_path: Path | str | None = None,
+    *,
+    broker: str = "IB",
+    account_env: str = "legacy_unknown",
+    broker_account: str = "legacy_unknown",
 ) -> ReservationOutcome:
-    """Atomically reserve a submission slot keyed by (user_id, client_attempt_id)."""
+    """Atomically reserve a submission slot keyed by
+    (broker, account_env, broker_account, user_id, client_attempt_id)."""
     sid = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     engine = get_sync_engine()
@@ -106,6 +111,9 @@ def reserve_attempt(
             state="PENDING",
             submitted_at=now,
             updated_at=now,
+            broker=broker,
+            account_env=account_env,
+            broker_account=broker_account,
         )
         stmt = stmt.on_conflict_do_nothing(constraint="uq_order_sub_user_attempt")
         stmt = stmt.returning(order_submissions.c.submission_id)
@@ -127,6 +135,9 @@ def reserve_attempt(
                 order_submissions.c.ib_order_id,
                 order_submissions.c.reason_code,
             ).where(
+                order_submissions.c.broker == broker,
+                order_submissions.c.account_env == account_env,
+                order_submissions.c.broker_account == broker_account,
                 order_submissions.c.user_id == user_id,
                 order_submissions.c.client_attempt_id == client_attempt_id,
             )
@@ -193,6 +204,10 @@ def register_from_snapshot(
     multiplier: int = 1,
     user_id: str = "snapshot",
     db_path: Path | str | None = None,
+    *,
+    broker: str = "IB",
+    account_env: str = "legacy_unknown",
+    broker_account: str = "legacy_unknown",
 ) -> bool:
     """Insert a minimal row for an IB order not placed via the FastAPI flow.
 
@@ -221,6 +236,9 @@ def register_from_snapshot(
                 submitted_at=now,
                 updated_at=now,
                 modify_sequence=0,
+                broker=broker,
+                account_env=account_env,
+                broker_account=broker_account,
             )
             .on_conflict_do_nothing(index_elements=["submission_id"])
             .returning(order_submissions.c.submission_id)
@@ -352,9 +370,27 @@ def lookup_submission_id_by_perm_id(perm_id: str, db_path: Path | str | None = N
     return row[0] if row else None
 
 
-def lookup_by_attempt(user_id: str, client_attempt_id: str, db_path: Path | str | None = None) -> SubmissionRow | None:
+def lookup_by_attempt(
+    user_id: str,
+    client_attempt_id: str,
+    db_path: Path | str | None = None,
+    *,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
+) -> SubmissionRow | None:
     engine = get_sync_engine()
     with engine.connect() as conn:
+        conditions = [
+            order_submissions.c.user_id == user_id,
+            order_submissions.c.client_attempt_id == client_attempt_id,
+        ]
+        if broker is not None:
+            conditions.append(order_submissions.c.broker == broker)
+        if account_env is not None:
+            conditions.append(order_submissions.c.account_env == account_env)
+        if broker_account is not None:
+            conditions.append(order_submissions.c.broker_account == broker_account)
         row = conn.execute(
             select(
                 order_submissions.c.submission_id,
@@ -370,10 +406,7 @@ def lookup_by_attempt(user_id: str, client_attempt_id: str, db_path: Path | str 
                 order_submissions.c.security_type,
                 order_submissions.c.right,
                 order_submissions.c.expiry,
-            ).where(
-                order_submissions.c.user_id == user_id,
-                order_submissions.c.client_attempt_id == client_attempt_id,
-            )
+            ).where(*conditions)
         ).first()
     if row is None:
         return None
