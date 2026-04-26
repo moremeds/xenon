@@ -26,6 +26,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Req
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+from sqlalchemy import func, select
 
 # Project paths — file lives at src/xenon/api/server.py
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -47,7 +48,8 @@ from xenon.api.routes.wizard import router as wizard_router
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
-from xenon.db.engine import dispose_engine, init_engine
+from xenon.db.engine import dispose_engine, get_sync_engine, init_engine
+from xenon.db.schema import order_events, order_submissions
 from xenon.execution import orders_store, preflight, quote_guard, quote_tokens
 from xenon.execution.preflight import (
     PortfolioView,
@@ -161,20 +163,9 @@ async def _run_rehydrate_on_boot() -> None:
             raise RuntimeError("ib_pool sync role has no client")
         return client
 
-    db_path = os.environ.get("XENON_ORDERS_DB_PATH") or str(_orders_store_mod._resolve_path(None))
-
-    # B1 — in test_mode, refuse to touch the real data/orders.duckdb. A pytest
-    # TestClient(app) without XENON_ORDERS_DB_PATH would otherwise read/write
-    # the prod DuckDB file. Require the env var to enable rehydrate under
-    # test_mode so tests can opt in explicitly via a tmp_path fixture.
     if _is_test_mode():
-        env_override = os.environ.get("XENON_ORDERS_DB_PATH")
-        # Compare against the literal default string — don't call _resolve_path
-        # here because it would round-trip through the env var we're checking.
-        default_prod_path = "data/orders.duckdb"
-        if not env_override or env_override == default_prod_path:
-            logger.info("test_mode: skipping rehydrate (set XENON_ORDERS_DB_PATH to enable)")
-            return
+        logger.info("test_mode: skipping rehydrate")
+        return
 
     try:
         await asyncio.wait_for(
@@ -182,7 +173,6 @@ async def _run_rehydrate_on_boot() -> None:
                 _rehydrate_mod.rehydrate_on_boot,
                 ib_client_factory=_ib_client_factory,
                 orders_store=_orders_store_mod,
-                db_path=db_path,
             ),
             timeout=10.0,
         )
@@ -1162,14 +1152,9 @@ async def dev_rehydrate_synthetic():
     from datetime import timezone as _tz
     from decimal import Decimal as _Dec
 
-    import duckdb as _duckdb
-
     from xenon.execution import orders_store as _orders_store_mod
     from xenon.execution import single_leg_rehydrate as _rehydrate_mod
     from xenon.execution.single_leg_rehydrate import PENDING_TIMEOUT_SECONDS
-
-    db_path = os.environ.get("XENON_ORDERS_DB_PATH") or str(_orders_store_mod._resolve_path(None))
-    _orders_store_mod.init_store(db_path)
 
     client_attempt_id = f"synthetic-{_uuid.uuid4()}"
     reservation = _orders_store_mod.reserve_attempt(
@@ -1183,7 +1168,6 @@ async def dev_rehydrate_synthetic():
             multiplier=1,
             limit_price=_Dec("500"),
         ),
-        db_path=db_path,
     )
     submission_id = reservation.submission_id
 
@@ -1191,32 +1175,28 @@ async def dev_rehydrate_synthetic():
     # is deterministic (FAILED / PENDING_TIMEOUT). Inline UPDATE — probe-specific.
     # Use the UTC-session helper so the naive round-trip preserves the epoch.
     backdated = _dt.now(_tz.utc) - _td(seconds=PENDING_TIMEOUT_SECONDS + 5)
-    con = _orders_store_mod._connect_utc(db_path)
-    try:
-        con.execute(
-            "UPDATE orders_submissions SET submitted_at = ? WHERE submission_id = ?",
-            [backdated, submission_id],
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            order_submissions.update()
+            .where(order_submissions.c.submission_id == submission_id)
+            .values(submitted_at=backdated)
         )
-    finally:
-        con.close()
 
     decisions = await asyncio.to_thread(
         _rehydrate_mod.rehydrate_on_boot,
         ib_client_factory=lambda: _FakeEmptyIBClient(),
         orders_store=_orders_store_mod,
-        db_path=db_path,
     )
 
     # Count events written for this submission
-    con = _duckdb.connect(str(db_path))
-    try:
-        row = con.execute(
-            "SELECT COUNT(*) FROM orders_events WHERE submission_id = ?",
-            [submission_id],
-        ).fetchone()
-    finally:
-        con.close()
-    events_count = int(row[0]) if row else 0
+    with engine.connect() as conn:
+        events_count = int(
+            conn.execute(
+                select(func.count()).select_from(order_events).where(order_events.c.submission_id == submission_id)
+            ).scalar()
+            or 0
+        )
 
     summary = [
         {

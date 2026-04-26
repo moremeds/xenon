@@ -1,10 +1,12 @@
 """Shared pytest configuration and fixtures for scripts tests."""
 
 import importlib
+import os
 import sys
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine, text
 
 # Add repo root, scripts/, and src/ so tests can import via:
 #   - legacy bare module paths (`from fetchers...`, `from utils...`)
@@ -16,6 +18,52 @@ SRC_DIR = PROJECT_ROOT / "src"
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SRC_DIR))
+
+
+def _sync_test_db_url() -> str:
+    url = os.environ.get(
+        "DATABASE_URL_TEST",
+        "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
+    )
+    return url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+
+
+def _truncate_postgres_tables() -> None:
+    engine = create_engine(_sync_test_db_url(), pool_pre_ping=True)
+    try:
+        with engine.begin() as conn:
+            for table in (
+                "xenon.order_events",
+                "xenon.order_submissions",
+                "xenon.wizard_protection",
+                "xenon.wizard_events",
+                "xenon.wizard_combo_attempts",
+                "xenon.wizard_sessions",
+                "xenon.uw_flow_events",
+                "xenon.uw_api_stats",
+            ):
+                conn.execute(text(f"TRUNCATE {table} CASCADE"))
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _postgres_orders_test_db(monkeypatch):
+    """Point sync Postgres callers at the test DB and clean order tables."""
+    monkeypatch.setenv("DATABASE_URL", _sync_test_db_url())
+
+    try:
+        import xenon.db.engine as engine_mod
+        import xenon.execution.orders_store as orders_store_mod
+
+        monkeypatch.setattr(engine_mod, "_sync_engine", None)
+        monkeypatch.setattr(orders_store_mod, "_pg_engine", None)
+    except Exception:
+        pass
+
+    _truncate_postgres_tables()
+    yield
+    _truncate_postgres_tables()
 
 
 @pytest.fixture(autouse=True)

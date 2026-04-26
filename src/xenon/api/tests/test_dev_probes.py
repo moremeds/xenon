@@ -15,24 +15,25 @@ import os
 # Keep lifespan in test mode so IB Gateway / pool startup is skipped.
 os.environ["XENON_API_TEST_MODE"] = "1"
 
-import duckdb  # noqa: E402
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from sqlalchemy import create_engine, text  # noqa: E402
 
 from xenon.api import server as server_mod  # noqa: E402
 
 
 @pytest.fixture
-def _isolated_db(tmp_path, monkeypatch):
-    db_path = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db_path))
-    from xenon.execution.orders_store import init_store
+def _pg_engine():
+    url = os.environ.get(
+        "DATABASE_URL_TEST",
+        "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
+    ).replace("postgresql+asyncpg://", "postgresql+psycopg://")
+    engine = create_engine(url, pool_pre_ping=True)
+    yield engine
+    engine.dispose()
 
-    init_store(str(db_path))
-    yield db_path
 
-
-def test_synthetic_probe_writes_event(monkeypatch, _isolated_db):
+def test_synthetic_probe_writes_event(monkeypatch, _pg_engine):
     """Probe should insert a PENDING row, run rehydrate, record an event."""
     monkeypatch.setenv("DEV_PROBES", "1")
     monkeypatch.setenv("XENON_API_TEST_MODE", "1")
@@ -46,14 +47,11 @@ def test_synthetic_probe_writes_event(monkeypatch, _isolated_db):
     assert body["events_added"] >= 1
 
     # Confirm the event was actually written to the DB
-    con = duckdb.connect(str(_isolated_db))
-    try:
+    with _pg_engine.connect() as con:
         rows = con.execute(
-            "SELECT kind FROM orders_events WHERE submission_id = ?",
-            [body["submission_id"]],
+            text("SELECT kind FROM xenon.order_events WHERE submission_id = :submission_id"),
+            {"submission_id": body["submission_id"]},
         ).fetchall()
-    finally:
-        con.close()
     assert len(rows) >= 1
     assert any("REHYDRATE" in r[0] for r in rows)
 

@@ -6,11 +6,12 @@ Spec: docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md §11.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-import duckdb
 import pytest
+from sqlalchemy import create_engine, text
 
 from xenon.execution import orders_store, single_leg_rehydrate
 from xenon.execution.orders_store import RequestRow, init_store, reserve_attempt
@@ -54,6 +55,14 @@ def db_path(tmp_path, monkeypatch):
     return p
 
 
+def _pg_engine():
+    url = os.environ.get(
+        "DATABASE_URL_TEST",
+        "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
+    ).replace("postgresql+asyncpg://", "postgresql+psycopg://")
+    return create_engine(url, pool_pre_ping=True)
+
+
 def _make_working_row(
     db_path,
     *,
@@ -85,52 +94,72 @@ def _make_working_row(
         ),
         db_path=db_path,
     )
-    con = orders_store._connect_utc(db_path)
+    engine = _pg_engine()
     try:
-        if state == "WORKING":
-            con.execute(
-                "UPDATE orders_submissions SET state='WORKING', ib_order_id=?, perm_id=? WHERE submission_id=?",
-                [ib_order_id, perm_id, sid_outcome.submission_id],
-            )
-        elif state == "PENDING":
-            # keep PENDING; backdate submitted_at if provided
-            if submitted_at is not None:
+        with engine.begin() as con:
+            params = {"submission_id": sid_outcome.submission_id}
+            if state == "WORKING":
                 con.execute(
-                    "UPDATE orders_submissions SET submitted_at=? WHERE submission_id=?",
-                    [submitted_at, sid_outcome.submission_id],
+                    text(
+                        "UPDATE xenon.order_submissions "
+                        "SET state='WORKING', ib_order_id=:ib_order_id, perm_id=:perm_id "
+                        "WHERE submission_id=:submission_id"
+                    ),
+                    {**params, "ib_order_id": ib_order_id, "perm_id": perm_id},
                 )
-        else:
-            con.execute(
-                "UPDATE orders_submissions SET state=?, ib_order_id=?, perm_id=? WHERE submission_id=?",
-                [state, ib_order_id, perm_id, sid_outcome.submission_id],
-            )
+            elif state == "PENDING":
+                if submitted_at is not None:
+                    con.execute(
+                        text(
+                            "UPDATE xenon.order_submissions "
+                            "SET submitted_at=:submitted_at WHERE submission_id=:submission_id"
+                        ),
+                        {**params, "submitted_at": submitted_at},
+                    )
+            else:
+                con.execute(
+                    text(
+                        "UPDATE xenon.order_submissions "
+                        "SET state=:state, ib_order_id=:ib_order_id, perm_id=:perm_id "
+                        "WHERE submission_id=:submission_id"
+                    ),
+                    {**params, "state": state, "ib_order_id": ib_order_id, "perm_id": perm_id},
+                )
     finally:
-        con.close()
+        engine.dispose()
     return sid_outcome.submission_id
 
 
 def _fetch_row(db_path, submission_id):
-    con = orders_store._connect_utc(db_path)
+    engine = _pg_engine()
     try:
-        row = con.execute(
-            "SELECT state, filled_qty, avg_fill_price, reason_code, client_attempt_id FROM orders_submissions WHERE submission_id=?",
-            [submission_id],
-        ).fetchone()
+        with engine.connect() as con:
+            row = con.execute(
+                text(
+                    "SELECT state, filled_qty, avg_fill_price, reason_code, client_attempt_id "
+                    "FROM xenon.order_submissions WHERE submission_id=:submission_id"
+                ),
+                {"submission_id": submission_id},
+            ).fetchone()
     finally:
-        con.close()
+        engine.dispose()
     return row
 
 
 def _fetch_events(db_path, submission_id):
-    con = orders_store._connect_utc(db_path)
+    engine = _pg_engine()
     try:
-        rows = con.execute(
-            'SELECT kind, detail FROM orders_events WHERE submission_id=? ORDER BY "at"',
-            [submission_id],
-        ).fetchall()
+        with engine.connect() as con:
+            rows = con.execute(
+                text(
+                    'SELECT kind, detail FROM xenon.order_events '
+                    'WHERE submission_id=:submission_id ORDER BY "at"'
+                ),
+                {"submission_id": submission_id},
+            ).fetchall()
     finally:
-        con.close()
-    return [(kind, json.loads(detail) if detail else None) for kind, detail in rows]
+        engine.dispose()
+    return [(kind, detail if isinstance(detail, dict) else json.loads(detail) if detail else None) for kind, detail in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +352,7 @@ def test_rehydrate_handles_list_positions_end_to_end(db_path):
 
 
 def test_submitted_at_epoch_is_utc_regardless_of_tz(db_path, monkeypatch):
-    """A5: naive datetimes read from DuckDB must be interpreted as UTC.
+    """A5: naive datetimes from legacy stores must be interpreted as UTC.
 
     Simulate a PST server and verify the epoch matches the UTC wall time,
     not offset by ±8h.
@@ -336,21 +365,20 @@ def test_submitted_at_epoch_is_utc_regardless_of_tz(db_path, monkeypatch):
     # Known UTC moment
     known = datetime(2026, 4, 21, 12, 0, 0, tzinfo=timezone.utc)
     sid = _make_working_row(db_path, perm_id="P-utc", ib_order_id="44")
-    con = orders_store._connect_utc(db_path)
+    engine = _pg_engine()
     try:
-        con.execute(
-            "UPDATE orders_submissions SET submitted_at=? WHERE submission_id=?",
-            [known.replace(tzinfo=None), sid],
-        )
-        row = con.execute(
-            "SELECT submitted_at FROM orders_submissions WHERE submission_id=?",
-            [sid],
-        ).fetchone()
+        with engine.begin() as con:
+            con.execute(
+                text(
+                    "UPDATE xenon.order_submissions SET submitted_at=:submitted_at "
+                    "WHERE submission_id=:submission_id"
+                ),
+                {"submitted_at": known.replace(tzinfo=None), "submission_id": sid},
+            )
     finally:
-        con.close()
+        engine.dispose()
 
-    naive_read_back = row[0]
-    assert naive_read_back.tzinfo is None  # confirm DuckDB strips tz
+    naive_read_back = known.replace(tzinfo=None)
 
     original_tz = os.environ.get("TZ")
     try:

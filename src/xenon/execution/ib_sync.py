@@ -1052,9 +1052,6 @@ def convert_to_portfolio_format(
     return result
 
 
-NAV_HISTORY_PATH = PORTFOLIO_PATH.parent / "nav_history.jsonl"
-
-
 def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
     """Upsert today's NAV into Postgres nav_history."""
     import pytz
@@ -1134,23 +1131,12 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
 
 
 def save_portfolio(portfolio: dict):
-    """Save portfolio to Postgres + JSON file (atomic write with SHA-256 checksum)."""
-    from xenon.utils.atomic_io import atomic_save
-
-    # Write to Postgres
+    """Save portfolio to Postgres."""
     try:
         _save_portfolio_to_postgres(portfolio)
         print("✓ Saved portfolio to Postgres")
     except Exception as exc:
         print(f"  Warning: Postgres write failed: {exc}")
-
-    # Keep JSON write — read paths not yet migrated
-    if PORTFOLIO_PATH.exists():
-        backup_path = PORTFOLIO_PATH.with_suffix(".json.bak")
-        backup_path.write_text(PORTFOLIO_PATH.read_text())
-
-    checksum = atomic_save(str(PORTFOLIO_PATH), portfolio)
-    print(f"✓ Saved portfolio to {PORTFOLIO_PATH.name} (checksum: {checksum[:12]}…)")
 
     # Track daily NAV for performance history
     acct = portfolio.get("account_summary", {})

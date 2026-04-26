@@ -1,8 +1,4 @@
-"""B1 — rehydrate must skip in test_mode when XENON_ORDERS_DB_PATH is unset.
-
-Without this guard, pytest's TestClient(app) would read/write the shared
-prod data/orders.duckdb.
-"""
+"""Rehydrate lifespan behavior in API test mode."""
 
 from __future__ import annotations
 
@@ -26,11 +22,8 @@ def _force_test_mode_on(monkeypatch):
     yield
 
 
-def test_rehydrate_skipped_in_test_mode_without_env(monkeypatch):
-    """test_mode + no XENON_ORDERS_DB_PATH → skip with a log, no rehydrate call."""
-    # Override the autouse conftest fixture — simulate an unset env var.
-    monkeypatch.delenv("XENON_ORDERS_DB_PATH", raising=False)
-
+def test_rehydrate_skipped_in_test_mode(monkeypatch):
+    """test_mode skips boot rehydrate; route tests call rehydrate explicitly."""
     called: list[dict] = []
 
     def fake_rehydrate(**kwargs):
@@ -45,18 +38,12 @@ def test_rehydrate_skipped_in_test_mode_without_env(monkeypatch):
     with TestClient(server_mod.app):
         pass
 
-    # The real invariant: rehydrate must not run when env var is unset in
-    # test_mode. The log assertion was brittle — full-suite test runs can
-    # mutate logger propagation, dropping INFO records even when the skip
-    # branch ran. The behavioral check (called == []) proves the branch fired.
-    assert called == [], "rehydrate must not run when env var is unset in test_mode"
+    assert called == [], "rehydrate must not run in test_mode"
 
 
-def test_rehydrate_runs_when_env_var_set(monkeypatch, tmp_path):
-    """Explicit opt-in — when XENON_ORDERS_DB_PATH is set, rehydrate runs."""
-    db_path = tmp_path / "custom.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db_path))
-
+@pytest.mark.asyncio
+async def test_rehydrate_runs_outside_test_mode(monkeypatch):
+    """Outside test mode, boot rehydrate runs against Postgres."""
     called: list[dict] = []
 
     def fake_rehydrate(**kwargs):
@@ -67,9 +54,10 @@ def test_rehydrate_runs_when_env_var_set(monkeypatch, tmp_path):
         "xenon.execution.single_leg_rehydrate.rehydrate_on_boot",
         fake_rehydrate,
     )
+    monkeypatch.setattr(server_mod, "_is_test_mode", lambda: False)
+    monkeypatch.setattr(server_mod, "ib_pool", object())
 
-    with TestClient(server_mod.app):
-        pass
+    await server_mod._run_rehydrate_on_boot()
 
     assert len(called) == 1
-    assert called[0]["db_path"] == str(db_path)
+    assert "db_path" not in called[0]

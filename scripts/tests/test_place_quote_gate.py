@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, text
 
 SECRET = "d" * 64
 
@@ -102,8 +103,6 @@ def test_limit_override_records_PREFLIGHT_ACK_LIMIT_event(client, monkeypatch):
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    import duckdb
-
     from xenon.api import server
 
     midday = datetime(2026, 4, 22, 13, 0, tzinfo=ZoneInfo("America/New_York"))
@@ -128,7 +127,11 @@ def test_limit_override_records_PREFLIGHT_ACK_LIMIT_event(client, monkeypatch):
         },
     )
     assert resp.status_code == 200, resp.text
-    con = duckdb.connect(os.environ["XENON_ORDERS_DB_PATH"])
-    rows = con.execute("SELECT kind FROM orders_events").fetchall()
-    con.close()
+    sync_url = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql+psycopg://")
+    engine = create_engine(sync_url, pool_pre_ping=True)
+    try:
+        with engine.connect() as con:
+            rows = con.execute(text("SELECT kind FROM xenon.order_events")).fetchall()
+    finally:
+        engine.dispose()
     assert ("PREFLIGHT_ACK_LIMIT",) in rows

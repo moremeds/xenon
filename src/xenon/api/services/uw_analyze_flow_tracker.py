@@ -6,7 +6,7 @@ subsequent EOD snapshots, classifying anomalies (premium collapse, OI
 evaporation, closing-volume spike) and closing it out when positioning unwinds
 or the contract expires.
 
-Storage: data/uw_unusual_flow_log.json (atomic writes via tmpfile + os.replace).
+Storage: Postgres ``xenon.uw_flow_events``.
 
 Spec: docs/superpowers/specs/2026-04-08-uw-analyze-overhaul-design.md
       §"Unusual flow lifecycle tracker"
@@ -19,7 +19,6 @@ import json
 import logging
 import os
 import sys
-import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -369,7 +368,7 @@ def progress_event(
 
 
 class FlowLog:
-    """Thin file-backed dict-of-events with atomic writes."""
+    """Thin in-memory dict-of-events with Postgres persistence."""
 
     def __init__(self, path: Optional[Path] = None) -> None:
         self.path = Path(path) if path else _DEFAULT_PATH
@@ -381,6 +380,7 @@ class FlowLog:
             return
         self._loaded = True
         if not self.path.exists():
+            self._load_from_postgres()
             return
         try:
             raw = json.loads(self.path.read_text())
@@ -395,6 +395,42 @@ class FlowLog:
                 self._events[eid] = _event_from_dict(payload)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("skipping malformed flow event %s: %s", eid, exc)
+
+    def _load_from_postgres(self) -> None:
+        try:
+            url = os.environ.get("DATABASE_URL")
+            if not url:
+                return
+            from sqlalchemy import create_engine as _cse
+            from sqlalchemy import select
+
+            from xenon.db.schema import uw_flow_events
+
+            sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+            engine = _cse(sync_url)
+            try:
+                with engine.connect() as conn:
+                    rows = conn.execute(select(uw_flow_events)).fetchall()
+            finally:
+                engine.dispose()
+            for row in rows:
+                data = dict(row._mapping)
+                payload = {
+                    "id": data["flow_event_key"],
+                    "ticker": data["ticker"],
+                    "side": data["side"],
+                    "strike": float(data["strike"]) if data["strike"] is not None else 0.0,
+                    "expiry": data["expiry"].isoformat() if data["expiry"] else "",
+                    "detected_at": data["detected_at"].isoformat() if data["detected_at"] else "",
+                    "initial": data["initial"] or {},
+                    "daily_track": data["daily_track"] or [],
+                    "status": data["status"],
+                    "anomaly_reason": data["anomaly_reason"],
+                    "closed_at": data["closed_at"].isoformat() if data["closed_at"] else None,
+                }
+                self._events[payload["id"]] = _event_from_dict(payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("flow_log Postgres load failed: %s", exc)
 
     def all(self) -> list[FlowEvent]:
         self.load()
@@ -456,24 +492,6 @@ class FlowLog:
 
     def save(self) -> None:
         self.load()
-        payload = {
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "events": {eid: ev.to_dict() for eid, ev in self._events.items()},
-        }
-        # Write to JSON (keep for backward compat)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_fd, tmp_path = tempfile.mkstemp(prefix=".uw_unusual_flow_log_", suffix=".json", dir=str(self.path.parent))
-        try:
-            with os.fdopen(tmp_fd, "w") as fh:
-                json.dump(payload, fh, indent=2, default=str)
-            os.replace(tmp_path, self.path)
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
-        # Also write to Postgres
         self._save_to_postgres()
 
     def _save_to_postgres(self) -> None:

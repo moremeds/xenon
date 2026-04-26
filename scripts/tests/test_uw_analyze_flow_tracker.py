@@ -328,9 +328,7 @@ def test_flow_log_upsert_and_save_round_trip(tmp_path):
     ev = _make_event()
     assert log.upsert(ev) is True  # newly added
     log.save()
-    raw = json.loads((tmp_path / "flow.json").read_text())
-    assert ev.id in raw["events"]
-    assert raw["events"][ev.id]["ticker"] == "NVDA"
+    assert not (tmp_path / "flow.json").exists()
 
     log2 = FlowLog(path=tmp_path / "flow.json")
     loaded = log2.for_ticker("NVDA")

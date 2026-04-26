@@ -9,8 +9,10 @@ gate can apply, then the modify proceeds.
 
 from __future__ import annotations
 
-import duckdb
+import os
+
 import pytest
+from sqlalchemy import create_engine, text
 
 from xenon.execution.orders_store import (
     apply_modify,
@@ -25,6 +27,19 @@ def db_path(tmp_path):
     path = tmp_path / "orders.duckdb"
     init_store(path)
     return path
+
+
+def _fetch_one(sql: str, params: dict | None = None):
+    url = os.environ.get(
+        "DATABASE_URL_TEST",
+        "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
+    ).replace("postgresql+asyncpg://", "postgresql+psycopg://")
+    engine = create_engine(url, pool_pre_ping=True)
+    try:
+        with engine.connect() as conn:
+            return conn.execute(text(sql), params or {}).fetchone()
+    finally:
+        engine.dispose()
 
 
 def test_register_inserts_row_for_unknown_perm_id(db_path):
@@ -42,15 +57,11 @@ def test_register_inserts_row_for_unknown_perm_id(db_path):
     assert inserted is True
 
     # Row is now present and queryable by perm_id.
-    con = duckdb.connect(str(db_path))
-    try:
-        row = con.execute(
-            "SELECT ib_order_id, perm_id, ticker, action, quantity, limit_price, state, modify_sequence "
-            "FROM orders_submissions WHERE perm_id = ?",
-            ["1533567543"],
-        ).fetchone()
-    finally:
-        con.close()
+    row = _fetch_one(
+        "SELECT ib_order_id, perm_id, ticker, action, quantity, limit_price, state, modify_sequence "
+        "FROM xenon.order_submissions WHERE perm_id = :perm_id",
+        {"perm_id": "1533567543"},
+    )
     assert row is not None
     assert row[0] == "-5"
     assert row[1] == "1533567543"
@@ -88,14 +99,10 @@ def test_register_is_idempotent(db_path):
     assert second is False  # already exists, no-op
 
     # Exactly one row.
-    con = duckdb.connect(str(db_path))
-    try:
-        count = con.execute(
-            "SELECT COUNT(*) FROM orders_submissions WHERE perm_id = ?",
-            ["1533567543"],
-        ).fetchone()[0]
-    finally:
-        con.close()
+    count = _fetch_one(
+        "SELECT COUNT(*) FROM xenon.order_submissions WHERE perm_id = :perm_id",
+        {"perm_id": "1533567543"},
+    )[0]
     assert count == 1
 
 
@@ -150,14 +157,10 @@ def test_register_works_for_single_leg_option(db_path):
         db_path=db_path,
     )
     assert inserted is True
-    con = duckdb.connect(str(db_path))
-    try:
-        mult = con.execute(
-            "SELECT multiplier FROM orders_submissions WHERE perm_id = ?",
-            ["1000"],
-        ).fetchone()[0]
-    finally:
-        con.close()
+    mult = _fetch_one(
+        "SELECT multiplier FROM xenon.order_submissions WHERE perm_id = :perm_id",
+        {"perm_id": "1000"},
+    )[0]
     assert mult == 100
 
 

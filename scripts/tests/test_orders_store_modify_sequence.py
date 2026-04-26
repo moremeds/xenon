@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-import duckdb
 import pytest
+from sqlalchemy import create_engine, text
 
 from xenon.execution import orders_store
 from xenon.execution.orders_store import (
@@ -52,6 +52,15 @@ def db_path(tmp_path):
     return path
 
 
+def _fetch_scalar(sql: str, params: dict | None = None):
+    engine = create_engine(orders_store._get_pg_engine().url)
+    try:
+        with engine.connect() as conn:
+            return conn.execute(text(sql), params or {}).scalar()
+    finally:
+        engine.dispose()
+
+
 def test_applies_monotonic_modify_sequence(db_path):
     _seed_order(db_path, user_id="u1", client_attempt_id="a1", ib_order_id="1")
 
@@ -74,15 +83,11 @@ def test_modify_sequence_resets_per_order_id(db_path):
     assert out2 == {"applied": True, "current_sequence": 1}
 
     # verify via read that order 1 is still at 5
-    con = duckdb.connect(str(db_path))
-    try:
-        row = con.execute(
-            "SELECT modify_sequence FROM orders_submissions WHERE ib_order_id = ?",
-            ["1"],
-        ).fetchone()
-    finally:
-        con.close()
-    assert row[0] == 5
+    value = _fetch_scalar(
+        "SELECT modify_sequence FROM xenon.order_submissions WHERE ib_order_id = :ib_order_id",
+        {"ib_order_id": "1"},
+    )
+    assert value == 5
 
 
 def test_modify_sequence_monotonic_strictly_increasing(db_path):
@@ -143,14 +148,7 @@ def test_apply_modify_by_perm_id_unknown_returns_sentinel(db_path):
 
 
 def test_migration_idempotent(db_path):
-    # Second init_store call on the same path must not error (ADD COLUMN IF NOT EXISTS).
+    # Second init_store call on the same path must not error; schema is Alembic-managed.
     init_store(db_path)
     init_store(db_path)
-
-    # verify schema has modify_sequence column
-    con = duckdb.connect(str(db_path))
-    try:
-        cols = [r[1] for r in con.execute("PRAGMA table_info('orders_submissions')").fetchall()]
-    finally:
-        con.close()
-    assert "modify_sequence" in cols
+    assert not db_path.exists()

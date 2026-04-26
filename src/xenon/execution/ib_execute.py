@@ -2,7 +2,7 @@
 """
 Interactive Brokers Order Execution with Auto-Monitor and Auto-Log
 
-Places orders, monitors for fills, and automatically logs to trade_log.json.
+Places orders, monitors for fills, and automatically logs to Postgres.
 
 This is the UNIFIED workflow script. Use this instead of separate
 ib_order.py + ib_fill_monitor.py calls.
@@ -31,12 +31,10 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import sys
 from datetime import datetime, timezone
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
@@ -46,16 +44,12 @@ except ImportError:
     print("Install with: pip install ib_insync")
     sys.exit(1)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
 DEFAULT_CLIENT_ID = CLIENT_IDS.get("ib_execute", 25)
 DEFAULT_TIMEOUT = 60  # 1 minute default monitor timeout
 DEFAULT_INTERVAL = 3  # Check every 3 seconds
-
-TRADE_LOG_PATH = PROJECT_ROOT / "data" / "trade_log.json"
 
 _sync_engine = None
 
@@ -289,7 +283,7 @@ class OrderExecutor:
     def log_trade(
         self, result: Dict[str, Any], contract, side: str, limit_price: float, thesis: str = "", notes: str = ""
     ) -> bool:
-        """Log a filled trade to Postgres + trade_log.json.
+        """Log a filled trade to Postgres.
 
         Returns True if successfully logged.
         """
@@ -361,22 +355,6 @@ class OrderExecutor:
         except Exception as exc:
             print(f"  Warning: Postgres trade log failed: {exc}")
 
-        # Keep JSON write — read paths not yet migrated
-        if TRADE_LOG_PATH.exists():
-            with open(TRADE_LOG_PATH) as f:
-                trade_log = json.load(f)
-        else:
-            trade_log = {"trades": []}
-
-        existing_ids = [t.get("id", 0) for t in trade_log.get("trades", [])]
-        next_id = max(existing_ids, default=0) + 1
-        trade_entry["id"] = next_id
-
-        trade_log["trades"].append(trade_entry)
-        with open(TRADE_LOG_PATH, "w") as f:
-            json.dump(trade_log, f, indent=2)
-
-        print(f"✓ Trade logged to {TRADE_LOG_PATH.name} (ID: {next_id})")
         return True
 
 
@@ -409,7 +387,7 @@ def main():
     # Behavior
     parser.add_argument("--dry-run", action="store_true", help="Preview without submitting")
     parser.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
-    parser.add_argument("--no-log", action="store_true", help="Don't log to trade_log.json")
+    parser.add_argument("--no-log", action="store_true", help="Don't log to Postgres")
 
     # Logging metadata
     parser.add_argument("--thesis", default="", help="Trade thesis for logging")

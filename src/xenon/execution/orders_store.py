@@ -1,8 +1,7 @@
 """Postgres-backed orders_submissions / orders_events store.
 
 Migrated from DuckDB. Preserves the same public API (function signatures,
-dataclasses, return types). Combo wizard modules still import _connect_utc /
-_resolve_path for their own DuckDB tables — removed in Task 21.
+dataclasses, return types).
 
 Spec: docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md §12.
 """
@@ -10,7 +9,6 @@ Spec: docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md §12.
 from __future__ import annotations
 
 import os
-import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,83 +16,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
-import duckdb
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine as _create_sync_engine
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from xenon.db.schema import order_events, order_submissions
-
-# ── DuckDB compat kept for combo_wizard (Task 21 removes) ──
-
-_CREATE_SUBMISSIONS = """
-CREATE TABLE IF NOT EXISTS orders_submissions (
-    submission_id     TEXT PRIMARY KEY,
-    user_id           TEXT NOT NULL,
-    client_attempt_id TEXT NOT NULL,
-    ticker            TEXT NOT NULL,
-    security_type     TEXT NOT NULL,
-    action            TEXT NOT NULL,
-    quantity          INTEGER NOT NULL,
-    expiry            TEXT,
-    strike            DECIMAL(18,4),
-    "right"           TEXT,
-    multiplier        INTEGER NOT NULL,
-    con_id            INTEGER,
-    placing_client_id INTEGER,
-    ib_order_id       TEXT,
-    perm_id           TEXT,
-    limit_price       DECIMAL(18,4) NOT NULL,
-    state             TEXT NOT NULL,
-    reason_code       TEXT,
-    filled_qty        INTEGER NOT NULL DEFAULT 0,
-    avg_fill_price    DECIMAL(18,4),
-    submitted_at      TIMESTAMP NOT NULL,
-    updated_at        TIMESTAMP NOT NULL,
-    UNIQUE (user_id, client_attempt_id)
-);
-"""
-
-_CREATE_EVENTS = """
-CREATE TABLE IF NOT EXISTS orders_events (
-    event_id      TEXT PRIMARY KEY,
-    submission_id TEXT NOT NULL,
-    kind          TEXT NOT NULL,
-    detail        JSON,
-    "at"          TIMESTAMP NOT NULL
-);
-"""
-
-_CREATE_INDEXES = [
-    "CREATE INDEX IF NOT EXISTS ix_submissions_state_ticker ON orders_submissions(state, ticker);",
-    "CREATE INDEX IF NOT EXISTS ix_submissions_perm_id ON orders_submissions(perm_id);",
-    "CREATE INDEX IF NOT EXISTS ix_submissions_ib_order_id ON orders_submissions(ib_order_id);",
-    'CREATE INDEX IF NOT EXISTS ix_events_submission ON orders_events(submission_id, "at");',
-]
-
-_MIGRATIONS = [
-    "ALTER TABLE orders_submissions ADD COLUMN IF NOT EXISTS modify_sequence INTEGER DEFAULT 0;",
-]
-
-
-def _resolve_path(db_path: Path | str | None = None) -> Path:
-    if db_path is not None:
-        return Path(db_path)
-    env = os.environ.get("XENON_ORDERS_DB_PATH")
-    return Path(env) if env else Path("data/orders.duckdb")
-
-
-def _connect_utc(path: Path | str) -> duckdb.DuckDBPyConnection:
-    con = duckdb.connect(str(path))
-    try:
-        con.execute("SET TimeZone='UTC'")
-    except duckdb.Error:
-        pass
-    return con
-
-
-_WRITE_LOCK = threading.Lock()
 
 # ── Postgres sync engine ──
 
@@ -117,9 +44,7 @@ def _get_pg_engine():
 
 def init_store(db_path: Path | str | None = None) -> Path:
     """No-op — schema managed by Alembic. Kept for backward compatibility."""
-    path = _resolve_path(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+    return Path(db_path) if db_path is not None else Path("data/orders.duckdb")
 
 
 # ── Models ──
