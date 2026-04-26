@@ -418,8 +418,45 @@ class UwAnalyzeCache:
             )
             target = self._archive_file_for(ticker)
             await asyncio.to_thread(self._write_archive_sync, target, payload)
+            # Also archive to Postgres
+            await asyncio.to_thread(self._archive_to_postgres, ticker, current)
         except Exception as exc:  # noqa: BLE001
             logger.warning("uw_analyze_cache archive write failed for %s: %s", ticker, exc)
+
+    @staticmethod
+    def _archive_to_postgres(ticker: str, current: dict) -> None:
+        """Write snapshot to Postgres uw_analyze_snapshots (sync, for to_thread)."""
+        try:
+            url = os.environ.get("DATABASE_URL")
+            if not url:
+                return
+            from decimal import Decimal
+
+            from sqlalchemy import create_engine as _cse
+            from sqlalchemy import insert
+
+            from xenon.db.schema import uw_analyze_snapshots
+
+            sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+            engine = _cse(sync_url)
+            report = current.get("report") or {}
+            scores = report.get("scores") if isinstance(report, dict) else None
+            score_val = None
+            if isinstance(scores, dict):
+                score_val = scores.get("flow") or scores.get("total")
+            with engine.begin() as conn:
+                conn.execute(
+                    insert(uw_analyze_snapshots).values(
+                        ticker=ticker,
+                        vrp_state=_coerce_jsonable(report.get("vrp_state")) if isinstance(report, dict) else None,
+                        regime=_coerce_jsonable(report.get("regime")) if isinstance(report, dict) else None,
+                        flow_signals=_coerce_jsonable(current.get("flow_alerts")),
+                        portfolio_score=Decimal(str(score_val)) if score_val is not None else None,
+                    )
+                )
+            engine.dispose()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("uw_analyze_cache Postgres archive failed for %s: %s", ticker, exc)
 
     def load_history(
         self,

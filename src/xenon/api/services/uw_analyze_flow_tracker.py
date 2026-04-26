@@ -460,6 +460,7 @@ class FlowLog:
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "events": {eid: ev.to_dict() for eid, ev in self._events.items()},
         }
+        # Write to JSON (keep for backward compat)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp_fd, tmp_path = tempfile.mkstemp(prefix=".uw_unusual_flow_log_", suffix=".json", dir=str(self.path.parent))
         try:
@@ -472,6 +473,73 @@ class FlowLog:
             except OSError:
                 pass
             raise
+        # Also write to Postgres
+        self._save_to_postgres()
+
+    def _save_to_postgres(self) -> None:
+        try:
+            url = os.environ.get("DATABASE_URL")
+            if not url:
+                return
+            from decimal import Decimal
+
+            from sqlalchemy import create_engine as _cse
+            from sqlalchemy import text
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+            from xenon.db.schema import uw_flow_events
+
+            sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+            engine = _cse(sync_url)
+            with engine.begin() as conn:
+                for ev in self._events.values():
+                    detected = datetime.fromisoformat(ev.detected_at) if ev.detected_at else datetime.now(timezone.utc)
+                    closed = datetime.fromisoformat(ev.closed_at) if ev.closed_at else None
+                    expiry_d = None
+                    try:
+                        expiry_d = date.fromisoformat(ev.expiry) if ev.expiry else None
+                    except ValueError:
+                        pass
+                    initial_dict = {
+                        "premium_usd": ev.initial.premium_usd,
+                        "oi": ev.initial.oi,
+                        "volume": ev.initial.volume,
+                        "mid": ev.initial.mid,
+                        "underlying_price": ev.initial.underlying_price,
+                    }
+                    track_list = [
+                        {
+                            "date": r.date,
+                            "oi": r.oi,
+                            "mid": r.mid,
+                            "underlying_price": r.underlying_price,
+                            "pct_change_premium": r.pct_change_premium,
+                            "volume": r.volume,
+                        }
+                        for r in ev.daily_track
+                    ]
+                    conn.execute(
+                        text(
+                            """INSERT INTO xenon.uw_flow_events
+                            (ticker, side, strike, expiry, detected_at, initial, daily_track, status, anomaly_reason, closed_at)
+                            VALUES (:t, :s, :st, :e, :d, CAST(:i AS jsonb), CAST(:tr AS jsonb), :status, :ar, :ca)"""
+                        ),
+                        {
+                            "t": ev.ticker,
+                            "s": ev.side,
+                            "st": ev.strike,
+                            "e": expiry_d,
+                            "d": detected,
+                            "i": json.dumps(initial_dict),
+                            "tr": json.dumps(track_list),
+                            "status": ev.status,
+                            "ar": ev.anomaly_reason,
+                            "ca": closed,
+                        },
+                    )
+            engine.dispose()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("flow_log Postgres save failed: %s", exc)
 
 
 def _event_from_dict(d: dict) -> FlowEvent:

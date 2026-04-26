@@ -457,12 +457,8 @@ class UWApiStats:
         }
 
     def _write_history_atomic(self, payload: Dict[str, Any]) -> None:
-        """Atomically persist the history payload to disk.
-
-        Mirrors the pattern from scripts/api/services/uw_analyze_cache.py —
-        tempfile in the same directory → fdopen write → os.replace. On
-        any exception unlinks the temp file. Must NOT be called under lock.
-        """
+        """Atomically persist the history payload to disk + Postgres."""
+        # JSON file (keep for backward compat)
         try:
             self.history_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_fd, tmp_path = tempfile.mkstemp(
@@ -481,9 +477,49 @@ class UWApiStats:
                     pass
                 raise
         except Exception as exc:  # noqa: BLE001
-            # Never let persistence failure take down the caller — this
-            # is a best-effort observability feature.
             logger.warning("uw_api_stats history write failed: %s", exc)
+        # Also write to Postgres
+        self._write_history_to_postgres(payload)
+
+    def _write_history_to_postgres(self, payload: Dict[str, Any]) -> None:
+        try:
+            url = os.environ.get("DATABASE_URL")
+            if not url:
+                return
+            from decimal import Decimal
+
+            from sqlalchemy import create_engine as _cse
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+            from xenon.db.schema import uw_api_stats as uw_stats_table
+
+            sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+            engine = _cse(sync_url)
+            buckets = payload.get("buckets") or {}
+            with engine.begin() as conn:
+                for hour_key, b in buckets.items():
+                    bucket_dt = datetime.strptime(hour_key, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                    values = dict(
+                        bucket_hour=bucket_dt,
+                        requests=int(b.get("requests_2xx", 0))
+                        + int(b.get("requests_4xx", 0))
+                        + int(b.get("requests_5xx", 0)),
+                        cache_hits=int(b.get("cached", 0)),
+                        latency_sum=Decimal(str(b.get("sum_latency_ms", 0.0))),
+                        latency_count=int(b.get("latency_count", 0)),
+                        status_2xx=int(b.get("requests_2xx", 0)),
+                        status_4xx=int(b.get("requests_4xx", 0)),
+                        status_5xx=int(b.get("requests_5xx", 0)),
+                    )
+                    stmt = pg_insert(uw_stats_table).values(**values)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=[uw_stats_table.c.bucket_hour],
+                        set_={k: stmt.excluded[k] for k in values if k != "bucket_hour"},
+                    )
+                    conn.execute(stmt)
+            engine.dispose()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("uw_api_stats Postgres write failed: %s", exc)
 
     def _load_history(self) -> None:
         """Read persisted history on startup. Tolerates every failure mode.
