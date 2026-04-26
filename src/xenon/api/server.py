@@ -47,6 +47,7 @@ from xenon.api.routes.wizard import router as wizard_router
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
+from xenon.db.engine import dispose_engine, init_engine
 from xenon.execution import orders_store, preflight, quote_guard, quote_tokens
 from xenon.execution.preflight import (
     PortfolioView,
@@ -239,6 +240,8 @@ async def lifespan(app: FastAPI):
         logger.info("Xenon API starting in test mode; IB Gateway and pool startup are disabled")
         uw_available = bool(os.environ.get("UW_TOKEN"))
         orders_store.init_store()
+        if os.environ.get("DATABASE_URL"):
+            app.state.db_engine = init_engine()
         await _run_rehydrate_on_boot()
         app.state.trading_mode = trading_mode.MODE
         # Tests monkeypatch _get_managed_account_for_health; honor that.
@@ -280,6 +283,7 @@ async def lifespan(app: FastAPI):
         logger.info("Trading mode verified: %s account=%s", trading_mode.MODE, account)
 
     orders_store.init_store()
+    app.state.db_engine = init_engine()
 
     # UW client — just verify token exists
     uw_available = bool(os.environ.get("UW_TOKEN"))
@@ -461,6 +465,7 @@ async def lifespan(app: FastAPI):
             _uw_stats.flush_history()
         except Exception as exc:  # noqa: BLE001
             logger.warning("uw_api_stats history flush on shutdown failed: %s", exc)
+        await dispose_engine()
         logger.info("Xenon API shut down")
 
 
