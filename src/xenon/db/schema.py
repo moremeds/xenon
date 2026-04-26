@@ -43,6 +43,14 @@ positions = Table(
     Column("unrealized_pnl", Numeric(12, 2)),
     Column("account", Text, nullable=False),
     Column("synced_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Column("broker", Text, nullable=False, server_default=text("'IB'")),
+    Column("account_env", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    Column("broker_account", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    CheckConstraint("broker IN ('IB', 'FUTU')", name="ck_positions_broker"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
+        name="ck_positions_account_env",
+    ),
 )
 
 account_snapshots = Table(
@@ -54,6 +62,14 @@ account_snapshots = Table(
     Column("peak_value", Numeric(14, 2)),
     Column("net_liquidation", Numeric(14, 2)),
     Column("snapshot_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Column("broker", Text, nullable=False, server_default=text("'IB'")),
+    Column("account_env", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    Column("broker_account", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    CheckConstraint("broker IN ('IB', 'FUTU')", name="ck_acct_snap_broker"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
+        name="ck_acct_snap_account_env",
+    ),
 )
 
 trades = Table(
@@ -72,14 +88,30 @@ trades = Table(
     Column("opened_at", TIMESTAMP(timezone=True)),
     Column("closed_at", TIMESTAMP(timezone=True)),
     Column("metadata", JSONB),
+    Column("broker", Text, nullable=False, server_default=text("'IB'")),
+    Column("account_env", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    Column("broker_account", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    CheckConstraint("broker = 'IB'", name="ck_trades_broker_ib_only"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
+        name="ck_trades_account_env",
+    ),
 )
 
 nav_history = Table(
     "nav_history",
     xenon_metadata,
+    Column("broker", Text, primary_key=True, server_default=text("'IB'")),
+    Column("account_env", Text, primary_key=True, server_default=text("'legacy_unknown'")),
+    Column("broker_account", Text, primary_key=True, server_default=text("'legacy_unknown'")),
     Column("date", Date, primary_key=True),
     Column("nav", Numeric(14, 2), nullable=False),
     Column("daily_pnl", Numeric(12, 2)),
+    CheckConstraint("broker IN ('IB', 'FUTU')", name="ck_nav_broker"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
+        name="ck_nav_account_env",
+    ),
 )
 
 # ---------- Order Lifecycle ----------
@@ -110,10 +142,25 @@ order_submissions = Table(
     Column("modify_sequence", Integer, server_default=text("0")),
     Column("submitted_at", TIMESTAMP(timezone=True), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
-    UniqueConstraint("user_id", "client_attempt_id", name="uq_order_sub_user_attempt"),
+    Column("broker", Text, nullable=False, server_default=text("'IB'")),
+    Column("account_env", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    Column("broker_account", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    CheckConstraint("broker = 'IB'", name="ck_order_sub_broker_ib_only"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
+        name="ck_order_sub_account_env",
+    ),
+    UniqueConstraint(
+        "broker",
+        "account_env",
+        "broker_account",
+        "user_id",
+        "client_attempt_id",
+        name="uq_order_sub_user_attempt",
+    ),
     Index("ix_order_sub_state_ticker", "state", "ticker"),
-    Index("ix_order_sub_perm_id", "perm_id"),
-    Index("ix_order_sub_ib_order_id", "ib_order_id"),
+    Index("ix_order_sub_perm_id", "broker", "account_env", "broker_account", "perm_id"),
+    Index("ix_order_sub_ib_order_id", "broker", "account_env", "broker_account", "ib_order_id"),
 )
 
 order_events = Table(
@@ -144,6 +191,14 @@ wizard_sessions = Table(
     Column("current_attempt_id", Text),
     Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
     Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Column("broker", Text, nullable=False, server_default=text("'IB'")),
+    Column("account_env", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    Column("broker_account", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    CheckConstraint("broker = 'IB'", name="ck_wizard_sess_broker_ib_only"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
+        name="ck_wizard_sess_account_env",
+    ),
 )
 
 wizard_events = Table(
@@ -186,6 +241,14 @@ wizard_combo_attempts = Table(
     Column("modify_sequence", Integer, server_default=text("0")),
     Column("submitted_at", TIMESTAMP(timezone=True)),
     Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Column("broker", Text, nullable=False, server_default=text("'IB'")),
+    Column("account_env", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    Column("broker_account", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    CheckConstraint("broker = 'IB'", name="ck_wizard_attempt_broker_ib_only"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
+        name="ck_wizard_attempt_account_env",
+    ),
     Index("ix_wizard_attempts_session_updated", "session_id", "updated_at"),
 )
 
