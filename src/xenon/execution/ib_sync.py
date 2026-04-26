@@ -18,6 +18,7 @@ import json
 import os
 import sys
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -35,6 +36,21 @@ DEFAULT_PORT = DEFAULT_GATEWAY_PORT
 DEFAULT_CLIENT_ID = CLIENT_IDS["ib_sync"]
 
 PORTFOLIO_PATH = Path(__file__).resolve().parents[3] / "data" / "portfolio.json"
+
+_sync_engine = None
+
+
+def _get_sync_engine():
+    global _sync_engine
+    if _sync_engine is None:
+        url = os.environ.get("DATABASE_URL")
+        if not url:
+            raise RuntimeError("DATABASE_URL not set — no silent fallback to JSON files post-migration.")
+        from sqlalchemy import create_engine as _create_sync_engine
+
+        sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+        _sync_engine = _create_sync_engine(sync_url)
+    return _sync_engine
 
 
 def connect_ib(host: str, port: int, client_id="auto") -> IBClient:
@@ -1040,53 +1056,101 @@ NAV_HISTORY_PATH = PORTFOLIO_PATH.parent / "nav_history.jsonl"
 
 
 def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
-    """Append today's NAV to the daily history file (JSONL, one entry per day)."""
+    """Upsert today's NAV into Postgres nav_history."""
     import pytz
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from xenon.db.schema import nav_history
 
     et = pytz.timezone("America/New_York")
-    today = datetime.now(et).strftime("%Y-%m-%d")
-    entry = {"date": today, "nav": round(net_liq, 2)}
-    if daily_pnl is not None:
-        entry["daily_pnl"] = round(float(daily_pnl), 2)
+    today = datetime.now(et).date()
 
-    # Read existing, update-or-append for today
-    existing = []
-    if NAV_HISTORY_PATH.exists():
-        for line in NAV_HISTORY_PATH.read_text().strip().splitlines():
-            try:
-                existing.append(json.loads(line))
-            except (json.JSONDecodeError, ValueError):
-                continue
+    nav_val = Decimal(str(round(net_liq, 2)))
+    pnl_val = Decimal(str(round(float(daily_pnl), 2))) if daily_pnl is not None else None
 
-    found = False
-    for e in existing:
-        if e.get("date") == today:
-            e["nav"] = entry["nav"]
-            if "daily_pnl" in entry:
-                e["daily_pnl"] = entry["daily_pnl"]
-            found = True
-            break
-    if not found:
-        existing.append(entry)
+    engine = _get_sync_engine()
+    with engine.begin() as conn:
+        stmt = pg_insert(nav_history).values(date=today, nav=nav_val, daily_pnl=pnl_val)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[nav_history.c.date],
+            set_={"nav": stmt.excluded.nav, "daily_pnl": stmt.excluded.daily_pnl},
+        )
+        conn.execute(stmt)
 
-    with open(NAV_HISTORY_PATH, "w") as f:
-        for e in sorted(existing, key=lambda x: x.get("date", "")):
-            f.write(json.dumps(e) + "\n")
     print(f"✓ NAV snapshot: {today} → ${net_liq:,.2f}")
 
 
+def _save_portfolio_to_postgres(portfolio: dict) -> None:
+    """Write positions + account snapshot to Postgres."""
+    from sqlalchemy import delete, insert
+
+    from xenon.db.schema import account_snapshots, positions
+
+    engine = _get_sync_engine()
+    with engine.begin() as conn:
+        conn.execute(delete(positions).where(positions.c.account == "IB"))
+
+        for pos in portfolio.get("positions", []):
+            ticker = pos["ticker"]
+            expiry_raw = pos.get("expiry")
+            expiry = None
+            if expiry_raw and expiry_raw != "N/A":
+                try:
+                    expiry = datetime.strptime(expiry_raw, "%Y-%m-%d").date()
+                except (ValueError, TypeError):
+                    pass
+
+            for leg in pos.get("legs", []):
+                leg_type = leg.get("type", "Stock")
+                sec_type = "STK" if leg_type == "Stock" else "OPT"
+                right = {"Call": "C", "Put": "P"}.get(leg_type)
+                sign = 1 if leg.get("direction") == "LONG" else -1
+                qty = int(leg.get("contracts", 0)) * sign
+
+                conn.execute(
+                    insert(positions).values(
+                        ticker=ticker,
+                        security_type=sec_type,
+                        expiry=expiry,
+                        strike=Decimal(str(leg["strike"])) if leg.get("strike") else None,
+                        right=right,
+                        quantity=qty,
+                        avg_cost=Decimal(str(leg.get("avg_cost", 0))),
+                        current_price=Decimal(str(leg["market_price"])) if leg.get("market_price") else None,
+                        unrealized_pnl=None,
+                        account="IB",
+                    )
+                )
+
+        acct = portfolio.get("account_summary", {})
+        conn.execute(
+            insert(account_snapshots).values(
+                account="IB",
+                bankroll=Decimal(str(portfolio.get("bankroll", 0))),
+                peak_value=Decimal(str(portfolio.get("peak_value", 0))),
+                net_liquidation=Decimal(str(acct.get("net_liquidation", 0))),
+            )
+        )
+
+
 def save_portfolio(portfolio: dict):
-    """Save portfolio to JSON file (atomic write with SHA-256 checksum)."""
+    """Save portfolio to Postgres + JSON file (atomic write with SHA-256 checksum)."""
     from xenon.utils.atomic_io import atomic_save
 
-    # Backup existing
+    # Write to Postgres
+    try:
+        _save_portfolio_to_postgres(portfolio)
+        print("✓ Saved portfolio to Postgres")
+    except Exception as exc:
+        print(f"  Warning: Postgres write failed: {exc}")
+
+    # Keep JSON write — read paths not yet migrated
     if PORTFOLIO_PATH.exists():
         backup_path = PORTFOLIO_PATH.with_suffix(".json.bak")
         backup_path.write_text(PORTFOLIO_PATH.read_text())
-        print(f"✓ Backed up existing portfolio to {backup_path.name}")
 
     checksum = atomic_save(str(PORTFOLIO_PATH), portfolio)
-    print(f"✓ Saved portfolio to {PORTFOLIO_PATH} (checksum: {checksum[:12]}…)")
+    print(f"✓ Saved portfolio to {PORTFOLIO_PATH.name} (checksum: {checksum[:12]}…)")
 
     # Track daily NAV for performance history
     acct = portfolio.get("account_summary", {})
