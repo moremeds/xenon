@@ -15,7 +15,7 @@ def test_xenon_metadata_has_expected_tables():
         "wizard_protection",
         "scan_results",
         "cri_series",
-        "uw_snapshots",
+        "uw_analyze_snapshots",
         "uw_flow_events",
         "uw_api_stats",
         "ticker_cache",

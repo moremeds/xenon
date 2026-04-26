@@ -231,8 +231,8 @@ cri_series = Table(
 
 # ---------- UW Analysis ----------
 
-uw_snapshots = Table(
-    "uw_snapshots",
+uw_analyze_snapshots = Table(
+    "uw_analyze_snapshots",
     xenon_metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
     Column("ticker", Text, nullable=False),
@@ -241,7 +241,7 @@ uw_snapshots = Table(
     Column("flow_signals", JSONB),
     Column("portfolio_score", Numeric(6, 2)),
     Column("snapshot_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
-    Index("ix_uw_snap_ticker_time", "ticker", "snapshot_at"),
+    Index("ix_uw_analyze_snap_ticker_time", "ticker", "snapshot_at"),
 )
 
 uw_flow_events = Table(

@@ -7,7 +7,7 @@ from sqlalchemy import insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from xenon.db.schema import uw_api_stats, uw_flow_events, uw_snapshots
+from xenon.db.schema import uw_analyze_snapshots, uw_api_stats, uw_flow_events
 
 
 async def save_snapshot(
@@ -20,7 +20,7 @@ async def save_snapshot(
     portfolio_score: Decimal | None = None,
 ) -> None:
     await conn.execute(
-        insert(uw_snapshots).values(
+        insert(uw_analyze_snapshots).values(
             ticker=ticker,
             vrp_state=vrp_state,
             regime=regime,
@@ -32,9 +32,9 @@ async def save_snapshot(
 
 async def get_latest_snapshot(conn: AsyncConnection, *, ticker: str) -> dict | None:
     stmt = (
-        select(uw_snapshots)
-        .where(uw_snapshots.c.ticker == ticker)
-        .order_by(uw_snapshots.c.snapshot_at.desc(), uw_snapshots.c.id.desc())
+        select(uw_analyze_snapshots)
+        .where(uw_analyze_snapshots.c.ticker == ticker)
+        .order_by(uw_analyze_snapshots.c.snapshot_at.desc(), uw_analyze_snapshots.c.id.desc())
         .limit(1)
     )
     row = (await conn.execute(stmt)).first()
@@ -43,9 +43,9 @@ async def get_latest_snapshot(conn: AsyncConnection, *, ticker: str) -> dict | N
 
 async def get_snapshot_history(conn: AsyncConnection, *, ticker: str, limit: int = 100) -> list[dict]:
     stmt = (
-        select(uw_snapshots)
-        .where(uw_snapshots.c.ticker == ticker)
-        .order_by(uw_snapshots.c.snapshot_at.desc())
+        select(uw_analyze_snapshots)
+        .where(uw_analyze_snapshots.c.ticker == ticker)
+        .order_by(uw_analyze_snapshots.c.snapshot_at.desc())
         .limit(limit)
     )
     result = await conn.execute(stmt)

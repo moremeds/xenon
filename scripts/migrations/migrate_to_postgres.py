@@ -428,7 +428,7 @@ def migrate_uw_data(engine):
                     continue
                 conn.execute(
                     text("""
-                    INSERT INTO xenon.uw_snapshots
+                    INSERT INTO xenon.uw_analyze_snapshots
                         (ticker, vrp_state, regime, flow_signals, portfolio_score)
                     VALUES (:ticker, CAST(:vrp AS jsonb), CAST(:regime AS jsonb),
                             CAST(:flow AS jsonb), :score)
@@ -515,7 +515,7 @@ def migrate_uw_data(engine):
 
 
 def migrate_uw_history(engine):
-    """Import uw_analyze_history/ archive into uw_snapshots."""
+    """Import uw_analyze_history/ archive into uw_analyze_snapshots."""
     history_dir = DATA_DIR / "uw_analyze_history"
     if not history_dir.exists():
         print("  SKIP uw_analyze_history/ (not found)")
@@ -531,7 +531,7 @@ def migrate_uw_history(engine):
             return
         conn.execute(
             text("""
-            INSERT INTO xenon.uw_snapshots
+            INSERT INTO xenon.uw_analyze_snapshots
                 (ticker, vrp_state, regime, flow_signals, portfolio_score, snapshot_at)
             VALUES (:ticker, CAST(:vrp AS jsonb), CAST(:regime AS jsonb),
                     CAST(:flow AS jsonb), :score, :snapshot_at)
@@ -648,7 +648,7 @@ def verify(engine):
             "xenon.wizard_protection",
             "xenon.scan_results",
             "xenon.cri_series",
-            "xenon.uw_snapshots",
+            "xenon.uw_analyze_snapshots",
             "xenon.uw_flow_events",
             "xenon.uw_api_stats",
             "xenon.ticker_cache",
