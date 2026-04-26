@@ -47,9 +47,14 @@ async def reserve_attempt(
         updated_at=now,
     )
     stmt = pg_insert(order_submissions).values(**values)
-    stmt = stmt.on_conflict_do_nothing(index_elements=["submission_id"])
-    await conn.execute(stmt)
-    return await get_by_submission_id(conn, submission_id)
+    stmt = stmt.on_conflict_do_nothing(constraint="uq_order_sub_user_attempt")
+    stmt = stmt.returning(order_submissions.c.submission_id)
+    result = await conn.execute(stmt)
+    inserted = result.first()
+    if inserted is not None:
+        return await get_by_submission_id(conn, submission_id)
+    existing = await lookup_by_attempt(conn, user_id, client_attempt_id)
+    return existing
 
 
 async def get_by_submission_id(conn: AsyncConnection, submission_id: str) -> dict | None:

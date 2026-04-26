@@ -116,22 +116,9 @@ def _get_pg_engine():
 
 
 def init_store(db_path: Path | str | None = None) -> Path:
-    """Alembic manages Postgres schema. DuckDB tables kept for combo wizard."""
+    """No-op — schema managed by Alembic. Kept for backward compatibility."""
     path = _resolve_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    con = _connect_utc(path)
-    try:
-        con.execute(_CREATE_SUBMISSIONS)
-        con.execute(_CREATE_EVENTS)
-        for stmt in _CREATE_INDEXES:
-            con.execute(stmt)
-        for stmt in _MIGRATIONS:
-            con.execute(stmt)
-    finally:
-        con.close()
-    from xenon.execution.combo_wizard import store as wizard_store
-
-    wizard_store.init_store(path)
     return path
 
 

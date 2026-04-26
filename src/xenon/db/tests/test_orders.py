@@ -163,3 +163,35 @@ async def test_apply_modify(conn):
     await apply_modify(conn, submission_id="sub-001", modify_sequence=1)
     row = await get_by_submission_id(conn, "sub-001")
     assert row["modify_sequence"] == 1
+
+
+@pytest.mark.asyncio
+async def test_reserve_attempt_different_submission_id_same_user_attempt(conn):
+    """Retry with a new submission_id but same (user, client_attempt) returns existing row."""
+    from xenon.db.queries.orders import reserve_attempt
+
+    r1 = await reserve_attempt(
+        conn,
+        submission_id="sub-original",
+        user_id="user-1",
+        client_attempt_id="att-retry",
+        ticker="AAPL",
+        security_type="STK",
+        action="BUY",
+        quantity=100,
+        limit_price=Decimal("150"),
+    )
+    assert r1["submission_id"] == "sub-original"
+
+    r2 = await reserve_attempt(
+        conn,
+        submission_id="sub-retry-new-id",
+        user_id="user-1",
+        client_attempt_id="att-retry",
+        ticker="AAPL",
+        security_type="STK",
+        action="BUY",
+        quantity=100,
+        limit_price=Decimal("150"),
+    )
+    assert r2["submission_id"] == "sub-original", "Must return existing reservation, not create new"

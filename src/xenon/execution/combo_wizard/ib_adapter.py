@@ -29,6 +29,7 @@ installed source tree at `.venv/lib/python3.13/site-packages/ib_insync/`).
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path

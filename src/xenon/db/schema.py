@@ -248,6 +248,7 @@ uw_flow_events = Table(
     "uw_flow_events",
     xenon_metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("flow_event_key", Text, unique=True),
     Column("ticker", Text, nullable=False),
     Column("side", Text),
     Column("strike", Numeric(12, 2)),

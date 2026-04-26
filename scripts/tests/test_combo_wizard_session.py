@@ -4,21 +4,55 @@ import asyncio
 import os
 from pathlib import Path
 
-import duckdb
 import pytest
+from sqlalchemy import create_engine, text
 
 from xenon.execution import orders_store
 from xenon.execution.combo_wizard import session
+
+# --------------------------------------------------------------------------
+# Postgres helpers
+# --------------------------------------------------------------------------
+
+_TEST_DB_URL = os.environ.get(
+    "DATABASE_URL_TEST",
+    "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
+)
+_SYNC_URL = _TEST_DB_URL.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+
+
+def _pg_engine():
+    return create_engine(_SYNC_URL, pool_pre_ping=True)
+
+
+def _cleanup(engine):
+    with engine.begin() as conn:
+        conn.execute(text("TRUNCATE xenon.wizard_events CASCADE"))
+        conn.execute(text("TRUNCATE xenon.wizard_combo_attempts CASCADE"))
+        conn.execute(text("TRUNCATE xenon.wizard_sessions CASCADE"))
+
+
+@pytest.fixture(autouse=True)
+def _setup_pg(monkeypatch):
+    """Point get_sync_engine() at the test database and clean tables."""
+    monkeypatch.setenv("DATABASE_URL", _SYNC_URL)
+    import xenon.db.engine as eng_mod
+
+    monkeypatch.setattr(eng_mod, "_sync_engine", None)
+
+    engine = _pg_engine()
+    _cleanup(engine)
+    engine.dispose()
+    yield
+    engine = _pg_engine()
+    _cleanup(engine)
+    engine.dispose()
 
 
 @pytest.fixture(autouse=True)
 def _force_test_mode_on(monkeypatch):
     monkeypatch.setenv("XENON_API_TEST_MODE", "1")
     yield
-
-
-def _db_path() -> Path:
-    return Path(os.environ["XENON_ORDERS_DB_PATH"])
 
 
 def _plan_payload() -> dict:
@@ -46,9 +80,7 @@ def _plan_payload() -> dict:
 
 
 def test_submit_combo_persists_wizard_attempt_and_client_attempt_id(tmp_path, monkeypatch):
-    db_path = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db_path))
-    orders_store.init_store(db_path)
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
 
     planned = session.create_session(
         ticker="AAPL",
@@ -66,19 +98,23 @@ def test_submit_combo_persists_wizard_attempt_and_client_attempt_id(tmp_path, mo
 
     assert result["submission_id"]
 
-    con = duckdb.connect(str(_db_path()))
-    try:
-        row = con.execute(
-            """
-            SELECT client_attempt_id, ib_order_id
-              FROM wizard_combo_attempts
-             WHERE session_id = ?
-            """,
-            [planned["session_id"]],
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT combo_contract, ib_order_id
+                  FROM xenon.wizard_combo_attempts
+                 WHERE session_id = :sid
+                """
+            ),
+            {"sid": planned["session_id"]},
         ).fetchone()
-    finally:
-        con.close()
+    engine.dispose()
 
     assert row is not None
-    assert row[0].startswith(f"wiz:{planned['session_id']}:combo:")
+    # client_attempt_id is stored inside the combo_contract JSONB
+    client_attempt_id = row[0].get("client_attempt_id") if isinstance(row[0], dict) else None
+    assert client_attempt_id is not None
+    assert client_attempt_id.startswith(f"wiz:{planned['session_id']}:combo:")
     assert row[1] == str(result["orderId"])

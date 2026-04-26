@@ -9,17 +9,61 @@ reached ratio * totalQuantity.
 
 from __future__ import annotations
 
-import json
+import os
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-import duckdb
 import pytest
+from sqlalchemy import create_engine, text
 
+from xenon.db.queries import combo_wizard as cwq
 from xenon.execution import orders_store
 from xenon.execution.combo_wizard import rehydrate as wiz_rehydrate
+
+# --------------------------------------------------------------------------
+# Postgres helpers
+# --------------------------------------------------------------------------
+
+_TEST_DB_URL = os.environ.get(
+    "DATABASE_URL_TEST",
+    "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
+)
+_SYNC_URL = _TEST_DB_URL.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+
+
+def _pg_engine():
+    return create_engine(_SYNC_URL, pool_pre_ping=True)
+
+
+def _cleanup(engine):
+    with engine.begin() as conn:
+        conn.execute(text("TRUNCATE xenon.wizard_events CASCADE"))
+        conn.execute(text("TRUNCATE xenon.wizard_combo_attempts CASCADE"))
+        conn.execute(text("TRUNCATE xenon.wizard_sessions CASCADE"))
+
+
+@pytest.fixture(autouse=True)
+def _setup_pg(monkeypatch):
+    """Point get_sync_engine() at the test database and clean tables."""
+    monkeypatch.setenv("DATABASE_URL", _SYNC_URL)
+    import xenon.db.engine as eng_mod
+
+    monkeypatch.setattr(eng_mod, "_sync_engine", None)
+
+    engine = _pg_engine()
+    _cleanup(engine)
+    engine.dispose()
+    yield
+    engine = _pg_engine()
+    _cleanup(engine)
+    engine.dispose()
+
+
+# --------------------------------------------------------------------------
+# Seed helper
+# --------------------------------------------------------------------------
 
 
 def _seed_session(
@@ -31,7 +75,6 @@ def _seed_session(
     quantity: int = 1,
     legs: list[dict] | None = None,
 ) -> tuple[str, str]:
-    orders_store.init_store(db_path)
     sid = f"wiz-{uuid.uuid4().hex[:12]}"
     aid = uuid.uuid4().hex
     legs = legs or [
@@ -46,27 +89,39 @@ def _seed_session(
         "legs": legs,
     }
     now = datetime.now(timezone.utc)
-    con = duckdb.connect(str(db_path))
-    try:
-        con.execute(
-            """
-            INSERT INTO wizard_sessions (session_id, ticker, state, structure_name,
-                intent, payload_json, current_attempt_id, created_at, updated_at)
-            VALUES (?, 'AAPL', ?, 'Bull Call Spread', 'OPEN', ?, ?, ?, ?)
-            """,
-            [sid, state, json.dumps(payload), aid, now, now],
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        cwq.create_session(
+            conn,
+            session_id=sid,
+            ticker="AAPL",
+            state=state,
+            structure_name="Bull Call Spread",
+            intent="OPEN",
+            payload=payload,
+            created_at=now,
+            updated_at=now,
         )
-        con.execute(
-            """
-            INSERT INTO wizard_combo_attempts (attempt_id, session_id, client_attempt_id,
-                ib_order_id, perm_id, intent, target_price, price_basis, submitted_at,
-                terminal_state, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'OPEN', '2.50', 'MID', ?, 'WORKING', ?, ?)
-            """,
-            [aid, sid, f"wiz:{sid}:combo:{aid}", ib_order_id, perm_id, now, now, now],
+        cwq.update_session(conn, sid, current_attempt_id=aid)
+        cwq.create_attempt(
+            conn,
+            attempt_id=aid,
+            session_id=sid,
+            ticker="AAPL",
+            structure_name="Bull Call Spread",
+            ib_order_id=ib_order_id,
+            perm_id=perm_id,
+            limit_price=Decimal("2.50"),
+            state="WORKING",
+            submitted_at=now,
+            updated_at=now,
+            combo_contract={
+                "client_attempt_id": f"wiz:{sid}:combo:{aid}",
+                "intent": "OPEN",
+                "price_basis": "MID",
+            },
         )
-    finally:
-        con.close()
+    engine.dispose()
     return sid, aid
 
 
@@ -94,9 +149,8 @@ class _StubIB:
 def test_combo_rehydrate_partial_leg_fills_stays_partially_filled(tmp_path, monkeypatch):
     """Two leg executions (one partial, one full) must NOT mark the attempt
     FILLED — the session must remain PARTIALLY_FILLED."""
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid, aid = _seed_session(db, state="working", perm_id="P-1", quantity=1)
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid, aid = _seed_session(tmp_path, state="working", perm_id="P-1", quantity=1)
 
     # Order qty=1, ratio=1 per leg → each leg needs shares=1 to be FILLED.
     # Leg 1001: shares=1 (full). Leg 1002: shares=0 (none yet).
@@ -107,23 +161,24 @@ def test_combo_rehydrate_partial_leg_fills_stays_partially_filled(tmp_path, monk
     ]
     ib = _StubIB(open_orders=[], executions=execs)
 
-    decisions = wiz_rehydrate.rehydrate_combo_sessions(ib_client_factory=lambda: ib, db_path=db)
+    decisions = wiz_rehydrate.rehydrate_combo_sessions(ib_client_factory=lambda: ib, db_path=tmp_path)
 
     assert len(decisions) == 1
     assert decisions[0].to_state == "PARTIALLY_FILLED"
 
-    con = duckdb.connect(str(db))
-    try:
-        state = con.execute("SELECT state FROM wizard_sessions WHERE session_id=?", [sid]).fetchone()[0]
-    finally:
-        con.close()
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        state = conn.execute(
+            text("SELECT state FROM xenon.wizard_sessions WHERE session_id = :sid"),
+            {"sid": sid},
+        ).fetchone()[0]
+    engine.dispose()
     assert state.upper() == "PARTIALLY_FILLED"
 
 
 def test_combo_rehydrate_all_legs_full_ratio_marks_filled(tmp_path, monkeypatch):
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid, _ = _seed_session(db, state="working", perm_id="P-2", quantity=2)
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid, _ = _seed_session(tmp_path, state="working", perm_id="P-2", quantity=2)
 
     # qty=2, ratio=1 each → each leg needs shares=2 to be FILLED.
     execs = [
@@ -132,29 +187,30 @@ def test_combo_rehydrate_all_legs_full_ratio_marks_filled(tmp_path, monkeypatch)
     ]
     ib = _StubIB(executions=execs)
 
-    decisions = wiz_rehydrate.rehydrate_combo_sessions(ib_client_factory=lambda: ib, db_path=db)
+    decisions = wiz_rehydrate.rehydrate_combo_sessions(ib_client_factory=lambda: ib, db_path=tmp_path)
 
     assert decisions[0].to_state == "FILLED"
 
-    con = duckdb.connect(str(db))
-    try:
-        state = con.execute("SELECT state FROM wizard_sessions WHERE session_id=?", [sid]).fetchone()[0]
-    finally:
-        con.close()
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        state = conn.execute(
+            text("SELECT state FROM xenon.wizard_sessions WHERE session_id = :sid"),
+            {"sid": sid},
+        ).fetchone()[0]
+    engine.dispose()
     assert state.upper() == "FILLED"
 
 
 def test_combo_rehydrate_one_leg_missing_stays_partially_filled(tmp_path, monkeypatch):
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    _seed_session(db, state="working", perm_id="P-3", quantity=1)
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    _seed_session(tmp_path, state="working", perm_id="P-3", quantity=1)
 
     execs = [
         {"perm_id": "P-3", "con_id": 1001, "shares": 1, "avg_price": 3.10},
         # Leg 1002 fully absent.
     ]
     ib = _StubIB(executions=execs)
-    decisions = wiz_rehydrate.rehydrate_combo_sessions(ib_client_factory=lambda: ib, db_path=db)
+    decisions = wiz_rehydrate.rehydrate_combo_sessions(ib_client_factory=lambda: ib, db_path=tmp_path)
     assert decisions[0].to_state == "PARTIALLY_FILLED"
 
 
@@ -162,28 +218,26 @@ def test_combo_rehydrate_overfill_on_one_leg_still_partially_filled(tmp_path, mo
     """If one leg overfills (e.g. a ratio miscount at IB) but the other leg
     hasn't reached its target, we stay PARTIALLY_FILLED — we never claim
     FILLED on a mismatched combo."""
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    _seed_session(db, state="working", perm_id="P-4", quantity=1)
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    _seed_session(tmp_path, state="working", perm_id="P-4", quantity=1)
 
     execs = [
         {"perm_id": "P-4", "con_id": 1001, "shares": 3, "avg_price": 3.10},  # overfill
         {"perm_id": "P-4", "con_id": 1002, "shares": 0, "avg_price": 0.0},  # nothing
     ]
     ib = _StubIB(executions=execs)
-    decisions = wiz_rehydrate.rehydrate_combo_sessions(ib_client_factory=lambda: ib, db_path=db)
+    decisions = wiz_rehydrate.rehydrate_combo_sessions(ib_client_factory=lambda: ib, db_path=tmp_path)
     assert decisions[0].to_state == "PARTIALLY_FILLED"
 
 
 def test_combo_rehydrate_ratio_2_for_one_leg(tmp_path, monkeypatch):
     """Ratio 1:2 (e.g. a ratio spread) — FILLED only when leg 2 has 2x shares."""
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
     legs = [
         {"conId": 1001, "action": "BUY", "ratio": 1},
         {"conId": 1002, "action": "SELL", "ratio": 2},
     ]
-    _seed_session(db, state="working", perm_id="P-5", quantity=1, legs=legs)
+    _seed_session(tmp_path, state="working", perm_id="P-5", quantity=1, legs=legs)
 
     # qty=1, ratio 1 & 2 → need shares 1 and 2 respectively.
     # Here leg2 only has 1 share → PARTIALLY_FILLED.
@@ -192,7 +246,7 @@ def test_combo_rehydrate_ratio_2_for_one_leg(tmp_path, monkeypatch):
         {"perm_id": "P-5", "con_id": 1002, "shares": 1, "avg_price": 1.30},
     ]
     ib = _StubIB(executions=execs)
-    decisions = wiz_rehydrate.rehydrate_combo_sessions(ib_client_factory=lambda: ib, db_path=db)
+    decisions = wiz_rehydrate.rehydrate_combo_sessions(ib_client_factory=lambda: ib, db_path=tmp_path)
     assert decisions[0].to_state == "PARTIALLY_FILLED"
 
 
@@ -202,13 +256,12 @@ def test_combo_rehydrate_ratio_2_for_one_leg(tmp_path, monkeypatch):
 
 
 def test_combo_rehydrate_open_order_stays_working(tmp_path, monkeypatch):
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    _seed_session(db, state="working", perm_id="P-6")
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    _seed_session(tmp_path, state="working", perm_id="P-6")
 
     ib = _StubIB(open_orders=[{"perm_id": "P-6", "status": "Submitted"}], executions=[])
 
-    decisions = wiz_rehydrate.rehydrate_combo_sessions(ib_client_factory=lambda: ib, db_path=db)
+    decisions = wiz_rehydrate.rehydrate_combo_sessions(ib_client_factory=lambda: ib, db_path=tmp_path)
     assert decisions[0].to_state == "WORKING"
 
 
@@ -218,24 +271,22 @@ def test_combo_rehydrate_open_order_stays_working(tmp_path, monkeypatch):
 
 
 def test_combo_rehydrate_skips_terminal_states(tmp_path, monkeypatch):
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    _seed_session(db, state="aborted", perm_id="P-7")
-    _seed_session(db, state="rejected", perm_id="P-8")
-    _seed_session(db, state="filled", perm_id="P-9")  # FILLED not in rehydrate set
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    _seed_session(tmp_path, state="aborted", perm_id="P-7")
+    _seed_session(tmp_path, state="rejected", perm_id="P-8")
+    _seed_session(tmp_path, state="filled", perm_id="P-9")  # FILLED not in rehydrate set
 
     ib = _StubIB()
-    decisions = wiz_rehydrate.rehydrate_combo_sessions(ib_client_factory=lambda: ib, db_path=db)
+    decisions = wiz_rehydrate.rehydrate_combo_sessions(ib_client_factory=lambda: ib, db_path=tmp_path)
     assert decisions == []
 
 
 def test_combo_rehydrate_picks_up_protection_pending_session(tmp_path, monkeypatch):
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid, _ = _seed_session(db, state="PROTECTION_PENDING", perm_id="P-10")
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid, _ = _seed_session(tmp_path, state="protection_pending", perm_id="P-10")
 
     ib = _StubIB()
-    decisions = wiz_rehydrate.rehydrate_combo_sessions(ib_client_factory=lambda: ib, db_path=db)
+    decisions = wiz_rehydrate.rehydrate_combo_sessions(ib_client_factory=lambda: ib, db_path=tmp_path)
     # PROTECTION_PENDING sessions surface an "awaiting protection retry" decision.
     assert len(decisions) == 1
     assert decisions[0].detail.get("reason_code") in {

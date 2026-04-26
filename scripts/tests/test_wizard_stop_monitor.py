@@ -8,23 +8,66 @@ Risk Alert is assisted-exit; the operator confirms.
 
 from __future__ import annotations
 
-import json
+import os
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-import duckdb
 import pytest
+from sqlalchemy import create_engine, text
+
+from xenon.db.queries import combo_wizard as cwq
+from xenon.execution import orders_store
 from xenon.monitor_daemon.handlers.wizard_stop_monitor import WizardStopMonitorHandler
 
-from xenon.execution import orders_store
+# --------------------------------------------------------------------------
+# Postgres helpers
+# --------------------------------------------------------------------------
+
+_TEST_DB_URL = os.environ.get(
+    "DATABASE_URL_TEST",
+    "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
+)
+_SYNC_URL = _TEST_DB_URL.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+
+
+def _pg_engine():
+    return create_engine(_SYNC_URL, pool_pre_ping=True)
+
+
+def _cleanup(engine):
+    with engine.begin() as conn:
+        conn.execute(text("TRUNCATE xenon.wizard_events CASCADE"))
+        conn.execute(text("TRUNCATE xenon.wizard_protection CASCADE"))
+        conn.execute(text("TRUNCATE xenon.wizard_combo_attempts CASCADE"))
+        conn.execute(text("TRUNCATE xenon.wizard_sessions CASCADE"))
+
+
+@pytest.fixture(autouse=True)
+def _setup_pg(monkeypatch):
+    """Point get_sync_engine() at the test database and clean tables."""
+    monkeypatch.setenv("DATABASE_URL", _SYNC_URL)
+    import xenon.db.engine as eng_mod
+
+    monkeypatch.setattr(eng_mod, "_sync_engine", None)
+
+    engine = _pg_engine()
+    _cleanup(engine)
+    engine.dispose()
+    yield
+    engine = _pg_engine()
+    _cleanup(engine)
+    engine.dispose()
+
+
+# --------------------------------------------------------------------------
+# Seed helper
+# --------------------------------------------------------------------------
 
 
 def _seed_protected(db_path: Path, *, threshold: Decimal, polarity: str = "DEBIT") -> str:
-    orders_store.init_store(db_path)
     sid = f"wiz-{uuid.uuid4().hex[:12]}"
-    now = datetime.now(timezone.utc)
     payload = {
         "symbol": "AAPL",
         "type": "combo",
@@ -33,26 +76,31 @@ def _seed_protected(db_path: Path, *, threshold: Decimal, polarity: str = "DEBIT
             {"conId": 1002, "action": "SELL", "ratio": 1},
         ],
     }
-    con = duckdb.connect(str(db_path))
-    try:
-        con.execute(
-            """
-            INSERT INTO wizard_sessions (session_id, ticker, state, structure_name,
-                intent, payload_json, created_at, updated_at)
-            VALUES (?, 'AAPL', 'PROTECTED', 'Bull Call Spread', 'OPEN', ?, ?, ?)
-            """,
-            [sid, json.dumps(payload), now, now],
+    config = {
+        "tp_enabled": True,
+        "tp_target_price": "3.50",
+        "alert_enabled": True,
+        "alert_net_mid_threshold": str(threshold),
+    }
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        cwq.create_session(
+            conn,
+            session_id=sid,
+            ticker="AAPL",
+            state="PROTECTED",
+            structure_name="Bull Call Spread",
+            intent="OPEN",
+            payload=payload,
         )
-        con.execute(
-            """
-            INSERT INTO wizard_protection (session_id, tp_enabled, tp_target_price,
-                alert_enabled, alert_net_mid_threshold, created_at, updated_at)
-            VALUES (?, TRUE, '3.50', TRUE, ?, ?, ?)
-            """,
-            [sid, str(threshold), now, now],
+        cwq.upsert_protection(
+            conn,
+            sid,
+            protection_type="combo_tp_alert",
+            config=config,
+            state="active",
         )
-    finally:
-        con.close()
+    engine.dispose()
     return sid
 
 
@@ -66,9 +114,8 @@ def test_handler_identity():
 def test_emits_event_when_threshold_crossed_debit(tmp_path, monkeypatch):
     """DEBIT polarity: Risk Alert fires when combo net mid falls BELOW threshold
     (the long spread has decayed into the alert zone)."""
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _seed_protected(db, threshold=Decimal("1.25"), polarity="DEBIT")
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid = _seed_protected(tmp_path, threshold=Decimal("1.25"), polarity="DEBIT")
 
     quotes = {sid: Decimal("1.00")}  # below threshold → cross
     events: list[dict] = []
@@ -76,7 +123,7 @@ def test_emits_event_when_threshold_crossed_debit(tmp_path, monkeypatch):
     h = WizardStopMonitorHandler(
         quote_fn=lambda session_id: quotes.get(session_id),
         notify_fn=lambda payload: events.append(payload),
-        db_path=db,
+        db_path=tmp_path,
     )
     result = h.execute()
 
@@ -89,20 +136,22 @@ def test_emits_event_when_threshold_crossed_debit(tmp_path, monkeypatch):
     assert "risk alert" in body or "assisted exit" in body
     assert "stop-loss" not in body and "stop loss" not in body
 
-    con = duckdb.connect(str(db))
-    try:
+    engine = _pg_engine()
+    with engine.connect() as conn:
         kinds = [
-            r[0] for r in con.execute("SELECT kind FROM wizard_session_events WHERE session_id=?", [sid]).fetchall()
+            r[0]
+            for r in conn.execute(
+                text("SELECT kind FROM xenon.wizard_events WHERE session_id = :sid"),
+                {"sid": sid},
+            ).fetchall()
         ]
-    finally:
-        con.close()
+    engine.dispose()
     assert any("RISK_ALERT" in k for k in kinds)
 
 
 def test_no_event_when_threshold_not_crossed(tmp_path, monkeypatch):
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _seed_protected(db, threshold=Decimal("1.25"), polarity="DEBIT")
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid = _seed_protected(tmp_path, threshold=Decimal("1.25"), polarity="DEBIT")
 
     quotes = {sid: Decimal("2.00")}  # well above threshold
     events: list[dict] = []
@@ -110,7 +159,7 @@ def test_no_event_when_threshold_not_crossed(tmp_path, monkeypatch):
     h = WizardStopMonitorHandler(
         quote_fn=lambda _sid: quotes.get(_sid),
         notify_fn=lambda payload: events.append(payload),
-        db_path=db,
+        db_path=tmp_path,
     )
     result = h.execute()
     assert result["checked"] == 1
@@ -121,16 +170,15 @@ def test_no_event_when_threshold_not_crossed(tmp_path, monkeypatch):
 def test_handler_does_not_place_close_orders(tmp_path, monkeypatch):
     """Risk Alert is assisted-exit: operator confirms. The handler must not
     auto-place any order even when the threshold is crossed."""
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    _seed_protected(db, threshold=Decimal("1.25"))
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    _seed_protected(tmp_path, threshold=Decimal("1.25"))
 
     quotes_crossed = Decimal("1.00")
 
     h = WizardStopMonitorHandler(
         quote_fn=lambda _sid: quotes_crossed,
         notify_fn=lambda _p: None,
-        db_path=db,
+        db_path=tmp_path,
     )
     result = h.execute()
     # No orders_placed key — and if present, must be zero.
@@ -140,9 +188,8 @@ def test_handler_does_not_place_close_orders(tmp_path, monkeypatch):
 def test_handler_idempotent_within_same_run(tmp_path, monkeypatch):
     """Calling execute() twice in a row with the threshold still crossed must
     not emit duplicate events — we record that the alert has fired."""
-    db = tmp_path / "orders.duckdb"
-    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(db))
-    sid = _seed_protected(db, threshold=Decimal("1.25"))
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid = _seed_protected(tmp_path, threshold=Decimal("1.25"))
 
     quotes_crossed = Decimal("1.00")
     events: list[dict] = []
@@ -150,7 +197,7 @@ def test_handler_idempotent_within_same_run(tmp_path, monkeypatch):
     h = WizardStopMonitorHandler(
         quote_fn=lambda _sid: quotes_crossed,
         notify_fn=lambda p: events.append(p),
-        db_path=db,
+        db_path=tmp_path,
     )
     h.execute()
     h.execute()

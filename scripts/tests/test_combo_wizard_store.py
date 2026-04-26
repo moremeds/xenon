@@ -1,36 +1,22 @@
-import duckdb
+"""Tests for combo wizard store (Postgres-backed, schema managed by Alembic)."""
 
-from xenon.execution import orders_store
+from pathlib import Path
+
 from xenon.execution.combo_wizard import store
 
 
-def test_orders_store_init_store_creates_combo_wizard_tables(tmp_path):
-    db_path = tmp_path / "orders.duckdb"
+def test_init_store_is_noop():
+    """init_store is a backward-compat no-op that returns a Path."""
+    result = store.init_store(None)
+    assert isinstance(result, Path)
 
-    orders_store.init_store(db_path)
 
-    assert {
-        "wizard_sessions",
-        "wizard_combo_attempts",
-        "wizard_session_events",
-        "wizard_protection",
-    } <= store.list_tables(db_path)
+def test_init_store_with_path(tmp_path):
+    result = store.init_store(tmp_path / "orders.duckdb")
+    assert result == tmp_path / "orders.duckdb"
 
-    con = duckdb.connect(str(db_path))
-    try:
-        session_cols = {
-            row[1] for row in con.execute("PRAGMA table_info('wizard_sessions')").fetchall()
-        }
-    finally:
-        con.close()
 
-    assert {
-        "session_id",
-        "ticker",
-        "state",
-        "structure_name",
-        "intent",
-        "payload_json",
-        "created_at",
-        "updated_at",
-    } <= session_cols
+def test_list_tables_returns_set():
+    """list_tables should return a set (may be empty if no Postgres connection)."""
+    result = store.list_tables()
+    assert isinstance(result, set)

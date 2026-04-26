@@ -481,10 +481,7 @@ class FlowLog:
             url = os.environ.get("DATABASE_URL")
             if not url:
                 return
-            from decimal import Decimal
-
             from sqlalchemy import create_engine as _cse
-            from sqlalchemy import text
             from sqlalchemy.dialects.postgresql import insert as pg_insert
 
             from xenon.db.schema import uw_flow_events
@@ -518,25 +515,30 @@ class FlowLog:
                         }
                         for r in ev.daily_track
                     ]
-                    conn.execute(
-                        text(
-                            """INSERT INTO xenon.uw_flow_events
-                            (ticker, side, strike, expiry, detected_at, initial, daily_track, status, anomaly_reason, closed_at)
-                            VALUES (:t, :s, :st, :e, :d, CAST(:i AS jsonb), CAST(:tr AS jsonb), :status, :ar, :ca)"""
-                        ),
-                        {
-                            "t": ev.ticker,
-                            "s": ev.side,
-                            "st": ev.strike,
-                            "e": expiry_d,
-                            "d": detected,
-                            "i": json.dumps(initial_dict),
-                            "tr": json.dumps(track_list),
-                            "status": ev.status,
-                            "ar": ev.anomaly_reason,
-                            "ca": closed,
+                    values = {
+                        "flow_event_key": ev.id,
+                        "ticker": ev.ticker,
+                        "side": ev.side,
+                        "strike": ev.strike,
+                        "expiry": expiry_d,
+                        "detected_at": detected,
+                        "initial": initial_dict,
+                        "daily_track": track_list,
+                        "status": ev.status,
+                        "anomaly_reason": ev.anomaly_reason,
+                        "closed_at": closed,
+                    }
+                    stmt = pg_insert(uw_flow_events).values(**values)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=[uw_flow_events.c.flow_event_key],
+                        set_={
+                            "daily_track": stmt.excluded.daily_track,
+                            "status": stmt.excluded.status,
+                            "anomaly_reason": stmt.excluded.anomaly_reason,
+                            "closed_at": stmt.excluded.closed_at,
                         },
                     )
+                    conn.execute(stmt)
             engine.dispose()
         except Exception as exc:  # noqa: BLE001
             logger.warning("flow_log Postgres save failed: %s", exc)

@@ -586,8 +586,7 @@ def _write_scan_to_postgres(filename: str, data: dict) -> None:
             conn.execute(insert(scan_results).values(scan_type=scan_type, payload=data))
         engine.dispose()
     except Exception:
-        pass
-        raise
+        logger.warning("scan archive to Postgres failed for %s", filename, exc_info=True)
 
 
 def _atomic_save(path: str, data: dict) -> str:

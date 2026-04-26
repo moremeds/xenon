@@ -2,15 +2,58 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 
-import duckdb
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, text
 from starlette.responses import JSONResponse
 
 from xenon.api import server as server_mod
-from xenon.execution import orders_store
+from xenon.db.queries import combo_wizard as cwq
+
+# --------------------------------------------------------------------------
+# Postgres helpers
+# --------------------------------------------------------------------------
+
+_TEST_DB_URL = os.environ.get(
+    "DATABASE_URL_TEST",
+    "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
+)
+_SYNC_URL = _TEST_DB_URL.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+
+
+def _pg_engine():
+    return create_engine(_SYNC_URL, pool_pre_ping=True)
+
+
+def _truncate(engine):
+    with engine.begin() as conn:
+        conn.execute(text("TRUNCATE xenon.order_events CASCADE"))
+        conn.execute(text("TRUNCATE xenon.order_submissions CASCADE"))
+        conn.execute(text("TRUNCATE xenon.wizard_protection CASCADE"))
+        conn.execute(text("TRUNCATE xenon.wizard_events CASCADE"))
+        conn.execute(text("TRUNCATE xenon.wizard_combo_attempts CASCADE"))
+        conn.execute(text("TRUNCATE xenon.wizard_sessions CASCADE"))
+
+
+@pytest.fixture(autouse=True)
+def _setup_pg(monkeypatch):
+    """Point get_sync_engine() and orders_store._pg_engine at the test DB."""
+    monkeypatch.setenv("DATABASE_URL", _SYNC_URL)
+
+    import xenon.db.engine as eng_mod
+    import xenon.execution.orders_store as os_mod
+
+    monkeypatch.setattr(eng_mod, "_sync_engine", None)
+    monkeypatch.setattr(os_mod, "_pg_engine", None)
+
+    engine = _pg_engine()
+    _truncate(engine)
+    engine.dispose()
+    yield
+    engine = _pg_engine()
+    _truncate(engine)
+    engine.dispose()
 
 
 @pytest.fixture(autouse=True)
@@ -74,25 +117,19 @@ def _plan_payload() -> dict:
     }
 
 
-def _db_path() -> Path:
-    return Path(os.environ["XENON_ORDERS_DB_PATH"])
-
-
 def _seed_session(session_id: str, order_payload: dict) -> None:
-    db_path = _db_path()
-    orders_store.init_store(db_path)
-    con = duckdb.connect(str(db_path))
-    try:
-        con.execute(
-            """
-            INSERT INTO wizard_sessions (
-                session_id, ticker, state, structure_name, intent, payload_json, created_at, updated_at
-            ) VALUES (?, 'AAPL', 'planned', 'Bull Call Spread', 'OPEN', ?, NOW(), NOW())
-            """,
-            [session_id, json.dumps(order_payload)],
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        cwq.create_session(
+            conn,
+            session_id=session_id,
+            ticker="AAPL",
+            state="planned",
+            structure_name="Bull Call Spread",
+            intent="OPEN",
+            payload=order_payload,
         )
-    finally:
-        con.close()
+    engine.dispose()
 
 
 def test_plan_endpoint_returns_combo_mode_and_prices(client):
@@ -186,17 +223,12 @@ def test_submit_endpoint_reuses_shared_combo_submission_path(client):
     assert body["echo"]["type"] == "combo"
     assert body["echo"]["action"] == "BUY"
 
-    con = duckdb.connect(str(_db_path()))
-    try:
-        count = con.execute(
-            """
-            SELECT COUNT(*)
-              FROM orders_submissions
-             WHERE client_attempt_id LIKE 'wiz:wiz-submit-1:combo:%'
-            """
-        ).fetchone()[0]
-    finally:
-        con.close()
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        count = conn.execute(
+            text("SELECT COUNT(*) FROM xenon.order_submissions WHERE client_attempt_id LIKE 'wiz:wiz-submit-1:combo:%'")
+        ).scalar()
+    engine.dispose()
 
     assert count == 1
 
@@ -206,17 +238,14 @@ def test_submit_endpoint_claims_session_before_live_order(monkeypatch, client):
     observed_claim: dict[str, str | None] = {}
 
     async def fake_place(body: dict) -> dict:
-        con = duckdb.connect(str(_db_path()))
-        try:
-            row = con.execute(
-                """
-                SELECT state, current_attempt_id
-                  FROM wizard_sessions
-                 WHERE session_id='wiz-submit-claim'
-                """
+        engine = _pg_engine()
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT state, current_attempt_id FROM xenon.wizard_sessions WHERE session_id = 'wiz-submit-claim'"
+                )
             ).fetchone()
-        finally:
-            con.close()
+        engine.dispose()
         observed_claim["state"] = row[0]
         observed_claim["current_attempt_id"] = row[1]
         return {
@@ -255,17 +284,15 @@ def test_submit_endpoint_rejects_duplicate_submission(client):
     assert second.status_code == 409
     assert "already has a submitted combo attempt" in second.json()["detail"]
 
-    con = duckdb.connect(str(_db_path()))
-    try:
-        count = con.execute(
-            """
-            SELECT COUNT(*)
-              FROM orders_submissions
-             WHERE client_attempt_id LIKE 'wiz:wiz-submit-duplicate:combo:%'
-            """
-        ).fetchone()[0]
-    finally:
-        con.close()
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        count = conn.execute(
+            text(
+                "SELECT COUNT(*) FROM xenon.order_submissions"
+                " WHERE client_attempt_id LIKE 'wiz:wiz-submit-duplicate:combo:%'"
+            )
+        ).scalar()
+    engine.dispose()
 
     assert count == 1
 
@@ -288,17 +315,16 @@ def test_submit_endpoint_rejects_aborted_session(client):
 
 def test_abort_endpoint_rejects_submitting_session(client):
     _seed_session("wiz-abort-submitting", _plan_payload()["order_payload"])
-    con = duckdb.connect(str(_db_path()))
-    try:
-        con.execute(
-            """
-            UPDATE wizard_sessions
-               SET state='submitting', current_attempt_id='attempt-submitting'
-             WHERE session_id='wiz-abort-submitting'
-            """
+
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        cwq.update_session(
+            conn,
+            "wiz-abort-submitting",
+            state="submitting",
+            current_attempt_id="attempt-submitting",
         )
-    finally:
-        con.close()
+    engine.dispose()
 
     resp = client.post("/wizard/sessions/wiz-abort-submitting/abort", json={})
 
@@ -324,20 +350,16 @@ def test_submit_endpoint_preserves_order_helper_error_and_releases_claim(monkeyp
 
     assert resp.status_code == 400
     assert resp.json()["detail"] == "Preflight blocked"
-    con = duckdb.connect(str(_db_path()))
-    try:
-        row = con.execute(
-            """
-            SELECT state, current_attempt_id
-              FROM wizard_sessions
-             WHERE session_id='wiz-submit-blocked'
-            """
+
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT state, current_attempt_id FROM xenon.wizard_sessions WHERE session_id = 'wiz-submit-blocked'")
         ).fetchone()
-        attempts = con.execute(
-            "SELECT COUNT(*) FROM wizard_combo_attempts WHERE session_id='wiz-submit-blocked'"
-        ).fetchone()[0]
-    finally:
-        con.close()
+        attempts = conn.execute(
+            text("SELECT COUNT(*) FROM xenon.wizard_combo_attempts WHERE session_id = 'wiz-submit-blocked'")
+        ).scalar()
+    engine.dispose()
 
     assert row == ("planned", None)
     assert attempts == 0
@@ -354,13 +376,12 @@ def test_abort_endpoint_cancels_working_combo_before_marking_aborted(monkeypatch
 
     async def fake_cancel(body: dict) -> dict:
         cancel_calls.append(body)
-        con = duckdb.connect(str(_db_path()))
-        try:
-            state = con.execute(
-                "SELECT state FROM wizard_sessions WHERE session_id='wiz-abort-working'"
-            ).fetchone()[0]
-        finally:
-            con.close()
+        engine = _pg_engine()
+        with engine.connect() as conn:
+            state = conn.execute(
+                text("SELECT state FROM xenon.wizard_sessions WHERE session_id = 'wiz-abort-working'")
+            ).scalar()
+        engine.dispose()
         assert state == "working"
         return {"status": "ok", "message": "Cancelled", "echo": body}
 
@@ -398,13 +419,13 @@ def test_abort_endpoint_preserves_cancel_error_and_keeps_working(monkeypatch, cl
 
     assert abort_resp.status_code == 503
     assert abort_resp.json()["detail"]["reason_code"] == "IB_CONNECTION"
-    con = duckdb.connect(str(_db_path()))
-    try:
-        state = con.execute(
-            "SELECT state FROM wizard_sessions WHERE session_id='wiz-abort-cancel-error'"
-        ).fetchone()[0]
-    finally:
-        con.close()
+
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        state = conn.execute(
+            text("SELECT state FROM xenon.wizard_sessions WHERE session_id = 'wiz-abort-cancel-error'")
+        ).scalar()
+    engine.dispose()
     assert state == "working"
 
 
@@ -459,18 +480,10 @@ def test_reprice_endpoint_rejects_protection_states(client, state):
     )
     assert submit_resp.status_code == 200
 
-    con = duckdb.connect(str(_db_path()))
-    try:
-        con.execute(
-            """
-            UPDATE wizard_sessions
-               SET state=?
-             WHERE session_id='wiz-reprice-protection'
-            """,
-            [state],
-        )
-    finally:
-        con.close()
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        cwq.update_session(conn, "wiz-reprice-protection", state=state)
+    engine.dispose()
 
     reprice_resp = client.post(
         "/wizard/sessions/wiz-reprice-protection/reprice",
@@ -515,18 +528,13 @@ def test_reprice_endpoint_advances_from_shared_order_store_sequence(client):
     assert submit_resp.status_code == 200
     submit_body = submit_resp.json()
 
-    con = duckdb.connect(str(_db_path()))
-    try:
-        con.execute(
-            """
-            UPDATE orders_submissions
-               SET modify_sequence=4
-             WHERE client_attempt_id=?
-            """,
-            [submit_body["client_attempt_id"]],
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE xenon.order_submissions SET modify_sequence = 4 WHERE client_attempt_id = :caid"),
+            {"caid": submit_body["client_attempt_id"]},
         )
-    finally:
-        con.close()
+    engine.dispose()
 
     resp = client.post(
         "/wizard/sessions/wiz-reprice-external-seq/reprice",
@@ -540,11 +548,11 @@ def test_reprice_endpoint_advances_from_shared_order_store_sequence(client):
 @pytest.mark.parametrize("state", ["planned", "working", "ABORTED"])
 def test_protect_endpoint_rejects_non_filled_sessions_before_ib_pool(client, state):
     _seed_session("wiz-protect-state", _plan_payload()["order_payload"])
-    con = duckdb.connect(str(_db_path()))
-    try:
-        con.execute("UPDATE wizard_sessions SET state=? WHERE session_id='wiz-protect-state'", [state])
-    finally:
-        con.close()
+
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        cwq.update_session(conn, "wiz-protect-state", state=state)
+    engine.dispose()
 
     resp = client.post(
         "/wizard/sessions/wiz-protect-state/protect",
@@ -561,11 +569,11 @@ def test_protect_endpoint_rejects_non_filled_sessions_before_ib_pool(client, sta
 
 def test_protect_endpoint_is_idempotent_for_already_protected_without_ib_pool(client):
     _seed_session("wiz-protect-idempotent", _plan_payload()["order_payload"])
-    con = duckdb.connect(str(_db_path()))
-    try:
-        con.execute("UPDATE wizard_sessions SET state='PROTECTED' WHERE session_id='wiz-protect-idempotent'")
-    finally:
-        con.close()
+
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        cwq.update_session(conn, "wiz-protect-idempotent", state="PROTECTED")
+    engine.dispose()
 
     resp = client.post(
         "/wizard/sessions/wiz-protect-idempotent/protect",
