@@ -33,6 +33,7 @@ def _truncate_postgres_tables() -> None:
     try:
         with engine.begin() as conn:
             for table in (
+                "events.outbox",
                 "xenon.order_events",
                 "xenon.order_submissions",
                 "xenon.wizard_protection",
@@ -41,6 +42,14 @@ def _truncate_postgres_tables() -> None:
                 "xenon.wizard_sessions",
                 "xenon.uw_flow_events",
                 "xenon.uw_api_stats",
+                "xenon.uw_analyze_snapshots",
+                "xenon.positions",
+                "xenon.account_snapshots",
+                "xenon.trades",
+                "xenon.nav_history",
+                "xenon.scan_results",
+                "xenon.cri_series",
+                "xenon.ticker_cache",
             ):
                 conn.execute(text(f"TRUNCATE {table} CASCADE"))
     finally:

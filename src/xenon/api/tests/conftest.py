@@ -15,8 +15,8 @@ def _postgres_orders_test_db(monkeypatch):
         "DATABASE_URL_TEST",
         "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
     )
+    monkeypatch.setenv("DATABASE_URL", url)
     sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
-    monkeypatch.setenv("DATABASE_URL", sync_url)
 
     try:
         import xenon.db.engine as engine_mod
@@ -30,6 +30,7 @@ def _postgres_orders_test_db(monkeypatch):
         try:
             with engine.begin() as conn:
                 for table in (
+                    "events.outbox",
                     "xenon.order_events",
                     "xenon.order_submissions",
                     "xenon.wizard_protection",
@@ -38,6 +39,14 @@ def _postgres_orders_test_db(monkeypatch):
                     "xenon.wizard_sessions",
                     "xenon.uw_flow_events",
                     "xenon.uw_api_stats",
+                    "xenon.uw_analyze_snapshots",
+                    "xenon.positions",
+                    "xenon.account_snapshots",
+                    "xenon.trades",
+                    "xenon.nav_history",
+                    "xenon.scan_results",
+                    "xenon.cri_series",
+                    "xenon.ticker_cache",
                 ):
                     conn.execute(text(f"TRUNCATE {table} CASCADE"))
         finally:
