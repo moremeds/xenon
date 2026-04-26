@@ -29,7 +29,7 @@ src/xenon/db/
 │   ├── wizard.py          # wizard_sessions, wizard_events
 │   ├── trades.py          # trades
 │   ├── scans.py           # scan_results, cri_series
-│   ├── uw.py              # uw_snapshots, uw_flow_events, uw_api_stats
+│   ├── uw.py              # uw_analyze_snapshots, uw_flow_events, uw_api_stats
 │   ├── combo_wizard.py    # wizard_combo_attempts, wizard_protection
 │   └── cache.py           # ticker_cache
 └── migrations/
@@ -334,7 +334,7 @@ def test_xenon_metadata_has_expected_tables():
         "wizard_sessions", "wizard_events",
         "wizard_combo_attempts", "wizard_protection",
         "scan_results", "cri_series",
-        "uw_snapshots", "uw_flow_events", "uw_api_stats",
+        "uw_analyze_snapshots", "uw_flow_events", "uw_api_stats",
         "ticker_cache",
     }
     actual = set(xenon_metadata.tables.keys())
@@ -583,8 +583,8 @@ cri_series = Table(
 
 # ---------- UW Analysis ----------
 
-uw_snapshots = Table(
-    "uw_snapshots",
+uw_analyze_snapshots = Table(
+    "uw_analyze_snapshots",
     xenon_metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
     Column("ticker", Text, nullable=False),
@@ -1905,7 +1905,7 @@ from sqlalchemy import insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from xenon.db.schema import uw_api_stats, uw_flow_events, uw_snapshots
+from xenon.db.schema import uw_api_stats, uw_flow_events, uw_analyze_snapshots
 
 
 async def save_snapshot(
@@ -1918,7 +1918,7 @@ async def save_snapshot(
     portfolio_score: Decimal | None = None,
 ) -> None:
     await conn.execute(
-        insert(uw_snapshots).values(
+        insert(uw_analyze_snapshots).values(
             ticker=ticker,
             vrp_state=vrp_state,
             regime=regime,
@@ -1932,9 +1932,9 @@ async def get_latest_snapshot(
     conn: AsyncConnection, *, ticker: str
 ) -> dict | None:
     stmt = (
-        select(uw_snapshots)
-        .where(uw_snapshots.c.ticker == ticker)
-        .order_by(uw_snapshots.c.snapshot_at.desc(), uw_snapshots.c.id.desc())
+        select(uw_analyze_snapshots)
+        .where(uw_analyze_snapshots.c.ticker == ticker)
+        .order_by(uw_analyze_snapshots.c.snapshot_at.desc(), uw_analyze_snapshots.c.id.desc())
         .limit(1)
     )
     row = (await conn.execute(stmt)).first()
@@ -1945,9 +1945,9 @@ async def get_snapshot_history(
     conn: AsyncConnection, *, ticker: str, limit: int = 100
 ) -> list[dict]:
     stmt = (
-        select(uw_snapshots)
-        .where(uw_snapshots.c.ticker == ticker)
-        .order_by(uw_snapshots.c.snapshot_at.desc())
+        select(uw_analyze_snapshots)
+        .where(uw_analyze_snapshots.c.ticker == ticker)
+        .order_by(uw_analyze_snapshots.c.snapshot_at.desc())
         .limit(limit)
     )
     result = await conn.execute(stmt)
@@ -2674,7 +2674,7 @@ git commit -m "feat(db): migrate trade log from JSON to Postgres"
 
 - [ ] **Step 1: Migrate uw_analyze_cache.py**
 
-Replace `_persist()` (tmpfile + os.replace) with Postgres INSERT into `uw_snapshots`. Replace `_ensure_loaded()` (JSON file read) with SELECT from `uw_snapshots`.
+Replace `_persist()` (tmpfile + os.replace) with Postgres INSERT into `uw_analyze_snapshots`. Replace `_ensure_loaded()` (JSON file read) with SELECT from `uw_analyze_snapshots`.
 
 Keep the in-memory OrderedDict cache — Postgres is the durable store, memory is the hot cache. On startup, load from Postgres instead of JSON file.
 
@@ -3120,7 +3120,7 @@ def migrate_uw_data(engine):
                 if ticker.startswith("_"):
                     continue
                 conn.execute(text("""
-                    INSERT INTO xenon.uw_snapshots (ticker, vrp_state, regime, flow_signals, portfolio_score)
+                    INSERT INTO xenon.uw_analyze_snapshots (ticker, vrp_state, regime, flow_signals, portfolio_score)
                     VALUES (:ticker, :vrp::jsonb, :regime::jsonb, :flow::jsonb, :score)
                 """), {
                     "ticker": ticker,
@@ -3236,7 +3236,7 @@ def verify(engine):
             "xenon.wizard_sessions", "xenon.wizard_events",
             "xenon.wizard_combo_attempts", "xenon.wizard_protection",
             "xenon.scan_results", "xenon.cri_series",
-            "xenon.uw_snapshots", "xenon.uw_flow_events", "xenon.uw_api_stats",
+            "xenon.uw_analyze_snapshots", "xenon.uw_flow_events", "xenon.uw_api_stats",
             "xenon.ticker_cache",
         ]
         print("\n--- Verification ---")
