@@ -315,26 +315,11 @@ describe("POST /api/portfolio (via xenonFetch)", () => {
     expect(body.bankroll).toBe(100000);
   });
 
-  it("falls back to cached portfolio when xenonFetch fails", async () => {
+  it("returns 502 when sync fails (no JSON-file fallback after PG migration)", async () => {
+    // Phase 1 of the postgres read-path migration deliberately removed the
+    // file-cache fallback — silently serving stale paper data when the live
+    // sync fails was the bug. Failures must surface loudly.
     mockXenonFetch.mockRejectedValue(new Error("IB connection refused"));
-    const cached = {
-      bankroll: 95000,
-      last_sync: "2026-03-13T16:00:00",
-      positions: [{ ticker: "AAPL" }],
-    };
-    mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
-
-    const { POST } = await import("../app/api/portfolio/route");
-    const res = await POST();
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.bankroll).toBe(95000);
-    expect(res.headers.get("X-Sync-Warning")).toContain("cached");
-  });
-
-  it("returns 502 when sync fails and no cache exists", async () => {
-    mockXenonFetch.mockRejectedValue(new Error("connection refused"));
-    mockReadDataFile.mockResolvedValue({ ok: false, error: "not found" });
 
     const { POST } = await import("../app/api/portfolio/route");
     const res = await POST();
@@ -343,15 +328,17 @@ describe("POST /api/portfolio (via xenonFetch)", () => {
 });
 
 // =============================================================================
-// GET /api/portfolio — stale-while-revalidate
+// GET /api/portfolio — proxies to FastAPI GET /portfolio (PG-backed)
 // =============================================================================
 
-describe("GET /api/portfolio (stale-while-revalidate)", () => {
-  it("returns cached data immediately without blocking", async () => {
-    const cached = { bankroll: 100000, last_sync: "2026-03-14", positions: [] };
-    mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
-    // Fresh stat — no background sync
-    mockStat.mockResolvedValue({ mtimeMs: Date.now() - 5_000 });
+describe("GET /api/portfolio", () => {
+  it("returns FastAPI data on success", async () => {
+    const data = {
+      bankroll: 100000,
+      last_sync: new Date().toISOString(),
+      positions: [],
+    };
+    mockXenonFetch.mockResolvedValueOnce(data);
 
     const { GET } = await import("../app/api/portfolio/route");
     const res = await GET();
@@ -360,9 +347,11 @@ describe("GET /api/portfolio (stale-while-revalidate)", () => {
     expect(body.bankroll).toBe(100000);
   });
 
-  it("returns 404 when no portfolio file exists", async () => {
-    mockReadDataFile.mockResolvedValue({ ok: false, error: "File not found" });
-    mockStat.mockResolvedValue({ mtimeMs: Date.now() - 5_000 });
+  it("returns 404 when FastAPI reports no snapshot exists yet", async () => {
+    const notFound = Object.assign(new Error("no snapshot"), { status: 404 });
+    mockXenonFetch
+      .mockRejectedValueOnce(notFound) // GET /portfolio
+      .mockResolvedValueOnce({ ok: true }); // POST /portfolio/background-sync (triggered)
 
     const { GET } = await import("../app/api/portfolio/route");
     const res = await GET();

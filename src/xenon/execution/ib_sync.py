@@ -1086,7 +1086,15 @@ def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
 
 
 def _save_portfolio_to_postgres(portfolio: dict) -> None:
-    """Write positions + account snapshot to Postgres."""
+    """Write positions + account snapshot to Postgres.
+
+    The full structured `portfolio` dict is also stamped into
+    `account_snapshots.payload` (jsonb) so the FastAPI `GET /portfolio`
+    endpoint can return the UI-shaped payload without re-deriving structure
+    classification, Kelly sizing, or the 15-field account_summary that only
+    exists in the in-memory dict at sync time. See
+    docs/plans/2026-04-27-portfolio-postgres-read-path.md.
+    """
     from sqlalchemy import delete, insert, text
 
     from xenon.db.schema import account_snapshots, positions
@@ -1146,6 +1154,7 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
                 bankroll=Decimal(str(portfolio.get("bankroll", 0))),
                 peak_value=Decimal(str(portfolio.get("peak_value", 0))),
                 net_liquidation=Decimal(str(acct.get("net_liquidation", 0))),
+                payload=portfolio,
                 broker=broker,
                 account_env=account_env,
                 broker_account=broker_account,

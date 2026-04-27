@@ -51,7 +51,9 @@ vi.mock("@/lib/xenonApi", () => ({
 }));
 
 // Mock @tools/data-reader for portfolio + orders routes
-const mockReadDataFile = vi.fn().mockResolvedValue({ ok: false, error: "not found" });
+const mockReadDataFile = vi
+  .fn()
+  .mockResolvedValue({ ok: false, error: "not found" });
 vi.mock("@tools/data-reader", () => ({
   readDataFile: mockReadDataFile,
 }));
@@ -99,11 +101,20 @@ vi.mock("ws", () => {
   class MockWebSocket {
     handlers: Record<string, Function> = {};
     constructor() {
-      setTimeout(() => { this.handlers.error?.(); }, 0);
+      setTimeout(() => {
+        this.handlers.error?.();
+      }, 0);
     }
-    on(event: string, fn: Function) { this.handlers[event] = fn; return this; }
-    send() { /* no-op */ }
-    close() { this.handlers.close?.(); }
+    on(event: string, fn: Function) {
+      this.handlers[event] = fn;
+      return this;
+    }
+    send() {
+      /* no-op */
+    }
+    close() {
+      this.handlers.close?.();
+    }
   }
   return { WebSocket: MockWebSocket };
 });
@@ -356,7 +367,7 @@ describe("POST /api/orders/place", () => {
         symbol: "PLTR",
         action: "SELL",
         quantity: 50,
-        limitPrice: 8.50,
+        limitPrice: 8.5,
       }),
     });
     const res = await POST(req);
@@ -374,9 +385,15 @@ describe("POST /api/orders/place", () => {
         symbol: "PLTR",
         action: "SELL",
         quantity: 50,
-        limitPrice: 8.50,
+        limitPrice: 8.5,
         legs: [
-          { expiry: "20260327", strike: 145, right: "C", action: "SELL", ratio: 1 },
+          {
+            expiry: "20260327",
+            strike: 145,
+            right: "C",
+            action: "SELL",
+            ratio: 1,
+          },
         ],
       }),
     });
@@ -395,7 +412,7 @@ describe("POST /api/orders/place", () => {
         symbol: "PLTR",
         action: "SELL",
         quantity: 50,
-        limitPrice: 8.50,
+        limitPrice: 8.5,
         legs: [],
       }),
     });
@@ -474,11 +491,11 @@ describe("GET /api/portfolio", () => {
     GET = mod.GET;
   });
 
-  it("returns portfolio data when file exists", async () => {
+  it("returns portfolio data from FastAPI on success", async () => {
     const mockPortfolio = {
       bankroll: 100000,
       peak_value: 105000,
-      last_sync: "2026-03-05T10:00:00",
+      last_sync: new Date().toISOString(),
       positions: [],
       total_deployed_pct: 25.0,
       total_deployed_dollars: 25000,
@@ -488,7 +505,7 @@ describe("GET /api/portfolio", () => {
       undefined_risk_count: 0,
       avg_kelly_optimal: null,
     };
-    mockReadDataFile.mockResolvedValue({ ok: true, data: mockPortfolio });
+    mockXenonFetch.mockResolvedValueOnce(mockPortfolio);
 
     const res = await GET();
     expect(res.status).toBe(200);
@@ -498,13 +515,16 @@ describe("GET /api/portfolio", () => {
     expect(body.position_count).toBe(0);
   });
 
-  it("returns 404 when file not found", async () => {
-    mockReadDataFile.mockResolvedValue({ ok: false, error: "File not found: data/portfolio.json" });
+  it("returns 404 when FastAPI reports no snapshot", async () => {
+    const notFound = Object.assign(new Error("no snapshot"), { status: 404 });
+    mockXenonFetch
+      .mockRejectedValueOnce(notFound) // GET /portfolio
+      .mockResolvedValueOnce({ ok: true }); // background sync trigger
 
     const res = await GET();
     expect(res.status).toBe(404);
     const body = await res.json();
-    expect(body.error).toContain("not found");
+    expect(body.error).toContain("snapshot");
   });
 });
 
@@ -589,7 +609,14 @@ describe("GET /api/orders", () => {
           orderId: 101,
           permId: 9001,
           symbol: "AAPL",
-          contract: { conId: 1, symbol: "AAPL", secType: "STK", strike: null, right: null, expiry: null },
+          contract: {
+            conId: 1,
+            symbol: "AAPL",
+            secType: "STK",
+            strike: null,
+            right: null,
+            expiry: null,
+          },
           action: "BUY",
           orderType: "LMT",
           totalQuantity: 100,
@@ -636,7 +663,13 @@ describe("POST /api/orders", () => {
     mockXenonFetch.mockRejectedValue(new Error("IB gateway timeout"));
     mockReadDataFile.mockResolvedValue({
       ok: true,
-      data: { last_sync: "", open_orders: [], executed_orders: [], open_count: 0, executed_count: 0 },
+      data: {
+        last_sync: "",
+        open_orders: [],
+        executed_orders: [],
+        open_count: 0,
+        executed_count: 0,
+      },
     });
 
     const res = await POST();
@@ -653,7 +686,14 @@ describe("POST /api/orders", () => {
         {
           execId: "exec-001",
           symbol: "GOOG",
-          contract: { conId: 2, symbol: "GOOG", secType: "STK", strike: null, right: null, expiry: null },
+          contract: {
+            conId: 2,
+            symbol: "GOOG",
+            secType: "STK",
+            strike: null,
+            right: null,
+            expiry: null,
+          },
           side: "BOT",
           quantity: 50,
           avgPrice: 175.25,
@@ -695,7 +735,12 @@ describe("GET /api/blotter", () => {
   it("returns cached data when file exists", async () => {
     const blotterData = {
       as_of: "2026-03-05",
-      summary: { closed_trades: 5, open_trades: 3, total_commissions: 12.50, realized_pnl: 2500 },
+      summary: {
+        closed_trades: 5,
+        open_trades: 3,
+        total_commissions: 12.5,
+        realized_pnl: 2500,
+      },
       closed_trades: [
         {
           symbol: "AAPL",
@@ -703,7 +748,7 @@ describe("GET /api/blotter", () => {
           sec_type: "OPT",
           is_closed: true,
           net_quantity: 0,
-          total_commission: 2.50,
+          total_commission: 2.5,
           realized_pnl: 500,
           cost_basis: 1000,
           proceeds: 1500,
@@ -724,7 +769,9 @@ describe("GET /api/blotter", () => {
   });
 
   it("returns empty structure when file not found", async () => {
-    mockReadFile.mockRejectedValue(new Error("ENOENT: no such file or directory"));
+    mockReadFile.mockRejectedValue(
+      new Error("ENOENT: no such file or directory"),
+    );
 
     const res = await GET();
     expect(res.status).toBe(200);
@@ -783,7 +830,9 @@ describe("GET /api/journal", () => {
   });
 
   it("returns 500 with empty trades when file not found", async () => {
-    mockReadFile.mockRejectedValue(new Error("ENOENT: no such file or directory"));
+    mockReadFile.mockRejectedValue(
+      new Error("ENOENT: no such file or directory"),
+    );
 
     const res = await GET();
     expect(res.status).toBe(500);

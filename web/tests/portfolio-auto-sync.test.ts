@@ -1,21 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 /**
- * Verifies that GET /api/portfolio triggers background sync via FastAPI
- * when portfolio.json is stale, without blocking the response.
+ * Verifies the GET /api/portfolio stale-while-revalidate behavior after the
+ * Phase 1 postgres read-path migration: the route now calls FastAPI
+ * `GET /portfolio` for the snapshot and decides staleness from the response's
+ * `last_sync` field, not the local file mtime.
  */
-
-// Mock fs/stat so we can control staleness.
-const mockStat = vi.fn();
-vi.mock("fs/promises", () => ({ stat: mockStat }));
-
-// Mock read from cached data file.
-const mockReadDataFile = vi.fn();
-vi.mock("@tools/data-reader", () => ({ readDataFile: mockReadDataFile }));
 
 // Mock FastAPI client.
 const mockXenonFetch = vi.fn();
 vi.mock("@/lib/xenonApi", () => ({ xenonFetch: mockXenonFetch }));
+
+// Mock fs (only trade_log.json reads remain).
+const mockReadFile = vi.fn();
+vi.mock("fs/promises", () => ({ readFile: mockReadFile }));
 
 /** A minimal valid PortfolioData object */
 function makePortfolio(lastSync: string) {
@@ -43,15 +41,14 @@ describe("GET /api/portfolio — stale-while-revalidate background sync", () => 
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
-    mockXenonFetch.mockResolvedValue({ ok: true });
+    mockReadFile.mockResolvedValue("[]"); // empty trade log
   });
 
-  it("triggers FastAPI background sync when portfolio.json mtime is >60 s old", async () => {
-    const staleMtime = new Date(Date.now() - 90_000);
-    mockStat.mockResolvedValue({ mtimeMs: staleMtime.getTime() });
-
+  it("triggers FastAPI background sync when last_sync is >60 s old", async () => {
     const portfolio = makePortfolio(ageAgo(90_000));
-    mockReadDataFile.mockResolvedValue({ ok: true, data: portfolio });
+    mockXenonFetch
+      .mockResolvedValueOnce(portfolio) // GET /portfolio
+      .mockResolvedValueOnce({ ok: true }); // POST /portfolio/background-sync
 
     const { GET } = await import("../app/api/portfolio/route");
     const response = await GET();
@@ -59,51 +56,55 @@ describe("GET /api/portfolio — stale-while-revalidate background sync", () => 
 
     expect(response.status).toBe(200);
     expect(body.last_sync).toBe(portfolio.last_sync);
-    expect(mockXenonFetch).toHaveBeenCalledOnce();
-    const [path, options] = mockXenonFetch.mock.calls[0] as [string, Record<string, unknown>];
-    expect(path).toBe("/portfolio/background-sync");
-    expect(options).toMatchObject({ method: "POST" });
+    expect(mockXenonFetch).toHaveBeenCalledTimes(2);
+    expect(mockXenonFetch.mock.calls[0]?.[0]).toBe("/portfolio");
+    expect(mockXenonFetch.mock.calls[1]?.[0]).toBe(
+      "/portfolio/background-sync",
+    );
   });
 
-  it("does NOT trigger FastAPI sync when portfolio.json mtime is <60 s old (fresh)", async () => {
-    const freshMtime = new Date(Date.now() - 10_000);
-    mockStat.mockResolvedValue({ mtimeMs: freshMtime.getTime() });
+  it("does NOT trigger FastAPI sync when last_sync is <60 s old (fresh)", async () => {
     const portfolio = makePortfolio(ageAgo(10_000));
-    mockReadDataFile.mockResolvedValue({ ok: true, data: portfolio });
+    mockXenonFetch.mockResolvedValueOnce(portfolio);
 
     const { GET } = await import("../app/api/portfolio/route");
     await GET();
 
-    expect(mockXenonFetch).not.toHaveBeenCalled();
+    expect(mockXenonFetch).toHaveBeenCalledOnce();
+    expect(mockXenonFetch.mock.calls[0]?.[0]).toBe("/portfolio");
   });
 
-  it("triggers background sync when stat() throws (file missing counts as stale)", async () => {
-    mockStat.mockRejectedValue(new Error("ENOENT"));
-    mockReadDataFile.mockResolvedValue({ ok: false, error: "not found" });
+  it("triggers background sync when FastAPI returns 404 (no snapshot yet)", async () => {
+    const notFound = Object.assign(new Error("not found"), { status: 404 });
+    mockXenonFetch
+      .mockRejectedValueOnce(notFound) // GET /portfolio → 404
+      .mockResolvedValueOnce({ ok: true }); // POST /portfolio/background-sync
 
     const { GET } = await import("../app/api/portfolio/route");
     const response = await GET();
 
     expect(response.status).toBe(404);
-    expect(mockXenonFetch).toHaveBeenCalledOnce();
-    const [path, options] = mockXenonFetch.mock.calls[0] as [string, Record<string, unknown>];
-    expect(path).toBe("/portfolio/background-sync");
-    expect(options).toMatchObject({ method: "POST" });
+    expect(mockXenonFetch).toHaveBeenCalledTimes(2);
+    expect(mockXenonFetch.mock.calls[1]?.[0]).toBe(
+      "/portfolio/background-sync",
+    );
   });
 
   it("does not trigger a second sync when one is already in-flight", async () => {
-    mockXenonFetch.mockReturnValue(new Promise(() => {})); // never-resolving in-flight request
-
-    const staleMtime = new Date(Date.now() - 90_000);
-    mockStat.mockResolvedValue({ mtimeMs: staleMtime.getTime() });
     const portfolio = makePortfolio(ageAgo(90_000));
-    mockReadDataFile.mockResolvedValue({ ok: true, data: portfolio });
+    let bgCalls = 0;
+    mockXenonFetch.mockImplementation((path: string) => {
+      if (path === "/portfolio") return Promise.resolve(portfolio);
+      // Background sync — never-resolving so the in-flight guard stays armed.
+      bgCalls += 1;
+      return new Promise(() => {});
+    });
 
     const { GET } = await import("../app/api/portfolio/route");
 
     await GET();
     await GET();
 
-    expect(mockXenonFetch).toHaveBeenCalledOnce();
+    expect(bgCalls).toBe(1);
   });
 });
