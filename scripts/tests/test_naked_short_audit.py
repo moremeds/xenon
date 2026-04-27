@@ -246,17 +246,29 @@ class TestCancelViolations:
 
 
 class TestDryRun:
-    def test_dry_run_does_not_cancel(self, tmp_path):
-        """Dry-run prints violations but does not connect to IB or cancel."""
-        portfolio = {"positions": []}
+    def test_dry_run_does_not_cancel(self, tmp_path, monkeypatch):
+        """Dry-run prints violations but does not connect to IB or cancel.
+
+        Phase-2 postgres migration: portfolio comes from PG (seeded here),
+        not data/portfolio.json. The audit reads scope from env vars.
+        """
+        from scripts.tests.helpers.portfolio_seed import seed_portfolio_snapshot
+
+        seed_portfolio_snapshot(
+            {"positions": []},
+            broker="IB",
+            account_env="paper",
+            broker_account="DU0000000",
+        )
+        monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+        monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU0000000")
+
         orders = {
             "open_orders": [
                 make_order(1, 100, "AAPL", "STK", "SELL", 100),
             ]
         }
-        pf = tmp_path / "portfolio.json"
         of = tmp_path / "orders.json"
-        pf.write_text(json.dumps(portfolio))
         of.write_text(json.dumps(orders))
 
         import sys
@@ -269,8 +281,6 @@ class TestDryRun:
             [
                 "execution.naked_short_audit.py",
                 "--dry-run",
-                "--portfolio",
-                str(pf),
                 "--orders",
                 str(of),
             ],
@@ -393,8 +403,15 @@ def test_leg_wizard_tagged_order_is_skipped():
     """Order with orderRef starting 'leg_wizard:' is skipped even if apparently naked."""
     orders = [
         make_order(
-            10, 2001, "SPY", "OPT", "SELL", 1,
-            right="C", strike=510.0, expiry="20260620",
+            10,
+            2001,
+            "SPY",
+            "OPT",
+            "SELL",
+            1,
+            right="C",
+            strike=510.0,
+            expiry="20260620",
             order_ref="leg_wizard:session_abc123",
         ),
     ]
@@ -403,8 +420,7 @@ def test_leg_wizard_tagged_order_is_skipped():
     violations = find_naked_short_violations(orders, positions)
 
     assert violations == [], (
-        "Wizard-tagged orders are governed by server-side Gate 4; "
-        "the post-sync audit must skip them per spec Wiz §11.1"
+        "Wizard-tagged orders are governed by server-side Gate 4; the post-sync audit must skip them per spec Wiz §11.1"
     )
 
 
@@ -412,8 +428,15 @@ def test_non_wizard_order_still_checked():
     """Control: same naked order without the tag is still flagged."""
     orders = [
         make_order(
-            11, 2002, "SPY", "OPT", "SELL", 1,
-            right="C", strike=510.0, expiry="20260620",
+            11,
+            2002,
+            "SPY",
+            "OPT",
+            "SELL",
+            1,
+            right="C",
+            strike=510.0,
+            expiry="20260620",
             order_ref=None,
         ),
     ]
@@ -428,8 +451,15 @@ def test_leg_wizard_tag_prefix_must_match_exactly():
     """orderRef must start with literal 'leg_wizard:' — partial matches don't skip."""
     orders = [
         make_order(
-            12, 2003, "SPY", "OPT", "SELL", 1,
-            right="C", strike=510.0, expiry="20260620",
+            12,
+            2003,
+            "SPY",
+            "OPT",
+            "SELL",
+            1,
+            right="C",
+            strike=510.0,
+            expiry="20260620",
             order_ref="manual_leg_wizard_misleading",
         ),
     ]

@@ -296,22 +296,22 @@ def main(argv=None):
     """CLI entry point. Returns summary dict (for testing)."""
     parser = argparse.ArgumentParser(description="Naked short audit — detect and cancel violations")
     parser.add_argument("--dry-run", action="store_true", help="Print violations without cancelling")
-    parser.add_argument(
-        "--portfolio", type=str, default=str(DATA_DIR / "portfolio.json"), help="Path to portfolio.json"
-    )
     parser.add_argument("--orders", type=str, default=str(DATA_DIR / "orders.json"), help="Path to orders.json")
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_GATEWAY_PORT)
 
     args = parser.parse_args(argv)
 
-    # Load data
-    with open(args.portfolio) as f:
-        portfolio_data = json.load(f)
+    # Phase-2 postgres migration: portfolio sourced from PG, scoped by env.
+    from xenon.execution.account_scope import resolve_from_env
+    from xenon.utils.portfolio_loader import load_portfolio_payload_sync
+
+    scope = resolve_from_env()
+    payload = load_portfolio_payload_sync(scope=scope) or {}
+    positions = payload.get("positions", [])
+
     with open(args.orders) as f:
         orders_data = json.load(f)
-
-    positions = portfolio_data.get("positions", [])
     orders = orders_data.get("open_orders", [])
 
     # Detect violations
