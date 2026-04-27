@@ -1463,23 +1463,33 @@ async def orders_refresh():
 
 
 def _load_portfolio_view() -> PortfolioView | None:
-    """Load portfolio snapshot for preflight. Matches TS guard's data/portfolio.json source.
+    """Load portfolio snapshot from Postgres for preflight Gate 4.
 
-    Returns None when the snapshot is missing or unreadable — the caller
-    must fail OPEN in that case to match web/app/api/orders/place/route.ts
-    which logs and skips enforcement rather than blocking every SELL on
-    a fresh/cleaned environment. F5 will replace this with a live IB-pool
-    call per SL spec §5.2, at which point the fail-open branch disappears.
+    Reads the scope-specific payload via portfolio_loader so paper/live
+    data never blend. Returns None when no snapshot exists or scope can't
+    be resolved; the caller fails OPEN in those cases to match
+    web/app/api/orders/place/route.ts behavior on fresh environments.
+    F5 will replace this with a live IB-pool call per SL spec §5.2.
     """
-    data_dir = Path(os.environ.get("XENON_DATA_DIR", str(DATA_DIR)))
-    pf_file = data_dir / "portfolio.json"
-    if not pf_file.exists():
+    from xenon.execution.account_scope import AccountScope
+    from xenon.utils.portfolio_loader import load_portfolio_payload_sync
+
+    mode = getattr(app.state, "trading_mode", None)
+    account = getattr(app.state, "account", None)
+    if not mode or not account:
+        return None
+    scope = AccountScope(broker="IB", account_env=mode, broker_account=account)
+    try:
+        payload = load_portfolio_payload_sync(scope=scope)
+    except Exception as exc:  # noqa: BLE001 — fail open on DB error
+        logger.warning("[preflight] could not load portfolio from PG: %s", exc)
+        return None
+    if not payload:
         return None
     try:
-        raw = json.loads(pf_file.read_text())
-        return PortfolioView.model_validate(raw)
-    except (OSError, ValueError, ValidationError) as exc:
-        logger.warning("[preflight] Could not load portfolio.json: %s", exc)
+        return PortfolioView.model_validate(payload)
+    except ValidationError as exc:
+        logger.warning("[preflight] payload failed PortfolioView validation: %s", exc)
         return None
 
 

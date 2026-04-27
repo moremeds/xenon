@@ -3,22 +3,33 @@
 Uses FastAPI TestClient with XENON_API_TEST_MODE=1 to stub the subprocess
 call. Verifies that the preflight gate returns HTTP 400 with the reason
 code BEFORE any subprocess invocation.
-"""
 
-import json
+Phase-2 postgres migration: portfolio state is seeded into
+xenon.account_snapshots.payload (jsonb) instead of data/portfolio.json.
+The autouse `_postgres_orders_test_db` fixture in conftest.py truncates
+the table before/after every test, so test bodies just call
+`seed_portfolio_snapshot(...)` to install fixtures.
+"""
 
 import pytest
 from fastapi.testclient import TestClient
 
+from scripts.tests.helpers.portfolio_seed import seed_portfolio_snapshot
+
 
 @pytest.fixture(autouse=True)
-def _test_mode(monkeypatch, tmp_path):
+def _test_mode(monkeypatch):
     monkeypatch.setenv("XENON_API_TEST_MODE", "1")
-    # Point data dir at an empty portfolio
-    portfolio = {"positions": []}
-    pf_file = tmp_path / "portfolio.json"
-    pf_file.write_text(json.dumps(portfolio))
-    monkeypatch.setenv("XENON_DATA_DIR", str(tmp_path))
+    # Seed an empty portfolio snapshot so _load_portfolio_view returns
+    # PortfolioView(positions=[]) instead of None — mirrors the previous
+    # default of writing {"positions": []} to data/portfolio.json. Tests
+    # that need real positions overwrite this with their own seed.
+    seed_portfolio_snapshot(
+        {"positions": []},
+        broker="IB",
+        account_env="paper",
+        broker_account="DU0000000",
+    )
     yield
 
 
@@ -84,9 +95,6 @@ def test_spy_buy_passes_preflight(client):
         },
     )
     # Preflight blocks would return 400 with a preflight reason_code.
-    # A 200/500 means we reached the post-preflight path. A 400 with a
-    # non-preflight reason (e.g. STALE_QUOTE from F3) also means preflight
-    # ACCEPTed — we only reject preflight-origin codes here.
     preflight_codes = {
         "UNIVERSE_UNKNOWN",
         "INDEX_HAS_NO_STOCK",
@@ -101,28 +109,28 @@ def test_spy_buy_passes_preflight(client):
     )
 
 
-def test_spoofed_multiplier_cannot_bypass_gate(client, monkeypatch, tmp_path):
+def test_spoofed_multiplier_cannot_bypass_gate(client):
     """Codex pass-3 P2: attacker posts multiplier=1 to turn 100 SPY shares into
     100 cover units, bypassing Gate 4 on a SELL call. The server must derive
     multiplier from universe.py, not the request body.
     """
-    # Portfolio with 100 SPY shares → 1 contract of cover at multiplier=100
-    portfolio = {
-        "positions": [
-            {
-                "ticker": "SPY",
-                "structure_type": "Stock",
-                "direction": "LONG",
-                "contracts": 100,
-                "expiry": None,
-                "legs": [{"direction": "LONG", "type": "Stock", "contracts": 100, "strike": 0.0}],
-            }
-        ]
-    }
-    pf_path = tmp_path / "nodata_multiplier"
-    pf_path.mkdir()
-    (pf_path / "portfolio.json").write_text(json.dumps(portfolio))
-    monkeypatch.setenv("XENON_DATA_DIR", str(pf_path))
+    seed_portfolio_snapshot(
+        {
+            "positions": [
+                {
+                    "ticker": "SPY",
+                    "structure_type": "Stock",
+                    "direction": "LONG",
+                    "contracts": 100,
+                    "expiry": None,
+                    "legs": [{"direction": "LONG", "type": "Stock", "contracts": 100, "strike": 0.0}],
+                }
+            ]
+        },
+        broker="IB",
+        account_env="paper",
+        broker_account="DU0000000",
+    )
 
     # 2 short calls with spoofed multiplier=1 — would bypass the gate if trusted
     resp = client.post(
@@ -143,21 +151,21 @@ def test_spoofed_multiplier_cannot_bypass_gate(client, monkeypatch, tmp_path):
     assert resp.json()["reason_code"] == "ETF_CALL_UNCOVERED"
 
 
-def test_missing_portfolio_fails_open(monkeypatch, tmp_path):
+def test_missing_portfolio_fails_open(client):
     """Codex P1 #1: TS guard at web/app/api/orders/place/route.ts:183-185 fails
-    OPEN when portfolio.json is absent (logs + skips enforcement). Preflight
+    OPEN when the portfolio snapshot is absent (logs + skips enforcement). Preflight
     must match that behavior — otherwise a fresh server start blocks every SELL.
+
+    Clears the autouse empty-portfolio seed so PG truly has no row for this
+    scope, forcing _load_portfolio_view to return None.
     """
-    # Override the autouse fixture's data dir with one that has NO portfolio file.
-    empty_dir = tmp_path / "nodata"
-    empty_dir.mkdir()
-    monkeypatch.setenv("XENON_DATA_DIR", str(empty_dir))
+    from sqlalchemy import text
 
-    from xenon.api.server import app
+    from xenon.db.engine import get_sync_engine
 
-    client = TestClient(app)
-    # A SELL that would be blocked as INSUFFICIENT_SHARES with an empty portfolio
-    # should pass preflight when the portfolio file is missing (fail-open).
+    with get_sync_engine().begin() as conn:
+        conn.execute(text("TRUNCATE xenon.account_snapshots CASCADE"))
+
     resp = client.post(
         "/orders/place",
         json={
@@ -178,7 +186,7 @@ def test_missing_portfolio_fails_open(monkeypatch, tmp_path):
     }
     body_json = resp.json() if resp.status_code == 400 else {}
     assert body_json.get("reason_code") not in preflight_codes, (
-        f"Missing portfolio.json must fail open (match TS guard); got {resp.status_code} {body_json}"
+        f"Missing portfolio must fail open (match TS guard); got {resp.status_code} {body_json}"
     )
 
 
@@ -187,26 +195,23 @@ def test_insufficient_shares_when_working_sell_exists(client, monkeypatch, tmp_p
     consumes held shares. With held=100 and a PENDING sell of 100 in the
     store, a new SELL 1 SPY must BLOCK with INSUFFICIENT_SHARES.
     """
-    import json as _json
-
-    pf = tmp_path / "portfolio.json"
-    pf.write_text(
-        _json.dumps(
-            {
-                "positions": [
-                    {
-                        "ticker": "SPY",
-                        "structure_type": "Stock",
-                        "direction": "LONG",
-                        "contracts": 100,
-                        "legs": [{"direction": "LONG", "type": "Stock", "contracts": 100, "strike": 0.0}],
-                    }
-                ],
-                "available_funds": 0,
-            }
-        )
+    seed_portfolio_snapshot(
+        {
+            "positions": [
+                {
+                    "ticker": "SPY",
+                    "structure_type": "Stock",
+                    "direction": "LONG",
+                    "contracts": 100,
+                    "legs": [{"direction": "LONG", "type": "Stock", "contracts": 100, "strike": 0.0}],
+                }
+            ],
+            "available_funds": 0,
+        },
+        broker="IB",
+        account_env="paper",
+        broker_account="DU0000000",
     )
-    monkeypatch.setenv("XENON_DATA_DIR", str(tmp_path))
 
     from decimal import Decimal
 
