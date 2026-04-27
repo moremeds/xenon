@@ -277,7 +277,6 @@ def main():
     # Paths
     project_root = Path(__file__).resolve().parents[3]
     trade_log_path = project_root / "data" / "trade_log.json"
-    portfolio_path = project_root / "data" / "portfolio.json"
     reconcile_path = project_root / "data" / "reconciliation.json"
 
     # Connect to IB
@@ -289,16 +288,15 @@ def main():
     try:
         # Load local data
         trade_log = load_json(str(trade_log_path))
-        # Use verified_load for portfolio (checksum integrity check)
-        try:
-            from xenon.utils.atomic_io import verified_load
+        # Phase-2 postgres migration: portfolio sourced from PG, scoped by env.
+        from xenon.execution.account_scope import resolve_from_env
+        from xenon.utils.portfolio_loader import load_portfolio_payload_sync
 
-            portfolio = verified_load(str(portfolio_path))
-        except (FileNotFoundError, json.JSONDecodeError):
+        try:
+            portfolio = load_portfolio_payload_sync(scope=resolve_from_env()) or {}
+        except ValueError as exc:
+            log(f"Could not resolve account scope for reconcile: {exc}", "warn")
             portfolio = {}
-        except ValueError as e:
-            log(f"Portfolio checksum verification failed: {e}", "warn")
-            portfolio = load_json(str(portfolio_path))
 
         # Fetch IB data
         log("Fetching executions from IB...")
