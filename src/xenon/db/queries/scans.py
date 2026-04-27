@@ -85,3 +85,21 @@ def save_vcg_scan(
         )
         .returning(vcg_series.c.id)
     ).scalar()
+
+
+async def get_latest_vcg(conn: AsyncConnection) -> dict | None:
+    """Return the most recent vcg_series payload, or None when no scans exist.
+
+    The payload is the full UI shape (signal, history, market_open,
+    credit_proxy, scan_time) that vcg_scan.py emits — vcg_series.payload
+    is structurally complete on every row, so callers don't need to
+    reconstruct the 20d history from separate rows.
+    """
+    from xenon.db.schema import vcg_series
+
+    stmt = select(vcg_series.c.payload).order_by(vcg_series.c.scanned_at.desc(), vcg_series.c.id.desc()).limit(1)
+    row = (await conn.execute(stmt)).first()
+    if row is None:
+        return None
+    payload = row.payload
+    return dict(payload) if payload else None
