@@ -418,18 +418,30 @@ class UwAnalyzeCache:
             )
             target = self._archive_file_for(ticker)
             await asyncio.to_thread(self._write_archive_sync, target, payload)
-            # Also archive to Postgres
-            await asyncio.to_thread(self._archive_to_postgres, ticker, current)
+            # Also archive to Postgres (full payload)
+            await asyncio.to_thread(
+                self._archive_to_postgres,
+                ticker,
+                current,
+                payload.get("materialized_changes") if isinstance(payload, dict) else None,
+                payload.get("archived_at") if isinstance(payload, dict) else None,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("uw_analyze_cache archive write failed for %s: %s", ticker, exc)
 
     @staticmethod
-    def _archive_to_postgres(ticker: str, current: dict) -> None:
+    def _archive_to_postgres(
+        ticker: str,
+        current: dict,
+        materialized_changes: list | None = None,
+        archived_at_iso: str | None = None,
+    ) -> None:
         """Write snapshot to Postgres uw_analyze_snapshots (sync, for to_thread)."""
         try:
             url = os.environ.get("DATABASE_URL")
             if not url:
                 return
+            from datetime import datetime
             from decimal import Decimal
 
             from sqlalchemy import create_engine as _cse
@@ -443,14 +455,29 @@ class UwAnalyzeCache:
             scores = report.get("scores") if isinstance(report, dict) else None
             score_val = None
             if isinstance(scores, dict):
-                score_val = scores.get("flow") or scores.get("total")
+                score_val = scores.get("flow") or scores.get("composite") or scores.get("total")
+
+            def _ts(value: str | None):
+                if not value:
+                    return None
+                try:
+                    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+                except (ValueError, AttributeError):
+                    return None
+
             with engine.begin() as conn:
                 conn.execute(
                     insert(uw_analyze_snapshots).values(
                         ticker=ticker,
-                        vrp_state=_coerce_jsonable(report.get("vrp_state")) if isinstance(report, dict) else None,
-                        regime=_coerce_jsonable(report.get("regime")) if isinstance(report, dict) else None,
-                        flow_signals=_coerce_jsonable(current.get("flow_alerts")),
+                        report=_coerce_jsonable(report) if isinstance(report, dict) else None,
+                        display=_coerce_jsonable(current.get("display")),
+                        derived=_coerce_jsonable(current.get("derived")),
+                        dark_pool_summary=_coerce_jsonable(current.get("dark_pool_summary")),
+                        options_flow_summary=_coerce_jsonable(current.get("options_flow_summary")),
+                        flow_alerts=_coerce_jsonable(current.get("flow_alerts")),
+                        materialized_changes=_coerce_jsonable(materialized_changes),
+                        report_fetched_at=_ts(report.get("fetched_at")) if isinstance(report, dict) else None,
+                        archived_at=_ts(archived_at_iso),
                         portfolio_score=Decimal(str(score_val)) if score_val is not None else None,
                     )
                 )

@@ -468,35 +468,14 @@ def migrate_scan_results(engine):
 def migrate_uw_data(engine):
     count = 0
     with engine.begin() as conn:
-        # UW analyze cache
+        # uw_analyze_snapshots: writer was rewritten in 2026-04-26 normalize_payloads.
+        # Use scripts/migrations/_2026_04_26_backfill_uw_analyze_history.py instead.
         path = DATA_DIR / "uw_analyze_cache.json"
         if path.exists():
-            with open(path) as f:
-                data = json.load(f)
-            data.pop("_checksum", None)
-            # Handle both flat {ticker: {...}} and nested {entries: {ticker: {...}}}
-            entries = data.get("entries", data) if isinstance(data, dict) else data
-            if not isinstance(entries, dict):
-                entries = {}
-            for ticker, entry in entries.items():
-                if ticker.startswith("_") or not isinstance(entry, dict):
-                    continue
-                conn.execute(
-                    text("""
-                    INSERT INTO xenon.uw_analyze_snapshots
-                        (ticker, vrp_state, regime, flow_signals, portfolio_score)
-                    VALUES (:ticker, CAST(:vrp AS jsonb), CAST(:regime AS jsonb),
-                            CAST(:flow AS jsonb), :score)
-                """),
-                    {
-                        "ticker": ticker,
-                        "vrp": json.dumps(entry.get("vrp_state")),
-                        "regime": json.dumps(entry.get("regime")),
-                        "flow": json.dumps(entry.get("flow_signals")),
-                        "score": entry.get("portfolio_score"),
-                    },
-                )
-                count += 1
+            print(
+                "  SKIP uw_analyze_snapshots from uw_analyze_cache.json — "
+                "use _2026_04_26_backfill_uw_analyze_history.py instead"
+            )
 
         # UW flow events — JSON format is {"events": {event_id: event_dict}}
         path = DATA_DIR / "uw_unusual_flow_log.json"
@@ -580,62 +559,13 @@ def migrate_uw_data(engine):
 
 
 def migrate_uw_history(engine):
-    """Import uw_analyze_history/ archive into uw_analyze_snapshots."""
-    history_dir = DATA_DIR / "uw_analyze_history"
-    if not history_dir.exists():
-        print("  SKIP uw_analyze_history/ (not found)")
-        return 0
+    """DEPRECATED — superseded by 2026-04-26 normalize_payloads.
 
-    ticker_dirs = sorted(d for d in history_dir.iterdir() if d.is_dir())
-    total = 0
-    batch = []
-    BATCH_SIZE = 500
-
-    def flush(conn, batch):
-        if not batch:
-            return
-        conn.execute(
-            text("""
-            INSERT INTO xenon.uw_analyze_snapshots
-                (ticker, vrp_state, regime, flow_signals, portfolio_score, snapshot_at)
-            VALUES (:ticker, CAST(:vrp AS jsonb), CAST(:regime AS jsonb),
-                    CAST(:flow AS jsonb), :score, :snapshot_at)
-            """),
-            batch,
-        )
-        batch.clear()
-
-    with engine.begin() as conn:
-        for ticker_dir in ticker_dirs:
-            ticker = ticker_dir.name
-            files = sorted(ticker_dir.glob("*.json"))
-            for f in files:
-                try:
-                    with open(f) as fh:
-                        data = json.load(fh)
-                except (json.JSONDecodeError, OSError):
-                    continue
-                current = data.get("current", {})
-                if not isinstance(current, dict):
-                    continue
-                archived_at = data.get("archived_at")
-                batch.append(
-                    {
-                        "ticker": current.get("ticker", ticker),
-                        "vrp": json.dumps(current.get("vrp_state")),
-                        "regime": json.dumps(current.get("regime")),
-                        "flow": json.dumps(current.get("flow_signals")),
-                        "score": current.get("portfolio_score"),
-                        "snapshot_at": archived_at,
-                    }
-                )
-                total += 1
-                if len(batch) >= BATCH_SIZE:
-                    flush(conn, batch)
-        flush(conn, batch)
-
-    print(f"  uw_analyze_history/ → {total} snapshots ({len(ticker_dirs)} tickers)")
-    return total
+    Use scripts/migrations/_2026_04_26_backfill_uw_analyze_history.py to load
+    data/uw_analyze_history/ into the new uw_analyze_snapshots schema.
+    """
+    print("  SKIP migrate_uw_history — superseded by scripts/migrations/_2026_04_26_backfill_uw_analyze_history.py")
+    return 0
 
 
 def migrate_caches(engine):

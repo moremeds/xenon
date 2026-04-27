@@ -14,20 +14,35 @@ async def save_snapshot(
     conn: AsyncConnection,
     *,
     ticker: str,
-    vrp_state: dict | None = None,
-    regime: dict | None = None,
-    flow_signals: dict | None = None,
+    report: dict | None = None,
+    display: dict | None = None,
+    derived: dict | None = None,
+    dark_pool_summary: dict | None = None,
+    options_flow_summary: dict | None = None,
+    flow_alerts: list | None = None,
+    materialized_changes: list | None = None,
+    report_fetched_at: datetime | None = None,
+    archived_at: datetime | None = None,
     portfolio_score: Decimal | None = None,
-) -> None:
-    await conn.execute(
-        insert(uw_analyze_snapshots).values(
+) -> int:
+    result = await conn.execute(
+        insert(uw_analyze_snapshots)
+        .values(
             ticker=ticker,
-            vrp_state=vrp_state,
-            regime=regime,
-            flow_signals=flow_signals,
+            report=report,
+            display=display,
+            derived=derived,
+            dark_pool_summary=dark_pool_summary,
+            options_flow_summary=options_flow_summary,
+            flow_alerts=flow_alerts,
+            materialized_changes=materialized_changes,
+            report_fetched_at=report_fetched_at,
+            archived_at=archived_at,
             portfolio_score=portfolio_score,
         )
+        .returning(uw_analyze_snapshots.c.id)
     )
+    return result.scalar()
 
 
 async def get_latest_snapshot(conn: AsyncConnection, *, ticker: str) -> dict | None:

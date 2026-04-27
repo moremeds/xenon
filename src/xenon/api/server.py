@@ -569,7 +569,11 @@ _SCAN_TYPE_MAP = {
 
 
 def _write_scan_to_postgres(filename: str, data: dict) -> None:
-    """Write a scanner result to Postgres scan_results table (best-effort)."""
+    """Write a scanner result to Postgres scan_results table (best-effort).
+
+    For 'vcg.json', also writes a row to xenon.vcg_series so generated columns
+    populate. (gex.json writes its own gex_snapshots row inside gex.py.)
+    """
     scan_type = _SCAN_TYPE_MAP.get(filename)
     if not scan_type:
         return
@@ -586,6 +590,15 @@ def _write_scan_to_postgres(filename: str, data: dict) -> None:
         engine = _cse(sync_url)
         with engine.begin() as conn:
             conn.execute(insert(scan_results).values(scan_type=scan_type, payload=data))
+            if filename == "vcg.json":
+                from xenon.db.queries.scans import save_vcg_scan
+
+                save_vcg_scan(
+                    conn,
+                    payload=data,
+                    market_open=data.get("market_open"),
+                    credit_proxy=data.get("credit_proxy"),
+                )
         engine.dispose()
     except Exception:
         logger.warning("scan archive to Postgres failed for %s", filename, exc_info=True)

@@ -932,16 +932,18 @@ def main():
     atomic_save(str(cache_path), result)
     print(f"  Cache written: {cache_path}", file=sys.stderr)
 
-    # Also write to Postgres
+    # Also write to Postgres (dual-write: legacy scan_results + new gex_snapshots)
     try:
         from sqlalchemy import insert
 
         from xenon.db.engine import get_sync_engine
+        from xenon.db.queries.scans import save_gex_snapshot
         from xenon.db.schema import scan_results
 
         engine = get_sync_engine()
         with engine.begin() as conn:
             conn.execute(insert(scan_results).values(scan_type="gex", payload=result))
+            save_gex_snapshot(conn, payload=result)
     except Exception as exc:
         print(f"  Warning: Postgres scan write failed: {exc}", file=sys.stderr)
 

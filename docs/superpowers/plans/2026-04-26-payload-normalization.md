@@ -46,47 +46,47 @@
 
 ## Task 0: Phase 0 reconnaissance
 
-**Goal:** confirm exact JSONB key names so generated-column expressions and trigger DDL are correct on the first try.
+**Goal:** confirm exact JSONB key names and parent revision so generated-column expressions, trigger DDL, and Alembic graph are correct on the first try.
+
+**Pre-confirmed by Codex review (2026-04-27)** — these checks have already been done; do them again only if you suspect the data has shifted since:
+
+- ✅ `data/gex.json` levels are objects `{strike, gamma, distance, distance_pct}`, not scalars. Task 1 step 5 gex_snapshots Computed expressions extract `->>'strike'` from each level object.
+- ✅ `uw_flow_events.daily_track` is an ARRAY of `{date, oi, mid, underlying_price, pct_change_premium, volume}` (`uw_analyze_flow_tracker.py:514-524`). Trigger 4 in Task 2 step 3 handles array form (and falls back to object form for completeness).
+- ✅ `uw_flow_events.initial` keys are `premium_usd, oi, volume, mid, underlying_price` only. Task 1 step 6 generated columns are scoped to those.
+- ✅ Alembic head is `27a1d085c2cd` (`add_broker_account_scope_columns`). New migration's `down_revision` MUST be `27a1d085c2cd`.
+- ✅ Local DB has scan_types `vcg, discover, cri, gex, watchlist`. This plan ships only `gex_snapshots`. The other four stay as-is in `scan_results` and are explicitly out of scope (deferred follow-up).
 
 **Files:**
 
 - Output: append findings to this plan as a comment block at the bottom (or to a separate `recon-results.md` next to the spec)
 
-- [ ] **Step 1: Run distinct scan_type query**
+- [ ] **Step 1: Confirm Alembic head is still `27a1d085c2cd`**
+
+```bash
+uv run alembic heads
+```
+
+Expected: `27a1d085c2cd (head)`. If a newer migration has landed since this plan was written, the new revision in Task 2 must descend from whatever the current head is — not from `27a1d085c2cd`.
+
+- [ ] **Step 2: Distinct scan_type query (optional — already known: vcg, discover, cri, gex, watchlist)**
 
 ```bash
 psql -h localhost -U xenon_app xenon_db -c "SELECT scan_type, COUNT(*) FROM xenon.scan_results GROUP BY scan_type ORDER BY 2 DESC;"
 ```
 
-Record the output. The plan only details `gex_snapshots`; if other types exist, the implementation needs an analogous per-type table for each (same template — see Task 9 for the GEX pattern).
+Record current counts so the verification report (Task 15) has a baseline.
 
-- [ ] **Step 2: Sample uw_flow_events.initial keys**
-
-```bash
-psql -h localhost -U xenon_app xenon_db -c "SELECT jsonb_object_keys(initial) AS k, COUNT(*) FROM xenon.uw_flow_events GROUP BY k ORDER BY 2 DESC;"
-```
-
-Record which keys actually exist. Task 11's generated columns assume `premium_usd`, `size`, `dte`, `iv`, `spot`, `aggressor`. If actual keys differ (e.g. `premium` not `premium_usd`), update Task 11 step 1 expressions before generating the migration.
-
-- [ ] **Step 3: Sample uw_flow_events.daily_track shape**
-
-```bash
-psql -h localhost -U xenon_app xenon_db -c "SELECT id, jsonb_typeof(daily_track), daily_track FROM xenon.uw_flow_events WHERE daily_track IS NOT NULL LIMIT 3;"
-```
-
-Determine if `daily_track` is `'object'` (dict keyed by ISO timestamp) or `'array'`. The trigger DDL in Task 11 step 4 assumes object form (`jsonb_each`). If array, change to `jsonb_array_elements` and extract `observed_at` from inside each element.
-
-- [ ] **Step 4: Sample uw_analyze_snapshots existing JSONBs**
+- [ ] **Step 3: Sample uw_analyze_snapshots existing JSONBs (about to be dropped)**
 
 ```bash
 psql -h localhost -U xenon_app xenon_db -c "SELECT vrp_state, regime FROM xenon.uw_analyze_snapshots WHERE vrp_state IS NOT NULL LIMIT 2;"
 ```
 
-These are about to be dropped, but the contents inform what existing rows look like vs the on-disk archive — backfill must reconcile both sources.
+The on-disk archives are the lossless source — the existing column contents are about to be dropped. This step exists only to confirm there is no field in the DB that's missing from archives.
 
-- [ ] **Step 5: Commit recon findings**
+- [ ] **Step 4: Commit recon findings**
 
-Append findings as `## Phase 0 Findings` at the end of this plan file (do not commit yet — combine with the recon comment in the next task's commit, or commit standalone if you prefer separate history). One commit:
+Append findings as `## Phase 0 Findings` at the end of this plan file. One commit:
 
 ```bash
 git add docs/superpowers/plans/2026-04-26-payload-normalization.md
@@ -300,6 +300,10 @@ vcg_series = Table(
     Column("attr_vvix_component", Numeric(12, 8), Computed("((payload->'signal'->'attribution')->>'vvix_component')::numeric", persisted=True)),
     Column("attr_vix_component", Numeric(12, 8), Computed("((payload->'signal'->'attribution')->>'vix_component')::numeric", persisted=True)),
     Column("attr_model_implied", Numeric(12, 8), Computed("((payload->'signal'->'attribution')->>'model_implied')::numeric", persisted=True)),
+    # Idempotency: scanned_at is the natural unique key for both live writes
+    # and history backfill (one row per scan event). Backfill scripts use
+    # ON CONFLICT (scanned_at) DO NOTHING so re-running is safe.
+    UniqueConstraint("scanned_at", name="uq_vcg_series_scanned_at"),
     Index("ix_vcg_scanned_at", "scanned_at"),
     Index("ix_vcg_regime", "regime"),
     Index("ix_vcg_tier", "tier", postgresql_where=text("tier IS NOT NULL")),
@@ -327,10 +331,18 @@ gex_snapshots = Table(
     Column("iv_rank", Numeric(6, 2), Computed("((payload->'iv')->>'iv_rank')::numeric", persisted=True)),
     Column("hv_30d", Numeric(6, 4), Computed("((payload->'iv')->>'hv30')::numeric", persisted=True)),
     Column("mq_iv_30d", Numeric(6, 4), Computed("((payload->'iv')->>'mq_iv30d')::numeric", persisted=True)),
-    Column("level_max_magnet", Numeric(12, 4), Computed("((payload->'levels')->>'max_magnet')::numeric", persisted=True)),
-    Column("level_second_magnet", Numeric(12, 4), Computed("((payload->'levels')->>'second_magnet')::numeric", persisted=True)),
-    Column("level_max_accelerator", Numeric(12, 4), Computed("((payload->'levels')->>'max_accelerator')::numeric", persisted=True)),
-    Column("level_put_wall", Numeric(12, 4), Computed("((payload->'levels')->>'put_wall')::numeric", persisted=True)),
+    # Real GEX payload nests each level as an object {strike, gamma, distance, distance_pct}.
+    # Verified against data/gex.json:14-50. Extract the strike (and gamma where useful)
+    # from each named level rather than casting the wrapping object to numeric.
+    Column("level_max_magnet_strike", Numeric(12, 4), Computed("(((payload->'levels')->'max_magnet')->>'strike')::numeric", persisted=True)),
+    Column("level_max_magnet_gamma", Numeric(14, 4), Computed("(((payload->'levels')->'max_magnet')->>'gamma')::numeric", persisted=True)),
+    Column("level_second_magnet_strike", Numeric(12, 4), Computed("(((payload->'levels')->'second_magnet')->>'strike')::numeric", persisted=True)),
+    Column("level_second_magnet_gamma", Numeric(14, 4), Computed("(((payload->'levels')->'second_magnet')->>'gamma')::numeric", persisted=True)),
+    Column("level_max_accelerator_strike", Numeric(12, 4), Computed("(((payload->'levels')->'max_accelerator')->>'strike')::numeric", persisted=True)),
+    Column("level_max_accelerator_gamma", Numeric(14, 4), Computed("(((payload->'levels')->'max_accelerator')->>'gamma')::numeric", persisted=True)),
+    Column("level_put_wall_strike", Numeric(12, 4), Computed("(((payload->'levels')->'put_wall')->>'strike')::numeric", persisted=True)),
+    Column("level_call_wall_strike", Numeric(12, 4), Computed("(((payload->'levels')->'call_wall')->>'strike')::numeric", persisted=True)),
+    Column("level_gex_flip_strike", Numeric(12, 4), Computed("(((payload->'levels')->'gex_flip')->>'strike')::numeric", persisted=True)),
     Index("ix_gex_ticker_time", "ticker", "scanned_at"),
     Index("ix_gex_scanned_at", "scanned_at"),
     Index("ix_gex_data_date", "data_date"),
@@ -357,13 +369,15 @@ uw_flow_events = Table(
     Column("status", Text, nullable=False),
     Column("anomaly_reason", Text),
     Column("closed_at", TIMESTAMP(timezone=True)),
-    # Generated from initial.* — exact key names confirmed in Phase 0
+    # Generated from initial.* — keys verified against
+    # src/xenon/api/services/uw_analyze_flow_tracker.py:507-513.
+    # Real writer stores premium_usd / oi / volume / mid / underlying_price; nothing
+    # else. Do NOT add columns for size/dte/iv/aggressor — they would be NULL forever.
     Column("initial_premium_usd", Numeric(14, 2), Computed("(initial->>'premium_usd')::numeric", persisted=True)),
-    Column("initial_size", Integer, Computed("(initial->>'size')::int", persisted=True)),
-    Column("initial_dte", Integer, Computed("(initial->>'dte')::int", persisted=True)),
-    Column("initial_iv", Numeric(6, 4), Computed("(initial->>'iv')::numeric", persisted=True)),
-    Column("initial_spot", Numeric(12, 4), Computed("(initial->>'spot')::numeric", persisted=True)),
-    Column("initial_aggressor", Text, Computed("initial->>'aggressor'", persisted=True)),
+    Column("initial_oi", Integer, Computed("(initial->>'oi')::int", persisted=True)),
+    Column("initial_volume", Integer, Computed("(initial->>'volume')::int", persisted=True)),
+    Column("initial_mid", Numeric(10, 4), Computed("(initial->>'mid')::numeric", persisted=True)),
+    Column("initial_underlying_price", Numeric(12, 4), Computed("(initial->>'underlying_price')::numeric", persisted=True)),
 )
 ```
 
@@ -372,16 +386,24 @@ uw_flow_events = Table(
 Insert after `uw_flow_events`:
 
 ```python
+# Child-table design note (per user direction on Codex review, 2026-04-27):
+# These tables are intended to become externally referenced. That makes
+# DELETE+INSERT triggers wrong long-term — child IDs would churn on every
+# parent update. Each table therefore exposes a stable natural key
+# (snapshot_id + ordinal/strike), and the triggers below use INSERT ON
+# CONFLICT DO UPDATE keyed on that constraint instead of DELETE+INSERT.
 uw_analyze_flow_alerts = Table(
     "uw_analyze_flow_alerts",
     xenon_metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
     Column("snapshot_id", BigInteger, ForeignKey("xenon.uw_analyze_snapshots.id", ondelete="CASCADE"), nullable=False),
+    Column("ordinal", Integer, nullable=False),  # position within flow_alerts[] — natural-key component
     Column("ticker", Text, nullable=False),
     Column("snapshot_at", TIMESTAMP(timezone=True), nullable=False),
     Column("alert_type", Text),
     Column("alert_severity", Text),
     Column("alert_payload", JSONB, nullable=False),
+    UniqueConstraint("snapshot_id", "ordinal", name="uq_uw_flow_alerts_snapshot_ordinal"),
     Index("ix_uw_flow_alerts_snapshot", "snapshot_id"),
     Index("ix_uw_flow_alerts_ticker_time", "ticker", "snapshot_at"),
 )
@@ -400,6 +422,7 @@ uw_analyze_gex_strikes = Table(
     Column("distance_pct", Numeric(10, 6)),
     Column("is_call_wall", Boolean),
     Column("is_put_wall", Boolean),
+    UniqueConstraint("snapshot_id", "strike", name="uq_uw_gex_strikes_snapshot_strike"),
     Index("ix_uw_gex_strikes_snapshot", "snapshot_id"),
     Index("ix_uw_gex_strikes_ticker_time", "ticker", "snapshot_at"),
 )
@@ -413,6 +436,7 @@ uw_analyze_short_volume_trend = Table(
     Column("snapshot_at", TIMESTAMP(timezone=True), nullable=False),
     Column("position_in_trend", Integer, nullable=False),
     Column("ratio", Numeric(8, 6)),
+    UniqueConstraint("snapshot_id", "position_in_trend", name="uq_uw_short_vol_snapshot_pos"),
     Index("ix_uw_short_vol_snapshot", "snapshot_id"),
 )
 
@@ -422,14 +446,16 @@ uw_flow_event_ticks = Table(
     Column("id", BigInteger, primary_key=True, autoincrement=True),
     Column("event_id", BigInteger, ForeignKey("xenon.uw_flow_events.id", ondelete="CASCADE"), nullable=False),
     Column("flow_event_key", Text, nullable=False),
+    # Real writer stores daily_track as a list of {date, oi, mid, underlying_price,
+    # pct_change_premium, volume} (uw_analyze_flow_tracker.py:514-524). observed_at is
+    # derived from `date` (YYYY-MM-DD) at 20:00 UTC (~16:00 ET close).
     Column("observed_at", TIMESTAMP(timezone=True), nullable=False),
-    Column("spot", Numeric(12, 4)),
-    Column("bid", Numeric(10, 4)),
-    Column("ask", Numeric(10, 4)),
-    Column("mark", Numeric(10, 4)),
+    Column("track_date", Date),  # raw YYYY-MM-DD from the writer
     Column("oi", Integer),
     Column("volume", Integer),
-    Column("iv", Numeric(6, 4)),
+    Column("mid", Numeric(10, 4)),
+    Column("underlying_price", Numeric(12, 4)),
+    Column("pct_change_premium", Numeric(10, 6)),
     Column("tick_payload", JSONB, nullable=False),
     UniqueConstraint("event_id", "observed_at", name="uq_uw_flow_event_ticks"),
     Index("ix_uw_flow_event_ticks_event_time", "event_id", "observed_at"),
@@ -470,7 +496,7 @@ git commit -m "schema: add normalized payload tables and generated columns"
 uv run alembic revision --autogenerate -m "normalize_payloads"
 ```
 
-This creates a new file under `src/xenon/db/migrations/versions/`. Note its revision ID and confirm `down_revision = "eaec7f146df5"`. The autogenerated body will contain the `op.drop_column` for old uw_analyze cols, `op.add_column` for new ones with `Computed`, and `op.create_table` for new tables. **Inspect it carefully** — autogenerate sometimes misses `Computed` clauses or generates them with wrong syntax.
+This creates a new file under `src/xenon/db/migrations/versions/`. Note its revision ID and confirm `down_revision = "27a1d085c2cd"` (the current head — verify with `uv run alembic heads`). If autogenerate sets a different parent (e.g. an older `eaec7f146df5`), edit it to `27a1d085c2cd` or you will create a branch / multiple heads. The autogenerated body will contain the `op.drop_column` for old uw_analyze cols, `op.add_column` for new ones with `Computed`, and `op.create_table` for new tables. **Inspect it carefully** — autogenerate sometimes misses `Computed` clauses or generates them with wrong syntax.
 
 - [ ] **Step 2: Manually verify drop columns are present**
 
@@ -489,23 +515,52 @@ If missing, add them at the top of `upgrade()` before any `add_column` calls.
 After the autogenerated body of `upgrade()`, append:
 
 ```python
+    # =====================================================================
+    # Trigger design notes (per Codex review + user direction, 2026-04-27):
+    #
+    # 1. UPSERT, do not DELETE+INSERT. Child tables will be externally
+    #    referenced; row IDs must be stable across parent updates. Each
+    #    trigger uses INSERT ... ON CONFLICT (natural-key) DO UPDATE.
+    #
+    # 2. Malformed-element policy: STRICT-FAIL. A bad element aborts the
+    #    parent INSERT/UPDATE. Operationally this surfaces upstream payload
+    #    bugs immediately rather than silently dropping rows. Acceptable
+    #    while we are still in test/QA mode. Revisit if production payloads
+    #    become user-controlled.
+    #
+    # 3. Trigger guard order: NULL → wrong jsonb type → no-op return. We do
+    #    NOT silently skip on type mismatch as a "feature" — instead the
+    #    cast inside the loop will error if elements have the wrong shape.
+    # =====================================================================
+
     # ===== Trigger 1: uw_analyze_flow_alerts fanout =====
     op.execute("""
     CREATE OR REPLACE FUNCTION xenon.fanout_uw_analyze_flow_alerts() RETURNS TRIGGER AS $$
-    DECLARE alert jsonb;
+    DECLARE
+      alert jsonb;
+      pos int := 0;
     BEGIN
       IF NEW.flow_alerts IS NULL OR jsonb_typeof(NEW.flow_alerts) <> 'array' THEN
         RETURN NEW;
       END IF;
-      DELETE FROM xenon.uw_analyze_flow_alerts WHERE snapshot_id = NEW.id;
       FOR alert IN SELECT * FROM jsonb_array_elements(NEW.flow_alerts) LOOP
         INSERT INTO xenon.uw_analyze_flow_alerts (
-          snapshot_id, ticker, snapshot_at, alert_type, alert_severity, alert_payload
+          snapshot_id, ordinal, ticker, snapshot_at, alert_type, alert_severity, alert_payload
         ) VALUES (
-          NEW.id, NEW.ticker, NEW.snapshot_at,
+          NEW.id, pos, NEW.ticker, NEW.snapshot_at,
           alert->>'type', alert->>'severity', alert
-        );
+        )
+        ON CONFLICT (snapshot_id, ordinal) DO UPDATE SET
+          ticker = EXCLUDED.ticker,
+          snapshot_at = EXCLUDED.snapshot_at,
+          alert_type = EXCLUDED.alert_type,
+          alert_severity = EXCLUDED.alert_severity,
+          alert_payload = EXCLUDED.alert_payload;
+        pos := pos + 1;
       END LOOP;
+      -- Trim trailing rows when the new alert array is shorter than before.
+      DELETE FROM xenon.uw_analyze_flow_alerts
+        WHERE snapshot_id = NEW.id AND ordinal >= pos;
       RETURN NEW;
     END $$ LANGUAGE plpgsql;
     """)
@@ -518,7 +573,7 @@ After the autogenerated body of `upgrade()`, append:
     # ===== Trigger 2: uw_analyze_gex_strikes fanout =====
     op.execute("""
     CREATE OR REPLACE FUNCTION xenon.fanout_uw_analyze_gex_strikes() RETURNS TRIGGER AS $$
-    DECLARE strike_row jsonb;
+    DECLARE strike_row jsonb; seen_strikes numeric[] := ARRAY[]::numeric[]; s numeric;
     BEGIN
       IF NEW.display IS NULL OR (NEW.display->'gex_by_strike') IS NULL THEN
         RETURN NEW;
@@ -526,23 +581,33 @@ After the autogenerated body of `upgrade()`, append:
       IF jsonb_typeof(NEW.display->'gex_by_strike') <> 'array' THEN
         RETURN NEW;
       END IF;
-      DELETE FROM xenon.uw_analyze_gex_strikes WHERE snapshot_id = NEW.id;
       FOR strike_row IN SELECT * FROM jsonb_array_elements(NEW.display->'gex_by_strike') LOOP
+        s := (strike_row->>'strike')::numeric;
+        seen_strikes := array_append(seen_strikes, s);
         INSERT INTO xenon.uw_analyze_gex_strikes (
           snapshot_id, ticker, snapshot_at, strike,
           call_gamma, put_gamma, net_gamma, distance_pct,
           is_call_wall, is_put_wall
         ) VALUES (
-          NEW.id, NEW.ticker, NEW.snapshot_at,
-          (strike_row->>'strike')::numeric,
+          NEW.id, NEW.ticker, NEW.snapshot_at, s,
           (strike_row->>'call_gamma')::numeric,
           (strike_row->>'put_gamma')::numeric,
           (strike_row->>'net_gamma')::numeric,
           (strike_row->>'distance_pct')::numeric,
           (strike_row->>'is_call_wall')::boolean,
           (strike_row->>'is_put_wall')::boolean
-        );
+        )
+        ON CONFLICT (snapshot_id, strike) DO UPDATE SET
+          call_gamma = EXCLUDED.call_gamma,
+          put_gamma = EXCLUDED.put_gamma,
+          net_gamma = EXCLUDED.net_gamma,
+          distance_pct = EXCLUDED.distance_pct,
+          is_call_wall = EXCLUDED.is_call_wall,
+          is_put_wall = EXCLUDED.is_put_wall;
       END LOOP;
+      -- Drop strikes that disappeared from the new payload.
+      DELETE FROM xenon.uw_analyze_gex_strikes
+        WHERE snapshot_id = NEW.id AND NOT (strike = ANY(seen_strikes));
       RETURN NEW;
     END $$ LANGUAGE plpgsql;
     """)
@@ -565,15 +630,20 @@ After the autogenerated body of `upgrade()`, append:
       IF jsonb_typeof(NEW.display->'short_volume_trend') <> 'array' THEN
         RETURN NEW;
       END IF;
-      DELETE FROM xenon.uw_analyze_short_volume_trend WHERE snapshot_id = NEW.id;
       FOR ratio_val IN SELECT * FROM jsonb_array_elements(NEW.display->'short_volume_trend') LOOP
         INSERT INTO xenon.uw_analyze_short_volume_trend (
           snapshot_id, ticker, snapshot_at, position_in_trend, ratio
         ) VALUES (
           NEW.id, NEW.ticker, NEW.snapshot_at, pos, (ratio_val#>>'{}')::numeric
-        );
+        )
+        ON CONFLICT (snapshot_id, position_in_trend) DO UPDATE SET
+          ticker = EXCLUDED.ticker,
+          snapshot_at = EXCLUDED.snapshot_at,
+          ratio = EXCLUDED.ratio;
         pos := pos + 1;
       END LOOP;
+      DELETE FROM xenon.uw_analyze_short_volume_trend
+        WHERE snapshot_id = NEW.id AND position_in_trend >= pos;
       RETURN NEW;
     END $$ LANGUAGE plpgsql;
     """)
@@ -584,28 +654,83 @@ After the autogenerated body of `upgrade()`, append:
     """)
 
     # ===== Trigger 4: uw_flow_event_ticks fanout =====
-    # Assumes daily_track is a dict keyed by ISO timestamp.
-    # If Phase 0 step 3 found it's an array instead, swap jsonb_each for
-    # jsonb_array_elements and pull observed_at from inside each element.
+    # Real writer (uw_analyze_flow_tracker.py:514-524) stores daily_track as a
+    # JSON ARRAY of {date, oi, mid, underlying_price, pct_change_premium, volume}.
+    # `date` is a YYYY-MM-DD string; we synthesize observed_at as
+    # date + 20:00 UTC (≈ 16:00 ET equity close) so all timestamps stay in UTC,
+    # consistent with the system-wide timestamp policy (see Task 13/14/15 below).
     op.execute("""
     CREATE OR REPLACE FUNCTION xenon.fanout_uw_flow_event_ticks() RETURNS TRIGGER AS $$
-    DECLARE k text; v jsonb;
+    DECLARE
+      tick jsonb;
+      observed timestamptz;
+      track_d date;
+      seen_ts timestamptz[] := ARRAY[]::timestamptz[];
     BEGIN
-      IF NEW.daily_track IS NULL OR jsonb_typeof(NEW.daily_track) <> 'object' THEN
+      IF NEW.daily_track IS NULL THEN
         RETURN NEW;
       END IF;
-      FOR k, v IN SELECT key, value FROM jsonb_each(NEW.daily_track) LOOP
-        INSERT INTO xenon.uw_flow_event_ticks (
-          event_id, flow_event_key, observed_at,
-          spot, bid, ask, mark, oi, volume, iv, tick_payload
-        ) VALUES (
-          NEW.id, NEW.flow_event_key, k::timestamptz,
-          (v->>'spot')::numeric, (v->>'bid')::numeric, (v->>'ask')::numeric,
-          (v->>'mark')::numeric, (v->>'oi')::int, (v->>'volume')::int,
-          (v->>'iv')::numeric, v
-        )
-        ON CONFLICT (event_id, observed_at) DO NOTHING;
-      END LOOP;
+      -- Accept BOTH array shape (production writer) and object shape
+      -- (legacy / Codex's earlier assumption). Object form keys are taken
+      -- as ISO timestamps; array form derives observed_at from .date.
+      IF jsonb_typeof(NEW.daily_track) = 'array' THEN
+        FOR tick IN SELECT * FROM jsonb_array_elements(NEW.daily_track) LOOP
+          track_d := (tick->>'date')::date;
+          observed := (track_d::timestamp + INTERVAL '20 hours') AT TIME ZONE 'UTC';
+          seen_ts := array_append(seen_ts, observed);
+          INSERT INTO xenon.uw_flow_event_ticks (
+            event_id, flow_event_key, observed_at, track_date,
+            oi, volume, mid, underlying_price, pct_change_premium, tick_payload
+          ) VALUES (
+            NEW.id, NEW.flow_event_key, observed, track_d,
+            (tick->>'oi')::int,
+            (tick->>'volume')::int,
+            (tick->>'mid')::numeric,
+            (tick->>'underlying_price')::numeric,
+            (tick->>'pct_change_premium')::numeric,
+            tick
+          )
+          ON CONFLICT (event_id, observed_at) DO UPDATE SET
+            track_date = EXCLUDED.track_date,
+            oi = EXCLUDED.oi,
+            volume = EXCLUDED.volume,
+            mid = EXCLUDED.mid,
+            underlying_price = EXCLUDED.underlying_price,
+            pct_change_premium = EXCLUDED.pct_change_premium,
+            tick_payload = EXCLUDED.tick_payload;
+        END LOOP;
+      ELSIF jsonb_typeof(NEW.daily_track) = 'object' THEN
+        FOR observed, tick IN
+          SELECT key::timestamptz, value FROM jsonb_each(NEW.daily_track)
+        LOOP
+          seen_ts := array_append(seen_ts, observed);
+          INSERT INTO xenon.uw_flow_event_ticks (
+            event_id, flow_event_key, observed_at, track_date,
+            oi, volume, mid, underlying_price, pct_change_premium, tick_payload
+          ) VALUES (
+            NEW.id, NEW.flow_event_key, observed, observed::date,
+            (tick->>'oi')::int,
+            (tick->>'volume')::int,
+            (tick->>'mid')::numeric,
+            (tick->>'underlying_price')::numeric,
+            (tick->>'pct_change_premium')::numeric,
+            tick
+          )
+          ON CONFLICT (event_id, observed_at) DO UPDATE SET
+            track_date = EXCLUDED.track_date,
+            oi = EXCLUDED.oi,
+            volume = EXCLUDED.volume,
+            mid = EXCLUDED.mid,
+            underlying_price = EXCLUDED.underlying_price,
+            pct_change_premium = EXCLUDED.pct_change_premium,
+            tick_payload = EXCLUDED.tick_payload;
+        END LOOP;
+      END IF;
+      -- Drop ticks that disappeared from the new daily_track payload.
+      DELETE FROM xenon.uw_flow_event_ticks
+        WHERE event_id = NEW.id
+          AND array_length(seen_ts, 1) IS NOT NULL
+          AND NOT (observed_at = ANY(seen_ts));
       RETURN NEW;
     END $$ LANGUAGE plpgsql;
     """)
@@ -616,8 +741,12 @@ After the autogenerated body of `upgrade()`, append:
     """)
 
     # ===== Backfill: replay triggers over existing rows =====
-    op.execute("UPDATE xenon.uw_analyze_snapshots SET id = id;")
-    op.execute("UPDATE xenon.uw_flow_events SET id = id;")
+    # IMPORTANT: AFTER UPDATE OF <col> triggers fire only when <col> appears in
+    # the SET list. `SET id = id` would touch the rows but NOT fire any of the
+    # triggers above. Update each watched column to itself instead.
+    op.execute("UPDATE xenon.uw_analyze_snapshots SET flow_alerts = flow_alerts WHERE flow_alerts IS NOT NULL;")
+    op.execute("UPDATE xenon.uw_analyze_snapshots SET display = display WHERE display IS NOT NULL;")
+    op.execute("UPDATE xenon.uw_flow_events SET daily_track = daily_track WHERE daily_track IS NOT NULL;")
 ```
 
 - [ ] **Step 4: Append trigger drops to downgrade()**
@@ -2240,16 +2369,30 @@ def _date_to_ts(d: str) -> datetime:
     return datetime.combine(datetime.fromisoformat(d).date(), time(20, 0), tzinfo=timezone.utc)
 
 
-def _parse_iso(s: str | None) -> datetime | None:
+def _parse_iso_utc(s: str | None) -> datetime | None:
+    """Parse an ISO timestamp and force UTC tz.
+
+    System-wide policy (per Codex review answer, 2026-04-27): every datetime we
+    persist is stored timezone-aware in UTC. data/vcg.json `scan_time` is
+    naive, so we attach UTC explicitly rather than letting Postgres/asyncpg
+    infer it from the session timezone.
+    """
     if not s:
         return None
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt
 
 
 def run(*, json_path: Path | str, db_url: str) -> int:
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
     data = json.loads(Path(json_path).read_text())
     history = data.get("history", []) or []
     market_open = data.get("market_open")
@@ -2264,7 +2407,7 @@ def run(*, json_path: Path | str, db_url: str) -> int:
             payload=_history_row_payload(item),
         ))
     # Current snapshot last so its scanned_at sorts after history
-    current_ts = _parse_iso(data.get("scan_time")) or datetime.now(tz=timezone.utc)
+    current_ts = _parse_iso_utc(data.get("scan_time")) or datetime.now(tz=timezone.utc)
     rows_to_insert.append(dict(
         scanned_at=current_ts,
         market_open=market_open,
@@ -2272,13 +2415,20 @@ def run(*, json_path: Path | str, db_url: str) -> int:
         payload=data,
     ))
     engine = create_engine(db_url, pool_pre_ping=True)
+    inserted = 0
     try:
         with engine.begin() as conn:
             for row in rows_to_insert:
-                conn.execute(insert(vcg_series).values(**row))
+                # Idempotent: vcg_series has UNIQUE(scanned_at). Re-running the
+                # backfill against the same JSON file is a no-op.
+                stmt = pg_insert(vcg_series).values(**row).on_conflict_do_nothing(
+                    index_elements=[vcg_series.c.scanned_at]
+                )
+                result = conn.execute(stmt)
+                inserted += result.rowcount or 0
     finally:
         engine.dispose()
-    return len(rows_to_insert)
+    return inserted
 
 
 if __name__ == "__main__":
@@ -2304,7 +2454,7 @@ uv run pytest scripts/tests/test_backfill_vcg_history.py -xvs
 
 Expected: PASS.
 
-**Note: backfill is NOT idempotent** — re-running inserts duplicate history rows. That's acceptable for a one-shot file-based source; if it matters, truncate `vcg_series` first.
+**Idempotent:** the schema declares `UNIQUE(scanned_at)` and the backfill uses `ON CONFLICT (scanned_at) DO NOTHING`. Re-running against the same JSON inserts zero rows. The return value is the count of rows actually inserted.
 
 - [ ] **Step 5: Commit**
 
@@ -2763,13 +2913,288 @@ git commit -m "test: align fixtures with new uw_analyze_snapshots shape"
 
 ---
 
+## Task 18: Update `scripts/migrations/migrate_to_postgres.py`
+
+**Goal:** the legacy migrator script (`scripts/migrations/migrate_to_postgres.py`) still inserts into the about-to-be-dropped `vrp_state`/`regime`/`flow_signals` columns at lines 486-499 and 599-602. Once the alembic migration in Task 2 lands, those INSERTs will fail with `column does not exist`. Point the script at the new richer columns OR mark it deprecated with a guard.
+
+**Files:**
+
+- Modify: `scripts/migrations/migrate_to_postgres.py:480-500` (uw_analyze_snapshots writer)
+- Modify: `scripts/migrations/migrate_to_postgres.py:594-606` (uw_analyze_history writer)
+- Test: `scripts/tests/test_migrate_to_postgres.py` (existing — extend)
+
+- [ ] **Step 1: Decide deprecate vs migrate**
+
+The script is one-shot. Two paths:
+
+1. **Deprecate.** Add a top-of-file guard:
+   ```python
+   raise SystemExit(
+       "migrate_to_postgres.py is deprecated as of 2026-04-26. "
+       "Use scripts/migrations/_2026_04_26_backfill_uw_analyze_history.py instead."
+   )
+   ```
+2. **Migrate.** Rewrite the two `INSERT … (ticker, vrp_state, regime, flow_signals, portfolio_score)` blocks to write the new shape:
+   - `(ticker, snapshot_at, report, display, derived, dark_pool_summary, options_flow_summary, flow_alerts, materialized_changes, archived_at, portfolio_score)`
+   - The on-disk archive's full `current` dict already has these fields; reuse `_archive_to_postgres` from Task 7 (extract it into a shared helper if needed).
+
+**Recommendation: deprecate.** Task 14 (`_2026_04_26_backfill_uw_analyze_history.py`) supersedes the uw_analyze_history portion. The flow_events / uw_api_stats portions of `migrate_to_postgres.py` remain valid (they target unchanged tables) — gate only the uw_analyze portion behind a flag.
+
+- [ ] **Step 2: Apply chosen approach**
+
+If deprecating just the uw_analyze portion, replace lines 484-499 with:
+
+```python
+# uw_analyze_snapshots: writer was rewritten in 2026-04-26 normalize_payloads.
+# Use scripts/migrations/_2026_04_26_backfill_uw_analyze_history.py instead.
+print("  SKIP uw_analyze_snapshots (use _2026_04_26_backfill_uw_analyze_history.py)")
+```
+
+And lines 593-606 (the `migrate_uw_history` function body) the same way.
+
+- [ ] **Step 3: Run the existing test**
+
+```bash
+uv run pytest scripts/tests/test_migrate_to_postgres.py -xvs
+```
+
+Expected: PASS. If the test exercises the now-removed code path, replace its assertions with a check that the SKIP message is emitted.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add scripts/migrations/migrate_to_postgres.py scripts/tests/test_migrate_to_postgres.py
+git commit -m "migrate_to_postgres: skip uw_analyze writes (superseded by 2026-04-26 backfill)"
+```
+
+---
+
+## Task 19: Cross-system timestamp audit
+
+**Goal:** every datetime persisted to Postgres or compared against another datetime is timezone-aware UTC. Naive datetime parsing has caused production bugs in this codebase before (DuckDB TZ migration documented in `src/xenon/api/CLAUDE.md`); this task locks the policy in across the new code.
+
+**Files:**
+
+- Audit: every backfill/writer touched by this plan
+- Modify (probable): `src/xenon/api/services/uw_analyze_flow_tracker.py:500-501` (already uses `datetime.now(timezone.utc)` — verify)
+- Modify (probable): backfill scripts created in Tasks 12, 13, 14
+
+- [ ] **Step 1: Grep for naive datetime parsing**
+
+```bash
+rg "datetime\.fromisoformat\(" src/xenon/api/services scripts/migrations/_2026_04_26 -n
+```
+
+For each hit, confirm that either (a) the input string already has a tz suffix (`+00:00` / `Z`), or (b) the result is wrapped in `.replace(tzinfo=timezone.utc)` or `.astimezone(timezone.utc)`.
+
+- [ ] **Step 2: Grep for `datetime.now()` without tz**
+
+```bash
+rg "datetime\.now\(\)" src/xenon/api scripts/migrations/_2026_04_26 -n
+```
+
+Expected: zero hits. Use `datetime.now(timezone.utc)` everywhere.
+
+- [ ] **Step 3: Grep for `datetime.utcnow()`**
+
+```bash
+rg "datetime\.utcnow\(\)" src/ scripts/ -n
+```
+
+Expected: zero hits. `utcnow()` returns naive — banned. Replace with `datetime.now(timezone.utc)`.
+
+- [ ] **Step 4: Add a regression test**
+
+Create `scripts/tests/test_timestamp_policy.py`:
+
+```python
+"""All datetimes persisted by new backfill scripts must be tz-aware UTC."""
+from __future__ import annotations
+
+from datetime import timezone
+
+import pytest
+
+from scripts.migrations import _2026_04_26_backfill_vcg_history as bf_vcg
+
+
+def test_vcg_parser_returns_utc_aware():
+    naive = "2026-04-21T14:11:08.383805"
+    parsed = bf_vcg._parse_iso_utc(naive)
+    assert parsed is not None
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset().total_seconds() == 0
+
+
+def test_vcg_parser_normalizes_offset_to_utc():
+    eastern = "2026-04-21T10:11:08.383805-04:00"
+    parsed = bf_vcg._parse_iso_utc(eastern)
+    assert parsed is not None
+    assert parsed.tzinfo is timezone.utc
+    assert parsed.hour == 14  # 10:11 EDT == 14:11 UTC
+
+
+def test_vcg_parser_handles_z_suffix():
+    z_form = "2026-04-21T14:11:08Z"
+    parsed = bf_vcg._parse_iso_utc(z_form)
+    assert parsed is not None
+    assert parsed.utcoffset().total_seconds() == 0
+```
+
+- [ ] **Step 5: Run**
+
+```bash
+uv run pytest scripts/tests/test_timestamp_policy.py -xvs
+```
+
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add scripts/tests/test_timestamp_policy.py
+git commit -m "test: enforce tz-aware UTC parsing across normalize_payloads backfills"
+```
+
+---
+
+## Task 20: Regression tests for Codex-found bugs
+
+**Goal:** add the specific tests Codex's review identified as gaps so this class of bug cannot regress silently.
+
+**Files:**
+
+- Create / extend: `scripts/tests/test_normalize_payloads_triggers.py`
+- Create: `scripts/tests/fixtures/gex_real.json` (copy of `data/gex.json` trimmed)
+
+- [ ] **Step 1: Real-shape GEX fixture test**
+
+```python
+# scripts/tests/test_normalize_payloads_triggers.py (new module or extend existing)
+import json
+from pathlib import Path
+
+from sqlalchemy import create_engine, insert, select
+
+from scripts.tests.conftest import _sync_test_db_url
+from xenon.db.schema import gex_snapshots
+
+
+def test_gex_snapshots_real_payload_shape(postgres):
+    """Insert a realistic GEX payload (levels.<name> as objects) and verify
+    generated columns extract level_*_strike correctly. Regression for Codex
+    finding: previous expression `((levels)->>'max_magnet')::numeric` cast a
+    JSON object to numeric and would have failed on real data."""
+    payload = json.loads(Path("data/gex.json").read_text())
+    engine = create_engine(_sync_test_db_url(), pool_pre_ping=True)
+    with engine.begin() as conn:
+        conn.execute(insert(gex_snapshots).values(
+            ticker=payload["ticker"],
+            data_date=payload["data_date"],
+            payload=payload,
+        ))
+        row = conn.execute(select(gex_snapshots)).first()
+    assert float(row.level_max_magnet_strike) == 7200.0
+    assert float(row.level_put_wall_strike) == 7000.0
+    assert float(row.level_call_wall_strike) == 7000.0
+    assert float(row.level_max_accelerator_strike) == 6800.0
+```
+
+- [ ] **Step 2: Array-shape daily_track trigger test**
+
+```python
+def test_daily_track_array_fans_out(postgres):
+    """uw_flow_events.daily_track is an ARRAY in the production writer
+    (uw_analyze_flow_tracker.py:514). Trigger must populate
+    uw_flow_event_ticks for array-shaped input. Regression for Codex
+    finding: original trigger guarded with jsonb_typeof = 'object' and
+    silently skipped every real row."""
+    from xenon.db.schema import uw_flow_events, uw_flow_event_ticks
+    daily_track = [
+        {"date": "2026-04-22", "oi": 100, "mid": 1.20,
+         "underlying_price": 184.5, "pct_change_premium": 0.0, "volume": 50},
+        {"date": "2026-04-23", "oi": 110, "mid": 1.35,
+         "underlying_price": 185.2, "pct_change_premium": 0.125, "volume": 75},
+    ]
+    engine = create_engine(_sync_test_db_url(), pool_pre_ping=True)
+    with engine.begin() as conn:
+        result = conn.execute(insert(uw_flow_events).values(
+            flow_event_key="TEST_AAPL_240500C_2026-05-17",
+            ticker="AAPL", side="C", strike=240.0,
+            detected_at="2026-04-22T15:00:00+00:00",
+            initial={"premium_usd": 6000.0, "oi": 100, "volume": 50,
+                     "mid": 1.20, "underlying_price": 184.5},
+            daily_track=daily_track, status="open",
+        ).returning(uw_flow_events.c.id))
+        event_id = result.scalar_one()
+        ticks = conn.execute(
+            select(uw_flow_event_ticks).where(uw_flow_event_ticks.c.event_id == event_id)
+            .order_by(uw_flow_event_ticks.c.observed_at)
+        ).all()
+    assert len(ticks) == 2  # not 0 — the trigger fired on array form
+    assert ticks[0].track_date.isoformat() == "2026-04-22"
+    assert ticks[0].oi == 100
+    assert float(ticks[1].pct_change_premium) == 0.125
+```
+
+- [ ] **Step 3: Migration replay fires triggers**
+
+```python
+def test_migration_replay_pattern_fires_triggers(postgres):
+    """`UPDATE … SET <watched_col> = <watched_col>` MUST fire AFTER UPDATE OF
+    <watched_col> triggers, while `SET id = id` does NOT. Regression for
+    Codex finding on Task 2 step 3 backfill replay."""
+    from sqlalchemy import text
+    engine = create_engine(_sync_test_db_url(), pool_pre_ping=True)
+    # Insert a row with flow_alerts but stub the trigger so we can observe
+    # whether it fired by checking child-row count before/after the replay.
+    flow_alerts = [{"type": "sweep", "severity": "high", "ticker": "AAPL"}]
+    with engine.begin() as conn:
+        result = conn.execute(text(
+            "INSERT INTO xenon.uw_analyze_snapshots (ticker, flow_alerts) "
+            "VALUES ('AAPL', :fa::jsonb) RETURNING id"
+        ), {"fa": json.dumps(flow_alerts)})
+        sid = result.scalar_one()
+        # Wipe the child rows the insert trigger created
+        conn.execute(text("DELETE FROM xenon.uw_analyze_flow_alerts WHERE snapshot_id = :sid"), {"sid": sid})
+        # Replay using the WRONG pattern — should NOT repopulate
+        conn.execute(text("UPDATE xenon.uw_analyze_snapshots SET id = id WHERE id = :sid"), {"sid": sid})
+        bad = conn.execute(text(
+            "SELECT COUNT(*) FROM xenon.uw_analyze_flow_alerts WHERE snapshot_id = :sid"
+        ), {"sid": sid}).scalar_one()
+        # Replay using the RIGHT pattern — should repopulate
+        conn.execute(text("UPDATE xenon.uw_analyze_snapshots SET flow_alerts = flow_alerts WHERE id = :sid"), {"sid": sid})
+        good = conn.execute(text(
+            "SELECT COUNT(*) FROM xenon.uw_analyze_flow_alerts WHERE snapshot_id = :sid"
+        ), {"sid": sid}).scalar_one()
+    assert bad == 0
+    assert good == 1
+```
+
+- [ ] **Step 4: Run all three**
+
+```bash
+uv run pytest scripts/tests/test_normalize_payloads_triggers.py -xvs
+```
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/tests/test_normalize_payloads_triggers.py
+git commit -m "test: regressions for Codex-found gex-shape/daily_track-array/trigger-replay bugs"
+```
+
+---
+
 ## Self-review notes
 
 Spec coverage check (each section of the spec → task that implements it):
 
 - Spec §"`cri_series`" → Task 1 step 3 + Task 5
 - Spec §"`uw_analyze_snapshots`" → Task 1 step 2, Task 6, Task 7, Task 8
-- Spec §"`scan_results` — split per scan_type" → Task 1 step 5, Task 10. Plan only ships GEX; other scan_types deferred to a follow-up driven by Task 0 step 1 findings (called out in the plan).
+- Spec §"`scan_results` — split per scan_type" → Task 1 step 5, Task 10. **Plan ships only `gex_snapshots`. Other scan_types in `scan_results` (vcg, discover, cri, watchlist) are explicitly out of scope** — VCG already gets its own first-class table (vcg_series); cri is covered by cri_series; discover and watchlist remain JSONB-only and may be normalized in a follow-up if backtesting needs them.
 - Spec §"`uw_flow_events`" → Task 1 step 6 + step 7, Task 9
 - Spec §"NEW `vcg_series`" → Task 1 step 4, Task 11, Task 13
 - Spec §"`uw_api_stats` — backfill" → Task 12
@@ -2777,7 +3202,28 @@ Spec coverage check (each section of the spec → task that implements it):
 - Spec §"Trigger DDL" → Task 2 step 3
 - Spec §"Writer code changes" → Tasks 6, 7, 10, 11
 - Spec §"Backfill scripts" → Tasks 12–14
-- Spec §"Testing" → Tasks 4, 5, 7, 8, 9, 10, 11, 12, 13, 14
+- Spec §"Testing" → Tasks 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 19, 20
 - Spec §"Sanity check" → Task 15
+- Spec §"CRI consumption views" (`cri_market_features`, `cri_cta_positioning`, `cri_crash_signals`) → **deferred / removed from this plan**. Generated columns on `cri_series` already expose every field the views would have selected; create the views in a follow-up only if a downstream consumer asks for them.
+- Spec §"Legacy migrator compatibility" → Task 18 (new — added in response to Codex review)
+- Spec §"System-wide UTC timestamp policy" → Task 19 (new — added in response to user direction)
+- Spec §"Regression tests for review-found bugs" → Task 20 (new — added in response to Codex review)
 
-Open spec items deferred to Phase 0 reconnaissance (Task 0): exact `initial.*` keys for uw_flow_events generated columns; exact `daily_track` shape (object vs array) for the trigger DDL; non-GEX scan_types for sibling tables.
+**Codex review pass (2026-04-27)** — independent review surfaced 4 critical, 7 significant, 4 minor issues. Resolved in this plan revision:
+
+| Severity    | Issue                                                             | Resolved at                                                                          |
+| ----------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Critical    | gex_snapshots level columns cast objects to numeric               | Task 1 step 5 (rewrite to `->>'strike'`) + Task 20 step 1 (real-fixture test)        |
+| Critical    | uw_flow_event_ticks trigger guards on object, writer stores array | Task 2 step 3 trigger 4 (array branch added) + Task 20 step 2                        |
+| Critical    | Migration replay `SET id = id` doesn't fire `OF <col>` triggers   | Task 2 step 3 backfill block + Task 20 step 3                                        |
+| Critical    | Alembic down_revision pointed at non-head revision                | Task 2 step 1 + Task 0 step 1                                                        |
+| Significant | uw_flow_events generated columns target nonexistent keys          | Task 1 step 6 (rewritten to writer's actual keys)                                    |
+| Significant | Trigger malformed-element policy unspecified                      | Task 2 step 3 design-notes block (strict-fail documented)                            |
+| Significant | Child IDs churn on every parent update                            | Task 1 step 7 (UNIQUE constraints) + Task 2 step 3 (UPSERT instead of DELETE+INSERT) |
+| Significant | Spec promised CRI views; no task                                  | Self-review notes (deferred — generated cols already cover)                          |
+| Significant | Non-GEX scan_types not addressed                                  | Self-review notes (explicit out-of-scope)                                            |
+| Significant | VCG backfill timestamp is naive                                   | Task 13 step 3 (`_parse_iso_utc`) + Task 19                                          |
+| Significant | Plan framed as "backtesting" but excludes returns                 | Spec edit (separate commit)                                                          |
+| Minor       | VCG backfill not idempotent                                       | Task 1 step 4 UNIQUE + Task 13 ON CONFLICT                                           |
+| Minor       | Naming inconsistency in file map                                  | (no change — file map already uses `_2026_…` prefix)                                 |
+| Minor       | Tests for malformed elements + 100+ element fanout                | Task 20 (extend with parametric malformed cases as needed)                           |

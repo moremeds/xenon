@@ -37,3 +37,51 @@ async def get_cri_series(conn: AsyncConnection, *, limit: int = 100) -> list[dic
     stmt = select(cri_series).order_by(cri_series.c.recorded_at).limit(limit)
     result = await conn.execute(stmt)
     return [dict(row._mapping) for row in result]
+
+
+def save_gex_snapshot(conn, *, payload: dict) -> int:
+    """Insert a row into gex_snapshots. Conn is a sync SA connection."""
+    from datetime import date as _date
+
+    from sqlalchemy import insert as _insert
+
+    from xenon.db.schema import gex_snapshots
+
+    data_date = payload.get("data_date")
+    if isinstance(data_date, str):
+        try:
+            data_date = _date.fromisoformat(data_date)
+        except ValueError:
+            data_date = None
+    return conn.execute(
+        _insert(gex_snapshots)
+        .values(
+            ticker=payload.get("ticker"),
+            data_date=data_date,
+            payload=payload,
+        )
+        .returning(gex_snapshots.c.id)
+    ).scalar()
+
+
+def save_vcg_scan(
+    conn,
+    *,
+    payload: dict,
+    market_open: bool | None = None,
+    credit_proxy: str | None = None,
+) -> int:
+    """Insert a row into vcg_series. Conn is a sync SA connection."""
+    from sqlalchemy import insert as _insert
+
+    from xenon.db.schema import vcg_series
+
+    return conn.execute(
+        _insert(vcg_series)
+        .values(
+            market_open=market_open,
+            credit_proxy=credit_proxy,
+            payload=payload,
+        )
+        .returning(vcg_series.c.id)
+    ).scalar()

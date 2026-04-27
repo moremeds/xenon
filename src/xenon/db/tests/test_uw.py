@@ -11,14 +11,19 @@ async def test_save_and_get_uw_snapshot(conn):
     await save_snapshot(
         conn,
         ticker="AAPL",
-        vrp_state={"iv_rank": 0.65},
-        regime={"label": "high_vol"},
-        flow_signals={"sweeps": 3},
+        report={
+            "scores": {"composite": 15.0, "grade": "B", "bias": "MIXED"},
+            "regime": {"regime": "high_vol", "gex_sign": "positive"},
+            "vrp": {"iv_percentile": 65.0},
+        },
+        display={"iv_rank": 65.0},
+        flow_alerts=[{"type": "sweep"}],
         portfolio_score=Decimal("7.50"),
     )
     snap = await get_latest_snapshot(conn, ticker="AAPL")
     assert snap["ticker"] == "AAPL"
-    assert snap["vrp_state"]["iv_rank"] == 0.65
+    assert float(snap["iv_rank"]) == 65.0
+    assert snap["regime_label"] == "high_vol"
 
 
 @pytest.mark.asyncio

@@ -1,12 +1,14 @@
-# Payload Normalization for Backtesting Analytics
+# Payload Normalization — Feature Extraction for Downstream Backtesting
 
-**Date:** 2026-04-26
+**Date:** 2026-04-26 (revised 2026-04-27 after Codex review)
 **Status:** Draft — pending implementation plan
 **Author:** Brainstorm with chenxi
 
 ## Problem
 
-Several Postgres tables store substantive data inside opaque `payload` / `vrp_state` / `regime` / `flow_signals` JSONB columns, which makes them impossible to query for analytics. The motivating use case is **backtesting**: discovering patterns in market-structure signals (CRI, VCG, UW analyze, GEX, flow events) to find alpha or enhanced beta. We can't run feature-matrix queries when every metric is nested inside a JSONB blob.
+Several Postgres tables store substantive data inside opaque `payload` / `vrp_state` / `regime` / `flow_signals` JSONB columns, which makes them impossible to query for analytics. The motivating use case is **feature extraction for downstream backtesting** (apex or any pandas/polars consumer): discovering patterns in market-structure signals (CRI, VCG, UW analyze, GEX, flow events) to find alpha or enhanced beta. We can't run feature-matrix queries when every metric is nested inside a JSONB blob.
+
+This spec normalizes the _independent_ variables. Forward-return / dependent-variable data lives in a separate spec (see Non-goals) — strictly speaking the deliverable here is the feature side of a backtest, not the backtest itself.
 
 Two specific problems on top of the general one:
 
@@ -84,11 +86,7 @@ Add 19 generated columns extracted from `payload` (source: `src/xenon/scanners/c
 
 **Indexes:** `(recorded_date)`, partial `(crash_trigger_fired) WHERE crash_trigger_fired`, partial `(cta_forced_reduction) WHERE cta_forced_reduction`.
 
-**Views:**
-
-- `cri_market_features(recorded_at, recorded_date, vix, vvix, spy, vix_5d_roc, vvix_vix_ratio, spx_100d_ma, spx_distance_pct, cor1m, cor1m_5d_change, realized_vol)`
-- `cri_cta_positioning(recorded_at, cta_exposure_pct, cta_forced_reduction, cta_selling_usd_b, menthorq_cta_score)`
-- `cri_crash_signals(recorded_at, cri_level, cri_score, alert, crash_trigger_fired)`
+**Views (deferred):** `cri_market_features`, `cri_cta_positioning`, `cri_crash_signals` were originally proposed as consumption shims, but the generated columns above already expose every field they would have selected — `SELECT vix, vvix, spy, … FROM xenon.cri_series` is just as ergonomic. Create these views in a follow-up only if a specific consumer asks for them.
 
 `history[]` and `spy_closes[]` arrays stay in JSONB; truth lives in row-by-row series.
 
