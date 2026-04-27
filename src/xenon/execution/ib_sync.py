@@ -382,6 +382,21 @@ def _merge_covered_call_groups(groups: dict) -> dict:
     return merged
 
 
+def _is_unrecognized_combo(structure_type: str) -> bool:
+    """True when detect_structure_type returned a fall-through "Combo (...)" label.
+
+    Verified labels emitted by detect_structure_type (lines 241-247):
+      - "Combo (N legs)"
+      - "Long Combo (N legs)"
+      - "Long Call Combo (N legs)"
+      - "Long Put Combo (N legs)"
+    All four either start with "Combo (" or contain " Combo (".
+    Recognized structures (e.g. "Bull Call Spread", "Straddle", "Synthetic
+    Long", "Covered Call") never match, so they keep collapsing as today.
+    """
+    return structure_type.startswith("Combo (") or " Combo (" in structure_type
+
+
 def collapse_positions(positions: list) -> list:
     """
     Collapse individual legs into multi-leg structures.
@@ -406,6 +421,26 @@ def collapse_positions(positions: list) -> list:
 
     for (symbol, expiry), legs in groups.items():
         structure_type, risk_profile = detect_structure_type(legs)
+
+        # Bugfix 2026-04-27: 2 legs sharing (ticker, expiry) that don't form a
+        # recognized structure (e.g. two SHORT puts at different strikes) are
+        # almost always two unrelated single-leg orders, not a real combo.
+        # Collapsing them hides per-leg order entry from the UI and buckets the
+        # row under "Other". Split them back into singles via recursion — the
+        # single-leg branch in detect_structure_type (lines 151-157) returns
+        # concrete labels ("Short Put", "Long Call", "Stock"), so recursion
+        # always terminates and produces field-shape parity with the normal
+        # collapsed output.
+        # Scope is intentionally narrow (==2 legs): 3+ leg fall-throughs more
+        # often represent intentional unrecognized multi-leg orders.
+        if len(legs) == 2 and _is_unrecognized_combo(structure_type):
+            for leg in legs:
+                for emitted in collapse_positions([leg]):
+                    emitted["id"] = position_id
+                    position_id += 1
+                    collapsed.append(emitted)
+            continue
+
         structure_desc = format_structure_description(structure_type, legs)
 
         # Calculate aggregate values — sign-aware (short legs are credits)
