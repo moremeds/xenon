@@ -82,6 +82,24 @@ jobs:
 
   python-tests:
     runs-on: ubuntu-latest
+    # Postgres is required: scripts/tests/conftest.py and src/xenon/api/tests/conftest.py
+    # have autouse fixtures that truncate xenon.* tables before every test.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: xenon_app
+          POSTGRES_PASSWORD: xenon_dev
+          POSTGRES_DB: xenon_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xenon_app -d xenon_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL_TEST: postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test
     steps:
       - uses: actions/checkout@v4
         with:
@@ -94,6 +112,19 @@ jobs:
         run: |
           uv python install 3.13
           uv sync --frozen --extra test
+      - name: Pre-create xenon/events schemas
+        # Alembic creates xenon.alembic_version (its version-tracking table) before
+        # running any migration's upgrade(), so the schema must exist before
+        # `alembic upgrade head`. Locally the dev setup script handles this.
+        env:
+          PGPASSWORD: xenon_dev
+        run: >-
+          psql -h localhost -U xenon_app -d xenon_test
+          -c "CREATE SCHEMA IF NOT EXISTS xenon; CREATE SCHEMA IF NOT EXISTS events;"
+      - name: Apply alembic migrations to test DB
+        env:
+          DATABASE_URL: postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test
+        run: uv run alembic upgrade head
       - name: Collection smoke test (import-level guard)
         # Catches missing deps / ImportError on files the affected-tests selector
         # would otherwise skip on a PR. ~1s, cheap insurance.
@@ -114,7 +145,10 @@ jobs:
         run: |
           IGNORES="--ignore=scripts/tests/test_trend_scan.py --ignore=scripts/tests/test_trend_scan_runtime.py --ignore=scripts/tests/test_trend_config.py --ignore=scripts/tests/test_trend_models.py --ignore=scripts/tests/test_trend_storage.py --ignore=scripts/tests/test_trend_ranking.py --ignore=scripts/tests/test_trend_scan_catalysts.py --ignore=scripts/tests/test_ta_prefilter.py --ignore=scripts/tests/test_flow_confirmation.py --ignore=scripts/tests/test_volatility.py --ignore=scripts/tests/test_parquet_store.py"
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            uv run python scripts/infra/dev/run_pytest_affected.py --base origin/${{ github.base_ref }} $IGNORES
+            # `--` forwards $IGNORES to pytest via run_pytest_affected.py's
+            # REMAINDER positional, instead of argparse rejecting them as
+            # unknown flags.
+            uv run python scripts/infra/dev/run_pytest_affected.py --base origin/${{ github.base_ref }} -- $IGNORES
           else
             uv run pytest $IGNORES
           fi
