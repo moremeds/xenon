@@ -95,7 +95,6 @@ class TestComboEntryDateResolution(unittest.TestCase):
 
             self.assertEqual(result["positions"][0]["entry_date"], "2026-03-24")
 
-
     def test_fill_dates_resolve_entry_date_when_blotter_missing(self):
         """When blotter and trade_log have no data for a same-session trade,
         fill_dates from IB fills should resolve entry_date instead of 'unknown'."""
@@ -272,6 +271,98 @@ class TestComboEntryDateResolution(unittest.TestCase):
 
             # No fill_dates passed → still "unknown"
             self.assertEqual(result["positions"][0]["entry_date"], "unknown")
+
+
+def test_entry_date_carries_forward_from_postgres(monkeypatch, tmp_path):
+    """Phase-2 postgres migration: prev_dates lookup pulls the previous
+    entry_date from xenon.account_snapshots.payload, not portfolio.json.
+
+    Setup: PG has a snapshot with PLTR Risk Reversal entry_date=2026-04-01.
+    A new sync runs today with the same collapsed position. Expectation:
+    today's portfolio inherits 2026-04-01 (not today) because the carry-
+    forward path reads PG and finds the prior entry_date.
+    """
+    from scripts.tests.helpers.portfolio_seed import seed_portfolio_snapshot
+
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU0000000")
+
+    seed_portfolio_snapshot(
+        {
+            "positions": [
+                {
+                    "ticker": "PLTR",
+                    "structure": "Risk Reversal (P$152.5/C$155.0)",
+                    "expiry": "2026-03-27",
+                    "entry_date": "2026-04-01",
+                    "legs": [],
+                }
+            ]
+        },
+        broker="IB",
+        account_env="paper",
+        broker_account="DU0000000",
+    )
+
+    # No blotter / trade_log / fill_dates → carry-forward path is the only
+    # source for entry_date.
+    portfolio_path = tmp_path / "portfolio.json"
+    (tmp_path / "trade_log.json").write_text(json.dumps({"trades": []}))
+    (tmp_path / "blotter.json").write_text(json.dumps({"open_trades": []}))
+
+    collapsed_positions = [
+        {
+            "id": 16,
+            "ticker": "PLTR",
+            "structure": "Risk Reversal (P$152.5/C$155.0)",
+            "structure_type": "Risk Reversal",
+            "risk_profile": "undefined",
+            "expiry": "2026-03-27",
+            "contracts": 20,
+            "direction": "COMBO",
+            "entry_cost": -1571.92,
+            "max_risk": None,
+            "market_value": -1760.0,
+            "market_price_is_calculated": False,
+            "ib_daily_pnl": None,
+            "legs": [
+                {
+                    "direction": "LONG",
+                    "contracts": 20,
+                    "type": "Call",
+                    "strike": 155.0,
+                    "entry_cost": 5034.01,
+                    "avg_cost": 251.7,
+                    "market_price": 2.48,
+                    "market_value": 4960.0,
+                    "market_price_is_calculated": False,
+                },
+                {
+                    "direction": "SHORT",
+                    "contracts": 20,
+                    "type": "Put",
+                    "strike": 152.5,
+                    "entry_cost": 6605.93,
+                    "avg_cost": 330.29,
+                    "market_price": 3.36,
+                    "market_value": 6720.0,
+                    "market_price_is_calculated": False,
+                },
+            ],
+            "kelly_optimal": None,
+            "target": None,
+            "stop": None,
+        }
+    ]
+
+    with patch.object(ib_sync, "PORTFOLIO_PATH", portfolio_path):
+        result = ib_sync.convert_to_portfolio_format(
+            {"NetLiquidation": 1_000_000},
+            collapsed_positions,
+            {},
+        )
+
+    assert result["positions"][0]["entry_date"] == "2026-04-01"
 
 
 if __name__ == "__main__":

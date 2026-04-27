@@ -987,20 +987,25 @@ def convert_to_portfolio_format(
         except Exception:
             pass
 
-    # Previous portfolio dates (fallback)
+    # Previous portfolio dates (fallback) — Phase-2 postgres migration:
+    # read xenon.account_snapshots.payload via portfolio_loader instead of
+    # data/portfolio.json. Scope comes from XENON_TRADING_MODE +
+    # XENON_BROKER_ACCOUNT (set at IB connect time in main()).
     prev_dates: dict[str, str] = {}
-    if PORTFOLIO_PATH.exists():
-        try:
-            prev = _json.loads(PORTFOLIO_PATH.read_text())
-            for p in prev.get("positions", []):
-                key = f"{p.get('ticker')}|{p.get('structure')}|{p.get('expiry')}"
-                ed = p.get("entry_date", "")
-                # Only carry forward dates that aren't today (avoids inheriting
-                # the old bug where every sync set entry_date = today)
-                if ed and ed != today:
-                    prev_dates[key] = ed
-        except Exception:
-            pass
+    try:
+        from xenon.execution.account_scope import resolve_from_env
+        from xenon.utils.portfolio_loader import load_portfolio_payload_sync
+
+        prev_payload = load_portfolio_payload_sync(scope=resolve_from_env()) or {}
+        for p in prev_payload.get("positions", []):
+            key = f"{p.get('ticker')}|{p.get('structure')}|{p.get('expiry')}"
+            ed = p.get("entry_date", "")
+            # Only carry forward dates that aren't today (avoids inheriting
+            # the old bug where every sync set entry_date = today)
+            if ed and ed != today:
+                prev_dates[key] = ed
+    except Exception:
+        pass
 
     for pos in collapsed_positions:
         key = f"{pos.get('ticker')}|{pos.get('structure')}|{pos.get('expiry')}"
