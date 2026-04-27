@@ -24,6 +24,13 @@ Every execution/portfolio row carries `broker`, `account_env`, `broker_account` 
 
 New scanners MUST build on `src/xenon/scanners/_shared/` — do not duplicate universe/executor/scoring logic.
 
+## Portfolio Structure Classification
+
+- Preserve recognized multi-leg structures: verticals, straddles, synthetics, covered calls, risk reversals, butterflies/condors where classified.
+- Do not collapse unrelated two-leg same-symbol/same-expiry singles into `Combo (2 legs)` when structure detection falls through. Split that narrow fall-through back into concrete single-leg rows (`Short Put`, `Long Call`, `Stock`, etc.) so row-level order actions stay available.
+- Keep 3+ leg fall-through combos intact unless there is explicit order lineage or a recognized structure; splitting unknown complex orders can misrepresent user intent.
+- IB position snapshots do not carry originating combo order id. If exact lineage is needed, join against order submission records instead of guessing from symbol/expiry alone.
+
 ## Data Source Priority
 
 1. Interactive Brokers — real-time quotes, chains, execution, live portfolio
@@ -31,6 +38,16 @@ New scanners MUST build on `src/xenon/scanners/_shared/` — do not duplicate un
 3. Web scrape — last resort.
 
 **Never use Yahoo Finance.**
+
+## Runtime Data Read Paths
+
+Postgres is the runtime source of truth for migrated analytics and portfolio surfaces. Do not reintroduce silent file fallbacks.
+
+- Portfolio UI reads `xenon.account_snapshots.payload` through FastAPI `GET /portfolio`, scoped by `AccountScope` (`XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`). `data/portfolio.json` is legacy/backfill input only, not a UI read path.
+- VCG History reads the latest `xenon.vcg_series` row through FastAPI `GET /vcg`. `data/vcg.json` is legacy/backfill input only; `/vcg/scan` cooldown/cache checks also stay in Postgres.
+- GEX writes to both `scan_results` and `gex_snapshots`; UW analyze snapshots keep full payload JSONB plus generated columns and fanout child tables.
+- Next.js API routes proxy these migrated surfaces via `xenonFetch()`; no `readFile`, `readDataFile`, or cached JSON fallback on runtime paths.
+- Preserve CI guard tests that prove stale JSON files are not read (`scripts/tests/test_vcg_json_not_read.py`, portfolio payload/route tests).
 
 ## ⛔ Mandatory Rules
 

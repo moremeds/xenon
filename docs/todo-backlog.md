@@ -160,3 +160,115 @@ when scoping starts.
   `src/xenon/api/services/uw_analyze_cache.py`, `src/xenon/api/routes/uw_analyze.py`.
   Watch the daily UW budget while debugging — a misfiring polling loop could
   blow through the 20k/day cap in a few hours.
+
+- 2026-04-27 — **🔴 TOP PRIORITY — Bug: single-leg orders rejected with "quote expired"** —
+  placing a single-leg option order raises a "quote expired" alert and the
+  order does not submit. Previously raised, not fixed. User has hit this
+  repeatedly. **Blocks real trading on the IB tab.** Repro: open the order
+  form for any single-leg option position, fill in size/price, click submit,
+  observe the "quote expired" alert.
+  **Notes:** Almost certainly the long tail of the **quote_token saga** —
+  per session memory: PR #34 introduced `quote_token`, #35 reverted it, #47
+  re-attempted, then commit `654d72d2` removed the gate. `web/CLAUDE.md` even
+  warns "do not re-ship as-is" on that surface. If the alert is still firing
+  after the gate was removed, three live hypotheses: (a) a _different_
+  staleness check is misreading a quote as expired (snapshot-age, contract
+  qualification, bid/ask sanity), (b) the gate wasn't fully removed and a
+  surviving path still enforces it, or (c) the alert text is being raised by
+  a different validation entirely and is just _labelled_ "quote expired" —
+  the label is a tell, not a diagnosis. Investigation must start by
+  **grepping the literal "quote expired" string** across `web/` to enumerate
+  every emitter, then trace which one fires for single-leg specifically. Do
+  _not_ assume the same code path as the previous fix. Cross-references in
+  the codebase: `654d72d2`, PRs #34 / #35 / #47, position-row order button
+  (`a7cbbbc4`), `/orders/quote` snapshot resolver (`8ef479ab`). Tag this P0 /
+  "drop everything" once a priority scheme is picked.
+
+- 2026-04-27 — **🔴 TOP PRIORITY — Bug: naked-short guard blocks plain stock
+  BUY orders** — attempted to **buy 1 share of QQQ** (the simplest possible
+  long-stock order, no shorting involved) and the order was rejected with
+  `"Naked short blocked: Naked short stock: no long shares held for QQQ"`.
+  This is structurally wrong — Gate 4 (naked shorts) only applies to SELL /
+  short-side orders; a BUY of stock can never be a naked short. Sister bug
+  to the "quote expired" single-leg blocker above; group with it as P0
+  order-placement reliability work.
+  **Notes:** The principle, stated strongly: **the naked-short guard must be
+  structurally unreachable from any BUY path** — direction-of-trade is the
+  outermost gate, not a branch buried inside the guard. No state of the
+  account, no inventory level, no contract type, no order-source path should
+  ever cause a stock BUY to surface a naked-short rejection. If the guard
+  _can_ be reached from a BUY path, the architecture is wrong even if today's
+  inventory check happens to let it through. Acceptance criterion: a stock
+  BUY for a ticker the user has never traded must place cleanly without ever
+  evaluating any naked-short logic. Two likely root causes (in order of
+  prior probability): (1) the guard runs unconditionally on every order
+  before any side check — so an empty inventory looks like "naked" to it on
+  any order, BUY or SELL; (2) BUY/SELL classification is inverted somewhere
+  upstream so a real BUY arrives at the guard tagged as SELL. (1) reproduces
+  on any fresh ticker; (2) would only fire on specific routing paths.
+  Investigation: grep `"Naked short blocked"` and `"no long shares held"`
+  across `src/xenon/` and `web/` to find every emitter, then verify the
+  outermost guard wrapper short-circuits to a no-op when
+  `order.action == "BUY"` (or the equivalent `side` field). Per session
+  memory **"In-process
+  route bypass"** — FastAPI Depends only fire on HTTP, in-process handler
+  calls (`_orders_X_from_body`, `submit_combo`) skip every dep. The naked-short
+  guard fires on a plain stock BUY _today_, which means it's already inside
+  the inner handler (right place); the fix is to put the BUY-short-circuit
+  there too, not at the route boundary. Reference: `src/xenon/CLAUDE.md` for
+  the naked-short table. **Must ship in the same PR as the quote-expired fix
+  above** — fixing one and shipping it leaves the surviving bug to mask QA
+  signal on the other. Tests required: a regression test that asserts a
+  stock BUY for a never-traded ticker reaches the broker layer without
+  invoking the naked-short guard at all (mock the guard, assert it's not
+  called), plus a parallel test for the `_orders_X_from_body` in-process
+  path so the bypass class-of-bug doesn't recur.
+
+- 2026-04-27 — **OI-as-flow-attribution (overnight check, not intraday)** — OI
+  is reported once per day end-of-day by OCC, so this is fundamentally an
+  **overnight delta** feature, not an intraday tracker. Real use case: when
+  a big options flow event prints today (sweep, block, unusual volume),
+  cross-check the next session's OI to disambiguate **new positioning** (OI
+  grows by roughly the flow size) from **churn / pass-through** (OI flat or
+  down — institutions reshuffling existing positions, market-makers warehousing
+  briefly). The flow signal alone is ambiguous; OI confirms (or doesn't)
+  whether real conviction was put on.
+  **Notes:** This is a meaningful reframing — earlier draft treated OI as
+  something to "track" generically; the actual question is binary
+  per-flow-event: _did that flow create position?_ Workflow: capture the
+  notable flow events from a session, store them, run an overnight job after
+  the next OCC settlement that pulls fresh OI and compares against
+  prior-day OI for those exact contracts, surface a "confirmed / churned"
+  verdict next morning. Concrete contracts to watch are produced by the UW
+  flow scanner already in the codebase, so this doesn't need its own
+  universe — it's a _post-processor_ on existing flow output. Overlaps with
+  existing **todo #5 (UW polling and OI alerts)** but the framing is sharper:
+  #5 says "alert on OI deltas," this says "use OI deltas to grade flow
+  signals retroactively." Merge on promotion. Side benefit: builds a labelled
+  dataset of flow → real-positioning over time, which is the kind of training
+  data you'd want if anything in todo #3 (Apex backtesting) ever wants to
+  learn flow-quality scoring. Source: UW historical OI endpoint or the
+  `xenon-uw-analyze` snapshot (the latter is already cached daily). No
+  intraday polling needed, so this does _not_ eat the 20k/day budget the way
+  passive monitors do — it's a single batch run per ticker per day.
+
+- 2026-04-27 — **Intraday IV tracking + alerts on large IV moves** — watch IV
+  on tickers in the universe (or a configurable subset) intraday, alert when
+  IV moves significantly relative to its own recent baseline. Goal: catch
+  unusual vol expansion or compression _as it's happening_, before it shows
+  up in price.
+  **Notes:** Real questions hidden in "moves greatly": (a) which IV — ATM
+  IV, IV30, term-structure point, surface-level? Probably ATM IV30 to start;
+  it's the single most-quoted number and ib_insync surfaces it directly,
+  (b) baseline for "great" — fixed bps move, Z-score against a rolling
+  window, percentile of historical IV range? Z-score is the right answer
+  long-term and connects to **todo #4 (signal graphs / Z-score on ATR)** —
+  same statistical machinery, different input series. Worth co-designing
+  the rolling-window infrastructure once and reusing it for both.
+  (c) sample cadence — minute? 5-min? Cheaper and noisier vs. coarser and
+  more reliable; the 5-min cadence aligns with the existing flow-cache TTL
+  in root CLAUDE.md. Source: IB option-chain greeks (already streamed) is
+  the cheap path; UW's IV endpoints are the richer-but-budgeted path. Default
+  to IB to avoid eating UW budget on a passive monitor. Alert delivery
+  channel ties back to **todo #1 (rule-based portfolio management)** — same
+  alert plumbing, different trigger.
