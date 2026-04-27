@@ -53,7 +53,6 @@ IB_CLIENT_ID = CLIENT_IDS["fetch_analyst_ratings"]
 # File paths
 DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
-PORTFOLIO_FILE = DATA_DIR / "portfolio.json"
 RATINGS_CACHE_FILE = DATA_DIR / "analyst_ratings_cache.json"
 
 
@@ -89,16 +88,10 @@ def get_watchlist_tickers() -> list:
 
 
 def get_portfolio_tickers() -> list:
-    """Extract all tickers from portfolio."""
-    data = load_json(PORTFOLIO_FILE)
-    tickers = set()
+    """Extract all tickers from portfolio (Postgres latest snapshot, scope-naive)."""
+    from xenon.utils.portfolio_loader import get_portfolio_tickers_sync
 
-    for pos in data.get("positions", []):
-        ticker = pos.get("ticker", "").upper()
-        if ticker:
-            tickers.add(ticker)
-
-    return sorted(list(tickers))
+    return get_portfolio_tickers_sync()
 
 
 def get_cached_rating(ticker: str) -> Optional[dict]:
