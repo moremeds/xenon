@@ -82,6 +82,24 @@ jobs:
 
   python-tests:
     runs-on: ubuntu-latest
+    # Postgres is required: scripts/tests/conftest.py and src/xenon/api/tests/conftest.py
+    # have autouse fixtures that truncate xenon.* tables before every test.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: xenon_app
+          POSTGRES_PASSWORD: xenon_dev
+          POSTGRES_DB: xenon_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xenon_app -d xenon_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL_TEST: postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test
     steps:
       - uses: actions/checkout@v4
         with:
@@ -94,6 +112,14 @@ jobs:
         run: |
           uv python install 3.13
           uv sync --frozen --extra test
+      - name: Apply alembic migrations to test DB
+        # The service-container init creates the xenon_app role/database; alembic's
+        # initial migration auto-creates the xenon/events schemas when the role has
+        # CREATE (it does, as the owner). Sets up everything the autouse fixture
+        # needs to TRUNCATE.
+        env:
+          DATABASE_URL: postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test
+        run: uv run alembic upgrade head
       - name: Collection smoke test (import-level guard)
         # Catches missing deps / ImportError on files the affected-tests selector
         # would otherwise skip on a PR. ~1s, cheap insurance.
