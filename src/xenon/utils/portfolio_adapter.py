@@ -1,9 +1,14 @@
 """Broker-agnostic portfolio normalization for downstream analysis.
 
-Loads positions from either the IB portfolio (`data/portfolio.json`) or the Futu
-portfolio (`data/futu_portfolio.json`) and converts them into a single
-`NormalizedPosition` shape so analysis services (e.g. the /flow-analysis
-portfolio-bias classifier) can stay source-unaware.
+Loads positions from Postgres (IB) or `data/futu_portfolio.json` (Futu)
+and converts them into a single `NormalizedPosition` shape so analysis
+services (e.g. the /flow-analysis portfolio-bias classifier) can stay
+source-unaware.
+
+Phase-2 postgres migration: IB reads xenon.account_snapshots.payload via
+portfolio_loader (latest snapshot, scope-naive). Futu still reads JSON
+until the Futu→PG migration ships
+(docs/plans/2026-04-27-futu-postgres-migration-followup.md).
 
 Unsupported instruments (non-US, HK.*, etc.) are filtered out and counted in
 `LoadResult.skipped_unsupported`.
@@ -21,7 +26,6 @@ Account = Literal["ib", "futu"]
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 PROJECT_DIR = SCRIPT_DIR.parent.parent
-IB_PORTFOLIO = PROJECT_DIR / "data" / "portfolio.json"
 FUTU_PORTFOLIO = PROJECT_DIR / "data" / "futu_portfolio.json"
 
 
@@ -126,11 +130,15 @@ def _normalize_futu(rows: List[dict]) -> LoadResult:
 def load_normalized_positions(account: Account) -> LoadResult:
     """Load and normalize positions for the given account.
 
-    Returns an empty `LoadResult` if the source file is missing.
+    IB reads from Postgres (latest snapshot, scope-naive). Futu still
+    reads `data/futu_portfolio.json` until the Futu→PG migration ships.
+    Returns an empty `LoadResult` if the source has no data.
     Raises `ValueError` for unknown account values.
     """
     if account == "ib":
-        data = _read_json(IB_PORTFOLIO)
+        from xenon.utils.portfolio_loader import load_portfolio_payload_sync
+
+        data = load_portfolio_payload_sync() or {}
         rows = data.get("positions", []) if isinstance(data, dict) else []
         return _normalize_ib(rows)
     if account == "futu":
