@@ -40,6 +40,7 @@ New scanners MUST build on `src/xenon/scanners/_shared/` — do not duplicate un
 4. **95% test coverage target.** Every change includes corresponding tests.
 5. **API keys** in `.env` files (see Credentials below). Fallback: `~/.zshrc`.
 6. **Options structure reference:** `docs/trading/options-structures.json` + `docs/trading/options-structures.md` — 58 structures, guard decisions, P&L attribution labels. Use for order entry, structure classification, and naked short guard logic.
+7. **Todo capture.** When the user says "todo" (e.g. "todo: explore X", "add this as a todo"), append the idea to the **Inbox** section at the bottom of `docs/todo-backlog.md` with today's date. Do not start work on it. Do not silently drop it. The backlog is a queue for future planning sessions, not active work. **Add your own commentary** under each entry — hypotheses, suspected file sites, dependencies on other backlog items, design questions, references to commits/CLAUDE.md guidance — anything that would save future-you from rebuilding the context from scratch. Use a `**Notes:**` sub-bullet to keep your commentary visually separate from the user's original framing.
 
 ## Identity
 
