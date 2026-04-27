@@ -2200,9 +2200,72 @@ _vcg_scan_lock: Optional[asyncio.Lock] = None
 VCG_COOLDOWN_S = 60
 
 
+def _is_market_open_now() -> bool:
+    """Live ET market-hours check — used to override stamped market_open at read time."""
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    et = _dt.now(tz=ZoneInfo("America/New_York"))
+    if et.weekday() >= 5:
+        return False
+    minutes = et.hour * 60 + et.minute
+    return 9 * 60 + 30 <= minutes <= 16 * 60
+
+
+@app.get("/vcg")
+async def vcg_get():
+    """Return the latest VCG snapshot from Postgres.
+
+    Sources from `xenon.vcg_series.payload` — the same JSONB the scanner
+    writes via `save_vcg_scan`. Replaces the prior `data/vcg.json` reader
+    in `web/app/api/vcg/route.ts`. Background refresh is still triggered
+    via `POST /vcg/scan` (the cron-or-manual path), so this endpoint is
+    purely read-side.
+
+    Returns an empty-shape envelope when no scan rows exist yet so the
+    web route can render the panel without 404 handling.
+    """
+    from xenon.db.engine import get_engine
+    from xenon.db.queries.scans import get_latest_vcg
+
+    engine = get_engine()
+    async with engine.connect() as conn:
+        payload = await get_latest_vcg(conn)
+
+    market_open_now = _is_market_open_now()
+    if not payload:
+        return {
+            "scan_time": "",
+            "market_open": market_open_now,
+            "credit_proxy": "HYG",
+            "signal": {},
+            "history": [],
+        }
+    payload["market_open"] = market_open_now
+    return payload
+
+
+async def _load_latest_vcg_from_pg() -> dict | None:
+    """Helper: read the latest vcg_series payload from Postgres."""
+    from xenon.db.engine import get_engine
+    from xenon.db.queries.scans import get_latest_vcg
+
+    try:
+        engine = get_engine()
+        async with engine.connect() as conn:
+            return await get_latest_vcg(conn)
+    except Exception:
+        logger.warning("[vcg] failed to read latest payload from PG", exc_info=True)
+        return None
+
+
 @app.post("/vcg/scan")
 async def vcg_scan():
-    """Run VCG scan (vcg_scan.py --json). 60s cooldown between scans."""
+    """Run VCG scan (vcg_scan.py --json). 60s cooldown between scans.
+
+    During the cooldown window, returns the most recent payload from
+    xenon.vcg_series (Postgres) instead of re-reading data/vcg.json.
+    """
     global _vcg_last_scan, _vcg_scan_lock
     import time as _time
 
@@ -2210,12 +2273,12 @@ async def vcg_scan():
         _vcg_scan_lock = asyncio.Lock()
     now = _time.monotonic()
     if now - _vcg_last_scan < VCG_COOLDOWN_S:
-        cached = _read_cache(DATA_DIR / "vcg.json")
+        cached = await _load_latest_vcg_from_pg()
         if cached:
             return cached
     async with _vcg_scan_lock:
         if _time.monotonic() - _vcg_last_scan < VCG_COOLDOWN_S:
-            cached = _read_cache(DATA_DIR / "vcg.json")
+            cached = await _load_latest_vcg_from_pg()
             if cached:
                 return cached
         result = await run_entry_point("xenon-vcg-scan", ["--json"], timeout=120)

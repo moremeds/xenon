@@ -128,7 +128,7 @@ function sortHistory(
 
 export default function VcgPanel({ marketState }: VcgPanelProps) {
   const { data, loading, error, lastSync } = useVcg(marketState ?? null);
-  const [sortCol, setSortCol] = useState<VcgSortCol | null>(null);
+  const [sortCol, setSortCol] = useState<VcgSortCol | null>("date");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
   function handleSort(col: VcgSortCol) {

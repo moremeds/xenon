@@ -52,6 +52,7 @@ def _postgres_orders_test_db(monkeypatch):
                     "xenon.nav_history",
                     "xenon.scan_results",
                     "xenon.cri_series",
+                    "xenon.vcg_series",
                     "xenon.ticker_cache",
                 ):
                     conn.execute(text(f"TRUNCATE {table} CASCADE"))
