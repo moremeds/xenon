@@ -160,20 +160,3 @@ when scoping starts.
   `src/xenon/api/services/uw_analyze_cache.py`, `src/xenon/api/routes/uw_analyze.py`.
   Watch the daily UW budget while debugging — a misfiring polling loop could
   blow through the 20k/day cap in a few hours.
-
-- 2026-04-27 — **Bug: combo grouping false-positive on same-expiry singles** —
-  two or more independent single-leg option positions sharing the same
-  expiration date are being fused into a combo row when they shouldn't be.
-  Suspect the IB/Futu position-fusion heuristic is keying on `(ticker, expiry)`
-  alone instead of also requiring matched long+short pairing or shared
-  order/comboLeg lineage. Reproduce on the IB tab first, then confirm Futu
-  parity (`futuPortfolioAdapter.ts`). Likely fix sites: position-grouping logic
-  in `PositionTable.tsx` / adapter layer. Affects displayed P&L, exposure delta,
-  and the position-row order button pre-fill.
-  **Notes:** Per `web/CLAUDE.md`, IB combos already carry shared `comboLeg`
-  lineage from the broker — IB-side fix should _trust that metadata_ and stop
-  re-deriving combos from `(ticker, expiry)`. Futu fusion is a deliberate
-  presentation layer added in commit 9eaf1e6c that pairs long+short on the
-  same ticker; for Futu the fix is enforcing the long+short pairing constraint,
-  not removing the heuristic. Two different fixes in two different layers — be
-  careful not to over-tighten the key and _under_-group legitimate combos.
