@@ -32,12 +32,13 @@ def engine():
 
 
 def test_gex_snapshots_real_payload_shape(engine):
-    """Insert the real data/gex.json payload and verify level_*_strike extracts.
+    """Insert a real GEX payload fixture and verify level_*_strike extracts.
 
     Regression: previous expression `((levels)->>'max_magnet')::numeric` cast a
     JSON object to numeric and would have failed on real data.
     """
-    payload = json.loads(Path("data/gex.json").read_text())
+    fixture = Path(__file__).parent / "fixtures" / "gex_sample.json"
+    payload = json.loads(fixture.read_text())
     with engine.begin() as conn:
         conn.execute(
             insert(gex_snapshots).values(
