@@ -71,13 +71,13 @@ UI portfolio tab → renders live positions + correct NAV
 ### 7. Verification
 
 - [ ] `uv run pytest scripts/tests/test_portfolio_query.py
-    src/xenon/api/tests/test_portfolio_endpoint.py` green.
+  src/xenon/api/tests/test_portfolio_endpoint.py` green.
 - [ ] `cd web && npm test -- portfolio` green.
 - [ ] `cd web && npm run typecheck` green.
 - [ ] Manual: `dev.sh live` → hard-refresh browser → 11 positions visible,
       live NAV correct.
 - [ ] `psql ... -c "SELECT payload->>'last_sync' FROM xenon.account_snapshots
-    WHERE account_env='live' ORDER BY snapshot_at DESC LIMIT 1"` returns
+  WHERE account_env='live' ORDER BY snapshot_at DESC LIMIT 1"` returns
       a fresh ISO timestamp.
 
 ### 8. Stop-leave-Phase-2 boundary
@@ -88,6 +88,11 @@ UI portfolio tab → renders live positions + correct NAV
       previous-snapshot read). Phase 2 covers them.
 - [ ] Do **not** touch Futu paths. Followup tracked at
       `docs/plans/2026-04-27-futu-postgres-migration-followup.md`.
+
+**Phase 2 done 2026-04-27** — see
+`docs/plans/2026-04-27-portfolio-postgres-read-path-phase2.md`. All
+readers migrated; `scripts/tests/test_portfolio_json_not_read.py` is
+the regression guard.
 
 ## Closes when
 

@@ -158,6 +158,8 @@ CI uses `uv sync --frozen --extra test` then `uv run pytest` — affected-on-PR,
 
 Postgres is primary for portfolio, orders, NAV, trades, UW stats, flow events, and scanner archival. Files under `data/` are backup or cache inputs unless a module explicitly documents otherwise. Full data catalog: `docs/architecture/data-files.md`.
 
+`data/portfolio.json` was retired 2026-04-27. All readers go through `xenon.utils.portfolio_loader` (sync, used by subprocesses + scanners + reports) or `xenon.db.queries.portfolio.get_latest_portfolio_payload` (async, used by FastAPI). `scripts/tests/test_portfolio_json_not_read.py` enforces the boundary. Futu still flows through `data/futu_portfolio.json` until the Futu→PG follow-up ships.
+
 ## Commands
 
 | Command                          | Action                                                                                                                                      |
