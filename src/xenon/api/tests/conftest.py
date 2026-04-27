@@ -22,6 +22,12 @@ def _postgres_orders_test_db(monkeypatch):
         import xenon.db.engine as engine_mod
 
         monkeypatch.setattr(engine_mod, "_sync_engine", None)
+        # Routes that touch the async engine (e.g. GET /portfolio) call
+        # `get_engine()` which raises if init_engine() never ran. Tests use
+        # TestClient(app) without `with`, so the lifespan that normally
+        # initializes it is skipped — seed it here.
+        engine_mod._engine = None  # type: ignore[attr-defined]
+        engine_mod.init_engine(url)
     except Exception:
         pass
 

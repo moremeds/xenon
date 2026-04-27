@@ -63,6 +63,7 @@ account_snapshots = Table(
     Column("bankroll", Numeric(14, 2), nullable=False),
     Column("peak_value", Numeric(14, 2)),
     Column("net_liquidation", Numeric(14, 2)),
+    Column("payload", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
     Column("snapshot_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
     Column("broker", Text, nullable=False, server_default=text("'IB'")),
     Column("account_env", Text, nullable=False, server_default=text("'legacy_unknown'")),

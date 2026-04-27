@@ -1,9 +1,7 @@
 import { NextResponse } from "next/server";
-import { readFile, stat } from "fs/promises";
+import { readFile } from "fs/promises";
 import { join } from "path";
-import { readDataFile } from "@tools/data-reader";
 import { xenonFetch } from "@/lib/xenonApi";
-import { PortfolioDataSchema } from "@/lib/portfolioDataSchema";
 import {
   getRequestId,
   jsonApiError,
@@ -12,12 +10,19 @@ import {
 
 export const runtime = "nodejs";
 
-const PORTFOLIO_PATH = join(process.cwd(), "..", "data", "portfolio.json");
-const CACHE_TTL_MS = 60_000; // 1 minute
+// Phase 1 of the portfolio postgres read-path migration: this route used to
+// read data/portfolio.json directly, which went stale after PR #52 moved the
+// writer into Postgres. Both GET and POST now hit the new FastAPI
+// `GET /portfolio` endpoint, which queries account_snapshots.payload scoped
+// by the current AccountScope. See
+// docs/plans/2026-04-27-portfolio-postgres-read-path.md.
 
 const TRADE_LOG_PATH = join(process.cwd(), "..", "data", "trade_log.json");
+const STALE_AFTER_MS = 60_000;
 
-/** Load ticker → earliest trade date from trade_log.json */
+/** Load ticker → earliest trade date from trade_log.json. Read straight from
+ * the file because trade_log.json is still owned by the prior writer; Phase 2
+ * will migrate it to PG along with the other 8 readers. */
 async function loadTradeLogDates(): Promise<Record<string, string>> {
   try {
     const raw = JSON.parse(await readFile(TRADE_LOG_PATH, "utf-8"));
@@ -27,7 +32,6 @@ async function loadTradeLogDates(): Promise<Record<string, string>> {
       const ticker = t?.ticker;
       const date = t?.date;
       if (typeof ticker === "string" && typeof date === "string") {
-        // Keep the LATEST date per ticker (most recent entry)
         if (!dates[ticker] || date > dates[ticker]) {
           dates[ticker] = date;
         }
@@ -40,17 +44,6 @@ async function loadTradeLogDates(): Promise<Record<string, string>> {
 }
 
 let bgSyncInFlight = false;
-
-/** Returns true when portfolio.json file mtime is older than TTL */
-async function isPortfolioStale(): Promise<boolean> {
-  try {
-    const s = await stat(PORTFOLIO_PATH);
-    return Date.now() - s.mtimeMs > CACHE_TTL_MS;
-  } catch {
-    // File missing or unreadable → treat as stale so we kick off a sync
-    return true;
-  }
-}
 
 /** Fire-and-forget: call FastAPI background sync endpoint */
 function triggerBackgroundSync(): void {
@@ -70,21 +63,39 @@ function triggerBackgroundSync(): void {
     });
 }
 
+/** Parse the FastAPI payload's `last_sync` and decide if it's stale. */
+function isResponseStale(payload: { last_sync?: unknown }): boolean {
+  const raw = typeof payload.last_sync === "string" ? payload.last_sync : null;
+  if (!raw) return true;
+  const ts = Date.parse(raw);
+  if (Number.isNaN(ts)) return true;
+  return Date.now() - ts > STALE_AFTER_MS;
+}
+
 export async function GET(): Promise<Response> {
   const requestId = getRequestId();
-  // Stale-while-revalidate: kick off background sync if data is >60 s old,
-  // but always return the current cached file immediately (non-blocking).
-  const stale = await isPortfolioStale();
-  if (stale) {
-    triggerBackgroundSync();
-  }
-
   try {
-    const result = await readDataFile("data/portfolio.json", PortfolioDataSchema);
-    if (!result.ok) {
+    const data = (await xenonFetch("/portfolio", {
+      method: "GET",
+      timeout: 10_000,
+    })) as Record<string, unknown>;
+    if (isResponseStale(data)) {
+      triggerBackgroundSync();
+    }
+    const tradeLogDates = await loadTradeLogDates();
+    const response = NextResponse.json({
+      ...data,
+      trade_log_dates: tradeLogDates,
+    });
+    return setNoStoreResponseHeaders(response, requestId);
+  } catch (error) {
+    const status = (error as { status?: number })?.status ?? 502;
+    // 404 → no snapshot yet; trigger a sync and tell the client to retry.
+    if (status === 404) {
+      triggerBackgroundSync();
       return setNoStoreResponseHeaders(
         jsonApiError({
-          message: result.error ?? "Portfolio data not found",
+          message: "No portfolio snapshot yet — sync triggered, retry shortly.",
           status: 404,
           code: "NOT_FOUND",
           requestId,
@@ -92,17 +103,13 @@ export async function GET(): Promise<Response> {
         requestId,
       );
     }
-    // Inject trade_log dates for share PnL entry timestamps
-    const tradeLogDates = await loadTradeLogDates();
-    const response = NextResponse.json({ ...result.data, trade_log_dates: tradeLogDates });
-    return setNoStoreResponseHeaders(response, requestId);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to read portfolio";
+    const message =
+      error instanceof Error ? error.message : "Failed to read portfolio";
     return setNoStoreResponseHeaders(
       jsonApiError({
         message,
-        status: 500,
-        code: "INTERNAL_ERROR",
+        status,
+        code: "UPSTREAM_ERROR",
         requestId,
       }),
       requestId,
@@ -113,25 +120,23 @@ export async function GET(): Promise<Response> {
 export async function POST(): Promise<Response> {
   const requestId = getRequestId();
   try {
-    const data = await xenonFetch("/portfolio/sync", { method: "POST", timeout: 35_000 });
+    const data = (await xenonFetch("/portfolio/sync", {
+      method: "POST",
+      timeout: 35_000,
+    })) as Record<string, unknown>;
     const tradeLogDates = await loadTradeLogDates();
-    const response = NextResponse.json({ ...data, trade_log_dates: tradeLogDates });
+    const response = NextResponse.json({
+      ...data,
+      trade_log_dates: tradeLogDates,
+    });
     return setNoStoreResponseHeaders(response, requestId);
-  } catch {
-    // Sync failed — fall back to cached data file
-    const cached = await readDataFile("data/portfolio.json", PortfolioDataSchema);
-    if (cached.ok) {
-      console.warn("[Portfolio] Sync failed, serving cached data");
-      const tradeLogDates = await loadTradeLogDates();
-      const res = NextResponse.json({ ...cached.data, trade_log_dates: tradeLogDates });
-      res.headers.set("X-Sync-Warning", "IB sync failed - serving cached data");
-      return setNoStoreResponseHeaders(res, requestId);
-    }
-    // No cached data either — genuine failure
+  } catch (error) {
+    const status = (error as { status?: number })?.status ?? 502;
+    const message = error instanceof Error ? error.message : "Sync failed";
     return setNoStoreResponseHeaders(
       jsonApiError({
-        message: "Sync failed and no cached data available",
-        status: 502,
+        message,
+        status,
         code: "UPSTREAM_ERROR",
         requestId,
       }),

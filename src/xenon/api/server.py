@@ -37,7 +37,7 @@ INTERNALS_SKEW_CACHE_TTL_SECONDS = 60 * 15
 
 from xenon.api import trading_mode
 from xenon.api.auth import verify_api_key, verify_clerk_jwt
-from xenon.api.guards import mask_account, require_mode_verified
+from xenon.api.guards import get_account_scope, mask_account, require_mode_verified
 from xenon.api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_mode, is_docker_mode, restart_ib_gateway
 from xenon.api.ib_pool import IBPool
 from xenon.api.pool_order_manage import pool_cancel_order, pool_modify_order
@@ -1354,26 +1354,67 @@ async def attribution():
 # ---------------------------------------------------------------------------
 
 
+async def _read_portfolio_payload(scope) -> dict:
+    """Load the latest structured portfolio payload from Postgres for the scope.
+
+    Phase 1 of the portfolio postgres read-path migration — replaces the prior
+    `data/portfolio.json` reader. The payload is stamped at sync time by
+    `_save_portfolio_to_postgres` in `xenon.execution.ib_sync`.
+    See docs/plans/2026-04-27-portfolio-postgres-read-path.md.
+    """
+    from xenon.db.engine import get_engine
+    from xenon.db.queries.portfolio import get_latest_portfolio_payload
+
+    engine = get_engine()
+    async with engine.connect() as conn:
+        return await get_latest_portfolio_payload(
+            conn,
+            broker=scope.broker,
+            account_env=scope.account_env,
+            broker_account=scope.broker_account,
+        )
+
+
+@app.get("/portfolio")
+async def portfolio_get(scope=Depends(get_account_scope)):
+    """Return the latest portfolio snapshot from Postgres, scoped to the
+    current broker account. Shape matches `web/lib/portfolioDataSchema.ts`.
+    Returns 404 when no snapshot exists yet — callers should POST
+    /portfolio/sync (or /portfolio/background-sync) to populate.
+    """
+    payload = await _read_portfolio_payload(scope)
+    if payload is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No portfolio snapshot for scope "
+                f"{scope.broker}/{scope.account_env}/{scope.broker_account} — "
+                f"run POST /portfolio/sync to populate."
+            ),
+        )
+    return payload
+
+
 @app.post("/portfolio/sync")
-async def portfolio_sync():
-    """Sync portfolio from IB via subprocess.
+async def portfolio_sync(scope=Depends(get_account_scope)):
+    """Sync portfolio from IB via subprocess, then return the fresh payload.
 
     Scripts auto-allocate client IDs from subprocess range (20-49).
-    Auto-restarts IB Gateway on ECONNREFUSED and retries once.
+    Auto-restarts IB Gateway on ECONNREFUSED and retries once. Reads the
+    just-written snapshot from Postgres (no longer hits data/portfolio.json).
     """
     result = await _run_ib_script_with_recovery(
         "xenon-ib-sync", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
     )
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
-    # ib_sync.py writes to data/portfolio.json; read it back
-    from xenon.utils.atomic_io import verified_load
-
-    try:
-        data = verified_load(str(DATA_DIR / "portfolio.json"))
-        return data
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to read synced portfolio: {e}")
+    payload = await _read_portfolio_payload(scope)
+    if payload is None:
+        raise HTTPException(
+            status_code=502,
+            detail="ib_sync ran but no snapshot landed in Postgres — check ib_sync logs.",
+        )
+    return payload
 
 
 @app.post("/portfolio/background-sync", status_code=202)

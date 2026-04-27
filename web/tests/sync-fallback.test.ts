@@ -49,33 +49,32 @@ describe("POST /api/portfolio — sync failure fallback", () => {
     mockStat.mockResolvedValue({ mtimeMs: Date.now() });
   });
 
-  it("returns cached portfolio data with 200 when ibSync fails", async () => {
-    const cached = makePortfolio("2026-03-13T14:00:00Z");
+  it("returns 502 when ibSync fails (no JSON-file fallback after PG migration)", async () => {
+    // Phase 1 of the postgres read-path migration removed the cached-file
+    // fallback — silently serving stale paper data when the live sync failed
+    // was the original bug. Sync failures must surface loudly.
     mockXenonFetch.mockRejectedValue(new Error("Connect call failed"));
-    mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
-
-    const { POST } = await import("../app/api/portfolio/route");
-    const response = await POST();
-    const body = await response.json();
-
-    expect(response.status).toBe(200);
-    expect(body.last_sync).toBe("2026-03-13T14:00:00Z");
-    expect(body.positions).toEqual([]);
-    expect(mockXenonFetch).toHaveBeenCalledWith("/portfolio/sync", expect.objectContaining({ method: "POST" }));
-  });
-
-  it("sets X-Sync-Warning header when falling back to cached data", async () => {
-    const cached = makePortfolio("2026-03-13T14:00:00Z");
-    mockXenonFetch.mockRejectedValue(new Error("Connect call failed"));
-    mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
 
     const { POST } = await import("../app/api/portfolio/route");
     const response = await POST();
 
-    expect(response.headers.get("X-Sync-Warning")).toBeTruthy();
+    expect(response.status).toBe(502);
+    expect(mockXenonFetch).toHaveBeenCalledWith(
+      "/portfolio/sync",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 
-  it("returns 502 only when sync fails AND no cached data exists", async () => {
+  it("does not set X-Sync-Warning header (header retired with cache fallback)", async () => {
+    mockXenonFetch.mockRejectedValue(new Error("Connect call failed"));
+
+    const { POST } = await import("../app/api/portfolio/route");
+    const response = await POST();
+
+    expect(response.headers.get("X-Sync-Warning")).toBeNull();
+  });
+
+  it("returns 502 when sync fails (cache no longer participates)", async () => {
     mockXenonFetch.mockRejectedValue(new Error("Connect call failed"));
     mockReadDataFile.mockResolvedValue({ ok: false, error: "File not found" });
 
@@ -119,7 +118,10 @@ describe("POST /api/orders — sync failure fallback", () => {
     expect(response.status).toBe(200);
     expect(body.last_sync).toBe("2026-03-13T14:00:00Z");
     expect(body.open_orders).toEqual([]);
-    expect(mockXenonFetch).toHaveBeenCalledWith("/orders/refresh", expect.objectContaining({ method: "POST" }));
+    expect(mockXenonFetch).toHaveBeenCalledWith(
+      "/orders/refresh",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 
   it("sets X-Sync-Warning header when falling back to cached orders", async () => {
