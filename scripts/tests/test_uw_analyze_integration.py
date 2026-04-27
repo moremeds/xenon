@@ -15,12 +15,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
 from xenon.api.routes import uw_analyze as routes_mod  # noqa: E402
 from xenon.api.services import uw_analyze_candidates as cand  # noqa: E402
 from xenon.api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
 from xenon.api.services.uw_analyze_flow_tracker import FlowLog  # noqa: E402
-from fastapi import FastAPI  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
 
 
 def test_full_stack_refresh_then_portfolio_surfaces_sweep_event(monkeypatch, tmp_path):
@@ -28,10 +29,11 @@ def test_full_stack_refresh_then_portfolio_surfaces_sweep_event(monkeypatch, tmp
     routes_mod.reset_state_for_tests()
     cand.clear_adhoc()
 
-    # Point candidate loader at a fixture with NVDA only.
-    portfolio_path = tmp_path / "portfolio.json"
-    portfolio_path.write_text(__import__("json").dumps({"positions": [{"ticker": "NVDA"}]}))
-    cand.PORTFOLIO_PATH = portfolio_path
+    # Phase-2 postgres migration: seed portfolio in PG (autouse fixture
+    # truncates between tests). Watchlist still flows through a JSON file.
+    from scripts.tests.helpers.portfolio_seed import seed_portfolio_snapshot
+
+    seed_portfolio_snapshot({"positions": [{"ticker": "NVDA"}]})
     cand.WATCHLIST_PATH = tmp_path / "missing-watchlist.json"
 
     # Inject fresh cache + flow log singletons scoped to tmp_path.
