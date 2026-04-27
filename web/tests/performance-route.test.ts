@@ -33,13 +33,11 @@ describe("/api/performance route", () => {
           series: [],
         });
       }
-      if (path.includes("portfolio.json")) {
-        return JSON.stringify({
-          last_sync: "2026-03-13T12:00:00Z",
-          account_summary: { net_liquidation: 1_313_112.03 },
-        });
-      }
       throw new Error(`unexpected read: ${path}`);
+    });
+    mockXenonFetch.mockResolvedValue({
+      last_sync: "2026-03-13T12:00:00Z",
+      account_summary: { net_liquidation: 1_313_112.03 },
     });
 
     const { GET } = await import("../app/api/performance/route");
@@ -48,9 +46,48 @@ describe("/api/performance route", () => {
 
     expect(res.status).toBe(200);
     expect(body.as_of).toBe("2026-03-13");
-        expect(body.summary.sharpe_ratio).toBe(1.2);
-        expect(mockXenonFetch).not.toHaveBeenCalled();
-      });
+    expect(body.summary.sharpe_ratio).toBe(1.2);
+    expect(mockXenonFetch).toHaveBeenCalledTimes(1);
+    expect(mockXenonFetch).toHaveBeenCalledWith(
+      "/portfolio",
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("GET does not read data/portfolio.json for portfolio freshness", async () => {
+    mockStat.mockResolvedValue({ mtimeMs: Date.now() });
+    mockReadFile.mockImplementation(async (path: string) => {
+      if (path.includes("portfolio.json")) {
+        throw new Error("stale portfolio file must not be read");
+      }
+      if (path.includes("performance.json")) {
+        return JSON.stringify({
+          as_of: "2026-03-13",
+          last_sync: "2026-03-13T12:00:00Z",
+          summary: { sharpe_ratio: 1.2 },
+          series: [],
+        });
+      }
+      throw new Error(`unexpected read: ${path}`);
+    });
+    mockXenonFetch.mockResolvedValue({
+      last_sync: "2026-03-13T12:00:00Z",
+      account_summary: { net_liquidation: 1_313_112.03 },
+    });
+
+    const { GET } = await import("../app/api/performance/route");
+    const res = await GET();
+
+    expect(res.status).toBe(200);
+    expect(mockXenonFetch).toHaveBeenCalledWith(
+      "/portfolio",
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(mockReadFile).not.toHaveBeenCalledWith(
+      expect.stringContaining("portfolio.json"),
+      expect.anything(),
+    );
+  });
 
   it("GET returns stale cache + triggers background rebuild when cached performance lags the current portfolio snapshot (SWR)", async () => {
     mockStat.mockResolvedValue({ mtimeMs: Date.now() });
@@ -63,15 +100,12 @@ describe("/api/performance route", () => {
           series: [],
         });
       }
-      if (path.includes("portfolio.json")) {
-        return JSON.stringify({
-          last_sync: "2026-03-11T13:37:14Z",
-          account_summary: { net_liquidation: 1_313_112.03 },
-        });
-      }
       throw new Error(`unexpected read: ${path}`);
     });
     mockXenonFetch
+      .mockResolvedValueOnce({
+        last_sync: "2026-03-11T13:37:14Z",
+      })
       .mockResolvedValueOnce({
         last_sync: "2026-03-11T13:37:14Z",
       })
@@ -85,15 +119,20 @@ describe("/api/performance route", () => {
     expect(res.status).toBe(200);
     expect(body.as_of).toBe("2026-03-10");
     expect(body.summary.ending_equity).toBe(1_063_031.86);
-    // Should have called portfolio/sync + background trigger
-    expect(mockXenonFetch).toHaveBeenCalledTimes(2);
+    // Should have read portfolio via FastAPI, then sync + background trigger
+    expect(mockXenonFetch).toHaveBeenCalledTimes(3);
     expect(mockXenonFetch).toHaveBeenNthCalledWith(
       1,
+      "/portfolio",
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(mockXenonFetch).toHaveBeenNthCalledWith(
+      2,
       "/portfolio/sync",
       expect.objectContaining({ method: "POST" }),
     );
     expect(mockXenonFetch).toHaveBeenNthCalledWith(
-      2,
+      3,
       "/performance/background",
       expect.objectContaining({ method: "POST", timeout: 5_000 }),
     );
@@ -110,15 +149,12 @@ describe("/api/performance route", () => {
           series: [],
         });
       }
-      if (path.includes("portfolio.json")) {
-        return JSON.stringify({
-          last_sync: "2026-03-12T13:23:21Z",
-          account_summary: { net_liquidation: 1_218_410.03 },
-        });
-      }
       throw new Error(`unexpected read: ${path}`);
     });
     mockXenonFetch
+      .mockResolvedValueOnce({
+        last_sync: "2026-03-12T13:23:21Z",
+      })
       .mockResolvedValueOnce({
         last_sync: "2026-03-13T20:02:06Z",
       })
@@ -135,11 +171,16 @@ describe("/api/performance route", () => {
     // Portfolio sync + background trigger
     expect(mockXenonFetch).toHaveBeenNthCalledWith(
       1,
+      "/portfolio",
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(mockXenonFetch).toHaveBeenNthCalledWith(
+      2,
       "/portfolio/sync",
       expect.objectContaining({ method: "POST" }),
     );
     expect(mockXenonFetch).toHaveBeenNthCalledWith(
-      2,
+      3,
       "/performance/background",
       expect.objectContaining({ method: "POST", timeout: 5_000 }),
     );
@@ -156,15 +197,14 @@ describe("/api/performance route", () => {
           series: [],
         });
       }
-      if (path.includes("portfolio.json")) {
-        return JSON.stringify({
-          last_sync: "2026-03-12T13:23:21Z",
-          account_summary: { net_liquidation: 1_218_410.03 },
-        });
-      }
       throw new Error(`unexpected read: ${path}`);
     });
-    mockXenonFetch.mockRejectedValue(new Error("IB unavailable"));
+    mockXenonFetch
+      .mockResolvedValueOnce({
+        last_sync: "2026-03-12T13:23:21Z",
+        account_summary: { net_liquidation: 1_218_410.03 },
+      })
+      .mockRejectedValueOnce(new Error("IB unavailable"));
 
     const { GET } = await import("../app/api/performance/route");
     const res = await GET();
@@ -172,8 +212,17 @@ describe("/api/performance route", () => {
 
     expect(res.status).toBe(200);
     expect(body.as_of).toBe("2026-03-12");
-    expect(mockXenonFetch).toHaveBeenCalledTimes(1);
-    expect(mockXenonFetch).toHaveBeenCalledWith("/portfolio/sync", expect.objectContaining({ method: "POST" }));
+    expect(mockXenonFetch).toHaveBeenCalledTimes(2);
+    expect(mockXenonFetch).toHaveBeenNthCalledWith(
+      1,
+      "/portfolio",
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(mockXenonFetch).toHaveBeenNthCalledWith(
+      2,
+      "/portfolio/sync",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 
   it("POST runs the API sync and returns generated performance JSON", async () => {
@@ -192,7 +241,10 @@ describe("/api/performance route", () => {
     expect(res.status).toBe(200);
     expect(body.summary.sharpe_ratio).toBe(1.84);
     expect(mockXenonFetch).toHaveBeenCalledOnce();
-    expect(mockXenonFetch).toHaveBeenCalledWith("/performance", expect.objectContaining({ method: "POST" }));
+    expect(mockXenonFetch).toHaveBeenCalledWith(
+      "/performance",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 
   // ---- SWR-specific tests ----

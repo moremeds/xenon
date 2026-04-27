@@ -43,6 +43,28 @@ type PlaceBody = {
   acknowledge_limit_override?: boolean;
 };
 
+function shouldLoadPortfolioForNakedShortGuard(body: PlaceBody): boolean {
+  if (body.type === "combo") {
+    return body.action !== "SELL";
+  }
+  return body.action !== "BUY";
+}
+
+async function loadPortfolioForNakedShortGuard(): Promise<NakedShortPortfolio | null> {
+  try {
+    return await xenonFetch<NakedShortPortfolio>("/portfolio", {
+      method: "GET",
+      timeout: 10_000,
+    });
+  } catch (error) {
+    console.warn(
+      "[orders/place] Could not load portfolio for naked short guard:",
+      error instanceof Error ? error.message : "unknown error",
+    );
+    return null;
+  }
+}
+
 export async function POST(request: Request): Promise<Response> {
   const requestId = getRequestId();
   try {
@@ -186,12 +208,11 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     // Naked short guard — block orders that would create naked short exposure
-    const portfolioResult = await readDataFile("data/portfolio.json");
-    if (portfolioResult?.ok) {
-      const guard = checkNakedShortRisk(
-        body,
-        portfolioResult.data as NakedShortPortfolio,
-      );
+    const portfolio = shouldLoadPortfolioForNakedShortGuard(body)
+      ? await loadPortfolioForNakedShortGuard()
+      : null;
+    if (portfolio) {
+      const guard = checkNakedShortRisk(body, portfolio);
       if (!guard.allowed) {
         return setNoStoreResponseHeaders(
           jsonApiError({
@@ -203,11 +224,6 @@ export async function POST(request: Request): Promise<Response> {
           requestId,
         );
       }
-    } else {
-      console.warn(
-        "[orders/place] Could not load portfolio for naked short guard:",
-        portfolioResult?.error ?? "unknown error",
-      );
     }
 
     const orderPayload = {

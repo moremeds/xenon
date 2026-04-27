@@ -1,14 +1,16 @@
 import { NextResponse } from "next/server";
 import { readFile, stat } from "fs/promises";
 import { join } from "path";
-import { isPerformanceBehindPortfolioSync, isPortfolioBehindCurrentEtSession } from "@/lib/performanceFreshness";
+import {
+  isPerformanceBehindPortfolioSync,
+  isPortfolioBehindCurrentEtSession,
+} from "@/lib/performanceFreshness";
 import { xenonFetch } from "@/lib/xenonApi";
 import { getRequestId, setNoStoreResponseHeaders } from "@/lib/apiContracts";
 
 export const runtime = "nodejs";
 
 const PERFORMANCE_PATH = join(process.cwd(), "..", "data", "performance.json");
-const PORTFOLIO_PATH = join(process.cwd(), "..", "data", "portfolio.json");
 const CACHE_TTL_MS = 15 * 60_000;
 
 async function isPerformanceStale(): Promise<boolean> {
@@ -20,7 +22,9 @@ async function isPerformanceStale(): Promise<boolean> {
   }
 }
 
-async function readJsonFile(path: string): Promise<Record<string, unknown> | null> {
+async function readJsonFile(
+  path: string,
+): Promise<Record<string, unknown> | null> {
   try {
     const raw = await readFile(path, "utf-8");
     return JSON.parse(raw) as Record<string, unknown>;
@@ -29,9 +33,26 @@ async function readJsonFile(path: string): Promise<Record<string, unknown> | nul
   }
 }
 
-function extractTimestampValue(data: Record<string, unknown> | null, key: string): string | null {
+function extractTimestampValue(
+  data: Record<string, unknown> | null,
+  key: string,
+): string | null {
   const value = data?.[key];
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+async function fetchPortfolioSnapshot(): Promise<Record<
+  string,
+  unknown
+> | null> {
+  try {
+    return await xenonFetch<Record<string, unknown>>("/portfolio", {
+      method: "GET",
+      timeout: 10_000,
+    });
+  } catch {
+    return null;
+  }
 }
 
 function isCacheBehindPortfolio(
@@ -55,54 +76,85 @@ function isCacheBehindPortfolio(
  * 5s timeout, swallow all errors — caller already returned cached data.
  */
 function triggerBackgroundRebuild(): void {
-  xenonFetch("/performance/background", { method: "POST", timeout: 5_000 }).catch(() => {});
+  xenonFetch("/performance/background", {
+    method: "POST",
+    timeout: 5_000,
+  }).catch(() => {});
 }
 
 export async function GET(): Promise<Response> {
   const requestId = getRequestId();
-  const [stale, cachedPerformance, initialPortfolioSnapshot] = await Promise.all([
-    isPerformanceStale(),
-    readJsonFile(PERFORMANCE_PATH),
-    readJsonFile(PORTFOLIO_PATH),
-  ]);
+  const [stale, cachedPerformance, initialPortfolioSnapshot] =
+    await Promise.all([
+      isPerformanceStale(),
+      readJsonFile(PERFORMANCE_PATH),
+      fetchPortfolioSnapshot(),
+    ]);
 
   let portfolioSnapshot = initialPortfolioSnapshot;
-  const portfolioLastSync = extractTimestampValue(portfolioSnapshot, "last_sync");
+  const portfolioLastSync = extractTimestampValue(
+    portfolioSnapshot,
+    "last_sync",
+  );
 
   if (isPortfolioBehindCurrentEtSession(portfolioLastSync)) {
     try {
-      const refreshed = await xenonFetch<Record<string, unknown>>("/portfolio/sync", {
-        method: "POST",
-        timeout: 35_000,
-      });
+      const refreshed = await xenonFetch<Record<string, unknown>>(
+        "/portfolio/sync",
+        {
+          method: "POST",
+          timeout: 35_000,
+        },
+      );
       portfolioSnapshot = refreshed;
     } catch {
       // Portfolio sync failed — if we have fresh-enough perf cache, return it
-      if (cachedPerformance && !isCacheBehindPortfolio(cachedPerformance, portfolioSnapshot)) {
-        return setNoStoreResponseHeaders(NextResponse.json(cachedPerformance), requestId);
+      if (
+        cachedPerformance &&
+        !isCacheBehindPortfolio(cachedPerformance, portfolioSnapshot)
+      ) {
+        return setNoStoreResponseHeaders(
+          NextResponse.json(cachedPerformance),
+          requestId,
+        );
       }
       // Otherwise fall through to rebuild evaluation
     }
   }
 
-  const shouldRebuild = !cachedPerformance || stale || isCacheBehindPortfolio(cachedPerformance, portfolioSnapshot);
+  const shouldRebuild =
+    !cachedPerformance ||
+    stale ||
+    isCacheBehindPortfolio(cachedPerformance, portfolioSnapshot);
 
   if (!shouldRebuild && cachedPerformance) {
-    return setNoStoreResponseHeaders(NextResponse.json(cachedPerformance), requestId);
+    return setNoStoreResponseHeaders(
+      NextResponse.json(cachedPerformance),
+      requestId,
+    );
   }
 
   // SWR: if we have stale cache, return it immediately + trigger background rebuild
   if (cachedPerformance) {
     triggerBackgroundRebuild();
-    return setNoStoreResponseHeaders(NextResponse.json(cachedPerformance), requestId);
+    return setNoStoreResponseHeaders(
+      NextResponse.json(cachedPerformance),
+      requestId,
+    );
   }
 
   // Cold start: no cache at all — must block on full rebuild
   try {
-    const data = await xenonFetch("/performance", { method: "POST", timeout: 180_000 });
+    const data = await xenonFetch("/performance", {
+      method: "POST",
+      timeout: 180_000,
+    });
     return setNoStoreResponseHeaders(NextResponse.json(data), requestId);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to generate performance metrics";
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Failed to generate performance metrics";
     return setNoStoreResponseHeaders(
       NextResponse.json({ error: message }, { status: 502 }),
       requestId,
@@ -113,10 +165,16 @@ export async function GET(): Promise<Response> {
 export async function POST(): Promise<Response> {
   const requestId = getRequestId();
   try {
-    const data = await xenonFetch("/performance", { method: "POST", timeout: 190_000 });
+    const data = await xenonFetch("/performance", {
+      method: "POST",
+      timeout: 190_000,
+    });
     return setNoStoreResponseHeaders(NextResponse.json(data), requestId);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to generate performance metrics";
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Failed to generate performance metrics";
     return setNoStoreResponseHeaders(
       NextResponse.json({ error: message }, { status: 502 }),
       requestId,

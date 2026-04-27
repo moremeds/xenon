@@ -22,30 +22,31 @@ describe("POST /api/orders/place — closing a held long option", () => {
   });
 
   it("allows SELL option payloads that match a held long call contract", async () => {
-    mockReadDataFile
-      .mockResolvedValueOnce({
-        ok: true,
-        data: {
-          positions: [
-            {
-              ticker: "WULF",
-              expiry: "2027-01-15",
-              structure_type: "Long Call",
-              contracts: 77,
-              direction: "LONG",
-              legs: [
-                { direction: "LONG", type: "Call", contracts: 77, strike: 17 },
-              ],
-            },
-          ],
-        },
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        data: { open_orders: [], executed_orders: [], open_count: 0, executed_count: 0 },
-      });
+    mockReadDataFile.mockResolvedValueOnce({
+      ok: true,
+      data: {
+        open_orders: [],
+        executed_orders: [],
+        open_count: 0,
+        executed_count: 0,
+      },
+    });
 
     mockXenonFetch
+      .mockResolvedValueOnce({
+        positions: [
+          {
+            ticker: "WULF",
+            expiry: "2027-01-15",
+            structure_type: "Long Call",
+            contracts: 77,
+            direction: "LONG",
+            legs: [
+              { direction: "LONG", type: "Call", contracts: 77, strike: 17 },
+            ],
+          },
+        ],
+      })
       .mockResolvedValueOnce({
         status: "ok",
         orderId: 12345,
@@ -74,11 +75,23 @@ describe("POST /api/orders/place — closing a held long option", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(mockXenonFetch).toHaveBeenCalledWith(
+    expect(mockXenonFetch).toHaveBeenNthCalledWith(
+      1,
+      "/portfolio",
+      expect.objectContaining({
+        method: "GET",
+      }),
+    );
+    expect(mockXenonFetch).toHaveBeenNthCalledWith(
+      2,
       "/orders/place",
       expect.objectContaining({
         method: "POST",
       }),
+    );
+    expect(mockReadDataFile).not.toHaveBeenCalledWith(
+      "data/portfolio.json",
+      expect.anything(),
     );
 
     const body = await res.json();

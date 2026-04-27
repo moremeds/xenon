@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
+import { xenonFetch } from "@/lib/xenonApi";
 
 export const runtime = "nodejs";
 
@@ -21,7 +22,7 @@ type ScriptResult = {
   stderr: string;
   exitCode: number;
   timedOut: boolean;
-  source: "script" | "local";
+  source: "script" | "local" | "api";
 };
 
 type PiResponse = {
@@ -87,8 +88,7 @@ const resolveProjectPaths = (): Paths => {
     if (
       existsSync(
         path.join(scriptsDir, "infra", "dev", "run_pytest_affected.py"),
-      ) &&
-      existsSync(path.join(dataDir, "portfolio.json"))
+      )
     ) {
       return { cwd: candidate, scriptsDir, dataDir };
     }
@@ -341,10 +341,12 @@ const parseBooleanFlags = (args: string[], booleanSet: Set<string>) => {
   return { parsed, positional };
 };
 
-const executePortfolio = async (paths: Paths): Promise<ScriptResult> => {
-  const data = await readLocalJsonFile(
-    path.join(paths.dataDir, "portfolio.json"),
-  );
+const executePortfolio = async (): Promise<ScriptResult> => {
+  const data = await xenonFetch<unknown>("/portfolio", {
+    method: "GET",
+    timeout: 10_000,
+  });
+
   return {
     command: "portfolio",
     status: "ok",
@@ -352,7 +354,7 @@ const executePortfolio = async (paths: Paths): Promise<ScriptResult> => {
     stderr: "",
     exitCode: 0,
     timedOut: false,
-    source: "local",
+    source: "api",
   };
 };
 
@@ -556,7 +558,7 @@ const executeCommand = async (value: ParsedCommand): Promise<ScriptResult> => {
     case "help":
       return executeHelp();
     case "portfolio":
-      return executePortfolio(paths);
+      return executePortfolio();
     case "journal":
       return executeJournal(value.args, paths);
     case "scan":

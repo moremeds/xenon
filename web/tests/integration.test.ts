@@ -1,9 +1,17 @@
-import { test, expect } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { NextRequest } from "next/server";
 import { buildEvaluateCommand, __resolvePiInput } from "../app/api/pi/route";
+
+const { mockXenonFetch } = vi.hoisted(() => ({
+  mockXenonFetch: vi.fn(),
+}));
+
+vi.mock("@/lib/xenonApi", () => ({
+  xenonFetch: mockXenonFetch,
+}));
 
 type CommandResult = {
   status: number;
@@ -57,6 +65,10 @@ const runPiRequest = async (input: string) => {
   return { response, body };
 };
 
+beforeEach(() => {
+  mockXenonFetch.mockReset();
+});
+
 test("__resolvePiInput combines command and separate text payloads", () => {
   expect(__resolvePiInput({ command: "/evaluate", text: "KWEB" })).toBe(
     "/evaluate KWEB",
@@ -83,12 +95,23 @@ test("buildEvaluateCommand builds single evaluate command with default and expli
   ]);
 });
 
-test("pi API returns local portfolio payload", async () => {
+test("pi API returns portfolio payload from FastAPI", async () => {
+  mockXenonFetch.mockResolvedValue({
+    bankroll: 100000,
+    position_count: 0,
+    positions: [],
+  });
+
   const { response, body } = await runPiRequest("/portfolio");
 
   expect(response.status).toBe(200);
   expect(body.command).toBe("portfolio");
   expect(body.status).toBe("ok");
+  expect(body.source).toBe("api");
+  expect(mockXenonFetch).toHaveBeenCalledWith("/portfolio", {
+    method: "GET",
+    timeout: 10_000,
+  });
   expect(typeof body.output === "string").toBeTruthy();
   expect(body.output.includes("bankroll")).toBeTruthy();
 });

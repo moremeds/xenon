@@ -81,7 +81,8 @@ def resolve_pytest_targets(changed_files: list[str | Path]) -> list[str]:
 
         abs_path = ROOT / rel
         if is_test_file(rel):
-            targets.add(abs_path)
+            if abs_path.exists():
+                targets.add(abs_path)
             continue
 
         if rel.name == "conftest.py":

@@ -13,6 +13,11 @@ def test_resolve_pytest_targets_keeps_changed_test_files():
     assert targets == ["scripts/tests/test_combo_entry_date.py"]
 
 
+def test_resolve_pytest_targets_skips_deleted_test_files():
+    targets = resolve_pytest_targets(["scripts/tests/test_incremental_sync.py"])
+    assert "scripts/tests/test_incremental_sync.py" not in targets
+
+
 def test_resolve_pytest_targets_expands_conftest_to_sibling_tree():
     targets = resolve_pytest_targets(["scripts/tests/conftest.py"])
     assert "scripts/tests/test_run_pytest_affected.py" in targets
