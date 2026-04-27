@@ -54,7 +54,6 @@ _MAX_WORKERS = 20
 
 
 ROOT = Path(__file__).resolve().parents[3]
-PORTFOLIO_PATH = ROOT / "data" / "portfolio.json"
 BLOTTER_CACHE_PATH = ROOT / "data" / "blotter.json"
 TRADING_DAYS = 252
 OPTION_DESC_RE = re.compile(
@@ -140,13 +139,11 @@ def select_option_mark(row: Mapping[str, Any]) -> Optional[float]:
     return None
 
 
-def load_portfolio_snapshot(path: Path = PORTFOLIO_PATH) -> dict:
-    try:
-        from xenon.utils.atomic_io import verified_load
+def load_portfolio_snapshot() -> dict:
+    """Load the latest IB portfolio payload from Postgres."""
+    from xenon.utils.portfolio_loader import load_portfolio_payload_sync
 
-        return verified_load(str(path))
-    except (ValueError, ImportError):
-        return json.loads(path.read_text())
+    return load_portfolio_payload_sync() or {}
 
 
 def parse_flex_trade_rows(df: pd.DataFrame) -> List[TradeFill]:
