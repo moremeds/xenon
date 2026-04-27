@@ -112,11 +112,16 @@ jobs:
         run: |
           uv python install 3.13
           uv sync --frozen --extra test
+      - name: Pre-create xenon/events schemas
+        # Alembic creates xenon.alembic_version (its version-tracking table) before
+        # running any migration's upgrade(), so the schema must exist before
+        # `alembic upgrade head`. Locally the dev setup script handles this.
+        env:
+          PGPASSWORD: xenon_dev
+        run: >-
+          psql -h localhost -U xenon_app -d xenon_test
+          -c "CREATE SCHEMA IF NOT EXISTS xenon; CREATE SCHEMA IF NOT EXISTS events;"
       - name: Apply alembic migrations to test DB
-        # The service-container init creates the xenon_app role/database; alembic's
-        # initial migration auto-creates the xenon/events schemas when the role has
-        # CREATE (it does, as the owner). Sets up everything the autouse fixture
-        # needs to TRUNCATE.
         env:
           DATABASE_URL: postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test
         run: uv run alembic upgrade head
