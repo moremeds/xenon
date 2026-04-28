@@ -164,3 +164,17 @@ jobs:
         with:
           python-version: "3.13"
       - run: python3.13 scripts/release/version_sync_check.py
+
+  order-path-guards:
+    # Layer 2 of docs/plans/2026-04-28-order-path-regression-prevention.md.
+    # Pure-stdlib Python — no uv sync, no Postgres. Runs in seconds.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: No JSON fallback on order/migrated routes
+        run: python3.13 scripts/checks/no_json_fallback_on_order_path.py
+      - name: ib_place_order caller allowlist
+        run: python3.13 scripts/checks/order_path_caller_allowlist.py
