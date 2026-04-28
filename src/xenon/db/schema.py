@@ -90,6 +90,19 @@ trades = Table(
     Column("decision", Text),
     Column("opened_at", TIMESTAMP(timezone=True)),
     Column("closed_at", TIMESTAMP(timezone=True)),
+    Column(
+        "submission_id",
+        Text,
+        ForeignKey(f"{XENON_SCHEMA}.order_submissions.submission_id"),
+        nullable=True,
+    ),
+    Column(
+        "combo_attempt_id",
+        Text,
+        ForeignKey(f"{XENON_SCHEMA}.wizard_combo_attempts.attempt_id"),
+        nullable=True,
+    ),
+    Column("state", Text, nullable=False, server_default=text("'OPEN'")),
     Column("metadata", JSONB),
     Column("broker", Text, nullable=False, server_default=text("'IB'")),
     Column("account_env", Text, nullable=False, server_default=text("'legacy_unknown'")),
@@ -99,6 +112,9 @@ trades = Table(
         "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
         name="ck_trades_account_env",
     ),
+    CheckConstraint("state IN ('OPEN','PARTIALLY_FILLED','CLOSED')", name="ck_trades_state"),
+    Index("ix_trades_submission", "submission_id"),
+    Index("ix_trades_combo_attempt", "combo_attempt_id"),
 )
 
 nav_history = Table(
