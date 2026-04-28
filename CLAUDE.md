@@ -49,6 +49,18 @@ Postgres is the runtime source of truth for migrated analytics and portfolio sur
 - Next.js API routes proxy these migrated surfaces via `xenonFetch()`; no `readFile`, `readDataFile`, or cached JSON fallback on runtime paths.
 - Preserve CI guard tests that prove stale JSON files are not read (`scripts/tests/test_vcg_json_not_read.py`, portfolio payload/route tests).
 
+## Order-Path Guards (Layers 1+2)
+
+Two automated guards lock in regression patterns from PR #61. Full design: `docs/plans/2026-04-28-order-path-regression-prevention.md`.
+
+- **Edit-time reminder** (`.claude/hooks/order-path-reminder.sh`) — PreToolUse hook prints an order-path checklist when Claude edits files under `src/xenon/execution/`, `src/xenon/api/server.py`, `web/app/api/orders/`, or `web/lib/order/`. Advisory, never blocks.
+- **CI guards** (`.github/workflows/ci.yml::order-path-guards`):
+  - `scripts/checks/no_json_fallback_on_order_path.py` — fails new `readDataFile`/`json.load` against `data/*.json` in `web/app/api/` or `src/xenon/api/`. Existing legacy reads are pinned in `_ALLOWLIST`; the list is intended to shrink to zero.
+  - `scripts/checks/order_path_caller_allowlist.py` — fails imports/CLI invocations of `xenon.execution.ib_place_order` outside the allowlist (`server.py`, the module itself, tests). Locks down [In-process route bypass].
+- **Local pre-commit** (optional): `scripts/checks/install-pre-commit.sh` drops a managed `.git/hooks/pre-commit` that runs both guards.
+
+To audit the current allowlists: `python3 scripts/checks/no_json_fallback_on_order_path.py --show-allowlist` (and the corresponding flag on the caller guard).
+
 ## ⛔ Mandatory Rules
 
 1. **Be concise.** No preamble, no filler.

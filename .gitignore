@@ -135,6 +135,7 @@ web/verify-regime-internals.mjs
 # Local agent worktrees / scratch state
 /.claude/worktrees/
 /.claude/hooks/dead-code.manifest
+/.claude/settings.local.json
 
 # =============================================================================
 # Vendor (downloaded binaries, not checked in)
@@ -160,7 +161,6 @@ docker/ib-gateway/secrets/*.txt
 .firecrawl/
 
 .vscode/
-.claude/
 .figma/
 .gemini/
 .worktrees/
