@@ -424,13 +424,11 @@ describe("POST /api/orders/cancel (via xenonFetch)", () => {
   });
 
   it("succeeds when orderId is provided", async () => {
+    const ordersPayload = { open_orders: [], executed_orders: [] };
     mockXenonFetch
       .mockResolvedValueOnce({ status: "ok", message: "Cancelled" }) // cancel
-      .mockResolvedValueOnce({}); // refresh
-    mockReadDataFile.mockResolvedValue({
-      ok: true,
-      data: { open_orders: [], executed_orders: [] },
-    });
+      .mockResolvedValueOnce({}) // refresh
+      .mockResolvedValueOnce(ordersPayload); // PG orders read
 
     const { POST } = await import("../app/api/orders/cancel/route");
     const req = makeRequest("http://localhost/api/orders/cancel", {
@@ -442,6 +440,13 @@ describe("POST /api/orders/cancel (via xenonFetch)", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.status).toBe("ok");
+    expect(body.orders).toEqual(ordersPayload);
+    expect(mockReadDataFile).not.toHaveBeenCalled();
+    expect(mockXenonFetch.mock.calls.map((call) => call[0])).toEqual([
+      "/orders/cancel",
+      "/orders/refresh",
+      "/orders",
+    ]);
   });
 });
 

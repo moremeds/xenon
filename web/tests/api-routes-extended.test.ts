@@ -55,7 +55,7 @@ vi.mock("@tools/wrappers/ib-orders", () => ({
   ibOrders: mockIbOrders,
 }));
 
-// Mock @tools/data-reader for reading orders.json after refresh
+// Mock @tools/data-reader for legacy cached-file routes.
 const mockReadDataFile = vi
   .fn()
   .mockResolvedValue({ ok: false, error: "not found" });
@@ -698,9 +698,16 @@ describe("POST /api/orders/cancel — extended", () => {
   });
 
   it("returns success when cancel succeeds", async () => {
+    const ordersPayload = {
+      open_orders: [],
+      executed_orders: [],
+      open_count: 0,
+      executed_count: 0,
+    };
     mockXenonFetch
       .mockResolvedValueOnce({ status: "ok", message: "Order 101 cancelled" })
-      .mockResolvedValueOnce({});
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(ordersPayload);
 
     const { POST } = await import("../app/api/orders/cancel/route");
     const res = await POST(
@@ -715,7 +722,13 @@ describe("POST /api/orders/cancel — extended", () => {
     const body = await res.json();
     expect(body.status).toBe("ok");
     expect(body.message).toBe("Order 101 cancelled");
-    expect(body.orders).toBeDefined();
+    expect(body.orders).toEqual(ordersPayload);
+    expect(mockReadDataFile).not.toHaveBeenCalled();
+    expect(mockXenonFetch.mock.calls.map((call) => call[0])).toEqual([
+      "/orders/cancel",
+      "/orders/refresh",
+      "/orders",
+    ]);
   });
 
   it("returns 500 when cancel fails via xenonFetch", async () => {

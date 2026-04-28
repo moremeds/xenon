@@ -1,6 +1,4 @@
 import { NextResponse } from "next/server";
-import { readDataFile } from "@tools/data-reader";
-import { OrdersData } from "@tools/schemas/ib-orders";
 import { xenonFetch } from "@/lib/xenonApi";
 import { passThroughXenonError } from "@/lib/passThroughXenonError";
 import { getRequestId } from "@/lib/apiContracts";
@@ -39,12 +37,17 @@ export async function POST(request: Request): Promise<Response> {
     } catch {
       // Non-fatal
     }
-    const ordersResult = await readDataFile("data/orders.json", OrdersData);
+    let orders: unknown = null;
+    try {
+      orders = await xenonFetch("/orders", { method: "GET", timeout: 10_000 });
+    } catch {
+      // Non-fatal; cancel success should still be returned.
+    }
 
     return NextResponse.json({
       status: "ok",
       message: result.message,
-      orders: ordersResult.ok ? ordersResult.data : null,
+      orders,
     });
   } catch (error) {
     return passThroughXenonError(error, requestId);
