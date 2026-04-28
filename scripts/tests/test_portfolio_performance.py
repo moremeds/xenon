@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import math
 import os
+from datetime import datetime, timezone
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pandas as pd
 import pytest
+from sqlalchemy import insert
 
 # Prevent price_cache from creating dirs on import
 with patch("os.makedirs"):
@@ -26,6 +29,8 @@ with patch("os.makedirs"):
         reconstruct_equity_curve,
         select_option_mark,
     )
+from xenon.db.engine import get_sync_engine
+from xenon.db.schema import account_snapshots, trades as trades_table
 
 
 def test_build_option_id_formats_occ_style_identifier():
@@ -266,6 +271,90 @@ def test_build_payload_exposes_expected_top_level_contract(monkeypatch):
     assert payload["summary"]["trading_days"] == 3
     assert len(payload["series"]) == 3
     assert payload["series"][0]["date"] == "2026-01-02"
+
+
+def test_portfolio_performance_does_not_read_json_files(monkeypatch):
+    from xenon.reports import portfolio_performance as perf
+
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU123456")
+
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            insert(account_snapshots).values(
+                account="DU123456",
+                bankroll=Decimal("2000"),
+                net_liquidation=Decimal("2000"),
+                payload={
+                    "last_sync": "2026-01-06T16:00:00Z",
+                    "account_summary": {"net_liquidation": 2000.0},
+                    "bankroll": 2000.0,
+                    "positions": [],
+                },
+                snapshot_at=datetime(2026, 1, 6, 21, 0, tzinfo=timezone.utc),
+                broker="IB",
+                account_env="paper",
+                broker_account="DU123456",
+            )
+        )
+        conn.execute(
+            insert(trades_table).values(
+                ticker="AAPL",
+                structure="Stock",
+                action="BUY",
+                quantity=10,
+                entry_cost=Decimal("1000.0000"),
+                opened_at=datetime(2025, 12, 31, 21, 0, tzinfo=timezone.utc),
+                state="OPEN",
+                broker="IB",
+                account_env="paper",
+                broker_account="DU123456",
+            )
+        )
+
+    def guard_open(path, *args, **kwargs):
+        text = str(path)
+        if "data/portfolio.json" in text or "data/blotter.json" in text:
+            raise AssertionError(f"unexpected JSON read: {text}")
+        return original_open(path, *args, **kwargs)
+
+    original_open = open
+    monkeypatch.setattr("builtins.open", guard_open)
+
+    class DummyIBClient:
+        def connect(self, **kwargs):
+            return None
+
+        def disconnect(self):
+            return None
+
+    def fake_stock_history(symbol, start_date, end_date, ib_client, uw_client):
+        histories = {
+            "SPY": {"2026-01-02": 100.0, "2026-01-05": 101.0, "2026-01-06": 102.0},
+            "AAPL": {"2026-01-02": 100.0, "2026-01-05": 105.0, "2026-01-06": 110.0},
+        }
+        return histories.get(symbol, {})
+
+    def fake_fetch_all(trades_arg, start, end, ib_client, warnings, seed_marks=None):
+        assert len(trades_arg) == 1
+        assert trades_arg[0].contract_key == "STK:AAPL"
+        return {"STK:AAPL": {"2026-01-02": 100.0, "2026-01-05": 105.0, "2026-01-06": 110.0}}, []
+
+    monkeypatch.setattr(perf, "fetch_ib_nav_series", lambda: None)
+    monkeypatch.setattr(perf, "load_ib_nav_cache", lambda: None)
+    monkeypatch.setattr(perf, "fetch_flex_trade_fills", lambda: (_ for _ in ()).throw(RuntimeError("no flex")))
+    monkeypatch.setattr(perf, "fetch_stock_history", fake_stock_history)
+    monkeypatch.setattr(perf, "_fetch_all_histories", fake_fetch_all)
+    monkeypatch.setattr(perf, "_fetch_stock_history_fallback", lambda s, st, en: (s, {}, "none"))
+    monkeypatch.setattr(perf, "IBClient", DummyIBClient)
+    monkeypatch.setattr(perf, "read_cache", lambda *a: None)
+    monkeypatch.setattr(perf, "write_cache", lambda *a, **kw: None)
+
+    payload = perf.build_payload()
+
+    assert payload["trades_source"] == "postgres"
+    assert payload["summary"]["ending_equity"] == pytest.approx(2000.0)
 
 
 def test_build_payload_warns_and_continues_when_option_history_is_rate_limited(monkeypatch):
