@@ -55,6 +55,19 @@ def test_resolve_from_env_live(monkeypatch):
     assert scope.broker_account == "U1234567"
 
 
+def test_resolve_from_app_state_preserves_broker():
+    from types import SimpleNamespace
+
+    from xenon.execution.account_scope import resolve_from_app_state
+
+    scope = resolve_from_app_state(
+        SimpleNamespace(broker="FUTU", trading_mode="live", account="FUTU-US")
+    )
+    assert scope.broker == "FUTU"
+    assert scope.account_env == "live"
+    assert scope.broker_account == "FUTU-US"
+
+
 def test_resolve_from_env_missing_account_raises(monkeypatch):
     _reload_trading_mode_with(monkeypatch, "paper")
     monkeypatch.delenv("XENON_BROKER_ACCOUNT", raising=False)

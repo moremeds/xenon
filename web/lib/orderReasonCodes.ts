@@ -32,8 +32,24 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
     severity: "error",
     copy: "Short call uncovered after accounting for working orders.",
   },
+  INVALID_ORDER_BODY: {
+    severity: "error",
+    copy: "Order request is malformed. Refresh and rebuild the ticket.",
+  },
   // F3 — quote gate
   STALE_QUOTE: { severity: "error", copy: "Quote expired; refreshing." },
+  OPTION_MARKET_CLOSED: {
+    severity: "error",
+    copy: "Equity options can only be traded during regular market hours.",
+  },
+  QUOTE_CONTRACT_MISMATCH: {
+    severity: "error",
+    copy: "Quote contract mismatch. Refresh the quote and retry.",
+  },
+  QUOTE_UNAVAILABLE: {
+    severity: "error",
+    copy: "Live quote unavailable. Refresh market data and retry.",
+  },
   LIMIT_OUT_OF_BAND: {
     severity: "warn",
     copy: "Limit too far from market. Acknowledge to override.",
@@ -66,6 +82,14 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
   ORDER_IDENTIFIER_REQUIRED: {
     severity: "error",
     copy: "Modify request must include orderId or permId.",
+  },
+  PORTFOLIO_SNAPSHOT_REQUIRED: {
+    severity: "error",
+    copy: "Portfolio snapshot required before placing short-exposure orders.",
+  },
+  READ_ONLY_BROKER: {
+    severity: "error",
+    copy: "Selected broker is read-only for order placement.",
   },
   // F7 — pending timeout
   PENDING_TIMEOUT: {

@@ -26,6 +26,10 @@ export type {
 // Hooks
 export { useOrderPrices } from "./hooks/useOrderPrices";
 export { useOrderValidation } from "./hooks/useOrderValidation";
+export {
+  buildFastApiPlaceOrderPayload,
+  buildPlaceOrderBody,
+} from "./placeOrderContract";
 
 // Components
 export { OrderPriceStrip } from "./components/OrderPriceStrip";

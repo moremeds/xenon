@@ -32,6 +32,8 @@ import WizardModal from "@/components/ticker-detail/WizardModal";
 import WizardSessionStrip from "@/components/ticker-detail/WizardSessionStrip";
 import { useWizardLauncher } from "@/lib/useWizardLauncher";
 import { useWizardSession } from "@/lib/useWizardSession";
+import { useClientAttemptId } from "./useClientAttemptId";
+import { getReasonToast } from "@/lib/orderReasonCodes";
 
 /* ─── Types ─── */
 
@@ -54,6 +56,10 @@ function errorFromResponseBody(
   fallback: string,
 ): string {
   if (body && typeof body === "object") {
+    const code = body.reason_code;
+    if (typeof code === "string" && code.length > 0) {
+      return getReasonToast(code).copy;
+    }
     const detail = body.detail;
     if (typeof detail === "string" && detail.length > 0) return detail;
     const error = body.error;
@@ -227,6 +233,7 @@ function OrderBuilder({
   const [confirmStep, setConfirmStep] = useState(false);
   const wizardLauncher = useWizardLauncher();
   const wizardSession = useWizardSession(wizardLauncher.sessionId);
+  const attemptId = useClientAttemptId({ ticker });
 
   const isCombo = legs.length > 1;
   // prettier-ignore
@@ -380,20 +387,27 @@ function OrderBuilder({
             right: legs[0].right === "C" ? "CALL" : "PUT",
           };
 
+      attemptId.markSubmitted();
       const res = await fetch("/api/orders/place", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          ...body,
+          client_attempt_id: attemptId.id,
+        }),
       });
       const json = await res.json();
       if (!res.ok) {
-        setError(json.error || "Order placement failed");
+        setError(errorFromResponseBody(json, "Order placement failed"));
+        attemptId.markTerminal();
       } else {
         setSuccess(`Order placed: ${structure || "Option"} on ${ticker}`);
         setConfirmStep(false);
+        attemptId.markTerminal();
       }
     } catch {
       setError("Network error placing order");
+      attemptId.markTerminal();
     } finally {
       setLoading(false);
     }
@@ -407,6 +421,7 @@ function OrderBuilder({
     tif,
     structure,
     signedLimitPrice,
+    attemptId,
   ]);
 
   const handleOpenWizard = useCallback(async () => {

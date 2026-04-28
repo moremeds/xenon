@@ -8,6 +8,8 @@ import Modal from "./Modal";
 import OrderErrorBanner from "./OrderErrorBanner";
 import { InstrumentOrderQuoteTelemetry } from "./QuoteTelemetry";
 import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
+import { useClientAttemptId } from "@/components/ticker-detail/useClientAttemptId";
+import { getReasonToast } from "@/lib/orderReasonCodes";
 
 export type InstrumentDetailProps = {
   leg: PortfolioLeg | null;
@@ -18,6 +20,23 @@ export type InstrumentDetailProps = {
 };
 
 type OrderAction = "BUY" | "SELL";
+
+function errorFromResponseBody(
+  body: Record<string, unknown> | null | undefined,
+  fallback: string,
+): string {
+  if (body && typeof body === "object") {
+    const code = body.reason_code;
+    if (typeof code === "string" && code.length > 0) {
+      return getReasonToast(code).copy;
+    }
+    const error = body.error;
+    if (typeof error === "string" && error.length > 0) return error;
+    const detail = body.detail;
+    if (typeof detail === "string" && detail.length > 0) return detail;
+  }
+  return fallback;
+}
 
 export default function InstrumentDetailModal({ leg, ticker, expiry, prices, onClose }: InstrumentDetailProps) {
   const [quantity, setQuantity] = useState(() => String(leg?.contracts ?? ""));
@@ -124,6 +143,7 @@ function LegOrderForm({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const attemptId = useClientAttemptId({ ticker });
 
   const parsedQty = parseInt(quantity, 10);
   const parsedPrice = parseFloat(limitPrice);
@@ -156,6 +176,7 @@ function LegOrderForm({
     setSuccess(null);
 
     try {
+      attemptId.markSubmitted();
       const res = await fetch("/api/orders/place", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -169,21 +190,25 @@ function LegOrderForm({
           expiry: expiryClean,
           strike: leg.strike,
           right,
+          client_attempt_id: attemptId.id,
         }),
       });
       const json = await res.json();
       if (!res.ok) {
-        setError(json.error || "Order placement failed");
+        setError(errorFromResponseBody(json, "Order placement failed"));
+        attemptId.markTerminal();
       } else {
         setSuccess(`Order placed: ${action} ${parsedQty}x ${ticker} ${strikeStr}${right} @ ${fmtPrice(parsedPrice)}`);
         setConfirmStep(false);
+        attemptId.markTerminal();
       }
     } catch {
       setError("Network error placing order");
+      attemptId.markTerminal();
     } finally {
       setLoading(false);
     }
-  }, [confirmStep, ticker, action, parsedQty, parsedPrice, tif, expiryClean, leg.strike, right, strikeStr]);
+  }, [confirmStep, ticker, action, parsedQty, parsedPrice, tif, expiryClean, leg.strike, right, strikeStr, attemptId]);
 
   return (
     <div className="order-form">

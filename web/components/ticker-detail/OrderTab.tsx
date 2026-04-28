@@ -674,6 +674,7 @@ function ComboOrderForm({
   const [success, setSuccess] = useState<string | null>(null);
   const wizardLauncher = useWizardLauncher();
   const wizardSession = useWizardSession(wizardLauncher.sessionId);
+  const attemptId = useClientAttemptId({ ticker });
 
   // Combo leg actions define the SPREAD STRUCTURE, not the trade direction.
   // IB reverses all leg actions when Order.action = SELL.
@@ -810,6 +811,7 @@ function ComboOrderForm({
         return;
       }
 
+      attemptId.markSubmitted();
       const res = await fetch("/api/orders/place", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -821,20 +823,24 @@ function ComboOrderForm({
           limitPrice: parsedPrice,
           tif,
           legs,
+          client_attempt_id: attemptId.id,
         }),
       });
       const json = await res.json();
       if (!res.ok) {
         setError(errorFromResponseBody(json, "Order placement failed"));
+        attemptId.markTerminal();
       } else {
         setSuccess(
           `Combo order placed: ${action} ${parsedQty}x ${position.structure} @ ${fmtSignedPrice(parsedPrice)}`,
         );
         setConfirmStep(false);
+        attemptId.markTerminal();
         onOrderPlaced?.();
       }
     } catch {
       setError("Network error placing order");
+      attemptId.markTerminal();
     } finally {
       setLoading(false);
     }
@@ -849,6 +855,7 @@ function ComboOrderForm({
     position.structure,
     portfolio,
     onOrderPlaced,
+    attemptId,
   ]);
 
   const handleOpenWizard = useCallback(async () => {

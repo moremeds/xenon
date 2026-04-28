@@ -17,7 +17,7 @@ from xenon.execution import quote_tokens
 from xenon.execution.market_hours import is_opt_tradeable
 from xenon.execution.preflight import ReasonCode
 
-_MAX_AGE_RTH_MS = 500
+MAX_AGE_RTH_MS = 500
 
 
 class QuoteVerdict(BaseModel):
@@ -26,14 +26,27 @@ class QuoteVerdict(BaseModel):
     reason_detail: str | None = None
 
 
+def check_market_hours(
+    *,
+    security_type: Literal["STK", "OPT"],
+    now: datetime,
+) -> QuoteVerdict:
+    if security_type == "OPT" and not is_opt_tradeable(now):
+        return QuoteVerdict(
+            accept=False,
+            reason_code=ReasonCode.OPTION_MARKET_CLOSED,
+            reason_detail="equity-option market closed (09:30-16:00 ET weekdays)",
+        )
+    return QuoteVerdict(accept=True)
+
+
 def _on_tick(price: Decimal, min_tick: Decimal) -> bool:
     return (price % min_tick) == Decimal("0")
 
 
-def check(
+def check_payload(
     *,
-    token: str,
-    token_secret: str,
+    payload: quote_tokens.QuotePayload,
     con_id: int,
     ticker: str,
     security_type: Literal["STK", "OPT"],
@@ -42,36 +55,21 @@ def check(
     now: datetime,
     tick_rule_lookup: Callable[[int], Decimal],
 ) -> QuoteVerdict:
-    if security_type == "OPT" and not is_opt_tradeable(now):
-        return QuoteVerdict(
-            accept=False,
-            reason_code=ReasonCode.STALE_QUOTE,
-            reason_detail="equity-option market closed (09:30-16:00 ET weekdays)",
-        )
-
-    max_age = _MAX_AGE_RTH_MS
-    try:
-        payload = quote_tokens.verify(token, token_secret, max_age_ms=max_age)
-    except quote_tokens.QuoteTokenExpired as exc:
-        return QuoteVerdict(accept=False, reason_code=ReasonCode.STALE_QUOTE, reason_detail=str(exc))
-    except quote_tokens.QuoteTokenInvalid as exc:
-        return QuoteVerdict(
-            accept=False,
-            reason_code=ReasonCode.STALE_QUOTE,
-            reason_detail=f"token invalid: {exc}",
-        )
+    market = check_market_hours(security_type=security_type, now=now)
+    if not market.accept:
+        return market
 
     if payload.ticker.upper() != ticker.upper() or payload.con_id != con_id:
         return QuoteVerdict(
             accept=False,
-            reason_code=ReasonCode.STALE_QUOTE,
+            reason_code=ReasonCode.QUOTE_CONTRACT_MISMATCH,
             reason_detail="token contract mismatch",
         )
 
     if payload.bid > payload.ask or payload.bid_size <= 0 or payload.ask_size <= 0:
         return QuoteVerdict(
             accept=False,
-            reason_code=ReasonCode.STALE_QUOTE,
+            reason_code=ReasonCode.QUOTE_UNAVAILABLE,
             reason_detail="crossed or zero-size quote",
         )
 
@@ -102,6 +100,41 @@ def check(
             )
 
     return QuoteVerdict(accept=True)
+
+
+def check(
+    *,
+    token: str,
+    token_secret: str,
+    con_id: int,
+    ticker: str,
+    security_type: Literal["STK", "OPT"],
+    action: Literal["BUY", "SELL"],
+    limit_price: Decimal,
+    now: datetime,
+    tick_rule_lookup: Callable[[int], Decimal],
+) -> QuoteVerdict:
+    try:
+        payload = quote_tokens.verify(token, token_secret, max_age_ms=MAX_AGE_RTH_MS)
+    except quote_tokens.QuoteTokenExpired as exc:
+        return QuoteVerdict(accept=False, reason_code=ReasonCode.STALE_QUOTE, reason_detail=str(exc))
+    except quote_tokens.QuoteTokenInvalid as exc:
+        return QuoteVerdict(
+            accept=False,
+            reason_code=ReasonCode.STALE_QUOTE,
+            reason_detail=f"token invalid: {exc}",
+        )
+
+    return check_payload(
+        payload=payload,
+        con_id=con_id,
+        ticker=ticker,
+        security_type=security_type,
+        action=action,
+        limit_price=limit_price,
+        now=now,
+        tick_rule_lookup=tick_rule_lookup,
+    )
 
 
 class TickRuleCache:

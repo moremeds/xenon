@@ -34,8 +34,12 @@ class ReasonCode(StrEnum):
     INSUFFICIENT_CASH = "INSUFFICIENT_CASH"
     INDEX_CALL_UNCOVERED = "INDEX_CALL_UNCOVERED"
     ETF_CALL_UNCOVERED = "ETF_CALL_UNCOVERED"
+    INVALID_ORDER_BODY = "INVALID_ORDER_BODY"
     # F3 — quote gate (PR-B)
     STALE_QUOTE = "STALE_QUOTE"
+    OPTION_MARKET_CLOSED = "OPTION_MARKET_CLOSED"
+    QUOTE_CONTRACT_MISMATCH = "QUOTE_CONTRACT_MISMATCH"
+    QUOTE_UNAVAILABLE = "QUOTE_UNAVAILABLE"
     LIMIT_OUT_OF_BAND = "LIMIT_OUT_OF_BAND"
     LIMIT_OFF_TICK = "LIMIT_OFF_TICK"
     # F4 — idempotency (PR-B)
@@ -48,6 +52,8 @@ class ReasonCode(StrEnum):
     MODIFY_SEQUENCE_REQUIRED = "MODIFY_SEQUENCE_REQUIRED"
     ORDER_NOT_FOUND = "ORDER_NOT_FOUND"
     ORDER_IDENTIFIER_REQUIRED = "ORDER_IDENTIFIER_REQUIRED"
+    PORTFOLIO_SNAPSHOT_REQUIRED = "PORTFOLIO_SNAPSHOT_REQUIRED"
+    READ_ONLY_BROKER = "READ_ONLY_BROKER"
     # F7 — pending timeout (PR-D)
     PENDING_TIMEOUT = "PENDING_TIMEOUT"
     # B5 — hard subprocess failure on /orders/place (non-2xx from runner).
@@ -66,6 +72,22 @@ class PreflightRequest(BaseModel):
     strike: Decimal | None = None
     multiplier: int = 100
     limit_price: Decimal
+
+
+class ComboPreflightLeg(BaseModel):
+    expiry: str | None = None
+    strike: Decimal | None = None
+    right: Literal["C", "P"]
+    action: Literal["BUY", "SELL"]
+    ratio: int = Field(gt=0)
+
+
+class ComboPreflightRequest(BaseModel):
+    ticker: str
+    action: Literal["BUY", "SELL"]
+    quantity: int = Field(gt=0)
+    multiplier: int = 100
+    legs: list[ComboPreflightLeg] = Field(min_length=1)
 
 
 class PortfolioLeg(BaseModel):
@@ -113,6 +135,14 @@ class Verdict(BaseModel):
     accept: bool
     reason_code: ReasonCode | None = None
     reason_detail: str | None = None
+
+
+def combo_uncovered_short_call_ratio(req: ComboPreflightRequest) -> int:
+    if req.action == "SELL":
+        return 0
+    sell_call_ratio = sum(leg.ratio for leg in req.legs if leg.action == "SELL" and leg.right == "C")
+    buy_call_ratio = sum(leg.ratio for leg in req.legs if leg.action == "BUY" and leg.right == "C")
+    return max(sell_call_ratio - buy_call_ratio, 0)
 
 
 def _normalize_expiry(expiry: str | None) -> str | None:
@@ -181,6 +211,62 @@ def _count_existing_short_calls(positions: list[PortfolioPosition], ticker: str)
             if leg.type == "Call" and leg.direction == "SHORT":
                 total += leg.contracts
     return total
+
+
+def evaluate_combo(
+    req: ComboPreflightRequest,
+    portfolio: PortfolioView,
+    reservations: WorkingReservations | None = None,
+) -> Verdict:
+    """Evaluate Gate 4 for IB BAG combos.
+
+    The BAG envelope action stays BUY for opens; leg actions define the
+    structure. Closing combo envelopes (SELL) reduce exposure and are allowed
+    after universe validation.
+    """
+    reservations = reservations or WorkingReservations()
+
+    if not is_known(req.ticker):
+        return Verdict(
+            accept=False,
+            reason_code=ReasonCode.UNIVERSE_UNKNOWN,
+            reason_detail=f"{req.ticker} not in V1 universe",
+        )
+
+    if req.action == "SELL":
+        return Verdict(accept=True)
+
+    uncovered_ratio = combo_uncovered_short_call_ratio(req)
+    if uncovered_ratio <= 0:
+        return Verdict(accept=True)
+
+    new_uncovered_calls = uncovered_ratio * req.quantity
+    if is_index(req.ticker):
+        return Verdict(
+            accept=False,
+            reason_code=ReasonCode.INDEX_CALL_UNCOVERED,
+            reason_detail=(
+                f"Combo opens {new_uncovered_calls} uncovered {req.ticker} short call(s); "
+                "index options require long-call cover in the combo"
+            ),
+        )
+
+    existing_short = _count_existing_short_calls(portfolio.positions, req.ticker)
+    shares = _count_long_shares(portfolio.positions, req.ticker)
+    share_cover_units = max(shares - reservations.stock_sell_qty, 0) // req.multiplier
+    total_short_after = existing_short + reservations.short_call_qty + new_uncovered_calls
+    if total_short_after > share_cover_units:
+        return Verdict(
+            accept=False,
+            reason_code=ReasonCode.ETF_CALL_UNCOVERED,
+            reason_detail=(
+                f"Combo opens {new_uncovered_calls} uncovered {req.ticker} short call(s); "
+                f"existing short calls {existing_short}, reserved {reservations.short_call_qty}, "
+                f"share-cover units {share_cover_units}"
+            ),
+        )
+
+    return Verdict(accept=True)
 
 
 def evaluate(
