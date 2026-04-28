@@ -815,23 +815,21 @@ describe("POST /api/orders/modify — extended", () => {
   });
 
   it("returns success when modify succeeds", async () => {
-    mockReadDataFile.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        open_orders: [
-          { orderId: 101, permId: 0, totalQuantity: 25, limitPrice: 5.5 },
-        ],
-        executed_orders: [],
-        open_count: 1,
-        executed_count: 0,
-      },
-    });
+    const ordersPayload = {
+      open_orders: [
+        { orderId: 101, permId: 0, totalQuantity: 25, limitPrice: 5.5 },
+      ],
+      executed_orders: [],
+      open_count: 1,
+      executed_count: 0,
+    };
     mockXenonFetch
       .mockResolvedValueOnce({
         status: "ok",
         message: "Order 101 modified to 5.50",
       })
-      .mockResolvedValueOnce({});
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(ordersPayload);
 
     const { POST } = await import("../app/api/orders/modify/route");
     const res = await POST(
@@ -846,7 +844,8 @@ describe("POST /api/orders/modify — extended", () => {
     const body = await res.json();
     expect(body.status).toBe("ok");
     expect(body.message).toBe("Order 101 modified to 5.50");
-    expect(body.orders).toBeDefined();
+    expect(body.orders).toEqual(ordersPayload);
+    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
   it("returns 500 when modify fails via xenonFetch", async () => {
@@ -883,23 +882,21 @@ describe("POST /api/orders/modify — extended", () => {
   });
 
   it("returns success when quantity-only modify succeeds", async () => {
-    mockReadDataFile.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        open_orders: [
-          { orderId: 101, permId: 0, totalQuantity: 75, limitPrice: 5.0 },
-        ],
-        executed_orders: [],
-        open_count: 1,
-        executed_count: 0,
-      },
-    });
+    const ordersPayload = {
+      open_orders: [
+        { orderId: 101, permId: 0, totalQuantity: 75, limitPrice: 5.0 },
+      ],
+      executed_orders: [],
+      open_count: 1,
+      executed_count: 0,
+    };
     mockXenonFetch
       .mockResolvedValueOnce({
         status: "ok",
         message: "Order 101 quantity modified to 75",
       })
-      .mockResolvedValueOnce({});
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(ordersPayload);
 
     const { POST } = await import("../app/api/orders/modify/route");
     const res = await POST(
@@ -918,31 +915,30 @@ describe("POST /api/orders/modify — extended", () => {
       permId: 0,
       newQuantity: 75,
     });
+    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
   it("returns 502 when refreshed orders do not confirm the modified price", async () => {
-    mockReadDataFile.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        open_orders: [
-          {
-            orderId: 95,
-            permId: 653624857,
-            totalQuantity: 50,
-            limitPrice: 5.7,
-          },
-        ],
-        executed_orders: [],
-        open_count: 1,
-        executed_count: 0,
-      },
-    });
+    const ordersPayload = {
+      open_orders: [
+        {
+          orderId: 95,
+          permId: 653624857,
+          totalQuantity: 50,
+          limitPrice: 5.7,
+        },
+      ],
+      executed_orders: [],
+      open_count: 1,
+      executed_count: 0,
+    };
     mockXenonFetch
       .mockResolvedValueOnce({
         status: "ok",
         message: "Order modified: $5.7 → $5.55",
       })
-      .mockResolvedValueOnce({});
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(ordersPayload);
 
     const { POST } = await import("../app/api/orders/modify/route");
     const res = await POST(
@@ -960,9 +956,17 @@ describe("POST /api/orders/modify — extended", () => {
 
     const body = await res.json();
     expect(String(body.error).toLowerCase()).toContain("not confirmed");
+    expect(body.orders).toEqual(ordersPayload);
+    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
   it("replaces combo orders via cancel then place when replacement payload provided", async () => {
+    const ordersPayload = {
+      open_orders: [],
+      executed_orders: [],
+      open_count: 0,
+      executed_count: 0,
+    };
     mockXenonFetch
       .mockResolvedValueOnce({ status: "ok", message: "Order cancelled" })
       .mockResolvedValueOnce({ status: "ok", message: "Order cancelled" })
@@ -972,7 +976,8 @@ describe("POST /api/orders/modify — extended", () => {
         orderId: 202,
         permId: 999,
       })
-      .mockResolvedValueOnce({});
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(ordersPayload);
 
     const { POST } = await import("../app/api/orders/modify/route");
     const res = await POST(
@@ -1015,7 +1020,7 @@ describe("POST /api/orders/modify — extended", () => {
     );
     expect(res.status).toBe(200);
 
-    expect(mockXenonFetch).toHaveBeenCalledTimes(4);
+    expect(mockXenonFetch).toHaveBeenCalledTimes(5);
     expect(mockXenonFetch.mock.calls[0][0]).toBe("/orders/cancel");
     expect(
       JSON.parse(String(mockXenonFetch.mock.calls[0][1].body)),
@@ -1031,6 +1036,8 @@ describe("POST /api/orders/modify — extended", () => {
       permId: 653611588,
     });
     expect(mockXenonFetch.mock.calls[2][0]).toBe("/orders/place");
+    expect(mockXenonFetch.mock.calls[3][0]).toBe("/orders/refresh");
+    expect(mockXenonFetch.mock.calls[4][0]).toBe("/orders");
     expect(
       JSON.parse(String(mockXenonFetch.mock.calls[2][1].body)),
     ).toMatchObject({
@@ -1056,6 +1063,7 @@ describe("POST /api/orders/modify — extended", () => {
         },
       ],
     });
+    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
   it("returns 400 when modify fields are missing", async () => {
