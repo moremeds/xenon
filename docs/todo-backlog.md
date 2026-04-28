@@ -272,3 +272,29 @@ when scoping starts.
   to IB to avoid eating UW budget on a passive monitor. Alert delivery
   channel ties back to **todo #1 (rule-based portfolio management)** — same
   alert plumbing, different trigger.
+
+- 2026-04-28 — **Order-path regression prevention (layered automation)** —
+  PR #61 (`fix/order-placement-reliability`, merged 2026-04-28) shipped
+  five distinct order-path bug fixes in one branch and skipped the live
+  paper smoke test. Build out a layered automation strategy so the same
+  five regression classes (silent JSON fallback after Postgres migration,
+  in-process bypass of route guards, reason-code overloading, optional
+  fields that should be required, untested live broker contract drift)
+  cannot recur. Six layers: edit-time Claude hook → pre-commit AST grep
+  → CI path-filtered structural tests → pre-merge live paper smoke →
+  nightly safety net → auto codex review on order-path PRs. Full design
+  in **`docs/plans/2026-04-28-order-path-regression-prevention.md`**.
+  **Notes:** Highest-leverage layer is the live paper smoke (Layer 4) —
+  it's the only one that catches _unknown_ regression shapes. The other
+  five lock in known shapes from the `[Postgres read-side gap]`,
+  `[In-process route bypass]`, and `[Live E2E surfaces contract bugs]`
+  memories, all of which have already burned this repo at least twice.
+  Recommended starting point if anyone has half a day: Layer 2
+  (pre-commit AST grep ~1h) + Layer 1 (edit-time hook ~30m) — together
+  they lock in the two most-burned patterns in under two hours. Total
+  full-coverage effort: ~3 person-days. Tradeoff: layered guards add
+  inner-loop friction and flake surface, but for an order path that
+  asymmetry is correct — false-positive retries cost minutes, a single
+  naked-short order reaching IB costs real money. Provide
+  `--no-verify` / `skip-smoke` bypasses for genuine emergencies. Depends
+  on no other backlog item; can be picked up independently.
