@@ -431,10 +431,20 @@ Examples:
     query_id = args.query_id or os.environ.get("IB_FLEX_QUERY_ID")
 
     if not token or not query_id:
-        print("Error: Flex Query credentials required.")
-        print("       Use --token and --query-id, or set IB_FLEX_TOKEN and IB_FLEX_QUERY_ID")
-        print("       Run with --setup for configuration guide.")
-        return 1
+        # Emit a structured marker on stderr so the FastAPI wrapper can
+        # distinguish "not configured" from real failures and translate to
+        # a friendly empty state instead of a red 502. Plan: docs/plans/
+        # 2026-04-28-postgres-migration-completion-IMPL.md § W2.1.
+        missing = []
+        if not token:
+            missing.append("IB_FLEX_TOKEN")
+        if not query_id:
+            missing.append("IB_FLEX_QUERY_ID")
+        marker = json.dumps({"error": "FLEX_NOT_CONFIGURED", "missing": missing})
+        print(marker, file=sys.stderr)
+        # Distinct exit code so the wrapper's exit_code branch can match
+        # without parsing stderr text.
+        return 2
 
     try:
         # Fetch executions
@@ -450,8 +460,6 @@ Examples:
         blotter = TradeBlotter(trades=trades, as_of=datetime.now())
 
         if args.json:
-            import json
-
             from xenon.trade_blotter.cli import DecimalEncoder, blotter_to_dict
 
             print(json.dumps(blotter_to_dict(blotter), cls=DecimalEncoder, indent=2))
