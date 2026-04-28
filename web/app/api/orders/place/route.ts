@@ -235,6 +235,7 @@ export async function POST(request: Request): Promise<Response> {
       status: "ok",
       orderId: orderResult.orderId,
       permId: orderResult.permId,
+      tif: orderResult.tif ?? orderPayload.tif,
       initialStatus: orderResult.initialStatus,
       message: orderResult.message,
       orders: refreshedOrders,

@@ -48,6 +48,7 @@ describe("POST /api/orders/place — FastAPI owns runtime Gate 4", () => {
         permId: 54321,
         initialStatus: "Submitted",
         message: "Order placed successfully",
+        tif: "GTC",
       })
       .mockResolvedValueOnce({});
     mockReadDataFile.mockImplementation(async (path: string) => {
@@ -71,12 +72,15 @@ describe("POST /api/orders/place — FastAPI owns runtime Gate 4", () => {
           action: "BUY",
           quantity: 1,
           limitPrice: 400,
+          tif: "GTC",
           client_attempt_id: "buy-stock-1",
         }),
       }),
     );
 
     expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.tif).toBe("GTC");
     expect(mockReadDataFile).not.toHaveBeenCalled();
     const forwarded = JSON.parse(mockXenonFetch.mock.calls[0][1].body as string);
     expect(forwarded.client_attempt_id).toBe("buy-stock-1");
