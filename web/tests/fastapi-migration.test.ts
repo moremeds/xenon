@@ -360,7 +360,7 @@ describe("GET /api/portfolio", () => {
 });
 
 // =============================================================================
-// POST /api/orders — via xenonFetch + cache fallback
+// POST /api/orders — via xenonFetch, no JSON-file fallback
 // =============================================================================
 
 describe("POST /api/orders (via xenonFetch)", () => {
@@ -372,8 +372,9 @@ describe("POST /api/orders (via xenonFetch)", () => {
       open_count: 0,
       executed_count: 0,
     };
-    mockXenonFetch.mockResolvedValue(orders);
-    mockReadDataFile.mockResolvedValue({ ok: true, data: orders });
+    mockXenonFetch
+      .mockResolvedValueOnce({ status: "ok" })
+      .mockResolvedValueOnce(orders);
 
     const { POST } = await import("../app/api/orders/route");
     const res = await POST();
@@ -382,37 +383,21 @@ describe("POST /api/orders (via xenonFetch)", () => {
     expect(body.open_count).toBe(0);
   });
 
-  it("falls back to cached orders when sync fails", async () => {
+  it("returns 502 when sync fails instead of serving cached orders", async () => {
     mockXenonFetch.mockRejectedValue(new Error("timeout"));
-    const cached = {
-      last_sync: "2026-03-13",
-      open_orders: [{ orderId: 1 }],
-      executed_orders: [],
-      open_count: 1,
-      executed_count: 0,
-    };
-    mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
 
     const { POST } = await import("../app/api/orders/route");
     const res = await POST();
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(502);
     const body = await res.json();
-    expect(body.open_count).toBe(1);
-    expect(res.headers.get("X-Sync-Warning")).toContain("cached");
+    expect(body.error).toContain("timeout");
+    expect(res.headers.get("X-Sync-Warning")).toBeNull();
   });
 
-  it("returns 502 when sync fails and no cache", async () => {
-    mockXenonFetch.mockRejectedValue(new Error("timeout"));
-    mockReadDataFile.mockResolvedValue({
-      ok: true,
-      data: {
-        last_sync: "",
-        open_orders: [],
-        executed_orders: [],
-        open_count: 0,
-        executed_count: 0,
-      },
-    });
+  it("returns 502 when refresh succeeds but the PG read fails", async () => {
+    mockXenonFetch
+      .mockResolvedValueOnce({ status: "ok" })
+      .mockRejectedValueOnce(new Error("timeout"));
 
     const { POST } = await import("../app/api/orders/route");
     const res = await POST();

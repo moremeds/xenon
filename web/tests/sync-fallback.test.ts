@@ -99,56 +99,55 @@ describe("POST /api/portfolio — sync failure fallback", () => {
   });
 });
 
-describe("POST /api/orders — sync failure fallback", () => {
+describe("POST /api/orders — PG-only refresh", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
     mockStat.mockResolvedValue({ mtimeMs: Date.now() });
   });
 
-  it("returns cached orders data with 200 when ibOrders sync fails", async () => {
-    const cached = makeOrders("2026-03-13T14:00:00Z");
+  it("returns 502 when refresh fails instead of serving cached orders", async () => {
     mockXenonFetch.mockRejectedValue(new Error("Connect call failed"));
-    mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
 
     const { POST } = await import("../app/api/orders/route");
     const response = await POST();
     const body = await response.json();
 
-    expect(response.status).toBe(200);
-    expect(body.last_sync).toBe("2026-03-13T14:00:00Z");
-    expect(body.open_orders).toEqual([]);
+    expect(response.status).toBe(502);
+    expect(body.error).toContain("Connect call failed");
     expect(mockXenonFetch).toHaveBeenCalledWith(
       "/orders/refresh",
       expect.objectContaining({ method: "POST" }),
     );
+    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
-  it("sets X-Sync-Warning header when falling back to cached orders", async () => {
-    const cached = makeOrders("2026-03-13T14:00:00Z");
+  it("does not set X-Sync-Warning header because cache fallback is removed", async () => {
     mockXenonFetch.mockRejectedValue(new Error("Connect call failed"));
-    mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
 
     const { POST } = await import("../app/api/orders/route");
     const response = await POST();
 
-    expect(response.headers.get("X-Sync-Warning")).toBeTruthy();
+    expect(response.headers.get("X-Sync-Warning")).toBeNull();
   });
 
-  it("returns 502 only when sync fails AND no cached orders exist", async () => {
-    mockXenonFetch.mockRejectedValue(new Error("Connect call failed"));
-    mockReadDataFile.mockResolvedValue({ ok: false, error: "File not found" });
+  it("returns 502 when refresh succeeds but the PG orders read fails", async () => {
+    mockXenonFetch
+      .mockResolvedValueOnce({ status: "ok" })
+      .mockRejectedValueOnce(new Error("PG unavailable"));
 
     const { POST } = await import("../app/api/orders/route");
     const response = await POST();
 
     expect(response.status).toBe(502);
+    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
-  it("returns orders data with 200 when sync succeeds", async () => {
-    const cached = makeOrders("2026-03-13T15:00:00Z");
-    mockXenonFetch.mockResolvedValue({ ok: true });
-    mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
+  it("returns PG orders data with 200 when refresh succeeds", async () => {
+    const orders = makeOrders("2026-03-13T15:00:00Z");
+    mockXenonFetch
+      .mockResolvedValueOnce({ status: "ok" })
+      .mockResolvedValueOnce(orders);
 
     const { POST } = await import("../app/api/orders/route");
     const response = await POST();
@@ -157,5 +156,6 @@ describe("POST /api/orders — sync failure fallback", () => {
     expect(response.status).toBe(200);
     expect(body.last_sync).toBe("2026-03-13T15:00:00Z");
     expect(response.headers.get("X-Sync-Warning")).toBeNull();
+    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 });

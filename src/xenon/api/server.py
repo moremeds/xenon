@@ -42,6 +42,8 @@ from xenon.api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_m
 from xenon.api.ib_pool import IBPool
 from xenon.api.pool_order_manage import pool_cancel_order, pool_modify_order
 from xenon.api.routes.historical import router as historical_router
+from xenon.api.routes.orders import orders_payload_for_scope
+from xenon.api.routes.orders import router as orders_router
 from xenon.api.routes.trades import router as trades_router
 from xenon.api.routes.uw_analyze import router as uw_analyze_router
 from xenon.api.routes.uw_stats import router as uw_stats_router
@@ -475,6 +477,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Xenon API", version="1.0.0", lifespan=lifespan)
 app.include_router(historical_router)
+app.include_router(orders_router)
 app.include_router(trades_router)
 app.include_router(uw_analyze_router)
 app.include_router(uw_stats_router)
@@ -1439,7 +1442,7 @@ async def _bg_sync_via_subprocess():
 
 
 @app.post("/orders/refresh", dependencies=[Depends(require_mode_verified)])
-async def orders_refresh():
+async def orders_refresh(scope=Depends(get_account_scope)):
     """Sync orders from IB via subprocess.
 
     Scripts auto-allocate client IDs from subprocess range (20-49).
@@ -1453,11 +1456,7 @@ async def orders_refresh():
     )
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
-    # ib_orders.py writes to data/orders.json; read it back
-    cache = _read_cache(DATA_DIR / "orders.json")
-    if cache:
-        return cache
-    raise HTTPException(status_code=502, detail="Failed to read synced orders")
+    return orders_payload_for_scope(scope)
 
 
 # ---------------------------------------------------------------------------
