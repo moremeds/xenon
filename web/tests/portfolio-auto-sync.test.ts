@@ -1,5 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+vi.mock("next/server", () => ({
+  NextResponse: {
+    json: (body: unknown, init?: ResponseInit) =>
+      new Response(JSON.stringify(body), {
+        ...init,
+        headers: {
+          "content-type": "application/json",
+          ...(init?.headers ?? {}),
+        },
+      }),
+  },
+}));
+
 /**
  * Verifies the GET /api/portfolio stale-while-revalidate behavior after the
  * Phase 1 postgres read-path migration: the route now calls FastAPI
@@ -11,7 +24,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const mockXenonFetch = vi.fn();
 vi.mock("@/lib/xenonApi", () => ({ xenonFetch: mockXenonFetch }));
 
-// Mock fs (only trade_log.json reads remain).
+// Mock fs so this route cannot silently regress to trade_log.json.
 const mockReadFile = vi.fn();
 vi.mock("fs/promises", () => ({ readFile: mockReadFile }));
 
@@ -41,14 +54,38 @@ describe("GET /api/portfolio — stale-while-revalidate background sync", () => 
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
-    mockReadFile.mockResolvedValue("[]"); // empty trade log
+    mockXenonFetch.mockReset();
+    mockReadFile.mockReset();
+    mockReadFile.mockImplementation(async (path: string) => {
+      throw new Error(`portfolio route must not read trade_log.json: ${path}`);
+    });
+  });
+
+  it("loads entry dates from FastAPI without reading trade_log.json", async () => {
+    const portfolio = makePortfolio(ageAgo(10_000));
+    mockXenonFetch
+      .mockResolvedValueOnce(portfolio)
+      .mockResolvedValueOnce({ AAPL: "2026-03-01T14:00:00+00:00" });
+
+    const { GET } = await import("../app/api/portfolio/route");
+    const response = await GET();
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.trade_log_dates).toEqual({ AAPL: "2026-03-01T14:00:00+00:00" });
+    expect(mockReadFile).not.toHaveBeenCalled();
+    expect(mockXenonFetch.mock.calls.map((call) => call[0])).toEqual([
+      "/portfolio",
+      "/trades/entry-dates",
+    ]);
   });
 
   it("triggers FastAPI background sync when last_sync is >60 s old", async () => {
     const portfolio = makePortfolio(ageAgo(90_000));
     mockXenonFetch
       .mockResolvedValueOnce(portfolio) // GET /portfolio
-      .mockResolvedValueOnce({ ok: true }); // POST /portfolio/background-sync
+      .mockResolvedValueOnce({ ok: true }) // POST /portfolio/background-sync
+      .mockResolvedValueOnce({}); // GET /trades/entry-dates
 
     const { GET } = await import("../app/api/portfolio/route");
     const response = await GET();
@@ -56,22 +93,24 @@ describe("GET /api/portfolio — stale-while-revalidate background sync", () => 
 
     expect(response.status).toBe(200);
     expect(body.last_sync).toBe(portfolio.last_sync);
-    expect(mockXenonFetch).toHaveBeenCalledTimes(2);
+    expect(mockXenonFetch).toHaveBeenCalledTimes(3);
     expect(mockXenonFetch.mock.calls[0]?.[0]).toBe("/portfolio");
     expect(mockXenonFetch.mock.calls[1]?.[0]).toBe(
       "/portfolio/background-sync",
     );
+    expect(mockXenonFetch.mock.calls[2]?.[0]).toBe("/trades/entry-dates");
   });
 
   it("does NOT trigger FastAPI sync when last_sync is <60 s old (fresh)", async () => {
     const portfolio = makePortfolio(ageAgo(10_000));
-    mockXenonFetch.mockResolvedValueOnce(portfolio);
+    mockXenonFetch.mockResolvedValueOnce(portfolio).mockResolvedValueOnce({});
 
     const { GET } = await import("../app/api/portfolio/route");
     await GET();
 
-    expect(mockXenonFetch).toHaveBeenCalledOnce();
+    expect(mockXenonFetch).toHaveBeenCalledTimes(2);
     expect(mockXenonFetch.mock.calls[0]?.[0]).toBe("/portfolio");
+    expect(mockXenonFetch.mock.calls[1]?.[0]).toBe("/trades/entry-dates");
   });
 
   it("triggers background sync when FastAPI returns 404 (no snapshot yet)", async () => {
@@ -95,6 +134,7 @@ describe("GET /api/portfolio — stale-while-revalidate background sync", () => 
     let bgCalls = 0;
     mockXenonFetch.mockImplementation((path: string) => {
       if (path === "/portfolio") return Promise.resolve(portfolio);
+      if (path === "/trades/entry-dates") return Promise.resolve({});
       // Background sync — never-resolving so the in-flight guard stays armed.
       bgCalls += 1;
       return new Promise(() => {});
