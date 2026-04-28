@@ -3522,7 +3522,20 @@ export function HistoricalTradesSection() {
             <TableSkeleton rows={5} columns={8} />
           </div>
         )}
-        {!loading && !hasData && !error && (
+        {!loading && !error && data?.configured === false && (
+          <div className="alert-item section-message">
+            <div>
+              {data.message ?? "Historical trades source not configured."}
+            </div>
+            <div
+              style={{ marginTop: "0.5rem", opacity: 0.7, fontSize: "0.85em" }}
+            >
+              Recent fills will populate from Postgres once the order pipeline
+              records them. IB Flex Query stays as an optional audit overlay.
+            </div>
+          </div>
+        )}
+        {!loading && !hasData && !error && data?.configured !== false && (
           <div className="alert-item section-message">
             No historical trades. Click REFRESH to fetch from IB.
           </div>

@@ -399,8 +399,10 @@ export type BlotterTrade = {
   executions: BlotterExecution[];
 };
 
+export type BlotterSource = "postgres" | "flex" | "postgres+flex" | "none";
+
 export type BlotterData = {
-  as_of: string;
+  as_of: string | null;
   summary: {
     closed_trades: number;
     open_trades: number;
@@ -409,6 +411,15 @@ export type BlotterData = {
   };
   closed_trades: BlotterTrade[];
   open_trades: BlotterTrade[];
+  /** True when at least one data source (PG or Flex) is configured.
+   * False indicates the empty-state path: render setup hint, not an error.
+   * Plan: docs/plans/2026-04-28-postgres-migration-completion-IMPL.md § W2.1.
+   */
+  configured?: boolean;
+  /** Which source produced this payload. "none" means empty-state. */
+  source?: BlotterSource;
+  /** Human-readable hint shown alongside the empty state when configured=false. */
+  message?: string;
 };
 
 // Scanner types — Trend Scanner v2

@@ -51,6 +51,7 @@ from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
 from xenon.db.engine import dispose_engine, get_sync_engine, init_engine
 from xenon.db.schema import account_snapshots, order_events, order_submissions
 from xenon.execution import orders_store, preflight, quote_guard, quote_tokens
+from xenon.execution.account_scope import resolve_from_app_state
 from xenon.execution.preflight import (
     PortfolioView,
     PreflightRequest,
@@ -58,7 +59,6 @@ from xenon.execution.preflight import (
     Verdict,
 )
 from xenon.execution.quote_tokens import QuotePayload
-from xenon.execution.account_scope import resolve_from_app_state
 
 # Load .env from project root for Python scripts
 try:
@@ -2834,12 +2834,44 @@ async def internals_skew_history(
 
 @app.post("/blotter")
 async def blotter_sync():
-    """Run IB Flex Query for historical trades. 120s timeout."""
+    """Run IB Flex Query for historical trades. 120s timeout.
+
+    When IB_FLEX_TOKEN / IB_FLEX_QUERY_ID are unset, return a structured
+    empty payload with configured=False rather than a 502, so the UI can
+    show a friendly empty state. The Flex CLI emits exit code 2 + a
+    JSON marker `{"error":"FLEX_NOT_CONFIGURED",...}` for that case
+    (see src/xenon/trade_blotter/flex_query.py). Plan: docs/plans/
+    2026-04-28-postgres-migration-completion-IMPL.md § W2.1.
+    """
     result = await run_module("xenon.trade_blotter.flex_query", ["--json"], timeout=120)
     if not result.ok:
+        is_unconfigured = result.exit_code == 2 or (result.error and "FLEX_NOT_CONFIGURED" in result.error)
+        if is_unconfigured:
+            payload = {
+                "configured": False,
+                "as_of": None,
+                "summary": {
+                    "closed_trades": 0,
+                    "open_trades": 0,
+                    "total_commissions": 0,
+                    "realized_pnl": 0,
+                },
+                "closed_trades": [],
+                "open_trades": [],
+                "source": "none",
+                "message": (
+                    "IB Flex Query not configured. Set IB_FLEX_TOKEN and "
+                    "IB_FLEX_QUERY_ID in .env, then click Refresh. Run "
+                    "`uv run python -m xenon.trade_blotter.flex_query --setup` "
+                    "for the configuration guide."
+                ),
+            }
+            _write_cache(DATA_DIR / "blotter.json", payload)
+            return payload
         raise HTTPException(status_code=502, detail=result.error)
-    _write_cache(DATA_DIR / "blotter.json", result.data)
-    return result.data
+    payload = {**result.data, "configured": True, "source": "flex"}
+    _write_cache(DATA_DIR / "blotter.json", payload)
+    return payload
 
 
 # ---------------------------------------------------------------------------
