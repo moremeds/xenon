@@ -117,6 +117,30 @@ trades = Table(
     Index("ix_trades_combo_attempt", "combo_attempt_id"),
 )
 
+journal_entries = Table(
+    "journal_entries",
+    xenon_metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("trade_id", BigInteger, ForeignKey(f"{XENON_SCHEMA}.trades.id"), nullable=True),
+    Column("ticker", Text, nullable=False),
+    Column("decision", Text),
+    Column("note", Text),
+    Column("attachments", JSONB),
+    Column("authored_by", Text),
+    Column("authored_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Column("metadata", JSONB),
+    Column("broker", Text, nullable=False, server_default=text("'IB'")),
+    Column("account_env", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    Column("broker_account", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    CheckConstraint("broker IN ('IB','FUTU')", name="ck_journal_broker"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
+        name="ck_journal_account_env",
+    ),
+    Index("ix_journal_ticker_at", "ticker", "authored_at"),
+    Index("ix_journal_scope_at", "broker", "account_env", "broker_account", "authored_at"),
+)
+
 nav_history = Table(
     "nav_history",
     xenon_metadata,

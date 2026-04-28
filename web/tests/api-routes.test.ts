@@ -804,11 +804,12 @@ describe("GET /api/journal", () => {
   beforeEach(async () => {
     vi.resetModules();
     mockReadFile.mockReset();
+    mockXenonFetch.mockReset();
     const mod = await import("../app/api/journal/route");
     GET = mod.GET;
   });
 
-  it("returns trade data when file exists", async () => {
+  it("returns trade data from FastAPI", async () => {
     const tradeLog = {
       trades: [
         {
@@ -829,7 +830,7 @@ describe("GET /api/journal", () => {
         },
       ],
     };
-    mockReadFile.mockResolvedValue(JSON.stringify(tradeLog));
+    mockXenonFetch.mockResolvedValueOnce(tradeLog);
 
     const res = await GET();
     expect(res.status).toBe(200);
@@ -837,12 +838,15 @@ describe("GET /api/journal", () => {
     expect(body.trades).toHaveLength(2);
     expect(body.trades[0].ticker).toBe("GOOG");
     expect(body.trades[1].ticker).toBe("AMD");
+    expect(mockReadFile).not.toHaveBeenCalled();
+    expect(mockXenonFetch).toHaveBeenCalledWith(
+      "/journal",
+      expect.objectContaining({ method: "GET", timeout: 10_000 }),
+    );
   });
 
-  it("returns 500 with empty trades when file not found", async () => {
-    mockReadFile.mockRejectedValue(
-      new Error("ENOENT: no such file or directory"),
-    );
+  it("returns 500 with empty trades when FastAPI is unavailable", async () => {
+    mockXenonFetch.mockRejectedValueOnce(new Error("journal unavailable"));
 
     const res = await GET();
     expect(res.status).toBe(500);

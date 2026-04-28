@@ -48,6 +48,7 @@ def _postgres_orders_test_db(monkeypatch):
                     "xenon.uw_analyze_snapshots",
                     "xenon.positions",
                     "xenon.account_snapshots",
+                    "xenon.journal_entries",
                     "xenon.trades",
                     "xenon.nav_history",
                     "xenon.scan_results",

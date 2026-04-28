@@ -50,6 +50,7 @@ def _truncate_postgres_tables() -> None:
                 "xenon.uw_analyze_snapshots",
                 "xenon.positions",
                 "xenon.account_snapshots",
+                "xenon.journal_entries",
                 "xenon.trades",
                 "xenon.nav_history",
                 "xenon.gex_snapshots",

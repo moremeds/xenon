@@ -42,6 +42,7 @@ from xenon.api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_m
 from xenon.api.ib_pool import IBPool
 from xenon.api.pool_order_manage import pool_cancel_order, pool_modify_order
 from xenon.api.routes.historical import router as historical_router
+from xenon.api.routes.journal import router as journal_router
 from xenon.api.routes.orders import orders_payload_for_scope
 from xenon.api.routes.orders import router as orders_router
 from xenon.api.routes.trades import router as trades_router
@@ -477,6 +478,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Xenon API", version="1.0.0", lifespan=lifespan)
 app.include_router(historical_router)
+app.include_router(journal_router)
 app.include_router(orders_router)
 app.include_router(trades_router)
 app.include_router(uw_analyze_router)
