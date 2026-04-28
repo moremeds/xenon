@@ -1066,6 +1066,10 @@ describe("POST /api/orders/modify — extended", () => {
 // =============================================================================
 
 describe("POST /api/orders/place — extended", () => {
+  const placeOrderBase = {
+    client_attempt_id: "test-place-extended",
+  };
+
   beforeEach(() => {
     vi.resetModules();
     mockXenonFetch.mockReset();
@@ -1098,6 +1102,7 @@ describe("POST /api/orders/place — extended", () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          ...placeOrderBase,
           type: "stock",
           symbol: "AAPL",
           action: "BUY",
@@ -1125,6 +1130,7 @@ describe("POST /api/orders/place — extended", () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          ...placeOrderBase,
           type: "stock",
           symbol: "GOOG",
           action: "BUY",
@@ -1169,6 +1175,7 @@ describe("POST /api/orders/place — extended", () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          ...placeOrderBase,
           type: "option",
           symbol: "AAPL",
           action: "BUY",
@@ -1200,6 +1207,7 @@ describe("POST /api/orders/place — extended", () => {
 
 describe("POST /api/orders/place — silent IB rejection states", () => {
   const SPXU_COMBO_BODY = {
+    client_attempt_id: "test-spxu-combo",
     type: "combo",
     symbol: "SPXU",
     action: "SELL",

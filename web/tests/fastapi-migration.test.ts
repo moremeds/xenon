@@ -517,6 +517,8 @@ describe("POST /api/orders/modify (via xenonFetch)", () => {
 // =============================================================================
 
 describe("POST /api/orders/place (via xenonFetch)", () => {
+  const client_attempt_id = "test-fastapi-migration";
+
   it("returns 400 when symbol is missing", async () => {
     const { POST } = await import("../app/api/orders/place/route");
     const req = makeRequest("http://localhost/api/orders/place", {
@@ -547,6 +549,7 @@ describe("POST /api/orders/place (via xenonFetch)", () => {
         action: "BUY",
         quantity: 10,
         limitPrice: 150,
+        client_attempt_id,
       }),
     });
     const res = await POST(req);
@@ -573,6 +576,7 @@ describe("POST /api/orders/place (via xenonFetch)", () => {
         action: "BUY",
         quantity: 10,
         limitPrice: 150,
+        client_attempt_id,
       }),
     });
     const res = await POST(req);
@@ -606,6 +610,7 @@ describe("POST /api/orders/place (via xenonFetch)", () => {
         action: "BUY",
         quantity: 10,
         limitPrice: 150,
+        client_attempt_id,
       }),
     });
     const res = await POST(req);
@@ -641,6 +646,7 @@ describe("POST /api/orders/place (via xenonFetch)", () => {
         action: "BUY",
         quantity: 1,
         limitPrice: 2.5,
+        client_attempt_id,
         legs: [
           {
             symbol: "AAPL",
