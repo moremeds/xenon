@@ -19,8 +19,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from xenon.db.events import CHANNEL_FILL_RECORDED, emit_outbox_in_txn
 from xenon.db.engine import get_sync_engine
-from xenon.db.schema import order_events, order_submissions
+from xenon.db.schema import order_events, order_fills, order_submissions
 
 # ── Schema init ──
 
@@ -368,6 +369,84 @@ def mark_terminal(
                 updated_at=now,
             )
         )
+
+
+def record_fill(
+    *,
+    exec_id: str,
+    submission_id: str | None,
+    combo_attempt_id: str | None = None,
+    perm_id: str | None,
+    ib_order_id: str | None = None,
+    con_id: int | None,
+    ticker: str,
+    side: str,
+    qty: int,
+    price: Decimal,
+    commission: Decimal = Decimal(0),
+    filled_at: datetime,
+    metadata: dict | None = None,
+    broker: str,
+    account_env: str,
+    broker_account: str,
+) -> bool:
+    """Idempotently record one execution-grain fill and emit fill.recorded."""
+    if account_env == "legacy_unknown" or broker_account == "legacy_unknown":
+        raise ValueError("record_fill requires explicit account scope")
+
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        stmt = (
+            pg_insert(order_fills)
+            .values(
+                exec_id=exec_id,
+                submission_id=submission_id,
+                combo_attempt_id=combo_attempt_id,
+                perm_id=perm_id,
+                ib_order_id=str(ib_order_id) if ib_order_id is not None else None,
+                con_id=con_id,
+                ticker=ticker,
+                side=side,
+                qty=qty,
+                price=price,
+                commission=commission,
+                filled_at=filled_at,
+                metadata=metadata,
+                broker=broker,
+                account_env=account_env,
+                broker_account=broker_account,
+            )
+            .on_conflict_do_nothing(index_elements=["exec_id"])
+            .returning(order_fills.c.exec_id)
+        )
+        inserted = conn.execute(stmt).first()
+        if inserted is None:
+            return False
+
+        emit_outbox_in_txn(
+            conn,
+            channel=CHANNEL_FILL_RECORDED,
+            source="record_fill",
+            payload={
+                "exec_id": exec_id,
+                "submission_id": submission_id,
+                "combo_attempt_id": combo_attempt_id,
+                "perm_id": perm_id,
+                "ib_order_id": str(ib_order_id) if ib_order_id is not None else None,
+                "con_id": con_id,
+                "ticker": ticker,
+                "side": side,
+                "qty": qty,
+                "price": str(price),
+                "commission": str(commission),
+                "filled_at": filled_at.isoformat(),
+                "metadata": metadata,
+                "broker": broker,
+                "account_env": account_env,
+                "broker_account": broker_account,
+            },
+        )
+        return True
 
 
 def record_event(
