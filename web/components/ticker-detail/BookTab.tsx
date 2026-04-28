@@ -6,6 +6,7 @@ import type { PriceData } from "@/lib/pricesProtocol";
 import { fmtPrice } from "@/lib/positionUtils";
 import OrderErrorBanner from "@/components/OrderErrorBanner";
 import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
+import { OrderTifSelector } from "@/lib/order/components/OrderTifSelector";
 import { useClientAttemptId } from "./useClientAttemptId";
 import { getReasonToast } from "@/lib/orderReasonCodes";
 
@@ -515,20 +516,13 @@ function StockOrderForm({
 
       <div className="order-field">
         <label className="order-label">Time in Force</label>
-        <div className="order-action-buttons">
-          <button
-            className={`order-action-btn ${tif === "DAY" ? "order-action-active" : ""}`}
-            onClick={() => setTif("DAY")}
-          >
-            DAY
-          </button>
-          <button
-            className={`order-action-btn ${tif === "GTC" ? "order-action-active" : ""}`}
-            onClick={() => setTif("GTC")}
-          >
-            GTC
-          </button>
-        </div>
+        <OrderTifSelector
+          tif={tif}
+          onChange={(value) => {
+            setTif(value);
+            setConfirmStep(false);
+          }}
+        />
       </div>
 
       <OrderErrorBanner error={error} />

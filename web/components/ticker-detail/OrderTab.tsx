@@ -16,6 +16,7 @@ import {
   type OrderPayload,
 } from "@/lib/nakedShortGuard";
 import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
+import { OrderTifSelector } from "@/lib/order/components/OrderTifSelector";
 import { fmtSignedPrice, toneClass } from "@/lib/format";
 import { getReasonToast } from "@/lib/orderReasonCodes";
 import { useClientAttemptId } from "./useClientAttemptId";
@@ -581,20 +582,14 @@ function NewOrderForm({
 
       <div className="order-field">
         <label className="order-label">Time in Force</label>
-        <div className="order-action-buttons">
-          <button
-            className={`order-action-btn ${tif === "DAY" ? "order-action-active" : ""}`}
-            onClick={() => setTif("DAY")}
-          >
-            DAY
-          </button>
-          <button
-            className={`order-action-btn ${tif === "GTC" ? "order-action-active" : ""}`}
-            onClick={() => setTif("GTC")}
-          >
-            GTC
-          </button>
-        </div>
+        <OrderTifSelector
+          tif={tif}
+          onChange={(value) => {
+            attemptId.onFieldEdit("tif");
+            setTif(value);
+            setConfirmStep(false);
+          }}
+        />
       </div>
 
       {nakedShortWarning && (
@@ -1283,20 +1278,14 @@ function ComboOrderForm({
       {/* TIF */}
       <div className="order-field">
         <label className="order-label">Time in Force</label>
-        <div className="order-action-buttons">
-          <button
-            className={`order-action-btn ${tif === "DAY" ? "order-action-active" : ""}`}
-            onClick={() => setTif("DAY")}
-          >
-            DAY
-          </button>
-          <button
-            className={`order-action-btn ${tif === "GTC" ? "order-action-active" : ""}`}
-            onClick={() => setTif("GTC")}
-          >
-            GTC
-          </button>
-        </div>
+        <OrderTifSelector
+          tif={tif}
+          onChange={(value) => {
+            attemptId.onFieldEdit("tif");
+            setTif(value);
+            setConfirmStep(false);
+          }}
+        />
       </div>
 
       {nakedShortWarning && (

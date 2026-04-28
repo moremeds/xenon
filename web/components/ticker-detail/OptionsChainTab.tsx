@@ -28,6 +28,7 @@ import {
   type OrderLeg as UnifiedOrderLeg,
   type OrderSummary,
 } from "@/lib/order";
+import { OrderTifSelector } from "@/lib/order/components/OrderTifSelector";
 import WizardModal from "@/components/ticker-detail/WizardModal";
 import WizardSessionStrip from "@/components/ticker-detail/WizardSessionStrip";
 import { useWizardLauncher } from "@/lib/useWizardLauncher";
@@ -961,20 +962,13 @@ function OrderBuilder({
       {/* TIF */}
       <div className="order-field" style={{ marginTop: "8px" }}>
         <label className="order-label">Time in Force</label>
-        <div className="order-action-buttons">
-          <button
-            className={`order-action-btn ${tif === "DAY" ? "order-action-active" : ""}`}
-            onClick={() => setTif("DAY")}
-          >
-            DAY
-          </button>
-          <button
-            className={`order-action-btn ${tif === "GTC" ? "order-action-active" : ""}`}
-            onClick={() => setTif("GTC")}
-          >
-            GTC
-          </button>
-        </div>
+        <OrderTifSelector
+          tif={tif}
+          onChange={(value) => {
+            setTif(value);
+            setConfirmStep(false);
+          }}
+        />
       </div>
 
       <OrderErrorBanner error={error} />

@@ -24,11 +24,19 @@ export function OrderTifSelector({
   disabled = false,
   className = "",
 }: OrderTifSelectorProps) {
+  const dayActive = tif === "DAY";
+  const gtcActive = tif === "GTC";
+
   return (
-    <div className={`order-tif-selector ${className}`.trim()}>
+    <div
+      className={`order-tif-selector ${className}`.trim()}
+      role="group"
+      aria-label="Time in force"
+    >
       <button
         type="button"
-        className={`order-action-btn ${tif === "DAY" ? "order-action-active" : ""}`}
+        className={`order-action-btn order-tif-btn ${dayActive ? "order-action-active order-tif-active" : ""}`}
+        aria-pressed={dayActive}
         disabled={disabled}
         onClick={() => onChange("DAY")}
       >
@@ -36,7 +44,8 @@ export function OrderTifSelector({
       </button>
       <button
         type="button"
-        className={`order-action-btn ${tif === "GTC" ? "order-action-active" : ""}`}
+        className={`order-action-btn order-tif-btn ${gtcActive ? "order-action-active order-tif-active" : ""}`}
+        aria-pressed={gtcActive}
         disabled={disabled}
         onClick={() => onChange("GTC")}
       >

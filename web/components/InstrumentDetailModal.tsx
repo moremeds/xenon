@@ -8,6 +8,7 @@ import Modal from "./Modal";
 import OrderErrorBanner from "./OrderErrorBanner";
 import { InstrumentOrderQuoteTelemetry } from "./QuoteTelemetry";
 import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
+import { OrderTifSelector } from "@/lib/order/components/OrderTifSelector";
 import { useClientAttemptId } from "@/components/ticker-detail/useClientAttemptId";
 import { getReasonToast } from "@/lib/orderReasonCodes";
 
@@ -272,10 +273,13 @@ function LegOrderForm({
 
       <div className="order-field">
         <label className="order-label">Time in Force</label>
-        <div className="order-action-buttons">
-          <button className={`order-action-btn ${tif === "DAY" ? "order-action-active" : ""}`} onClick={() => setTif("DAY")}>DAY</button>
-          <button className={`order-action-btn ${tif === "GTC" ? "order-action-active" : ""}`} onClick={() => setTif("GTC")}>GTC</button>
-        </div>
+        <OrderTifSelector
+          tif={tif}
+          onChange={(value) => {
+            setTif(value);
+            setConfirmStep(false);
+          }}
+        />
       </div>
 
       <OrderErrorBanner error={error} />
