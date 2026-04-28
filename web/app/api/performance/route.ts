@@ -1,106 +1,94 @@
 import { NextResponse } from "next/server";
-import { readFile, stat } from "fs/promises";
-import { join } from "path";
-import { isPerformanceBehindPortfolioSync, isPortfolioBehindCurrentEtSession } from "@/lib/performanceFreshness";
 import { xenonFetch } from "@/lib/xenonApi";
 import { getRequestId, setNoStoreResponseHeaders } from "@/lib/apiContracts";
 
 export const runtime = "nodejs";
 
-const PERFORMANCE_PATH = join(process.cwd(), "..", "data", "performance.json");
-const PORTFOLIO_PATH = join(process.cwd(), "..", "data", "portfolio.json");
-const CACHE_TTL_MS = 15 * 60_000;
+type PerformancePayload = Record<string, unknown>;
 
-async function isPerformanceStale(): Promise<boolean> {
-  try {
-    const fileStat = await stat(PERFORMANCE_PATH);
-    return Date.now() - fileStat.mtimeMs > CACHE_TTL_MS;
-  } catch {
-    return true;
+type PerformanceCache = {
+  data: PerformancePayload;
+  fetchedAtMs: number;
+};
+
+const OPEN_TTL_ENV = "XENON_PERFORMANCE_TTL_OPEN_S";
+const CLOSED_TTL_ENV = "XENON_PERFORMANCE_TTL_CLOSED_S";
+const DEFAULT_OPEN_TTL_SECONDS = 5 * 60;
+const DEFAULT_CLOSED_TTL_SECONDS = 30 * 60;
+
+let performanceCache: PerformanceCache | null = null;
+let refreshInFlight: Promise<PerformancePayload> | null = null;
+
+function ttlSecondsFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function isMarketOpenNow(now: Date = new Date()): boolean {
+  const et = new Date(now.toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const day = et.getDay();
+  if (day === 0 || day === 6) return false;
+  const minutes = et.getHours() * 60 + et.getMinutes();
+  return minutes >= 9 * 60 + 30 && minutes < 16 * 60;
+}
+
+function cacheTtlMs(now: Date = new Date()): number {
+  const ttlSeconds = isMarketOpenNow(now)
+    ? ttlSecondsFromEnv(OPEN_TTL_ENV, DEFAULT_OPEN_TTL_SECONDS)
+    : ttlSecondsFromEnv(CLOSED_TTL_ENV, DEFAULT_CLOSED_TTL_SECONDS);
+  return ttlSeconds * 1_000;
+}
+
+function isCacheFresh(cache: PerformanceCache, nowMs: number = Date.now()): boolean {
+  return nowMs - cache.fetchedAtMs <= cacheTtlMs(new Date(nowMs));
+}
+
+async function fetchPerformance(timeout: number): Promise<PerformancePayload> {
+  const data = await xenonFetch<PerformancePayload>("/performance", {
+    method: "POST",
+    timeout,
+  });
+  performanceCache = {
+    data,
+    fetchedAtMs: Date.now(),
+  };
+  return data;
+}
+
+function refreshPerformanceCache(timeout: number): Promise<PerformancePayload> {
+  if (!refreshInFlight) {
+    refreshInFlight = fetchPerformance(timeout).finally(() => {
+      refreshInFlight = null;
+    });
   }
+  return refreshInFlight;
 }
 
-async function readJsonFile(path: string): Promise<Record<string, unknown> | null> {
-  try {
-    const raw = await readFile(path, "utf-8");
-    return JSON.parse(raw) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
+function triggerBackgroundRefresh(): void {
+  refreshPerformanceCache(180_000).catch(() => {});
 }
 
-function extractTimestampValue(data: Record<string, unknown> | null, key: string): string | null {
-  const value = data?.[key];
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function isCacheBehindPortfolio(
-  performance: Record<string, unknown> | null,
-  portfolio: Record<string, unknown> | null,
-): boolean {
-  const portfolioLastSync = extractTimestampValue(portfolio, "last_sync");
-  return isPerformanceBehindPortfolioSync(
-    performance
-      ? {
-          last_sync: extractTimestampValue(performance, "last_sync"),
-          as_of: extractTimestampValue(performance, "as_of"),
-        }
-      : null,
-    portfolioLastSync,
-  );
-}
-
-/**
- * Fire-and-forget background rebuild trigger.
- * 5s timeout, swallow all errors — caller already returned cached data.
- */
-function triggerBackgroundRebuild(): void {
-  xenonFetch("/performance/background", { method: "POST", timeout: 5_000 }).catch(() => {});
+function jsonWithNoStore(data: PerformancePayload, requestId: string): NextResponse {
+  return setNoStoreResponseHeaders(NextResponse.json(data), requestId);
 }
 
 export async function GET(): Promise<Response> {
   const requestId = getRequestId();
-  const [stale, cachedPerformance, initialPortfolioSnapshot] = await Promise.all([
-    isPerformanceStale(),
-    readJsonFile(PERFORMANCE_PATH),
-    readJsonFile(PORTFOLIO_PATH),
-  ]);
 
-  let portfolioSnapshot = initialPortfolioSnapshot;
-  const portfolioLastSync = extractTimestampValue(portfolioSnapshot, "last_sync");
-
-  if (isPortfolioBehindCurrentEtSession(portfolioLastSync)) {
-    try {
-      const refreshed = await xenonFetch<Record<string, unknown>>("/portfolio/sync", {
-        method: "POST",
-        timeout: 35_000,
-      });
-      portfolioSnapshot = refreshed;
-    } catch {
-      // Portfolio sync failed — if we have fresh-enough perf cache, return it
-      if (cachedPerformance && !isCacheBehindPortfolio(cachedPerformance, portfolioSnapshot)) {
-        return setNoStoreResponseHeaders(NextResponse.json(cachedPerformance), requestId);
-      }
-      // Otherwise fall through to rebuild evaluation
-    }
+  if (performanceCache && isCacheFresh(performanceCache)) {
+    return jsonWithNoStore(performanceCache.data, requestId);
   }
 
-  const shouldRebuild = !cachedPerformance || stale || isCacheBehindPortfolio(cachedPerformance, portfolioSnapshot);
-
-  if (!shouldRebuild && cachedPerformance) {
-    return setNoStoreResponseHeaders(NextResponse.json(cachedPerformance), requestId);
+  if (performanceCache) {
+    triggerBackgroundRefresh();
+    return jsonWithNoStore(performanceCache.data, requestId);
   }
 
-  // SWR: if we have stale cache, return it immediately + trigger background rebuild
-  if (cachedPerformance) {
-    triggerBackgroundRebuild();
-    return setNoStoreResponseHeaders(NextResponse.json(cachedPerformance), requestId);
-  }
-
-  // Cold start: no cache at all — must block on full rebuild
   try {
-    const data = await xenonFetch("/performance", { method: "POST", timeout: 180_000 });
-    return setNoStoreResponseHeaders(NextResponse.json(data), requestId);
+    const data = await refreshPerformanceCache(180_000);
+    return jsonWithNoStore(data, requestId);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to generate performance metrics";
     return setNoStoreResponseHeaders(
@@ -113,8 +101,8 @@ export async function GET(): Promise<Response> {
 export async function POST(): Promise<Response> {
   const requestId = getRequestId();
   try {
-    const data = await xenonFetch("/performance", { method: "POST", timeout: 190_000 });
-    return setNoStoreResponseHeaders(NextResponse.json(data), requestId);
+    const data = await refreshPerformanceCache(190_000);
+    return jsonWithNoStore(data, requestId);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to generate performance metrics";
     return setNoStoreResponseHeaders(
