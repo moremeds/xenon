@@ -3490,6 +3490,12 @@ tr.leg-row td {
   display: flex;
   gap: 6px;
 }
+.order-tif-btn.order-tif-active {
+  background: color-mix(in srgb, var(--signal-core) 18%, transparent);
+  border-color: var(--signal-core);
+  color: var(--signal-strong);
+  box-shadow: inset 0 -2px 0 var(--signal-core);
+}
 
 /* OrderQuantityInput, OrderPriceInput */
 .order-price-input-row {
@@ -6655,7 +6661,9 @@ tr {
 }
 
 .modify-order-modal .modify-quick-buttons .btn-quick,
-.modify-order-modal-combo .modify-quick-buttons .btn-quick {
+.modify-order-modal-combo .modify-quick-buttons .btn-quick,
+.modify-order-modal .modify-quick-buttons .order-tif-btn,
+.modify-order-modal-combo .modify-quick-buttons .order-tif-btn {
   font-variant-numeric: tabular-nums;
   min-width: 96px;
   justify-content: center;

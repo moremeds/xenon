@@ -116,7 +116,7 @@ def test_expensive_option_out_of_band_rejects():
     assert v.reason_code == ReasonCode.LIMIT_OUT_OF_BAND
 
 
-def test_opt_outside_rth_blocks():
+def test_opt_outside_rth_blocks_with_OPTION_MARKET_CLOSED():
     token = quote_tokens.mint(_payload(), SECRET)
     v = quote_guard.check(
         token=token,
@@ -130,11 +130,11 @@ def test_opt_outside_rth_blocks():
         tick_rule_lookup=_tick_rule,
     )
     assert v.accept is False
-    assert v.reason_code == ReasonCode.STALE_QUOTE
+    assert v.reason_code == ReasonCode.OPTION_MARKET_CLOSED
     assert "market" in (v.reason_detail or "").lower()
 
 
-def test_crossed_or_zero_size_rejects_as_STALE_QUOTE():
+def test_crossed_or_zero_size_rejects_as_QUOTE_UNAVAILABLE():
     token = quote_tokens.mint(_payload(bid=Decimal("500.25"), ask=Decimal("500.20")), SECRET)
     v = quote_guard.check(
         token=token,
@@ -148,7 +148,7 @@ def test_crossed_or_zero_size_rejects_as_STALE_QUOTE():
         tick_rule_lookup=_tick_rule,
     )
     assert v.accept is False
-    assert v.reason_code == ReasonCode.STALE_QUOTE
+    assert v.reason_code == ReasonCode.QUOTE_UNAVAILABLE
 
 
 def test_tick_rule_cache_hits_second_call():
@@ -203,7 +203,7 @@ def test_token_contract_mismatch_rejects():
         now=MIDDAY_RTH, tick_rule_lookup=_tick_rule,
     )
     assert v.accept is False
-    assert v.reason_code == ReasonCode.STALE_QUOTE
+    assert v.reason_code == ReasonCode.QUOTE_CONTRACT_MISMATCH
     assert "mismatch" in (v.reason_detail or "")
 
 

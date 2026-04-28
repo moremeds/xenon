@@ -53,6 +53,7 @@ describe("POST /api/orders/place upstream error propagation", () => {
           action: "BUY",
           quantity: 100,
           limitPrice: 150,
+          client_attempt_id: "test-order-place-error-propagation",
         }),
       }),
     );

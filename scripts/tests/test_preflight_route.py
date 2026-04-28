@@ -9,6 +9,28 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, text
+
+
+def _insert_portfolio_snapshot(payload: dict) -> None:
+    import os
+
+    engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
+    try:
+        with engine.begin() as con:
+            con.execute(
+                text(
+                    """
+                    INSERT INTO xenon.account_snapshots
+                      (account, bankroll, payload, broker, account_env, broker_account)
+                    VALUES
+                      (:account, 0, CAST(:payload AS jsonb), 'IB', 'paper', 'DU0000000')
+                    """
+                ),
+                {"account": "DU0000000", "payload": json.dumps(payload)},
+            )
+    finally:
+        engine.dispose()
 
 
 @pytest.fixture(autouse=True)
@@ -119,10 +141,7 @@ def test_spoofed_multiplier_cannot_bypass_gate(client, monkeypatch, tmp_path):
             }
         ]
     }
-    pf_path = tmp_path / "nodata_multiplier"
-    pf_path.mkdir()
-    (pf_path / "portfolio.json").write_text(json.dumps(portfolio))
-    monkeypatch.setenv("XENON_DATA_DIR", str(pf_path))
+    _insert_portfolio_snapshot(portfolio)
 
     # 2 short calls with spoofed multiplier=1 — would bypass the gate if trusted
     resp = client.post(
@@ -143,10 +162,9 @@ def test_spoofed_multiplier_cannot_bypass_gate(client, monkeypatch, tmp_path):
     assert resp.json()["reason_code"] == "ETF_CALL_UNCOVERED"
 
 
-def test_missing_portfolio_fails_open(monkeypatch, tmp_path):
-    """Codex P1 #1: TS guard at web/app/api/orders/place/route.ts:183-185 fails
-    OPEN when portfolio.json is absent (logs + skips enforcement). Preflight
-    must match that behavior — otherwise a fresh server start blocks every SELL.
+def test_missing_portfolio_snapshot_blocks_sell(monkeypatch, tmp_path):
+    """Runtime preflight must not fall back to data/portfolio.json or fail open
+    for SELL exposure. A missing Postgres snapshot is an explicit blocker.
     """
     # Override the autouse fixture's data dir with one that has NO portfolio file.
     empty_dir = tmp_path / "nodata"
@@ -156,8 +174,6 @@ def test_missing_portfolio_fails_open(monkeypatch, tmp_path):
     from xenon.api.server import app
 
     client = TestClient(app)
-    # A SELL that would be blocked as INSUFFICIENT_SHARES with an empty portfolio
-    # should pass preflight when the portfolio file is missing (fail-open).
     resp = client.post(
         "/orders/place",
         json={
@@ -168,18 +184,134 @@ def test_missing_portfolio_fails_open(monkeypatch, tmp_path):
             "limitPrice": 500.0,
         },
     )
-    preflight_codes = {
-        "UNIVERSE_UNKNOWN",
-        "INDEX_HAS_NO_STOCK",
-        "INSUFFICIENT_SHARES",
-        "INSUFFICIENT_CASH",
-        "INDEX_CALL_UNCOVERED",
-        "ETF_CALL_UNCOVERED",
-    }
-    body_json = resp.json() if resp.status_code == 400 else {}
-    assert body_json.get("reason_code") not in preflight_codes, (
-        f"Missing portfolio.json must fail open (match TS guard); got {resp.status_code} {body_json}"
+    assert resp.status_code == 400
+    assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
+
+
+def test_preflight_uses_postgres_snapshot_not_portfolio_json(client, monkeypatch, tmp_path):
+    """The runtime portfolio source for /orders/place is Postgres. A stale
+    data/portfolio.json must not make a covered SELL look naked.
+    """
+    stale_json_dir = tmp_path / "stale_json"
+    stale_json_dir.mkdir()
+    (stale_json_dir / "portfolio.json").write_text(json.dumps({"positions": []}))
+    monkeypatch.setenv("XENON_DATA_DIR", str(stale_json_dir))
+    _insert_portfolio_snapshot(
+        {
+            "positions": [
+                {
+                    "ticker": "SPY",
+                    "structure_type": "Stock",
+                    "direction": "LONG",
+                    "contracts": 100,
+                    "expiry": None,
+                    "legs": [{"direction": "LONG", "type": "Stock", "contracts": 100, "strike": 0.0}],
+                }
+            ],
+            "available_funds": 0,
+        }
     )
+
+    from xenon.api import server
+
+    async def _fresh_quote(ticker: str, con_id: int):
+        return {"bid": 500.10, "ask": 500.20, "bid_size": 100, "ask_size": 120}
+
+    monkeypatch.setattr(server, "_fetch_quote_snapshot", _fresh_quote)
+
+    resp = client.post(
+        "/orders/place",
+        json={
+            "type": "stock",
+            "symbol": "SPY",
+            "action": "SELL",
+            "quantity": 1,
+            "limitPrice": 500.10,
+            "con_id": 756733,
+            "client_attempt_id": "pg-source-1",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_combo_call_ratio_spread_blocked_by_server_preflight(client):
+    _insert_portfolio_snapshot({"positions": [], "available_funds": 0})
+
+    resp = client.post(
+        "/orders/place",
+        json={
+            "type": "combo",
+            "symbol": "SPY",
+            "action": "BUY",
+            "quantity": 1,
+            "limitPrice": 1.00,
+            "client_attempt_id": "combo-ratio-1",
+            "legs": [
+                {"expiry": "20260620", "strike": 500, "right": "C", "action": "BUY", "ratio": 1},
+                {"expiry": "20260620", "strike": 510, "right": "C", "action": "SELL", "ratio": 2},
+            ],
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["reason_code"] == "ETF_CALL_UNCOVERED"
+
+
+@pytest.mark.asyncio
+async def test_run_preflight_awaits_async_portfolio_loader(monkeypatch):
+    from xenon.api import server
+    from xenon.execution.preflight import PortfolioView
+
+    called = {"value": False}
+
+    async def _snapshot():
+        called["value"] = True
+        return PortfolioView(
+            positions=[
+                {
+                    "ticker": "SPY",
+                    "structure_type": "Stock",
+                    "direction": "LONG",
+                    "contracts": 100,
+                    "expiry": None,
+                    "legs": [{"direction": "LONG", "type": "Stock", "contracts": 100, "strike": 0.0}],
+                }
+            ],
+            available_funds=0,
+        )
+
+    monkeypatch.setattr(server, "_load_portfolio_view", _snapshot)
+    verdict = await server._run_preflight(
+        {
+            "type": "stock",
+            "symbol": "SPY",
+            "action": "SELL",
+            "quantity": 1,
+            "limitPrice": 500.10,
+        }
+    )
+    assert called["value"] is True
+    assert verdict.accept is True
+
+
+def test_combo_malformed_leg_right_rejects_as_invalid_body(client):
+    _insert_portfolio_snapshot({"positions": [], "available_funds": 0})
+
+    resp = client.post(
+        "/orders/place",
+        json={
+            "type": "combo",
+            "symbol": "SPY",
+            "action": "BUY",
+            "quantity": 1,
+            "limitPrice": 1.00,
+            "client_attempt_id": "combo-bad-right-1",
+            "legs": [
+                {"expiry": "20260620", "strike": 510, "right": "BAD", "action": "SELL", "ratio": 1},
+            ],
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["reason_code"] == "INVALID_ORDER_BODY"
 
 
 def test_insufficient_shares_when_working_sell_exists(client, monkeypatch, tmp_path):
@@ -189,24 +321,20 @@ def test_insufficient_shares_when_working_sell_exists(client, monkeypatch, tmp_p
     """
     import json as _json
 
-    pf = tmp_path / "portfolio.json"
-    pf.write_text(
-        _json.dumps(
-            {
-                "positions": [
-                    {
-                        "ticker": "SPY",
-                        "structure_type": "Stock",
-                        "direction": "LONG",
-                        "contracts": 100,
-                        "legs": [{"direction": "LONG", "type": "Stock", "contracts": 100, "strike": 0.0}],
-                    }
-                ],
-                "available_funds": 0,
-            }
-        )
+    _insert_portfolio_snapshot(
+        {
+            "positions": [
+                {
+                    "ticker": "SPY",
+                    "structure_type": "Stock",
+                    "direction": "LONG",
+                    "contracts": 100,
+                    "legs": [{"direction": "LONG", "type": "Stock", "contracts": 100, "strike": 0.0}],
+                }
+            ],
+            "available_funds": 0,
+        }
     )
-    monkeypatch.setenv("XENON_DATA_DIR", str(tmp_path))
 
     from decimal import Decimal
 

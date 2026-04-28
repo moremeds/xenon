@@ -51,6 +51,7 @@ describe("POST /api/orders/place — signed combo prices", () => {
           quantity: 50,
           limitPrice: -0.4,
           tif: "DAY",
+          client_attempt_id: "combo-negative-1",
           legs: [
             { expiry: "20260326", strike: 247, right: "C", action: "BUY", ratio: 1 },
             { expiry: "20260326", strike: 243, right: "P", action: "SELL", ratio: 1 },

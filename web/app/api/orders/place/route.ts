@@ -1,10 +1,6 @@
 import { NextResponse } from "next/server";
-import { readDataFile } from "@tools/data-reader";
-import { OrdersData } from "@tools/schemas/ib-orders";
 import { xenonFetch } from "@/lib/xenonApi";
 import { passThroughXenonError } from "@/lib/passThroughXenonError";
-import { checkNakedShortRisk } from "@/lib/nakedShortGuard";
-import type { NakedShortPortfolio } from "@/lib/nakedShortGuard";
 import {
   getRequestId,
   jsonApiError,
@@ -14,8 +10,10 @@ import {
   firstPlaceOrderSchemaErrorMessage,
   normalizeOptionRight,
 } from "@/lib/placeOrderBodySchema";
+import { buildFastApiPlaceOrderPayload } from "@/lib/order/placeOrderContract";
 
 export const runtime = "nodejs";
+const ORDER_PLACE_TIMEOUT_MS = 60_000;
 
 type ComboLeg = {
   expiry: string;
@@ -37,7 +35,7 @@ type PlaceBody = {
   strike?: number;
   right?: "C" | "P";
   legs?: ComboLeg[];
-  client_attempt_id?: string;
+  client_attempt_id: string;
   quote_token?: string;
   con_id?: number;
   acknowledge_limit_override?: boolean;
@@ -185,62 +183,7 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    // Naked short guard — block orders that would create naked short exposure
-    const portfolioResult = await readDataFile("data/portfolio.json");
-    if (portfolioResult?.ok) {
-      const guard = checkNakedShortRisk(
-        body,
-        portfolioResult.data as NakedShortPortfolio,
-      );
-      if (!guard.allowed) {
-        return setNoStoreResponseHeaders(
-          jsonApiError({
-            message: `Naked short blocked: ${guard.reason}`,
-            status: 403,
-            code: "VALIDATION_ERROR",
-            requestId,
-          }),
-          requestId,
-        );
-      }
-    } else {
-      console.warn(
-        "[orders/place] Could not load portfolio for naked short guard:",
-        portfolioResult?.error ?? "unknown error",
-      );
-    }
-
-    const orderPayload = {
-      type: body.type || "stock",
-      symbol: body.symbol.toUpperCase(),
-      action: body.action,
-      quantity: body.quantity,
-      limitPrice: body.limitPrice,
-      tif: body.tif || "DAY",
-      ...(body.type === "option"
-        ? { expiry: body.expiry, strike: body.strike, right: body.right }
-        : {}),
-      ...(body.type === "combo" && body.legs
-        ? {
-            legs: body.legs.map((l) => ({
-              expiry: l.expiry,
-              strike: l.strike,
-              right: l.right,
-              action: l.action,
-              ratio: l.ratio,
-              ...(l.limitPrice != null ? { limitPrice: l.limitPrice } : {}),
-            })),
-          }
-        : {}),
-      ...(body.client_attempt_id
-        ? { client_attempt_id: body.client_attempt_id }
-        : {}),
-      ...(body.quote_token ? { quote_token: body.quote_token } : {}),
-      ...(body.con_id != null ? { con_id: body.con_id } : {}),
-      ...(body.acknowledge_limit_override === true
-        ? { acknowledge_limit_override: true }
-        : {}),
-    };
+    const orderPayload = buildFastApiPlaceOrderPayload(body);
 
     const orderResult = await xenonFetch<Record<string, unknown>>(
       "/orders/place",
@@ -248,7 +191,7 @@ export async function POST(request: Request): Promise<Response> {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(orderPayload),
-        timeout: 20_000,
+        timeout: ORDER_PLACE_TIMEOUT_MS,
       },
     );
 
@@ -278,20 +221,24 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     // Refresh orders after placement
+    let refreshedOrders: Record<string, unknown> | null = null;
     try {
-      await xenonFetch("/orders/refresh", { method: "POST", timeout: 10_000 });
+      refreshedOrders = await xenonFetch<Record<string, unknown>>(
+        "/orders/refresh",
+        { method: "POST", timeout: 10_000 },
+      );
     } catch {
       // Non-fatal — order was placed, refresh failed
     }
-    const ordersResult = await readDataFile("data/orders.json", OrdersData);
 
     const response = NextResponse.json({
       status: "ok",
       orderId: orderResult.orderId,
       permId: orderResult.permId,
+      tif: orderResult.tif ?? orderPayload.tif,
       initialStatus: orderResult.initialStatus,
       message: orderResult.message,
-      orders: ordersResult.ok ? ordersResult.data : null,
+      orders: refreshedOrders,
       requestId,
     });
     return setNoStoreResponseHeaders(response, requestId);

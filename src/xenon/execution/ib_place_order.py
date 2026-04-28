@@ -139,6 +139,7 @@ def place_order(params: dict) -> dict:
 
         order_id = trade.order.orderId
         perm_id = trade.order.permId
+        accepted_tif = getattr(trade.order, "tif", None) or tif
         status = trade.orderStatus.status if trade.orderStatus else "Unknown"
 
         # Surface any IB error events caught during the wait
@@ -149,6 +150,7 @@ def place_order(params: dict) -> dict:
                 "message": f"IB error {code}: {msg}",
                 "orderId": order_id,
                 "permId": perm_id,
+                "tif": accepted_tif,
                 "initialStatus": status,
             }
 
@@ -156,8 +158,9 @@ def place_order(params: dict) -> dict:
             "status": "ok",
             "orderId": order_id,
             "permId": perm_id,
+            "tif": accepted_tif,
             "initialStatus": status,
-            "message": f"{action} {quantity} {symbol} @ ${limit_price:.2f} — {status}",
+            "message": f"{action} {quantity} {symbol} @ ${limit_price:.2f} {accepted_tif} — {status}",
         }
 
     except Exception as e:

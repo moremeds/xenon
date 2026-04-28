@@ -34,6 +34,7 @@ function placeReq(extra: Record<string, unknown> = {}): Request {
       action: "BUY",
       quantity: 1,
       limitPrice: 500,
+      client_attempt_id: "test-orders-upstream",
       ...extra,
     }),
   });

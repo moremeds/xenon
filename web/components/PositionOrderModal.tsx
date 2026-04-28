@@ -7,6 +7,7 @@ import Modal from "./Modal";
 import { ModifyOrderQuoteTelemetry } from "./QuoteTelemetry";
 import { fmtPrice } from "@/lib/positionUtils";
 import { OrderLegPills, type OrderLeg as UnifiedOrderLeg } from "@/lib/order";
+import { OrderTifSelector } from "@/lib/order/components/OrderTifSelector";
 import { useClientAttemptId } from "@/components/ticker-detail/useClientAttemptId";
 import { getReasonToast } from "@/lib/orderReasonCodes";
 import {
@@ -391,26 +392,14 @@ export default function PositionOrderModal({
                 <>
                   <div className="modify-quick-section">
                     <span className="modify-price-label">Time in Force</span>
-                    <div
+                    <OrderTifSelector
+                      tif={tif}
                       className="modify-quick-buttons"
-                      role="group"
-                      aria-label="Time in force"
-                    >
-                      {(["DAY", "GTC"] as const).map((value) => (
-                        <button
-                          key={value}
-                          type="button"
-                          className={`btn-quick ${tif === value ? "active" : ""}`}
-                          aria-pressed={tif === value}
-                          onClick={() => {
-                            setTif(value);
-                            attemptId.onFieldEdit("tif");
-                          }}
-                        >
-                          {value}
-                        </button>
-                      ))}
-                    </div>
+                      onChange={(value) => {
+                        setTif(value);
+                        attemptId.onFieldEdit("tif");
+                      }}
+                    />
                   </div>
 
                   <label className="modify-rth-toggle">
@@ -430,26 +419,14 @@ export default function PositionOrderModal({
               {isCombo && (
                 <div className="modify-quick-section">
                   <span className="modify-price-label">Time in Force</span>
-                  <div
+                  <OrderTifSelector
+                    tif={tif}
                     className="modify-quick-buttons"
-                    role="group"
-                    aria-label="Time in force"
-                  >
-                    {(["DAY", "GTC"] as const).map((value) => (
-                      <button
-                        key={value}
-                        type="button"
-                        className={`btn-quick ${tif === value ? "active" : ""}`}
-                        aria-pressed={tif === value}
-                        onClick={() => {
-                          setTif(value);
-                          attemptId.onFieldEdit("tif");
-                        }}
-                      >
-                        {value}
-                      </button>
-                    ))}
-                  </div>
+                    onChange={(value) => {
+                      setTif(value);
+                      attemptId.onFieldEdit("tif");
+                    }}
+                  />
                 </div>
               )}
 

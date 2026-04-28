@@ -16,6 +16,7 @@ import {
   type OrderPayload,
 } from "@/lib/nakedShortGuard";
 import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
+import { OrderTifSelector } from "@/lib/order/components/OrderTifSelector";
 import { fmtSignedPrice, toneClass } from "@/lib/format";
 import { getReasonToast } from "@/lib/orderReasonCodes";
 import { useClientAttemptId } from "./useClientAttemptId";
@@ -581,20 +582,14 @@ function NewOrderForm({
 
       <div className="order-field">
         <label className="order-label">Time in Force</label>
-        <div className="order-action-buttons">
-          <button
-            className={`order-action-btn ${tif === "DAY" ? "order-action-active" : ""}`}
-            onClick={() => setTif("DAY")}
-          >
-            DAY
-          </button>
-          <button
-            className={`order-action-btn ${tif === "GTC" ? "order-action-active" : ""}`}
-            onClick={() => setTif("GTC")}
-          >
-            GTC
-          </button>
-        </div>
+        <OrderTifSelector
+          tif={tif}
+          onChange={(value) => {
+            attemptId.onFieldEdit("tif");
+            setTif(value);
+            setConfirmStep(false);
+          }}
+        />
       </div>
 
       {nakedShortWarning && (
@@ -674,6 +669,7 @@ function ComboOrderForm({
   const [success, setSuccess] = useState<string | null>(null);
   const wizardLauncher = useWizardLauncher();
   const wizardSession = useWizardSession(wizardLauncher.sessionId);
+  const attemptId = useClientAttemptId({ ticker });
 
   // Combo leg actions define the SPREAD STRUCTURE, not the trade direction.
   // IB reverses all leg actions when Order.action = SELL.
@@ -810,6 +806,7 @@ function ComboOrderForm({
         return;
       }
 
+      attemptId.markSubmitted();
       const res = await fetch("/api/orders/place", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -821,20 +818,24 @@ function ComboOrderForm({
           limitPrice: parsedPrice,
           tif,
           legs,
+          client_attempt_id: attemptId.id,
         }),
       });
       const json = await res.json();
       if (!res.ok) {
         setError(errorFromResponseBody(json, "Order placement failed"));
+        attemptId.markTerminal();
       } else {
         setSuccess(
           `Combo order placed: ${action} ${parsedQty}x ${position.structure} @ ${fmtSignedPrice(parsedPrice)}`,
         );
         setConfirmStep(false);
+        attemptId.markTerminal();
         onOrderPlaced?.();
       }
     } catch {
       setError("Network error placing order");
+      attemptId.markTerminal();
     } finally {
       setLoading(false);
     }
@@ -849,6 +850,7 @@ function ComboOrderForm({
     position.structure,
     portfolio,
     onOrderPlaced,
+    attemptId,
   ]);
 
   const handleOpenWizard = useCallback(async () => {
@@ -1276,20 +1278,14 @@ function ComboOrderForm({
       {/* TIF */}
       <div className="order-field">
         <label className="order-label">Time in Force</label>
-        <div className="order-action-buttons">
-          <button
-            className={`order-action-btn ${tif === "DAY" ? "order-action-active" : ""}`}
-            onClick={() => setTif("DAY")}
-          >
-            DAY
-          </button>
-          <button
-            className={`order-action-btn ${tif === "GTC" ? "order-action-active" : ""}`}
-            onClick={() => setTif("GTC")}
-          >
-            GTC
-          </button>
-        </div>
+        <OrderTifSelector
+          tif={tif}
+          onChange={(value) => {
+            attemptId.onFieldEdit("tif");
+            setTif(value);
+            setConfirmStep(false);
+          }}
+        />
       </div>
 
       {nakedShortWarning && (

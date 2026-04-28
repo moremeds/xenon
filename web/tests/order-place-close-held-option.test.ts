@@ -66,6 +66,7 @@ describe("POST /api/orders/place — closing a held long option", () => {
           action: "SELL",
           quantity: 77,
           limitPrice: 4.47,
+          client_attempt_id: "close-held-option-1",
           expiry: "20270115",
           strike: 17,
           right: "C",

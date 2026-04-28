@@ -49,7 +49,7 @@ from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
 from xenon.db.engine import dispose_engine, get_sync_engine, init_engine
-from xenon.db.schema import order_events, order_submissions
+from xenon.db.schema import account_snapshots, order_events, order_submissions
 from xenon.execution import orders_store, preflight, quote_guard, quote_tokens
 from xenon.execution.preflight import (
     PortfolioView,
@@ -58,6 +58,7 @@ from xenon.execution.preflight import (
     Verdict,
 )
 from xenon.execution.quote_tokens import QuotePayload
+from xenon.execution.account_scope import resolve_from_app_state
 
 # Load .env from project root for Python scripts
 try:
@@ -77,7 +78,7 @@ logging.getLogger("ib_insync.wrapper").setLevel(logging.WARNING)
 logging.getLogger("ib_insync.client").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
-from ib_insync import Contract, Index
+from ib_insync import Contract, Index, Option, Stock
 
 from xenon.clients.futu_client import FutuClient
 from xenon.clients.futu_exceptions import FutuConnectionError, FutuError
@@ -1462,25 +1463,34 @@ async def orders_refresh():
 # ---------------------------------------------------------------------------
 
 
-def _load_portfolio_view() -> PortfolioView | None:
-    """Load portfolio snapshot for preflight. Matches TS guard's data/portfolio.json source.
-
-    Returns None when the snapshot is missing or unreadable — the caller
-    must fail OPEN in that case to match web/app/api/orders/place/route.ts
-    which logs and skips enforcement rather than blocking every SELL on
-    a fresh/cleaned environment. F5 will replace this with a live IB-pool
-    call per SL spec §5.2, at which point the fail-open branch disappears.
-    """
-    data_dir = Path(os.environ.get("XENON_DATA_DIR", str(DATA_DIR)))
-    pf_file = data_dir / "portfolio.json"
-    if not pf_file.exists():
-        return None
+def _load_portfolio_view_sync() -> PortfolioView | None:
+    """Load the latest scoped portfolio snapshot from Postgres for preflight."""
+    scope = _resolve_scope_kwargs()
     try:
-        raw = json.loads(pf_file.read_text())
-        return PortfolioView.model_validate(raw)
-    except (OSError, ValueError, ValidationError) as exc:
-        logger.warning("[preflight] Could not load portfolio.json: %s", exc)
+        engine = get_sync_engine()
+        stmt = (
+            select(account_snapshots.c.payload)
+            .where(account_snapshots.c.broker == scope["broker"])
+            .where(account_snapshots.c.account_env == scope["account_env"])
+            .where(account_snapshots.c.broker_account == scope["broker_account"])
+            .order_by(account_snapshots.c.snapshot_at.desc())
+            .limit(1)
+        )
+        with engine.connect() as con:
+            row = con.execute(stmt).first()
+        if row is None or not row.payload:
+            return None
+        return PortfolioView.model_validate(dict(row.payload))
+    except (ValueError, ValidationError) as exc:
+        logger.warning("[preflight] Could not validate Postgres portfolio snapshot: %s", exc)
         return None
+    except Exception as exc:
+        logger.warning("[preflight] Could not load Postgres portfolio snapshot: %s", exc)
+        return None
+
+
+async def _load_portfolio_view() -> PortfolioView | None:
+    return await asyncio.to_thread(_load_portfolio_view_sync)
 
 
 def _body_to_preflight_request(body: dict) -> PreflightRequest:
@@ -1513,17 +1523,98 @@ def _body_to_preflight_request(body: dict) -> PreflightRequest:
     )
 
 
-def _run_preflight(body: dict, user_id: str = "local") -> Verdict:
+def _body_to_combo_preflight_request(body: dict) -> preflight.ComboPreflightRequest:
+    from xenon.execution.universe import UNIVERSE, get_multiplier
+
+    ticker = str(body.get("symbol", "")).upper()
+    multiplier = get_multiplier(ticker) if ticker in UNIVERSE else 100
+    legs = []
+    for leg in body.get("legs") or []:
+        right_raw = str(leg.get("right") or "").upper()
+        if right_raw not in ("C", "P"):
+            raise ValueError(f"combo leg right must be C or P, got {right_raw!r}")
+        legs.append(
+            preflight.ComboPreflightLeg(
+                expiry=leg.get("expiry"),
+                strike=Decimal(str(leg["strike"])) if leg.get("strike") is not None else None,
+                right=right_raw,
+                action=str(leg.get("action", "")).upper(),
+                ratio=int(leg.get("ratio") or 1),
+            )
+        )
+    return preflight.ComboPreflightRequest(
+        ticker=ticker,
+        action=str(body.get("action", "")).upper(),
+        quantity=int(body.get("quantity", 0)),
+        multiplier=multiplier,
+        legs=legs,
+    )
+
+
+def _invalid_order_body_response(exc: Exception) -> Verdict:
+    return Verdict(
+        accept=False,
+        reason_code=ReasonCode.INVALID_ORDER_BODY,
+        reason_detail=str(exc),
+    )
+
+
+def _portfolio_required_response(body: dict) -> Verdict | None:
+    order_type = body.get("type")
+    action = str(body.get("action", "")).upper()
+    if order_type == "combo":
+        req = _body_to_combo_preflight_request(body)
+        if preflight.combo_uncovered_short_call_ratio(req) > 0:
+            return Verdict(
+                accept=False,
+                reason_code=ReasonCode.PORTFOLIO_SNAPSHOT_REQUIRED,
+                reason_detail="Portfolio snapshot required to verify combo short-call coverage",
+            )
+        return None
+    if action != "SELL":
+        return None
+    if order_type == "option" and str(body.get("right", "")).upper() == "P":
+        return None
+    return Verdict(
+        accept=False,
+        reason_code=ReasonCode.PORTFOLIO_SNAPSHOT_REQUIRED,
+        reason_detail="Portfolio snapshot required to verify short exposure",
+    )
+
+
+async def _run_preflight(body: dict, user_id: str = "local") -> Verdict:
     if body.get("type") == "combo":
-        return Verdict(accept=True)
-    portfolio = _load_portfolio_view()
+        try:
+            req = _body_to_combo_preflight_request(body)
+        except (ValueError, ValidationError) as exc:
+            return _invalid_order_body_response(exc)
+        if preflight.combo_uncovered_short_call_ratio(req) <= 0 or req.action == "SELL":
+            return preflight.evaluate_combo(req, PortfolioView())
+        portfolio = await _load_portfolio_view()
+        if portfolio is None:
+            try:
+                missing = _portfolio_required_response(body)
+            except (ValueError, ValidationError) as exc:
+                return _invalid_order_body_response(exc)
+            if missing is not None:
+                return missing
+            portfolio = PortfolioView()
+        reservations = orders_store.working_reservations_for(user_id, req.ticker, **_resolve_scope_kwargs())
+        return preflight.evaluate_combo(req, portfolio, reservations=reservations)
+
+    try:
+        req = _body_to_preflight_request(body)
+    except (ValueError, ValidationError) as exc:
+        return _invalid_order_body_response(exc)
+    if req.action == "BUY":
+        return preflight.evaluate(req, PortfolioView())
+
+    portfolio = await _load_portfolio_view()
     if portfolio is None:
-        # Fail OPEN to match TS guard (route.ts:183-185). Without a portfolio
-        # snapshot we can't distinguish covered from naked shorts; blocking
-        # every SELL would regress fresh-start workflows. F5 (live IB pool)
-        # removes this branch.
-        return Verdict(accept=True)
-    req = _body_to_preflight_request(body)
+        missing = _portfolio_required_response(body)
+        if missing is not None:
+            return missing
+        portfolio = PortfolioView()
     reservations = orders_store.working_reservations_for(user_id, req.ticker, **_resolve_scope_kwargs())
     return preflight.evaluate(req, portfolio, reservations=reservations)
 
@@ -1593,6 +1684,45 @@ def _fetch_quote_snapshot_with_client(client: Any, ticker: str, con_id: int) -> 
     return _ticker_to_quote_snapshot(ticker, con_id, tk)
 
 
+def _contract_from_order_body(body: dict) -> Contract:
+    symbol = str(body.get("symbol", "")).upper()
+    if body.get("type") == "option":
+        return Option(
+            symbol=symbol,
+            lastTradeDateOrContractMonth=str(body.get("expiry") or ""),
+            strike=float(body.get("strike") or 0),
+            right=str(body.get("right") or "").upper(),
+            exchange="SMART",
+            currency="USD",
+        )
+    return Stock(symbol, "SMART", "USD")
+
+
+def _fetch_order_quote_snapshot_with_client(client: Any, body: dict) -> tuple[int, dict]:
+    """Qualify a stock/option order body and fetch its snapshot quote."""
+    _ensure_thread_event_loop()
+    ticker = str(body.get("symbol", "")).upper()
+    contract = _contract_from_order_body(body)
+    qualified = client.qualify_contract(contract)
+    con_id = int(getattr(qualified, "conId", 0) or 0)
+    if con_id <= 0:
+        raise HTTPException(status_code=503, detail=f"Could not qualify contract for {ticker}")
+    tk = client.get_quote(qualified, snapshot=True)
+    return con_id, _ticker_to_quote_snapshot(ticker, con_id, tk)
+
+
+def _qualify_order_con_id_with_client(client: Any, body: dict) -> int:
+    """Qualify a stock/option order body and return its IB conId."""
+    _ensure_thread_event_loop()
+    ticker = str(body.get("symbol", "")).upper()
+    contract = _contract_from_order_body(body)
+    qualified = client.qualify_contract(contract)
+    con_id = int(getattr(qualified, "conId", 0) or 0)
+    if con_id <= 0:
+        raise HTTPException(status_code=503, detail=f"Could not qualify contract for {ticker}")
+    return con_id
+
+
 async def _fetch_quote_snapshot(ticker: str, con_id: int) -> dict:
     """Fetch a bid/ask snapshot from the serialized ib_pool 'data' role."""
     pool = ib_pool
@@ -1609,6 +1739,135 @@ async def _fetch_quote_snapshot(ticker: str, con_id: int) -> dict:
             )
     except ConnectionError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+async def _fetch_order_quote_snapshot(body: dict) -> tuple[int, dict]:
+    ticker = str(body.get("symbol", "")).upper()
+    con_id = int(body.get("con_id") or 0)
+    if con_id > 0:
+        return con_id, await _fetch_quote_snapshot(ticker, con_id)
+
+    pool = ib_pool
+    if pool is None:
+        raise HTTPException(status_code=503, detail="IB data role unavailable")
+
+    try:
+        async with pool.acquire("data") as client:
+            return await asyncio.to_thread(
+                _fetch_order_quote_snapshot_with_client,
+                client,
+                dict(body),
+            )
+    except ConnectionError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+async def _qualify_order_con_id(body: dict) -> int:
+    con_id = int(body.get("con_id") or 0)
+    if con_id > 0:
+        return con_id
+
+    pool = ib_pool
+    if pool is None:
+        raise HTTPException(status_code=503, detail="IB data role unavailable")
+
+    try:
+        async with pool.acquire("data") as client:
+            return await asyncio.to_thread(
+                _qualify_order_con_id_with_client,
+                client,
+                dict(body),
+            )
+    except ConnectionError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _quote_payload_from_snapshot(ticker: str, con_id: int, snap: dict) -> QuotePayload:
+    return QuotePayload(
+        con_id=int(con_id),
+        ticker=ticker.upper(),
+        bid=Decimal(str(snap["bid"])),
+        ask=Decimal(str(snap["ask"])),
+        bid_size=int(snap["bid_size"]),
+        ask_size=int(snap["ask_size"]),
+        ts_server_ms=int(time.time() * 1000),
+    )
+
+
+async def _validate_non_combo_quote(body: dict) -> tuple[quote_guard.QuoteVerdict, int]:
+    ticker = str(body.get("symbol", "")).upper()
+    security_type = "STK" if body.get("type") == "stock" else "OPT"
+    action = str(body.get("action", "")).upper()
+    limit_price = Decimal(str(body.get("limitPrice", "0")))
+    now = _now()
+
+    market = quote_guard.check_market_hours(security_type=security_type, now=now)
+    if not market.accept:
+        return market, 400
+
+    payload: QuotePayload | None = None
+    token = body.get("quote_token")
+    if token:
+        try:
+            payload = quote_tokens.verify(
+                token,
+                os.environ.get("XENON_QUOTE_TOKEN_SECRET", ""),
+                max_age_ms=quote_guard.MAX_AGE_RTH_MS,
+            )
+        except quote_tokens.QuoteTokenExpired:
+            payload = None
+        except quote_tokens.QuoteTokenInvalid as exc:
+            return (
+                quote_guard.QuoteVerdict(
+                    accept=False,
+                    reason_code=ReasonCode.STALE_QUOTE,
+                    reason_detail=f"token invalid: {exc}",
+                ),
+                400,
+            )
+
+    con_id = int(body.get("con_id") or 0)
+    if payload is not None and body.get("type") == "option" and con_id <= 0:
+        try:
+            con_id = await _qualify_order_con_id(body)
+        except HTTPException as exc:
+            return (
+                quote_guard.QuoteVerdict(
+                    accept=False,
+                    reason_code=ReasonCode.QUOTE_UNAVAILABLE,
+                    reason_detail=str(exc.detail),
+                ),
+                exc.status_code if exc.status_code >= 500 else 400,
+            )
+
+    if payload is None:
+        try:
+            con_id, snap = await _fetch_order_quote_snapshot(body)
+        except HTTPException as exc:
+            return (
+                quote_guard.QuoteVerdict(
+                    accept=False,
+                    reason_code=ReasonCode.QUOTE_UNAVAILABLE,
+                    reason_detail=str(exc.detail),
+                ),
+                exc.status_code if exc.status_code >= 500 else 400,
+            )
+        payload = _quote_payload_from_snapshot(ticker, con_id, snap)
+
+    expected_con_id = con_id or payload.con_id
+    return (
+        quote_guard.check_payload(
+            payload=payload,
+            con_id=expected_con_id,
+            ticker=ticker,
+            security_type=security_type,
+            action=action,
+            limit_price=limit_price,
+            now=now,
+            tick_rule_lookup=_tick_rule_cache.get,
+        ),
+        400,
+    )
 
 
 @app.get("/orders/quote")
@@ -1639,9 +1898,12 @@ async def orders_quote(ticker: str, con_id: int):
     }
 
 
-@app.post("/orders/place", dependencies=[Depends(require_mode_verified)])
+@app.post("/orders/place")
 async def orders_place(request: Request):
     """Place an order via IB (on-demand connection, client_id=26)."""
+    broker = str(getattr(request.app.state, "broker", "IB") or "IB").upper()
+    if broker == "IB":
+        require_mode_verified(request)
     body = await request.json()
     return await _orders_place_from_body(body)
 
@@ -1653,16 +1915,38 @@ def _resolve_scope_kwargs() -> dict[str, str]:
     Tests that bypass lifespan get `legacy_unknown` defaults — this matches
     the column server_default so existing test rows still pass CHECK.
     """
-    mode = getattr(app.state, "trading_mode", None)
-    account = getattr(app.state, "account", None)
-    if mode and account:
-        return {"broker": "IB", "account_env": mode, "broker_account": account}
+    try:
+        return resolve_from_app_state(app.state).as_dict()
+    except ValueError:
+        pass
     return {"broker": "IB", "account_env": "legacy_unknown", "broker_account": "legacy_unknown"}
 
 
 async def _orders_place_from_body(body: dict):
+    broker = str(getattr(app.state, "broker", "IB") or "IB").upper()
+    if broker != "IB":
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": f"{broker} is read-only for order placement",
+                "reason_code": ReasonCode.READ_ONLY_BROKER.value,
+                "reason_detail": f"{broker} is read-only for order placement",
+            },
+        )
+
+    scope = _resolve_scope_kwargs()
+    if scope["broker"] != "IB":
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": f"{scope['broker']} is read-only for order placement",
+                "reason_code": ReasonCode.READ_ONLY_BROKER.value,
+                "reason_detail": f"{scope['broker']} is read-only for order placement",
+            },
+        )
+
     # F2: server-side Gate 4. Run preflight before any subprocess invocation.
-    verdict = _run_preflight(body)
+    verdict = await _run_preflight(body)
     if not verdict.accept:
         code = verdict.reason_code.value if verdict.reason_code else None
         # `detail` is the field web/lib/xenonApi.ts:39 reads for human-
@@ -1679,26 +1963,7 @@ async def _orders_place_from_body(body: dict):
 
     # F3: quote-token + tick-grid + limit-band + market-hours
     if body.get("type") != "combo":
-        token = body.get("quote_token")
-        if not token:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "detail": "quote_token is required",
-                    "reason_code": ReasonCode.STALE_QUOTE.value,
-                },
-            )
-        qv = quote_guard.check(
-            token=token,
-            token_secret=os.environ.get("XENON_QUOTE_TOKEN_SECRET", ""),
-            con_id=int(body.get("con_id") or 0),
-            ticker=str(body.get("symbol", "")).upper(),
-            security_type="STK" if body.get("type") == "stock" else "OPT",
-            action=str(body.get("action", "")).upper(),
-            limit_price=Decimal(str(body.get("limitPrice", "0"))),
-            now=_now(),
-            tick_rule_lookup=_tick_rule_cache.get,
-        )
+        qv, quote_status = await _validate_non_combo_quote(body)
         _override_detail = None
         if not qv.accept:
             if qv.reason_code == ReasonCode.LIMIT_OUT_OF_BAND and body.get("acknowledge_limit_override") is True:
@@ -1708,7 +1973,7 @@ async def _orders_place_from_body(body: dict):
                 }
             else:
                 return JSONResponse(
-                    status_code=400,
+                    status_code=quote_status,
                     content={
                         "detail": qv.reason_detail,
                         "reason_code": qv.reason_code.value if qv.reason_code else None,

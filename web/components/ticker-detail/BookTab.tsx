@@ -6,6 +6,9 @@ import type { PriceData } from "@/lib/pricesProtocol";
 import { fmtPrice } from "@/lib/positionUtils";
 import OrderErrorBanner from "@/components/OrderErrorBanner";
 import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
+import { OrderTifSelector } from "@/lib/order/components/OrderTifSelector";
+import { useClientAttemptId } from "./useClientAttemptId";
+import { getReasonToast } from "@/lib/orderReasonCodes";
 
 /* ─── Types ─── */
 
@@ -18,6 +21,23 @@ type BookTabProps = {
 };
 
 type OrderAction = "BUY" | "SELL";
+
+function errorFromResponseBody(
+  body: Record<string, unknown> | null | undefined,
+  fallback: string,
+): string {
+  if (body && typeof body === "object") {
+    const code = body.reason_code;
+    if (typeof code === "string" && code.length > 0) {
+      return getReasonToast(code).copy;
+    }
+    const error = body.error;
+    if (typeof error === "string" && error.length > 0) return error;
+    const detail = body.detail;
+    if (typeof detail === "string" && detail.length > 0) return detail;
+  }
+  return fallback;
+}
 
 /* ─── L1 Order Book ─── */
 
@@ -316,6 +336,7 @@ function StockOrderForm({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const attemptId = useClientAttemptId({ ticker });
 
   const parsedQty = parseInt(quantity, 10);
   const parsedPrice = parseFloat(limitPrice);
@@ -347,6 +368,7 @@ function StockOrderForm({
     setSuccess(null);
 
     try {
+      attemptId.markSubmitted();
       const res = await fetch("/api/orders/place", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -357,23 +379,27 @@ function StockOrderForm({
           quantity: parsedQty,
           limitPrice: parsedPrice,
           tif,
+          client_attempt_id: attemptId.id,
         }),
       });
       const json = await res.json();
       if (!res.ok) {
-        setError(json.error || "Order placement failed");
+        setError(errorFromResponseBody(json, "Order placement failed"));
+        attemptId.markTerminal();
       } else {
         setSuccess(
           `Order placed: ${action} ${parsedQty} ${ticker} @ ${fmtPrice(parsedPrice)}`
         );
         setConfirmStep(false);
+        attemptId.markTerminal();
       }
     } catch {
       setError("Network error placing order");
+      attemptId.markTerminal();
     } finally {
       setLoading(false);
     }
-  }, [confirmStep, ticker, action, parsedQty, parsedPrice, tif]);
+  }, [confirmStep, ticker, action, parsedQty, parsedPrice, tif, attemptId]);
 
   return (
     <div className="order-form" style={{ marginTop: "16px" }}>
@@ -490,20 +516,13 @@ function StockOrderForm({
 
       <div className="order-field">
         <label className="order-label">Time in Force</label>
-        <div className="order-action-buttons">
-          <button
-            className={`order-action-btn ${tif === "DAY" ? "order-action-active" : ""}`}
-            onClick={() => setTif("DAY")}
-          >
-            DAY
-          </button>
-          <button
-            className={`order-action-btn ${tif === "GTC" ? "order-action-active" : ""}`}
-            onClick={() => setTif("GTC")}
-          >
-            GTC
-          </button>
-        </div>
+        <OrderTifSelector
+          tif={tif}
+          onChange={(value) => {
+            setTif(value);
+            setConfirmStep(false);
+          }}
+        />
       </div>
 
       <OrderErrorBanner error={error} />

@@ -38,6 +38,10 @@ export const PlaceOrderBodySchema = Type.Object({
   strike: Type.Optional(Type.Number()),
   right: Type.Optional(OptionRightSchema),
   legs: Type.Optional(Type.Array(PlaceOrderComboLegSchema)),
+  client_attempt_id: Type.String({ minLength: 1 }),
+  quote_token: Type.Optional(Type.String()),
+  con_id: Type.Optional(Type.Number()),
+  acknowledge_limit_override: Type.Optional(Type.Boolean()),
 });
 
 export type PlaceOrderBodyValidated = Static<typeof PlaceOrderBodySchema>;

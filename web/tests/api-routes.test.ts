@@ -237,6 +237,8 @@ describe("GET /api/ticker/seasonality", () => {
 // =============================================================================
 
 describe("POST /api/orders/place", () => {
+  const client_attempt_id = "test-api-routes";
+
   let POST: (req: Request) => Promise<Response>;
 
   beforeEach(async () => {
@@ -298,6 +300,7 @@ describe("POST /api/orders/place", () => {
         action: "BUY",
         quantity: 1,
         limitPrice: 5.0,
+        client_attempt_id,
         strike: 200,
         right: "C",
       }),
@@ -318,6 +321,7 @@ describe("POST /api/orders/place", () => {
         action: "BUY",
         quantity: 1,
         limitPrice: 5.0,
+        client_attempt_id,
         expiry: "20260320",
         right: "C",
       }),
@@ -338,6 +342,7 @@ describe("POST /api/orders/place", () => {
         action: "BUY",
         quantity: 1,
         limitPrice: 5.0,
+        client_attempt_id,
         expiry: "20260320",
         strike: 200,
       }),
@@ -368,6 +373,7 @@ describe("POST /api/orders/place", () => {
         action: "SELL",
         quantity: 50,
         limitPrice: 8.5,
+        client_attempt_id,
       }),
     });
     const res = await POST(req);
@@ -386,6 +392,7 @@ describe("POST /api/orders/place", () => {
         action: "SELL",
         quantity: 50,
         limitPrice: 8.5,
+        client_attempt_id,
         legs: [
           {
             expiry: "20260327",
@@ -413,6 +420,7 @@ describe("POST /api/orders/place", () => {
         action: "SELL",
         quantity: 50,
         limitPrice: 8.5,
+        client_attempt_id,
         legs: [],
       }),
     });

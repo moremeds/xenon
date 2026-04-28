@@ -19,6 +19,7 @@ import { NextRequest } from "next/server";
 
 describe("POST /api/orders/place validation", () => {
   let placePOST: (req: Request) => Promise<Response>;
+  const client_attempt_id = "test-order-reliability";
 
   beforeAll(async () => {
     const mod = await import("../app/api/orders/place/route");
@@ -29,7 +30,7 @@ describe("POST /api/orders/place validation", () => {
     const req = new NextRequest("http://localhost/api/orders/place", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ symbol: "AAPL", action: "BUY", quantity: 10, limitPrice: 0 }),
+      body: JSON.stringify({ symbol: "AAPL", action: "BUY", quantity: 10, limitPrice: 0, client_attempt_id }),
     });
     const res = await placePOST(req);
     expect(res.status).toBe(400);
@@ -41,7 +42,7 @@ describe("POST /api/orders/place validation", () => {
     const req = new NextRequest("http://localhost/api/orders/place", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ symbol: "AAPL", action: "BUY", quantity: 10, limitPrice: -5 }),
+      body: JSON.stringify({ symbol: "AAPL", action: "BUY", quantity: 10, limitPrice: -5, client_attempt_id }),
     });
     const res = await placePOST(req);
     expect(res.status).toBe(400);
@@ -53,7 +54,7 @@ describe("POST /api/orders/place validation", () => {
     const req = new NextRequest("http://localhost/api/orders/place", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ symbol: "AAPL", action: "BUY", quantity: 0, limitPrice: 100 }),
+      body: JSON.stringify({ symbol: "AAPL", action: "BUY", quantity: 0, limitPrice: 100, client_attempt_id }),
     });
     const res = await placePOST(req);
     expect(res.status).toBe(400);
@@ -65,7 +66,7 @@ describe("POST /api/orders/place validation", () => {
     const req = new NextRequest("http://localhost/api/orders/place", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ symbol: "AAPL", action: "BUY", quantity: -10, limitPrice: 100 }),
+      body: JSON.stringify({ symbol: "AAPL", action: "BUY", quantity: -10, limitPrice: 100, client_attempt_id }),
     });
     const res = await placePOST(req);
     expect(res.status).toBe(400);
@@ -131,6 +132,7 @@ describe("POST /api/orders/place validation", () => {
         action: "BUY",
         quantity: 10,
         limitPrice: 5.0,
+        client_attempt_id,
         strike: 200,
         right: "C",
       }),
@@ -151,6 +153,7 @@ describe("POST /api/orders/place validation", () => {
         action: "BUY",
         quantity: 10,
         limitPrice: 5.0,
+        client_attempt_id,
         expiry: "20260417",
         right: "C",
       }),
@@ -171,6 +174,7 @@ describe("POST /api/orders/place validation", () => {
         action: "BUY",
         quantity: 10,
         limitPrice: 5.0,
+        client_attempt_id,
         expiry: "20260417",
         strike: 200,
       }),
@@ -191,6 +195,7 @@ describe("POST /api/orders/place validation", () => {
         action: "BUY",
         quantity: 10,
         limitPrice: 1.5,
+        client_attempt_id,
         legs: [{ expiry: "20260417", strike: 200, right: "C", action: "BUY", ratio: 1 }],
       }),
     });
@@ -210,6 +215,7 @@ describe("POST /api/orders/place validation", () => {
         action: "BUY",
         quantity: 10,
         limitPrice: 1.5,
+        client_attempt_id,
         legs: [],
       }),
     });

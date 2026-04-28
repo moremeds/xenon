@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from xenon.execution import preflight
 from xenon.execution.preflight import (
     PortfolioView,
     PreflightRequest,
@@ -62,6 +63,21 @@ def _make_request(**overrides) -> PreflightRequest:
     )
     base.update(overrides)
     return PreflightRequest(**base)
+
+
+def _combo_request(**overrides):
+    base = dict(
+        ticker="SPY",
+        action="BUY",
+        quantity=1,
+        multiplier=100,
+        legs=[
+            preflight.ComboPreflightLeg(expiry="20260620", strike=500.0, right="C", action="BUY", ratio=1),
+            preflight.ComboPreflightLeg(expiry="20260620", strike=510.0, right="C", action="SELL", ratio=1),
+        ],
+    )
+    base.update(overrides)
+    return preflight.ComboPreflightRequest(**base)
 
 
 def test_universe_unknown_ticker_blocks():
@@ -280,6 +296,72 @@ def test_sell_to_close_exact_match_ok():
             limit_price=5.0,
         ),
         PortfolioView(positions=[_long_call_position("SPY", 500.0, "20260620")]),
+    )
+    assert v.accept is True
+
+
+def test_combo_vertical_open_allows_without_stock():
+    v = preflight.evaluate_combo(_combo_request(), PortfolioView(positions=[]))
+    assert v.accept is True
+
+
+def test_combo_short_put_open_allows_without_stock():
+    v = preflight.evaluate_combo(
+        _combo_request(
+            legs=[
+                preflight.ComboPreflightLeg(expiry="20260620", strike=480.0, right="P", action="SELL", ratio=1),
+            ]
+        ),
+        PortfolioView(positions=[]),
+    )
+    assert v.accept is True
+
+
+def test_combo_short_risk_reversal_blocks_without_stock_cover():
+    v = preflight.evaluate_combo(
+        _combo_request(
+            legs=[
+                preflight.ComboPreflightLeg(expiry="20260620", strike=500.0, right="P", action="BUY", ratio=1),
+                preflight.ComboPreflightLeg(expiry="20260620", strike=510.0, right="C", action="SELL", ratio=1),
+            ]
+        ),
+        PortfolioView(positions=[]),
+    )
+    assert v.accept is False
+    assert v.reason_code == ReasonCode.ETF_CALL_UNCOVERED
+
+
+def test_combo_call_ratio_spread_blocks_uncovered_tail():
+    v = preflight.evaluate_combo(
+        _combo_request(
+            legs=[
+                preflight.ComboPreflightLeg(expiry="20260620", strike=500.0, right="C", action="BUY", ratio=1),
+                preflight.ComboPreflightLeg(expiry="20260620", strike=510.0, right="C", action="SELL", ratio=2),
+            ]
+        ),
+        PortfolioView(positions=[]),
+    )
+    assert v.accept is False
+    assert v.reason_code == ReasonCode.ETF_CALL_UNCOVERED
+
+
+def test_combo_call_ratio_spread_allows_with_stock_cover():
+    v = preflight.evaluate_combo(
+        _combo_request(
+            legs=[
+                preflight.ComboPreflightLeg(expiry="20260620", strike=500.0, right="C", action="BUY", ratio=1),
+                preflight.ComboPreflightLeg(expiry="20260620", strike=510.0, right="C", action="SELL", ratio=2),
+            ]
+        ),
+        PortfolioView(positions=[_stock_position("SPY", 100)]),
+    )
+    assert v.accept is True
+
+
+def test_combo_closing_sell_allows_without_portfolio_cover():
+    v = preflight.evaluate_combo(
+        _combo_request(action="SELL"),
+        PortfolioView(positions=[]),
     )
     assert v.accept is True
 
