@@ -41,7 +41,7 @@ xenon.order_events:               11 events
                                   kinds: REHYDRATE_UNCERTAIN, MODIFY, CANCEL, PREFLIGHT_ACK_LIMIT
                                   no FILL kind exists in code
 ib_execute.py:345:                inserts to xenon.trades only on inline-watch path
-orders_store.py:351 mark_finalized: updates state but does NOT insert to xenon.trades
+orders_store.py:351 mark_terminal: updates state but does NOT insert to xenon.trades
 single_leg_rehydrate.py:185:      writes UNKNOWN when execs snapshot empty + positions changed
 ```
 
@@ -86,8 +86,8 @@ single_leg_rehydrate.py:185:      writes UNKNOWN when execs snapshot empty + pos
 
 | #   | Change                                                           | Site                                                     | Notes                                                                     |
 | --- | ---------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------- |
-| 1.1 | Add `FILL` event kind                                            | `orders_store.py:351`, `mark_finalized()`                | `kind` is text — no schema migration                                      |
-| 1.2 | Insert into `xenon.trades` on finalize                           | `orders_store.py::mark_finalized()`                      | Currently only `ib_execute.py:345` inserts; rehydrate path skips          |
+| 1.1 | Add `FILL` event kind                                            | `orders_store.py:351`, `mark_terminal()`                | `kind` is text — no schema migration                                      |
+| 1.2 | Insert into `xenon.trades` on finalize                           | `orders_store.py::mark_terminal()`                      | Currently only `ib_execute.py:345` inserts; rehydrate path skips          |
 | 1.3 | Diagnose + fix rehydrate exec-snapshot lookup                    | `single_leg_rehydrate.py:60-100`, IB pool `executions()` | Today's orders all `UNKNOWN`; either pool role or gateway-restart issue   |
 | 1.4 | Enrich trades writes with `structure` + `decision`               | new helper in `orders_store`                             | `xenon.trades.structure` currently empty; needed for blotter/journal UX   |
 | 1.5 | Combo wizard fill propagation                                    | `combo_wizard/rehydrate.py:144-170`                      | All combo legs roll into one `trades` row, leg detail in `metadata` JSONB |
@@ -308,7 +308,7 @@ Existing memory references that informed this plan:
 
 ## What changed
 
-Codex correctly identified that revision 0's keystone (a single `mark_finalized` call writing both lifecycle events and `xenon.trades` rows as deltas) cannot be idempotent under reconnects, partial fills, or combo legs because:
+Codex correctly identified that revision 0's keystone (a single `mark_terminal` call writing both lifecycle events and `xenon.trades` rows as deltas) cannot be idempotent under reconnects, partial fills, or combo legs because:
 
 - `xenon.trades` has no `submission_id` / `perm_id` / `exec_id` linkage to the source fill (`src/xenon/db/schema.py:78-101`).
 - `order_events` has no idempotency key (`src/xenon/db/schema.py:169-183`); rehydrate already aggregates by `perm_id` and discards execution identity (`src/xenon/execution/single_leg_rehydrate.py:235-263`).
@@ -316,9 +316,9 @@ Codex correctly identified that revision 0's keystone (a single `mark_finalized`
 
 Plus three name slips that would have broken first-day execution:
 
-- Real symbol is `mark_terminal`, not `mark_finalized` (`src/xenon/execution/orders_store.py:348`).
-- Real outbox is `events.outbox` (in the `events` schema), not `xenon.outbox` (`src/xenon/db/schema.py:720-732`).
-- Pool roles are `sync` / `data` (and `orders`), not `exec` (`src/xenon/api/server.py:793,1733; src/xenon/api/ib_pool.py:98`).
+- Real terminal-state helper is `mark_terminal` (`src/xenon/execution/orders_store.py:348`).
+- Real outbox table is `events.outbox` in the `events` schema (`src/xenon/db/schema.py:720-732`).
+- Pool roles are `sync` / `data` (and `orders`) (`src/xenon/api/server.py:793,1733; src/xenon/api/ib_pool.py:98`).
 
 ## Locked architectural decisions (Q1–Q4)
 
@@ -412,7 +412,7 @@ Deferred    W4.9 (Futu)
 - [ ] `events.outbox` emits `fill.recorded` on every fill insert and `trade.closed` on every close transition, in the same transaction as the source write (never racy thanks to post-commit `pg_notify`).
 - [ ] `ib_reconcile` writes to `order_fills` for IB-external fills before W4.7 removes journal sync.
 - [ ] `portfolio_performance.py` reads PG only — no `data/portfolio.json` or `data/blotter.json` reads.
-- [ ] All references to `mark_finalized`, `xenon.outbox`, and pool role `'exec'` are eradicated from code, plans, tests, and docs.
+- [ ] All stale finalize-helper, outbox-schema, and pool-role references are eradicated from code, plans, tests, and docs.
 
 ## Revised non-goals (additions)
 

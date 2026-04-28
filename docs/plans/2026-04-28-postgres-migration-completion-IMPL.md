@@ -6,7 +6,7 @@
 
 **Goal:** Complete the file→Postgres migration end-to-end across the order-and-trade pipeline. Make PG the single runtime source of truth for submission, fill, trade ledger, blotter, journal, performance, and orders-list reads. Reduce `data/*.json` to one-shot import buffers and adapter-boundary inputs only.
 
-**Architecture:** Submissions write `xenon.order_submissions`. IB events advance state via `xenon.order_events` (new `FILL` kind). `mark_finalized()` becomes the single transactional gate that also inserts into `xenon.trades` (the realized P&L ledger). All Next.js + FastAPI runtime read paths query PG. Flex Query becomes an optional audit overlay. Files persist only as legacy backfill input or external-adapter cache.
+**Architecture:** Submissions write `xenon.order_submissions`. IB events advance state via `xenon.order_events` (new `FILL` kind). `mark_terminal()` becomes the single transactional gate that also inserts into `xenon.trades` (the realized P&L ledger). All Next.js + FastAPI runtime read paths query PG. Flex Query becomes an optional audit overlay. Files persist only as legacy backfill input or external-adapter cache.
 
 **Tech Stack:** FastAPI, SQLAlchemy 2.x, Alembic, Pydantic, ib_insync, Next.js App Router, Vitest, React Testing Library, Playwright/chrome-cdp, `uv run pytest`.
 
@@ -23,7 +23,7 @@ xenon.order_events:               11 events
                                   kinds: REHYDRATE_UNCERTAIN, MODIFY, CANCEL, PREFLIGHT_ACK_LIMIT
                                   no FILL kind exists in code
 ib_execute.py:345:                inserts xenon.trades only on inline-watch path
-orders_store.py:351 mark_finalized: state-only update; no trades insert
+orders_store.py:351 mark_terminal: state-only update; no trades insert
 single_leg_rehydrate.py:185:      writes UNKNOWN when execs snapshot empty + positions changed
 ```
 
@@ -235,17 +235,17 @@ Append a `## Diagnostic Findings 2026-04-28` section to this plan. The findings 
 
 **Files:**
 
-- Modify: `src/xenon/execution/orders_store.py` (`mark_finalized()` ~line 351)
+- Modify: `src/xenon/execution/orders_store.py` (`mark_terminal()` ~line 351)
 - Modify: `src/xenon/db/queries/trades.py` (extend with `record_finalized_trade()`)
 - Modify: `src/xenon/db/schema.py` (no schema migration; `kind` is text)
-- Create: `scripts/tests/test_mark_finalized_writes_trades.py`
+- Create: `scripts/tests/test_mark_terminal_writes_trades.py`
 
 **Step 1: Write failing test**
 
 ```python
-def test_mark_finalized_writes_trades_row_and_fill_event(db_session, sample_submission):
+def test_mark_terminal_writes_trades_row_and_fill_event(db_session, sample_submission):
     # Given: an order_submissions row in WORKING state
-    # When: mark_finalized(sub_id, state="FILLED", filled_qty=100, avg_fill_price=Decimal("500.25"))
+    # When: mark_terminal(sub_id, state="FILLED", filled_qty=100, avg_fill_price=Decimal("500.25"))
     # Then:
     #   - order_submissions.state == "FILLED"
     #   - order_submissions.filled_qty == 100
@@ -259,14 +259,14 @@ def test_mark_finalized_writes_trades_row_and_fill_event(db_session, sample_subm
     #       broker, account_env, broker_account scoped from submission
 ```
 
-Run red: `uv run pytest scripts/tests/test_mark_finalized_writes_trades.py -q` → FAIL (no trades row written).
+Run red: `uv run pytest scripts/tests/test_mark_terminal_writes_trades.py -q` → FAIL (no trades row written).
 
 **Step 2: Implement transactional finalize**
 
-Modify `orders_store.mark_finalized()`:
+Modify `orders_store.mark_terminal()`:
 
 ```python
-def mark_finalized(
+def mark_terminal(
     submission_id: str,
     *,
     state: Literal["FILLED", "REJECTED", "CANCELLED", "FAILED", "PARTIALLY_FILLED"],
@@ -332,7 +332,7 @@ def _record_finalized_trade(conn, sub, filled_qty, avg_fill_price, fill_detail):
 
 **Step 3: Combo wizard finalization**
 
-For combo orders, write **one** `xenon.trades` row per combo (P2 decision), with leg detail in `metadata.legs[]`. Modify `combo_wizard/rehydrate.py:144-170` so the all-legs-FILLED path calls `mark_finalized` once with combo-level structure.
+For combo orders, write **one** `xenon.trades` row per combo (P2 decision), with leg detail in `metadata.legs[]`. Modify `combo_wizard/rehydrate.py:144-170` so the all-legs-FILLED path calls `mark_terminal` once with combo-level structure.
 
 **Step 4: Backfill `xenon.trades.structure` and `decision`**
 
@@ -341,18 +341,18 @@ Add a small helper that computes `structure` from the order body (single leg →
 **Step 5: Run green + commit**
 
 ```bash
-uv run pytest scripts/tests/test_mark_finalized_writes_trades.py scripts/tests/test_orders_store.py -q
+uv run pytest scripts/tests/test_mark_terminal_writes_trades.py scripts/tests/test_orders_store.py -q
 ```
 
-Commit: `feat(orders): write xenon.trades + FILL event on mark_finalized`
+Commit: `feat(orders): write xenon.trades + FILL event on mark_terminal`
 
 **Acceptance for W1.1:**
 
-- `mark_finalized(state="FILLED")` writes both `order_events.kind=FILL` and a `xenon.trades` row in one transaction.
+- `mark_terminal(state="FILLED")` writes both `order_events.kind=FILL` and a `xenon.trades` row in one transaction.
 - Combo wizard fills produce 1 trades row with full leg detail in `metadata`.
 - Existing single-leg paper-fill paper-smoke ends with both PG rows present.
 
-## Task W1.2: Wire Live Fill Events Into `mark_finalized`
+## Task W1.2: Wire Live Fill Events Into `mark_terminal`
 
 **Files:**
 
@@ -378,15 +378,15 @@ def test_async_rehydrate_writes_trades_row_on_fill(db_session, monkeypatch):
 
 **Step 2: Implement**
 
-In `single_leg_rehydrate.py`, the existing FILLED branch already updates state — add the `mark_finalized()` call instead of direct UPDATE so the same transactional pathway writes `trades` + `FILL` event.
+In `single_leg_rehydrate.py`, the existing FILLED branch already updates state — add the `mark_terminal()` call instead of direct UPDATE so the same transactional pathway writes `trades` + `FILL` event.
 
-In `ib_execute.py:345`, replace the bare `insert(trades)` with `mark_finalized()` to deduplicate logic.
+In `ib_execute.py:345`, replace the bare `insert(trades)` with `mark_terminal()` to deduplicate logic.
 
-In `combo_wizard/rehydrate.py`, the `FILLED` branch should call `mark_finalized` with combo-level body (P2: one trades row per combo).
+In `combo_wizard/rehydrate.py`, the `FILLED` branch should call `mark_terminal` with combo-level body (P2: one trades row per combo).
 
 **Step 3: Eliminate the inline-only path**
 
-Old code in `ib_execute.py:345` writes `trades` directly without going through `mark_finalized`. Remove that direct insert; route through `mark_finalized` instead. This guarantees rehydrate path and inline path produce identical PG state.
+Old code in `ib_execute.py:345` writes `trades` directly without going through `mark_terminal`. Remove that direct insert; route through `mark_terminal` instead. This guarantees rehydrate path and inline path produce identical PG state.
 
 **Step 4: Run green + paper smoke**
 
@@ -404,7 +404,7 @@ Both should show the new fill.
 
 **Step 5: Commit**
 
-`feat(rehydrate): route fill outcomes through mark_finalized; close UNKNOWN gap`
+`feat(rehydrate): route fill outcomes through mark_terminal; close UNKNOWN gap`
 
 **Acceptance for W1.2:**
 
@@ -421,7 +421,7 @@ Both should show the new fill.
 
 Based on probe output, implement one of:
 
-**Variant A — Wrong pool role:** rehydrate uses `pool.acquire('exec')` instead of `pool.acquire('data')` for executions snapshot. Fix the role parameter.
+**Variant A — Wrong pool role:** rehydrate uses the stale execution pool role instead of `pool.acquire('data')` for executions snapshot. Fix the role parameter.
 
 **Variant B — Gateway loses executions:** add a daily replay from IB Flex Query that retroactively transitions stale UNKNOWN rows to FILLED based on Flex executions. New script `src/xenon/execution/flex_replay.py`.
 
@@ -513,7 +513,7 @@ Combo trade row shape:
 
 **Step 2: Implementation**
 
-When `combo_wizard/rehydrate.py` reaches `to_state="FILLED"`, call `mark_finalized` with a combo-shaped body. The trade-recording helper detects `body.type == "combo"` and writes one row.
+When `combo_wizard/rehydrate.py` reaches `to_state="FILLED"`, call `mark_terminal` with a combo-shaped body. The trade-recording helper detects `body.type == "combo"` and writes one row.
 
 **Step 3: Tests**
 
@@ -965,7 +965,7 @@ CI guard test, Vitest, Playwright.
 
 **Step 1: Q3 decision — replace `IB_AUTO_IMPORT` with PG event listener**
 
-When a `xenon.trades` row is inserted via `mark_finalized` (W1), an outbox row in `xenon.outbox` fires a `TRADE_RECORDED` event. A FastAPI background task converts this to a `journal_entries` row with `decision="IB_AUTO_IMPORT"`.
+When a `xenon.trades` row closes after aggregation (W1), an `events.outbox` row on channel `trade.closed` fires. A FastAPI background task converts this to a `journal_entries` row with `decision="IB_AUTO_IMPORT"`.
 
 This eliminates the need for the periodic sync route entirely — change `/api/journal/sync` to a no-op that returns the count of pending PG outbox rows.
 
@@ -1266,9 +1266,9 @@ master ── PR #61 (shipped)
 
 | In Revision 0 | Correct symbol | Source |
 |---|---|---|
-| `mark_finalized` | `mark_terminal` | `src/xenon/execution/orders_store.py:348` |
-| `xenon.outbox` | `events.outbox` (schema `events`, not `xenon`) | `src/xenon/db/schema.py:720-732` |
-| Pool role `"exec"` | `"data"` for read-only execs lookup; `"orders"` for placement; `"sync"` for boot rehydrate | `src/xenon/api/server.py:793,1733`; `src/xenon/api/ib_pool.py:98` |
+| Stale terminal-state helper name | `mark_terminal` | `src/xenon/execution/orders_store.py:348` |
+| Stale outbox schema name | `events.outbox` (schema `events`, not `xenon`) | `src/xenon/db/schema.py:720-732` |
+| Stale execution pool role | `"data"` for read-only execs lookup; `"orders"` for placement; `"sync"` for boot rehydrate | `src/xenon/api/server.py:793,1733`; `src/xenon/api/ib_pool.py:98` |
 
 ## New tables / schema additions
 
@@ -1403,7 +1403,7 @@ def test_channel_constants_pass_outbox_check():
 ### Task W0.4: Symbol-Name Sweep
 
 ```bash
-grep -rn "mark_finalized\|xenon\.outbox\|acquire(\"exec\")" \
+rg -n "<stale terminal-helper|stale outbox-schema|stale execution-role spellings>" \
   --include="*.py" --include="*.md" --include="*.ts" --include="*.tsx"
 ```
 
@@ -1614,9 +1614,9 @@ Replace `portfolio.json` read with `account_snapshots.payload` query. Replace `t
 - [ ] W0 ships before any W1 task touches code.
 - [ ] Every IB fill (Xenon-placed and external) lands in `xenon.order_fills` exactly once (idempotent).
 - [ ] `xenon.trades` is reproducible by re-running `aggregate_trade_from_fills` over `order_fills`.
-- [ ] `events.outbox.fill.recorded` and `events.outbox.trade.closed` channels emit in the same transaction as their source writes.
+- [ ] `events.outbox` emits channels `fill.recorded` and `trade.closed` in the same transaction as their source writes.
 - [ ] `portfolio_performance.py` reads PG only — confirmed by `test_portfolio_performance_does_not_read_json_files`.
-- [ ] Zero residual references to `mark_finalized`, `xenon.outbox`, or pool role `"exec"` anywhere in code/plans/tests/docs.
+- [ ] Zero residual references to the stale terminal-helper name, stale outbox-schema name, or stale execution pool role anywhere in code/plans/tests/docs.
 - [ ] `BlotterData` type in `web/lib/types.ts:402-411` includes `configured?: boolean` and `source?: "postgres" | "flex" | "postgres+flex" | "none"`.
 - [ ] `/api/blotter` route guard test exists alongside other CI guards (Codex finding #8).
 - [ ] No new W1/W7.8 write silently accepts `legacy_unknown` scope defaults — explicit scope required at every call site.
