@@ -53,6 +53,63 @@ DEFAULT_TIMEOUT = 60  # 1 minute default monitor timeout
 DEFAULT_INTERVAL = 3  # Check every 3 seconds
 
 
+def _coerce_fill_time(value: Any, default: datetime) -> datetime:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if value is None:
+        return default
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _fill_get(fill: Any, *names: str) -> Any:
+    if isinstance(fill, dict):
+        for name in names:
+            if name in fill and fill[name] is not None:
+                return fill[name]
+        return None
+    for name in names:
+        if hasattr(fill, name):
+            value = getattr(fill, name)
+            if value is not None:
+                return value
+    execution = getattr(fill, "execution", None)
+    if execution is not None:
+        for name in names:
+            if hasattr(execution, name):
+                value = getattr(execution, name)
+                if value is not None:
+                    return value
+    return None
+
+
+def _legacy_cli_fill_records(result: Dict[str, Any], contract: Any, side: str, now_utc: datetime) -> list[dict]:
+    raw_fills = result.get("fills") or [{}]
+    records: list[dict] = []
+    for idx, fill in enumerate(raw_fills):
+        exec_id = _fill_get(fill, "exec_id", "execId")
+        if not exec_id:
+            exec_id = f"legacy_cli:{result['order_id']}:{idx}"
+        qty = _fill_get(fill, "qty", "shares", "filled_qty") or result["quantity"]
+        price = _fill_get(fill, "price", "avg_price", "avgPrice") or result["avg_price"]
+        commission = _fill_get(fill, "commission")
+        if commission is None:
+            commission = result.get("commission", 0) if len(raw_fills) == 1 else 0
+        records.append(
+            {
+                "exec_id": str(exec_id),
+                "con_id": _fill_get(fill, "con_id", "conId") or getattr(contract, "conId", None),
+                "ticker": _fill_get(fill, "ticker", "symbol") or result["symbol"],
+                "side": _fill_get(fill, "side", "action") or side,
+                "qty": int(qty),
+                "price": Decimal(str(price)),
+                "commission": Decimal(str(commission or 0)),
+                "filled_at": _coerce_fill_time(_fill_get(fill, "filled_at", "time"), now_utc),
+            }
+        )
+    return records
+
+
 class OrderExecutor:
     """Unified order executor with monitoring and logging"""
 
@@ -292,38 +349,16 @@ class OrderExecutor:
             structure = "Long Stock" if side == "BUY" else "Sold Stock"
 
         now_utc = datetime.now(timezone.utc)
-        now_local = datetime.now()
 
-        trade_entry = {
-            "date": now_local.strftime("%Y-%m-%d"),
-            "time": now_local.strftime("%H:%M:%S"),
-            "ticker": result["symbol"],
-            "contract_type": contract_type,
-            "contract": contract_str,
-            "structure": structure,
-            "action": side,
-            "decision": "EXECUTED",
-            "order_id": result["order_id"],
-            "quantity": result["quantity"],
-            "fill_price": result["avg_price"],
-            "total_value": round(result["total_value"], 2),
-            "commission": result.get("commission", 0),
-            "limit_price": limit_price,
-            "thesis": thesis,
-            "notes": notes,
-            "fills": result.get("fills", []),
-        }
-
-        # Write to Postgres. Resolve scope strictly when env is set:
+        # Write execution-grain fills to Postgres. Resolve scope strictly when env is set:
         # if XENON_TRADING_MODE is present, validate XENON_BROKER_ACCOUNT
         # matches it via resolve_from_env(); fail loud on mismatch instead
         # of silently writing under a wrong account_env. With no env set,
         # fall back to legacy_unknown defaults (e.g. ad-hoc CLI usage).
         try:
-            from sqlalchemy import insert
-
-            from xenon.db.schema import trades
             from xenon.execution.account_scope import resolve_from_env
+            from xenon.execution.orders_store import record_fill
+            from xenon.execution.trade_aggregator import aggregate_trade_from_fills
 
             if os.environ.get("XENON_TRADING_MODE") or os.environ.get("XENON_BROKER_ACCOUNT"):
                 scope = resolve_from_env()
@@ -339,24 +374,39 @@ class OrderExecutor:
                     "broker_account": "legacy_unknown",
                 }
 
-            engine = get_sync_engine()
-            with engine.begin() as conn:
-                conn.execute(
-                    insert(trades).values(
-                        ticker=result["symbol"],
-                        structure=structure,
-                        action=side,
-                        quantity=result["quantity"],
-                        entry_cost=Decimal(str(round(result["total_value"], 4))) if side == "BUY" else None,
-                        exit_cost=Decimal(str(round(result["total_value"], 4))) if side == "SELL" else None,
-                        edge=thesis or None,
-                        decision="EXECUTED",
-                        opened_at=now_utc if side == "BUY" else None,
-                        closed_at=now_utc if side == "SELL" else None,
-                        metadata=trade_entry,
-                        **scope_kwargs,
-                    )
+            legacy_ids: list[str] = []
+            for fill in _legacy_cli_fill_records(result, contract, side, now_utc):
+                legacy_id = fill["exec_id"]
+                record_fill(
+                    exec_id=fill["exec_id"],
+                    submission_id=None,
+                    combo_attempt_id=None,
+                    perm_id=None,
+                    ib_order_id=str(result["order_id"]),
+                    con_id=fill["con_id"],
+                    ticker=fill["ticker"],
+                    side=fill["side"],
+                    qty=fill["qty"],
+                    price=fill["price"],
+                    commission=fill["commission"],
+                    filled_at=fill["filled_at"],
+                    metadata={
+                        "legacy_source": "ib_execute_cli",
+                        "legacy_id": legacy_id,
+                        "structure": structure,
+                        "contract_type": contract_type,
+                        "contract": contract_str,
+                        "order_id": str(result["order_id"]),
+                        "limit_price": str(limit_price),
+                        "decision": "EXECUTED",
+                        "thesis": thesis or None,
+                        "notes": notes or None,
+                    },
+                    **scope_kwargs,
                 )
+                legacy_ids.append(legacy_id)
+            for legacy_id in legacy_ids:
+                aggregate_trade_from_fills(legacy_id=legacy_id)
             print("✓ Trade logged to Postgres")
         except Exception as exc:
             print(f"  Warning: Postgres trade log failed: {exc}")

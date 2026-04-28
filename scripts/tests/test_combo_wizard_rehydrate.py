@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -74,6 +75,9 @@ def _seed_session(
     ib_order_id: str = "IB-1",
     quantity: int = 1,
     legs: list[dict] | None = None,
+    broker: str = "IB",
+    account_env: str = "legacy_unknown",
+    broker_account: str = "legacy_unknown",
 ) -> tuple[str, str]:
     sid = f"wiz-{uuid.uuid4().hex[:12]}"
     aid = uuid.uuid4().hex
@@ -101,6 +105,9 @@ def _seed_session(
             payload=payload,
             created_at=now,
             updated_at=now,
+            broker=broker,
+            account_env=account_env,
+            broker_account=broker_account,
         )
         cwq.update_session(conn, sid, current_attempt_id=aid)
         cwq.create_attempt(
@@ -119,10 +126,52 @@ def _seed_session(
                 "client_attempt_id": f"wiz:{sid}:combo:{aid}",
                 "intent": "OPEN",
                 "price_basis": "MID",
+                "action": "BUY",
+                "quantity": quantity,
             },
+            broker=broker,
+            account_env=account_env,
+            broker_account=broker_account,
         )
     engine.dispose()
     return sid, aid
+
+
+def _fetch_combo_fill_rows():
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT exec_id, combo_attempt_id, con_id, side, qty, price "
+                "FROM xenon.order_fills ORDER BY exec_id"
+            )
+        ).fetchall()
+    engine.dispose()
+    return rows
+
+
+def _fetch_combo_trade_rows():
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT combo_attempt_id, structure, action, quantity, entry_cost, state, metadata "
+                "FROM xenon.trades ORDER BY id"
+            )
+        ).fetchall()
+    engine.dispose()
+    return rows
+
+
+def _fetch_combo_outbox(channel: str):
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT channel, source, payload FROM events.outbox WHERE channel=:channel ORDER BY id"),
+            {"channel": channel},
+        ).fetchall()
+    engine.dispose()
+    return rows
 
 
 class _StubIB:
@@ -201,6 +250,78 @@ def test_combo_rehydrate_all_legs_full_ratio_marks_filled(tmp_path, monkeypatch)
     assert state.upper() == "FILLED"
 
 
+def test_combo_rehydrate_records_leg_fills_and_aggregates_trade(tmp_path, monkeypatch):
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    _sid, aid = _seed_session(
+        tmp_path,
+        state="working",
+        perm_id="P-ledger",
+        quantity=1,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU123456",
+    )
+    execs = [
+        {
+            "exec_id": "exec-combo-ledger-buy",
+            "perm_id": "P-ledger",
+            "ib_order_id": "IB-1",
+            "con_id": 1001,
+            "ticker": "AAPL",
+            "side": "BOT",
+            "shares": 1,
+            "avg_price": 3.10,
+            "time": datetime(2026, 4, 28, 14, 30, tzinfo=timezone.utc),
+        },
+        {
+            "exec_id": "exec-combo-ledger-sell",
+            "perm_id": "P-ledger",
+            "ib_order_id": "IB-1",
+            "con_id": 1002,
+            "ticker": "AAPL",
+            "side": "SLD",
+            "shares": 1,
+            "avg_price": 1.30,
+            "time": datetime(2026, 4, 28, 14, 31, tzinfo=timezone.utc),
+        },
+    ]
+    ib = _StubIB(executions=execs)
+
+    wiz_rehydrate.rehydrate_combo_sessions(
+        ib_client_factory=lambda: ib,
+        db_path=tmp_path,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU123456",
+    )
+    wiz_rehydrate.rehydrate_combo_sessions(
+        ib_client_factory=lambda: ib,
+        db_path=tmp_path,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU123456",
+    )
+
+    fill_rows = _fetch_combo_fill_rows()
+    assert len(fill_rows) == 2
+    assert {row.exec_id for row in fill_rows} == {"exec-combo-ledger-buy", "exec-combo-ledger-sell"}
+    assert {row.combo_attempt_id for row in fill_rows} == {aid}
+    assert [row.side for row in fill_rows] == ["BUY", "SELL"]
+
+    trade_rows = _fetch_combo_trade_rows()
+    assert len(trade_rows) == 1
+    trade = trade_rows[0]
+    assert trade.combo_attempt_id == aid
+    assert trade.structure == "Bull Call Spread"
+    assert trade.action == "BUY"
+    assert trade.quantity == 1
+    assert Decimal(str(trade.entry_cost)) == Decimal("1.8000")
+    assert trade.state == "OPEN"
+    assert [leg["con_id"] for leg in trade.metadata["legs"]] == [1001, 1002]
+
+    assert len(_fetch_combo_outbox("fill.recorded")) == 2
+
+
 def test_combo_rehydrate_one_leg_missing_stays_partially_filled(tmp_path, monkeypatch):
     monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
     _seed_session(tmp_path, state="working", perm_id="P-3", quantity=1)
@@ -248,6 +369,21 @@ def test_combo_rehydrate_ratio_2_for_one_leg(tmp_path, monkeypatch):
     ib = _StubIB(executions=execs)
     decisions = wiz_rehydrate.rehydrate_combo_sessions(ib_client_factory=lambda: ib, db_path=tmp_path)
     assert decisions[0].to_state == "PARTIALLY_FILLED"
+
+
+def test_aggregate_leg_fills_reads_ib_fill_objects():
+    fills = [
+        SimpleNamespace(
+            execution=SimpleNamespace(permId="P-obj", shares=1),
+            contract=SimpleNamespace(conId=1001),
+        ),
+        SimpleNamespace(
+            execution=SimpleNamespace(permId="P-obj", shares=2),
+            contract=SimpleNamespace(conId=1002),
+        ),
+    ]
+
+    assert wiz_rehydrate._aggregate_leg_fills(perm_id="P-obj", executions=fills) == {1001: 1, 1002: 2}
 
 
 # ---------------------------------------------------------------------------

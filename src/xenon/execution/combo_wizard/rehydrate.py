@@ -25,7 +25,9 @@ from typing import Any, Callable
 from xenon.db.engine import get_sync_engine
 from xenon.db.queries import combo_wizard
 from xenon.execution.combo_wizard import protect as _protect_mod
+from xenon.execution.trade_aggregator import aggregate_trade_from_fills
 from xenon.execution.single_leg_rehydrate import (  # noqa: F401 — shared pattern
+    _index_execution_records,
     _index_open_orders,
 )
 
@@ -84,10 +86,15 @@ def _load_latest_attempt(session_id: str) -> dict[str, Any] | None:
     # Map Postgres column names to the dict keys used downstream.
     return {
         "attempt_id": row["attempt_id"],
+        "ticker": row.get("ticker"),
+        "structure_name": row.get("structure_name"),
         "ib_order_id": row.get("ib_order_id"),
         "perm_id": row.get("perm_id"),
         "terminal_state": row.get("state"),  # Postgres `state` → legacy `terminal_state`
         "filled_qty": int(row.get("filled_qty") or 0),
+        "broker": row.get("broker", "IB"),
+        "account_env": row.get("account_env", "legacy_unknown"),
+        "broker_account": row.get("broker_account", "legacy_unknown"),
     }
 
 
@@ -118,9 +125,23 @@ def _aggregate_leg_fills(*, perm_id: str, executions: list[dict]) -> dict[int, i
     for ex in executions or []:
         if not isinstance(ex, dict):
             # Normalize objects with attribute access.
-            pid = getattr(ex, "perm_id", None) or getattr(ex, "permId", None)
-            cid = getattr(ex, "con_id", None) or getattr(ex, "conId", None)
-            sh = getattr(ex, "shares", 0)
+            execution = getattr(ex, "execution", ex)
+            contract = getattr(ex, "contract", None)
+            pid = (
+                getattr(ex, "perm_id", None)
+                or getattr(ex, "permId", None)
+                or getattr(execution, "permId", None)
+                or getattr(execution, "perm_id", None)
+            )
+            cid = (
+                getattr(ex, "con_id", None)
+                or getattr(ex, "conId", None)
+                or getattr(contract, "conId", None)
+                or getattr(contract, "con_id", None)
+            )
+            sh = getattr(ex, "shares", None)
+            if sh is None:
+                sh = getattr(execution, "shares", 0)
         else:
             pid = ex.get("perm_id") or ex.get("permId")
             cid = ex.get("con_id") or ex.get("conId")
@@ -165,6 +186,42 @@ def _combo_fill_state(
     return "WORKING"
 
 
+def _has_explicit_scope(row: dict) -> bool:
+    return bool(row.get("account_env") != "legacy_unknown" and row.get("broker_account") != "legacy_unknown")
+
+
+def _record_combo_fill_records(sess: dict, attempt: dict, records: list[dict]) -> None:
+    if not records or not _has_explicit_scope(attempt):
+        return
+    for record in records:
+        if not record.get("exec_id"):
+            continue
+        _orders_store_record_fill(
+            exec_id=record["exec_id"],
+            combo_attempt_id=attempt["attempt_id"],
+            perm_id=str(attempt.get("perm_id") or record["perm_id"]),
+            ib_order_id=str(attempt.get("ib_order_id") or record.get("ib_order_id") or "") or None,
+            con_id=record.get("con_id"),
+            ticker=record.get("ticker") or attempt.get("ticker") or sess["ticker"],
+            side=record["side"],
+            qty=record["qty"],
+            price=record["price"],
+            commission=record["commission"],
+            filled_at=record["filled_at"],
+            metadata={"source": "combo_wizard_rehydrate", "session_id": sess["session_id"]},
+            broker=attempt.get("broker", "IB"),
+            account_env=attempt["account_env"],
+            broker_account=attempt["broker_account"],
+        )
+    aggregate_trade_from_fills(combo_attempt_id=attempt["attempt_id"])
+
+
+def _orders_store_record_fill(**kwargs) -> bool:
+    from xenon.execution.orders_store import record_fill
+
+    return record_fill(submission_id=None, **kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Public entry point.
 # ---------------------------------------------------------------------------
@@ -189,6 +246,7 @@ def rehydrate_combo_sessions(
     ib = ib_client_factory()
     open_orders = ib.get_open_orders() or []
     executions = ib.get_executions() or []
+    execution_records = _index_execution_records(executions)
 
     open_by_perm: dict[str, dict] = {}
     for oo in open_orders:
@@ -258,6 +316,8 @@ def rehydrate_combo_sessions(
         # Not in open orders. Reconcile against execs with BAG per-leg aggregation.
         leg_shares = _aggregate_leg_fills(perm_id=perm_id, executions=executions)
         to_state = _combo_fill_state(legs=legs, quantity=quantity, leg_shares_by_con=leg_shares)
+        if to_state in {"FILLED", "PARTIALLY_FILLED"}:
+            _record_combo_fill_records(sess, attempt, execution_records.get(str(perm_id), []))
 
         detail = {
             "perm_id": perm_id,
