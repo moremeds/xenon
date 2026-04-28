@@ -13,6 +13,7 @@ import {
 import { buildFastApiPlaceOrderPayload } from "@/lib/order/placeOrderContract";
 
 export const runtime = "nodejs";
+const ORDER_PLACE_TIMEOUT_MS = 60_000;
 
 type ComboLeg = {
   expiry: string;
@@ -190,7 +191,7 @@ export async function POST(request: Request): Promise<Response> {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(orderPayload),
-        timeout: 20_000,
+        timeout: ORDER_PLACE_TIMEOUT_MS,
       },
     );
 

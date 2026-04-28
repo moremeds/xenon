@@ -82,4 +82,35 @@ describe("POST /api/orders/place — FastAPI owns runtime Gate 4", () => {
     expect(forwarded.client_attempt_id).toBe("buy-stock-1");
     expect(forwarded.action).toBe("BUY");
   });
+
+  it("keeps the Next timeout longer than quote validation plus IB placement", async () => {
+    mockXenonFetch
+      .mockResolvedValueOnce({
+        status: "ok",
+        orderId: 12345,
+        permId: 54321,
+        initialStatus: "Submitted",
+        message: "Order placed successfully",
+      })
+      .mockResolvedValueOnce({});
+
+    const { POST } = await import("../app/api/orders/place/route");
+    await POST(
+      new Request("http://localhost/api/orders/place", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "stock",
+          symbol: "QQQ",
+          action: "BUY",
+          quantity: 1,
+          limitPrice: 400,
+          client_attempt_id: "buy-stock-timeout",
+        }),
+      }),
+    );
+
+    expect(mockXenonFetch.mock.calls[0][0]).toBe("/orders/place");
+    expect(mockXenonFetch.mock.calls[0][1].timeout).toBeGreaterThanOrEqual(45_000);
+  });
 });
