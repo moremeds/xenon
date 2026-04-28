@@ -1652,3 +1652,11 @@ master ── PR #61 (shipped)
   ├── feat/snapshot-freshness-observability    (W6 — anytime)
   └── chore/<W7 per file>                      (W7 — opportunistic; W7.8 promoted above)
 ```
+
+## Errata
+
+### 2026-04-28 — W0.1 `ck_fills_source_present` Must Guard NULL Metadata
+
+- Evidence: `docs/plans/2026-04-28-postgres-migration-completion-IMPL.md:1298-1300` specified `(metadata ? 'legacy_source')` as the legacy-source branch of the source-present check.
+- Local Postgres probe: `SELECT (NULL::jsonb ? 'legacy_source'), ((NULL::text IS NOT NULL) OR (NULL::text IS NOT NULL) OR (NULL::jsonb ? 'legacy_source'));` returns NULL for both expressions. PostgreSQL CHECK constraints pass when the expression evaluates to NULL, so the planned check would allow rows with `submission_id IS NULL`, `combo_attempt_id IS NULL`, and `metadata IS NULL`.
+- Correction for W0.1: use `submission_id IS NOT NULL OR combo_attempt_id IS NOT NULL OR (metadata IS NOT NULL AND metadata ? 'legacy_source')`.
