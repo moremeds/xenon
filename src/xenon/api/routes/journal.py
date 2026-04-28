@@ -9,7 +9,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from xenon.api.guards import get_account_scope
 from xenon.db.engine import get_sync_engine
-from xenon.db.queries.journal import create_journal_entry, list_journal_entries, resolve_trade_ticker
+from xenon.db.queries.journal import (
+    create_journal_entry,
+    list_journal_entries,
+    pending_journal_outbox_count,
+    resolve_trade_ticker,
+)
 from xenon.execution.account_scope import AccountScope
 
 router = APIRouter()
@@ -73,3 +78,12 @@ async def journal_create(
             authored_at=_parse_authored_at(body.get("authored_at")),
             metadata=metadata,
         )
+
+
+@router.post("/journal/sync")
+async def journal_sync(scope: AccountScope = Depends(get_account_scope)) -> dict[str, int]:
+    """Legacy sync endpoint retained as a PG outbox status probe."""
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        pending = pending_journal_outbox_count(conn, scope=scope)
+    return {"imported": 0, "skipped": 0, "pending_outbox": pending}

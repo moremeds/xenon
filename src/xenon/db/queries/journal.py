@@ -4,10 +4,12 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping
 
-from sqlalchemy import desc, insert, select
+from sqlalchemy import desc, func, insert, or_, select
 from sqlalchemy.engine import Connection
 
+from xenon.db.events import CHANNEL_TRADE_CLOSED
 from xenon.db.schema import journal_entries, trades
+from xenon.db.schema import outbox
 from xenon.execution.account_scope import AccountScope
 
 _METADATA_TOP_LEVEL_FIELDS = (
@@ -144,3 +146,18 @@ def create_journal_entry(
         values["authored_at"] = authored_at
     row = conn.execute(insert(journal_entries).values(**values).returning(journal_entries)).one()
     return journal_entry_to_payload(row)
+
+
+def pending_journal_outbox_count(conn: Connection, *, scope: AccountScope) -> int:
+    result = conn.execute(
+        select(func.count())
+        .select_from(outbox)
+        .where(
+            outbox.c.channel == CHANNEL_TRADE_CLOSED,
+            outbox.c.payload["broker"].astext == scope.broker,
+            outbox.c.payload["account_env"].astext == scope.account_env,
+            outbox.c.payload["broker_account"].astext == scope.broker_account,
+            or_(outbox.c.consumed_by.is_(None), ~outbox.c.consumed_by.contains(["journal"])),
+        )
+    )
+    return int(result.scalar_one())
