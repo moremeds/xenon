@@ -181,13 +181,32 @@ def _reconcile_from_three_sources(
             },
         )
 
-    # Positions changed OR unknown → never auto-CANCELLED.
+    if positions_changed is True:
+        # Positions genuinely moved but we couldn't reconcile to a fill →
+        # UNKNOWN is the right "we know something happened, can't say what" state.
+        return ReconcileDecision(
+            to_state="UNKNOWN",
+            event_kind="REHYDRATE_UNCERTAIN",
+            detail={
+                "from_state": state,
+                "to_state": "UNKNOWN",
+                "sources": sources,
+            },
+        )
+
+    # positions_changed is None → no baseline (boot path) or no signal at all.
+    # We have NO authoritative evidence the row's state has changed, so leave
+    # it alone. Demoting to UNKNOWN here was the bug behind the post-restart
+    # "open orders disappeared from the UI" regression — `snapshot-*` rows
+    # imported in WORKING got nuked to UNKNOWN by every boot, hiding real
+    # IB-side open orders that the importer had just captured. The next sync
+    # cycle (with a real positions baseline) is the correct place to act.
     return ReconcileDecision(
-        to_state="UNKNOWN",
-        event_kind="REHYDRATE_UNCERTAIN",
+        to_state=state,
+        noop=True,
         detail={
             "from_state": state,
-            "to_state": "UNKNOWN",
+            "reason_code": "REHYDRATE_NO_BASELINE",
             "sources": sources,
         },
     )

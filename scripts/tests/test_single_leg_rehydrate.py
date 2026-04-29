@@ -159,15 +159,14 @@ def _fetch_events(db_path, submission_id):
     try:
         with engine.connect() as con:
             rows = con.execute(
-                text(
-                    'SELECT kind, detail FROM xenon.order_events '
-                    'WHERE submission_id=:submission_id ORDER BY "at"'
-                ),
+                text('SELECT kind, detail FROM xenon.order_events WHERE submission_id=:submission_id ORDER BY "at"'),
                 {"submission_id": submission_id},
             ).fetchall()
     finally:
         engine.dispose()
-    return [(kind, detail if isinstance(detail, dict) else json.loads(detail) if detail else None) for kind, detail in rows]
+    return [
+        (kind, detail if isinstance(detail, dict) else json.loads(detail) if detail else None) for kind, detail in rows
+    ]
 
 
 def _fetch_fill_rows():
@@ -378,6 +377,33 @@ def test_reconciles_cancelled_positions_unchanged(db_path):
     assert any(k == "REHYDRATE_RECONCILED" for k, _ in events)
 
 
+def test_no_op_when_open_orders_empty_and_no_positions_baseline(db_path):
+    """Boot-time rehydrate must not demote rows when it has no signal.
+
+    Regression: snapshot-* rows imported by the IB-side importer in state
+    WORKING were getting transitioned to UNKNOWN on every server restart.
+    Decision tree: open_orders is empty (transient race during boot, or
+    IB Gateway just connected and hasn't fully populated) + no positions
+    baseline → previous code routed to UNKNOWN. Correct behavior is to
+    leave state alone — the next sync cycle has the authoritative signal.
+
+    positions_changed=True (genuine state change) still routes to UNKNOWN
+    per `test_reconciles_unknown_positions_changed`. positions_changed=False
+    still routes to CANCELLED. Only the None branch (no baseline) is a no-op.
+    """
+    sid = _make_working_row(db_path, perm_id="P-no-baseline", ib_order_id="42", con_id=4242)
+    # No baseline → positions list with no `changed` markers. open_orders empty.
+    ib = FakeIBClient(open_orders=[], executions=[], positions=[])
+
+    rehydrate_on_boot(lambda: ib, orders_store, now=lambda: 1_000_000_000)
+
+    state, *_ = _fetch_row(db_path, sid)
+    assert state == "WORKING", f"expected WORKING (no-op on no-baseline), got {state}"
+    events = _fetch_events(db_path, sid)
+    # No event emitted on a no-op — same as test_pending_within_60s_untouched.
+    assert events == [], f"expected no events on no-op, got {events}"
+
+
 def test_reconciles_unknown_positions_changed(db_path):
     sid = _make_working_row(db_path, perm_id="P-4", ib_order_id="14", con_id=888)
     # positions changed — means order likely filled but we missed the fill msg
@@ -505,8 +531,14 @@ def test_build_positions_snapshot_passes_dict_through():
 
 
 def test_rehydrate_handles_list_positions_end_to_end(db_path):
-    """A3: when get_positions() returns a list, rehydrate does not crash and
-    routes no-baseline rows to UNKNOWN (REHYDRATE_UNCERTAIN)."""
+    """A3: when get_positions() returns a list, rehydrate does not crash.
+
+    Updated contract: rows without a positions baseline are now NO-OPs (state
+    preserved, no event emitted) — see test_no_op_when_open_orders_empty_and_
+    no_positions_baseline above and the REHYDRATE_NO_BASELINE branch in
+    _reconcile_from_three_sources. Previously this routed to UNKNOWN, which
+    silently demoted live `snapshot-*` rows on every boot.
+    """
     from types import SimpleNamespace
 
     sid = _make_working_row(db_path, perm_id="P-list", ib_order_id="33", con_id=500)
@@ -517,9 +549,9 @@ def test_rehydrate_handles_list_positions_end_to_end(db_path):
     )
     rehydrate_on_boot(lambda: ib, orders_store, now=lambda: 1_000_000_000)
     state, *_ = _fetch_row(db_path, sid)
-    assert state == "UNKNOWN"
+    assert state == "WORKING", f"expected WORKING (no-op on no-baseline), got {state}"
     events = _fetch_events(db_path, sid)
-    assert any(k == "REHYDRATE_UNCERTAIN" for k, _ in events)
+    assert events == [], f"expected no events on no-op, got {events}"
 
 
 def test_submitted_at_epoch_is_utc_regardless_of_tz(db_path, monkeypatch):
@@ -541,8 +573,7 @@ def test_submitted_at_epoch_is_utc_regardless_of_tz(db_path, monkeypatch):
         with engine.begin() as con:
             con.execute(
                 text(
-                    "UPDATE xenon.order_submissions SET submitted_at=:submitted_at "
-                    "WHERE submission_id=:submission_id"
+                    "UPDATE xenon.order_submissions SET submitted_at=:submitted_at WHERE submission_id=:submission_id"
                 ),
                 {"submitted_at": known.replace(tzinfo=None), "submission_id": sid},
             )
