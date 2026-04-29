@@ -178,9 +178,44 @@ def test_lifespan_helper_skips_when_scope_unresolved(monkeypatch):
     assert called is False
 
 
+def test_activity_poller_defaults_enabled_unless_explicitly_disabled(monkeypatch, scope):
+    """TWS-side orders placed after startup must be mirrored without requiring
+    an operator-only env flag in the normal app process."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from xenon.api import server
+
+    monkeypatch.delenv("XENON_IB_ACTIVITY_POLLER", raising=False)
+    monkeypatch.setattr(server, "_is_test_mode", lambda: False)
+    monkeypatch.setattr(
+        server,
+        "app",
+        SimpleNamespace(state=SimpleNamespace(trading_mode=scope.account_env, account=scope.broker_account)),
+    )
+    monkeypatch.setattr(
+        server,
+        "ib_pool",
+        SimpleNamespace(get=lambda role: object()),
+    )
+
+    captured: dict = {}
+
+    def fake_create_task(coro):
+        captured["started"] = True
+        coro.close()
+        return SimpleNamespace(cancel=lambda: None)
+
+    monkeypatch.setattr(asyncio, "create_task", fake_create_task)
+
+    server._maybe_start_activity_poller()
+
+    assert captured["started"] is True
+
+
 # ---------------------------------------------------------------------------
 # Periodic poller — runs forever, ticks both surfaces (open orders + fills).
-# Gated on XENON_IB_ACTIVITY_POLLER so the feature lands without surprise.
+# Enabled by default; XENON_IB_ACTIVITY_POLLER=0 suppresses it for special cases.
 # ---------------------------------------------------------------------------
 
 

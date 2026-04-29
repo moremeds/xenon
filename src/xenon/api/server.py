@@ -223,7 +223,7 @@ async def _run_rehydrate_on_boot() -> None:
 def _maybe_start_activity_poller() -> None:
     """Start the periodic IB→Postgres activity poller if enabled.
 
-    Gated behind XENON_IB_ACTIVITY_POLLER=1. The task handle is stored on
+    Enabled by default. Set XENON_IB_ACTIVITY_POLLER=0 to disable. The task handle is stored on
     app.state so the lifespan shutdown can cancel + await it cleanly.
     Skipped in test mode and when the IB pool sync role has no client.
     """
@@ -239,8 +239,9 @@ def _maybe_start_activity_poller() -> None:
         logger.info("test_mode: skipping ib activity poller")
         return
 
-    if os.environ.get("XENON_IB_ACTIVITY_POLLER", "").strip() != "1":
-        logger.info("ib activity poller disabled (XENON_IB_ACTIVITY_POLLER!=1)")
+    poller_flag = os.environ.get("XENON_IB_ACTIVITY_POLLER", "").strip().lower()
+    if poller_flag in {"0", "false", "no", "off"}:
+        logger.info("ib activity poller disabled (XENON_IB_ACTIVITY_POLLER=%s)", poller_flag)
         return
 
     _scope_account_env = getattr(app.state, "trading_mode", None)
@@ -538,8 +539,8 @@ async def lifespan(app: FastAPI):
 
     # Periodic IB activity poller. Mirrors TWS-side activity (price/qty
     # edits, new fills, cancels expressed by disappearance) into Postgres
-    # on a fixed cadence. Gated behind XENON_IB_ACTIVITY_POLLER=1 so the
-    # feature ramps without surprise. Cadence env: XENON_IB_ACTIVITY_POLL_S.
+    # on a fixed cadence. Enabled by default; set XENON_IB_ACTIVITY_POLLER=0
+    # to suppress. Cadence env: XENON_IB_ACTIVITY_POLL_S.
     _maybe_start_activity_poller()
 
     # W4.7 — PG-event-driven journal auto-import listener.
