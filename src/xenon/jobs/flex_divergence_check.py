@@ -85,6 +85,44 @@ def latest_run(*, scope: AccountScope) -> dict[str, Any] | None:
     return dict(row._mapping) if row is not None else None
 
 
+def _parse_execution_time(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _row_has_execution_in_window(row: dict[str, Any], start_utc: datetime, end_utc: datetime) -> bool:
+    for execution in row.get("executions") or []:
+        if not isinstance(execution, dict):
+            continue
+        executed_at = _parse_execution_time(execution.get("time"))
+        if executed_at is not None and start_utc <= executed_at.astimezone(timezone.utc) < end_utc:
+            return True
+    return False
+
+
+def filter_payload_by_execution_window(
+    payload: dict[str, Any],
+    start_utc: datetime,
+    end_utc: datetime,
+) -> dict[str, Any]:
+    return {
+        **payload,
+        "closed_trades": [
+            row
+            for row in payload.get("closed_trades", [])
+            if _row_has_execution_in_window(row, start_utc, end_utc)
+        ],
+        "open_trades": [],
+    }
+
+
 def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Nightly PG↔Flex divergence check.")
     parser.add_argument("--apply", action="store_true", help="Insert a flex_divergence_runs row.")
@@ -92,19 +130,21 @@ def _main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO)
 
     scope = resolve_from_env()
-    start_utc, _end_utc = yesterday_session_window()
+    start_utc, end_utc = yesterday_session_window()
     days = max(1, int((datetime.now(timezone.utc) - start_utc).total_seconds() // 86400) + 1)
 
     engine = get_sync_engine()
     with engine.connect() as conn:
         pg_payload = fetch_blotter_pg(conn, scope=scope, days=days)
+    pg_payload = filter_payload_by_execution_window(pg_payload, start_utc, end_utc)
 
     flex_result = asyncio.run(run_module("xenon.trade_blotter.flex_query", ["--json"], timeout=120))
     if not flex_result.ok:
         print(json.dumps({"skipped": True, "reason": "flex_unavailable"}, indent=2))
         return 0
 
-    summary = compute_divergence(pg_payload, flex_result.data or {})
+    flex_payload = filter_payload_by_execution_window(flex_result.data or {}, start_utc, end_utc)
+    summary = compute_divergence(pg_payload, flex_payload)
     if args.apply:
         run_id = record_run(scope=scope, summary=summary)
         print(json.dumps({"applied": True, "run_id": run_id, **summary}, indent=2))

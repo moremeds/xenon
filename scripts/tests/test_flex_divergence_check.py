@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ from xenon.execution.account_scope import AccountScope
 from xenon.jobs.flex_divergence_check import (
     _main,
     compute_divergence,
+    filter_payload_by_execution_window,
     latest_run,
     record_run,
 )
@@ -33,6 +35,24 @@ def test_compute_divergence_counts_disagreements():
     summary = compute_divergence(pg, flex)
     assert summary["total_compared"] == 2
     assert summary["divergence_count"] == 1
+
+
+def test_filter_payload_by_execution_window_keeps_only_rows_with_in_window_execution():
+    start = datetime(2026, 4, 28, 4, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 4, 29, 4, 0, tzinfo=timezone.utc)
+    payload = {
+        "closed_trades": [
+            {"perm_id": "in", "executions": [{"time": "2026-04-28T15:00:00+00:00"}]},
+            {"perm_id": "out", "executions": [{"time": "2026-04-29T05:00:00+00:00"}]},
+            {"perm_id": "bad", "executions": [{"time": ""}]},
+        ],
+        "open_trades": [{"perm_id": "open", "executions": [{"time": "2026-04-28T15:00:00+00:00"}]}],
+    }
+
+    filtered = filter_payload_by_execution_window(payload, start, end)
+
+    assert [row["perm_id"] for row in filtered["closed_trades"]] == ["in"]
+    assert filtered["open_trades"] == []
 
 
 def test_record_run_round_trips_latest():
@@ -65,13 +85,28 @@ def test_main_skips_when_flex_unavailable(monkeypatch):
 def test_main_records_a_run_when_both_sides_present(monkeypatch):
     monkeypatch.setenv("XENON_TRADING_MODE", _SCOPE.account_env)
     monkeypatch.setenv("XENON_BROKER_ACCOUNT", _SCOPE.broker_account)
-    fake_pg = {"closed_trades": [{"perm_id": "p1", "realized_pnl": 10}], "open_trades": []}
-    fake_flex_data = {"closed_trades": [{"perm_id": "p1", "realized_pnl": 10}], "open_trades": []}
+    start = datetime(2026, 4, 28, 4, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 4, 29, 4, 0, tzinfo=timezone.utc)
+    fake_pg = {
+        "closed_trades": [
+            {"perm_id": "p1", "realized_pnl": 10, "executions": [{"time": "2026-04-28T15:00:00+00:00"}]},
+            {"perm_id": "p2", "realized_pnl": 10, "executions": [{"time": "2026-04-29T05:00:00+00:00"}]},
+        ],
+        "open_trades": [],
+    }
+    fake_flex_data = {
+        "closed_trades": [
+            {"perm_id": "p1", "realized_pnl": 10, "executions": [{"time": "2026-04-28T15:00:00+00:00"}]},
+            {"perm_id": "p2", "realized_pnl": 99, "executions": [{"time": "2026-04-29T05:00:00+00:00"}]},
+        ],
+        "open_trades": [],
+    }
 
     async def fake_run_module(*_a, **_kw):
         return SimpleNamespace(ok=True, data=fake_flex_data)
 
     with (
+        patch("xenon.jobs.flex_divergence_check.yesterday_session_window", return_value=(start, end)),
         patch("xenon.jobs.flex_divergence_check.fetch_blotter_pg", return_value=fake_pg),
         patch("xenon.jobs.flex_divergence_check.run_module", side_effect=fake_run_module),
     ):
@@ -79,3 +114,5 @@ def test_main_records_a_run_when_both_sides_present(monkeypatch):
     assert rc == 0
     latest = latest_run(scope=_SCOPE)
     assert latest is not None
+    assert latest["total_compared"] == 1
+    assert latest["divergence_count"] == 0
