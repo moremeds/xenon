@@ -414,10 +414,28 @@ async def lifespan(app: FastAPI):
     # UNKNOWN rather than auto-CANCELLED (per F7.1 design).
     await _run_rehydrate_on_boot()
 
+    # W4.7 — PG-event-driven journal auto-import listener.
+    # Replaces the legacy periodic /journal/sync flow. Failures must not
+    # block boot.
+    try:
+        from xenon.api.services.journal_auto_import import JournalAutoImportSubscriber
+
+        journal_auto_import = JournalAutoImportSubscriber()
+        await journal_auto_import.start()
+        app.state.journal_auto_import = journal_auto_import
+    except Exception:  # noqa: BLE001
+        logger.exception("journal auto-import listener failed to start")
+
     try:
         yield
     finally:
         # Shutdown — always runs, even if the app raised.
+        listener = getattr(app.state, "journal_auto_import", None)
+        if listener is not None:
+            try:
+                await listener.stop()
+            except Exception:  # noqa: BLE001
+                logger.exception("journal auto-import listener failed to stop")
         if uw_daily_task is not None:
             uw_daily_task.cancel()
             try:

@@ -4,12 +4,12 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping
 
-from sqlalchemy import desc, func, insert, or_, select
+from sqlalchemy import desc, func, insert, or_, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 
 from xenon.db.events import CHANNEL_TRADE_CLOSED
-from xenon.db.schema import journal_entries, trades
-from xenon.db.schema import outbox
+from xenon.db.schema import journal_entries, outbox, trades
 from xenon.execution.account_scope import AccountScope
 
 _METADATA_TOP_LEVEL_FIELDS = (
@@ -90,17 +90,19 @@ def list_journal_entries(
     conn: Connection,
     *,
     scope: AccountScope,
-    cutoff: datetime,
-    limit: int,
+    cutoff: datetime | None = None,
+    limit: int = 500,
 ) -> list[dict[str, Any]]:
+    conditions = [
+        journal_entries.c.broker == scope.broker,
+        journal_entries.c.account_env == scope.account_env,
+        journal_entries.c.broker_account == scope.broker_account,
+    ]
+    if cutoff is not None:
+        conditions.append(journal_entries.c.authored_at >= cutoff)
     rows = conn.execute(
         select(journal_entries)
-        .where(
-            journal_entries.c.broker == scope.broker,
-            journal_entries.c.account_env == scope.account_env,
-            journal_entries.c.broker_account == scope.broker_account,
-            journal_entries.c.authored_at >= cutoff,
-        )
+        .where(*conditions)
         .order_by(desc(journal_entries.c.authored_at), desc(journal_entries.c.id))
         .limit(limit)
     ).all()
@@ -146,6 +148,66 @@ def create_journal_entry(
         values["authored_at"] = authored_at
     row = conn.execute(insert(journal_entries).values(**values).returning(journal_entries)).one()
     return journal_entry_to_payload(row)
+
+
+def upsert_auto_import_entry(
+    conn: Connection,
+    *,
+    trade_id: int,
+) -> dict[str, Any] | None:
+    """Idempotently create an IB_AUTO_IMPORT journal entry for a closed trade.
+
+    Resolves scope from the `trades` row (not from a caller-supplied scope) so
+    the listener does not need scope-bearing payloads. Relies on the partial
+    unique index `uq_journal_auto_import` for concurrent safety.
+
+    Returns the row payload, or None if the trade does not exist.
+    """
+    trade_row = conn.execute(
+        select(
+            trades.c.ticker,
+            trades.c.broker,
+            trades.c.account_env,
+            trades.c.broker_account,
+        ).where(trades.c.id == trade_id)
+    ).first()
+    if trade_row is None:
+        return None
+
+    stmt = (
+        pg_insert(journal_entries)
+        .values(
+            trade_id=trade_id,
+            ticker=trade_row.ticker,
+            decision="IB_AUTO_IMPORT",
+            authored_by="system",
+            metadata={"source": "trade_closed_outbox"},
+            broker=trade_row.broker,
+            account_env=trade_row.account_env,
+            broker_account=trade_row.broker_account,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["broker", "account_env", "broker_account", "trade_id"],
+            index_where=text("decision = 'IB_AUTO_IMPORT' AND trade_id IS NOT NULL"),
+        )
+        .returning(journal_entries)
+    )
+    inserted = conn.execute(stmt).first()
+    if inserted is not None:
+        return journal_entry_to_payload(inserted)
+
+    existing = conn.execute(
+        select(journal_entries)
+        .where(
+            journal_entries.c.trade_id == trade_id,
+            journal_entries.c.decision == "IB_AUTO_IMPORT",
+            journal_entries.c.broker == trade_row.broker,
+            journal_entries.c.account_env == trade_row.account_env,
+            journal_entries.c.broker_account == trade_row.broker_account,
+        )
+        .limit(1)
+    ).first()
+    return journal_entry_to_payload(existing) if existing is not None else None
 
 
 def pending_journal_outbox_count(conn: Connection, *, scope: AccountScope) -> int:

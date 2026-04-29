@@ -139,6 +139,15 @@ journal_entries = Table(
     ),
     Index("ix_journal_ticker_at", "ticker", "authored_at"),
     Index("ix_journal_scope_at", "broker", "account_env", "broker_account", "authored_at"),
+    Index(
+        "uq_journal_auto_import",
+        "broker",
+        "account_env",
+        "broker_account",
+        "trade_id",
+        unique=True,
+        postgresql_where=text("decision = 'IB_AUTO_IMPORT' AND trade_id IS NOT NULL"),
+    ),
 )
 
 nav_history = Table(
