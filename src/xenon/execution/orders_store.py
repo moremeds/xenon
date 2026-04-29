@@ -282,12 +282,15 @@ def register_from_snapshot(
             if not existing_submission_id.startswith("snapshot-"):
                 return {"action": "SKIPPED_UUID", "drift": None}
 
+            # Round to 4dp before comparing — the DB column is numeric(12,4)
+            # and incoming `limit_price` is a raw float that can carry round-trip
+            # noise (e.g. 1.4500000001). Without rounding, every poll tick would
+            # spuriously detect drift and emit a redundant IB_MIRROR_UPDATE event.
+            new_price = round(float(limit_price), 4)
+            stored_price = round(existing_limit_price, 4) if existing_limit_price is not None else None
             drift: dict = {}
-            if existing_limit_price != float(limit_price):
-                drift["limit_price"] = {
-                    "from": existing_limit_price,
-                    "to": float(limit_price),
-                }
+            if stored_price != new_price:
+                drift["limit_price"] = {"from": stored_price, "to": new_price}
             if existing_quantity != int(quantity):
                 drift["quantity"] = {
                     "from": existing_quantity,

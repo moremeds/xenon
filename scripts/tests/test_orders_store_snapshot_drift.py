@@ -240,6 +240,38 @@ def test_updates_snapshot_row_when_both_price_and_qty_drift(db_path):
     }
 
 
+def test_float_precision_noise_does_not_trigger_drift(db_path):
+    """Tribunal review caught: comparing raw floats with `!=` would spuriously
+    detect drift on round-trip noise (e.g. 1.4500000001 vs 1.45 stored).
+    With numeric(12,4) on the DB side, anything past 4dp is meaningless — round."""
+    register_from_snapshot(
+        perm_id="2100099",
+        ib_order_id="299",
+        ticker="SPX",
+        security_type="BAG",
+        action="SELL",
+        quantity=11,
+        limit_price=1.45,
+        db_path=db_path,
+        **SCOPE,
+    )
+
+    result = register_from_snapshot(
+        perm_id="2100099",
+        ib_order_id="299",
+        ticker="SPX",
+        security_type="BAG",
+        action="SELL",
+        quantity=11,
+        limit_price=1.4500000000001,  # round-trip noise past 4dp
+        db_path=db_path,
+        **SCOPE,
+    )
+
+    assert result["action"] == "NOOP"
+    assert _events_for("snapshot-2100099") == []
+
+
 def test_does_not_update_uuid_authored_rows(db_path):
     """Xenon-authored UUID rows keep their dedupe semantics: no UPDATE,
     no event, action='SKIPPED_UUID'. Documented gap — see CLAUDE.md."""
