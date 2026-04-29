@@ -103,3 +103,20 @@ async def get_latest_vcg(conn: AsyncConnection) -> dict | None:
         return None
     payload = row.payload
     return dict(payload) if payload else None
+
+
+async def get_latest_gex(conn: AsyncConnection, *, ticker: str = "SPX") -> dict | None:
+    """Return the most recent gex_snapshots payload for a ticker."""
+    from xenon.db.schema import gex_snapshots
+
+    stmt = (
+        select(gex_snapshots.c.payload)
+        .where(gex_snapshots.c.ticker == ticker.upper())
+        .order_by(gex_snapshots.c.scanned_at.desc(), gex_snapshots.c.id.desc())
+        .limit(1)
+    )
+    row = (await conn.execute(stmt)).first()
+    if row is None:
+        return None
+    payload = row.payload
+    return dict(payload) if payload else None

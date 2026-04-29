@@ -139,3 +139,50 @@ def test_blotter_returns_postgres_rows_before_flex(monkeypatch):
     assert body["summary"]["closed_trades"] == 1
     assert body["closed_trades"][0]["symbol"] == "AAPL"
     assert body["closed_trades"][0]["executions"][-1]["exec_id"] == "exec-pg-2"
+
+
+def test_blotter_get_returns_postgres_rows_without_flex(monkeypatch):
+    """The read path must not use data/blotter.json or trigger Flex."""
+    from xenon.api import server
+
+    async def fail_if_flex_called(*args, **kwargs):  # pragma: no cover - assertion guard
+        raise AssertionError("GET /blotter should not run Flex")
+
+    monkeypatch.setattr(server, "run_module", fail_if_flex_called)
+
+    opened_at = datetime(2026, 4, 28, 14, 30, tzinfo=timezone.utc)
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            insert(trades).values(
+                ticker="MSFT",
+                structure="Stock",
+                action="BUY",
+                quantity=50,
+                entry_cost=500,
+                opened_at=opened_at,
+                state="OPEN",
+                metadata={
+                    "legs": [
+                        {
+                            "exec_id": "exec-pg-open",
+                            "side": "BUY",
+                            "qty": 50,
+                            "price": "10.00",
+                            "commission": "0.75",
+                            "filled_at": opened_at.isoformat(),
+                        }
+                    ]
+                },
+                **BROKER_SCOPE,
+            )
+        )
+
+    client = TestClient(server.app)
+    resp = client.get("/blotter")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["configured"] is True
+    assert body["source"] == "postgres"
+    assert body["summary"]["open_trades"] == 1
+    assert body["open_trades"][0]["symbol"] == "MSFT"

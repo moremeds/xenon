@@ -1288,15 +1288,82 @@ async def ib_restart():
 # ---------------------------------------------------------------------------
 
 
+async def _load_latest_scan_payload(scan_type: str) -> dict | None:
+    from xenon.db.engine import get_engine
+    from xenon.db.queries.scans import get_latest_scan
+
+    try:
+        engine = get_engine()
+        async with engine.connect() as conn:
+            row = await get_latest_scan(conn, scan_type=scan_type)
+    except Exception:
+        logger.warning("[%s] failed to read latest scan payload from PG", scan_type, exc_info=True)
+        return None
+    if not row:
+        return None
+    payload = dict(row.get("payload") or {})
+    scanned_at = row.get("scanned_at")
+    if isinstance(scanned_at, datetime):
+        payload["_scanned_at"] = scanned_at.astimezone(timezone.utc).isoformat()
+    return payload
+
+
+def _empty_scan_payload() -> dict:
+    return {
+        "scan_id": "",
+        "scan_timestamp": "",
+        "market_context": {"spy_close": 0, "vix_close": 0, "regime": "unknown"},
+        "universe_size": 0,
+        "stage_a_survivors": 0,
+        "stage_b_survivors": 0,
+        "candidates": [],
+    }
+
+
+def _empty_discover_payload() -> dict:
+    return {
+        "discovery_time": "",
+        "alerts_analyzed": 0,
+        "candidates_found": 0,
+        "candidates": [],
+    }
+
+
+def _empty_cri_payload() -> dict:
+    return {
+        "scan_time": "",
+        "date": "",
+        "market_open": _is_market_open_now(),
+        "vix": None,
+        "vvix": None,
+        "spy": None,
+        "cri": {"score": 0, "level": "LOW", "components": {}},
+        "cta": {},
+        "menthorq_cta": None,
+        "crash_trigger": {"triggered": False, "conditions": {}, "values": {}},
+        "history": [],
+        "spy_closes": [],
+    }
+
+
+@app.get("/scan")
+async def scan_get():
+    return await _load_latest_scan_payload("scanner") or _empty_scan_payload()
+
+
 @app.post("/scan")
 async def scan():
     """Run watchlist scanner (scanner.py --top 25)."""
     result = await run_entry_point("xenon-scan", ["--top", "25"], timeout=120)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
-    _write_cache(DATA_DIR / "scanner.json", result.data)
     _write_scan_to_postgres("scanner.json", result.data)
     return result.data
+
+
+@app.get("/discover")
+async def discover_get():
+    return await _load_latest_scan_payload("discover") or _empty_discover_payload()
 
 
 @app.post("/discover")
@@ -1307,7 +1374,6 @@ async def discover():
         raise HTTPException(status_code=502, detail=result.error)
     if result.data and result.data.get("error"):
         raise HTTPException(status_code=400, detail=result.data["error"])
-    _write_cache(DATA_DIR / "discover.json", result.data)
     _write_scan_to_postgres("discover.json", result.data)
     return result.data
 
@@ -2223,54 +2289,6 @@ async def _orders_cancel_from_body(body: dict):
     return data
 
 
-def _try_register_order_from_snapshot(*, perm_id: int, order_id: int) -> bool:
-    """Lazy-register a snapshot-only order in orders_store so the modify gate
-    can apply. Returns True on insert, False if the order isn't in the
-    snapshot or is already registered.
-
-    Source of truth is ``data/orders.json`` — the same file the UI reads.
-    Synthetic ib_order_id values (e.g. -5 from snapshot reconstruction) are
-    preserved as-is; the modify subprocess uses perm_id as the primary key.
-    """
-    cache = _read_cache(DATA_DIR / "orders.json")
-    if not cache:
-        return False
-    open_orders = cache.get("open_orders") or []
-    target = None
-    for o in open_orders:
-        if perm_id and o.get("permId") == perm_id:
-            target = o
-            break
-        if order_id and o.get("orderId") == order_id:
-            target = o
-            break
-    if target is None:
-        return False
-    contract = target.get("contract") or {}
-    sec_type = contract.get("secType") or "STK"
-    # Multiplier: BAG/OPT default to 100, STK to 1.
-    multiplier = 100 if sec_type in ("OPT", "BAG") else 1
-    try:
-        return orders_store.register_from_snapshot(
-            perm_id=str(target.get("permId") or perm_id),
-            ib_order_id=str(target.get("orderId") or order_id),
-            ticker=str(target.get("symbol") or contract.get("symbol") or ""),
-            security_type=sec_type,
-            action=str(target.get("action") or "BUY"),
-            quantity=int(target.get("totalQuantity") or 0),
-            limit_price=float(target.get("limitPrice") or 0.0),
-            multiplier=multiplier,
-            **_resolve_scope_kwargs(),
-        )
-    except Exception as exc:
-        logger.warning(
-            "register_from_snapshot failed for perm_id=%s: %s",
-            perm_id,
-            exc,
-        )
-        return False
-
-
 @app.post("/orders/modify", dependencies=[Depends(require_mode_verified)])
 async def orders_modify(request: Request):
     """Modify an open order via subprocess.
@@ -2342,17 +2360,6 @@ async def _orders_modify_from_body(body: dict):
         seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence, **_scope)
     else:
         seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence, **_scope)
-    # If the perm_id is unknown to orders_store but exists in the IB snapshot,
-    # lazy-register it and retry. Covers orders placed before orders_store
-    # tracking existed or by an external client (the snapshot reconstruction
-    # gives us synthetic ib_order_id like -5 plus the real perm_id).
-    if not seq_outcome["applied"] and seq_outcome["current_sequence"] == -1:
-        if _try_register_order_from_snapshot(perm_id=perm_id, order_id=order_id):
-            if not order_id and perm_id:
-                seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence, **_scope)
-            else:
-                seq_outcome = orders_store.apply_modify(str(order_id), modify_sequence, **_scope)
-
     if not seq_outcome["applied"]:
         current = seq_outcome["current_sequence"]
         if current == -1:
@@ -2451,13 +2458,21 @@ async def cta_share():
     return result.data
 
 
+@app.get("/regime")
+async def regime_get():
+    payload = await _load_latest_scan_payload("cri")
+    if not payload:
+        return _empty_cri_payload()
+    payload["market_open"] = _is_market_open_now()
+    return payload
+
+
 @app.post("/regime/scan")
 async def regime_scan():
     """Run CRI scan (cri_scan.py --json). 120s timeout."""
     result = await run_entry_point("xenon-cri-scan", ["--json"], timeout=120)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
-    _write_cache(DATA_DIR / "cri.json", result.data)
     _write_scan_to_postgres("cri.json", result.data)
     return result.data
 
@@ -2553,7 +2568,6 @@ async def vcg_scan():
         result = await run_entry_point("xenon-vcg-scan", ["--json"], timeout=120)
         if not result.ok:
             raise HTTPException(status_code=502, detail=result.error)
-        _write_cache(DATA_DIR / "vcg.json", result.data)
         _write_scan_to_postgres("vcg.json", result.data)
         _vcg_last_scan = _time.monotonic()
         return result.data
@@ -2725,6 +2739,53 @@ async def gex_share():
     return result.data
 
 
+def _empty_gex_payload(ticker: str) -> dict:
+    return {
+        "scan_time": "",
+        "market_open": _is_market_open_now(),
+        "ticker": ticker.upper(),
+        "spot": 0,
+        "close": None,
+        "day_change": None,
+        "day_change_pct": None,
+        "data_date": "",
+        "net_gex": 0,
+        "net_dex": 0,
+        "atm_iv": None,
+        "vol_pc": None,
+        "levels": {},
+        "profile": [],
+        "expected_range": {},
+        "bias": {},
+        "history": [],
+        "iv": None,
+        "mq": None,
+        "source_delta": None,
+    }
+
+
+async def _load_latest_gex_from_pg(ticker: str) -> dict | None:
+    from xenon.db.engine import get_engine
+    from xenon.db.queries.scans import get_latest_gex
+
+    try:
+        engine = get_engine()
+        async with engine.connect() as conn:
+            return await get_latest_gex(conn, ticker=ticker)
+    except Exception:
+        logger.warning("[gex] failed to read latest payload from PG", exc_info=True)
+        return None
+
+
+@app.get("/gex")
+async def gex_get(ticker: str = "SPX"):
+    payload = await _load_latest_gex_from_pg(ticker.upper())
+    if not payload:
+        return _empty_gex_payload(ticker)
+    payload["market_open"] = _is_market_open_now()
+    return payload
+
+
 @app.post("/gex/scan")
 async def gex_scan(ticker: str = "SPX"):
     """Run GEX scan (gex_scan.py --json --ticker X). 60s cooldown between scans."""
@@ -2735,18 +2796,17 @@ async def gex_scan(ticker: str = "SPX"):
         _gex_scan_lock = asyncio.Lock()
     now = _time.monotonic()
     if now - _gex_last_scan < GEX_COOLDOWN_S:
-        cached = _read_cache(DATA_DIR / "gex.json")
+        cached = await _load_latest_gex_from_pg(ticker.upper())
         if cached:
             return cached
     async with _gex_scan_lock:
         if _time.monotonic() - _gex_last_scan < GEX_COOLDOWN_S:
-            cached = _read_cache(DATA_DIR / "gex.json")
+            cached = await _load_latest_gex_from_pg(ticker.upper())
             if cached:
                 return cached
         result = await run_entry_point("xenon-gex-scan", ["--json", "--ticker", ticker.upper()], timeout=120)
         if not result.ok:
             raise HTTPException(status_code=502, detail=result.error)
-        _write_cache(DATA_DIR / "gex.json", result.data)
         _write_scan_to_postgres("gex.json", result.data)
         _gex_last_scan = _time.monotonic()
         return result.data
@@ -2876,12 +2936,17 @@ async def blotter_sync(scope=Depends(get_account_scope)):
                     "for the configuration guide."
                 ),
             }
-            _write_cache(DATA_DIR / "blotter.json", payload)
             return payload
         raise HTTPException(status_code=502, detail=result.error)
     payload = {**result.data, "configured": True, "source": "flex"}
-    _write_cache(DATA_DIR / "blotter.json", payload)
     return payload
+
+
+@app.get("/blotter")
+async def blotter_get(scope=Depends(get_account_scope)):
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        return fetch_blotter_pg(conn, scope=scope, days=30)
 
 
 # ---------------------------------------------------------------------------
@@ -2895,7 +2960,6 @@ async def _do_performance_rebuild() -> dict:
     result = await run_entry_point("xenon-portfolio-perf", ["--json"], timeout=180)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
-    _write_cache(DATA_DIR / "performance.json", result.data)
     return result.data
 
 

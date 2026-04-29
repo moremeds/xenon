@@ -104,7 +104,7 @@ beforeEach(() => {
 });
 
 // =============================================================================
-// POST /api/discover — success + cache fallback
+// POST /api/discover — FastAPI proxy
 // =============================================================================
 
 describe("POST /api/discover (via xenonFetch)", () => {
@@ -124,23 +124,15 @@ describe("POST /api/discover (via xenonFetch)", () => {
     expect(body.candidates_found).toBe(12);
   });
 
-  it("falls back to cache on failure", async () => {
+  it("returns 502 on failure without JSON cache fallback", async () => {
     mockXenonFetch.mockRejectedValue(new Error("timeout"));
-    mockReadFile.mockResolvedValue(
-      JSON.stringify({
-        discovery_time: "2026-03-13",
-        candidates_found: 8,
-        candidates: [],
-      }),
-    );
-    mockStatSync.mockReturnValue({ mtime: new Date(Date.now() - 900_000) });
 
     const { POST } = await import("../app/api/discover/route");
     const res = await POST();
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(502);
     const body = await res.json();
-    expect(body.candidates_found).toBe(8);
-    expect(body.is_stale).toBe(true);
+    expect(body.error).toContain("timeout");
+    expect(mockReadFile).not.toHaveBeenCalled();
   });
 });
 
@@ -696,49 +688,15 @@ describe("POST /api/blotter (via xenonFetch)", () => {
     expect(body.summary.closed_trades).toBe(5);
   });
 
-  it("falls back to cached blotter on failure", async () => {
+  it("returns 502 on failure without JSON cache fallback", async () => {
     mockXenonFetch.mockRejectedValue(new Error("Flex query timed out"));
-    mockReadFile.mockResolvedValue(
-      JSON.stringify({
-        as_of: "2026-03-13",
-        summary: { closed_trades: 2 },
-        closed_trades: [
-          {
-            symbol: "AAPL",
-            contract_desc: "AAPL 240315C00200000",
-            sec_type: "OPT",
-            is_closed: true,
-            net_quantity: 0,
-            total_commission: 1,
-            realized_pnl: 200,
-            cost_basis: 1000,
-            proceeds: 1200,
-            total_cash_flow: 200,
-            executions: [],
-          },
-        ],
-        open_trades: [],
-      }),
-    );
-
-    const { POST } = await import("../app/api/blotter/route");
-    const res = await POST();
-    expect(res.status).toBe(200);
-    expect(res.headers.get("X-Sync-Warning")).toContain("cached data");
-    const body = await res.json();
-    expect(body.summary.closed_trades).toBe(2);
-    expect(body.closed_trades[0].symbol).toBe("AAPL");
-  });
-
-  it("returns 502 on failure when cache unavailable", async () => {
-    mockXenonFetch.mockRejectedValue(new Error("Flex query timed out"));
-    mockReadFile.mockRejectedValue(new Error("ENOENT"));
 
     const { POST } = await import("../app/api/blotter/route");
     const res = await POST();
     expect(res.status).toBe(502);
     const body = await res.json();
     expect(body.error).toContain("timed out");
+    expect(mockReadFile).not.toHaveBeenCalled();
   });
 });
 

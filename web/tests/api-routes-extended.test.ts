@@ -1661,18 +1661,21 @@ describe("POST /api/assistant — extended", () => {
 });
 
 // =============================================================================
-// 8. GET /api/blotter — mocked fs
+// 8. GET /api/blotter — FastAPI PG read path
 // =============================================================================
 
 describe("GET /api/blotter — extended", () => {
   beforeEach(() => {
     vi.resetModules();
     mockReadFile.mockReset();
+    mockXenonFetch.mockReset();
   });
 
-  it("returns cached blotter data when file exists", async () => {
+  it("returns FastAPI blotter data without reading JSON", async () => {
     const blotterData = {
       as_of: "2026-03-05",
+      configured: true,
+      source: "postgres",
       summary: {
         closed_trades: 5,
         open_trades: 2,
@@ -1682,7 +1685,7 @@ describe("GET /api/blotter — extended", () => {
       closed_trades: [{ symbol: "AAPL", realized_pnl: 500 }],
       open_trades: [],
     };
-    mockReadFile.mockResolvedValue(JSON.stringify(blotterData));
+    mockXenonFetch.mockResolvedValue(blotterData);
 
     const { GET } = await import("../app/api/blotter/route");
     const res = await GET();
@@ -1692,40 +1695,41 @@ describe("GET /api/blotter — extended", () => {
     expect(body.as_of).toBe("2026-03-05");
     expect(body.summary.closed_trades).toBe(5);
     expect(body.closed_trades).toHaveLength(1);
+    expect(mockReadFile).not.toHaveBeenCalled();
   });
 
-  it("returns empty structure when file not found", async () => {
-    mockReadFile.mockRejectedValue(new Error("ENOENT"));
+  it("returns 502 when FastAPI blotter read fails", async () => {
+    mockXenonFetch.mockRejectedValue(new Error("PG unavailable"));
 
     const { GET } = await import("../app/api/blotter/route");
     const res = await GET();
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(502);
 
     const body = await res.json();
-    expect(body.as_of).toBe("");
-    expect(body.closed_trades).toEqual([]);
-    expect(body.open_trades).toEqual([]);
+    expect(body.error).toContain("PG unavailable");
+    expect(mockReadFile).not.toHaveBeenCalled();
   });
 });
 
 // =============================================================================
-// 9. GET /api/discover — mocked fs
+// 9. GET /api/discover — FastAPI PG read path
 // =============================================================================
 
 describe("GET /api/discover — extended", () => {
   beforeEach(() => {
     vi.resetModules();
     mockReadFile.mockReset();
+    mockXenonFetch.mockReset();
   });
 
-  it("returns cached discover data when file exists", async () => {
+  it("returns FastAPI discover data without reading JSON", async () => {
     const discoverData = {
       discovery_time: "2026-03-05T10:00:00Z",
       alerts_analyzed: 150,
       candidates_found: 3,
       candidates: [{ ticker: "NET", score: 78 }],
     };
-    mockReadFile.mockResolvedValue(JSON.stringify(discoverData));
+    mockXenonFetch.mockResolvedValue(discoverData);
 
     const { GET } = await import("../app/api/discover/route");
     const res = await GET();
@@ -1735,10 +1739,11 @@ describe("GET /api/discover — extended", () => {
     expect(body.candidates_found).toBe(3);
     expect(body.candidates).toHaveLength(1);
     expect(body.candidates[0].ticker).toBe("NET");
+    expect(mockReadFile).not.toHaveBeenCalled();
   });
 
-  it("returns empty structure when cache file not found", async () => {
-    mockReadFile.mockRejectedValue(new Error("ENOENT"));
+  it("returns empty structure when FastAPI read fails", async () => {
+    mockXenonFetch.mockRejectedValue(new Error("PG unavailable"));
 
     const { GET } = await import("../app/api/discover/route");
     const res = await GET();
@@ -1747,5 +1752,6 @@ describe("GET /api/discover — extended", () => {
     const body = await res.json();
     expect(body.candidates).toEqual([]);
     expect(body.candidates_found).toBe(0);
+    expect(mockReadFile).not.toHaveBeenCalled();
   });
 });

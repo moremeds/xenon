@@ -1,17 +1,10 @@
 import { NextResponse } from "next/server";
-import { readFile, readdir, writeFile, stat, mkdir } from "fs/promises";
-import { join } from "path";
 import { isCriDataStale } from "@/lib/criStaleness";
-import { selectPreferredCriCandidate, type CriCacheCandidate } from "@/lib/criCache";
 import { backfillRealizedVolHistory, type RegimeHistoryEntry } from "@/lib/regimeHistory";
 import { xenonFetch } from "@/lib/xenonApi";
 import { getRequestId, setCacheResponseHeaders } from "@/lib/apiContracts";
 
 export const runtime = "nodejs";
-
-const DATA_DIR = join(process.cwd(), "..", "data");
-const CACHE_PATH = join(DATA_DIR, "cri.json");
-const SCHEDULED_DIR = join(DATA_DIR, "cri_scheduled");
 
 /** Today's date in ET (YYYY-MM-DD) — the trading calendar reference */
 function todayET(): string {
@@ -167,59 +160,16 @@ function normalizeCriPayload(raw: Record<string, unknown>): Record<string, unkno
   };
 }
 
+function payloadMtimeMs(data: Record<string, unknown>): number {
+  const raw =
+    (typeof data._scanned_at === "string" && data._scanned_at) ||
+    (typeof data.scan_time === "string" && data.scan_time) ||
+    null;
+  const parsed = raw ? Date.parse(raw) : NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 let bgScanInFlight = false;
-
-/** Read the latest CRI JSON — scheduled dir first, then legacy cri.json.
- *  Iterates newest→oldest, skipping corrupt files (e.g. stderr mixed in). */
-async function readLatestCri(): Promise<{ data: object; path: string } | null> {
-  async function readCriCandidate(filePath: string): Promise<CriCacheCandidate | null> {
-    try {
-      const raw = await readFile(filePath, "utf-8");
-      const jsonStart = raw.indexOf("{");
-      if (jsonStart === -1) return null;
-      const fileStat = await stat(filePath);
-      return {
-        path: filePath,
-        mtimeMs: fileStat.mtimeMs,
-        data: JSON.parse(raw.slice(jsonStart)) as Record<string, unknown>,
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  async function readLatestScheduledCri(): Promise<CriCacheCandidate | null> {
-    try {
-      const files = await readdir(SCHEDULED_DIR);
-      const jsonFiles = files.filter((f) => f.startsWith("cri-") && f.endsWith(".json")).sort();
-      for (let index = jsonFiles.length - 1; index >= 0; index -= 1) {
-        const candidate = await readCriCandidate(join(SCHEDULED_DIR, jsonFiles[index]));
-        if (candidate) return candidate;
-      }
-    } catch {
-      // dir may not exist yet
-    }
-
-    return null;
-  }
-
-  const selected = selectPreferredCriCandidate(
-    await readLatestScheduledCri(),
-    await readCriCandidate(CACHE_PATH),
-  );
-
-  return selected ? { data: selected.data, path: selected.path } : null;
-}
-
-/** Check if the latest cached data is stale (market-hours aware). */
-async function isCacheStale(filePath: string, data: Record<string, unknown>): Promise<boolean> {
-  try {
-    const s = await stat(filePath);
-    return isCriDataStale(data, s.mtimeMs, todayET(), isMarketOpenNow());
-  } catch {
-    return true;
-  }
-}
 
 /** Fire-and-forget: run CRI scan via FastAPI and save results */
 function triggerBackgroundScan(): void {
@@ -228,31 +178,31 @@ function triggerBackgroundScan(): void {
 
   console.log("[CRI] Background scan triggered via FastAPI");
   xenonFetch<Record<string, unknown>>("/regime/scan", { method: "POST", timeout: 130_000 })
-    .then(async (data) => {
-      await mkdir(SCHEDULED_DIR, { recursive: true });
-      const ts = new Date().toLocaleString("sv", { timeZone: "America/New_York" })
-        .replace(" ", "T").slice(0, 16).replace(":", "-");
-      const outPath = join(SCHEDULED_DIR, `cri-${ts}.json`);
-      const payload = JSON.stringify(data, null, 2);
-      await writeFile(outPath, payload);
-      console.log(`[CRI] Background scan complete → ${outPath}`);
-    })
+    .then(() => { console.log("[CRI] Background scan complete"); })
     .catch((err) => { console.error("[CRI] Background scan failed:", err.message); })
     .finally(() => { bgScanInFlight = false; });
 }
 
 export async function GET(): Promise<Response> {
   const requestId = getRequestId();
-  const result = await readLatestCri();
-  const data = normalizeCriPayload((result?.data ?? EMPTY_CRI) as Record<string, unknown>);
+  let upstream: Record<string, unknown> | null = null;
+  try {
+    upstream = await xenonFetch<Record<string, unknown>>("/regime", {
+      method: "GET",
+      timeout: 10_000,
+    });
+  } catch (err) {
+    console.warn("[CRI] FastAPI /regime failed:", err);
+  }
+  const data = normalizeCriPayload((upstream ?? EMPTY_CRI) as Record<string, unknown>);
   const currentMarketOpen = isMarketOpenNow();
 
   // Keep market_open aligned with the current session state for every request.
   (data as Record<string, unknown>).market_open = currentMarketOpen;
 
-  // Stale-while-revalidate: return cached data immediately,
-  // kick off a background scan if today's data is stale or from stale date.
-  if (!result || await isCacheStale(result.path, data)) {
+  // Stale-while-revalidate: return latest PG data immediately, kick off a
+  // background scan if today's data is stale or absent.
+  if (!upstream || isCriDataStale(data, payloadMtimeMs(upstream), todayET(), currentMarketOpen)) {
     triggerBackgroundScan();
   }
 
