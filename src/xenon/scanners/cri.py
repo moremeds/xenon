@@ -740,6 +740,7 @@ def cta_exposure_model(
             "forced_reduction_pct": 0.0,
             "forced_reduction": False,
             "est_selling_bn": 0.0,
+            "selling_usd_b": 0.0,
         }
 
     exposure = min(vol_target / realized_vol * 100.0, CTA_MAX_EXPOSURE)
@@ -752,6 +753,7 @@ def cta_exposure_model(
         "forced_reduction_pct": round(reduction * 100.0, 1),
         "forced_reduction": reduction > 0.0,
         "est_selling_bn": round(est_selling, 1),
+        "selling_usd_b": round(est_selling, 1),
     }
 
 

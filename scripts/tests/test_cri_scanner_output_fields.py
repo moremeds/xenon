@@ -74,3 +74,26 @@ def test_cta_emits_forced_reduction_false_for_invalid_input():
 
     out_zero = cta_exposure_model(realized_vol=0.0)
     assert out_zero["forced_reduction"] is False
+
+
+# ── cta.selling_usd_b (schema-named alias for est_selling_bn) ─────
+
+
+def test_cta_emits_selling_usd_b_alongside_legacy_est_selling_bn():
+    """schema.py:439 reads payload->'cta'->>'selling_usd_b' for the
+    cta_selling_usd_b generated column. Without this alias the column
+    stays NULL on every persisted row — same shape of bug as fired /
+    forced_reduction."""
+    out = cta_exposure_model(realized_vol=25.0)  # 60% reduction × $400B
+    assert "selling_usd_b" in out
+    assert out["selling_usd_b"] == out["est_selling_bn"]
+    # legacy field still present
+    assert "est_selling_bn" in out
+
+
+def test_cta_emits_selling_usd_b_in_guard_path_too():
+    """Both return paths in cta_exposure_model must emit the field.
+    The early-exit guard (NaN / zero realized_vol) returns 0 selling."""
+    out_nan = cta_exposure_model(realized_vol=float("nan"))
+    assert out_nan["selling_usd_b"] == 0.0
+    assert out_nan["est_selling_bn"] == 0.0
