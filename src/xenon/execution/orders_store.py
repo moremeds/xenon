@@ -233,20 +233,25 @@ def register_from_snapshot(
     right: str | None = None,
     expiry: str | None = None,
     con_id: int | None = None,
-) -> bool:
-    """Register an IB-side open order in `xenon.order_submissions`.
+) -> dict:
+    """Mirror an IB-side open order into `xenon.order_submissions`.
 
-    Two behaviors, one transaction:
+    Three branches, one transaction:
 
-    1. An existing row for `(perm_id, broker, account_env, broker_account)`
-       wins — Xenon-authored UUID rows carry richer authorship metadata
-       (preflight verdict, modify_sequence, naked-short audit) that the
-       IB snapshot can't reconstruct. Return False.
-    2. No existing row — INSERT a `snapshot-<perm_id>` row in state
-       `WORKING` (IB returned this from `get_open_orders()`, so it's
-       literally working — `SUBMITTED` is unread by the UI route).
-       Option / BAG contract fields propagate so the UI renders the leg
-       correctly. Return True.
+    1. **No existing row** — INSERT a `snapshot-<perm_id>` row in state
+       `WORKING`. Returns ``{"action": "INSERTED", "drift": None}``.
+    2. **Existing snapshot-* row** — compare ``limit_price`` and ``quantity``
+       against incoming. On drift, UPDATE the row + write an
+       ``IB_MIRROR_UPDATE`` order_event recording before/after. On no drift,
+       no-op. Returns ``{"action": "UPDATED"|"NOOP", "drift": {...}|None}``.
+    3. **Existing UUID-authored row** — keep dedupe semantics: this is a
+       Xenon-placed order with `modify_sequence` invariants we won't
+       silently violate from a TWS-side change. Returns
+       ``{"action": "SKIPPED_UUID", "drift": None}``.
+
+    Branch (2) closes the bug where TWS price/qty edits never reached our
+    DB: the previous insert-only behavior left snapshot rows frozen at
+    their first-seen values.
     """
     submission_id = f"snapshot-{perm_id}"
     client_attempt_id = f"snapshot-{perm_id}"
@@ -254,15 +259,61 @@ def register_from_snapshot(
     engine = get_sync_engine()
     with engine.begin() as conn:
         existing = conn.execute(
-            select(order_submissions.c.submission_id).where(
+            select(
+                order_submissions.c.submission_id,
+                order_submissions.c.limit_price,
+                order_submissions.c.quantity,
+            ).where(
                 order_submissions.c.perm_id == str(perm_id),
                 order_submissions.c.broker == broker,
                 order_submissions.c.account_env == account_env,
                 order_submissions.c.broker_account == broker_account,
             )
         ).first()
+
         if existing is not None:
-            return False
+            existing_submission_id = existing[0]
+            existing_limit_price = float(existing[1]) if existing[1] is not None else None
+            existing_quantity = int(existing[2]) if existing[2] is not None else None
+
+            # UUID-authored rows are off-limits: their modify_sequence is
+            # the source of truth. TWS-side modifies on those need a
+            # separate, conscious policy decision.
+            if not existing_submission_id.startswith("snapshot-"):
+                return {"action": "SKIPPED_UUID", "drift": None}
+
+            drift: dict = {}
+            if existing_limit_price != float(limit_price):
+                drift["limit_price"] = {
+                    "from": existing_limit_price,
+                    "to": float(limit_price),
+                }
+            if existing_quantity != int(quantity):
+                drift["quantity"] = {
+                    "from": existing_quantity,
+                    "to": int(quantity),
+                }
+            if not drift:
+                return {"action": "NOOP", "drift": None}
+
+            conn.execute(
+                update(order_submissions)
+                .where(order_submissions.c.submission_id == existing_submission_id)
+                .values(
+                    limit_price=float(limit_price),
+                    quantity=int(quantity),
+                    updated_at=now,
+                )
+            )
+            conn.execute(
+                insert(order_events).values(
+                    submission_id=existing_submission_id,
+                    kind="IB_MIRROR_UPDATE",
+                    detail=drift,
+                    at=now,
+                )
+            )
+            return {"action": "UPDATED", "drift": drift}
 
         result = conn.execute(
             pg_insert(order_submissions)
@@ -293,7 +344,11 @@ def register_from_snapshot(
             .on_conflict_do_nothing(index_elements=["submission_id"])
             .returning(order_submissions.c.submission_id)
         )
-        return result.first() is not None
+        if result.first() is None:
+            # Race: another writer slipped in between the SELECT and INSERT.
+            # Fine to no-op — the next poll tick will see and reconcile.
+            return {"action": "NOOP", "drift": None}
+        return {"action": "INSERTED", "drift": None}
 
 
 def apply_modify_by_perm_id(

@@ -58,7 +58,7 @@ def test_register_inserts_row_for_unknown_perm_id(db_path):
         limit_price=1.7,
         db_path=db_path,
     )
-    assert inserted is True
+    assert inserted["action"] == "INSERTED"
 
     # Row is now present and queryable by perm_id.
     row = _fetch_one(
@@ -97,7 +97,7 @@ def test_register_persists_option_contract_fields(db_path):
         expiry="2026-05-01",
         con_id=987654321,
     )
-    assert inserted is True
+    assert inserted["action"] == "INSERTED"
 
     row = _fetch_one(
         'SELECT strike, "right", expiry, con_id, multiplier FROM xenon.order_submissions WHERE perm_id = :perm_id',
@@ -160,7 +160,7 @@ def test_register_dedupes_against_existing_uuid_row(db_path):
         account_env="live",
         broker_account="U18007831",
     )
-    assert inserted is False
+    assert inserted["action"] == "SKIPPED_UUID"
 
     with engine.connect() as conn:
         rows = conn.execute(
@@ -199,8 +199,8 @@ def test_register_is_idempotent(db_path):
         limit_price=1.7,
         db_path=db_path,
     )
-    assert first is True
-    assert second is False  # already exists, no-op
+    assert first["action"] == "INSERTED"
+    assert second["action"] == "NOOP"  # same values → no UPDATE, no event
 
     # Exactly one row.
     count = _fetch_one(
@@ -244,7 +244,7 @@ def test_register_works_for_stock_security_type(db_path):
         limit_price=350.0,
         db_path=db_path,
     )
-    assert inserted is True
+    assert inserted["action"] == "INSERTED"
 
 
 def test_register_works_for_single_leg_option(db_path):
@@ -260,7 +260,7 @@ def test_register_works_for_single_leg_option(db_path):
         multiplier=100,
         db_path=db_path,
     )
-    assert inserted is True
+    assert inserted["action"] == "INSERTED"
     mult = _fetch_one(
         "SELECT multiplier FROM xenon.order_submissions WHERE perm_id = :perm_id",
         {"perm_id": "1000"},
