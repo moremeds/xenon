@@ -138,6 +138,21 @@ def _make_working_row(
     return sid_outcome.submission_id
 
 
+def _fetch_submission_summary(submission_id: str):
+    engine = _pg_engine()
+    try:
+        with engine.connect() as con:
+            return con.execute(
+                text(
+                    "SELECT state, filled_qty, avg_fill_price "
+                    "FROM xenon.order_submissions WHERE submission_id=:submission_id"
+                ),
+                {"submission_id": submission_id},
+            ).fetchone()
+    finally:
+        engine.dispose()
+
+
 def _fetch_row(db_path, submission_id):
     engine = _pg_engine()
     try:
@@ -175,7 +190,7 @@ def _fetch_fill_rows():
         with engine.connect() as con:
             return con.execute(
                 text(
-                    "SELECT exec_id, submission_id, ticker, side, qty, price, broker, account_env, broker_account "
+                    "SELECT exec_id, submission_id, ticker, side, qty, price, metadata, broker, account_env, broker_account "
                     "FROM xenon.order_fills ORDER BY exec_id"
                 )
             ).fetchall()
@@ -312,6 +327,94 @@ def test_rehydrate_records_fill_and_trade_for_explicit_scope(db_path):
     fill_events = _fetch_outbox("fill.recorded")
     assert len(fill_events) == 1
     assert fill_events[0].payload["exec_id"] == "exec-single-fill-1"
+
+
+def test_rehydrate_bag_execution_uses_envelope_for_quantity_and_preserves_leg_metadata(db_path):
+    sid = _make_working_row(
+        db_path,
+        ticker="SPX",
+        perm_id="P-bag-fill",
+        ib_order_id="21",
+        security_type="BAG",
+        action="SELL",
+        quantity=11,
+        con_id=28812380,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU123456",
+    )
+    filled_at = datetime(2026, 4, 29, 13, 45, 20, tzinfo=timezone.utc)
+    ib = FakeIBClient(
+        open_orders=[],
+        executions=[
+            {
+                "exec_id": "bag-parent",
+                "perm_id": "P-bag-fill",
+                "ib_order_id": "21",
+                "con_id": 28812380,
+                "ticker": "SPX",
+                "sec_type": "BAG",
+                "side": "SLD",
+                "shares": 11,
+                "avg_price": Decimal("1.40"),
+                "time": filled_at,
+            },
+            {
+                "exec_id": "bag-leg-short",
+                "perm_id": "P-bag-fill",
+                "ib_order_id": "21",
+                "con_id": 872609959,
+                "ticker": "SPX",
+                "sec_type": "OPT",
+                "right": "P",
+                "strike": Decimal("5600"),
+                "expiry": "20260429",
+                "side": "SLD",
+                "shares": 11,
+                "avg_price": Decimal("27.90"),
+                "commission": Decimal("14.1950"),
+                "realized_pnl": Decimal("-29431.38995"),
+                "time": filled_at,
+            },
+            {
+                "exec_id": "bag-leg-long",
+                "perm_id": "P-bag-fill",
+                "ib_order_id": "21",
+                "con_id": 873604441,
+                "ticker": "SPX",
+                "sec_type": "OPT",
+                "right": "P",
+                "strike": Decimal("5595"),
+                "expiry": "20260429",
+                "side": "BOT",
+                "shares": 11,
+                "avg_price": Decimal("26.50"),
+                "commission": Decimal("14.1950"),
+                "realized_pnl": Decimal("29154.61005"),
+                "time": filled_at,
+            },
+        ],
+    )
+
+    rehydrate_on_boot(
+        lambda: ib,
+        orders_store,
+        now=lambda: 1_000_000_000,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU123456",
+    )
+
+    summary = _fetch_submission_summary(sid)
+    assert summary.state == "FILLED"
+    assert summary.filled_qty == 11
+    assert Decimal(str(summary.avg_fill_price)) == Decimal("1.4000")
+
+    fills = {row.exec_id: row for row in _fetch_fill_rows()}
+    assert fills["bag-parent"].metadata["sec_type"] == "BAG"
+    assert fills["bag-leg-short"].metadata["sec_type"] == "OPT"
+    assert fills["bag-leg-short"].metadata["realized_pnl"] == "-29431.38995"
+    assert fills["bag-leg-long"].metadata["right"] == "P"
 
 
 def test_rehydrate_replay_does_not_duplicate_fill_or_trade(db_path):

@@ -16,7 +16,15 @@ BROKER_SCOPE = {
 }
 
 
-def _insert_submission(submission_id: str, *, ticker: str = "AAPL", quantity: int = 100, action: str = "BUY") -> None:
+def _insert_submission(
+    submission_id: str,
+    *,
+    ticker: str = "AAPL",
+    quantity: int = 100,
+    action: str = "BUY",
+    security_type: str = "STK",
+    con_id: int = 265598,
+) -> None:
     engine = get_sync_engine()
     with engine.begin() as conn:
         conn.execute(
@@ -25,11 +33,11 @@ def _insert_submission(submission_id: str, *, ticker: str = "AAPL", quantity: in
                 user_id="user-1",
                 client_attempt_id=f"attempt-{submission_id}",
                 ticker=ticker,
-                security_type="STK",
+                security_type=security_type,
                 action=action,
                 quantity=quantity,
                 multiplier=1,
-                con_id=265598,
+                con_id=con_id,
                 state="WORKING",
                 submitted_at=datetime.now(timezone.utc),
                 **BROKER_SCOPE,
@@ -81,6 +89,7 @@ def _fill(
     side: str = "BUY",
     qty: int = 100,
     price: str = "10.00",
+    commission: str = "0",
     filled_at: datetime | None = None,
     metadata: dict | None = None,
 ) -> None:
@@ -95,7 +104,7 @@ def _fill(
         side=side,
         qty=qty,
         price=Decimal(price),
-        commission=Decimal("0"),
+        commission=Decimal(commission),
         filled_at=filled_at or datetime(2026, 4, 28, 14, 30, tzinfo=timezone.utc),
         metadata=metadata,
         **BROKER_SCOPE,
@@ -170,6 +179,69 @@ def test_combo_legs_yield_one_trades_row_with_metadata_legs():
     assert row["state"] == "OPEN"
     assert [leg["con_id"] for leg in row["metadata"]["legs"]] == [111, 222]
     assert [leg["side"] for leg in row["metadata"]["legs"]] == ["BUY", "SELL"]
+
+
+def test_bag_envelope_is_not_counted_as_a_trade_leg_and_realized_pnl_sums_from_leg_reports():
+    _insert_submission(
+        "sub-bag-close",
+        ticker="SPX",
+        quantity=11,
+        action="SELL",
+        security_type="BAG",
+        con_id=28812380,
+    )
+    filled_at = datetime(2026, 4, 29, 13, 45, 20, tzinfo=timezone.utc)
+    _fill(
+        "bag-parent",
+        submission_id="sub-bag-close",
+        ticker="SPX",
+        con_id=28812380,
+        side="SELL",
+        qty=11,
+        price="1.40",
+        filled_at=filled_at,
+        metadata={"source": "single_leg_rehydrate", "sec_type": "BAG"},
+    )
+    _fill(
+        "bag-leg-short",
+        submission_id="sub-bag-close",
+        ticker="SPX",
+        con_id=872609959,
+        side="SELL",
+        qty=11,
+        price="27.90",
+        commission="14.1950",
+        filled_at=filled_at,
+        metadata={
+            "source": "single_leg_rehydrate",
+            "sec_type": "OPT",
+            "realized_pnl": "-29431.38995",
+        },
+    )
+    _fill(
+        "bag-leg-long",
+        submission_id="sub-bag-close",
+        ticker="SPX",
+        con_id=873604441,
+        side="BUY",
+        qty=11,
+        price="26.50",
+        commission="14.1950",
+        filled_at=filled_at,
+        metadata={
+            "source": "single_leg_rehydrate",
+            "sec_type": "OPT",
+            "realized_pnl": "29154.61005",
+        },
+    )
+
+    aggregate_trade_from_fills(submission_id="sub-bag-close")
+
+    row = _trade_rows()[0]
+    assert row["state"] == "CLOSED"
+    assert row["quantity"] == 11
+    assert row["realized_pnl"] == Decimal("-276.78")
+    assert [leg["exec_id"] for leg in row["metadata"]["legs"]] == ["bag-leg-long", "bag-leg-short"]
 
 
 def test_closed_combo_keeps_net_entry_and_exit_costs():
