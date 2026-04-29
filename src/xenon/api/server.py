@@ -508,14 +508,32 @@ async def lifespan(app: FastAPI):
                         return None
                 return None
 
-            uw_daily_task = asyncio.create_task(
-                uw_daily_run_loop(
-                    cache=get_portfolio_cache(),
-                    flow_log=get_flow_log(),
-                    uw_client=_uw_client,
-                    contract_fetcher=_default_contract_fetcher,
-                )
+            from xenon.api.services.advisory_lock import (
+                LOCK_KEY_UW_DAILY,
+                pg_try_advisory_lock,
             )
+
+            async def _supervised_uw_daily() -> None:
+                """Run the UW-daily loop only if we hold the singleton lock.
+
+                The env-var XENON_DAILY_JOB_WORKER_ID lets an operator
+                explicitly suppress the loop on a worker; this advisory
+                lock is the strict singleton guarantee — even if multiple
+                workers share worker_id="0" by accident, only the lock
+                holder actually runs.
+                """
+                async with pg_try_advisory_lock(LOCK_KEY_UW_DAILY) as got_lock:
+                    if not got_lock:
+                        logger.info("uw_analyze_daily_job already running on another worker (advisory lock held)")
+                        return
+                    await uw_daily_run_loop(
+                        cache=get_portfolio_cache(),
+                        flow_log=get_flow_log(),
+                        uw_client=_uw_client,
+                        contract_fetcher=_default_contract_fetcher,
+                    )
+
+            uw_daily_task = asyncio.create_task(_supervised_uw_daily())
             logger.info("uw_analyze_daily_job background task started")
         except Exception as exc:  # noqa: BLE001
             logger.warning("uw_analyze_daily_job failed to start: %s", exc)
