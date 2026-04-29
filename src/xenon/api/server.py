@@ -53,6 +53,7 @@ from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
 from xenon.db.engine import dispose_engine, get_sync_engine, init_engine
+from xenon.db.queries.blotter import blotter_has_trades, fetch_blotter_pg
 from xenon.db.schema import account_snapshots, order_events, order_submissions
 from xenon.execution import orders_store, preflight, quote_guard, quote_tokens
 from xenon.execution.account_scope import resolve_from_app_state
@@ -2836,8 +2837,8 @@ async def internals_skew_history(
 
 
 @app.post("/blotter")
-async def blotter_sync():
-    """Run IB Flex Query for historical trades. 120s timeout.
+async def blotter_sync(scope=Depends(get_account_scope)):
+    """Return historical trades from Postgres first, then optional IB Flex.
 
     When IB_FLEX_TOKEN / IB_FLEX_QUERY_ID are unset, return a structured
     empty payload with configured=False rather than a 502, so the UI can
@@ -2846,6 +2847,12 @@ async def blotter_sync():
     (see src/xenon/trade_blotter/flex_query.py). Plan: docs/plans/
     2026-04-28-postgres-migration-completion-IMPL.md § W2.1.
     """
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        pg_payload = fetch_blotter_pg(conn, scope=scope, days=30)
+    if blotter_has_trades(pg_payload):
+        return pg_payload
+
     result = await run_module("xenon.trade_blotter.flex_query", ["--json"], timeout=120)
     if not result.ok:
         is_unconfigured = result.exit_code == 2 or (result.error and "FLEX_NOT_CONFIGURED" in result.error)
