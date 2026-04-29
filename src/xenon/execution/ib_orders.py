@@ -246,6 +246,8 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
         ib_order_id = str(order.get("orderId") or "")
         if not perm_id or not ib_order_id:
             continue
+        strike_val = contract.get("strike")
+        con_id_val = contract.get("conId")
         inserted = orders_store.register_from_snapshot(
             perm_id=perm_id,
             ib_order_id=ib_order_id,
@@ -255,6 +257,10 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
             quantity=int(float(order.get("totalQuantity") or 0)),
             limit_price=float(order.get("limitPrice") or 0.0),
             multiplier=multiplier,
+            strike=float(strike_val) if strike_val not in (None, 0, 0.0) else None,
+            right=contract.get("right") or None,
+            expiry=contract.get("expiry") or None,
+            con_id=int(con_id_val) if con_id_val else None,
             **resolved,
         )
         if inserted:
