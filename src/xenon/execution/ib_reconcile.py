@@ -181,6 +181,24 @@ def _realized_pnl_for_update(execution: dict) -> Decimal | None:
     return _decimal(raw)
 
 
+def _has_meaningful_realized_pnl(execution: dict) -> bool:
+    """True iff IB attached a non-zero realizedPNL to this execution.
+
+    Used to self-heal trade rows whose realized_pnl is stuck at NULL because
+    they were aggregated before the leg-level reported_realized_pnl path
+    landed. The aggregator is idempotent, so re-running on a fill with
+    meaningful realized_pnl is cheap and converges existing rows on the next
+    poll tick without an explicit migration.
+    """
+    raw = _field(execution, "realized_pnl", "realizedPNL")
+    if raw is None or raw == "":
+        return False
+    try:
+        return Decimal(str(raw)) != _ZERO
+    except (ArithmeticError, ValueError):
+        return False
+
+
 def _normalize_fill_side(side: Any) -> str:
     normalized = str(side or "").upper()
     if normalized in {"BOT", "BOUGHT"}:
@@ -324,6 +342,11 @@ def record_external_fills(
                     affected_legacy_ids.add(legacy_id)
             else:
                 replayed += 1
+            if not did_update and _has_meaningful_realized_pnl(execution):
+                if submission_id is not None:
+                    affected_submission_ids.add(submission_id)
+                else:
+                    affected_legacy_ids.add(legacy_id)
 
     ordered_submission_ids = sorted(affected_submission_ids)
     for sid in ordered_submission_ids:

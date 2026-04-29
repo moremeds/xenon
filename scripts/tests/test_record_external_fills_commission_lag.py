@@ -47,9 +47,7 @@ def _execution(
 def _fill(exec_id: str = "lag-exec-001") -> dict:
     engine = get_sync_engine()
     with engine.connect() as conn:
-        return dict(
-            conn.execute(select(order_fills).where(order_fills.c.exec_id == exec_id)).one()._mapping
-        )
+        return dict(conn.execute(select(order_fills).where(order_fills.c.exec_id == exec_id)).one()._mapping)
 
 
 def _trade_for_legacy_id(legacy_id: str) -> dict:
@@ -286,3 +284,81 @@ def test_commission_update_emits_outbox_event():
     assert event["payload"]["legacy_id"] == "ib_reconcile:perm:9300001"
     assert event["payload"]["commission"] == "1.23"
     assert event["payload"]["realized_pnl"] == "-12.50"
+
+
+def test_replayed_fill_with_realized_pnl_triggers_re_aggregation():
+    """Self-heal: trade rows whose realized_pnl was NULL because they were
+    aggregated before the leg-level reported_realized_pnl path landed must
+    re-aggregate when the next poll tick replays the underlying fills.
+
+    The aggregator is idempotent, so the cost is one redundant SQL roundtrip
+    per replayed fill that carries non-zero realized_pnl. The value is that
+    operators don't need a manual backfill after the leg-level path lands.
+    """
+    from xenon.execution.ib_reconcile import record_external_fills
+
+    first = record_external_fills(
+        [
+            _execution(
+                exec_id="lag-self-heal",
+                commission=Decimal("1.23"),
+                realized_pnl=Decimal("-12.50"),
+                commission_ready=True,
+            )
+        ],
+        scope=SCOPE,
+    )
+    legacy_id = "ib_reconcile:perm:9300001"
+    assert first["inserted"] == 1
+    assert legacy_id in first["affected_legacy_ids"]
+
+    second = record_external_fills(
+        [
+            _execution(
+                exec_id="lag-self-heal",
+                commission=Decimal("1.23"),
+                realized_pnl=Decimal("-12.50"),
+                commission_ready=True,
+            )
+        ],
+        scope=SCOPE,
+    )
+    assert second["inserted"] == 0
+    assert second["updated"] == 0
+    assert second["replayed"] == 1
+    assert legacy_id in second["affected_legacy_ids"]
+
+
+def test_replayed_fill_with_zero_realized_pnl_does_not_re_aggregate():
+    """Narrow gate: zero-realized_pnl replays (i.e. opening fills) must not
+    add the submission/legacy id to the affected set. Otherwise every poll
+    tick would burn O(open_fills) re-aggregation SQL forever."""
+    from xenon.execution.ib_reconcile import record_external_fills
+
+    first = record_external_fills(
+        [
+            _execution(
+                exec_id="lag-no-heal",
+                commission=Decimal("1.23"),
+                realized_pnl=Decimal("0"),
+                commission_ready=True,
+            )
+        ],
+        scope=SCOPE,
+    )
+    assert first["inserted"] == 1
+
+    second = record_external_fills(
+        [
+            _execution(
+                exec_id="lag-no-heal",
+                commission=Decimal("1.23"),
+                realized_pnl=Decimal("0"),
+                commission_ready=True,
+            )
+        ],
+        scope=SCOPE,
+    )
+    assert second["replayed"] == 1
+    assert second["affected_legacy_ids"] == []
+    assert second["affected_submission_ids"] == []
