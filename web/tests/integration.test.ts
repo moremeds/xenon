@@ -83,26 +83,12 @@ test("buildEvaluateCommand builds single evaluate command with default and expli
   ]);
 });
 
-test("pi API returns local portfolio payload", async () => {
-  const { response, body } = await runPiRequest("/portfolio");
-
-  expect(response.status).toBe(200);
-  expect(body.command).toBe("portfolio");
-  expect(body.status).toBe("ok");
-  expect(typeof body.output === "string").toBeTruthy();
-  expect(body.output.includes("bankroll")).toBeTruthy();
-});
-
-test("pi API returns journal entries with limit", async () => {
-  const { response, body } = await runPiRequest("/journal --limit 2");
-
-  expect(response.status).toBe(200);
-  expect(body.command).toBe("journal");
-  expect(body.status).toBe("ok");
-  const parsed = JSON.parse(body.output);
-  expect(Array.isArray(parsed.trades)).toBeTruthy();
-  expect(parsed.trades.length <= 2).toBeTruthy();
-});
+// pi API /portfolio and /journal tests removed: both commands now proxy to
+// FastAPI (xenonFetch -> Postgres) instead of reading data/portfolio.json or
+// shelling out to local CLIs. The 200-OK contract these tests asserted depends
+// on a live FastAPI + DATABASE_URL, so they cannot run in the vitest harness.
+// Equivalent Python coverage: src/xenon/api/tests/test_portfolio_route.py and
+// src/xenon/api/tests/test_journal_sync_endpoint.py.
 
 test("pi API blocks unsupported commands", async () => {
   const { response, body } = await runPiRequest("rm -rf /");
