@@ -71,6 +71,32 @@ _VIOLATION_PATTERNS = (
 # File extensions to scan.
 _EXTENSIONS = (".ts", ".tsx", ".js", ".mjs", ".py")
 
+# Files where ANY filesystem read is forbidden, not just JSON fallbacks.
+# These are runtime regime/state surfaces that must read from FastAPI →
+# Postgres only. Stricter than the JSON-fallback rule because the file
+# being read is not the issue — the read itself is.
+#
+# Reference: spec §7.5, audit §5.2 (web/app/api/regime/route.ts already
+# proxies FastAPI; this guard locks it in).
+_NO_FS_FILES = frozenset(
+    {
+        "web/app/api/regime/route.ts",
+    }
+)
+
+# Patterns that flag any fs import or read. Used only for files in
+# _NO_FS_FILES.
+_FS_PATTERNS = (
+    re.compile(r'^\s*import\s+[^"\'\n]*from\s+["\']fs(?:/promises)?["\']'),
+    re.compile(r'^\s*import\s+[^"\'\n]*from\s+["\']node:fs(?:/promises)?["\']'),
+    re.compile(r'\brequire\s*\(\s*["\']fs(?:/promises)?["\']'),
+    re.compile(r'\brequire\s*\(\s*["\']node:fs(?:/promises)?["\']'),
+    # Defensive: catch readFileSync / fs.read* calls even if the import
+    # was somehow obscured (re-export, dynamic import, etc).
+    re.compile(r"\b(?:readFileSync|readDirSync)\s*\("),
+    re.compile(r"\bfs\.(?:readFile|readFileSync|readdir|readdirSync)\s*\("),
+)
+
 
 def _iter_candidate_files(root: Path) -> list[Path]:
     files: list[Path] = []
@@ -118,6 +144,21 @@ def main() -> int:
                     if pattern.search(line):
                         violations.append((rel, lineno, line.strip()))
                         break
+
+    # Stricter check for runtime regime/state surfaces — no fs reads at all.
+    for rel in sorted(_NO_FS_FILES):
+        target = repo_root / rel
+        if not target.exists():
+            continue
+        try:
+            lines = target.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for lineno, line in enumerate(lines, start=1):
+            for pattern in _FS_PATTERNS:
+                if pattern.search(line):
+                    violations.append((rel, lineno, line.strip()))
+                    break
 
     if not violations:
         print("OK — no new JSON fallbacks on order/migrated routes.")
