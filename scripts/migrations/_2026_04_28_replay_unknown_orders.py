@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 from sqlalchemy import select
 
+from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 from xenon.db.engine import get_sync_engine
 from xenon.db.schema import order_submissions
 from xenon.execution import orders_store
@@ -40,6 +41,17 @@ def _count_unknown(scope: AccountScope) -> int:
     return len(rows)
 
 
+def _connect_replay_ib_client() -> IBClient:
+    client = IBClient()
+    client.connect(
+        host=DEFAULT_HOST,
+        port=DEFAULT_GATEWAY_PORT,
+        client_id="auto",
+        timeout=10,
+    )
+    return client
+
+
 def replay_unknown(
     *,
     scope: AccountScope,
@@ -50,12 +62,12 @@ def replay_unknown(
     Returns:
         dict with keys ``resolved``, ``still_unknown``, ``scanned``, ``errors``.
     """
+    managed_clients: list[Any] = []
     if ib_client_factory is None:
-        from xenon.api import ib_pool
-
-        if ib_pool is None:
-            return {"resolved": 0, "still_unknown": 0, "scanned": 0, "errors": ["ib_pool not initialized"]}
-        ib_client_factory = lambda: ib_pool.get("sync").ib  # type: ignore[union-attr]
+        def ib_client_factory() -> Any:
+            client = _connect_replay_ib_client()
+            managed_clients.append(client)
+            return client
 
     scanned = _count_unknown(scope)
     if scanned == 0:
@@ -75,6 +87,12 @@ def replay_unknown(
         logger.exception("rehydrate raised during UNKNOWN replay")
         errors.append(f"rehydrate failed: {exc}")
         decisions = []
+    finally:
+        for client in managed_clients:
+            try:
+                client.disconnect()
+            except Exception:  # noqa: BLE001
+                logger.warning("failed to disconnect replay IB client", exc_info=True)
 
     resolved = sum(1 for d in decisions if not d.noop and d.to_state and d.to_state != "UNKNOWN")
     still_unknown = scanned - resolved

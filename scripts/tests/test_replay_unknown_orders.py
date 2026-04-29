@@ -110,3 +110,51 @@ def test_replay_surfaces_errors_rather_than_silencing_them():
     summary = replay_unknown(scope=_SCOPE, ib_client_factory=lambda: fake_ib)
     assert summary["scanned"] >= 1
     assert summary["errors"], f"errors must be surfaced, not silenced; got {summary}"
+
+
+def test_replay_default_factory_uses_auto_allocated_ib_client(monkeypatch):
+    import scripts.migrations._2026_04_28_replay_unknown_orders as mod
+
+    calls = {"connect": [], "disconnect": 0}
+
+    class FakeClient:
+        def connect(self, **kwargs):
+            calls["connect"].append(kwargs)
+
+        def disconnect(self):
+            calls["disconnect"] += 1
+
+        def get_open_orders(self):
+            return []
+
+        def get_executions(self):
+            return []
+
+        def get_positions(self):
+            return []
+
+    monkeypatch.setattr(mod, "IBClient", lambda: FakeClient())
+    monkeypatch.setattr(mod, "_count_unknown", lambda scope: 1)
+
+    def fake_rehydrate(ib_factory, store, **kwargs):
+        ib = ib_factory()
+        assert ib.get_open_orders() == []
+        return [SimpleNamespace(noop=True, to_state="UNKNOWN")]
+
+    monkeypatch.setattr(mod, "rehydrate_on_boot", fake_rehydrate)
+
+    summary = mod.replay_unknown(scope=_SCOPE)
+
+    assert calls["connect"]
+    assert calls["connect"][0]["client_id"] == "auto"
+    assert calls["disconnect"] == 1
+    assert summary["scanned"] == 1
+
+
+def test_replay_module_no_longer_imports_api_ib_pool():
+    import inspect
+    import scripts.migrations._2026_04_28_replay_unknown_orders as mod
+
+    source = inspect.getsource(mod)
+    assert "from xenon.api import ib_pool" not in source
+    assert "ib_pool.get" not in source
