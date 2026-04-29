@@ -87,6 +87,35 @@ def save_vcg_scan(
     ).scalar()
 
 
+def save_cri_scan(conn, *, payload: dict) -> int:
+    """Insert a row into cri_series from a CRI scanner JSON payload.
+
+    Mirrors save_vcg_scan: sync conn, plain INSERT, returns the new id.
+    The cri_level NOT NULL column is derived from payload['cri']['score']
+    (defaulting to 0 when absent so partial / legacy payloads still
+    land instead of erroring out — matches the test_cri_partial_payload
+    fixture pattern).
+
+    No ON CONFLICT clause: the regime_state view (Phase 1) picks the
+    latest row, so multiple rows per calendar day from the 30-min
+    scheduled cadence + manual /regime/scan refreshes are intentional.
+    """
+    from sqlalchemy import insert as _insert
+
+    from xenon.db.schema import cri_series
+
+    cri = payload.get("cri") or {}
+    score = cri.get("score")
+    try:
+        cri_level = Decimal(str(score)) if score is not None else Decimal("0")
+    except (ValueError, ArithmeticError):
+        cri_level = Decimal("0")
+
+    return conn.execute(
+        _insert(cri_series).values(cri_level=cri_level, alert=False, payload=payload).returning(cri_series.c.id)
+    ).scalar()
+
+
 async def get_latest_vcg(conn: AsyncConnection) -> dict | None:
     """Return the most recent vcg_series payload, or None when no scans exist.
 
