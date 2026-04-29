@@ -220,6 +220,65 @@ async def _run_rehydrate_on_boot() -> None:
         logger.warning("combo wizard rehydrate failed on boot; continuing to serve: %s", exc)
 
 
+def _maybe_start_activity_poller() -> None:
+    """Start the periodic IB→Postgres activity poller if enabled.
+
+    Gated behind XENON_IB_ACTIVITY_POLLER=1. The task handle is stored on
+    app.state so the lifespan shutdown can cancel + await it cleanly.
+    Skipped in test mode and when the IB pool sync role has no client.
+    """
+    import asyncio as _asyncio
+
+    from xenon.api.services.ib_activity_mirror import (
+        DEFAULT_POLL_INTERVAL_S,
+        activity_poller_loop,
+    )
+    from xenon.execution.account_scope import AccountScope
+
+    if _is_test_mode():
+        logger.info("test_mode: skipping ib activity poller")
+        return
+
+    if os.environ.get("XENON_IB_ACTIVITY_POLLER", "").strip() != "1":
+        logger.info("ib activity poller disabled (XENON_IB_ACTIVITY_POLLER!=1)")
+        return
+
+    _scope_account_env = getattr(app.state, "trading_mode", None)
+    _scope_account = getattr(app.state, "account", None)
+    if not _scope_account_env or not _scope_account:
+        logger.info("ib activity poller skipped: scope not resolved")
+        return
+
+    scope = AccountScope(
+        broker="IB",
+        account_env=_scope_account_env,
+        broker_account=_scope_account,
+    )
+
+    def _ib_client_factory():
+        if ib_pool is None:
+            raise RuntimeError("ib_pool not initialized")
+        client = ib_pool.get("sync")
+        if client is None:
+            raise RuntimeError("ib_pool sync role has no client")
+        return client
+
+    try:
+        interval_s = float(os.environ.get("XENON_IB_ACTIVITY_POLL_S", DEFAULT_POLL_INTERVAL_S))
+    except ValueError:
+        interval_s = DEFAULT_POLL_INTERVAL_S
+
+    task = _asyncio.create_task(
+        activity_poller_loop(
+            ib_client_factory=_ib_client_factory,
+            scope=scope,
+            interval_s=interval_s,
+        )
+    )
+    app.state.ib_activity_poller_task = task
+    logger.info("ib activity poller started: interval=%ss", interval_s)
+
+
 async def _run_fills_replay_on_boot() -> None:
     """Replay IB fills into xenon.order_fills once on boot. Best-effort.
 
@@ -477,6 +536,12 @@ async def lifespan(app: FastAPI):
     # `xenon-ib-reconcile` manually.
     await _run_fills_replay_on_boot()
 
+    # Periodic IB activity poller. Mirrors TWS-side activity (price/qty
+    # edits, new fills, cancels expressed by disappearance) into Postgres
+    # on a fixed cadence. Gated behind XENON_IB_ACTIVITY_POLLER=1 so the
+    # feature ramps without surprise. Cadence env: XENON_IB_ACTIVITY_POLL_S.
+    _maybe_start_activity_poller()
+
     # W4.7 — PG-event-driven journal auto-import listener.
     # Replaces the legacy periodic /journal/sync flow. Failures must not
     # block boot.
@@ -503,6 +568,13 @@ async def lifespan(app: FastAPI):
             uw_daily_task.cancel()
             try:
                 await uw_daily_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        ib_activity_task = getattr(app.state, "ib_activity_poller_task", None)
+        if ib_activity_task is not None:
+            ib_activity_task.cancel()
+            try:
+                await ib_activity_task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         if ib_pool:

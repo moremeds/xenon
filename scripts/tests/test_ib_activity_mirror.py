@@ -176,3 +176,157 @@ def test_lifespan_helper_skips_when_scope_unresolved(monkeypatch):
 
     asyncio.run(server._run_fills_replay_on_boot())
     assert called is False
+
+
+# ---------------------------------------------------------------------------
+# Periodic poller — runs forever, ticks both surfaces (open orders + fills).
+# Gated on XENON_IB_ACTIVITY_POLLER so the feature lands without surprise.
+# ---------------------------------------------------------------------------
+
+
+def test_run_activity_poll_tick_calls_both_surfaces(monkeypatch, scope):
+    """One tick must call sync_open_orders_to_postgres AND record_external_fills.
+
+    The whole point of this PR is that those two surfaces stay in step. Either
+    one alone leaves us in the same broken state we started from.
+    """
+    from xenon.api.services import ib_activity_mirror
+
+    fake_client = object()
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        ib_activity_mirror,
+        "_fetch_open_orders",
+        lambda c: [{"orderId": 1, "permId": 9, "contract": {"secType": "STK", "symbol": "QQQ"}}],
+    )
+    monkeypatch.setattr(
+        ib_activity_mirror,
+        "_fetch_ib_executions",
+        lambda c, lookback_days=7: [{"exec_id": "x1", "perm_id": "9", "symbol": "QQQ"}],
+    )
+
+    def fake_sync(open_orders, *, scope):
+        captured["sync_orders"] = open_orders
+        captured["sync_scope"] = scope
+        return {"registered": 1, "updated": 0, "skipped": 0, "open_count": 1}
+
+    def fake_record(executions, *, scope):
+        captured["record_executions"] = executions
+        captured["record_scope"] = scope
+        return {"inserted": 1, "replayed": 0, "affected_legacy_ids": [], "affected_submission_ids": []}
+
+    monkeypatch.setattr(ib_activity_mirror, "_sync_open_orders_to_postgres", fake_sync)
+    monkeypatch.setattr(ib_activity_mirror, "_record_external_fills", fake_record)
+
+    result = ib_activity_mirror.run_activity_poll_tick(
+        ib_client_factory=lambda: fake_client,
+        scope=scope,
+    )
+
+    assert captured["sync_scope"] == scope
+    assert captured["record_scope"] == scope
+    assert result["open_orders"]["registered"] == 1
+    assert result["fills"]["inserted"] == 1
+
+
+def test_run_activity_poll_tick_swallows_each_surface_independently(monkeypatch, scope):
+    """If the open-order side fails, the fills side must still run, and vice
+    versa. One transient IB hiccup must not lose a whole poll cycle."""
+    from xenon.api.services import ib_activity_mirror
+
+    monkeypatch.setattr(
+        ib_activity_mirror,
+        "_fetch_open_orders",
+        lambda c: (_ for _ in ()).throw(RuntimeError("ib timeout")),
+    )
+    monkeypatch.setattr(ib_activity_mirror, "_fetch_ib_executions", lambda c, lookback_days=7: [])
+    fills_ran = False
+
+    def fake_record(executions, *, scope):
+        nonlocal fills_ran
+        fills_ran = True
+        return {"inserted": 0, "replayed": 0, "affected_legacy_ids": [], "affected_submission_ids": []}
+
+    monkeypatch.setattr(ib_activity_mirror, "_record_external_fills", fake_record)
+
+    result = ib_activity_mirror.run_activity_poll_tick(
+        ib_client_factory=lambda: object(),
+        scope=scope,
+    )
+
+    assert "error" in result["open_orders"]
+    assert fills_ran is True
+    assert result["fills"]["inserted"] == 0
+
+
+def test_activity_poller_loop_runs_until_cancelled(monkeypatch, scope):
+    """The forever loop should call run_activity_poll_tick repeatedly and
+    exit cleanly on asyncio.CancelledError."""
+    import asyncio
+
+    from xenon.api.services import ib_activity_mirror
+
+    tick_count = 0
+
+    def fake_tick(**kwargs):
+        nonlocal tick_count
+        tick_count += 1
+        return {"open_orders": {}, "fills": {}}
+
+    monkeypatch.setattr(ib_activity_mirror, "run_activity_poll_tick", fake_tick)
+
+    async def _run():
+        task = asyncio.create_task(
+            ib_activity_mirror.activity_poller_loop(
+                ib_client_factory=lambda: object(),
+                scope=scope,
+                interval_s=0.01,  # fast for tests; loop sleeps between ticks
+            )
+        )
+        # Let a few ticks fire, then cancel.
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_run())
+    assert tick_count >= 2
+
+
+def test_activity_poller_loop_recovers_from_tick_failure(monkeypatch, scope):
+    """A raise inside run_activity_poll_tick must not kill the loop."""
+    import asyncio
+
+    from xenon.api.services import ib_activity_mirror
+
+    calls = 0
+
+    def fake_tick(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient")
+        return {"open_orders": {}, "fills": {}}
+
+    monkeypatch.setattr(ib_activity_mirror, "run_activity_poll_tick", fake_tick)
+
+    async def _run():
+        task = asyncio.create_task(
+            ib_activity_mirror.activity_poller_loop(
+                ib_client_factory=lambda: object(),
+                scope=scope,
+                interval_s=0.01,
+            )
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_run())
+    assert calls >= 2  # proves we kept ticking after the first one threw
