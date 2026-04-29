@@ -7,7 +7,7 @@ from typing import Any, Mapping
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.engine import Connection
 
-from xenon.db.schema import trades
+from xenon.db.schema import order_submissions, trades
 from xenon.execution.account_scope import AccountScope
 
 
@@ -21,7 +21,13 @@ def fetch_blotter_pg(
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     trade_time = func.coalesce(trades.c.closed_at, trades.c.opened_at)
     rows = conn.execute(
-        select(trades)
+        select(trades, order_submissions.c.perm_id.label("perm_id"))
+        .select_from(
+            trades.outerjoin(
+                order_submissions,
+                trades.c.submission_id == order_submissions.c.submission_id,
+            )
+        )
         .where(
             trades.c.broker == scope.broker,
             trades.c.account_env == scope.account_env,
@@ -92,6 +98,7 @@ def _trade_to_payload(row: Mapping[str, Any]) -> dict[str, Any]:
         "proceeds": _number(exit_cost) if exit_cost is not None else None,
         "total_cash_flow": _number(realized_pnl) if realized_pnl is not None else _number(entry_cost or 0),
         "executions": executions,
+        "perm_id": row.get("perm_id"),
     }
 
 

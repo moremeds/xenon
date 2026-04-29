@@ -229,6 +229,8 @@ class FlexQueryFetcher:
             expiry = trade.get("expiry") or trade.get("lastTradeDateOrContractMonth", "")
 
         trade_id = trade.get("tradeID") or trade.get("execId") or f"{symbol}_{datetime_str}"
+        perm_id = trade.get("permID") or None
+        ib_order_id = trade.get("ibOrderID") or None
 
         return Execution(
             exec_id=trade_id,
@@ -242,6 +244,8 @@ class FlexQueryFetcher:
             strike=strike,
             right=right,
             expiry=expiry,
+            perm_id=perm_id,
+            ib_order_id=ib_order_id,
         )
 
 
