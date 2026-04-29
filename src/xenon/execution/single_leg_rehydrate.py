@@ -204,6 +204,7 @@ def _list_unresolved(
     broker: str | None = None,
     account_env: str | None = None,
     broker_account: str | None = None,
+    states: tuple[str, ...] = combo_wizard.DEFAULT_UNRESOLVED_STATES,
 ) -> list[dict]:
     engine = get_sync_engine()
     with engine.connect() as conn:
@@ -212,6 +213,7 @@ def _list_unresolved(
             broker=broker,
             account_env=account_env,
             broker_account=broker_account,
+            states=states,
         )
     # Postgres returns `expiry` as a date object; convert to str for compat.
     for r in rows:
@@ -292,8 +294,7 @@ def _normalize_execution_record(ex: Any) -> dict | None:
         return {
             "perm_id": str(pid),
             "exec_id": str(exec_id) if exec_id is not None else None,
-            "ib_order_id": str(ex.get("ib_order_id") or ex.get("order_id") or ex.get("orderId") or "")
-            or None,
+            "ib_order_id": str(ex.get("ib_order_id") or ex.get("order_id") or ex.get("orderId") or "") or None,
             "con_id": ex.get("con_id") or ex.get("conId"),
             "ticker": ex.get("ticker") or ex.get("symbol"),
             "side": _normalize_execution_side(ex.get("side") or ex.get("action")),
@@ -419,6 +420,7 @@ def rehydrate_on_boot(
     broker: str | None = None,
     account_env: str | None = None,
     broker_account: str | None = None,
+    states: tuple[str, ...] = combo_wizard.DEFAULT_UNRESOLVED_STATES,
 ) -> list[ReconcileDecision]:
     """Reconcile all unresolved orders against IB state. Returns decisions made.
 
@@ -434,6 +436,7 @@ def rehydrate_on_boot(
         broker=broker,
         account_env=account_env,
         broker_account=broker_account,
+        states=states,
     )
     if not rows:
         return []
