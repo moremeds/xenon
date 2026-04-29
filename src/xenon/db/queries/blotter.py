@@ -170,3 +170,103 @@ def _iso(value: datetime) -> str:
 
 def _number(value: Decimal | int | float | str) -> float:
     return float(Decimal(str(value)))
+
+
+# ---------------------------------------------------------------------------
+# PG ↔ Flex overlay merge (W3.4)
+# ---------------------------------------------------------------------------
+
+_DIVERGENCE_TOLERANCE = 0.01
+_DIVERGENCE_FIELDS = ("realized_pnl", "total_quantity", "total_commission", "cost_basis", "proceeds")
+
+
+def compare_blotter_rows(pg_row: Mapping[str, Any], flex_row: Mapping[str, Any]) -> list[str]:
+    """Return list of fields that differ between PG and Flex by more than tolerance."""
+    differing: list[str] = []
+    for field in _DIVERGENCE_FIELDS:
+        pg_val = pg_row.get(field)
+        flex_val = flex_row.get(field)
+        if pg_val is None or flex_val is None:
+            continue
+        try:
+            if abs(float(pg_val) - float(flex_val)) > _DIVERGENCE_TOLERANCE:
+                differing.append(field)
+        except (TypeError, ValueError):
+            if pg_val != flex_val:
+                differing.append(field)
+    return differing
+
+
+def _trade_index(rows: list[dict]) -> dict[str, dict]:
+    return {r["perm_id"]: r for r in rows if r.get("perm_id")}
+
+
+def _merge_section(pg_rows: list[dict], flex_rows: list[dict]) -> list[dict]:
+    pg_index = _trade_index(pg_rows)
+    flex_index = _trade_index(flex_rows)
+    merged: list[dict] = []
+    for perm_id in sorted(set(pg_index) | set(flex_index)):
+        pg_row = pg_index.get(perm_id)
+        flex_row = flex_index.get(perm_id)
+        if pg_row and flex_row:
+            differing = compare_blotter_rows(pg_row, flex_row)
+            merged.append({**pg_row, "divergence": bool(differing), "divergence_fields": differing})
+        elif pg_row:
+            merged.append({**pg_row, "divergence": False})
+        else:
+            merged.append({**flex_row, "divergence": False})
+    merged.extend({**r, "divergence": False} for r in pg_rows if not r.get("perm_id"))
+    return merged
+
+
+def _summary_from_rows(closed: list[dict], open_: list[dict]) -> dict[str, Any]:
+    total_commission = Decimal("0")
+    realized_pnl = Decimal("0")
+    for row in closed + open_:
+        if row.get("total_commission") is not None:
+            total_commission += Decimal(str(row["total_commission"]))
+    for row in closed:
+        if row.get("realized_pnl") is not None:
+            realized_pnl += Decimal(str(row["realized_pnl"]))
+    return {
+        "closed_trades": len(closed),
+        "open_trades": len(open_),
+        "total_commissions": float(total_commission),
+        "realized_pnl": float(realized_pnl),
+    }
+
+
+def merge_pg_and_flex(pg_payload: Mapping[str, Any], flex_payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge PG and Flex blotter payloads by perm_id.
+
+    Sets ``source`` based on which side contributed rows. Each merged row carries
+    a ``divergence`` flag (True when both sides had the row and any tracked field
+    differed by more than _DIVERGENCE_TOLERANCE). Recomputes ``summary`` from the
+    merged row sets so totals match the visible rows.
+    """
+    pg_closed = list(pg_payload.get("closed_trades") or [])
+    pg_open = list(pg_payload.get("open_trades") or [])
+    flex_closed = list(flex_payload.get("closed_trades") or [])
+    flex_open = list(flex_payload.get("open_trades") or [])
+
+    closed = _merge_section(pg_closed, flex_closed)
+    open_ = _merge_section(pg_open, flex_open)
+
+    flex_contributed = bool(flex_closed or flex_open)
+    pg_contributed = bool(pg_closed or pg_open)
+    if flex_contributed and pg_contributed:
+        source = "postgres+flex"
+    elif pg_contributed:
+        source = "postgres"
+    elif flex_contributed:
+        source = "flex"
+    else:
+        source = "none"
+
+    return {
+        **pg_payload,
+        "source": source,
+        "closed_trades": closed,
+        "open_trades": open_,
+        "summary": _summary_from_rows(closed, open_),
+    }

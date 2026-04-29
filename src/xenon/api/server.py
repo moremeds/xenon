@@ -53,7 +53,7 @@ from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
 from xenon.db.engine import dispose_engine, get_sync_engine, init_engine
-from xenon.db.queries.blotter import blotter_has_trades, fetch_blotter_pg
+from xenon.db.queries.blotter import blotter_has_trades, fetch_blotter_pg, merge_pg_and_flex
 from xenon.db.schema import account_snapshots, order_events, order_submissions
 from xenon.execution import orders_store, preflight, quote_guard, quote_tokens
 from xenon.execution.account_scope import resolve_from_app_state
@@ -3012,14 +3012,16 @@ async def blotter_sync(scope=Depends(get_account_scope)):
     engine = get_sync_engine()
     with engine.connect() as conn:
         pg_payload = fetch_blotter_pg(conn, scope=scope, days=30)
-    if blotter_has_trades(pg_payload):
-        return pg_payload
 
+    pg_has = blotter_has_trades(pg_payload)
     result = await run_module("xenon.trade_blotter.flex_query", ["--json"], timeout=120)
+
     if not result.ok:
         is_unconfigured = result.exit_code == 2 or (result.error and "FLEX_NOT_CONFIGURED" in result.error)
         if is_unconfigured:
-            payload = {
+            if pg_has:
+                return pg_payload
+            return {
                 "configured": False,
                 "as_of": None,
                 "summary": {
@@ -3038,10 +3040,14 @@ async def blotter_sync(scope=Depends(get_account_scope)):
                     "for the configuration guide."
                 ),
             }
-            return payload
+        if pg_has:
+            return pg_payload
         raise HTTPException(status_code=502, detail=result.error)
-    payload = {**result.data, "configured": True, "source": "flex"}
-    return payload
+
+    flex_payload = {**result.data, "configured": True}
+    merged = merge_pg_and_flex(pg_payload, flex_payload)
+    merged["configured"] = True
+    return merged
 
 
 @app.get("/blotter")

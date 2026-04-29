@@ -8,12 +8,10 @@ from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
-
 from sqlalchemy import insert
 
 from xenon.db.engine import get_sync_engine
 from xenon.db.schema import trades
-
 
 BROKER_SCOPE = {
     "broker": "IB",
@@ -78,17 +76,21 @@ def test_blotter_response_has_no_502_legacy_setup_hint(unconfigured_client):
     )
 
 
-def test_blotter_returns_postgres_rows_before_flex(monkeypatch):
-    """When the execution ledger has trades, the route is PG-first.
+def test_blotter_returns_postgres_rows_when_flex_unconfigured(monkeypatch):
+    """When the execution ledger has trades but Flex is unconfigured, return PG.
 
     Missing Flex credentials must not hide captured order-pipeline fills.
+    With the W3.4 overlay merge, Flex is always invoked, but unconfigured Flex
+    must downgrade to PG-only rather than wiping the visible rows.
     """
+    from types import SimpleNamespace
+
     from xenon.api import server
 
-    async def fail_if_flex_called(*args, **kwargs):  # pragma: no cover - assertion guard
-        raise AssertionError("Flex subprocess should not run when PG blotter has rows")
+    async def flex_unconfigured(*args, **kwargs):
+        return SimpleNamespace(ok=False, exit_code=2, error="FLEX_NOT_CONFIGURED", data=None)
 
-    monkeypatch.setattr(server, "run_module", fail_if_flex_called)
+    monkeypatch.setattr(server, "run_module", flex_unconfigured)
 
     opened_at = datetime(2026, 4, 28, 14, 30, tzinfo=timezone.utc)
     closed_at = datetime(2026, 4, 28, 15, 30, tzinfo=timezone.utc)
