@@ -229,6 +229,8 @@ class FlexQueryFetcher:
             expiry = trade.get("expiry") or trade.get("lastTradeDateOrContractMonth", "")
 
         trade_id = trade.get("tradeID") or trade.get("execId") or f"{symbol}_{datetime_str}"
+        perm_id = trade.get("permID") or None
+        ib_order_id = trade.get("ibOrderID") or None
 
         return Execution(
             exec_id=trade_id,
@@ -242,20 +244,28 @@ class FlexQueryFetcher:
             strike=strike,
             right=right,
             expiry=expiry,
+            perm_id=perm_id,
+            ib_order_id=ib_order_id,
         )
+
+
+def _execution_group_key(exec: Execution) -> tuple[str, str]:
+    identifier = exec.perm_id or exec.ib_order_id or exec.contract_desc
+    return (str(identifier), exec.contract_desc)
 
 
 def group_executions_to_trades(executions: List[Execution]) -> List[Trade]:
     """Group executions into trades by contract."""
     from collections import defaultdict
 
-    trades_map = defaultdict(lambda: {"executions": [], "sec_type": None, "symbol": None})
+    trades_map = defaultdict(lambda: {"executions": [], "sec_type": None, "symbol": None, "contract_desc": None})
 
     for exec in executions:
-        key = exec.contract_desc
+        key = _execution_group_key(exec)
         trades_map[key]["executions"].append(exec)
         trades_map[key]["sec_type"] = exec.sec_type
         trades_map[key]["symbol"] = exec.symbol
+        trades_map[key]["contract_desc"] = exec.contract_desc
 
     trades = []
     for key, data in trades_map.items():
@@ -263,7 +273,7 @@ def group_executions_to_trades(executions: List[Execution]) -> List[Trade]:
         trades.append(
             Trade(
                 symbol=data["symbol"],
-                contract_desc=key,
+                contract_desc=data["contract_desc"] or str(key),
                 sec_type=data["sec_type"],
                 executions=data["executions"],
             )

@@ -23,7 +23,7 @@ import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from urllib.parse import urlencode
@@ -32,9 +32,13 @@ from urllib.request import Request, urlopen
 import numpy as np
 import pandas as pd
 from ib_insync import Stock
+from sqlalchemy import select
 
 from xenon.clients.ib_client import IBClient  # noqa: E402
 from xenon.clients.uw_client import UWClient, UWRateLimitError  # noqa: E402
+from xenon.db.engine import get_sync_engine  # noqa: E402
+from xenon.db.schema import account_snapshots, trades as trades_table  # noqa: E402
+from xenon.execution.account_scope import resolve_from_env  # noqa: E402
 from xenon.utils.price_cache import (  # noqa: E402
     OPTIONS_DIR,
     STOCKS_DIR,
@@ -54,26 +58,7 @@ _MAX_WORKERS = 20
 
 
 ROOT = Path(__file__).resolve().parents[3]
-PORTFOLIO_PATH = ROOT / "data" / "portfolio.json"
-BLOTTER_CACHE_PATH = ROOT / "data" / "blotter.json"
 TRADING_DAYS = 252
-OPTION_DESC_RE = re.compile(
-    r"^(?P<symbol>[A-Z.]+)\s+(?P<day>\d{1,2})(?P<mon>[A-Z]{3})(?P<year>\d{2})\s+(?P<strike>[\d.]+)\s+(?P<right>[CP])$"
-)
-MONTHS = {
-    "JAN": 1,
-    "FEB": 2,
-    "MAR": 3,
-    "APR": 4,
-    "MAY": 5,
-    "JUN": 6,
-    "JUL": 7,
-    "AUG": 8,
-    "SEP": 9,
-    "OCT": 10,
-    "NOV": 11,
-    "DEC": 12,
-}
 
 
 @dataclass(frozen=True)
@@ -140,13 +125,24 @@ def select_option_mark(row: Mapping[str, Any]) -> Optional[float]:
     return None
 
 
-def load_portfolio_snapshot(path: Path = PORTFOLIO_PATH) -> dict:
-    try:
-        from xenon.utils.atomic_io import verified_load
-
-        return verified_load(str(path))
-    except (ValueError, ImportError):
-        return json.loads(path.read_text())
+def load_portfolio_snapshot(path: Path | None = None) -> dict:
+    scope = resolve_from_env()
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(account_snapshots.c.payload)
+            .where(account_snapshots.c.broker == scope.broker)
+            .where(account_snapshots.c.account_env == scope.account_env)
+            .where(account_snapshots.c.broker_account == scope.broker_account)
+            .order_by(account_snapshots.c.snapshot_at.desc())
+            .limit(1)
+        ).first()
+    if row is None or not row.payload:
+        raise RuntimeError(
+            "No Postgres portfolio snapshot found for "
+            f"{scope.broker}/{scope.account_env}/{scope.broker_account}"
+        )
+    return dict(row.payload)
 
 
 def parse_flex_trade_rows(df: pd.DataFrame) -> List[TradeFill]:
@@ -194,90 +190,117 @@ def parse_flex_trade_rows(df: pd.DataFrame) -> List[TradeFill]:
     return fills
 
 
-def _parse_blotter_contract_desc(desc: str) -> tuple[str, Optional[str], Optional[str], Optional[float]]:
-    match = OPTION_DESC_RE.match(desc.strip().upper())
-    if not match:
-        return desc.strip().upper(), None, None, None
-    month = MONTHS[match.group("mon")]
-    expiry = date(
-        year=2000 + int(match.group("year")),
-        month=month,
-        day=int(match.group("day")),
-    ).strftime("%Y%m%d")
-    return (
-        match.group("symbol"),
-        expiry,
-        match.group("right"),
-        float(match.group("strike")),
-    )
+def _pg_trade_rows() -> list[dict]:
+    scope = resolve_from_env()
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(trades_table)
+            .where(trades_table.c.broker == scope.broker)
+            .where(trades_table.c.account_env == scope.account_env)
+            .where(trades_table.c.broker_account == scope.broker_account)
+            .order_by(trades_table.c.opened_at, trades_table.c.id)
+        ).all()
+    return [dict(row._mapping) for row in rows]
 
 
-def load_blotter_fallback(path: Path = BLOTTER_CACHE_PATH) -> List[TradeFill]:
-    if not path.exists():
-        return []
-    raw = json.loads(path.read_text())
+def _trade_contract_key(trade: Mapping[str, Any]) -> tuple[str, str, Optional[str], Optional[str]]:
+    ticker = str(trade.get("ticker") or "").upper()
+    metadata = trade.get("metadata") if isinstance(trade.get("metadata"), dict) else {}
+    option_id = metadata.get("option_id") or metadata.get("contract_key")
+    if option_id:
+        return str(option_id), "OPT", ticker, str(option_id)
+    return f"STK:{ticker}", "STK", ticker, None
+
+
+def _trade_fill_date(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    return normalize_trade_date(value)
+
+
+def _trade_rows_to_fills(rows: list[dict]) -> List[TradeFill]:
     fills: List[TradeFill] = []
-    for trade in raw.get("open_trades", []) + raw.get("closed_trades", []):
-        desc = str(trade.get("contract_desc") or trade.get("symbol") or "")
-        symbol, expiry, right, strike = _parse_blotter_contract_desc(desc)
-        contract_key = (
-            build_option_id(symbol, expiry, right, strike)
-            if expiry and right and strike is not None
-            else f"STK:{symbol}"
-        )
-        security_type = "OPT" if expiry and right else "STK"
+    for trade in rows:
+        contract_key, security_type, symbol, option_id = _trade_contract_key(trade)
         multiplier = 100.0 if security_type == "OPT" else 1.0
+        qty = abs(safe_float(trade.get("quantity"), default=0.0))
+        if qty <= 0:
+            continue
 
-        for execution in trade.get("executions", []):
-            side = str(execution.get("side") or "").upper()
-            qty = abs(safe_float(execution.get("quantity")))
-            signed_qty = qty if side == "BUY" else -qty
+        action = str(trade.get("action") or "BUY").upper()
+        opening_qty = qty if action == "BUY" else -qty
+        opened_at = trade.get("opened_at")
+        entry_cost = trade.get("entry_cost")
+        if opened_at is not None and entry_cost is not None:
             fills.append(
                 TradeFill(
-                    trade_date=normalize_trade_date(execution.get("time") or ""),
+                    trade_date=_trade_fill_date(opened_at),
                     contract_key=contract_key,
-                    quantity=signed_qty,
-                    net_cash=safe_float(execution.get("net_cash_flow")),
+                    quantity=opening_qty,
+                    net_cash=-safe_float(entry_cost),
                     multiplier=multiplier,
                     security_type=security_type,
                     symbol=symbol,
-                    option_id=contract_key if security_type == "OPT" else None,
-                    expiry=expiry,
+                    option_id=option_id,
+                )
+            )
+
+        closed_at = trade.get("closed_at")
+        exit_cost = trade.get("exit_cost")
+        if closed_at is not None and exit_cost is not None:
+            fills.append(
+                TradeFill(
+                    trade_date=_trade_fill_date(closed_at),
+                    contract_key=contract_key,
+                    quantity=-opening_qty,
+                    net_cash=safe_float(exit_cost) if action == "BUY" else -safe_float(exit_cost),
+                    multiplier=multiplier,
+                    security_type=security_type,
+                    symbol=symbol,
+                    option_id=option_id,
                 )
             )
     fills.sort(key=lambda item: (item.trade_date, item.contract_key, item.quantity))
     return fills
 
 
-def extract_fill_marks(path: Path = BLOTTER_CACHE_PATH) -> Dict[str, Dict[str, float]]:
-    """Extract known price marks from trade execution prices.
+def load_blotter_fallback(path: Path | None = None) -> List[TradeFill]:
+    return _trade_rows_to_fills(_pg_trade_rows())
+
+
+def extract_fill_marks(path: Path | None = None) -> Dict[str, Dict[str, float]]:
+    """Extract known price marks from Postgres trade costs.
 
     When UW/IB historical data is unavailable for an option contract, the
-    execution price on the trade date is the best available mark.  These seed
-    marks are forward-filled by ``align_mark_series()`` to cover calendar gaps,
-    giving a reasonable (though approximate) equity curve for contracts that
-    would otherwise be valued at zero.
+    execution price on the trade date is the best available mark. These seed
+    marks are forward-filled by ``align_mark_series()`` to cover calendar gaps.
     """
-    if not path.exists():
-        return {}
-    raw = json.loads(path.read_text())
     marks: Dict[str, Dict[str, float]] = {}
-    for trade in raw.get("open_trades", []) + raw.get("closed_trades", []):
-        desc = str(trade.get("contract_desc") or trade.get("symbol") or "")
-        symbol, expiry, right, strike = _parse_blotter_contract_desc(desc)
-        if expiry and right and strike is not None:
-            contract_key = build_option_id(symbol, expiry, right, strike)
-        else:
-            contract_key = f"STK:{symbol}"
+    for trade in _pg_trade_rows():
+        contract_key, _security_type, _symbol, _option_id = _trade_contract_key(trade)
+        qty = abs(safe_float(trade.get("quantity"), default=0.0))
+        if qty <= 0:
+            continue
 
-        for execution in trade.get("executions", []):
-            price = safe_float(execution.get("price"), default=0.0)
-            dt = normalize_trade_date(execution.get("time") or "")
-            if price > 0 and dt:
-                if contract_key not in marks:
-                    marks[contract_key] = {}
-                marks[contract_key][dt] = price
+        opened_at = trade.get("opened_at")
+        entry_cost = safe_float(trade.get("entry_cost"), default=0.0)
+        if opened_at is not None and entry_cost:
+            marks.setdefault(contract_key, {})[_trade_fill_date(opened_at)] = abs(entry_cost) / qty
+
+        closed_at = trade.get("closed_at")
+        exit_cost = safe_float(trade.get("exit_cost"), default=0.0)
+        if closed_at is not None and exit_cost:
+            marks.setdefault(contract_key, {})[_trade_fill_date(closed_at)] = abs(exit_cost) / qty
     return marks
+
+
+def _pg_fill_counts_by_date() -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for fill in _trade_rows_to_fills(_pg_trade_rows()):
+        if abs(fill.net_cash) > 1:
+            counts[fill.trade_date] = counts.get(fill.trade_date, 0) + 1
+    return counts
 
 
 def parse_option_id(option_id: str) -> Tuple[str, str, str, float]:
@@ -399,18 +422,7 @@ def _extract_acats_transfers(
     nav_by_date = {e["date"]: e["total"] for e in nav_entries}
     sorted_dates = sorted(nav_by_date.keys())
 
-    # Build fill count per day (real trades with nonzero cash)
-    fill_counts: Dict[str, int] = {}
-    try:
-        raw = json.loads(BLOTTER_CACHE_PATH.read_text())
-        for trade in raw.get("open_trades", []) + raw.get("closed_trades", []):
-            for execution in trade.get("executions", []):
-                dt = str(execution.get("time", ""))[:10]
-                ncf = abs(safe_float(execution.get("net_cash_flow"), default=0.0))
-                if dt and ncf > 1:
-                    fill_counts[dt] = fill_counts.get(dt, 0) + 1
-    except (OSError, json.JSONDecodeError):
-        pass
+    fill_counts = _pg_fill_counts_by_date()
 
     # Detect: large positive NAV jump with no real fills and no cash deposits
     for i in range(1, len(sorted_dates)):
@@ -1325,8 +1337,8 @@ def build_payload(benchmark_symbol: str = "SPY") -> dict:
         trades, trades_source = fetch_flex_trade_fills()
     except Exception as exc:
         trades = load_blotter_fallback()
-        trades_source = "blotter_cache"
-        warnings.append(f"Live IB Flex Query unavailable. Falling back to cached blotter data: {exc}")
+        trades_source = "postgres"
+        warnings.append(f"Live IB Flex Query unavailable. Falling back to Postgres trades: {exc}")
 
     if not trades:
         raise RuntimeError("No trades available to reconstruct portfolio performance")
@@ -1341,7 +1353,7 @@ def build_payload(benchmark_symbol: str = "SPY") -> dict:
     if ib_client is not None:
         ib_client.disconnect()
 
-    # 4b. Inject current marks from portfolio.json for the final date.
+    # 4b. Inject current marks from the latest Postgres portfolio snapshot for the final date.
     # This anchors final_holdings_value to IB's live marks rather than stale
     # execution prices or zeros.
     final_date = end_date

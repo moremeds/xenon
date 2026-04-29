@@ -26,6 +26,7 @@ from typing import Any, Callable, Literal
 from xenon.db.engine import get_sync_engine
 from xenon.db.queries import combo_wizard
 from xenon.execution import orders_store as _orders_store_mod
+from xenon.execution.trade_aggregator import aggregate_trade_from_fills
 
 PENDING_TIMEOUT_SECONDS = 60
 
@@ -203,6 +204,7 @@ def _list_unresolved(
     broker: str | None = None,
     account_env: str | None = None,
     broker_account: str | None = None,
+    states: tuple[str, ...] = combo_wizard.DEFAULT_UNRESOLVED_STATES,
 ) -> list[dict]:
     engine = get_sync_engine()
     with engine.connect() as conn:
@@ -211,6 +213,7 @@ def _list_unresolved(
             broker=broker,
             account_env=account_env,
             broker_account=broker_account,
+            states=states,
         )
     # Postgres returns `expiry` as a date object; convert to str for compat.
     for r in rows:
@@ -239,15 +242,13 @@ def _index_executions(execs: list) -> dict:
     """
     agg: dict = {}
     for ex in execs or []:
-        if isinstance(ex, dict):
-            pid = ex.get("perm_id") or ex.get("permId")
-            shares = float(ex.get("shares") or ex.get("filled_qty") or 0)
-            avg = ex.get("avg_price") or ex.get("avg_fill_price") or ex.get("price")
-        else:
-            pid = getattr(ex, "perm_id", None) or getattr(ex, "permId", None)
-            shares = float(getattr(ex, "shares", 0) or 0)
-            avg = getattr(ex, "avg_price", None) or getattr(ex, "price", None)
-        if pid is None or shares <= 0 or avg is None:
+        record = _normalize_execution_record(ex)
+        if record is None:
+            continue
+        pid = record["perm_id"]
+        shares = float(record["qty"])
+        avg = record["price"]
+        if shares <= 0:
             continue
         key = str(pid)
         prior = agg.get(key)
@@ -261,6 +262,109 @@ def _index_executions(execs: list) -> dict:
     for v in agg.values():
         v["shares"] = int(round(v["shares"]))
     return agg
+
+
+def _coerce_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if value is None:
+        return datetime.now(timezone.utc)
+    text = str(value).replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(text)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _normalize_execution_side(side: Any) -> str:
+    normalized = str(side or "").upper()
+    if normalized in {"BOT", "BOUGHT"}:
+        return "BUY"
+    if normalized in {"SLD", "SOLD"}:
+        return "SELL"
+    return normalized or "BUY"
+
+
+def _normalize_execution_record(ex: Any) -> dict | None:
+    if isinstance(ex, dict):
+        pid = ex.get("perm_id") or ex.get("permId")
+        exec_id = ex.get("exec_id") or ex.get("execId")
+        shares = ex.get("shares") or ex.get("filled_qty") or ex.get("qty")
+        price = ex.get("avg_price") or ex.get("avg_fill_price") or ex.get("avgPrice") or ex.get("price")
+        if pid is None or shares is None or price is None:
+            return None
+        return {
+            "perm_id": str(pid),
+            "exec_id": str(exec_id) if exec_id is not None else None,
+            "ib_order_id": str(ex.get("ib_order_id") or ex.get("order_id") or ex.get("orderId") or "") or None,
+            "con_id": ex.get("con_id") or ex.get("conId"),
+            "ticker": ex.get("ticker") or ex.get("symbol"),
+            "side": _normalize_execution_side(ex.get("side") or ex.get("action")),
+            "qty": int(shares),
+            "price": Decimal(str(price)),
+            "commission": Decimal(str(ex.get("commission") or 0)),
+            "filled_at": _coerce_datetime(ex.get("filled_at") or ex.get("time")),
+        }
+
+    execution = getattr(ex, "execution", ex)
+    contract = getattr(ex, "contract", None)
+    report = getattr(ex, "commissionReport", None)
+    pid = getattr(execution, "permId", None) or getattr(execution, "perm_id", None)
+    shares = getattr(execution, "shares", None)
+    price = getattr(execution, "avgPrice", None) or getattr(execution, "price", None)
+    if pid is None or shares is None or price is None:
+        return None
+    return {
+        "perm_id": str(pid),
+        "exec_id": str(getattr(execution, "execId", "") or "") or None,
+        "ib_order_id": str(getattr(execution, "orderId", "") or "") or None,
+        "con_id": getattr(contract, "conId", None),
+        "ticker": getattr(contract, "symbol", None),
+        "side": _normalize_execution_side(getattr(execution, "side", None)),
+        "qty": int(shares),
+        "price": Decimal(str(price)),
+        "commission": Decimal(str(getattr(report, "commission", 0) or 0)),
+        "filled_at": _coerce_datetime(getattr(execution, "time", None)),
+    }
+
+
+def _index_execution_records(execs: list) -> dict[str, list[dict]]:
+    by_perm: dict[str, list[dict]] = {}
+    for ex in execs or []:
+        record = _normalize_execution_record(ex)
+        if record is None:
+            continue
+        by_perm.setdefault(record["perm_id"], []).append(record)
+    return by_perm
+
+
+def _has_explicit_scope(row: dict) -> bool:
+    return bool(row.get("account_env") != "legacy_unknown" and row.get("broker_account") != "legacy_unknown")
+
+
+def _record_fill_records_for_order(row: dict, records: list[dict], orders_store) -> None:
+    if not records or not _has_explicit_scope(row):
+        return
+    for record in records:
+        if not record.get("exec_id"):
+            continue
+        orders_store.record_fill(
+            exec_id=record["exec_id"],
+            submission_id=row["submission_id"],
+            combo_attempt_id=None,
+            perm_id=str(row.get("perm_id") or record["perm_id"]),
+            ib_order_id=str(row.get("ib_order_id") or record.get("ib_order_id") or "") or None,
+            con_id=record.get("con_id") if record.get("con_id") is not None else row.get("con_id"),
+            ticker=record.get("ticker") or row["ticker"],
+            side=record["side"],
+            qty=record["qty"],
+            price=record["price"],
+            commission=record["commission"],
+            filled_at=record["filled_at"],
+            metadata={"source": "single_leg_rehydrate"},
+            broker=row.get("broker", "IB"),
+            account_env=row["account_env"],
+            broker_account=row["broker_account"],
+        )
+    aggregate_trade_from_fills(submission_id=row["submission_id"])
 
 
 def _build_positions_snapshot(
@@ -316,6 +420,7 @@ def rehydrate_on_boot(
     broker: str | None = None,
     account_env: str | None = None,
     broker_account: str | None = None,
+    states: tuple[str, ...] = combo_wizard.DEFAULT_UNRESOLVED_STATES,
 ) -> list[ReconcileDecision]:
     """Reconcile all unresolved orders against IB state. Returns decisions made.
 
@@ -331,6 +436,7 @@ def rehydrate_on_boot(
         broker=broker,
         account_env=account_env,
         broker_account=broker_account,
+        states=states,
     )
     if not rows:
         return []
@@ -343,6 +449,7 @@ def rehydrate_on_boot(
 
     open_idx = _index_open_orders(open_orders)
     exec_idx = _index_executions(execs)
+    exec_records_by_perm = _index_execution_records(execs)
     now_ts = now() if callable(now) else float(now)
 
     decisions: list[ReconcileDecision] = []
@@ -359,6 +466,13 @@ def rehydrate_on_boot(
 
         if decision.noop:
             continue
+
+        if decision.to_state in ("FILLED", "PARTIALLY_FILLED"):
+            _record_fill_records_for_order(
+                row,
+                exec_records_by_perm.get(str(row.get("perm_id")), []),
+                orders_store,
+            )
 
         # Apply side effects. WORKING→WORKING is still recorded as an event
         # for observability but does not need a DB state change.

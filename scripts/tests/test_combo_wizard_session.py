@@ -57,7 +57,7 @@ def _force_test_mode_on(monkeypatch):
 
 def _plan_payload() -> dict:
     return {
-        "symbol": "AAPL",
+        "symbol": "SPY",
         "type": "combo",
         "action": "BUY",
         "quantity": 1,
@@ -68,12 +68,18 @@ def _plan_payload() -> dict:
                 "action": "BUY",
                 "ratio": 1,
                 "exchange": "SMART",
+                "right": "C",
+                "expiry": "20260620",
+                "strike": "190",
             },
             {
                 "conId": 1002,
                 "action": "SELL",
                 "ratio": 1,
                 "exchange": "SMART",
+                "right": "C",
+                "expiry": "20260620",
+                "strike": "200",
             },
         ],
     }
@@ -83,7 +89,7 @@ def test_submit_combo_persists_wizard_attempt_and_client_attempt_id(tmp_path, mo
     monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
 
     planned = session.create_session(
-        ticker="AAPL",
+        ticker="SPY",
         intent="OPEN",
         structure_name="Bull Call Spread",
         payload=_plan_payload(),

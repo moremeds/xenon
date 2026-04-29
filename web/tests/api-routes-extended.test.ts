@@ -55,7 +55,7 @@ vi.mock("@tools/wrappers/ib-orders", () => ({
   ibOrders: mockIbOrders,
 }));
 
-// Mock @tools/data-reader for reading orders.json after refresh
+// Mock @tools/data-reader for legacy cached-file routes.
 const mockReadDataFile = vi
   .fn()
   .mockResolvedValue({ ok: false, error: "not found" });
@@ -698,9 +698,16 @@ describe("POST /api/orders/cancel — extended", () => {
   });
 
   it("returns success when cancel succeeds", async () => {
+    const ordersPayload = {
+      open_orders: [],
+      executed_orders: [],
+      open_count: 0,
+      executed_count: 0,
+    };
     mockXenonFetch
       .mockResolvedValueOnce({ status: "ok", message: "Order 101 cancelled" })
-      .mockResolvedValueOnce({});
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(ordersPayload);
 
     const { POST } = await import("../app/api/orders/cancel/route");
     const res = await POST(
@@ -715,7 +722,13 @@ describe("POST /api/orders/cancel — extended", () => {
     const body = await res.json();
     expect(body.status).toBe("ok");
     expect(body.message).toBe("Order 101 cancelled");
-    expect(body.orders).toBeDefined();
+    expect(body.orders).toEqual(ordersPayload);
+    expect(mockReadDataFile).not.toHaveBeenCalled();
+    expect(mockXenonFetch.mock.calls.map((call) => call[0])).toEqual([
+      "/orders/cancel",
+      "/orders/refresh",
+      "/orders",
+    ]);
   });
 
   it("returns 500 when cancel fails via xenonFetch", async () => {
@@ -802,23 +815,21 @@ describe("POST /api/orders/modify — extended", () => {
   });
 
   it("returns success when modify succeeds", async () => {
-    mockReadDataFile.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        open_orders: [
-          { orderId: 101, permId: 0, totalQuantity: 25, limitPrice: 5.5 },
-        ],
-        executed_orders: [],
-        open_count: 1,
-        executed_count: 0,
-      },
-    });
+    const ordersPayload = {
+      open_orders: [
+        { orderId: 101, permId: 0, totalQuantity: 25, limitPrice: 5.5 },
+      ],
+      executed_orders: [],
+      open_count: 1,
+      executed_count: 0,
+    };
     mockXenonFetch
       .mockResolvedValueOnce({
         status: "ok",
         message: "Order 101 modified to 5.50",
       })
-      .mockResolvedValueOnce({});
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(ordersPayload);
 
     const { POST } = await import("../app/api/orders/modify/route");
     const res = await POST(
@@ -833,7 +844,8 @@ describe("POST /api/orders/modify — extended", () => {
     const body = await res.json();
     expect(body.status).toBe("ok");
     expect(body.message).toBe("Order 101 modified to 5.50");
-    expect(body.orders).toBeDefined();
+    expect(body.orders).toEqual(ordersPayload);
+    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
   it("returns 500 when modify fails via xenonFetch", async () => {
@@ -870,23 +882,21 @@ describe("POST /api/orders/modify — extended", () => {
   });
 
   it("returns success when quantity-only modify succeeds", async () => {
-    mockReadDataFile.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        open_orders: [
-          { orderId: 101, permId: 0, totalQuantity: 75, limitPrice: 5.0 },
-        ],
-        executed_orders: [],
-        open_count: 1,
-        executed_count: 0,
-      },
-    });
+    const ordersPayload = {
+      open_orders: [
+        { orderId: 101, permId: 0, totalQuantity: 75, limitPrice: 5.0 },
+      ],
+      executed_orders: [],
+      open_count: 1,
+      executed_count: 0,
+    };
     mockXenonFetch
       .mockResolvedValueOnce({
         status: "ok",
         message: "Order 101 quantity modified to 75",
       })
-      .mockResolvedValueOnce({});
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(ordersPayload);
 
     const { POST } = await import("../app/api/orders/modify/route");
     const res = await POST(
@@ -905,31 +915,30 @@ describe("POST /api/orders/modify — extended", () => {
       permId: 0,
       newQuantity: 75,
     });
+    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
   it("returns 502 when refreshed orders do not confirm the modified price", async () => {
-    mockReadDataFile.mockResolvedValueOnce({
-      ok: true,
-      data: {
-        open_orders: [
-          {
-            orderId: 95,
-            permId: 653624857,
-            totalQuantity: 50,
-            limitPrice: 5.7,
-          },
-        ],
-        executed_orders: [],
-        open_count: 1,
-        executed_count: 0,
-      },
-    });
+    const ordersPayload = {
+      open_orders: [
+        {
+          orderId: 95,
+          permId: 653624857,
+          totalQuantity: 50,
+          limitPrice: 5.7,
+        },
+      ],
+      executed_orders: [],
+      open_count: 1,
+      executed_count: 0,
+    };
     mockXenonFetch
       .mockResolvedValueOnce({
         status: "ok",
         message: "Order modified: $5.7 → $5.55",
       })
-      .mockResolvedValueOnce({});
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(ordersPayload);
 
     const { POST } = await import("../app/api/orders/modify/route");
     const res = await POST(
@@ -947,9 +956,17 @@ describe("POST /api/orders/modify — extended", () => {
 
     const body = await res.json();
     expect(String(body.error).toLowerCase()).toContain("not confirmed");
+    expect(body.orders).toEqual(ordersPayload);
+    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
   it("replaces combo orders via cancel then place when replacement payload provided", async () => {
+    const ordersPayload = {
+      open_orders: [],
+      executed_orders: [],
+      open_count: 0,
+      executed_count: 0,
+    };
     mockXenonFetch
       .mockResolvedValueOnce({ status: "ok", message: "Order cancelled" })
       .mockResolvedValueOnce({ status: "ok", message: "Order cancelled" })
@@ -959,7 +976,8 @@ describe("POST /api/orders/modify — extended", () => {
         orderId: 202,
         permId: 999,
       })
-      .mockResolvedValueOnce({});
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(ordersPayload);
 
     const { POST } = await import("../app/api/orders/modify/route");
     const res = await POST(
@@ -1002,7 +1020,7 @@ describe("POST /api/orders/modify — extended", () => {
     );
     expect(res.status).toBe(200);
 
-    expect(mockXenonFetch).toHaveBeenCalledTimes(4);
+    expect(mockXenonFetch).toHaveBeenCalledTimes(5);
     expect(mockXenonFetch.mock.calls[0][0]).toBe("/orders/cancel");
     expect(
       JSON.parse(String(mockXenonFetch.mock.calls[0][1].body)),
@@ -1018,6 +1036,8 @@ describe("POST /api/orders/modify — extended", () => {
       permId: 653611588,
     });
     expect(mockXenonFetch.mock.calls[2][0]).toBe("/orders/place");
+    expect(mockXenonFetch.mock.calls[3][0]).toBe("/orders/refresh");
+    expect(mockXenonFetch.mock.calls[4][0]).toBe("/orders");
     expect(
       JSON.parse(String(mockXenonFetch.mock.calls[2][1].body)),
     ).toMatchObject({
@@ -1043,6 +1063,7 @@ describe("POST /api/orders/modify — extended", () => {
         },
       ],
     });
+    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
   it("returns 400 when modify fields are missing", async () => {
@@ -1640,18 +1661,21 @@ describe("POST /api/assistant — extended", () => {
 });
 
 // =============================================================================
-// 8. GET /api/blotter — mocked fs
+// 8. GET /api/blotter — FastAPI PG read path
 // =============================================================================
 
 describe("GET /api/blotter — extended", () => {
   beforeEach(() => {
     vi.resetModules();
     mockReadFile.mockReset();
+    mockXenonFetch.mockReset();
   });
 
-  it("returns cached blotter data when file exists", async () => {
+  it("returns FastAPI blotter data without reading JSON", async () => {
     const blotterData = {
       as_of: "2026-03-05",
+      configured: true,
+      source: "postgres",
       summary: {
         closed_trades: 5,
         open_trades: 2,
@@ -1661,7 +1685,7 @@ describe("GET /api/blotter — extended", () => {
       closed_trades: [{ symbol: "AAPL", realized_pnl: 500 }],
       open_trades: [],
     };
-    mockReadFile.mockResolvedValue(JSON.stringify(blotterData));
+    mockXenonFetch.mockResolvedValue(blotterData);
 
     const { GET } = await import("../app/api/blotter/route");
     const res = await GET();
@@ -1671,40 +1695,41 @@ describe("GET /api/blotter — extended", () => {
     expect(body.as_of).toBe("2026-03-05");
     expect(body.summary.closed_trades).toBe(5);
     expect(body.closed_trades).toHaveLength(1);
+    expect(mockReadFile).not.toHaveBeenCalled();
   });
 
-  it("returns empty structure when file not found", async () => {
-    mockReadFile.mockRejectedValue(new Error("ENOENT"));
+  it("returns 502 when FastAPI blotter read fails", async () => {
+    mockXenonFetch.mockRejectedValue(new Error("PG unavailable"));
 
     const { GET } = await import("../app/api/blotter/route");
     const res = await GET();
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(502);
 
     const body = await res.json();
-    expect(body.as_of).toBe("");
-    expect(body.closed_trades).toEqual([]);
-    expect(body.open_trades).toEqual([]);
+    expect(body.error).toContain("PG unavailable");
+    expect(mockReadFile).not.toHaveBeenCalled();
   });
 });
 
 // =============================================================================
-// 9. GET /api/discover — mocked fs
+// 9. GET /api/discover — FastAPI PG read path
 // =============================================================================
 
 describe("GET /api/discover — extended", () => {
   beforeEach(() => {
     vi.resetModules();
     mockReadFile.mockReset();
+    mockXenonFetch.mockReset();
   });
 
-  it("returns cached discover data when file exists", async () => {
+  it("returns FastAPI discover data without reading JSON", async () => {
     const discoverData = {
       discovery_time: "2026-03-05T10:00:00Z",
       alerts_analyzed: 150,
       candidates_found: 3,
       candidates: [{ ticker: "NET", score: 78 }],
     };
-    mockReadFile.mockResolvedValue(JSON.stringify(discoverData));
+    mockXenonFetch.mockResolvedValue(discoverData);
 
     const { GET } = await import("../app/api/discover/route");
     const res = await GET();
@@ -1714,10 +1739,11 @@ describe("GET /api/discover — extended", () => {
     expect(body.candidates_found).toBe(3);
     expect(body.candidates).toHaveLength(1);
     expect(body.candidates[0].ticker).toBe("NET");
+    expect(mockReadFile).not.toHaveBeenCalled();
   });
 
-  it("returns empty structure when cache file not found", async () => {
-    mockReadFile.mockRejectedValue(new Error("ENOENT"));
+  it("returns empty structure when FastAPI read fails", async () => {
+    mockXenonFetch.mockRejectedValue(new Error("PG unavailable"));
 
     const { GET } = await import("../app/api/discover/route");
     const res = await GET();
@@ -1726,5 +1752,6 @@ describe("GET /api/discover — extended", () => {
     const body = await res.json();
     expect(body.candidates).toEqual([]);
     expect(body.candidates_found).toBe(0);
+    expect(mockReadFile).not.toHaveBeenCalled();
   });
 });

@@ -90,6 +90,19 @@ trades = Table(
     Column("decision", Text),
     Column("opened_at", TIMESTAMP(timezone=True)),
     Column("closed_at", TIMESTAMP(timezone=True)),
+    Column(
+        "submission_id",
+        Text,
+        ForeignKey(f"{XENON_SCHEMA}.order_submissions.submission_id"),
+        nullable=True,
+    ),
+    Column(
+        "combo_attempt_id",
+        Text,
+        ForeignKey(f"{XENON_SCHEMA}.wizard_combo_attempts.attempt_id"),
+        nullable=True,
+    ),
+    Column("state", Text, nullable=False, server_default=text("'OPEN'")),
     Column("metadata", JSONB),
     Column("broker", Text, nullable=False, server_default=text("'IB'")),
     Column("account_env", Text, nullable=False, server_default=text("'legacy_unknown'")),
@@ -98,6 +111,62 @@ trades = Table(
     CheckConstraint(
         "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
         name="ck_trades_account_env",
+    ),
+    CheckConstraint("state IN ('OPEN','PARTIALLY_FILLED','CLOSED')", name="ck_trades_state"),
+    Index("ix_trades_submission", "submission_id"),
+    Index("ix_trades_combo_attempt", "combo_attempt_id"),
+)
+
+journal_entries = Table(
+    "journal_entries",
+    xenon_metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("trade_id", BigInteger, ForeignKey(f"{XENON_SCHEMA}.trades.id"), nullable=True),
+    Column("ticker", Text, nullable=False),
+    Column("decision", Text),
+    Column("note", Text),
+    Column("attachments", JSONB),
+    Column("authored_by", Text),
+    Column("authored_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Column("metadata", JSONB),
+    Column("broker", Text, nullable=False, server_default=text("'IB'")),
+    Column("account_env", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    Column("broker_account", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    CheckConstraint("broker IN ('IB','FUTU')", name="ck_journal_broker"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
+        name="ck_journal_account_env",
+    ),
+    Index("ix_journal_ticker_at", "ticker", "authored_at"),
+    Index("ix_journal_scope_at", "broker", "account_env", "broker_account", "authored_at"),
+    Index(
+        "uq_journal_auto_import",
+        "broker",
+        "account_env",
+        "broker_account",
+        "trade_id",
+        unique=True,
+        postgresql_where=text("decision = 'IB_AUTO_IMPORT' AND trade_id IS NOT NULL"),
+    ),
+)
+
+flex_divergence_runs = Table(
+    "flex_divergence_runs",
+    xenon_metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("ran_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Column("scope_broker", Text, nullable=False),
+    Column("scope_account_env", Text, nullable=False),
+    Column("scope_broker_account", Text, nullable=False),
+    Column("total_compared", Integer, nullable=False),
+    Column("divergence_count", Integer, nullable=False),
+    Column("notes", JSONB, nullable=True),
+    Index(
+        "ix_flex_divergence_scope_ran_at",
+        "scope_broker",
+        "scope_account_env",
+        "scope_broker_account",
+        "ran_at",
     ),
 )
 
@@ -180,6 +249,48 @@ order_events = Table(
     Column("detail", JSONB),
     Column("at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
     Index("ix_order_events_submission_at", "submission_id", "at"),
+)
+
+order_fills = Table(
+    "order_fills",
+    xenon_metadata,
+    Column("exec_id", Text, primary_key=True),
+    Column(
+        "submission_id",
+        Text,
+        ForeignKey(f"{XENON_SCHEMA}.order_submissions.submission_id"),
+        nullable=True,
+    ),
+    Column(
+        "combo_attempt_id",
+        Text,
+        ForeignKey(f"{XENON_SCHEMA}.wizard_combo_attempts.attempt_id"),
+        nullable=True,
+    ),
+    Column("perm_id", Text),
+    Column("ib_order_id", Text),
+    Column("con_id", BigInteger),
+    Column("ticker", Text, nullable=False),
+    Column("side", Text, nullable=False),
+    Column("qty", Integer, nullable=False),
+    Column("price", Numeric(12, 4), nullable=False),
+    Column("commission", Numeric(12, 4), server_default=text("0")),
+    Column("filled_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("metadata", JSONB),
+    Column("broker", Text, nullable=False, server_default=text("'IB'")),
+    Column("account_env", Text, nullable=False),
+    Column("broker_account", Text, nullable=False),
+    CheckConstraint("broker IN ('IB','FUTU')", name="ck_fills_broker"),
+    CheckConstraint(
+        "submission_id IS NOT NULL "
+        "OR combo_attempt_id IS NOT NULL "
+        "OR (metadata IS NOT NULL AND metadata ? 'legacy_source')",
+        name="ck_fills_source_present",
+    ),
+    Index("ix_fills_perm_id", "broker", "account_env", "broker_account", "perm_id"),
+    Index("ix_fills_submission", "submission_id"),
+    Index("ix_fills_combo_attempt", "combo_attempt_id"),
+    Index("ix_fills_ticker_time", "ticker", "filled_at"),
 )
 
 wizard_sessions = Table(

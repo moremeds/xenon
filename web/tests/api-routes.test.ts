@@ -592,13 +592,20 @@ describe("GET /api/orders", () => {
 
   beforeEach(async () => {
     vi.resetModules();
+    mockXenonFetch.mockReset();
     mockReadDataFile.mockReset();
     const mod = await import("../app/api/orders/route");
     GET = mod.GET;
   });
 
-  it("returns empty orders when no file exists", async () => {
-    mockReadDataFile.mockResolvedValue({ ok: false, error: "not found" });
+  it("returns orders from FastAPI on success", async () => {
+    mockXenonFetch.mockResolvedValue({
+      last_sync: "2026-03-05T14:00:00",
+      open_orders: [],
+      executed_orders: [],
+      open_count: 0,
+      executed_count: 0,
+    });
 
     const res = await GET();
     expect(res.status).toBe(200);
@@ -607,9 +614,10 @@ describe("GET /api/orders", () => {
     expect(body.executed_orders).toEqual([]);
     expect(body.open_count).toBe(0);
     expect(body.executed_count).toBe(0);
+    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
-  it("returns order data when file exists", async () => {
+  it("returns order data from FastAPI", async () => {
     const mockOrders = {
       last_sync: "2026-03-05T14:00:00",
       open_orders: [
@@ -641,7 +649,7 @@ describe("GET /api/orders", () => {
       open_count: 1,
       executed_count: 0,
     };
-    mockReadDataFile.mockResolvedValue({ ok: true, data: mockOrders });
+    mockXenonFetch.mockResolvedValue(mockOrders);
 
     const res = await GET();
     expect(res.status).toBe(200);
@@ -649,6 +657,7 @@ describe("GET /api/orders", () => {
     expect(body.open_orders).toHaveLength(1);
     expect(body.open_orders[0].symbol).toBe("AAPL");
     expect(body.open_count).toBe(1);
+    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 });
 
@@ -669,21 +678,12 @@ describe("POST /api/orders", () => {
 
   it("returns 502 when sync fails and no cache", async () => {
     mockXenonFetch.mockRejectedValue(new Error("IB gateway timeout"));
-    mockReadDataFile.mockResolvedValue({
-      ok: true,
-      data: {
-        last_sync: "",
-        open_orders: [],
-        executed_orders: [],
-        open_count: 0,
-        executed_count: 0,
-      },
-    });
 
     const res = await POST();
     expect(res.status).toBe(502);
     const body = await res.json();
-    expect(body.error).toBe("Sync failed");
+    expect(body.error).toContain("IB gateway timeout");
+    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
   it("returns refreshed orders on success", async () => {
@@ -714,8 +714,9 @@ describe("POST /api/orders", () => {
       open_count: 0,
       executed_count: 1,
     };
-    mockXenonFetch.mockResolvedValue(refreshedOrders);
-    mockReadDataFile.mockResolvedValue({ ok: true, data: refreshedOrders });
+    mockXenonFetch
+      .mockResolvedValueOnce({ status: "ok" })
+      .mockResolvedValueOnce(refreshedOrders);
 
     const res = await POST();
     expect(res.status).toBe(200);
@@ -723,6 +724,7 @@ describe("POST /api/orders", () => {
     expect(body.executed_orders).toHaveLength(1);
     expect(body.executed_orders[0].symbol).toBe("GOOG");
     expect(body.executed_count).toBe(1);
+    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 });
 
@@ -736,13 +738,16 @@ describe("GET /api/blotter", () => {
   beforeEach(async () => {
     vi.resetModules();
     mockReadFile.mockReset();
+    mockXenonFetch.mockReset();
     const mod = await import("../app/api/blotter/route");
     GET = mod.GET;
   });
 
-  it("returns cached data when file exists", async () => {
+  it("returns Postgres blotter data from FastAPI", async () => {
     const blotterData = {
       as_of: "2026-03-05",
+      configured: true,
+      source: "postgres",
       summary: {
         closed_trades: 5,
         open_trades: 3,
@@ -766,7 +771,7 @@ describe("GET /api/blotter", () => {
       ],
       open_trades: [],
     };
-    mockReadFile.mockResolvedValue(JSON.stringify(blotterData));
+    mockXenonFetch.mockResolvedValue(blotterData);
 
     const res = await GET();
     expect(res.status).toBe(200);
@@ -774,21 +779,21 @@ describe("GET /api/blotter", () => {
     expect(body.summary.closed_trades).toBe(5);
     expect(body.closed_trades).toHaveLength(1);
     expect(body.closed_trades[0].symbol).toBe("AAPL");
+    expect(mockReadFile).not.toHaveBeenCalled();
+    expect(mockXenonFetch).toHaveBeenCalledWith(
+      "/blotter",
+      expect.objectContaining({ method: "GET", timeout: 10_000 }),
+    );
   });
 
-  it("returns empty structure when file not found", async () => {
-    mockReadFile.mockRejectedValue(
-      new Error("ENOENT: no such file or directory"),
-    );
+  it("returns 502 when FastAPI blotter read fails", async () => {
+    mockXenonFetch.mockRejectedValue(new Error("PG unavailable"));
 
     const res = await GET();
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(502);
     const body = await res.json();
-    expect(body.as_of).toBe("");
-    expect(body.summary.closed_trades).toBe(0);
-    expect(body.summary.realized_pnl).toBe(0);
-    expect(body.closed_trades).toEqual([]);
-    expect(body.open_trades).toEqual([]);
+    expect(body.error).toContain("PG unavailable");
+    expect(mockReadFile).not.toHaveBeenCalled();
   });
 });
 
@@ -802,11 +807,12 @@ describe("GET /api/journal", () => {
   beforeEach(async () => {
     vi.resetModules();
     mockReadFile.mockReset();
+    mockXenonFetch.mockReset();
     const mod = await import("../app/api/journal/route");
     GET = mod.GET;
   });
 
-  it("returns trade data when file exists", async () => {
+  it("returns trade data from FastAPI", async () => {
     const tradeLog = {
       trades: [
         {
@@ -827,7 +833,7 @@ describe("GET /api/journal", () => {
         },
       ],
     };
-    mockReadFile.mockResolvedValue(JSON.stringify(tradeLog));
+    mockXenonFetch.mockResolvedValueOnce(tradeLog);
 
     const res = await GET();
     expect(res.status).toBe(200);
@@ -835,12 +841,15 @@ describe("GET /api/journal", () => {
     expect(body.trades).toHaveLength(2);
     expect(body.trades[0].ticker).toBe("GOOG");
     expect(body.trades[1].ticker).toBe("AMD");
+    expect(mockReadFile).not.toHaveBeenCalled();
+    expect(mockXenonFetch).toHaveBeenCalledWith(
+      "/journal",
+      expect.objectContaining({ method: "GET", timeout: 10_000 }),
+    );
   });
 
-  it("returns 500 with empty trades when file not found", async () => {
-    mockReadFile.mockRejectedValue(
-      new Error("ENOENT: no such file or directory"),
-    );
+  it("returns 500 with empty trades when FastAPI is unavailable", async () => {
+    mockXenonFetch.mockRejectedValueOnce(new Error("journal unavailable"));
 
     const res = await GET();
     expect(res.status).toBe(500);

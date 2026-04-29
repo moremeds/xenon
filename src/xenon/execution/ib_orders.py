@@ -2,31 +2,30 @@
 """
 Interactive Brokers Orders Sync
 
-Connects to TWS/IB Gateway and syncs open orders + executed trades to orders.json
+Connects to TWS/IB Gateway and syncs open orders to Postgres.
 
 Requirements:
   pip install ib_insync
 
 Usage:
   xenon-ib-orders              # Display orders
-  xenon-ib-orders --sync       # Sync to orders.json
+  xenon-ib-orders --sync       # Register open-order snapshots in Postgres
   xenon-ib-orders --port 4001  # Custom port
 """
 
 import argparse
-import json
 import math
+import os
 import sys
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
+from xenon.execution import orders_store
+from xenon.execution.account_scope import AccountScope, resolve_from_env
 
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
 DEFAULT_CLIENT_ID = CLIENT_IDS["ib_orders"]
-
-ORDERS_PATH = Path(__file__).resolve().parents[3] / "data" / "orders.json"
 
 # IB uses this sentinel for "no value" on realizedPNL
 IB_SENTINEL = 1.7976931348623157e308
@@ -219,7 +218,7 @@ def fetch_executed_orders(client: IBClient) -> list:
 
 
 def build_orders_data(open_orders: list, executed_orders: list) -> dict:
-    """Build the orders.json structure"""
+    """Build the display payload for open orders and session fills."""
     return {
         "last_sync": datetime.now().isoformat(),
         "open_orders": open_orders,
@@ -229,18 +228,38 @@ def build_orders_data(open_orders: list, executed_orders: list) -> dict:
     }
 
 
-def save_orders(data: dict):
-    """Save orders to JSON file"""
-    ORDERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | AccountScope | None = None) -> dict:
+    """Register IB open-order snapshots in xenon.order_submissions."""
+    if scope is None:
+        resolved = resolve_from_env().as_dict()
+    elif isinstance(scope, AccountScope):
+        resolved = scope.as_dict()
+    else:
+        resolved = dict(scope)
 
-    if ORDERS_PATH.exists():
-        backup = ORDERS_PATH.with_suffix(".json.bak")
-        backup.write_text(ORDERS_PATH.read_text())
-
-    with open(ORDERS_PATH, "w") as f:
-        json.dump(data, f, indent=2)
-
-    print(f"Saved orders to {ORDERS_PATH}")
+    registered = 0
+    for order in open_orders:
+        contract = order.get("contract") or {}
+        sec_type = str(contract.get("secType") or "STK")
+        multiplier = 100 if sec_type in {"OPT", "BAG"} else 1
+        perm_id = str(order.get("permId") or order.get("orderId") or "")
+        ib_order_id = str(order.get("orderId") or "")
+        if not perm_id or not ib_order_id:
+            continue
+        inserted = orders_store.register_from_snapshot(
+            perm_id=perm_id,
+            ib_order_id=ib_order_id,
+            ticker=str(contract.get("symbol") or order.get("symbol") or ""),
+            security_type=sec_type,
+            action=str(order.get("action") or "BUY"),
+            quantity=int(float(order.get("totalQuantity") or 0)),
+            limit_price=float(order.get("limitPrice") or 0.0),
+            multiplier=multiplier,
+            **resolved,
+        )
+        if inserted:
+            registered += 1
+    return {"registered": registered, "open_count": len(open_orders)}
 
 
 def display_orders(open_orders: list, executed_orders: list):
@@ -276,7 +295,7 @@ def main():
     parser.add_argument("--host", default=DEFAULT_HOST, help="TWS/Gateway host")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="TWS/Gateway port")
     parser.add_argument("--client-id", type=int, default=None, help="Client ID (omit for auto-allocation)")
-    parser.add_argument("--sync", action="store_true", help="Sync to orders.json")
+    parser.add_argument("--sync", action="store_true", help="Register open-order snapshots in Postgres")
 
     args = parser.parse_args()
 
@@ -292,10 +311,13 @@ def main():
         display_orders(open_orders, executed_orders)
 
         if args.sync:
-            data = build_orders_data(open_orders, executed_orders)
-            save_orders(data)
+            accounts = client.ib.managedAccounts()
+            if accounts:
+                os.environ["XENON_BROKER_ACCOUNT"] = accounts[0]
+            result = sync_open_orders_to_postgres(open_orders)
+            print(f"Registered {result['registered']} open-order snapshots in Postgres")
         else:
-            print("\nRun with --sync to save to orders.json")
+            print("\nRun with --sync to register open-order snapshots in Postgres")
 
     finally:
         client.disconnect()

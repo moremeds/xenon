@@ -1,10 +1,9 @@
 import { NextResponse } from "next/server";
-import { readDataFile } from "@tools/data-reader";
-import { OrdersData } from "@tools/schemas/ib-orders";
 import { xenonFetch } from "@/lib/xenonApi";
 import { passThroughXenonError } from "@/lib/passThroughXenonError";
 import { getRequestId } from "@/lib/apiContracts";
 import type { ModifyCancelTarget, ReplaceComboOrder } from "@/lib/orderModify";
+import type { OrdersData } from "@tools/schemas/ib-orders";
 
 export const runtime = "nodejs";
 
@@ -73,6 +72,17 @@ function normalizeCancelTargets(
   }
 
   return targets;
+}
+
+async function fetchOrders(): Promise<OrdersData | null> {
+  try {
+    return await xenonFetch<OrdersData>("/orders", {
+      method: "GET",
+      timeout: 10_000,
+    });
+  } catch {
+    return null;
+  }
 }
 
 export async function POST(request: Request): Promise<Response> {
@@ -160,7 +170,7 @@ export async function POST(request: Request): Promise<Response> {
         } catch {
           /* non-fatal */
         }
-        const ordersResult = await readDataFile("data/orders.json", OrdersData);
+        const orders = await fetchOrders();
         const placeMsg =
           placeErr instanceof Error ? placeErr.message : String(placeErr);
         return NextResponse.json(
@@ -168,7 +178,7 @@ export async function POST(request: Request): Promise<Response> {
             error:
               "CRITICAL: Original order cancelled, replacement FAILED. Place a new order manually.",
             detail: { placeError: placeMsg, requestId },
-            orders: ordersResult.ok ? ordersResult.data : null,
+            orders,
           },
           { status: 502 },
         );
@@ -182,14 +192,14 @@ export async function POST(request: Request): Promise<Response> {
       } catch {
         // Non-fatal
       }
-      const ordersResult = await readDataFile("data/orders.json", OrdersData);
+      const orders = await fetchOrders();
 
       return NextResponse.json({
         status: "ok",
         message: result.message,
         orderId: result.orderId,
         permId: result.permId,
-        orders: ordersResult.ok ? ordersResult.data : null,
+        orders,
       });
     }
 
@@ -237,9 +247,9 @@ export async function POST(request: Request): Promise<Response> {
     } catch {
       // Non-fatal
     }
-    const ordersResult = await readDataFile("data/orders.json", OrdersData);
+    const orders = await fetchOrders();
 
-    if (!ordersResult.ok) {
+    if (!orders) {
       return NextResponse.json(
         { error: "Modify completed but refreshed orders were unavailable" },
         { status: 502 },
@@ -248,7 +258,7 @@ export async function POST(request: Request): Promise<Response> {
 
     if (
       !isModifyConfirmed(
-        ordersResult.data,
+        orders,
         orderId,
         permId,
         newPrice,
@@ -258,7 +268,7 @@ export async function POST(request: Request): Promise<Response> {
       return NextResponse.json(
         {
           error: "Modify not confirmed by refreshed orders",
-          orders: ordersResult.data,
+          orders,
         },
         { status: 502 },
       );
@@ -267,7 +277,7 @@ export async function POST(request: Request): Promise<Response> {
     return NextResponse.json({
       status: "ok",
       message: result.message,
-      orders: ordersResult.data,
+      orders,
     });
   } catch (error) {
     return passThroughXenonError(error, requestId);

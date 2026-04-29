@@ -9,6 +9,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -17,6 +18,7 @@ from xenon.execution import orders_store, single_leg_rehydrate
 from xenon.execution.orders_store import RequestRow, init_store, reserve_attempt
 from xenon.execution.single_leg_rehydrate import (
     ReconcileDecision,
+    _index_executions,
     _reconcile_from_three_sources,
     rehydrate_on_boot,
 )
@@ -75,6 +77,9 @@ def _make_working_row(
     state="WORKING",
     con_id=999,
     submitted_at: datetime | None = None,
+    broker: str = "IB",
+    account_env: str = "legacy_unknown",
+    broker_account: str = "legacy_unknown",
 ):
     """Insert a row and advance it to WORKING (or leave PENDING)."""
     sid_outcome = reserve_attempt(
@@ -93,6 +98,9 @@ def _make_working_row(
             limit_price=Decimal("1.50"),
         ),
         db_path=db_path,
+        broker=broker,
+        account_env=account_env,
+        broker_account=broker_account,
     )
     engine = _pg_engine()
     try:
@@ -162,6 +170,46 @@ def _fetch_events(db_path, submission_id):
     return [(kind, detail if isinstance(detail, dict) else json.loads(detail) if detail else None) for kind, detail in rows]
 
 
+def _fetch_fill_rows():
+    engine = _pg_engine()
+    try:
+        with engine.connect() as con:
+            return con.execute(
+                text(
+                    "SELECT exec_id, submission_id, ticker, side, qty, price, broker, account_env, broker_account "
+                    "FROM xenon.order_fills ORDER BY exec_id"
+                )
+            ).fetchall()
+    finally:
+        engine.dispose()
+
+
+def _fetch_trade_rows():
+    engine = _pg_engine()
+    try:
+        with engine.connect() as con:
+            return con.execute(
+                text(
+                    "SELECT submission_id, ticker, action, quantity, entry_cost, state, metadata "
+                    "FROM xenon.trades ORDER BY id"
+                )
+            ).fetchall()
+    finally:
+        engine.dispose()
+
+
+def _fetch_outbox(channel: str):
+    engine = _pg_engine()
+    try:
+        with engine.connect() as con:
+            return con.execute(
+                text("SELECT channel, source, payload FROM events.outbox WHERE channel=:channel ORDER BY id"),
+                {"channel": channel},
+            ).fetchall()
+    finally:
+        engine.dispose()
+
+
 # ---------------------------------------------------------------------------
 # Pure helper tests (the ones the spec mandates)
 # ---------------------------------------------------------------------------
@@ -199,6 +247,118 @@ def test_reconciles_filled_via_executions(db_path):
     assert Decimal(str(avg_fill)) == Decimal("1.50")
     events = _fetch_events(db_path, sid)
     assert any(k == "REHYDRATE_RECONCILED" for k, _ in events)
+
+
+def test_rehydrate_records_fill_and_trade_for_explicit_scope(db_path):
+    sid = _make_working_row(
+        db_path,
+        ticker="AAPL",
+        perm_id="P-fill",
+        ib_order_id="42",
+        security_type="STK",
+        quantity=100,
+        con_id=265598,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU123456",
+    )
+    ib = FakeIBClient(
+        open_orders=[],
+        executions=[
+            {
+                "exec_id": "exec-single-fill-1",
+                "perm_id": "P-fill",
+                "ib_order_id": "42",
+                "con_id": 265598,
+                "ticker": "AAPL",
+                "side": "BOT",
+                "shares": 100,
+                "avg_price": 190.25,
+                "commission": 1.25,
+                "time": datetime(2026, 4, 28, 14, 30, tzinfo=timezone.utc),
+            }
+        ],
+    )
+
+    rehydrate_on_boot(
+        lambda: ib,
+        orders_store,
+        now=lambda: 1_000_000_000,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU123456",
+    )
+
+    fill_rows = _fetch_fill_rows()
+    assert len(fill_rows) == 1
+    fill = fill_rows[0]
+    assert fill.exec_id == "exec-single-fill-1"
+    assert fill.submission_id == sid
+    assert fill.side == "BUY"
+    assert fill.qty == 100
+    assert Decimal(str(fill.price)) == Decimal("190.2500")
+    assert fill.account_env == "paper"
+    assert fill.broker_account == "DU123456"
+
+    trade_rows = _fetch_trade_rows()
+    assert len(trade_rows) == 1
+    trade = trade_rows[0]
+    assert trade.submission_id == sid
+    assert trade.ticker == "AAPL"
+    assert trade.action == "BUY"
+    assert trade.quantity == 100
+    assert Decimal(str(trade.entry_cost)) == Decimal("19026.2500")
+    assert trade.state == "OPEN"
+
+    fill_events = _fetch_outbox("fill.recorded")
+    assert len(fill_events) == 1
+    assert fill_events[0].payload["exec_id"] == "exec-single-fill-1"
+
+
+def test_rehydrate_replay_does_not_duplicate_fill_or_trade(db_path):
+    _make_working_row(
+        db_path,
+        ticker="AAPL",
+        perm_id="P-replay",
+        ib_order_id="43",
+        security_type="STK",
+        quantity=10,
+        con_id=265598,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU123456",
+    )
+    ib = FakeIBClient(
+        open_orders=[],
+        executions=[
+            {
+                "exec_id": "exec-single-replay",
+                "perm_id": "P-replay",
+                "ib_order_id": "43",
+                "con_id": 265598,
+                "ticker": "AAPL",
+                "side": "BUY",
+                "shares": 10,
+                "avg_price": 20.00,
+                "time": datetime(2026, 4, 28, 14, 30, tzinfo=timezone.utc),
+            }
+        ],
+    )
+
+    kwargs = {
+        "ib_client_factory": lambda: ib,
+        "orders_store": orders_store,
+        "now": lambda: 1_000_000_000,
+        "broker": "IB",
+        "account_env": "paper",
+        "broker_account": "DU123456",
+    }
+    rehydrate_on_boot(**kwargs)
+    rehydrate_on_boot(**kwargs)
+
+    assert len(_fetch_fill_rows()) == 1
+    assert len(_fetch_trade_rows()) == 1
+    assert len(_fetch_outbox("fill.recorded")) == 1
 
 
 def test_reconciles_cancelled_positions_unchanged(db_path):
@@ -303,6 +463,17 @@ def test_reconcile_helper_is_pure_working():
     assert isinstance(d, ReconcileDecision)
     assert d.to_state == "WORKING"
     assert d.event_kind == "REHYDRATE_RECONCILED"
+
+
+def test_index_executions_reads_ib_fill_objects():
+    fill = SimpleNamespace(
+        execution=SimpleNamespace(permId=123, shares=2, avgPrice=1.25),
+        contract=SimpleNamespace(symbol="SPY", conId=999),
+    )
+
+    indexed = _index_executions([fill])
+
+    assert indexed == {"123": {"shares": 2, "avg_price": 1.25}}
 
 
 def test_build_positions_snapshot_from_list():

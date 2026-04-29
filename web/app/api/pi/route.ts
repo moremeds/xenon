@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
+import { xenonFetch } from "@/lib/xenonApi";
 
 export const runtime = "nodejs";
 
@@ -88,7 +88,7 @@ const resolveProjectPaths = (): Paths => {
       existsSync(
         path.join(scriptsDir, "infra", "dev", "run_pytest_affected.py"),
       ) &&
-      existsSync(path.join(dataDir, "portfolio.json"))
+      existsSync(path.join(candidate, "pyproject.toml"))
     ) {
       return { cwd: candidate, scriptsDir, dataDir };
     }
@@ -200,11 +200,6 @@ const runPythonScript = (
       });
     });
   });
-};
-
-const readLocalJsonFile = async <T>(filePath: string): Promise<T> => {
-  const content = await readFile(filePath, "utf8");
-  return JSON.parse(content) as T;
 };
 
 const formatPortfolio = (raw: unknown) => {
@@ -341,10 +336,11 @@ const parseBooleanFlags = (args: string[], booleanSet: Set<string>) => {
   return { parsed, positional };
 };
 
-const executePortfolio = async (paths: Paths): Promise<ScriptResult> => {
-  const data = await readLocalJsonFile(
-    path.join(paths.dataDir, "portfolio.json"),
-  );
+const executePortfolio = async (): Promise<ScriptResult> => {
+  const data = await xenonFetch("/portfolio", {
+    method: "GET",
+    timeout: 10_000,
+  });
   return {
     command: "portfolio",
     status: "ok",
@@ -356,10 +352,7 @@ const executePortfolio = async (paths: Paths): Promise<ScriptResult> => {
   };
 };
 
-const executeJournal = (
-  args: string[],
-  paths: Paths,
-): Promise<ScriptResult> => {
+const executeJournal = (args: string[]): Promise<ScriptResult> => {
   const parsed = parseGenericIntFlags(args, {
     "--limit": (value) => parseFlagInt(value, "limit"),
   });
@@ -369,17 +362,16 @@ const executeJournal = (
     throw new Error("journal accepts only --limit");
   }
 
-  return readLocalJsonFile(path.join(paths.dataDir, "trade_log.json")).then(
-    (raw) => ({
-      command: "journal",
-      status: "ok",
-      output: formatJournal(raw, limit),
-      stderr: "",
-      exitCode: 0,
-      timedOut: false,
-      source: "local",
-    }),
-  );
+  const endpoint = limit ? `/journal?limit=${limit}` : "/journal";
+  return xenonFetch(endpoint, { method: "GET", timeout: 10_000 }).then((raw) => ({
+    command: "journal",
+    status: "ok",
+    output: formatJournal(raw, limit),
+    stderr: "",
+    exitCode: 0,
+    timedOut: false,
+    source: "local",
+  }));
 };
 
 const executeScan = async (
@@ -556,9 +548,9 @@ const executeCommand = async (value: ParsedCommand): Promise<ScriptResult> => {
     case "help":
       return executeHelp();
     case "portfolio":
-      return executePortfolio(paths);
+      return executePortfolio();
     case "journal":
-      return executeJournal(value.args, paths);
+      return executeJournal(value.args);
     case "scan":
       return executeScan(value.args, paths);
     case "discover":

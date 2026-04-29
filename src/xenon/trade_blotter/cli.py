@@ -152,6 +152,10 @@ def blotter_to_dict(blotter: TradeBlotter) -> dict:
     """Convert blotter to JSON-serializable dict."""
 
     def trade_to_dict(trade: Trade) -> dict:
+        # perm_id is the IBKR order ID; all executions for one order share it.
+        # Surface the first non-empty perm_id from the executions; W3.4 uses
+        # this as the join key for the PG↔Flex blotter overlay.
+        perm_id = next((e.perm_id for e in trade.executions if e.perm_id), None)
         return {
             "symbol": trade.symbol,
             "contract_desc": trade.contract_desc,
@@ -164,6 +168,7 @@ def blotter_to_dict(blotter: TradeBlotter) -> dict:
             "cost_basis": trade.cost_basis,
             "proceeds": trade.proceeds,
             "total_cash_flow": trade.total_cash_flow,
+            "perm_id": perm_id,
             "executions": [
                 {
                     "exec_id": e.exec_id,

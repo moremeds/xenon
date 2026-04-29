@@ -1,13 +1,10 @@
 /**
- * Journal Auto-Sync — imports IB reconciliation new_trades into trade_log.json
+ * Journal Auto-Sync helpers retained for legacy reconciliation tests.
  *
- * Reads reconciliation.json, converts new_trades to TradeEntry format,
- * appends to trade_log.json with decision: "IB_AUTO_IMPORT".
- * Duplicate detection via (ticker + date + action + quantity) fingerprint.
+ * Runtime journal sync is now PG/outbox-backed via FastAPI. These pure
+ * conversion helpers remain as compatibility coverage while the old file
+ * sync path is retired.
  */
-
-import { readFile, writeFile } from "fs/promises";
-import { join } from "path";
 
 /* ─── Types ──────────────────────────────────────────── */
 
@@ -25,14 +22,6 @@ export interface ReconciliationTrade {
   right?: string; // "C" or "P"
 }
 
-interface ReconciliationData {
-  timestamp: string;
-  new_trades: ReconciliationTrade[];
-  positions_missing_locally: unknown[];
-  positions_closed: unknown[];
-  needs_attention: boolean;
-}
-
 interface TradeEntry {
   id: number;
   date: string;
@@ -48,10 +37,6 @@ interface TradeEntry {
   commission?: number;
   notes?: string;
   [key: string]: unknown;
-}
-
-interface TradeLogData {
-  trades: TradeEntry[];
 }
 
 /* ─── Helpers ────────────────────────────────────────── */
@@ -147,47 +132,4 @@ export function syncNewTrades(
   }
 
   return { imported, skipped, trades: importedTrades };
-}
-
-/* ─── File I/O ───────────────────────────────────────── */
-
-const DATA_DIR = join(process.cwd(), "..", "data");
-
-export async function loadReconciliation(): Promise<ReconciliationData> {
-  const raw = await readFile(join(DATA_DIR, "reconciliation.json"), "utf-8");
-  return JSON.parse(raw);
-}
-
-export async function loadTradeLog(): Promise<TradeLogData> {
-  const raw = await readFile(join(DATA_DIR, "trade_log.json"), "utf-8");
-  return JSON.parse(raw);
-}
-
-export async function saveTradeLog(data: TradeLogData): Promise<void> {
-  await writeFile(
-    join(DATA_DIR, "trade_log.json"),
-    JSON.stringify(data, null, 2),
-    "utf-8"
-  );
-}
-
-/**
- * Full sync: read reconciliation → import new trades → write trade_log
- */
-export async function runJournalSync(): Promise<SyncResult> {
-  const recon = await loadReconciliation();
-  const tradeLog = await loadTradeLog();
-
-  if (!recon.new_trades || recon.new_trades.length === 0) {
-    return { imported: 0, skipped: 0, trades: [] };
-  }
-
-  const result = syncNewTrades(tradeLog.trades, recon.new_trades);
-
-  if (result.imported > 0) {
-    tradeLog.trades.push(...result.trades);
-    await saveTradeLog(tradeLog);
-  }
-
-  return result;
 }

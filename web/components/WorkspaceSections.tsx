@@ -60,6 +60,7 @@ import type {
   UwTickerRow,
 } from "@/lib/uwAnalyzeTypes";
 import { MetricCard, SourceBadge } from "@/components/ui/MetricCard";
+import { SourcePill } from "./SourcePill";
 import GexProfileChart, {
   uwGexRowsToBuckets,
 } from "@/components/charts/GexProfileChart";
@@ -3488,6 +3489,7 @@ export function HistoricalTradesSection() {
               {new Date(data.as_of).toLocaleDateString()}
             </span>
           )}
+          <SourcePill source={data?.source} />
           {allTrades.length > 0 ? (
             <TableSearch
               query={query}

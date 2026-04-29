@@ -1,6 +1,4 @@
 import { NextResponse } from "next/server";
-import { readFile } from "fs/promises";
-import { join } from "path";
 import { xenonFetch } from "@/lib/xenonApi";
 import {
   getRequestId,
@@ -17,27 +15,15 @@ export const runtime = "nodejs";
 // by the current AccountScope. See
 // docs/plans/2026-04-27-portfolio-postgres-read-path.md.
 
-const TRADE_LOG_PATH = join(process.cwd(), "..", "data", "trade_log.json");
 const STALE_AFTER_MS = 60_000;
 
-/** Load ticker → earliest trade date from trade_log.json. Read straight from
- * the file because trade_log.json is still owned by the prior writer; Phase 2
- * will migrate it to PG along with the other 8 readers. */
-async function loadTradeLogDates(): Promise<Record<string, string>> {
+async function loadTradeEntryDates(): Promise<Record<string, string>> {
   try {
-    const raw = JSON.parse(await readFile(TRADE_LOG_PATH, "utf-8"));
-    const trades = Array.isArray(raw) ? raw : (raw?.trades ?? []);
-    const dates: Record<string, string> = {};
-    for (const t of trades) {
-      const ticker = t?.ticker;
-      const date = t?.date;
-      if (typeof ticker === "string" && typeof date === "string") {
-        if (!dates[ticker] || date > dates[ticker]) {
-          dates[ticker] = date;
-        }
-      }
-    }
-    return dates;
+    const result = await xenonFetch<Record<string, string>>("/trades/entry-dates", {
+      method: "GET",
+      timeout: 10_000,
+    });
+    return result ?? {};
   } catch {
     return {};
   }
@@ -82,7 +68,7 @@ export async function GET(): Promise<Response> {
     if (isResponseStale(data)) {
       triggerBackgroundSync();
     }
-    const tradeLogDates = await loadTradeLogDates();
+    const tradeLogDates = await loadTradeEntryDates();
     const response = NextResponse.json({
       ...data,
       trade_log_dates: tradeLogDates,
@@ -124,7 +110,7 @@ export async function POST(): Promise<Response> {
       method: "POST",
       timeout: 35_000,
     })) as Record<string, unknown>;
-    const tradeLogDates = await loadTradeLogDates();
+    const tradeLogDates = await loadTradeEntryDates();
     const response = NextResponse.json({
       ...data,
       trade_log_dates: tradeLogDates,

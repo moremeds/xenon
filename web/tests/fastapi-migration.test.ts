@@ -104,7 +104,7 @@ beforeEach(() => {
 });
 
 // =============================================================================
-// POST /api/discover — success + cache fallback
+// POST /api/discover — FastAPI proxy
 // =============================================================================
 
 describe("POST /api/discover (via xenonFetch)", () => {
@@ -124,23 +124,15 @@ describe("POST /api/discover (via xenonFetch)", () => {
     expect(body.candidates_found).toBe(12);
   });
 
-  it("falls back to cache on failure", async () => {
+  it("returns 502 on failure without JSON cache fallback", async () => {
     mockXenonFetch.mockRejectedValue(new Error("timeout"));
-    mockReadFile.mockResolvedValue(
-      JSON.stringify({
-        discovery_time: "2026-03-13",
-        candidates_found: 8,
-        candidates: [],
-      }),
-    );
-    mockStatSync.mockReturnValue({ mtime: new Date(Date.now() - 900_000) });
 
     const { POST } = await import("../app/api/discover/route");
     const res = await POST();
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(502);
     const body = await res.json();
-    expect(body.candidates_found).toBe(8);
-    expect(body.is_stale).toBe(true);
+    expect(body.error).toContain("timeout");
+    expect(mockReadFile).not.toHaveBeenCalled();
   });
 });
 
@@ -360,7 +352,7 @@ describe("GET /api/portfolio", () => {
 });
 
 // =============================================================================
-// POST /api/orders — via xenonFetch + cache fallback
+// POST /api/orders — via xenonFetch, no JSON-file fallback
 // =============================================================================
 
 describe("POST /api/orders (via xenonFetch)", () => {
@@ -372,8 +364,9 @@ describe("POST /api/orders (via xenonFetch)", () => {
       open_count: 0,
       executed_count: 0,
     };
-    mockXenonFetch.mockResolvedValue(orders);
-    mockReadDataFile.mockResolvedValue({ ok: true, data: orders });
+    mockXenonFetch
+      .mockResolvedValueOnce({ status: "ok" })
+      .mockResolvedValueOnce(orders);
 
     const { POST } = await import("../app/api/orders/route");
     const res = await POST();
@@ -382,37 +375,21 @@ describe("POST /api/orders (via xenonFetch)", () => {
     expect(body.open_count).toBe(0);
   });
 
-  it("falls back to cached orders when sync fails", async () => {
+  it("returns 502 when sync fails instead of serving cached orders", async () => {
     mockXenonFetch.mockRejectedValue(new Error("timeout"));
-    const cached = {
-      last_sync: "2026-03-13",
-      open_orders: [{ orderId: 1 }],
-      executed_orders: [],
-      open_count: 1,
-      executed_count: 0,
-    };
-    mockReadDataFile.mockResolvedValue({ ok: true, data: cached });
 
     const { POST } = await import("../app/api/orders/route");
     const res = await POST();
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(502);
     const body = await res.json();
-    expect(body.open_count).toBe(1);
-    expect(res.headers.get("X-Sync-Warning")).toContain("cached");
+    expect(body.error).toContain("timeout");
+    expect(res.headers.get("X-Sync-Warning")).toBeNull();
   });
 
-  it("returns 502 when sync fails and no cache", async () => {
-    mockXenonFetch.mockRejectedValue(new Error("timeout"));
-    mockReadDataFile.mockResolvedValue({
-      ok: true,
-      data: {
-        last_sync: "",
-        open_orders: [],
-        executed_orders: [],
-        open_count: 0,
-        executed_count: 0,
-      },
-    });
+  it("returns 502 when refresh succeeds but the PG read fails", async () => {
+    mockXenonFetch
+      .mockResolvedValueOnce({ status: "ok" })
+      .mockRejectedValueOnce(new Error("timeout"));
 
     const { POST } = await import("../app/api/orders/route");
     const res = await POST();
@@ -439,13 +416,11 @@ describe("POST /api/orders/cancel (via xenonFetch)", () => {
   });
 
   it("succeeds when orderId is provided", async () => {
+    const ordersPayload = { open_orders: [], executed_orders: [] };
     mockXenonFetch
       .mockResolvedValueOnce({ status: "ok", message: "Cancelled" }) // cancel
-      .mockResolvedValueOnce({}); // refresh
-    mockReadDataFile.mockResolvedValue({
-      ok: true,
-      data: { open_orders: [], executed_orders: [] },
-    });
+      .mockResolvedValueOnce({}) // refresh
+      .mockResolvedValueOnce(ordersPayload); // PG orders read
 
     const { POST } = await import("../app/api/orders/cancel/route");
     const req = makeRequest("http://localhost/api/orders/cancel", {
@@ -457,6 +432,13 @@ describe("POST /api/orders/cancel (via xenonFetch)", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.status).toBe("ok");
+    expect(body.orders).toEqual(ordersPayload);
+    expect(mockReadDataFile).not.toHaveBeenCalled();
+    expect(mockXenonFetch.mock.calls.map((call) => call[0])).toEqual([
+      "/orders/cancel",
+      "/orders/refresh",
+      "/orders",
+    ]);
   });
 });
 
@@ -706,49 +688,15 @@ describe("POST /api/blotter (via xenonFetch)", () => {
     expect(body.summary.closed_trades).toBe(5);
   });
 
-  it("falls back to cached blotter on failure", async () => {
+  it("returns 502 on failure without JSON cache fallback", async () => {
     mockXenonFetch.mockRejectedValue(new Error("Flex query timed out"));
-    mockReadFile.mockResolvedValue(
-      JSON.stringify({
-        as_of: "2026-03-13",
-        summary: { closed_trades: 2 },
-        closed_trades: [
-          {
-            symbol: "AAPL",
-            contract_desc: "AAPL 240315C00200000",
-            sec_type: "OPT",
-            is_closed: true,
-            net_quantity: 0,
-            total_commission: 1,
-            realized_pnl: 200,
-            cost_basis: 1000,
-            proceeds: 1200,
-            total_cash_flow: 200,
-            executions: [],
-          },
-        ],
-        open_trades: [],
-      }),
-    );
-
-    const { POST } = await import("../app/api/blotter/route");
-    const res = await POST();
-    expect(res.status).toBe(200);
-    expect(res.headers.get("X-Sync-Warning")).toContain("cached data");
-    const body = await res.json();
-    expect(body.summary.closed_trades).toBe(2);
-    expect(body.closed_trades[0].symbol).toBe("AAPL");
-  });
-
-  it("returns 502 on failure when cache unavailable", async () => {
-    mockXenonFetch.mockRejectedValue(new Error("Flex query timed out"));
-    mockReadFile.mockRejectedValue(new Error("ENOENT"));
 
     const { POST } = await import("../app/api/blotter/route");
     const res = await POST();
     expect(res.status).toBe(502);
     const body = await res.json();
     expect(body.error).toContain("timed out");
+    expect(mockReadFile).not.toHaveBeenCalled();
   });
 });
 

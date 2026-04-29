@@ -1,12 +1,8 @@
 import { NextResponse } from "next/server";
-import { readFile } from "fs/promises";
-import { statSync } from "fs";
-import { join } from "path";
 import { xenonFetch } from "@/lib/xenonApi";
 
 export const runtime = "nodejs";
 
-const DISCOVER_CACHE_PATH = join(process.cwd(), "..", "data", "discover.json");
 const STALE_THRESHOLD_SECONDS = 600;
 
 interface CacheMeta {
@@ -16,17 +12,20 @@ interface CacheMeta {
   stale_threshold_seconds: number;
 }
 
-function buildCacheMeta(filePath: string): CacheMeta {
-  try {
-    const s = statSync(filePath);
-    const ageSeconds = (Date.now() - s.mtime.getTime()) / 1000;
-    return {
-      last_refresh: s.mtime.toISOString(),
-      age_seconds: Math.round(ageSeconds),
-      is_stale: ageSeconds > STALE_THRESHOLD_SECONDS,
-      stale_threshold_seconds: STALE_THRESHOLD_SECONDS,
-    };
-  } catch {
+const EMPTY_DISCOVER = {
+  discovery_time: "",
+  alerts_analyzed: 0,
+  candidates_found: 0,
+  candidates: [],
+};
+
+function cacheMetaFromPayload(payload: Record<string, unknown> | null): CacheMeta {
+  const raw =
+    (typeof payload?._scanned_at === "string" && payload._scanned_at) ||
+    (typeof payload?.discovery_time === "string" && payload.discovery_time) ||
+    null;
+  const ts = raw ? Date.parse(raw) : NaN;
+  if (!Number.isFinite(ts)) {
     return {
       last_refresh: null,
       age_seconds: null,
@@ -34,43 +33,39 @@ function buildCacheMeta(filePath: string): CacheMeta {
       stale_threshold_seconds: STALE_THRESHOLD_SECONDS,
     };
   }
+  const ageSeconds = (Date.now() - ts) / 1000;
+  return {
+    last_refresh: new Date(ts).toISOString(),
+    age_seconds: Math.round(ageSeconds),
+    is_stale: ageSeconds > STALE_THRESHOLD_SECONDS,
+    stale_threshold_seconds: STALE_THRESHOLD_SECONDS,
+  };
 }
 
 export async function GET(): Promise<Response> {
   try {
-    const raw = await readFile(DISCOVER_CACHE_PATH, "utf-8");
-    const data = JSON.parse(raw);
-    const cache_meta = buildCacheMeta(DISCOVER_CACHE_PATH);
-    return NextResponse.json({ ...data, cache_meta });
+    const data = await xenonFetch<Record<string, unknown>>("/discover", {
+      method: "GET",
+      timeout: 10_000,
+    });
+    return NextResponse.json({ ...data, cache_meta: cacheMetaFromPayload(data) });
   } catch {
-    const cache_meta = buildCacheMeta(DISCOVER_CACHE_PATH);
     return NextResponse.json({
-      discovery_time: "",
-      alerts_analyzed: 0,
-      candidates_found: 0,
-      candidates: [],
-      cache_meta,
+      ...EMPTY_DISCOVER,
+      cache_meta: cacheMetaFromPayload(null),
     });
   }
 }
 
 export async function POST(): Promise<Response> {
   try {
-    const data = await xenonFetch("/discover", { method: "POST", timeout: 130_000 });
-    const cache_meta = buildCacheMeta(DISCOVER_CACHE_PATH);
-    return NextResponse.json({ ...data, cache_meta });
+    const data = await xenonFetch<Record<string, unknown>>("/discover", {
+      method: "POST",
+      timeout: 130_000,
+    });
+    return NextResponse.json({ ...data, cache_meta: cacheMetaFromPayload(data) });
   } catch (error) {
-    // Serve cached data on failure
-    try {
-      const raw = await readFile(DISCOVER_CACHE_PATH, "utf-8");
-      const cached = JSON.parse(raw);
-      const cache_meta = buildCacheMeta(DISCOVER_CACHE_PATH);
-      const res = NextResponse.json({ ...cached, cache_meta, is_stale: true });
-      res.headers.set("X-Sync-Warning", "Xenon API unavailable - serving cached data");
-      return res;
-    } catch {
-      const message = error instanceof Error ? error.message : "Discover sync failed";
-      return NextResponse.json({ error: message }, { status: 502 });
-    }
+    const message = error instanceof Error ? error.message : "Discover sync failed";
+    return NextResponse.json({ error: message }, { status: 502 });
   }
 }

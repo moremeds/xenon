@@ -7,6 +7,7 @@ from typing import Callable
 
 import asyncpg
 from sqlalchemy import insert, select
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from xenon.db.schema import outbox
@@ -14,6 +15,13 @@ from xenon.db.schema import outbox
 logger = logging.getLogger(__name__)
 
 _CHANNEL_RE = re.compile(r"^[a-z_][a-z0-9_.]{0,62}$")
+CHANNEL_FILL_RECORDED = "fill.recorded"
+CHANNEL_TRADE_CLOSED = "trade.closed"
+
+
+def _validate_channel(channel: str) -> None:
+    if not _CHANNEL_RE.match(channel):
+        raise ValueError(f"Invalid NOTIFY channel: {channel!r}")
 
 
 async def emit(
@@ -23,12 +31,24 @@ async def emit(
     source: str,
     payload: dict,
 ) -> int:
-    if not _CHANNEL_RE.match(channel):
-        raise ValueError(f"Invalid NOTIFY channel: {channel!r}")
+    _validate_channel(channel)
     result = await conn.execute(
         insert(outbox).values(channel=channel, source=source, payload=payload).returning(outbox.c.id)
     )
     return result.scalar()
+
+
+def emit_outbox_in_txn(
+    conn: Connection,
+    *,
+    channel: str,
+    source: str,
+    payload: dict,
+) -> int:
+    """Insert an outbox event using the caller's active transaction."""
+    _validate_channel(channel)
+    result = conn.execute(insert(outbox).values(channel=channel, source=source, payload=payload).returning(outbox.c.id))
+    return int(result.scalar_one())
 
 
 async def get_events_since(

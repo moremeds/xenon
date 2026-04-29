@@ -34,6 +34,7 @@ def _truncate_postgres_tables() -> None:
         with engine.begin() as conn:
             for table in (
                 "events.outbox",
+                "xenon.order_fills",
                 "xenon.order_events",
                 "xenon.order_submissions",
                 "xenon.wizard_protection",
@@ -49,6 +50,7 @@ def _truncate_postgres_tables() -> None:
                 "xenon.uw_analyze_snapshots",
                 "xenon.positions",
                 "xenon.account_snapshots",
+                "xenon.journal_entries",
                 "xenon.trades",
                 "xenon.nav_history",
                 "xenon.gex_snapshots",

@@ -1,14 +1,9 @@
 import { NextResponse } from "next/server";
-import { readFile } from "fs/promises";
-import { join } from "path";
 import { isGexDataStale } from "@/lib/gexStaleness";
 import { xenonFetch } from "@/lib/xenonApi";
 import { getRequestId, setCacheResponseHeaders } from "@/lib/apiContracts";
 
 export const runtime = "nodejs";
-
-const DATA_DIR = join(process.cwd(), "..", "data");
-const CACHE_PATH = join(DATA_DIR, "gex.json");
 
 const EMPTY_GEX = {
   scan_time: "",
@@ -65,13 +60,14 @@ function todayET(): string {
   return new Date().toLocaleDateString("sv", { timeZone: "America/New_York" });
 }
 
-async function readCachedGex(): Promise<Record<string, unknown> | null> {
+async function fetchLatestGex(): Promise<Record<string, unknown> | null> {
   try {
-    const raw = await readFile(CACHE_PATH, "utf-8");
-    const jsonStart = raw.indexOf("{");
-    if (jsonStart === -1) return null;
-    return JSON.parse(raw.slice(jsonStart)) as Record<string, unknown>;
-  } catch {
+    return await xenonFetch<Record<string, unknown>>("/gex", {
+      method: "GET",
+      timeout: 10_000,
+    });
+  } catch (err) {
+    console.warn("[GEX] FastAPI /gex failed:", err);
     return null;
   }
 }
@@ -115,14 +111,14 @@ function triggerBackgroundScan(): void {
 
 export async function GET(): Promise<Response> {
   const requestId = getRequestId();
-  const cached = await readCachedGex();
-  const data = normalizeGexPayload(cached ?? {});
+  const upstream = await fetchLatestGex();
+  const data = normalizeGexPayload(upstream ?? {});
   const currentMarketOpen = isMarketOpenNow();
 
   (data as Record<string, unknown>).market_open = currentMarketOpen;
 
-  const stale = cached
-    ? isGexDataStale(cached as { scan_time?: string; market_open?: boolean }, todayET(), currentMarketOpen)
+  const stale = upstream
+    ? isGexDataStale(upstream as { scan_time?: string; market_open?: boolean }, todayET(), currentMarketOpen)
     : true;
 
   if (stale) {

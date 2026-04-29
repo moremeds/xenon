@@ -86,48 +86,12 @@ describe("Flow Analysis API GET", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Scanner API — GET
+// Scanner API — GET tests removed: /api/scanner now proxies to FastAPI via
+// xenonFetch and no longer reads data/scan_results.json from disk. The
+// fs/promises::readFile cache contract these tests asserted is gone.
+// FastAPI scan-result coverage lives in scripts/tests/test_blotter_query.py
+// and the Python scan-result query tests.
 // ---------------------------------------------------------------------------
-
-describe("Scanner API GET", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    mockReadFile.mockReset();
-  });
-
-  it("returns cached data when file exists", async () => {
-    const cached = {
-      scan_id: "trend_20260306_1200",
-      scan_timestamp: "2026-03-06T12:00:00",
-      market_context: { spy_close: 520, vix_close: 17, regime: "bullish" },
-      universe_size: 500,
-      stage_a_survivors: 100,
-      stage_b_survivors: 50,
-      candidates: [{ ticker: "NVDA", final_score: 0.85 }],
-    };
-    mockReadFile.mockResolvedValueOnce(JSON.stringify(cached));
-
-    const { GET } = await import("../app/api/scanner/route");
-    const res = await GET();
-    const body = await res.json();
-
-    expect(res.status).toBe(200);
-    expect(body.universe_size).toBe(500);
-    expect(body.candidates).toHaveLength(1);
-  });
-
-  it("returns empty structure when cache file is missing", async () => {
-    mockReadFile.mockRejectedValueOnce(new Error("ENOENT"));
-
-    const { GET } = await import("../app/api/scanner/route");
-    const res = await GET();
-    const body = await res.json();
-
-    expect(res.status).toBe(200);
-    expect(body.universe_size).toBe(0);
-    expect(body.candidates).toEqual([]);
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Type shape tests — ensure types are properly exported

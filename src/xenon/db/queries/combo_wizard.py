@@ -234,16 +234,20 @@ def list_protected_sessions(
 # ── orders_submissions helpers (for single_leg_rehydrate) ──
 
 
+DEFAULT_UNRESOLVED_STATES: tuple[str, ...] = ("PENDING", "WORKING", "PARTIALLY_FILLED")
+
+
 def list_unresolved_orders(
     conn: Connection,
     *,
     broker: str | None = None,
     account_env: str | None = None,
     broker_account: str | None = None,
+    states: tuple[str, ...] = DEFAULT_UNRESOLVED_STATES,
 ) -> list[dict]:
     from xenon.db.schema import order_submissions
 
-    conditions = [order_submissions.c.state.in_(["PENDING", "WORKING", "PARTIALLY_FILLED"])]
+    conditions = [order_submissions.c.state.in_(list(states))]
     if broker is not None:
         conditions.append(order_submissions.c.broker == broker)
     if account_env is not None:
