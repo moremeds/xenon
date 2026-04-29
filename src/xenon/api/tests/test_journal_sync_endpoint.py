@@ -31,6 +31,7 @@ def _emit_trade_closed(*, broker_account: str, consumed_by=None) -> None:
 def test_journal_sync_reports_scoped_pending_trade_closed_outbox():
     _emit_trade_closed(broker_account="DU0000000")
     _emit_trade_closed(broker_account="DU0000000", consumed_by=["journal"])
+    _emit_trade_closed(broker_account="DU0000000", consumed_by=["journal_auto_import"])
     _emit_trade_closed(broker_account="DU9999999")
 
     response = TestClient(app).post("/journal/sync")
@@ -38,3 +39,13 @@ def test_journal_sync_reports_scoped_pending_trade_closed_outbox():
 
     assert response.status_code == 200
     assert body == {"imported": 0, "skipped": 0, "pending_outbox": 1}
+
+
+def test_journal_sync_treats_auto_import_consumer_as_consumed():
+    _emit_trade_closed(broker_account="DU0000000", consumed_by=["journal_auto_import"])
+
+    response = TestClient(app).post("/journal/sync")
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["pending_outbox"] == 0

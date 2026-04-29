@@ -4,13 +4,16 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping
 
-from sqlalchemy import desc, func, insert, or_, select, text
+from sqlalchemy import and_, desc, func, insert, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection
 
 from xenon.db.events import CHANNEL_TRADE_CLOSED
 from xenon.db.schema import journal_entries, outbox, trades
 from xenon.execution.account_scope import AccountScope
+
+AUTO_IMPORT_CONSUMER_ID = "journal_auto_import"
+LEGACY_JOURNAL_CONSUMER_ID = "journal"
 
 _METADATA_TOP_LEVEL_FIELDS = (
     "structure",
@@ -219,7 +222,13 @@ def pending_journal_outbox_count(conn: Connection, *, scope: AccountScope) -> in
             outbox.c.payload["broker"].astext == scope.broker,
             outbox.c.payload["account_env"].astext == scope.account_env,
             outbox.c.payload["broker_account"].astext == scope.broker_account,
-            or_(outbox.c.consumed_by.is_(None), ~outbox.c.consumed_by.contains(["journal"])),
+            or_(
+                outbox.c.consumed_by.is_(None),
+                and_(
+                    ~outbox.c.consumed_by.contains([AUTO_IMPORT_CONSUMER_ID]),
+                    ~outbox.c.consumed_by.contains([LEGACY_JOURNAL_CONSUMER_ID]),
+                ),
+            ),
         )
     )
     return int(result.scalar_one())

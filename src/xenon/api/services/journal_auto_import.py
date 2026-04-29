@@ -20,12 +20,12 @@ from sqlalchemy import select, update
 
 from xenon.db.engine import get_sync_engine
 from xenon.db.events import CHANNEL_TRADE_CLOSED, EventSubscriber
-from xenon.db.queries.journal import upsert_auto_import_entry
+from xenon.db.queries.journal import AUTO_IMPORT_CONSUMER_ID, upsert_auto_import_entry
 from xenon.db.schema import outbox
 
 logger = logging.getLogger(__name__)
 
-CONSUMER_ID = "journal_auto_import"
+CONSUMER_ID = AUTO_IMPORT_CONSUMER_ID
 
 
 class JournalAutoImportSubscriber:
