@@ -201,24 +201,64 @@ def _fill_metadata(execution: dict, *, legacy_id: str) -> dict[str, Any]:
     }
 
 
+def _resolve_submission_id_by_perm_id(perm_id: str | None, *, scope: AccountScope) -> str | None:
+    """Look up xenon.order_submissions for a fill's permId within the same scope.
+
+    Returns the submission_id if exactly one match exists, else None. Multiple
+    rows for the same (perm_id, scope) tuple should not happen — the index
+    `ix_order_sub_perm_id` makes the lookup cheap, and any duplicate is a
+    pre-existing data error we don't try to resolve here. Scope filtering is
+    mandatory: paper and live never blend in the shared Postgres.
+    """
+    if not perm_id:
+        return None
+    from sqlalchemy import select as _select
+
+    from xenon.db.engine import get_sync_engine
+    from xenon.db.schema import order_submissions
+
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            _select(order_submissions.c.submission_id).where(
+                order_submissions.c.perm_id == str(perm_id),
+                order_submissions.c.broker == scope.broker,
+                order_submissions.c.account_env == scope.account_env,
+                order_submissions.c.broker_account == scope.broker_account,
+            )
+        ).first()
+    return row[0] if row else None
+
+
 def record_external_fills(
     executions: list[dict],
     *,
     scope: AccountScope | None = None,
 ) -> dict[str, Any]:
-    """Record external IB executions into order_fills and aggregate affected groups."""
+    """Record external IB executions into order_fills and aggregate affected groups.
+
+    Each fill carries a permId. When the permId matches a row in
+    xenon.order_submissions for the same scope (typically a snapshot-* row
+    imported by register_from_snapshot), we link the fill to that submission
+    and aggregate via aggregate_trade_from_fills(submission_id=...). When
+    no match exists — true orphans, e.g. TWS-placed orders Xenon never saw —
+    we keep the legacy_id grouping path so historical behavior is unchanged.
+    """
     resolved = scope or resolve_from_env()
     inserted = 0
     replayed = 0
     affected_legacy_ids: set[str] = set()
+    affected_submission_ids: set[str] = set()
 
     for execution in executions:
+        perm_id = str(_field(execution, "perm_id", "permId") or "") or None
+        submission_id = _resolve_submission_id_by_perm_id(perm_id, scope=resolved)
         legacy_id = _legacy_group_id(execution)
         did_insert = record_fill(
             exec_id=_execution_exec_id(execution),
-            submission_id=None,
+            submission_id=submission_id,
             combo_attempt_id=None,
-            perm_id=str(_field(execution, "perm_id", "permId") or "") or None,
+            perm_id=perm_id,
             ib_order_id=str(_field(execution, "ib_order_id", "order_id", "orderId") or "") or None,
             con_id=_field(execution, "con_id", "conId"),
             ticker=str(_field(execution, "symbol", "ticker")),
@@ -234,9 +274,16 @@ def record_external_fills(
         )
         if did_insert:
             inserted += 1
-            affected_legacy_ids.add(legacy_id)
+            if submission_id is not None:
+                affected_submission_ids.add(submission_id)
+            else:
+                affected_legacy_ids.add(legacy_id)
         else:
             replayed += 1
+
+    ordered_submission_ids = sorted(affected_submission_ids)
+    for sid in ordered_submission_ids:
+        aggregate_trade_from_fills(submission_id=sid)
 
     ordered_legacy_ids = sorted(affected_legacy_ids)
     for legacy_id in ordered_legacy_ids:
@@ -246,6 +293,7 @@ def record_external_fills(
         "inserted": inserted,
         "replayed": replayed,
         "affected_legacy_ids": ordered_legacy_ids,
+        "affected_submission_ids": ordered_submission_ids,
     }
 
 
@@ -451,10 +499,7 @@ def main():
 
         log("Recording external executions to Postgres...")
         fill_result = record_external_fills(executions, scope=scope)
-        log(
-            f"Recorded {fill_result['inserted']} new fills "
-            f"({fill_result['replayed']} already present)"
-        )
+        log(f"Recorded {fill_result['inserted']} new fills ({fill_result['replayed']} already present)")
 
         log("Fetching positions from IB...")
         positions = fetch_ib_positions(client)
