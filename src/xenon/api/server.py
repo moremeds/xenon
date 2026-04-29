@@ -220,6 +220,61 @@ async def _run_rehydrate_on_boot() -> None:
         logger.warning("combo wizard rehydrate failed on boot; continuing to serve: %s", exc)
 
 
+async def _run_fills_replay_on_boot() -> None:
+    """Replay IB fills into xenon.order_fills once on boot. Best-effort.
+
+    Mirrors the open-order import that PR #67 added on the order side.
+    Without this, fills from TWS-placed or TWS-modified orders are
+    invisible to the blotter (xenon.trades is derived from
+    xenon.order_fills, which is only written by the in-process placement
+    flow). The standalone CLI ``xenon-ib-reconcile`` does the same job
+    but no scheduler runs it — operators forget.
+
+    Skipped in test mode and when the IB pool sync role has no client
+    (gateway down). 30s timeout — boot must not hang on a slow IB.
+    """
+    from xenon.api.services.ib_activity_mirror import reconcile_fills_on_boot
+    from xenon.execution.account_scope import AccountScope
+
+    if _is_test_mode():
+        logger.info("test_mode: skipping ib fills replay")
+        return
+
+    def _ib_client_factory():
+        if ib_pool is None:
+            raise RuntimeError("ib_pool not initialized")
+        client = ib_pool.get("sync")
+        if client is None:
+            raise RuntimeError("ib_pool sync role has no client")
+        return client
+
+    _scope_account_env = getattr(app.state, "trading_mode", None)
+    _scope_account = getattr(app.state, "account", None)
+    if not _scope_account_env or not _scope_account:
+        logger.info("ib fills replay skipped: scope not resolved (trading_mode/account empty)")
+        return
+
+    scope = AccountScope(
+        broker="IB",
+        account_env=_scope_account_env,
+        broker_account=_scope_account,
+    )
+
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                reconcile_fills_on_boot,
+                ib_client_factory=_ib_client_factory,
+                scope=scope,
+            ),
+            timeout=30.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("ib fills replay timed out after 30s; continuing to serve")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ib fills replay failed on boot; continuing to serve: %s", exc)
+
+
 def _get_managed_account_for_health() -> str:
     """Return the first managedAccount from the IB pool's sync client.
 
@@ -413,6 +468,14 @@ async def lifespan(app: FastAPI):
     # heuristic has no persisted baseline on boot, so unknowns map to
     # UNKNOWN rather than auto-CANCELLED (per F7.1 design).
     await _run_rehydrate_on_boot()
+
+    # IB→Postgres activity mirror — boot replay of fills. Pulls executions
+    # from the same long-lived IB sync client and inserts new ones into
+    # xenon.order_fills + aggregated xenon.trades. Best-effort: any failure
+    # is logged and swallowed. Without this, fills from TWS-modified or
+    # TWS-placed orders never reach the blotter unless an operator runs
+    # `xenon-ib-reconcile` manually.
+    await _run_fills_replay_on_boot()
 
     # W4.7 — PG-event-driven journal auto-import listener.
     # Replaces the legacy periodic /journal/sync flow. Failures must not
