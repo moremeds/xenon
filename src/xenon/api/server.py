@@ -1118,6 +1118,52 @@ def _compute_futu_health() -> Dict[str, Any]:
     }
 
 
+def _iso_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _snapshotter_health() -> dict:
+    try:
+        engine = get_sync_engine()
+        with engine.connect() as conn:
+            last_write_at = conn.execute(select(func.max(account_snapshots.c.snapshot_at))).scalar()
+    except Exception:
+        logger.warning("[health] failed to load snapshotter heartbeat", exc_info=True)
+        return {"last_write_at": None, "stale_seconds": None}
+
+    if last_write_at is None:
+        return {"last_write_at": None, "stale_seconds": None}
+    if last_write_at.tzinfo is None:
+        last_write_at = last_write_at.replace(tzinfo=timezone.utc)
+    stale_seconds = max(0, int((datetime.now(timezone.utc) - last_write_at).total_seconds()))
+    return {"last_write_at": _iso_datetime(last_write_at), "stale_seconds": stale_seconds}
+
+
+def _order_submissions_health() -> dict:
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+        engine = get_sync_engine()
+        with engine.connect() as conn:
+            unknown_count = conn.execute(
+                select(func.count())
+                .select_from(order_submissions)
+                .where(
+                    order_submissions.c.state == "UNKNOWN",
+                    order_submissions.c.submitted_at >= cutoff,
+                )
+            ).scalar()
+    except Exception:
+        logger.warning("[health] failed to load order submissions health", exc_info=True)
+        return {"unknown_count": None, "alarm": False}
+
+    count = int(unknown_count or 0)
+    return {"unknown_count": count, "alarm": count > 5}
+
+
 @app.get("/health")
 async def health():
     gw = await check_ib_gateway()
@@ -1134,6 +1180,8 @@ async def health():
         # for the require_mode_verified 503 detail (which is auth-gated).
         "account": mask_account(getattr(app.state, "account", "")),
         "mode_verified": getattr(app.state, "mode_verified", False),
+        "snapshotter": _snapshotter_health(),
+        "order_submissions": _order_submissions_health(),
     }
 
 
@@ -1533,13 +1581,13 @@ async def orders_refresh(scope=Depends(get_account_scope)):
 # ---------------------------------------------------------------------------
 
 
-def _load_portfolio_view_sync() -> PortfolioView | None:
+def _load_portfolio_view_sync() -> tuple[PortfolioView | None, datetime | None]:
     """Load the latest scoped portfolio snapshot from Postgres for preflight."""
     scope = _resolve_scope_kwargs()
     try:
         engine = get_sync_engine()
         stmt = (
-            select(account_snapshots.c.payload)
+            select(account_snapshots.c.payload, account_snapshots.c.snapshot_at)
             .where(account_snapshots.c.broker == scope["broker"])
             .where(account_snapshots.c.account_env == scope["account_env"])
             .where(account_snapshots.c.broker_account == scope["broker_account"])
@@ -1549,18 +1597,49 @@ def _load_portfolio_view_sync() -> PortfolioView | None:
         with engine.connect() as con:
             row = con.execute(stmt).first()
         if row is None or not row.payload:
-            return None
-        return PortfolioView.model_validate(dict(row.payload))
+            return None, None
+        return PortfolioView.model_validate(dict(row.payload)), row.snapshot_at
     except (ValueError, ValidationError) as exc:
         logger.warning("[preflight] Could not validate Postgres portfolio snapshot: %s", exc)
-        return None
+        return None, None
     except Exception as exc:
         logger.warning("[preflight] Could not load Postgres portfolio snapshot: %s", exc)
-        return None
+        return None, None
 
 
-async def _load_portfolio_view() -> PortfolioView | None:
+async def _load_portfolio_view() -> tuple[PortfolioView | None, datetime | None]:
     return await asyncio.to_thread(_load_portfolio_view_sync)
+
+
+def _unpack_portfolio_load(loaded) -> tuple[PortfolioView | None, datetime | None]:
+    if isinstance(loaded, tuple) and len(loaded) == 2:
+        return loaded
+    return loaded, None
+
+
+def _portfolio_snapshot_stale_response(snapshot_at: datetime | None) -> Verdict | None:
+    if snapshot_at is None:
+        return None
+    if snapshot_at.tzinfo is None:
+        snapshot_at = snapshot_at.replace(tzinfo=timezone.utc)
+    market_open = _is_market_open_now()
+    threshold_env = "XENON_PORTFOLIO_SNAPSHOT_STALE_S" if market_open else "XENON_PORTFOLIO_SNAPSHOT_STALE_CLOSED_S"
+    default_seconds = "300" if market_open else "1800"
+    try:
+        threshold_seconds = int(os.environ.get(threshold_env, default_seconds))
+    except ValueError:
+        threshold_seconds = int(default_seconds)
+    age_seconds = (datetime.now(timezone.utc) - snapshot_at).total_seconds()
+    if age_seconds <= threshold_seconds:
+        return None
+    return Verdict(
+        accept=False,
+        reason_code=ReasonCode.PORTFOLIO_SNAPSHOT_STALE,
+        reason_detail=(
+            f"Portfolio snapshot is stale ({int(age_seconds)}s old; "
+            f"threshold {threshold_seconds}s). Sync portfolio before submitting SELL exposure."
+        ),
+    )
 
 
 def _body_to_preflight_request(body: dict) -> PreflightRequest:
@@ -1660,7 +1739,7 @@ async def _run_preflight(body: dict, user_id: str = "local") -> Verdict:
             return _invalid_order_body_response(exc)
         if preflight.combo_uncovered_short_call_ratio(req) <= 0 or req.action == "SELL":
             return preflight.evaluate_combo(req, PortfolioView())
-        portfolio = await _load_portfolio_view()
+        portfolio, snapshot_at = _unpack_portfolio_load(await _load_portfolio_view())
         if portfolio is None:
             try:
                 missing = _portfolio_required_response(body)
@@ -1669,6 +1748,9 @@ async def _run_preflight(body: dict, user_id: str = "local") -> Verdict:
             if missing is not None:
                 return missing
             portfolio = PortfolioView()
+        stale = _portfolio_snapshot_stale_response(snapshot_at)
+        if stale is not None:
+            return stale
         reservations = orders_store.working_reservations_for(user_id, req.ticker, **_resolve_scope_kwargs())
         return preflight.evaluate_combo(req, portfolio, reservations=reservations)
 
@@ -1679,12 +1761,15 @@ async def _run_preflight(body: dict, user_id: str = "local") -> Verdict:
     if req.action == "BUY":
         return preflight.evaluate(req, PortfolioView())
 
-    portfolio = await _load_portfolio_view()
+    portfolio, snapshot_at = _unpack_portfolio_load(await _load_portfolio_view())
     if portfolio is None:
         missing = _portfolio_required_response(body)
         if missing is not None:
             return missing
         portfolio = PortfolioView()
+    stale = _portfolio_snapshot_stale_response(snapshot_at)
+    if stale is not None:
+        return stale
     reservations = orders_store.working_reservations_for(user_id, req.ticker, **_resolve_scope_kwargs())
     return preflight.evaluate(req, portfolio, reservations=reservations)
 

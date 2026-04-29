@@ -6,13 +6,14 @@ code BEFORE any subprocess invocation.
 """
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 
 
-def _insert_portfolio_snapshot(payload: dict) -> None:
+def _insert_portfolio_snapshot(payload: dict, *, snapshot_at: datetime | None = None) -> None:
     import os
 
     engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
@@ -22,12 +23,16 @@ def _insert_portfolio_snapshot(payload: dict) -> None:
                 text(
                     """
                     INSERT INTO xenon.account_snapshots
-                      (account, bankroll, payload, broker, account_env, broker_account)
+                      (account, bankroll, payload, snapshot_at, broker, account_env, broker_account)
                     VALUES
-                      (:account, 0, CAST(:payload AS jsonb), 'IB', 'paper', 'DU0000000')
+                      (:account, 0, CAST(:payload AS jsonb), :snapshot_at, 'IB', 'paper', 'DU0000000')
                     """
                 ),
-                {"account": "DU0000000", "payload": json.dumps(payload)},
+                {
+                    "account": "DU0000000",
+                    "payload": json.dumps(payload),
+                    "snapshot_at": snapshot_at or datetime.now(timezone.utc),
+                },
             )
     finally:
         engine.dispose()
@@ -232,6 +237,55 @@ def test_preflight_uses_postgres_snapshot_not_portfolio_json(client, monkeypatch
         },
     )
     assert resp.status_code == 200, resp.text
+
+
+def test_stale_portfolio_snapshot_blocks_sell(client, monkeypatch):
+    """SELL exposure must not be approved from a stale PG portfolio snapshot."""
+    monkeypatch.setenv("XENON_PORTFOLIO_SNAPSHOT_STALE_S", "300")
+    _insert_portfolio_snapshot(
+        {
+            "positions": [
+                {
+                    "ticker": "SPY",
+                    "structure_type": "Stock",
+                    "direction": "LONG",
+                    "contracts": 100,
+                    "expiry": None,
+                    "legs": [{"direction": "LONG", "type": "Stock", "contracts": 100, "strike": 0.0}],
+                }
+            ],
+            "available_funds": 0,
+        },
+        snapshot_at=datetime.now(timezone.utc) - timedelta(minutes=20),
+    )
+
+    from xenon.api import server
+
+    monkeypatch.setattr(server, "_is_market_open_now", lambda: True)
+
+    resp = client.post(
+        "/orders/place",
+        json={
+            "type": "stock",
+            "symbol": "SPY",
+            "action": "SELL",
+            "quantity": 1,
+            "limitPrice": 500.10,
+            "con_id": 756733,
+            "client_attempt_id": "stale-snapshot-1",
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_STALE"
+
+
+def test_closed_market_snapshot_stale_default_is_30_minutes(monkeypatch):
+    from xenon.api import server
+
+    monkeypatch.delenv("XENON_PORTFOLIO_SNAPSHOT_STALE_CLOSED_S", raising=False)
+    monkeypatch.setattr(server, "_is_market_open_now", lambda: False)
+    verdict = server._portfolio_snapshot_stale_response(datetime.now(timezone.utc) - timedelta(minutes=20))
+    assert verdict is None
 
 
 def test_combo_call_ratio_spread_blocked_by_server_preflight(client):
