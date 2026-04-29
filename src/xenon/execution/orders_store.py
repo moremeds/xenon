@@ -19,8 +19,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from xenon.db.events import CHANNEL_FILL_RECORDED, emit_outbox_in_txn
 from xenon.db.engine import get_sync_engine
+from xenon.db.events import CHANNEL_FILL_RECORDED, emit_outbox_in_txn
 from xenon.db.schema import order_events, order_fills, order_submissions
 
 # ── Schema init ──
@@ -229,16 +229,41 @@ def register_from_snapshot(
     broker: str = "IB",
     account_env: str = "legacy_unknown",
     broker_account: str = "legacy_unknown",
+    strike: float | None = None,
+    right: str | None = None,
+    expiry: str | None = None,
+    con_id: int | None = None,
 ) -> bool:
-    """Insert a minimal row for an IB order not placed via the FastAPI flow.
+    """Register an IB-side open order in `xenon.order_submissions`.
 
-    Idempotent: keyed by submission_id = "snapshot-<perm_id>".
+    Two behaviors, one transaction:
+
+    1. An existing row for `(perm_id, broker, account_env, broker_account)`
+       wins — Xenon-authored UUID rows carry richer authorship metadata
+       (preflight verdict, modify_sequence, naked-short audit) that the
+       IB snapshot can't reconstruct. Return False.
+    2. No existing row — INSERT a `snapshot-<perm_id>` row in state
+       `WORKING` (IB returned this from `get_open_orders()`, so it's
+       literally working — `SUBMITTED` is unread by the UI route).
+       Option / BAG contract fields propagate so the UI renders the leg
+       correctly. Return True.
     """
     submission_id = f"snapshot-{perm_id}"
     client_attempt_id = f"snapshot-{perm_id}"
     now = datetime.now(timezone.utc)
     engine = get_sync_engine()
     with engine.begin() as conn:
+        existing = conn.execute(
+            select(order_submissions.c.submission_id).where(
+                order_submissions.c.perm_id == str(perm_id),
+                order_submissions.c.broker == broker,
+                order_submissions.c.account_env == account_env,
+                order_submissions.c.broker_account == broker_account,
+            )
+        ).first()
+        if existing is not None:
+            return False
+
         result = conn.execute(
             pg_insert(order_submissions)
             .values(
@@ -253,13 +278,17 @@ def register_from_snapshot(
                 ib_order_id=str(ib_order_id),
                 perm_id=str(perm_id),
                 limit_price=limit_price,
-                state="SUBMITTED",
+                state="WORKING",
                 submitted_at=now,
                 updated_at=now,
                 modify_sequence=0,
                 broker=broker,
                 account_env=account_env,
                 broker_account=broker_account,
+                strike=strike,
+                right=right,
+                expiry=expiry,
+                con_id=con_id,
             )
             .on_conflict_do_nothing(index_elements=["submission_id"])
             .returning(order_submissions.c.submission_id)

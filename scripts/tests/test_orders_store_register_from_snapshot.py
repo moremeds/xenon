@@ -43,7 +43,11 @@ def _fetch_one(sql: str, params: dict | None = None):
 
 
 def test_register_inserts_row_for_unknown_perm_id(db_path):
-    """A perm_id absent from orders_store should be insertable from snapshot."""
+    """A perm_id absent from orders_store should be insertable from snapshot.
+
+    Writes state=WORKING (IB returned this in get_open_orders, so it's
+    literally working — `SUBMITTED` is unread and would render invisible).
+    """
     inserted = register_from_snapshot(
         perm_id="1533567543",
         ib_order_id="-5",
@@ -69,8 +73,108 @@ def test_register_inserts_row_for_unknown_perm_id(db_path):
     assert row[3] == "SELL"
     assert row[4] == 20
     assert float(row[5]) == 1.7
-    assert row[6] == "SUBMITTED"
+    assert row[6] == "WORKING"
     assert row[7] == 0
+
+
+def test_register_persists_option_contract_fields(db_path):
+    """Option / BAG snapshots must carry strike/right/expiry/con_id so the UI
+    can render `SPY C500 2026-05-01` rather than bare `SPY`.
+    """
+    from datetime import date
+
+    inserted = register_from_snapshot(
+        perm_id="2000001",
+        ib_order_id="100",
+        ticker="SPY",
+        security_type="OPT",
+        action="BUY",
+        quantity=2,
+        limit_price=4.20,
+        multiplier=100,
+        strike=500.0,
+        right="C",
+        expiry="2026-05-01",
+        con_id=987654321,
+    )
+    assert inserted is True
+
+    row = _fetch_one(
+        'SELECT strike, "right", expiry, con_id, multiplier FROM xenon.order_submissions WHERE perm_id = :perm_id',
+        {"perm_id": "2000001"},
+    )
+    assert row is not None
+    assert float(row[0]) == 500.0
+    assert row[1] == "C"
+    assert row[2] == date(2026, 5, 1)
+    assert int(row[3]) == 987654321
+    assert int(row[4]) == 100
+
+
+def test_register_dedupes_against_existing_uuid_row(db_path):
+    """When a Xenon-authored UUID row already exists for this perm_id+scope,
+    register_from_snapshot must not insert a parallel `snapshot-<perm_id>`
+    row. The existing row wins (it has richer authorship metadata).
+    """
+    from datetime import datetime, timezone
+
+    from sqlalchemy import insert, select
+
+    from xenon.db.engine import get_sync_engine
+    from xenon.db.schema import order_submissions
+
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            insert(order_submissions).values(
+                submission_id="uuid-existing-001",
+                user_id="local",
+                client_attempt_id="attempt-existing-001",
+                ticker="QQQ",
+                security_type="STK",
+                action="BUY",
+                quantity=10,
+                multiplier=1,
+                ib_order_id="42",
+                perm_id="3000001",
+                limit_price=400.0,
+                state="WORKING",
+                submitted_at=datetime(2026, 4, 29, tzinfo=timezone.utc),
+                updated_at=datetime(2026, 4, 29, tzinfo=timezone.utc),
+                modify_sequence=0,
+                broker="IB",
+                account_env="live",
+                broker_account="U18007831",
+            )
+        )
+
+    inserted = register_from_snapshot(
+        perm_id="3000001",
+        ib_order_id="42",
+        ticker="QQQ",
+        security_type="STK",
+        action="BUY",
+        quantity=10,
+        limit_price=400.0,
+        broker="IB",
+        account_env="live",
+        broker_account="U18007831",
+    )
+    assert inserted is False
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(order_submissions.c.submission_id).where(
+                order_submissions.c.perm_id == "3000001",
+                order_submissions.c.broker == "IB",
+                order_submissions.c.account_env == "live",
+                order_submissions.c.broker_account == "U18007831",
+            )
+        ).all()
+
+    # Exactly one row, still keyed by the original UUID.
+    assert len(rows) == 1
+    assert rows[0].submission_id == "uuid-existing-001"
 
 
 def test_register_is_idempotent(db_path):
