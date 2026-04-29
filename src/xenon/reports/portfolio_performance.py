@@ -37,7 +37,7 @@ from sqlalchemy import select
 from xenon.clients.ib_client import IBClient  # noqa: E402
 from xenon.clients.uw_client import UWClient, UWRateLimitError  # noqa: E402
 from xenon.db.engine import get_sync_engine  # noqa: E402
-from xenon.db.schema import account_snapshots, trades as trades_table  # noqa: E402
+from xenon.db.schema import trades as trades_table
 from xenon.execution.account_scope import resolve_from_env  # noqa: E402
 from xenon.utils.price_cache import (  # noqa: E402
     OPTIONS_DIR,
@@ -125,24 +125,11 @@ def select_option_mark(row: Mapping[str, Any]) -> Optional[float]:
     return None
 
 
-def load_portfolio_snapshot(path: Path | None = None) -> dict:
-    scope = resolve_from_env()
-    engine = get_sync_engine()
-    with engine.connect() as conn:
-        row = conn.execute(
-            select(account_snapshots.c.payload)
-            .where(account_snapshots.c.broker == scope.broker)
-            .where(account_snapshots.c.account_env == scope.account_env)
-            .where(account_snapshots.c.broker_account == scope.broker_account)
-            .order_by(account_snapshots.c.snapshot_at.desc())
-            .limit(1)
-        ).first()
-    if row is None or not row.payload:
-        raise RuntimeError(
-            "No Postgres portfolio snapshot found for "
-            f"{scope.broker}/{scope.account_env}/{scope.broker_account}"
-        )
-    return dict(row.payload)
+def load_portfolio_snapshot() -> dict:
+    """Load the latest IB portfolio payload from Postgres."""
+    from xenon.utils.portfolio_loader import load_portfolio_payload_sync
+
+    return load_portfolio_payload_sync() or {}
 
 
 def parse_flex_trade_rows(df: pd.DataFrame) -> List[TradeFill]:

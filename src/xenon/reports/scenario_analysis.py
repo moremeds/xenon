@@ -728,9 +728,15 @@ def analyze_position(pos, scenario="base"):
 
 
 def run_full_analysis():
-    """Run scenario analysis across all positions for all three scenarios."""
-    with open("data/portfolio.json") as f:
-        pf = json.load(f)
+    """Run scenario analysis across all positions for all three scenarios.
+
+    Phase-2 postgres migration: portfolio sourced from PG via portfolio_loader.
+    """
+    from xenon.utils.portfolio_loader import load_portfolio_payload_sync
+
+    pf = load_portfolio_payload_sync() or {}
+    if not pf.get("positions"):
+        return {"bear": [], "base": [], "bull": []}
 
     results = {"bear": [], "base": [], "bull": []}
 

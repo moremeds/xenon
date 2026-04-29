@@ -1,33 +1,30 @@
 """Tests for scanner.py refactor — path resolution and direct imports."""
+
 import json
 import os
-import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from xenon.scanners.scanner import WATCHLIST, PORTFOLIO, fetch_flow_data
+import pytest
+
+from xenon.scanners.scanner import WATCHLIST, fetch_flow_data
 
 
 class TestWatchlistPathResolution:
-    """Verify watchlist path is absolute and works from any CWD."""
+    """Verify watchlist path is absolute and works from any CWD.
+
+    Phase-2 postgres migration removed the PORTFOLIO constant — portfolio
+    underlyings now come from xenon.account_snapshots via portfolio_loader.
+    """
 
     def test_watchlist_is_absolute(self):
         """WATCHLIST path should be absolute, not relative."""
         assert WATCHLIST.is_absolute(), f"WATCHLIST path is relative: {WATCHLIST}"
 
-    def test_portfolio_is_absolute(self):
-        """PORTFOLIO path should be absolute, not relative."""
-        assert PORTFOLIO.is_absolute(), f"PORTFOLIO path is relative: {PORTFOLIO}"
-
     def test_watchlist_under_data_dir(self):
         """WATCHLIST should be under the project data/ directory."""
         assert WATCHLIST.name == "watchlist.json"
         assert WATCHLIST.parent.name == "data"
-
-    def test_portfolio_under_data_dir(self):
-        """PORTFOLIO should be under the project data/ directory."""
-        assert PORTFOLIO.name == "portfolio.json"
-        assert PORTFOLIO.parent.name == "data"
 
 
 class TestFetchFlowDataDirect:

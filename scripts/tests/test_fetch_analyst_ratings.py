@@ -1,20 +1,22 @@
 """Tests for fetch_analyst_ratings.py — signal calculation and data extraction."""
+
 import json
-import pytest
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
+import pytest
+
 from xenon.fetchers.fetch_analyst_ratings import (
-    calculate_rating_signal,
-    get_watchlist_tickers,
-    get_portfolio_tickers,
-    get_cached_rating,
-    format_ratings_table,
     CACHE_TTL_HOURS,
+    calculate_rating_signal,
+    format_ratings_table,
+    get_cached_rating,
+    get_portfolio_tickers,
+    get_watchlist_tickers,
 )
 
-
 # ── calculate_rating_signal ─────────────────────────────────────────
+
 
 class TestCalculateRatingSignal:
     def test_high_buy_pct_bullish(self):
@@ -100,18 +102,21 @@ class TestCalculateRatingSignal:
 
 # ── get_watchlist_tickers ───────────────────────────────────────────
 
+
 class TestGetWatchlistTickers:
     def test_extracts_tickers(self, tmp_path):
         wl = tmp_path / "watchlist.json"
-        wl.write_text(json.dumps({
-            "tickers": [
-                {"ticker": "AAPL"},
-                {"ticker": "MSFT"},
-            ],
-            "subcategories": {
-                "@someone": {"tickers": [{"ticker": "NVDA"}]}
-            }
-        }))
+        wl.write_text(
+            json.dumps(
+                {
+                    "tickers": [
+                        {"ticker": "AAPL"},
+                        {"ticker": "MSFT"},
+                    ],
+                    "subcategories": {"@someone": {"tickers": [{"ticker": "NVDA"}]}},
+                }
+            )
+        )
         with patch("xenon.fetchers.fetch_analyst_ratings.WATCHLIST_FILE", wl):
             tickers = get_watchlist_tickers()
             assert "AAPL" in tickers
@@ -127,32 +132,33 @@ class TestGetWatchlistTickers:
 
 # ── get_portfolio_tickers ───────────────────────────────────────────
 
+
 class TestGetPortfolioTickers:
-    def test_extracts_tickers(self, tmp_path):
-        pf = tmp_path / "portfolio.json"
-        pf.write_text(json.dumps({
-            "positions": [
-                {"ticker": "AAPL"},
-                {"ticker": "NVDA"},
-            ]
-        }))
-        with patch("xenon.fetchers.fetch_analyst_ratings.PORTFOLIO_FILE", pf):
-            tickers = get_portfolio_tickers()
-            assert "AAPL" in tickers
-            assert "NVDA" in tickers
+    def test_extracts_tickers(self):
+        """Phase-2 postgres migration: seed PG instead of writing portfolio.json."""
+        from scripts.tests.helpers.portfolio_seed import seed_portfolio_snapshot
+
+        seed_portfolio_snapshot(
+            {
+                "positions": [
+                    {"ticker": "AAPL"},
+                    {"ticker": "NVDA"},
+                ]
+            }
+        )
+        tickers = get_portfolio_tickers()
+        assert "AAPL" in tickers
+        assert "NVDA" in tickers
 
 
 # ── get_cached_rating ───────────────────────────────────────────────
+
 
 class TestCachedRating:
     def test_fresh_cache_returned(self, tmp_path):
         cache_file = tmp_path / "cache.json"
         fresh_time = datetime.now().isoformat()
-        cache_file.write_text(json.dumps({
-            "ratings": {
-                "AAPL": {"fetched_at": fresh_time, "recommendation": "buy"}
-            }
-        }))
+        cache_file.write_text(json.dumps({"ratings": {"AAPL": {"fetched_at": fresh_time, "recommendation": "buy"}}}))
         with patch("xenon.fetchers.fetch_analyst_ratings.RATINGS_CACHE_FILE", cache_file):
             result = get_cached_rating("AAPL")
             assert result is not None
@@ -161,11 +167,7 @@ class TestCachedRating:
     def test_stale_cache_returns_none(self, tmp_path):
         cache_file = tmp_path / "cache.json"
         stale_time = (datetime.now() - timedelta(hours=CACHE_TTL_HOURS + 1)).isoformat()
-        cache_file.write_text(json.dumps({
-            "ratings": {
-                "AAPL": {"fetched_at": stale_time, "recommendation": "buy"}
-            }
-        }))
+        cache_file.write_text(json.dumps({"ratings": {"AAPL": {"fetched_at": stale_time, "recommendation": "buy"}}}))
         with patch("xenon.fetchers.fetch_analyst_ratings.RATINGS_CACHE_FILE", cache_file):
             result = get_cached_rating("AAPL")
             assert result is None
@@ -179,6 +181,7 @@ class TestCachedRating:
 
 # ── format_ratings_table ────────────────────────────────────────────
 
+
 class TestFormatRatingsTable:
     def test_empty_results(self):
         output = format_ratings_table([])
@@ -187,14 +190,21 @@ class TestFormatRatingsTable:
 
     def test_changes_only_filter(self):
         results = [
-            {"ticker": "AAPL", "ratings": {"buy_pct": 70, "sell_pct": 5, "total": 20,
-             "hold": 5}, "recommendation": "buy", "target_price": {"mean": 200},
-             "has_recent_changes": False},
-            {"ticker": "NVDA", "ratings": {"buy_pct": 80, "sell_pct": 5, "total": 30,
-             "hold": 5}, "recommendation": "buy", "target_price": {"mean": 500},
-             "has_recent_changes": True, "recent_changes": [
-                 {"category": "buy", "previous": 25, "current": 28, "change": 3}
-             ]},
+            {
+                "ticker": "AAPL",
+                "ratings": {"buy_pct": 70, "sell_pct": 5, "total": 20, "hold": 5},
+                "recommendation": "buy",
+                "target_price": {"mean": 200},
+                "has_recent_changes": False,
+            },
+            {
+                "ticker": "NVDA",
+                "ratings": {"buy_pct": 80, "sell_pct": 5, "total": 30, "hold": 5},
+                "recommendation": "buy",
+                "target_price": {"mean": 500},
+                "has_recent_changes": True,
+                "recent_changes": [{"category": "buy", "previous": 25, "current": 28, "change": 3}],
+            },
         ]
         output = format_ratings_table(results, changes_only=True)
         assert "NVDA" in output

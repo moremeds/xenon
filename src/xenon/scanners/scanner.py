@@ -25,16 +25,13 @@ logger = logging.getLogger(__name__)
 
 PROJECT_DIR = Path(__file__).resolve().parents[3]
 WATCHLIST = PROJECT_DIR / "data" / "watchlist.json"
-PORTFOLIO = PROJECT_DIR / "data" / "portfolio.json"
 
 
 def get_open_positions():
-    """Get list of tickers with open positions."""
-    if not PORTFOLIO.exists():
-        return set()
-    with open(PORTFOLIO) as f:
-        portfolio = json.load(f)
-    return {p["ticker"] for p in portfolio.get("positions", [])}
+    """Set of tickers with open positions (latest PG snapshot, scope-naive)."""
+    from xenon.utils.portfolio_loader import get_portfolio_tickers_sync
+
+    return set(get_portfolio_tickers_sync())
 
 
 def fetch_flow_data(ticker: str, days: int = 5) -> dict:
