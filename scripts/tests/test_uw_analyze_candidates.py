@@ -1,4 +1,10 @@
-"""Tests for candidate seeding."""
+"""Tests for candidate seeding.
+
+Phase-2 postgres migration: portfolio tickers come from
+xenon.account_snapshots.payload via portfolio_loader. Tests seed PG via
+the shared helper; the autouse fixture in scripts/tests/conftest.py
+truncates between tests so seeds don't leak.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.tests.helpers.portfolio_seed import seed_portfolio_snapshot  # noqa: E402
 from xenon.api.services import uw_analyze_candidates as cand  # noqa: E402
 
 
@@ -17,14 +24,13 @@ def _write(path, data):
     path.write_text(json.dumps(data))
 
 
-def test_portfolio_tickers_extracted(tmp_path):
-    p = tmp_path / "portfolio.json"
-    _write(p, {"positions": [{"ticker": "nvda"}, {"ticker": "AAPL"}, {"symbol": "msft"}]})
-    assert cand.portfolio_tickers(p) == {"NVDA", "AAPL", "MSFT"}
+def test_portfolio_tickers_extracted():
+    seed_portfolio_snapshot({"positions": [{"ticker": "nvda"}, {"ticker": "AAPL"}, {"ticker": "msft"}]})
+    assert cand.portfolio_tickers() == {"NVDA", "AAPL", "MSFT"}
 
 
-def test_portfolio_missing_returns_empty(tmp_path):
-    assert cand.portfolio_tickers(tmp_path / "missing.json") == set()
+def test_portfolio_missing_returns_empty():
+    assert cand.portfolio_tickers() == set()
 
 
 def test_watchlist_tickers_extracted(tmp_path):
@@ -34,12 +40,11 @@ def test_watchlist_tickers_extracted(tmp_path):
 
 
 def test_seed_merges_sources(tmp_path):
-    port = tmp_path / "p.json"
+    seed_portfolio_snapshot({"positions": [{"ticker": "NVDA"}, {"ticker": "MSFT"}]})
     watch = tmp_path / "w.json"
-    _write(port, {"positions": [{"ticker": "NVDA"}, {"ticker": "MSFT"}]})
     _write(watch, {"tickers": [{"ticker": "NVDA"}, {"ticker": "AAPL"}]})
 
-    out = cand.seed_candidates(portfolio_path=port, watchlist_path=watch, extra_adhoc=["TSLA"])
+    out = cand.seed_candidates(watchlist_path=watch, extra_adhoc=["TSLA"])
     assert out["NVDA"] == ["portfolio", "watchlist"]
     assert out["MSFT"] == ["portfolio"]
     assert out["AAPL"] == ["watchlist"]
@@ -49,13 +54,11 @@ def test_seed_merges_sources(tmp_path):
 def test_seed_includes_static_universe(tmp_path):
     """Static UW-analyze universe is always seeded, with empty sources
     when a ticker isn't in the portfolio/watchlist/adhoc sets."""
-    port = tmp_path / "p.json"
     watch = tmp_path / "w.json"
-    _write(port, {"positions": []})
     _write(watch, {"tickers": []})
     cand.clear_adhoc()
 
-    out = cand.seed_candidates(portfolio_path=port, watchlist_path=watch)
+    out = cand.seed_candidates(watchlist_path=watch)
     # Every static-universe ticker lands in the seed.
     for t in cand.UW_ANALYZE_STATIC_UNIVERSE:
         assert t in out, f"{t} missing from seed"
@@ -66,20 +69,19 @@ def test_seed_includes_static_universe(tmp_path):
 def test_seed_static_universe_merges_with_portfolio(tmp_path):
     """When a static-universe ticker is also in portfolio, the source
     tag is attached without dropping the scaffold presence."""
-    port = tmp_path / "p.json"
+    seed_portfolio_snapshot({"positions": [{"ticker": "SPY"}, {"ticker": "NVDA"}]})
     watch = tmp_path / "w.json"
-    _write(port, {"positions": [{"ticker": "SPY"}, {"ticker": "NVDA"}]})
     _write(watch, {"tickers": []})
     cand.clear_adhoc()
 
-    out = cand.seed_candidates(portfolio_path=port, watchlist_path=watch)
+    out = cand.seed_candidates(watchlist_path=watch)
     assert out["SPY"] == ["portfolio"]
     assert out["NVDA"] == ["portfolio"]
     # A non-portfolio static ticker remains in the seed with no source.
     assert out["XLK"] == []
 
 
-def test_adhoc_set_persists_across_calls(tmp_path):
+def test_adhoc_set_persists_across_calls():
     cand.clear_adhoc()
     cand.add_adhoc("foo")
     cand.add_adhoc("bar")
@@ -89,9 +91,8 @@ def test_adhoc_set_persists_across_calls(tmp_path):
 
 
 def test_seed_dedupes_within_a_source(tmp_path):
-    port = tmp_path / "p.json"
-    _write(port, {"positions": [{"ticker": "NVDA"}, {"ticker": "NVDA"}, {"ticker": "nvda"}]})
-    out = cand.seed_candidates(portfolio_path=port, watchlist_path=tmp_path / "missing.json")
+    seed_portfolio_snapshot({"positions": [{"ticker": "NVDA"}, {"ticker": "NVDA"}, {"ticker": "nvda"}]})
+    out = cand.seed_candidates(watchlist_path=tmp_path / "missing.json")
     # NVDA is present exactly once with a single "portfolio" source tag
     # (alongside the static-universe scaffold tickers).
     assert "NVDA" in out

@@ -31,7 +31,6 @@ from typing import Optional, Tuple
 # Project paths
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = PROJECT_ROOT / "data"
-PORTFOLIO_FILE = DATA_DIR / "portfolio.json"
 
 try:
     from xenon.utils.market_hours import get_last_market_close, get_market_status, is_market_open
@@ -320,16 +319,10 @@ def parse_portfolio_position(pos: dict) -> Optional[PositionAnalysis]:
 
 
 def load_portfolio() -> list:
-    """Load portfolio from JSON file (with checksum verification)."""
-    if not PORTFOLIO_FILE.exists():
-        return []
-    try:
-        from xenon.utils.atomic_io import verified_load
+    """Load positions from the latest IB portfolio snapshot in Postgres."""
+    from xenon.utils.portfolio_loader import load_portfolio_payload_sync
 
-        data = verified_load(str(PORTFOLIO_FILE))
-    except (ValueError, ImportError):
-        with open(PORTFOLIO_FILE) as f:
-            data = json.load(f)
+    data = load_portfolio_payload_sync() or {}
     return data.get("positions", [])
 
 

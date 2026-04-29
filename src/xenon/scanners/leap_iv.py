@@ -979,21 +979,15 @@ def generate_report(results: list, min_gap: float, target_years: list = None) ->
 
 
 def load_portfolio_tickers() -> Dict[str, str]:
-    """Load tickers from portfolio.json"""
-    portfolio_path = Path(__file__).resolve().parent.parent.parent.parent / "data" / "portfolio.json"
-    if not portfolio_path.exists():
-        print("⚠ No portfolio.json found")
+    """Load tickers → structure_type from latest portfolio snapshot in Postgres."""
+    from xenon.utils.portfolio_loader import load_portfolio_payload_sync
+
+    portfolio = load_portfolio_payload_sync() or {}
+    if not portfolio.get("positions"):
+        print("⚠ No portfolio snapshot in Postgres")
         return {}
 
-    try:
-        from xenon.utils.atomic_io import verified_load
-
-        portfolio = verified_load(str(portfolio_path))
-    except (ValueError, ImportError):
-        with open(portfolio_path) as f:
-            portfolio = json.load(f)
-
-    tickers = {}
+    tickers: Dict[str, str] = {}
     for pos in portfolio.get("positions", []):
         ticker = pos.get("ticker")
         if ticker and ticker not in tickers:

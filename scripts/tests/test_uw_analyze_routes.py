@@ -16,17 +16,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import pytest  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
 from xenon.api.routes import uw_analyze as routes_mod  # noqa: E402
 from xenon.api.services import uw_analyze_candidates as cand  # noqa: E402
 from xenon.api.services.uw_analyze_cache import UwAnalyzeCache  # noqa: E402
 from xenon.api.services.uw_analyze_flow_tracker import FlowLog  # noqa: E402
-from fastapi import FastAPI  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
 
 _original_runner = routes_mod._runner
 _original_portfolio_cache = routes_mod._portfolio_cache
 _original_flow_log = routes_mod._flow_log
-_original_portfolio_path = cand.PORTFOLIO_PATH
 _original_watchlist_path = cand.WATCHLIST_PATH
 
 
@@ -37,24 +37,26 @@ def _restore_module_state():
     routes_mod._runner = _original_runner
     routes_mod._portfolio_cache = _original_portfolio_cache
     routes_mod._flow_log = _original_flow_log
-    cand.PORTFOLIO_PATH = _original_portfolio_path
     cand.WATCHLIST_PATH = _original_watchlist_path
     routes_mod.reset_state_for_tests()
 
 
 def _build_app(tmp_path, fake_runner, *, portfolio=None, watchlist=None, market_open=True):
     """Wire a fresh module-state cache + flow log + candidate fixtures
-    into the route singletons, then mount the router on a fresh app."""
+    into the route singletons, then mount the router on a fresh app.
+
+    Phase-2 postgres migration: portfolio fixtures are seeded into
+    xenon.account_snapshots.payload via the shared seed helper instead of
+    writing data/portfolio.json. The autouse `_postgres_orders_test_db`
+    fixture truncates between tests so seeds don't leak.
+    """
+    from scripts.tests.helpers.portfolio_seed import seed_portfolio_snapshot
+
     routes_mod.reset_state_for_tests()
     cand.clear_adhoc()
 
-    # Patch candidates source paths to fixtures.
     if portfolio is not None:
-        path = tmp_path / "portfolio.json"
-        path.write_text(__import__("json").dumps(portfolio))
-        cand.PORTFOLIO_PATH = path
-    else:
-        cand.PORTFOLIO_PATH = tmp_path / "missing-portfolio.json"
+        seed_portfolio_snapshot(portfolio)
     if watchlist is not None:
         path = tmp_path / "watchlist.json"
         path.write_text(__import__("json").dumps(watchlist))

@@ -38,7 +38,6 @@ from xenon.utils.market_calendar import (
 )
 
 WATCHLIST = Path(__file__).resolve().parent.parent.parent.parent / "data" / "watchlist.json"
-PORTFOLIO = Path(__file__).resolve().parent.parent.parent.parent / "data" / "portfolio.json"
 
 # Keep for backward compatibility with existing tests
 MARKET_HOLIDAYS_2026 = load_holidays(2026)

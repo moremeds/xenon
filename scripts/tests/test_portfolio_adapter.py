@@ -1,4 +1,5 @@
 """Tests for scripts/utils/portfolio_adapter.py — broker-agnostic position normalization."""
+
 import json
 from pathlib import Path
 
@@ -12,48 +13,62 @@ from xenon.utils.portfolio_adapter import (
 
 
 @pytest.fixture
-def ib_portfolio_file(tmp_path: Path) -> Path:
-    p = tmp_path / "portfolio.json"
-    p.write_text(json.dumps({
-        "positions": [
-            {"id": 1, "ticker": "GLD", "structure": "Short Put $440.0",
-             "direction": "SHORT", "contracts": 1},
-            {"id": 2, "ticker": "QQQ", "structure": "Long Call $500.0",
-             "direction": "LONG", "contracts": 2},
-        ]
-    }))
-    return p
+def seeded_ib_portfolio():
+    """Phase-2 postgres migration: seed xenon.account_snapshots.payload
+    instead of writing data/portfolio.json. The autouse fixture in
+    conftest truncates between tests."""
+    from scripts.tests.helpers.portfolio_seed import seed_portfolio_snapshot
+
+    seed_portfolio_snapshot(
+        {
+            "positions": [
+                {"id": 1, "ticker": "GLD", "structure": "Short Put $440.0", "direction": "SHORT", "contracts": 1},
+                {"id": 2, "ticker": "QQQ", "structure": "Long Call $500.0", "direction": "LONG", "contracts": 2},
+            ]
+        }
+    )
 
 
 @pytest.fixture
 def futu_portfolio_file(tmp_path: Path) -> Path:
     p = tmp_path / "futu_portfolio.json"
-    p.write_text(json.dumps({
-        "positions": [
+    p.write_text(
+        json.dumps(
             {
-                "futu_code": "US.TSLA270115P400000",
-                "normalized": {"kind": "OPT", "symbol": "TSLA", "right": "P", "strike": 400.0,
-                               "expiry": "20270115", "currency": "USD"},
-                "quantity": -15.0, "position_side": "SHORT",
-            },
-            {
-                "futu_code": "US.NVDA",
-                "normalized": {"kind": "STK", "symbol": "NVDA", "currency": "USD"},
-                "quantity": 100.0, "position_side": "LONG",
-            },
-            {
-                "futu_code": "HK.00700",
-                "normalized": {"kind": "STK", "symbol": "0700", "currency": "HKD"},
-                "quantity": 200.0, "position_side": "LONG",
-            },
-        ]
-    }))
+                "positions": [
+                    {
+                        "futu_code": "US.TSLA270115P400000",
+                        "normalized": {
+                            "kind": "OPT",
+                            "symbol": "TSLA",
+                            "right": "P",
+                            "strike": 400.0,
+                            "expiry": "20270115",
+                            "currency": "USD",
+                        },
+                        "quantity": -15.0,
+                        "position_side": "SHORT",
+                    },
+                    {
+                        "futu_code": "US.NVDA",
+                        "normalized": {"kind": "STK", "symbol": "NVDA", "currency": "USD"},
+                        "quantity": 100.0,
+                        "position_side": "LONG",
+                    },
+                    {
+                        "futu_code": "HK.00700",
+                        "normalized": {"kind": "STK", "symbol": "0700", "currency": "HKD"},
+                        "quantity": 200.0,
+                        "position_side": "LONG",
+                    },
+                ]
+            }
+        )
+    )
     return p
 
 
-def test_load_ib(monkeypatch, ib_portfolio_file):
-    from xenon.utils import portfolio_adapter
-    monkeypatch.setattr(portfolio_adapter, "IB_PORTFOLIO", ib_portfolio_file)
+def test_load_ib(seeded_ib_portfolio):
     result = load_normalized_positions("ib")
     assert len(result.positions) == 2
     assert result.positions[0].ticker == "GLD"
@@ -66,6 +81,7 @@ def test_load_ib(monkeypatch, ib_portfolio_file):
 
 def test_load_futu_filters_non_us(monkeypatch, futu_portfolio_file):
     from xenon.utils import portfolio_adapter
+
     monkeypatch.setattr(portfolio_adapter, "FUTU_PORTFOLIO", futu_portfolio_file)
     result = load_normalized_positions("futu")
     tickers = [p.ticker for p in result.positions]
@@ -80,6 +96,7 @@ def test_load_futu_filters_non_us(monkeypatch, futu_portfolio_file):
 
 def test_load_missing_file_returns_empty(monkeypatch, tmp_path):
     from xenon.utils import portfolio_adapter
+
     monkeypatch.setattr(portfolio_adapter, "FUTU_PORTFOLIO", tmp_path / "nope.json")
     result = load_normalized_positions("futu")
     assert result.positions == []

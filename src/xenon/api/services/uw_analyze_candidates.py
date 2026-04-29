@@ -1,9 +1,9 @@
 """Candidate seeding for UW Analyze portfolio view.
 
 Resolves the union of:
-- portfolio underlyings (data/portfolio.json::positions[].ticker)
-- watchlist tickers   (data/watchlist.json::tickers[].ticker)
-- in-memory ad-hoc set (per-process; cleared on restart)
+- portfolio underlyings (xenon.account_snapshots.payload, scope-naive)
+- watchlist tickers     (data/watchlist.json::tickers[].ticker)
+- in-memory ad-hoc set  (per-process; cleared on restart)
 
 Returns `dict[str, list[Source]]` where Source ∈ {"portfolio", "watchlist", "adhoc"}.
 A ticker present in multiple buckets is tagged with all of them.
@@ -22,7 +22,6 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 logger = logging.getLogger("xenon.uw_analyze_candidates")
 
 _DATA = _PROJECT_ROOT / "data"
-PORTFOLIO_PATH = _DATA / "portfolio.json"
 WATCHLIST_PATH = _DATA / "watchlist.json"
 
 # Static UW-analyze universe — always scanned regardless of portfolio /
@@ -85,18 +84,11 @@ def _read_json(path: Path) -> dict | list | None:
         return None
 
 
-def portfolio_tickers(path: Path = PORTFOLIO_PATH) -> set[str]:
-    data = _read_json(path)
-    if not isinstance(data, dict):
-        return set()
-    out: set[str] = set()
-    for pos in data.get("positions") or []:
-        if not isinstance(pos, dict):
-            continue
-        t = pos.get("ticker") or pos.get("symbol")
-        if isinstance(t, str) and t:
-            out.add(t.upper())
-    return out
+def portfolio_tickers() -> set[str]:
+    """Return uppercase tickers from the latest IB portfolio snapshot in Postgres."""
+    from xenon.utils.portfolio_loader import get_portfolio_tickers_sync
+
+    return set(get_portfolio_tickers_sync())
 
 
 def watchlist_tickers(path: Path = WATCHLIST_PATH) -> set[str]:
@@ -115,17 +107,16 @@ def watchlist_tickers(path: Path = WATCHLIST_PATH) -> set[str]:
 
 def seed_candidates(
     *,
-    portfolio_path: Path | None = None,
     watchlist_path: Path | None = None,
     extra_adhoc: Iterable[str] = (),
 ) -> dict[str, list[str]]:
     """Build the ticker → sources[] map.
 
-    Paths default to the module-level `PORTFOLIO_PATH` / `WATCHLIST_PATH`
-    attributes resolved AT CALL TIME — tests rebinding these module
-    attributes will be picked up correctly.
+    Watchlist path defaults to the module-level `WATCHLIST_PATH` resolved AT
+    CALL TIME — tests rebinding this attribute will be picked up correctly.
+    Portfolio tickers come from Postgres (latest snapshot, scope-naive).
     """
-    port = portfolio_tickers(portfolio_path or PORTFOLIO_PATH)
+    port = portfolio_tickers()
     watch = watchlist_tickers(watchlist_path or WATCHLIST_PATH)
     adhoc = set(_adhoc) | {t.upper() for t in extra_adhoc if t}
 
