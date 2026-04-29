@@ -734,7 +734,9 @@ def _write_scan_to_postgres(filename: str, data: dict) -> None:
     """Write a scanner result to Postgres scan_results table (best-effort).
 
     For 'vcg.json', also writes a row to xenon.vcg_series so generated columns
-    populate. (gex.json writes its own gex_snapshots row inside gex.py.)
+    populate. For 'cri.json', also writes a row to xenon.cri_series — the
+    Phase 1 regime_state view reads cri_series, not scan_results.
+    (gex.json writes its own gex_snapshots row inside gex.py.)
     """
     scan_type = _SCAN_TYPE_MAP.get(filename)
     if not scan_type:
@@ -761,6 +763,10 @@ def _write_scan_to_postgres(filename: str, data: dict) -> None:
                     market_open=data.get("market_open"),
                     credit_proxy=data.get("credit_proxy"),
                 )
+            elif filename == "cri.json":
+                from xenon.db.queries.scans import save_cri_scan
+
+                save_cri_scan(conn, payload=data)
         engine.dispose()
     except Exception:
         logger.warning("scan archive to Postgres failed for %s", filename, exc_info=True)
