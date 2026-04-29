@@ -168,11 +168,12 @@ async def activity_poller_loop(
             oo = result.get("open_orders") or {}
             fills = result.get("fills") or {}
             logger.info(
-                "ib_activity_mirror tick: open_orders[reg=%s upd=%s skip=%s] fills[ins=%s rep=%s]",
+                "ib_activity_mirror tick: open_orders[reg=%s upd=%s skip=%s] fills[ins=%s upd=%s rep=%s]",
                 oo.get("registered"),
                 oo.get("updated"),
                 oo.get("skipped"),
                 fills.get("inserted"),
+                fills.get("updated"),
                 fills.get("replayed"),
             )
         except asyncio.CancelledError:

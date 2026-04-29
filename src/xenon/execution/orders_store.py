@@ -8,6 +8,7 @@ Spec: docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md §12.
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,11 +17,11 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import func, insert, select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import Text, cast, func, insert, literal, select, update
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, insert as pg_insert
 
 from xenon.db.engine import get_sync_engine
-from xenon.db.events import CHANNEL_FILL_RECORDED, emit_outbox_in_txn
+from xenon.db.events import CHANNEL_FILL_COMMISSION_UPDATED, CHANNEL_FILL_RECORDED, emit_outbox_in_txn
 from xenon.db.schema import order_events, order_fills, order_submissions
 
 # ── Schema init ──
@@ -531,6 +532,76 @@ def record_fill(
                 "broker": broker,
                 "account_env": account_env,
                 "broker_account": broker_account,
+            },
+        )
+        return True
+
+
+def update_fill_commission(
+    *,
+    exec_id: str,
+    commission: Decimal,
+    realized_pnl: Decimal | None,
+) -> bool:
+    """Apply a late-arriving CommissionReport to an existing order_fills row.
+
+    Execution-grain fill fields remain insert-only. IB delivers commission
+    and realizedPNL on a separate message, so this writer only patches those
+    post-fill report fields and emits an outbox event when anything changed.
+    """
+    incoming_commission = Decimal(str(commission))
+    realized_pnl_text = str(realized_pnl) if realized_pnl is not None else None
+
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        row = conn.execute(
+            select(
+                order_fills.c.exec_id,
+                order_fills.c.submission_id,
+                order_fills.c.combo_attempt_id,
+                order_fills.c.commission,
+                order_fills.c.metadata,
+            )
+            .where(order_fills.c.exec_id == exec_id)
+            .with_for_update()
+        ).first()
+        if row is None:
+            return False
+
+        fill = row._mapping
+        stored_commission = Decimal(fill["commission"] or 0)
+        metadata = fill["metadata"] if isinstance(fill["metadata"], dict) else {}
+        existing_realized_pnl = metadata.get("realized_pnl")
+        existing_realized_pnl_text = str(existing_realized_pnl) if existing_realized_pnl is not None else None
+
+        update_commission = incoming_commission > 0 and stored_commission == 0
+        update_realized_pnl = realized_pnl is not None and existing_realized_pnl_text != realized_pnl_text
+        if not update_commission and not update_realized_pnl:
+            return False
+
+        values = {}
+        if update_commission:
+            values["commission"] = incoming_commission
+        if update_realized_pnl:
+            values["metadata"] = func.jsonb_set(
+                func.coalesce(order_fills.c.metadata, cast(literal("{}"), JSONB)),
+                cast(literal(["realized_pnl"]), ARRAY(Text)),
+                cast(literal(json.dumps(realized_pnl_text)), JSONB),
+                True,
+            )
+
+        conn.execute(update(order_fills).where(order_fills.c.exec_id == exec_id).values(**values))
+        emit_outbox_in_txn(
+            conn,
+            channel=CHANNEL_FILL_COMMISSION_UPDATED,
+            source="update_fill_commission",
+            payload={
+                "exec_id": exec_id,
+                "submission_id": fill["submission_id"],
+                "combo_attempt_id": fill["combo_attempt_id"],
+                "legacy_id": metadata.get("legacy_id"),
+                "commission": str(incoming_commission),
+                "realized_pnl": realized_pnl_text,
             },
         )
         return True

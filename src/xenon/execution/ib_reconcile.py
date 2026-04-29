@@ -30,8 +30,11 @@ from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HO
 from xenon.db.engine import get_sync_engine
 from xenon.db.schema import account_snapshots
 from xenon.execution.account_scope import AccountScope, resolve_from_env
-from xenon.execution.orders_store import record_fill
+from xenon.execution.orders_store import record_fill, update_fill_commission
 from xenon.execution.trade_aggregator import aggregate_trade_from_fills
+
+_ZERO = Decimal("0")
+_IB_UNSET_COMMISSION_THRESHOLD = Decimal("1e100")
 
 
 def log(msg: str, level: str = "info"):
@@ -108,6 +111,9 @@ def fetch_ib_executions(client: IBClient, lookback_days: int = 7) -> list:
         e = fill.execution
         c = fill.contract
         cr = fill.commissionReport
+        commission_ready = bool(cr and getattr(cr, "execId", "") == getattr(e, "execId", ""))
+        commission = cr.commission if commission_ready else 0
+        realized_pnl = cr.realizedPNL if commission_ready and getattr(cr, "realizedPNL", None) is not None else 0
 
         executions.append(
             {
@@ -122,8 +128,9 @@ def fetch_ib_executions(client: IBClient, lookback_days: int = 7) -> list:
                 "shares": e.shares,
                 "price": e.price,
                 "exchange": e.exchange,
-                "commission": cr.commission if cr else 0,
-                "realized_pnl": cr.realizedPNL if cr and cr.realizedPNL else 0,
+                "commission": commission,
+                "realized_pnl": realized_pnl,
+                "commission_ready": commission_ready,
                 "strike": c.strike if c.secType == "OPT" else None,
                 "expiry": c.lastTradeDateOrContractMonth if c.secType == "OPT" else None,
                 "right": c.right if c.secType == "OPT" else None,
@@ -154,6 +161,24 @@ def _coerce_datetime(value: Any) -> datetime:
 
 def _decimal(value: Any) -> Decimal:
     return Decimal(str(value if value is not None else 0))
+
+
+def _is_unset_commission(value: Decimal) -> bool:
+    return value >= _IB_UNSET_COMMISSION_THRESHOLD
+
+
+def _commission_for_record(execution: dict) -> Decimal:
+    commission = _decimal(_field(execution, "commission"))
+    if _field(execution, "commission_ready") is False or _is_unset_commission(commission):
+        return _ZERO
+    return commission
+
+
+def _realized_pnl_for_update(execution: dict) -> Decimal | None:
+    raw = _field(execution, "realized_pnl", "realizedPNL")
+    if raw is None:
+        return None
+    return _decimal(raw)
 
 
 def _normalize_fill_side(side: Any) -> str:
@@ -246,6 +271,7 @@ def record_external_fills(
     """
     resolved = scope or resolve_from_env()
     inserted = 0
+    updated = 0
     replayed = 0
     affected_legacy_ids: set[str] = set()
     affected_submission_ids: set[str] = set()
@@ -254,8 +280,10 @@ def record_external_fills(
         perm_id = str(_field(execution, "perm_id", "permId") or "") or None
         submission_id = _resolve_submission_id_by_perm_id(perm_id, scope=resolved)
         legacy_id = _legacy_group_id(execution)
+        exec_id = _execution_exec_id(execution)
+        commission = _commission_for_record(execution)
         did_insert = record_fill(
-            exec_id=_execution_exec_id(execution),
+            exec_id=exec_id,
             submission_id=submission_id,
             combo_attempt_id=None,
             perm_id=perm_id,
@@ -265,7 +293,7 @@ def record_external_fills(
             side=_normalize_fill_side(_field(execution, "side")),
             qty=int(_field(execution, "shares", "qty")),
             price=_decimal(_field(execution, "price")),
-            commission=_decimal(_field(execution, "commission")),
+            commission=commission,
             filled_at=_coerce_datetime(_field(execution, "time", "filled_at")),
             metadata=_fill_metadata(execution, legacy_id=legacy_id),
             broker=resolved.broker,
@@ -279,7 +307,23 @@ def record_external_fills(
             else:
                 affected_legacy_ids.add(legacy_id)
         else:
-            replayed += 1
+            raw_commission = _decimal(_field(execution, "commission"))
+            commission_ready = bool(_field(execution, "commission_ready"))
+            did_update = False
+            if commission_ready and not _is_unset_commission(raw_commission):
+                did_update = update_fill_commission(
+                    exec_id=exec_id,
+                    commission=commission,
+                    realized_pnl=_realized_pnl_for_update(execution),
+                )
+            if did_update:
+                updated += 1
+                if submission_id is not None:
+                    affected_submission_ids.add(submission_id)
+                else:
+                    affected_legacy_ids.add(legacy_id)
+            else:
+                replayed += 1
 
     ordered_submission_ids = sorted(affected_submission_ids)
     for sid in ordered_submission_ids:
@@ -291,6 +335,7 @@ def record_external_fills(
 
     return {
         "inserted": inserted,
+        "updated": updated,
         "replayed": replayed,
         "affected_legacy_ids": ordered_legacy_ids,
         "affected_submission_ids": ordered_submission_ids,

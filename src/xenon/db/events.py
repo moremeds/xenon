@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 _CHANNEL_RE = re.compile(r"^[a-z_][a-z0-9_.]{0,62}$")
 CHANNEL_FILL_RECORDED = "fill.recorded"
+CHANNEL_FILL_COMMISSION_UPDATED = "fill.commission_updated"
 CHANNEL_TRADE_CLOSED = "trade.closed"
 
 

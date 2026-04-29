@@ -260,6 +260,77 @@ def test_run_activity_poll_tick_swallows_each_surface_independently(monkeypatch,
     assert result["fills"]["inserted"] == 0
 
 
+def test_poller_tick_returns_updated_count(monkeypatch, scope, caplog):
+    """Late commission updates are a first-class fill-side outcome."""
+    import asyncio
+    import logging
+
+    from xenon.api.services import ib_activity_mirror
+
+    monkeypatch.setattr(
+        ib_activity_mirror,
+        "_fetch_open_orders",
+        lambda c: [{"orderId": 1, "permId": 9, "contract": {"secType": "STK", "symbol": "QQQ"}}],
+    )
+    monkeypatch.setattr(
+        ib_activity_mirror,
+        "_fetch_ib_executions",
+        lambda c, lookback_days=7: [{"exec_id": "x1", "perm_id": "9", "symbol": "QQQ"}],
+    )
+    monkeypatch.setattr(
+        ib_activity_mirror,
+        "_sync_open_orders_to_postgres",
+        lambda open_orders, *, scope: {"registered": 0, "updated": 0, "skipped": 0, "open_count": 1},
+    )
+    monkeypatch.setattr(
+        ib_activity_mirror,
+        "_record_external_fills",
+        lambda executions, *, scope: {
+            "inserted": 0,
+            "updated": 1,
+            "replayed": 0,
+            "affected_legacy_ids": [],
+            "affected_submission_ids": [],
+        },
+    )
+
+    result = ib_activity_mirror.run_activity_poll_tick(
+        ib_client_factory=lambda: object(),
+        scope=scope,
+    )
+    assert result["fills"]["updated"] == 1
+
+    tick_count = 0
+
+    def fake_tick(**kwargs):
+        nonlocal tick_count
+        tick_count += 1
+        return result
+
+    monkeypatch.setattr(ib_activity_mirror, "run_activity_poll_tick", fake_tick)
+
+    async def _run_once():
+        task = asyncio.create_task(
+            ib_activity_mirror.activity_poller_loop(
+                ib_client_factory=lambda: object(),
+                scope=scope,
+                interval_s=60,
+            )
+        )
+        while tick_count == 0:
+            await asyncio.sleep(0.01)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    with caplog.at_level(logging.INFO, logger="xenon.api.services.ib_activity_mirror"):
+        asyncio.run(_run_once())
+
+    assert "fills[ins=0 upd=1 rep=0]" in caplog.text
+
+
 def test_activity_poller_loop_runs_until_cancelled(monkeypatch, scope):
     """The forever loop should call run_activity_poll_tick repeatedly and
     exit cleanly on asyncio.CancelledError."""

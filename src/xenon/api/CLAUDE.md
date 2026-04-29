@@ -35,6 +35,8 @@ Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xeno
   - `register_from_snapshot` UPDATEs `snapshot-*` rows on price/qty drift and emits an `IB_MIRROR_UPDATE` order_event with before/after. Xenon-authored UUID rows are deliberately untouched (their `modify_sequence` invariant is the source of truth) — TWS-side modifies on those are a known gap.
   - `record_external_fills` resolves `(perm_id, scope)` → `submission_id` so blotter rows tie back to the originating order. Falls back to `legacy_id` grouping for true orphans only.
 
+  Late-arriving commission/realizedPNL. IB delivers Execution then CommissionReport as separate messages — the report can lag by minutes for BAG. The poller inserts fills with commission=0 on the first tick, then applies `update_fill_commission` on subsequent ticks once `cr.execId == exec.execId`. Three tests lock this in: first-tick zero insert, second-tick non-zero update, idempotent zero-zero no-op.
+
   **Known gap — TWS cancels not mirrored.** The current poller does not transition `WORKING` snapshot-* rows to `CANCELLED` when they disappear from `get_open_orders()`. Naïve disappearance-detection is unsafe: an order that *fills\* mid-tick also disappears, and we'd misclassify it as `CANCELLED`. The right fix combines the disappeared set with `xenon.order_fills` for the same `(perm_id, scope)` to disambiguate fill vs cancel, plus an idle-grace window. Tracked as follow-up.
 
 ## Cancel / Modify Failure Propagation
