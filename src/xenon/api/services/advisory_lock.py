@@ -73,12 +73,22 @@ async def pg_try_advisory_lock(
     try:
         result = await conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": key})
         got_lock = bool(result.scalar())
+        # SQLAlchemy 2.x AsyncConnection.execute() auto-begins a transaction.
+        # If we yield with that txn open, the lock-holding session sits
+        # `idle in transaction` for the entire loop runtime — blocking
+        # VACUUM, bloating WAL, and showing up in pg_stat_activity warnings.
+        # Postgres advisory locks are session-scoped, not transaction-scoped,
+        # so they survive commit/rollback. Commit here releases the txn while
+        # the lock stays held until the session closes (or we explicitly
+        # unlock below).
+        await conn.commit()
         try:
             yield got_lock
         finally:
             if got_lock:
                 try:
                     await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
+                    await conn.commit()
                 except Exception:
                     # Connection may already be closed by an outer error;
                     # the lock dies with the session anyway.
