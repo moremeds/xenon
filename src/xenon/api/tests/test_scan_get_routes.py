@@ -24,8 +24,8 @@ def _seed(scan_type: str, payload: dict) -> None:
 
 
 def test_scan_get_returns_latest_pg_payload(client):
-    _seed("scanner", {"scan_id": "old", "candidates": []})
-    _seed("scanner", {"scan_id": "new", "candidates": [{"ticker": "AAPL"}]})
+    _seed("watchlist", {"scan_id": "old", "candidates": []})
+    _seed("watchlist", {"scan_id": "new", "candidates": [{"ticker": "AAPL"}]})
 
     body = client.get("/scan").json()
     assert body["scan_id"] == "new"

@@ -67,11 +67,11 @@ def client():
 
 def _plan_payload() -> dict:
     return {
-        "ticker": "AAPL",
+        "ticker": "SPY",
         "intent": "OPEN",
         "legs": [
             {
-                "contract_id": "AAPL_20260417_200_C",
+                "contract_id": "SPY_20260417_200_C",
                 "action": "BUY",
                 "right": "C",
                 "strike": "200",
@@ -79,7 +79,7 @@ def _plan_payload() -> dict:
                 "quantity": 1,
             },
             {
-                "contract_id": "AAPL_20260417_210_C",
+                "contract_id": "SPY_20260417_210_C",
                 "action": "SELL",
                 "right": "C",
                 "strike": "210",
@@ -88,11 +88,11 @@ def _plan_payload() -> dict:
             },
         ],
         "quotes": {
-            "AAPL_20260417_200_C": {"bid": "4.50", "ask": "4.70"},
-            "AAPL_20260417_210_C": {"bid": "2.00", "ask": "2.20"},
+            "SPY_20260417_200_C": {"bid": "4.50", "ask": "4.70"},
+            "SPY_20260417_210_C": {"bid": "2.00", "ask": "2.20"},
         },
         "order_payload": {
-            "symbol": "AAPL",
+            "symbol": "SPY",
             "type": "combo",
             "action": "BUY",
             "quantity": 1,
@@ -115,17 +115,36 @@ def _plan_payload() -> dict:
     }
 
 
+def _enriched_order_payload(order_payload: dict) -> dict:
+    plan = _plan_payload()
+    payload = dict(order_payload)
+    enriched_legs = []
+    for raw_leg, planned_leg in zip(payload.get("legs") or [], plan["legs"], strict=True):
+        enriched_legs.append(
+            {
+                **dict(raw_leg),
+                "symbol": plan["ticker"],
+                "expiry": planned_leg["expiry"],
+                "strike": float(planned_leg["strike"]),
+                "right": planned_leg["right"],
+                "ratio": planned_leg["quantity"],
+            }
+        )
+    payload["legs"] = enriched_legs
+    return payload
+
+
 def _seed_session(session_id: str, order_payload: dict) -> None:
     engine = _pg_engine()
     with engine.begin() as conn:
         cwq.create_session(
             conn,
             session_id=session_id,
-            ticker="AAPL",
+            ticker=_plan_payload()["ticker"],
             state="planned",
             structure_name="Bull Call Spread",
             intent="OPEN",
-            payload=order_payload,
+            payload=_enriched_order_payload(order_payload),
         )
     engine.dispose()
 
@@ -223,12 +242,16 @@ def test_submit_endpoint_reuses_shared_combo_submission_path(client):
 
     engine = _pg_engine()
     with engine.connect() as conn:
-        count = conn.execute(
-            text("SELECT COUNT(*) FROM xenon.order_submissions WHERE client_attempt_id LIKE 'wiz:wiz-submit-1:combo:%'")
-        ).scalar()
+        row = conn.execute(
+            text(
+                "SELECT COUNT(*) AS count, MIN(security_type) AS security_type "
+                "FROM xenon.order_submissions WHERE client_attempt_id LIKE 'wiz:wiz-submit-1:combo:%'"
+            )
+        ).one()
     engine.dispose()
 
-    assert count == 1
+    assert row.count == 1
+    assert row.security_type == "BAG"
 
 
 def test_submit_endpoint_claims_session_before_live_order(monkeypatch, client):

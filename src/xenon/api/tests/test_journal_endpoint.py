@@ -92,3 +92,23 @@ def test_journal_create_requires_ticker_or_trade_id():
     response = TestClient(app).post("/journal", json={"decision": "MANUAL"})
     assert response.status_code == 400
     assert "ticker" in response.json()["detail"]
+
+
+def test_journal_create_rejects_invalid_trade_id():
+    response = TestClient(app).post(
+        "/journal",
+        json={"trade_id": "not-an-int", "decision": "MANUAL"},
+    )
+
+    assert response.status_code == 400
+    assert "trade_id" in response.json()["detail"]
+
+
+def test_journal_create_rejects_invalid_authored_at():
+    response = TestClient(app).post(
+        "/journal",
+        json={"ticker": "NVDA", "authored_at": "not-a-date"},
+    )
+
+    assert response.status_code == 400
+    assert "authored_at" in response.json()["detail"]

@@ -36,7 +36,7 @@ def init_store(db_path: Path | str | None = None) -> Path:
 
 class RequestRow(BaseModel):
     ticker: str
-    security_type: Literal["STK", "OPT"]
+    security_type: Literal["STK", "OPT", "BAG"]
     action: Literal["BUY", "SELL"]
     quantity: int = Field(gt=0)
     expiry: str | None = None

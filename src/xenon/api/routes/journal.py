@@ -26,11 +26,23 @@ def _parse_authored_at(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value.astimezone(timezone.utc)
     if isinstance(value, str):
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="authored_at must be an ISO timestamp") from exc
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
     raise HTTPException(status_code=400, detail="authored_at must be an ISO timestamp")
+
+
+def _parse_trade_id(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="trade_id must be an integer") from exc
 
 
 @router.get("/journal")
@@ -52,7 +64,7 @@ async def journal_create(
     scope: AccountScope = Depends(get_account_scope),
 ) -> dict[str, Any]:
     trade_id_raw = body.get("trade_id")
-    trade_id = int(trade_id_raw) if trade_id_raw not in (None, "") else None
+    trade_id = _parse_trade_id(trade_id_raw)
     ticker = str(body.get("ticker") or "").strip().upper()
 
     engine = get_sync_engine()

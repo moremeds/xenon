@@ -1,10 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+vi.mock("next/server", () => ({
+  NextResponse: {
+    json: (body: unknown, init?: ResponseInit) =>
+      new Response(JSON.stringify(body), {
+        ...init,
+        headers: {
+          "content-type": "application/json",
+          ...(init?.headers ?? {}),
+        },
+      }),
+  },
+}));
+
 /**
  * sync-fallback.test.ts
  *
- * When sync fails, routes must fall back to cached data and return 200.
- * 502 should only happen when both sync and cache are unavailable.
+ * When sync fails, routes surface the FastAPI/Postgres failure instead of
+ * serving local JSON fallback data.
  */
 
 const mockStat = vi.fn();

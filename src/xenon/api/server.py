@@ -1396,7 +1396,7 @@ def _empty_cri_payload() -> dict:
 
 @app.get("/scan")
 async def scan_get():
-    return await _load_latest_scan_payload("scanner") or _empty_scan_payload()
+    return await _load_latest_scan_payload("watchlist") or _empty_scan_payload()
 
 
 @app.post("/scan")
@@ -1643,9 +1643,7 @@ def _portfolio_snapshot_stale_response(snapshot_at: datetime | None) -> Verdict 
 
 
 def _body_to_preflight_request(body: dict) -> PreflightRequest:
-    """Translate /orders/place body to PreflightRequest. Combo (BAG) orders are skipped
-    by preflight in F2 — the TS guard still gates them; server-side BAG gate is scoped
-    out of PR-A."""
+    """Translate non-combo /orders/place bodies to PreflightRequest."""
     from xenon.execution.universe import UNIVERSE, get_multiplier
 
     sec_type = "STK" if body.get("type") == "stock" else "OPT"
@@ -2146,9 +2144,10 @@ async def _orders_place_from_body(body: dict):
             content={"detail": "client_attempt_id is required"},
         )
     user_id = "local"
+    security_type = "STK" if body.get("type") == "stock" else "BAG" if body.get("type") == "combo" else "OPT"
     req_row = orders_store.RequestRow(
         ticker=str(body.get("symbol", "")).upper(),
-        security_type="STK" if body.get("type") == "stock" else "OPT",
+        security_type=security_type,
         action=str(body.get("action", "")).upper(),
         quantity=int(body.get("quantity", 0)),
         expiry=body.get("expiry"),

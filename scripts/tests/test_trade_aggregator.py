@@ -172,6 +172,57 @@ def test_combo_legs_yield_one_trades_row_with_metadata_legs():
     assert [leg["side"] for leg in row["metadata"]["legs"]] == ["BUY", "SELL"]
 
 
+def test_closed_combo_keeps_net_entry_and_exit_costs():
+    _insert_combo_attempt("combo-agg-close")
+    _fill(
+        "exec-combo-open-long",
+        submission_id=None,
+        combo_attempt_id="combo-agg-close",
+        con_id=111,
+        side="BUY",
+        qty=1,
+        price="4.00",
+    )
+    _fill(
+        "exec-combo-open-short",
+        submission_id=None,
+        combo_attempt_id="combo-agg-close",
+        con_id=222,
+        side="SELL",
+        qty=1,
+        price="1.50",
+        filled_at=datetime(2026, 4, 28, 14, 31, tzinfo=timezone.utc),
+    )
+    _fill(
+        "exec-combo-close-long",
+        submission_id=None,
+        combo_attempt_id="combo-agg-close",
+        con_id=111,
+        side="SELL",
+        qty=1,
+        price="5.00",
+        filled_at=datetime(2026, 4, 28, 15, 30, tzinfo=timezone.utc),
+    )
+    _fill(
+        "exec-combo-close-short",
+        submission_id=None,
+        combo_attempt_id="combo-agg-close",
+        con_id=222,
+        side="BUY",
+        qty=1,
+        price="1.00",
+        filled_at=datetime(2026, 4, 28, 15, 31, tzinfo=timezone.utc),
+    )
+
+    aggregate_trade_from_fills(combo_attempt_id="combo-agg-close")
+
+    row = _trade_rows()[0]
+    assert row["state"] == "CLOSED"
+    assert row["entry_cost"] == Decimal("2.5000")
+    assert row["exit_cost"] == Decimal("4.0000")
+    assert row["realized_pnl"] == Decimal("1.50")
+
+
 def test_close_emits_trade_closed_outbox_once():
     _insert_submission("sub-close-001", quantity=100)
     _fill("exec-close-open", submission_id="sub-close-001", qty=100, price="10.00")

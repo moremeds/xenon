@@ -185,28 +185,37 @@ def _is_closed(fills: list[dict[str, Any]]) -> bool:
 def _costs(fills: list[dict[str, Any]], *, closed: bool) -> tuple[Decimal, Decimal | None, Decimal | None]:
     buy_cost = _ZERO
     sell_proceeds = _ZERO
-    net_entry = _ZERO
+    entry_cash = _ZERO
+    exit_cash = _ZERO
+    net_qty: dict[str, int] = defaultdict(int)
     for fill in fills:
         value = Decimal(fill["qty"]) * Decimal(fill["price"])
         commission = Decimal(fill["commission"] or 0)
-        if fill["side"] == "BUY":
+        side = fill["side"]
+        key = _instrument_key(fill)
+        direction = 1 if side == "BUY" else -1
+        signed_cash = value + commission if side == "BUY" else -value + commission
+        if _is_entry_fill(net_qty[key], direction):
+            entry_cash += signed_cash
+        else:
+            exit_cash += signed_cash
+        net_qty[key] += direction * int(fill["qty"])
+        if side == "BUY":
             buy_cost += value + commission
-            net_entry += value + commission
-        elif fill["side"] == "SELL":
+        elif side == "SELL":
             sell_proceeds += value - commission
-            net_entry -= value - commission
 
     if not closed:
-        return _money4(net_entry), None, None
+        return _money4(entry_cash), None, None
 
-    first_side = fills[0]["side"]
-    if first_side == "SELL":
-        entry_cost = -sell_proceeds
-        exit_cost = buy_cost
-    else:
-        entry_cost = buy_cost
-        exit_cost = sell_proceeds
-    return _money4(entry_cost), _money4(exit_cost), _money2(sell_proceeds - buy_cost)
+    exit_cost = exit_cash if entry_cash < 0 else -exit_cash
+    return _money4(entry_cash), _money4(exit_cost), _money2(sell_proceeds - buy_cost)
+
+
+def _is_entry_fill(current_net_qty: int, fill_direction: int) -> bool:
+    return current_net_qty == 0 or (current_net_qty > 0 and fill_direction > 0) or (
+        current_net_qty < 0 and fill_direction < 0
+    )
 
 
 def _quantity(fills: list[dict[str, Any]]) -> int:

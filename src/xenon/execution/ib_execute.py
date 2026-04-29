@@ -350,11 +350,10 @@ class OrderExecutor:
 
         now_utc = datetime.now(timezone.utc)
 
-        # Write execution-grain fills to Postgres. Resolve scope strictly when env is set:
-        # if XENON_TRADING_MODE is present, validate XENON_BROKER_ACCOUNT
-        # matches it via resolve_from_env(); fail loud on mismatch instead
-        # of silently writing under a wrong account_env. With no env set,
-        # fall back to legacy_unknown defaults (e.g. ad-hoc CLI usage).
+        # Write execution-grain fills to Postgres. If any scope env is present,
+        # validate it strictly via resolve_from_env(); otherwise record_fill()
+        # rejects the legacy_unknown default rather than silently writing
+        # account-ambiguous fills.
         try:
             from xenon.execution.account_scope import resolve_from_env
             from xenon.execution.orders_store import record_fill
