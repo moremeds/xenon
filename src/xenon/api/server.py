@@ -1182,6 +1182,32 @@ def _order_submissions_health() -> dict:
     return {"unknown_count": count, "alarm": count > 5}
 
 
+def _flex_divergence_health() -> dict:
+    """Latest nightly PG↔Flex divergence run, if any. Resolves scope via app.state."""
+    try:
+        from xenon.execution.account_scope import AccountScope
+        from xenon.jobs.flex_divergence_check import latest_run
+
+        kwargs = _resolve_scope_kwargs()
+        scope = AccountScope(
+            broker=kwargs["broker"],
+            account_env=kwargs["account_env"],
+            broker_account=kwargs["broker_account"],
+        )
+        row = latest_run(scope=scope)
+    except Exception:  # noqa: BLE001
+        logger.warning("[health] failed to load flex_divergence", exc_info=True)
+        return {"configured": False}
+    if row is None:
+        return {"configured": True, "ran_at": None, "divergence_count": None, "total_compared": None}
+    return {
+        "configured": True,
+        "ran_at": _iso_datetime(row.get("ran_at")),
+        "total_compared": row["total_compared"],
+        "divergence_count": row["divergence_count"],
+    }
+
+
 @app.get("/health")
 async def health():
     gw = await check_ib_gateway()
@@ -1200,6 +1226,7 @@ async def health():
         "mode_verified": getattr(app.state, "mode_verified", False),
         "snapshotter": _snapshotter_health(),
         "order_submissions": _order_submissions_health(),
+        "flex_divergence": _flex_divergence_health(),
     }
 
 

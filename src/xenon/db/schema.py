@@ -150,6 +150,26 @@ journal_entries = Table(
     ),
 )
 
+flex_divergence_runs = Table(
+    "flex_divergence_runs",
+    xenon_metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("ran_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Column("scope_broker", Text, nullable=False),
+    Column("scope_account_env", Text, nullable=False),
+    Column("scope_broker_account", Text, nullable=False),
+    Column("total_compared", Integer, nullable=False),
+    Column("divergence_count", Integer, nullable=False),
+    Column("notes", JSONB, nullable=True),
+    Index(
+        "ix_flex_divergence_scope_ran_at",
+        "scope_broker",
+        "scope_account_env",
+        "scope_broker_account",
+        "ran_at",
+    ),
+)
+
 nav_history = Table(
     "nav_history",
     xenon_metadata,
