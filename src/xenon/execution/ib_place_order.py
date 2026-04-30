@@ -145,8 +145,29 @@ def place_order(params: dict) -> dict:
         # Surface any IB error events caught during the wait
         if ib_errors:
             code, msg = ib_errors[0]
+            # Code 110 = "The price does not conform to the minimum price
+            # variation for this contract." Means our 0.01 tick stub
+            # under-approximated the real tick rule for this instrument.
+            # Log structured so we can grep and measure how often it bites.
+            if code == 110:
+                print(
+                    json.dumps(
+                        {
+                            "level": "warning",
+                            "event": "ib_tick_rejection",
+                            "ib_code": 110,
+                            "ib_message": msg,
+                            "symbol": symbol,
+                            "limit_price": limit_price,
+                            "order_type": order_type,
+                            "note": "tick-rule stub returned 0.01; IB enforced true rule",
+                        }
+                    ),
+                    file=sys.stderr,
+                )
             return {
                 "status": "error",
+                "code": code,
                 "message": f"IB error {code}: {msg}",
                 "orderId": order_id,
                 "permId": perm_id,

@@ -1953,16 +1953,33 @@ async def _run_preflight(body: dict, user_id: str = "local") -> Verdict:
 
 
 def _lookup_min_tick_via_pool(con_id: int) -> Decimal:
-    """Real-path minTick lookup via ib_pool 'data' role. Tests replace
-    `_tick_rule_cache` with a deterministic fake.
+    """Front-of-house minTick approximation. Returns 0.01 for every contract.
 
-    TEMPORARY: returns 0.01 (US equity minTick) without hitting IB. The
-    real implementation needs an async-safe path: ``ib_insync``'s
-    ``reqContractDetails`` starts its own event loop, which collides with
-    FastAPI's loop when called from the sync ``quote_guard.check`` stack.
-    Stocks are always 0.01; options are 0.01 above $3 and 0.05 below,
-    but sub-cent stock ticks are allowed for stocks priced < $1 — out of
-    scope for PR-C/D QA.
+    **By design.** Replicating IB's tick-rule table locally is fragile:
+    Reg NMS Rule 612 sub-penny carve-outs for stocks under $1, OPRA penny
+    pilot rosters for options, and exchange-specific market rules for
+    futures all change without notice. Instead of reaching into IB on the
+    sync ``quote_guard.check`` path (which would require ``ib_insync``'s
+    ``reqContractDetailsAsync`` and a wider sync→async refactor), we keep
+    the cheap 0.01 approximation **and rely on IB to reject off-tick
+    prices server-side**.
+
+    When IB rejects with error code 110 ("price does not conform to
+    minimum price variation"), ``_orders_place_from_body`` re-maps the
+    response from generic ``IB_REJECT`` to ``LIMIT_OFF_TICK`` so the UI
+    surfaces a clean message and the IB code+message land in the
+    ``orders_events`` audit row for later analysis.
+
+    Most US equities and most options at the prices we trade have $0.01
+    ticks, so this approximation covers the common case correctly. Edge
+    instruments (sub-$1 stocks, foreign equities, futures, index option
+    strike bands) will hit IB's rejection — that's acceptable: the
+    user-visible error is actionable and we have a structured log to
+    measure how often it happens.
+
+    If you ever need real tick lookups (e.g. for fractional-share / sub-$1
+    stock support), the right path is to plumb ``reqContractDetailsAsync``
+    through an async ``quote_guard``, not to patch this stub.
     """
     return Decimal("0.01")
 
@@ -2392,15 +2409,27 @@ async def _orders_place_from_body(body: dict):
         )
         raise HTTPException(status_code=502, detail=result.error)
     if result.data and result.data.get("status") == "error":
-        # B6 — always write the literal "IB_REJECT" as reason_code so the UI
-        # toast map resolves. The raw IB numeric code + message go into the
-        # orders_events audit row so we don't lose the info.
+        # B6 — write a reason_code the UI toast map can resolve. Most IB
+        # rejections collapse to IB_REJECT, but tick-rule rejections
+        # (code 110) re-map to LIMIT_OFF_TICK so the user sees a clean
+        # actionable message instead of raw IB error text. The raw IB
+        # numeric code + message always go into the orders_events audit
+        # row so we don't lose the info.
         ib_code = result.data.get("code")
         ib_message = result.data.get("message", "Order failed")
+        if str(ib_code) == "110":
+            reason_code = ReasonCode.LIMIT_OFF_TICK.value
+            logger.warning(
+                "IB rejected order with tick-rule violation: submission=%s ib_code=110 ib_message=%s",
+                submission_id,
+                ib_message,
+            )
+        else:
+            reason_code = ReasonCode.IB_REJECT.value
         orders_store.mark_terminal(
             submission_id=submission_id,
             state="REJECTED",
-            reason_code=ReasonCode.IB_REJECT.value,
+            reason_code=reason_code,
             filled_qty=0,
             avg_fill_price=None,
         )
