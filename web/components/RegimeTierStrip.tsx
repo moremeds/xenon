@@ -85,7 +85,7 @@ export function RegimeTierStrip({ data }: { data: RegimeTierData | null }) {
           className="regime-stale-banner"
           style={{ color: "var(--text-muted)" }}
         >
-          regime data stale (&gt;90 min) — sized conservatively
+          regime data stale — sized conservatively
         </span>
       )}
     </div>

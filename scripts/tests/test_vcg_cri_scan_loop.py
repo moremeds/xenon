@@ -239,6 +239,33 @@ async def test_unknown_suppression_from_unknown(engine, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_emit_failure_preserves_last_seen_for_retry(engine, monkeypatch):
+    """Codex-review fix C1: if the outbox INSERT fails, last_seen MUST NOT
+    advance — otherwise the transition is permanently lost. Next tick should
+    re-attempt the emit.
+    """
+    from xenon.api import server
+
+    monkeypatch.setattr(server, "_run_vcg_scan_and_persist", _noop_scan)
+    monkeypatch.setattr(server, "_run_cri_scan_and_persist", _noop_scan)
+
+    async def _failing_emit(**kw):
+        raise RuntimeError("outbox down")
+
+    monkeypatch.setattr(server, "_emit_regime_transition", _failing_emit)
+
+    _seed(engine, vcg_tier=2, cri_score=20.0)
+    new_state = await server._vcg_cri_tick(last_seen=("NORMAL", "NORMAL"))
+
+    # last_seen should NOT have advanced — return the prior baseline so the
+    # caller's next tick re-attempts the emit.
+    assert new_state == ("NORMAL", "NORMAL"), "emit failure must preserve last_seen — otherwise transitions are lost"
+    with engine.connect() as c:
+        rows = c.execute(sa.select(outbox).where(outbox.c.channel == "regime_transition")).all()
+    assert rows == [], "no row written when emit raised"
+
+
+@pytest.mark.asyncio
 async def test_panic_transition_emits(engine, monkeypatch):
     """TIER_2 → PANIC must emit. PANIC is the regime change downstream
     consumers care about most."""

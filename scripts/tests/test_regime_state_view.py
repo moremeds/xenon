@@ -161,6 +161,44 @@ def test_view_returns_latest_of_each(engine):
     assert row.cta_forced_reduction is False
 
 
+def test_view_uses_id_tiebreaker_on_timestamp_tie(engine):
+    """Codex-review CODEX-7: when two rows share the same recorded_at,
+    LIMIT 1 was previously nondeterministic — could surface either.
+    Migration a1b2c3d4e5f6 added `id DESC` as the tiebreaker so the
+    latest-inserted row always wins.
+
+    Only verifiable on cri_series — vcg_series has a UNIQUE constraint
+    on scanned_at so a true tie is impossible there. The view DDL adds
+    the tiebreaker on both sides defensively.
+    """
+    same_ts = dt.datetime(2026, 4, 29, 14, 0, tzinfo=dt.timezone.utc)
+    with engine.begin() as conn:
+        conn.execute(
+            sa.insert(vcg_series).values(
+                scanned_at=same_ts,
+                payload=_vcg_payload(tier=2, regime="ACTIVE", vix=29.0),
+            )
+        )
+        # Two CRI rows with identical recorded_at — second insert (id DESC) must win
+        conn.execute(
+            sa.insert(cri_series).values(
+                recorded_at=same_ts,
+                cri_level=Decimal("30.0"),
+                payload=_cri_payload(score=30.0, vix=29.0),
+            )
+        )
+        conn.execute(
+            sa.insert(cri_series).values(
+                recorded_at=same_ts,
+                cri_level=Decimal("60.0"),
+                payload=_cri_payload(score=60.0, vix=29.0),
+            )
+        )
+        row = conn.execute(text("SELECT cri_score FROM xenon.regime_state")).one()
+    # The later-inserted (cri_score=60) row must win on the id DESC tiebreaker
+    assert float(row.cri_score) == 60.0
+
+
 def test_view_projects_panic_signal(engine):
     """pi_panic and crash_trigger_fired propagate so the Python classifier
     can map them to the PANIC/TIER_1 tier."""

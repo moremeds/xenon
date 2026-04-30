@@ -255,6 +255,66 @@ def test_get_regime_overrides_clamps_limit(client):
     assert res.status_code == 422  # Query(le=200) rejects oversize limit
 
 
+def test_get_regime_overrides_filters_by_broker(client):
+    """Codex-review CODEX-4: AccountScope is (broker, account_env,
+    broker_account); a Futu-scope override row must not surface in an
+    IB listing even when account_env+broker_account collide.
+
+    Note: order_submissions has a CHECK constraint that pins its broker
+    column to 'IB' only — the audit-row broker column is independent of
+    the parent's, so we use a single IB parent and write two audit rows
+    with different broker columns. This is exactly the cross-broker
+    leak vector CODEX-4 is guarding against.
+    """
+    from xenon.db.engine import get_sync_engine
+    from xenon.db.schema import order_submissions, regime_overrides
+
+    engine = get_sync_engine()
+    now = dt.datetime.now(dt.timezone.utc)
+    parent_sub = f"SUB-IB-{secrets.token_hex(4)}"
+
+    with engine.begin() as conn:
+        conn.execute(
+            sa.insert(order_submissions).values(
+                submission_id=parent_sub,
+                user_id="u1",
+                ticker="AAPL",
+                security_type="STK",
+                action="BUY",
+                quantity=1,
+                state="RESERVED",
+                submitted_at=now,
+                broker="IB",
+                account_env="paper",
+                broker_account="DU0000000",
+            )
+        )
+        # Two audit rows pointing at the same parent — one claims IB, the
+        # other Futu. The IB-scoped listing must only return the IB row.
+        for broker_col, reason in (("ib", "real ib audit"), ("futu", "leak attempt")):
+            conn.execute(
+                sa.insert(regime_overrides).values(
+                    user_id="u1",
+                    account_env="paper",
+                    broker=broker_col,
+                    broker_account="DU0000000",
+                    submission_id=parent_sub,
+                    route="POST /orders/place",
+                    binding_side="vcg",
+                    block_reason="VCG TIER_1",
+                    user_reason=reason,
+                    order_payload={"symbol": "AAPL"},
+                )
+            )
+
+    res = client.get("/regime/overrides?limit=10")
+    assert res.status_code == 200
+    body = res.json()
+    reasons = {item["user_reason"] for item in body["items"]}
+    assert "real ib audit" in reasons
+    assert "leak attempt" not in reasons, "FUTU-broker audit row must not surface in IB scope listing"
+
+
 def test_legacy_regime_endpoint_not_shadowed(client):
     """Regression: the new /regime/state route must not shadow the
     pre-existing /regime endpoint (which returns the CRI scan payload

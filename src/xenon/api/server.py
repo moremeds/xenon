@@ -428,8 +428,15 @@ async def _vcg_cri_tick(
 
     from xenon.api.services.regime_state import _read_regime_row, classify
 
-    await _run_vcg_scan_and_persist()
-    await _run_cri_scan_and_persist()
+    # Codex-review CODEX-3: gate the scan subprocesses behind market hours
+    # so we don't burn UW quota on weekends/after-close. The classify+emit
+    # path still runs every tick — useful for catching delayed transitions
+    # from the last scan of the session. Override via env for tests/manual
+    # operator runs.
+    skip_scans = os.environ.get("XENON_VCG_CRI_SCAN_GATE_OFF_HOURS", "1") != "0" and not _is_market_open_now()
+    if not skip_scans:
+        await _run_vcg_scan_and_persist()
+        await _run_cri_scan_and_persist()
 
     max_age_s = int(os.environ.get("XENON_REGIME_MAX_AGE_S", str(90 * 60)))
     row = await _read_regime_row()
@@ -447,7 +454,10 @@ async def _vcg_cri_tick(
                 state=state,
             )
         except Exception:  # noqa: BLE001
-            logger.exception("regime_transition emit failed")
+            # Don't advance last_seen — next tick re-attempts the emit so a
+            # transient outbox failure can't permanently lose the transition.
+            logger.exception("regime_transition emit failed; preserving last_seen for retry")
+            return last_seen
 
     return new_pair
 

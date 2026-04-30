@@ -42,11 +42,16 @@ async def list_regime_overrides(
     limit: int = Query(50, ge=1, le=200),
     scope: AccountScope = Depends(get_account_scope),
 ):
+    # Codex-review CODEX-4: filter on the full AccountScope tuple including
+    # broker. The audit table stores the broker column lowercase ("ib"/"futu");
+    # AccountScope.broker is uppercase ("IB"/"FUTU"). Match on lowercase to
+    # align with the existing insert convention.
     engine = get_engine()
     async with engine.connect() as conn:
         result = await conn.execute(
             sa.select(regime_overrides)
             .where(
+                regime_overrides.c.broker == scope.broker.lower(),
                 regime_overrides.c.account_env == scope.account_env,
                 regime_overrides.c.broker_account == scope.broker_account,
             )
