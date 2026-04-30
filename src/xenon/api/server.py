@@ -354,6 +354,123 @@ def _get_managed_account_for_health() -> str:
     return accounts[0] if accounts else ""
 
 
+async def _run_vcg_scan_and_persist() -> None:
+    """Run xenon-vcg-scan and persist its JSON output to vcg_series.
+
+    Mirrors the inline path used by POST /vcg/scan. Failures are logged
+    and swallowed — the loop must keep ticking even if a single scan
+    fails (e.g. transient UW outage). Extracted as a top-level function
+    so tests can monkeypatch it without exercising the subprocess.
+    """
+    try:
+        result = await run_entry_point("xenon-vcg-scan", ["--json"], timeout=120)
+        if result.ok and result.data:
+            _write_scan_to_postgres("vcg.json", result.data)
+    except Exception:  # noqa: BLE001
+        logger.exception("vcg-scan tick failed")
+
+
+async def _run_cri_scan_and_persist() -> None:
+    """Run xenon-cri-scan and persist to cri_series. See sibling vcg helper."""
+    try:
+        result = await run_entry_point("xenon-cri-scan", ["--json"], timeout=120)
+        if result.ok and result.data:
+            _write_scan_to_postgres("cri.json", result.data)
+    except Exception:  # noqa: BLE001
+        logger.exception("cri-scan tick failed")
+
+
+async def _emit_regime_transition(*, from_pair: tuple[str, str], to_pair: tuple[str, str], state) -> None:
+    """Insert a regime_transition row into events.outbox.
+
+    Schema: outbox.payload (JSONB) carries the full transition envelope
+    so consumers can react without re-reading the regime view.
+    """
+    import sqlalchemy as _sa
+
+    from xenon.db.engine import get_engine
+    from xenon.db.schema import outbox
+
+    engine = get_engine()
+    async with engine.begin() as conn:
+        await conn.execute(
+            _sa.insert(outbox).values(
+                channel="regime_transition",
+                source="vcg_cri_scan_loop",
+                payload={
+                    "from": {"vcg": from_pair[0], "cri": from_pair[1]},
+                    "to": {"vcg": to_pair[0], "cri": to_pair[1]},
+                    "binding_tier": state.binding_tier,
+                    "binding_side": state.binding_side,
+                },
+            )
+        )
+
+
+async def _vcg_cri_tick(
+    last_seen: tuple[str, str] | None,
+) -> tuple[str, str] | None:
+    """One iteration of the consolidated VCG/CRI loop.
+
+    Steps:
+    1. Run both scans (best-effort; failures are logged in the helpers).
+    2. Read the freshly-persisted regime_state view, classify into tiers.
+    3. If (vcg_tier, cri_tier) changed AND neither endpoint is UNKNOWN,
+       emit a regime_transition event.
+    4. Return the new (vcg_tier, cri_tier) so the caller can update its
+       last_seen baseline.
+
+    UNKNOWN suppression rationale: a stale feed should not fire a "regime
+    change" alert. The first non-UNKNOWN observation after a stale gap
+    becomes the new baseline; emits resume on the NEXT real transition.
+    """
+    import datetime as _dt
+
+    from xenon.api.services.regime_state import _read_regime_row, classify
+
+    await _run_vcg_scan_and_persist()
+    await _run_cri_scan_and_persist()
+
+    max_age_s = int(os.environ.get("XENON_REGIME_MAX_AGE_S", str(90 * 60)))
+    row = await _read_regime_row()
+    state = classify(row, now=_dt.datetime.now(_dt.timezone.utc), max_age_s=max_age_s)
+    new_pair = (state.vcg_tier, state.cri_tier)
+
+    should_emit = (
+        last_seen is not None and new_pair != last_seen and "UNKNOWN" not in new_pair and "UNKNOWN" not in last_seen
+    )
+    if should_emit:
+        try:
+            await _emit_regime_transition(
+                from_pair=last_seen,  # type: ignore[arg-type]
+                to_pair=new_pair,
+                state=state,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("regime_transition emit failed")
+
+    return new_pair
+
+
+async def _vcg_cri_scan_loop() -> None:
+    """Forever-loop driver — runs `_vcg_cri_tick` every interval.
+
+    Cadence: XENON_VCG_CRI_INTERVAL_S (default 1800s = 30 min). The loop
+    swallows per-tick exceptions so one bad tick can't kill the loop;
+    only cancellation breaks out.
+    """
+    interval_s = int(os.environ.get("XENON_VCG_CRI_INTERVAL_S", "1800"))
+    last_seen: tuple[str, str] | None = None
+    while True:
+        try:
+            last_seen = await _vcg_cri_tick(last_seen)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("_vcg_cri_tick raised")
+        await asyncio.sleep(interval_s)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start IB pool and UW client on startup, tear down on shutdown."""
@@ -539,6 +656,31 @@ async def lifespan(app: FastAPI):
         except Exception as exc:  # noqa: BLE001
             logger.warning("uw_analyze_daily_job failed to start: %s", exc)
 
+    # Consolidated VCG/CRI scanner loop. Single-worker singleton via
+    # advisory lock LOCK_KEY_VCG_CRI; runs every XENON_VCG_CRI_INTERVAL_S
+    # (default 30 min). Emits regime_transition events to events.outbox
+    # on (vcg_tier, cri_tier) changes (UNKNOWN endpoints suppressed).
+    vcg_cri_task: asyncio.Task | None = None
+    if os.environ.get("XENON_VCG_CRI_LOOP", "1") != "0":
+        try:
+            from xenon.api.services.advisory_lock import (
+                LOCK_KEY_VCG_CRI,
+                pg_try_advisory_lock,
+            )
+
+            async def _supervised_vcg_cri() -> None:
+                async with pg_try_advisory_lock(LOCK_KEY_VCG_CRI) as got_lock:
+                    if not got_lock:
+                        logger.info("vcg_cri scan loop already running on another worker (advisory lock held)")
+                        return
+                    await _vcg_cri_scan_loop()
+
+            vcg_cri_task = asyncio.create_task(_supervised_vcg_cri())
+            app.state.vcg_cri_task = vcg_cri_task
+            logger.info("vcg_cri_scan_loop background task started")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("vcg_cri_scan_loop failed to start: %s", exc)
+
     # F7.2 — single-leg three-source rehydrate. Runs synchronously before
     # the server starts serving so our view of in-flight orders is accurate
     # on first request. Failures are logged + swallowed so boot cannot be
@@ -587,6 +729,13 @@ async def lifespan(app: FastAPI):
             uw_daily_task.cancel()
             try:
                 await uw_daily_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        vcg_cri_task = getattr(app.state, "vcg_cri_task", None)
+        if vcg_cri_task is not None:
+            vcg_cri_task.cancel()
+            try:
+                await vcg_cri_task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         ib_activity_task = getattr(app.state, "ib_activity_poller_task", None)
