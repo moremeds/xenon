@@ -22,7 +22,7 @@ from xenon.execution.account_scope import AccountScope
 router = APIRouter()
 
 
-@router.get("/regime")
+@router.get("/regime/state")
 async def get_regime(
     response: Response,
     state: RegimeState = Depends(get_regime_state),

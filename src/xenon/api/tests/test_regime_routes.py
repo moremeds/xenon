@@ -113,7 +113,7 @@ def test_get_regime_returns_payload_shape(client):
         vcg_tier=2,
         cri_score=20.0,
     )
-    res = client.get("/regime")
+    res = client.get("/regime/state")
     assert res.status_code == 200
     body = res.json()
     for k in (
@@ -136,7 +136,7 @@ def test_get_regime_classifies_tier_2(client):
         vcg_tier=2,
         cri_score=20.0,
     )
-    res = client.get("/regime")
+    res = client.get("/regime/state")
     body = res.json()
     assert body["vcg_tier"] == "TIER_2"
     assert body["binding_side"] == "vcg"
@@ -144,7 +144,7 @@ def test_get_regime_classifies_tier_2(client):
 
 def test_get_regime_cold_start_returns_unknown(client):
     """No scans yet → both feeds UNKNOWN, binding throttle = EDR."""
-    res = client.get("/regime")
+    res = client.get("/regime/state")
     assert res.status_code == 200
     body = res.json()
     assert body["vcg_tier"] == "UNKNOWN"
@@ -155,7 +155,7 @@ def test_get_regime_cold_start_returns_unknown(client):
 
 def test_get_regime_sets_cache_control_header(client):
     _seed_vcg_cri(dt.datetime.now(dt.timezone.utc), vcg_tier=None, cri_score=20.0)
-    res = client.get("/regime")
+    res = client.get("/regime/state")
     assert res.headers.get("Cache-Control", "").startswith("private")
 
 
@@ -253,3 +253,23 @@ def test_get_regime_overrides_paginates_and_filters_by_scope(client):
 def test_get_regime_overrides_clamps_limit(client):
     res = client.get("/regime/overrides?limit=999")
     assert res.status_code == 422  # Query(le=200) rejects oversize limit
+
+
+def test_legacy_regime_endpoint_not_shadowed(client):
+    """Regression: the new /regime/state route must not shadow the
+    pre-existing /regime endpoint (which returns the CRI scan payload
+    consumed by web/app/api/regime/route.ts).
+
+    /regime should still return a CRI-shaped envelope, NOT the new
+    RegimeState shape.
+    """
+    res = client.get("/regime")
+    assert res.status_code == 200
+    body = res.json()
+    # CRI shape has these keys; RegimeState does NOT.
+    assert "cri" in body or "scan_time" in body or "history" in body, (
+        "/regime collision — new router shadowed the legacy CRI endpoint"
+    )
+    # And conversely, the new fields must NOT appear on /regime.
+    assert "binding_tier" not in body
+    assert "vcg_tier" not in body
