@@ -51,6 +51,8 @@ Postgres is the runtime source of truth for migrated analytics and portfolio sur
 
 ## Order-Path Guards (Layers 1+2)
 
+**Read first:** `docs/reference/order-path-incident-history.md` — chronological log of every non-trivial order-path bug, root cause, fix, and regression test. Append a row when you ship a similar fix.
+
 Two automated guards lock in regression patterns from PR #61. Full design: `docs/plans/2026-04-28-order-path-regression-prevention.md`.
 
 - **Edit-time reminder** (`.claude/hooks/order-path-reminder.sh`) — PreToolUse hook prints an order-path checklist when Claude edits files under `src/xenon/execution/`, `src/xenon/api/server.py`, `web/app/api/orders/`, or `web/lib/order/`. Advisory, never blocks.

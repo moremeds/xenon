@@ -433,6 +433,70 @@ def test_cancel_permid_only_writes_event(client, tmp_db, monkeypatch):
     assert '"http_status": 200' in detail_json
 
 
+def _fetch_submission_state(submission_id: str) -> tuple[str, str | None]:
+    """Return (state, reason_code) for the given submission row."""
+    engine = _pg_engine()
+    try:
+        with engine.connect() as con:
+            row = con.execute(
+                text("SELECT state, reason_code FROM xenon.order_submissions WHERE submission_id = :sid"),
+                {"sid": submission_id},
+            ).first()
+    finally:
+        engine.dispose()
+    return (row[0], row[1]) if row else ("", None)
+
+
+def test_cancel_success_marks_submission_cancelled(client, tmp_db, monkeypatch):
+    """Successful cancel must transition order_submissions.state to CANCELLED.
+
+    Without this the Open Orders panel keeps showing the row (the /orders
+    reader filters on WORKING/PENDING/PARTIALLY_FILLED) even though the
+    order was cancelled at IB. UI's cancel poll then times out and reverts.
+    """
+    sid = _seed_permid_submission(tmp_db, perm_id="42")
+
+    async def fake_runner(entry, args, timeout=30):
+        return ScriptResult(ok=True, data={"status": "ok", "message": "Cancelled"})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post("/orders/cancel", json={"orderId": 0, "permId": 42})
+    assert resp.status_code == 200
+
+    state, reason_code = _fetch_submission_state(sid)
+    assert state == "CANCELLED"
+    assert reason_code == "USER_CANCEL"
+
+
+def test_cancel_failure_does_not_mark_submission_cancelled(client, tmp_db, monkeypatch):
+    """A failed cancel (subprocess error / IB reject) must NOT touch state.
+
+    If IB refused the cancel the order is still working — we cannot lie to
+    the panel by marking it CANCELLED locally.
+    """
+    sid = _seed_permid_submission(tmp_db, perm_id="42")
+
+    async def fake_runner(entry, args, timeout=30):
+        return ScriptResult(
+            ok=True,
+            data={
+                "status": "error",
+                "classification": "ib_reject",
+                "message": "Order not found",
+                "upstream": {"code": 10147, "message": "Order not found"},
+            },
+        )
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post("/orders/cancel", json={"orderId": 0, "permId": 42})
+    assert resp.status_code == 404
+
+    state, _ = _fetch_submission_state(sid)
+    assert state == "WORKING"
+
+
 def test_dev_probe_not_in_auth_exempt_paths():
     """B3 — defense in depth: Clerk middleware must still cover the probe."""
     assert "/dev/rehydrate/synthetic" not in server_mod.AUTH_EXEMPT_PATHS

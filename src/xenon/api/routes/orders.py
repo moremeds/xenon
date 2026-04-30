@@ -113,7 +113,7 @@ def _open_order(row: dict[str, Any]) -> dict[str, Any]:
         "filled": filled,
         "remaining": max(total - filled, 0),
         "avgFillPrice": _float_or_none(row.get("avg_fill_price")),
-        "tif": "DAY",
+        "tif": str(row.get("tif") or "DAY"),
         "modifySequence": int(row.get("modify_sequence") or 0),
     }
 

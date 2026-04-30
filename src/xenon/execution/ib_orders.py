@@ -246,13 +246,17 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
     registered = 0
     updated = 0
     skipped = 0
+    resurrected = 0
     for order in open_orders:
         contract = order.get("contract") or {}
         sec_type = str(contract.get("secType") or "STK")
         multiplier = 100 if sec_type in {"OPT", "BAG"} else 1
+        # IB returns BAG combos with orderId=0 when fetched from a non-originating
+        # clientId. perm_id is the cross-client stable identifier — that alone is
+        # enough to register the snapshot. ib_order_id falls back to "0".
         perm_id = str(order.get("permId") or order.get("orderId") or "")
-        ib_order_id = str(order.get("orderId") or "")
-        if not perm_id or not ib_order_id:
+        ib_order_id = str(order.get("orderId") or "0")
+        if not perm_id:
             continue
         strike_val = contract.get("strike")
         con_id_val = contract.get("conId")
@@ -269,6 +273,7 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
             right=contract.get("right") or None,
             expiry=contract.get("expiry") or None,
             con_id=int(con_id_val) if con_id_val else None,
+            tif=str(order.get("tif") or "DAY"),
             **resolved,
         )
         action = result.get("action") if isinstance(result, dict) else None
@@ -276,11 +281,14 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
             registered += 1
         elif action == "UPDATED":
             updated += 1
+        elif action == "RESURRECTED":
+            resurrected += 1
         elif action == "SKIPPED_UUID":
             skipped += 1
     return {
         "registered": registered,
         "updated": updated,
+        "resurrected": resurrected,
         "skipped": skipped,
         "open_count": len(open_orders),
     }

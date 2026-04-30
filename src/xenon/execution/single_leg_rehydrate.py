@@ -400,6 +400,63 @@ def _index_execution_records(execs: list) -> dict[str, list[dict]]:
     return by_perm
 
 
+def _enrich_records_via_ib(by_perm: dict[str, list[dict]], ib: Any) -> None:
+    """Fill in strike/right/expiry on leg records when IB's Fill.contract was
+    incomplete. ib_insync sometimes returns leg-level fills with a contract
+    that lacks strike/right (only conId is reliable), which leaves the
+    blotter showing 'Unknown' on closing combos. We round-trip the conIds
+    through ``qualify_contracts`` to recover the missing fields.
+
+    Best-effort: any individual qualify failure leaves that record as-is so
+    boot rehydrate doesn't fail because of one stubborn contract.
+    """
+    needs_qualify: dict[int, list[dict]] = {}
+    for records in by_perm.values():
+        for record in records:
+            con_id = record.get("con_id")
+            if not con_id:
+                continue
+            if record.get("sec_type") == "BAG":
+                continue
+            if record.get("strike") is not None and record.get("right") and record.get("expiry"):
+                continue
+            needs_qualify.setdefault(int(con_id), []).append(record)
+
+    if not needs_qualify:
+        return
+
+    qualify_one = getattr(ib, "qualify_contract", None) or getattr(ib, "qualify_contracts", None)
+    if qualify_one is None:
+        return
+
+    try:
+        from ib_insync import Contract as _IBContract
+    except Exception:  # pragma: no cover — ib_insync always present in prod path
+        return
+
+    for con_id, records in needs_qualify.items():
+        try:
+            qualified = qualify_one(_IBContract(conId=con_id, exchange="SMART"))
+        except Exception:
+            continue
+        contract = qualified[0] if isinstance(qualified, list) and qualified else qualified
+        if contract is None:
+            continue
+        strike = getattr(contract, "strike", None) or None
+        right = getattr(contract, "right", None) or None
+        expiry = getattr(contract, "lastTradeDateOrContractMonth", None) or None
+        sec_type = getattr(contract, "secType", None) or None
+        for record in records:
+            if record.get("strike") is None and strike is not None:
+                record["strike"] = strike
+            if not record.get("right") and right:
+                record["right"] = right
+            if not record.get("expiry") and expiry:
+                record["expiry"] = expiry
+            if not record.get("sec_type") and sec_type:
+                record["sec_type"] = sec_type
+
+
 def _has_explicit_scope(row: dict) -> bool:
     return bool(row.get("account_env") != "legacy_unknown" and row.get("broker_account") != "legacy_unknown")
 
@@ -514,6 +571,7 @@ def rehydrate_on_boot(
     open_idx = _index_open_orders(open_orders)
     exec_idx = _index_executions(execs)
     exec_records_by_perm = _index_execution_records(execs)
+    _enrich_records_via_ib(exec_records_by_perm, ib)
     now_ts = now() if callable(now) else float(now)
 
     decisions: list[ReconcileDecision] = []
