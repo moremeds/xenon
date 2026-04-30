@@ -298,3 +298,37 @@ when scoping starts.
   naked-short order reaching IB costs real money. Provide
   `--no-verify` / `skip-smoke` bypasses for genuine emergencies. Depends
   on no other backlog item; can be picked up independently.
+
+- 2026-04-30 — **Fractional-share quantity for stocks (e.g., sell 0.1 QQQ)** —
+  Today the order-place flow truncates fractional stock quantities to
+  integers. User wants to sell 0.1 QQQ; current behavior either rejects or
+  silently rounds to 1 share. Options/combos must remain integer.
+  **Notes:** Touches the schema, not just the input box. `src/xenon/db/schema.py`
+  types `positions.quantity`, `trades.quantity`, `order_submissions.quantity`,
+  `order_submissions.filled_qty` as `Integer` — all four need to migrate to
+  `Numeric` (idempotent cast preserves existing whole-number rows).
+  Pydantic models tightly type `int`: `PreflightRequest.quantity`,
+  `RequestRow.quantity` (`src/xenon/execution/preflight.py:70`,
+  `orders_store.py`); `ComboPreflightRequest.quantity` stays `int`.
+  Backend choke points: `src/xenon/api/server.py:1845`, `:1876`, `:2333` all
+  do `int(body.get("quantity", 0))`; `src/xenon/execution/ib_place_order.py:34`
+  does `int(params["quantity"])` and passes to `totalQuantity` (ib_insync
+  accepts float). Frontend choke points: 5 entry-point components —
+  `web/components/PositionOrderModal.tsx` already does conditional
+  `parseFloat` for `structure_type === "Stock"` at L99-104, BUT `Math.max(1, …)`
+  at L127-128 clamps fractional → 1 (the bug already manifests here),
+  `web/components/ticker-detail/OrderTab.tsx` (single-leg row L371, L515-516
+  `min="1" step="1"`; combo row L741 stays integer),
+  `web/components/InstrumentDetailModal.tsx` (L149, L239-240),
+  plus `OptionsChainTab.tsx` and `BookTab.tsx`. Shared lib at
+  `web/lib/order/components/OrderQuantityInput.tsx` and `hooks/useOrderValidation.ts`
+  also enforce integer (`parseInt`, `Number.isInteger`); exported but unused —
+  update for consistency. Naked-short audit math (`naked_short_audit.py`,
+  `preflight.py:244` `new_uncovered_calls = uncovered_ratio * req.quantity`)
+  should already work with float/Decimal but needs verification. IB-side:
+  account-level fractional eligibility varies; IB rejects fractional on
+  non-eligible instruments, so failure mode is surface-able. **Dependency:**
+  Pairs naturally with the `orders_store.py` Decimal-typing cluster (Issues 1, 2,
+  4, 5, 6, 9, 10, 14 from `bug_report_ib_postgres_activity_mirror.md`) — that
+  PR is a logical prerequisite since it lays the Decimal foundation.
+  **Estimate:** 1–2 day PR with TDD + browser verification per CLAUDE.md.
