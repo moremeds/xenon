@@ -132,7 +132,9 @@ def _init_async_engine():
     engine_mod._engine = None  # type: ignore[attr-defined]
     engine_mod.init_engine()
     yield
-    asyncio.get_event_loop().run_until_complete(engine_mod.dispose_engine())
+    # Python 3.13: asyncio.get_event_loop() raises when no current loop
+    # is set. asyncio.run() creates+closes a fresh loop for the dispose.
+    asyncio.run(engine_mod.dispose_engine())
 
 
 async def _noop_scan() -> None:
