@@ -120,7 +120,7 @@ def resolve_pytest_targets(changed_files: list[str | Path]) -> list[str]:
             if any(pattern.search(text) for pattern in import_patterns):
                 targets.add(test_file)
 
-    return sorted(str(path.relative_to(ROOT)) for path in targets)
+    return sorted(str(path.relative_to(ROOT)) for path in targets if path.exists())
 
 
 def git_changed_files(base: str) -> list[str]:
