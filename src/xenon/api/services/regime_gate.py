@@ -95,7 +95,7 @@ class RegimeGate:
         ignored — `order.limit_price` is used directly.
         """
         tier = state.binding_tier
-        is_hedge = _is_hedge(order)
+        is_hedge = _is_hedge(order, net_price=net_price)
 
         # Step 1: TIER_1 / PANIC blocks non-hedge entries. Hedges at
         # these tiers fall through to OK — invariant 4 from §3.1.
@@ -135,7 +135,7 @@ class RegimeGate:
         )
 
 
-def _is_hedge(order: OrderLike) -> bool:
+def _is_hedge(order: OrderLike, *, net_price: Optional[Decimal] = None) -> bool:
     """True iff `order` is a long-only / defined-risk hedge structure.
 
     Single-leg: long put on equity-index/credit hedge underlying, OR
@@ -147,7 +147,7 @@ def _is_hedge(order: OrderLike) -> bool:
     if isinstance(order, PreflightRequest):
         return _is_hedge_single(order)
     if isinstance(order, ComboPreflightRequest):
-        return _is_hedge_combo(order)
+        return _is_hedge_combo(order, net_price=net_price)
     return False
 
 
@@ -162,10 +162,12 @@ def _is_hedge_single(order: PreflightRequest) -> bool:
     return False
 
 
-def _is_hedge_combo(order: ComboPreflightRequest) -> bool:
+def _is_hedge_combo(order: ComboPreflightRequest, *, net_price: Optional[Decimal] = None) -> bool:
     if order.action != "BUY":
         # Credit combo on a hedge underlying is not a hedge — it's
         # writing risk on the same name. Hedges must be debit.
+        return False
+    if net_price is not None and net_price <= 0:
         return False
     ticker = order.ticker.upper()
     if not order.legs:
@@ -184,7 +186,17 @@ def _is_hedge_combo(order: ComboPreflightRequest) -> bool:
     # Two-leg vertical: one BUY + one SELL, same right, same expiry.
     if len(order.legs) == 2:
         actions = sorted(leg.action for leg in order.legs)
-        return actions == ["BUY", "SELL"]
+        if actions != ["BUY", "SELL"]:
+            return False
+        buy_leg = next(leg for leg in order.legs if leg.action == "BUY")
+        sell_leg = next(leg for leg in order.legs if leg.action == "SELL")
+        if buy_leg.strike is None or sell_leg.strike is None:
+            return False
+        if right == "P":
+            return buy_leg.strike > sell_leg.strike
+        if right == "C":
+            return buy_leg.strike < sell_leg.strike
+        return False
     # Single-leg combo collapses to single-leg hedge logic.
     if len(order.legs) == 1:
         return order.legs[0].action == "BUY"
@@ -195,8 +207,8 @@ def _max_loss_usd(order: OrderLike, *, net_price: Optional[Decimal] = None) -> f
     """Compute defined-risk max loss in USD, or `math.inf` when unbounded.
 
     Single-leg long option: premium × contracts × multiplier.
-    Combo BUY (debit): net_debit × contracts × multiplier.
-    Combo SELL (credit, defined-risk): (max_width − net_credit) × contracts × multiplier.
+    Combo debit: net_debit × contracts × multiplier.
+    Combo credit, defined-risk: (max_width − net_credit) × contracts × multiplier.
     Anything not classified as defined-risk → inf.
     """
     if isinstance(order, PreflightRequest):
@@ -220,18 +232,16 @@ def _max_loss_single(order: PreflightRequest) -> float:
 def _max_loss_combo(order: ComboPreflightRequest, *, net_price: Optional[Decimal]) -> float:
     if net_price is None:
         return math.inf
-    if order.action == "BUY":
-        # Debit — max loss = net_debit × contracts × multiplier
-        if net_price <= 0:
-            return math.inf
+    if net_price > 0:
         return float(net_price) * order.quantity * order.multiplier
-    # SELL combo: credit — width − net_credit per contract
+    if net_price == 0:
+        return math.inf
+
+    # Credit — width − net_credit per contract. Opening BAG envelopes
+    # stay BUY; the sign of net_price, not the envelope action, tells us
+    # whether the combo is debit or credit.
     width = _combo_max_width(order)
     if width is None:
-        return math.inf
-    if net_price >= 0:
-        # Sign convention drift — SELL combo with non-negative
-        # net_price is suspect; refuse to compute.
         return math.inf
     net_credit = abs(float(net_price))
     return max(0.0, width - net_credit) * order.quantity * order.multiplier

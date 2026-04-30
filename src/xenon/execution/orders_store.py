@@ -489,7 +489,20 @@ def mark_submitted(
     perm_id: str | None,
     placing_client_id: int | None,
 ) -> None:
+    def _int_or_none(value: str | None) -> int | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            return None
+
     now = datetime.now(timezone.utc)
+    perm_id_int = _int_or_none(perm_id)
+    ib_order_id_int = _int_or_none(ib_order_id)
     engine = get_sync_engine()
     with engine.begin() as conn:
         conn.execute(
@@ -501,6 +514,14 @@ def mark_submitted(
                 placing_client_id=placing_client_id,
                 state="WORKING",
                 updated_at=now,
+            )
+        )
+        conn.execute(
+            update(regime_overrides)
+            .where(regime_overrides.c.submission_id == submission_id)
+            .values(
+                perm_id=perm_id_int,
+                ib_order_id=ib_order_id_int,
             )
         )
 

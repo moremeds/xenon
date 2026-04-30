@@ -2110,6 +2110,76 @@ def _body_to_combo_preflight_request(body: dict) -> preflight.ComboPreflightRequ
     )
 
 
+def _normalize_gate_expiry(expiry: Any) -> str | None:
+    if not expiry:
+        return None
+    clean = str(expiry).replace("-", "")
+    return clean if len(clean) == 8 and clean.isdigit() else None
+
+
+def _portfolio_has_matching_long_option(
+    portfolio: PortfolioView,
+    *,
+    ticker: str,
+    expiry: str | None,
+    strike: Decimal | None,
+    right: str | None,
+    quantity: int,
+) -> bool:
+    if strike is None or right not in {"C", "P"}:
+        return False
+    expected_type = "Call" if right == "C" else "Put"
+    wanted_expiry = _normalize_gate_expiry(expiry)
+    if wanted_expiry is None:
+        return False
+    held = 0
+    for pos in portfolio.positions:
+        if pos.ticker.upper() != ticker.upper():
+            continue
+        if _normalize_gate_expiry(pos.expiry) != wanted_expiry:
+            continue
+        for leg in pos.legs:
+            if leg.direction == "LONG" and leg.type == expected_type and leg.strike == strike:
+                held += int(leg.contracts)
+    return held >= quantity
+
+
+async def _is_regime_gate_risk_reducing_exit(body: dict) -> bool:
+    """True when /orders/place is reducing an existing exposure.
+
+    RegimeGate blocks new exposure. Closing BAG envelopes and covered stock
+    sells are allowed to reach Gate 4; single-leg option SELLs bypass only
+    when the current portfolio snapshot proves they match an existing long
+    option. This avoids turning new cash-secured short puts into a panic-tier
+    bypass.
+    """
+    action = str(body.get("action", "")).upper()
+    if action != "SELL":
+        return False
+    if body.get("type") == "combo":
+        return True
+    if body.get("type") == "stock":
+        return True
+    if body.get("type") != "option":
+        return False
+
+    try:
+        req = _body_to_preflight_request(body)
+    except (ValueError, ValidationError):
+        return False
+    portfolio, _snapshot_at = _unpack_portfolio_load(await _load_portfolio_view())
+    if portfolio is None:
+        return False
+    return _portfolio_has_matching_long_option(
+        portfolio,
+        ticker=req.ticker,
+        expiry=req.expiry,
+        strike=req.strike,
+        right=req.right,
+        quantity=req.quantity,
+    )
+
+
 def _invalid_order_body_response(exc: Exception) -> Verdict:
     return Verdict(
         accept=False,
@@ -2536,6 +2606,9 @@ async def _run_regime_gate(body: dict):
     if os.environ.get("XENON_REGIME_GATE_DISABLED") == "1" or (
         _is_test_mode() and os.environ.get("XENON_REGIME_GATE_IN_TESTS") != "1"
     ):
+        return None, None
+
+    if await _is_regime_gate_risk_reducing_exit(body):
         return None, None
 
     try:
@@ -3000,6 +3073,7 @@ async def _run_modify_regime_gate(
     *,
     submission: dict,
     new_quantity: int | None,
+    new_price: Any = None,
 ):
     """Apply RegimeGate to a /orders/modify body per spec §4.6.1.
 
@@ -3041,6 +3115,11 @@ async def _run_modify_regime_gate(
         return None, None
 
     try:
+        limit_price = (
+            Decimal(str(new_price))
+            if new_price is not None
+            else submission.get("limit_price") or Decimal("0")
+        )
         delta_req = PreflightRequest(
             ticker=submission["ticker"],
             security_type=sec_type or "OPT",
@@ -3050,7 +3129,7 @@ async def _run_modify_regime_gate(
             expiry=submission.get("expiry").isoformat() if submission.get("expiry") else None,
             strike=submission.get("strike"),
             multiplier=int(submission.get("multiplier") or 100),
-            limit_price=submission.get("limit_price") or Decimal("0"),
+            limit_price=limit_price,
         )
     except (ValueError, ValidationError) as exc:
         return None, JSONResponse(
@@ -3150,6 +3229,20 @@ async def _orders_modify_from_body(body: dict):
             },
         )
     _scope = _resolve_scope_kwargs()
+    submission = orders_store.load_submission_for_modify(
+        order_id=str(order_id) if order_id else "",
+        perm_id=str(perm_id) if perm_id else "",
+        **_scope,
+    )
+    if submission is not None:
+        _gate_outcome, gate_response = await _run_modify_regime_gate(
+            submission=submission,
+            new_quantity=new_quantity,
+            new_price=new_price,
+        )
+        if gate_response is not None:
+            return gate_response
+
     if not order_id and perm_id:
         seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence, **_scope)
     else:
@@ -3174,17 +3267,6 @@ async def _orders_modify_from_body(body: dict):
                 "http_status": 409,
             },
         )
-
-    # RegimeGate — only quantity-increase modifies are gated (§4.6.1).
-    submission = orders_store.load_submission_for_modify(
-        order_id=str(order_id) if order_id else "",
-        perm_id=str(perm_id) if perm_id else "",
-        **_scope,
-    )
-    if submission is not None:
-        _gate_outcome, gate_response = await _run_modify_regime_gate(submission=submission, new_quantity=new_quantity)
-        if gate_response is not None:
-            return gate_response
 
     args = ["modify"]
     if order_id:

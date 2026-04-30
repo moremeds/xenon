@@ -22,6 +22,7 @@ from sqlalchemy import text as sa_text
 
 from xenon.api import server as server_mod
 from xenon.api.services import regime_state as regime_state_mod
+from xenon.execution.preflight import PortfolioLeg, PortfolioPosition, PortfolioView
 from xenon.execution import quote_tokens
 
 _QUOTE_SECRET = "e" * 64
@@ -140,6 +141,27 @@ def _opt_order_body(
     }
 
 
+def _combo_order_body(
+    *,
+    symbol: str,
+    action: str = "BUY",
+    limit: str = "1.00",
+    qty: int = 1,
+    legs: list[dict],
+    suffix: str = "combo",
+) -> dict:
+    return {
+        "type": "combo",
+        "symbol": symbol,
+        "action": action,
+        "quantity": qty,
+        "multiplier": 100,
+        "limitPrice": limit,
+        "client_attempt_id": f"{symbol}-{action}-{limit}-{suffix}-test",
+        "legs": legs,
+    }
+
+
 def _delete_test_overrides(submission_ids: list[str]) -> None:
     eng = server_mod.get_sync_engine()
     with eng.begin() as conn:
@@ -202,7 +224,7 @@ def test_tier_1_with_valid_override_writes_audit_row(client):
             row = conn.execute(
                 sa_text(
                     "SELECT submission_id, vcg_tier, cri_tier, user_reason, "
-                    "binding_side, block_reason FROM xenon.regime_overrides "
+                    "binding_side, block_reason, perm_id, ib_order_id FROM xenon.regime_overrides "
                     "WHERE submission_id = :sid"
                 ),
                 {"sid": sid},
@@ -211,6 +233,8 @@ def test_tier_1_with_valid_override_writes_audit_row(client):
             assert row.vcg_tier == "NORMAL"
             assert row.cri_tier == "TIER_1"
             assert row.user_reason == "earnings catalyst contrarian play"
+            assert row.perm_id == response["permId"]
+            assert row.ib_order_id == response["orderId"]
     finally:
         _delete_test_overrides([sid])
 
@@ -224,6 +248,78 @@ def test_tier_1_hedge_passes_without_override(client):
     sid = resp.json().get("submission_id")
     if sid:
         _delete_test_overrides([sid])
+
+
+def test_tier_1_sell_to_close_matching_long_option_skips_regime_gate(client, monkeypatch):
+    _seed_regime_state(vcg_tier="NORMAL", cri_tier="TIER_1")
+
+    async def snapshot():
+        return (
+            PortfolioView(
+                positions=[
+                    PortfolioPosition(
+                        ticker="QQQ",
+                        structure_type="Long Call",
+                        direction="LONG",
+                        contracts=1,
+                        expiry="2026-06-19",
+                        legs=[
+                            PortfolioLeg(
+                                direction="LONG",
+                                type="Call",
+                                contracts=1,
+                                strike=Decimal("200"),
+                            )
+                        ],
+                    )
+                ]
+            ),
+            dt.datetime.now(dt.timezone.utc),
+        )
+
+    monkeypatch.setattr(server_mod, "_load_portfolio_view", snapshot)
+    body = _opt_order_body(symbol="QQQ", action="SELL", right="C", limit="5.00")
+    resp = client.post("/orders/place", json=body)
+    assert resp.status_code == 200, resp.text
+    sid = resp.json().get("submission_id")
+    if sid:
+        _delete_test_overrides([sid])
+
+
+def test_tier_1_combo_sell_to_close_skips_regime_gate(client):
+    _seed_regime_state(vcg_tier="NORMAL", cri_tier="TIER_1")
+    body = _combo_order_body(
+        symbol="QQQ",
+        action="SELL",
+        limit="2.00",
+        suffix="close",
+        legs=[
+            {"expiry": "2026-06-19", "strike": "200", "right": "C", "action": "BUY", "ratio": 1},
+            {"expiry": "2026-06-19", "strike": "210", "right": "C", "action": "SELL", "ratio": 1},
+        ],
+    )
+    resp = client.post("/orders/place", json=body)
+    assert resp.status_code == 200, resp.text
+    sid = resp.json().get("submission_id")
+    if sid:
+        _delete_test_overrides([sid])
+
+
+def test_tier_1_buy_envelope_credit_put_spread_is_not_hedge(client):
+    _seed_regime_state(vcg_tier="NORMAL", cri_tier="TIER_1")
+    body = _combo_order_body(
+        symbol="SPY",
+        action="BUY",
+        limit="-0.50",
+        suffix="credit-put-spread",
+        legs=[
+            {"expiry": "2026-06-19", "strike": "390", "right": "P", "action": "BUY", "ratio": 1},
+            {"expiry": "2026-06-19", "strike": "400", "right": "P", "action": "SELL", "ratio": 1},
+        ],
+    )
+    resp = client.post("/orders/place", json=body)
+    assert resp.status_code == 409
+    assert resp.json()["reason_code"] == "REGIME_BLOCK"
 
 
 def test_tier_2_over_cap_returns_422_resize_required(client, monkeypatch):
@@ -251,7 +347,50 @@ def test_tier_2_within_cap_proceeds_with_125_cover_ratio(client):
         _delete_test_overrides([sid])
 
 
-def _seed_submission(*, ticker: str, quantity: int, ib_order_id: str, perm_id: str = "") -> str:
+def test_tier_2_buy_envelope_credit_spread_uses_defined_risk_max_loss(client, monkeypatch):
+    monkeypatch.setenv("XENON_REGIME_BANKROLL_USD_OVERRIDE", "100000")
+    _seed_regime_state(vcg_tier="TIER_2", cri_tier="NORMAL")
+    body = _combo_order_body(
+        symbol="QQQ",
+        action="BUY",
+        limit="-0.50",
+        suffix="credit-spread",
+        legs=[
+            {"expiry": "2026-06-19", "strike": "190", "right": "P", "action": "BUY", "ratio": 1},
+            {"expiry": "2026-06-19", "strike": "195", "right": "P", "action": "SELL", "ratio": 1},
+        ],
+    )
+    resp = client.post("/orders/place", json=body)
+    assert resp.status_code == 200, resp.text
+    sid = resp.json().get("submission_id")
+    if sid:
+        _delete_test_overrides([sid])
+
+
+def test_combo_malformed_body_returns_invalid_order_body_400(client):
+    _seed_regime_state(vcg_tier="TIER_2", cri_tier="NORMAL")
+    body = _combo_order_body(
+        symbol="AAPL",
+        action="BUY",
+        limit="1.00",
+        suffix="bad-leg",
+        legs=[
+            {"expiry": "2026-06-19", "strike": "190", "right": "BAD", "action": "BUY", "ratio": 1},
+        ],
+    )
+    resp = client.post("/orders/place", json=body)
+    assert resp.status_code == 400
+    assert resp.json()["reason_code"] == "INVALID_ORDER_BODY"
+
+
+def _seed_submission(
+    *,
+    ticker: str,
+    quantity: int,
+    ib_order_id: str,
+    perm_id: str = "",
+    limit_price: str = "5.00",
+) -> str:
     """Insert a real order_submissions row for /orders/modify gate tests."""
     import uuid
 
@@ -269,7 +408,7 @@ def _seed_submission(*, ticker: str, quantity: int, ib_order_id: str, perm_id: s
                     submitted_at, updated_at, broker, account_env, broker_account
                 ) VALUES (
                     :sid, 'local', :sid, :ticker, 'OPT', 'BUY', :qty, '2026-06-19',
-                    200, 'C', 100, 5.00, 'WORKING', :ib_id, :perm_id, 0,
+                    200, 'C', 100, :limit_price, 'WORKING', :ib_id, :perm_id, 0,
                     :now, :now, 'IB',
                     COALESCE((SELECT account_env FROM xenon.account_snapshots ORDER BY snapshot_at DESC LIMIT 1), 'paper'),
                     COALESCE((SELECT broker_account FROM xenon.account_snapshots ORDER BY snapshot_at DESC LIMIT 1), 'DU0000000')
@@ -282,6 +421,7 @@ def _seed_submission(*, ticker: str, quantity: int, ib_order_id: str, perm_id: s
                 "qty": quantity,
                 "ib_id": ib_order_id,
                 "perm_id": perm_id,
+                "limit_price": Decimal(limit_price),
                 "now": now,
             },
         )
@@ -353,6 +493,44 @@ def test_modify_quantity_increase_blocks_at_tier_1(client, monkeypatch):
         assert body["reason_code"] == "REGIME_BLOCK"
         assert body["modify_path"] is True
         assert body["delta_quantity"] == 4
+        eng = server_mod.get_sync_engine()
+        with eng.connect() as conn:
+            seq = conn.execute(
+                sa_text("SELECT modify_sequence FROM xenon.order_submissions WHERE submission_id = :sid"),
+                {"sid": sid},
+            ).scalar_one()
+        assert seq == 0
+    finally:
+        _delete_submission(sid)
+
+
+def test_modify_quantity_increase_uses_new_price_for_tier_2_cap(client, monkeypatch):
+    monkeypatch.setenv("XENON_API_TEST_MODE", "0")
+    monkeypatch.setenv("XENON_REGIME_BANKROLL_USD_OVERRIDE", "10000")
+    _seed_regime_state(vcg_tier="TIER_2", cri_tier="NORMAL")
+    ib_order_id = "9000004"
+    sid = _seed_submission(ticker="QQQ", quantity=1, ib_order_id=ib_order_id, limit_price="0.10")
+    try:
+
+        async def fake_runner(entry, args, timeout=15):
+            from xenon.api.subprocess import ScriptResult
+
+            return ScriptResult(ok=True, data={"status": "ok"}, error=None)
+
+        monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+        resp = client.post(
+            "/orders/modify",
+            json={
+                "orderId": int(ib_order_id),
+                "newPrice": 10.00,
+                "newQuantity": 5,
+                "modifySequence": 1,
+            },
+        )
+        assert resp.status_code == 422, resp.text
+        body = resp.json()
+        assert body["reason_code"] == "REGIME_RESIZE_REQUIRED"
+        assert body["max_loss_usd"] == pytest.approx(4000.0)
     finally:
         _delete_submission(sid)
 

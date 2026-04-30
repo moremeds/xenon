@@ -216,6 +216,35 @@ def test_is_hedge_combo_credit_put_spread_is_not_hedge():
     assert _is_hedge(_put_spread_combo("SPY", action="SELL")) is False
 
 
+def test_is_hedge_combo_buy_envelope_credit_put_spread_is_not_hedge():
+    combo = ComboPreflightRequest(
+        ticker="SPY",
+        action="BUY",
+        quantity=1,
+        multiplier=100,
+        legs=[
+            ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("390"), right="P", action="BUY", ratio=1),
+            ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("400"), right="P", action="SELL", ratio=1),
+        ],
+    )
+    assert _is_hedge(combo) is False
+
+
+def test_tier_1_buy_envelope_credit_put_spread_blocks_even_on_spy():
+    combo = ComboPreflightRequest(
+        ticker="SPY",
+        action="BUY",
+        quantity=1,
+        multiplier=100,
+        legs=[
+            ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("390"), right="P", action="BUY", ratio=1),
+            ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("400"), right="P", action="SELL", ratio=1),
+        ],
+    )
+    result = RegimeGate.veto(combo, _state("TIER_1"), bankroll_usd=100_000.0, net_price=Decimal("-0.50"))
+    assert result.decision == GateDecision.BLOCK
+
+
 def test_is_hedge_combo_call_spread_on_aapl_not_hedge():
     combo = ComboPreflightRequest(
         ticker="AAPL",
@@ -353,19 +382,31 @@ def test_max_loss_combo_sell_without_net_price_is_inf():
     assert _max_loss_usd(combo, net_price=None) == math.inf
 
 
-def test_max_loss_combo_buy_with_negative_net_price_is_inf():
-    # Sign-convention drift — BUY combo cannot be a credit.
+def test_max_loss_combo_buy_credit_without_defined_width_is_inf():
     combo = ComboPreflightRequest(
         ticker="AAPL",
         action="BUY",
         quantity=1,
         multiplier=100,
         legs=[
-            ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("200"), right="C", action="BUY", ratio=1),
-            ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("210"), right="C", action="SELL", ratio=1),
+            ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("200"), right="P", action="SELL", ratio=1),
         ],
     )
     assert _max_loss_usd(combo, net_price=Decimal("-1.00")) == math.inf
+
+
+def test_max_loss_combo_buy_envelope_credit_spread_uses_width_minus_credit():
+    combo = ComboPreflightRequest(
+        ticker="AAPL",
+        action="BUY",
+        quantity=1,
+        multiplier=100,
+        legs=[
+            ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("190"), right="P", action="BUY", ratio=1),
+            ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("200"), right="P", action="SELL", ratio=1),
+        ],
+    )
+    assert _max_loss_usd(combo, net_price=Decimal("-2.00")) == pytest.approx(800.0)
 
 
 def test_max_loss_iron_condor_uses_max_pair_width():
