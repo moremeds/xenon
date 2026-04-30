@@ -738,7 +738,9 @@ def cta_exposure_model(
             "realized_vol": realized_vol if not math.isnan(realized_vol) else 0.0,
             "exposure_pct": CTA_MAX_EXPOSURE,
             "forced_reduction_pct": 0.0,
+            "forced_reduction": False,
             "est_selling_bn": 0.0,
+            "selling_usd_b": 0.0,
         }
 
     exposure = min(vol_target / realized_vol * 100.0, CTA_MAX_EXPOSURE)
@@ -749,7 +751,9 @@ def cta_exposure_model(
         "realized_vol": round(realized_vol, 2),
         "exposure_pct": round(exposure, 1),
         "forced_reduction_pct": round(reduction * 100.0, 1),
+        "forced_reduction": reduction > 0.0,
         "est_selling_bn": round(est_selling, 1),
+        "selling_usd_b": round(est_selling, 1),
     }
 
 
@@ -776,6 +780,7 @@ def crash_trigger(
 
     return {
         "triggered": triggered,
+        "fired": triggered,
         "conditions": {
             "spx_below_100d_ma": spx_below_ma,
             "realized_vol_gt_25": vol_ok,
