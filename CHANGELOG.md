@@ -5,6 +5,20 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+### Added
+
+- **IB→Postgres activity mirror (#70).** Boot replay of IB executions into `xenon.order_fills` + aggregated `xenon.trades`; periodic poller (default 60s, env `XENON_IB_ACTIVITY_POLL_S`) runs open-order import + fill replay every tick with independent failure isolation. `register_from_snapshot` now UPDATEs `snapshot-*` rows on TWS price/qty drift and emits `IB_MIRROR_UPDATE` events. `record_external_fills` resolves `(perm_id, scope)` → `submission_id` so blotter rows tie back to their originating order.
+- **`tif` column on `order_submissions` (#71).** Alembic migration `8a3f2c7d1e90` replaces the route's hard-coded `"DAY"` with the IB-reported TIF, threaded through writer + drift detection + reader. GTC orders now render correctly.
+- **Snapshot row resurrection (#71).** `register_from_snapshot` restores rows in any terminal state (CANCELLED/FILLED/REJECTED/FAILED/UNKNOWN) when IB still reports them open. Emits `IB_MIRROR_RESURRECT` event for audit. Self-heals from cancel-route races and operator errors.
+- **Leg-contract enrichment in rehydrate (#71).** `single_leg_rehydrate._enrich_records_via_ib` qualifies leg conIds via `IB.qualify_contracts` when `Fill.contract` lacks strike/right/expiry. Fixes "Bull Put Spread (Short Unknown Unknown / Long Unknown Unknown)" rendering on closing combos.
+- **`docs/reference/order-path-incident-history.md`.** Chronological log of every non-trivial order-path bug since PR #27, with root cause, fix, and the regression test that protects against recurrence. Cross-linked from root + api CLAUDE.md.
+
+### Fixed
+
+- **Cancel doesn't clear Open Orders panel (#71).** `/orders/cancel` now calls `mark_terminal(state="CANCELLED", reason_code="USER_CANCEL")` on the success path. The activity poller intentionally cannot disambiguate fill vs cancel on disappearance, so the cancel route is the only authoritative trigger.
+- **BAG combo missing from panel (#71).** `sync_open_orders_to_postgres` no longer drops orders with `orderId=0` (which IB returns for combos viewed from non-originating clientIds). `perm_id` alone is sufficient identity.
+- **Trade aggregator labels combos as "Stock" (#71).** New `_has_bag_signal` heuristic — checks both `source.security_type` and per-fill `metadata.sec_type` — derives "Spread"/"Combo" from leg shape so snapshot-\* and legacy_id BAG groups never fall through to "Stock".
+
 ## [0.0.1] — 2026-04-24
 
 - Versioning reset. Begin semver from `0.0.1` as part of introducing the CI/release/deploy pipeline.
