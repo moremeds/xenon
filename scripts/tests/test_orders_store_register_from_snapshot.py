@@ -56,7 +56,6 @@ def test_register_inserts_row_for_unknown_perm_id(db_path):
         action="SELL",
         quantity=20,
         limit_price=1.7,
-        db_path=db_path,
     )
     assert inserted["action"] == "INSERTED"
 
@@ -187,7 +186,6 @@ def test_register_is_idempotent(db_path):
         action="SELL",
         quantity=20,
         limit_price=1.7,
-        db_path=db_path,
     )
     second = register_from_snapshot(
         perm_id="1533567543",
@@ -197,7 +195,6 @@ def test_register_is_idempotent(db_path):
         action="SELL",
         quantity=20,
         limit_price=1.7,
-        db_path=db_path,
     )
     assert first["action"] == "INSERTED"
     assert second["action"] == "NOOP"  # same values → no UPDATE, no event
@@ -213,7 +210,7 @@ def test_register_is_idempotent(db_path):
 def test_after_register_apply_modify_by_perm_id_succeeds(db_path):
     """End-to-end: register snapshot order, then sequence-gate apply succeeds."""
     # Pre-condition: unknown order returns -1 sentinel.
-    pre = apply_modify_by_perm_id("1533567543", sequence=1, db_path=db_path)
+    pre = apply_modify_by_perm_id("1533567543", sequence=1)
     assert pre == {"applied": False, "current_sequence": -1}
 
     # Register, then retry.
@@ -225,10 +222,9 @@ def test_after_register_apply_modify_by_perm_id_succeeds(db_path):
         action="SELL",
         quantity=20,
         limit_price=1.7,
-        db_path=db_path,
     )
 
-    post = apply_modify_by_perm_id("1533567543", sequence=1, db_path=db_path)
+    post = apply_modify_by_perm_id("1533567543", sequence=1)
     assert post == {"applied": True, "current_sequence": 1}
 
 
@@ -242,7 +238,6 @@ def test_register_works_for_stock_security_type(db_path):
         action="BUY",
         quantity=100,
         limit_price=350.0,
-        db_path=db_path,
     )
     assert inserted["action"] == "INSERTED"
 
@@ -258,7 +253,6 @@ def test_register_works_for_single_leg_option(db_path):
         quantity=5,
         limit_price=6.50,
         multiplier=100,
-        db_path=db_path,
     )
     assert inserted["action"] == "INSERTED"
     mult = _fetch_one(
@@ -278,8 +272,90 @@ def test_negative_ib_order_id_accepted(db_path):
         action="SELL",
         quantity=20,
         limit_price=1.7,
-        db_path=db_path,
     )
     # apply_modify keys by ib_order_id — confirm the negative value round-trips.
-    outcome = apply_modify("-5", sequence=1, db_path=db_path)
+    outcome = apply_modify("-5", sequence=1)
     assert outcome == {"applied": True, "current_sequence": 1}
+
+
+def test_register_accepts_decimal_limit_price(db_path):
+    """Decimal `limit_price` round-trips without float-noise.
+
+    Floats can't represent 1.45 exactly (1.4499999999...), and the prior
+    signature `limit_price: float` quietly accepted Decimal at runtime via
+    duck-typing but converted via float() internally — re-introducing noise.
+    """
+    from decimal import Decimal
+
+    register_from_snapshot(
+        perm_id="9000001",
+        ib_order_id="601",
+        ticker="SPY",
+        security_type="STK",
+        action="BUY",
+        quantity=100,
+        limit_price=Decimal("1.4567"),
+    )
+    row = _fetch_one(
+        "SELECT limit_price FROM xenon.order_submissions WHERE perm_id = :perm_id",
+        {"perm_id": "9000001"},
+    )
+    assert row is not None
+    # DB column is Numeric(12,4) — exact Decimal round-trip.
+    assert row[0] == Decimal("1.4567")
+
+
+def test_register_accepts_decimal_strike(db_path):
+    """Option `strike` accepts Decimal and persists exactly."""
+    from decimal import Decimal
+
+    register_from_snapshot(
+        perm_id="9000002",
+        ib_order_id="602",
+        ticker="SPY",
+        security_type="OPT",
+        action="BUY",
+        quantity=1,
+        limit_price=Decimal("4.20"),
+        multiplier=100,
+        strike=Decimal("525.50"),
+        right="C",
+        expiry="2026-05-01",
+    )
+    row = _fetch_one(
+        "SELECT strike FROM xenon.order_submissions WHERE perm_id = :perm_id",
+        {"perm_id": "9000002"},
+    )
+    assert row is not None
+    assert row[0] == Decimal("525.50")
+
+
+def test_register_decimal_no_spurious_drift_on_repeat(db_path):
+    """Re-registering the same Decimal must NOT trigger drift detection.
+
+    Without Decimal-aware comparison, float round-trip noise can make the
+    second call see `existing=1.4499999...` vs `incoming=1.45` and emit a
+    spurious IB_MIRROR_UPDATE every poll tick.
+    """
+    from decimal import Decimal
+
+    first = register_from_snapshot(
+        perm_id="9000003",
+        ib_order_id="603",
+        ticker="QQQ",
+        security_type="STK",
+        action="BUY",
+        quantity=10,
+        limit_price=Decimal("1.45"),
+    )
+    second = register_from_snapshot(
+        perm_id="9000003",
+        ib_order_id="603",
+        ticker="QQQ",
+        security_type="STK",
+        action="BUY",
+        quantity=10,
+        limit_price=Decimal("1.45"),
+    )
+    assert first["action"] == "INSERTED"
+    assert second["action"] == "NOOP"

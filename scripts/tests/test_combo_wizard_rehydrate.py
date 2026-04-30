@@ -289,14 +289,12 @@ def test_combo_rehydrate_records_leg_fills_and_aggregates_trade(tmp_path, monkey
 
     wiz_rehydrate.rehydrate_combo_sessions(
         ib_client_factory=lambda: ib,
-        db_path=tmp_path,
         broker="IB",
         account_env="paper",
         broker_account="DU123456",
     )
     wiz_rehydrate.rehydrate_combo_sessions(
         ib_client_factory=lambda: ib,
-        db_path=tmp_path,
         broker="IB",
         account_env="paper",
         broker_account="DU123456",

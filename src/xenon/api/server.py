@@ -208,7 +208,6 @@ async def _run_rehydrate_on_boot() -> None:
             asyncio.to_thread(
                 _combo_rehydrate_mod.rehydrate_combo_sessions,
                 ib_client_factory=_ib_client_factory,
-                db_path=db_path,
                 **_scope_kwargs,
             ),
             timeout=10.0,

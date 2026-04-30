@@ -128,7 +128,6 @@ def test_emits_event_when_threshold_crossed_debit(tmp_path, monkeypatch):
     h = WizardStopMonitorHandler(
         quote_fn=lambda session_id: quotes.get(session_id),
         notify_fn=lambda payload: events.append(payload),
-        db_path=tmp_path,
     )
     result = h.execute()
 
@@ -164,7 +163,6 @@ def test_no_event_when_threshold_not_crossed(tmp_path, monkeypatch):
     h = WizardStopMonitorHandler(
         quote_fn=lambda _sid: quotes.get(_sid),
         notify_fn=lambda payload: events.append(payload),
-        db_path=tmp_path,
     )
     result = h.execute()
     assert result["checked"] == 1
@@ -183,7 +181,6 @@ def test_handler_does_not_place_close_orders(tmp_path, monkeypatch):
     h = WizardStopMonitorHandler(
         quote_fn=lambda _sid: quotes_crossed,
         notify_fn=lambda _p: None,
-        db_path=tmp_path,
     )
     result = h.execute()
     # No orders_placed key — and if present, must be zero.
@@ -202,7 +199,6 @@ def test_handler_idempotent_within_same_run(tmp_path, monkeypatch):
     h = WizardStopMonitorHandler(
         quote_fn=lambda _sid: quotes_crossed,
         notify_fn=lambda p: events.append(p),
-        db_path=tmp_path,
     )
     h.execute()
     h.execute()

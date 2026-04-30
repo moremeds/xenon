@@ -411,7 +411,6 @@ def test_default_tick_ttl_env_tunable(tmp_path, monkeypatch):
 
     quote_fn = cqs.build_default_quote_fn(
         lambda: fake_ib,
-        db_path=db,
         now_fn=lambda: now,
     )
     result = quote_fn(sid)
@@ -464,7 +463,6 @@ def test_ticker_cache_reuses_subscription_across_ticks(tmp_path, monkeypatch):
 
     quote_fn = build_default_quote_fn(
         lambda: fake_ib,
-        db_path=db,
         ttl_s=60.0,
         now_fn=lambda: now,
     )

@@ -13,7 +13,6 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -28,9 +27,12 @@ from xenon.db.schema import order_events, order_fills, order_submissions
 # ── Schema init ──
 
 
-def init_store(db_path: Path | str | None = None) -> Path:
-    """No-op — schema managed by Alembic. Kept for backward compatibility."""
-    return Path(db_path) if db_path is not None else Path("data/orders.duckdb")
+def init_store(*_args, **_kwargs) -> None:
+    """No-op — schema is managed by Alembic. Kept as a callable for legacy
+    tests; any positional/keyword arguments (e.g. legacy ``db_path=``) are
+    silently ignored.
+    """
+    return None
 
 
 # ── Models ──
@@ -85,7 +87,6 @@ def reserve_attempt(
     user_id: str,
     client_attempt_id: str,
     request: RequestRow,
-    db_path: Path | str | None = None,
     *,
     broker: str = "IB",
     account_env: str = "legacy_unknown",
@@ -167,7 +168,6 @@ def reserve_attempt(
 def apply_modify(
     order_id: str,
     sequence: int,
-    db_path: Path | str | None = None,
     *,
     broker: str | None = None,
     account_env: str | None = None,
@@ -226,7 +226,6 @@ def register_from_snapshot(
     limit_price: float,
     multiplier: int = 1,
     user_id: str = "snapshot",
-    db_path: Path | str | None = None,
     *,
     broker: str = "IB",
     account_env: str = "legacy_unknown",
@@ -405,7 +404,6 @@ def register_from_snapshot(
 def apply_modify_by_perm_id(
     perm_id: str,
     sequence: int,
-    db_path: Path | str | None = None,
     *,
     broker: str | None = None,
     account_env: str | None = None,
@@ -463,7 +461,6 @@ def mark_submitted(
     ib_order_id: str,
     perm_id: str | None,
     placing_client_id: int | None,
-    db_path: Path | str | None = None,
 ) -> None:
     now = datetime.now(timezone.utc)
     engine = get_sync_engine()
@@ -488,7 +485,6 @@ def mark_terminal(
     reason_code: str | None,
     filled_qty: int,
     avg_fill_price: Decimal | None,
-    db_path: Path | str | None = None,
 ) -> None:
     now = datetime.now(timezone.utc)
     engine = get_sync_engine()
@@ -658,7 +654,6 @@ def record_event(
     submission_id: str,
     kind: str,
     detail: dict,
-    db_path: Path | str | None = None,
 ) -> None:
     engine = get_sync_engine()
     with engine.begin() as conn:
@@ -673,7 +668,6 @@ def record_event(
 
 def lookup_submission_id_by_ib_order_id(
     ib_order_id: str,
-    db_path: Path | str | None = None,
     *,
     broker: str | None = None,
     account_env: str | None = None,
@@ -696,7 +690,6 @@ def lookup_submission_id_by_ib_order_id(
 
 def lookup_submission_id_by_perm_id(
     perm_id: str,
-    db_path: Path | str | None = None,
     *,
     broker: str | None = None,
     account_env: str | None = None,
@@ -720,7 +713,6 @@ def lookup_submission_id_by_perm_id(
 def lookup_by_attempt(
     user_id: str,
     client_attempt_id: str,
-    db_path: Path | str | None = None,
     *,
     broker: str | None = None,
     account_env: str | None = None,
@@ -771,7 +763,6 @@ _ACTIVE_STATES = ("PENDING", "WORKING", "PARTIALLY_FILLED")
 def working_reservations_for(
     user_id: str,
     ticker: str,
-    db_path: Path | str | None = None,
     *,
     broker: str | None = None,
     account_env: str | None = None,

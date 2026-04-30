@@ -67,7 +67,6 @@ def test_reserve_attempt_winner(db_path):
         user_id="local",
         client_attempt_id="cid-A",
         request=_req(),
-        db_path=db_path,
     )
     assert out.status == "winner"
     assert out.submission_id
@@ -77,8 +76,8 @@ def test_reserve_attempt_winner(db_path):
 
 def test_reserve_attempt_loser_non_terminal(db_path):
     init_store(db_path)
-    first = reserve_attempt("local", "cid-B", _req(), db_path=db_path)
-    second = reserve_attempt("local", "cid-B", _req(), db_path=db_path)
+    first = reserve_attempt("local", "cid-B", _req())
+    second = reserve_attempt("local", "cid-B", _req())
     assert first.status == "winner"
     assert second.status == "duplicate"
     assert second.submission_id == first.submission_id
@@ -93,7 +92,7 @@ def test_reserve_attempt_concurrent_only_one_winner(db_path):
 
     def _go():
         barrier.wait()
-        outcomes.append(reserve_attempt("local", "cid-C", _req(), db_path=db_path))
+        outcomes.append(reserve_attempt("local", "cid-C", _req()))
 
     threads = [threading.Thread(target=_go) for _ in range(8)]
     for t in threads:
@@ -118,15 +117,14 @@ from xenon.execution.orders_store import (
 
 def test_mark_submitted_stamps_ib_order_id(db_path):
     init_store(db_path)
-    win = reserve_attempt("local", "cid-S", _req(), db_path=db_path)
+    win = reserve_attempt("local", "cid-S", _req())
     mark_submitted(
         submission_id=win.submission_id,
         ib_order_id="5001",
         perm_id="9901",
         placing_client_id=26,
-        db_path=db_path,
     )
-    row = lookup_by_attempt("local", "cid-S", db_path=db_path)
+    row = lookup_by_attempt("local", "cid-S")
     assert row.ib_order_id == "5001"
     assert row.perm_id == "9901"
     assert row.placing_client_id == 26
@@ -135,28 +133,27 @@ def test_mark_submitted_stamps_ib_order_id(db_path):
 
 def test_mark_terminal_sets_reason_code(db_path):
     init_store(db_path)
-    win = reserve_attempt("local", "cid-T", _req(), db_path=db_path)
+    win = reserve_attempt("local", "cid-T", _req())
     mark_terminal(
         submission_id=win.submission_id,
         state="REJECTED",
         reason_code="IB_REJECT_201",
         filled_qty=0,
         avg_fill_price=None,
-        db_path=db_path,
     )
-    row = lookup_by_attempt("local", "cid-T", db_path=db_path)
+    row = lookup_by_attempt("local", "cid-T")
     assert row.state == "REJECTED"
     assert row.reason_code == "IB_REJECT_201"
 
-    out = reserve_attempt("local", "cid-T", _req(), db_path=db_path)
+    out = reserve_attempt("local", "cid-T", _req())
     assert out.status == "terminal"
     assert out.reason_code == "IB_REJECT_201"
 
 
 def test_record_event_appends_row(db_path):
     init_store(db_path)
-    win = reserve_attempt("local", "cid-E", _req(), db_path=db_path)
-    record_event(win.submission_id, "PREFLIGHT_ACK_LIMIT", {"override": True}, db_path=db_path)
+    win = reserve_attempt("local", "cid-E", _req())
+    record_event(win.submission_id, "PREFLIGHT_ACK_LIMIT", {"override": True})
 
     rows = _fetch_all(
         "SELECT kind FROM xenon.order_events WHERE submission_id = :submission_id",
@@ -170,25 +167,23 @@ from xenon.execution.orders_store import working_reservations_for
 
 def test_working_reservations_sums_active_sell_rows(db_path):
     init_store(db_path)
-    reserve_attempt("local", "cid-W1", _req(quantity=100), db_path=db_path)
-    r2 = reserve_attempt("local", "cid-W2", _req(quantity=50), db_path=db_path)
+    reserve_attempt("local", "cid-W1", _req(quantity=100))
+    r2 = reserve_attempt("local", "cid-W2", _req(quantity=50))
     mark_submitted(
         submission_id=r2.submission_id,
         ib_order_id="6001",
         perm_id="8001",
         placing_client_id=26,
-        db_path=db_path,
     )
-    r3 = reserve_attempt("local", "cid-W3", _req(quantity=77), db_path=db_path)
+    r3 = reserve_attempt("local", "cid-W3", _req(quantity=77))
     mark_terminal(
         submission_id=r3.submission_id,
         state="CANCELLED",
         reason_code=None,
         filled_qty=0,
         avg_fill_price=None,
-        db_path=db_path,
     )
-    res = working_reservations_for("local", "SPY", db_path=db_path)
+    res = working_reservations_for("local", "SPY")
     assert res.stock_sell_qty == 150
     assert res.short_call_qty == 0
     assert res.long_call_close_qty_same_exp == 0
@@ -207,8 +202,7 @@ def test_working_reservations_counts_short_call_only_when_sell_call(db_path):
             strike=Decimal("500"),
             quantity=3,
         ),
-        db_path=db_path,
     )
-    res = working_reservations_for("local", "SPY", db_path=db_path)
+    res = working_reservations_for("local", "SPY")
     assert res.short_call_qty == 3
     assert res.stock_sell_qty == 0
