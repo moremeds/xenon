@@ -239,6 +239,89 @@ async def test_unknown_suppression_from_unknown(engine, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_market_hours_gate_skips_scans_off_hours(engine, monkeypatch):
+    """Codex-review ISSUE-3 (CODEX-3 fix coverage): when the market is
+    closed, the scan subprocesses MUST NOT run, but the classify+emit path
+    still continues (so a delayed transition from the last open scan can
+    still emit). XENON_VCG_CRI_SCAN_GATE_OFF_HOURS=1 (default) enables the
+    gate; "0" disables it for manual operator runs.
+    """
+    from xenon.api import server
+
+    scan_called = {"vcg": 0, "cri": 0}
+
+    async def _track_vcg():
+        scan_called["vcg"] += 1
+
+    async def _track_cri():
+        scan_called["cri"] += 1
+
+    monkeypatch.setattr(server, "_run_vcg_scan_and_persist", _track_vcg)
+    monkeypatch.setattr(server, "_run_cri_scan_and_persist", _track_cri)
+    monkeypatch.setattr(server, "_is_market_open_now", lambda: False)
+    monkeypatch.delenv("XENON_VCG_CRI_SCAN_GATE_OFF_HOURS", raising=False)
+
+    _seed(engine, vcg_tier=2, cri_score=20.0)
+    new_state = await server._vcg_cri_tick(last_seen=("NORMAL", "NORMAL"))
+
+    assert scan_called == {"vcg": 0, "cri": 0}, "scans must be skipped off-hours"
+    # classify+emit still runs — the seeded TIER_2 row is observed and
+    # last_seen advances + transition is emitted.
+    assert new_state == ("TIER_2", "NORMAL")
+    with engine.connect() as c:
+        rows = c.execute(sa.select(outbox).where(outbox.c.channel == "regime_transition")).all()
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_market_hours_gate_runs_scans_when_open(engine, monkeypatch):
+    """When market is open, scans run. Mirror of the off-hours test."""
+    from xenon.api import server
+
+    scan_called = {"vcg": 0, "cri": 0}
+
+    async def _track_vcg():
+        scan_called["vcg"] += 1
+
+    async def _track_cri():
+        scan_called["cri"] += 1
+
+    monkeypatch.setattr(server, "_run_vcg_scan_and_persist", _track_vcg)
+    monkeypatch.setattr(server, "_run_cri_scan_and_persist", _track_cri)
+    monkeypatch.setattr(server, "_is_market_open_now", lambda: True)
+
+    _seed(engine, vcg_tier=None, cri_score=20.0)
+    await server._vcg_cri_tick(last_seen=None)
+
+    assert scan_called == {"vcg": 1, "cri": 1}
+
+
+@pytest.mark.asyncio
+async def test_market_hours_gate_overridable_via_env(engine, monkeypatch):
+    """XENON_VCG_CRI_SCAN_GATE_OFF_HOURS=0 forces scans even when closed —
+    the operator escape hatch for manual backfills."""
+    from xenon.api import server
+
+    scan_called = {"vcg": 0, "cri": 0}
+
+    async def _track_vcg():
+        scan_called["vcg"] += 1
+
+    async def _track_cri():
+        scan_called["cri"] += 1
+
+    monkeypatch.setattr(server, "_run_vcg_scan_and_persist", _track_vcg)
+    monkeypatch.setattr(server, "_run_cri_scan_and_persist", _track_cri)
+    monkeypatch.setattr(server, "_is_market_open_now", lambda: False)
+    monkeypatch.setenv("XENON_VCG_CRI_SCAN_GATE_OFF_HOURS", "0")
+
+    _seed(engine, vcg_tier=None, cri_score=20.0)
+    await server._vcg_cri_tick(last_seen=None)
+
+    assert scan_called == {"vcg": 1, "cri": 1}, "env override must force scans even off-hours"
+
+
+@pytest.mark.asyncio
 async def test_emit_failure_preserves_last_seen_for_retry(engine, monkeypatch):
     """Codex-review fix C1: if the outbox INSERT fails, last_seen MUST NOT
     advance — otherwise the transition is permanently lost. Next tick should

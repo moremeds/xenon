@@ -686,6 +686,24 @@ async def lifespan(app: FastAPI):
                     await _vcg_cri_scan_loop()
 
             vcg_cri_task = asyncio.create_task(_supervised_vcg_cri())
+
+            # Codex-review ISSUE-1: surface unexpected supervisor exit. Without
+            # this, a dead lock-holder is silent — no other worker can take over
+            # because the lock is session-scoped on a connection that's still
+            # open from this worker.
+            def _vcg_cri_done(t: asyncio.Task) -> None:
+                if t.cancelled():
+                    logger.info("vcg_cri_scan_loop supervisor cancelled")
+                    return
+                exc = t.exception()
+                if exc is not None:
+                    logger.error("vcg_cri_scan_loop supervisor exited with exception", exc_info=exc)
+                else:
+                    logger.warning(
+                        "vcg_cri_scan_loop supervisor returned without error (lock contention or unexpected exit)"
+                    )
+
+            vcg_cri_task.add_done_callback(_vcg_cri_done)
             app.state.vcg_cri_task = vcg_cri_task
             logger.info("vcg_cri_scan_loop background task started")
         except Exception as exc:  # noqa: BLE001
@@ -1547,7 +1565,29 @@ async def health():
         "snapshotter": _snapshotter_health(),
         "order_submissions": _order_submissions_health(),
         "flex_divergence": _flex_divergence_health(),
+        "vcg_cri_loop": _vcg_cri_loop_health(),
     }
+
+
+def _vcg_cri_loop_health() -> dict:
+    """Codex-review ISSUE-1: report supervisor task state so a dead loop is
+    observable to operators. `running=True` means the supervisor task is
+    alive and (presumably) holds the advisory lock; `running=False` plus
+    `exception` set indicates the lock-holder crashed and no worker is
+    currently scanning."""
+    task = getattr(app.state, "vcg_cri_task", None)
+    if task is None:
+        return {"configured": False}
+    if not task.done():
+        return {"configured": True, "running": True}
+    out: dict = {"configured": True, "running": False}
+    if task.cancelled():
+        out["cancelled"] = True
+        return out
+    exc = task.exception()
+    if exc is not None:
+        out["exception"] = f"{type(exc).__name__}: {exc}"
+    return out
 
 
 # ---------------------------------------------------------------------------
