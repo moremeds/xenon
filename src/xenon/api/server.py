@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -50,6 +51,12 @@ from xenon.api.routes.trades import router as trades_router
 from xenon.api.routes.uw_analyze import router as uw_analyze_router
 from xenon.api.routes.uw_stats import router as uw_stats_router
 from xenon.api.routes.wizard import router as wizard_router
+from xenon.api.services.regime_gate import (
+    GateDecision,
+    OrderGateOutcome,
+    evaluate_order_gate,
+)
+from xenon.api.services.regime_state import get_regime_state_for_scope
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
@@ -2134,14 +2141,16 @@ def _portfolio_required_response(body: dict) -> Verdict | None:
     )
 
 
-async def _run_preflight(body: dict, user_id: str = "local") -> Verdict:
+async def _run_preflight(body: dict, user_id: str = "local", cover_ratio: float = 1.0) -> Verdict:
+    """Run server-side Gate 4. `cover_ratio` is plumbed from RegimeGate
+    when binding_tier is TIER_2 (1.25 → 125 shares per short call)."""
     if body.get("type") == "combo":
         try:
             req = _body_to_combo_preflight_request(body)
         except (ValueError, ValidationError) as exc:
             return _invalid_order_body_response(exc)
         if preflight.combo_uncovered_short_call_ratio(req) <= 0 or req.action == "SELL":
-            return preflight.evaluate_combo(req, PortfolioView())
+            return preflight.evaluate_combo(req, PortfolioView(), cover_ratio=cover_ratio)
         portfolio, snapshot_at = _unpack_portfolio_load(await _load_portfolio_view())
         if portfolio is None:
             try:
@@ -2155,14 +2164,14 @@ async def _run_preflight(body: dict, user_id: str = "local") -> Verdict:
         if stale is not None:
             return stale
         reservations = orders_store.working_reservations_for(user_id, req.ticker, **_resolve_scope_kwargs())
-        return preflight.evaluate_combo(req, portfolio, reservations=reservations)
+        return preflight.evaluate_combo(req, portfolio, reservations=reservations, cover_ratio=cover_ratio)
 
     try:
         req = _body_to_preflight_request(body)
     except (ValueError, ValidationError) as exc:
         return _invalid_order_body_response(exc)
     if req.action == "BUY":
-        return preflight.evaluate(req, PortfolioView())
+        return preflight.evaluate(req, PortfolioView(), cover_ratio=cover_ratio)
 
     portfolio, snapshot_at = _unpack_portfolio_load(await _load_portfolio_view())
     if portfolio is None:
@@ -2174,7 +2183,7 @@ async def _run_preflight(body: dict, user_id: str = "local") -> Verdict:
     if stale is not None:
         return stale
     reservations = orders_store.working_reservations_for(user_id, req.ticker, **_resolve_scope_kwargs())
-    return preflight.evaluate(req, portfolio, reservations=reservations)
+    return preflight.evaluate(req, portfolio, reservations=reservations, cover_ratio=cover_ratio)
 
 
 def _lookup_min_tick_via_pool(con_id: int) -> Decimal:
@@ -2497,6 +2506,121 @@ def _resolve_scope_kwargs() -> dict[str, str]:
     return {"broker": "IB", "account_env": "legacy_unknown", "broker_account": "legacy_unknown"}
 
 
+_REGIME_OVERRIDE_MIN_REASON_CHARS = 10
+
+
+def _resolve_scope_obj():
+    """Return AccountScope for in-process callers. Falls back when lifespan didn't run."""
+    from xenon.execution.account_scope import AccountScope
+
+    try:
+        return resolve_from_app_state(app.state)
+    except ValueError:
+        return AccountScope(broker="IB", account_env="legacy_unknown", broker_account="legacy_unknown")
+
+
+async def _run_regime_gate(body: dict):
+    """Evaluate the regime gate against an order body.
+
+    Returns `(outcome_or_None, block_response_or_None)`:
+    - When the gate would BLOCK without a valid override → outcome=None,
+      block_response is a JSONResponse (409) the caller returns.
+    - When the gate would 422 (THROTTLE + max_loss > cap) → same shape
+      with status 422.
+    - When the gate decides OK or THROTTLE within cap, or BLOCK with a
+      valid override, → outcome is set, block_response is None and the
+      caller continues with cover_ratio + override_audit.
+    - When gating is disabled (test mode default), outcome is None and
+      block_response is None — caller proceeds with cover_ratio=1.0.
+    """
+    if os.environ.get("XENON_REGIME_GATE_DISABLED") == "1" or (
+        _is_test_mode() and os.environ.get("XENON_REGIME_GATE_IN_TESTS") != "1"
+    ):
+        return None, None
+
+    try:
+        if body.get("type") == "combo":
+            gate_req = _body_to_combo_preflight_request(body)
+            net_price = Decimal(str(body["limitPrice"])) if body.get("limitPrice") is not None else None
+        else:
+            gate_req = _body_to_preflight_request(body)
+            net_price = None
+    except (ValueError, ValidationError) as exc:
+        return None, JSONResponse(
+            status_code=400,
+            content={
+                "detail": str(exc),
+                "reason_code": ReasonCode.INVALID_ORDER_BODY.value,
+                "reason_detail": str(exc),
+            },
+        )
+
+    state = await get_regime_state_for_scope(_resolve_scope_obj())
+    outcome = evaluate_order_gate(gate_req, state, net_price=net_price)
+
+    if outcome.decision is GateDecision.BLOCK:
+        override_requested = bool(body.get("override"))
+        override_reason = str(body.get("override_reason") or "").strip()
+        if not override_requested or len(override_reason) < _REGIME_OVERRIDE_MIN_REASON_CHARS:
+            return None, JSONResponse(
+                status_code=409,
+                content={
+                    "detail": outcome.reason,
+                    "reason_code": "REGIME_BLOCK",
+                    "decision": "block",
+                    "binding_tier": state.binding_tier,
+                    "binding_side": outcome.bind,
+                    "vcg_tier": state.vcg_tier,
+                    "cri_tier": state.cri_tier,
+                    "override_required": True,
+                    "override_min_reason_chars": _REGIME_OVERRIDE_MIN_REASON_CHARS,
+                },
+            )
+        return outcome, None
+
+    if outcome.exceeds_throttle_cap:
+        max_loss_payload = outcome.max_loss_usd if outcome.max_loss_usd != math.inf else None
+        return None, JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"{state.binding_tier} throttle: order's max loss exceeds the "
+                    f"per-order cap (${outcome.max_loss_cap_usd:.0f})"
+                ),
+                "reason_code": "REGIME_RESIZE_REQUIRED",
+                "decision": "resize_required",
+                "binding_tier": state.binding_tier,
+                "binding_side": outcome.bind,
+                "max_loss_usd": max_loss_payload,
+                "max_loss_cap_usd": outcome.max_loss_cap_usd,
+                "cover_ratio": outcome.cover_ratio,
+            },
+        )
+
+    return outcome, None
+
+
+def _build_override_audit(body: dict, outcome) -> dict | None:
+    """Pack override data for orders_store.reserve_attempt.
+
+    Returns None unless the order is proceeding via override (i.e. the
+    gate would have BLOCK'd but body['override'] + override_reason were
+    valid). Caller already validated the reason length in _run_regime_gate.
+    """
+    if outcome is None or outcome.decision is not GateDecision.BLOCK:
+        return None
+    state = outcome.state
+    return {
+        "route": "POST /orders/place",
+        "vcg_tier": state.vcg_tier,
+        "cri_tier": state.cri_tier,
+        "binding_side": outcome.bind,
+        "block_reason": outcome.reason,
+        "user_reason": str(body.get("override_reason") or "").strip(),
+        "order_payload": body,
+    }
+
+
 async def _orders_place_from_body(body: dict):
     broker = str(getattr(app.state, "broker", "IB") or "IB").upper()
     if broker != "IB":
@@ -2520,8 +2644,17 @@ async def _orders_place_from_body(body: dict):
             },
         )
 
+    # Phase 3 — RegimeGate. Runs before preflight so its cover_ratio
+    # (1.25 on TIER_2) tightens Gate 4 in the same pass. Tests bypass
+    # via XENON_REGIME_GATE_DISABLED=1 unless they want to exercise it.
+    gate_outcome, gate_block_response = await _run_regime_gate(body)
+    if gate_block_response is not None:
+        return gate_block_response
+    cover_ratio_for_preflight = gate_outcome.cover_ratio if gate_outcome else 1.0
+    override_audit = _build_override_audit(body, gate_outcome) if gate_outcome else None
+
     # F2: server-side Gate 4. Run preflight before any subprocess invocation.
-    verdict = await _run_preflight(body)
+    verdict = await _run_preflight(body, cover_ratio=cover_ratio_for_preflight)
     if not verdict.accept:
         code = verdict.reason_code.value if verdict.reason_code else None
         # `detail` is the field web/lib/xenonApi.ts:39 reads for human-
@@ -2579,7 +2712,13 @@ async def _orders_place_from_body(body: dict):
         con_id=int(body.get("con_id") or 0) or None,
         limit_price=Decimal(str(body.get("limitPrice", "0"))),
     )
-    outcome = orders_store.reserve_attempt(user_id, cid, req_row, **_resolve_scope_kwargs())
+    outcome = orders_store.reserve_attempt(
+        user_id,
+        cid,
+        req_row,
+        override_audit=override_audit,
+        **_resolve_scope_kwargs(),
+    )
     if outcome.status == "terminal":
         return JSONResponse(
             status_code=409,

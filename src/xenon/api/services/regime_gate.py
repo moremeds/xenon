@@ -22,6 +22,7 @@ gate runs, but inf is the belt-and-suspenders default.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -257,3 +258,89 @@ def _combo_max_width(order: ComboPreflightRequest) -> Optional[float]:
         if len(strikes) >= 2:
             widths.append(float(max(strikes) - min(strikes)))
     return max(widths) if widths else None
+
+
+# ---- Bankroll resolver --------------------------------------------------
+
+# Test override env var per spec §4.5.1. When AccountScope grows a
+# net_liq_usd attribute, that's the preferred source — for now the order
+# route falls back to a documented default.
+_BANKROLL_OVERRIDE_ENV = "XENON_REGIME_BANKROLL_USD_OVERRIDE"
+_BANKROLL_DEFAULT_USD = 100_000.0
+
+
+def resolve_bankroll_usd() -> float:
+    """Bankroll source for the gate's throttle-cap math.
+
+    Precedence:
+    1. XENON_REGIME_BANKROLL_USD_OVERRIDE env var (test/dev override)
+    2. Default $100,000 (TODO: replace with AccountScope.net_liq_usd or
+       latest account_snapshots NAV when that integration lands)
+    """
+    raw = os.environ.get(_BANKROLL_OVERRIDE_ENV)
+    if raw is not None and raw.strip():
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return _BANKROLL_DEFAULT_USD
+
+
+# ---- Order-route integration --------------------------------------------
+
+
+@dataclass(frozen=True)
+class OrderGateOutcome:
+    """Result of evaluating the regime gate against a candidate order.
+
+    Disjoint shape:
+    - `decision == OK / THROTTLE`: proceed with `cover_ratio` plumbed
+      into preflight; if THROTTLE, also compare order's max_loss_usd
+      against `max_loss_cap_usd` and 422 if exceeded.
+    - `decision == BLOCK`: caller must return 409 unless an override
+      with valid reason was supplied.
+    """
+
+    decision: GateDecision
+    reason: str
+    bind: str
+    cover_ratio: float
+    max_loss_cap_usd: Optional[float]
+    max_loss_usd: float  # the order's computed max loss (inf when unbounded)
+    state: RegimeState
+
+    @property
+    def exceeds_throttle_cap(self) -> bool:
+        return (
+            self.decision is GateDecision.THROTTLE
+            and self.max_loss_cap_usd is not None
+            and self.max_loss_usd > self.max_loss_cap_usd
+        )
+
+
+def evaluate_order_gate(
+    order: OrderLike,
+    state: RegimeState,
+    *,
+    bankroll_usd: Optional[float] = None,
+    net_price: Optional[Decimal] = None,
+) -> OrderGateOutcome:
+    """Top-level helper used by the order route.
+
+    Resolves bankroll (via `resolve_bankroll_usd` when None), runs the
+    gate, computes the order's max_loss_usd, and packages everything the
+    order route needs in one immutable result.
+    """
+    bankroll = bankroll_usd if bankroll_usd is not None else resolve_bankroll_usd()
+    gate = RegimeGate.veto(order, state, bankroll, net_price=net_price)
+    cover_ratio = gate.cover_ratio if gate.cover_ratio is not None else 1.0
+    max_loss = _max_loss_usd(order, net_price=net_price)
+    return OrderGateOutcome(
+        decision=gate.decision,
+        reason=gate.reason,
+        bind=gate.bind,
+        cover_ratio=cover_ratio,
+        max_loss_cap_usd=gate.max_loss_cap_usd,
+        max_loss_usd=max_loss,
+        state=state,
+    )

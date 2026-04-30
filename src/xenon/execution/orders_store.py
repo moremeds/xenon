@@ -22,7 +22,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from xenon.db.engine import get_sync_engine
 from xenon.db.events import CHANNEL_FILL_COMMISSION_UPDATED, CHANNEL_FILL_RECORDED, emit_outbox_in_txn
-from xenon.db.schema import order_events, order_fills, order_submissions
+from xenon.db.schema import order_events, order_fills, order_submissions, regime_overrides
 
 # ── Schema init ──
 
@@ -91,9 +91,18 @@ def reserve_attempt(
     broker: str = "IB",
     account_env: str = "legacy_unknown",
     broker_account: str = "legacy_unknown",
+    override_audit: dict | None = None,
 ) -> ReservationOutcome:
     """Atomically reserve a submission slot keyed by
-    (broker, account_env, broker_account, user_id, client_attempt_id)."""
+    (broker, account_env, broker_account, user_id, client_attempt_id).
+
+    `override_audit` (when provided) writes a regime_overrides row in
+    the same transaction as the submission reservation. The deferred
+    composite FK on regime_overrides means both rows commit atomically
+    or both roll back. Schema: dict with keys
+    `route, vcg_tier, cri_tier, binding_side, block_reason, user_reason,
+    order_payload`.
+    """
     sid = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     engine = get_sync_engine()
@@ -124,6 +133,24 @@ def reserve_attempt(
         inserted = conn.execute(stmt).first()
 
         if inserted is not None:
+            if override_audit is not None:
+                conn.execute(
+                    insert(regime_overrides).values(
+                        user_id=user_id,
+                        account_env=account_env,
+                        broker=broker,
+                        broker_account=broker_account,
+                        submission_id=sid,
+                        client_attempt_id=client_attempt_id,
+                        route=override_audit["route"],
+                        vcg_tier=override_audit.get("vcg_tier"),
+                        cri_tier=override_audit.get("cri_tier"),
+                        binding_side=override_audit["binding_side"],
+                        block_reason=override_audit["block_reason"],
+                        user_reason=override_audit["user_reason"],
+                        order_payload=override_audit["order_payload"],
+                    )
+                )
             return ReservationOutcome(
                 status="winner",
                 submission_id=sid,
