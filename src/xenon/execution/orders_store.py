@@ -8,6 +8,7 @@ Spec: docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md §12.
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,11 +17,11 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import func, insert, select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import Text, cast, func, insert, literal, select, update
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, insert as pg_insert
 
 from xenon.db.engine import get_sync_engine
-from xenon.db.events import CHANNEL_FILL_RECORDED, emit_outbox_in_txn
+from xenon.db.events import CHANNEL_FILL_COMMISSION_UPDATED, CHANNEL_FILL_RECORDED, emit_outbox_in_txn
 from xenon.db.schema import order_events, order_fills, order_submissions
 
 # ── Schema init ──
@@ -233,20 +234,25 @@ def register_from_snapshot(
     right: str | None = None,
     expiry: str | None = None,
     con_id: int | None = None,
-) -> bool:
-    """Register an IB-side open order in `xenon.order_submissions`.
+) -> dict:
+    """Mirror an IB-side open order into `xenon.order_submissions`.
 
-    Two behaviors, one transaction:
+    Three branches, one transaction:
 
-    1. An existing row for `(perm_id, broker, account_env, broker_account)`
-       wins — Xenon-authored UUID rows carry richer authorship metadata
-       (preflight verdict, modify_sequence, naked-short audit) that the
-       IB snapshot can't reconstruct. Return False.
-    2. No existing row — INSERT a `snapshot-<perm_id>` row in state
-       `WORKING` (IB returned this from `get_open_orders()`, so it's
-       literally working — `SUBMITTED` is unread by the UI route).
-       Option / BAG contract fields propagate so the UI renders the leg
-       correctly. Return True.
+    1. **No existing row** — INSERT a `snapshot-<perm_id>` row in state
+       `WORKING`. Returns ``{"action": "INSERTED", "drift": None}``.
+    2. **Existing snapshot-* row** — compare ``limit_price`` and ``quantity``
+       against incoming. On drift, UPDATE the row + write an
+       ``IB_MIRROR_UPDATE`` order_event recording before/after. On no drift,
+       no-op. Returns ``{"action": "UPDATED"|"NOOP", "drift": {...}|None}``.
+    3. **Existing UUID-authored row** — keep dedupe semantics: this is a
+       Xenon-placed order with `modify_sequence` invariants we won't
+       silently violate from a TWS-side change. Returns
+       ``{"action": "SKIPPED_UUID", "drift": None}``.
+
+    Branch (2) closes the bug where TWS price/qty edits never reached our
+    DB: the previous insert-only behavior left snapshot rows frozen at
+    their first-seen values.
     """
     submission_id = f"snapshot-{perm_id}"
     client_attempt_id = f"snapshot-{perm_id}"
@@ -254,15 +260,64 @@ def register_from_snapshot(
     engine = get_sync_engine()
     with engine.begin() as conn:
         existing = conn.execute(
-            select(order_submissions.c.submission_id).where(
+            select(
+                order_submissions.c.submission_id,
+                order_submissions.c.limit_price,
+                order_submissions.c.quantity,
+            ).where(
                 order_submissions.c.perm_id == str(perm_id),
                 order_submissions.c.broker == broker,
                 order_submissions.c.account_env == account_env,
                 order_submissions.c.broker_account == broker_account,
             )
         ).first()
+
         if existing is not None:
-            return False
+            existing_submission_id = existing[0]
+            existing_limit_price = float(existing[1]) if existing[1] is not None else None
+            existing_quantity = int(existing[2]) if existing[2] is not None else None
+
+            # UUID-authored rows are off-limits: their modify_sequence is
+            # the source of truth. TWS-side modifies on those need a
+            # separate, conscious policy decision.
+            if not existing_submission_id.startswith("snapshot-"):
+                return {"action": "SKIPPED_UUID", "drift": None}
+
+            # Round to 4dp before comparing — the DB column is numeric(12,4)
+            # and incoming `limit_price` is a raw float that can carry round-trip
+            # noise (e.g. 1.4500000001). Without rounding, every poll tick would
+            # spuriously detect drift and emit a redundant IB_MIRROR_UPDATE event.
+            new_price = round(float(limit_price), 4)
+            stored_price = round(existing_limit_price, 4) if existing_limit_price is not None else None
+            drift: dict = {}
+            if stored_price != new_price:
+                drift["limit_price"] = {"from": stored_price, "to": new_price}
+            if existing_quantity != int(quantity):
+                drift["quantity"] = {
+                    "from": existing_quantity,
+                    "to": int(quantity),
+                }
+            if not drift:
+                return {"action": "NOOP", "drift": None}
+
+            conn.execute(
+                update(order_submissions)
+                .where(order_submissions.c.submission_id == existing_submission_id)
+                .values(
+                    limit_price=float(limit_price),
+                    quantity=int(quantity),
+                    updated_at=now,
+                )
+            )
+            conn.execute(
+                insert(order_events).values(
+                    submission_id=existing_submission_id,
+                    kind="IB_MIRROR_UPDATE",
+                    detail=drift,
+                    at=now,
+                )
+            )
+            return {"action": "UPDATED", "drift": drift}
 
         result = conn.execute(
             pg_insert(order_submissions)
@@ -293,7 +348,11 @@ def register_from_snapshot(
             .on_conflict_do_nothing(index_elements=["submission_id"])
             .returning(order_submissions.c.submission_id)
         )
-        return result.first() is not None
+        if result.first() is None:
+            # Race: another writer slipped in between the SELECT and INSERT.
+            # Fine to no-op — the next poll tick will see and reconcile.
+            return {"action": "NOOP", "drift": None}
+        return {"action": "INSERTED", "drift": None}
 
 
 def apply_modify_by_perm_id(
@@ -473,6 +532,76 @@ def record_fill(
                 "broker": broker,
                 "account_env": account_env,
                 "broker_account": broker_account,
+            },
+        )
+        return True
+
+
+def update_fill_commission(
+    *,
+    exec_id: str,
+    commission: Decimal,
+    realized_pnl: Decimal | None,
+) -> bool:
+    """Apply a late-arriving CommissionReport to an existing order_fills row.
+
+    Execution-grain fill fields remain insert-only. IB delivers commission
+    and realizedPNL on a separate message, so this writer only patches those
+    post-fill report fields and emits an outbox event when anything changed.
+    """
+    incoming_commission = Decimal(str(commission))
+    realized_pnl_text = str(realized_pnl) if realized_pnl is not None else None
+
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        row = conn.execute(
+            select(
+                order_fills.c.exec_id,
+                order_fills.c.submission_id,
+                order_fills.c.combo_attempt_id,
+                order_fills.c.commission,
+                order_fills.c.metadata,
+            )
+            .where(order_fills.c.exec_id == exec_id)
+            .with_for_update()
+        ).first()
+        if row is None:
+            return False
+
+        fill = row._mapping
+        stored_commission = Decimal(fill["commission"] or 0)
+        metadata = fill["metadata"] if isinstance(fill["metadata"], dict) else {}
+        existing_realized_pnl = metadata.get("realized_pnl")
+        existing_realized_pnl_text = str(existing_realized_pnl) if existing_realized_pnl is not None else None
+
+        update_commission = incoming_commission > 0 and stored_commission == 0
+        update_realized_pnl = realized_pnl is not None and existing_realized_pnl_text != realized_pnl_text
+        if not update_commission and not update_realized_pnl:
+            return False
+
+        values = {}
+        if update_commission:
+            values["commission"] = incoming_commission
+        if update_realized_pnl:
+            values["metadata"] = func.jsonb_set(
+                func.coalesce(order_fills.c.metadata, cast(literal("{}"), JSONB)),
+                cast(literal(["realized_pnl"]), ARRAY(Text)),
+                cast(literal(json.dumps(realized_pnl_text)), JSONB),
+                True,
+            )
+
+        conn.execute(update(order_fills).where(order_fills.c.exec_id == exec_id).values(**values))
+        emit_outbox_in_txn(
+            conn,
+            channel=CHANNEL_FILL_COMMISSION_UPDATED,
+            source="update_fill_commission",
+            payload={
+                "exec_id": exec_id,
+                "submission_id": fill["submission_id"],
+                "combo_attempt_id": fill["combo_attempt_id"],
+                "legacy_id": metadata.get("legacy_id"),
+                "commission": str(incoming_commission),
+                "realized_pnl": realized_pnl_text,
             },
         )
         return True

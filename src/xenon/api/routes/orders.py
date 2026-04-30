@@ -120,7 +120,7 @@ def _open_order(row: dict[str, Any]) -> dict[str, Any]:
 
 def _executed_order(row: dict[str, Any]) -> dict[str, Any]:
     metadata = row.get("metadata") or {}
-    sec_type = str(metadata.get("sec_type") or "STK")
+    sec_type = _fill_sec_type(row, metadata)
     side = str(row["side"]).upper()
     return {
         "execId": row["exec_id"],
@@ -143,6 +143,19 @@ def _executed_order(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _fill_sec_type(row: dict[str, Any], metadata: dict[str, Any]) -> str:
+    explicit = metadata.get("sec_type")
+    if explicit:
+        return str(explicit)
+    submission_sec_type = row.get("submission_security_type")
+    if submission_sec_type == "BAG":
+        submission_con_id = row.get("submission_con_id")
+        if submission_con_id is not None and row.get("con_id") == submission_con_id:
+            return "BAG"
+        return "OPT"
+    return str(submission_sec_type or "STK")
+
+
 def orders_payload_for_scope(scope: AccountScope, *, limit: int = 200) -> dict[str, Any]:
     engine = get_sync_engine()
     with engine.connect() as conn:
@@ -163,7 +176,17 @@ def orders_payload_for_scope(scope: AccountScope, *, limit: int = 200) -> dict[s
         fill_rows = [
             dict(row._mapping)
             for row in conn.execute(
-                select(order_fills)
+                select(
+                    order_fills,
+                    order_submissions.c.security_type.label("submission_security_type"),
+                    order_submissions.c.con_id.label("submission_con_id"),
+                )
+                .select_from(
+                    order_fills.outerjoin(
+                        order_submissions,
+                        order_fills.c.submission_id == order_submissions.c.submission_id,
+                    )
+                )
                 .where(
                     order_fills.c.broker == scope.broker,
                     order_fills.c.account_env == scope.account_env,

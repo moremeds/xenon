@@ -719,6 +719,11 @@ function groupExecutedOrders(
   return result;
 }
 
+export function executedGroupDetailFills(group: PositionFillGroup): ExecutedOrder[] {
+  const executableLegs = group.fills.filter((fill) => fill.contract.secType !== "BAG");
+  return executableLegs.length > 0 ? executableLegs : group.fills;
+}
+
 function blotterShareData(t: BlotterTrade): SharePnlData {
   const lastExec =
     t.executions.length > 0 ? t.executions[t.executions.length - 1] : null;
@@ -3167,6 +3172,7 @@ function OrdersSections({
                 {execFilter.filtered.map((group) => {
                   const isExpanded = expandedGroups.has(group.id);
                   const isCancelled = group.fills[0]?.side === "CANCELLED";
+                  const detailFills = executedGroupDetailFills(group);
                   return (
                     <React.Fragment key={group.id}>
                       {/* Position group header row */}
@@ -3174,14 +3180,14 @@ function OrdersSections({
                         className={`exec-group-header ${isCancelled ? "row-cancelled" : ""}`}
                         style={{
                           cursor:
-                            group.fills.length > 1 ? "pointer" : "default",
+                            detailFills.length > 1 ? "pointer" : "default",
                         }}
                         onClick={() =>
-                          group.fills.length > 1 && toggleGroup(group.id)
+                          detailFills.length > 1 && toggleGroup(group.id)
                         }
                       >
                         <td style={{ width: "24px", textAlign: "center" }}>
-                          {group.fills.length > 1 &&
+                          {detailFills.length > 1 &&
                             (isExpanded ? (
                               <ChevronDown
                                 size={14}
@@ -3279,7 +3285,7 @@ function OrdersSections({
                       </tr>
                       {/* Expanded fill detail rows */}
                       {isExpanded &&
-                        group.fills.map((e, i) => {
+                        detailFills.map((e, i) => {
                           const displaySide =
                             e.side === "BOT"
                               ? "BUY"

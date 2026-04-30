@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { positionGroupShareData, type PositionFillGroup } from "../components/WorkspaceSections";
+import {
+  executedGroupDetailFills,
+  positionGroupShareData,
+  type PositionFillGroup,
+} from "../components/WorkspaceSections";
 import type { ExecutedOrder } from "../lib/types";
 
 function makeOptionFill(
@@ -193,5 +197,55 @@ describe("positionGroupShareData", () => {
     expect(data.entryPrice).toBeCloseTo(-0.75, 2);
     expect(data.exitPrice).toBe(1.0);
     expect(data.pnlPct).toBeCloseTo(231.35, 2);
+  });
+});
+
+describe("executedGroupDetailFills", () => {
+  it("hides the BAG envelope when a combo group has executable option legs", () => {
+    const group: PositionFillGroup = {
+      id: "spx-close",
+      symbol: "SPX",
+      description: "Closed SPX Bear Put Spread",
+      isClosing: true,
+      totalQuantity: 11,
+      netPrice: 1.4,
+      totalCommission: 28.39,
+      totalPnL: -276.78,
+      time: "2026-04-29T13:45:20+00:00",
+      fills: [
+        makeBagFill({
+          execId: "bag-parent",
+          symbol: "SPX",
+          side: "SLD",
+          quantity: 11,
+          avgPrice: 1.4,
+          time: "2026-04-29T13:45:20+00:00",
+        }),
+        makeOptionFill({
+          execId: "short-put-close",
+          symbol: "SPX",
+          side: "SLD",
+          quantity: 11,
+          avgPrice: 27.9,
+          realizedPNL: -29431.38995,
+          time: "2026-04-29T13:45:20+00:00",
+          contract: { conId: 872609959, symbol: "SPX", strike: 5600, right: "P", expiry: "2026-04-29" },
+        }),
+        makeOptionFill({
+          execId: "long-put-close",
+          symbol: "SPX",
+          side: "BOT",
+          quantity: 11,
+          avgPrice: 26.5,
+          realizedPNL: 29154.61005,
+          time: "2026-04-29T13:45:20+00:00",
+          contract: { conId: 873604441, symbol: "SPX", strike: 5595, right: "P", expiry: "2026-04-29" },
+        }),
+      ],
+    };
+
+    const detailFills = executedGroupDetailFills(group);
+
+    expect(detailFills.map((fill) => fill.execId)).toEqual(["short-put-close", "long-put-close"]);
   });
 });

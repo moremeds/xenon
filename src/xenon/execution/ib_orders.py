@@ -229,7 +229,13 @@ def build_orders_data(open_orders: list, executed_orders: list) -> dict:
 
 
 def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | AccountScope | None = None) -> dict:
-    """Register IB open-order snapshots in xenon.order_submissions."""
+    """Register IB open-order snapshots in xenon.order_submissions.
+
+    Returns counts per branch so a periodic poller can publish drift metrics:
+      - registered: new rows INSERTed
+      - updated:    snapshot-* rows UPDATEd because TWS values drifted
+      - skipped:    UUID-authored rows left untouched (existing dedupe)
+    """
     if scope is None:
         resolved = resolve_from_env().as_dict()
     elif isinstance(scope, AccountScope):
@@ -238,6 +244,8 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
         resolved = dict(scope)
 
     registered = 0
+    updated = 0
+    skipped = 0
     for order in open_orders:
         contract = order.get("contract") or {}
         sec_type = str(contract.get("secType") or "STK")
@@ -248,7 +256,7 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
             continue
         strike_val = contract.get("strike")
         con_id_val = contract.get("conId")
-        inserted = orders_store.register_from_snapshot(
+        result = orders_store.register_from_snapshot(
             perm_id=perm_id,
             ib_order_id=ib_order_id,
             ticker=str(contract.get("symbol") or order.get("symbol") or ""),
@@ -263,9 +271,19 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
             con_id=int(con_id_val) if con_id_val else None,
             **resolved,
         )
-        if inserted:
+        action = result.get("action") if isinstance(result, dict) else None
+        if action == "INSERTED":
             registered += 1
-    return {"registered": registered, "open_count": len(open_orders)}
+        elif action == "UPDATED":
+            updated += 1
+        elif action == "SKIPPED_UUID":
+            skipped += 1
+    return {
+        "registered": registered,
+        "updated": updated,
+        "skipped": skipped,
+        "open_count": len(open_orders),
+    }
 
 
 def display_orders(open_orders: list, executed_orders: list):

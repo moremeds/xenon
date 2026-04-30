@@ -220,6 +220,121 @@ async def _run_rehydrate_on_boot() -> None:
         logger.warning("combo wizard rehydrate failed on boot; continuing to serve: %s", exc)
 
 
+def _maybe_start_activity_poller() -> None:
+    """Start the periodic IB→Postgres activity poller if enabled.
+
+    Enabled by default. Set XENON_IB_ACTIVITY_POLLER=0 to disable. The task handle is stored on
+    app.state so the lifespan shutdown can cancel + await it cleanly.
+    Skipped in test mode and when the IB pool sync role has no client.
+    """
+    import asyncio as _asyncio
+
+    from xenon.api.services.ib_activity_mirror import (
+        DEFAULT_POLL_INTERVAL_S,
+        activity_poller_loop,
+    )
+    from xenon.execution.account_scope import AccountScope
+
+    if _is_test_mode():
+        logger.info("test_mode: skipping ib activity poller")
+        return
+
+    poller_flag = os.environ.get("XENON_IB_ACTIVITY_POLLER", "").strip().lower()
+    if poller_flag in {"0", "false", "no", "off"}:
+        logger.info("ib activity poller disabled (XENON_IB_ACTIVITY_POLLER=%s)", poller_flag)
+        return
+
+    _scope_account_env = getattr(app.state, "trading_mode", None)
+    _scope_account = getattr(app.state, "account", None)
+    if not _scope_account_env or not _scope_account:
+        logger.info("ib activity poller skipped: scope not resolved")
+        return
+
+    scope = AccountScope(
+        broker="IB",
+        account_env=_scope_account_env,
+        broker_account=_scope_account,
+    )
+
+    def _ib_client_factory():
+        if ib_pool is None:
+            raise RuntimeError("ib_pool not initialized")
+        client = ib_pool.get("sync")
+        if client is None:
+            raise RuntimeError("ib_pool sync role has no client")
+        return client
+
+    try:
+        interval_s = float(os.environ.get("XENON_IB_ACTIVITY_POLL_S", DEFAULT_POLL_INTERVAL_S))
+    except ValueError:
+        interval_s = DEFAULT_POLL_INTERVAL_S
+
+    task = _asyncio.create_task(
+        activity_poller_loop(
+            ib_client_factory=_ib_client_factory,
+            scope=scope,
+            interval_s=interval_s,
+        )
+    )
+    app.state.ib_activity_poller_task = task
+    logger.info("ib activity poller started: interval=%ss", interval_s)
+
+
+async def _run_fills_replay_on_boot() -> None:
+    """Replay IB fills into xenon.order_fills once on boot. Best-effort.
+
+    Mirrors the open-order import that PR #67 added on the order side.
+    Without this, fills from TWS-placed or TWS-modified orders are
+    invisible to the blotter (xenon.trades is derived from
+    xenon.order_fills, which is only written by the in-process placement
+    flow). The standalone CLI ``xenon-ib-reconcile`` does the same job
+    but no scheduler runs it — operators forget.
+
+    Skipped in test mode and when the IB pool sync role has no client
+    (gateway down). 30s timeout — boot must not hang on a slow IB.
+    """
+    from xenon.api.services.ib_activity_mirror import reconcile_fills_on_boot
+    from xenon.execution.account_scope import AccountScope
+
+    if _is_test_mode():
+        logger.info("test_mode: skipping ib fills replay")
+        return
+
+    def _ib_client_factory():
+        if ib_pool is None:
+            raise RuntimeError("ib_pool not initialized")
+        client = ib_pool.get("sync")
+        if client is None:
+            raise RuntimeError("ib_pool sync role has no client")
+        return client
+
+    _scope_account_env = getattr(app.state, "trading_mode", None)
+    _scope_account = getattr(app.state, "account", None)
+    if not _scope_account_env or not _scope_account:
+        logger.info("ib fills replay skipped: scope not resolved (trading_mode/account empty)")
+        return
+
+    scope = AccountScope(
+        broker="IB",
+        account_env=_scope_account_env,
+        broker_account=_scope_account,
+    )
+
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                reconcile_fills_on_boot,
+                ib_client_factory=_ib_client_factory,
+                scope=scope,
+            ),
+            timeout=30.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("ib fills replay timed out after 30s; continuing to serve")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ib fills replay failed on boot; continuing to serve: %s", exc)
+
+
 def _get_managed_account_for_health() -> str:
     """Return the first managedAccount from the IB pool's sync client.
 
@@ -414,6 +529,20 @@ async def lifespan(app: FastAPI):
     # UNKNOWN rather than auto-CANCELLED (per F7.1 design).
     await _run_rehydrate_on_boot()
 
+    # IB→Postgres activity mirror — boot replay of fills. Pulls executions
+    # from the same long-lived IB sync client and inserts new ones into
+    # xenon.order_fills + aggregated xenon.trades. Best-effort: any failure
+    # is logged and swallowed. Without this, fills from TWS-modified or
+    # TWS-placed orders never reach the blotter unless an operator runs
+    # `xenon-ib-reconcile` manually.
+    await _run_fills_replay_on_boot()
+
+    # Periodic IB activity poller. Mirrors TWS-side activity (price/qty
+    # edits, new fills, cancels expressed by disappearance) into Postgres
+    # on a fixed cadence. Enabled by default; set XENON_IB_ACTIVITY_POLLER=0
+    # to suppress. Cadence env: XENON_IB_ACTIVITY_POLL_S.
+    _maybe_start_activity_poller()
+
     # W4.7 — PG-event-driven journal auto-import listener.
     # Replaces the legacy periodic /journal/sync flow. Failures must not
     # block boot.
@@ -440,6 +569,13 @@ async def lifespan(app: FastAPI):
             uw_daily_task.cancel()
             try:
                 await uw_daily_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        ib_activity_task = getattr(app.state, "ib_activity_poller_task", None)
+        if ib_activity_task is not None:
+            ib_activity_task.cancel()
+            try:
+                await ib_activity_task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         if ib_pool:

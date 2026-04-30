@@ -117,10 +117,16 @@ def _derive_trade(
     combo_attempt_id: str | None,
     legacy_id: str | None,
 ) -> dict[str, Any]:
-    first = fills[0]
-    normalized = [{**fill, "side": _normalize_side(str(fill["side"]))} for fill in fills]
-    closed = _is_closed(normalized)
-    entry_cost, exit_cost, realized_pnl = _costs(normalized, closed=closed)
+    normalized_all = [{**fill, "side": _normalize_side(str(fill["side"]))} for fill in fills]
+    normalized = _economic_fills(normalized_all, source=source)
+    first = normalized[0]
+    reported_realized_pnl = _reported_realized_pnl(normalized)
+    closed = _is_closed(normalized) or reported_realized_pnl is not None
+    entry_cost, exit_cost, realized_pnl = _costs(
+        normalized,
+        closed=closed,
+        reported_realized_pnl=reported_realized_pnl,
+    )
     quantity = _quantity(normalized)
     opened_at = min(fill["filled_at"] for fill in normalized)
     closed_at = max(fill["filled_at"] for fill in normalized) if closed else None
@@ -167,6 +173,37 @@ def _instrument_key(fill: dict[str, Any]) -> str:
     return str(con_id) if con_id is not None else str(fill["ticker"])
 
 
+def _is_bag_envelope(fill: dict[str, Any], source: dict[str, Any] | None) -> bool:
+    metadata = fill.get("metadata") or {}
+    if metadata.get("sec_type") == "BAG":
+        return True
+    if source and source.get("security_type") == "BAG":
+        source_con_id = source.get("con_id")
+        return source_con_id is not None and fill.get("con_id") == source_con_id
+    return False
+
+
+def _economic_fills(fills: list[dict[str, Any]], *, source: dict[str, Any] | None) -> list[dict[str, Any]]:
+    non_bag = [fill for fill in fills if not _is_bag_envelope(fill, source)]
+    return non_bag or fills
+
+
+def _reported_realized_pnl(fills: list[dict[str, Any]]) -> Decimal | None:
+    total = _ZERO
+    found = False
+    for fill in fills:
+        metadata = fill.get("metadata") or {}
+        value = metadata.get("realized_pnl")
+        if value is None or value == "":
+            continue
+        decimal_value = Decimal(str(value))
+        if decimal_value == 0:
+            continue
+        total += decimal_value
+        found = True
+    return _money2(total) if found else None
+
+
 def _is_closed(fills: list[dict[str, Any]]) -> bool:
     net: dict[str, int] = defaultdict(int)
     has_buy = False
@@ -182,7 +219,12 @@ def _is_closed(fills: list[dict[str, Any]]) -> bool:
     return has_buy and has_sell and all(qty == 0 for qty in net.values())
 
 
-def _costs(fills: list[dict[str, Any]], *, closed: bool) -> tuple[Decimal, Decimal | None, Decimal | None]:
+def _costs(
+    fills: list[dict[str, Any]],
+    *,
+    closed: bool,
+    reported_realized_pnl: Decimal | None = None,
+) -> tuple[Decimal, Decimal | None, Decimal | None]:
     buy_cost = _ZERO
     sell_proceeds = _ZERO
     entry_cash = _ZERO
@@ -209,7 +251,8 @@ def _costs(fills: list[dict[str, Any]], *, closed: bool) -> tuple[Decimal, Decim
         return _money4(entry_cash), None, None
 
     exit_cost = exit_cash if entry_cash < 0 else -exit_cash
-    return _money4(entry_cash), _money4(exit_cost), _money2(sell_proceeds - buy_cost)
+    realized_pnl = reported_realized_pnl if reported_realized_pnl is not None else _money2(sell_proceeds - buy_cost)
+    return _money4(entry_cash), _money4(exit_cost), realized_pnl
 
 
 def _is_entry_fill(current_net_qty: int, fill_direction: int) -> bool:
@@ -273,6 +316,7 @@ def _metadata(fills: list[dict[str, Any]], *, legacy_id: str | None) -> dict[str
                 "price": str(fill["price"]),
                 "commission": str(fill["commission"] or 0),
                 "filled_at": _iso(fill["filled_at"]),
+                **_leg_contract_metadata(fill),
             }
             for fill in fills
         ],
@@ -283,6 +327,16 @@ def _metadata(fills: list[dict[str, Any]], *, legacy_id: str | None) -> dict[str
         if first_metadata.get("legacy_source"):
             metadata["legacy_source"] = first_metadata["legacy_source"]
     return metadata
+
+
+def _leg_contract_metadata(fill: dict[str, Any]) -> dict[str, Any]:
+    metadata = fill.get("metadata") or {}
+    out: dict[str, Any] = {}
+    for key in ("sec_type", "strike", "expiry", "right"):
+        value = metadata.get(key)
+        if value is not None and value != "":
+            out[key] = value
+    return out
 
 
 def _iso(value: datetime) -> str:

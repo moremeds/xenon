@@ -181,13 +181,32 @@ def _reconcile_from_three_sources(
             },
         )
 
-    # Positions changed OR unknown → never auto-CANCELLED.
+    if positions_changed is True:
+        # Positions genuinely moved but we couldn't reconcile to a fill →
+        # UNKNOWN is the right "we know something happened, can't say what" state.
+        return ReconcileDecision(
+            to_state="UNKNOWN",
+            event_kind="REHYDRATE_UNCERTAIN",
+            detail={
+                "from_state": state,
+                "to_state": "UNKNOWN",
+                "sources": sources,
+            },
+        )
+
+    # positions_changed is None → no baseline (boot path) or no signal at all.
+    # We have NO authoritative evidence the row's state has changed, so leave
+    # it alone. Demoting to UNKNOWN here was the bug behind the post-restart
+    # "open orders disappeared from the UI" regression — `snapshot-*` rows
+    # imported in WORKING got nuked to UNKNOWN by every boot, hiding real
+    # IB-side open orders that the importer had just captured. The next sync
+    # cycle (with a real positions baseline) is the correct place to act.
     return ReconcileDecision(
-        to_state="UNKNOWN",
-        event_kind="REHYDRATE_UNCERTAIN",
+        to_state=state,
+        noop=True,
         detail={
             "from_state": state,
-            "to_state": "UNKNOWN",
+            "reason_code": "REHYDRATE_NO_BASELINE",
             "sources": sources,
         },
     )
@@ -240,28 +259,61 @@ def _index_executions(execs: list) -> dict:
 
     Takes shares-weighted average price across fills for the same perm_id.
     """
-    agg: dict = {}
+    records_by_perm: dict[str, list[dict]] = {}
     for ex in execs or []:
         record = _normalize_execution_record(ex)
         if record is None:
             continue
-        pid = record["perm_id"]
-        shares = float(record["qty"])
-        avg = record["price"]
-        if shares <= 0:
-            continue
-        key = str(pid)
-        prior = agg.get(key)
-        if prior is None:
-            agg[key] = {"shares": shares, "avg_price": float(avg)}
-        else:
-            tot = prior["shares"] + shares
-            prior["avg_price"] = (prior["avg_price"] * prior["shares"] + float(avg) * shares) / tot
-            prior["shares"] = tot
+        records_by_perm.setdefault(str(record["perm_id"]), []).append(record)
+
+    agg: dict = {}
+    for key, records in records_by_perm.items():
+        bag_records = [record for record in records if record.get("sec_type") == "BAG"]
+        summary_records = bag_records or records
+        for record in summary_records:
+            shares = float(record["qty"])
+            avg = record["price"]
+            if shares <= 0:
+                continue
+            prior = agg.get(key)
+            if prior is None:
+                agg[key] = {"shares": shares, "avg_price": float(avg)}
+            else:
+                tot = prior["shares"] + shares
+                prior["avg_price"] = (prior["avg_price"] * prior["shares"] + float(avg) * shares) / tot
+                prior["shares"] = tot
+
     # Normalize integer shares
     for v in agg.values():
         v["shares"] = int(round(v["shares"]))
     return agg
+
+
+def _record_sec_type_from_row(row: dict, record: dict) -> str | None:
+    sec_type = record.get("sec_type")
+    if sec_type:
+        return str(sec_type)
+    row_sec_type = row.get("security_type")
+    if row_sec_type == "BAG":
+        return "BAG" if record.get("con_id") == row.get("con_id") else "OPT"
+    return str(row_sec_type) if row_sec_type else None
+
+
+def _record_metadata_for_order(row: dict, record: dict) -> dict:
+    metadata = {"source": "single_leg_rehydrate"}
+    sec_type = _record_sec_type_from_row(row, record)
+    optional_fields = {
+        "sec_type": sec_type,
+        "exchange": record.get("exchange"),
+        "strike": record.get("strike"),
+        "expiry": record.get("expiry"),
+        "right": record.get("right"),
+        "realized_pnl": record.get("realized_pnl"),
+    }
+    for key, value in optional_fields.items():
+        if value is not None and value != "":
+            metadata[key] = str(value)
+    return metadata
 
 
 def _coerce_datetime(value: Any) -> datetime:
@@ -297,10 +349,16 @@ def _normalize_execution_record(ex: Any) -> dict | None:
             "ib_order_id": str(ex.get("ib_order_id") or ex.get("order_id") or ex.get("orderId") or "") or None,
             "con_id": ex.get("con_id") or ex.get("conId"),
             "ticker": ex.get("ticker") or ex.get("symbol"),
+            "sec_type": ex.get("sec_type") or ex.get("secType"),
+            "exchange": ex.get("exchange"),
+            "strike": ex.get("strike"),
+            "expiry": ex.get("expiry") or ex.get("lastTradeDateOrContractMonth"),
+            "right": ex.get("right"),
             "side": _normalize_execution_side(ex.get("side") or ex.get("action")),
             "qty": int(shares),
             "price": Decimal(str(price)),
             "commission": Decimal(str(ex.get("commission") or 0)),
+            "realized_pnl": ex.get("realized_pnl") if ex.get("realized_pnl") is not None else ex.get("realizedPNL"),
             "filled_at": _coerce_datetime(ex.get("filled_at") or ex.get("time")),
         }
 
@@ -318,10 +376,16 @@ def _normalize_execution_record(ex: Any) -> dict | None:
         "ib_order_id": str(getattr(execution, "orderId", "") or "") or None,
         "con_id": getattr(contract, "conId", None),
         "ticker": getattr(contract, "symbol", None),
+        "sec_type": getattr(contract, "secType", None),
+        "exchange": getattr(execution, "exchange", None),
+        "strike": getattr(contract, "strike", None),
+        "expiry": getattr(contract, "lastTradeDateOrContractMonth", None),
+        "right": getattr(contract, "right", None),
         "side": _normalize_execution_side(getattr(execution, "side", None)),
         "qty": int(shares),
         "price": Decimal(str(price)),
         "commission": Decimal(str(getattr(report, "commission", 0) or 0)),
+        "realized_pnl": getattr(report, "realizedPNL", None) if report is not None else None,
         "filled_at": _coerce_datetime(getattr(execution, "time", None)),
     }
 
@@ -359,7 +423,7 @@ def _record_fill_records_for_order(row: dict, records: list[dict], orders_store)
             price=record["price"],
             commission=record["commission"],
             filled_at=record["filled_at"],
-            metadata={"source": "single_leg_rehydrate"},
+            metadata=_record_metadata_for_order(row, record),
             broker=row.get("broker", "IB"),
             account_env=row["account_env"],
             broker_account=row["broker_account"],
