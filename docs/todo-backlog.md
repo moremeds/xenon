@@ -183,6 +183,17 @@ when scoping starts.
   the codebase: `654d72d2`, PRs #34 / #35 / #47, position-row order button
   (`a7cbbbc4`), `/orders/quote` snapshot resolver (`8ef479ab`). Tag this P0 /
   "drop everything" once a priority scheme is picked.
+  **Status (2026-04-30, cross-ref pass):** Hypothesis (b) ruled out — the
+  literal string "quote expired" no longer appears anywhere in `web/` or
+  `src/`. The gate from `654d72d2` is fully gone. The alert text "Quote
+  expired; refreshing." today comes from `web/lib/orderReasonCodes.ts:40`
+  rendering the `STALE_QUOTE` reason code, which is emitted by
+  `src/xenon/execution/quote_guard.py:120,124` (the freshness/tick-grid/band/
+  market-hours guard from commit `2a489060`) and surfaced via `server.py:2173`.
+  So the live theory is hypothesis (a): the new guard's freshness check is
+  rejecting valid single-leg quotes. Investigation narrows to: snapshot age
+  TTL, tick-grid validation, band check, market-hours gate inside
+  `quote_guard.check`. Still open.
 
 - 2026-04-27 — **🔴 TOP PRIORITY — Bug: naked-short guard blocks plain stock
   BUY orders** — attempted to **buy 1 share of QQQ** (the simplest possible
@@ -223,6 +234,40 @@ when scoping starts.
   invoking the naked-short guard at all (mock the guard, assert it's not
   called), plus a parallel test for the `_orders_X_from_body` in-process
   path so the bypass class-of-bug doesn't recur.
+  **Status (2026-04-30, deep cross-ref + live preflight test):**
+  **Strong evidence the bug is already resolved. One live UI confirmation
+  click still needed before closing.** Findings:
+  - **Both BUY short-circuits were in code at the time of the report
+    (2026-04-27).** TS UI guard `web/lib/nakedShortGuard.ts:207`
+    (`if (order.action === "BUY") return { allowed: true }`) since
+    commit `0913fcf3` (2026-04-07). Python preflight `preflight.py:301`
+    (`if req.action == "BUY": return Verdict(accept=True)`) since
+    commit `b6cadd376` (2026-04-21).
+  - **Direct preflight test (2026-04-30) passes:** invoking
+    `preflight.evaluate(PreflightRequest(action="BUY", ticker="QQQ",
+security_type="STK", quantity=1, ...), PortfolioView(positions=[]))`
+    returns `accept=True, reason_code=None` — no false naked-short
+    rejection. Control test (`SELL 1 QQQ` on empty portfolio) correctly
+    returns `INSUFFICIENT_SHARES`.
+  - **Caller path is clean:** `OrderTab.tsx:425-444` (`handlePlace`)
+    passes user-chosen `action` straight through to the guard with no
+    inversion. The reactive warning at `OrderTab.tsx:397-412` is
+    explicitly gated on `action === "SELL"` (returns null otherwise).
+  - **The exact error text the user reported (`"Naked short blocked: "`
+    prefix) exists nowhere in source today** — `grep` across `web/` and
+    `src/` returned zero non-test matches. The TS guard's reason at
+    `nakedShortGuard.ts:219` (`"Naked short stock: no long shares held
+for ${sym}"`) survives, but the wrapping prefix is gone.
+  - **In-process bypass path is safe:** `naked_short_audit.py` runs
+    against IB open orders post-sync, not against incoming user orders,
+    so it cannot reject a fresh BUY at submission time.
+  - **Most likely closer:** PR #61 (`fix/order-placement-reliability`,
+    2026-04-28) shipped five order-path fixes including reason-code
+    rework — the error-prefix rewrite likely came from there.
+    Action: user does a live **BUY 1 QQQ** click in the IB tab when next
+    convenient. If it places cleanly → close this entry. If it still
+    rejects with the same error → narrow hunt for an upstream
+    sign-inversion (since the guards themselves are proven correct).
 
 - 2026-04-27 — **OI-as-flow-attribution (overnight check, not intraday)** — OI
   is reported once per day end-of-day by OCC, so this is fundamentally an
@@ -298,6 +343,15 @@ when scoping starts.
   naked-short order reaching IB costs real money. Provide
   `--no-verify` / `skip-smoke` bypasses for genuine emergencies. Depends
   on no other backlog item; can be picked up independently.
+  **Status (2026-04-30, cross-ref pass):** **Layers 1+2 SHIPPED** in
+  PR #63 (`018cf534 ci: order-path regression guards (Layers 1+2)`). The
+  edit-time hook (`.claude/hooks/order-path-reminder.sh`) and the two CI
+  guards (`scripts/checks/no_json_fallback_on_order_path.py`,
+  `scripts/checks/order_path_caller_allowlist.py`) are live; root CLAUDE.md
+  documents them under "Order-Path Guards (Layers 1+2)". Remaining work:
+  Layers 3 (CI path-filtered structural tests), 4 (pre-merge live paper
+  smoke — highest leverage, still pending), 5 (nightly safety net),
+  6 (auto codex review on order-path PRs).
 
 - 2026-04-30 — **Fractional-share quantity for stocks (e.g., sell 0.1 QQQ)** —
   Today the order-place flow truncates fractional stock quantities to
@@ -332,3 +386,43 @@ when scoping starts.
   4, 5, 6, 9, 10, 14 from `bug_report_ib_postgres_activity_mirror.md`) — that
   PR is a logical prerequisite since it lays the Decimal foundation.
   **Estimate:** 1–2 day PR with TDD + browser verification per CLAUDE.md.
+  **Status (2026-04-30, cross-ref pass):** Prerequisite ISSUE-5 from the
+  `orders_store.py` cluster (vestigial `db_path` parameter) closed by PR #75
+  `cb0903e4 chore(orders_store): remove vestigial db_path parameter`. The
+  Decimal-typing issues (1, 2, 4, 6, 9, 10, 14) are still open.
+
+- 2026-04-30 — **Share button broken on CRI and VCG pages** — clicking
+  Share-to-X on the CRI and VCG pages does not produce a usable result. Sample
+  payload returned by the VCG endpoint:
+  `{preview_path: "/Users/chenxi/projects/xenon/reports/tweet-vcg-2026-04-30.html",`
+  `card_paths: ["…tweet-vcg-2026-04-30-card-1.html", …]}`.
+  **Notes:** The payload is the smoking gun — the API hands back **absolute
+  filesystem paths**, not browser-addressable URLs, so anything in
+  `ShareReportModal.tsx` that tries to `<iframe>` or `fetch()` them will fail
+  silently. Two plausible fixes: (a) serve the `reports/` directory under a
+  static route (e.g. `/api/share/file?path=…` with strict allowlist) and rewrite
+  the response to URLs, or (b) inline the rendered HTML into the response and
+  drop the disk write. Option (b) is cleaner for the share-modal use case
+  since the disk artifact is only needed for the CLI flow that calls
+  `subprocess.Popen(["open", preview_path])` (`generate_vcg_share.py:609`).
+  **Suspected file sites:**
+  `src/xenon/shares/generate_vcg_share.py` (and siblings: `generate_cta_share.py`,
+  `generate_gex_share.py`, `generate_regime_share.py`),
+  `web/app/api/vcg/share/route.ts`,
+  `web/components/ShareReportModal.tsx`,
+  `web/components/VcgPanel.tsx`. **CRI-specific gap:** there is no
+  `web/app/api/cri/share/route.ts` and no `generate_cri_share.py` — "CRI broken"
+  may mean the button is wired to a missing endpoint (returns 404), or it lives
+  on a non-VCG panel I didn't locate. Triage step #1 is to identify which
+  component renders the CRI share button and confirm its target endpoint.
+  **Cross-reference:** `web/CLAUDE.md` "UI Verification" — fix must be E2E
+  verified in chrome-cdp, not just unit-tested. Check all five share-enabled
+  panels (Regime, GEX, CTA, VCG, internals) since they share `ShareReportModal`
+  and likely share the bug. **Estimate:** half-day if the fix is option (b)
+  inline-HTML; full day if standing up a static-serve route with auth.
+  **Status (2026-04-30, cross-ref pass):** Bug confirmed structurally
+  present. `preview_path` is still emitted as an absolute filesystem path
+  by all four generators (`generate_gex_share.py:723`,
+  `generate_cta_share.py:689`, `generate_vcg_share.py:604`,
+  `generate_regime_share.py:701`), and `ShareReportModal.tsx:82` consumes
+  it directly via `data?.preview_path`. No fix in flight.
