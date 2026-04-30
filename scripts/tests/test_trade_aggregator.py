@@ -8,7 +8,6 @@ from xenon.db.schema import order_submissions, outbox, trades, wizard_combo_atte
 from xenon.execution.orders_store import record_fill
 from xenon.execution.trade_aggregator import aggregate_trade_from_fills
 
-
 BROKER_SCOPE = {
     "broker": "IB",
     "account_env": "paper",
@@ -242,6 +241,62 @@ def test_bag_envelope_is_not_counted_as_a_trade_leg_and_realized_pnl_sums_from_l
     assert row["quantity"] == 11
     assert row["realized_pnl"] == Decimal("-276.78")
     assert [leg["exec_id"] for leg in row["metadata"]["legs"]] == ["bag-leg-long", "bag-leg-short"]
+
+
+def test_bag_submission_does_not_label_structure_as_stock():
+    """A submission_id-keyed trade whose source row is a BAG combo must not
+    fall through to ``structure='Stock'``. snapshot-* rows imported by the
+    activity poller carry no structure_name, so the aggregator has to derive
+    a sensible label from leg shape instead.
+    """
+    _insert_submission(
+        "sub-bag-stock-fallback",
+        ticker="SPX",
+        quantity=11,
+        action="SELL",
+        security_type="BAG",
+        con_id=28812380,
+    )
+    filled_at = datetime(2026, 4, 29, 13, 45, 20, tzinfo=timezone.utc)
+    _fill(
+        "stock-fallback-bag",
+        submission_id="sub-bag-stock-fallback",
+        ticker="SPX",
+        con_id=28812380,
+        side="SELL",
+        qty=11,
+        price="1.40",
+        filled_at=filled_at,
+        metadata={"source": "single_leg_rehydrate", "sec_type": "BAG"},
+    )
+    _fill(
+        "stock-fallback-leg-a",
+        submission_id="sub-bag-stock-fallback",
+        ticker="SPX",
+        con_id=872609959,
+        side="SELL",
+        qty=11,
+        price="27.90",
+        filled_at=filled_at,
+        metadata={"source": "single_leg_rehydrate", "sec_type": "OPT", "realized_pnl": "-29431.38995"},
+    )
+    _fill(
+        "stock-fallback-leg-b",
+        submission_id="sub-bag-stock-fallback",
+        ticker="SPX",
+        con_id=873604441,
+        side="BUY",
+        qty=11,
+        price="26.50",
+        filled_at=filled_at,
+        metadata={"source": "single_leg_rehydrate", "sec_type": "OPT", "realized_pnl": "29154.61005"},
+    )
+
+    aggregate_trade_from_fills(submission_id="sub-bag-stock-fallback")
+
+    row = _trade_rows()[0]
+    assert row["structure"] != "Stock"
+    assert row["structure"] in {"Spread", "Combo", "Bull Put Spread", "Bear Put Spread"}
 
 
 def test_closed_combo_keeps_net_entry_and_exit_costs():

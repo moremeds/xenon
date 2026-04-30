@@ -2551,7 +2551,39 @@ async def _orders_cancel_from_body(body: dict):
         {"status": data.get("status"), "message": data.get("message"), "http_status": 200},
         perm_id=str(perm_id or ""),
     )
+    _mark_submission_cancelled(str(order_id or ""), str(perm_id or ""))
     return data
+
+
+def _mark_submission_cancelled(ib_order_id: str, perm_id: str) -> None:
+    """Transition the order_submissions row to CANCELLED after a successful
+    /orders/cancel. The activity poller cannot do this on its own — naive
+    disappearance-detection misclassifies fills as cancels — so the cancel
+    route is the only authoritative trigger.
+    """
+    try:
+        scope = _resolve_scope_kwargs()
+        sid: str | None = None
+        if ib_order_id:
+            sid = orders_store.lookup_submission_id_by_ib_order_id(ib_order_id, **scope)
+        if sid is None and perm_id:
+            sid = orders_store.lookup_submission_id_by_perm_id(perm_id, **scope)
+        if sid is None:
+            return
+        orders_store.mark_terminal(
+            submission_id=sid,
+            state="CANCELLED",
+            reason_code="USER_CANCEL",
+            filled_qty=0,
+            avg_fill_price=None,
+        )
+    except Exception:  # pragma: no cover — best-effort
+        logger.warning(
+            "Failed to mark submission CANCELLED for order=%s perm=%s",
+            ib_order_id,
+            perm_id,
+            exc_info=True,
+        )
 
 
 @app.post("/orders/modify", dependencies=[Depends(require_mode_verified)])

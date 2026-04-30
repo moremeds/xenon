@@ -29,7 +29,9 @@ def aggregate_trade_from_fills(
 
     engine = get_sync_engine()
     with engine.begin() as conn:
-        fills = [dict(row._mapping) for row in conn.execute(_fills_stmt(submission_id, combo_attempt_id, legacy_id)).all()]
+        fills = [
+            dict(row._mapping) for row in conn.execute(_fills_stmt(submission_id, combo_attempt_id, legacy_id)).all()
+        ]
         if not fills:
             return
 
@@ -42,7 +44,9 @@ def aggregate_trade_from_fills(
             legacy_id=legacy_id,
         )
 
-        existing = conn.execute(_existing_trade_stmt(submission_id, combo_attempt_id, legacy_id).with_for_update()).first()
+        existing = conn.execute(
+            _existing_trade_stmt(submission_id, combo_attempt_id, legacy_id).with_for_update()
+        ).first()
         existing_state = existing._mapping["state"] if existing is not None else None
 
         if existing is None:
@@ -135,6 +139,12 @@ def _derive_trade(
         structure = source["structure_name"]
     elif combo_attempt_id is not None:
         structure = "Combo"
+    elif _has_bag_signal(fills, source):
+        # snapshot-* BAG submissions and legacy_id BAG groups have no
+        # structure_name. Derive a label from the economic legs so the
+        # blotter never shows a combo as "Stock".
+        leg_count = len({_instrument_key(fill) for fill in normalized})
+        structure = "Spread" if leg_count == 2 else "Combo"
     else:
         structure = "Stock"
     state = _state(normalized, closed=closed, quantity=quantity, source=source)
@@ -171,6 +181,22 @@ def _normalize_side(side: str) -> str:
 def _instrument_key(fill: dict[str, Any]) -> str:
     con_id = fill.get("con_id")
     return str(con_id) if con_id is not None else str(fill["ticker"])
+
+
+def _has_bag_signal(fills: list[dict[str, Any]], source: dict[str, Any] | None) -> bool:
+    """True if any fill or the source row carries a BAG marker — used to
+    pick the structure label for snapshot/legacy combos that lack a
+    structure_name. Both surfaces matter: TWS-imported snapshot rows have
+    security_type=BAG on the source; legacy_id-grouped fills have sec_type=BAG
+    in metadata on the envelope row.
+    """
+    if source and str(source.get("security_type") or "") == "BAG":
+        return True
+    for fill in fills:
+        metadata = fill.get("metadata") or {}
+        if metadata.get("sec_type") == "BAG":
+            return True
+    return False
 
 
 def _is_bag_envelope(fill: dict[str, Any], source: dict[str, Any] | None) -> bool:
@@ -256,8 +282,10 @@ def _costs(
 
 
 def _is_entry_fill(current_net_qty: int, fill_direction: int) -> bool:
-    return current_net_qty == 0 or (current_net_qty > 0 and fill_direction > 0) or (
-        current_net_qty < 0 and fill_direction < 0
+    return (
+        current_net_qty == 0
+        or (current_net_qty > 0 and fill_direction > 0)
+        or (current_net_qty < 0 and fill_direction < 0)
     )
 
 

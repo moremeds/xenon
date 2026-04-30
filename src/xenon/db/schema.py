@@ -212,6 +212,7 @@ order_submissions = Table(
     Column("filled_qty", Integer, server_default=text("0")),
     Column("avg_fill_price", Numeric(12, 4)),
     Column("modify_sequence", Integer, server_default=text("0")),
+    Column("tif", Text, nullable=False, server_default=text("'DAY'")),
     Column("submitted_at", TIMESTAMP(timezone=True), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
     Column("broker", Text, nullable=False, server_default=text("'IB'")),

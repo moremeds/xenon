@@ -18,7 +18,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 from sqlalchemy import Text, cast, func, insert, literal, select, update
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB, insert as pg_insert
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from xenon.db.engine import get_sync_engine
 from xenon.db.events import CHANNEL_FILL_COMMISSION_UPDATED, CHANNEL_FILL_RECORDED, emit_outbox_in_txn
@@ -234,6 +235,7 @@ def register_from_snapshot(
     right: str | None = None,
     expiry: str | None = None,
     con_id: int | None = None,
+    tif: str = "DAY",
 ) -> dict:
     """Mirror an IB-side open order into `xenon.order_submissions`.
 
@@ -264,6 +266,7 @@ def register_from_snapshot(
                 order_submissions.c.submission_id,
                 order_submissions.c.limit_price,
                 order_submissions.c.quantity,
+                order_submissions.c.state,
             ).where(
                 order_submissions.c.perm_id == str(perm_id),
                 order_submissions.c.broker == broker,
@@ -272,16 +275,56 @@ def register_from_snapshot(
             )
         ).first()
 
+        # Pull existing tif separately so we don't break the positional unpack
+        # of older callers if this query expands further.
+        existing_tif: str | None = None
+        if existing is not None:
+            existing_tif_row = conn.execute(
+                select(order_submissions.c.tif).where(order_submissions.c.submission_id == existing[0])
+            ).first()
+            existing_tif = str(existing_tif_row[0]) if existing_tif_row and existing_tif_row[0] is not None else None
+
         if existing is not None:
             existing_submission_id = existing[0]
             existing_limit_price = float(existing[1]) if existing[1] is not None else None
             existing_quantity = int(existing[2]) if existing[2] is not None else None
+            existing_state = str(existing[3]) if existing[3] is not None else ""
 
             # UUID-authored rows are off-limits: their modify_sequence is
             # the source of truth. TWS-side modifies on those need a
             # separate, conscious policy decision.
             if not existing_submission_id.startswith("snapshot-"):
                 return {"action": "SKIPPED_UUID", "drift": None}
+
+            # IB still reports this order as open while we have it in a
+            # terminal state — restore it. Operator error, race in the
+            # cancel route, or out-of-band TWS action can drive this.
+            if existing_state in {"CANCELLED", "FILLED", "REJECTED", "FAILED", "UNKNOWN"}:
+                conn.execute(
+                    update(order_submissions)
+                    .where(order_submissions.c.submission_id == existing_submission_id)
+                    .values(
+                        state="WORKING",
+                        reason_code=None,
+                        limit_price=float(limit_price),
+                        quantity=int(quantity),
+                        tif=tif,
+                        updated_at=now,
+                    )
+                )
+                conn.execute(
+                    insert(order_events).values(
+                        submission_id=existing_submission_id,
+                        kind="IB_MIRROR_RESURRECT",
+                        detail={
+                            "from_state": existing_state,
+                            "to_state": "WORKING",
+                            "reason": "ib_still_reports_open",
+                        },
+                        at=now,
+                    )
+                )
+                return {"action": "RESURRECTED", "drift": None}
 
             # Round to 4dp before comparing — the DB column is numeric(12,4)
             # and incoming `limit_price` is a raw float that can carry round-trip
@@ -297,6 +340,8 @@ def register_from_snapshot(
                     "from": existing_quantity,
                     "to": int(quantity),
                 }
+            if existing_tif is not None and existing_tif != tif:
+                drift["tif"] = {"from": existing_tif, "to": tif}
             if not drift:
                 return {"action": "NOOP", "drift": None}
 
@@ -306,6 +351,7 @@ def register_from_snapshot(
                 .values(
                     limit_price=float(limit_price),
                     quantity=int(quantity),
+                    tif=tif,
                     updated_at=now,
                 )
             )
@@ -344,6 +390,7 @@ def register_from_snapshot(
                 right=right,
                 expiry=expiry,
                 con_id=con_id,
+                tif=tif,
             )
             .on_conflict_do_nothing(index_elements=["submission_id"])
             .returning(order_submissions.c.submission_id)

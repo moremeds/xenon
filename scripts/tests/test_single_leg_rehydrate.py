@@ -29,10 +29,13 @@ from xenon.execution.single_leg_rehydrate import (
 
 
 class FakeIBClient:
-    def __init__(self, open_orders=None, executions=None, positions=None):
+    def __init__(self, open_orders=None, executions=None, positions=None, qualify_lookup=None):
         self._open = open_orders or []
         self._execs = executions or []
         self._positions = positions or {}
+        # Map conId -> SimpleNamespace(strike, right, lastTradeDateOrContractMonth, secType).
+        # Lets tests exercise the leg-metadata enrichment path.
+        self._qualify_lookup = qualify_lookup or {}
 
     def get_open_orders(self):
         return self._open
@@ -42,6 +45,11 @@ class FakeIBClient:
 
     def get_positions(self):
         return self._positions
+
+    def qualify_contracts(self, contract):
+        con_id = getattr(contract, "conId", None)
+        match = self._qualify_lookup.get(con_id)
+        return [match] if match is not None else []
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +423,112 @@ def test_rehydrate_bag_execution_uses_envelope_for_quantity_and_preserves_leg_me
     assert fills["bag-leg-short"].metadata["sec_type"] == "OPT"
     assert fills["bag-leg-short"].metadata["realized_pnl"] == "-29431.38995"
     assert fills["bag-leg-long"].metadata["right"] == "P"
+
+
+def test_rehydrate_qualifies_leg_contracts_when_metadata_missing(db_path):
+    """When IB returns leg-level fills with a contract that lacks strike/
+    right/expiry (only conId reliable), the rehydrate must qualify each
+    conId via IB so the persisted leg metadata carries the full contract.
+
+    Without this fix the blotter renders 'Bull Put Spread (Short Unknown
+    Unknown / Long Unknown Unknown)' for any combo whose close happened
+    while Xenon was down.
+    """
+    sid = _make_working_row(
+        db_path,
+        ticker="SPX",
+        perm_id="P-bag-enrich",
+        ib_order_id="0",
+        security_type="BAG",
+        action="SELL",
+        quantity=11,
+        con_id=28812380,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU123456",
+    )
+    filled_at = datetime(2026, 4, 29, 13, 45, 20, tzinfo=timezone.utc)
+    ib = FakeIBClient(
+        open_orders=[],
+        executions=[
+            {
+                "exec_id": "bag-env",
+                "perm_id": "P-bag-enrich",
+                "ib_order_id": "0",
+                "con_id": 28812380,
+                "ticker": "SPX",
+                "sec_type": "BAG",
+                "side": "SLD",
+                "shares": 11,
+                "avg_price": Decimal("1.40"),
+                "time": filled_at,
+            },
+            {
+                "exec_id": "leg-short-incomplete",
+                "perm_id": "P-bag-enrich",
+                "ib_order_id": "0",
+                "con_id": 872609959,
+                "ticker": "SPX",
+                "side": "SLD",
+                "shares": 11,
+                "avg_price": Decimal("27.90"),
+                "commission": Decimal("14.1950"),
+                "realized_pnl": Decimal("-29431.38995"),
+                "time": filled_at,
+                # NB: no sec_type/strike/right/expiry — Fill.contract was incomplete
+            },
+            {
+                "exec_id": "leg-long-incomplete",
+                "perm_id": "P-bag-enrich",
+                "ib_order_id": "0",
+                "con_id": 873604441,
+                "ticker": "SPX",
+                "side": "BOT",
+                "shares": 11,
+                "avg_price": Decimal("26.50"),
+                "commission": Decimal("14.1950"),
+                "realized_pnl": Decimal("29154.61005"),
+                "time": filled_at,
+            },
+        ],
+        qualify_lookup={
+            872609959: SimpleNamespace(
+                conId=872609959,
+                symbol="SPX",
+                strike=7070.0,
+                right="P",
+                lastTradeDateOrContractMonth="20260501",
+                secType="OPT",
+            ),
+            873604441: SimpleNamespace(
+                conId=873604441,
+                symbol="SPX",
+                strike=7065.0,
+                right="P",
+                lastTradeDateOrContractMonth="20260501",
+                secType="OPT",
+            ),
+        },
+    )
+
+    rehydrate_on_boot(
+        lambda: ib,
+        orders_store,
+        now=lambda: 1_000_000_000,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU123456",
+    )
+
+    fills = {row.exec_id: row for row in _fetch_fill_rows()}
+    short_meta = fills["leg-short-incomplete"].metadata
+    long_meta = fills["leg-long-incomplete"].metadata
+    assert short_meta.get("strike") == "7070.0"
+    assert short_meta.get("right") == "P"
+    assert short_meta.get("expiry") == "20260501"
+    assert long_meta.get("strike") == "7065.0"
+    assert long_meta.get("right") == "P"
+    assert long_meta.get("expiry") == "20260501"
 
 
 def test_rehydrate_replay_does_not_duplicate_fill_or_trade(db_path):
