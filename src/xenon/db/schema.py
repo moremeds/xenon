@@ -390,6 +390,47 @@ wizard_protection = Table(
     UniqueConstraint("session_id", name="uq_wizard_protection_session"),
 )
 
+regime_overrides = Table(
+    "regime_overrides",
+    xenon_metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("ts", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Column("user_id", Text, nullable=False),
+    Column("account_env", Text, nullable=False),
+    Column("broker", Text, nullable=False),
+    Column("broker_account", Text, nullable=False),
+    Column(
+        "submission_id",
+        Text,
+        ForeignKey(
+            f"{XENON_SCHEMA}.order_submissions.submission_id",
+            name="fk_regime_overrides_submission",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        nullable=False,
+    ),
+    Column("client_attempt_id", Text),
+    Column("perm_id", BigInteger),
+    Column("ib_order_id", BigInteger),
+    Column("route", Text, nullable=False),
+    Column("vcg_tier", Text),
+    Column("cri_tier", Text),
+    Column("binding_side", Text, nullable=False),
+    Column("block_reason", Text, nullable=False),
+    Column("user_reason", Text, nullable=False),
+    Column("order_payload", JSONB, nullable=False),
+    Index("ix_regime_overrides_ts", text("ts DESC")),
+    Index("ix_regime_overrides_submission", "submission_id"),
+    Index("ix_regime_overrides_user_ts", "user_id", text("ts DESC")),
+    Index(
+        "ix_regime_overrides_scope_ts",
+        "account_env",
+        "broker_account",
+        text("ts DESC"),
+    ),
+)
+
 # ---------- Scanner Results ----------
 
 scan_results = Table(
