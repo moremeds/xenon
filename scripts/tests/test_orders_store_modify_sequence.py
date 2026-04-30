@@ -35,13 +35,12 @@ def _req(**over) -> RequestRow:
 
 
 def _seed_order(db_path, *, user_id: str, client_attempt_id: str, ib_order_id: str) -> None:
-    outcome = reserve_attempt(user_id, client_attempt_id, _req(), db_path=db_path)
+    outcome = reserve_attempt(user_id, client_attempt_id, _req())
     mark_submitted(
         submission_id=outcome.submission_id,
         ib_order_id=ib_order_id,
         perm_id=None,
         placing_client_id=1,
-        db_path=db_path,
     )
 
 
@@ -63,10 +62,10 @@ def _fetch_scalar(sql: str, params: dict | None = None):
 def test_applies_monotonic_modify_sequence(db_path):
     _seed_order(db_path, user_id="u1", client_attempt_id="a1", ib_order_id="1")
 
-    first = apply_modify(order_id="1", sequence=2, db_path=db_path)
+    first = apply_modify(order_id="1", sequence=2)
     assert first == {"applied": True, "current_sequence": 2}
 
-    second = apply_modify(order_id="1", sequence=2, db_path=db_path)
+    second = apply_modify(order_id="1", sequence=2)
     assert second == {"applied": False, "current_sequence": 2}
 
 
@@ -74,11 +73,11 @@ def test_modify_sequence_resets_per_order_id(db_path):
     _seed_order(db_path, user_id="u1", client_attempt_id="a1", ib_order_id="1")
     _seed_order(db_path, user_id="u1", client_attempt_id="a2", ib_order_id="2")
 
-    out = apply_modify(order_id="1", sequence=5, db_path=db_path)
+    out = apply_modify(order_id="1", sequence=5)
     assert out == {"applied": True, "current_sequence": 5}
 
     # order 2 unaffected
-    out2 = apply_modify(order_id="2", sequence=1, db_path=db_path)
+    out2 = apply_modify(order_id="2", sequence=1)
     assert out2 == {"applied": True, "current_sequence": 1}
 
     # verify via read that order 1 is still at 5
@@ -92,26 +91,26 @@ def test_modify_sequence_resets_per_order_id(db_path):
 def test_modify_sequence_monotonic_strictly_increasing(db_path):
     _seed_order(db_path, user_id="u1", client_attempt_id="a1", ib_order_id="1")
 
-    assert apply_modify(order_id="1", sequence=1, db_path=db_path) == {
+    assert apply_modify(order_id="1", sequence=1) == {
         "applied": True,
         "current_sequence": 1,
     }
-    assert apply_modify(order_id="1", sequence=1, db_path=db_path) == {
+    assert apply_modify(order_id="1", sequence=1) == {
         "applied": False,
         "current_sequence": 1,
     }
-    assert apply_modify(order_id="1", sequence=2, db_path=db_path) == {
+    assert apply_modify(order_id="1", sequence=2) == {
         "applied": True,
         "current_sequence": 2,
     }
-    assert apply_modify(order_id="1", sequence=2, db_path=db_path) == {
+    assert apply_modify(order_id="1", sequence=2) == {
         "applied": False,
         "current_sequence": 2,
     }
 
 
 def test_apply_modify_unknown_order_id(db_path):
-    out = apply_modify(order_id="999", sequence=1, db_path=db_path)
+    out = apply_modify(order_id="999", sequence=1)
     assert out == {"applied": False, "current_sequence": -1}
 
 
@@ -119,22 +118,21 @@ def test_apply_modify_by_perm_id_monotonic(db_path):
     """A4: apply_modify_by_perm_id resolves ib_order_id and applies the same gate."""
     from xenon.execution.orders_store import apply_modify_by_perm_id, mark_submitted
 
-    outcome = reserve_attempt("u1", "a-perm", _req(), db_path=db_path)
+    outcome = reserve_attempt("u1", "a-perm", _req())
     mark_submitted(
         submission_id=outcome.submission_id,
         ib_order_id="77",
         perm_id="P77",
         placing_client_id=1,
-        db_path=db_path,
     )
 
-    first = apply_modify_by_perm_id(perm_id="P77", sequence=1, db_path=db_path)
+    first = apply_modify_by_perm_id(perm_id="P77", sequence=1)
     assert first == {"applied": True, "current_sequence": 1}
 
-    second = apply_modify_by_perm_id(perm_id="P77", sequence=1, db_path=db_path)
+    second = apply_modify_by_perm_id(perm_id="P77", sequence=1)
     assert second == {"applied": False, "current_sequence": 1}
 
-    third = apply_modify_by_perm_id(perm_id="P77", sequence=2, db_path=db_path)
+    third = apply_modify_by_perm_id(perm_id="P77", sequence=2)
     assert third == {"applied": True, "current_sequence": 2}
 
 
@@ -142,7 +140,7 @@ def test_apply_modify_by_perm_id_unknown_returns_sentinel(db_path):
     """A4: unknown perm_id returns the -1 sentinel so the route can 404."""
     from xenon.execution.orders_store import apply_modify_by_perm_id
 
-    out = apply_modify_by_perm_id(perm_id="P-nope", sequence=1, db_path=db_path)
+    out = apply_modify_by_perm_id(perm_id="P-nope", sequence=1)
     assert out == {"applied": False, "current_sequence": -1}
 
 

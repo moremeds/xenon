@@ -96,7 +96,6 @@ def test_returns_inserted_when_row_is_new(db_path):
         action="BUY",
         quantity=10,
         limit_price=500.0,
-        db_path=db_path,
         **SCOPE,
     )
     assert isinstance(result, dict)
@@ -114,7 +113,6 @@ def test_returns_noop_when_values_unchanged(db_path):
         action="BUY",
         quantity=10,
         limit_price=500.0,
-        db_path=db_path,
         **SCOPE,
     )
     second = register_from_snapshot(
@@ -125,7 +123,6 @@ def test_returns_noop_when_values_unchanged(db_path):
         action="BUY",
         quantity=10,
         limit_price=500.0,
-        db_path=db_path,
         **SCOPE,
     )
     assert second["action"] == "NOOP"
@@ -142,7 +139,6 @@ def test_updates_snapshot_row_when_limit_price_drifts(db_path):
         action="SELL",
         quantity=11,
         limit_price=1.45,
-        db_path=db_path,
         **SCOPE,
     )
 
@@ -154,7 +150,6 @@ def test_updates_snapshot_row_when_limit_price_drifts(db_path):
         action="SELL",
         quantity=11,
         limit_price=1.30,
-        db_path=db_path,
         **SCOPE,
     )
 
@@ -183,7 +178,6 @@ def test_updates_snapshot_row_when_quantity_drifts(db_path):
         action="BUY",
         quantity=10,
         limit_price=500.0,
-        db_path=db_path,
         **SCOPE,
     )
 
@@ -195,7 +189,6 @@ def test_updates_snapshot_row_when_quantity_drifts(db_path):
         action="BUY",
         quantity=15,
         limit_price=500.0,
-        db_path=db_path,
         **SCOPE,
     )
 
@@ -217,7 +210,6 @@ def test_updates_snapshot_row_when_both_price_and_qty_drift(db_path):
         action="BUY",
         quantity=10,
         limit_price=500.0,
-        db_path=db_path,
         **SCOPE,
     )
 
@@ -229,7 +221,6 @@ def test_updates_snapshot_row_when_both_price_and_qty_drift(db_path):
         action="BUY",
         quantity=20,
         limit_price=499.50,
-        db_path=db_path,
         **SCOPE,
     )
 
@@ -252,7 +243,6 @@ def test_float_precision_noise_does_not_trigger_drift(db_path):
         action="SELL",
         quantity=11,
         limit_price=1.45,
-        db_path=db_path,
         **SCOPE,
     )
 
@@ -264,7 +254,6 @@ def test_float_precision_noise_does_not_trigger_drift(db_path):
         action="SELL",
         quantity=11,
         limit_price=1.4500000000001,  # round-trip noise past 4dp
-        db_path=db_path,
         **SCOPE,
     )
 
@@ -306,7 +295,6 @@ def test_does_not_update_uuid_authored_rows(db_path):
         action="BUY",
         quantity=10,
         limit_price=499.0,  # would be drift if we touched UUID rows
-        db_path=db_path,
         **SCOPE,
     )
 

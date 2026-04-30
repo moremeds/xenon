@@ -553,7 +553,6 @@ def rehydrate_on_boot(
     compatible with legacy callers).
     """
     rows = _list_unresolved(
-        db_path=db_path,
         broker=broker,
         account_env=account_env,
         broker_account=broker_account,
@@ -601,7 +600,7 @@ def rehydrate_on_boot(
         if decision.to_state != row["state"]:
             if decision.to_state == "WORKING":
                 # No dedicated helper; use a direct UPDATE via Postgres for state shift.
-                _update_state_only(row["submission_id"], decision.to_state, db_path=db_path)
+                _update_state_only(row["submission_id"], decision.to_state)
             elif decision.to_state in (
                 "FILLED",
                 "CANCELLED",
@@ -616,22 +615,20 @@ def rehydrate_on_boot(
                     if decision.filled_qty is not None
                     else int(row.get("filled_qty") or 0),
                     avg_fill_price=decision.avg_fill_price,
-                    db_path=db_path,
                 )
             elif decision.to_state == "UNKNOWN":
-                _update_state_only(row["submission_id"], "UNKNOWN", db_path=db_path)
+                _update_state_only(row["submission_id"], "UNKNOWN")
 
         orders_store.record_event(
             row["submission_id"],
             decision.event_kind,
             decision.detail,
-            db_path=db_path,
         )
 
     return decisions
 
 
-def _update_state_only(submission_id: str, state: str, db_path: Path | str | None = None) -> None:
+def _update_state_only(submission_id: str, state: str) -> None:
     engine = get_sync_engine()
     with engine.begin() as conn:
         combo_wizard.update_order_state(conn, submission_id, state)

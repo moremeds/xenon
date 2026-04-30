@@ -105,7 +105,6 @@ def _make_working_row(
             con_id=con_id,
             limit_price=Decimal("1.50"),
         ),
-        db_path=db_path,
         broker=broker,
         account_env=account_env,
         broker_account=broker_account,

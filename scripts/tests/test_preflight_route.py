@@ -412,7 +412,6 @@ def test_insufficient_shares_when_working_sell_exists(client, monkeypatch, tmp_p
             con_id=756733,
             limit_price=Decimal("500.15"),
         ),
-        db_path=db,
         # Match the conftest harness scope (paper/DU0000000) so the
         # scope-filtered preflight aggregation finds this seeded reservation.
         broker="IB",
