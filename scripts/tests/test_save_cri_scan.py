@@ -87,17 +87,36 @@ def test_save_cri_scan_returns_id(engine):
     assert new_id > 0
 
 
-def test_save_cri_scan_handles_missing_cri_score_field(engine):
-    """The scanner emits payload['cri']['score'] but be defensive: an
-    older payload shape without the score should land cri_level=0
-    rather than crash, mirroring how cri_series test fixtures land
-    Decimal('0') for empty payloads."""
+def test_save_cri_scan_rejects_missing_cri_score(engine):
+    """Codex tribunal ISSUE-2: payload['cri']['score'] missing/None/NaN/inf
+    must raise instead of silently landing cri_level=0. The regime gate
+    binding tier picks the worst of (vcg, cri); a zero-fill would surface
+    as cri_tier=NORMAL (safest tier) and bias the gate permissive."""
     payload = {"date": "2026-05-01"}  # no cri.* keys at all
     with engine.begin() as conn:
-        save_cri_scan(conn, payload=payload)
-        row = conn.execute(select(cri_series).where(cri_series.c.payload["date"].astext == "2026-05-01")).first()
-    assert row is not None
-    assert float(row.cri_level) == 0.0
+        with pytest.raises(ValueError, match="cri.*score.*required"):
+            save_cri_scan(conn, payload=payload)
+
+
+def test_save_cri_scan_rejects_nan_score(engine):
+    payload = {"date": "2026-05-01", "cri": {"score": float("nan")}}
+    with engine.begin() as conn:
+        with pytest.raises(ValueError, match="non-finite"):
+            save_cri_scan(conn, payload=payload)
+
+
+def test_save_cri_scan_rejects_inf_score(engine):
+    payload = {"date": "2026-05-01", "cri": {"score": float("inf")}}
+    with engine.begin() as conn:
+        with pytest.raises(ValueError, match="non-finite"):
+            save_cri_scan(conn, payload=payload)
+
+
+def test_save_cri_scan_rejects_non_numeric_score(engine):
+    payload = {"date": "2026-05-01", "cri": {"score": "not-a-number"}}
+    with engine.begin() as conn:
+        with pytest.raises(ValueError, match="not numeric"):
+            save_cri_scan(conn, payload=payload)
 
 
 def test_save_cri_scan_appends_per_call(engine):

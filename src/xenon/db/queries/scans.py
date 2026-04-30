@@ -91,25 +91,36 @@ def save_cri_scan(conn, *, payload: dict) -> int:
     """Insert a row into cri_series from a CRI scanner JSON payload.
 
     Mirrors save_vcg_scan: sync conn, plain INSERT, returns the new id.
-    The cri_level NOT NULL column is derived from payload['cri']['score']
-    (defaulting to 0 when absent so partial / legacy payloads still
-    land instead of erroring out — matches the test_cri_partial_payload
-    fixture pattern).
+    The cri_level NOT NULL column is derived from payload['cri']['score'].
+
+    Rejects malformed payloads (missing/None/NaN/non-finite score) with
+    ValueError. The regime gate's binding tier picks the worst of
+    (vcg_tier, cri_tier); a silent zero-fill would surface as cri_tier=
+    NORMAL (the safest tier) and bias the gate toward "permissive". A bad
+    scan must not pretend the regime is normal — the caller can retry or
+    skip.
 
     No ON CONFLICT clause: the regime_state view (Phase 1) picks the
     latest row, so multiple rows per calendar day from the 30-min
     scheduled cadence + manual /regime/scan refreshes are intentional.
     """
+    import math
+
     from sqlalchemy import insert as _insert
 
     from xenon.db.schema import cri_series
 
     cri = payload.get("cri") or {}
     score = cri.get("score")
+    if score is None:
+        raise ValueError("save_cri_scan: payload['cri']['score'] is required")
     try:
-        cri_level = Decimal(str(score)) if score is not None else Decimal("0")
-    except (ValueError, ArithmeticError):
-        cri_level = Decimal("0")
+        score_f = float(score)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"save_cri_scan: payload['cri']['score'] is not numeric ({score!r})") from exc
+    if not math.isfinite(score_f):
+        raise ValueError(f"save_cri_scan: payload['cri']['score'] is non-finite ({score_f!r})")
+    cri_level = Decimal(str(score_f))
 
     return conn.execute(
         _insert(cri_series).values(cri_level=cri_level, alert=False, payload=payload).returning(cri_series.c.id)

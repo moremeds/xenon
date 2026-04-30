@@ -634,6 +634,18 @@ The Codex-style audit identified eight spec-correctness issues. All resolved inl
 | 7   | Scheduler had no multi-worker guard                                           | §4.1 + Phase 0 use `pg_try_advisory_lock`, sharing helper with the UW-daily worker pattern.                         |
 | 8   | Web `/api/regime` route reads files; `RegimePanel` recomputes CRI client-side | §4.9 + Phase 0 rewrite the route to proxy FastAPI; remove client-side recomputation; CI guard locks the rewrite in. |
 
+### 9.6 Tribunal review — accepted design decisions (Phases 0/1/2/4 review, 2026-04-30)
+
+After the Codex tribunal pass on 18 commits across Phases 0/1/2/4, four findings were intentionally accepted as-designed rather than fixed:
+
+- **CROSS JOIN partial-feed → UNKNOWN/UNKNOWN** (tribunal ISSUE-4). When only one feed has data, `xenon.regime_state` returns zero rows by design (CROSS JOIN with two `LIMIT 1` CTEs). The classifier maps a missing row to `vcg_tier=UNKNOWN`, `cri_tier=UNKNOWN`, which the binding logic surfaces as `EDR` (THROTTLE). For a risk gate, "we don't have both signals → throttle, don't go permissive" is the conservative interpretation. Alternative (LEFT JOIN with NULL handling) was considered and rejected as bias-toward-permissive.
+- **`events.outbox` thin payload** (tribunal ISSUE-6). The `regime_transition` outbox row stores only the tier tuple + scanner timestamps, not the full classifier inputs. `events.outbox.payload` is `JSONB` so additional fields can be appended without a migration if a downstream consumer (mobile/Slack/email — out of scope per §10) needs richer context. Forward-compat by schema, not by pre-emptive payload bloat.
+
+Two findings handled separately:
+
+- **`regime_overrides` FK scope binding** (tribunal ISSUE-5) — **deferred to Phase 3.** The deferred FK in §4.3 references `order_submissions.submission_id` but does not enforce that the override row's `(broker, account_env, broker_account)` matches the parent's. No production code path inserts into `regime_overrides` yet — only tests do — so the cleanest fix (composite FK requiring full scope match) lands when the gate's override-write path lands in Phase 3.
+- **CRI malformed-score → NORMAL** (tribunal ISSUE-2) — **fixed in Phase 0.** `save_cri_scan` now raises `ValueError` on missing/None/NaN/non-finite `cri.score`. A bad scan no longer biases the gate toward permissive (which would surface as `cri_tier=NORMAL`, the safest tier, and unblock trading). Tests in `scripts/tests/test_save_cri_scan.py`.
+
 ---
 
 ## 10. Open questions for user verification
@@ -651,4 +663,5 @@ These didn't reach a question gate during brainstorming; default decisions are s
 ## 11. Changelog
 
 - 2026-04-29 — Initial design.
+- 2026-04-30 — **Tribunal review (v3).** Codex+Gemini+Claude tribunal pass on the 18 commits implementing Phases 0/1/2/4. Six issues fixed inline (advisory-lock txn commit, supervisor observability, market-hours gate, broker-scope filter on overrides listing, regime-state view id-tiebreaker migration, save_cri_scan malformed-score rejection). Four issues addressed via §9.6: ISSUE-4 (CROSS JOIN partial-feed) and ISSUE-6 (thin outbox payload) accepted as-designed; ISSUE-5 (FK scope binding) deferred to Phase 3 where the override-write code path lands.
 - 2026-04-29 — **Audit-driven revision (v2).** Eight findings from a code-anchored review applied inline; see §9.5 for the full mapping. Notable structural changes: introduced **Phase 0** (CRI persistence + plumbing prerequisites); rewrote §3.2 throttle contract to `risk-budget cap + HTTP 422 resize_required`; redesigned `regime_overrides` around `submission_id` + scope columns + deferred FK to `order_submissions`; replaced fictional `PushNotification` symbol with `xenon.db.events.emit()` outbox; added `pg_try_advisory_lock` multi-worker guard sharing helper with UW-daily; bounded modify gating to new-exposure cases (price-only and quantity-decrease bypass); added `/api/regime` no-file-reads CI guard. Sections rewritten or substantially edited: §1 (summary + errata), §2 (in/out scope), §3.2 + §3.2.1 (throttle contract + EDR fix), §3.3 (push channel → outbox), §4.1 (advisory lock + outbox emit), §4.3 (audit table redesign), §4.5 + §4.5.1 (gate result shape + max_loss helper), §4.6 + §4.6.1 + §4.6.2 (modify rules + override protocol), §4.8 (outbox-based emission), §4.9 (web rewrites), §6 (error table), §7.5 (CI guard timing), §8 (Phase 0 + reordered phases).
