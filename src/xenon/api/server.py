@@ -2996,6 +2996,111 @@ async def orders_modify(request: Request):
     return await _orders_modify_from_body(body)
 
 
+async def _run_modify_regime_gate(
+    *,
+    submission: dict,
+    new_quantity: int | None,
+):
+    """Apply RegimeGate to a /orders/modify body per spec §4.6.1.
+
+    Modify rules:
+    - Pure price (newQuantity is None or == old): skip gate.
+    - Quantity decrease: skip gate (reducing risk).
+    - Quantity increase: gate the synthetic delta order. BLOCK → 409,
+      THROTTLE over cap → 422. Combos are not gated yet (BAG modify
+      with quantity change is rare; tracked as follow-up).
+    - Side change: not supported by IB modify, would need a new place.
+
+    Returns `(outcome_or_None, response_or_None)`. When both are None,
+    the modify proceeds without gating.
+    """
+    if os.environ.get("XENON_REGIME_GATE_DISABLED") == "1" or (
+        _is_test_mode() and os.environ.get("XENON_REGIME_GATE_IN_TESTS") != "1"
+    ):
+        return None, None
+
+    if new_quantity is None:
+        return None, None  # pure price modify
+    try:
+        new_qty = int(new_quantity)
+    except (TypeError, ValueError):
+        return None, None  # malformed → bubble through normal validation
+    old_qty = int(submission.get("quantity") or 0)
+    if new_qty <= old_qty:
+        return None, None  # quantity decrease / unchanged
+
+    delta_qty = new_qty - old_qty
+    sec_type = submission.get("security_type")
+    if sec_type == "BAG":
+        # Combo modifies have no per-leg payload to reconstruct here.
+        # Logged as a known gap; combo size-up paths typically replace.
+        logger.info(
+            "regime_gate(modify): BAG quantity-increase not gated (submission=%s)",
+            submission.get("submission_id"),
+        )
+        return None, None
+
+    try:
+        delta_req = PreflightRequest(
+            ticker=submission["ticker"],
+            security_type=sec_type or "OPT",
+            action=submission["action"],
+            quantity=delta_qty,
+            right=submission.get("right"),
+            expiry=submission.get("expiry").isoformat() if submission.get("expiry") else None,
+            strike=submission.get("strike"),
+            multiplier=int(submission.get("multiplier") or 100),
+            limit_price=submission.get("limit_price") or Decimal("0"),
+        )
+    except (ValueError, ValidationError) as exc:
+        return None, JSONResponse(
+            status_code=400,
+            content={
+                "detail": str(exc),
+                "reason_code": ReasonCode.INVALID_ORDER_BODY.value,
+            },
+        )
+
+    state = await get_regime_state_for_scope(_resolve_scope_obj())
+    outcome = evaluate_order_gate(delta_req, state)
+
+    if outcome.decision is GateDecision.BLOCK:
+        return None, JSONResponse(
+            status_code=409,
+            content={
+                "detail": outcome.reason,
+                "reason_code": "REGIME_BLOCK",
+                "decision": "block",
+                "binding_tier": state.binding_tier,
+                "binding_side": outcome.bind,
+                "vcg_tier": state.vcg_tier,
+                "cri_tier": state.cri_tier,
+                "delta_quantity": delta_qty,
+                "modify_path": True,
+            },
+        )
+    if outcome.exceeds_throttle_cap:
+        max_loss_payload = outcome.max_loss_usd if outcome.max_loss_usd != math.inf else None
+        return None, JSONResponse(
+            status_code=422,
+            content={
+                "detail": (
+                    f"{state.binding_tier} throttle: delta order exceeds "
+                    f"per-order cap (${outcome.max_loss_cap_usd:.0f})"
+                ),
+                "reason_code": "REGIME_RESIZE_REQUIRED",
+                "decision": "resize_required",
+                "binding_tier": state.binding_tier,
+                "binding_side": outcome.bind,
+                "max_loss_usd": max_loss_payload,
+                "max_loss_cap_usd": outcome.max_loss_cap_usd,
+                "delta_quantity": delta_qty,
+                "modify_path": True,
+            },
+        )
+    return outcome, None
+
+
 async def _orders_modify_from_body(body: dict):
     if _is_test_mode():
         return {
@@ -3069,6 +3174,17 @@ async def _orders_modify_from_body(body: dict):
                 "http_status": 409,
             },
         )
+
+    # RegimeGate — only quantity-increase modifies are gated (§4.6.1).
+    submission = orders_store.load_submission_for_modify(
+        order_id=str(order_id) if order_id else "",
+        perm_id=str(perm_id) if perm_id else "",
+        **_scope,
+    )
+    if submission is not None:
+        _gate_outcome, gate_response = await _run_modify_regime_gate(submission=submission, new_quantity=new_quantity)
+        if gate_response is not None:
+            return gate_response
 
     args = ["modify"]
     if order_id:

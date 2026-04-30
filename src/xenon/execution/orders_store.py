@@ -693,6 +693,37 @@ def record_event(
         )
 
 
+def load_submission_for_modify(
+    *,
+    order_id: str = "",
+    perm_id: str = "",
+    broker: str = "IB",
+    account_env: str = "legacy_unknown",
+    broker_account: str = "legacy_unknown",
+) -> dict | None:
+    """Return the full submission row identified by order_id or perm_id.
+
+    Used by the modify route to reconstruct a PreflightRequest for the
+    regime gate (modify body only carries IDs+price+qty+sequence).
+    Scope-filtered so a paper-account modify cannot resolve a live row.
+    """
+    conditions = [
+        order_submissions.c.broker == broker,
+        order_submissions.c.account_env == account_env,
+        order_submissions.c.broker_account == broker_account,
+    ]
+    if order_id:
+        conditions.append(order_submissions.c.ib_order_id == str(order_id))
+    elif perm_id:
+        conditions.append(order_submissions.c.perm_id == str(perm_id))
+    else:
+        return None
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        row = conn.execute(select(order_submissions).where(*conditions).limit(1)).first()
+    return dict(row._mapping) if row else None
+
+
 def lookup_submission_id_by_ib_order_id(
     ib_order_id: str,
     *,

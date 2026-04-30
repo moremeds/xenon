@@ -251,6 +251,139 @@ def test_tier_2_within_cap_proceeds_with_125_cover_ratio(client):
         _delete_test_overrides([sid])
 
 
+def _seed_submission(*, ticker: str, quantity: int, ib_order_id: str, perm_id: str = "") -> str:
+    """Insert a real order_submissions row for /orders/modify gate tests."""
+    import uuid
+
+    sid = f"modify-test-{uuid.uuid4().hex[:8]}"
+    eng = server_mod.get_sync_engine()
+    now = dt.datetime.now(dt.timezone.utc)
+    with eng.begin() as conn:
+        conn.execute(
+            sa_text(
+                """
+                INSERT INTO xenon.order_submissions (
+                    submission_id, user_id, client_attempt_id, ticker, security_type,
+                    action, quantity, expiry, strike, "right", multiplier, limit_price,
+                    state, ib_order_id, perm_id, modify_sequence,
+                    submitted_at, updated_at, broker, account_env, broker_account
+                ) VALUES (
+                    :sid, 'local', :sid, :ticker, 'OPT', 'BUY', :qty, '2026-06-19',
+                    200, 'C', 100, 5.00, 'WORKING', :ib_id, :perm_id, 0,
+                    :now, :now, 'IB',
+                    COALESCE((SELECT account_env FROM xenon.account_snapshots ORDER BY snapshot_at DESC LIMIT 1), 'paper'),
+                    COALESCE((SELECT broker_account FROM xenon.account_snapshots ORDER BY snapshot_at DESC LIMIT 1), 'DU0000000')
+                )
+                """
+            ),
+            {
+                "sid": sid,
+                "ticker": ticker,
+                "qty": quantity,
+                "ib_id": ib_order_id,
+                "perm_id": perm_id,
+                "now": now,
+            },
+        )
+    return sid
+
+
+def _delete_submission(sid: str) -> None:
+    eng = server_mod.get_sync_engine()
+    with eng.begin() as conn:
+        conn.execute(
+            sa_text("DELETE FROM xenon.regime_overrides WHERE submission_id = :sid"),
+            {"sid": sid},
+        )
+        conn.execute(
+            sa_text("DELETE FROM xenon.order_events WHERE submission_id = :sid"),
+            {"sid": sid},
+        )
+        conn.execute(
+            sa_text("DELETE FROM xenon.order_submissions WHERE submission_id = :sid"),
+            {"sid": sid},
+        )
+
+
+def test_modify_quantity_decrease_skips_gate(client, monkeypatch):
+    monkeypatch.setenv("XENON_API_TEST_MODE", "0")
+    _seed_regime_state(vcg_tier="NORMAL", cri_tier="TIER_1")
+    ib_order_id = "9000001"
+    sid = _seed_submission(ticker="QQQ", quantity=10, ib_order_id=ib_order_id)
+    try:
+        # Patch subprocess so the modify path doesn't actually call IB
+        async def fake_runner(entry, args, timeout=15):
+            from xenon.api.subprocess import ScriptResult
+
+            return ScriptResult(ok=True, data={"status": "ok"}, error=None)
+
+        monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+        resp = client.post(
+            "/orders/modify",
+            json={
+                "orderId": int(ib_order_id),
+                "newPrice": 5.50,
+                "newQuantity": 5,  # decrease
+                "modifySequence": 1,
+            },
+        )
+        # Decrease bypasses gate; subprocess accepts → 200
+        assert resp.status_code == 200, resp.text
+    finally:
+        _delete_submission(sid)
+
+
+def test_modify_quantity_increase_blocks_at_tier_1(client, monkeypatch):
+    monkeypatch.setenv("XENON_API_TEST_MODE", "0")
+    _seed_regime_state(vcg_tier="NORMAL", cri_tier="TIER_1")
+    ib_order_id = "9000002"
+    sid = _seed_submission(ticker="QQQ", quantity=1, ib_order_id=ib_order_id)
+    try:
+        resp = client.post(
+            "/orders/modify",
+            json={
+                "orderId": int(ib_order_id),
+                "newPrice": 5.00,
+                "newQuantity": 5,  # increase = gate the delta
+                "modifySequence": 1,
+            },
+        )
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body["reason_code"] == "REGIME_BLOCK"
+        assert body["modify_path"] is True
+        assert body["delta_quantity"] == 4
+    finally:
+        _delete_submission(sid)
+
+
+def test_modify_pure_price_skips_gate(client, monkeypatch):
+    monkeypatch.setenv("XENON_API_TEST_MODE", "0")
+    _seed_regime_state(vcg_tier="NORMAL", cri_tier="TIER_1")
+    ib_order_id = "9000003"
+    sid = _seed_submission(ticker="QQQ", quantity=2, ib_order_id=ib_order_id)
+    try:
+
+        async def fake_runner(entry, args, timeout=15):
+            from xenon.api.subprocess import ScriptResult
+
+            return ScriptResult(ok=True, data={"status": "ok"}, error=None)
+
+        monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+        resp = client.post(
+            "/orders/modify",
+            json={
+                "orderId": int(ib_order_id),
+                "newPrice": 6.00,  # price-only
+                "modifySequence": 1,
+            },
+        )
+        # Pure price modify bypasses gate even at TIER_1
+        assert resp.status_code == 200, resp.text
+    finally:
+        _delete_submission(sid)
+
+
 def test_disabled_gate_skips_evaluation_entirely(client, monkeypatch):
     monkeypatch.setenv("XENON_REGIME_GATE_IN_TESTS", "0")
     monkeypatch.setenv("XENON_REGIME_GATE_DISABLED", "1")
