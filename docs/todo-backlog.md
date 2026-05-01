@@ -426,3 +426,49 @@ for ${sym}"`) survives, but the wrapping prefix is gone.
   `generate_cta_share.py:689`, `generate_vcg_share.py:604`,
   `generate_regime_share.py:701`), and `ShareReportModal.tsx:82` consumes
   it directly via `data?.preview_path`. No fix in flight.
+
+- 2026-05-01 — **Regime-gate Phase 3 follow-ups (post-Codex deep review)** —
+  Four panic-tier hotfixes shipped (PR #79 + #80) closing C-1 combo SELL
+  bypass, C-2.1 BAG modify gate skipped, C-3 stale portfolio bypass, and
+  C-4 hardcoded $100k bankroll. Five lower-stakes items remain from the
+  same review:
+  - **C-2.2 cancel-then-place data loss** — `web/app/api/orders/modify/route.ts:142-184`
+    cancels the working order before calling `/orders/place` for a
+    structure-change modify. If the replacement is regime-blocked, the
+    user is left with no order. Fix: pre-gate the replacement via a
+    server-side dry-run before the cancel call. Web-route refactor.
+  - **C-2.3 modify override audit insert** — `/orders/modify` 409 now
+    surfaces `override_required: true` but `override_supported: false`.
+    Honoring an override on modify needs a parallel audit-insert path
+    (place uses `orders_store.reserve_attempt` which doesn't apply on
+    modify since the row already exists).
+  - **C-5 hedge structure registry** — `_is_hedge_combo` only recognizes
+    2-leg verticals. The spec (`§4.5`) points at the canonical
+    `docs/trading/options-structures.json` registry. Multi-leg hedges
+    (long put butterflies on SPX/SPY) are blocked at TIER_1 even though
+    the design says they must pass.
+  - **C-6 hardcoded `user_id="local"`** — `server.py:2774` attributes
+    every order_submissions and regime_overrides row to the same
+    pseudo-user; `/regime/overrides` filters by scope only, not by
+    user. Compliance can't reconstruct "who overrode what". Also the
+    permId=0 race in ib_place_order can leave override rows with
+    `perm_id=NULL` even when the order acked.
+  - **C-7 substring CI guard** — `scripts/checks/order_path_regime_gate_called.py`
+    passes if the function source merely _contains_ one of four
+    substrings. A comment like `# RegimeGate is bypassed here` would
+    satisfy it. Upgrade to AST call-site analysis.
+
+  **Notes:** Codex review output saved at `/tmp/codex-phase3-spec-review.txt`
+  (ephemeral, regenerate via the deep-review prompt template if needed).
+  Items are independent and can be picked up in any order. Pair with
+  re-running the deep review after each lands.
+
+- 2026-05-01 — **TWS-cancel mirroring** — `src/xenon/api/CLAUDE.md` line 44
+  documents this as a known gap: the IB→Postgres activity poller does not
+  transition `WORKING` snapshot-\* rows to `CANCELLED` when they vanish from
+  `get_open_orders()`. Naïve disappearance-detection is unsafe (a fill also
+  disappears). Right fix: combine the disappeared set with `xenon.order_fills`
+  for the same `(perm_id, scope)` to disambiguate, plus an idle-grace window.
+  **Suspected file site:** `src/xenon/api/services/ib_activity_mirror.py`.
+  Tracked here to surface in a future planning session — the activity poller
+  has been stable since #71.
