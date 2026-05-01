@@ -22,7 +22,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from xenon.db.engine import get_sync_engine
 from xenon.db.events import CHANNEL_FILL_COMMISSION_UPDATED, CHANNEL_FILL_RECORDED, emit_outbox_in_txn
-from xenon.db.schema import order_events, order_fills, order_submissions
+from xenon.db.schema import order_events, order_fills, order_submissions, regime_overrides
 
 # ── Schema init ──
 
@@ -91,9 +91,18 @@ def reserve_attempt(
     broker: str = "IB",
     account_env: str = "legacy_unknown",
     broker_account: str = "legacy_unknown",
+    override_audit: dict | None = None,
 ) -> ReservationOutcome:
     """Atomically reserve a submission slot keyed by
-    (broker, account_env, broker_account, user_id, client_attempt_id)."""
+    (broker, account_env, broker_account, user_id, client_attempt_id).
+
+    `override_audit` (when provided) writes a regime_overrides row in
+    the same transaction as the submission reservation. The deferred
+    composite FK on regime_overrides means both rows commit atomically
+    or both roll back. Schema: dict with keys
+    `route, vcg_tier, cri_tier, binding_side, block_reason, user_reason,
+    order_payload`.
+    """
     sid = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     engine = get_sync_engine()
@@ -124,6 +133,24 @@ def reserve_attempt(
         inserted = conn.execute(stmt).first()
 
         if inserted is not None:
+            if override_audit is not None:
+                conn.execute(
+                    insert(regime_overrides).values(
+                        user_id=user_id,
+                        account_env=account_env,
+                        broker=broker,
+                        broker_account=broker_account,
+                        submission_id=sid,
+                        client_attempt_id=client_attempt_id,
+                        route=override_audit["route"],
+                        vcg_tier=override_audit.get("vcg_tier"),
+                        cri_tier=override_audit.get("cri_tier"),
+                        binding_side=override_audit["binding_side"],
+                        block_reason=override_audit["block_reason"],
+                        user_reason=override_audit["user_reason"],
+                        order_payload=override_audit["order_payload"],
+                    )
+                )
             return ReservationOutcome(
                 status="winner",
                 submission_id=sid,
@@ -462,7 +489,20 @@ def mark_submitted(
     perm_id: str | None,
     placing_client_id: int | None,
 ) -> None:
+    def _int_or_none(value: str | None) -> int | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            return None
+
     now = datetime.now(timezone.utc)
+    perm_id_int = _int_or_none(perm_id)
+    ib_order_id_int = _int_or_none(ib_order_id)
     engine = get_sync_engine()
     with engine.begin() as conn:
         conn.execute(
@@ -474,6 +514,14 @@ def mark_submitted(
                 placing_client_id=placing_client_id,
                 state="WORKING",
                 updated_at=now,
+            )
+        )
+        conn.execute(
+            update(regime_overrides)
+            .where(regime_overrides.c.submission_id == submission_id)
+            .values(
+                perm_id=perm_id_int,
+                ib_order_id=ib_order_id_int,
             )
         )
 
@@ -664,6 +712,37 @@ def record_event(
                 detail=detail,
             )
         )
+
+
+def load_submission_for_modify(
+    *,
+    order_id: str = "",
+    perm_id: str = "",
+    broker: str = "IB",
+    account_env: str = "legacy_unknown",
+    broker_account: str = "legacy_unknown",
+) -> dict | None:
+    """Return the full submission row identified by order_id or perm_id.
+
+    Used by the modify route to reconstruct a PreflightRequest for the
+    regime gate (modify body only carries IDs+price+qty+sequence).
+    Scope-filtered so a paper-account modify cannot resolve a live row.
+    """
+    conditions = [
+        order_submissions.c.broker == broker,
+        order_submissions.c.account_env == account_env,
+        order_submissions.c.broker_account == broker_account,
+    ]
+    if order_id:
+        conditions.append(order_submissions.c.ib_order_id == str(order_id))
+    elif perm_id:
+        conditions.append(order_submissions.c.perm_id == str(perm_id))
+    else:
+        return None
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        row = conn.execute(select(order_submissions).where(*conditions).limit(1)).first()
+    return dict(row._mapping) if row else None
 
 
 def lookup_submission_id_by_ib_order_id(

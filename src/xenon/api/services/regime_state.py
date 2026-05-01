@@ -169,6 +169,32 @@ async def _read_regime_row() -> dict:
     return dict(row)
 
 
+async def get_regime_state_for_scope(scope) -> RegimeState:
+    """Direct entry point for in-process callers (no FastAPI Depends).
+
+    The order route's _orders_place_from_body needs RegimeState but runs
+    outside the FastAPI Depends graph (see in-process route bypass note
+    in CLAUDE.md). Use this helper instead of get_regime_state to avoid
+    triggering the dependency-injection machinery.
+
+    Same per-scope TTL cache as the FastAPI dep — calls share the
+    process-wide _cache, so the cost is only paid once per 30s per scope.
+    """
+    ttl_s = int(os.environ.get("XENON_REGIME_CACHE_TTL_S", "30"))
+    max_age_s = int(os.environ.get("XENON_REGIME_MAX_AGE_S", str(90 * 60)))
+    key = (scope.account_env, scope.broker_account)
+
+    cached = _cache_get(key, ttl_s)
+    if cached is not None:
+        return cached
+
+    row = await _read_regime_row()
+    state = classify(row, now=dt.datetime.now(dt.timezone.utc), max_age_s=max_age_s)
+    if ttl_s > 0:
+        _cache_set(key, state)
+    return state
+
+
 async def get_regime_state(
     scope=Depends(lambda: None),  # overridden below
 ) -> RegimeState:

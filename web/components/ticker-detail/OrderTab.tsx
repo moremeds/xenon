@@ -9,6 +9,7 @@ import { useOrderActions } from "@/lib/OrderActionsContext";
 import { fmtPrice, legPriceKey, resolveEntryCost } from "@/lib/positionUtils";
 import ModifyOrderModal from "@/components/ModifyOrderModal";
 import OrderErrorBanner from "@/components/OrderErrorBanner";
+import { RegimeBlockModal } from "@/components/RegimeBlockModal";
 import type { ModifyOrderRequest } from "@/lib/orderModify";
 import {
   checkNakedShortRisk,
@@ -24,6 +25,13 @@ import WizardModal from "@/components/ticker-detail/WizardModal";
 import WizardSessionStrip from "@/components/ticker-detail/WizardSessionStrip";
 import { useWizardLauncher } from "@/lib/useWizardLauncher";
 import { useWizardSession } from "@/lib/useWizardSession";
+import {
+  buildRegimeOverrideFields,
+  parseRegimeGateResponse,
+  suggestResizeQuantity,
+  type RegimeBlockResponse,
+  type RegimeResizeResponse,
+} from "@/lib/order/regimeGate";
 
 /** Derive a user-facing error string from a /api/orders/* JSON body. */
 function errorFromResponseBody(
@@ -52,6 +60,19 @@ type OrderTabProps = {
   /** Resolved price data (option-level for single-leg options, underlying otherwise) */
   tickerPriceData?: PriceData | null;
 };
+
+type RegimePrompt =
+  | {
+      kind: "block";
+      payload: RegimeBlockResponse;
+      requestBody: Record<string, unknown>;
+    }
+  | {
+      kind: "resize";
+      payload: RegimeResizeResponse;
+      requestBody: Record<string, unknown>;
+      currentQuantity: number;
+    };
 
 /* ─── Convert PortfolioData to NakedShortPortfolio ─── */
 
@@ -367,6 +388,7 @@ function NewOrderForm({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [regimePrompt, setRegimePrompt] = useState<RegimePrompt | null>(null);
 
   const parsedQty = parseInt(quantity, 10);
   const parsedPrice = parseFloat(limitPrice);
@@ -443,17 +465,36 @@ function NewOrderForm({
         return;
       }
 
+      const requestBody = {
+        ...payload,
+        client_attempt_id: attemptId.id,
+      };
       attemptId.markSubmitted();
       const res = await fetch("/api/orders/place", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...payload,
-          client_attempt_id: attemptId.id,
-        }),
+        body: JSON.stringify(requestBody),
       });
-      const json = await res.json();
+      const regime = await parseRegimeGateResponse(res);
+      const json = await res.json().catch(() => null);
       if (!res.ok) {
+        if (regime.kind === "block") {
+          setRegimePrompt({
+            kind: "block",
+            payload: regime.payload,
+            requestBody,
+          });
+          return;
+        }
+        if (regime.kind === "resize") {
+          setRegimePrompt({
+            kind: "resize",
+            payload: regime.payload,
+            requestBody,
+            currentQuantity: parsedQty,
+          });
+          return;
+        }
         setError(errorFromResponseBody(json, "Order placement failed"));
         attemptId.markTerminal();
       } else {
@@ -461,6 +502,7 @@ function NewOrderForm({
           `Order placed: ${action} ${parsedQty} ${ticker} @ ${fmtPrice(parsedPrice)}`,
         );
         setConfirmStep(false);
+        setRegimePrompt(null);
         attemptId.markTerminal();
         onOrderPlaced?.();
       }
@@ -479,7 +521,84 @@ function NewOrderForm({
     position,
     portfolio,
     onOrderPlaced,
+    attemptId,
   ]);
+
+  const retryRegimeOrder = useCallback(
+    async (requestBody: Record<string, unknown>) => {
+      setLoading(true);
+      setError(null);
+      setSuccess(null);
+      try {
+        attemptId.markSubmitted();
+        const res = await fetch("/api/orders/place", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestBody),
+        });
+        const regime = await parseRegimeGateResponse(res);
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          if (regime.kind === "block") {
+            setRegimePrompt({
+              kind: "block",
+              payload: regime.payload,
+              requestBody,
+            });
+            return;
+          }
+          if (regime.kind === "resize") {
+            setRegimePrompt({
+              kind: "resize",
+              payload: regime.payload,
+              requestBody,
+              currentQuantity: Number(requestBody.quantity) || parsedQty,
+            });
+            return;
+          }
+          setError(errorFromResponseBody(json, "Order placement failed"));
+          attemptId.markTerminal();
+          return;
+        }
+        setSuccess(
+          `Order placed: ${requestBody.action} ${requestBody.quantity} ${ticker} @ ${fmtPrice(Number(requestBody.limitPrice))}`,
+        );
+        setConfirmStep(false);
+        setRegimePrompt(null);
+        attemptId.markTerminal();
+        onOrderPlaced?.();
+      } catch {
+        setError("Network error placing order");
+        attemptId.markTerminal();
+      } finally {
+        setLoading(false);
+      }
+    },
+    [attemptId, onOrderPlaced, parsedQty, ticker],
+  );
+
+  const handleRegimeOverride = useCallback(
+    (overrideReason: string) => {
+      if (regimePrompt?.kind !== "block") return;
+      void retryRegimeOrder({
+        ...regimePrompt.requestBody,
+        ...buildRegimeOverrideFields(overrideReason),
+      });
+    },
+    [regimePrompt, retryRegimeOrder],
+  );
+
+  const handleRegimeResize = useCallback(
+    (newQuantity: number) => {
+      if (regimePrompt?.kind !== "resize") return;
+      _setQuantity(String(newQuantity));
+      void retryRegimeOrder({
+        ...regimePrompt.requestBody,
+        quantity: newQuantity,
+      });
+    },
+    [regimePrompt, retryRegimeOrder],
+  );
 
   return (
     <div className="order-form">
@@ -604,6 +723,27 @@ function NewOrderForm({
 
       <OrderErrorBanner error={error} />
       {success && <div className="order-success">{success}</div>}
+      {regimePrompt?.kind === "block" && (
+        <RegimeBlockModal
+          kind="block"
+          payload={regimePrompt.payload}
+          onConfirm={handleRegimeOverride}
+          onCancel={() => setRegimePrompt(null)}
+        />
+      )}
+      {regimePrompt?.kind === "resize" && (
+        <RegimeBlockModal
+          kind="resize"
+          payload={regimePrompt.payload}
+          currentQuantity={regimePrompt.currentQuantity}
+          suggestedQuantity={suggestResizeQuantity(
+            regimePrompt.payload,
+            regimePrompt.currentQuantity,
+          )}
+          onResize={handleRegimeResize}
+          onCancel={() => setRegimePrompt(null)}
+        />
+      )}
 
       {/* Order Summary (shown in confirm step) */}
       {confirmStep && orderSummary && (
@@ -667,6 +807,7 @@ function ComboOrderForm({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [regimePrompt, setRegimePrompt] = useState<RegimePrompt | null>(null);
   const wizardLauncher = useWizardLauncher();
   const wizardSession = useWizardSession(wizardLauncher.sessionId);
   const attemptId = useClientAttemptId({ ticker });
@@ -806,23 +947,42 @@ function ComboOrderForm({
         return;
       }
 
+      const requestBody = {
+        type: "combo",
+        symbol: ticker,
+        action,
+        quantity: parsedQty,
+        limitPrice: parsedPrice,
+        tif,
+        legs,
+        client_attempt_id: attemptId.id,
+      };
       attemptId.markSubmitted();
       const res = await fetch("/api/orders/place", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "combo",
-          symbol: ticker,
-          action,
-          quantity: parsedQty,
-          limitPrice: parsedPrice,
-          tif,
-          legs,
-          client_attempt_id: attemptId.id,
-        }),
+        body: JSON.stringify(requestBody),
       });
-      const json = await res.json();
+      const regime = await parseRegimeGateResponse(res);
+      const json = await res.json().catch(() => null);
       if (!res.ok) {
+        if (regime.kind === "block") {
+          setRegimePrompt({
+            kind: "block",
+            payload: regime.payload,
+            requestBody,
+          });
+          return;
+        }
+        if (regime.kind === "resize") {
+          setRegimePrompt({
+            kind: "resize",
+            payload: regime.payload,
+            requestBody,
+            currentQuantity: parsedQty,
+          });
+          return;
+        }
         setError(errorFromResponseBody(json, "Order placement failed"));
         attemptId.markTerminal();
       } else {
@@ -830,6 +990,7 @@ function ComboOrderForm({
           `Combo order placed: ${action} ${parsedQty}x ${position.structure} @ ${fmtSignedPrice(parsedPrice)}`,
         );
         setConfirmStep(false);
+        setRegimePrompt(null);
         attemptId.markTerminal();
         onOrderPlaced?.();
       }
@@ -852,6 +1013,82 @@ function ComboOrderForm({
     onOrderPlaced,
     attemptId,
   ]);
+
+  const retryRegimeOrder = useCallback(
+    async (requestBody: Record<string, unknown>) => {
+      setLoading(true);
+      setError(null);
+      setSuccess(null);
+      try {
+        attemptId.markSubmitted();
+        const res = await fetch("/api/orders/place", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestBody),
+        });
+        const regime = await parseRegimeGateResponse(res);
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          if (regime.kind === "block") {
+            setRegimePrompt({
+              kind: "block",
+              payload: regime.payload,
+              requestBody,
+            });
+            return;
+          }
+          if (regime.kind === "resize") {
+            setRegimePrompt({
+              kind: "resize",
+              payload: regime.payload,
+              requestBody,
+              currentQuantity: Number(requestBody.quantity) || parsedQty,
+            });
+            return;
+          }
+          setError(errorFromResponseBody(json, "Order placement failed"));
+          attemptId.markTerminal();
+          return;
+        }
+        setSuccess(
+          `Combo order placed: ${requestBody.action} ${requestBody.quantity}x ${position.structure} @ ${fmtSignedPrice(Number(requestBody.limitPrice))}`,
+        );
+        setConfirmStep(false);
+        setRegimePrompt(null);
+        attemptId.markTerminal();
+        onOrderPlaced?.();
+      } catch {
+        setError("Network error placing order");
+        attemptId.markTerminal();
+      } finally {
+        setLoading(false);
+      }
+    },
+    [attemptId, onOrderPlaced, parsedQty, position.structure],
+  );
+
+  const handleRegimeOverride = useCallback(
+    (overrideReason: string) => {
+      if (regimePrompt?.kind !== "block") return;
+      void retryRegimeOrder({
+        ...regimePrompt.requestBody,
+        ...buildRegimeOverrideFields(overrideReason),
+      });
+    },
+    [regimePrompt, retryRegimeOrder],
+  );
+
+  const handleRegimeResize = useCallback(
+    (newQuantity: number) => {
+      if (regimePrompt?.kind !== "resize") return;
+      setQuantity(String(newQuantity));
+      void retryRegimeOrder({
+        ...regimePrompt.requestBody,
+        quantity: newQuantity,
+      });
+    },
+    [regimePrompt, retryRegimeOrder],
+  );
 
   const handleOpenWizard = useCallback(async () => {
     if (netPrices.mid == null) {
@@ -1300,6 +1537,27 @@ function ComboOrderForm({
 
       <OrderErrorBanner error={error} />
       {success && <div className="order-success">{success}</div>}
+      {regimePrompt?.kind === "block" && (
+        <RegimeBlockModal
+          kind="block"
+          payload={regimePrompt.payload}
+          onConfirm={handleRegimeOverride}
+          onCancel={() => setRegimePrompt(null)}
+        />
+      )}
+      {regimePrompt?.kind === "resize" && (
+        <RegimeBlockModal
+          kind="resize"
+          payload={regimePrompt.payload}
+          currentQuantity={regimePrompt.currentQuantity}
+          suggestedQuantity={suggestResizeQuantity(
+            regimePrompt.payload,
+            regimePrompt.currentQuantity,
+          )}
+          onResize={handleRegimeResize}
+          onCancel={() => setRegimePrompt(null)}
+        />
+      )}
 
       {/* Order Summary (shown in confirm step) */}
       {confirmStep && orderSummary && (

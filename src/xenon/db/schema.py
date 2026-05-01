@@ -8,6 +8,7 @@ from sqlalchemy import (
     Computed,
     Date,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     MetaData,
@@ -231,6 +232,16 @@ order_submissions = Table(
         "client_attempt_id",
         name="uq_order_sub_user_attempt",
     ),
+    # FK target for regime_overrides composite scope FK (ISSUE-5).
+    # Logically redundant under the submission_id PK, but Postgres requires
+    # an explicit UNIQUE/PK target for composite FKs.
+    UniqueConstraint(
+        "submission_id",
+        "broker",
+        "account_env",
+        "broker_account",
+        name="uq_order_sub_submission_scope",
+    ),
     Index("ix_order_sub_state_ticker", "state", "ticker"),
     Index("ix_order_sub_perm_id", "broker", "account_env", "broker_account", "perm_id"),
     Index("ix_order_sub_ib_order_id", "broker", "account_env", "broker_account", "ib_order_id"),
@@ -399,17 +410,7 @@ regime_overrides = Table(
     Column("account_env", Text, nullable=False),
     Column("broker", Text, nullable=False),
     Column("broker_account", Text, nullable=False),
-    Column(
-        "submission_id",
-        Text,
-        ForeignKey(
-            f"{XENON_SCHEMA}.order_submissions.submission_id",
-            name="fk_regime_overrides_submission",
-            deferrable=True,
-            initially="DEFERRED",
-        ),
-        nullable=False,
-    ),
+    Column("submission_id", Text, nullable=False),
     Column("client_attempt_id", Text),
     Column("perm_id", BigInteger),
     Column("ib_order_id", BigInteger),
@@ -420,6 +421,21 @@ regime_overrides = Table(
     Column("block_reason", Text, nullable=False),
     Column("user_reason", Text, nullable=False),
     Column("order_payload", JSONB, nullable=False),
+    # Composite FK (tribunal ISSUE-5): the override row's scope must match
+    # the parent submission's scope. Without the scope columns on the FK,
+    # an override row could reference a submission in a different account.
+    ForeignKeyConstraint(
+        ["submission_id", "broker", "account_env", "broker_account"],
+        [
+            f"{XENON_SCHEMA}.order_submissions.submission_id",
+            f"{XENON_SCHEMA}.order_submissions.broker",
+            f"{XENON_SCHEMA}.order_submissions.account_env",
+            f"{XENON_SCHEMA}.order_submissions.broker_account",
+        ],
+        name="fk_regime_overrides_submission_scope",
+        deferrable=True,
+        initially="DEFERRED",
+    ),
     Index("ix_regime_overrides_ts", text("ts DESC")),
     Index("ix_regime_overrides_submission", "submission_id"),
     Index("ix_regime_overrides_user_ts", "user_id", text("ts DESC")),

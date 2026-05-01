@@ -56,7 +56,7 @@ def _override_values(submission_id: str) -> dict:
     return dict(
         user_id="u1",
         account_env="paper",
-        broker="ib",
+        broker="IB",
         broker_account="DU000",
         submission_id=submission_id,
         route="POST /orders/place",

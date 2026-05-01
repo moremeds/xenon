@@ -218,12 +218,18 @@ def evaluate_combo(
     req: ComboPreflightRequest,
     portfolio: PortfolioView,
     reservations: WorkingReservations | None = None,
+    cover_ratio: float = 1.0,
 ) -> Verdict:
     """Evaluate Gate 4 for IB BAG combos.
 
     The BAG envelope action stays BUY for opens; leg actions define the
     structure. Closing combo envelopes (SELL) reduce exposure and are allowed
     after universe validation.
+
+    `cover_ratio` tightens the share-cover requirement per short call.
+    Default 1.0 = standard Gate 4 (1 contract = `multiplier` shares).
+    `RegimeGate` passes 1.25 on TIER_2 to require 125 shares per call —
+    this is the only path that should change the ratio.
     """
     reservations = reservations or WorkingReservations()
 
@@ -254,7 +260,8 @@ def evaluate_combo(
 
     existing_short = _count_existing_short_calls(portfolio.positions, req.ticker)
     shares = _count_long_shares(portfolio.positions, req.ticker)
-    share_cover_units = max(shares - reservations.stock_sell_qty, 0) // req.multiplier
+    threshold = _share_cover_threshold(req.multiplier, cover_ratio)
+    share_cover_units = max(shares - reservations.stock_sell_qty, 0) // threshold
     total_short_after = existing_short + reservations.short_call_qty + new_uncovered_calls
     if total_short_after > share_cover_units:
         return Verdict(
@@ -263,22 +270,39 @@ def evaluate_combo(
             reason_detail=(
                 f"Combo opens {new_uncovered_calls} uncovered {req.ticker} short call(s); "
                 f"existing short calls {existing_short}, reserved {reservations.short_call_qty}, "
-                f"share-cover units {share_cover_units}"
+                f"share-cover units {share_cover_units} "
+                f"(threshold={threshold} shares/call, cover_ratio={cover_ratio})"
             ),
         )
 
     return Verdict(accept=True)
 
 
+def _share_cover_threshold(multiplier: int, cover_ratio: float) -> int:
+    """Shares required to cover one short call at the given ratio.
+
+    Conservatively rounds up — if multiplier × ratio is non-integer, the
+    desk needs more shares, not fewer. Example: multiplier=100,
+    cover_ratio=1.25 → 125 shares. cover_ratio=1.0 (default) → 100.
+    """
+    import math as _math
+
+    return _math.ceil(multiplier * cover_ratio)
+
+
 def evaluate(
     req: PreflightRequest,
     portfolio: PortfolioView,
     reservations: WorkingReservations | None = None,
+    cover_ratio: float = 1.0,
 ) -> Verdict:
     """Evaluate Gate 4 server-side. Pure function.
 
     F2: universe + Gate 4 using `portfolio` (live-like view) and empty-by-default
     `reservations` (F4 replaces the stub with duckdb reads).
+
+    `cover_ratio` tightens the share-cover requirement per short call.
+    Default 1.0. `RegimeGate` passes 1.25 on TIER_2 throttle.
     """
     reservations = reservations or WorkingReservations()
 
@@ -357,7 +381,8 @@ def evaluate(
         # that still needs share cover.
         existing_short = _count_existing_short_calls(portfolio.positions, req.ticker)
         shares = _count_long_shares(portfolio.positions, req.ticker)
-        share_cover_units = max(shares - reservations.stock_sell_qty, 0) // req.multiplier
+        threshold = _share_cover_threshold(req.multiplier, cover_ratio)
+        share_cover_units = max(shares - reservations.stock_sell_qty, 0) // threshold
 
         total_short_after = existing_short + reservations.short_call_qty + remaining_after_spread
         if share_cover_units < total_short_after:
