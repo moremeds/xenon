@@ -467,6 +467,7 @@ def _seed_submission(
     ib_order_id: str,
     perm_id: str = "",
     limit_price: str = "5.00",
+    security_type: str = "OPT",
 ) -> str:
     """Insert a real order_submissions row for /orders/modify gate tests."""
     import uuid
@@ -474,6 +475,7 @@ def _seed_submission(
     sid = f"modify-test-{uuid.uuid4().hex[:8]}"
     eng = server_mod.get_sync_engine()
     now = dt.datetime.now(dt.timezone.utc)
+    is_bag = security_type == "BAG"
     with eng.begin() as conn:
         conn.execute(
             sa_text(
@@ -484,8 +486,11 @@ def _seed_submission(
                     state, ib_order_id, perm_id, modify_sequence,
                     submitted_at, updated_at, broker, account_env, broker_account
                 ) VALUES (
-                    :sid, 'local', :sid, :ticker, 'OPT', 'BUY', :qty, '2026-06-19',
-                    200, 'C', 100, :limit_price, 'WORKING', :ib_id, :perm_id, 0,
+                    :sid, 'local', :sid, :ticker, :sec_type, 'BUY', :qty,
+                    CASE WHEN :is_bag THEN NULL ELSE DATE '2026-06-19' END,
+                    CASE WHEN :is_bag THEN NULL ELSE 200 END,
+                    CASE WHEN :is_bag THEN NULL ELSE 'C' END,
+                    100, :limit_price, 'WORKING', :ib_id, :perm_id, 0,
                     :now, :now, 'IB',
                     COALESCE((SELECT account_env FROM xenon.account_snapshots ORDER BY snapshot_at DESC LIMIT 1), 'paper'),
                     COALESCE((SELECT broker_account FROM xenon.account_snapshots ORDER BY snapshot_at DESC LIMIT 1), 'DU0000000')
@@ -499,6 +504,8 @@ def _seed_submission(
                 "ib_id": ib_order_id,
                 "perm_id": perm_id,
                 "limit_price": Decimal(limit_price),
+                "sec_type": security_type,
+                "is_bag": is_bag,
                 "now": now,
             },
         )
@@ -608,6 +615,100 @@ def test_modify_quantity_increase_uses_new_price_for_tier_2_cap(client, monkeypa
         body = resp.json()
         assert body["reason_code"] == "REGIME_RESIZE_REQUIRED"
         assert body["max_loss_usd"] == pytest.approx(4000.0)
+    finally:
+        _delete_submission(sid)
+
+
+def test_modify_bag_quantity_increase_blocks_at_tier_1(client, monkeypatch):
+    """Hotfix C-2: combo qty-increase modify can't reconstruct legs to gate, so any
+    non-NORMAL tier must refuse the modify and force cancel + replace through place."""
+    monkeypatch.setenv("XENON_API_TEST_MODE", "0")
+    _seed_regime_state(vcg_tier="NORMAL", cri_tier="TIER_1")
+    ib_order_id = "9000099"
+    sid = _seed_submission(
+        ticker="QQQ",
+        quantity=1,
+        ib_order_id=ib_order_id,
+        security_type="BAG",
+    )
+    try:
+        resp = client.post(
+            "/orders/modify",
+            json={
+                "orderId": int(ib_order_id),
+                "newPrice": 1.00,
+                "newQuantity": 5,
+                "modifySequence": 1,
+            },
+        )
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body["reason_code"] == "REGIME_BLOCK"
+        assert body["modify_path"] is True
+        assert body["modify_sec_type"] == "BAG"
+        assert body["applied_sequence"] == 0
+    finally:
+        _delete_submission(sid)
+
+
+def test_modify_bag_quantity_increase_passes_at_normal(client, monkeypatch):
+    """At NORMAL tier there's no gate to enforce, so BAG qty modify falls through to subprocess."""
+    monkeypatch.setenv("XENON_API_TEST_MODE", "0")
+    _seed_regime_state(vcg_tier="NORMAL", cri_tier="NORMAL")
+    ib_order_id = "9000098"
+    sid = _seed_submission(
+        ticker="QQQ",
+        quantity=1,
+        ib_order_id=ib_order_id,
+        security_type="BAG",
+    )
+    try:
+
+        async def fake_runner(entry, args, timeout=15):
+            from xenon.api.subprocess import ScriptResult
+
+            return ScriptResult(ok=True, data={"status": "ok"}, error=None)
+
+        monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+        resp = client.post(
+            "/orders/modify",
+            json={
+                "orderId": int(ib_order_id),
+                "newPrice": 1.00,
+                "newQuantity": 5,
+                "modifySequence": 1,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+    finally:
+        _delete_submission(sid)
+
+
+def test_modify_block_response_includes_override_required_hint(client, monkeypatch):
+    """Hotfix C-2 sub-3: modify 409 must surface override_required so the UI can
+    render the same modal as place. Honoring the override on modify is a follow-up
+    (override_supported=False makes the contract explicit until then)."""
+    monkeypatch.setenv("XENON_API_TEST_MODE", "0")
+    monkeypatch.setenv("XENON_REGIME_BANKROLL_USD_OVERRIDE", "10000")
+    _seed_regime_state(vcg_tier="NORMAL", cri_tier="TIER_1")
+    ib_order_id = "9000097"
+    sid = _seed_submission(ticker="QQQ", quantity=1, ib_order_id=ib_order_id)
+    try:
+        resp = client.post(
+            "/orders/modify",
+            json={
+                "orderId": int(ib_order_id),
+                "newPrice": 5.00,
+                "newQuantity": 5,
+                "modifySequence": 1,
+            },
+        )
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body["reason_code"] == "REGIME_BLOCK"
+        assert body["override_required"] is True
+        assert body["override_min_reason_chars"] == 10
+        assert body["override_supported"] is False
     finally:
         _delete_submission(sid)
 
