@@ -358,12 +358,135 @@ def test_combo_call_ratio_spread_allows_with_stock_cover():
     assert v.accept is True
 
 
-def test_combo_closing_sell_allows_without_portfolio_cover():
+def test_combo_closing_sell_balanced_vertical_allows_without_portfolio_cover():
+    """A SELL envelope on a balanced (1 long + 1 short call) combo is safe regardless
+    of portfolio because per-leg ratio analysis nets to zero uncovered shorts."""
     v = preflight.evaluate_combo(
         _combo_request(action="SELL"),
         PortfolioView(positions=[]),
     )
     assert v.accept is True
+
+
+def test_combo_close_covered_by_portfolio_matches_inverse_legs():
+    portfolio = PortfolioView(
+        positions=[
+            {
+                "ticker": "QQQ",
+                "structure_type": "Bull Call Spread",
+                "direction": "COMBO",
+                "contracts": 1,
+                "expiry": "20260619",
+                "legs": [
+                    {"direction": "SHORT", "type": "Call", "contracts": 1, "strike": 200.0},
+                    {"direction": "LONG", "type": "Call", "contracts": 1, "strike": 210.0},
+                ],
+            }
+        ]
+    )
+    closing = preflight.ComboPreflightRequest(
+        ticker="QQQ",
+        action="SELL",
+        quantity=1,
+        multiplier=100,
+        legs=[
+            preflight.ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("200"), right="C", action="BUY", ratio=1),
+            preflight.ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("210"), right="C", action="SELL", ratio=1),
+        ],
+    )
+    assert preflight.combo_close_covered_by_portfolio(closing, portfolio) is True
+
+
+def test_combo_close_covered_by_portfolio_rejects_when_no_inverse():
+    closing = preflight.ComboPreflightRequest(
+        ticker="QQQ",
+        action="SELL",
+        quantity=1,
+        multiplier=100,
+        legs=[
+            preflight.ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("200"), right="C", action="BUY", ratio=1),
+            preflight.ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("210"), right="C", action="SELL", ratio=1),
+        ],
+    )
+    assert preflight.combo_close_covered_by_portfolio(closing, PortfolioView(positions=[])) is False
+
+
+def test_combo_close_covered_by_portfolio_rejects_partial_cover():
+    """Hotfix C-1: matching only one of two legs is not enough — bypass requires every leg covered."""
+    portfolio = PortfolioView(
+        positions=[
+            {
+                "ticker": "QQQ",
+                "structure_type": "Short Call",
+                "direction": "SHORT",
+                "contracts": 1,
+                "expiry": "20260619",
+                "legs": [{"direction": "SHORT", "type": "Call", "contracts": 1, "strike": 200.0}],
+            }
+        ]
+    )
+    closing = preflight.ComboPreflightRequest(
+        ticker="QQQ",
+        action="SELL",
+        quantity=1,
+        multiplier=100,
+        legs=[
+            preflight.ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("200"), right="C", action="BUY", ratio=1),
+            preflight.ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("210"), right="C", action="SELL", ratio=1),
+        ],
+    )
+    assert preflight.combo_close_covered_by_portfolio(closing, portfolio) is False
+
+
+def test_combo_close_covered_by_portfolio_aggregates_supply_across_positions():
+    """Two separate positions covering one leg each combine to satisfy a 2-leg close."""
+    portfolio = PortfolioView(
+        positions=[
+            {
+                "ticker": "QQQ",
+                "structure_type": "Short Call",
+                "direction": "SHORT",
+                "contracts": 1,
+                "expiry": "20260619",
+                "legs": [{"direction": "SHORT", "type": "Call", "contracts": 1, "strike": 200.0}],
+            },
+            {
+                "ticker": "QQQ",
+                "structure_type": "Long Call",
+                "direction": "LONG",
+                "contracts": 1,
+                "expiry": "20260619",
+                "legs": [{"direction": "LONG", "type": "Call", "contracts": 1, "strike": 210.0}],
+            },
+        ]
+    )
+    closing = preflight.ComboPreflightRequest(
+        ticker="QQQ",
+        action="SELL",
+        quantity=1,
+        multiplier=100,
+        legs=[
+            preflight.ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("200"), right="C", action="BUY", ratio=1),
+            preflight.ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("210"), right="C", action="SELL", ratio=1),
+        ],
+    )
+    assert preflight.combo_close_covered_by_portfolio(closing, portfolio) is True
+
+
+def test_combo_close_covered_by_portfolio_rejects_calendar_combo():
+    """Hotfix scope: calendar spreads (legs at different expiries) fall through to the gate."""
+    portfolio = PortfolioView(positions=[])
+    closing = preflight.ComboPreflightRequest(
+        ticker="QQQ",
+        action="SELL",
+        quantity=1,
+        multiplier=100,
+        legs=[
+            preflight.ComboPreflightLeg(expiry="2026-06-19", strike=Decimal("200"), right="C", action="BUY", ratio=1),
+            preflight.ComboPreflightLeg(expiry="2026-09-18", strike=Decimal("200"), right="C", action="SELL", ratio=1),
+        ],
+    )
+    assert preflight.combo_close_covered_by_portfolio(closing, portfolio) is False
 
 
 def test_etf_sell_two_calls_one_long_cover_no_shares_blocks_tail():

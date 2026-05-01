@@ -272,20 +272,22 @@ def _combo_max_width(order: ComboPreflightRequest) -> Optional[float]:
 
 # ---- Bankroll resolver --------------------------------------------------
 
-# Test override env var per spec §4.5.1. When AccountScope grows a
-# net_liq_usd attribute, that's the preferred source — for now the order
-# route falls back to a documented default.
+# Test override env var per spec §4.5.1.
+# Production callers MUST pass `bankroll_usd` resolved from
+# `account_snapshots.net_liquidation` for the active scope; the default is
+# a conservative fail-safe used only when the override is unset and the
+# caller could not source NAV (cold boot, before first sync). $10k makes
+# TIER_2 caps tight rather than loose so unknown-bankroll fails closed.
 _BANKROLL_OVERRIDE_ENV = "XENON_REGIME_BANKROLL_USD_OVERRIDE"
-_BANKROLL_DEFAULT_USD = 100_000.0
+_BANKROLL_FAILSAFE_USD = 10_000.0
 
 
 def resolve_bankroll_usd() -> float:
-    """Bankroll source for the gate's throttle-cap math.
+    """Conservative bankroll fallback for callers that did not pass NAV.
 
     Precedence:
     1. XENON_REGIME_BANKROLL_USD_OVERRIDE env var (test/dev override)
-    2. Default $100,000 (TODO: replace with AccountScope.net_liq_usd or
-       latest account_snapshots NAV when that integration lands)
+    2. $10,000 fail-safe (caps fire at small notional; intentionally tight)
     """
     raw = os.environ.get(_BANKROLL_OVERRIDE_ENV)
     if raw is not None and raw.strip():
@@ -293,7 +295,7 @@ def resolve_bankroll_usd() -> float:
             return float(raw)
         except ValueError:
             pass
-    return _BANKROLL_DEFAULT_USD
+    return _BANKROLL_FAILSAFE_USD
 
 
 # ---- Order-route integration --------------------------------------------

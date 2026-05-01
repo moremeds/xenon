@@ -101,6 +101,32 @@ async def get_latest_snapshot(
     return dict(row._mapping) if row else None
 
 
+async def get_latest_net_liquidation_for_scope(
+    conn: AsyncConnection,
+    *,
+    broker: str,
+    account_env: str,
+    broker_account: str,
+) -> Decimal | None:
+    """Most recent non-null `net_liquidation` for this scope, or None.
+
+    Used as the bankroll input to RegimeGate's throttle-cap math so caps
+    are sized against actual account NAV instead of a hardcoded default.
+    """
+    stmt = (
+        select(account_snapshots.c.net_liquidation)
+        .where(account_snapshots.c.broker == broker)
+        .where(account_snapshots.c.account_env == account_env)
+        .where(account_snapshots.c.broker_account == broker_account)
+        .where(account_snapshots.c.net_liquidation.is_not(None))
+        .order_by(account_snapshots.c.snapshot_at.desc())
+        .limit(1)
+    )
+    result = await conn.execute(stmt)
+    row = result.first()
+    return row[0] if row and row[0] is not None else None
+
+
 async def get_latest_portfolio_payload(
     conn: AsyncConnection,
     *,
