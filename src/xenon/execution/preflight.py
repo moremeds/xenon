@@ -139,11 +139,63 @@ class Verdict(BaseModel):
 
 
 def combo_uncovered_short_call_ratio(req: ComboPreflightRequest) -> int:
-    if req.action == "SELL":
-        return 0
+    """Per-contract count of uncovered short calls implied by this combo.
+
+    Counts leg-level actions only — the BAG envelope (`req.action`) is
+    untrusted because IB's open-vs-close convention can be inverted by a
+    buggy or malicious client. A combo where short calls outnumber long
+    calls leaves naked exposure regardless of whether the user labels the
+    envelope BUY or SELL.
+    """
     sell_call_ratio = sum(leg.ratio for leg in req.legs if leg.action == "SELL" and leg.right == "C")
     buy_call_ratio = sum(leg.ratio for leg in req.legs if leg.action == "BUY" and leg.right == "C")
     return max(sell_call_ratio - buy_call_ratio, 0)
+
+
+def combo_close_covered_by_portfolio(
+    req: ComboPreflightRequest,
+    portfolio: PortfolioView,
+) -> bool:
+    """True iff every leg of `req` has an opposite-direction inverse in the
+    portfolio with sufficient contracts.
+
+    Used by the regime gate to decide whether a combo SELL/BUY is genuinely
+    closing existing exposure (and therefore exempt from new-exposure tier
+    blocks). Conservative: aggregates supply across all matching positions
+    but requires the entire combo to be 100% covered. Only same-expiry
+    combos are recognised — calendar spreads fall through to the gate.
+    """
+    if not req.legs:
+        return False
+    leg_expiries = {leg.expiry for leg in req.legs}
+    if len(leg_expiries) != 1:
+        return False
+    wanted_expiry = _normalize_expiry(next(iter(leg_expiries)))
+    if wanted_expiry is None:
+        return False
+
+    needs: dict[tuple[str, Decimal, str], int] = {}
+    for leg in req.legs:
+        if leg.strike is None:
+            return False
+        want_dir = "SHORT" if leg.action == "BUY" else "LONG"
+        want_type = "Call" if leg.right == "C" else "Put"
+        key = (want_type, leg.strike, want_dir)
+        needs[key] = needs.get(key, 0) + leg.ratio * req.quantity
+
+    supply: dict[tuple[str, Decimal, str], int] = {}
+    for pos in portfolio.positions:
+        if pos.ticker.upper() != req.ticker.upper():
+            continue
+        if _normalize_expiry(pos.expiry) != wanted_expiry:
+            continue
+        for leg in pos.legs:
+            if leg.type == "Stock":
+                continue
+            key = (leg.type, leg.strike, leg.direction)
+            supply[key] = supply.get(key, 0) + int(leg.contracts)
+
+    return all(supply.get(key, 0) >= want for key, want in needs.items())
 
 
 def _normalize_expiry(expiry: str | None) -> str | None:
@@ -239,9 +291,6 @@ def evaluate_combo(
             reason_code=ReasonCode.UNIVERSE_UNKNOWN,
             reason_detail=f"{req.ticker} not in V1 universe",
         )
-
-    if req.action == "SELL":
-        return Verdict(accept=True)
 
     uncovered_ratio = combo_uncovered_short_call_ratio(req)
     if uncovered_ratio <= 0:

@@ -55,6 +55,7 @@ from xenon.api.services.regime_gate import (
     GateDecision,
     OrderGateOutcome,
     evaluate_order_gate,
+    resolve_bankroll_usd,
 )
 from xenon.api.services.regime_state import get_regime_state_for_scope
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
@@ -2147,28 +2148,39 @@ def _portfolio_has_matching_long_option(
 async def _is_regime_gate_risk_reducing_exit(body: dict) -> bool:
     """True when /orders/place is reducing an existing exposure.
 
-    RegimeGate blocks new exposure. Closing BAG envelopes and covered stock
-    sells are allowed to reach Gate 4; single-leg option SELLs bypass only
-    when the current portfolio snapshot proves they match an existing long
-    option. This avoids turning new cash-secured short puts into a panic-tier
-    bypass.
+    RegimeGate blocks new exposure. To bypass it, a SELL must be backed by
+    portfolio evidence — an existing long option for single-leg SELL, or
+    a per-leg inverse cover for combo SELL. Stock SELL bypasses (Gate 4
+    naked-short audit catches the rest).
+
+    Fail-closed on a stale or missing portfolio snapshot: a 30-min-old
+    snapshot during a fast-moving panic can falsely "prove" a long still
+    exists, so we refuse the bypass instead and let RegimeGate block.
     """
     action = str(body.get("action", "")).upper()
     if action != "SELL":
         return False
-    if body.get("type") == "combo":
-        return True
     if body.get("type") == "stock":
         return True
-    if body.get("type") != "option":
+
+    portfolio, snapshot_at = _unpack_portfolio_load(await _load_portfolio_view())
+    if portfolio is None:
+        return False
+    if _portfolio_snapshot_stale_response(snapshot_at) is not None:
         return False
 
+    if body.get("type") == "combo":
+        try:
+            combo_req = _body_to_combo_preflight_request(body)
+        except (ValueError, ValidationError):
+            return False
+        return preflight.combo_close_covered_by_portfolio(combo_req, portfolio)
+
+    if body.get("type") != "option":
+        return False
     try:
         req = _body_to_preflight_request(body)
     except (ValueError, ValidationError):
-        return False
-    portfolio, _snapshot_at = _unpack_portfolio_load(await _load_portfolio_view())
-    if portfolio is None:
         return False
     return _portfolio_has_matching_long_option(
         portfolio,
@@ -2589,6 +2601,40 @@ def _resolve_scope_obj():
         return AccountScope(broker="IB", account_env="legacy_unknown", broker_account="legacy_unknown")
 
 
+async def _resolve_regime_bankroll_usd(scope) -> float:
+    """Bankroll input for RegimeGate, sourced from real account NAV.
+
+    Precedence: env override (test/dev) → latest `account_snapshots.net_liquidation`
+    for this scope → small conservative fail-safe. The fail-safe is intentionally
+    tight — at TIER_2, a small bankroll yields a small max-loss cap, so an
+    unknown-NAV order is more likely to require the user to resize down rather
+    than slip through with a $100k assumption.
+    """
+    raw = os.environ.get("XENON_REGIME_BANKROLL_USD_OVERRIDE")
+    if raw is not None and raw.strip():
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    try:
+        from xenon.db.engine import get_engine
+        from xenon.db.queries.portfolio import get_latest_net_liquidation_for_scope
+
+        engine = get_engine()
+        async with engine.connect() as conn:
+            net_liq = await get_latest_net_liquidation_for_scope(
+                conn,
+                broker=scope.broker,
+                account_env=scope.account_env,
+                broker_account=scope.broker_account,
+            )
+        if net_liq is not None and net_liq > 0:
+            return float(net_liq)
+    except Exception as exc:
+        logger.warning("[regime] Could not load net_liquidation for %s: %s", scope.as_dict(), exc)
+    return resolve_bankroll_usd()
+
+
 async def _run_regime_gate(body: dict):
     """Evaluate the regime gate against an order body.
 
@@ -2628,8 +2674,10 @@ async def _run_regime_gate(body: dict):
             },
         )
 
-    state = await get_regime_state_for_scope(_resolve_scope_obj())
-    outcome = evaluate_order_gate(gate_req, state, net_price=net_price)
+    scope = _resolve_scope_obj()
+    state = await get_regime_state_for_scope(scope)
+    bankroll_usd = await _resolve_regime_bankroll_usd(scope)
+    outcome = evaluate_order_gate(gate_req, state, bankroll_usd=bankroll_usd, net_price=net_price)
 
     if outcome.decision is GateDecision.BLOCK:
         override_requested = bool(body.get("override"))
@@ -3116,9 +3164,7 @@ async def _run_modify_regime_gate(
 
     try:
         limit_price = (
-            Decimal(str(new_price))
-            if new_price is not None
-            else submission.get("limit_price") or Decimal("0")
+            Decimal(str(new_price)) if new_price is not None else submission.get("limit_price") or Decimal("0")
         )
         delta_req = PreflightRequest(
             ticker=submission["ticker"],
@@ -3140,8 +3186,10 @@ async def _run_modify_regime_gate(
             },
         )
 
-    state = await get_regime_state_for_scope(_resolve_scope_obj())
-    outcome = evaluate_order_gate(delta_req, state)
+    scope = _resolve_scope_obj()
+    state = await get_regime_state_for_scope(scope)
+    bankroll_usd = await _resolve_regime_bankroll_usd(scope)
+    outcome = evaluate_order_gate(delta_req, state, bankroll_usd=bankroll_usd)
 
     if outcome.decision is GateDecision.BLOCK:
         return None, JSONResponse(

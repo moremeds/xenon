@@ -22,8 +22,8 @@ from sqlalchemy import text as sa_text
 
 from xenon.api import server as server_mod
 from xenon.api.services import regime_state as regime_state_mod
-from xenon.execution.preflight import PortfolioLeg, PortfolioPosition, PortfolioView
 from xenon.execution import quote_tokens
+from xenon.execution.preflight import PortfolioLeg, PortfolioPosition, PortfolioView
 
 _QUOTE_SECRET = "e" * 64
 
@@ -286,8 +286,31 @@ def test_tier_1_sell_to_close_matching_long_option_skips_regime_gate(client, mon
         _delete_test_overrides([sid])
 
 
-def test_tier_1_combo_sell_to_close_skips_regime_gate(client):
+def test_tier_1_combo_sell_with_matching_inverse_legs_skips_regime_gate(client, monkeypatch):
+    """Combo SELL bypasses the gate only when every per-leg inverse is in the portfolio."""
     _seed_regime_state(vcg_tier="NORMAL", cri_tier="TIER_1")
+
+    async def snapshot():
+        return (
+            PortfolioView(
+                positions=[
+                    PortfolioPosition(
+                        ticker="QQQ",
+                        structure_type="Bull Call Spread",
+                        direction="COMBO",
+                        contracts=1,
+                        expiry="2026-06-19",
+                        legs=[
+                            PortfolioLeg(direction="SHORT", type="Call", contracts=1, strike=Decimal("200")),
+                            PortfolioLeg(direction="LONG", type="Call", contracts=1, strike=Decimal("210")),
+                        ],
+                    )
+                ]
+            ),
+            dt.datetime.now(dt.timezone.utc),
+        )
+
+    monkeypatch.setattr(server_mod, "_load_portfolio_view", snapshot)
     body = _combo_order_body(
         symbol="QQQ",
         action="SELL",
@@ -303,6 +326,60 @@ def test_tier_1_combo_sell_to_close_skips_regime_gate(client):
     sid = resp.json().get("submission_id")
     if sid:
         _delete_test_overrides([sid])
+
+
+def test_tier_1_combo_sell_without_matching_portfolio_blocks(client, monkeypatch):
+    """Hotfix C-1 lineage proof: a combo SELL with an empty portfolio is treated as new exposure."""
+    _seed_regime_state(vcg_tier="NORMAL", cri_tier="TIER_1")
+
+    async def empty_snapshot():
+        return (PortfolioView(positions=[]), dt.datetime.now(dt.timezone.utc))
+
+    monkeypatch.setattr(server_mod, "_load_portfolio_view", empty_snapshot)
+    body = _combo_order_body(
+        symbol="QQQ",
+        action="SELL",
+        limit="2.00",
+        suffix="bypass-attempt",
+        legs=[
+            {"expiry": "2026-06-19", "strike": "200", "right": "C", "action": "BUY", "ratio": 1},
+            {"expiry": "2026-06-19", "strike": "210", "right": "C", "action": "SELL", "ratio": 1},
+        ],
+    )
+    resp = client.post("/orders/place", json=body)
+    assert resp.status_code == 409
+    assert resp.json()["reason_code"] == "REGIME_BLOCK"
+
+
+def test_tier_1_sell_with_stale_portfolio_snapshot_blocks(client, monkeypatch):
+    """Hotfix C-3 staleness: an old snapshot cannot prove the bypass."""
+    _seed_regime_state(vcg_tier="NORMAL", cri_tier="TIER_1")
+
+    async def stale_snapshot():
+        long_ago = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=12)
+        return (
+            PortfolioView(
+                positions=[
+                    PortfolioPosition(
+                        ticker="QQQ",
+                        structure_type="Long Call",
+                        direction="LONG",
+                        contracts=1,
+                        expiry="2026-06-19",
+                        legs=[
+                            PortfolioLeg(direction="LONG", type="Call", contracts=1, strike=Decimal("200")),
+                        ],
+                    )
+                ]
+            ),
+            long_ago,
+        )
+
+    monkeypatch.setattr(server_mod, "_load_portfolio_view", stale_snapshot)
+    body = _opt_order_body(symbol="QQQ", action="SELL", right="C", limit="5.00")
+    resp = client.post("/orders/place", json=body)
+    assert resp.status_code == 409
+    assert resp.json()["reason_code"] == "REGIME_BLOCK"
 
 
 def test_tier_1_buy_envelope_credit_put_spread_is_not_hedge(client):
