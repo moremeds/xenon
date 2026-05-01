@@ -3153,14 +3153,45 @@ async def _run_modify_regime_gate(
 
     delta_qty = new_qty - old_qty
     sec_type = submission.get("security_type")
+
+    scope = _resolve_scope_obj()
+    state = await get_regime_state_for_scope(scope)
+    bankroll_usd = await _resolve_regime_bankroll_usd(scope)
+
     if sec_type == "BAG":
-        # Combo modifies have no per-leg payload to reconstruct here.
-        # Logged as a known gap; combo size-up paths typically replace.
+        # order_submissions does not persist combo legs, so we can't build
+        # a synthetic delta order to evaluate. At NORMAL there is no gate
+        # anyway. At any restrictive tier, the conservative behavior is to
+        # refuse the modify and require the user to cancel + replace through
+        # the gated /orders/place path (which reconstructs legs from the
+        # request body). Without this, a BAG qty-increase silently bypasses
+        # the gate during PANIC.
+        if state.binding_tier == "NORMAL":
+            return None, None
         logger.info(
-            "regime_gate(modify): BAG quantity-increase not gated (submission=%s)",
+            "regime_gate(modify): BAG quantity-increase blocked at tier=%s (submission=%s)",
+            state.binding_tier,
             submission.get("submission_id"),
         )
-        return None, None
+        return None, JSONResponse(
+            status_code=409,
+            content={
+                "detail": (
+                    f"{state.binding_tier} — combo quantity-increase modifies are "
+                    "not supported under regime gating; cancel and replace through /orders/place"
+                ),
+                "reason_code": "REGIME_BLOCK",
+                "decision": "block",
+                "binding_tier": state.binding_tier,
+                "binding_side": "vcg" if state.vcg_tier == state.binding_tier else "cri",
+                "vcg_tier": state.vcg_tier,
+                "cri_tier": state.cri_tier,
+                "delta_quantity": delta_qty,
+                "modify_path": True,
+                "modify_sec_type": "BAG",
+                "applied_sequence": int(submission.get("modify_sequence") or 0),
+            },
+        )
 
     try:
         limit_price = (
@@ -3186,11 +3217,9 @@ async def _run_modify_regime_gate(
             },
         )
 
-    scope = _resolve_scope_obj()
-    state = await get_regime_state_for_scope(scope)
-    bankroll_usd = await _resolve_regime_bankroll_usd(scope)
     outcome = evaluate_order_gate(delta_req, state, bankroll_usd=bankroll_usd)
 
+    applied_sequence = int(submission.get("modify_sequence") or 0)
     if outcome.decision is GateDecision.BLOCK:
         return None, JSONResponse(
             status_code=409,
@@ -3204,6 +3233,10 @@ async def _run_modify_regime_gate(
                 "cri_tier": state.cri_tier,
                 "delta_quantity": delta_qty,
                 "modify_path": True,
+                "applied_sequence": applied_sequence,
+                "override_required": True,
+                "override_min_reason_chars": _REGIME_OVERRIDE_MIN_REASON_CHARS,
+                "override_supported": False,
             },
         )
     if outcome.exceeds_throttle_cap:
@@ -3223,6 +3256,7 @@ async def _run_modify_regime_gate(
                 "max_loss_cap_usd": outcome.max_loss_cap_usd,
                 "delta_quantity": delta_qty,
                 "modify_path": True,
+                "applied_sequence": applied_sequence,
             },
         )
     return outcome, None
