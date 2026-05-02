@@ -9,7 +9,7 @@ Wires `combo_quotes.compute_combo_quote` to fresh IB leg ticks. Applies spec
 - fresh quote timestamps (within a TTL; default 30s)
 
 We deliberately do NOT use `reqTickersAsync` here — per
-`feedback_ib_insync_in_fastapi`, it hangs on index options. We use the
+`feedback_ib_async_in_fastapi`, it hangs on index options. We use the
 ``get_quote`` / streaming ``reqMktData`` path wrapped by ``IBClient``, which
 keeps the stream alive so subsequent ticks refresh in place.
 

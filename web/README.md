@@ -5,7 +5,7 @@ Next.js dashboard with real-time IB pricing and Claude-powered conversational in
 ## Prerequisites
 
 - Node.js 20+
-- Python 3.13 (Python 3.14 has ib_insync/eventkit incompatibility)
+- Python 3.13 (Python 3.14 has ib_async/eventkit incompatibility)
 - Interactive Brokers TWS or IB Gateway running
 - API keys in `web/.env`
 

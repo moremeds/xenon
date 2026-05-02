@@ -95,8 +95,8 @@ describe("computeRealizedPnlFromFills — date filter", () => {
     expect(computeRealizedPnlFromFills(fills)).toBeCloseTo(200);
   });
 
-  test("ISO strings without timezone offset are treated as UTC (ib_insync default)", () => {
-    // ib_insync datetime.isoformat() without tz = UTC naive. Treat as UTC.
+  test("ISO strings without timezone offset are treated as UTC (ib_async default)", () => {
+    // ib_async datetime.isoformat() without tz = UTC naive. Treat as UTC.
     // 2026-03-09T10:00:00 UTC = 2026-03-09T05:00:00 ET → today in ET
     // 2026-03-08T10:00:00 UTC = 2026-03-08T05:00:00 ET → yesterday in ET
     const fills = [
