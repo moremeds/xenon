@@ -12,7 +12,7 @@
 -- Design: docs/plans/2026-05-03-multi-service-postgres-design.md
 --
 -- Run as superuser (postgres):
---   psql -h 192.168.50.47 -U postgres xenon_db -v apex_password='<set>' \
+--   psql -h 192.168.50.47 -U postgres core -v apex_password='<set>' \
 --        -f scripts/migrations/2026_05_03_apex_schema_setup.sql
 
 \set ON_ERROR_STOP on

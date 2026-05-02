@@ -13,14 +13,14 @@ Two parallel infrastructure moves are happening together:
 
 2. **Postgres** is moving from local Homebrew on this Mac → the same remote server (`192.168.50.47:5432`). Once moved, **`apex`, our signal service, will share that Postgres**. apex and Xenon need clean isolation but also need to communicate — signal-arrival (apex→Xenon) and outcome-feedback (Xenon→apex).
 
-The status quo (single-tenant `xenon_db` on local Mac) doesn't extend cleanly to the shared-instance world. This doc captures the design that does.
+The status quo (single-tenant `xenon_db` on local Mac) doesn't extend cleanly to the shared-instance world. The new database — named `core` to reflect its multi-service role — is the design captured here.
 
 ## Decision
 
-**Single Postgres database `xenon_db`, three schemas, two service roles, one shared event channel.**
+**Single Postgres database `core`, three schemas, two service roles, one shared event channel.**
 
 ```
-xenon_db (Postgres on 192.168.50.47:5432)
+core (Postgres on 192.168.50.47:5432)
 ├── schema: xenon          owner: xenon_app    Xenon-only writes
 ├── schema: apex           owner: apex_app     apex-only writes
 ├── schema: events         shared writeable     LISTEN/NOTIFY outbox
@@ -29,7 +29,7 @@ xenon_db (Postgres on 192.168.50.47:5432)
 
 | Why this shape               | Alternative                                               | Why we rejected it                                                                                                                                                        |
 | ---------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Schemas (not separate DBs)   | Two databases (`xenon_db` + `apex_db`)                    | Cross-service joins require dblink/FDW or app-level join. We want `apex.signals JOIN xenon.order_submissions` to be a plain SQL join.                                     |
+| Schemas (not separate DBs)   | Two databases (`core` + `apex_db`)                        | Cross-service joins require dblink/FDW or app-level join. We want `apex.signals JOIN xenon.order_submissions` to be a plain SQL join.                                     |
 | Schemas (not table prefix)   | All tables in one schema with `xenon_*` / `apex_*` prefix | Permission model conflates services — apex_app would have grants on tables it shouldn't see. Prefix-based naming also pollutes autocomplete and breaks Alembic isolation. |
 | Schema-per-service ownership | Single `db_owner` role, ACLs per table                    | Per-table ACLs drift; per-schema ownership is one-line lockdown.                                                                                                          |
 | Single DB                    | Two Postgres instances                                    | Operational overhead, duplicate connection pools, no cross-service consistency.                                                                                           |
@@ -189,31 +189,31 @@ sudo systemctl reload postgresql      # or: brew services restart postgresql@17 
 
 # 1e. Create xenon_app role + databases
 sudo -u postgres createuser xenon_app --pwprompt        # password = xenon_dev (current .env)
-sudo -u postgres createdb -O xenon_app xenon_db
-sudo -u postgres createdb -O xenon_app xenon_test
+sudo -u postgres createdb -O xenon_app core
+sudo -u postgres createdb -O xenon_app core_test
 ```
 
 **Verification (from this Mac):**
 
 ```bash
-psql -h 192.168.50.47 -U xenon_app xenon_db -c "SELECT 1"   # expect "1"
+psql -h 192.168.50.47 -U xenon_app core -c "SELECT 1"   # expect "1"
 ```
 
 ### Phase 2 — Data migration (driver: this Mac)
 
 ```bash
 # 2a. Dump local
-pg_dump -h localhost -U xenon_app -Fc -f /tmp/xenon_db.dump xenon_db
+pg_dump -h localhost -U xenon_app -Fc -f /tmp/core.dump core
 
 # 2b. Restore to remote
-pg_restore -h 192.168.50.47 -U xenon_app -d xenon_db --no-owner --no-acl /tmp/xenon_db.dump
+pg_restore -h 192.168.50.47 -U xenon_app -d core --no-owner --no-acl /tmp/core.dump
 
 # 2c. Verify row counts match
 for tbl in order_submissions regime_overrides order_fills order_events account_snapshots trades nav_history; do
   echo -n "$tbl: local="
-  psql -h localhost      -U xenon_app xenon_db -tA -c "SELECT count(*) FROM xenon.$tbl"
+  psql -h localhost      -U xenon_app core -tA -c "SELECT count(*) FROM xenon.$tbl"
   echo -n " remote="
-  psql -h 192.168.50.47  -U xenon_app xenon_db -tA -c "SELECT count(*) FROM xenon.$tbl"
+  psql -h 192.168.50.47  -U xenon_app core -tA -c "SELECT count(*) FROM xenon.$tbl"
 done
 ```
 
@@ -232,7 +232,7 @@ Expected baseline (snapshot taken 2026-05-03):
 Run `scripts/migrations/2026_05_03_apex_schema_setup.sql` against the remote (full SQL above under "Roles & grants").
 
 ```bash
-psql -h 192.168.50.47 -U postgres xenon_db -f scripts/migrations/2026_05_03_apex_schema_setup.sql
+psql -h 192.168.50.47 -U postgres core -f scripts/migrations/2026_05_03_apex_schema_setup.sql
 ```
 
 apex's own table creation (`apex.signals`, etc.) is owned by apex's repo, run from apex's Alembic when ready.
@@ -244,8 +244,8 @@ apex's own table creation (`apex.signals`, etc.) is owned by apex's repo, run fr
 # (kill running scripts/infra/dev.sh)
 
 # 3b. Update .env
-DATABASE_URL=postgresql+asyncpg://xenon_app:xenon_dev@192.168.50.47:5432/xenon_db
-DATABASE_URL_TEST=postgresql+asyncpg://xenon_app:xenon_dev@192.168.50.47:5432/xenon_test
+DATABASE_URL=postgresql+asyncpg://xenon_app:xenon_dev@192.168.50.47:5432/core
+DATABASE_URL_TEST=postgresql+asyncpg://xenon_app:xenon_dev@192.168.50.47:5432/core_test
 
 # 3c. Apply migrations against remote (no-op if schema matches)
 uv run alembic upgrade head
@@ -304,7 +304,7 @@ NOTIFY is missed; durable signal stays in `apex.signals` with `consumed_at IS NU
 
 ## Acceptance criteria
 
-- [ ] Phase 1 complete: `psql -h 192.168.50.47 -U xenon_app xenon_db -c "SELECT 1"` succeeds from this Mac
+- [ ] Phase 1 complete: `psql -h 192.168.50.47 -U xenon_app core -c "SELECT 1"` succeeds from this Mac
 - [ ] Phase 2 complete: row counts match exactly between local and remote for all xenon.\* tables
 - [ ] Phase 2.5 complete: `apex_app` role exists, `apex` schema exists, grants verified via `\dn+` and `\dp xenon.*`
 - [ ] Phase 3 complete: FastAPI starts cleanly against remote DB, `/health` returns ok, `/portfolio` and `/orders` return non-empty

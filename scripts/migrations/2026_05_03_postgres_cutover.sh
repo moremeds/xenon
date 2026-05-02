@@ -8,9 +8,9 @@
 #
 # PREREQUISITE: Phase 1 must be complete on the remote — pg_hba allows
 # this Mac, listen_addresses=*, postgresql reloaded, xenon_app role +
-# xenon_db / xenon_test databases created. Verify with:
+# core / core_test databases created. Verify with:
 #
-#   psql -h 192.168.50.47 -U xenon_app xenon_db -c "SELECT 1"
+#   psql -h 192.168.50.47 -U xenon_app core -c "SELECT 1"
 #
 # Design doc: docs/plans/2026-05-03-multi-service-postgres-design.md
 #
@@ -25,9 +25,13 @@ REMOTE_HOST="${POSTGRES_REMOTE_HOST:-192.168.50.47}"
 REMOTE_PORT="${POSTGRES_REMOTE_PORT:-5432}"
 LOCAL_HOST="${POSTGRES_LOCAL_HOST:-localhost}"
 LOCAL_PORT="${POSTGRES_LOCAL_PORT:-5432}"
-DB_NAME="${XENON_DB_NAME:-xenon_db}"
+# Local DB is named xenon_db (current); remote is the new shared multi-service DB named core.
+# pg_restore can target a different DB name than the source — the dump's
+# internal CREATE statements name objects by SCHEMA only, not database.
+LOCAL_DB="${LOCAL_DB:-xenon_db}"
+REMOTE_DB="${REMOTE_DB:-core}"
 DB_USER="${XENON_DB_USER:-xenon_app}"
-DUMP_FILE="${DUMP_FILE:-/tmp/xenon_db_$(date +%Y%m%d_%H%M%S).dump}"
+DUMP_FILE="${DUMP_FILE:-/tmp/${LOCAL_DB}_$(date +%Y%m%d_%H%M%S).dump}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 APPLY=0
@@ -48,23 +52,23 @@ warn() { printf '\033[33m[cutover]\033[0m %s\n' "$*" >&2; }
 err()  { printf '\033[31m[cutover]\033[0m %s\n' "$*" >&2; }
 
 # ── Phase 1 verification ──────────────────────────────────────────────
-log "Phase 1 verification: probing remote $REMOTE_HOST:$REMOTE_PORT…"
-if ! PGCONNECT_TIMEOUT=5 psql -h "$REMOTE_HOST" -p "$REMOTE_PORT" -U "$DB_USER" "$DB_NAME" -tA -c "SELECT 1" > /dev/null 2>&1; then
-  err "Cannot reach remote Postgres as $DB_USER on $DB_NAME."
+log "Phase 1 verification: probing remote $REMOTE_HOST:$REMOTE_PORT/$REMOTE_DB…"
+if ! PGCONNECT_TIMEOUT=5 psql -h "$REMOTE_HOST" -p "$REMOTE_PORT" -U "$DB_USER" "$REMOTE_DB" -tA -c "SELECT 1" > /dev/null 2>&1; then
+  err "Cannot reach remote Postgres as $DB_USER on $REMOTE_DB."
   err "Phase 1 must be complete first:"
   err "  - pg_hba.conf: host all all 192.168.50.0/24 scram-sha-256"
   err "  - postgresql.conf: listen_addresses = '*'"
   err "  - sudo systemctl reload postgresql"
   err "  - createuser xenon_app --pwprompt"
-  err "  - createdb -O xenon_app xenon_db"
-  err "  - createdb -O xenon_app xenon_test"
+  err "  - createdb -O xenon_app $REMOTE_DB"
+  err "  - createdb -O xenon_app ${REMOTE_DB}_test"
   exit 1
 fi
-log "  Remote $DB_USER@$REMOTE_HOST:$DB_NAME reachable."
+log "  Remote $DB_USER@$REMOTE_HOST:$REMOTE_DB reachable."
 
 # ── Local data snapshot ───────────────────────────────────────────────
-log "Local Postgres snapshot:"
-psql -h "$LOCAL_HOST" -p "$LOCAL_PORT" -U "$DB_USER" "$DB_NAME" -tA <<'SQL' 2>/dev/null | sed 's/^/  /'
+log "Local Postgres snapshot ($LOCAL_HOST:$LOCAL_PORT/$LOCAL_DB):"
+psql -h "$LOCAL_HOST" -p "$LOCAL_PORT" -U "$DB_USER" "$LOCAL_DB" -tA <<'SQL' 2>/dev/null | sed 's/^/  /'
 SELECT format('  size: %s', pg_size_pretty(pg_database_size(current_database())));
 SELECT format('  order_submissions: %s', count(*)) FROM xenon.order_submissions;
 SELECT format('  regime_overrides:  %s', count(*)) FROM xenon.regime_overrides;
@@ -92,15 +96,15 @@ fi
 # ── Phase 2: dump + restore ───────────────────────────────────────────
 log ""
 log "Phase 2: pg_dump local → pg_restore remote"
-log "  dumping $LOCAL_HOST:$LOCAL_PORT/$DB_NAME → $DUMP_FILE"
-pg_dump -h "$LOCAL_HOST" -p "$LOCAL_PORT" -U "$DB_USER" -Fc -f "$DUMP_FILE" "$DB_NAME"
+log "  dumping $LOCAL_HOST:$LOCAL_PORT/$LOCAL_DB → $DUMP_FILE"
+pg_dump -h "$LOCAL_HOST" -p "$LOCAL_PORT" -U "$DB_USER" -Fc -f "$DUMP_FILE" "$LOCAL_DB"
 DUMP_SIZE=$(du -h "$DUMP_FILE" | cut -f1)
 log "  dump complete: $DUMP_SIZE"
 
-log "  restoring → $REMOTE_HOST:$REMOTE_PORT/$DB_NAME"
+log "  restoring → $REMOTE_HOST:$REMOTE_PORT/$REMOTE_DB"
 pg_restore \
   -h "$REMOTE_HOST" -p "$REMOTE_PORT" -U "$DB_USER" \
-  -d "$DB_NAME" \
+  -d "$REMOTE_DB" \
   --no-owner --no-acl \
   --if-exists --clean \
   --exit-on-error \
@@ -113,8 +117,8 @@ log "Verifying row counts match…"
 TABLES=(order_submissions regime_overrides order_fills order_events account_snapshots trades nav_history)
 ALL_MATCH=1
 for tbl in "${TABLES[@]}"; do
-  LOCAL=$(psql -h "$LOCAL_HOST"  -p "$LOCAL_PORT"  -U "$DB_USER" "$DB_NAME" -tA -c "SELECT count(*) FROM xenon.$tbl" 2>/dev/null)
-  REMOTE=$(psql -h "$REMOTE_HOST" -p "$REMOTE_PORT" -U "$DB_USER" "$DB_NAME" -tA -c "SELECT count(*) FROM xenon.$tbl" 2>/dev/null)
+  LOCAL=$(psql -h "$LOCAL_HOST"  -p "$LOCAL_PORT"  -U "$DB_USER" "$LOCAL_DB"  -tA -c "SELECT count(*) FROM xenon.$tbl" 2>/dev/null)
+  REMOTE=$(psql -h "$REMOTE_HOST" -p "$REMOTE_PORT" -U "$DB_USER" "$REMOTE_DB" -tA -c "SELECT count(*) FROM xenon.$tbl" 2>/dev/null)
   if [[ "$LOCAL" == "$REMOTE" ]]; then
     log "  $tbl: $LOCAL (match)"
   else
@@ -131,7 +135,7 @@ log "All row counts match."
 # ── Phase 2.5: apex bootstrap ─────────────────────────────────────────
 if [[ "$SKIP_APEX" == "1" ]]; then
   warn "Skipping Phase 2.5 (--skip-apex). Run it later with:"
-  warn "  psql -h $REMOTE_HOST -U postgres $DB_NAME \\"
+  warn "  psql -h $REMOTE_HOST -U postgres $REMOTE_DB \\"
   warn "       -v apex_password='<set>' \\"
   warn "       -f $REPO_ROOT/scripts/migrations/2026_05_03_apex_schema_setup.sql"
 else
@@ -145,7 +149,7 @@ else
     exit 1
   fi
   PGPASSWORD="${POSTGRES_SUPERUSER_PASSWORD:-}" psql \
-    -h "$REMOTE_HOST" -p "$REMOTE_PORT" -U postgres "$DB_NAME" \
+    -h "$REMOTE_HOST" -p "$REMOTE_PORT" -U postgres "$REMOTE_DB" \
     -v "apex_password=$APEX_PASSWORD" \
     -f "$REPO_ROOT/scripts/migrations/2026_05_03_apex_schema_setup.sql"
   log "Phase 2.5 complete."
@@ -157,8 +161,8 @@ log "Phases 2 + 2.5 complete. Phase 3 (cutover) is manual — your call when:"
 log ""
 log "  1. Stop the dev stack (Ctrl-C scripts/infra/dev.sh)"
 log "  2. Update .env:"
-log "       DATABASE_URL=postgresql+asyncpg://$DB_USER:xenon_dev@$REMOTE_HOST:$REMOTE_PORT/$DB_NAME"
-log "       DATABASE_URL_TEST=postgresql+asyncpg://$DB_USER:xenon_dev@$REMOTE_HOST:$REMOTE_PORT/xenon_test"
+log "       DATABASE_URL=postgresql+asyncpg://$DB_USER:xenon_dev@$REMOTE_HOST:$REMOTE_PORT/$REMOTE_DB"
+log "       DATABASE_URL_TEST=postgresql+asyncpg://$DB_USER:xenon_dev@$REMOTE_HOST:$REMOTE_PORT/${REMOTE_DB}_test"
 log "  3. uv run alembic upgrade head    # no-op if schemas match"
 log "  4. scripts/infra/dev.sh paper     # smoke test"
 log "  5. curl http://localhost:8321/health | jq"
