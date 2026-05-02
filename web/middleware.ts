@@ -10,11 +10,8 @@ const isPublicRoute = createRouteMatcher([
 ]);
 
 // Auth can be bypassed for local dev / E2E by setting XENON_DISABLE_AUTH=1.
-// PLAYWRIGHT_DISABLE_AUTH is the legacy name (still honored).
 export default clerkMiddleware(async (auth, request) => {
-  const authBypassEnabled =
-    process.env.XENON_DISABLE_AUTH === "1" ||
-    process.env.PLAYWRIGHT_DISABLE_AUTH === "1";
+  const authBypassEnabled = process.env.XENON_DISABLE_AUTH === "1";
   if (!authBypassEnabled && !isPublicRoute(request)) {
     await auth.protect();
   }
