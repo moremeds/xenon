@@ -34,7 +34,7 @@ resolve_python() {
         command -v "$candidate" >/dev/null 2>&1 || continue
         "$candidate" - <<'PY' >/dev/null 2>&1
 import importlib.util
-required = ("ib_insync",)
+required = ("ib_async",)
 raise SystemExit(0 if all(importlib.util.find_spec(name) for name in required) else 1)
 PY
         if [ $? -eq 0 ]; then
@@ -47,7 +47,7 @@ PY
 
 PYTHON_BIN=$(resolve_python)
 if [ -z "$PYTHON_BIN" ]; then
-    echo "$(date): No Python interpreter with ib_insync available for data refresh"
+    echo "$(date): No Python interpreter with ib_async available for data refresh"
     exit 1
 fi
 

@@ -402,7 +402,7 @@ def _index_execution_records(execs: list) -> dict[str, list[dict]]:
 
 def _enrich_records_via_ib(by_perm: dict[str, list[dict]], ib: Any) -> None:
     """Fill in strike/right/expiry on leg records when IB's Fill.contract was
-    incomplete. ib_insync sometimes returns leg-level fills with a contract
+    incomplete. ib_async sometimes returns leg-level fills with a contract
     that lacks strike/right (only conId is reliable), which leaves the
     blotter showing 'Unknown' on closing combos. We round-trip the conIds
     through ``qualify_contracts`` to recover the missing fields.
@@ -430,8 +430,8 @@ def _enrich_records_via_ib(by_perm: dict[str, list[dict]], ib: Any) -> None:
         return
 
     try:
-        from ib_insync import Contract as _IBContract
-    except Exception:  # pragma: no cover — ib_insync always present in prod path
+        from ib_async import Contract as _IBContract
+    except Exception:  # pragma: no cover — ib_async always present in prod path
         return
 
     for con_id, records in needs_qualify.items():
@@ -495,7 +495,7 @@ def _build_positions_snapshot(
     """Normalize ``ib.positions()`` output to the snapshot dict shape the
     reconcile helper consumes.
 
-    ``IBClient.get_positions()`` returns ib_insync ``Position`` objects in a
+    ``IBClient.get_positions()`` returns ib_async ``Position`` objects in a
     list; older call sites pass a preformed dict. We accept either form.
 
     v1 has no baseline to diff against, so every row's (ticker, con_id) is

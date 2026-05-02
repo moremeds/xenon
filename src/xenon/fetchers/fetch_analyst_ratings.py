@@ -136,7 +136,7 @@ def fetch_from_ib(client: IBClient, ticker: str) -> Optional[dict]:
     "Fundamentals data is not allowed" - subscription not active.
     """
     try:
-        from ib_insync import Stock
+        from ib_async import Stock
 
         contract = Stock(ticker, "SMART", "USD")
         client.qualify_contracts(contract)

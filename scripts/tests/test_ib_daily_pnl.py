@@ -117,7 +117,7 @@ class TestIbDailyPnlValidation(unittest.TestCase):
     def test_dbl_max_sentinel_filtered(self):
         """IB's DBL_MAX sentinel (1.7976...e+308) should be treated as None."""
         DBL_MAX = 1.7976931348623157e+308
-        from ib_insync import util as ib_util
+        from ib_async import util as ib_util
 
         def _valid(val):
             return val is not None and not ib_util.isNan(val) and val != DBL_MAX

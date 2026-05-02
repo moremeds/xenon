@@ -75,8 +75,8 @@ def _get_pool(request: Request):
 
 
 def make_ib_contract(spec: ContractSpec):
-    """Reconstruct an ib_insync contract from a JSON spec."""
-    from ib_insync import Stock, Future, Index
+    """Reconstruct an ib_async contract from a JSON spec."""
+    from ib_async import Stock, Future, Index
 
     if spec.sec_type == "STK":
         return Stock(spec.symbol, spec.exchange, spec.currency)
@@ -91,7 +91,7 @@ def make_ib_contract(spec: ContractSpec):
 
 
 def _contract_to_dict(contract) -> dict:
-    """Serialize a qualified ib_insync contract to JSON-safe dict."""
+    """Serialize a qualified ib_async contract to JSON-safe dict."""
     return {
         "conId": contract.conId,
         "symbol": contract.symbol,

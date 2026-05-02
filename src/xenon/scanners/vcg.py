@@ -74,7 +74,7 @@ YAHOO_TICKERS = {
 def _fetch_ib(tickers: List[str]) -> Dict[str, List[Tuple[str, float]]]:
     """Fetch 1Y daily bars from IB.  Returns {ticker: [(date_str, close), ...]}."""
     try:
-        from ib_insync import Index, Stock
+        from ib_async import Index, Stock
 
         from xenon.clients.ib_client import IBClient, IBConnectionError
     except ImportError:

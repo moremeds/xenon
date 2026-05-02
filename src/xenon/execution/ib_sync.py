@@ -5,7 +5,7 @@ Interactive Brokers Portfolio Sync
 Connects to TWS/IB Gateway and syncs live positions to portfolio.json
 
 Requirements:
-  pip install ib_insync
+  pip install ib_async
 
 Usage:
   xenon-ib-sync              # Display portfolio
@@ -23,10 +23,10 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 try:
-    from ib_insync import util
+    from ib_async import util
 except ImportError:
-    print("ERROR: ib_insync not installed")
-    print("Install with: pip install ib_insync")
+    print("ERROR: ib_async not installed")
+    print("Install with: pip install ib_async")
     sys.exit(1)
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
@@ -81,7 +81,7 @@ ACCOUNT_TAGS = [
 def get_account_summary(client: IBClient) -> dict:
     """Fetch account summary from cached account values (instant, no round-trip).
 
-    Uses ib.accountValues() which reads from ib_insync's internal cache
+    Uses ib.accountValues() which reads from ib_async's internal cache
     (populated automatically at connect time) instead of ib.accountSummary()
     which makes a blocking round-trip (~200-700ms).
     """
@@ -97,7 +97,7 @@ def get_account_summary(client: IBClient) -> dict:
 
 def get_pnl(client: IBClient, account: str = "") -> dict:
     """Fetch daily P&L via reqPnL. Polls up to 10s for data to arrive."""
-    from ib_insync import util as ib_util
+    from ib_async import util as ib_util
 
     def _valid(val):
         return val is not None and not ib_util.isNan(val)
@@ -125,7 +125,7 @@ def get_pnl(client: IBClient, account: str = "") -> dict:
         try:
             client.cancel_pnl(pnl)
         except Exception:
-            pass  # ib_insync PnL unhashable in some versions
+            pass  # ib_async PnL unhashable in some versions
         return result
     except Exception as e:
         print(f"  Warning: reqPnL failed: {e}")
@@ -689,7 +689,7 @@ def fetch_position_daily_pnl(client: IBClient, positions: list, account: str = "
     Performance: All PnL subscriptions are requested at once (no per-request
     sleep), then a single combined sleep waits for data to arrive.
     """
-    from ib_insync import util as ib_util
+    from ib_async import util as ib_util
 
     def _valid(val):
         return val is not None and not ib_util.isNan(val) and val != 1.7976931348623157e308
@@ -1239,7 +1239,7 @@ def main():
         # ── Phase 2: Request account PnL + positions concurrently ──
         # reqPnL is a subscription — request it, then do other work while it streams
         print("Fetching P&L + positions...")
-        from ib_insync import util as ib_util
+        from ib_async import util as ib_util
 
         def _valid_pnl(val):
             return val is not None and not ib_util.isNan(val)

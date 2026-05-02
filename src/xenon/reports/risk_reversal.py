@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _VENV_BIN = PROJECT_ROOT / ".venv" / "bin"
 
-from ib_insync import Option, Stock
+from ib_async import Option, Stock
 
 from xenon.clients.ib_client import IBClient
 
@@ -96,7 +96,7 @@ def fetch_chain(
     # Suppress noisy "No security definition" errors for invalid strikes
     import logging
 
-    logging.getLogger("ib_insync.wrapper").setLevel(logging.CRITICAL)
+    logging.getLogger("ib_async.wrapper").setLevel(logging.CRITICAL)
 
     client = IBClient()
     client.connect(port=port, client_id=33)

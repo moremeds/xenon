@@ -166,14 +166,14 @@ def fetch_price_history(ticker: str, days: int = 10) -> List[Dict]:
         import asyncio
         import logging
 
-        from ib_insync import IB, Stock, util
+        from ib_async import IB, Stock, util
 
         from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST
 
-        # Suppress noisy ib_insync connection logs in worker threads
-        logging.getLogger("ib_insync").setLevel(logging.CRITICAL)
+        # Suppress noisy ib_async connection logs in worker threads
+        logging.getLogger("ib_async").setLevel(logging.CRITICAL)
 
-        # ib_insync needs an event loop — create one for this thread.
+        # ib_async needs an event loop — create one for this thread.
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
@@ -464,7 +464,7 @@ def _run_parallel_milestones(
         skip_ib: If True, skip IB price fetch (used when batch-fetching prices)
         flow_days: Dark-pool lookback window in trading days
 
-    Note: IB price history runs on the main thread (ib_insync requires the
+    Note: IB price history runs on the main thread (ib_async requires the
     main asyncio event loop). All UW-based fetches run in a thread pool.
     """
     results: Dict[str, Any] = {}
@@ -501,7 +501,7 @@ def _run_parallel_milestones(
         return ("M2", fetch_flow(ticker, lookback_days=flow_days))
 
     def _m3():
-        # Skip IB inside thread (ib_insync needs main event loop).
+        # Skip IB inside thread (ib_async needs main event loop).
         # Spot price comes from PRICE fetch on main thread.
         return ("M3", fetch_options(ticker, source="uw"))
 
@@ -545,11 +545,11 @@ def _fetch_all_prices(tickers: List[str], days: int = 10) -> Dict[str, List[Dict
         import asyncio
         import logging
 
-        from ib_insync import IB, Stock
+        from ib_async import IB, Stock
 
         from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST
 
-        logging.getLogger("ib_insync").setLevel(logging.CRITICAL)
+        logging.getLogger("ib_async").setLevel(logging.CRITICAL)
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)

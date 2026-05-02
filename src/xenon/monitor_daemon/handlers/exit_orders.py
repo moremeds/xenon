@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-from ib_insync import Option, LimitOrder
+from ib_async import Option, LimitOrder
 
 from .base import BaseHandler
 from xenon.clients.ib_client import IBClient, DEFAULT_HOST

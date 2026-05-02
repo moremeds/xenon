@@ -34,10 +34,10 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 try:
-    from ib_insync import Option, Stock, util
+    from ib_async import Option, Stock, util
 except ImportError as e:
     print(f"ERROR: Missing dependency: {e}")
-    print("Install with: pip install ib_insync")
+    print("Install with: pip install ib_async")
     sys.exit(1)
 
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient

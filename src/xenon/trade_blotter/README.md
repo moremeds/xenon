@@ -33,10 +33,10 @@ xenon-blotter-history --symbol EWY
 ### Prerequisites
 
 1. **IB Gateway or TWS** running with API enabled
-2. **Python packages**: `ib_insync`, `requests`
+2. **Python packages**: `ib_async`, `requests`
 
 ```bash
-pip install ib_insync requests
+pip install ib_async requests
 ```
 
 ### IB Connection

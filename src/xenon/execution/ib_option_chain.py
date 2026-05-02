@@ -28,7 +28,7 @@ def main():
         client.connect(port=args.port, client_id=args.client_id)
 
         # Qualify the underlying to get a valid conId (required by reqSecDefOptParams)
-        from ib_insync import Stock
+        from ib_async import Stock
 
         stk = Stock(args.symbol, "SMART", "USD")
         client._ib.qualifyContracts(stk)

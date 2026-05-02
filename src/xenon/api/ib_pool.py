@@ -73,7 +73,7 @@ def acquire_owner(client_id: int, timeout_ms: int = 2000) -> Iterator[None]:
 def _connect_in_thread(host: str, port: int, client_id: int, timeout: int = 5) -> IBClient:
     """Connect an IBClient in a thread with its own event loop.
 
-    ib_insync needs an event loop in the connecting thread. When called
+    ib_async needs an event loop in the connecting thread. When called
     from asyncio.to_thread(), the thread has no loop by default.
     """
     import asyncio as _aio

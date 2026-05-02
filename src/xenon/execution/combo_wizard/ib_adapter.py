@@ -1,4 +1,4 @@
-"""Concrete ib_insync-backed adapter for the combo wizard protect / rehydrate
+"""Concrete ib_async-backed adapter for the combo wizard protect / rehydrate
 pipelines.
 
 Task 5 shipped `protect.py` and `rehydrate.py` against abstract handles with
@@ -22,8 +22,8 @@ Key guarantees:
   persist a ``RISK_ALERT_REGISTERED`` event + a virtual alert id so the
   ``wizard_stop_monitor`` handler can drive the crossing check.
 
-Citations (every ib_insync call site below is grep-verified against the
-installed source tree at `.venv/lib/python3.13/site-packages/ib_insync/`).
+Citations (every ib_async call site below is grep-verified against the
+installed source tree at `.venv/lib/python3.13/site-packages/ib_async/`).
 """
 
 from __future__ import annotations
@@ -35,13 +35,13 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-# ib_insync imports. Citations:
-#   ib_insync/contract.py:11  — class Contract (BAG via secType='BAG')
-#   ib_insync/contract.py:418 — class Bag(Contract): __init__(**kwargs)
-#   ib_insync/contract.py:449 — class ComboLeg (conId, ratio, action, exchange)
-#   ib_insync/contract.py:193 — class Option(Contract)
-#   ib_insync/order.py:181    — class LimitOrder(action, totalQuantity, lmtPrice)
-from ib_insync import ComboLeg, Contract, LimitOrder, Option  # type: ignore
+# ib_async imports. Citations:
+#   ib_async/contract.py:11  — class Contract (BAG via secType='BAG')
+#   ib_async/contract.py:418 — class Bag(Contract): __init__(**kwargs)
+#   ib_async/contract.py:449 — class ComboLeg (conId, ratio, action, exchange)
+#   ib_async/contract.py:193 — class Option(Contract)
+#   ib_async/order.py:181    — class LimitOrder(action, totalQuantity, lmtPrice)
+from ib_async import ComboLeg, Contract, LimitOrder, Option  # type: ignore
 
 from xenon.execution import orders_store  # noqa: F401 — kept for external import paths
 from xenon.execution.combo_wizard.protect import _uncovered_short_calls
@@ -63,7 +63,7 @@ def _is_ib_error_201(exc: BaseException) -> bool:
     """Heuristic: does this exception represent an IB "error 201"
     (terminal order reject)?
 
-    IBClient.place_order wraps the underlying ib_insync failure in
+    IBClient.place_order wraps the underlying ib_async failure in
     ``IBOrderError(f"Failed to place order: {exc}")`` — no .code attribute
     is preserved. `ib_place_order.py` classifies via errorEvent listener,
     which our adapter doesn't wire. Match whatever is observable: a `.code`
@@ -91,12 +91,12 @@ def _is_ib_error_201(exc: BaseException) -> bool:
 def _wait_for_perm_id(ib_client: Any, trade: Any) -> int | None:
     """Poll ``trade.order.permId`` until non-zero or deadline reached.
 
-    ib_insync seeds permId=0 client-side; IB's openOrder ack later sets the
+    ib_async seeds permId=0 client-side; IB's openOrder ack later sets the
     real value. Returns the real permId if obtained within the deadline,
     else None (so callers fall back to order_id; downstream
     ``protect.py`` uses ``ack.get("perm_id") or ack.get("order_id")``).
 
-    Uses ``ib_client.ib.sleep(...)`` if available (the ib_insync idiom —
+    Uses ``ib_client.ib.sleep(...)`` if available (the ib_async idiom —
     runs the event loop for N seconds without blocking), else falls back
     to ``time.sleep`` (test stubs).
     """
@@ -152,13 +152,13 @@ def _record_event(session_id: str, kind: str, detail: dict, db_path: Path | str 
 
 
 def _fill_to_dict(fill: Any) -> dict:
-    """Flatten an ib_insync Fill (NamedTuple of contract + execution + commissionReport)
+    """Flatten an ib_async Fill (NamedTuple of contract + execution + commissionReport)
     into a dict that the rehydrate per-leg aggregator understands.
 
     Citations:
-      ib_insync/objects.py:316 — class Fill(NamedTuple): contract, execution, ...
-      ib_insync/objects.py:50  — class Execution (permId, shares, price, execId)
-      ib_insync/contract.py:86 — Contract.conId
+      ib_async/objects.py:316 — class Fill(NamedTuple): contract, execution, ...
+      ib_async/objects.py:50  — class Execution (permId, shares, price, execId)
+      ib_async/contract.py:86 — Contract.conId
     """
     if isinstance(fill, dict):
         return fill
@@ -227,7 +227,7 @@ class ComboWizardIbAdapter:
         # If the caller already supplied conIds we still qualify so that
         # exchange/localSymbol get populated (IB requires fully-qualified
         # contracts on BAG legs).
-        # Citation: ib_insync/contract.py:193 — class Option(Contract)
+        # Citation: ib_async/contract.py:193 — class Option(Contract)
         option_contracts = []
         for leg in legs:
             option_contracts.append(
@@ -240,11 +240,11 @@ class ComboWizardIbAdapter:
                     currency="USD",
                 )
             )
-        # Citation: ib_insync/ib.py:? qualifyContracts via IBClient wrapper
+        # Citation: ib_async/ib.py:? qualifyContracts via IBClient wrapper
         # (src/xenon/clients/ib_client.py:775).
         qualified = self._ib.qualify_contracts(*option_contracts) if option_contracts else []
 
-        # Build BAG. Citation: ib_insync/contract.py:418 — class Bag(Contract)
+        # Build BAG. Citation: ib_async/contract.py:418 — class Bag(Contract)
         # A plain Contract with secType='BAG' is the idiom already used in
         # src/xenon/execution/ib_place_order.py:65-80.
         combo = Contract()
@@ -257,7 +257,7 @@ class ComboWizardIbAdapter:
         for i, leg in enumerate(legs):
             # Prefer qualified conId (IB-provided) but fall back to the leg's
             # own conId if qualification didn't return anything at this index.
-            # Citation: ib_insync/contract.py:449-457 — class ComboLeg
+            # Citation: ib_async/contract.py:449-457 — class ComboLeg
             con_id = None
             if i < len(qualified):
                 con_id = getattr(qualified[i], "conId", None)
@@ -273,7 +273,7 @@ class ComboWizardIbAdapter:
             combo_legs.append(cl)
         combo.comboLegs = combo_legs
 
-        # Citation: ib_insync/order.py:181-187 — class LimitOrder(action,
+        # Citation: ib_async/order.py:181-187 — class LimitOrder(action,
         # totalQuantity, lmtPrice). Signed price preserved (no abs()).
         order = LimitOrder(
             action="SELL",  # close a long-debit combo
@@ -304,11 +304,11 @@ class ComboWizardIbAdapter:
                 ) from exc
             raise
 
-        # permId=0 race: ib_insync seeds Trade.order.permId=0 client-side and
+        # permId=0 race: ib_async seeds Trade.order.permId=0 client-side and
         # only fills the real value once IB's openOrder ack arrives. The
         # rehydrate BAG per-leg aggregator keys on permId, so emitting 0/None
         # here would break combo fill detection. Poll briefly for the real
-        # value using the ib_insync idiom (ib.sleep yields the event loop
+        # value using the ib_async idiom (ib.sleep yields the event loop
         # without blocking). Matches ib_place_order.py:138 which also waits
         # after place_order before reading permId.
         order_id = getattr(getattr(trade, "order", None), "orderId", None)
@@ -362,22 +362,22 @@ class ComboWizardIbAdapter:
 
         No ``since`` parameter: the previous signature forwarded a ``datetime``
         to ``IBClient.get_executions(exec_filter)``, which expects an
-        ``ib_insync.ExecutionFilter`` — a latent type mismatch with no live
+        ``ib_async.ExecutionFilter`` — a latent type mismatch with no live
         callers. If a future caller needs filtering, add proper
         ExecutionFilter conversion at the call site then.
 
-        Citation: ib_insync/ib.py:822 — def reqExecutions(self, filter) ->
+        Citation: ib_async/ib.py:822 — def reqExecutions(self, filter) ->
         List[Fill]. Wrapped by IBClient.get_executions (ib_client.py:782).
         """
         raw = self._ib.get_executions()
         return [_fill_to_dict(f) for f in (raw or [])]
 
     def get_open_orders(self) -> list:
-        """Delegate to IBClient. Citation: ib_insync/ib.py:804 — reqAllOpenOrders
+        """Delegate to IBClient. Citation: ib_async/ib.py:804 — reqAllOpenOrders
         (wrapped in ib_client.py:649 which calls reqAllOpenOrders + openTrades)."""
         return self._ib.get_open_orders() or []
 
     def get_positions(self) -> list:
-        """Delegate. Citation: ib_insync/ib.py:429 — def positions(account) ->
+        """Delegate. Citation: ib_async/ib.py:429 — def positions(account) ->
         List[Position]. Wrapped by IBClient.get_positions (ib_client.py:499)."""
         return self._ib.get_positions() or []

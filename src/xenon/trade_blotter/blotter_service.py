@@ -16,7 +16,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
-from ib_insync import Fill
+from ib_async import Fill
 
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 from xenon.trade_blotter.models import Execution, SecurityType, Side, Trade, TradeBlotter
@@ -60,7 +60,7 @@ class IBFetcher(ExecutionFetcher):
         self.client_id = client_id
         self.client = IBClient()
         # Backward-compat alias used by older tests and scripts that patched the
-        # raw ib_insync handle directly.
+        # raw ib_async handle directly.
         self.ib = self.client.ib
 
     def _connect(self):

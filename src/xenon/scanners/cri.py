@@ -112,7 +112,7 @@ def _fetch_ib(tickers: List[str]) -> Dict[str, List[Tuple[str, float]]]:
     Returns {ticker: [(date_str, close), ...]}.
     """
     try:
-        from ib_insync import IB, Index, Stock
+        from ib_async import IB, Index, Stock
     except ImportError:
         return {}
 
@@ -324,7 +324,7 @@ def _extract_ib_quote_value(ticker: Any) -> Optional[float]:
 def _fetch_ib_current_quote(ticker: str) -> Optional[float]:
     """Fetch a current quote from IB, trying live then delayed data."""
     try:
-        from ib_insync import IB, Index, Stock
+        from ib_async import IB, Index, Stock
     except ImportError:
         return None
 

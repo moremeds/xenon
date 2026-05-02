@@ -1,7 +1,7 @@
 """Tests for IBClient pacing & invalid contract error handling.
 
 Red/Green TDD: tests written FIRST (RED phase), then implementation follows.
-All tests mock ib_insync.IB — no real IB connection needed.
+All tests mock ib_async.IB — no real IB connection needed.
 """
 
 from unittest.mock import MagicMock, patch

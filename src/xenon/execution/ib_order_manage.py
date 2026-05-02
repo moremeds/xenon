@@ -59,7 +59,7 @@ def classify_failure(
 
 # IB Error 326 detection. Must match standalone "326" (word boundary) AND
 # the phrase "client id" to avoid false positives on messages like
-# "order 3261 rejected". The canonical ib_insync surface text is
+# "order 3261 rejected". The canonical ib_async surface text is
 # "client id is already in use"; we keep compatibility with that phrasing.
 _CLIENTID_IN_USE_RE = re.compile(r"\b326\b")
 
@@ -372,7 +372,7 @@ def modify_order(
     # IB's open order snapshot may strip smartComboRoutingParams;
     # re-submitting without it causes "Missing or invalid NonGuaranteed value".
     if trade.contract.secType == "BAG":
-        from ib_insync import TagValue
+        from ib_async import TagValue
 
         trade.order.smartComboRoutingParams = [TagValue("NonGuaranteed", "1")]
 

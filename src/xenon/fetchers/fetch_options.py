@@ -25,9 +25,9 @@ from xenon.clients.uw_client import UWClient, UWAPIError
 UW_TOKEN = os.environ.get("UW_TOKEN")
 IB_PORTS = [4001, 7496, 7497, 4002]  # Gateway Live, TWS Live, TWS Paper, Gateway Paper
 
-# Try to import ib_insync
+# Try to import ib_async
 try:
-    from ib_insync import Stock, util
+    from ib_async import Stock, util
     from xenon.clients.ib_client import IBClient, DEFAULT_HOST
     IB_AVAILABLE = True
 except ImportError:

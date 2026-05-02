@@ -139,7 +139,7 @@ async def pool_modify_order(
     # IB's open order snapshot may strip smartComboRoutingParams;
     # re-submitting without it causes "Missing or invalid NonGuaranteed value".
     if trade.contract.secType == "BAG":
-        from ib_insync import TagValue
+        from ib_async import TagValue
         trade.order.smartComboRoutingParams = [TagValue("NonGuaranteed", "1")]
 
     await asyncio.to_thread(client.place_order, trade.contract, trade.order)

@@ -8,7 +8,7 @@ This is the UNIFIED workflow script. Use this instead of separate
 ib_order.py + ib_fill_monitor.py calls.
 
 Requirements:
-  pip install ib_insync
+  pip install ib_async
 
 Usage:
   # Sell stock
@@ -38,10 +38,10 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 try:
-    from ib_insync import LimitOrder, Option, Stock, util
+    from ib_async import LimitOrder, Option, Stock, util
 except ImportError:
-    print("ERROR: ib_insync not installed")
-    print("Install with: pip install ib_insync")
+    print("ERROR: ib_async not installed")
+    print("Install with: pip install ib_async")
     sys.exit(1)
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
