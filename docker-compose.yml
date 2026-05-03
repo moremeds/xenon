@@ -37,6 +37,12 @@ services:
     image: xenon-api:dev
     env_file:
       - ./.env
+    environment:
+      # Futu OpenD is always a host-native daemon (Mac-only, no container
+      # form), and it binds 127.0.0.1 by default. From inside a container,
+      # `host.docker.internal` is the only hostname that actually reaches
+      # it — a 127.0.0.1 default would dial the container's own loopback.
+      FUTU_OPEND_HOST: host.docker.internal
     # IB_GATEWAY_HOST comes from .env. On the remote Mac mini set
     # IB_GATEWAY_HOST=host.docker.internal so the container reaches the
     # host-native Gateway; on this dev Mac it stays at the LAN IP that
