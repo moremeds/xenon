@@ -306,16 +306,12 @@ def parse_option_id(option_id: str) -> Tuple[str, str, str, float]:
     return symbol, expiry, right, strike
 
 
-NAV_HISTORY_PATH = ROOT / "data" / "nav_history.jsonl"
-
-
-IB_NAV_CACHE_PATH = ROOT / "data" / "nav_history_ib.json"
-
-
 def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
-    """Fetch daily NAV from IB Flex Query (EquitySummaryInBase).
+    """Fetch daily NAV from IB Flex Query (EquitySummaryInBase) and persist to PG.
 
     Uses ``IB_FLEX_NAV_QUERY_ID`` env var (separate from trade query).
+    Each entry is upserted into ``xenon.nav_history`` so a later
+    ``load_ib_nav_cache()`` call can replay it without another Flex round-trip.
     Returns list of ``{date, total, cash, stock, options}`` or None on failure.
     """
     token = os.environ.get("IB_FLEX_TOKEN")
@@ -325,11 +321,12 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
 
     import time
     import xml.etree.ElementTree as ET
+    from datetime import date as _date
+    from decimal import Decimal as _Decimal
     from urllib.parse import urlencode
     from urllib.request import urlopen
 
     try:
-        # Request report
         url = "https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService.SendRequest"
         params = urlencode({"t": token, "q": nav_query_id, "v": "3"})
         resp = urlopen(f"{url}?{params}", timeout=30)
@@ -340,7 +337,6 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
             return None
         ref_code = ref_node.text
 
-        # Poll for result
         stmt_url = "https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService.GetStatement"
         for _ in range(30):
             time.sleep(3)
@@ -372,10 +368,34 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                     }
                 )
 
-            # Cache to disk
+            # Persist to PG (replaces data/nav_history_ib.json cache).
             try:
-                IB_NAV_CACHE_PATH.write_text(json.dumps(entries, indent=2))
-            except OSError:
+                from xenon.execution.account_scope import resolve_from_env
+                from xenon.utils.portfolio_loader import upsert_nav_sync
+
+                scope = resolve_from_env()
+                for e in entries:
+                    try:
+                        day = _date.fromisoformat(e["date"])
+                    except (TypeError, ValueError):
+                        continue
+                    total_v = _Decimal(str(e["total"])) if e.get("total") is not None else None
+                    cash_v = _Decimal(str(e["cash"])) if e.get("cash") is not None else None
+                    stock_v = _Decimal(str(e["stock"])) if e.get("stock") is not None else None
+                    opt_v = _Decimal(str(e["options"])) if e.get("options") is not None else None
+                    # nav column mirrors total for IB Flex (single authoritative source).
+                    upsert_nav_sync(
+                        scope=scope,
+                        day=day,
+                        nav=total_v if total_v is not None else _Decimal("0"),
+                        total=total_v,
+                        cash=cash_v,
+                        stock_value=stock_v,
+                        options_value=opt_v,
+                    )
+            except Exception:
+                # PG unavailable / scope unset — return entries anyway so the
+                # caller still gets a one-shot result. Cache miss next run.
                 pass
             return entries
         return None
@@ -384,14 +404,36 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
 
 
 def load_ib_nav_cache() -> Optional[List[Dict[str, Any]]]:
-    """Load cached IB NAV series from disk."""
-    if not IB_NAV_CACHE_PATH.exists():
-        return None
+    """Load cached IB NAV series from PG (`xenon.nav_history`).
+
+    Returns rows shaped like `fetch_ib_nav_series` output:
+    ``{date, total, cash, stock, options}``. Returns None when fewer than 2
+    rows exist or when the scope/PG is unavailable.
+    """
     try:
-        entries = json.loads(IB_NAV_CACHE_PATH.read_text())
-        return entries if isinstance(entries, list) and len(entries) >= 2 else None
-    except (json.JSONDecodeError, OSError):
+        from xenon.execution.account_scope import resolve_from_env
+        from xenon.utils.portfolio_loader import load_nav_history_sync
+
+        rows = load_nav_history_sync(scope=resolve_from_env())
+    except Exception:
         return None
+    entries: List[Dict[str, Any]] = []
+    for row in rows:
+        # Only emit rows with breakdown — pre-Flex-importer rows have nav only
+        # and would corrupt downstream calculations expecting all four buckets.
+        if row.get("total") is None:
+            continue
+        d = row.get("date")
+        entries.append(
+            {
+                "date": d.isoformat() if hasattr(d, "isoformat") else str(d),
+                "total": float(row["total"]),
+                "cash": float(row["cash"]) if row.get("cash") is not None else 0.0,
+                "stock": float(row["stock_value"]) if row.get("stock_value") is not None else 0.0,
+                "options": float(row["options_value"]) if row.get("options_value") is not None else 0.0,
+            }
+        )
+    return entries if len(entries) >= 2 else None
 
 
 def _extract_acats_transfers(
@@ -556,39 +598,6 @@ def build_nav_based_curve(
             metrics["annualized_return"] = float((1.0 + last_twr) ** (TRADING_DAYS / max(trading_days, 1)) - 1.0)
 
     return curve, metrics
-
-
-def load_nav_history(path: Path = NAV_HISTORY_PATH) -> Dict[str, float]:
-    """Load daily NAV snapshots from JSONL file. Returns date→nav mapping."""
-    if not path.exists():
-        return {}
-    history: Dict[str, float] = {}
-    for line in path.read_text().strip().splitlines():
-        try:
-            entry = json.loads(line)
-            dt = entry.get("date", "")
-            nav = entry.get("nav")
-            if dt and nav is not None:
-                history[dt] = float(nav)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            continue
-    return history
-
-
-def build_nav_equity_curve(nav_history: Dict[str, float]) -> Optional[pd.DataFrame]:
-    """Build equity curve DataFrame from daily NAV snapshots.
-
-    Returns None if fewer than 2 data points.
-    """
-    if len(nav_history) < 2:
-        return None
-    dates = sorted(nav_history.keys())
-    equities = [nav_history[d] for d in dates]
-    df = pd.DataFrame({"equity": equities}, index=dates)
-    df["daily_return"] = df["equity"].pct_change()
-    df["drawdown"] = df["equity"] / df["equity"].cummax() - 1.0
-    df.index.name = "date"
-    return df
 
 
 def fetch_flex_trade_fills() -> tuple[List[TradeFill], str]:

@@ -13,9 +13,12 @@ non-async services (uw_analyze_candidates).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date as _date
+from decimal import Decimal as _Decimal
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as _pg_insert
 
 from xenon.db.engine import get_sync_engine
 from xenon.db.schema import account_snapshots, nav_history, order_fills, trades
@@ -119,6 +122,62 @@ def load_nav_history_sync(*, scope: AccountScope) -> list[dict[str, Any]]:
         return [dict(row._mapping) for row in result]
 
 
+def upsert_nav_sync(
+    *,
+    scope: AccountScope,
+    day: _date,
+    nav: _Decimal | float | int,
+    daily_pnl: _Decimal | float | int | None = None,
+    total: _Decimal | float | int | None = None,
+    cash: _Decimal | float | int | None = None,
+    stock_value: _Decimal | float | int | None = None,
+    options_value: _Decimal | float | int | None = None,
+) -> None:
+    """Sync mirror of `xenon.db.queries.portfolio.upsert_nav`.
+
+    NULL-safe on every nullable column: when a caller passes ``None`` for a
+    breakdown field (or daily_pnl), the existing PG value is preserved rather
+    than overwritten. ib_sync only knows ``nav``; the IB Flex importer
+    (`fetch_ib_nav_series`) supplies the full breakdown — both can write to
+    the same row without erasing each other's contributions.
+    """
+    stmt = _pg_insert(nav_history).values(
+        broker=scope.broker,
+        account_env=scope.account_env,
+        broker_account=scope.broker_account,
+        date=day,
+        nav=nav,
+        daily_pnl=daily_pnl,
+        total=total,
+        cash=cash,
+        stock_value=stock_value,
+        options_value=options_value,
+    )
+    set_columns: dict[str, object] = {"nav": stmt.excluded.nav}
+    if daily_pnl is not None:
+        set_columns["daily_pnl"] = stmt.excluded.daily_pnl
+    if total is not None:
+        set_columns["total"] = stmt.excluded.total
+    if cash is not None:
+        set_columns["cash"] = stmt.excluded.cash
+    if stock_value is not None:
+        set_columns["stock_value"] = stmt.excluded.stock_value
+    if options_value is not None:
+        set_columns["options_value"] = stmt.excluded.options_value
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[
+            nav_history.c.broker,
+            nav_history.c.account_env,
+            nav_history.c.broker_account,
+            nav_history.c.date,
+        ],
+        set_=set_columns,
+    )
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        conn.execute(stmt)
+
+
 def load_entry_date_lookups_sync(*, scope: AccountScope) -> EntryDateLookups:
     """Build all four entry-date lookup dicts from PG in one engine context.
 
@@ -135,8 +194,9 @@ def load_entry_date_lookups_sync(*, scope: AccountScope) -> EntryDateLookups:
       NOT-today account_snapshots row, keyed by ``"{ticker}|{structure}|{expiry}"``.
     """
     from datetime import datetime as _datetime
+    from datetime import timezone as _timezone
 
-    today = _datetime.now().strftime("%Y-%m-%d")
+    today = _datetime.now(_timezone.utc).strftime("%Y-%m-%d")
     engine = get_sync_engine()
     with engine.begin() as conn:
         # Per-contract earliest fill from order_fills.metadata (option fills only)

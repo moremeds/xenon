@@ -211,10 +211,12 @@ async def upsert_nav(
         stock_value=stock_value,
         options_value=options_value,
     )
-    set_columns: dict[str, object] = {"nav": stmt.excluded.nav, "daily_pnl": stmt.excluded.daily_pnl}
-    # Only overwrite breakdown columns when this caller actually has values —
+    set_columns: dict[str, object] = {"nav": stmt.excluded.nav}
+    # Only overwrite columns when this caller actually has values —
     # ib_sync's daily upsert sends nav only; the IB Flex importer sends the
     # full breakdown. Skipping NULLs preserves whichever source last filled them.
+    if daily_pnl is not None:
+        set_columns["daily_pnl"] = stmt.excluded.daily_pnl
     if total is not None:
         set_columns["total"] = stmt.excluded.total
     if cash is not None:

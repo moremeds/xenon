@@ -15,9 +15,10 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional, Tuple
@@ -930,11 +931,20 @@ def convert_to_portfolio_format(
     # Derive entry_date from PG (order_fills + trades + previous account_snapshots).
     # Priority: per-contract fills → trade_log → per-ticker fills → IB session
     # fills → previous portfolio → "unknown".
+    # PG outage / unset XENON_BROKER_ACCOUNT must not abort the whole sync —
+    # fall back to empty lookups so positions get entry_date="unknown" rather
+    # than the portfolio failing to write at all.
     from xenon.execution.account_scope import resolve_from_env
-    from xenon.utils.portfolio_loader import load_entry_date_lookups_sync
+    from xenon.utils.portfolio_loader import EntryDateLookups, load_entry_date_lookups_sync
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    lookups = load_entry_date_lookups_sync(scope=resolve_from_env())
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        lookups = load_entry_date_lookups_sync(scope=resolve_from_env())
+    except Exception as e:
+        logging.getLogger("ib_sync.entry_dates").warning(
+            "entry-date PG lookup failed (%s: %s); using empty fallback", type(e).__name__, e
+        )
+        lookups = EntryDateLookups({}, {}, {}, {})
     blotter_dates = lookups.per_contract_dates | lookups.per_ticker_dates
     trade_log_dates = lookups.trade_log_dates
     prev_dates = lookups.prev_portfolio_dates
@@ -1152,6 +1162,47 @@ def save_portfolio(portfolio: dict):
             print(f"  Warning: NAV snapshot failed: {exc}")
 
 
+def _open_orders_for_audit(client) -> list[dict]:
+    """Pull open orders from IB and shape them for naked_short_audit.
+
+    Replaces the old `data/orders.json` read. The audit's pure function
+    (`find_naked_short_violations`) expects a list of dicts shaped like the
+    web app's open_orders payload — this adapter mirrors that shape from
+    live ib_async Trade objects so we don't depend on a separate process
+    having written to disk first.
+    """
+    try:
+        trades = client.get_open_orders()
+    except Exception as exc:
+        logging.getLogger("ib_sync.audit").warning("could not fetch open orders for audit (%s); skipping", exc)
+        return []
+    out: list[dict] = []
+    for trade in trades:
+        order = getattr(trade, "order", None)
+        contract = getattr(trade, "contract", None)
+        status_obj = getattr(trade, "orderStatus", None)
+        if order is None or contract is None:
+            continue
+        out.append(
+            {
+                "status": getattr(status_obj, "status", "") if status_obj else "",
+                "action": getattr(order, "action", "") or "",
+                "totalQuantity": int(getattr(order, "totalQuantity", 0) or 0),
+                "orderId": getattr(order, "orderId", None),
+                "permId": getattr(order, "permId", None),
+                "orderRef": getattr(order, "orderRef", "") or "",
+                "contract": {
+                    "secType": getattr(contract, "secType", "") or "",
+                    "symbol": getattr(contract, "symbol", "") or "",
+                    "right": getattr(contract, "right", "") or "",
+                    "expiry": getattr(contract, "lastTradeDateOrContractMonth", "") or "",
+                    "strike": getattr(contract, "strike", 0) or 0,
+                },
+            }
+        )
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description="Sync portfolio from Interactive Brokers")
     parser.add_argument("--host", default=DEFAULT_HOST, help="TWS/Gateway host")
@@ -1315,50 +1366,37 @@ def main():
             # ── Naked Short Audit (post-sync) ──
             if not args.skip_audit:
                 try:
-                    import logging
-
                     from naked_short_audit import find_naked_short_violations
 
                     log = logging.getLogger("ib_sync.audit")
 
-                    data_dir = str(DATA_DIR)
-                    orders_path = os.path.join(data_dir, "orders.json")
-                    if os.path.exists(orders_path):
-                        with open(orders_path) as f:
-                            orders_data = json.load(f)
-                        orders = (
-                            orders_data
-                            if isinstance(orders_data, list)
-                            else orders_data.get("orders", orders_data.get("open_orders", []))
-                        )
+                    # Pull open orders directly from IB rather than reading
+                    # data/orders.json (which is written by the web app and can
+                    # lag actual IB state). Adapter shapes Trade objects into
+                    # the dict shape `find_naked_short_violations` expects.
+                    orders = _open_orders_for_audit(client)
 
-                        violations = find_naked_short_violations(orders, portfolio["positions"])
-                        if violations:
-                            log.warning("NAKED SHORT AUDIT: %d violation(s) detected", len(violations))
-                            for v in violations:
-                                log.warning("  → %s: %s (order %s)", v["symbol"], v["reason"], v["order_id"])
+                    violations = find_naked_short_violations(orders, portfolio["positions"])
+                    if violations:
+                        log.warning("NAKED SHORT AUDIT: %d violation(s) detected", len(violations))
+                        for v in violations:
+                            log.warning("  → %s: %s (order %s)", v["symbol"], v["reason"], v["order_id"])
 
-                            # Auto-cancel only if client is still connected
-                            if client.is_connected():
-                                from naked_short_audit import cancel_violations
+                        # Auto-cancel only if client is still connected
+                        if client.is_connected():
+                            from naked_short_audit import cancel_violations
 
-                                cancelled = cancel_violations(client, violations)
-                                log.warning("  Cancelled %d violating order(s)", cancelled)
-                            else:
-                                log.warning("  Client disconnected — skipping auto-cancel")
+                            cancelled = cancel_violations(client, violations)
+                            log.warning("  Cancelled %d violating order(s)", cancelled)
                         else:
-                            print("✓ Naked short audit: no violations")
+                            log.warning("  Client disconnected — skipping auto-cancel")
                     else:
-                        print("  Naked short audit: orders.json not found, skipping")
+                        print("✓ Naked short audit: no violations")
                 except ImportError:
-                    import logging
-
                     logging.getLogger("ib_sync.audit").warning(
                         "naked_short_audit module not available — skipping audit"
                     )
                 except Exception:
-                    import logging
-
                     logging.getLogger("ib_sync.audit").warning(
                         "Naked short audit failed — sync completed successfully",
                         exc_info=True,
