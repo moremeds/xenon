@@ -40,7 +40,7 @@ All IB and UW access goes through centralized clients in `src/xenon/clients/`:
 | `IBClient` | `src/xenon/clients/ib_client.py` | `from xenon.clients.ib_client import IBClient` |
 | `UWClient` | `src/xenon/clients/uw_client.py` | `from xenon.clients.uw_client import UWClient` |
 
-**IBClient** wraps `ib_insync.IB` with connection retries, context manager support, and methods for positions, orders, quotes, options chains, fills, flex queries, and historical data. Exception hierarchy: `IBError` → `IBConnectionError`, `IBOrderError`, `IBTimeoutError`, `IBContractError`. Raw access via `client.ib` property.
+**IBClient** wraps `ib_async.IB` with connection retries, context manager support, and methods for positions, orders, quotes, options chains, fills, flex queries, and historical data. Exception hierarchy: `IBError` → `IBConnectionError`, `IBOrderError`, `IBTimeoutError`, `IBContractError`. Raw access via `client.ib` property.
 
 **UWClient** wraps all Unusual Whales REST endpoints with session pooling, automatic retry/backoff, and context manager support. Exception hierarchy: `UWAPIError` → `UWAuthError`, `UWRateLimitError`, `UWNotFoundError`, `UWValidationError`, `UWServerError`. 50+ methods covering dark pool, options flow, stock info, GEX, volatility, ratings, seasonality, and more.
 
@@ -388,7 +388,7 @@ xenon-ib-execute --type option --symbol GOOG --expiry 20260417 --strike 315 --ri
 xenon-ib-execute --type option --symbol GOOG --expiry 20260417 --strike 290 --right P --qty 10 --side SELL --limit 3.50 --yes
 ```
 
-**Multi-leg spread:** Use inline Python with `ib_insync` (see `ib-order-execution` skill)
+**Multi-leg spread:** Use inline Python with `ib_async` (see `ib-order-execution` skill)
 
 ### Exit Orders
 

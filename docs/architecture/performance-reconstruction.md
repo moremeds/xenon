@@ -13,7 +13,7 @@ Match IB's YTD TWR (Time-Weighted Return) on the Xenon `/performance` page. IB s
 | Flex Query: Transfers                         | ACATS securities transfers ($961K positionAmount) | Yes                                         |
 | Flex Query: Trade History (ID: 1422766)       | 630 trade executions (Oct 2025 – Mar 2026)        | Yes                                         |
 | Client Portal Highcharts                      | Exact TWR series (58 points, -10.56%)             | No — requires authenticated browser session |
-| TWS API (ib_insync)                           | Current account values, positions, daily P&L      | Yes — but no historical TWR                 |
+| TWS API (ib_async)                           | Current account values, positions, daily P&L      | Yes — but no historical TWR                 |
 
 ## Approaches Tried
 

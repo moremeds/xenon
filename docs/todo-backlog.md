@@ -117,7 +117,7 @@ when scoping starts.
   most want to know "how am I doing right now" but no quotes are streaming. The
   Taylor expansion is the standard hack for this gap and is accurate enough at
   ATM strikes; accuracy degrades on deep OTM where gamma is non-linear, which is
-  worth flagging in the UI. ib_insync caches yesterday's greeks so no extra
+  worth flagging in the UI. ib_async caches yesterday's greeks so no extra
   fetch needed for the v1.
 
 - 2026-04-27 — **Portfolio shock analysis (macro → individual)** — extension of
@@ -304,7 +304,7 @@ for ${sym}"`) survives, but the wrapping prefix is gone.
   up in price.
   **Notes:** Real questions hidden in "moves greatly": (a) which IV — ATM
   IV, IV30, term-structure point, surface-level? Probably ATM IV30 to start;
-  it's the single most-quoted number and ib_insync surfaces it directly,
+  it's the single most-quoted number and ib_async surfaces it directly,
   (b) baseline for "great" — fixed bps move, Z-score against a rolling
   window, percentile of historical IV range? Z-score is the right answer
   long-term and connects to **todo #4 (signal graphs / Z-score on ATR)** —
@@ -366,7 +366,7 @@ for ${sym}"`) survives, but the wrapping prefix is gone.
   `orders_store.py`); `ComboPreflightRequest.quantity` stays `int`.
   Backend choke points: `src/xenon/api/server.py:1845`, `:1876`, `:2333` all
   do `int(body.get("quantity", 0))`; `src/xenon/execution/ib_place_order.py:34`
-  does `int(params["quantity"])` and passes to `totalQuantity` (ib_insync
+  does `int(params["quantity"])` and passes to `totalQuantity` (ib_async
   accepts float). Frontend choke points: 5 entry-point components —
   `web/components/PositionOrderModal.tsx` already does conditional
   `parseFloat` for `structure_type === "Stock"` at L99-104, BUT `Math.max(1, …)`

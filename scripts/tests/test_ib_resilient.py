@@ -1,7 +1,7 @@
 """Tests for IBClient resilient reconnection — subscription tracking + disconnect recovery.
 
 Red/Green TDD: these tests are written FIRST (RED phase), then implementation follows.
-All tests mock ib_insync.IB — no real IB connection needed.
+All tests mock ib_async.IB — no real IB connection needed.
 """
 
 import logging

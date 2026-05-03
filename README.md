@@ -42,7 +42,7 @@ Full specs: [`docs/trading/strategies.md`](docs/trading/strategies.md) · VCG ma
 
 **Prerequisites**
 
-- Python `3.13` (3.14 has ib_insync/eventkit incompatibility)
+- Python `3.13` (3.14 has ib_async/eventkit incompatibility)
 - Node.js `18+`
 - [Interactive Brokers](https://ibkr.com/referral/joseph5632) Gateway (cloud via Tailscale, Docker, or local TWS)
 - [Unusual Whales](https://unusualwhales.com/referral#39985a64-656c-4642-a051-db89f6324d64) API access

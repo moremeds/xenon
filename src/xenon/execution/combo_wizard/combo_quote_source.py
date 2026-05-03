@@ -9,7 +9,7 @@ Wires `combo_quotes.compute_combo_quote` to fresh IB leg ticks. Applies spec
 - fresh quote timestamps (within a TTL; default 30s)
 
 We deliberately do NOT use `reqTickersAsync` here — per
-`feedback_ib_insync_in_fastapi`, it hangs on index options. We use the
+`feedback_ib_async_in_fastapi`, it hangs on index options. We use the
 ``get_quote`` / streaming ``reqMktData`` path wrapped by ``IBClient``, which
 keeps the stream alive so subsequent ticks refresh in place.
 
@@ -27,9 +27,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-# ib_insync imports. Citations:
-#   ib_insync/contract.py:193 — class Option(Contract)
-from ib_insync import Option  # type: ignore
+# ib_async imports. Citations:
+#   ib_async/contract.py:193 — class Option(Contract)
+from ib_async import Option  # type: ignore
 
 from xenon.execution import orders_store  # noqa: F401 — kept for external import paths
 
@@ -60,7 +60,7 @@ def _ticker_is_fresh(
 ) -> bool:
     """Spec §10: non-crossed, non-zero sizes, no NaN, fresh timestamps.
 
-    Citation: ib_insync/ticker.py:19-80 — class Ticker(bid, ask, bidSize,
+    Citation: ib_async/ticker.py:19-80 — class Ticker(bid, ask, bidSize,
     askSize, time).
     """
     if ticker is None:
@@ -108,14 +108,14 @@ def _session_legs(session_id: str, db_path: Path | str | None) -> list[dict]:
 
 
 class _TickerCache:
-    """Session-scoped cache of streaming ib_insync Tickers keyed by conId.
+    """Session-scoped cache of streaming ib_async Tickers keyed by conId.
 
     First access for a conId calls ``IBClient.get_quote(contract)`` which
-    wraps ``ib_insync.IB.reqMktData(contract, ..., snapshot=False)``; the
+    wraps ``ib_async.IB.reqMktData(contract, ..., snapshot=False)``; the
     returned ``Ticker`` is retained. Subsequent accesses re-read the same
-    ``Ticker`` instance — ib_insync live-updates ``bid/ask/bidSize/askSize/time``
+    ``Ticker`` instance — ib_async live-updates ``bid/ask/bidSize/askSize/time``
     on the object as new ticks arrive (see
-    ``.venv/lib/python3.13/site-packages/ib_insync/ib.py:1181`` —
+    ``.venv/lib/python3.13/site-packages/ib_async/ib.py:1181`` —
     ``reqMktData`` returns a ticker that is updated in-place).
 
     Prevents the subscription leak where a long-running monitor otherwise
@@ -139,13 +139,13 @@ class _TickerCache:
     def cleanup(self, ib: Any) -> None:
         """Cancel every retained subscription.
 
-        Delegates to ``ib_insync.IB.cancelMktData(contract)``
-        (``.venv/lib/python3.13/site-packages/ib_insync/ib.py:1241`` —
+        Delegates to ``ib_async.IB.cancelMktData(contract)``
+        (``.venv/lib/python3.13/site-packages/ib_async/ib.py:1241`` —
         ``def cancelMktData(self, contract: Contract)``; unsubscribes
         realtime streaming tick data for the exact contract that was used
         to subscribe). We access it as ``ib.ib.cancelMktData`` because
         ``ib`` here is the Xenon ``IBClient`` wrapper; ``.ib`` is the
-        underlying ``ib_insync.IB`` instance.
+        underlying ``ib_async.IB`` instance.
         """
         inner = getattr(ib, "ib", None)
         for _con_id, (contract, _ticker) in list(self._tickers.items()):
@@ -203,7 +203,7 @@ def build_default_quote_fn(
             if con_id is None:
                 return None
 
-            # Citation: ib_insync/contract.py:193 — class Option(Contract)
+            # Citation: ib_async/contract.py:193 — class Option(Contract)
             contract = Option(
                 symbol=str(leg.get("symbol") or ""),
                 lastTradeDateOrContractMonth=str(leg.get("expiry") or ""),
@@ -223,7 +223,7 @@ def build_default_quote_fn(
             # Citation: src/xenon/clients/ib_client.py:696 — get_quote.
             # The _TickerCache only calls get_quote once per conId; subsequent
             # ticks re-read the retained Ticker whose bid/ask/time fields are
-            # live-updated in place by ib_insync (ib.py:1181 reqMktData).
+            # live-updated in place by ib_async (ib.py:1181 reqMktData).
             try:
                 ticker = cache.get(ib, contract)
             except Exception as exc:  # noqa: BLE001

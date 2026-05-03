@@ -86,13 +86,13 @@ except ImportError:
 logger = logging.getLogger("xenon.api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-# Suppress verbose ib_insync logging (positions, orders at INFO level)
-logging.getLogger("ib_insync").setLevel(logging.WARNING)
-logging.getLogger("ib_insync.wrapper").setLevel(logging.WARNING)
-logging.getLogger("ib_insync.client").setLevel(logging.WARNING)
+# Suppress verbose ib_async logging (positions, orders at INFO level)
+logging.getLogger("ib_async").setLevel(logging.WARNING)
+logging.getLogger("ib_async.wrapper").setLevel(logging.WARNING)
+logging.getLogger("ib_async.client").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
-from ib_insync import Contract, Index, Option, Stock
+from ib_async import Contract, Index, Option, Stock
 
 from xenon.clients.futu_client import FutuClient
 from xenon.clients.futu_exceptions import FutuConnectionError, FutuError
@@ -2275,7 +2275,7 @@ def _lookup_min_tick_via_pool(con_id: int) -> Decimal:
     Reg NMS Rule 612 sub-penny carve-outs for stocks under $1, OPRA penny
     pilot rosters for options, and exchange-specific market rules for
     futures all change without notice. Instead of reaching into IB on the
-    sync ``quote_guard.check`` path (which would require ``ib_insync``'s
+    sync ``quote_guard.check`` path (which would require ``ib_async``'s
     ``reqContractDetailsAsync`` and a wider sync→async refactor), we keep
     the cheap 0.01 approximation **and rely on IB to reject off-tick
     prices server-side**.
@@ -2342,7 +2342,7 @@ def _ticker_to_quote_snapshot(ticker: str, con_id: int, tk: Any) -> dict:
 
 
 def _fetch_quote_snapshot_with_client(client: Any, ticker: str, con_id: int) -> dict:
-    """Run blocking ib_insync quote work in a worker thread that owns a loop."""
+    """Run blocking ib_async quote work in a worker thread that owns a loop."""
     _ensure_thread_event_loop()
     contract = Contract(conId=int(con_id), exchange="SMART")
     qualified = client.qualify_contract(contract)

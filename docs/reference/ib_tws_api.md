@@ -1,6 +1,6 @@
-# IB TWS API Reference (ib_insync)
+# IB TWS API Reference (ib_async)
 
-Developer reference for the Interactive Brokers TWS API as used via the `ib_insync` Python library.
+Developer reference for the Interactive Brokers TWS API as used via the `ib_async` Python library.
 
 ---
 

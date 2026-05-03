@@ -1,7 +1,7 @@
-"""Contract tests for combo_wizard.ib_adapter — concrete ib_insync-backed
+"""Contract tests for combo_wizard.ib_adapter — concrete ib_async-backed
 adapter satisfying protect.py + rehydrate.py handles.
 
-Uses stubbed ib_insync objects (no live broker). Covers:
+Uses stubbed ib_async objects (no live broker). Covers:
 - place_combo_tp builds BAG + LimitOrder with Order.action=SELL envelope for
   closing a long-debit combo; leg actions preserve the structure (no flip).
 - Gate-4 naked-short guard: TP that would create naked short exposure is
@@ -71,7 +71,7 @@ def _setup_pg(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# Stubs that look like ib_insync objects but don't import the real thing.
+# Stubs that look like ib_async objects but don't import the real thing.
 # --------------------------------------------------------------------------
 
 
@@ -557,7 +557,7 @@ def test_place_combo_tp_classifies_ib_error_201_as_naked_short(tmp_path, monkeyp
 
 def test_place_combo_tp_classifies_ib_error_201_via_code_attribute(tmp_path, monkeypatch):
     """If the underlying exception carries a .code attribute (e.g. some
-    ib_insync error shapes), classify by code without relying on message."""
+    ib_async error shapes), classify by code without relying on message."""
     monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
     sid = _seed_session(tmp_path)
 

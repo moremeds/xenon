@@ -58,12 +58,12 @@ async def test_ib_connection(host: str, port: int):
     print("\n[IB Connection Tests]")
     
     try:
-        from ib_insync import IB, Stock
+        from ib_async import IB, Stock
     except ImportError:
-        results.fail("ib_insync import", "Module not installed")
+        results.fail("ib_async import", "Module not installed")
         return
     
-    results.ok("ib_insync import")
+    results.ok("ib_async import")
     
     ib = IB()
     

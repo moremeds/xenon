@@ -5,7 +5,7 @@ Interactive Brokers Orders Sync
 Connects to TWS/IB Gateway and syncs open orders to Postgres.
 
 Requirements:
-  pip install ib_insync
+  pip install ib_async
 
 Usage:
   xenon-ib-orders              # Display orders
@@ -142,7 +142,7 @@ def fetch_open_orders(client: IBClient) -> list:
     # Batch-resolve combo leg contracts
     resolved_legs: dict = {}
     if combo_con_ids:
-        from ib_insync import Contract as IBContract
+        from ib_async import Contract as IBContract
 
         for con_id in combo_con_ids:
             try:

@@ -15,9 +15,9 @@ import sys
 from pathlib import Path
 
 try:
-    from ib_insync import ComboLeg, Contract, LimitOrder, Option, Stock, TagValue, util
+    from ib_async import ComboLeg, Contract, LimitOrder, Option, Stock, TagValue, util
 except ImportError:
-    print(json.dumps({"status": "error", "message": "ib_insync not installed"}))
+    print(json.dumps({"status": "error", "message": "ib_async not installed"}))
     sys.exit(1)
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient

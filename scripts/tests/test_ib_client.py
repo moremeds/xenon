@@ -1,6 +1,6 @@
 """Comprehensive tests for IBClient — the unified IB API client.
 
-All tests mock ib_insync.IB so no real IB connection is needed.
+All tests mock ib_async.IB so no real IB connection is needed.
 Follows Red/Green TDD: tests written first, implementation follows.
 """
 
@@ -1194,7 +1194,7 @@ class TestUtilities:
 
     @patch("xenon.clients.ib_client.IB")
     def test_ib_property(self, MockIB):
-        """The underlying ib_insync.IB instance should be accessible."""
+        """The underlying ib_async.IB instance should be accessible."""
         mock_ib = MockIB.return_value
         client = IBClient()
         assert client.ib is mock_ib

@@ -314,7 +314,7 @@ class TestModifyOrder:
 
     def test_modify_bag_order_sets_non_guaranteed(self):
         """Modifying a BAG/combo order must set NonGuaranteed to prevent IB rejection."""
-        from ib_insync import TagValue
+        from ib_async import TagValue
         t = make_trade(status="Submitted", order_type="LMT", lmt_price=20.00)
         t.contract.secType = "BAG"
         t.order.smartComboRoutingParams = None  # IB snapshot may strip this

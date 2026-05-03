@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from ib_insync import IB
+from ib_async import IB
 
 from xenon.api.trading_mode import EXPECTED_PORT as _EXPECTED_PORT
 

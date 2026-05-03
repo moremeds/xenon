@@ -31,7 +31,7 @@ from urllib.request import Request, urlopen
 
 import numpy as np
 import pandas as pd
-from ib_insync import Stock
+from ib_async import Stock
 from sqlalchemy import select
 
 from xenon.clients.ib_client import IBClient  # noqa: E402

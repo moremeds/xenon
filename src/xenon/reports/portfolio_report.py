@@ -60,7 +60,7 @@ TODAY_STR = TODAY.strftime("%Y-%m-%d")
 
 def connect_ib(port: int = 4001, client_id: int = 55):
     """Connect to IB Gateway/TWS."""
-    from ib_insync import IB
+    from ib_async import IB
 
     ib = IB()
     ib.connect(DEFAULT_HOST, port, clientId=client_id)

@@ -422,7 +422,7 @@ def test_default_tick_ttl_env_tunable(tmp_path, monkeypatch):
 
 def test_ticker_cache_reuses_subscription_across_ticks(tmp_path, monkeypatch):
     """Item 4: get_quote MUST be called once per conId even when quote_fn is
-    invoked on every tick. The cache keeps the ib_insync Ticker and lets it
+    invoked on every tick. The cache keeps the ib_async Ticker and lets it
     live-update in place."""
     from xenon.execution.combo_wizard.combo_quote_source import (
         build_default_quote_fn,

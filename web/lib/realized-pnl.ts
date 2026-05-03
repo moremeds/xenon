@@ -11,7 +11,7 @@ function todayET(): string {
 /**
  * Convert an IB fill timestamp string to a YYYY-MM-DD date in ET.
  *
- * IB (via ib_insync) always emits ISO-8601 strings.  Two forms occur in
+ * IB (via ib_async) always emits ISO-8601 strings.  Two forms occur in
  * practice:
  *   • With explicit UTC offset  e.g. "2026-03-09T15:43:07+00:00"
  *   • Without timezone (UTC-naive from Python datetime.isoformat())
@@ -37,7 +37,7 @@ function fillDateET(time: string): string {
  *
  * Why filter by date?
  * orders.json persists between trading days.  IB Gateway's session (and thus
- * ib_insync's fills() cache) spans multiple calendar days between the nightly
+ * ib_async's fills() cache) spans multiple calendar days between the nightly
  * auto-restart.  When the user opens the dashboard on a new day, stale fills
  * from previous sessions are still present and produce a large, incorrect
  * realized P&L (e.g. -$6,835) even when no trades have been made today.

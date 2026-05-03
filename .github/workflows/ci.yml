@@ -180,3 +180,5 @@ jobs:
         run: python3.13 scripts/checks/order_path_caller_allowlist.py
       - name: RegimeGate present on every order entry point
         run: python3.13 scripts/checks/order_path_regime_gate_called.py
+      - name: No ib_insync references (migrated to ib_async in PR #81)
+        run: python3.13 scripts/checks/no_ib_insync.py
