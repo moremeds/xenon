@@ -32,25 +32,34 @@ def _sync_test_db_url() -> str:
     return url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
 
 
-_PG_UNREACHABLE: bool | None = None
+_PG_REACHABLE_CACHE: bool | None = None
 
 
 def _pg_reachable(engine: Engine) -> bool:
-    """Cache reachability across all autouse fixtures within a session."""
-    global _PG_UNREACHABLE
-    if _PG_UNREACHABLE is not None:
-        return not _PG_UNREACHABLE
+    """Lazily probe PG with a real SELECT 1 + short connect timeout, cache result.
+
+    Lazy because conftest imports BEFORE pytest-dotenv loads .env, so the URL
+    available at module-import time may not match the URL the test uses.
+
+    A TCP-only probe is not sufficient: a NAT/firewall may accept the handshake
+    while the PG protocol negotiation times out.
+    """
+    global _PG_REACHABLE_CACHE
+    if _PG_REACHABLE_CACHE is not None:
+        return _PG_REACHABLE_CACHE
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-        _PG_UNREACHABLE = False
-        return True
-    except OperationalError:
-        _PG_UNREACHABLE = True
-        return False
+        _PG_REACHABLE_CACHE = True
+    except Exception:
+        _PG_REACHABLE_CACHE = False
+    return _PG_REACHABLE_CACHE
 
 
 def _truncate_postgres_tables() -> None:
+    global _PG_REACHABLE_CACHE
+    if _PG_REACHABLE_CACHE is False:
+        return
     engine = create_engine(_sync_test_db_url(), pool_pre_ping=True, connect_args={"connect_timeout": 2})
     try:
         if not _pg_reachable(engine):
@@ -86,8 +95,7 @@ def _truncate_postgres_tables() -> None:
                 ):
                     conn.execute(text(f"TRUNCATE {table} CASCADE"))
         except OperationalError:
-            global _PG_UNREACHABLE
-            _PG_UNREACHABLE = True
+            _PG_REACHABLE_CACHE = False
     finally:
         engine.dispose()
 
@@ -121,11 +129,11 @@ def pg_test_engine() -> Engine:
     Skips the test if the test DB is unreachable (offline development).
     Migration tests that need to seed PG should depend on this fixture.
     """
-    engine = create_engine(_sync_test_db_url(), pool_pre_ping=True, connect_args={"connect_timeout": 2})
-    if not _pg_reachable(engine):
-        engine.dispose()
+    eng = create_engine(_sync_test_db_url(), pool_pre_ping=True, connect_args={"connect_timeout": 2})
+    if not _pg_reachable(eng):
+        eng.dispose()
         pytest.skip(f"PG test DB unreachable at {_sync_test_db_url()}")
-    return engine
+    return eng
 
 
 @pytest.fixture

@@ -53,6 +53,27 @@ def load_portfolio_payload_sync(*, scope: AccountScope | None = None) -> dict[st
     return dict(payload) if payload else None
 
 
+def load_account_snapshots_history_sync(*, scope: AccountScope, limit: int = 5) -> list[dict[str, Any]]:
+    """Return the most recent N account_snapshots rows for the given scope, desc.
+
+    Sync mirror of `xenon.db.queries.portfolio.get_account_snapshots_history`.
+    Used by sync subprocesses (ib_sync entry-date fallback) after the JSON
+    cutoff — see the PG migration plan.
+    """
+    stmt = (
+        select(account_snapshots)
+        .where(account_snapshots.c.broker == scope.broker)
+        .where(account_snapshots.c.account_env == scope.account_env)
+        .where(account_snapshots.c.broker_account == scope.broker_account)
+        .order_by(account_snapshots.c.snapshot_at.desc())
+        .limit(limit)
+    )
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        result = conn.execute(stmt)
+        return [dict(row._mapping) for row in result]
+
+
 def get_portfolio_tickers_sync(*, scope: AccountScope | None = None) -> list[str]:
     """Convenience wrapper: extract unique uppercase tickers from the latest snapshot."""
     payload = load_portfolio_payload_sync(scope=scope)

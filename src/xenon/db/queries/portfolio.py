@@ -159,6 +159,32 @@ async def get_latest_portfolio_payload(
     return dict(payload)
 
 
+async def get_account_snapshots_history(
+    conn: AsyncConnection,
+    *,
+    broker: str,
+    account_env: str,
+    broker_account: str,
+    limit: int = 5,
+) -> list[dict]:
+    """Return the most recent N account_snapshots rows for the given scope, desc.
+
+    Each row dict carries every column on `xenon.account_snapshots`, including
+    `payload` (jsonb) and `snapshot_at`. Used by ib_sync as the entry-date
+    fallback chain after the JSON cutoff — see the PG migration plan.
+    """
+    stmt = (
+        select(account_snapshots)
+        .where(account_snapshots.c.broker == broker)
+        .where(account_snapshots.c.account_env == account_env)
+        .where(account_snapshots.c.broker_account == broker_account)
+        .order_by(account_snapshots.c.snapshot_at.desc())
+        .limit(limit)
+    )
+    result = await conn.execute(stmt)
+    return [dict(row._mapping) for row in result]
+
+
 async def upsert_nav(
     conn: AsyncConnection,
     day: date,

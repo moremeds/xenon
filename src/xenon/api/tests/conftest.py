@@ -40,7 +40,7 @@ def _postgres_orders_test_db(monkeypatch):
 
     def truncate() -> None:
         global _PG_UNREACHABLE
-        if _PG_UNREACHABLE:
+        if _PG_UNREACHABLE is True:
             return
         engine = create_engine(sync_url, pool_pre_ping=True, connect_args={"connect_timeout": 2})
         try:
