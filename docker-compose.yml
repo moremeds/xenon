@@ -66,14 +66,19 @@ services:
         # from the repo-root .env. Empty defaults keep `compose build` working
         # in CI / clean checkouts without Clerk keys.
         NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
-        NEXT_PUBLIC_REALTIME_WS_URL: ${NEXT_PUBLIC_REALTIME_WS_URL:-ws://localhost:8765}
+        # Optional: pin the WS URL into the bundle. When unset, the client
+        # falls back via /api/ib/ws-config or window.location.hostname:8765
+        # — workable for `localhost` access; set explicitly for any other
+        # browser-facing hostname (LAN IP, custom domain).
+        NEXT_PUBLIC_IB_REALTIME_WS_URL: ${NEXT_PUBLIC_IB_REALTIME_WS_URL:-}
     image: xenon-web:dev
     env_file:
       - ./web/.env
     environment:
       # Server-side fetches inside the Next.js container target the api
-      # service over the compose network, not localhost.
-      XENON_API_BASE_URL: http://api:8321
+      # service over the compose network, not localhost. Var name matches
+      # web/lib/xenonApi.ts and the per-route fallbacks in web/app/api/.
+      XENON_API_URL: http://api:8321
     ports:
       - "3000:3000"
     extra_hosts:
