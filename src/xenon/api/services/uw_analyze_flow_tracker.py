@@ -15,16 +15,10 @@ Spec: docs/superpowers/specs/2026-04-08-uw-analyze-overhaul-design.md
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
-import os
-import sys
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
-
-_PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 logger = logging.getLogger("xenon.uw_analyze_flow_tracker")
 
@@ -40,9 +34,6 @@ PURGE_AFTER_DAYS = 30  # drop closed/expired events older than this
 
 Side = Literal["call", "put"]
 Status = Literal["open", "closed", "anomaly", "expired"]
-
-_DEFAULT_PATH = _PROJECT_ROOT / "data" / "uw_unusual_flow_log.json"
-
 
 # ── Data classes ────────────────────────────────────────────────────────────
 
@@ -368,35 +359,25 @@ def progress_event(
 
 
 class FlowLog:
-    """Thin in-memory dict-of-events with Postgres persistence."""
+    """Thin in-memory dict-of-events backed by Postgres ``xenon.uw_flow_events``."""
 
-    def __init__(self, path: Optional[Path] = None) -> None:
-        self.path = Path(path) if path else _DEFAULT_PATH
+    def __init__(self) -> None:
         self._events: dict[str, FlowEvent] = {}
         self._loaded = False
 
     def load(self) -> None:
         if self._loaded:
             return
-        self._loaded = True
-        if not self.path.exists():
-            self._load_from_postgres()
-            return
-        try:
-            raw = json.loads(self.path.read_text())
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("uw_unusual_flow_log corrupt — starting empty: %s", exc)
-            return
-        events = raw.get("events") if isinstance(raw, dict) else None
-        if not isinstance(events, dict):
-            return
-        for eid, payload in events.items():
-            try:
-                self._events[eid] = _event_from_dict(payload)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("skipping malformed flow event %s: %s", eid, exc)
+        # Set _loaded only after a successful PG read. If PG is briefly
+        # unreachable on the first call we must NOT latch _loaded=True with
+        # empty _events — subsequent upsert()s would treat real terminal
+        # statuses (closed/anomaly) as "new open" and overwrite them on the
+        # next save(). Retrying on the next call is the safe default.
+        ok = self._load_from_postgres()
+        if ok:
+            self._loaded = True
 
-    def _load_from_postgres(self) -> None:
+    def _load_from_postgres(self) -> bool:
         try:
             from sqlalchemy import select
 
@@ -422,8 +403,10 @@ class FlowLog:
                     "closed_at": data["closed_at"].isoformat() if data["closed_at"] else None,
                 }
                 self._events[payload["id"]] = _event_from_dict(payload)
+            return True
         except Exception as exc:  # noqa: BLE001
             logger.warning("flow_log Postgres load failed: %s", exc)
+            return False
 
     def all(self) -> list[FlowEvent]:
         self.load()
@@ -480,6 +463,20 @@ class FlowLog:
         for eid in to_drop:
             self._events.pop(eid, None)
         if to_drop:
+            # Also delete from PG — _save_to_postgres uses UPSERT so it would
+            # never remove rows on its own; without this, the next process
+            # restart would re-load every "purged" event from disk.
+            try:
+                from sqlalchemy import delete
+
+                from xenon.db.engine import get_sync_engine
+                from xenon.db.schema import uw_flow_events
+
+                engine = get_sync_engine()
+                with engine.begin() as conn:
+                    conn.execute(delete(uw_flow_events).where(uw_flow_events.c.flow_event_key.in_(to_drop)))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("flow_log purge PG delete failed (memory state still updated): %s", exc)
             logger.info("flow_log purge removed %d events older than %s", len(to_drop), cutoff.isoformat())
         return len(to_drop)
 

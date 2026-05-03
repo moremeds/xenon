@@ -292,57 +292,140 @@ def cancel_violations(client, violations: list) -> int:
     return cancelled
 
 
+def _shape_open_order_for_audit(trade) -> dict | None:
+    """Map an ib_async Trade into the dict shape `find_naked_short_violations`
+    consumes. Mirrors `ib_sync._open_orders_for_audit`."""
+    order = getattr(trade, "order", None)
+    contract = getattr(trade, "contract", None)
+    status_obj = getattr(trade, "orderStatus", None)
+    if order is None or contract is None:
+        return None
+    return {
+        "status": getattr(status_obj, "status", "") if status_obj else "",
+        "action": getattr(order, "action", "") or "",
+        "totalQuantity": int(getattr(order, "totalQuantity", 0) or 0),
+        "orderId": getattr(order, "orderId", None),
+        "permId": getattr(order, "permId", None),
+        "orderRef": getattr(order, "orderRef", "") or "",
+        "contract": {
+            "secType": getattr(contract, "secType", "") or "",
+            "symbol": getattr(contract, "symbol", "") or "",
+            "right": getattr(contract, "right", "") or "",
+            "expiry": getattr(contract, "lastTradeDateOrContractMonth", "") or "",
+            "strike": getattr(contract, "strike", 0) or 0,
+        },
+    }
+
+
 def main(argv=None):
-    """CLI entry point. Returns summary dict (for testing)."""
+    """CLI entry point. Returns summary dict (for testing).
+
+    Default sources are PG (positions via account_snapshots) + live IB
+    (open orders). The legacy ``--portfolio FILE`` / ``--orders FILE``
+    flags remain for offline test fixtures and dry-run forensics.
+    """
     parser = argparse.ArgumentParser(description="Naked short audit — detect and cancel violations")
     parser.add_argument("--dry-run", action="store_true", help="Print violations without cancelling")
     parser.add_argument(
-        "--portfolio", type=str, default=str(DATA_DIR / "portfolio.json"), help="Path to portfolio.json"
+        "--portfolio",
+        type=str,
+        default=None,
+        help="Optional path to portfolio.json fixture (default: PG account_snapshots for current scope)",
     )
-    parser.add_argument("--orders", type=str, default=str(DATA_DIR / "orders.json"), help="Path to orders.json")
+    parser.add_argument(
+        "--orders",
+        type=str,
+        default=None,
+        help="Optional path to orders.json fixture (default: live IB open orders)",
+    )
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_GATEWAY_PORT)
 
     args = parser.parse_args(argv)
 
-    # Load data
-    with open(args.portfolio) as f:
-        portfolio_data = json.load(f)
-    with open(args.orders) as f:
-        orders_data = json.load(f)
+    # Positions: PG by default, optional file override.
+    if args.portfolio is not None:
+        with open(args.portfolio) as f:
+            portfolio_data = json.load(f)
+        positions = portfolio_data.get("positions", [])
+    else:
+        from xenon.execution.account_scope import resolve_from_env
+        from xenon.utils.portfolio_loader import load_portfolio_payload_sync
 
-    positions = portfolio_data.get("positions", [])
-    orders = orders_data.get("open_orders", [])
+        payload = load_portfolio_payload_sync(scope=resolve_from_env())
+        if payload is None:
+            print(json.dumps({"error": "no portfolio snapshot in PG for current scope"}, indent=2))
+            return {"violations_found": 0, "violations": [], "cancelled": 0, "error": "no portfolio snapshot"}
+        positions = payload.get("positions", [])
 
-    # Detect violations
-    violations = find_naked_short_violations(orders, positions)
-
-    summary = {
-        "violations_found": len(violations),
-        "violations": violations,
-        "cancelled": 0,
-        "dry_run": args.dry_run,
-    }
-
-    if not violations:
-        print(json.dumps(summary, indent=2))
-        return summary
-
-    if args.dry_run:
-        print(json.dumps(summary, indent=2))
-        return summary
-
-    # Live mode: connect and cancel
+    # Orders + cancel: fold both into a single IB session so we don't acquire
+    # the audit client_id twice.
     audit_client_id = CLIENT_IDS.get("ib_order_manage", 25)
+    needs_ib = args.orders is None or not args.dry_run
+    summary: dict
+    if args.orders is not None:
+        with open(args.orders) as f:
+            orders_data = json.load(f)
+        orders = orders_data.get("open_orders", [])
+        violations = find_naked_short_violations(orders, positions)
+        summary = {
+            "violations_found": len(violations),
+            "violations": violations,
+            "cancelled": 0,
+            "dry_run": args.dry_run,
+        }
+        if not violations or args.dry_run:
+            print(json.dumps(summary, indent=2))
+            return summary
+        # Live cancel of violations from file-supplied orders.
+        try:
+            with acquire_owner(audit_client_id, timeout_ms=5000):
+                client = IBClient()
+                try:
+                    client.connect(host=args.host, port=args.port, client_id=audit_client_id)
+                    summary["cancelled"] = cancel_violations(client, violations)
+                except Exception as e:
+                    logger.error("IB connection failed: %s", e)
+                    summary["error"] = str(e)
+                finally:
+                    try:
+                        client.disconnect()
+                    except Exception:
+                        pass
+        except ClientIdBusy as e:
+            logger.error("audit deferred: clientId %d busy", e.client_id)
+            summary["error"] = f"audit deferred: clientId {e.client_id} busy"
+            print(json.dumps(summary, indent=2))
+            sys.exit(2)
+        print(json.dumps(summary, indent=2))
+        return summary
+
+    # Default path: pull orders from IB and cancel inside the same session.
     try:
         with acquire_owner(audit_client_id, timeout_ms=5000):
             client = IBClient()
             try:
                 client.connect(host=args.host, port=args.port, client_id=audit_client_id)
-                summary["cancelled"] = cancel_violations(client, violations)
+                trades = client.get_open_orders()
+                orders = [o for o in (_shape_open_order_for_audit(t) for t in trades) if o is not None]
+                violations = find_naked_short_violations(orders, positions)
+                summary = {
+                    "violations_found": len(violations),
+                    "violations": violations,
+                    "cancelled": 0,
+                    "dry_run": args.dry_run,
+                }
+                if violations and not args.dry_run:
+                    summary["cancelled"] = cancel_violations(client, violations)
             except Exception as e:
-                logger.error("IB connection failed: %s", e)
-                summary["error"] = str(e)
+                logger.error("IB session failed: %s", e)
+                summary = {
+                    "violations_found": 0,
+                    "violations": [],
+                    "cancelled": 0,
+                    "dry_run": args.dry_run,
+                    "error": str(e),
+                }
             finally:
                 try:
                     client.disconnect()
@@ -350,7 +433,13 @@ def main(argv=None):
                     pass
     except ClientIdBusy as e:
         logger.error("audit deferred: clientId %d busy", e.client_id)
-        summary["error"] = f"audit deferred: clientId {e.client_id} busy"
+        summary = {
+            "violations_found": 0,
+            "violations": [],
+            "cancelled": 0,
+            "dry_run": args.dry_run,
+            "error": f"audit deferred: clientId {e.client_id} busy",
+        }
         print(json.dumps(summary, indent=2))
         sys.exit(2)
 

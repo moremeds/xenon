@@ -6,11 +6,18 @@ import os
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
+
+_PG_UNREACHABLE: bool | None = None
 
 
 @pytest.fixture(autouse=True)
 def _postgres_orders_test_db(monkeypatch):
-    """Point sync Postgres callers at the test DB and clean order tables."""
+    """Point sync Postgres callers at the test DB and clean order tables.
+
+    Tolerates an unreachable test DB (offline development) — see the matching
+    pattern in `scripts/tests/conftest.py`.
+    """
     url = os.environ.get(
         "DATABASE_URL_TEST",
         "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
@@ -32,7 +39,10 @@ def _postgres_orders_test_db(monkeypatch):
         pass
 
     def truncate() -> None:
-        engine = create_engine(sync_url, pool_pre_ping=True)
+        global _PG_UNREACHABLE
+        if _PG_UNREACHABLE is True:
+            return
+        engine = create_engine(sync_url, pool_pre_ping=True, connect_args={"connect_timeout": 2})
         try:
             with engine.begin() as conn:
                 for table in (
@@ -46,6 +56,7 @@ def _postgres_orders_test_db(monkeypatch):
                     "xenon.uw_flow_events",
                     "xenon.uw_api_stats",
                     "xenon.uw_analyze_snapshots",
+                    "xenon.order_fills",
                     "xenon.positions",
                     "xenon.account_snapshots",
                     "xenon.journal_entries",
@@ -58,6 +69,8 @@ def _postgres_orders_test_db(monkeypatch):
                     "xenon.ticker_cache",
                 ):
                     conn.execute(text(f"TRUNCATE {table} CASCADE"))
+        except OperationalError:
+            _PG_UNREACHABLE = True
         finally:
             engine.dispose()
 
@@ -82,6 +95,7 @@ def _trading_mode_paper_default(monkeypatch):
     import importlib
 
     monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU0000000")
     try:
         import xenon.api.trading_mode as tm
 

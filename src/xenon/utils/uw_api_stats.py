@@ -14,15 +14,12 @@ UWClient._get() runs in concurrent threads via asyncio.to_thread().
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import re
 import threading
 import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 from zoneinfo import ZoneInfo
 
@@ -40,9 +37,6 @@ _PERSIST_THROTTLE_SECONDS = 30.0
 # History schema version (bumped if the on-disk shape changes in a
 # non-forward-compat way).
 _HISTORY_SCHEMA_VERSION = 1
-
-# Default history file path — resolves to <repo>/data/uw_api_stats_history.json.
-_DEFAULT_HISTORY_PATH = Path(__file__).resolve().parent.parent.parent.parent / "data" / "uw_api_stats_history.json"
 
 # Regex to extract ticker from common UW endpoint paths.
 # Matches: stock/{TICKER}/..., darkpool/{TICKER}, earnings/{TICKER},
@@ -103,7 +97,6 @@ class UWApiStats:
     def __init__(
         self,
         *,
-        history_path: Optional[Path] = None,
         now_fn: Optional[Callable[[], float]] = None,
         persist_throttle_seconds: float = _PERSIST_THROTTLE_SECONDS,
     ) -> None:
@@ -125,14 +118,12 @@ class UWApiStats:
         self._latencies: deque[float] = deque(maxlen=_LATENCY_WINDOW)
 
         # Hourly history bookkeeping.
-        self.history_path: Path = Path(history_path) if history_path else _DEFAULT_HISTORY_PATH
         self._persist_throttle = float(persist_throttle_seconds)
         self._hourly: Dict[str, Dict[str, Any]] = {}
         self._last_write_ts: float = 0.0
 
-        # Load any persisted history on init. Tolerates every possible
-        # failure mode so the FastAPI server never fails to boot due to
-        # a corrupt history file.
+        # Load persisted history from Postgres on init. Tolerates failures
+        # so the FastAPI server never fails to boot.
         self._load_history()
 
     # ── public API ────────────────────────────────────────────────────
@@ -495,7 +486,7 @@ class UWApiStats:
             logger.warning("uw_api_stats Postgres write failed: %s", exc)
 
     def _load_history(self) -> None:
-        """Read persisted history on startup. Tolerates every failure mode.
+        """Read persisted history from Postgres on startup.
 
         After loading the hourly buckets, also rehydrates the in-memory
         session counters (``_totals``, ``_by_status``) from them so the
@@ -504,40 +495,7 @@ class UWApiStats:
         sum/count per hour, not the raw distribution — so ``latency_ms.p95``
         stays absent until the first new live sample arrives.
         """
-        if self._load_history_from_postgres():
-            return
-        try:
-            if not self.history_path.exists():
-                return
-            raw = self.history_path.read_text()
-            payload = json.loads(raw)
-            buckets_in = payload.get("buckets") or {}
-            if not isinstance(buckets_in, dict):
-                return
-            loaded: Dict[str, Dict[str, Any]] = {}
-            for key, val in buckets_in.items():
-                if not isinstance(key, str) or not isinstance(val, dict):
-                    continue
-                loaded[key] = {
-                    "requests_2xx": int(val.get("requests_2xx", 0) or 0),
-                    "requests_4xx": int(val.get("requests_4xx", 0) or 0),
-                    "requests_5xx": int(val.get("requests_5xx", 0) or 0),
-                    "cached": int(val.get("cached", 0) or 0),
-                    "sum_latency_ms": float(val.get("sum_latency_ms", 0.0) or 0.0),
-                    "latency_count": int(val.get("latency_count", 0) or 0),
-                }
-            self._hourly = loaded
-            # Prune immediately — the file might be from >96h ago.
-            self._prune_history(now_ts=self._now_fn())
-            self._rehydrate_session_counters_from_history()
-            logger.info("uw_api_stats loaded %d hourly buckets from %s", len(self._hourly), self.history_path)
-        except (FileNotFoundError, json.JSONDecodeError, OSError, KeyError, TypeError, ValueError) as exc:
-            logger.warning(
-                "uw_api_stats history load failed (%s: %s) — starting fresh",
-                type(exc).__name__,
-                exc,
-            )
-            self._hourly = {}
+        self._load_history_from_postgres()
 
     def _load_history_from_postgres(self) -> bool:
         try:

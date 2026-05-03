@@ -30,7 +30,8 @@ with patch("os.makedirs"):
         select_option_mark,
     )
 from xenon.db.engine import get_sync_engine
-from xenon.db.schema import account_snapshots, trades as trades_table
+from xenon.db.schema import account_snapshots
+from xenon.db.schema import trades as trades_table
 
 
 def test_build_option_id_formats_occ_style_identifier():
@@ -254,7 +255,9 @@ def test_build_payload_exposes_expected_top_level_contract(monkeypatch):
     monkeypatch.setattr("xenon.reports.portfolio_performance.extract_fill_marks", lambda *a, **kw: {})
     monkeypatch.setattr("xenon.reports.portfolio_performance.fetch_stock_history", fake_stock_history)
     monkeypatch.setattr("xenon.reports.portfolio_performance._fetch_all_histories", fake_fetch_all)
-    monkeypatch.setattr("xenon.reports.portfolio_performance._fetch_stock_history_fallback", lambda s, st, en: (s, {}, "none"))
+    monkeypatch.setattr(
+        "xenon.reports.portfolio_performance._fetch_stock_history_fallback", lambda s, st, en: (s, {}, "none")
+    )
     monkeypatch.setattr("xenon.reports.portfolio_performance.IBClient", DummyIBClient)
     monkeypatch.setattr("xenon.reports.portfolio_performance.read_cache", lambda *a: None)
     monkeypatch.setattr("xenon.reports.portfolio_performance.write_cache", lambda *a, **kw: None)
@@ -273,13 +276,13 @@ def test_build_payload_exposes_expected_top_level_contract(monkeypatch):
     assert payload["series"][0]["date"] == "2026-01-02"
 
 
-def test_portfolio_performance_does_not_read_json_files(monkeypatch):
+def test_portfolio_performance_does_not_read_json_files(monkeypatch, pg_test_engine):
     from xenon.reports import portfolio_performance as perf
 
     monkeypatch.setenv("XENON_TRADING_MODE", "paper")
     monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU123456")
 
-    engine = get_sync_engine()
+    engine = pg_test_engine
     with engine.begin() as conn:
         conn.execute(
             insert(account_snapshots).values(
@@ -404,7 +407,9 @@ def test_build_payload_warns_and_continues_when_option_history_is_rate_limited(m
         },
     )
     monkeypatch.setattr("xenon.reports.portfolio_performance._fetch_all_histories", fake_fetch_all)
-    monkeypatch.setattr("xenon.reports.portfolio_performance._fetch_stock_history_fallback", lambda s, st, en: (s, {}, "none"))
+    monkeypatch.setattr(
+        "xenon.reports.portfolio_performance._fetch_stock_history_fallback", lambda s, st, en: (s, {}, "none")
+    )
     monkeypatch.setattr("xenon.reports.portfolio_performance.IBClient", DummyIBClient)
     monkeypatch.setattr("xenon.reports.portfolio_performance.read_cache", lambda *a: None)
     monkeypatch.setattr("xenon.reports.portfolio_performance.write_cache", lambda *a, **kw: None)

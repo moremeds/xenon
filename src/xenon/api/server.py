@@ -549,38 +549,16 @@ async def lifespan(app: FastAPI):
         logger.warning("UW_TOKEN not set — UW-dependent endpoints will fail")
 
     # Eager-load the uw_analyze cache so the most recent snapshots are in
-    # memory before the first request. Without this, the first GET after
-    # a restart pays the disk-read + parse cost (~2 MB JSON). The cache is
-    # lazy-loaded by construction; all_entries() triggers _ensure_loaded()
-    # exactly once and is a no-op on subsequent calls. Suppressed in test
-    # mode so unit tests seeing an empty singleton aren't polluted by the
-    # real data/uw_analyze_cache.json on disk.
+    # memory before the first request. The cache is lazy-loaded by
+    # construction; all_entries() triggers _ensure_loaded() exactly once
+    # and is a no-op on subsequent calls. Suppressed in test mode so unit
+    # tests seeing an empty singleton aren't polluted by the real PG state.
     try:
         from xenon.api.routes.uw_analyze import get_portfolio_cache as _get_portfolio_cache
-        from xenon.api.services import uw_analyze_cache as _uw_cache_mod
 
         _cache_singleton = _get_portfolio_cache()
         _preloaded = _cache_singleton.all_entries()
-        _cache_path = _uw_cache_mod._DEFAULT_CACHE_PATH
-        _disk_exists = _cache_path.exists()
-        _disk_size = _cache_path.stat().st_size if _disk_exists else 0
-        if _disk_exists and _disk_size > 64 and not _preloaded:
-            # Loud: the file has real content but we hydrated nothing.
-            # `_ensure_loaded` already logged the specific reason at
-            # WARNING; escalate to ERROR here so ops sees it.
-            logger.error(
-                "uw_analyze_cache preload: disk file %s has %d bytes but in-memory "
-                "cache is empty — investigate _ensure_loaded warning above",
-                _cache_path,
-                _disk_size,
-            )
-        else:
-            logger.info(
-                "uw_analyze_cache preloaded: %d entries (disk=%s, %d bytes)",
-                len(_preloaded),
-                _disk_exists,
-                _disk_size,
-            )
+        logger.info("uw_analyze_cache preloaded from PG: %d entries", len(_preloaded))
     except Exception as exc:  # noqa: BLE001
         logger.warning("uw_analyze_cache preload failed: %s", exc)
 

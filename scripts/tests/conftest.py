@@ -7,6 +7,10 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
+
+from xenon.execution.account_scope import AccountScope
 
 # Add repo root, scripts/, and src/ so tests can import via:
 #   - legacy bare module paths (`from fetchers...`, `from utils...`)
@@ -28,45 +32,82 @@ def _sync_test_db_url() -> str:
     return url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
 
 
-def _truncate_postgres_tables() -> None:
-    engine = create_engine(_sync_test_db_url(), pool_pre_ping=True)
+_PG_REACHABLE_CACHE: bool | None = None
+
+
+def _pg_reachable(engine: Engine) -> bool:
+    """Lazily probe PG with a real SELECT 1 + short connect timeout, cache result.
+
+    Lazy because conftest imports BEFORE pytest-dotenv loads .env, so the URL
+    available at module-import time may not match the URL the test uses.
+
+    A TCP-only probe is not sufficient: a NAT/firewall may accept the handshake
+    while the PG protocol negotiation times out.
+    """
+    global _PG_REACHABLE_CACHE
+    if _PG_REACHABLE_CACHE is not None:
+        return _PG_REACHABLE_CACHE
     try:
-        with engine.begin() as conn:
-            for table in (
-                "events.outbox",
-                "xenon.order_fills",
-                "xenon.order_events",
-                "xenon.order_submissions",
-                "xenon.wizard_protection",
-                "xenon.wizard_events",
-                "xenon.wizard_combo_attempts",
-                "xenon.wizard_sessions",
-                "xenon.uw_flow_event_ticks",
-                "xenon.uw_flow_events",
-                "xenon.uw_api_stats",
-                "xenon.uw_analyze_flow_alerts",
-                "xenon.uw_analyze_gex_strikes",
-                "xenon.uw_analyze_short_volume_trend",
-                "xenon.uw_analyze_snapshots",
-                "xenon.positions",
-                "xenon.account_snapshots",
-                "xenon.journal_entries",
-                "xenon.trades",
-                "xenon.nav_history",
-                "xenon.gex_snapshots",
-                "xenon.scan_results",
-                "xenon.vcg_series",
-                "xenon.cri_series",
-                "xenon.ticker_cache",
-            ):
-                conn.execute(text(f"TRUNCATE {table} CASCADE"))
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        _PG_REACHABLE_CACHE = True
+    except Exception:
+        _PG_REACHABLE_CACHE = False
+    return _PG_REACHABLE_CACHE
+
+
+def _truncate_postgres_tables() -> None:
+    global _PG_REACHABLE_CACHE
+    if _PG_REACHABLE_CACHE is False:
+        return
+    engine = create_engine(_sync_test_db_url(), pool_pre_ping=True, connect_args={"connect_timeout": 2})
+    try:
+        if not _pg_reachable(engine):
+            return
+        try:
+            with engine.begin() as conn:
+                for table in (
+                    "events.outbox",
+                    "xenon.order_fills",
+                    "xenon.order_events",
+                    "xenon.order_submissions",
+                    "xenon.wizard_protection",
+                    "xenon.wizard_events",
+                    "xenon.wizard_combo_attempts",
+                    "xenon.wizard_sessions",
+                    "xenon.uw_flow_event_ticks",
+                    "xenon.uw_flow_events",
+                    "xenon.uw_api_stats",
+                    "xenon.uw_analyze_flow_alerts",
+                    "xenon.uw_analyze_gex_strikes",
+                    "xenon.uw_analyze_short_volume_trend",
+                    "xenon.uw_analyze_snapshots",
+                    "xenon.positions",
+                    "xenon.account_snapshots",
+                    "xenon.journal_entries",
+                    "xenon.trades",
+                    "xenon.nav_history",
+                    "xenon.gex_snapshots",
+                    "xenon.scan_results",
+                    "xenon.vcg_series",
+                    "xenon.cri_series",
+                    "xenon.ticker_cache",
+                ):
+                    conn.execute(text(f"TRUNCATE {table} CASCADE"))
+        except SQLAlchemyError:
+            _PG_REACHABLE_CACHE = False
     finally:
         engine.dispose()
 
 
 @pytest.fixture(autouse=True)
 def _postgres_orders_test_db(monkeypatch):
-    """Point sync Postgres callers at the test DB and clean order tables."""
+    """Point sync Postgres callers at the test DB and clean order tables.
+
+    Tolerates an unreachable test DB (offline development): truncation is
+    silently skipped and tests that actually need PG should depend on the
+    `pg_test_engine` fixture, which calls `pytest.skip()` when offline.
+    """
     monkeypatch.setenv("DATABASE_URL", _sync_test_db_url())
 
     try:
@@ -81,6 +122,30 @@ def _postgres_orders_test_db(monkeypatch):
     _truncate_postgres_tables()
 
 
+@pytest.fixture
+def pg_test_engine() -> Engine:
+    """Sync SQLAlchemy engine pointed at DATABASE_URL_TEST.
+
+    Skips the test if the test DB is unreachable (offline development).
+    Migration tests that need to seed PG should depend on this fixture.
+    """
+    eng = create_engine(_sync_test_db_url(), pool_pre_ping=True, connect_args={"connect_timeout": 2})
+    if not _pg_reachable(eng):
+        eng.dispose()
+        pytest.skip(f"PG test DB unreachable at {_sync_test_db_url()}")
+    return eng
+
+
+@pytest.fixture
+def scope_fixture() -> AccountScope:
+    """Default paper-mode IB scope used by every migrated CLI test.
+
+    Mirrors the autouse env exports below so tests that build their own
+    AccountScope use the same identity that `resolve_from_env()` would yield.
+    """
+    return AccountScope(broker="IB", account_env="paper", broker_account="DU0000000")
+
+
 @pytest.fixture(autouse=True)
 def _trading_mode_paper_default(monkeypatch):
     """Default every test to paper + a paper-prefixed account so the lifespan
@@ -90,6 +155,7 @@ def _trading_mode_paper_default(monkeypatch):
     that normally seeds app.state.mode_verified never runs.
     """
     monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU0000000")
     try:
         import xenon.api.trading_mode as tm
 

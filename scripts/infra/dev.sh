@@ -100,6 +100,35 @@ export XENON_TRADING_MODE="$MODE"
 export IB_GATEWAY_HOST="$IB_HOST"
 export IB_GATEWAY_PORT="$PORT"
 
+# Per-mode broker account placeholder. AccountScope.resolve_from_env() raises
+# if XENON_BROKER_ACCOUNT is unset, and many sync subprocesses (ib_sync,
+# ib_reconcile, naked_short_audit) call it at startup before IB Gateway is
+# even reachable. ib_sync overrides this with managedAccounts()[0] after the
+# IB connection is established — so this export is only the initial value to
+# unblock imports. Pulled from .env vars XENON_PAPER_ACCOUNT / XENON_LIVE_ACCOUNT
+# (paper requires DU* prefix; live requires U* and not DU*).
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source <(grep -E '^(XENON_PAPER_ACCOUNT|XENON_LIVE_ACCOUNT)=' "$ENV_FILE")
+  set +a
+fi
+case "$MODE" in
+  paper) BROKER_ACCOUNT="${XENON_PAPER_ACCOUNT:-}" ;;
+  live)  BROKER_ACCOUNT="${XENON_LIVE_ACCOUNT:-}"  ;;
+esac
+if [[ -z "$BROKER_ACCOUNT" ]]; then
+  if [[ "$MODE" == "paper" ]]; then
+    log_err "XENON_PAPER_ACCOUNT must be set in .env for paper mode (e.g. DU1234567)."
+  else
+    log_err "XENON_LIVE_ACCOUNT must be set in .env for live mode (e.g. U1234567)."
+  fi
+  log_err "  Required: clean-slate PG cutoff — fake DU0000000 default would let unscoped rows leak into PG."
+  exit 2
+fi
+export XENON_BROKER_ACCOUNT="$BROKER_ACCOUNT"
+log_info "Broker account: $XENON_BROKER_ACCOUNT (overridden by ib_sync after IB connect)"
+
 # Optionally bypass Clerk for the dev session. The flag is honored by
 # web/middleware.ts (XENON_DISABLE_AUTH=1).
 if [[ "$NO_AUTH" == "1" ]]; then

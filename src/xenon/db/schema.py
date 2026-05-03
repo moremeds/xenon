@@ -180,6 +180,12 @@ nav_history = Table(
     Column("date", Date, primary_key=True),
     Column("nav", Numeric(14, 2), nullable=False),
     Column("daily_pnl", Numeric(12, 2)),
+    # IB Flex EquitySummaryByReportDateInBase breakdown (NULL when no Flex data).
+    # Replaces data/nav_history_ib.json post-2026-05-03 PG cutoff.
+    Column("total", Numeric(14, 2)),
+    Column("cash", Numeric(14, 2)),
+    Column("stock_value", Numeric(14, 2)),
+    Column("options_value", Numeric(14, 2)),
     CheckConstraint("broker IN ('IB', 'FUTU')", name="ck_nav_broker"),
     CheckConstraint(
         "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
@@ -650,6 +656,14 @@ uw_analyze_snapshots = Table(
     Column("options_flow_summary", JSONB),
     Column("flow_alerts", JSONB),
     Column("materialized_changes", JSONB),
+    # Internal cache state preserved across restarts so source-aware eviction
+    # priority (sources), OI diffing (oi_baseline), and prev-vs-current diff
+    # comparison (previous_snapshot) survive a process bounce. Without these,
+    # rehydrated entries would land in tier=0/adhoc and force unnecessary OI
+    # re-fetches.
+    Column("sources", JSONB),
+    Column("oi_baseline", JSONB),
+    Column("previous_snapshot", JSONB),
     Column("report_fetched_at", TIMESTAMP(timezone=True)),
     Column("archived_at", TIMESTAMP(timezone=True)),
     Column("price", Numeric(12, 4), Computed("(report->>'price')::numeric", persisted=True)),

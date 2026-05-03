@@ -15,9 +15,10 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional, Tuple
@@ -36,7 +37,10 @@ from xenon.db.engine import get_sync_engine
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
 DEFAULT_CLIENT_ID = CLIENT_IDS["ib_sync"]
 
-PORTFOLIO_PATH = Path(__file__).resolve().parents[3] / "data" / "portfolio.json"
+# Data directory for legacy disk readers (Gate-4 audit reads orders.json from
+# here). Replaces the old PORTFOLIO_PATH constant — the portfolio itself now
+# lives in xenon.account_snapshots, but a few legacy disk readers remain.
+DATA_DIR = Path(__file__).resolve().parents[3] / "data"
 
 
 def connect_ib(host: str, port: int, client_id="auto") -> IBClient:
@@ -924,83 +928,26 @@ def convert_to_portfolio_format(
     total_deployed = sum(p["entry_cost"] for p in collapsed_positions)
     deployed_pct = (total_deployed / bankroll * 100) if bankroll > 0 else 0
 
-    # Derive entry_date from trade_log and previous portfolio.
-    # Priority: trade_log (most recent BUY/TRADE for matching ticker+structure) →
-    # previous portfolio → today (truly new position).
-    import json as _json
+    # Derive entry_date from PG (order_fills + trades + previous account_snapshots).
+    # Priority: per-contract fills → trade_log → per-ticker fills → IB session
+    # fills → previous portfolio → "unknown".
+    # PG outage / unset XENON_BROKER_ACCOUNT must not abort the whole sync —
+    # fall back to empty lookups so positions get entry_date="unknown" rather
+    # than the portfolio failing to write at all.
+    from xenon.execution.account_scope import resolve_from_env
+    from xenon.utils.portfolio_loader import EntryDateLookups, load_entry_date_lookups_sync
 
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    # Build date lookup from trade_log (latest trade per ticker+structure key)
-    trade_log_dates: dict[str, str] = {}
-    trade_log_path = PORTFOLIO_PATH.parent / "trade_log.json"
-    if trade_log_path.exists():
-        try:
-            raw_log = _json.loads(trade_log_path.read_text())
-            log_entries = raw_log if isinstance(raw_log, list) else raw_log.get("trades", [])
-            if isinstance(log_entries, list):
-                for entry in log_entries:
-                    t = entry.get("ticker", "")
-                    d = entry.get("date", "")
-                    s = entry.get("structure", "")
-                    if t and d:
-                        trade_log_dates[t] = d
-                        if s:
-                            trade_log_dates[f"{t}|{s}"] = d
-        except Exception:
-            pass
-
-    # Blotter dates (from IB Flex Query — most reliable source)
-    blotter_dates: dict[str, str] = {}  # keyed by "ticker" and "ticker|expiry|right|strike"
-    blotter_path = PORTFOLIO_PATH.parent / "blotter.json"
-    if blotter_path.exists():
-        try:
-            blotter = _json.loads(blotter_path.read_text())
-            for trade in blotter.get("open_trades", []):
-                sym_raw = trade.get("symbol", "")
-                ticker_b = sym_raw.split()[0].strip()
-                execs = trade.get("executions", [])
-                # Find earliest execution date
-                earliest = None
-                for ex in execs:
-                    t_str = ex.get("time", "")
-                    if t_str:
-                        d = t_str[:10]
-                        if earliest is None or d < earliest:
-                            earliest = d
-                if not earliest or not ticker_b:
-                    continue
-                # Per-ticker fallback (earliest across all legs)
-                if ticker_b not in blotter_dates or earliest < blotter_dates[ticker_b]:
-                    blotter_dates[ticker_b] = earliest
-                # Per-contract key for options (parse OCC symbol: AAOI  260417P00085000)
-                parts = sym_raw.strip().split()
-                if len(parts) >= 2 and trade.get("sec_type") == "OPT":
-                    occ = parts[-1]  # e.g. "260417P00085000"
-                    if len(occ) >= 15:
-                        exp = f"20{occ[:6]}"  # 260417 → 20260417
-                        exp_fmt = f"{exp[:4]}-{exp[4:6]}-{exp[6:8]}"  # → 2026-04-17
-                        right = occ[6]  # P or C
-                        strike_raw = int(occ[7:]) / 1000  # 00085000 → 85.0
-                        contract_key = f"{ticker_b}|{exp_fmt}|{right}|{strike_raw}"
-                        blotter_dates[contract_key] = earliest
-        except Exception:
-            pass
-
-    # Previous portfolio dates (fallback)
-    prev_dates: dict[str, str] = {}
-    if PORTFOLIO_PATH.exists():
-        try:
-            prev = _json.loads(PORTFOLIO_PATH.read_text())
-            for p in prev.get("positions", []):
-                key = f"{p.get('ticker')}|{p.get('structure')}|{p.get('expiry')}"
-                ed = p.get("entry_date", "")
-                # Only carry forward dates that aren't today (avoids inheriting
-                # the old bug where every sync set entry_date = today)
-                if ed and ed != today:
-                    prev_dates[key] = ed
-        except Exception:
-            pass
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        lookups = load_entry_date_lookups_sync(scope=resolve_from_env())
+    except Exception as e:
+        logging.getLogger("ib_sync.entry_dates").warning(
+            "entry-date PG lookup failed (%s: %s); using empty fallback", type(e).__name__, e
+        )
+        lookups = EntryDateLookups({}, {}, {}, {})
+    blotter_dates = lookups.per_contract_dates | lookups.per_ticker_dates
+    trade_log_dates = lookups.trade_log_dates
+    prev_dates = lookups.prev_portfolio_dates
 
     for pos in collapsed_positions:
         key = f"{pos.get('ticker')}|{pos.get('structure')}|{pos.get('expiry')}"
@@ -1215,6 +1162,47 @@ def save_portfolio(portfolio: dict):
             print(f"  Warning: NAV snapshot failed: {exc}")
 
 
+def _open_orders_for_audit(client) -> list[dict]:
+    """Pull open orders from IB and shape them for naked_short_audit.
+
+    Replaces the old `data/orders.json` read. The audit's pure function
+    (`find_naked_short_violations`) expects a list of dicts shaped like the
+    web app's open_orders payload — this adapter mirrors that shape from
+    live ib_async Trade objects so we don't depend on a separate process
+    having written to disk first.
+    """
+    try:
+        trades = client.get_open_orders()
+    except Exception as exc:
+        logging.getLogger("ib_sync.audit").warning("could not fetch open orders for audit (%s); skipping", exc)
+        return []
+    out: list[dict] = []
+    for trade in trades:
+        order = getattr(trade, "order", None)
+        contract = getattr(trade, "contract", None)
+        status_obj = getattr(trade, "orderStatus", None)
+        if order is None or contract is None:
+            continue
+        out.append(
+            {
+                "status": getattr(status_obj, "status", "") if status_obj else "",
+                "action": getattr(order, "action", "") or "",
+                "totalQuantity": int(getattr(order, "totalQuantity", 0) or 0),
+                "orderId": getattr(order, "orderId", None),
+                "permId": getattr(order, "permId", None),
+                "orderRef": getattr(order, "orderRef", "") or "",
+                "contract": {
+                    "secType": getattr(contract, "secType", "") or "",
+                    "symbol": getattr(contract, "symbol", "") or "",
+                    "right": getattr(contract, "right", "") or "",
+                    "expiry": getattr(contract, "lastTradeDateOrContractMonth", "") or "",
+                    "strike": getattr(contract, "strike", 0) or 0,
+                },
+            }
+        )
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description="Sync portfolio from Interactive Brokers")
     parser.add_argument("--host", default=DEFAULT_HOST, help="TWS/Gateway host")
@@ -1378,50 +1366,37 @@ def main():
             # ── Naked Short Audit (post-sync) ──
             if not args.skip_audit:
                 try:
-                    import logging
-
                     from naked_short_audit import find_naked_short_violations
 
                     log = logging.getLogger("ib_sync.audit")
 
-                    data_dir = str(PORTFOLIO_PATH.parent)
-                    orders_path = os.path.join(data_dir, "orders.json")
-                    if os.path.exists(orders_path):
-                        with open(orders_path) as f:
-                            orders_data = json.load(f)
-                        orders = (
-                            orders_data
-                            if isinstance(orders_data, list)
-                            else orders_data.get("orders", orders_data.get("open_orders", []))
-                        )
+                    # Pull open orders directly from IB rather than reading
+                    # data/orders.json (which is written by the web app and can
+                    # lag actual IB state). Adapter shapes Trade objects into
+                    # the dict shape `find_naked_short_violations` expects.
+                    orders = _open_orders_for_audit(client)
 
-                        violations = find_naked_short_violations(orders, portfolio["positions"])
-                        if violations:
-                            log.warning("NAKED SHORT AUDIT: %d violation(s) detected", len(violations))
-                            for v in violations:
-                                log.warning("  → %s: %s (order %s)", v["symbol"], v["reason"], v["order_id"])
+                    violations = find_naked_short_violations(orders, portfolio["positions"])
+                    if violations:
+                        log.warning("NAKED SHORT AUDIT: %d violation(s) detected", len(violations))
+                        for v in violations:
+                            log.warning("  → %s: %s (order %s)", v["symbol"], v["reason"], v["order_id"])
 
-                            # Auto-cancel only if client is still connected
-                            if client.is_connected():
-                                from naked_short_audit import cancel_violations
+                        # Auto-cancel only if client is still connected
+                        if client.is_connected():
+                            from naked_short_audit import cancel_violations
 
-                                cancelled = cancel_violations(client, violations)
-                                log.warning("  Cancelled %d violating order(s)", cancelled)
-                            else:
-                                log.warning("  Client disconnected — skipping auto-cancel")
+                            cancelled = cancel_violations(client, violations)
+                            log.warning("  Cancelled %d violating order(s)", cancelled)
                         else:
-                            print("✓ Naked short audit: no violations")
+                            log.warning("  Client disconnected — skipping auto-cancel")
                     else:
-                        print("  Naked short audit: orders.json not found, skipping")
+                        print("✓ Naked short audit: no violations")
                 except ImportError:
-                    import logging
-
                     logging.getLogger("ib_sync.audit").warning(
                         "naked_short_audit module not available — skipping audit"
                     )
                 except Exception:
-                    import logging
-
                     logging.getLogger("ib_sync.audit").warning(
                         "Naked short audit failed — sync completed successfully",
                         exc_info=True,

@@ -8,6 +8,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -46,7 +48,6 @@ def _display(iv_rank=42, max_pain=100, ncp=1e6, npp=-1e6):
 
 def make_cache(tmp_path, *, market_open=True, **kw):
     return UwAnalyzeCache(
-        cache_path=tmp_path / "cache.json",
         market_open_fn=lambda: market_open,
         **kw,
     )
@@ -445,6 +446,7 @@ def test_semaphore_caps_concurrent_calls(tmp_path):
 # ── Persistence + atomic writes ────────────────────────────────────────────
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_persists_to_disk(tmp_path):
     async def go():
         cache = make_cache(tmp_path)
@@ -456,6 +458,7 @@ def test_persists_to_disk(tmp_path):
     assert raw["entries"]["NVDA"]["sources"] == ["portfolio"]
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_reload_from_disk(tmp_path):
     async def go():
         cache1 = make_cache(tmp_path)
@@ -468,6 +471,7 @@ def test_reload_from_disk(tmp_path):
     assert entry["current"]["ticker"] == "NVDA"
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_corrupt_file_starts_empty(tmp_path):
     (tmp_path / "cache.json").write_text("not json {{")
     cache = make_cache(tmp_path)
@@ -621,13 +625,14 @@ def test_orphan_locks_swept_on_eviction(tmp_path):
 
 def _archive_cache(tmp_path, **kw):
     return UwAnalyzeCache(
-        cache_path=tmp_path / "cache.json",
-        history_path=tmp_path / "history",
         market_open_fn=lambda: True,
         **kw,
     )
 
 
+@pytest.mark.skip(
+    reason="Disk archive removed in PG cutoff; PG-based snapshot history is in xenon.uw_analyze_snapshots."
+)
 def test_archive_written_on_refresh(tmp_path):
     async def go():
         cache = _archive_cache(tmp_path)
@@ -643,6 +648,9 @@ def test_archive_written_on_refresh(tmp_path):
     assert payload["current"]["ticker"] == "NVDA"
 
 
+@pytest.mark.skip(
+    reason="Disk archive removed in PG cutoff; PG-based snapshot history is in xenon.uw_analyze_snapshots."
+)
 def test_archive_not_written_on_cache_hit(tmp_path):
     async def go():
         cache = _archive_cache(tmp_path)
@@ -655,6 +663,9 @@ def test_archive_not_written_on_cache_hit(tmp_path):
     assert len(files) == 1  # only the first refresh archived
 
 
+@pytest.mark.skip(
+    reason="Disk archive removed in PG cutoff; PG-based snapshot history is in xenon.uw_analyze_snapshots."
+)
 def test_archive_failure_does_not_break_request(tmp_path):
     async def go():
         cache = _archive_cache(tmp_path)
@@ -673,6 +684,7 @@ def test_archive_failure_does_not_break_request(tmp_path):
     assert entry["current"]["ticker"] == "NVDA"
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_archive_happens_after_persist(tmp_path):
     """If _persist raises, no archive file should exist — ordering guarantee."""
 
@@ -696,6 +708,9 @@ def test_archive_happens_after_persist(tmp_path):
     assert not nvda_dir.exists() or not list(nvda_dir.glob("*.json"))
 
 
+@pytest.mark.skip(
+    reason="Disk archive removed in PG cutoff; PG-based snapshot history is in xenon.uw_analyze_snapshots."
+)
 def test_archive_uses_coerce_jsonable(tmp_path):
     """Archive must round-trip non-JSON-native values via _coerce_jsonable."""
 
@@ -721,6 +736,9 @@ def test_archive_uses_coerce_jsonable(tmp_path):
     assert isinstance(fetched, str) and fetched.startswith("2026-04-08")
 
 
+@pytest.mark.skip(
+    reason="Disk archive removed in PG cutoff; PG-based snapshot history is in xenon.uw_analyze_snapshots."
+)
 def test_archive_handles_none_summaries(tmp_path):
     """Runner returning 3-tuple → dark_pool/options_flow summaries are None."""
 
@@ -736,6 +754,7 @@ def test_archive_handles_none_summaries(tmp_path):
     assert payload["current"]["options_flow_summary"] is None
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_archive_filename_unique_under_burst(tmp_path):
     """Two back-to-back forced refreshes must not collide on filename."""
 
@@ -750,6 +769,9 @@ def test_archive_filename_unique_under_burst(tmp_path):
     assert len(files) == 2
 
 
+@pytest.mark.skip(
+    reason="Disk archive removed in PG cutoff; PG-based snapshot history is in xenon.uw_analyze_snapshots."
+)
 def test_load_history_returns_descending(tmp_path):
     cache = _archive_cache(tmp_path)
     ticker_dir = cache.history_path / "NVDA"
@@ -765,6 +787,7 @@ def test_load_history_returns_descending(tmp_path):
     assert [o["stamp"] for o in out_limited] == ["20260103-120000-000000", "20260102-120000-000000"]
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_load_history_applies_limit_before_parse(tmp_path, monkeypatch):
     """limit must cut the filename list BEFORE any JSON parsing."""
     cache = _archive_cache(tmp_path)
@@ -787,6 +810,9 @@ def test_load_history_applies_limit_before_parse(tmp_path, monkeypatch):
     assert parse_count["n"] == 5  # exactly 5, not 100
 
 
+@pytest.mark.skip(
+    reason="Disk archive removed in PG cutoff; PG-based snapshot history is in xenon.uw_analyze_snapshots."
+)
 def test_load_history_since_filter(tmp_path):
     cache = _archive_cache(tmp_path)
     ticker_dir = cache.history_path / "NVDA"
@@ -799,6 +825,9 @@ def test_load_history_since_filter(tmp_path):
     assert all(o["stamp"] >= "20260104" for o in out)
 
 
+@pytest.mark.skip(
+    reason="Disk archive removed in PG cutoff; PG-based snapshot history is in xenon.uw_analyze_snapshots."
+)
 def test_load_history_missing_ticker_returns_empty(tmp_path):
     cache = _archive_cache(tmp_path)
     assert cache.load_history("ZZZ") == []
@@ -832,12 +861,13 @@ def _seeded_cache_file(path: Path, *, ticker: str = "NVDA") -> None:
     path.write_text(json.dumps(payload))
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_ensure_loaded_retries_after_malformed_json(tmp_path):
     """A half-written file must not permanently blind the cache."""
     cache_file = tmp_path / "cache.json"
     cache_file.write_text("{not valid json")  # partial write from a crashed writer
 
-    cache = UwAnalyzeCache(cache_path=cache_file, history_path=tmp_path / "hist")
+    cache = UwAnalyzeCache()
     assert cache.all_entries() == {}
     assert cache._loaded is False, "malformed file must leave _loaded False for retry"
 
@@ -848,12 +878,13 @@ def test_ensure_loaded_retries_after_malformed_json(tmp_path):
     assert cache._loaded is True
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_ensure_loaded_retries_after_wrong_shape(tmp_path):
     """A schema-mismatched file must not permanently blind the cache."""
     cache_file = tmp_path / "cache.json"
     cache_file.write_text(json.dumps({"entries": []}))  # list, not dict
 
-    cache = UwAnalyzeCache(cache_path=cache_file, history_path=tmp_path / "hist")
+    cache = UwAnalyzeCache()
     assert cache.all_entries() == {}
     assert cache._loaded is False, "wrong-shape file must leave _loaded False for retry"
 
@@ -862,10 +893,11 @@ def test_ensure_loaded_retries_after_wrong_shape(tmp_path):
     assert "NVDA" in entries
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_ensure_loaded_picks_up_file_appearing_after_startup(tmp_path):
     """Missing file at construction must not block a later-arriving file."""
     cache_file = tmp_path / "cache.json"  # does not exist yet
-    cache = UwAnalyzeCache(cache_path=cache_file, history_path=tmp_path / "hist")
+    cache = UwAnalyzeCache()
     assert cache.all_entries() == {}
     # Missing file is a legitimate cold start: _loaded latches True to
     # avoid stat'ing disk on every call. The in-memory state is now
@@ -873,13 +905,14 @@ def test_ensure_loaded_picks_up_file_appearing_after_startup(tmp_path):
     assert cache._loaded is True
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_persist_refuses_to_overwrite_nonempty_file_when_memory_empty(tmp_path):
     """The data-loss footgun: a silently-empty cache must not clobber disk."""
     cache_file = tmp_path / "cache.json"
     _seeded_cache_file(cache_file)
     original_bytes = cache_file.read_bytes()
 
-    cache = UwAnalyzeCache(cache_path=cache_file, history_path=tmp_path / "hist")
+    cache = UwAnalyzeCache()
     # Simulate the pathological state: loaded but empty.
     cache._loaded = True
     cache._entries.clear()
@@ -987,3 +1020,37 @@ def test_sticky_merge_noop_on_first_refresh(tmp_path):
     )
     disp = cache.get_entry("NVDA")["current"]["display"]
     assert disp["term_structure_label"] is None
+
+
+def test_ensure_loaded_does_not_latch_on_pg_failure(tmp_path, monkeypatch):
+    """First-call PG failure must NOT latch _loaded=True.
+
+    Regression for codex tribunal SHIP-BLOCKER (2026-05-03): previous
+    behavior swallowed PG load errors and set _loaded=True with empty
+    _entries, which then poisoned _archive_snapshot eviction priorities
+    for the lifetime of the process. The new behavior mirrors
+    FlowLog.load — leave _loaded=False so the next call retries.
+    """
+    import sqlalchemy
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://x:y@127.0.0.1:1/none")
+    cache = make_cache(tmp_path)
+
+    real_create_engine = sqlalchemy.create_engine
+    calls: list[int] = []
+
+    def flaky_create_engine(*a, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("simulated transient PG outage")
+        return real_create_engine(*a, **kw)
+
+    monkeypatch.setattr(sqlalchemy, "create_engine", flaky_create_engine)
+
+    cache._ensure_loaded()
+    assert cache._loaded is False, "PG failure must not latch _loaded=True"
+    assert cache._entries == {}, "no entries should have been seeded by a failed load"
+    assert len(calls) == 1, "first load should have attempted exactly one engine create"
+
+    cache._ensure_loaded()
+    assert len(calls) == 2, "second call must retry rather than skip on a failed prior load"

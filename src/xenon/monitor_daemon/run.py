@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 from xenon.monitor_daemon.daemon import MonitorDaemon
-from xenon.monitor_daemon.handlers import ExitOrdersHandler, FillMonitorHandler, PresetRebalanceHandler
+from xenon.monitor_daemon.handlers import FillMonitorHandler, PresetRebalanceHandler
 from xenon.monitor_daemon.handlers.flex_token_check import FlexTokenCheck
 from xenon.monitor_daemon.handlers.wizard_stop_monitor import WizardStopMonitorHandler
 
@@ -72,8 +72,6 @@ def create_daemon() -> MonitorDaemon:
     # Register handlers
     daemon.register(FillMonitorHandler(ib_port=4001, client_id=70, send_notifications=True))
 
-    daemon.register(ExitOrdersHandler(ib_port=4001, client_id=71, max_gap_pct=0.40))
-
     daemon.register(PresetRebalanceHandler())
 
     daemon.register(FlexTokenCheck())
@@ -109,10 +107,6 @@ def run_once(daemon: MonitorDaemon) -> dict:
                 print(f"   New: {data.get('new_orders', 0)}")
                 print(f"   Partial fills: {data.get('partial_fills', 0)}")
                 print(f"   Complete fills: {data.get('complete_fills', 0)}")
-            elif name == "exit_orders":
-                print(f"   Checked: {data.get('orders_checked', 0)}")
-                print(f"   Placed: {data.get('orders_placed', 0)}")
-                print(f"   Skipped: {data.get('orders_skipped', 0)}")
 
     return results
 
@@ -147,7 +141,6 @@ def list_handlers():
     print("\nAvailable Handlers:")
     print("-" * 40)
     print("  fill_monitor       - Monitor orders for fills (60s)")
-    print("  exit_orders        - Place pending exit orders (300s)")
     print("  preset_rebalance   - Index constituent updates (weekly)")
     print("  flex_token_check   - IB Flex token expiry reminders (daily)")
     print()

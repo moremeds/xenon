@@ -66,10 +66,9 @@ def _build_app(tmp_path, fake_runner, *, portfolio=None, watchlist=None, market_
 
     # Inject our cache + flow log singletons.
     routes_mod._portfolio_cache = UwAnalyzeCache(
-        cache_path=tmp_path / "cache.json",
         market_open_fn=lambda: market_open,
     )
-    routes_mod._flow_log = FlowLog(path=tmp_path / "flow.json")
+    routes_mod._flow_log = FlowLog()
 
     # Patch the runner used by the routes.
     routes_mod._runner = fake_runner  # type: ignore[attr-defined]
