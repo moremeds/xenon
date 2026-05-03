@@ -5,8 +5,40 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.0.2] — 2026-04-30
+## [0.0.3] — 2026-05-04
 
+### Added
+
+- **Phase 1 Stage A — containerization (#85).** Four production deploy images (`api`, `web`, `realtime`, `migrator`) plus a single `docker-compose.yml` at repo root that runs the long-running stack (api + web + realtime); migrator is gated behind `profiles: ["migrate"]` so `compose up` never auto-runs alembic. Web image uses Next.js standalone output with `NEXT_PUBLIC_*` build-args inlined at build time; realtime image carries `scripts/lib/` for the relay's `lru-cache` import. Tag-triggered `ghcr-push` matrix job in `release.yml` builds and publishes all four images to `ghcr.io/<owner>/xenon-{api,web,realtime,migrator}` (linux/arm64) with `:vX.Y.Z` + `:latest` tags. `host.docker.internal` reaches host-native Postgres + IB Gateway + Futu OpenD; `XENON_API_URL=http://api:8321` wires server-side Next fetches to FastAPI inside the compose network.
+- **VCG-CRI regime gate Phase 3 — order entry wiring (#78).** `RegimeGate` now intercepts every order placement and modify/cancel path, scoped via `AccountScope`. Composite 4-tuple FK on `regime_overrides` (`submission_id, broker, account_env, broker_account`) prevents scope drift between override rows and parent submissions. New audit table records every blocked/permitted decision with the resolved (vcg_tier, cri_tier) tuple at decision time.
+- **VCG-CRI rewiring Phase 0/1/2/4 (#68).** CRI persistence (`cri_series`), `pg_try_advisory_lock` helper, web `/api/regime` rewrite, audit doc. The eight tribunal corrections from the v2 design are folded inline.
+- **Per-mode IB Gateway host routing in `dev.sh` (#83).** `paper` resolves to `127.0.0.1:4002` (always local), `live` resolves to whatever `IB_GATEWAY_HOST` from `.env` points at (typically the remote production server) on port `4001`. `IB_GATEWAY_HOST` and `IB_GATEWAY_PORT` are exported so child processes (uvicorn, Next, the Node IB realtime relay) inherit the resolved values.
+
+### Changed
+
+- **`ib_insync` → `ib_async` (#81).** `ib_insync` was last released July 2023 (0.9.86) and is unmaintained; newer Gateway versions (10.30+) tightened the API handshake. Migrated to the actively-maintained community fork `ib_async==2.1.0`. Package-name-only swap across 34 source/test files; no code-shape changes. 132 ib-related unit tests pass against the new dep.
+- **PG migration clean cutoff — drop `data/*.json` runtime reads (#84).** Strips silent JSON fallbacks from three UW services and tightens the order-path JSON-fallback allowlist to zero. Conftest gains `scope_fixture`, `pg_test_engine`, and an offline-tolerant PG truncate that caches unreachability so the test suite no longer dies on a 5-minute psycopg timeout when the LAN is unreachable. UW analyze cache hardened: closed-market gate covers user-initiated paths, write failures emit observability events.
+- **`output: 'standalone'` in `web/next.config.mjs`.** Required for the slim web runtime image; preserves the existing `outputFileTracingRoot` pointing at the repo root.
+- **Multi-service Postgres design (#82).** Same cluster, role-isolated schemas (`xenon`, `apex`, `events`); three DB names (`core`, `core_dev`, `core_test`) for prod/dev/test separation. `xenon_app/xenon_dev`, `apex_app/apex_app`, admin `moremeds/moremeds`. Documented in `docs/architecture/production-database-strategy.md`.
+
+### Fixed
+
+- **Combo SELL blanket bypass closed (#79).** `_is_regime_gate_risk_reducing_exit` no longer trusts a SELL BAG envelope. Combo SELL bypass now requires every per-leg inverse to exist in the portfolio with sufficient contracts via `preflight.combo_close_covered_by_portfolio`. `preflight.combo_uncovered_short_call_ratio` + `evaluate_combo` drop their `action == "SELL" → accept` short-circuit. Per-leg ratio analysis is the trustworthy check for naked-short risk; the envelope action is untrusted.
+- **Stale portfolio snapshot allowed bypass (#79).** SELL-to-close bypass now calls `_portfolio_snapshot_stale_response`. A snapshot beyond the freshness threshold (300s open / 1800s closed) refuses the bypass and lets RegimeGate block as new exposure.
+- **BAG quantity-increase modify outside NORMAL tier (#80).** `_run_modify_regime_gate` now blocks modify operations that increase exposure when the regime tier is anything but NORMAL.
+
+### Removed
+
+- **Dead `incremental_sync` + post-hoc reliability plan (#73).** Code removed; tests rewired to the live sync path.
+- **Vestigial `db_path` parameter in `orders_store` (#75).** All 11 functions stripped of the DuckDB-era param. Tracked in memory `feedback_orders_store_no_db_path.md` so it never returns.
+
+### Documentation
+
+- **Tick-stub by-design doc (#76).** `_lookup_min_tick_via_pool` returns 0.01 for every contract on purpose; IB enforces the real rule and code 110 maps to LIMIT_OFF_TICK. Captured in code comments + memory.
+- **Order-stack end-to-end walkthrough (#83).** New `docs/architecture/order-stack-end-to-end.md` traces a single order from web click through FastAPI to IB Gateway and back through the activity poller.
+- **Backlog hygiene (#74, plus chronological cross-reference of inbox items vs commits).**
+
+## [0.0.2] — 2026-04-30
 
 ### Added
 
@@ -21,6 +53,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 - **Cancel doesn't clear Open Orders panel (#71).** `/orders/cancel` now calls `mark_terminal(state="CANCELLED", reason_code="USER_CANCEL")` on the success path. The activity poller intentionally cannot disambiguate fill vs cancel on disappearance, so the cancel route is the only authoritative trigger.
 - **BAG combo missing from panel (#71).** `sync_open_orders_to_postgres` no longer drops orders with `orderId=0` (which IB returns for combos viewed from non-originating clientIds). `perm_id` alone is sufficient identity.
 - **Trade aggregator labels combos as "Stock" (#71).** New `_has_bag_signal` heuristic — checks both `source.security_type` and per-fill `metadata.sec_type` — derives "Spread"/"Combo" from leg shape so snapshot-\* and legacy_id BAG groups never fall through to "Stock".
+
 ## [0.0.1] — 2026-04-24
 
 - Versioning reset. Begin semver from `0.0.1` as part of introducing the CI/release/deploy pipeline.
