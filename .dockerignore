@@ -1,0 +1,57 @@
+# Keep Docker build context small. See docker/*.Dockerfile.
+# Anything below is excluded from `docker build` context.
+
+# VCS / dev shells
+.git
+.github
+.worktrees
+.claude
+.mcp.json
+.vscode
+.idea
+
+# Python build/runtime
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Node build/runtime
+node_modules
+web/node_modules
+web/.next
+.next
+
+# Runtime/state — bind-mounted at run time, never baked into images
+data
+logs
+tmp
+reports
+*.bak
+*.duckdb
+*.duckdb.wal
+*.sqlite
+
+# Secrets — env files are bind-mounted read-only or passed via env_file
+.env
+.env.*
+web/.env
+web/.env.*
+!.env.example
+
+# Test/scratch
+*.log
+.DS_Store
+.history
+.cache
+
+# Docs/large assets that don't belong in images
+docs/handovers
+brand/*.png
+brand/*.svg

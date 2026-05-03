@@ -1,0 +1,117 @@
+# Phase 1 Stage A — single compose file for both this Mac (dev workspace)
+# and the remote Mac mini (when Stage B lands). Postgres lives outside
+# compose at 192.168.50.47:5432; IB Gateway lives outside compose on the
+# host (Java GUI, not containerizable). Containers reach both via
+# host.docker.internal.
+#
+# Profiles
+#   default ............ api + web + realtime (long-running)
+#   migrate ............ migrator (one-shot — `docker compose run --rm migrator`)
+#
+# Local smoke test
+#   docker compose build
+#   docker compose run --rm migrator
+#   docker compose up -d
+#   curl http://localhost:8321/health
+#   curl -I http://localhost:3000
+
+services:
+  migrator:
+    build:
+      context: .
+      dockerfile: docker/migrator.Dockerfile
+    image: xenon-migrator:dev
+    profiles: ["migrate"]
+    env_file:
+      - ./.env
+    volumes:
+      - ./.env:/app/.env:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    image: xenon-api:dev
+    env_file:
+      - ./.env
+    # IB_GATEWAY_HOST comes from .env. On the remote Mac mini set
+    # IB_GATEWAY_HOST=host.docker.internal so the container reaches the
+    # host-native Gateway; on this dev Mac it stays at the LAN IP that
+    # actually has the Gateway running.
+    ports:
+      - "8321:8321"
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8321/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+      args:
+        # NEXT_PUBLIC_* vars must be inlined at build time. Source from the
+        # build-host shell — compose interpolates ${VAR} from the host env or
+        # from the repo-root .env. Empty defaults keep `compose build` working
+        # in CI / clean checkouts without Clerk keys.
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
+        NEXT_PUBLIC_REALTIME_WS_URL: ${NEXT_PUBLIC_REALTIME_WS_URL:-ws://localhost:8765}
+    image: xenon-web:dev
+    env_file:
+      - ./web/.env
+    environment:
+      # Server-side fetches inside the Next.js container target the api
+      # service over the compose network, not localhost.
+      XENON_API_BASE_URL: http://api:8321
+    ports:
+      - "3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # node:22-alpine ships busybox wget; --spider issues a HEAD-equivalent.
+      # Probe /sign-in: it's Clerk-public and returns 200 regardless of auth
+      # state, while `/` may return Clerk's dev-browser-handshake rewrite
+      # (404 from the server) when the build uses dev keys. /sign-in is
+      # stable across dev and prod Clerk environments.
+      # Next standalone binds IPv4 0.0.0.0:3000 only; alpine `localhost`
+      # resolves to ::1 first, which fails. Use 127.0.0.1 explicitly.
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/sign-in"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    restart: unless-stopped
+
+  realtime:
+    build:
+      context: .
+      dockerfile: docker/realtime.Dockerfile
+    image: xenon-realtime:dev
+    env_file:
+      - ./.env
+    # IB_GATEWAY_HOST comes from .env (see api comment). The relay also
+    # consults XENON_TRADING_MODE to derive the gateway port.
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./.env:/app/.env:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
