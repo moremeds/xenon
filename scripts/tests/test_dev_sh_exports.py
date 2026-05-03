@@ -2,8 +2,8 @@
 
 Prerequisite for the PG migration: every sync subprocess calls
 AccountScope.resolve_from_env() at startup, which raises if
-XENON_BROKER_ACCOUNT is unset. dev.sh must export a per-mode placeholder so
-the boot path doesn't crash before ib_sync can override from managedAccounts().
+XENON_BROKER_ACCOUNT is unset. dev.sh must export a real per-mode account
+from .env and fail loudly instead of inventing a fake fallback.
 
 Approach: invoke dev.sh with the launcher short-circuited to print the env
 vars and exit, instead of `exec npm run dev`. We do that by setting an env
@@ -73,20 +73,28 @@ def _run_dryrun(script: Path, mode: str, env_overrides: dict[str, str] | None = 
     return out
 
 
-def test_paper_mode_exports_du_account(dev_sh_dryrun, tmp_path, monkeypatch):
-    """Paper mode falls back to DU0000000 when XENON_PAPER_ACCOUNT is unset."""
+def test_paper_mode_requires_xenon_paper_account(dev_sh_dryrun):
+    """Paper mode with no XENON_PAPER_ACCOUNT must exit non-zero."""
     if not shutil.which("bash"):
         pytest.skip("bash not on PATH")
-    # Use a tmp .env so the user's real .env doesn't pollute the test
-    env = {
-        "XENON_PAPER_ACCOUNT": "",
-        "XENON_LIVE_ACCOUNT": "",
-    }
-    out = _run_dryrun(dev_sh_dryrun, "paper", env_overrides=env)
-    assert out.get("XENON_TRADING_MODE") == "paper"
-    assert out.get("XENON_BROKER_ACCOUNT", "").startswith("DU"), (
-        f"Paper mode must export a DU* account, got {out.get('XENON_BROKER_ACCOUNT')!r}"
+    env = os.environ.copy()
+    env["DATABASE_URL"] = ""
+    env["XENON_PAPER_ACCOUNT"] = ""
+    result = subprocess.run(
+        ["bash", str(dev_sh_dryrun), "paper"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=15,
+        cwd=str(REPO_ROOT),
     )
+    assert result.returncode != 0, (
+        f"Paper mode without XENON_PAPER_ACCOUNT must fail; got returncode={result.returncode}\n"
+        f"stdout={result.stdout}\nstderr={result.stderr}"
+    )
+    combined = result.stderr + result.stdout
+    assert "XENON_PAPER_ACCOUNT" in combined
+    assert "clean-slate PG cutoff" in combined
 
 
 def test_paper_mode_honors_xenon_paper_account(dev_sh_dryrun):

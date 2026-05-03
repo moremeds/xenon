@@ -534,17 +534,16 @@ def test_classify_anomaly_closing_volume_dte_guard():
 # ── Postgres upsert idempotency ──────────────────────────────────────────
 
 
-def test_postgres_double_save_produces_one_row(tmp_path, monkeypatch):
+def test_postgres_double_save_produces_one_row(pg_test_engine, monkeypatch):
     """Two saves of the same FlowEvent must produce exactly one Postgres row."""
     import os
 
-    from sqlalchemy import create_engine, text
+    from sqlalchemy import text
 
     url = os.environ.get("DATABASE_URL_TEST", "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test")
-    sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
     monkeypatch.setenv("DATABASE_URL", url)
 
-    engine = create_engine(sync_url)
+    engine = pg_test_engine
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM xenon.uw_flow_events WHERE flow_event_key LIKE 'test-%'"))
 
@@ -580,4 +579,3 @@ def test_postgres_double_save_produces_one_row(tmp_path, monkeypatch):
 
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM xenon.uw_flow_events WHERE flow_event_key LIKE 'test-%'"))
-    engine.dispose()
