@@ -541,35 +541,15 @@ def build_nav_based_curve(
     # IB's daily NAV IS the source of truth — just compute simple daily
     # returns from day-over-day NAV changes.  No TWR formula, no deposit
     # detection, no ACATS guessing.  The curve is the performance.
+    #
+    # PG cutoff (2026-05-03): the optional `data/ib_twr_series.json`
+    # refinement (manually scraped from IB portal Highcharts) is removed
+    # in favor of pure NAV-based returns. If a PG-backed authoritative TWR
+    # series is reintroduced later, hook it in here behind an
+    # `xenon.ib_twr_series` table read.
     daily_returns = [None]  # first day has no return
     for i in range(1, len(navs)):
         daily_returns.append((navs[i] / navs[i - 1]) - 1.0 if navs[i - 1] > 0 else 0.0)
-
-    # Load IB's authoritative TWR series (scraped from portal Highcharts).
-    # This is the source of truth for return % — we use it for total_return
-    # and derive daily TWR returns from the cumulative series.
-    ib_twr_path = ROOT / "data" / "ib_twr_series.json"
-    twr_by_date: Dict[str, float] = {}
-    try:
-        twr_entries = json.loads(ib_twr_path.read_text())
-        for entry in twr_entries:
-            twr_by_date[entry["date"]] = entry["twr"] / 100.0  # convert % to decimal
-    except (OSError, json.JSONDecodeError, KeyError):
-        pass
-
-    # If we have IB's TWR, use it for daily returns (more accurate than
-    # NAV-based returns which include deposit effects).
-    if twr_by_date:
-        daily_returns = [None]
-        for i in range(1, len(dates)):
-            curr_twr = twr_by_date.get(dates[i])
-            prev_twr = twr_by_date.get(dates[i - 1])
-            if curr_twr is not None and prev_twr is not None:
-                # daily return = (1 + cumTWR_today) / (1 + cumTWR_yesterday) - 1
-                daily_returns.append((1 + curr_twr) / (1 + prev_twr) - 1.0 if (1 + prev_twr) != 0 else 0.0)
-            else:
-                # Fallback to NAV-based return for dates not in TWR series
-                daily_returns.append((navs[i] / navs[i - 1]) - 1.0 if navs[i - 1] > 0 else 0.0)
 
     # Build DataFrame
     curve = pd.DataFrame(
@@ -582,20 +562,8 @@ def build_nav_based_curve(
     curve.index.name = "date"
     curve["drawdown"] = curve["equity"] / curve["equity"].cummax() - 1.0
 
-    # Metrics from TWR-adjusted returns (not NAV-based)
+    # Metrics from NAV-based daily returns
     metrics = compute_performance_metrics(curve["equity"], benchmark_series)
-
-    # Override total_return with IB's authoritative TWR if available
-    if twr_by_date:
-        last_twr = None
-        for dt in reversed(dates):
-            if dt in twr_by_date:
-                last_twr = twr_by_date[dt]
-                break
-        if last_twr is not None:
-            metrics["total_return"] = last_twr
-            trading_days = len([r for r in daily_returns if r is not None])
-            metrics["annualized_return"] = float((1.0 + last_twr) ** (TRADING_DAYS / max(trading_days, 1)) - 1.0)
 
     return curve, metrics
 

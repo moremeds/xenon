@@ -1,16 +1,19 @@
 """Lifespan preload test for uw_analyze_cache.
 
-Verifies that FastAPI startup eagerly loads the cache JSON into memory
+Verifies that FastAPI startup eagerly loads the cache from PG into memory
 before the first request path touches it. Without this, the first GET
-after a restart pays the disk-read + parse cost (~2 MB).
+after a restart pays the round-trip cost.
+
+Post-PG-cutoff: the cache is hydrated from xenon.uw_analyze_snapshots
+(latest row per ticker), not a JSON file. We seed a single row in the
+test DB and assert the lifespan preload populates the singleton.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,38 +25,34 @@ if str(ROOT) not in sys.path:
 # heavy IB/UW startup steps below.
 
 
-def test_lifespan_preloads_uw_analyze_cache(tmp_path, monkeypatch):
-    """Seed cache.json, enter lifespan(), assert singleton is loaded."""
-    # Point the default cache path at a seeded fixture BEFORE the module
-    # singleton is constructed.
-    seeded = {
-        "updated_at": "2026-04-08T00:00:00+00:00",
-        "entries": {
-            "NVDA": {
-                "current": {
-                    "ticker": "NVDA",
-                    "ts": "2026-04-08T00:00:00+00:00",
-                    "report": {},
-                    "display": {},
-                    "flow_alerts": [],
-                    "derived": {},
-                    "dark_pool_summary": None,
-                    "options_flow_summary": None,
-                },
-                "previous": None,
-                "oi_baseline": None,
-                "sources": ["portfolio"],
-                "materialized_changes": [],
-            }
-        },
-    }
-    cache_file = tmp_path / "cache.json"
-    cache_file.write_text(json.dumps(seeded))
+def test_lifespan_preloads_uw_analyze_cache(monkeypatch, pg_test_engine):
+    """Seed PG row, enter lifespan(), assert singleton is loaded."""
+    from sqlalchemy import delete, insert
 
     from xenon.api.routes import uw_analyze as route_mod
-    from xenon.api.services import uw_analyze_cache as cache_mod
+    from xenon.db.schema import uw_analyze_snapshots
 
-    monkeypatch.setattr(cache_mod, "_DEFAULT_CACHE_PATH", cache_file)
+    # Seed one snapshot row so the preload has something to surface.
+    with pg_test_engine.begin() as conn:
+        conn.execute(delete(uw_analyze_snapshots).where(uw_analyze_snapshots.c.ticker == "NVDAPRELOAD"))
+        conn.execute(
+            insert(uw_analyze_snapshots).values(
+                ticker="NVDAPRELOAD",
+                report={"price": 100.0, "scores": {"composite": 50}},
+                display={"iv": 0.30},
+                derived={},
+                dark_pool_summary=None,
+                options_flow_summary=None,
+                flow_alerts=[],
+                materialized_changes=[],
+                sources=["portfolio"],
+                oi_baseline=None,
+                previous_snapshot=None,
+                report_fetched_at=datetime(2026, 4, 8, tzinfo=timezone.utc),
+                archived_at=datetime(2026, 4, 8, tzinfo=timezone.utc),
+            )
+        )
+
     route_mod.reset_state_for_tests()
 
     # api.server pulls in eventkit which needs an event loop on the thread
@@ -89,13 +88,15 @@ def test_lifespan_preloads_uw_analyze_cache(tmp_path, monkeypatch):
 
     async def go():
         async with server_mod.lifespan(app):
-            # Singleton must be constructed AND loaded by now, without
-            # anyone having hit the route.
             singleton = route_mod.get_portfolio_cache()
             assert singleton._loaded is True, "preload did not run"
             entries = singleton.all_entries()
-            assert "NVDA" in entries, f"seeded entry missing: {list(entries)}"
+            assert "NVDAPRELOAD" in entries, f"seeded entry missing: {list(entries)}"
 
-    loop.run_until_complete(go())
-    # Reset for other tests.
-    route_mod.reset_state_for_tests()
+    try:
+        loop.run_until_complete(go())
+    finally:
+        # Reset for other tests + cleanup PG.
+        route_mod.reset_state_for_tests()
+        with pg_test_engine.begin() as conn:
+            conn.execute(delete(uw_analyze_snapshots).where(uw_analyze_snapshots.c.ticker == "NVDAPRELOAD"))

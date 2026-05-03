@@ -41,19 +41,12 @@ _SCAN_ROOTS = (
 )
 
 # Files that currently contain forbidden patterns. Each entry is technical
-# debt that should be migrated to FastAPI/Postgres reads. Do NOT add to
-# this list without an open ticket and a target date for removal.
+# debt that should be migrated to FastAPI/Postgres reads.
 #
-# Last verified: 2026-04-29 (commit 15be00e9 + a7bea3ad on master).
-_ALLOWLIST = frozenset(
-    {
-        # Legacy: still reads data/orders.json. Migrate alongside the
-        # `place/route.ts` pattern from PR #61.
-        "web/app/api/orders/cancel/route.ts",
-        "web/app/api/orders/modify/route.ts",
-        "web/app/api/orders/route.ts",
-    }
-)
+# Tightened to zero on 2026-05-03 PG cutoff: the previous three legacy
+# orders routes (cancel/modify/route.ts) no longer perform any JSON read.
+# A new entry here is a real regression — fix the read, don't allowlist.
+_ALLOWLIST: frozenset[str] = frozenset()
 
 # Patterns considered violations. Each pattern is a regex matched against
 # every line of every scanned file.

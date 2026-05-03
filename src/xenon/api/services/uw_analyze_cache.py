@@ -259,6 +259,7 @@ class UwAnalyzeCache:
                         "SELECT DISTINCT ON (ticker) "
                         "ticker, report, display, derived, dark_pool_summary, "
                         "options_flow_summary, flow_alerts, materialized_changes, "
+                        "sources, oi_baseline, previous_snapshot, "
                         "report_fetched_at, archived_at "
                         "FROM xenon.uw_analyze_snapshots "
                         "ORDER BY ticker, archived_at DESC"
@@ -267,7 +268,9 @@ class UwAnalyzeCache:
             engine.dispose()
             for row in rows:
                 m = row._mapping
+                ticker = m["ticker"]
                 current = {
+                    "ticker": ticker,
                     "report": m["report"] or {},
                     "display": m["display"],
                     "derived": m["derived"],
@@ -276,9 +279,12 @@ class UwAnalyzeCache:
                     "flow_alerts": m["flow_alerts"],
                     "ts": (m["archived_at"].isoformat() if m["archived_at"] else None),
                 }
-                self._entries[m["ticker"]] = {
+                self._entries[ticker] = {
                     "current": current,
                     "materialized_changes": m["materialized_changes"] or [],
+                    "sources": list(m["sources"]) if m["sources"] else [],
+                    "oi_baseline": m["oi_baseline"],
+                    "previous": m["previous_snapshot"],
                 }
             self._evict_if_over_cap()
             self._loaded = True
@@ -318,12 +324,18 @@ class UwAnalyzeCache:
             current = entry.get("current") if isinstance(entry, dict) else None
             if not isinstance(current, dict):
                 return
+            sources = list(entry.get("sources") or []) if isinstance(entry, dict) else []
+            oi_baseline = entry.get("oi_baseline") if isinstance(entry, dict) else None
+            previous = entry.get("previous") if isinstance(entry, dict) else None
             await asyncio.to_thread(
                 self._archive_to_postgres,
                 ticker,
                 current,
                 list(materialized_changes or []),
                 _now_iso(),
+                sources,
+                oi_baseline,
+                previous,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("uw_analyze_cache archive write failed for %s: %s", ticker, exc)
@@ -334,6 +346,9 @@ class UwAnalyzeCache:
         current: dict,
         materialized_changes: list | None = None,
         archived_at_iso: str | None = None,
+        sources: list | None = None,
+        oi_baseline: dict | None = None,
+        previous_snapshot: dict | None = None,
     ) -> None:
         """Write snapshot to Postgres uw_analyze_snapshots (sync, for to_thread)."""
         try:
@@ -375,6 +390,11 @@ class UwAnalyzeCache:
                         options_flow_summary=_coerce_jsonable(current.get("options_flow_summary")),
                         flow_alerts=_coerce_jsonable(current.get("flow_alerts")),
                         materialized_changes=_coerce_jsonable(materialized_changes),
+                        sources=_coerce_jsonable(sources) if sources is not None else None,
+                        oi_baseline=_coerce_jsonable(oi_baseline) if oi_baseline is not None else None,
+                        previous_snapshot=_coerce_jsonable(previous_snapshot)
+                        if previous_snapshot is not None
+                        else None,
                         report_fetched_at=_ts(report.get("fetched_at")) if isinstance(report, dict) else None,
                         archived_at=_ts(archived_at_iso),
                         portfolio_score=Decimal(str(score_val)) if score_val is not None else None,

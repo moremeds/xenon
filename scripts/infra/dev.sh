@@ -114,11 +114,16 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 case "$MODE" in
-  paper) BROKER_ACCOUNT="${XENON_PAPER_ACCOUNT:-DU0000000}" ;;
-  live)  BROKER_ACCOUNT="${XENON_LIVE_ACCOUNT:-}"           ;;
+  paper) BROKER_ACCOUNT="${XENON_PAPER_ACCOUNT:-}" ;;
+  live)  BROKER_ACCOUNT="${XENON_LIVE_ACCOUNT:-}"  ;;
 esac
 if [[ -z "$BROKER_ACCOUNT" ]]; then
-  log_err "XENON_LIVE_ACCOUNT must be set in .env for live mode (e.g. U1234567)."
+  if [[ "$MODE" == "paper" ]]; then
+    log_err "XENON_PAPER_ACCOUNT must be set in .env for paper mode (e.g. DU1234567)."
+  else
+    log_err "XENON_LIVE_ACCOUNT must be set in .env for live mode (e.g. U1234567)."
+  fi
+  log_err "  Required: clean-slate PG cutoff — fake DU0000000 default would let unscoped rows leak into PG."
   exit 2
 fi
 export XENON_BROKER_ACCOUNT="$BROKER_ACCOUNT"

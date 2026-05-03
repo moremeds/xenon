@@ -630,6 +630,9 @@ def _archive_cache(tmp_path, **kw):
     )
 
 
+@pytest.mark.skip(
+    reason="Disk archive removed in PG cutoff; PG-based snapshot history is in xenon.uw_analyze_snapshots."
+)
 def test_archive_written_on_refresh(tmp_path):
     async def go():
         cache = _archive_cache(tmp_path)
@@ -645,6 +648,9 @@ def test_archive_written_on_refresh(tmp_path):
     assert payload["current"]["ticker"] == "NVDA"
 
 
+@pytest.mark.skip(
+    reason="Disk archive removed in PG cutoff; PG-based snapshot history is in xenon.uw_analyze_snapshots."
+)
 def test_archive_not_written_on_cache_hit(tmp_path):
     async def go():
         cache = _archive_cache(tmp_path)
@@ -657,6 +663,9 @@ def test_archive_not_written_on_cache_hit(tmp_path):
     assert len(files) == 1  # only the first refresh archived
 
 
+@pytest.mark.skip(
+    reason="Disk archive removed in PG cutoff; PG-based snapshot history is in xenon.uw_analyze_snapshots."
+)
 def test_archive_failure_does_not_break_request(tmp_path):
     async def go():
         cache = _archive_cache(tmp_path)
@@ -699,6 +708,9 @@ def test_archive_happens_after_persist(tmp_path):
     assert not nvda_dir.exists() or not list(nvda_dir.glob("*.json"))
 
 
+@pytest.mark.skip(
+    reason="Disk archive removed in PG cutoff; PG-based snapshot history is in xenon.uw_analyze_snapshots."
+)
 def test_archive_uses_coerce_jsonable(tmp_path):
     """Archive must round-trip non-JSON-native values via _coerce_jsonable."""
 
@@ -724,6 +736,9 @@ def test_archive_uses_coerce_jsonable(tmp_path):
     assert isinstance(fetched, str) and fetched.startswith("2026-04-08")
 
 
+@pytest.mark.skip(
+    reason="Disk archive removed in PG cutoff; PG-based snapshot history is in xenon.uw_analyze_snapshots."
+)
 def test_archive_handles_none_summaries(tmp_path):
     """Runner returning 3-tuple → dark_pool/options_flow summaries are None."""
 
@@ -754,6 +769,9 @@ def test_archive_filename_unique_under_burst(tmp_path):
     assert len(files) == 2
 
 
+@pytest.mark.skip(
+    reason="Disk archive removed in PG cutoff; PG-based snapshot history is in xenon.uw_analyze_snapshots."
+)
 def test_load_history_returns_descending(tmp_path):
     cache = _archive_cache(tmp_path)
     ticker_dir = cache.history_path / "NVDA"
@@ -792,6 +810,9 @@ def test_load_history_applies_limit_before_parse(tmp_path, monkeypatch):
     assert parse_count["n"] == 5  # exactly 5, not 100
 
 
+@pytest.mark.skip(
+    reason="Disk archive removed in PG cutoff; PG-based snapshot history is in xenon.uw_analyze_snapshots."
+)
 def test_load_history_since_filter(tmp_path):
     cache = _archive_cache(tmp_path)
     ticker_dir = cache.history_path / "NVDA"
@@ -804,6 +825,9 @@ def test_load_history_since_filter(tmp_path):
     assert all(o["stamp"] >= "20260104" for o in out)
 
 
+@pytest.mark.skip(
+    reason="Disk archive removed in PG cutoff; PG-based snapshot history is in xenon.uw_analyze_snapshots."
+)
 def test_load_history_missing_ticker_returns_empty(tmp_path):
     cache = _archive_cache(tmp_path)
     assert cache.load_history("ZZZ") == []

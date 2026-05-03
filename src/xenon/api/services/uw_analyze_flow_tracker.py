@@ -368,10 +368,16 @@ class FlowLog:
     def load(self) -> None:
         if self._loaded:
             return
-        self._loaded = True
-        self._load_from_postgres()
+        # Set _loaded only after a successful PG read. If PG is briefly
+        # unreachable on the first call we must NOT latch _loaded=True with
+        # empty _events — subsequent upsert()s would treat real terminal
+        # statuses (closed/anomaly) as "new open" and overwrite them on the
+        # next save(). Retrying on the next call is the safe default.
+        ok = self._load_from_postgres()
+        if ok:
+            self._loaded = True
 
-    def _load_from_postgres(self) -> None:
+    def _load_from_postgres(self) -> bool:
         try:
             from sqlalchemy import select
 
@@ -397,8 +403,10 @@ class FlowLog:
                     "closed_at": data["closed_at"].isoformat() if data["closed_at"] else None,
                 }
                 self._events[payload["id"]] = _event_from_dict(payload)
+            return True
         except Exception as exc:  # noqa: BLE001
             logger.warning("flow_log Postgres load failed: %s", exc)
+            return False
 
     def all(self) -> list[FlowEvent]:
         self.load()
@@ -455,6 +463,20 @@ class FlowLog:
         for eid in to_drop:
             self._events.pop(eid, None)
         if to_drop:
+            # Also delete from PG — _save_to_postgres uses UPSERT so it would
+            # never remove rows on its own; without this, the next process
+            # restart would re-load every "purged" event from disk.
+            try:
+                from sqlalchemy import delete
+
+                from xenon.db.engine import get_sync_engine
+                from xenon.db.schema import uw_flow_events
+
+                engine = get_sync_engine()
+                with engine.begin() as conn:
+                    conn.execute(delete(uw_flow_events).where(uw_flow_events.c.flow_event_key.in_(to_drop)))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("flow_log purge PG delete failed (memory state still updated): %s", exc)
             logger.info("flow_log purge removed %d events older than %s", len(to_drop), cutoff.isoformat())
         return len(to_drop)
 

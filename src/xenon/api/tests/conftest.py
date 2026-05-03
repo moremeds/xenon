@@ -56,6 +56,7 @@ def _postgres_orders_test_db(monkeypatch):
                     "xenon.uw_flow_events",
                     "xenon.uw_api_stats",
                     "xenon.uw_analyze_snapshots",
+                    "xenon.order_fills",
                     "xenon.positions",
                     "xenon.account_snapshots",
                     "xenon.journal_entries",
