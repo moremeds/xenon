@@ -52,7 +52,7 @@ warn() { printf '\033[33m[cutover]\033[0m %s\n' "$*" >&2; }
 err()  { printf '\033[31m[cutover]\033[0m %s\n' "$*" >&2; }
 
 # ── Phase 1 verification ──────────────────────────────────────────────
-log "Phase 1 verification: probing remote $REMOTE_HOST:$REMOTE_PORT/$REMOTE_DB…"
+log "Phase 1 verification: probing remote $REMOTE_HOST:$REMOTE_PORT/$REMOTE_DB..."
 if ! PGCONNECT_TIMEOUT=5 psql -h "$REMOTE_HOST" -p "$REMOTE_PORT" -U "$DB_USER" "$REMOTE_DB" -tA -c "SELECT 1" > /dev/null 2>&1; then
   err "Cannot reach remote Postgres as $DB_USER on $REMOTE_DB."
   err "Phase 1 must be complete first:"
@@ -113,7 +113,7 @@ log "  restore complete."
 
 # ── Phase 2 verification: row counts ──────────────────────────────────
 log ""
-log "Verifying row counts match…"
+log "Verifying row counts match..."
 TABLES=(order_submissions regime_overrides order_fills order_events account_snapshots trades nav_history)
 ALL_MATCH=1
 for tbl in "${TABLES[@]}"; do

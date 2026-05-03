@@ -19,16 +19,23 @@
 
 BEGIN;
 
--- 1. apex_app role (idempotent via DO block)
+-- 1. apex_app role (idempotent)
+--    DO block can't see psql :variables (they don't substitute inside
+--    dollar-quoted strings). So: ensure-exists in DO with a placeholder
+--    password, then set/update the password via ALTER ROLE outside the
+--    block where psql substitution works.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'apex_app') THEN
-        EXECUTE format('CREATE ROLE apex_app LOGIN PASSWORD %L', :'apex_password');
+        CREATE ROLE apex_app LOGIN PASSWORD 'placeholder_will_be_overwritten';
         RAISE NOTICE 'Created role apex_app';
     ELSE
-        RAISE NOTICE 'Role apex_app already exists; password unchanged';
+        RAISE NOTICE 'Role apex_app already exists';
     END IF;
 END$$;
+
+ALTER ROLE apex_app WITH PASSWORD :'apex_password';
+\echo 'Role apex_app password set from :apex_password psql variable.'
 
 -- 2. apex schema, owned by apex_app
 CREATE SCHEMA IF NOT EXISTS apex AUTHORIZATION apex_app;
