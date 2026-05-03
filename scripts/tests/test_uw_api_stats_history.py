@@ -17,14 +17,15 @@ Covers:
 
 from __future__ import annotations
 
-import json
 import os
 import threading
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, insert, text
 
+from xenon.db.schema import uw_api_stats as uw_api_stats_table
 from xenon.utils.uw_api_stats import UWApiStats
 
 # ── helpers ───────────────────────────────────────────────────────────
@@ -75,6 +76,37 @@ def _pg_bucket(hour: str) -> dict | None:
                 .fetchone()
             )
             return dict(row) if row else None
+    finally:
+        engine.dispose()
+
+
+def _seed_pg_bucket(
+    hour: str,
+    *,
+    requests_2xx: int = 0,
+    requests_4xx: int = 0,
+    requests_5xx: int = 0,
+    cached: int = 0,
+    sum_latency_ms: float = 0.0,
+    latency_count: int = 0,
+) -> None:
+    url = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql+psycopg://")
+    engine = create_engine(url, pool_pre_ping=True)
+    try:
+        bucket_hour = datetime.strptime(hour, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        with engine.begin() as conn:
+            conn.execute(
+                insert(uw_api_stats_table).values(
+                    bucket_hour=bucket_hour,
+                    requests=requests_2xx + requests_4xx + requests_5xx,
+                    cache_hits=cached,
+                    latency_sum=Decimal(str(sum_latency_ms)),
+                    latency_count=latency_count,
+                    status_2xx=requests_2xx,
+                    status_4xx=requests_4xx,
+                    status_5xx=requests_5xx,
+                )
+            )
     finally:
         engine.dispose()
 
@@ -322,34 +354,21 @@ class TestPersistence:
         hist = s.get_hourly_history(hours=96)
         assert all(r["requests_2xx"] == 0 for r in hist)
 
-    def test_load_corrupt_json_no_crash(self, tmp_path):
-        history_path = tmp_path / "uw_api_stats_history.json"
-        history_path.write_text("{not-json]]")
+    def test_load_history_no_rows_clean_start(self, tmp_path):
         clock = Clock(datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc))
-        # Should NOT raise.
         s = UWApiStats(now_fn=clock.now)
         hist = s.get_hourly_history(hours=1)
         assert hist[0]["requests_2xx"] == 0
 
-    def test_load_forward_compat_unknown_keys(self, tmp_path):
-        history_path = tmp_path / "uw_api_stats_history.json"
-        payload = {
-            "updated_at": "2026-04-10T14:00:00Z",
-            "schema_version": 1,
-            "buckets": {
-                "2026-04-10T14:00:00Z": {
-                    "requests_2xx": 5,
-                    "requests_4xx": 1,
-                    "requests_5xx": 0,
-                    "cached": 2,
-                    "sum_latency_ms": 500.0,
-                    "latency_count": 5,
-                    "future_field": "ignored",  # unknown key, forward-compat
-                }
-            },
-            "extra_top_level": "also ignored",
-        }
-        history_path.write_text(json.dumps(payload))
+    def test_load_postgres_history_row(self, tmp_path):
+        _seed_pg_bucket(
+            "2026-04-10T14:00:00Z",
+            requests_2xx=5,
+            requests_4xx=1,
+            cached=2,
+            sum_latency_ms=500.0,
+            latency_count=5,
+        )
         clock = Clock(datetime(2026, 4, 10, 14, 30, tzinfo=timezone.utc))
         s = UWApiStats(now_fn=clock.now)
         row = s.get_hourly_history(hours=1)[0]
