@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import os
 import re
@@ -55,6 +56,8 @@ from xenon.utils.price_cache import (  # noqa: E402
 _DEFAULT_WORKERS = 8
 _MIN_WORKERS = 1
 _MAX_WORKERS = 20
+
+logger = logging.getLogger(__name__)
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -393,10 +396,15 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                         stock_value=stock_v,
                         options_value=opt_v,
                     )
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
                 # PG unavailable / scope unset — return entries anyway so the
                 # caller still gets a one-shot result. Cache miss next run.
-                pass
+                # Surface at WARNING so a silent NAV cache miss doesn't go
+                # undiagnosed when the same env succeeds elsewhere.
+                logger.warning(
+                    "fetch_ib_nav_series PG persist failed (%s) — returning fresh entries; cache will miss next run",
+                    exc,
+                )
             return entries
         return None
     except Exception:

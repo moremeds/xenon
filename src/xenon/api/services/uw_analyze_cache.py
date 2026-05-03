@@ -241,11 +241,19 @@ class UwAnalyzeCache:
         """
         if self._loaded:
             return
+        url = os.environ.get("DATABASE_URL")
+        if not url:
+            # Config decision, not a transient flap — latch so we don't
+            # retry on every read.
+            self._loaded = True
+            return
+        # Set _loaded only after a successful PG read. If PG is briefly
+        # unreachable on the first call we must NOT latch _loaded=True with
+        # empty _entries — a subsequent _archive_snapshot would then build
+        # on an empty cache and the next eviction pass could drop legitimate
+        # in-flight tickers. Retrying on the next call is the safe default
+        # (mirrors FlowLog.load — uw_analyze_flow_tracker.py).
         try:
-            url = os.environ.get("DATABASE_URL")
-            if not url:
-                self._loaded = True
-                return
             from sqlalchemy import create_engine as _cse
             from sqlalchemy import text
 
@@ -266,32 +274,32 @@ class UwAnalyzeCache:
                     )
                 ).fetchall()
             engine.dispose()
-            for row in rows:
-                m = row._mapping
-                ticker = m["ticker"]
-                current = {
-                    "ticker": ticker,
-                    "report": m["report"] or {},
-                    "display": m["display"],
-                    "derived": m["derived"],
-                    "dark_pool_summary": m["dark_pool_summary"],
-                    "options_flow_summary": m["options_flow_summary"],
-                    "flow_alerts": m["flow_alerts"],
-                    "ts": (m["archived_at"].isoformat() if m["archived_at"] else None),
-                }
-                self._entries[ticker] = {
-                    "current": current,
-                    "materialized_changes": m["materialized_changes"] or [],
-                    "sources": list(m["sources"]) if m["sources"] else [],
-                    "oi_baseline": m["oi_baseline"],
-                    "previous": m["previous_snapshot"],
-                }
-            self._evict_if_over_cap()
-            self._loaded = True
-            logger.info("uw_analyze_cache loaded %d entries from Postgres", len(self._entries))
         except Exception as exc:  # noqa: BLE001
-            logger.warning("uw_analyze_cache PG load failed (%s) — starting empty", exc)
-            self._loaded = True
+            logger.warning("uw_analyze_cache PG load failed (%s) — will retry on next access", exc)
+            return
+        for row in rows:
+            m = row._mapping
+            ticker = m["ticker"]
+            current = {
+                "ticker": ticker,
+                "report": m["report"] or {},
+                "display": m["display"],
+                "derived": m["derived"],
+                "dark_pool_summary": m["dark_pool_summary"],
+                "options_flow_summary": m["options_flow_summary"],
+                "flow_alerts": m["flow_alerts"],
+                "ts": (m["archived_at"].isoformat() if m["archived_at"] else None),
+            }
+            self._entries[ticker] = {
+                "current": current,
+                "materialized_changes": m["materialized_changes"] or [],
+                "sources": list(m["sources"]) if m["sources"] else [],
+                "oi_baseline": m["oi_baseline"],
+                "previous": m["previous_snapshot"],
+            }
+        self._evict_if_over_cap()
+        self._loaded = True
+        logger.info("uw_analyze_cache loaded %d entries from Postgres", len(self._entries))
 
     async def _persist(self, *, allow_empty: bool = False) -> None:
         """No-op kept for call-site compatibility.

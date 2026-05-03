@@ -1020,3 +1020,37 @@ def test_sticky_merge_noop_on_first_refresh(tmp_path):
     )
     disp = cache.get_entry("NVDA")["current"]["display"]
     assert disp["term_structure_label"] is None
+
+
+def test_ensure_loaded_does_not_latch_on_pg_failure(tmp_path, monkeypatch):
+    """First-call PG failure must NOT latch _loaded=True.
+
+    Regression for codex tribunal SHIP-BLOCKER (2026-05-03): previous
+    behavior swallowed PG load errors and set _loaded=True with empty
+    _entries, which then poisoned _archive_snapshot eviction priorities
+    for the lifetime of the process. The new behavior mirrors
+    FlowLog.load — leave _loaded=False so the next call retries.
+    """
+    import sqlalchemy
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://x:y@127.0.0.1:1/none")
+    cache = make_cache(tmp_path)
+
+    real_create_engine = sqlalchemy.create_engine
+    calls: list[int] = []
+
+    def flaky_create_engine(*a, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("simulated transient PG outage")
+        return real_create_engine(*a, **kw)
+
+    monkeypatch.setattr(sqlalchemy, "create_engine", flaky_create_engine)
+
+    cache._ensure_loaded()
+    assert cache._loaded is False, "PG failure must not latch _loaded=True"
+    assert cache._entries == {}, "no entries should have been seeded by a failed load"
+    assert len(calls) == 1, "first load should have attempted exactly one engine create"
+
+    cache._ensure_loaded()
+    assert len(calls) == 2, "second call must retry rather than skip on a failed prior load"
