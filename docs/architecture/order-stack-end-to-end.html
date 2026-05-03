@@ -1,0 +1,885 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Order Stack — End-to-End Architecture</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+      mermaid.initialize({
+        startOnLoad: true,
+        theme: "dark",
+        themeVariables: {
+          darkMode: true,
+          background: "#0d0d0d",
+          primaryColor: "#1a1a1a",
+          primaryTextColor: "#e8e8e8",
+          primaryBorderColor: "#3a3a3a",
+          lineColor: "#7a7a7a",
+          secondaryColor: "#222",
+          tertiaryColor: "#181818",
+        },
+      });
+    </script>
+    <style>
+      :root {
+        --bg: #0b0b0b;
+        --panel: #141414;
+        --border: #262626;
+        --text: #e8e8e8;
+        --text-dim: #9a9a9a;
+        --accent: #ff7a45;
+        --warn: #ffd166;
+        --good: #8ecf8e;
+        --bad: #ef6961;
+        --code-bg: #1a1a1a;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family:
+          "Inter",
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+        line-height: 1.6;
+        font-size: 14px;
+      }
+      body {
+        padding: 32px 8vw 80px;
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+      h1,
+      h2,
+      h3,
+      h4 {
+        color: var(--text);
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 8px;
+        margin-top: 36px;
+        line-height: 1.3;
+        letter-spacing: -0.01em;
+      }
+      h1 {
+        font-size: 28px;
+        border-bottom-width: 2px;
+        margin-top: 0;
+      }
+      h2 {
+        font-size: 22px;
+      }
+      h3 {
+        font-size: 17px;
+        border-bottom: none;
+      }
+      h4 {
+        font-size: 14px;
+        border-bottom: none;
+        color: var(--text-dim);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      p {
+        margin: 10px 0;
+      }
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+      code {
+        font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+        font-size: 0.9em;
+        background: var(--code-bg);
+        padding: 1px 6px;
+        border-radius: 3px;
+        color: #f0d4a8;
+      }
+      pre {
+        background: var(--code-bg);
+        border: 1px solid var(--border);
+        padding: 14px 18px;
+        overflow-x: auto;
+        border-radius: 4px;
+        line-height: 1.45;
+      }
+      pre code {
+        background: transparent;
+        padding: 0;
+        color: var(--text);
+        font-size: 12.5px;
+      }
+      blockquote {
+        border-left: 3px solid var(--accent);
+        margin: 16px 0;
+        padding: 6px 16px;
+        color: var(--text-dim);
+        background: rgba(255, 122, 69, 0.04);
+      }
+      blockquote strong {
+        color: var(--accent);
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 16px 0;
+        font-size: 13px;
+      }
+      th,
+      td {
+        border: 1px solid var(--border);
+        padding: 8px 10px;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: var(--panel);
+        color: var(--text);
+        font-weight: 600;
+      }
+      tr:nth-child(even) td {
+        background: rgba(255, 255, 255, 0.015);
+      }
+      ul,
+      ol {
+        padding-left: 24px;
+      }
+      li {
+        margin: 4px 0;
+      }
+      .mermaid {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 18px;
+        margin: 24px 0;
+        text-align: center;
+        overflow-x: auto;
+      }
+      .layer-map {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 18px;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 12px;
+        white-space: pre;
+        overflow-x: auto;
+        line-height: 1.45;
+      }
+      .meta {
+        color: var(--text-dim);
+        font-size: 13px;
+        margin-bottom: 24px;
+      }
+      .pill {
+        display: inline-block;
+        background: var(--code-bg);
+        border: 1px solid var(--border);
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        margin: 0 4px 4px 0;
+        color: var(--text-dim);
+        font-family: "JetBrains Mono", monospace;
+      }
+      .toc {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 12px 18px;
+        margin: 24px 0;
+      }
+      .toc ul {
+        margin: 0;
+      }
+      .toc li {
+        margin: 2px 0;
+        font-size: 13px;
+      }
+      hr {
+        border: none;
+        border-top: 1px solid var(--border);
+        margin: 36px 0;
+      }
+      .note {
+        color: var(--warn);
+      }
+      .file-cite {
+        font-family: "JetBrains Mono", monospace;
+        color: var(--text-dim);
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Order Stack — End-to-End Architecture</h1>
+    <p class="meta">
+      Companion to <code>order-stack-end-to-end.md</code>. Markdown carries
+      every detail; this file adds Mermaid diagrams.
+      <br />
+      <span class="pill">Audience: senior engineer, day 1</span>
+      <span class="pill">Last code-traced: 2026-05-02</span>
+      <span class="pill">Cite-anchor convention: file:line</span>
+    </p>
+
+    <div class="toc">
+      <strong>Contents</strong>
+      <ul>
+        <li><a href="#tldr">TL;DR</a></li>
+        <li><a href="#layer-map">1. Layer Map</a></li>
+        <li><a href="#diagram-layers">Diagram: Layers</a></li>
+        <li>
+          <a href="#diagram-component-tree">Diagram: React component tree</a>
+        </li>
+        <li><a href="#diagram-validation">Diagram: Validation pipeline</a></li>
+        <li>
+          <a href="#diagram-single-leg">Diagram: Single-leg place sequence</a>
+        </li>
+        <li><a href="#diagram-combo">Diagram: Combo BAG place sequence</a></li>
+        <li><a href="#diagram-modify">Diagram: Modify sequence</a></li>
+        <li><a href="#diagram-cancel">Diagram: Cancel sequence</a></li>
+        <li>
+          <a href="#diagram-state">Diagram: order_submissions state machine</a>
+        </li>
+        <li><a href="#diagram-data-flow">Diagram: Postgres data flow</a></li>
+        <li><a href="#diagram-feedback">Diagram: UI feedback loop</a></li>
+        <li><a href="#concerns">Architectural concerns</a></li>
+        <li><a href="#known-issues">Known issues + next steps</a></li>
+      </ul>
+    </div>
+
+    <h2 id="tldr">TL;DR</h2>
+    <blockquote>
+      The path is
+      <code
+        >OrderTab → /api/orders/place (Next.js) → POST /orders/place (FastAPI) →
+        8-stage validation pipeline → subprocess (xenon-ib-place-order) → IB
+        Gateway → ack persisted via orders_store.mark_submitted → activity
+        poller mirrors fills/external-modify back to Postgres → UI re-renders
+        from the next /orders GET (no live WS push for order events; WS is
+        price-only)</code
+      >. <br /><br />
+      The most fragile parts (verified 2026-05-02): (1)
+      <strong>no continuous PENDING reaper</strong> — subprocess hangs leave
+      phantoms until restart (§13.11); (2)
+      <strong>subprocess concurrency unbounded</strong> — clientId range 20–49
+      exhaustible under load (§13.12); (3) the in-process bypass class —
+      <code>_orders_*_from_body</code> and the <code>submit_combo</code> wizard
+      route both reproduce gates inline (§13.13); (4) cancel/modify clientId
+      scoping — pool can see but not cancel; (5)
+      <strong>fill-to-toast latency up to ~120 s</strong> from double-polling —
+      order-event WS push would compress this to sub-second (§13.15); (6)
+      late-arriving CommissionReport coupling; (7) the TWS-cancel-not-mirrored
+      gap.
+    </blockquote>
+
+    <h2 id="layer-map">1. Layer Map</h2>
+    <p>
+      The full source-of-truth layer map (with files, key symbols, and FK
+      semantics) is in the markdown. Below is a navigable diagram.
+    </p>
+
+    <!-- prettier-ignore -->
+    <pre id="diagram-layers" class="mermaid">
+flowchart TB
+  classDef ui fill:#1f2933,stroke:#3a4a5a,color:#e8e8e8
+  classDef next fill:#1a2e1a,stroke:#3a5a3a,color:#e8e8e8
+  classDef fast fill:#2a1e0e,stroke:#5a3e1e,color:#e8e8e8
+  classDef exec fill:#2a0e1e,stroke:#5a1e3a,color:#e8e8e8
+  classDef ib fill:#1a1a2a,stroke:#3a3a5a,color:#e8e8e8
+  classDef db fill:#0e2a1e,stroke:#1e5a3a,color:#e8e8e8
+  UI["Layer 1 — React UI<br/>OrderTab.tsx · NewOrderForm · ComboOrderForm<br/>RegimeBlockModal · OrderActionsContext<br/>nakedShortGuard · orderReasonCodes"]:::ui
+  NEXT["Layer 2a — Next.js routes<br/>app/api/orders/place,modify,cancel,quote/route.ts<br/>web/lib/xenonApi.ts xenonFetch"]:::next
+  FAST["Layer 2b — FastAPI<br/>server.py — _orders_place_modify_cancel_from_body<br/>services/regime_gate.py · services/regime_state.py<br/>services/ib_activity_mirror.py · auth.py · ib_pool.py"]:::fast
+  EXEC["Layer 3 — Execution subprocesses<br/>execution/ib_place_order.py clientId 20-49<br/>execution/ib_order_manage.py original clientId<br/>execution/preflight.py · orders_store.py · quote_guard.py<br/>execution/account_scope.py · single_leg_rehydrate.py"]:::exec
+  IB["Layer 4 — IB Gateway / TWS<br/>ib_async via 127.0.0.1:4002<br/>placeOrder · openOrder · orderStatus · execDetails<br/>commissionReport · errorEvent 110 201 10147 321"]:::ib
+  DB[("Layer 5 — Postgres xenon schema<br/>order_submissions · order_events · order_fills<br/>regime_overrides composite FK DEFERRED<br/>account_snapshots · trades · nav_history · events.outbox")]:::db
+  UI -->|fetch| NEXT
+  NEXT -->|xenonFetch| FAST
+  FAST -->|asyncio.subprocess| EXEC
+  EXEC -->|ib_async TCP| IB
+  IB -->|trade events| EXEC
+  EXEC -->|sync engine| DB
+  FAST -->|async engine| DB
+  DB -.->|activity poller 60s| FAST
+  FAST -.->|GET /orders refresh| NEXT
+  NEXT -.->|JSON body| UI
+    </pre>
+
+    <h2 id="diagram-component-tree">React Component Tree (OrderTab)</h2>
+
+    <!-- prettier-ignore -->
+    <pre class="mermaid">
+flowchart TB
+  classDef comp fill:#1f2933,stroke:#3a4a5a,color:#e8e8e8
+  classDef hook fill:#1a2e1a,stroke:#3a5a3a,color:#e8e8e8
+  classDef lib fill:#2a1e0e,stroke:#5a3e1e,color:#e8e8e8
+  OrderTab[OrderTab]:::comp
+  ExistingOrderRow["ExistingOrderRow x N"]:::comp
+  ModifyModal[ModifyOrderModal]:::comp
+  NewForm["NewOrderForm<br/>single-leg path"]:::comp
+  ComboForm["ComboOrderForm<br/>BAG path"]:::comp
+  RegimeModal["RegimeBlockModal<br/>409 / 422 prompt"]:::comp
+  OrderActionsCtx["OrderActionsContext<br/>requestCancel / requestModify<br/>pendingCancels Map"]:::hook
+  AttemptId["useClientAttemptId<br/>UUIDv4 per ticket"]:::hook
+  Wizard["useWizardLauncher<br/>useWizardSession"]:::hook
+  nakedGuard["nakedShortGuard.ts<br/>checkNakedShortRisk"]:::lib
+  regimeLib["order/regimeGate.ts<br/>parseRegimeGateResponse<br/>buildRegimeOverrideFields<br/>suggestResizeQuantity"]:::lib
+  placePayload["order/placeOrderContract.ts<br/>buildFastApiPlaceOrderPayload"]:::lib
+  reasonCodes["orderReasonCodes.ts<br/>getReasonToast"]:::lib
+  OrderTab --> ExistingOrderRow
+  OrderTab --> ModifyModal
+  OrderTab --> NewForm
+  OrderTab --> ComboForm
+  NewForm --> RegimeModal
+  ComboForm --> RegimeModal
+  ExistingOrderRow --> OrderActionsCtx
+  NewForm --> AttemptId
+  NewForm --> nakedGuard
+  NewForm --> regimeLib
+  NewForm --> reasonCodes
+  ComboForm --> AttemptId
+  ComboForm --> nakedGuard
+  ComboForm --> regimeLib
+  ComboForm --> reasonCodes
+  ComboForm --> Wizard
+  ModifyModal --> regimeLib
+    </pre>
+
+    <h2 id="diagram-validation">FastAPI Validation Pipeline</h2>
+    <p>The 8 stages run strictly in order; any failure short-circuits.</p>
+
+    <!-- prettier-ignore -->
+    <pre class="mermaid">
+flowchart TD
+  classDef pass fill:#1a2e1a,stroke:#3a5a3a,color:#e8e8e8
+  classDef block fill:#2a0e1e,stroke:#5a1e3a,color:#e8e8e8
+  A["1. Body schema<br/>pydantic ValidationError → 400 INVALID_ORDER_BODY"]:::pass
+  B["2. Account scope<br/>resolve_from_app_state → AccountScope"]:::pass
+  C{"3. Read-only broker?"}
+  C_BLK["403 READ_ONLY_BROKER"]:::block
+  D["4. Regime gate<br/>_run_regime_gate"]
+  D_BYPASS["risk-reducing exit?<br/>portfolio-backed SELL → bypass"]:::pass
+  D_BLOCK["409 REGIME_BLOCK<br/>override_required"]:::block
+  D_RES["422 REGIME_RESIZE_REQUIRED<br/>max_loss_cap_usd cover_ratio"]:::block
+  E["5. Preflight Gate 4<br/>universe → cover → cover_ratio threshold"]
+  E_BLK["400 reason_code<br/>UNIVERSE_UNKNOWN / INSUFFICIENT_SHARES / etc"]:::block
+  F["6. Quote gate single-leg only<br/>market hours · contract · sanity · tick · band"]
+  F_BLK["400 reason_code<br/>STALE_QUOTE / OPTION_MARKET_CLOSED / etc"]:::block
+  G["7. reserve_attempt<br/>ON CONFLICT DO NOTHING<br/>+ regime_overrides INSERT in same txn"]
+  G_DUP["200 duplicate_of"]:::pass
+  G_TERM["409 ATTEMPT_ID_TERMINAL"]:::block
+  H["8. Subprocess xenon-ib-place-order"]:::pass
+  H_OK["mark_submitted WORKING<br/>back-fill regime_overrides perm_id"]:::pass
+  H_ERR["mark_terminal REJECTED<br/>IB_REJECT / LIMIT_OFF_TICK"]:::block
+  A --> B
+  B --> C
+  C -- non-IB --> C_BLK
+  C -- IB --> D
+  D --> D_BYPASS
+  D_BYPASS --> E
+  D --> D_BLOCK
+  D --> D_RES
+  E --> E_BLK
+  E --> F
+  F --> F_BLK
+  F --> G
+  G --> G_DUP
+  G --> G_TERM
+  G --> H
+  H --> H_OK
+  H --> H_ERR
+    </pre>
+
+    <h2 id="diagram-single-leg">
+      Sequence — Single-leg LIMIT BUY (happy path)
+    </h2>
+
+    <!-- prettier-ignore -->
+    <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant U as User
+  participant UI as OrderTab (React)
+  participant N as Next.js /api/orders/place
+  participant F as FastAPI /orders/place
+  participant Gate as Regime + Preflight + Quote
+  participant Store as orders_store (Postgres)
+  participant Sub as xenon-ib-place-order
+  participant IB as IB Gateway
+  U->>UI: Click BUY 1 AAPL Call
+  UI->>UI: setConfirmStep(true)
+  U->>UI: Click Confirm
+  UI->>UI: buildSingleLegOrderPayload + checkNakedShortRisk
+  UI->>UI: attemptId.markSubmitted()
+  UI->>N: POST /api/orders/place {client_attempt_id, ...}
+  N->>N: schema validate, normalize C/P
+  N->>F: xenonFetch(/orders/place) 60s
+  F->>F: require_mode_verified (Clerk)
+  F->>F: _resolve_scope_kwargs (broker, env, account)
+  F->>Gate: _run_regime_gate(body)
+  alt Risk-reducing exit (SELL with portfolio match)
+    Gate-->>F: bypass
+  else New-exposure
+    Gate->>Store: load PortfolioView (account_snapshots)
+    Gate->>Store: get_latest_net_liquidation_for_scope
+    Gate-->>F: outcome (OK / THROTTLE / BLOCK)
+  end
+  F->>Gate: _run_preflight (cover_ratio threaded)
+  Gate-->>F: Verdict(accept=True)
+  F->>Gate: _validate_non_combo_quote (hours, tick, band)
+  Gate-->>F: QuoteVerdict(accept=True)
+  F->>Store: reserve_attempt — ON CONFLICT DO NOTHING (+ regime_overrides if override)
+  Store-->>F: winner submission_id
+  F->>Sub: subprocess xenon-ib-place-order --json (15s timeout)
+  Sub->>IB: connect clientId=auto (20-49)
+  Sub->>IB: qualify_contracts(Option)
+  Sub->>IB: placeOrder(LimitOrder)
+  IB-->>Sub: openOrder (permId arrives)
+  IB-->>Sub: orderStatus=Submitted
+  Sub-->>F: {status: ok, orderId, permId, initialStatus}
+  F->>Store: mark_submitted (state=WORKING) + UPDATE regime_overrides.perm_id
+  F-->>N: 200 {orderId, permId, ...}
+  N->>F: POST /orders/refresh (best-effort 10s)
+  N-->>UI: 200 {status: ok, orderId, ...}
+  UI->>UI: setSuccess() + attemptId.markTerminal()
+  UI-->>U: Toast Order placed
+  Note over IB,Store: Later, async — activity poller 60s writes order_fills, commissionReport patches via update_fill_commission
+    </pre>
+
+    <h2 id="diagram-combo">Sequence — Combo BAG bull call spread</h2>
+
+    <!-- prettier-ignore -->
+    <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant U as User
+  participant UI as ComboOrderForm
+  participant N as Next.js /api/orders/place
+  participant F as FastAPI /orders/place
+  participant Sub as xenon-ib-place-order
+  participant IB as IB Gateway
+  U->>UI: Build bull call spread BUY $200C, SELL $210C
+  UI->>UI: legsWithActions LONG to BUY, SHORT to SELL (never flip)
+  UI->>UI: netPrices cross-fields BUY combo pay ASK on BUY legs, BID on SELL legs
+  UI->>UI: checkNakedShortRisk (combo)
+  UI->>N: POST type=combo action=BUY limitPrice (signed) legs[2]
+  N->>F: xenonFetch(/orders/place)
+  F->>F: gate combo BUY net_price gt 0 = debit; hedge classification SPY put spread debit + strike geom
+  F->>F: preflight.evaluate_combo combo_uncovered_short_call_ratio == 0 = accept
+  F->>F: NO server-side combo quote check (BAG path skipped at gate 6)
+  F->>F: reserve_attempt security_type=BAG
+  F->>Sub: --json (combo)
+  Sub->>IB: qualify each leg as Option
+  Sub->>IB: build Contract secType=BAG + ComboLeg[] (action preserved)
+  Sub->>IB: placeOrder LimitOrder action=BUY smartComboRoutingParams=[NonGuaranteed=1]
+  Note over IB: 5s wait (combo) leg routing + risk checks longer than single-leg
+  IB-->>Sub: openOrder permId, Submitted
+  Sub-->>F: {status: ok, orderId, permId}
+  F->>F: mark_submitted state=WORKING
+  F-->>N: 200
+  N-->>UI: 200
+  UI-->>U: Toast Combo order placed
+    </pre>
+
+    <h2 id="diagram-modify">Sequence — Modify (single-leg, qty-increase)</h2>
+
+    <!-- prettier-ignore -->
+    <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant UI as ModifyOrderModal
+  participant N as Next.js /api/orders/modify
+  participant F as FastAPI _orders_modify_from_body
+  participant Store as orders_store
+  participant Sub as xenon-ib-order-manage
+  participant IB as IB Gateway
+  UI->>N: POST orderId newQuantity modifySequence
+  N->>F: xenonFetch(/orders/modify)
+  F->>F: require modifySequence (else 400)
+  F->>F: require orderId or permId
+  F->>Store: load_submission_for_modify (scope-filtered)
+  Store-->>F: submission row
+  F->>F: _run_modify_regime_gate BEFORE apply_modify
+  alt qty unchanged or decrease
+    F->>F: skip gate (risk-reducing)
+  else qty increase BAG restrictive tier
+    F-->>UI: 409 REGIME_BLOCK modify_sec_type=BAG override_supported=false
+  else qty increase OPT BLOCK
+    F-->>UI: 409 REGIME_BLOCK applied_sequence (so client can sync)
+  end
+  F->>Store: apply_modify(order_id, sequence) UPDATE WHERE modify_sequence lt seq
+  alt 0 rows
+    Store-->>F: stale or missing
+    F-->>UI: 409 MODIFY_STALE applied=current OR 404 ORDER_NOT_FOUND
+  else 1 row
+    F->>Sub: modify --order-id ... --new-quantity ...
+    Sub->>IB: detect original clientId (reqAllOpenOrders, reconnect)
+    Sub->>IB: clear VOL fields (avoid Error 321)
+    Sub->>IB: placeOrder (modified)
+    IB-->>Sub: openOrder ack
+    Sub-->>F: {status: ok}
+    F->>Store: record_event MODIFY
+    F-->>N: {status: ok, applied_sequence}
+    N->>F: GET /orders
+    N->>N: isModifyConfirmed (price/qty match)
+    N-->>UI: 200 with refreshed orders
+  end
+    </pre>
+
+    <h2 id="diagram-cancel">Sequence — Cancel</h2>
+
+    <!-- prettier-ignore -->
+    <pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant UI as ExistingOrderRow / Modal
+  participant Ctx as OrderActionsContext
+  participant N as Next.js /api/orders/cancel
+  participant F as FastAPI _orders_cancel_from_body
+  participant Sub as xenon-ib-order-manage
+  participant IB as IB Gateway
+  participant Store as orders_store
+  UI->>Ctx: requestCancel(order)
+  Ctx->>N: POST orderId permId
+  N->>F: xenonFetch(/orders/cancel)
+  F->>Sub: cancel --order-id --perm-id
+  Sub->>IB: detect original clientId
+  Sub->>IB: cancelOrder(orderId)
+  Note right of IB: IB confirms cancel either by orderStatus=Cancelled or by removing from open orders
+  IB-->>Sub: cancelled or refreshed snapshot
+  alt Subprocess error
+    F->>Store: _record_manage_event CANCEL (failure)
+    F-->>N: 503 IB_CONNECTION OR 409 OWNERSHIP OR 404 IB_REJECT (10147/10148)
+  else Success
+    F->>Store: _record_manage_event CANCEL (200)
+    F->>Store: _mark_submission_cancelled state=CANCELLED USER_CANCEL
+    F-->>N: 200 {status: ok}
+    N->>F: POST /orders/refresh
+    N->>F: GET /orders
+    N-->>Ctx: 200 with refreshed orders
+    Ctx-->>UI: clear pending state, row vanishes
+  end
+  Note over IB,Store: TWS-side cancels do NOT propagate. register_from_snapshot does not mark WORKING to CANCELLED on disappearance (naive disappearance misclassifies fills).
+    </pre>
+
+    <h2 id="diagram-state">order_submissions State Machine</h2>
+
+    <!-- prettier-ignore -->
+    <pre class="mermaid">
+stateDiagram-v2
+  [*] --> PENDING: reserve_attempt (winner)
+  PENDING --> WORKING: mark_submitted (subprocess success)
+  PENDING --> FAILED: subprocess hard fail SUBPROCESS_ERROR
+  PENDING --> REJECTED: ib status error IB_REJECT / LIMIT_OFF_TICK
+  WORKING --> FILLED: mark_terminal (filled_qty == qty)
+  WORKING --> PARTIALLY_FILLED: mark_terminal (filled lt qty)
+  WORKING --> CANCELLED: _mark_submission_cancelled USER_CANCEL
+  WORKING --> WORKING: apply_modify (modify_sequence advance)
+  PARTIALLY_FILLED --> FILLED: subsequent fills
+  PARTIALLY_FILLED --> CANCELLED: user cancel
+  FILLED --> [*]
+  REJECTED --> [*]
+  CANCELLED --> [*]
+  FAILED --> [*]
+  note right of WORKING
+    TWS-side cancels DO NOT transition
+    WORKING to CANCELLED (open gap,
+    src/xenon/api/CLAUDE.md:44)
+  end note
+  note right of PENDING
+    PENDING_TIMEOUT reaper runs only on
+    boot via single_leg_rehydrate. No
+    continuous sweep — abandoned PENDING
+    rows survive until restart (§13.11).
+  end note
+    </pre>
+
+    <h2 id="diagram-data-flow">Postgres Data Flow on Place</h2>
+
+    <!-- prettier-ignore -->
+    <pre class="mermaid">
+flowchart TB
+  classDef tbl fill:#0e2a1e,stroke:#1e5a3a,color:#e8e8e8
+  classDef step fill:#1a1a1a,stroke:#3a3a3a,color:#e8e8e8
+  R1["Step 7 reserve_attempt<br/>1 transaction"]:::step
+  SUBS[("xenon.order_submissions<br/>PK submission_id<br/>UNIQUE uq_order_sub_user_attempt")]:::tbl
+  OVR[("xenon.regime_overrides<br/>composite FK<br/>DEFERRABLE INITIALLY DEFERRED")]:::tbl
+  R1 -->|INSERT submission state=PENDING| SUBS
+  R1 -.->|if override_audit| OVR
+  R2["Step 8 success mark_submitted<br/>1 transaction"]:::step
+  R2 -->|UPDATE state=WORKING set ib_order_id perm_id| SUBS
+  R2 -->|UPDATE perm_id ib_order_id backfill audit identity| OVR
+  R3["Async — IB activity poller<br/>60s cadence"]:::step
+  FILLS[("xenon.order_fills<br/>PK exec_id<br/>idempotent")]:::tbl
+  OUTBOX[("events.outbox<br/>fill.recorded<br/>fill.commission_updated")]:::tbl
+  EVT[("xenon.order_events<br/>append-only audit")]:::tbl
+  NAV[("xenon.account_snapshots<br/>net_liquidation source<br/>for bankroll")]:::tbl
+  R3 -->|record_fill / record_external_fills ON CONFLICT DO NOTHING| FILLS
+  R3 -->|emit_outbox_in_txn| OUTBOX
+  R3 -->|update_fill_commission late CommissionReport| FILLS
+  R4["Cancel / modify / IB-reject record_event"]:::step
+  R4 -->|kind detail JSONB| EVT
+  R5["Regime gate read"]:::step
+  R5 -->|get_latest_net_liquidation_for_scope| NAV
+    </pre>
+
+    <h2 id="diagram-feedback">UI Feedback Loop</h2>
+
+    <!-- prettier-ignore -->
+    <pre class="mermaid">
+flowchart LR
+  classDef ui fill:#1f2933,stroke:#3a4a5a,color:#e8e8e8
+  classDef api fill:#2a1e0e,stroke:#5a3e1e,color:#e8e8e8
+  Place["OrderTab.handlePlace"]:::ui
+  Modal["RegimeBlockModal<br/>opens on 409/422"]:::ui
+  Toast["getReasonToast(code)<br/>orderReasonCodes.ts"]:::ui
+  Refresh["/api/orders<br/>poll + post-mutation refresh"]:::api
+  WS["Price WebSocket<br/>usePrices.ts<br/>price-only push"]:::api
+  Ctx["OrderActionsContext<br/>pendingModifies / pendingCancels"]:::ui
+  Place -->|on 409/422| Modal
+  Place -->|on 4xx other| Toast
+  Place -->|on 2xx| Refresh
+  Place -->|netPrices recompute| WS
+  Modal -->|retryRegimeOrder| Place
+  Refresh -->|orders snapshot| Place
+  WS -->|bid/ask updates| Place
+  Place -.->|requestModify / requestCancel| Ctx
+  Ctx -->|after mutation| Refresh
+    </pre>
+
+    <h2 id="concerns">Architectural Concerns</h2>
+    <p>
+      Cross-reference:
+      <code>docs/reference/order-path-incident-history.md</code> table rows
+      correspond to numbered incidents in the markdown. The 6+ recurring
+      patterns:
+    </p>
+    <ol>
+      <li>
+        <strong>In-process bypass class</strong> —
+        <code>_orders_*_from_body</code> helpers skip route
+        <code>Depends</code>. Caused PR #34 / #47 / #61 regressions. Guards:
+        <code>scripts/checks/order_path_caller_allowlist.py</code>,
+        <code>scripts/checks/no_json_fallback_on_order_path.py</code>.
+      </li>
+      <li>
+        <strong>HTTPException dict-detail trap</strong> — wraps under
+        <code>body.detail.reason_code</code>; UI toast reads
+        <code>body.reason_code</code> top-level. Always use
+        <code>JSONResponse(content={...})</code> for new error mappings.
+      </li>
+      <li>
+        <strong>quote_token saga</strong> — re-shipped + reverted twice (PR
+        #34/#35, #47/#48, finally <code>654d72d2</code>). Backend mint+verify
+        still wired; UI never attaches. Partially-dead code.
+      </li>
+      <li>
+        <strong>TWS-cancel mirroring gap</strong> —
+        <code>register_from_snapshot</code> does not transition
+        <code>WORKING → CANCELLED</code>; naive disappearance-detection
+        misclassifies fills. Phantom rows until restart.
+      </li>
+      <li>
+        <strong>Asymmetric writers of <code>order_fills.metadata</code></strong>
+        — <code>record_external_fills</code>, <code>single_leg_rehydrate</code>,
+        <code>record_fill</code> populate metadata with different richness.
+        Incident #16 surface.
+      </li>
+      <li>
+        <strong><code>user_id="local"</code></strong> hardcoded — blocks
+        multi-tenant; idempotency key collision risk if anything ever goes
+        multi-user.
+      </li>
+      <li>
+        <strong>Substring CI guard</strong> — fragile to obfuscation; AST
+        upgrade tracked as C-7.
+      </li>
+      <li>
+        <strong>Modify race on subprocess failure</strong> — DB sequence
+        advances, IB doesn't; <code>applied_sequence</code> in 503 body lets
+        client counter sync.
+      </li>
+      <li>
+        <strong>permId race</strong> —
+        <code>Trade.order.permId == 0</code> until <code>openOrder</code> ack;
+        the place subprocess sleeps 2s/5s as a coarse-grained workaround.
+        Downstream rehydrate / BAG aggregation must poll until non-zero.
+      </li>
+      <li>
+        <strong>No continuous PENDING reaper (§13.11)</strong> —
+        <code>PENDING_TIMEOUT_SECONDS = 60</code>
+        (<code>single_leg_rehydrate.py:31</code>) is consulted only during
+        <code>rehydrate_on_boot</code>. The activity poller does NOT sweep stale
+        <code>PENDING</code> rows. Subprocess hangs leave
+        <code>client_attempt_id</code> held; retries silently no-op as
+        <code>duplicate</code>. Mechanical fix: 30 s background
+        <code
+          >UPDATE order_submissions SET state='FAILED' ... WHERE state='PENDING'
+          AND updated_at &lt; now() - interval '60s'</code
+        >.
+      </li>
+      <li>
+        <strong>Subprocess concurrency unbounded (§13.12)</strong> — order place
+        / modify / cancel calls have no semaphore (compare UW OI's
+        <code>Semaphore(3)</code> at <code>server.py:810</code>). ClientId range
+        20–49 = 30 IDs; 30 concurrent place attempts can exhaust the range with
+        no fairness or queueing. Fix: <code>asyncio.Semaphore(20)</code> +
+        <code>IB_BUSY</code> 503 + counter metric.
+      </li>
+      <li>
+        <strong
+          ><code>submit_combo</code> parallel order surface (§13.13)</strong
+        >
+        — the wizard route
+        <code>/orders/wizard/{session_id}/submit</code> reaches
+        <code>combo_wizard/session.py:293</code>, which is a second
+        order-creating entry that reproduces the 8-stage gates inline. Any
+        change to the place-route gate sequence must be mirrored here, or the
+        wizard becomes a regression hazard. Future: extract the pipeline as a
+        pure async function and invoke from both surfaces.
+      </li>
+      <li>
+        <strong
+          ><code>acknowledge_limit_override</code> audit fragmentation
+          (§13.14)</strong
+        >
+        — limit-band overrides land in
+        <code>order_events</code> (<code>server.py:2864</code>); regime
+        overrides land in <code>regime_overrides</code>. An audit query for "all
+        overrides on this account" must hit both tables. Cleaner schema: extend
+        <code>regime_overrides</code> with
+        <code>kind ∈ {regime, limit_band}</code> and unify the writer surface.
+      </li>
+      <li>
+        <strong>Activity-poller latency budget (§13.15)</strong> —
+        <code>XENON_IB_ACTIVITY_POLL_S</code> default 60 s + UI
+        <code>/orders</code> poll = up to ~120 s fill-to-toast latency. Single
+        largest user-visible latency. Fix: extend the existing price WS surface
+        (<code>web/lib/usePrices.ts:354</code>) with an
+        <code>order</code> channel; emit on
+        <code>mark_submitted / mark_terminal / record_fill</code>.
+      </li>
+    </ol>
+
+    <h2 id="known-issues">Known Issues + Next Steps</h2>
+    <p>
+      Punch list, ranked by risk × impact (this version reflects a 2026-05-02
+      verification pass — Tier 1 items 1–4 were under-emphasized in the original
+      draft; full detail in markdown §14):
+    </p>
+
+    <h3>Tier 1 — reliability gaps with user-visible failure modes</h3>
+    <ol>
+      <li>
+        <strong>No continuous PENDING reaper (§13.11)</strong> — subprocess
+        hangs leave rows stuck <code>PENDING</code> until the next FastAPI
+        restart. Same <code>client_attempt_id</code> retries silently no-op.
+        Mechanical fix: 30 s background sweep, pure Postgres.
+      </li>
+      <li>
+        <strong>Subprocess concurrency unbounded (§13.12)</strong> — clientId
+        range 20–49 (30 IDs) is exhaustible under load. Fix:
+        <code>asyncio.Semaphore(20)</code> + <code>IB_BUSY</code> 503 + counter
+        metric.
+      </li>
+      <li>
+        <strong>TWS-cancel not mirrored</strong> — phantom
+        <code>WORKING</code> rows until restart. Disambiguate via
+        <code>order_fills</code> for the same <code>(perm_id, scope)</code>
+        + idle-grace window.
+      </li>
+      <li>
+        <strong>No order-event WS push (§13.15)</strong> — fill-to-toast latency
+        budget up to ~120 s (60 s server poll + 60 s UI poll). Extend the
+        existing price WS surface with an <code>order</code>
+        channel.
+      </li>
+    </ol>
+
+    <h3>Tier 2 — audit / consistency / parallel-surface parity</h3>
+    <ol start="5">
+      <li>
+        <strong>C-2.2</strong> combo modify cancel-then-place — explicit
+        "CRITICAL" message but no rollback. Persist legs in
+        <code>order_submissions.metadata</code> (or sibling
+        <code>combo_legs</code>) and auto-replay on failure.
+      </li>
+      <li>
+        <strong>C-2.3</strong> modify override audit —
+        <code>_run_modify_regime_gate</code> override path does not write
+        <code>regime_overrides</code>. <code>override_supported: false</code>
+        is the current honest signal.
+      </li>
+      <li>
+        <strong
+          ><code>acknowledge_limit_override</code> audit fragmentation
+          (§13.14)</strong
+        >
+        — limit-band overrides land in <code>order_events</code>, not
+        <code>regime_overrides</code>. Extend <code>regime_overrides</code> with
+        <code>kind ∈ {regime, limit_band}</code> and unify the writer surface.
+      </li>
+      <li>
+        <strong><code>submit_combo</code> gate parity (§13.13)</strong> — wizard
+        surface is a second order-creating route. Audit it line-by-line against
+        the 8-stage pipeline and extract a shared async function.
+      </li>
+      <li>
+        <strong><code>order_fills.metadata</code></strong> writer consolidation
+        — incident #16 follow-up. Three writers, different richness; root cause
+        of the "Stock" structure-label fall-through.
+      </li>
+    </ol>
+
+    <h3>Tier 3 — long-tail follow-ups (already on backlog)</h3>
+    <ol start="10">
+      <li>
+        <strong>C-5</strong> hedge registry — pull from
+        <code>docs/trading/options-structures.json</code> instead of hardcoded
+        frozenset.
+      </li>
+      <li>
+        <strong>C-6</strong> <code>user_id="local"</code> — idempotency key
+        risk, multi-tenant blocker.
+      </li>
+      <li><strong>C-7</strong> substring CI guard → AST call-site analysis.</li>
+      <li>
+        <strong>Modify race</strong> — DB sequence advances, IB doesn't on
+        subprocess failure. Cosmetic but worth flagging.
+      </li>
+      <li>
+        <strong>quote_token partially-dead</strong> — both sides wired, no UI
+        caller. Either delete or re-ship after re-doing #34/#47 analysis.
+      </li>
+      <li>
+        <strong>tick stub at 0.01</strong> —
+        <code>reqContractDetailsAsync</code> not plumbed; acceptable until edge
+        instruments dominate the trade mix.
+      </li>
+    </ol>
+
+    <p
+      class="meta"
+      style="
+        margin-top: 48px;
+        padding-top: 16px;
+        border-top: 1px solid var(--border);
+      "
+    >
+      Source-of-truth files cited throughout. Read
+      <code>docs/reference/order-path-incident-history.md</code> first when
+      touching this surface; append a row when shipping a non-trivial fix.
+    </p>
+  </body>
+</html>

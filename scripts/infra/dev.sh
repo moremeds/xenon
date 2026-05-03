@@ -41,16 +41,29 @@ fi
 MODE="${MODE:-paper}"
 MODE="$(echo "$MODE" | tr '[:upper:]' '[:lower:]' | xargs)"
 
+# Mode dictates BOTH port (4001 live / 4002 paper) AND the gateway host.
+# Paper runs locally on this machine; live runs on a remote server reachable
+# via IB_GATEWAY_HOST in .env. Without overriding host here, paper would try
+# to dial the remote live gateway and fail.
 case "$MODE" in
-  paper) PORT=4002 ;;
-  live)  PORT=4001 ;;
+  paper)
+    PORT=4002
+    IB_HOST="127.0.0.1"
+    ;;
+  live)
+    PORT=4001
+    # Use .env's IB_GATEWAY_HOST (typically a remote server). Default to
+    # 127.0.0.1 if unset.
+    IB_HOST="$(grep -E '^IB_GATEWAY_HOST=' "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs || true)"
+    IB_HOST="${IB_HOST:-127.0.0.1}"
+    ;;
   *)
     log_err "Invalid mode '$MODE' — must be 'paper' or 'live'."
     exit 2
     ;;
 esac
 
-log_info "Trading mode: $MODE  →  IB Gateway port $PORT"
+log_info "Trading mode: $MODE  →  IB Gateway $IB_HOST:$PORT"
 
 # 2. Apply pending Postgres migrations. Postgres is the primary persistence
 # layer — running new code against a stale schema causes obscure runtime
@@ -70,19 +83,22 @@ fi
 
 # 3. Probe the Gateway port. Warn if it's not up, but don't block — the user
 # may want to start the dev stack for frontend work without IB Gateway running.
-if (exec 3<>/dev/tcp/127.0.0.1/"$PORT") 2>/dev/null; then
+if (exec 3<>/dev/tcp/"$IB_HOST"/"$PORT") 2>/dev/null; then
   exec 3<&- 2>/dev/null || true
   exec 3>&- 2>/dev/null || true
-  log_info "IB Gateway port $PORT is listening."
+  log_info "IB Gateway port $PORT is listening at $IB_HOST."
 else
-  log_warn "IB Gateway is NOT listening on 127.0.0.1:$PORT."
+  log_warn "IB Gateway is NOT listening on $IB_HOST:$PORT."
   log_warn "Continuing anyway — start IB Gateway in '$MODE' mode when you need broker calls."
 fi
 
-# 4. Export the resolved mode so child processes (uvicorn, Next, the Node
-# realtime relay) all see the same value — without this, a per-invocation
-# arg override would silently desync from .env.
+# 4. Export the resolved mode + host/port so child processes (uvicorn, Next,
+# the Node realtime relay) all see the same value — without this, a
+# per-invocation arg override would silently desync from .env. The host/port
+# exports take precedence over the .env-loaded defaults inside Python.
 export XENON_TRADING_MODE="$MODE"
+export IB_GATEWAY_HOST="$IB_HOST"
+export IB_GATEWAY_PORT="$PORT"
 
 # Optionally bypass Clerk for the dev session. The flag is honored by
 # web/middleware.ts (XENON_DISABLE_AUTH=1).
