@@ -125,6 +125,26 @@ After bootstrap, the mini is ready for `pull → migrator → up`.
        the Gateway is started on the mini.
    - `/sign-in` → 200.
 
+## Auto-start on mini boot
+
+Colima is registered as a brew service so it launches at user login:
+
+```bash
+ssh moremeds@192.168.50.47 'PATH=/opt/homebrew/bin:$PATH brew services start colima'
+# plist lands at ~/Library/LaunchAgents/homebrew.mxcl.colima.plist
+```
+
+Combined with the `restart: unless-stopped` policy on all three long-running
+services, a mini reboot recovers the stack without operator action — provided
+moremeds either auto-logs in or someone logs in interactively. To check
+auto-login:
+
+```bash
+ssh moremeds@192.168.50.47 'sudo defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null'
+```
+
+To disable Colima auto-start later: `brew services stop colima`.
+
 ## Rollback
 
 ```bash
@@ -187,17 +207,19 @@ These tripped us during v0.0.3 and need real fixes before v0.0.4:
    containers; web alone can spike. If OOMKills appear or web becomes
    sluggish: `colima stop && colima start --cpu 4 --memory 6`.
 
-5. **`/opt/xenon/logs/`** isn't mounted yet. Container stdout still works
+5. **No auto-login on the mini yet** — Colima starts via brew/launchd at _user login_, not at boot. If the mini reboots and no one logs in, the stack stays down. If you want unattended recovery, enable auto-login via System Settings → Users & Groups → "Automatic login" (or `sysadminctl -autologin set …` from a shell with admin sudo). Mind the security trade-off: anyone with physical access skips the login prompt.
+
+6. **`/opt/xenon/logs/`** isn't mounted yet. Container stdout still works
    (`docker-compose logs`), but persistent file logs go nowhere. Add a
    `./logs:/app/logs` bind-mount once persistent logging is needed.
 
-6. **Full live promotion (Phase 1.11)** still waits on a 24h burn-in. Today
+7. **Full live promotion (Phase 1.11)** still waits on a 24h burn-in. Today
    we shipped _half-live_: live trading mode + live IB pointing, but
    `DATABASE_URL=core_dev`. To flip to full prod: edit `/opt/xenon/.env`
    `DATABASE_URL` from `core_dev` to `core`, restart, and stop this Mac's
    API to avoid double-writers.
 
-7. **Compose plugin parity.** Mini uses `docker-compose` (hyphen, v5.1.3
+8. **Compose plugin parity.** Mini uses `docker-compose` (hyphen, v5.1.3
    via brew) because the docker plugin's compose subcommand isn't
    installed. Either install `docker-compose-plugin` for the mini's docker,
    or accept hyphenated as the prod surface.
