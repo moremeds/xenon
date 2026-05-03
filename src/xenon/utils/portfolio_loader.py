@@ -17,7 +17,7 @@ from typing import Any
 from sqlalchemy import select
 
 from xenon.db.engine import get_sync_engine
-from xenon.db.schema import account_snapshots
+from xenon.db.schema import account_snapshots, nav_history
 from xenon.execution.account_scope import AccountScope
 
 
@@ -67,6 +67,26 @@ def load_account_snapshots_history_sync(*, scope: AccountScope, limit: int = 5) 
         .where(account_snapshots.c.broker_account == scope.broker_account)
         .order_by(account_snapshots.c.snapshot_at.desc())
         .limit(limit)
+    )
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        result = conn.execute(stmt)
+        return [dict(row._mapping) for row in result]
+
+
+def load_nav_history_sync(*, scope: AccountScope) -> list[dict[str, Any]]:
+    """Return the full NAV history for a scope, ordered by date asc.
+
+    Each row carries `date`, `nav`, `daily_pnl`, plus the IB Flex breakdown
+    columns when present (`total`, `cash`, `stock_value`, `options_value`).
+    Replaces both `data/nav_history.jsonl` and `data/nav_history_ib.json`.
+    """
+    stmt = (
+        select(nav_history)
+        .where(nav_history.c.broker == scope.broker)
+        .where(nav_history.c.account_env == scope.account_env)
+        .where(nav_history.c.broker_account == scope.broker_account)
+        .order_by(nav_history.c.date)
     )
     engine = get_sync_engine()
     with engine.begin() as conn:

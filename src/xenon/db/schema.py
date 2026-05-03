@@ -180,6 +180,12 @@ nav_history = Table(
     Column("date", Date, primary_key=True),
     Column("nav", Numeric(14, 2), nullable=False),
     Column("daily_pnl", Numeric(12, 2)),
+    # IB Flex EquitySummaryByReportDateInBase breakdown (NULL when no Flex data).
+    # Replaces data/nav_history_ib.json post-2026-05-03 PG cutoff.
+    Column("total", Numeric(14, 2)),
+    Column("cash", Numeric(14, 2)),
+    Column("stock_value", Numeric(14, 2)),
+    Column("options_value", Numeric(14, 2)),
     CheckConstraint("broker IN ('IB', 'FUTU')", name="ck_nav_broker"),
     CheckConstraint(
         "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",

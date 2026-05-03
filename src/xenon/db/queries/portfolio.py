@@ -191,6 +191,10 @@ async def upsert_nav(
     *,
     nav: Decimal,
     daily_pnl: Decimal | None = None,
+    total: Decimal | None = None,
+    cash: Decimal | None = None,
+    stock_value: Decimal | None = None,
+    options_value: Decimal | None = None,
     broker: str = "IB",
     account_env: str = "legacy_unknown",
     broker_account: str = "legacy_unknown",
@@ -202,7 +206,23 @@ async def upsert_nav(
         date=day,
         nav=nav,
         daily_pnl=daily_pnl,
+        total=total,
+        cash=cash,
+        stock_value=stock_value,
+        options_value=options_value,
     )
+    set_columns: dict[str, object] = {"nav": stmt.excluded.nav, "daily_pnl": stmt.excluded.daily_pnl}
+    # Only overwrite breakdown columns when this caller actually has values —
+    # ib_sync's daily upsert sends nav only; the IB Flex importer sends the
+    # full breakdown. Skipping NULLs preserves whichever source last filled them.
+    if total is not None:
+        set_columns["total"] = stmt.excluded.total
+    if cash is not None:
+        set_columns["cash"] = stmt.excluded.cash
+    if stock_value is not None:
+        set_columns["stock_value"] = stmt.excluded.stock_value
+    if options_value is not None:
+        set_columns["options_value"] = stmt.excluded.options_value
     stmt = stmt.on_conflict_do_update(
         index_elements=[
             nav_history.c.broker,
@@ -210,7 +230,7 @@ async def upsert_nav(
             nav_history.c.broker_account,
             nav_history.c.date,
         ],
-        set_={"nav": stmt.excluded.nav, "daily_pnl": stmt.excluded.daily_pnl},
+        set_=set_columns,
     )
     await conn.execute(stmt)
 
