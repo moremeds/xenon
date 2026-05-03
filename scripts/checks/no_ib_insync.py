@@ -75,6 +75,7 @@ ALLOWLIST_PATHS: set[Path] = {
     REPO_ROOT / "docs/plans/2026-04-29-postgres-migration-review-fixes.md",
     REPO_ROOT / "scripts/checks/no_ib_insync.py",  # this file references the term itself
     REPO_ROOT / ".github/workflows/ci.yml",  # CI step name documents what this guard checks for
+    REPO_ROOT / "CHANGELOG.md",  # release notes document migrations away from deprecated symbols
 }
 
 
