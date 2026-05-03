@@ -25,6 +25,7 @@ function securityHeaders() {
 }
 
 const config = {
+  output: "standalone",
   outputFileTracingRoot: resolve(__dirname, ".."),
   turbopack: {},
   webpack: (config) => {
