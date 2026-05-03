@@ -86,7 +86,6 @@ def test_is_trading_day_weekend():
 
 def _seed_cache(tmp_path, ticker="NVDA"):
     cache = UwAnalyzeCache(
-        cache_path=tmp_path / "cache.json",
         market_open_fn=lambda: True,
     )
 
@@ -111,7 +110,7 @@ def _seed_cache(tmp_path, ticker="NVDA"):
 
 def test_run_once_attaches_oi_baseline(tmp_path):
     cache = _seed_cache(tmp_path)
-    flow_log = FlowLog(path=tmp_path / "flow.json")
+    flow_log = FlowLog()
 
     async def fake_oi(ticker, spot):
         return [
@@ -144,7 +143,7 @@ def test_run_once_attaches_oi_baseline(tmp_path):
 
 def test_run_once_advances_open_flow_events(tmp_path):
     cache = _seed_cache(tmp_path)
-    flow_log = FlowLog(path=tmp_path / "flow.json")
+    flow_log = FlowLog()
     expiry = (date.today() + timedelta(days=60)).isoformat()
     ev = FlowEvent(
         id=make_event_id("NVDA", "call", 900, expiry, "2026-04-08"),
@@ -177,13 +176,13 @@ def test_run_once_advances_open_flow_events(tmp_path):
     )
     assert stats["events_advanced"] == 1
     assert stats["events_anomaly"] == 1
-    reloaded = FlowLog(path=tmp_path / "flow.json").for_ticker("NVDA")[0]
+    reloaded = FlowLog().for_ticker("NVDA")[0]
     assert reloaded.status == "anomaly"
 
 
 def test_run_once_skips_already_closed_events(tmp_path):
     cache = _seed_cache(tmp_path)
-    flow_log = FlowLog(path=tmp_path / "flow.json")
+    flow_log = FlowLog()
     expiry = (date.today() + timedelta(days=60)).isoformat()
     ev = FlowEvent(
         id="dummy",

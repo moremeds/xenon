@@ -1,4 +1,4 @@
-"""UwAnalyzeCache — TTL'd, atomically-persisted UW analysis snapshots.
+"""UwAnalyzeCache — TTL'd UW analysis snapshots backed by Postgres.
 
 Backs the /uw-analyze/portfolio route. Concurrency model:
 
@@ -6,8 +6,10 @@ Backs the /uw-analyze/portfolio route. Concurrency model:
   same ticker collapse to one upstream call.
 - Global `asyncio.Semaphore(_MAX_PARALLEL_RUNS)` caps total in-flight UW
   calls across all tickers.
-- Single `asyncio.Lock` guards disk writes; tmpfile + os.replace makes
-  reads atomic.
+
+All persistence goes through xenon.uw_analyze_snapshots — `_archive_snapshot`
+writes one row per refresh, `_ensure_loaded` rehydrates the in-memory cache
+from the latest row per ticker on first use.
 
 Spec: docs/superpowers/specs/2026-04-08-uw-analyze-overhaul-design.md §Architecture
 """
@@ -15,19 +17,13 @@ Spec: docs/superpowers/specs/2026-04-08-uw-analyze-overhaul-design.md §Architec
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
-import sys
-import tempfile
 import time
 from collections import OrderedDict
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Optional
-
-_PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 logger = logging.getLogger("xenon.uw_analyze_cache")
 
@@ -57,9 +53,6 @@ _MAX_MATERIALIZED_CHANGES = 10
 # Eviction tiers. Lower number = evicted first. Entries tagged with any of
 # these sources belong to the corresponding tier; ties broken by LRU order.
 _SOURCE_TIERS: dict[str, int] = {"adhoc": 0, "watchlist": 1, "portfolio": 2}
-
-_DEFAULT_CACHE_PATH = _PROJECT_ROOT / "data" / "uw_analyze_cache.json"
-_DEFAULT_HISTORY_DIR = _PROJECT_ROOT / "data" / "uw_analyze_history"
 
 Source = str  # "portfolio" | "watchlist" | "adhoc"
 
@@ -218,8 +211,6 @@ class UwAnalyzeCache:
     def __init__(
         self,
         *,
-        cache_path: Optional[Path] = None,
-        history_path: Optional[Path] = None,
         market_open_fn: Callable[[], bool] = _is_market_open_default,
         ttl_open_s: int = _TTL_OPEN_S,
         ttl_closed_s: int = _TTL_CLOSED_S,
@@ -227,11 +218,6 @@ class UwAnalyzeCache:
         max_entries: int = _MAX_ENTRIES,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self.cache_path = Path(cache_path) if cache_path else _DEFAULT_CACHE_PATH
-        # History archive: one file per materialized refresh, under
-        # <history_path>/<TICKER>/YYYYMMDD-HHMMSS-ffffff.json. Default
-        # lives next to cache.json under data/uw_analyze_history.
-        self.history_path = Path(history_path) if history_path else _DEFAULT_HISTORY_DIR
         self._market_open_fn = market_open_fn
         self._ttl_open = ttl_open_s
         self._ttl_closed = ttl_closed_s
@@ -241,138 +227,74 @@ class UwAnalyzeCache:
         # OrderedDict preserves insertion/access order for LRU eviction.
         self._entries: "OrderedDict[str, dict]" = OrderedDict()
         self._per_ticker_locks: dict[str, asyncio.Lock] = {}
-        self._disk_lock = asyncio.Lock()
         self._loaded = False
 
-    # ── Disk I/O ──────────────────────────────────────────────────────
+    # ── PG persistence ────────────────────────────────────────────────
 
     def _ensure_loaded(self) -> None:
-        """Lazily rehydrate the on-disk cache into memory.
+        """Lazily rehydrate the in-memory cache from Postgres.
 
-        The ``_loaded`` flag is only set to True on a *successful* parse of
-        a well-formed file, OR when the file is confirmed absent. Any other
-        outcome (raise, malformed shape) leaves ``_loaded`` False so the
-        next access retries — a transient partial-read or a file that
-        appears later must not cause permanent blindness to the archive.
+        Reads the latest snapshot per ticker from xenon.uw_analyze_snapshots
+        and rebuilds an entries dict in the in-memory shape. Tolerates PG
+        unavailability — the cache simply starts empty and gets populated
+        by subsequent runner calls.
         """
         if self._loaded:
             return
-        if not self.cache_path.exists():
-            # Legitimate cold start. Mark loaded so we don't stat the disk
-            # on every call; the next write will create the file and the
-            # in-memory state is authoritative from here.
-            self._loaded = True
-            return
         try:
-            raw = self.cache_path.read_text()
-            data = json.loads(raw)
-        except (OSError, json.JSONDecodeError) as exc:
-            # Transient read/parse failure (e.g., concurrent writer, zero-
-            # byte file from a crashed process). Do NOT set _loaded — the
-            # next access will retry and hopefully win the race.
-            logger.warning(
-                "uw_analyze_cache read/parse failed (%s) — will retry on next access",
-                exc,
-            )
-            return
-        entries = data.get("entries") if isinstance(data, dict) else None
-        if not isinstance(entries, dict):
-            # File exists and parses but is shaped wrong (wrong schema,
-            # empty `{}`, list payload from a legacy format). Leave
-            # _loaded False so a hand-fix of the file is picked up
-            # without restarting the process.
-            logger.warning(
-                "uw_analyze_cache file %s present but entries key missing or wrong shape "
-                "(top-level type=%s) — will retry on next access",
-                self.cache_path,
-                type(data).__name__,
-            )
-            return
-        # Rehydrate into OrderedDict in whatever order the file provides;
-        # LRU order will re-establish on first access.
-        self._entries = OrderedDict(entries)
-        # Enforce the cap immediately on load — a pre-bounds cache file
-        # may contain more entries than the new limit allows.
-        self._evict_if_over_cap()
-        self._loaded = True
-        logger.info(
-            "uw_analyze_cache loaded %d entries from %s",
-            len(self._entries),
-            self.cache_path,
-        )
+            url = os.environ.get("DATABASE_URL")
+            if not url:
+                self._loaded = True
+                return
+            from sqlalchemy import create_engine as _cse
+            from sqlalchemy import text
+
+            from xenon.db.schema import uw_analyze_snapshots  # noqa: F401
+
+            sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+            engine = _cse(sync_url)
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        "SELECT DISTINCT ON (ticker) "
+                        "ticker, report, display, derived, dark_pool_summary, "
+                        "options_flow_summary, flow_alerts, materialized_changes, "
+                        "report_fetched_at, archived_at "
+                        "FROM xenon.uw_analyze_snapshots "
+                        "ORDER BY ticker, archived_at DESC"
+                    )
+                ).fetchall()
+            engine.dispose()
+            for row in rows:
+                m = row._mapping
+                current = {
+                    "report": m["report"] or {},
+                    "display": m["display"],
+                    "derived": m["derived"],
+                    "dark_pool_summary": m["dark_pool_summary"],
+                    "options_flow_summary": m["options_flow_summary"],
+                    "flow_alerts": m["flow_alerts"],
+                    "ts": (m["archived_at"].isoformat() if m["archived_at"] else None),
+                }
+                self._entries[m["ticker"]] = {
+                    "current": current,
+                    "materialized_changes": m["materialized_changes"] or [],
+                }
+            self._evict_if_over_cap()
+            self._loaded = True
+            logger.info("uw_analyze_cache loaded %d entries from Postgres", len(self._entries))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("uw_analyze_cache PG load failed (%s) — starting empty", exc)
+            self._loaded = True
 
     async def _persist(self, *, allow_empty: bool = False) -> None:
-        """Atomically rewrite the on-disk cache.
+        """No-op kept for call-site compatibility.
 
-        Refuses to overwrite a non-trivially-sized existing file with an
-        empty in-memory state unless ``allow_empty=True``. This blocks a
-        subtle data-loss path: if ``_ensure_loaded`` ever failed silently
-        and left ``_entries`` empty, the next write from the route layer
-        would otherwise nuke the real archive. Callers that legitimately
-        want to wipe the cache must pass ``allow_empty=True`` explicitly.
+        Persistence happens inside ``_archive_snapshot._archive_to_postgres``
+        on every materialized refresh. There is no longer a separate cache
+        file; the per-ticker latest row IS the cache.
         """
-        async with self._disk_lock:
-            if not allow_empty and not self._entries and self.cache_path.exists():
-                try:
-                    existing_size = self.cache_path.stat().st_size
-                except OSError:
-                    existing_size = 0
-                # 64 bytes is larger than `{"updated_at": "...", "entries": {}}`
-                # but smaller than any file carrying even one entry.
-                if existing_size > 64:
-                    logger.error(
-                        "uw_analyze_cache refusing to overwrite non-empty disk file "
-                        "(%d bytes) with empty memory state — likely a failed load. "
-                        "Pass allow_empty=True to force.",
-                        existing_size,
-                    )
-                    return
-            payload = {
-                "updated_at": _now_iso(),
-                "entries": _coerce_jsonable(self._entries),
-            }
-            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_fd, tmp_path = tempfile.mkstemp(
-                prefix=".uw_analyze_cache_", suffix=".json", dir=str(self.cache_path.parent)
-            )
-            try:
-                with os.fdopen(tmp_fd, "w") as fh:
-                    json.dump(payload, fh, indent=2, default=str)
-                os.replace(tmp_path, self.cache_path)
-            except Exception:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
-
-    # ── History archive ───────────────────────────────────────────────
-
-    def _archive_file_for(self, ticker: str) -> Path:
-        """Build the archive filename for a just-committed snapshot.
-
-        Uses microsecond precision so two back-to-back forced refreshes
-        for the same ticker cannot collide within one wall-clock second.
-        Filenames remain lexicographically sortable by timestamp, which
-        ``load_history`` relies on to filter before parsing.
-        """
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
-        return self.history_path / ticker.upper() / f"{stamp}.json"
-
-    def _write_archive_sync(self, target: Path, payload: dict) -> None:
-        """Sync worker for archive writes. Runs inside asyncio.to_thread."""
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp_fd, tmp_path = tempfile.mkstemp(prefix=".uw_archive_", suffix=".json", dir=str(target.parent))
-        try:
-            with os.fdopen(tmp_fd, "w") as fh:
-                json.dump(payload, fh, indent=2, default=str)
-            os.replace(tmp_path, target)
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+        return None
 
     async def _archive_snapshot(
         self,
@@ -380,51 +302,28 @@ class UwAnalyzeCache:
         entry: dict,
         materialized_changes: list[dict],
     ) -> None:
-        """Append a just-committed snapshot to the history archive.
+        """Persist a just-committed snapshot to xenon.uw_analyze_snapshots.
 
-        MUST be called only AFTER ``_persist()`` has successfully written
-        the live cache. Ordering matters: if archive lands first and
-        persist then fails, history would contain a phantom snapshot
-        that never became the committed ``current`` state.
-
-        Archive schema (documented contract):
-          Top-level keys — guaranteed: ``current``, ``materialized_changes``,
-          ``archived_at``.
-          Nested fields inside ``current`` — ``dark_pool_summary`` and
-          ``options_flow_summary`` may be ``None``; ``flow_alerts`` may be
-          empty; ``report``/``display`` sub-fields are runner-dependent.
-          Consumers MUST NOT assume nested fields are populated.
+        Schema (documented contract):
+          - one row per refresh; ordered by archived_at DESC for time-series queries
+          - ``current.report`` lives in the ``report`` jsonb column
+          - ``current.display``/``derived``/``dark_pool_summary``/``options_flow_summary``/
+            ``flow_alerts`` get their own jsonb columns
+          - ``materialized_changes`` is a jsonb array column
 
         Error containment: failures are logged at WARNING but never raised
-        — disk-full on the archive path must not break ``/uw-analyze``.
-        The file write runs in ``asyncio.to_thread`` so it does not extend
-        event-loop stall on the refresh hot path.
-
-        Retention: none in v1. Operational guidance — add a janitor if the
-        history directory exceeds ~500K files or if ``load_history`` p99
-        latency exceeds ~50ms. At current rates (~1.5K files/day for a
-        20-ticker portfolio) this is many months away.
+        — a transient PG outage must not break ``/uw-analyze``.
         """
         try:
             current = entry.get("current") if isinstance(entry, dict) else None
             if not isinstance(current, dict):
                 return
-            payload = _coerce_jsonable(
-                {
-                    "current": current,
-                    "materialized_changes": list(materialized_changes or []),
-                    "archived_at": _now_iso(),
-                }
-            )
-            target = self._archive_file_for(ticker)
-            await asyncio.to_thread(self._write_archive_sync, target, payload)
-            # Also archive to Postgres (full payload)
             await asyncio.to_thread(
                 self._archive_to_postgres,
                 ticker,
                 current,
-                payload.get("materialized_changes") if isinstance(payload, dict) else None,
-                payload.get("archived_at") if isinstance(payload, dict) else None,
+                list(materialized_changes or []),
+                _now_iso(),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("uw_analyze_cache archive write failed for %s: %s", ticker, exc)
@@ -494,53 +393,60 @@ class UwAnalyzeCache:
     ) -> list[dict]:
         """Return archived snapshots for ``ticker``, most-recent first.
 
-        Filters on filename (which carries the full UTC timestamp) BEFORE
-        parsing any JSON, so cost scales with the returned count — not the
-        total archive size. Used by debug tools and future time-series
-        consumers; no HTTP route wires this up yet.
-
-        Args:
-          limit: max number of snapshots to return (after sort).
-          since: only include snapshots with archive stamp >= this UTC
-                 datetime. Naive datetimes are treated as UTC.
+        Reads from xenon.uw_analyze_snapshots ordered by archived_at DESC.
+        Returns the same shape the JSON archives used to (top-level
+        ``current``, ``materialized_changes``, ``archived_at``) so existing
+        consumers don't need to change.
         """
-        ticker_dir = self.history_path / ticker.upper()
-        if not ticker_dir.exists():
-            return []
-
-        # List + sort by filename descending. Filename prefix
-        # YYYYMMDD-HHMMSS-ffffff is lex-sortable == time-sortable.
         try:
-            names = [
-                e.name
-                for e in os.scandir(ticker_dir)
-                if e.is_file() and e.name.endswith(".json") and not e.name.startswith(".")
-            ]
-        except OSError as exc:
-            logger.warning("load_history scandir failed for %s: %s", ticker, exc)
-            return []
-        names.sort(reverse=True)
+            url = os.environ.get("DATABASE_URL")
+            if not url:
+                return []
+            from sqlalchemy import create_engine as _cse
+            from sqlalchemy import text
 
-        since_stamp: Optional[str] = None
-        if since is not None:
-            s = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
-            since_stamp = s.astimezone(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+            sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+            engine = _cse(sync_url)
+            params: dict[str, Any] = {"ticker": ticker.upper()}
+            sql = (
+                "SELECT report, display, derived, dark_pool_summary, "
+                "options_flow_summary, flow_alerts, materialized_changes, archived_at "
+                "FROM xenon.uw_analyze_snapshots "
+                "WHERE ticker = :ticker"
+            )
+            if since is not None:
+                s = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+                params["since"] = s.astimezone(timezone.utc)
+                sql += " AND archived_at >= :since"
+            sql += " ORDER BY archived_at DESC"
+            if limit is not None:
+                params["lim"] = int(limit)
+                sql += " LIMIT :lim"
+            with engine.connect() as conn:
+                rows = conn.execute(text(sql), params).fetchall()
+            engine.dispose()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("uw_analyze_cache.load_history PG read failed for %s: %s", ticker, exc)
+            return []
 
         out: list[dict] = []
-        for name in names:
-            if since_stamp is not None:
-                # Filename stem is the full stamp; compare as strings.
-                stem = name[:-5]  # drop ".json"
-                if stem < since_stamp:
-                    break  # names are descending — nothing older qualifies
-            if limit is not None and len(out) >= limit:
-                break
-            try:
-                with open(ticker_dir / name) as fh:
-                    out.append(json.load(fh))
-            except (OSError, json.JSONDecodeError) as exc:
-                logger.warning("load_history parse failed for %s/%s: %s", ticker, name, exc)
-                continue
+        for row in rows:
+            m = row._mapping
+            current = {
+                "report": m["report"] or {},
+                "display": m["display"],
+                "derived": m["derived"],
+                "dark_pool_summary": m["dark_pool_summary"],
+                "options_flow_summary": m["options_flow_summary"],
+                "flow_alerts": m["flow_alerts"],
+            }
+            out.append(
+                {
+                    "current": current,
+                    "materialized_changes": m["materialized_changes"] or [],
+                    "archived_at": (m["archived_at"].isoformat() if m["archived_at"] else None),
+                }
+            )
         return out
 
     # ── TTL ───────────────────────────────────────────────────────────

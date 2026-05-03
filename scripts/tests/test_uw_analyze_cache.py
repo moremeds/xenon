@@ -8,6 +8,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -46,7 +48,6 @@ def _display(iv_rank=42, max_pain=100, ncp=1e6, npp=-1e6):
 
 def make_cache(tmp_path, *, market_open=True, **kw):
     return UwAnalyzeCache(
-        cache_path=tmp_path / "cache.json",
         market_open_fn=lambda: market_open,
         **kw,
     )
@@ -445,6 +446,7 @@ def test_semaphore_caps_concurrent_calls(tmp_path):
 # ── Persistence + atomic writes ────────────────────────────────────────────
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_persists_to_disk(tmp_path):
     async def go():
         cache = make_cache(tmp_path)
@@ -456,6 +458,7 @@ def test_persists_to_disk(tmp_path):
     assert raw["entries"]["NVDA"]["sources"] == ["portfolio"]
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_reload_from_disk(tmp_path):
     async def go():
         cache1 = make_cache(tmp_path)
@@ -468,6 +471,7 @@ def test_reload_from_disk(tmp_path):
     assert entry["current"]["ticker"] == "NVDA"
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_corrupt_file_starts_empty(tmp_path):
     (tmp_path / "cache.json").write_text("not json {{")
     cache = make_cache(tmp_path)
@@ -621,8 +625,6 @@ def test_orphan_locks_swept_on_eviction(tmp_path):
 
 def _archive_cache(tmp_path, **kw):
     return UwAnalyzeCache(
-        cache_path=tmp_path / "cache.json",
-        history_path=tmp_path / "history",
         market_open_fn=lambda: True,
         **kw,
     )
@@ -673,6 +675,7 @@ def test_archive_failure_does_not_break_request(tmp_path):
     assert entry["current"]["ticker"] == "NVDA"
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_archive_happens_after_persist(tmp_path):
     """If _persist raises, no archive file should exist — ordering guarantee."""
 
@@ -736,6 +739,7 @@ def test_archive_handles_none_summaries(tmp_path):
     assert payload["current"]["options_flow_summary"] is None
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_archive_filename_unique_under_burst(tmp_path):
     """Two back-to-back forced refreshes must not collide on filename."""
 
@@ -765,6 +769,7 @@ def test_load_history_returns_descending(tmp_path):
     assert [o["stamp"] for o in out_limited] == ["20260103-120000-000000", "20260102-120000-000000"]
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_load_history_applies_limit_before_parse(tmp_path, monkeypatch):
     """limit must cut the filename list BEFORE any JSON parsing."""
     cache = _archive_cache(tmp_path)
@@ -832,12 +837,13 @@ def _seeded_cache_file(path: Path, *, ticker: str = "NVDA") -> None:
     path.write_text(json.dumps(payload))
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_ensure_loaded_retries_after_malformed_json(tmp_path):
     """A half-written file must not permanently blind the cache."""
     cache_file = tmp_path / "cache.json"
     cache_file.write_text("{not valid json")  # partial write from a crashed writer
 
-    cache = UwAnalyzeCache(cache_path=cache_file, history_path=tmp_path / "hist")
+    cache = UwAnalyzeCache()
     assert cache.all_entries() == {}
     assert cache._loaded is False, "malformed file must leave _loaded False for retry"
 
@@ -848,12 +854,13 @@ def test_ensure_loaded_retries_after_malformed_json(tmp_path):
     assert cache._loaded is True
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_ensure_loaded_retries_after_wrong_shape(tmp_path):
     """A schema-mismatched file must not permanently blind the cache."""
     cache_file = tmp_path / "cache.json"
     cache_file.write_text(json.dumps({"entries": []}))  # list, not dict
 
-    cache = UwAnalyzeCache(cache_path=cache_file, history_path=tmp_path / "hist")
+    cache = UwAnalyzeCache()
     assert cache.all_entries() == {}
     assert cache._loaded is False, "wrong-shape file must leave _loaded False for retry"
 
@@ -862,10 +869,11 @@ def test_ensure_loaded_retries_after_wrong_shape(tmp_path):
     assert "NVDA" in entries
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_ensure_loaded_picks_up_file_appearing_after_startup(tmp_path):
     """Missing file at construction must not block a later-arriving file."""
     cache_file = tmp_path / "cache.json"  # does not exist yet
-    cache = UwAnalyzeCache(cache_path=cache_file, history_path=tmp_path / "hist")
+    cache = UwAnalyzeCache()
     assert cache.all_entries() == {}
     # Missing file is a legitimate cold start: _loaded latches True to
     # avoid stat'ing disk on every call. The in-memory state is now
@@ -873,13 +881,14 @@ def test_ensure_loaded_picks_up_file_appearing_after_startup(tmp_path):
     assert cache._loaded is True
 
 
+@pytest.mark.skip(reason="JSON-only behavior — obsolete after PG cutoff (Strip-4). PG-based replacements TODO.")
 def test_persist_refuses_to_overwrite_nonempty_file_when_memory_empty(tmp_path):
     """The data-loss footgun: a silently-empty cache must not clobber disk."""
     cache_file = tmp_path / "cache.json"
     _seeded_cache_file(cache_file)
     original_bytes = cache_file.read_bytes()
 
-    cache = UwAnalyzeCache(cache_path=cache_file, history_path=tmp_path / "hist")
+    cache = UwAnalyzeCache()
     # Simulate the pathological state: loaded but empty.
     cache._loaded = True
     cache._entries.clear()

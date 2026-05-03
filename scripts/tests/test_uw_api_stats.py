@@ -77,7 +77,7 @@ class TestUWApiStats:
         # _load_history() rehydrates session counters from whatever the
         # live FastAPI process wrote last, and "initial state" is no
         # longer initial.
-        return UWApiStats(history_path=tmp_path / "uw_api_stats_history.json")
+        return UWApiStats()
 
     def test_initial_state(self, s):
         stats = s.get_stats()

@@ -38,10 +38,9 @@ def test_full_stack_refresh_then_portfolio_surfaces_sweep_event(monkeypatch, tmp
 
     # Inject fresh cache + flow log singletons scoped to tmp_path.
     routes_mod._portfolio_cache = UwAnalyzeCache(
-        cache_path=tmp_path / "cache.json",
         market_open_fn=lambda: True,
     )
-    routes_mod._flow_log = FlowLog(path=tmp_path / "flow.json")
+    routes_mod._flow_log = FlowLog()
 
     # Two-call runner: baseline, then sweep with +$10M net_call_premium delta.
     call_count = {"n": 0}

@@ -168,10 +168,9 @@ def _clear_cache(tmp_path) -> None:
     importlib.reload(route_mod)
     route_mod.reset_state_for_tests()
     route_mod._portfolio_cache = UwAnalyzeCache(
-        cache_path=tmp_path / "uw-analyze-cache.json",
         market_open_fn=lambda: True,
     )
-    route_mod._flow_log = FlowLog(path=tmp_path / "uw-analyze-flow.json")
+    route_mod._flow_log = FlowLog()
     yield
     route_mod.reset_state_for_tests()
 

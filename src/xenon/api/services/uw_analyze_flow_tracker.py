@@ -15,16 +15,10 @@ Spec: docs/superpowers/specs/2026-04-08-uw-analyze-overhaul-design.md
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
-import os
-import sys
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
-
-_PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 logger = logging.getLogger("xenon.uw_analyze_flow_tracker")
 
@@ -40,9 +34,6 @@ PURGE_AFTER_DAYS = 30  # drop closed/expired events older than this
 
 Side = Literal["call", "put"]
 Status = Literal["open", "closed", "anomaly", "expired"]
-
-_DEFAULT_PATH = _PROJECT_ROOT / "data" / "uw_unusual_flow_log.json"
-
 
 # ── Data classes ────────────────────────────────────────────────────────────
 
@@ -368,10 +359,9 @@ def progress_event(
 
 
 class FlowLog:
-    """Thin in-memory dict-of-events with Postgres persistence."""
+    """Thin in-memory dict-of-events backed by Postgres ``xenon.uw_flow_events``."""
 
-    def __init__(self, path: Optional[Path] = None) -> None:
-        self.path = Path(path) if path else _DEFAULT_PATH
+    def __init__(self) -> None:
         self._events: dict[str, FlowEvent] = {}
         self._loaded = False
 
@@ -379,22 +369,7 @@ class FlowLog:
         if self._loaded:
             return
         self._loaded = True
-        if not self.path.exists():
-            self._load_from_postgres()
-            return
-        try:
-            raw = json.loads(self.path.read_text())
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("uw_unusual_flow_log corrupt — starting empty: %s", exc)
-            return
-        events = raw.get("events") if isinstance(raw, dict) else None
-        if not isinstance(events, dict):
-            return
-        for eid, payload in events.items():
-            try:
-                self._events[eid] = _event_from_dict(payload)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("skipping malformed flow event %s: %s", eid, exc)
+        self._load_from_postgres()
 
     def _load_from_postgres(self) -> None:
         try:

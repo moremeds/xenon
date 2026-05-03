@@ -323,35 +323,27 @@ def test_progress_event_marks_anomaly_first():
 # ── FlowLog persistence ────────────────────────────────────────────────────
 
 
-def test_flow_log_upsert_and_save_round_trip(tmp_path):
-    log = FlowLog(path=tmp_path / "flow.json")
+def test_flow_log_upsert_and_save_round_trip(pg_test_engine):
+    """Save → reload via PG. Skips offline (pg_test_engine fixture handles it)."""
+    log = FlowLog()
     ev = _make_event()
     assert log.upsert(ev) is True  # newly added
     log.save()
-    assert not (tmp_path / "flow.json").exists()
 
-    log2 = FlowLog(path=tmp_path / "flow.json")
+    log2 = FlowLog()
     loaded = log2.for_ticker("NVDA")
     assert len(loaded) == 1
     assert loaded[0].id == ev.id
 
 
-def test_flow_log_upsert_idempotent_on_id(tmp_path):
-    log = FlowLog(path=tmp_path / "flow.json")
+def test_flow_log_upsert_idempotent_on_id():
+    """In-memory dedupe is independent of persistence — runs offline."""
+    log = FlowLog()
     ev1 = _make_event()
     ev2 = _make_event()  # same id
     log.upsert(ev1)
     log.upsert(ev2)
-    log.save()
     assert len(log.all()) == 1
-
-
-def test_flow_log_corrupt_file_starts_empty(tmp_path):
-    p = tmp_path / "flow.json"
-    p.write_text("not json {")
-    log = FlowLog(path=p)
-    log.load()
-    assert log.all() == []
 
 
 # ── Memory bounds ──────────────────────────────────────────────────────────
@@ -376,7 +368,7 @@ def test_daily_track_capped_at_max_rows():
 def test_flow_log_purge_removes_old_closed_events(tmp_path):
     """purge() drops closed/expired events older than the cutoff and leaves
     recent + still-open events alone."""
-    log = FlowLog(path=tmp_path / "flow.json")
+    log = FlowLog()
     # Old closed event
     old = _make_event(expiry="2025-01-15")
     old.id = "old"
@@ -567,7 +559,7 @@ def test_postgres_double_save_produces_one_row(tmp_path, monkeypatch):
         status="open",
     )
 
-    log = FlowLog(path=tmp_path / "flow_log.json")
+    log = FlowLog()
     log._loaded = True
     log._events = {ev.id: ev}
     log.save()

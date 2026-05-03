@@ -49,9 +49,10 @@ def _hour_key(dt: datetime) -> str:
 
 
 def _make_stats(tmp_path, clock: Clock) -> UWApiStats:
-    """Fresh stats instance with isolated history file and injected clock."""
+    """Fresh stats instance with injected clock — isolation comes from the
+    autouse PG truncation in conftest, not from a temp JSON file.
+    """
     return UWApiStats(
-        history_path=tmp_path / "uw_api_stats_history.json",
         now_fn=clock.now,
         persist_throttle_seconds=30.0,
     )
@@ -62,13 +63,17 @@ def _pg_bucket(hour: str) -> dict | None:
     engine = create_engine(url, pool_pre_ping=True)
     try:
         with engine.connect() as conn:
-            row = conn.execute(
-                text(
-                    "SELECT status_2xx, status_4xx, status_5xx, cache_hits, latency_sum, latency_count "
-                    "FROM xenon.uw_api_stats WHERE bucket_hour = :bucket_hour"
-                ),
-                {"bucket_hour": hour},
-            ).mappings().fetchone()
+            row = (
+                conn.execute(
+                    text(
+                        "SELECT status_2xx, status_4xx, status_5xx, cache_hits, latency_sum, latency_count "
+                        "FROM xenon.uw_api_stats WHERE bucket_hour = :bucket_hour"
+                    ),
+                    {"bucket_hour": hour},
+                )
+                .mappings()
+                .fetchone()
+            )
             return dict(row) if row else None
     finally:
         engine.dispose()
@@ -322,7 +327,7 @@ class TestPersistence:
         history_path.write_text("{not-json]]")
         clock = Clock(datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc))
         # Should NOT raise.
-        s = UWApiStats(history_path=history_path, now_fn=clock.now)
+        s = UWApiStats(now_fn=clock.now)
         hist = s.get_hourly_history(hours=1)
         assert hist[0]["requests_2xx"] == 0
 
@@ -346,7 +351,7 @@ class TestPersistence:
         }
         history_path.write_text(json.dumps(payload))
         clock = Clock(datetime(2026, 4, 10, 14, 30, tzinfo=timezone.utc))
-        s = UWApiStats(history_path=history_path, now_fn=clock.now)
+        s = UWApiStats(now_fn=clock.now)
         row = s.get_hourly_history(hours=1)[0]
         assert row["requests_2xx"] == 5
         assert row["requests_4xx"] == 1
