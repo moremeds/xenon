@@ -12,13 +12,38 @@ non-async services (uw_analyze_candidates).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from xenon.db.engine import get_sync_engine
-from xenon.db.schema import account_snapshots, nav_history
+from xenon.db.schema import account_snapshots, nav_history, order_fills, trades
 from xenon.execution.account_scope import AccountScope
+
+
+@dataclass(frozen=True)
+class EntryDateLookups:
+    """PG-derived entry-date fallback lookups for ib_sync.convert_to_portfolio_format.
+
+    Replaces the JSON triple-fallback chain (data/blotter.json + trade_log.json
+    + portfolio.json) with one composite query result.
+
+    - per_contract_dates: keyed by ``"{ticker}|{expiry}|{right}|{strike}"`` from
+      ``order_fills.metadata``; earliest filled_at per option contract.
+    - per_ticker_dates: keyed by ticker; earliest filled_at across all fills
+      for the scope. Used as the broader fallback when contract-level keys
+      don't match (stock positions, structures we couldn't classify).
+    - trade_log_dates: keyed by ``"{ticker}|{structure}"`` and ``"{ticker}"``
+      from ``trades.opened_at``. Mirrors the old trade_log.json shape.
+    - prev_portfolio_dates: keyed by ``"{ticker}|{structure}|{expiry}"`` from
+      the most recent NOT-today snapshot in account_snapshots.payload.
+    """
+
+    per_contract_dates: dict[str, str]
+    per_ticker_dates: dict[str, str]
+    trade_log_dates: dict[str, str]
+    prev_portfolio_dates: dict[str, str]
 
 
 def load_portfolio_payload_sync(*, scope: AccountScope | None = None) -> dict[str, Any] | None:
@@ -92,6 +117,111 @@ def load_nav_history_sync(*, scope: AccountScope) -> list[dict[str, Any]]:
     with engine.begin() as conn:
         result = conn.execute(stmt)
         return [dict(row._mapping) for row in result]
+
+
+def load_entry_date_lookups_sync(*, scope: AccountScope) -> EntryDateLookups:
+    """Build all four entry-date lookup dicts from PG in one engine context.
+
+    Replaces the JSON fallback chain in ib_sync.convert_to_portfolio_format
+    (data/blotter.json + trade_log.json + portfolio.json reads). The semantics
+    mirror what the JSON code did:
+
+    - per_contract_dates: ``MIN(filled_at)`` per (ticker, expiry, right, strike)
+      from order_fills.metadata. Date format ``YYYY-MM-DD`` to match old shape.
+    - per_ticker_dates: ``MIN(filled_at)`` per ticker from order_fills.
+    - trade_log_dates: latest ``opened_at`` per (ticker, structure) from trades,
+      stored under both ``"{ticker}|{structure}"`` and ``"{ticker}"`` keys.
+    - prev_portfolio_dates: ``entry_date`` from positions in the most recent
+      NOT-today account_snapshots row, keyed by ``"{ticker}|{structure}|{expiry}"``.
+    """
+    from datetime import datetime as _datetime
+
+    today = _datetime.now().strftime("%Y-%m-%d")
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        # Per-contract earliest fill from order_fills.metadata (option fills only)
+        meta = order_fills.c.metadata
+        per_contract_stmt = (
+            select(
+                order_fills.c.ticker,
+                meta["expiry"].astext.label("expiry"),
+                meta["right"].astext.label("right"),
+                meta["strike"].astext.label("strike"),
+                func.min(order_fills.c.filled_at).label("first_fill"),
+            )
+            .where(order_fills.c.broker == scope.broker)
+            .where(order_fills.c.account_env == scope.account_env)
+            .where(order_fills.c.broker_account == scope.broker_account)
+            .where(meta["expiry"].astext.isnot(None))
+            .where(meta["right"].astext.isnot(None))
+            .where(meta["strike"].astext.isnot(None))
+            .group_by(order_fills.c.ticker, "expiry", "right", "strike")
+        )
+        per_contract: dict[str, str] = {}
+        for row in conn.execute(per_contract_stmt):
+            try:
+                strike_f = float(row.strike)
+            except (TypeError, ValueError):
+                continue
+            key = f"{row.ticker}|{row.expiry}|{row.right}|{strike_f}"
+            per_contract[key] = row.first_fill.strftime("%Y-%m-%d")
+
+        # Per-ticker earliest fill (broader fallback)
+        per_ticker_stmt = (
+            select(order_fills.c.ticker, func.min(order_fills.c.filled_at).label("first_fill"))
+            .where(order_fills.c.broker == scope.broker)
+            .where(order_fills.c.account_env == scope.account_env)
+            .where(order_fills.c.broker_account == scope.broker_account)
+            .group_by(order_fills.c.ticker)
+        )
+        per_ticker: dict[str, str] = {
+            row.ticker: row.first_fill.strftime("%Y-%m-%d") for row in conn.execute(per_ticker_stmt)
+        }
+
+        # trade_log_dates from trades.opened_at (one per ticker+structure, most recent)
+        trade_stmt = (
+            select(trades.c.ticker, trades.c.structure, func.max(trades.c.opened_at).label("last_open"))
+            .where(trades.c.broker == scope.broker)
+            .where(trades.c.account_env == scope.account_env)
+            .where(trades.c.broker_account == scope.broker_account)
+            .where(trades.c.opened_at.isnot(None))
+            .group_by(trades.c.ticker, trades.c.structure)
+        )
+        trade_log: dict[str, str] = {}
+        for row in conn.execute(trade_stmt):
+            d = row.last_open.strftime("%Y-%m-%d")
+            trade_log[row.ticker] = d
+            if row.structure:
+                trade_log[f"{row.ticker}|{row.structure}"] = d
+
+        # Previous portfolio dates from the latest account_snapshot whose
+        # entry_dates are not all stamped today (avoids inheriting the old bug
+        # where every sync set entry_date = today).
+        snap_stmt = (
+            select(account_snapshots.c.payload, account_snapshots.c.snapshot_at)
+            .where(account_snapshots.c.broker == scope.broker)
+            .where(account_snapshots.c.account_env == scope.account_env)
+            .where(account_snapshots.c.broker_account == scope.broker_account)
+            .order_by(account_snapshots.c.snapshot_at.desc())
+            .limit(5)
+        )
+        prev_portfolio: dict[str, str] = {}
+        for row in conn.execute(snap_stmt):
+            payload = row.payload or {}
+            for p in payload.get("positions", []):
+                key = f"{p.get('ticker')}|{p.get('structure')}|{p.get('expiry')}"
+                ed = p.get("entry_date", "")
+                if ed and ed != today and key not in prev_portfolio:
+                    prev_portfolio[key] = ed
+            if prev_portfolio:
+                break
+
+    return EntryDateLookups(
+        per_contract_dates=per_contract,
+        per_ticker_dates=per_ticker,
+        trade_log_dates=trade_log,
+        prev_portfolio_dates=prev_portfolio,
+    )
 
 
 def get_portfolio_tickers_sync(*, scope: AccountScope | None = None) -> list[str]:
