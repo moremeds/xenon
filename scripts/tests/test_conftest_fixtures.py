@@ -11,8 +11,10 @@ from __future__ import annotations
 import os
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.engine import Engine
 
+import scripts.tests.conftest as shared_conftest
 from xenon.execution.account_scope import AccountScope, resolve_from_env
 
 
@@ -50,3 +52,36 @@ def test_pg_test_engine_points_at_test_db(pg_test_engine):
     assert "test" in db_name.lower(), (
         f"pg_test_engine must point at a *_test database (defense in depth), got {db_name!r}"
     )
+
+
+def test_truncate_postgres_tables_treats_missing_schema_as_offline(monkeypatch):
+    """A reachable but unmigrated test DB should not fail unrelated tests."""
+
+    class FakeConnection:
+        def execute(self, _statement):
+            raise SQLAlchemyError("missing schema")
+
+    class FakeBegin:
+        def __enter__(self):
+            return FakeConnection()
+
+        def __exit__(self, *_exc_info):
+            return False
+
+    class FakeEngine:
+        disposed = False
+
+        def begin(self):
+            return FakeBegin()
+
+        def dispose(self):
+            self.disposed = True
+
+    fake_engine = FakeEngine()
+    monkeypatch.setattr(shared_conftest, "_PG_REACHABLE_CACHE", True)
+    monkeypatch.setattr(shared_conftest, "create_engine", lambda *_args, **_kwargs: fake_engine)
+
+    shared_conftest._truncate_postgres_tables()
+
+    assert shared_conftest._PG_REACHABLE_CACHE is False
+    assert fake_engine.disposed is True

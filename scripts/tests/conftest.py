@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import SQLAlchemyError
 
 from xenon.execution.account_scope import AccountScope
 
@@ -94,7 +94,7 @@ def _truncate_postgres_tables() -> None:
                     "xenon.ticker_cache",
                 ):
                     conn.execute(text(f"TRUNCATE {table} CASCADE"))
-        except OperationalError:
+        except SQLAlchemyError:
             _PG_REACHABLE_CACHE = False
     finally:
         engine.dispose()

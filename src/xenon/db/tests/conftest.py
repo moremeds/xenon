@@ -5,7 +5,7 @@ import pytest_asyncio
 from sqlalchemy import create_engine as create_sync_engine
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import SQLAlchemyError
 
 from xenon.db.engine import create_engine
 from xenon.db.schema import events_metadata, xenon_metadata
@@ -74,15 +74,20 @@ async def conn(engine):
 @pytest_asyncio.fixture(autouse=True)
 async def clean_tables(pg_url):
     """Truncate all tables before each test for isolation. Tolerates offline PG."""
+    global _PG_REACHABLE_CACHE
     if not _pg_reachable(pg_url):
         yield
         return
     eng = create_engine(pg_url)
-    async with eng.begin() as connection:
-        for meta in (xenon_metadata, events_metadata):
-            for table in reversed(meta.sorted_tables):
-                await connection.execute(text(f"TRUNCATE TABLE {table.schema}.{table.name} CASCADE"))
-    await eng.dispose()
+    try:
+        async with eng.begin() as connection:
+            for meta in (xenon_metadata, events_metadata):
+                for table in reversed(meta.sorted_tables):
+                    await connection.execute(text(f"TRUNCATE TABLE {table.schema}.{table.name} CASCADE"))
+    except SQLAlchemyError:
+        _PG_REACHABLE_CACHE = False
+    finally:
+        await eng.dispose()
     yield
 
 
