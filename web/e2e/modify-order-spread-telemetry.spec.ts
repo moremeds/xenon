@@ -210,7 +210,7 @@ test.describe("Modify-order spread telemetry", () => {
     await page.unrouteAll({ behavior: "ignoreErrors" });
     stubApis(page);
 
-    await page.goto("http://127.0.0.1:3000/portfolio");
+    await page.goto("/portfolio");
 
     await page.evaluate((prices) => {
       for (const [, priceData] of Object.entries(prices)) {

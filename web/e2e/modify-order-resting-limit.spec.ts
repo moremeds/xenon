@@ -166,7 +166,7 @@ test("modify modal shows the resting sell limit as the effective ask", async ({ 
   await installMockWebSocket(page);
   stubApis(page);
 
-  await page.goto("http://127.0.0.1:3000/orders");
+  await page.goto("/orders");
 
   const row = page.getByRole("row", { name: /AAOI Short \$90 Put 2026-03-27/ });
   await expect(row).toBeVisible();

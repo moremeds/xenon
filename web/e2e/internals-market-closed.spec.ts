@@ -128,7 +128,7 @@ async function setupMocks(page: import("@playwright/test").Page) {
 test.describe("/internals closed-market load", () => {
   test("renders internals data instead of hanging on Loading internals", async ({ page }) => {
     await setupMocks(page);
-    await page.goto("http://127.0.0.1:3000/internals");
+    await page.goto("/internals");
 
     await expect(page.locator('[data-testid="strip-internals-nq-skew"] .regime-strip-value')).toHaveText("+0.1250");
     await expect(page.locator('[data-testid="strip-internals-spx-skew"] .regime-strip-value')).toHaveText("-0.2250");

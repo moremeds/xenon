@@ -292,7 +292,7 @@ test("IWM ticker detail preserves signed combo leg and order quotes", async ({ p
     });
   });
 
-  await page.goto("http://127.0.0.1:3000/IWM?posId=12&tab=position");
+  await page.goto("/IWM?posId=12&tab=position");
 
   await page.getByRole("button", { name: /Legs \(2\)/i }).click();
 

@@ -180,7 +180,7 @@ async function setupMocks(page: import("@playwright/test").Page) {
 test.describe("/performance closed-market load", () => {
   test("renders cached performance data instead of hanging on the loading state", async ({ page }) => {
     await setupMocks(page);
-    await page.goto("http://127.0.0.1:3000/performance");
+    await page.goto("/performance");
 
     await expect(page.locator('[data-testid="performance-panel"]')).toBeVisible();
     await expect(page.getByText("Reconstructing YTD portfolio performance...")).toHaveCount(0);

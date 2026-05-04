@@ -274,7 +274,7 @@ test("synthetic combo telemetry shows MARK instead of stale LAST for IWM", async
   await installMockWebSocket(page);
   await stubApis(page);
 
-  await page.goto("http://127.0.0.1:3000/IWM?posId=13&tab=position");
+  await page.goto("/IWM?posId=13&tab=position");
 
   const hero = page.locator(".price-bar").first();
   await expect(hero).toContainText("MARK");

@@ -207,7 +207,7 @@ async function setupMocks(page: import("@playwright/test").Page) {
 test.describe("/portfolio same-day combo today pnl", () => {
   test("renders a same-day risk reversal using entry-cost-based today pnl", async ({ page }) => {
     await setupMocks(page);
-    await page.goto("http://127.0.0.1:3000/portfolio");
+    await page.goto("/portfolio");
 
     const row = page.locator("tr", { hasText: "PLTR" }).first();
     await expect(row).toContainText("-$188");

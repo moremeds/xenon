@@ -130,7 +130,7 @@ test.describe("Combo order modify flow", () => {
       });
     });
 
-    await page.goto("http://127.0.0.1:3000/orders");
+    await page.goto("/orders");
 
     const row = page.locator("tbody tr").filter({ hasText: "AAOI" }).first();
     await expect(row).toBeVisible({ timeout: 10_000 });
