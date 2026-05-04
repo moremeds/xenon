@@ -5,6 +5,19 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.0.4] — 2026-05-04
+
+### Added
+
+- **Default-private route gating with explicit public allowlist (#90).** Inverts `web/middleware.ts` from "gate everything except sign-in/sign-up/api" to default-private with an explicit `PUBLIC_ROUTES` array of scanner / market-data surfaces (`/scanner`, `/discover`, `/regime`, `/flow-analysis`, `/uw-analyze`, `/cta`, `/kit`). Trading workspace (`/`), portfolio, orders, journal, internals, dashboard, performance, and `/[ticker]` stay private. New routes inherit auth automatically — opt out by adding to `PUBLIC_ROUTES`. Fail-closed default protects against scattered per-flow gating regressions called out in `project_universal_auth_gating` memory. New unit test `web/tests/middleware-route-gating.test.ts` pins 24 path classifications including the "unlisted route is private" invariant.
+- **Mac mini Docker deploy runbook (#87).** New `docs/runbooks/remote-deploy.md` documents topology, first-time bootstrap, standard release flow, Colima auto-start via `brew services`, rollback, logs/diagnostics, and a reference compose template. `docs/runbooks/mac-mini.md` now points at it as the authoritative source.
+- **Stage C auto-deploy planning handover (#88).** `docs/handovers/2026-05-04-stage-c-auto-deploy.md` — three-item plan covering release verify, build-args, and Watchtower on the mini.
+
+### Fixed
+
+- **`release.yml::verify` now provisions Postgres (#89).** Adds `postgres:16-alpine` service container, schema bootstrap (`xenon`, `events`), and `alembic upgrade head` before `uv run pytest`. Mirrors `ci.yml::python-tests` so the tag-trigger verify matches what master CI proves green. Without it, v0.0.3 verify hit 282 connection-refused errors and blocked `ghcr-push`; v0.0.4 is the first tag where verify is actually expected to pass clean.
+- **Clerk publishable key now baked into web image (#89).** `release.yml::ghcr-push` passes `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` as a `docker/build-push-action` build-arg via matrix conditional (web image only). `NEXT_PUBLIC_*` vars must be present at `next build` time so they're inlined into the client bundle; without it the production web image shipped with an undefined Clerk key and round-tripped to localhost on auth flows. Requires GHA repo secret `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` to be set (added 2026-05-04).
+
 ## [0.0.3] — 2026-05-04
 
 ### Added
