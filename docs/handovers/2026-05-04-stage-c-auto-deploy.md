@@ -1,17 +1,87 @@
 # Stage C — Tag-to-mini auto-deploy
 
 **Goal:** Pushing `vX.Y.Z` should result in the mini running that version with no
-operator action beyond the tag itself. Today the chain breaks in three places:
+operator action beyond the tag itself. Today the chain breaks in four places:
 
+0. **GHCR per-package ACL** — the 4 packages were bootstrapped via manual
+   `docker push` with a PAT, so GHCR never auto-linked `moremeds/xenon` as
+   an authorized writer. Every workflow push is denied. Hit during the
+   v0.0.4 cut (run [25296418217](https://github.com/moremeds/xenon/actions/runs/25296418217)).
 1. `release.yml::verify` fails on the runner (no Postgres) → `ghcr-push` skipped.
 2. `release.yml::ghcr-push` doesn't pass `NEXT_PUBLIC_*` build-args → the
    web image baked at CI has empty Clerk keys.
-3. Even if 1+2 land, the mini doesn't know about new images — operator has
+3. Even if 0+1+2 land, the mini doesn't know about new images — operator has
    to `ssh + pull + up -d` by hand.
 
-This doc fixes all three. Items 1+2 are repo-side PRs you (the dev Mac
-operator) merge; item 3 is a one-shot config on the mini that you can copy
-into a terminal there.
+This doc fixes all four. Item 0 is a one-time UI step on each package's
+settings page; items 1+2 are repo-side PRs you (the dev Mac operator)
+merge; item 3 is a one-shot config on the mini that you can copy into a
+terminal there.
+
+> **Status (2026-05-04):** Items 1+2 landed in PR #91 (`release: v0.0.4`).
+> Item 0 was discovered when the v0.0.4 tag fired and `ghcr-push` denied
+> all 4 matrix jobs. Item 3 (Watchtower) still pending mini-side.
+
+## Item 0 — GHCR per-package ACL (one-time)
+
+### Problem
+
+`release.yml::ghcr-push` declares `permissions: packages: write` and the
+run log confirms `Packages: write` on the `GITHUB_TOKEN`. Login succeeds.
+The push still fails with `denied: permission_denied: write_package`.
+
+GHCR has two permission layers:
+
+1. **Token scope** — granted by the workflow YAML (`permissions:` block).
+2. **Per-package ACL** — managed under each package's "Manage Actions
+   access" settings. When a workflow successfully pushes a package for
+   the first time, GHCR auto-links the source repo here. **There is no
+   public REST or GraphQL API to manage this** — UI only.
+
+The Xenon packages (`xenon-{api,web,realtime,migrator}`) were created by
+manual `docker push` from this Mac on 2026-05-03 because `release.yml::verify`
+was failing (item 1 wasn't fixed yet). That manual path bypasses the
+auto-link, leaving each package with no authorized repos. Every
+workflow-driven push is denied until a human grants access.
+
+### Fix
+
+For each of the 4 packages, visit the settings page and grant
+`moremeds/xenon` write access:
+
+- `https://github.com/users/moremeds/packages/container/xenon-api/settings`
+- `https://github.com/users/moremeds/packages/container/xenon-web/settings`
+- `https://github.com/users/moremeds/packages/container/xenon-realtime/settings`
+- `https://github.com/users/moremeds/packages/container/xenon-migrator/settings`
+
+On each page → **Manage Actions access** → **Add Repository** → search
+`xenon` → select `moremeds/xenon` → role **Write** → save.
+
+After all 4 are linked, re-run the failed jobs without re-tagging:
+
+```bash
+gh run rerun 25296418217 --failed --repo moremeds/xenon
+```
+
+(Or for any future blocked tag, swap the run id.)
+
+### Test plan
+
+- After the link is applied, `gh run rerun --failed` should publish all
+  4 images. Verify with `gh api user/packages/container/xenon-api/versions`
+  — a fresh `:v0.0.4` digest should appear, dated within minutes.
+
+### Cost
+
+Zero code change. ~30 seconds of UI clicks per package, one-time per
+package's lifetime. Future tags publish without operator intervention.
+
+### Prevention
+
+Don't bootstrap GHCR packages via manual `docker push`. Either push
+the first version from a working `release.yml` (auto-link on success),
+or link the repo immediately after the first manual push. Once linked,
+the ACL persists across version bumps.
 
 ## Item 1 — `release.yml::verify` Postgres service
 

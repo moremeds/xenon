@@ -10,11 +10,11 @@ The old launchd path is no longer the deploy mechanism.
 
 ## Topology
 
-| Host                                                      | Where things live                                                                                                                                                                                              |
-| --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Mac mini                                                  | Colima (Linux/arm64 VM running Docker), 4 containers (api / web / realtime / migrator), live IB Gateway 10.45 (`:4001`, host-native), Postgres 17 (`:5432`, host-native, schemas `xenon` / `apex` / `events`). |
-| This dev Mac                                              | Source of truth for builds + tag cuts. Paper IB Gateway local (`127.0.0.1:4002`).                                                                                                                              |
-| GHCR `ghcr.io/moremeds/xenon-{api,web,realtime,migrator}` | Linked to repo `moremeds/xenon`; tags `:vX.Y.Z` and `:latest`. Visibility "private + repo-linked".                                                                                                             |
+| Host                                                      | Where things live                                                                                                                                                                                                                                            |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Mac mini                                                  | Colima (Linux/arm64 VM running Docker), 4 containers (api / web / realtime / migrator), live IB Gateway 10.45 (`:4001`, host-native), Postgres 17 (`:5432`, host-native, schemas `xenon` / `apex` / `events`).                                               |
+| This dev Mac                                              | Source of truth for builds + tag cuts. Paper IB Gateway local (`127.0.0.1:4002`).                                                                                                                                                                            |
+| GHCR `ghcr.io/moremeds/xenon-{api,web,realtime,migrator}` | Owned by user `moremeds`; tags `:vX.Y.Z` and `:latest`. Visibility "private". Each package must have `moremeds/xenon` added under **Manage Actions access** with role **Write** — otherwise `release.yml::ghcr-push` is denied (see "Known follow-ups #11"). |
 
 Containers reach Postgres + IB Gateway + Futu OpenD via `host.docker.internal`
 (Colima maps it to the host gateway). Postgres + IB Gateway never run in
@@ -270,6 +270,43 @@ These tripped us during v0.0.3 and need real fixes before v0.0.4:
       create a Clerk Production instance, verify the domain via TXT
       record, swap `pk_test_*` → `pk_live_*` in the `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
       GHA secret, redeploy. Public domain + real auth.
+
+11. **GHCR packages need explicit per-repo ACL — not auto-linked when
+    bootstrapped manually.** Hit during v0.0.4 (run
+    [25296418217](https://github.com/moremeds/xenon/actions/runs/25296418217)):
+    `release.yml::ghcr-push` failed all 4 matrix jobs with
+    `denied: permission_denied: write_package`, even though the workflow
+    declares `permissions: packages: write` and the run log confirms the
+    `GITHUB_TOKEN` was granted `Packages: write`.
+
+    Cause: GHCR has two permission layers. The `GITHUB_TOKEN` scope is
+    one; the package's per-repo ACL ("Manage Actions access") is the
+    other. When a workflow successfully pushes a package for the first
+    time, GHCR auto-links the source repo. The Xenon packages were
+    created on 2026-05-03 by **manual `docker push` from this Mac with a
+    classic PAT** (see follow-up #2 above), so the auto-link never
+    happened. Every subsequent workflow push is denied because
+    `moremeds/xenon` is not listed under the package's Actions access.
+
+    There is no public REST or GraphQL API for managing per-repo
+    Actions access on user-owned packages — UI only. Fix is one-time per
+    package:
+    - Visit `https://github.com/users/moremeds/packages/container/xenon-<api|web|realtime|migrator>/settings`
+    - Scroll to **Manage Actions access** → **Add Repository**
+    - Search `xenon`, select `moremeds/xenon`, role **Write**, save.
+    - Repeat for the other 3 packages.
+
+    After the link is in place, re-run the failed jobs:
+
+    ```bash
+    gh run rerun <run-id> --failed --repo moremeds/xenon
+    ```
+
+    Permanent prevention: don't bootstrap GHCR packages via manual
+    `docker push`. Either (a) push the first version from a working
+    `release.yml` (auto-links on success), or (b) link the repo
+    immediately after the first manual push. Once linked, every future
+    tag release publishes without the operator touching anything.
 
 ## Reference: `/opt/xenon/compose.yml` template
 
