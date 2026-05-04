@@ -241,8 +241,8 @@ async function injectMockWebSocket(page: import("@playwright/test").Page) {
           const updates: Record<string, unknown> = {};
           const strikes = [88, 90, 92];
           for (const strike of strikes) {
-            const callKey = `PLTR_20260417_${strike}_C`;
-            const putKey = `PLTR_20260417_${strike}_P`;
+            const callKey = `PLTR_20260515_${strike}_C`;
+            const putKey = `PLTR_20260515_${strike}_P`;
             updates[callKey] = {
               symbol: callKey,
               last: strike === 90 ? 3.4 : strike < 90 ? 5.2 : 1.8,
@@ -330,7 +330,12 @@ async function injectMockWebSocket(page: import("@playwright/test").Page) {
         this.onclose?.(new Event("close"));
       }
 
-      addEventListener() {}
+      addEventListener(type: string, listener: EventListener) {
+        if (type === "open") this.onopen = listener as (event: Event) => void;
+        if (type === "message") this.onmessage = listener as (event: MessageEvent<string>) => void;
+        if (type === "close") this.onclose = listener as (event: Event) => void;
+        if (type === "error") this.onerror = listener as (event: Event) => void;
+      }
       removeEventListener() {}
       dispatchEvent() { return false; }
     }
@@ -355,7 +360,7 @@ test.describe("WebSocket connection stability on ticker detail page", () => {
     await page.goto("/PLTR?tab=chain");
 
     // Wait for page to render the sidebar status
-    const statusDot = page.locator(".sidebar-footer .status-dot-wrap");
+    const statusDot = page.locator(".sidebar-footer .status-dot-wrap").filter({ hasText: "CONNECTED" });
     await expect(statusDot).toBeVisible({ timeout: 10_000 });
 
     // Give time for portfolio, orders, and chain subscriptions to arrive sequentially
@@ -387,7 +392,7 @@ test.describe("WebSocket connection stability on ticker detail page", () => {
 
     // Collect bid values — at least one should be a real number, not "---"
     let realBidCount = 0;
-    for (let i = 0; i < Math.min(bidCount, 10); i++) {
+    for (let i = 0; i < bidCount; i++) {
       const text = await bidCells.nth(i).textContent();
       if (text && text.trim() !== "---" && text.trim() !== "") {
         realBidCount++;
@@ -399,7 +404,7 @@ test.describe("WebSocket connection stability on ticker detail page", () => {
     const askCells = page.locator(".chain-ask");
     let realAskCount = 0;
     const askCount = await askCells.count();
-    for (let i = 0; i < Math.min(askCount, 10); i++) {
+    for (let i = 0; i < askCount; i++) {
       const text = await askCells.nth(i).textContent();
       if (text && text.trim() !== "---" && text.trim() !== "") {
         realAskCount++;

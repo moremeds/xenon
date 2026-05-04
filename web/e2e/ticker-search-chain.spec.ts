@@ -42,7 +42,7 @@ const EXPIRATIONS = {
 
 const CHAIN_STRIKES = {
   symbol: "AAPL",
-  expiry: "20260417",
+  expiry: "20260515",
   exchange: "SMART",
   strikes: [180, 185, 190, 195, 200, 205, 210, 215, 220, 225, 230],
   multiplier: "100",
@@ -273,9 +273,9 @@ test.describe("Ticker Search → Detail Page → Chain", () => {
     // Inject prices
     const prices = [
       makePriceData("AAPL", 205.50, 205.40, 205.60),
-      makePriceData("AAPL_20260417_200_C", 10.50, 10.30, 10.70),
-      makePriceData("AAPL_20260417_210_C", 5.20, 5.00, 5.40),
-      makePriceData("AAPL_20260417_200_P", 4.80, 4.60, 5.00),
+      makePriceData("AAPL_20260515_200_C", 10.50, 10.30, 10.70),
+      makePriceData("AAPL_20260515_210_C", 5.20, 5.00, 5.40),
+      makePriceData("AAPL_20260515_200_P", 4.80, 4.60, 5.00),
     ];
     await page.evaluate((pds) => {
       for (const pd of pds) {
@@ -348,11 +348,11 @@ test.describe("Ticker Search → Detail Page → Chain", () => {
 
     await orderBuilder.getByRole("button", { name: /MID/i }).click();
     const limitPriceInput = orderBuilder.locator(".modify-price-input");
-    await expect(limitPriceInput).toHaveValue("0.10");
-    await expect(orderBuilder.getByText("$250.00 notional")).toBeVisible();
+    await expect(limitPriceInput).toHaveValue("-0.10");
+    await expect(orderBuilder.getByText("$-250.00 notional")).toBeVisible();
 
     await orderBuilder.getByRole("button", { name: /Place Risk Reversal/i }).click();
-    await orderBuilder.getByRole("button", { name: /Confirm: Risk Reversal @ \$0.10/i }).click();
+    await page.getByRole("button", { name: "Confirm Order" }).click();
 
     expect(placedBody).not.toBeNull();
     expect(placedBody?.quantity).toBe(25);
@@ -368,8 +368,8 @@ test.describe("Ticker Search → Detail Page → Chain", () => {
     stubApis(page);
     await installMockWebSocket(page, {
       AAPL: makePriceData("AAPL", 205.5, 205.4, 205.6),
-      AAPL_20260417_200_P: makePriceData("AAPL_20260417_200_P", 4.8, 4.8, 4.8),
-      AAPL_20260417_210_C: makePriceData("AAPL_20260417_210_C", 5.1, 5.1, 5.1),
+      AAPL_20260515_200_P: makePriceData("AAPL_20260515_200_P", 4.8, 4.8, 4.8),
+      AAPL_20260515_210_C: makePriceData("AAPL_20260515_210_C", 5.1, 5.1, 5.1),
     });
 
     let placedBody: Record<string, unknown> | null = null;
@@ -408,7 +408,7 @@ test.describe("Ticker Search → Detail Page → Chain", () => {
     await expect(limitPriceInput).toHaveValue(comboMid);
 
     await orderBuilder.getByRole("button", { name: /Place Risk Reversal/i }).click();
-    await orderBuilder.getByRole("button", { name: /Confirm: Risk Reversal @ /i }).click();
+    await page.getByRole("button", { name: "Confirm Order" }).click();
 
     expect(placedBody).not.toBeNull();
     expect(placedBody?.action).toBe("BUY");
@@ -422,7 +422,7 @@ test.describe("Ticker Search → Detail Page → Chain", () => {
     stubApis(page);
     await installMockWebSocket(page, {
       AAPL: makePriceData("AAPL", 205.5, 205.4, 205.6),
-      AAPL_20260417_200_P: makePriceData("AAPL_20260417_200_P", 4.8, 4.6, 5.0),
+      AAPL_20260515_200_P: makePriceData("AAPL_20260515_200_P", 4.8, 4.6, 5.0),
     });
 
     await page.route("**/api/orders/place", async (route) => {

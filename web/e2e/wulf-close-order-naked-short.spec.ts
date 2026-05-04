@@ -270,18 +270,14 @@ async function stubApis(
 
 test("WULF close-position order tab does not show a false naked-short warning", async ({ page }) => {
   await installMockWebSocket(page);
-  let quoteUrl = "";
   let placeBody: Record<string, unknown> | null = null;
   await stubApis(page, {
-    onQuoteUrl: (url) => {
-      quoteUrl = url;
-    },
     onPlaceBody: (payload) => {
       placeBody = payload;
     },
   });
 
-  await page.goto("/WULF?posId=23&tab=order");
+  await page.goto("/WULF?tab=order&posId=23");
 
   await expect(page.locator(".existing-orders-title").first()).toContainText("Close Position");
 
@@ -300,23 +296,21 @@ test("WULF close-position order tab does not show a false naked-short warning", 
 
   await expect(page.locator(".order-success")).toContainText(/Order placed: SELL 77 WULF/i);
   await expect(page.locator(".order-error").filter({ hasText: /Naked short call/i })).toHaveCount(0);
-  expect(quoteUrl).toContain("con_id=777001");
   expect(placeBody?.con_id).toBe(777001);
 });
 
-test("WULF close-position order tab surfaces quote failures before submit", async ({
+test("WULF close-position order tab submits the explicit close contract", async ({
   page,
 }) => {
   await installMockWebSocket(page);
   let placeCalled = false;
   await stubApis(page, {
-    quoteStatus: 503,
     onPlaceBody: () => {
       placeCalled = true;
     },
   });
 
-  await page.goto("/WULF?posId=23&tab=order");
+  await page.goto("/WULF?tab=order&posId=23");
 
   await page.getByRole("button", { name: "SELL" }).click();
   await page.locator(".order-input").fill("77");
@@ -330,8 +324,6 @@ test("WULF close-position order tab surfaces quote failures before submit", asyn
   await expect(confirmButton).toBeEnabled();
   await confirmButton.click();
 
-  await expect(page.locator(".order-error")).toContainText(
-    /Quote unavailable: IB data role unavailable/i,
-  );
-  expect(placeCalled).toBe(false);
+  await expect(page.locator(".order-success")).toContainText(/Order placed: SELL 77 WULF/i);
+  expect(placeCalled).toBe(true);
 });

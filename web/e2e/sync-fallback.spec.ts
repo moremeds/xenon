@@ -213,7 +213,7 @@ test.describe("Sync fallback — UI resilience when IB sync fails", () => {
     await page.goto("/portfolio");
 
     // Portfolio data should render (AAPL position visible in Defined Risk table)
-    await expect(page.getByText("AAPL")).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole("button", { name: "View details for AAPL" })).toBeVisible({ timeout: 10_000 });
 
     // No console 502 errors — the response is 200 with cached data
     const consoleErrors: string[] = [];
@@ -233,7 +233,7 @@ test.describe("Sync fallback — UI resilience when IB sync fails", () => {
     await page.goto("/orders");
 
     // Orders data should render (AAPL order visible)
-    await expect(page.getByText("AAPL")).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText("AAPL").first()).toBeVisible({ timeout: 10_000 });
 
     // No 502 errors in console
     const consoleErrors: string[] = [];
@@ -252,7 +252,7 @@ test.describe("Sync fallback — UI resilience when IB sync fails", () => {
     await page.goto("/portfolio");
 
     // Wait for data to render
-    await expect(page.getByText("AAPL")).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole("button", { name: "View details for AAPL" })).toBeVisible({ timeout: 10_000 });
 
     // Sync status should NOT show "Sync error" since the response is 200
     const syncError = page.locator(".sync-status.sync-error");

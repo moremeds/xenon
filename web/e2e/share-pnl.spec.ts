@@ -347,7 +347,7 @@ test.describe("Share PnL signed combo basis", () => {
     await expect(shareButton).toBeVisible({ timeout: 10_000 });
 
     const closedRow = shareButton.locator("xpath=ancestor::tr[1]");
-    await expect(closedRow).toContainText("Risk Reversal (Short $85 Put / Long $90 Call)");
+    await expect(closedRow).toContainText(/Risk Reversal .*Short \$85 Put \/ Long \$90 Call/);
     await expect(closedRow).toContainText("$1.00");
     await shareButton.click();
     const popover = page.locator(".share-pnl-popover");

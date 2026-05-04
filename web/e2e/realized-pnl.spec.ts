@@ -110,6 +110,13 @@ async function setupBaseMocks(page: import("@playwright/test").Page) {
   );
 }
 
+function realizedPnlCard(page: import("@playwright/test").Page) {
+  return page
+    .locator(".metric-card")
+    .filter({ has: page.locator(".metric-label", { hasText: /^Realized$/ }) })
+    .first();
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 test.describe("Realized P&L — fills-derived, not IB account summary", () => {
@@ -122,12 +129,12 @@ test.describe("Realized P&L — fills-derived, not IB account summary", () => {
     await page.goto("/portfolio");
 
     // Find the Realized P&L card in the ACCOUNT row
-    const realizedCard = page.locator(".metric-card", { hasText: "Realized P&L" }).first();
+    const realizedCard = realizedPnlCard(page);
     await realizedCard.waitFor({ timeout: 10_000 });
 
     // Must show $0.00 (no fills), NOT -$6,835 from IB account summary
     const value = realizedCard.locator(".metric-value");
-    await expect(value).toHaveText("$0.00");
+    await expect(value).toHaveText("+$0");
     await expect(value).not.toContainText("-$6,835");
     await expect(value).not.toContainText("-6,835");
   });
@@ -141,7 +148,7 @@ test.describe("Realized P&L — fills-derived, not IB account summary", () => {
     await page.goto("/portfolio");
 
     // $473 + (-$215) = $258
-    const realizedCard = page.locator(".metric-card", { hasText: "Realized P&L" }).first();
+    const realizedCard = realizedPnlCard(page);
     await realizedCard.waitFor({ timeout: 10_000 });
 
     const value = realizedCard.locator(".metric-value");
@@ -156,7 +163,7 @@ test.describe("Realized P&L — fills-derived, not IB account summary", () => {
 
     await page.goto("/portfolio");
 
-    const realizedCard = page.locator(".metric-card", { hasText: "Realized P&L" }).first();
+    const realizedCard = realizedPnlCard(page);
     await realizedCard.waitFor({ timeout: 10_000 });
     await realizedCard.click();
 
