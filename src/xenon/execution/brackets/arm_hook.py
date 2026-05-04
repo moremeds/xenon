@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select, text
@@ -201,4 +202,62 @@ def _emit_unsupported(engine: Engine, payload: dict[str, Any], *, reason: str) -
                     "broker_account": payload.get("broker_account"),
                 },
             },
+        )
+
+
+def sweep_insert(engine: Engine, *, scope, candidate: dict[str, Any]) -> None:
+    """Operator-driven sweep insert for an existing unprotected position."""
+    legs = [
+        {
+            "sec_type": candidate.get("sec_type", "STK"),
+            "symbol": candidate["symbol"],
+            "action": "BUY" if int(candidate.get("qty", 0)) >= 0 else "SELL",
+            "ratio": 1,
+            "fill_price": float(candidate.get("mark") or candidate.get("price") or 0.0),
+            "con_id": candidate.get("con_id") or 0,
+        }
+    ]
+    classified = classify_position(legs=legs, wizard_session_payload=None, sibling_legs=None)
+    if classified.asset_class not in (AssetClass.STOCK, AssetClass.LONG_OPTION):
+        return
+
+    policies = deduplicate_by_specificity(
+        resolve_for_scope(
+            engine,
+            broker=scope.broker,
+            account_env=scope.account_env,
+            broker_account=scope.broker_account,
+            asset_class=classified.asset_class.value,
+        )
+    )
+    if not policies:
+        return
+
+    now = datetime.now(timezone.utc)
+    qty = abs(int(candidate.get("qty") or 0))
+    descriptor = {
+        "asset_class": classified.asset_class.value,
+        "opened_at": now.isoformat(),
+        "source": "sweep_cli",
+        "anchor_price": legs[0]["fill_price"],
+        "anchor_currency": "USD",
+        "opened_qty": qty,
+        "protected_qty": qty,
+        "multiplier": 100 if legs[0]["sec_type"] == "OPT" else 1,
+        "qty_unit": "contract" if legs[0]["sec_type"] == "OPT" else "share",
+        "legs": legs,
+    }
+    position_key = compute_position_key(classified.asset_class.value, descriptor)
+
+    for policy in policies:
+        insert_pending_arm(
+            engine,
+            broker=scope.broker,
+            account_env=scope.account_env,
+            broker_account=scope.broker_account,
+            position_key=position_key,
+            position_descriptor=descriptor,
+            asset_class=classified.asset_class.value,
+            rule_kind=policy.rule_kind,
+            config=policy.config,
         )
