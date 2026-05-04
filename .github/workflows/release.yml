@@ -7,6 +7,25 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    # Postgres is required: scripts/tests/conftest.py and src/xenon/api/tests/conftest.py
+    # have autouse fixtures that truncate xenon.* tables before every test.
+    # Mirrors ci.yml::python-tests so release verify matches what master CI proved green.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: xenon_app
+          POSTGRES_PASSWORD: xenon_dev
+          POSTGRES_DB: xenon_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xenon_app -d xenon_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL_TEST: postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test
     steps:
       - uses: actions/checkout@v4
         with:
@@ -17,6 +36,18 @@ jobs:
           cache-dependency-glob: uv.lock
       - run: uv python install 3.13
       - run: uv sync --frozen --extra test
+      - name: Pre-create xenon/events schemas
+        # Alembic creates xenon.alembic_version before running upgrade(), so the
+        # schema must exist beforehand. Mirrors ci.yml::python-tests.
+        env:
+          PGPASSWORD: xenon_dev
+        run: >-
+          psql -h localhost -U xenon_app -d xenon_test
+          -c "CREATE SCHEMA IF NOT EXISTS xenon; CREATE SCHEMA IF NOT EXISTS events;"
+      - name: Apply alembic migrations to test DB
+        env:
+          DATABASE_URL: postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test
+        run: uv run alembic upgrade head
       - run: uv run pytest
       - uses: actions/setup-node@v4
         with:
@@ -114,5 +145,10 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.meta.outputs.revision }}
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          # NEXT_PUBLIC_* vars must be present at `next build` time so they're baked
+          # into the client bundle. Web image only — api/realtime/migrator ignore it.
+          # Empty string for non-web images keeps the build-args block valid.
+          build-args: |
+            NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${{ matrix.image == 'web' && secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY || '' }}
           cache-from: type=gha,scope=xenon-${{ matrix.image }}
           cache-to: type=gha,scope=xenon-${{ matrix.image }},mode=max
