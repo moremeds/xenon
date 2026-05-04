@@ -224,7 +224,7 @@ test.describe("Spread PriceBar — net pricing from per-leg WS data", () => {
     await page.unrouteAll({ behavior: "ignoreErrors" });
     stubApis(page);
 
-    await page.goto("/portfolio");
+    await page.goto("/GOOG?posId=1");
 
     // Only inject underlying price, NOT leg prices
     await page.evaluate((price) => {
@@ -234,13 +234,6 @@ test.describe("Spread PriceBar — net pricing from per-leg WS data", () => {
         }),
       );
     }, PRICES.GOOG);
-
-    const googLink = page
-      .locator('[aria-label="View details for GOOG"]')
-      .first();
-    await googLink.waitFor({ timeout: 10_000 });
-    await googLink.click();
-    await page.waitForURL("**/GOOG**", { timeout: 5_000 });
 
     const detail = page.locator(".ticker-detail-page");
     await detail.waitFor({ timeout: 5_000 });

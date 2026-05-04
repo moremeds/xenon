@@ -423,35 +423,39 @@ test.describe("WebSocket connection stability on ticker detail page", () => {
     const chainTable = page.locator(".chain-row");
     await expect(chainTable.first()).toBeVisible({ timeout: 15_000 });
 
-    // Wait for batch price data to arrive (100ms in mock + render time)
-    await page.waitForTimeout(1000);
-
     // At least some chain cells should show real bid/ask, not "---"
     const bidCells = page.locator(".chain-bid");
     const bidCount = await bidCells.count();
     expect(bidCount).toBeGreaterThan(0);
 
-    // Collect bid values — at least one should be a real number, not "---"
-    let realBidCount = 0;
-    for (let i = 0; i < bidCount; i++) {
-      const text = await bidCells.nth(i).textContent();
-      if (text && text.trim() !== "---" && text.trim() !== "") {
-        realBidCount++;
-      }
-    }
-    expect(realBidCount).toBeGreaterThan(0);
+    await expect
+      .poll(async () => {
+        let realBidCount = 0;
+        for (let i = 0; i < bidCount; i++) {
+          const text = await bidCells.nth(i).textContent();
+          if (text && text.trim() !== "---" && text.trim() !== "") {
+            realBidCount++;
+          }
+        }
+        return realBidCount;
+      }, { timeout: 10_000 })
+      .toBeGreaterThan(0);
 
     // Similarly for ask cells
     const askCells = page.locator(".chain-ask");
-    let realAskCount = 0;
     const askCount = await askCells.count();
-    for (let i = 0; i < askCount; i++) {
-      const text = await askCells.nth(i).textContent();
-      if (text && text.trim() !== "---" && text.trim() !== "") {
-        realAskCount++;
-      }
-    }
-    expect(realAskCount).toBeGreaterThan(0);
+    await expect
+      .poll(async () => {
+        let realAskCount = 0;
+        for (let i = 0; i < askCount; i++) {
+          const text = await askCells.nth(i).textContent();
+          if (text && text.trim() !== "---" && text.trim() !== "") {
+            realAskCount++;
+          }
+        }
+        return realAskCount;
+      }, { timeout: 10_000 })
+      .toBeGreaterThan(0);
   });
 
   test("usePrices does not tear down and recreate the WS when subscriptions change", async ({ page }) => {
