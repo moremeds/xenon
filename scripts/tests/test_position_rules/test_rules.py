@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
+from xenon.execution.brackets.executor.ib_executor import PlaceResult
 from xenon.execution.brackets.rules.base import RULE_REGISTRY
 from xenon.execution.brackets.rules.combo_tp_alert import ComboTpAlertRule
 from xenon.execution.brackets.rules.stop_loss import StopLossRule
@@ -56,6 +58,48 @@ def test_stop_loss_evaluate_above_threshold_no_op():
         marks={"mark": 4.01},
     )
     assert decision.kind == "NO_OP"
+
+
+def test_stop_loss_arm_native_path_calls_executor():
+    rule = StopLossRule()
+    executor = MagicMock()
+    executor.attach_native_stp.return_value = PlaceResult(
+        perm_id=999,
+        ib_order_id=1,
+        status="Submitted",
+        raw={},
+    )
+    pos = {
+        "asset_class": "long_option",
+        "anchor_price": 5.00,
+        "protected_qty": 1,
+        "multiplier": 100,
+        "legs": [
+            {
+                "sec_type": "OPT",
+                "symbol": "GOOG",
+                "expiry": "20260417",
+                "strike": 315.0,
+                "right": "C",
+                "action": "BUY",
+                "con_id": 12345,
+                "fill_price": 5.00,
+            }
+        ],
+    }
+    result = rule.arm(
+        scope=None,
+        position=pos,
+        config={"threshold_pct": -0.20, "anchor": "entry_price"},
+        state_data={},
+        executor=executor,
+    )
+    assert result.kind == "NATIVE_ARMED"
+    assert result.perm_id == 999
+    executor.attach_native_stp.assert_called_once()
+    args = executor.attach_native_stp.call_args.kwargs
+    assert args["stop_price"] == 4.00
+    assert args["close_action"] == "SELL"
 
 
 def test_trailing_tp_evaluate_below_activation_no_op_but_updates_mfe():

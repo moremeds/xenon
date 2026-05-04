@@ -8,11 +8,36 @@ from xenon.execution.brackets.triggers import threshold_crossed_below
 class StopLossRule:
     rule_kind = "stop_loss"
 
-    def arm(self, *, scope, position, config, state_data) -> ArmResult:
+    def arm(self, *, scope, position, config, state_data, executor=None) -> ArmResult:
         asset_class = position.get("asset_class")
         if asset_class in ("debit_combo", "credit_spread"):
             return ArmResult(kind="SYNTHETIC_ONLY", reason="bag_combo_no_native_bracket")
-        return ArmResult(kind="RETRY", reason="needs_subprocess_executor")
+        if executor is None:
+            return ArmResult(kind="RETRY", reason="needs_subprocess_executor")
+
+        anchor = position["anchor_price"]
+        stop_price = round(anchor * (1 + config["threshold_pct"]), 2)
+        leg = position["legs"][0]
+        close_action = "SELL" if leg["action"] == "BUY" else "BUY"
+        qty_multiplier = position.get("multiplier", 1) if leg["sec_type"] == "STK" else 1
+        try:
+            result = executor.attach_native_stp(
+                scope=scope,
+                con_id=leg["con_id"],
+                symbol=leg["symbol"],
+                sec_type=leg["sec_type"],
+                close_action=close_action,
+                qty=position["protected_qty"] * qty_multiplier,
+                stop_price=stop_price,
+                tif="GTC",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ArmResult(kind="RETRY", reason=str(exc))
+        return ArmResult(
+            kind="NATIVE_ARMED",
+            perm_id=result.perm_id,
+            state_data_patch={"native_stop_price": stop_price},
+        )
 
     def evaluate(self, *, scope, position, config, state_data, marks) -> Decision:
         anchor = position["anchor_price"]
@@ -72,7 +97,7 @@ class StopLossRule:
 
         return Decision(kind="NO_OP", reason="unsupported_asset_class")
 
-    def disarm(self, *, scope, position, native_perm_id) -> None:
+    def disarm(self, *, scope, position, native_perm_id, executor=None) -> None:
         return None
 
 

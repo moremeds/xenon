@@ -15,7 +15,7 @@ def _parse_iso(value: str | None) -> datetime | None:
 class ComboTpAlertRule:
     rule_kind = "combo_tp_alert"
 
-    def arm(self, *, scope, position, config, state_data) -> ArmResult:
+    def arm(self, *, scope, position, config, state_data, executor=None) -> ArmResult:
         return ArmResult(kind="SYNTHETIC_ONLY")
 
     def evaluate(self, *, scope, position, config, state_data, marks) -> Decision:
@@ -41,7 +41,7 @@ class ComboTpAlertRule:
             state_data_patch={"last_alert_at": now.isoformat()},
         )
 
-    def disarm(self, *, scope, position, native_perm_id) -> None:
+    def disarm(self, *, scope, position, native_perm_id, executor=None) -> None:
         return None
 
 

@@ -8,11 +8,8 @@ from xenon.execution.brackets.triggers import apply_trail_after_activation
 class TrailingTpRule:
     rule_kind = "trailing_tp"
 
-    def arm(self, *, scope, position, config, state_data) -> ArmResult:
-        asset_class = position.get("asset_class")
-        if asset_class in ("debit_combo", "credit_spread"):
-            return ArmResult(kind="SYNTHETIC_ONLY")
-        return ArmResult(kind="RETRY", reason="needs_subprocess_executor")
+    def arm(self, *, scope, position, config, state_data, executor=None) -> ArmResult:
+        return ArmResult(kind="SYNTHETIC_ONLY", reason="trail_handled_by_synthetic_monitor")
 
     def evaluate(self, *, scope, position, config, state_data, marks) -> Decision:
         mark = marks.get("mark")
@@ -37,7 +34,7 @@ class TrailingTpRule:
             return Decision(kind="UPDATE_STATE", state_data_patch={"mfe": new_mfe})
         return Decision(kind="NO_OP")
 
-    def disarm(self, *, scope, position, native_perm_id) -> None:
+    def disarm(self, *, scope, position, native_perm_id, executor=None) -> None:
         return None
 
 

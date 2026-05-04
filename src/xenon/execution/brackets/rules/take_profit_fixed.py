@@ -8,7 +8,7 @@ from xenon.execution.brackets.triggers import debit_to_close_at_credit_pct
 class TakeProfitFixedRule:
     rule_kind = "take_profit_fixed"
 
-    def arm(self, *, scope, position, config, state_data) -> ArmResult:
+    def arm(self, *, scope, position, config, state_data, executor=None) -> ArmResult:
         return ArmResult(kind="SYNTHETIC_ONLY")
 
     def evaluate(self, *, scope, position, config, state_data, marks) -> Decision:
@@ -29,7 +29,7 @@ class TakeProfitFixedRule:
             )
         return Decision(kind="NO_OP")
 
-    def disarm(self, *, scope, position, native_perm_id) -> None:
+    def disarm(self, *, scope, position, native_perm_id, executor=None) -> None:
         return None
 
 
