@@ -573,6 +573,24 @@ regime_overrides = Table(
     ),
 )
 
+position_rules_review = Table(
+    "position_rules_review",
+    xenon_metadata,
+    Column("review_id", BigInteger, primary_key=True, autoincrement=True),
+    Column("protection_id", BigInteger, nullable=False),
+    Column("event_id", BigInteger, nullable=False),
+    Column("reviewed_by", Text, nullable=False),
+    Column("reviewed_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Column("verdict", Text, nullable=False),
+    Column("note", Text),
+    CheckConstraint(
+        "verdict IN ('expected','unexpected','structural')",
+        name="ck_position_rules_review_verdict",
+    ),
+    UniqueConstraint("event_id", name="uq_position_rules_review_event"),
+    Index("ix_position_rules_review_protection", "protection_id", "reviewed_at"),
+)
+
 # ---------- Scanner Results ----------
 
 scan_results = Table(

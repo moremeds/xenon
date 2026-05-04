@@ -15,6 +15,7 @@ def test_xenon_metadata_has_expected_tables():
         "position_protection",
         "bracket_policies",
         "position_close_claims",
+        "position_rules_review",
         "scan_results",
         "cri_series",
         "uw_analyze_snapshots",
