@@ -1055,3 +1055,16 @@ outbox = Table(
     CheckConstraint("length(channel) <= 63", name="ck_outbox_channel_length"),
     Index("ix_outbox_channel_time", "channel", "emitted_at"),
 )
+
+outbox_dlq = Table(
+    "outbox_dlq",
+    events_metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("source_event_id", BigInteger, nullable=False),
+    Column("channel", Text, nullable=False),
+    Column("source", Text, nullable=False),
+    Column("payload", JSONB, nullable=False),
+    Column("error", Text, nullable=False),
+    Column("attempts", Integer, nullable=False, server_default=text("0")),
+    Column("dead_lettered_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+)
