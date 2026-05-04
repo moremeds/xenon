@@ -39,14 +39,14 @@ This document specifies the v1 rule engine that fixes that, designed so future r
 
 ### 3.1 Default policy table (seeded into `bracket_policies`)
 
-| Asset class                                                        | Hard SL                                                                                                                           | Take-profit                                               |
-| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| **Stocks**                                                         | −8% from entry, MKT at trigger                                                                                                    | 5% trail off MFE, activates immediately                   |
-| **Long single-name options**                                       | **−20% from entry** (rigid red line), MKT at trigger                                                                              | 25% trail off MFE, activates at +30%                      |
-| **Multi-leg debit combos**                                         | 50% of max-loss (synthetic monitor), MKT at trigger                                                                               | 25% trail off MFE in P&L $, activates at +25% of max-gain |
-| **Credit spreads** (bull put short / bear call short)              | **either trigger, whichever first**: ① spread debit-to-close ≥ 2× credit received, ② underlying touches/breaches the short strike | **fixed close at 50% of max credit** (no trail in v1)     |
-| **Covered calls**                                                  | n/a — `arm()` returns `FAILED(reason="covered_call_unsupported_v1")`; operator notified                                           | n/a                                                       |
-| **Unclassified** (ratio, jade lizard, calendar, condor, butterfly) | n/a — operator notified at fill, no auto-arm                                                                                      | n/a                                                       |
+| Asset class                                                        | Hard SL                                                                                                                                                                                                              | Take-profit                                               |
+| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| **Stocks**                                                         | −8% from entry, MKT at trigger                                                                                                                                                                                       | 5% trail off MFE, activates immediately                   |
+| **Long single-name options**                                       | **−20% from entry** (rigid red line), MKT at trigger                                                                                                                                                                 | 25% trail off MFE, activates at +30%                      |
+| **Multi-leg debit combos**                                         | 50% of max-loss (synthetic monitor), MKT at trigger                                                                                                                                                                  | 25% trail off MFE in P&L $, activates at +25% of max-gain |
+| **Credit spreads** (bull put short / bear call short)              | **either trigger, whichever first**: ① spread debit-to-close ≥ 2× credit received, ② underlying touches/breaches the short strike                                                                                    | **fixed close at 50% of max credit** (no trail in v1)     |
+| **Covered calls**                                                  | n/a — classifier returns `COVERED_CALL` → arm_hook short-circuits with operator notification; no `position_protection` row is inserted, `arm()` is never called. v2 enables auto-arm once atomic combo-close exists. | n/a                                                       |
+| **Unclassified** (ratio, jade lizard, calendar, condor, butterfly) | n/a — operator notified at fill, no auto-arm                                                                                                                                                                         | n/a                                                       |
 
 These are _defaults_. The seed inserts wildcard rows (broker / env / account = NULL); per-account overrides land as more-specific rows when the user wants them. Defaults are tunable via `psql UPDATE bracket_policies` — UI later.
 
@@ -483,10 +483,15 @@ def classify_position(fill_record, full_position) -> AssetClass:
 
 `UNCLASSIFIED` is a legitimate v1 outcome — no rows inserted, operator notified.
 
-**Manual leg-by-leg construction (operator opens a credit spread one leg at a time through `/orders/place` rather than the combo wizard):** the classifier sees leg 1 with no parent BAG and would naïvely classify it as `LONG_OPTION` or `UNCLASSIFIED`, then leg 2 fills and the position is now a credit spread but leg-1's rule is wrong. Two layered defenses:
+**Manual leg-by-leg construction (operator opens a credit spread one leg at a time through `/orders/place` rather than the combo wizard):** the classifier sees leg 1 with no parent BAG and would naïvely classify it as `LONG_OPTION`. Leg 2 fills moments later and the position is now a credit spread but leg-1's rule is already armed wrong.
 
-1. The atomicity gate (§6.3) holds classification on any single-leg fill that has a sibling order at the same scope/symbol/expiry within `manual_assembly_window_s` (default 60s).
-2. v1 policy: **multi-leg structures should go through combo wizard or a parent-BAG order**. Manual leg-by-leg construction is unsupported and surfaces a `manual_multi_leg_unsupported` operator notification when detected. This matches existing combo wizard policy and the user's actual workflow.
+**v1 handling — pure detection signal, NOT deferred classification.** The `manual_assembly_window_s` (default 60s) is used only to _detect_ the situation, not to delay arming:
+
+1. When the classifier sees a single-leg OPT fill with no `combo_wizard_session_id`, it queries `order_submissions` and `order_fills` for sibling orders/fills at the same `(scope, symbol, expiry)` opened within the trailing window.
+2. If a sibling is detected → emit `manual_multi_leg_unsupported` operator notification + return `UNCLASSIFIED` (no insert). The operator runs `xenon-position-rules sweep --apply` after the position is fully assembled.
+3. If no sibling → classify as single-leg `LONG_OPTION` and arm normally.
+
+The window is **not** used to defer classification (§6.3 already declares non-wizard manual combos unsupported in v1, so there's nothing to wait for). It exists purely so we can warn the operator at fill-time rather than silently arm the wrong rule.
 
 ### 6.3 Multi-leg fill atomicity (revised after codex review WF-2)
 
@@ -566,12 +571,29 @@ The post-fill arming hook only fires for fills that flow through `orders_store.r
 …bypass the hook entirely. Those positions appear in `IBClient.positions()` but have no `position_protection` row. v1 detects this via a daily reconciliation task (runs alongside the §10.4 quarter-end re-arm sweep, after market close):
 
 ```
-for each position in IBClient.positions(scope):
+positions = IBClient.positions(scope)
+
+# T5 sanity gate: a partial/empty positions response would falsely classify
+# real positions as 'out-of-band' and spam the operator. Bail out cleanly instead.
+expected_min = max(1, last_known_position_count(scope) * 0.7)   # 70% of yesterday
+if not IBClient.connected:                                       # connection broken mid-call
+    abort_sweep(reason='ib_disconnected'); return
+if len(positions) < expected_min and last_known_position_count(scope) > 0:
+    abort_sweep(reason='positions_response_suspiciously_small',
+                got=len(positions), expected_min=expected_min)
+    notify_operator_loud('daily out-of-band sweep aborted — IB positions() returned fewer rows than expected')
+    return                                                        # reschedule next day; no false alarms
+
+for each position in positions:
   if no position_protection row exists in non-terminal state:
     emit outbox event kind='unprotected_position_detected'
     increment health.unprotected_count
     notify operator via macOS toast (rate-limited daily)
+
+write last_known_position_count(scope) = len(positions)           # for tomorrow's gate
 ```
+
+The 70% floor is a conservative anti-flap heuristic — IB occasionally returns short responses during market-data-farm transitions. A genuine 30%+ position drop in a single day is real news worth a loud manual confirmation rather than auto-flagging every remaining position as "unprotected." First-run on a fresh deploy has `last_known_position_count = 0`, which the gate skips (you can't false-alarm against an unknown baseline).
 
 The operator's remediation is `xenon-position-rules sweep --apply --account-scope <…>` or per-position arming. The UI portfolio page surfaces these via the per-position shield badge in `UNCLASSIFIED`/none state with a tooltip "out-of-band fill — sweep to protect".
 
@@ -673,6 +695,15 @@ class PositionRulesHandler(BaseHandler):
 - **Mark / spot coalescing**: `mark_cache` and `spot_cache` are scoped to a single tick. If 30 credit-spread rows reference SPY, the underlying spot is read once per tick across all of them. With ~50 positions this keeps per-tick IB API calls in the low-double-digits — well within IB's ~50/sec pacing limit.
 - **Order of operations matters**: liveness check before mark read, because a cancelled-or-filled native bracket is more urgent than a fresh trigger evaluation.
 - **Trigger → close-claim protocol** (replaces "submit MKT directly"): when `rule.evaluate(...)` returns `TRIGGERED`, `apply_evaluation` follows the §5.6 close protocol — first insert a `position_close_claims` row with the partial-unique constraint on `(scope, position_key)`. If the INSERT returns no `claim_id`, another rule or the native-reconciler already owns the close — this rule's row transitions to `SUPERSEDED` (audit-only); the in-flight close handles the position-flat. If the INSERT returns a `claim_id`, the rule submits `xenon-ib-place-order` with `orderRef = f"xenon-pr-{claim_id}"`, capturing `perm_id` into the claim row. Per §5.6, retry-after-subprocess-error first searches IB by orderRef for an already-submitted order. **No rule ever submits a MKT close without first holding a claim.**
+- **Same-tick multi-row narrative — explicit (B7).** Two rules guard the same position (e.g., `stop_loss` and `trailing_tp` rows for one long option). Both are in `ARMED`; the loop processes them serially. If row A's `evaluate()` returns `TRIGGERED` (its threshold breached), `apply_evaluation` succeeds the close-claim INSERT, transitions A → `TRIGGERED`, submits MKT. Row B is processed next in the same tick:
+  1. Liveness check (no native_order_perm_id assumed for this case) — passes.
+  2. Mark read uses the per-tick cache → returns the same mark A saw.
+  3. `evaluate()` is allowed to run; if B's threshold is also breached, B returns `TRIGGERED`.
+  4. `apply_evaluation` for B attempts the close-claim INSERT — fails ON CONFLICT against A's claim → B transitions to `SUPERSEDED` immediately, with `reason='claim_held_by_other_rule'` recorded in `state_data`. No second MKT is submitted.
+
+  Net effect: at most one MKT per position per tick, regardless of how many rules see the breach simultaneously. Row B's evaluation is not skipped (so its breach is auditable in the outbox), but its close-action is short-circuited at the claim layer.
+
+- **Engine-internal vs operator-manual closes — explicit (B6).** The close-claim protocol applies **only to closes initiated by this engine** — synthetic-monitor triggers and native-bracket reconciliation. Closes the operator submits manually via `/orders/place` or TWS do **not** go through the claim table. They are detected by the §10.3 "Position closed externally" path (after the 2-tick gate) and reconcile the `position_protection` row to `CANCELED`. Implementation rule: **`position_close_claims` is touched only by `src/xenon/execution/brackets/rules/*.py` and the per-tick liveness check; never by `xenon-ib-place-order` itself or by the FastAPI `/orders/place` route.**
 
 ## 9. Rule plug-in interface
 
@@ -705,12 +736,12 @@ class RuleEvaluator(Protocol):
 
 ### 10.1 Read-side (cannot get a mark)
 
-| Failure                                    | Policy                                                                                            |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| `IBClient` disconnected / Gateway down     | Skip the tick, log, retry next tick. ARMED rows with native brackets remain defended broker-side. |
-| Quote stale (last_update > 60s during RTH) | Skip evaluation. Track `state_data.consecutive_stale_ticks`; alert at 5 misses.                   |
-| `con_id` lookup fails                      | Skip + log; re-resolve next tick.                                                                 |
-| Combo leg unavailable                      | Skip the combo entirely; do not synthesize.                                                       |
+| Failure                                    | Policy                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `IBClient` disconnected / Gateway down     | Skip the tick, log, retry next tick. ARMED rows with native brackets remain defended broker-side.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Quote stale (last_update > 60s during RTH) | Skip evaluation. **Distinguish two sub-cases via `IBClient.connected` flag:** (a) **stale + IB connected** → "silent market" (halt, illiquid name, low-volume window). Increment `state_data.consecutive_stale_ticks`; alert operator at 10 misses (5 min) with reason `silent_market_suspected`; do NOT escalate to FAILED — many illiquid options legitimately have multi-minute quote gaps. (b) **stale + IB disconnected** → connection failure. Same counter but alert at 3 misses (90s) with reason `ib_connection_stale`; this is more actionable. Counter resets on the first fresh quote. |
+| `con_id` lookup fails                      | Skip + log; re-resolve next tick.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Combo leg unavailable                      | Skip the combo entirely; do not synthesize.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 ### 10.2 Trigger-time (write fails)
 
@@ -727,15 +758,15 @@ The §5.6 close-claim protocol changes the failure model: every retry is keyed b
 
 ### 10.3 Position-state surprises
 
-| Surprise                                               | Policy                                                                                                                                                                                                                                                                                                                                                                                                      |
-| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| User manually cancels child STP/LMT in TWS             | Per-tick liveness check (§8) detects `Cancelled` from broker → state `CANCELED`. **Do not re-place.**                                                                                                                                                                                                                                                                                                       |
-| Position closed externally                             | Position not in IB `positions()` → `CANCELED`. Cancel orphaned native children.                                                                                                                                                                                                                                                                                                                             |
-| Position partially closed                              | v1: at trigger, the close-claim queries fresh `IBClient.positions()` and submits MKT for `min(protected_qty, current_broker_qty)`. If `current_broker_qty == 0` → claim `ABANDONED(reason="position_already_flat")`, row → `CANCELED`. If `0 < current_broker_qty < protected_qty` → close the remaining size, `state_data.partial_position_at_close=true` for operator review, row → `CLOSED`. (See §5.5.) |
-| Same position re-opened after close                    | New `position_protection` row inserted by post-fill hook. Old row's `CANCELED` remains as audit. Partial-unique constraint on `(scope, position_key, rule_kind)` over **non-terminal states only** (§17 R8) makes this work: terminal `CANCELED`/`CLOSED` rows don't block new inserts.                                                                                                                     |
-| Two rules trigger same tick                            | The §5.6 close-claim partial-unique constraint catches this at the position level: first rule's INSERT into `position_close_claims` succeeds; second rule's INSERT returns empty → second rule transitions to `SUPERSEDED` and reconciles to whatever terminal state the first rule's claim reaches. **No duplicate MKT submission possible.**                                                              |
-| Native bracket fires concurrent with synthetic trigger | Same close-claim partial-unique constraint catches this. The §8 native-liveness check inserts a `claim_kind='native_reconcile_close'` claim immediately upon observing `Filled`. If a synthetic close was racing, its INSERT fails ON CONFLICT → synthetic abandons. (Codex N-C1 fix.)                                                                                                                      |
-| Subprocess retry after broker accepted the order       | Before re-submission, rule queries IB by `orderRef = f"xenon-pr-{claim_id}"`. If the order is already on the broker, attach the existing `perm_id` to the claim and skip resubmission. (Codex N-C3 fix; see §5.6 step 3.)                                                                                                                                                                                   |
+| Surprise                                               | Policy                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| User manually cancels child STP/LMT in TWS             | Per-tick liveness check (§8) detects `Cancelled` from broker → state `CANCELED`. **Do not re-place.**                                                                                                                                                                                                                                                                                                                                                                    |
+| Position closed externally                             | Position not in IB `positions()` for **2 consecutive ticks** AND IB connected for both → `CANCELED`. Cancel orphaned native children. The 2-tick gate avoids false-positive cancellations from transient API blips (partial responses, market-data-farm flips, brief reconnects). The intermediate state is tracked in `state_data.position_missing_ticks` (resets to 0 on any tick that observes the position). Single-tick absence + IB-disconnected = skip per §10.1. |
+| Position partially closed                              | v1: at trigger, the close-claim queries fresh `IBClient.positions()` and submits MKT for `min(protected_qty, current_broker_qty)`. If `current_broker_qty == 0` → claim `ABANDONED(reason="position_already_flat")`, row → `CANCELED`. If `0 < current_broker_qty < protected_qty` → close the remaining size, `state_data.partial_position_at_close=true` for operator review, row → `CLOSED`. (See §5.5.)                                                              |
+| Same position re-opened after close                    | New `position_protection` row inserted by post-fill hook. Old row's `CANCELED` remains as audit. Partial-unique constraint on `(scope, position_key, rule_kind)` over **non-terminal states only** (§17 R8) makes this work: terminal `CANCELED`/`CLOSED` rows don't block new inserts.                                                                                                                                                                                  |
+| Two rules trigger same tick                            | The §5.6 close-claim partial-unique constraint catches this at the position level: first rule's INSERT into `position_close_claims` succeeds; second rule's INSERT returns empty → second rule transitions to `SUPERSEDED` and reconciles to whatever terminal state the first rule's claim reaches. **No duplicate MKT submission possible.**                                                                                                                           |
+| Native bracket fires concurrent with synthetic trigger | Same close-claim partial-unique constraint catches this. The §8 native-liveness check inserts a `claim_kind='native_reconcile_close'` claim immediately upon observing `Filled`. If a synthetic close was racing, its INSERT fails ON CONFLICT → synthetic abandons. (Codex N-C1 fix.)                                                                                                                                                                                   |
+| Subprocess retry after broker accepted the order       | Before re-submission, rule queries IB by `orderRef = f"xenon-pr-{claim_id}"`. If the order is already on the broker, attach the existing `perm_id` to the claim and skip resubmission. (Codex N-C3 fix; see §5.6 step 3.)                                                                                                                                                                                                                                                |
 
 ### 10.4 Concurrency / restart
 
@@ -804,6 +835,15 @@ xenon-position-rules sweep [--dry-run | --apply]
 - `--apply` required to insert; rows go in as `PENDING_ARM`.
 - `--interactive` prompts y/n per position.
 - `--rate-limit-per-min` defaults to 30. **Applies to native-arming attempts only** (the IB-side STP/LMT submissions), not the Postgres INSERTs. Inserting all rows in a 50-position sweep is fast and unbounded; the rate limit only governs the rate at which the handler then dequeues `PENDING_ARM` rows for native arming on subsequent ticks. Keeps IB API pacing under 50/sec even for large sweeps.
+
+**Re-arm semantics (B4) — explicit.** When the operator wants to re-arm a position whose protection was previously `CANCELED` (manual cancel via UI/CLI, or external-close detection that turned out to be a false positive):
+
+- The sweep CLI **always inserts a NEW row** with state `PENDING_ARM`. It never updates a terminal `CANCELED`/`CLOSED`/`FAILED`/`SUPERSEDED` row.
+- The partial-unique constraint over non-terminal states (R8) allows the new INSERT because the old row's terminal state is excluded from the unique index.
+- The old row is preserved verbatim as audit. The drawer UI shows both rows, with the older terminal row collapsed by default and a "history" expander.
+- If the operator runs sweep against a position that already has an `ARMED` row, the INSERT hits ON CONFLICT and is silently skipped (with the dry-run output noting "already armed").
+
+Operator-side rule: **never UPDATE a CANCELED row to PENDING_ARM** — always INSERT. This keeps the audit trail intact and avoids ambiguity about which threshold/anchor was active when. The CLI/UI exposes only INSERT-shaped operations; there is no "edit existing rule" surface in v1.
 
 The post-fill hook (§6) fires automatically for new fills; the sweep is the _only_ operator-initiated action that touches existing book.
 
@@ -937,7 +977,7 @@ Pure unit            — pytest, ~50 tests              (95% line coverage targe
 - `test_policies.py` — most-specific-wins resolution; explicit case for "account-specific override beats broker-wide override" (codex N-S1 regression test against the weighted-score ORDER BY)
 - `test_position_key.py` — deterministic, leg-order-invariant for combos
 - `test_state_machine.py` — every legal transition × every illegal one (CAS rejection); new transitions added by codex review: `ARMED → SUPERSEDED` via claim conflict; `TRIGGERED → CLOSED` after subprocess retry that found existing orderRef
-- `test_market_hours_dst.py` — **Phase 0 test** asserting `MonitorDaemon.is_market_hours()` is correct across the EST/EDT boundary (codex N-S5). At least four cases: 9:35 ET on a winter day (open), 9:35 ET on a summer day (open), 8:35 ET on a winter day (closed), 16:05 ET on a summer day (closed).
+- `test_market_hours_dst.py` — **Phase 0 test** asserting `MonitorDaemon.is_market_hours()` is correct across the EST/EDT boundary (codex N-S5). At least four cases: 9:35 ET on a winter day (open), 9:35 ET on a summer day (open), 8:35 ET on a winter day (closed), 16:05 ET on a summer day (closed). **T6 addition — also include an integration-level test** that constructs a `MonitorDaemon` instance with a fake clock pinned to a March 2026 EDT date (post-DST-start, pre-conversion in winter-locale developer machines) and verifies `run_once()` actually fires registered handlers' `is_due()` paths during EDT 9:30-16:00 ET. Pure unit-test of `is_market_hours()` is necessary but not sufficient — the integration version catches "we returned True from is_market_hours but the calling code converts the timestamp incorrectly" regressions.
 - `test_close_claim_logic.py` — pure-function tests for the §5.6 claim insert + orderRef derivation + retry-by-orderRef lookup logic (mocked broker calls).
 
 ### 13.3 Postgres integration (`scripts/tests/test_position_rules_db/`)
@@ -973,9 +1013,15 @@ Mandatory before live promotion (per memory `[paper-first for IB order bugs]`). 
 - **codex N-C2 scenario** — open a long option with both `stop_loss` and `trailing_tp` armed; force the price below SL while also above the TP activation (rare but constructable); confirm exactly one MKT close, one claim, one rule reaches `CLOSED`, the other reaches `SUPERSEDED`;
 - **codex N-C3 scenario** — paper IB Gateway: kill the gateway connection mid-MKT-submission (after broker accepted but before subprocess returned); restart; confirm the next handler tick finds the order via `orderRef` lookup and does NOT submit another MKT.
 
-### 13.8 New CI guard
+**Authority of paper smoke vs integration tests (T1/T2 caveat).** The N-C1 and N-C3 scenarios above require precise timing that paper-account testing cannot reliably reproduce — racing the native bracket fill against a synthetic-monitor tick window, or killing the subprocess at the exact moment broker accepts. **Integration tests (§13.3) are authoritative for these correctness guarantees.** Paper smoke is a _best-effort_ additional pass that confirms the integration-test result holds against real IB Gateway round-trips. If paper smoke can't construct a particular race (e.g., the native fill always happens cleanly before the synthetic tick), the operator marks the line "verified via integration test only" and moves on. Do not block live promotion on a paper-smoke scenario that cannot be deterministically reproduced.
 
-`scripts/checks/frozen_config_at_arm.py` — static check enforcing the frozen-config invariant. Implementation: AST-based scan of every file under `src/xenon/execution/brackets/rules/`. Fails the build if any module imports from `xenon.db.queries.bracket_policies` or contains string-literal references to the `bracket_policies` table. Rule modules must operate exclusively on the `config` dict passed in by the handler — which is sourced from `position_protection.config`, frozen at insert time. Prevents the class of bug where a `psql UPDATE bracket_policies` would silently change the threshold of an already-armed position mid-flight.
+### 13.8 New CI guards + audit scripts
+
+**`scripts/checks/frozen_config_at_arm.py`** — static check enforcing the frozen-config invariant. Implementation: AST-based scan of every file under `src/xenon/execution/brackets/rules/`. Fails the build if any module imports from `xenon.db.queries.bracket_policies` or contains string-literal references to the `bracket_policies` table. Rule modules must operate exclusively on the `config` dict passed in by the handler — which is sourced from `position_protection.config`, frozen at insert time. Prevents the class of bug where a `psql UPDATE bracket_policies` would silently change the threshold of an already-armed position mid-flight.
+
+**`scripts/checks/no_duplicate_close_audit.py`** (T4) — Phase 6/7 deliverable. Joins `position_close_claims` against IB Flex Query executions over a configurable date window. Asserts: every `position_protection` row that reached `CLOSED` has exactly one matching `position_close_claims` row with `status='FILLED'`; every claim with `status='FILLED'` has exactly one matching IB execution by `orderRef`; the count of distinct close orders for any (broker, account, position*key, day) is at most one. Outputs JSON-shaped violations for the operator review. Lands as part of Phase 7 (paper smoke) so the 14-day "zero duplicate MKT closes" acceptance criterion (§20) is \_verifiable*, not just declarative.
+
+**Daily ops review tooling (T3).** `xenon-position-rules events --since=24h [--rule_kind=...] [--state-transitions=...]` — JSON-out CLI that surfaces every `position_rule_transition` outbox event in a window, with operator-annotation slot stored in a sidecar `position_rules_review` Postgres table (rows: `protection_id`, `event_id`, `reviewed_by`, `reviewed_at`, `verdict ∈ {expected, unexpected, structural}`, `note`). Drives the §20 acceptance criterion "zero unexpected triggers": the reviewer marks each trigger expected/unexpected; the 14-day count is automatic. Without this tool, "zero unexpected triggers" is unscaled; with it, the burn-in gate becomes one daily 5-minute review.
 
 ## 14. Migration sequence
 
