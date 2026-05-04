@@ -7,6 +7,7 @@ type HarnessMode = "external" | "spawned" | "unavailable";
 type HealthPayload = {
   status?: string;
   test_mode?: boolean;
+  mode_verified?: boolean;
 };
 
 export type FastApiHarness = {
@@ -49,7 +50,11 @@ async function fetchHealth(baseUrl: string): Promise<HealthPayload | null> {
 
 async function isReusableTestServer(baseUrl: string): Promise<boolean> {
   const payload = await fetchHealth(baseUrl);
-  return payload?.status === "ok" && payload.test_mode === true;
+  return (
+    payload?.status === "ok" &&
+    payload.test_mode === true &&
+    payload.mode_verified === true
+  );
 }
 
 async function reservePort(): Promise<number> {
@@ -134,6 +139,12 @@ export async function ensureTestFastApi(): Promise<FastApiHarness> {
       env: {
         ...process.env,
         XENON_API_TEST_MODE: "1",
+        XENON_TRADING_MODE: "paper",
+        XENON_BROKER_ACCOUNT: "DU0000000",
+        DATABASE_URL:
+          "postgresql+psycopg://xenon_app:xenon_dev@localhost:5432/xenon_test",
+        XENON_QUOTE_TOKEN_SECRET:
+          "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         PYTHONUNBUFFERED: "1",
       },
       stdio: "pipe",

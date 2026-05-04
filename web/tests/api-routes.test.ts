@@ -21,6 +21,10 @@ vi.mock("@tools/runner", () => ({
   runScript: vi.fn().mockResolvedValue({ ok: false, stderr: "mocked" }),
   resolveProjectRoot: vi.fn().mockReturnValue("/mock/root"),
 }));
+vi.mock("@/lib/tools/runner", () => ({
+  runScript: vi.fn().mockResolvedValue({ ok: false, stderr: "mocked" }),
+  resolveProjectRoot: vi.fn().mockReturnValue("/mock/root"),
+}));
 
 // Mock @tools/wrappers/ib-orders for orders routes (legacy — no longer used by routes)
 const mockIbOrders = vi.fn().mockResolvedValue({ ok: false, stderr: "mocked" });

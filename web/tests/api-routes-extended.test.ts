@@ -40,6 +40,10 @@ vi.mock("@tools/runner", () => ({
   runScript: mockRunScript,
   resolveProjectRoot: vi.fn().mockReturnValue("/mock/root"),
 }));
+vi.mock("@/lib/tools/runner", () => ({
+  runScript: mockRunScript,
+  resolveProjectRoot: vi.fn().mockReturnValue("/mock/root"),
+}));
 
 // Mock @tools/wrappers/ib-order-manage for cancel + modify
 const mockIbCancelOrder = vi.fn();

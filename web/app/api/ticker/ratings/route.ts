@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { runScript } from "@tools/runner";
+import { runScript } from "@/lib/tools/runner";
 
 export const runtime = "nodejs";
 
