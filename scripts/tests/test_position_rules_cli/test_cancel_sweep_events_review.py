@@ -74,6 +74,50 @@ def test_sweep_dry_run_reports_unprotected_ib_position(monkeypatch, capsys):
     assert body["would_insert"][0]["symbol"] == "CLISWEEP"
 
 
+def test_positions_from_ib_connects_with_auto_client_id(monkeypatch):
+    import xenon.clients.ib_client as ib_client_mod
+
+    class Contract:
+        symbol = "CLIAUTO"
+        conId = 77
+
+    class Position:
+        contract = Contract()
+        position = 3
+
+    class FakeIBClient:
+        instance = None
+
+        def __init__(self):
+            self.connected = False
+            self.connect_kwargs = None
+            self.disconnected = False
+            FakeIBClient.instance = self
+
+        def is_connected(self):
+            return self.connected
+
+        def connect(self, **kwargs):
+            self.connected = True
+            self.connect_kwargs = kwargs
+
+        def get_positions(self):
+            assert self.connected
+            return [Position()]
+
+        def disconnect(self):
+            self.disconnected = True
+            self.connected = False
+
+    monkeypatch.setattr(ib_client_mod, "IBClient", FakeIBClient)
+
+    rows = cli._positions_from_ib()
+
+    assert rows == [{"symbol": "CLIAUTO", "qty": 3, "con_id": 77}]
+    assert FakeIBClient.instance.connect_kwargs["client_id"] == "auto"
+    assert FakeIBClient.instance.disconnected is True
+
+
 def test_sweep_apply_live_requires_operator_user(monkeypatch, capsys):
     import xenon.api.trading_mode as trading_mode
 

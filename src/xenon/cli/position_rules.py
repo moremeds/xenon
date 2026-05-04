@@ -93,21 +93,29 @@ def _positions_from_ib() -> list[dict[str, Any]]:
 
     singleton = getattr(IBClient, "singleton", None)
     client = singleton() if callable(singleton) else IBClient()
-    if hasattr(client, "positions"):
-        return list(client.positions() or [])
-    if hasattr(client, "get_positions"):
-        out: list[dict[str, Any]] = []
-        for pos in client.get_positions() or []:
-            contract = getattr(pos, "contract", None)
-            out.append(
-                {
-                    "symbol": getattr(contract, "symbol", None),
-                    "qty": getattr(pos, "position", 0),
-                    "con_id": getattr(contract, "conId", None),
-                }
-            )
-        return out
-    return []
+    opened_connection = False
+    try:
+        if hasattr(client, "is_connected") and not client.is_connected() and hasattr(client, "connect"):
+            client.connect(client_id="auto")
+            opened_connection = True
+        if hasattr(client, "positions"):
+            return list(client.positions() or [])
+        if hasattr(client, "get_positions"):
+            out: list[dict[str, Any]] = []
+            for pos in client.get_positions() or []:
+                contract = getattr(pos, "contract", None)
+                out.append(
+                    {
+                        "symbol": getattr(contract, "symbol", None),
+                        "qty": getattr(pos, "position", 0),
+                        "con_id": getattr(contract, "conId", None),
+                    }
+                )
+            return out
+        return []
+    finally:
+        if opened_connection and hasattr(client, "disconnect"):
+            client.disconnect()
 
 
 def _cmd_sweep(args: argparse.Namespace) -> int:
