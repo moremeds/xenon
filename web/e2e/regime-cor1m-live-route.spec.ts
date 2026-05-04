@@ -39,7 +39,7 @@ async function readCriCandidate(filePath: string): Promise<CriCacheCandidate | n
   }
 }
 
-async function readLatestCri(): Promise<Record<string, unknown>> {
+async function readLatestCri(): Promise<Record<string, unknown> | null> {
   let scheduled: CriCacheCandidate | null = null;
   try {
     const files = await readdir(SCHEDULED_DIR);
@@ -53,8 +53,7 @@ async function readLatestCri(): Promise<Record<string, unknown>> {
   }
 
   const selected = selectPreferredCriCandidate(scheduled, await readCriCandidate(CACHE_PATH));
-  if (!selected) throw new Error("No readable CRI cache candidate found.");
-  return selected.data as Record<string, unknown>;
+  return selected ? selected.data as Record<string, unknown> : null;
 }
 
 async function setupNonRegimeMocks(page: import("@playwright/test").Page) {
@@ -101,7 +100,8 @@ async function setupNonRegimeMocks(page: import("@playwright/test").Page) {
 test.describe("/regime page — live route COR1M cache", () => {
   test("renders the same COR1M value as the latest CRI cache file", async ({ page }) => {
     const cri = await readLatestCri();
-    const cor1m = typeof cri.cor1m === "number" ? cri.cor1m : null;
+    test.skip(!cri, "No readable CRI cache candidate found.");
+    const cor1m = typeof cri?.cor1m === "number" ? cri.cor1m : null;
 
     test.skip(cor1m == null, "Latest CRI cache does not contain a numeric COR1M value.");
 

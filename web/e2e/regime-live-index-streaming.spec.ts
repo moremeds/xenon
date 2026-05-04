@@ -128,8 +128,13 @@ async function setupMocks(page: import("@playwright/test").Page) {
 
   await page.addInitScript((livePrices) => {
     class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+
       public url: string;
-      public readyState = 0;
+      public readyState = MockWebSocket.CONNECTING;
       public onopen: ((event: Event) => void) | null = null;
       public onmessage: ((event: MessageEvent<string>) => void) | null = null;
       public onclose: ((event: Event) => void) | null = null;
@@ -138,7 +143,7 @@ async function setupMocks(page: import("@playwright/test").Page) {
       constructor(url: string) {
         this.url = url;
         window.setTimeout(() => {
-          this.readyState = 1;
+          this.readyState = MockWebSocket.OPEN;
           this.onopen?.(new Event("open"));
         }, 0);
       }
@@ -176,9 +181,18 @@ async function setupMocks(page: import("@playwright/test").Page) {
       }
 
       close() {
-        this.readyState = 3;
+        this.readyState = MockWebSocket.CLOSED;
         this.onclose?.(new Event("close"));
       }
+
+      addEventListener(type: string, listener: EventListener) {
+        if (type === "open") this.onopen = listener as (event: Event) => void;
+        if (type === "message") this.onmessage = listener as (event: MessageEvent<string>) => void;
+        if (type === "close") this.onclose = listener as (event: Event) => void;
+        if (type === "error") this.onerror = listener as (event: Event) => void;
+      }
+
+      removeEventListener() {}
     }
 
     Object.defineProperty(window, "WebSocket", {
