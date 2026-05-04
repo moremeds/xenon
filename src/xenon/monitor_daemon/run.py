@@ -82,14 +82,20 @@ def create_daemon() -> MonitorDaemon:
     daemon.register(FlexTokenCheck())
 
     if os.environ.get("XENON_POSITION_RULES_ENABLED", "0") == "1":
+        engine = get_sync_engine()
+        scope = resolve_from_env()
+        ib_client = IBClient()
         daemon.register(
             PositionRulesHandler(
-                engine=get_sync_engine(),
+                engine=engine,
                 executor=IBExecutor(),
-                ib_client=IBClient(),
-                scope=resolve_from_env(),
+                ib_client=ib_client,
+                scope=scope,
             )
         )
+        from xenon.monitor_daemon.handlers.out_of_band_sweep import OutOfBandSweepHandler
+
+        daemon.register(OutOfBandSweepHandler(engine=engine, ib_client=ib_client, scope=scope))
 
         from xenon.monitor_daemon.handlers.arm_consumer import start_listen_loop
 
