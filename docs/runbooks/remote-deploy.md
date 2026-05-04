@@ -224,6 +224,18 @@ These tripped us during v0.0.3 and need real fixes before v0.0.4:
    installed. Either install `docker-compose-plugin` for the mini's docker,
    or accept hyphenated as the prod surface.
 
+9. **Clerk dev origin only allows `localhost:3000`.** The `pk_test_*` key
+   in `web/.env` is bound to a Clerk dev instance whose configured
+   frontend host is `localhost:3000`. Visiting the web app at
+   `http://192.168.50.47:3000` triggers Clerk's dev-browser handshake to
+   redirect to `localhost:3000`, breaking sign-in from the LAN. Quick
+   workaround on the mini: append `XENON_DISABLE_AUTH=1` to
+   `/opt/xenon/web.env` and `docker-compose up -d --force-recreate web` —
+   bypasses Clerk middleware entirely. Proper fix: add the mini's LAN host
+   (`192.168.50.47:3000` and/or `moremeds-mac-mini.local:3000`) to the
+   Clerk dashboard under "Domains / Frontend hosts → Add development
+   host", then remove the bypass.
+
 ## Reference: `/opt/xenon/compose.yml` template
 
 ```yaml
