@@ -139,7 +139,6 @@ The closed-market gate lives inside `UwAnalyzeCache.get_or_run()` and also cover
 - [ ] `psql -h localhost -U xenon_app xenon_db -c "SELECT 1"` — verify Postgres accessible
 - [ ] `curl http://localhost:8321/health` — verify `ib_gateway.port_listening: true`
 - [ ] Reconciliation auto-runs → `data/reconciliation.json`
-- [ ] Exit order service auto-runs (PENDING_MANUAL)
 - [ ] Consolidated VCG/CRI scan loop running (30-min intervals; advisory-lock singleton, opt-out via `XENON_VCG_CRI_LOOP=0`). Emits `regime_transition` rows to `events.outbox` on (vcg_tier, cri_tier) change.
 - [ ] X scan if >12h stale
 - [ ] Check market hours
