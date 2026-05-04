@@ -47,11 +47,11 @@ MODE="$(echo "$MODE" | tr '[:upper:]' '[:lower:]' | xargs)"
 # to dial the remote live gateway and fail.
 case "$MODE" in
   paper)
-    PORT=4002
+    IB_PORT=4002
     IB_HOST="127.0.0.1"
     ;;
   live)
-    PORT=4001
+    IB_PORT=4001
     # Use .env's IB_GATEWAY_HOST (typically a remote server). Default to
     # 127.0.0.1 if unset.
     IB_HOST="$(grep -E '^IB_GATEWAY_HOST=' "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs || true)"
@@ -63,17 +63,44 @@ case "$MODE" in
     ;;
 esac
 
-log_info "Trading mode: $MODE  →  IB Gateway $IB_HOST:$PORT"
+log_info "Trading mode: $MODE  →  IB Gateway $IB_HOST:$IB_PORT"
+
+# Next.js dev port. 3000 (Next default) often collides with Docker Desktop on
+# this Mac, so paper mode binds 3001 instead. Live runs on shared infra where
+# 3000 is free, so the default is preserved. Honored by `next dev` via PORT.
+# Internal IB Gateway port lives in IB_PORT — `PORT` is reserved for Next.js.
+if [[ "$MODE" == "paper" ]]; then
+  export PORT=3001
+  log_info "Next.js dev port: $PORT (paper override; 3000 collides with Docker locally)"
+fi
 
 # 2. Apply pending Postgres migrations. Postgres is the primary persistence
 # layer — running new code against a stale schema causes obscure runtime
 # errors. `alembic upgrade head` is a no-op when the DB is already at head.
+#
+# Mode also dictates which Postgres to talk to. Live trades against the LAN
+# `core_dev` (DATABASE_URL); paper prefers DATABASE_URL_PAPER so off-LAN dev
+# doesn't hang trying to reach the remote box. Mirrors the IB host override
+# above — both sides of the broker/storage pair stay local in paper mode.
 if [[ -f "$ENV_FILE" ]]; then
   set -a
   # shellcheck disable=SC1090
-  source <(grep -E '^(DATABASE_URL|DATABASE_URL_TEST)=' "$ENV_FILE")
+  source <(grep -E '^(DATABASE_URL|DATABASE_URL_TEST|DATABASE_URL_PAPER|DATABASE_URL_TEST_PAPER)=' "$ENV_FILE")
   set +a
 fi
+if [[ "$MODE" == "paper" ]]; then
+  if [[ -n "${DATABASE_URL_PAPER:-}" ]]; then
+    DATABASE_URL="$DATABASE_URL_PAPER"
+    log_info "Using DATABASE_URL_PAPER (local) for paper mode."
+  else
+    log_warn "DATABASE_URL_PAPER not set — paper mode will use DATABASE_URL ($DATABASE_URL)."
+    log_warn "Off-LAN dev: add DATABASE_URL_PAPER=postgresql+asyncpg://xenon_app:xenon_dev@127.0.0.1:5432/core_dev to .env"
+  fi
+  if [[ -n "${DATABASE_URL_TEST_PAPER:-}" ]]; then
+    DATABASE_URL_TEST="$DATABASE_URL_TEST_PAPER"
+  fi
+fi
+export DATABASE_URL DATABASE_URL_TEST
 if [[ -n "${DATABASE_URL:-}" ]]; then
   log_info "Applying alembic migrations…"
   (cd "$REPO_ROOT" && uv run alembic upgrade head)
@@ -83,12 +110,15 @@ fi
 
 # 3. Probe the Gateway port. Warn if it's not up, but don't block — the user
 # may want to start the dev stack for frontend work without IB Gateway running.
-if (exec 3<>/dev/tcp/"$IB_HOST"/"$PORT") 2>/dev/null; then
-  exec 3<&- 2>/dev/null || true
-  exec 3>&- 2>/dev/null || true
-  log_info "IB Gateway port $PORT is listening at $IB_HOST."
+# FD 3 is opened only inside the subshell, so it's already closed in the
+# parent when the subshell exits. Don't `exec 3<&-` here — `exec` without a
+# command applies its redirections (including the trailing `2>/dev/null`) to
+# the *parent shell, permanently*, silently routing all subsequent stderr to
+# /dev/null and hiding errors from the broker-account guard below.
+if (exec 3<>/dev/tcp/"$IB_HOST"/"$IB_PORT") 2>/dev/null; then
+  log_info "IB Gateway port $IB_PORT is listening at $IB_HOST."
 else
-  log_warn "IB Gateway is NOT listening on $IB_HOST:$PORT."
+  log_warn "IB Gateway is NOT listening on $IB_HOST:$IB_PORT."
   log_warn "Continuing anyway — start IB Gateway in '$MODE' mode when you need broker calls."
 fi
 
@@ -98,7 +128,14 @@ fi
 # exports take precedence over the .env-loaded defaults inside Python.
 export XENON_TRADING_MODE="$MODE"
 export IB_GATEWAY_HOST="$IB_HOST"
-export IB_GATEWAY_PORT="$PORT"
+export IB_GATEWAY_PORT="$IB_PORT"
+
+# Pin Next.js → FastAPI proxy target to IPv4. xenonApi.ts defaults to
+# `http://localhost:8321`, but Node ≥18's fetch (undici) resolves `localhost`
+# to IPv6 `::1` on macOS while uvicorn binds only `127.0.0.1`. The dual-stack
+# mismatch causes intermittent 502s after the 5s connect timeout. Forcing the
+# IPv4 literal sidesteps the whole DNS-order issue.
+export XENON_API_URL="${XENON_API_URL:-http://127.0.0.1:8321}"
 
 # Per-mode broker account placeholder. AccountScope.resolve_from_env() raises
 # if XENON_BROKER_ACCOUNT is unset, and many sync subprocesses (ib_sync,
