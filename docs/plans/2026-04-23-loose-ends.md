@@ -40,7 +40,7 @@ triage. Archive lives in `docs/{plans,superpowers/{plans,specs}}/archive/`.
    already touches `naked_short_audit.py`.
 
 2. **Memory-report cache caps (one-pick).**
-   `docs/plans/2026-04-22-memory-usage-performance-report.md` flagged
+   `docs/plans/archive/2026-04-22-memory-usage-performance-report.md` flagged
    unbounded caches and report-path materialization. `uw_analyze_cache`
    already has entry caps, so no incident. Pick the next-biggest offender
    and cap it; skip the rest until RSS pressure returns.
@@ -70,5 +70,5 @@ triage. Archive lives in `docs/{plans,superpowers/{plans,specs}}/archive/`.
   Watch for defects in the first wizard PR that would have been caught
   by a clean burn-in window.
 - Active plans remaining: `docs/superpowers/specs/2026-04-20-leg-wizard-design.md`
-  (awaiting W1 plan), `docs/plans/2026-04-22-memory-usage-performance-report.md`
+  (awaiting W1 plan), `docs/plans/archive/2026-04-22-memory-usage-performance-report.md`
   (report, no owner).
