@@ -76,16 +76,11 @@ class MonitorDaemon:
         return open_mins <= current_mins < close_mins
     
     def is_market_hours(self) -> bool:
-        """Check if current time is within US market hours."""
-        # Get current time in ET (approximate - doesn't handle DST perfectly)
-        from datetime import timezone, timedelta
-        
-        # EST is UTC-5, EDT is UTC-4
-        # For simplicity, assume EST (UTC-5)
-        utc_now = datetime.now(timezone.utc)
-        et_offset = timedelta(hours=-5)  # EST
-        et_now = utc_now + et_offset
-        
+        """Check if current time is within US market hours (DST-correct)."""
+        from zoneinfo import ZoneInfo
+
+        et_now = datetime.now(ZoneInfo("America/New_York"))
+
         return self._is_market_hours_time(
             et_now.hour,
             et_now.minute,

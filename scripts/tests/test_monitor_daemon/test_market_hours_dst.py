@@ -18,6 +18,19 @@ def _at_utc(year, month, day, hour, minute):
     return datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
 
 
+def _patch_now_to(utc_dt):
+    def _now(tz=None):
+        return utc_dt.astimezone(tz) if tz else utc_dt.replace(tzinfo=None)
+
+    return patch(
+        "xenon.monitor_daemon.daemon.datetime",
+        **{
+            "now.side_effect": _now,
+            "side_effect": lambda *a, **kw: datetime(*a, **kw),
+        },
+    )
+
+
 @pytest.fixture
 def daemon():
     return MonitorDaemon(state_file=None, respect_market_hours=True)
@@ -57,9 +70,7 @@ def daemon():
     ],
 )
 def test_is_market_hours_dst_correctness(daemon, utc_dt, expected, description):
-    with patch("xenon.monitor_daemon.daemon.datetime") as mock_dt:
-        mock_dt.now.return_value = utc_dt
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+    with _patch_now_to(utc_dt):
         assert daemon.is_market_hours() is expected, description
 
 
@@ -73,12 +84,8 @@ def test_is_market_hours_uses_new_york_timezone(daemon):
     winter_morning = _at_utc(2026, 1, 12, 13, 35)
     summer_morning = _at_utc(2026, 7, 13, 13, 35)
 
-    with patch("xenon.monitor_daemon.daemon.datetime") as mock_dt:
-        mock_dt.now.return_value = winter_morning
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+    with _patch_now_to(winter_morning):
         assert daemon.is_market_hours() is False
 
-    with patch("xenon.monitor_daemon.daemon.datetime") as mock_dt:
-        mock_dt.now.return_value = summer_morning
-        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+    with _patch_now_to(summer_morning):
         assert daemon.is_market_hours() is True
