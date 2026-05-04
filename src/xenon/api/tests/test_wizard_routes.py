@@ -30,7 +30,7 @@ def _truncate(engine):
     with engine.begin() as conn:
         conn.execute(text("TRUNCATE xenon.order_events CASCADE"))
         conn.execute(text("TRUNCATE xenon.order_submissions CASCADE"))
-        conn.execute(text("TRUNCATE xenon.wizard_protection CASCADE"))
+        conn.execute(text("TRUNCATE xenon.position_protection CASCADE"))
         conn.execute(text("TRUNCATE xenon.wizard_events CASCADE"))
         conn.execute(text("TRUNCATE xenon.wizard_combo_attempts CASCADE"))
         conn.execute(text("TRUNCATE xenon.wizard_sessions CASCADE"))

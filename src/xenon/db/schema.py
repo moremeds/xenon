@@ -384,29 +384,6 @@ wizard_combo_attempts = Table(
     Index("ix_wizard_attempts_session_updated", "session_id", "updated_at"),
 )
 
-wizard_protection = Table(
-    "wizard_protection",
-    xenon_metadata,
-    Column("protection_id", BigInteger, primary_key=True, autoincrement=True),
-    Column(
-        "session_id",
-        Text,
-        ForeignKey(f"{XENON_SCHEMA}.wizard_sessions.session_id"),
-        nullable=False,
-    ),
-    Column(
-        "attempt_id",
-        Text,
-        ForeignKey(f"{XENON_SCHEMA}.wizard_combo_attempts.attempt_id"),
-    ),
-    Column("protection_type", Text, nullable=False),
-    Column("config", JSONB, nullable=False),
-    Column("state", Text, nullable=False, server_default=text("'active'")),
-    Column("triggered_at", TIMESTAMP(timezone=True)),
-    Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
-    UniqueConstraint("session_id", name="uq_wizard_protection_session"),
-)
-
 position_protection = Table(
     "position_protection",
     xenon_metadata,

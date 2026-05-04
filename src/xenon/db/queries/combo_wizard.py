@@ -1,5 +1,4 @@
-"""Sync query functions for combo wizard tables (wizard_sessions,
-wizard_combo_attempts, wizard_session_events, wizard_protection).
+"""Sync query functions for combo wizard tables.
 
 All functions take a sync sqlalchemy.Connection, not AsyncConnection.
 """
@@ -8,14 +7,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from typing import Any
+
 from sqlalchemy import Connection, insert, select, text, update
 
 from xenon.db.schema import (
+    position_protection,
     wizard_combo_attempts,
     wizard_events,
-    wizard_protection,
     wizard_sessions,
 )
+from xenon.execution.brackets.position_key import compute_position_key
 
 
 def create_session(
@@ -178,28 +180,123 @@ def record_event(conn: Connection, *, session_id: str, kind: str, detail: dict |
     )
 
 
-# ── wizard_protection ──
+# ── position_protection-backed combo TP alert ──
+
+
+_ACTIVE_PROTECTION_STATES = ("PENDING_ARM", "ARMED", "TRIGGERED")
+
+
+def _normalize_combo_legs(ticker: str, legs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for leg in legs:
+        out = dict(leg)
+        out["symbol"] = str(out.get("symbol") or out.get("localSymbol") or ticker)
+        out["sec_type"] = str(out.get("sec_type") or out.get("secType") or "OPT")
+        if "ratio" not in out:
+            out["ratio"] = 1
+        normalized.append(out)
+    return normalized
+
+
+def _combo_protection_context(conn: Connection, session_id: str) -> dict[str, Any]:
+    session = get_session(conn, session_id)
+    if session is None:
+        raise ValueError(f"Unknown wizard session {session_id}")
+
+    attempt = get_latest_attempt(conn, session_id)
+    legs = list((attempt or {}).get("legs") or (session.get("payload") or {}).get("legs") or [])
+    if not legs:
+        raise ValueError(f"Wizard session {session_id} has no combo legs for protection")
+
+    ticker = str((attempt or {}).get("ticker") or session["ticker"])
+    descriptor = {
+        "wizard_session_id": session_id,
+        "wizard_attempt_id": (attempt or {}).get("attempt_id"),
+        "ticker": ticker,
+        "structure_name": (attempt or {}).get("structure_name") or session.get("structure_name"),
+        "legs": _normalize_combo_legs(ticker, legs),
+    }
+    return {
+        "session": session,
+        "attempt": attempt,
+        "descriptor": descriptor,
+        "position_key": compute_position_key("debit_combo", descriptor),
+    }
 
 
 def upsert_protection(conn: Connection, session_id: str, **fields) -> None:
-    existing = conn.execute(
-        select(wizard_protection.c.protection_id).where(wizard_protection.c.session_id == session_id)
-    ).first()
+    ctx = _combo_protection_context(conn, session_id)
+    session = ctx["session"]
+    descriptor = ctx["descriptor"]
+    position_key = ctx["position_key"]
+    config = dict(fields.get("config") or {})
+    config["auto_place"] = False
     now = datetime.now(timezone.utc)
-    if existing is None:
-        conn.execute(
-            insert(wizard_protection).values(
-                session_id=session_id,
-                protection_type=fields.get("protection_type", "combo_tp_alert"),
-                config=fields.get("config", {}),
-                state=fields.get("state", "active"),
-                created_at=now,
-                **{k: v for k, v in fields.items() if k not in ("protection_type", "config", "state", "created_at")},
-            )
+
+    existing = conn.execute(
+        select(position_protection)
+        .where(
+            position_protection.c.broker == session["broker"],
+            position_protection.c.account_env == session["account_env"],
+            position_protection.c.broker_account == session["broker_account"],
+            position_protection.c.position_key == position_key,
+            position_protection.c.rule_kind == "combo_tp_alert",
+            position_protection.c.state.in_(_ACTIVE_PROTECTION_STATES),
         )
-    else:
-        fields.pop("created_at", None)
-        conn.execute(update(wizard_protection).where(wizard_protection.c.session_id == session_id).values(**fields))
+        .order_by(position_protection.c.protection_id.desc())
+        .limit(1)
+    ).first()
+
+    if existing is not None and dict(existing._mapping)["config"] == config:
+        return
+
+    if existing is not None:
+        conn.execute(
+            update(position_protection)
+            .where(position_protection.c.protection_id == existing.protection_id)
+            .values(state="SUPERSEDED", closed_at=now, updated_at=now)
+        )
+
+    state = fields.get("state", "PENDING_ARM")
+    if str(state).lower() == "active":
+        state = "PENDING_ARM"
+
+    conn.execute(
+        insert(position_protection).values(
+            broker=session["broker"],
+            account_env=session["account_env"],
+            broker_account=session["broker_account"],
+            position_key=position_key,
+            position_descriptor=descriptor,
+            asset_class="debit_combo",
+            rule_kind="combo_tp_alert",
+            state=state,
+            config=config,
+            state_data={},
+            triggered_at=fields.get("triggered_at"),
+            created_at=fields.get("created_at", now),
+            updated_at=now,
+        )
+    )
+
+
+def get_protection(conn: Connection, session_id: str) -> dict | None:
+    ctx = _combo_protection_context(conn, session_id)
+    session = ctx["session"]
+    row = conn.execute(
+        select(position_protection)
+        .where(
+            position_protection.c.broker == session["broker"],
+            position_protection.c.account_env == session["account_env"],
+            position_protection.c.broker_account == session["broker_account"],
+            position_protection.c.position_key == ctx["position_key"],
+            position_protection.c.rule_kind == "combo_tp_alert",
+            position_protection.c.state.in_(_ACTIVE_PROTECTION_STATES),
+        )
+        .order_by(position_protection.c.protection_id.desc())
+        .limit(1)
+    ).first()
+    return dict(row._mapping) if row else None
 
 
 def list_protected_sessions(
@@ -209,13 +306,15 @@ def list_protected_sessions(
     account_env: str | None = None,
     broker_account: str | None = None,
 ) -> list[dict]:
-    """Join wizard_sessions + wizard_protection for PROTECTED state with alert enabled."""
+    """Join wizard_sessions + position_protection for active combo TP alerts."""
     base_sql = """
         SELECT s.session_id, s.ticker, s.payload, p.config, p.state as protection_state
         FROM xenon.wizard_sessions s
-        JOIN xenon.wizard_protection p ON p.session_id = s.session_id
+        JOIN xenon.position_protection p
+          ON p.position_descriptor->>'wizard_session_id' = s.session_id
         WHERE UPPER(s.state) = 'PROTECTED'
-          AND p.state = 'active'
+          AND p.rule_kind = 'combo_tp_alert'
+          AND p.state IN ('PENDING_ARM','ARMED','TRIGGERED')
     """
     params: dict = {}
     if broker is not None:
