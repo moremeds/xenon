@@ -160,6 +160,14 @@ when scoping starts.
   `src/xenon/api/services/uw_analyze_cache.py`, `src/xenon/api/routes/uw_analyze.py`.
   Watch the daily UW budget while debugging — a misfiring polling loop could
   blow through the 20k/day cap in a few hours.
+  **Status (2026-05-04):** Still open. PR #84 (`209ff6cc`, "PG migration clean
+  cutoff: drop data/\*.json runtime reads + UW cache hardening") is **orthogonal**
+  — it migrated the cache from `data/uw_analyze_cache.json` to
+  `xenon.uw_analyze_snapshots` (Postgres) but did not touch the periodic-refresh
+  path. Confirmed: `web/lib/hooks/useUwAnalyze.ts` has zero matches for
+  `setInterval`, `setTimeout`, `EventSource`, or `stream` — there is no client
+  refresh loop wired up at all. So hypothesis (a) "SSE channel isn't wired to a
+  recurring tick, only a one-shot load" looks like the live theory. Start there.
 
 - 2026-04-27 — **🔴 TOP PRIORITY — Bug: single-leg orders rejected with "quote expired"** —
   placing a single-leg option order raises a "quote expired" alert and the
@@ -426,6 +434,12 @@ for ${sym}"`) survives, but the wrapping prefix is gone.
   `generate_cta_share.py:689`, `generate_vcg_share.py:604`,
   `generate_regime_share.py:701`), and `ShareReportModal.tsx:82` consumes
   it directly via `data?.preview_path`. No fix in flight.
+  **Status (2026-05-04):** Still unfixed. Note for the future
+  fix: the share generators are now also the **last residual `data/vcg.json`
+  reader** in `src/xenon/` after the PR #84 PG cutoff (see
+  `generate_vcg_share.py` module docstring) — fixing the absolute-path bug
+  is a natural moment to also move the share generator off the JSON file
+  and onto the `xenon.vcg_series` Postgres source the API already uses.
 
 - 2026-05-01 — **Regime-gate Phase 3 follow-ups (post-Codex deep review)** —
   Four panic-tier hotfixes shipped (PR #79 + #80) closing C-1 combo SELL
@@ -472,3 +486,18 @@ for ${sym}"`) survives, but the wrapping prefix is gone.
   **Suspected file site:** `src/xenon/api/services/ib_activity_mirror.py`.
   Tracked here to surface in a future planning session — the activity poller
   has been stable since #71.
+
+- 2026-05-04 — **Stage C: tag-to-mini auto-deploy** — Stages A and B of the
+  remote-deploy initiative shipped (PR #85 containerize Xenon for Mac mini
+  Docker stack; PR #89 GHCR push + Postgres-in-CI; PR #90 default-private
+  routes; PR #92 runbook docs). Stage C — automatic deploy to the Mac mini
+  on tag push — is designed but not built. Plan lives in
+  `docs/handovers/2026-05-04-stage-c-auto-deploy.md`.
+  **Notes:** v0.0.4 (`6c8e4e3c`, 2026-05-04) is the first release that
+  could exercise an auto-deploy. Until Stage C lands, releases require a
+  manual pull on the Mac mini per `docs/runbooks/remote-deploy.md`. Sister
+  runbooks: `docs/runbooks/mac-mini.md`, the Clerk LAN-host workaround note
+  (`9af51064`), and the Colima auto-start caveat (`7d796767`). Touches
+  `.github/workflows/release.yml` and the Mac mini's launchd / Colima
+  setup; cross-references the Tailscale connectivity used today by
+  `scripts/cloud.sh`. No order-path or trading-loop coupling — pure infra.
