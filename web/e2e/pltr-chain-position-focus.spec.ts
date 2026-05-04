@@ -338,7 +338,7 @@ test.describe("PLTR chain position focus", () => {
     await installMockWebSocket(page);
     stubApis(page);
 
-    await page.goto("/PLTR?posId=16&tab=chain");
+    await page.goto("/PLTR?tab=chain&posId=16");
 
     const detail = page.locator(".ticker-detail-page").last();
     await detail.locator(".chain-grid").waitFor();
