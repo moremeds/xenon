@@ -224,27 +224,27 @@ function installMockWebSocket(page: import("@playwright/test").Page) {
   }, PRICE_FIXTURES);
 }
 
-function stubApis(page: import("@playwright/test").Page) {
-  page.route("**/api/portfolio", (route) =>
+async function stubApis(page: import("@playwright/test").Page) {
+  await page.route("**/api/portfolio", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(PORTFOLIO_WITH_CRM_SPREAD) }),
   );
-  page.route("**/api/orders", (route) =>
+  await page.route("**/api/orders", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(ORDERS) }),
   );
-  page.route("**/api/regime", (route) =>
+  await page.route("**/api/regime", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ score: 15, cri: { score: 15 } }) }),
   );
-  page.route("**/api/ib-status", (route) =>
+  await page.route("**/api/ib-status", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ connected: true }) }),
   );
-  page.route("**/api/blotter", (route) =>
+  await page.route("**/api/blotter", (route) =>
     route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({ as_of: new Date().toISOString(), summary: { realized_pnl: 0 }, closed_trades: [], open_trades: [] }),
     }),
   );
-  page.route("**/api/ticker/**", (route) =>
+  await page.route("**/api/ticker/**", (route) =>
     route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -256,10 +256,10 @@ function stubApis(page: import("@playwright/test").Page) {
       }),
     }),
   );
-  page.route("**/api/options/expirations*", (route) =>
+  await page.route("**/api/options/expirations*", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(EXPIRATIONS) }),
   );
-  page.route("**/api/options/chain*", (route) =>
+  await page.route("**/api/options/chain*", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(CHAIN_STRIKES) }),
   );
 }
@@ -268,9 +268,9 @@ test.describe("Chain held-leg pricing", () => {
   test("shows bid/mid/ask for held option legs when expiries arrive dashed from the API", async ({ page }) => {
     await page.unrouteAll({ behavior: "ignoreErrors" });
     await installMockWebSocket(page);
-    stubApis(page);
+    await stubApis(page);
 
-    await page.goto("http://127.0.0.1:3000/CRM?tab=chain");
+    await page.goto("/CRM?tab=chain");
 
     const detail = page.locator(".ticker-detail-page");
     await detail.waitFor({ timeout: 5_000 });

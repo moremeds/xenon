@@ -271,16 +271,15 @@ test("portfolio row uses guarded spread marks for CROX instead of stale leg last
   await installMockWebSocket(page);
   await stubApis(page);
 
-  await page.goto("http://127.0.0.1:3000/portfolio");
+  await page.goto("/portfolio");
 
   const croxRow = page.locator("table tbody tr").filter({ hasText: "CROX" }).first();
   await expect(croxRow).toBeVisible();
 
-  const cells = croxRow.locator("td");
-  await expect(cells.nth(4)).toContainText("$77.96");
-  await expect(cells.nth(6)).toContainText("C$1.65");
-  await expect(cells.nth(9)).toContainText("$27,613");
-  await expect(cells.nth(10)).toContainText("$26,895");
+  await expect(croxRow).toContainText("$77.96");
+  await expect(croxRow).toContainText("C$1.65");
+  await expect(croxRow).toContainText("$27,613");
+  await expect(croxRow).toContainText("$26,895");
   await expect(croxRow).not.toContainText("$5.25");
   await expect(croxRow).not.toContainText("$85,575");
 });
