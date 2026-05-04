@@ -162,7 +162,7 @@ test.describe("Orders open-order combo rendering", () => {
 
     const modal = page.locator(".modify-dialog");
     await expect(modal).toBeVisible();
-    await expect(modal).toContainText("Combo Legs");
+    await expect(modal).toContainText("Edit Legs");
     await expect(modal.locator("#modify-quantity-input")).toHaveValue("10");
     await expect(modal.locator("#modify-leg-0-strike")).toHaveValue("150");
     await expect(modal.locator("#modify-leg-1-strike")).toHaveValue("165");

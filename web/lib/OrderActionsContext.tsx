@@ -221,7 +221,7 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
           const reasonCode = readReasonCode(json);
           const message = reasonCode
             ? getReasonToast(reasonCode).copy
-            : json?.error || "Cancel failed";
+            : json?.error || json?.detail || "Cancel failed";
           pushNotification({ type: "error", message });
           return { ok: false, status: res.status, reasonCode, message };
         }

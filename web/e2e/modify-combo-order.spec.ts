@@ -138,7 +138,7 @@ test.describe("Combo order modify flow", () => {
 
     const modal = page.locator(".modify-dialog");
     await expect(modal).toBeVisible();
-    await expect(modal.getByText("Combo Legs")).toBeVisible();
+    await expect(modal.getByText("Edit Legs")).toBeVisible();
 
     const modalContent = page.locator(".modal-content");
     const box = await modalContent.boundingBox();
