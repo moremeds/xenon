@@ -1,5 +1,12 @@
 # Mac Mini Production Runbook
 
+> **⚠️ Superseded by [`docs/runbooks/remote-deploy.md`](remote-deploy.md)** as
+> of v0.0.3 (2026-05-04). The Mac mini deploy is now Docker / Colima-based;
+> the launchd path documented below is no longer the operative deploy
+> mechanism. Kept here as a reference for the pre-containerization design
+> until the launchd plists / `scripts/deploy/macmini-*.sh` helpers are
+> retired in a follow-up.
+
 The single source of truth for the Mac mini that hosts Xenon production.
 Covers first-time bootstrap, recurring tagged deploys, database promotion from
 the laptop, rollback, health checks, and troubleshooting.
