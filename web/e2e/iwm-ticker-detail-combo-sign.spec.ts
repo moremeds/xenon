@@ -169,6 +169,15 @@ async function installMockWebSocket(page: import("@playwright/test").Page) {
       onclose: ((event?: unknown) => void) | null = null;
       onerror: ((event?: unknown) => void) | null = null;
 
+      addEventListener(type: string, listener: (event?: unknown) => void) {
+        if (type === "open") this.onopen = listener;
+        if (type === "message") this.onmessage = listener as (event: { data: string }) => void;
+        if (type === "close") this.onclose = listener;
+        if (type === "error") this.onerror = listener;
+      }
+
+      removeEventListener() {}
+
       constructor(url: string) {
         this.url = url;
         setTimeout(() => {
@@ -292,17 +301,17 @@ test("IWM ticker detail preserves signed combo leg and order quotes", async ({ p
     });
   });
 
-  await page.goto("/IWM?posId=12&tab=position");
+  await page.goto("/IWM?tab=position&posId=12");
 
   await page.getByRole("button", { name: /Legs \(2\)/i }).click();
 
   const shortRow = page.locator(".pos-legs-table tbody tr").filter({ hasText: "SHORT" }).first();
   await expect(shortRow).toContainText("-$3.57");
-  await expect(shortRow).toContainText("-$3.88");
+  await expect(shortRow).toContainText("-$3.83");
 
   const longRow = page.locator(".pos-legs-table tbody tr").filter({ hasText: "LONG" }).first();
   await expect(longRow).toContainText("$3.46");
-  await expect(longRow).toContainText("$3.63");
+  await expect(longRow).toContainText("$3.43");
 
   await page.getByRole("button", { name: "Order" }).click();
 

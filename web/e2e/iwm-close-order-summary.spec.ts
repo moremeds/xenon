@@ -168,6 +168,15 @@ async function installMockWebSocket(page: import("@playwright/test").Page) {
       onclose: ((event?: unknown) => void) | null = null;
       onerror: ((event?: unknown) => void) | null = null;
 
+      addEventListener(type: string, listener: (event?: unknown) => void) {
+        if (type === "open") this.onopen = listener;
+        if (type === "message") this.onmessage = listener as (event: { data: string }) => void;
+        if (type === "close") this.onclose = listener;
+        if (type === "error") this.onerror = listener;
+      }
+
+      removeEventListener() {}
+
       constructor(url: string) {
         this.url = url;
         setTimeout(() => {
@@ -274,7 +283,7 @@ test("IWM combo close confirmation uses close-order metrics instead of max-gain 
   await installMockWebSocket(page);
   await stubApis(page);
 
-  await page.goto("/IWM?posId=13&tab=order");
+  await page.goto("/IWM?tab=order&posId=13");
 
   const input = page.locator(".modify-price-input").first();
   await input.fill("3.00");
