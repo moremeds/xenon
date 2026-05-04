@@ -85,6 +85,7 @@ import CancelOrderDialog from "./CancelOrderDialog";
 import ModifyOrderModal from "./ModifyOrderModal";
 import type { ModifyOrderRequest } from "@/lib/orderModify";
 import RegimePanel from "./RegimePanel";
+import InternalsPanel from "./InternalsPanel";
 import CtaPage from "./CtaPage";
 import PerformancePanel from "./PerformancePanel";
 import InfoTooltip from "./InfoTooltip";
@@ -4687,6 +4688,8 @@ export default function WorkspaceSections({
       return <JournalSections />;
     case "regime":
       return <RegimePanel prices={prices ?? {}} marketState={marketState} />;
+    case "internals":
+      return <InternalsPanel marketState={marketState} />;
     case "cta":
       return <CtaPage />;
     case "ticker-detail":
