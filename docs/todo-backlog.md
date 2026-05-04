@@ -169,114 +169,6 @@ when scoping starts.
   refresh loop wired up at all. So hypothesis (a) "SSE channel isn't wired to a
   recurring tick, only a one-shot load" looks like the live theory. Start there.
 
-- 2026-04-27 — **🔴 TOP PRIORITY — Bug: single-leg orders rejected with "quote expired"** —
-  placing a single-leg option order raises a "quote expired" alert and the
-  order does not submit. Previously raised, not fixed. User has hit this
-  repeatedly. **Blocks real trading on the IB tab.** Repro: open the order
-  form for any single-leg option position, fill in size/price, click submit,
-  observe the "quote expired" alert.
-  **Notes:** Almost certainly the long tail of the **quote_token saga** —
-  per session memory: PR #34 introduced `quote_token`, #35 reverted it, #47
-  re-attempted, then commit `654d72d2` removed the gate. `web/CLAUDE.md` even
-  warns "do not re-ship as-is" on that surface. If the alert is still firing
-  after the gate was removed, three live hypotheses: (a) a _different_
-  staleness check is misreading a quote as expired (snapshot-age, contract
-  qualification, bid/ask sanity), (b) the gate wasn't fully removed and a
-  surviving path still enforces it, or (c) the alert text is being raised by
-  a different validation entirely and is just _labelled_ "quote expired" —
-  the label is a tell, not a diagnosis. Investigation must start by
-  **grepping the literal "quote expired" string** across `web/` to enumerate
-  every emitter, then trace which one fires for single-leg specifically. Do
-  _not_ assume the same code path as the previous fix. Cross-references in
-  the codebase: `654d72d2`, PRs #34 / #35 / #47, position-row order button
-  (`a7cbbbc4`), `/orders/quote` snapshot resolver (`8ef479ab`). Tag this P0 /
-  "drop everything" once a priority scheme is picked.
-  **Status (2026-04-30, cross-ref pass):** Hypothesis (b) ruled out — the
-  literal string "quote expired" no longer appears anywhere in `web/` or
-  `src/`. The gate from `654d72d2` is fully gone. The alert text "Quote
-  expired; refreshing." today comes from `web/lib/orderReasonCodes.ts:40`
-  rendering the `STALE_QUOTE` reason code, which is emitted by
-  `src/xenon/execution/quote_guard.py:120,124` (the freshness/tick-grid/band/
-  market-hours guard from commit `2a489060`) and surfaced via `server.py:2173`.
-  So the live theory is hypothesis (a): the new guard's freshness check is
-  rejecting valid single-leg quotes. Investigation narrows to: snapshot age
-  TTL, tick-grid validation, band check, market-hours gate inside
-  `quote_guard.check`. Still open.
-
-- 2026-04-27 — **🔴 TOP PRIORITY — Bug: naked-short guard blocks plain stock
-  BUY orders** — attempted to **buy 1 share of QQQ** (the simplest possible
-  long-stock order, no shorting involved) and the order was rejected with
-  `"Naked short blocked: Naked short stock: no long shares held for QQQ"`.
-  This is structurally wrong — Gate 4 (naked shorts) only applies to SELL /
-  short-side orders; a BUY of stock can never be a naked short. Sister bug
-  to the "quote expired" single-leg blocker above; group with it as P0
-  order-placement reliability work.
-  **Notes:** The principle, stated strongly: **the naked-short guard must be
-  structurally unreachable from any BUY path** — direction-of-trade is the
-  outermost gate, not a branch buried inside the guard. No state of the
-  account, no inventory level, no contract type, no order-source path should
-  ever cause a stock BUY to surface a naked-short rejection. If the guard
-  _can_ be reached from a BUY path, the architecture is wrong even if today's
-  inventory check happens to let it through. Acceptance criterion: a stock
-  BUY for a ticker the user has never traded must place cleanly without ever
-  evaluating any naked-short logic. Two likely root causes (in order of
-  prior probability): (1) the guard runs unconditionally on every order
-  before any side check — so an empty inventory looks like "naked" to it on
-  any order, BUY or SELL; (2) BUY/SELL classification is inverted somewhere
-  upstream so a real BUY arrives at the guard tagged as SELL. (1) reproduces
-  on any fresh ticker; (2) would only fire on specific routing paths.
-  Investigation: grep `"Naked short blocked"` and `"no long shares held"`
-  across `src/xenon/` and `web/` to find every emitter, then verify the
-  outermost guard wrapper short-circuits to a no-op when
-  `order.action == "BUY"` (or the equivalent `side` field). Per session
-  memory **"In-process
-  route bypass"** — FastAPI Depends only fire on HTTP, in-process handler
-  calls (`_orders_X_from_body`, `submit_combo`) skip every dep. The naked-short
-  guard fires on a plain stock BUY _today_, which means it's already inside
-  the inner handler (right place); the fix is to put the BUY-short-circuit
-  there too, not at the route boundary. Reference: `src/xenon/CLAUDE.md` for
-  the naked-short table. **Must ship in the same PR as the quote-expired fix
-  above** — fixing one and shipping it leaves the surviving bug to mask QA
-  signal on the other. Tests required: a regression test that asserts a
-  stock BUY for a never-traded ticker reaches the broker layer without
-  invoking the naked-short guard at all (mock the guard, assert it's not
-  called), plus a parallel test for the `_orders_X_from_body` in-process
-  path so the bypass class-of-bug doesn't recur.
-  **Status (2026-04-30, deep cross-ref + live preflight test):**
-  **Strong evidence the bug is already resolved. One live UI confirmation
-  click still needed before closing.** Findings:
-  - **Both BUY short-circuits were in code at the time of the report
-    (2026-04-27).** TS UI guard `web/lib/nakedShortGuard.ts:207`
-    (`if (order.action === "BUY") return { allowed: true }`) since
-    commit `0913fcf3` (2026-04-07). Python preflight `preflight.py:301`
-    (`if req.action == "BUY": return Verdict(accept=True)`) since
-    commit `b6cadd376` (2026-04-21).
-  - **Direct preflight test (2026-04-30) passes:** invoking
-    `preflight.evaluate(PreflightRequest(action="BUY", ticker="QQQ",
-security_type="STK", quantity=1, ...), PortfolioView(positions=[]))`
-    returns `accept=True, reason_code=None` — no false naked-short
-    rejection. Control test (`SELL 1 QQQ` on empty portfolio) correctly
-    returns `INSUFFICIENT_SHARES`.
-  - **Caller path is clean:** `OrderTab.tsx:425-444` (`handlePlace`)
-    passes user-chosen `action` straight through to the guard with no
-    inversion. The reactive warning at `OrderTab.tsx:397-412` is
-    explicitly gated on `action === "SELL"` (returns null otherwise).
-  - **The exact error text the user reported (`"Naked short blocked: "`
-    prefix) exists nowhere in source today** — `grep` across `web/` and
-    `src/` returned zero non-test matches. The TS guard's reason at
-    `nakedShortGuard.ts:219` (`"Naked short stock: no long shares held
-for ${sym}"`) survives, but the wrapping prefix is gone.
-  - **In-process bypass path is safe:** `naked_short_audit.py` runs
-    against IB open orders post-sync, not against incoming user orders,
-    so it cannot reject a fresh BUY at submission time.
-  - **Most likely closer:** PR #61 (`fix/order-placement-reliability`,
-    2026-04-28) shipped five order-path fixes including reason-code
-    rework — the error-prefix rewrite likely came from there.
-    Action: user does a live **BUY 1 QQQ** click in the IB tab when next
-    convenient. If it places cleanly → close this entry. If it still
-    rejects with the same error → narrow hunt for an upstream
-    sign-inversion (since the guards themselves are proven correct).
-
 - 2026-04-27 — **OI-as-flow-attribution (overnight check, not intraday)** — OI
   is reported once per day end-of-day by OCC, so this is fundamentally an
   **overnight delta** feature, not an intraday tracker. Real use case: when
@@ -501,3 +393,30 @@ for ${sym}"`) survives, but the wrapping prefix is gone.
   `.github/workflows/release.yml` and the Mac mini's launchd / Colima
   setup; cross-references the Tailscale connectivity used today by
   `scripts/cloud.sh`. No order-path or trading-loop coupling — pure infra.
+
+- 2026-05-04 — **[HIGH PRIORITY] Bracket-rule backtest / markout simulator over
+  historical trades** — replay every historical entry in `xenon.trades` /
+  `trade_log.json` against the `position_protection` rule engine as if the
+  brackets had been auto-attached at fill time. For each candidate (asset_class,
+  rule_kind, config) defaults set, compute: (a) the markout curves from
+  entry → simulated trigger or → actual exit, (b) what % of historical trades
+  would have triggered SL vs TP vs ridden out, (c) realized P&L delta vs actual
+  exit, (d) sensitivity sweep across ±SL%, ±trail%, ±activation% to find the
+  parameter set that maximises expected P&L for _this trader's_ historical
+  behaviour, not generic defaults. Output: per-asset-class recommended config
+  rows the operator can promote into `bracket_policies` with one click.
+  **Notes:** Captured during the 2026-05-04 brainstorm of the auto-bracket /
+  position-rules system (see `docs/superpowers/specs/2026-05-04-position-rules-…
+-design.md`). The defaults table seeded in v1 is essentially "industry rule
+  of thumb" — this simulator is the missing feedback loop that closes the
+  open-loop guess. Prerequisites the user flagged: (1) the post-fill arming hook
+  must be in production so the rule_kind plug-in interface is stable; (2) need
+  the historical-mark backfill (intraday OHLCV per leg) — IB historical bars
+  cover stocks but option intraday history is gappy in Xenon's current store;
+  may need UW intraday snapshots or a Polygon options bar fill. (3) Combo
+  positions need synthetic-mark reconstruction over historical leg quotes —
+  `combo_quote_source` does this for live, but historical replay is new code.
+  Belongs alongside `portfolio_attribution` / `markout` work; not item #1's
+  scope (entry-time alerting), this is rule-engine-tuning. Cross-reference:
+  the `position_descriptor` JSONB column in `position_protection` is exactly
+  the input shape this simulator wants — schema choice is forward-compatible.
