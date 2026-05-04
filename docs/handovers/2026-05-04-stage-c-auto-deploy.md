@@ -69,7 +69,8 @@ gh run rerun 25296418217 --failed --repo moremeds/xenon
 
 - After the link is applied, `gh run rerun --failed` should publish all
   4 images. Verify with `gh api user/packages/container/xenon-api/versions`
-  — a fresh `:v0.0.4` digest should appear, dated within minutes.
+  — a fresh `:0.0.4` digest should appear, dated within minutes (note:
+  no `v` prefix — see the Tag convention section in remote-deploy.md).
 
 ### Cost
 
@@ -309,15 +310,15 @@ docker logs $(docker ps -qf name=watchtower) 2>&1 | tail -20
 ```
 
 After step 3, every 60s Watchtower checks GHCR for newer digests on
-`ghcr.io/moremeds/xenon-{api,web,realtime}:v0.0.3` (matches whatever tag
-is pinned in compose.yml). When a digest changes, it pulls + recreates
-the container in place.
+whatever tag is pinned in compose.yml (e.g. `:0.0.4` for the current
+release — note: no `v` prefix; see Tag convention in remote-deploy.md).
+When a digest changes, it pulls + recreates the container in place.
 
 ### "But the tag in compose.yml is pinned"
 
-Right — Watchtower watches the _digest_, not the tag. If you re-tag
-`:v0.0.3` in GHCR (which you shouldn't), Watchtower notices. For new
-versions you still need to bump the tag in compose.yml _or_ switch
+Right — Watchtower watches the _digest_, not the tag. If you re-tag a
+pinned version in GHCR (which you shouldn't), Watchtower notices. For
+new versions you still need to bump the tag in compose.yml _or_ switch
 compose.yml to use `:latest` and let Watchtower handle the version dance:
 
 ```yaml
