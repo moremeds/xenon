@@ -2,19 +2,19 @@
 
 The authoritative runbook for shipping Xenon to the remote Mac mini
 (`192.168.50.47`, `moremeds@…`). Covers first-time bootstrap, tagged
-releases via GHCR, smoke checks, rollback, and the snags that bit us
-during the v0.0.3 cutover.
+releases via GHCR, smoke checks, rollback, and the open follow-ups for
+mini-side automation (Stage C).
 
 **Supersedes** `docs/runbooks/mac-mini.md` (launchd-based; pre-containers).
 The old launchd path is no longer the deploy mechanism.
 
 ## Topology
 
-| Host                                                      | Where things live                                                                                                                                                                                                                                            |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Mac mini                                                  | Colima (Linux/arm64 VM running Docker), 4 containers (api / web / realtime / migrator), live IB Gateway 10.45 (`:4001`, host-native), Postgres 17 (`:5432`, host-native, schemas `xenon` / `apex` / `events`).                                               |
-| This dev Mac                                              | Source of truth for builds + tag cuts. Paper IB Gateway local (`127.0.0.1:4002`).                                                                                                                                                                            |
-| GHCR `ghcr.io/moremeds/xenon-{api,web,realtime,migrator}` | Owned by user `moremeds`; tags `:vX.Y.Z` and `:latest`. Visibility "private". Each package must have `moremeds/xenon` added under **Manage Actions access** with role **Write** — otherwise `release.yml::ghcr-push` is denied (see "Known follow-ups #11"). |
+| Host                                                      | Where things live                                                                                                                                                                                                                                                              |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Mac mini                                                  | Colima (Linux/arm64 VM running Docker), 4 containers (api / web / realtime / migrator), live IB Gateway 10.45 (`:4001`, host-native), Postgres 17 (`:5432`, host-native, schemas `xenon` / `apex` / `events`).                                                                 |
+| This dev Mac                                              | Source of truth for builds + tag cuts. Paper IB Gateway local (`127.0.0.1:4002`).                                                                                                                                                                                              |
+| GHCR `ghcr.io/moremeds/xenon-{api,web,realtime,migrator}` | Owned by user `moremeds`; tags `:X.Y.Z` (no `v` prefix — see "Tag convention" below) and `:latest`. Visibility "private". Each package has `moremeds/xenon` linked under **Manage Actions access** with role **Write**; without that link, `release.yml::ghcr-push` is denied. |
 
 Containers reach Postgres + IB Gateway + Futu OpenD via `host.docker.internal`
 (Colima maps it to the host gateway). Postgres + IB Gateway never run in
@@ -74,43 +74,72 @@ ssh moremeds@192.168.50.47 'mkdir -p /opt/xenon/data'
 
 After bootstrap, the mini is ready for `pull → migrator → up`.
 
+## Tag convention
+
+GHCR image tags use **`X.Y.Z` (no `v` prefix)** — `release.yml::ghcr-push`
+strips the `v` from the git ref via `${GITHUB_REF_NAME#v}` so the image
+tag matches the contents of `VERSION` and `package.json` (which never
+have `v`). This matches Docker Hub norms (`postgres:16-alpine`,
+`node:20.11`).
+
+| Surface        | Form     | Example  |
+| -------------- | -------- | -------- |
+| Git tag        | `vX.Y.Z` | `v0.0.4` |
+| `VERSION` file | `X.Y.Z`  | `0.0.4`  |
+| `package.json` | `X.Y.Z`  | `0.0.4`  |
+| GHCR image tag | `X.Y.Z`  | `0.0.4`  |
+| GitHub Release | `vX.Y.Z` | `v0.0.4` |
+
+**Legacy exception:** `:v0.0.3` exists on each package because v0.0.3
+was bootstrapped via manual `docker push` from the dev Mac (the workflow
+was failing at the time). Don't reference `:v0.0.3` in new flows;
+treat it as a grandfathered rollback target only. v0.0.4 onwards
+follows the convention above.
+
 ## Standard release flow
 
-1. **Cut + tag** on this Mac (PR-merged `release: vX.Y.Z` on master, then
-   tag locally and push):
+1. **Cut + tag** on this Mac via the release script (operator-run; does
+   not push):
 
    ```bash
-   git fetch origin
-   git tag -a vX.Y.Z <merged-master-sha> -m "vX.Y.Z
-
-   <CHANGELOG section>"
-   git push origin vX.Y.Z
+   ./scripts/release/cut.sh        # interactive: patch / minor / major / custom
+                                   # rewrites VERSION + package.json + CHANGELOG,
+                                   # commits, tags vX.Y.Z
+   git push origin master --follow-tags
    ```
 
-2. **`release.yml` `ghcr-push` matrix fires** and publishes 4 images to GHCR
-   with `:vX.Y.Z` + `:latest` tags. ⚠️ The `verify` job is currently broken
-   on the runner (no Postgres service) — see "Known follow-ups". Until that
-   lands, do step 2 manually from this Mac:
+   The tag push fires `.github/workflows/release.yml`.
+
+2. **`release.yml` runs end-to-end** with no operator intervention:
+   - `verify` — full pytest + npm test + typecheck + lint + version-sync
+     against an ephemeral Postgres service container.
+   - `publish` — GitHub Release at `vX.Y.Z`, body extracted from
+     `CHANGELOG.md`.
+   - `ghcr-push` (matrix × 4) — builds + pushes each image at
+     `ghcr.io/moremeds/xenon-{api,web,realtime,migrator}:X.Y.Z` and
+     `:latest`.
+
+   Tail the run while it's in flight:
 
    ```bash
-   for img in api web realtime migrator; do
-     docker tag xenon-${img}:dev ghcr.io/moremeds/xenon-${img}:vX.Y.Z
-     docker tag xenon-${img}:dev ghcr.io/moremeds/xenon-${img}:latest
-     docker push ghcr.io/moremeds/xenon-${img}:vX.Y.Z
-     docker push ghcr.io/moremeds/xenon-${img}:latest
-   done
+   gh run watch --repo moremeds/xenon
    ```
 
 3. **Pull + restart on the mini**:
 
    ```bash
-   ssh moremeds@192.168.50.47 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && \
-     for img in api web realtime migrator; do \
-       docker pull ghcr.io/moremeds/xenon-${img}:vX.Y.Z; \
-     done && \
+   XV=0.0.4   # the version you just released (no `v` prefix)
+   ssh moremeds@192.168.50.47 "PATH=/opt/homebrew/bin:\$PATH; cd /opt/xenon && \
+     sed -i '' -E 's|xenon-([a-z]+):[^[:space:]]+|xenon-\\1:${XV}|' compose.yml && \
+     docker-compose pull && \
      docker-compose --profile migrate run --rm migrator && \
-     docker-compose up -d'
+     docker-compose up -d"
    ```
+
+   The `sed` rewrites every `xenon-*:<old>` literal in compose.yml in
+   one pass, so all 4 services bump together. Once Stage C item 3
+   (Watchtower + `compose.yml` on `:latest`) lands, this step becomes
+   redundant — the mini auto-pulls within 60s of `ghcr-push` finishing.
 
    Note: the mini uses **`docker-compose`** (hyphenated v5.1.3 from brew),
    not the `docker compose` plugin. Use the hyphenated form on the mini;
@@ -155,21 +184,26 @@ To disable Colima auto-start later: `brew services stop colima`.
 
 ## Rollback
 
+Bump the version literal in `/opt/xenon/compose.yml` to the previous tag,
+pull, and restart. The `<prev-tag>` is whatever GHCR has — for any
+release v0.0.4 onwards, that's `X.Y.Z` (no `v`). For the legacy v0.0.3
+rollback target, use `v0.0.3` (see "Tag convention" → legacy exception).
+
 ```bash
 ssh moremeds@192.168.50.47 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && \
-  docker-compose down && \
-  for img in api web realtime migrator; do \
-    docker pull ghcr.io/moremeds/xenon-${img}:<prev-tag>; \
-    docker tag ghcr.io/moremeds/xenon-${img}:<prev-tag> ghcr.io/moremeds/xenon-${img}:v0.0.3; \
-  done && \
+  sed -i "" -E "s|xenon-([a-z]+):[^[:space:]]+|xenon-\1:<prev-tag>|" compose.yml && \
+  docker-compose pull && \
   docker-compose up -d'
 ```
 
-(The `tag <prev>:v0.0.3` step makes the existing `compose.yml` (which pins
-`v0.0.3`) resolve to the rollback image without editing the file. Cleaner
-long-term: `image: ghcr.io/.../xenon-${SVC}:${XENON_VERSION:-latest}`
+Replace `<prev-tag>` with the actual tag (e.g. `0.0.4` or, for the
+legacy bootstrap, `v0.0.3`). The `sed` rewrites every `xenon-*:<old>`
+literal in compose.yml in one pass.
 
-- `XENON_VERSION` env in `.env` — captured as a follow-up.)
+**Cleaner long-term option** (deferred follow-up): switch compose.yml
+to `image: ghcr.io/.../xenon-${SVC}:${XENON_VERSION:-latest}` and put
+`XENON_VERSION=0.0.4` in `.env`. Rollback then becomes a one-line `.env`
+edit + `docker-compose up -d`. Captured as a follow-up; not blocking.
 
 ## Logs + diagnostics
 
@@ -186,17 +220,11 @@ ssh moremeds@192.168.50.47 'PATH=/opt/homebrew/bin:$PATH; docker stats --no-stre
 
 ## Known follow-ups
 
-These tripped us during v0.0.3 and need real fixes before v0.0.4:
+Open items as of v0.0.4. Items resolved during the v0.0.4 cut have been
+removed (`release.yml::verify` Postgres service, `NEXT_PUBLIC_*`
+build-args, GHCR per-package ACL — all landed via PR #91 + PR #94).
 
-1. **`release.yml::verify` job has no Postgres service** → full pytest
-   suite errors out with `connection refused` on `127.0.0.1:5432`. The PG
-   guard in `conftest.py` skips PG-backed _unit_ tests when offline, but
-   the wizard route + schema_scope tests use a different fixture path that
-   doesn't honor the skip. Either add a `services: postgres:` block to
-   the verify job and seed via alembic, or scope the test selection like
-   `ci.yml`'s `python-tests` does.
-
-2. **Mini's GHCR auth is on this Mac's classic PAT.** Worked for
+1. **Mini's GHCR auth is on this Mac's classic PAT.** Worked for
    bootstrap but isn't durable. The mini's own fine-grained PAT
    (`github_pat_11AAI…`) lacks "Packages: read" permission on the linked
    `moremeds/xenon` repo. Either:
@@ -205,34 +233,28 @@ These tripped us during v0.0.3 and need real fixes before v0.0.4:
    - Or generate a classic PAT with `read:packages` and feed it to
      `docker login` on the mini.
 
-3. **`release.yml::ghcr-push` doesn't pass `NEXT_PUBLIC_*` build-args.**
-   The web image baked at CI has empty `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
-   in its bundle. v0.0.3 was pushed manually from this Mac with the PK
-   inlined, so it works for now. Fix: add the PK as a GHA secret + thread
-   through `build-args:` in the ghcr-push step.
-
-4. **Sizing.** Colima default is 2 CPU / 2 GiB. Tight for 4 simultaneous
+2. **Sizing.** Colima default is 2 CPU / 2 GiB. Tight for 4 simultaneous
    containers; web alone can spike. If OOMKills appear or web becomes
    sluggish: `colima stop && colima start --cpu 4 --memory 6`.
 
-5. **No auto-login on the mini yet** — Colima starts via brew/launchd at _user login_, not at boot. If the mini reboots and no one logs in, the stack stays down. If you want unattended recovery, enable auto-login via System Settings → Users & Groups → "Automatic login" (or `sysadminctl -autologin set …` from a shell with admin sudo). Mind the security trade-off: anyone with physical access skips the login prompt.
+3. **No auto-login on the mini yet** — Colima starts via brew/launchd at _user login_, not at boot. If the mini reboots and no one logs in, the stack stays down. If you want unattended recovery, enable auto-login via System Settings → Users & Groups → "Automatic login" (or `sysadminctl -autologin set …` from a shell with admin sudo). Mind the security trade-off: anyone with physical access skips the login prompt.
 
-6. **`/opt/xenon/logs/`** isn't mounted yet. Container stdout still works
+4. **`/opt/xenon/logs/`** isn't mounted yet. Container stdout still works
    (`docker-compose logs`), but persistent file logs go nowhere. Add a
    `./logs:/app/logs` bind-mount once persistent logging is needed.
 
-7. **Full live promotion (Phase 1.11)** still waits on a 24h burn-in. Today
+5. **Full live promotion (Phase 1.11)** still waits on a 24h burn-in. Today
    we shipped _half-live_: live trading mode + live IB pointing, but
    `DATABASE_URL=core_dev`. To flip to full prod: edit `/opt/xenon/.env`
    `DATABASE_URL` from `core_dev` to `core`, restart, and stop this Mac's
    API to avoid double-writers.
 
-8. **Compose plugin parity.** Mini uses `docker-compose` (hyphen, v5.1.3
+6. **Compose plugin parity.** Mini uses `docker-compose` (hyphen, v5.1.3
    via brew) because the docker plugin's compose subcommand isn't
    installed. Either install `docker-compose-plugin` for the mini's docker,
    or accept hyphenated as the prod surface.
 
-9. **Container deploy bypasses `dev.sh`'s broker-account resolution.**
+7. **Container deploy bypasses `dev.sh`'s broker-account resolution.**
    `scripts/infra/dev.sh` reads `XENON_PAPER_ACCOUNT` / `XENON_LIVE_ACCOUNT`
    from `.env` and resolves `XENON_BROKER_ACCOUNT` based on `XENON_TRADING_MODE`
    before exec'ing uvicorn. The Docker compose path doesn't run that script —
@@ -248,65 +270,55 @@ These tripped us during v0.0.3 and need real fixes before v0.0.4:
      with profile-based overrides for paper. Less robust because compose
      can't pick the mode-specific key cleanly without a profile per mode.
 
-10. **Clerk dev origin only allows `localhost:3000`.** The `pk_test_*` key
-    in `web/.env` is bound to a Clerk Development instance which is
-    **hardcoded to `localhost`**. Clerk dev instances do not support adding
-    arbitrary hosts via the dashboard — the "Domains" UI for a dev instance
-    is read-only or limited to localhost variants. Visiting the web app at
-    `http://192.168.50.47:3000` triggers Clerk's dev-browser handshake to
-    redirect back to `localhost:3000`, breaking sign-in from the LAN.
-    Workarounds:
-    - **Quick (current state):** append `XENON_DISABLE_AUTH=1` to
-      `/opt/xenon/web.env` and `docker-compose up -d --force-recreate web`.
-      Bypasses Clerk middleware entirely; combine with default-private
-      route gating (PR #90) so portfolio/orders/journal still gate at the
-      app layer (you'd need a logged-in session — but with auth bypassed
-      that's not enforced; effectively all routes serve while bypass is on).
-    - **Network-level auth:** put the deploy on a Tailscale tailnet so
-      only your devices can reach it. Drop the public-internet attack
-      surface entirely; auth bypass becomes safe again. Does not need a
-      domain or Clerk Production.
-    - **Real fix:** buy any cheap domain (`.xyz`, `.click` ~ $1-2/yr),
-      create a Clerk Production instance, verify the domain via TXT
-      record, swap `pk_test_*` → `pk_live_*` in the `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
-      GHA secret, redeploy. Public domain + real auth.
+8. **Clerk dev origin only allows `localhost:3000`.** The `pk_test_*` key
+   in `web/.env` is bound to a Clerk Development instance which is
+   **hardcoded to `localhost`**. Clerk dev instances do not support adding
+   arbitrary hosts via the dashboard — the "Domains" UI for a dev instance
+   is read-only or limited to localhost variants. Visiting the web app at
+   `http://192.168.50.47:3000` triggers Clerk's dev-browser handshake to
+   redirect back to `localhost:3000`, breaking sign-in from the LAN.
+   Workarounds:
+   - **Quick (current state):** append `XENON_DISABLE_AUTH=1` to
+     `/opt/xenon/web.env` and `docker-compose up -d --force-recreate web`.
+     Bypasses Clerk middleware entirely; combine with default-private
+     route gating (PR #90) so portfolio/orders/journal still gate at the
+     app layer (you'd need a logged-in session — but with auth bypassed
+     that's not enforced; effectively all routes serve while bypass is on).
+   - **Network-level auth:** put the deploy on a Tailscale tailnet so
+     only your devices can reach it. Drop the public-internet attack
+     surface entirely; auth bypass becomes safe again. Does not need a
+     domain or Clerk Production.
+   - **Real fix:** buy any cheap domain (`.xyz`, `.click` ~ $1-2/yr),
+     create a Clerk Production instance, verify the domain via TXT
+     record, swap `pk_test_*` → `pk_live_*` in the `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
+     GHA secret, redeploy. Public domain + real auth.
 
-11. **GHCR packages need explicit per-repo ACL — not auto-linked when
-    bootstrapped manually.** Hit during v0.0.4 (run
-    [25296418217](https://github.com/moremeds/xenon/actions/runs/25296418217)):
-    `release.yml::ghcr-push` failed all 4 matrix jobs with
-    `denied: permission_denied: write_package`, even though the workflow
-    declares `permissions: packages: write` and the run log confirms the
-    `GITHUB_TOKEN` was granted `Packages: write`.
+## Resolved during v0.0.4
 
-    Cause: GHCR has two permission layers. The `GITHUB_TOKEN` scope is
-    one; the package's per-repo ACL ("Manage Actions access") is the
-    other. When a workflow successfully pushes a package for the first
-    time, GHCR auto-links the source repo. The Xenon packages were
-    created on 2026-05-03 by **manual `docker push` from this Mac with a
-    classic PAT** (see follow-up #2 above), so the auto-link never
-    happened. Every subsequent workflow push is denied because
-    `moremeds/xenon` is not listed under the package's Actions access.
+Kept here as institutional memory — these are no longer open.
 
-    There is no public REST or GraphQL API for managing per-repo
-    Actions access on user-owned packages — UI only. Fix is one-time per
-    package:
-    - Visit `https://github.com/users/moremeds/packages/container/xenon-<api|web|realtime|migrator>/settings`
-    - Scroll to **Manage Actions access** → **Add Repository**
-    - Search `xenon`, select `moremeds/xenon`, role **Write**, save.
-    - Repeat for the other 3 packages.
-
-    After the link is in place, re-run the failed jobs:
-
-    ```bash
-    gh run rerun <run-id> --failed --repo moremeds/xenon
-    ```
-
-    Permanent prevention: don't bootstrap GHCR packages via manual
-    `docker push`. Either (a) push the first version from a working
-    `release.yml` (auto-links on success), or (b) link the repo
-    immediately after the first manual push. Once linked, every future
-    tag release publishes without the operator touching anything.
+- **`release.yml::verify` had no Postgres service** → fixed in PR #91:
+  ephemeral `postgres:16-alpine` service container + alembic step
+  precede pytest in the verify job.
+- **`release.yml::ghcr-push` did not pass `NEXT_PUBLIC_*` build-args** →
+  fixed in PR #91: `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` is now plumbed
+  via `secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` and a `matrix.image
+== 'web'` ternary so the build-arg is empty for the other 3 images.
+- **GHCR packages need explicit per-repo ACL — not auto-linked when
+  bootstrapped manually.** Hit during the first v0.0.4 attempt
+  ([run 25296418217](https://github.com/moremeds/xenon/actions/runs/25296418217)):
+  `ghcr-push` was denied `write_package` even with `Packages: write`
+  on the token. Cause: GHCR has two permission layers — the
+  `GITHUB_TOKEN` scope **and** the package's per-repo ACL ("Manage
+  Actions access"). When a workflow pushes a package for the first
+  time, GHCR auto-links the source repo. The Xenon packages were
+  bootstrapped via manual `docker push` from this Mac on 2026-05-03,
+  bypassing the auto-link. Resolved by adding `moremeds/xenon` with
+  Write to each package's "Manage Actions access" page (UI only — no
+  public API). Permanent prevention: don't bootstrap via manual
+  `docker push`. Push the first version from a working `release.yml`
+  so GHCR auto-links on success, or link the repo immediately after
+  any manual bootstrap.
 
 ## Reference: `/opt/xenon/compose.yml` template
 
@@ -317,7 +329,7 @@ These tripped us during v0.0.3 and need real fixes before v0.0.4:
 
 services:
   migrator:
-    image: ghcr.io/moremeds/xenon-migrator:v0.0.3
+    image: ghcr.io/moremeds/xenon-migrator:0.0.4
     profiles: ["migrate"]
     env_file: [./.env]
     volumes: [./.env:/app/.env:ro]
@@ -325,7 +337,7 @@ services:
     restart: "no"
 
   api:
-    image: ghcr.io/moremeds/xenon-api:v0.0.3
+    image: ghcr.io/moremeds/xenon-api:0.0.4
     env_file: [./.env]
     environment:
       FUTU_OPEND_HOST: host.docker.internal
@@ -341,7 +353,7 @@ services:
     restart: unless-stopped
 
   web:
-    image: ghcr.io/moremeds/xenon-web:v0.0.3
+    image: ghcr.io/moremeds/xenon-web:0.0.4
     env_file: [./web.env]
     environment:
       XENON_API_URL: http://api:8321
@@ -357,7 +369,7 @@ services:
     restart: unless-stopped
 
   realtime:
-    image: ghcr.io/moremeds/xenon-realtime:v0.0.3
+    image: ghcr.io/moremeds/xenon-realtime:0.0.4
     env_file: [./.env]
     ports: ["8765:8765"]
     volumes: [./.env:/app/.env:ro]
@@ -366,4 +378,5 @@ services:
     restart: unless-stopped
 ```
 
-Bump the `v0.0.3` literal to the current release tag at deploy time.
+Bump the `0.0.4` literal to the current release tag at deploy time —
+or use the `sed` one-liner from the "Standard release flow" step 3.
