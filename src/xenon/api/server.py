@@ -490,6 +490,15 @@ async def _vcg_cri_scan_loop() -> None:
         await asyncio.sleep(interval_s)
 
 
+def _resolve_lifespan_account_state(managed_account: str | None) -> tuple[str, bool]:
+    """Resolve FastAPI account state without self-verifying a down Gateway."""
+    managed = (managed_account or "").strip()
+    if managed:
+        return managed, trading_mode.verify_account(managed)
+    fallback = os.environ.get("XENON_BROKER_ACCOUNT", "").strip()
+    return fallback, False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start IB pool and UW client on startup, tear down on shutdown."""
@@ -524,8 +533,8 @@ async def lifespan(app: FastAPI):
     # Trading-mode prefix guard — verify Gateway login matches XENON_TRADING_MODE.
     # Failure does not abort startup; it sets app.state.mode_verified=False
     # and the order routes refuse to serve until .env + Gateway are aligned.
-    account = await asyncio.to_thread(_get_managed_account_for_health)
-    verified = trading_mode.verify_account(account)
+    managed_account = await asyncio.to_thread(_get_managed_account_for_health)
+    account, verified = _resolve_lifespan_account_state(managed_account)
     app.state.trading_mode = trading_mode.MODE
     app.state.account = account
     app.state.mode_verified = verified
