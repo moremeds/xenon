@@ -46,6 +46,7 @@ from xenon.api.routes.historical import router as historical_router
 from xenon.api.routes.journal import router as journal_router
 from xenon.api.routes.orders import orders_payload_for_scope
 from xenon.api.routes.orders import router as orders_router
+from xenon.api.routes.position_rules import router as position_rules_router
 from xenon.api.routes.regime import router as regime_router
 from xenon.api.routes.trades import router as trades_router
 from xenon.api.routes.uw_analyze import router as uw_analyze_router
@@ -503,7 +504,7 @@ async def lifespan(app: FastAPI):
         await _run_rehydrate_on_boot()
         app.state.trading_mode = trading_mode.MODE
         # Tests monkeypatch _get_managed_account_for_health; honor that.
-        account = _get_managed_account_for_health()
+        account = _get_managed_account_for_health() or os.environ.get("XENON_BROKER_ACCOUNT", "")
         app.state.account = account
         app.state.mode_verified = trading_mode.verify_account(account)
         yield
@@ -816,6 +817,7 @@ app = FastAPI(title="Xenon API", version="1.0.0", lifespan=lifespan)
 app.include_router(historical_router)
 app.include_router(journal_router)
 app.include_router(orders_router)
+app.include_router(position_rules_router)
 app.include_router(regime_router)
 app.include_router(trades_router)
 app.include_router(uw_analyze_router)
