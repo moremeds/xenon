@@ -101,6 +101,38 @@ def _truncate_postgres_tables() -> None:
         engine.dispose()
 
 
+def _ensure_default_bracket_policies() -> None:
+    global _PG_REACHABLE_CACHE
+    if _PG_REACHABLE_CACHE is False:
+        return
+    engine = create_engine(_sync_test_db_url(), pool_pre_ping=True, connect_args={"connect_timeout": 2})
+    try:
+        if not _pg_reachable(engine):
+            return
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO xenon.bracket_policies (asset_class, rule_kind, auto_place, config) VALUES
+                          ('stock',          'stop_loss',          TRUE, '{"threshold_pct": -0.08, "anchor": "entry_price"}'),
+                          ('stock',          'trailing_tp',        TRUE, '{"trail_pct": 0.05, "activation_pct": 0.0, "anchor": "mfe"}'),
+                          ('long_option',    'stop_loss',          TRUE, '{"threshold_pct": -0.20, "anchor": "entry_price"}'),
+                          ('long_option',    'trailing_tp',        TRUE, '{"trail_pct": 0.25, "activation_pct": 0.30, "anchor": "mfe"}'),
+                          ('debit_combo',    'stop_loss',          TRUE, '{"threshold_pct_of_max_loss": 0.50, "anchor": "synthetic_mark"}'),
+                          ('debit_combo',    'trailing_tp',        TRUE, '{"trail_pct": 0.25, "activation_pct_of_max_gain": 0.25, "anchor": "mfe_pnl_dollars"}'),
+                          ('credit_spread',  'stop_loss',          TRUE, '{"trigger_kind": "either", "mark_multiple_of_credit": 2.0, "underlying_breach_short_strike": true, "anchor": "synthetic_mark"}'),
+                          ('credit_spread',  'take_profit_fixed',  TRUE, '{"close_at_credit_pct": 0.50, "anchor": "synthetic_mark"}')
+                        ON CONFLICT DO NOTHING
+                        """
+                    )
+                )
+        except SQLAlchemyError:
+            _PG_REACHABLE_CACHE = False
+    finally:
+        engine.dispose()
+
+
 @pytest.fixture(autouse=True)
 def _postgres_orders_test_db(monkeypatch):
     """Point sync Postgres callers at the test DB and clean order tables.
@@ -119,6 +151,7 @@ def _postgres_orders_test_db(monkeypatch):
         pass
 
     _truncate_postgres_tables()
+    _ensure_default_bracket_policies()
     yield
     _truncate_postgres_tables()
 
