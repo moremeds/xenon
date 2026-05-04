@@ -4,10 +4,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, Zap } from "lucide-react";
 import type { PortfolioLeg, PortfolioPosition } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
+import type { PositionRule } from "@/lib/api/positionRules";
 import InstrumentDetailModal from "./InstrumentDetailModal";
 import PositionOrderModal from "./PositionOrderModal";
+import { ShieldBadge } from "@/components/portfolio/ShieldBadge";
+import { PositionRulesDrawer } from "@/components/portfolio/PositionRulesDrawer";
 import { useSort, type SortDirection } from "@/lib/useSort";
 import TickerLink from "./TickerLink";
+import {
+  dominantProtectionState,
+  rulesForPortfolioPosition,
+} from "@/lib/positionRulesUi";
 import {
   fmtUsd,
   fmtPrice,
@@ -230,12 +237,14 @@ function LegRow({
   leg,
   showExpiry,
   showUnderlying,
+  showProtection,
   realtimeLegPrice,
   onLegClick,
 }: {
   leg: PortfolioPosition["legs"][number];
   showExpiry: boolean;
   showUnderlying?: boolean;
+  showProtection?: boolean;
   realtimeLegPrice?: PriceData | null;
   onLegClick?: (leg: PortfolioLeg) => void;
 }) {
@@ -272,6 +281,7 @@ function LegRow({
         {leg.direction} {leg.contracts}x {leg.type}
         {leg.strike ? ` $${leg.strike}` : ""}
       </td>
+      {showProtection && <td></td>}
       {showUnderlying && <td></td>}
       <td className="right cell-muted">
         {fmtPrice(Math.abs(leg.avg_cost) / (leg.type === "Stock" ? 1 : 100))}
@@ -319,8 +329,11 @@ function PositionRow({
   pos,
   showExpiry = true,
   showUnderlying = false,
+  showProtection = false,
   realtimePrice,
   prices,
+  positionRules = [],
+  onRulesClick,
   onLegClick,
   onOrderClick,
   readonly = false,
@@ -328,8 +341,11 @@ function PositionRow({
   pos: PortfolioPosition;
   showExpiry?: boolean;
   showUnderlying?: boolean;
+  showProtection?: boolean;
   realtimePrice?: PriceData | null;
   prices?: Record<string, PriceData>;
+  positionRules?: PositionRule[];
+  onRulesClick?: (positionKey: string) => void;
   onLegClick?: (leg: PortfolioLeg, pos: PortfolioPosition) => void;
   onOrderClick?: (pos: PortfolioPosition) => void;
   readonly?: boolean;
@@ -440,6 +456,10 @@ function PositionRow({
       : null;
   const { direction: underlyingDirection, flashDirection: underlyingFlash } =
     usePriceDirection(underlyingPrice);
+  const rules = useMemo(
+    () => rulesForPortfolioPosition(pos, positionRules),
+    [pos, positionRules],
+  );
 
   return (
     <>
@@ -510,6 +530,19 @@ function PositionRow({
             {pos.direction}
           </span>
         </td>
+        {showProtection && (
+          <td>
+            {rules.length > 0 ? (
+              <ShieldBadge
+                state={dominantProtectionState(rules)}
+                count={rules.length}
+                onClick={() => onRulesClick?.(rules[0].position_key)}
+              />
+            ) : (
+              <ShieldBadge state="NONE" ariaLabel="Protection none" />
+            )}
+          </td>
+        )}
         {showUnderlying && (
           <td
             className={`right last-price-cell ${underlyingFlash ? `last-price-${underlyingFlash}` : ""}`}
@@ -588,6 +621,7 @@ function PositionRow({
               leg={leg}
               showExpiry={showExpiry}
               showUnderlying={showUnderlying}
+              showProtection={showProtection}
               realtimeLegPrice={key && prices ? prices[key] : null}
               onLegClick={
                 readonly || !onLegClick ? undefined : (l) => onLegClick(l, pos)
@@ -605,6 +639,7 @@ export default function PositionTable({
   positions,
   showExpiry = true,
   showUnderlying = false,
+  positionRules,
   prices,
   readonly = false,
   hideHeader = false,
@@ -613,6 +648,7 @@ export default function PositionTable({
   positions: PortfolioPosition[];
   showExpiry?: boolean;
   showUnderlying?: boolean;
+  positionRules?: PositionRule[];
   prices?: Record<string, PriceData>;
   /**
    * When true, blocks all navigation and order-entry affordances.
@@ -641,6 +677,11 @@ export default function PositionTable({
   // Order modal state
   const [activeOrderPosition, setActiveOrderPosition] =
     useState<PortfolioPosition | null>(null);
+  const [drawerPositionKey, setDrawerPositionKey] = useState<string | null>(
+    null,
+  );
+  const showProtection = positionRules !== undefined;
+  const rulesForRows = positionRules ?? [];
 
   const handleLegClick = useCallback(
     (leg: PortfolioLeg, pos: PortfolioPosition) => {
@@ -661,6 +702,7 @@ export default function PositionTable({
           <col style={{ width: "14%" }} />
           <col style={{ width: "4%" }} />
           <col style={{ width: "7%" }} />
+          {showProtection && <col style={{ width: "6%" }} />}
           {showUnderlying && <col style={{ width: "7%" }} />}
           <col style={{ width: "7%" }} />
           <col style={{ width: "7%" }} />
@@ -703,6 +745,7 @@ export default function PositionTable({
                 direction={sort.direction}
                 onToggle={toggle}
               />
+              {showProtection && <th>Protection</th>}
               {showUnderlying && (
                 <SortTh<PositionSortKey>
                   label="Underlying"
@@ -788,8 +831,11 @@ export default function PositionTable({
               pos={pos}
               showExpiry={showExpiry}
               showUnderlying={showUnderlying}
+              showProtection={showProtection}
               realtimePrice={prices?.[pos.ticker]}
               prices={prices}
+              positionRules={rulesForRows}
+              onRulesClick={setDrawerPositionKey}
               onLegClick={handleLegClick}
               onOrderClick={
                 readonly ? undefined : (p) => setActiveOrderPosition(p)
@@ -820,6 +866,12 @@ export default function PositionTable({
           }}
         />
       )}
+      {!readonly && drawerPositionKey ? (
+        <PositionRulesDrawer
+          positionKey={drawerPositionKey}
+          onClose={() => setDrawerPositionKey(null)}
+        />
+      ) : null}
     </>
   );
 }

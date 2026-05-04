@@ -47,6 +47,7 @@ import { useDiscover } from "@/lib/useDiscover";
 import { useFlowAnalysis } from "@/lib/useFlowAnalysis";
 import { useUwAnalyze } from "@/lib/useUwAnalyze";
 import { useUwPortfolio } from "@/lib/useUwPortfolio";
+import { usePositionRules } from "@/lib/usePositionRules";
 import {
   groupByTier,
   groupSingleNames,
@@ -1252,6 +1253,7 @@ function PortfolioSections({
     extractPositionSearchText,
   );
   const structureFilter = useTableFilter(positions, extractPositionSearchText);
+  const { rules: positionRules } = usePositionRules(activeAccount === "ib");
 
   // View mode hydration: null until we've read localStorage to avoid SSR flash.
   const [viewMode, setViewMode] = useState<PortfolioViewMode | null>(null);
@@ -1367,6 +1369,7 @@ function PortfolioSections({
         <PortfolioByStructure
           positions={structureFilter.filtered}
           prices={prices}
+          positionRules={positionRules}
           activeAccount={activeAccount}
           lastSync={portfolio.last_sync}
         />
@@ -1403,6 +1406,7 @@ function PortfolioSections({
               positions={definedFilter.filtered}
               showUnderlying={true}
               prices={prices}
+              positionRules={positionRules}
               readonly={activeAccount === "futu"}
             />
           </div>
@@ -1437,6 +1441,7 @@ function PortfolioSections({
               positions={undefinedFilter.filtered}
               showUnderlying={true}
               prices={prices}
+              positionRules={positionRules}
               readonly={activeAccount === "futu"}
             />
           </div>
@@ -1469,6 +1474,7 @@ function PortfolioSections({
               positions={equityFilter.filtered}
               showExpiry={false}
               prices={prices}
+              positionRules={positionRules}
               readonly={activeAccount === "futu"}
             />
           </div>
