@@ -20,7 +20,7 @@ Key guarantees:
   submit with a negative ``lmtPrice``.
 - **register_risk_alert** is app-side only. No broker order is placed; we
   persist a ``RISK_ALERT_REGISTERED`` event + a virtual alert id so the
-  ``wizard_stop_monitor`` handler can drive the crossing check.
+  position-rules monitor can drive the crossing check.
 
 Citations (every ib_async call site below is grep-verified against the
 installed source tree at `.venv/lib/python3.13/site-packages/ib_async/`).
@@ -335,7 +335,7 @@ class ComboWizardIbAdapter:
     ) -> dict:
         """Register a Risk Alert (Assisted Exit, NOT a stop-loss). App-side
         only — no broker order. Persists a ``RISK_ALERT_REGISTERED`` event
-        keyed by a virtual id that the ``wizard_stop_monitor`` handler uses.
+        keyed by a virtual id for the position-rules monitor.
         """
         virtual_id = f"ra-{uuid.uuid4().hex[:12]}"
         _record_event(

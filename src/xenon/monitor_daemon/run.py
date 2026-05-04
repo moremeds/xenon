@@ -21,14 +21,19 @@ Usage:
 import argparse
 import json
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
+from xenon.clients.ib_client import IBClient
+from xenon.db.engine import get_sync_engine
+from xenon.execution.account_scope import resolve_from_env
+from xenon.execution.brackets.executor.ib_executor import IBExecutor
 from xenon.monitor_daemon.daemon import MonitorDaemon
 from xenon.monitor_daemon.handlers import FillMonitorHandler, PresetRebalanceHandler
 from xenon.monitor_daemon.handlers.flex_token_check import FlexTokenCheck
-from xenon.monitor_daemon.handlers.wizard_stop_monitor import WizardStopMonitorHandler
+from xenon.monitor_daemon.handlers.position_rules import PositionRulesHandler
 
 # Paths — repo root is 4 parents up (src/xenon/monitor_daemon/run.py → repo root)
 PROJECT_DIR = Path(__file__).resolve().parent.parent.parent.parent
@@ -76,7 +81,19 @@ def create_daemon() -> MonitorDaemon:
 
     daemon.register(FlexTokenCheck())
 
-    daemon.register(WizardStopMonitorHandler())
+    if os.environ.get("XENON_POSITION_RULES_ENABLED", "0") == "1":
+        daemon.register(
+            PositionRulesHandler(
+                engine=get_sync_engine(),
+                executor=IBExecutor(),
+                ib_client=IBClient(),
+                scope=resolve_from_env(),
+            )
+        )
+
+        from xenon.monitor_daemon.handlers.arm_consumer import start_listen_loop
+
+        daemon.register_async_task(start_listen_loop)
 
     # Load previous state
     daemon.load_state()
@@ -143,6 +160,7 @@ def list_handlers():
     print("  fill_monitor       - Monitor orders for fills (60s)")
     print("  preset_rebalance   - Index constituent updates (weekly)")
     print("  flex_token_check   - IB Flex token expiry reminders (daily)")
+    print("  position_rules     - Position protection rules (flagged)")
     print()
     print("Add new handlers by:")
     print("  1. Create scripts/monitor_daemon/handlers/my_handler.py")

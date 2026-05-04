@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import json
 import logging
+import asyncio
+import os
 from collections import defaultdict
 from typing import Any
 
 from sqlalchemy import text
 
-from xenon.db.events import CHANNEL_FILL_RECORDED
+from xenon.db.events import CHANNEL_FILL_RECORDED, EventSubscriber
 from xenon.execution.brackets import arm_hook
 
 logger = logging.getLogger(__name__)
@@ -69,3 +71,56 @@ def _already_dead_lettered(engine, source_event_id: int) -> bool:
             {"source_event_id": source_event_id},
         ).scalar_one()
     return bool(count)
+
+
+async def _listen_loop() -> None:
+    """Long-lived LISTEN coroutine; one subscriber per daemon process."""
+    from xenon.db.engine import get_sync_engine
+
+    dsn = os.environ.get("DATABASE_URL")
+    if not dsn:
+        logger.warning("arm_consumer: DATABASE_URL unset; listen loop disabled")
+        return
+
+    engine = get_sync_engine()
+    subscriber = EventSubscriber(dsn=dsn, channels=[CHANNEL_FILL_RECORDED])
+    subscriber.on(CHANNEL_FILL_RECORDED, lambda _channel, payload: _dispatch(engine, payload))
+    await subscriber.start()
+    try:
+        while True:
+            await asyncio.sleep(60)
+    finally:
+        await subscriber.stop()
+
+
+def _dispatch(engine, raw_payload: str | None) -> None:
+    if raw_payload is None:
+        return
+
+    source_event_id: int
+    payload: dict[str, Any]
+    if raw_payload.isdigit():
+        source_event_id = int(raw_payload)
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT payload FROM events.outbox WHERE id = :event_id"),
+                {"event_id": source_event_id},
+            ).first()
+        if row is None:
+            logger.warning("arm_consumer: outbox event %s not found", source_event_id)
+            return
+        payload = dict(row.payload or {})
+    else:
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            logger.warning("arm_consumer: malformed NOTIFY payload; skipping")
+            return
+        source_event_id = int(payload.get("__outbox_id", -1))
+
+    process_event_with_dlq(engine=engine, source_event_id=source_event_id, payload=payload)
+
+
+def start_listen_loop() -> None:
+    """Sync entry point for MonitorDaemon's side-task thread."""
+    asyncio.run(_listen_loop())

@@ -6,8 +6,8 @@ For V1 defined-risk spreads, after a combo FILLED we:
 2. Arm a Risk Alert (assisted-exit) row — NOT a stop-loss per spec §9.2.
 
 Retries TP attach with exponential backoff. On terminal failure we leave the
-session in PROTECTION_PENDING and emit a session event; the monitor daemon
-(rehydrate + wizard_stop_monitor) will re-drive.
+session in PROTECTION_PENDING and emit a session event; rehydrate and the
+position-rules monitor can re-drive.
 
 Gate-4 guard: if the proposed TP would short an uncovered leg we refuse the
 TP attach and route to Risk Alert only.
