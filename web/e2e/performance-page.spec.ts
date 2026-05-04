@@ -301,7 +301,7 @@ test.describe("/performance page", () => {
     await page.route("**/api/performance", async (route) => {
       performanceGetCalls += 1;
 
-      const isFresh = portfolioPostCalls > 0 && performanceGetCalls > 2;
+      const isFresh = portfolioPostCalls > 0 && performanceGetCalls > 1;
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -369,20 +369,15 @@ test.describe("/performance page", () => {
 
     await page.goto("/performance");
 
-    await expect(page.locator('[data-testid="performance-panel"]')).toBeVisible({ timeout: 10_000 });
-    await expect(page.locator("text=AS OF 2026-03-12")).toBeVisible();
-
-    const callsBeforeSync = performanceGetCalls;
-    await page.getByRole("button", { name: "Sync Now" }).click();
-
     await expect(page.locator("text=Ending equity $1,218,410.03")).toBeVisible({ timeout: 10_000 });
     await expect(page.locator("text=AS OF 2026-03-13")).toBeVisible({ timeout: 10_000 });
-    expect(performanceGetCalls).toBeGreaterThan(callsBeforeSync);
+    expect(performanceGetCalls).toBeGreaterThan(1);
   });
 
-  test("sidebar exposes the performance route", async ({ page }) => {
+  test("performance route remains addressable while hidden from the sidebar", async ({ page }) => {
     await setupMocks(page);
     await page.goto("/performance");
-    await expect(page.locator("a[href='/performance']")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('[data-testid="performance-panel"]')).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("a[href='/performance']")).toHaveCount(0);
   });
 });

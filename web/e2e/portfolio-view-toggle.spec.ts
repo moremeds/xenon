@@ -199,7 +199,12 @@ test.describe('Portfolio View Toggle — By Structure', () => {
     await context.clearCookies();
     await installMocks(page);
     await page.addInitScript(() => {
-      try { window.localStorage.removeItem('xenon.portfolio.view'); } catch { /* noop */ }
+      try {
+        if (!window.sessionStorage.getItem('xenon.portfolio.view.test-cleared')) {
+          window.localStorage.removeItem('xenon.portfolio.view');
+          window.sessionStorage.setItem('xenon.portfolio.view.test-cleared', '1');
+        }
+      } catch { /* noop */ }
     });
   });
 
@@ -225,22 +230,22 @@ test.describe('Portfolio View Toggle — By Structure', () => {
   test('toggle to By Risk reveals risk sections and persists across reload', async ({ page }) => {
     await page.goto('/portfolio');
     await page.getByTestId('toggle-by-risk').click();
-    await expect(page.getByText('Defined Risk Positions')).toBeVisible();
+    await expect(page.getByText(/^Defined Risk Positions/)).toBeVisible();
     await expect(page.getByText('Equity Positions')).toBeVisible();
 
     await page.reload();
     await page.getByTestId('portfolio-view-toggle').waitFor();
     await expect(page.getByTestId('toggle-by-risk')).toHaveAttribute('aria-selected', 'true');
-    await expect(page.getByText('Defined Risk Positions')).toBeVisible();
+    await expect(page.getByText(/^Defined Risk Positions/)).toBeVisible();
   });
 
   test('toggle back to By Structure returns to ticker cards', async ({ page }) => {
     await page.goto('/portfolio');
     await page.getByTestId('toggle-by-risk').click();
-    await expect(page.getByText('Defined Risk Positions')).toBeVisible();
+    await expect(page.getByText(/^Defined Risk Positions/)).toBeVisible();
     await page.getByTestId('toggle-by-structure').click();
     await expect(page.locator('[data-ticker="TSLA"]')).toBeVisible();
-    await expect(page.getByText('Defined Risk Positions')).toHaveCount(0);
+    await expect(page.getByText(/^Defined Risk Positions/)).toHaveCount(0);
   });
 
   test('collapse a category sub-block hides its rows (aria-expanded flips)', async ({ page }) => {
