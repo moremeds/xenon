@@ -62,6 +62,8 @@ The `bracket_policies.auto_place` boolean controls trigger behavior:
 - `auto_place = TRUE` (v1 default for all new rule_kinds) → MKT-flatten on trigger.
 - `auto_place = FALSE` → emit alert + macOS notification, state stays `ARMED`. Matches the existing `combo_tp_alert` semantics from the wizard pipeline.
 
+**Alert-only debounce.** A row in `ARMED` whose threshold remains breached would otherwise re-fire alerts every 30s tick. v1 debounces with `min_realert_interval_s` (default `3600` = 1 hour) tracked in `state_data.last_alert_at`. Edge-triggered: alert fires the first tick the threshold crosses; suppressed while breach is sustained until either the interval expires or the threshold un-crosses (which resets `last_alert_at` to NULL so the next crossing re-fires). The row stays `ARMED` until operator close or external position-flat detection moves it to `CANCELED`.
+
 This makes the new system orthogonal to the existing combo-wizard Risk Alert flow (spec §9.2). Wizard guards the entry decision pre-fill; this engine guards the position state post-fill. Different lifecycle, different store, no conflict.
 
 ## 4. Architecture
@@ -70,20 +72,20 @@ This makes the new system orthogonal to the existing combo-wizard Risk Alert flo
 
 The codebase already has 80% of the abstraction this work needs. Existing assets used:
 
-| Component                            | Location                                                   | Reuse                                                                                    |
-| ------------------------------------ | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `MonitorDaemon` orchestrator         | `src/xenon/monitor_daemon/daemon.py`                       | Hosts the new handler                                                                    |
-| `BaseHandler` ABC                    | `src/xenon/monitor_daemon/handlers/base.py`                | Parent class for `PositionRulesHandler`                                                  |
-| `wizard_stop_monitor` handler        | `src/xenon/monitor_daemon/handlers/wizard_stop_monitor.py` | Reference template; reroutes to new table in Migration B                                 |
-| `combo_wizard/protect.py`            | `src/xenon/execution/combo_wizard/`                        | Reference for retries, Gate-4, signed pricing; reroutes to new table in Migration B      |
-| `wizard_protection` table            | `src/xenon/db/schema.py`                                   | Renamed and reshaped to `position_protection` (Migration B); empty per user confirmation |
-| `orders_store.record_fill`           | `src/xenon/execution/orders_store.py`                      | Single integration point for the post-fill arming hook                                   |
-| `xenon-ib-place-order` CLI           | `src/xenon/execution/ib_place_order.py`                    | Subprocess write path for native bracket arming + MKT-flatten                            |
-| `xenon-ib-order-manage` CLI          | `src/xenon/execution/ib_order_manage.py`                   | Subprocess for cancel during disarm                                                      |
-| `account_scope.py`                   | `src/xenon/execution/account_scope.py`                     | Routes broker/env/account; selects which CLI to invoke                                   |
-| `IBClient` / `FutuClient` singletons | `src/xenon/clients/`                                       | In-process read path for marks, spot, position state                                     |
-| `events.outbox` + LISTEN/NOTIFY      | `src/xenon/db/events.py`                                   | Audit log + live UI updates                                                              |
-| Postgres advisory lock pattern       | `src/xenon/api/services/advisory_lock.py`                  | Daemon singleton enforcement                                                             |
+| Component                            | Location                                                   | Reuse                                                                                                                                                                |
+| ------------------------------------ | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MonitorDaemon` orchestrator         | `src/xenon/monitor_daemon/daemon.py`                       | Hosts the new handler                                                                                                                                                |
+| `BaseHandler` ABC                    | `src/xenon/monitor_daemon/handlers/base.py`                | Parent class for `PositionRulesHandler`                                                                                                                              |
+| `wizard_stop_monitor` handler        | `src/xenon/monitor_daemon/handlers/wizard_stop_monitor.py` | **Replaced** by `rules/combo_tp_alert.py` in Migration B (file deleted). Crossing-detection logic (`_crossed`, notify path) is lifted verbatim into the rule module. |
+| `combo_wizard/protect.py`            | `src/xenon/execution/combo_wizard/`                        | Reference for retries, Gate-4, signed pricing; rewires INSERT to `position_protection` with `rule_kind='combo_tp_alert'` in Migration B                              |
+| `wizard_protection` table            | `src/xenon/db/schema.py`                                   | Renamed and reshaped to `position_protection` (Migration B); empty per user confirmation                                                                             |
+| `orders_store.record_fill`           | `src/xenon/execution/orders_store.py`                      | Single integration point for the post-fill arming hook                                                                                                               |
+| `xenon-ib-place-order` CLI           | `src/xenon/execution/ib_place_order.py`                    | Subprocess write path for native bracket arming + MKT-flatten                                                                                                        |
+| `xenon-ib-order-manage` CLI          | `src/xenon/execution/ib_order_manage.py`                   | Subprocess for cancel during disarm                                                                                                                                  |
+| `account_scope.py`                   | `src/xenon/execution/account_scope.py`                     | Routes broker/env/account; selects which CLI to invoke                                                                                                               |
+| `IBClient` / `FutuClient` singletons | `src/xenon/clients/`                                       | In-process read path for marks, spot, position state                                                                                                                 |
+| `events.outbox` + LISTEN/NOTIFY      | `src/xenon/db/events.py`                                   | Audit log + live UI updates                                                                                                                                          |
+| Postgres advisory lock pattern       | `src/xenon/api/services/advisory_lock.py`                  | Daemon singleton enforcement                                                                                                                                         |
 
 ### 4.2 New code (delta)
 
@@ -99,10 +101,11 @@ src/xenon/execution/brackets/                    NEW
     ├── stop_loss.py       ~120 LOC
     ├── trailing_tp.py     ~140 LOC
     ├── take_profit_fixed.py ~80 LOC
-    └── combo_tp_alert.py  ~50  LOC — wraps existing wizard_stop_monitor logic
+    └── combo_tp_alert.py  ~80  LOC — lifts crossing-detection from wizard_stop_monitor (deleted in Migration B)
 
-src/xenon/monitor_daemon/handlers/               EXTEND
-└── position_rules.py      ~150 LOC — PositionRulesHandler(BaseHandler)
+src/xenon/monitor_daemon/handlers/               EXTEND + DELETE
+├── position_rules.py      ~150 LOC — PositionRulesHandler(BaseHandler)
+└── wizard_stop_monitor.py    DELETE — logic absorbed into rules/combo_tp_alert.py
 
 src/xenon/db/                                    EXTEND
 ├── schema.py              add position_protection + bracket_policies
@@ -120,7 +123,7 @@ CLI entry point                                  NEW
 └── xenon-position-rules    list / show / cancel / sweep / health
 ```
 
-Approximately **1100 new LOC + 1 alembic migration + 1 CI guard**. No deletions beyond the empty `wizard_protection` table.
+Approximately **1100 new LOC + 1 alembic migration + 1 CI guard**. Migration B deletes the empty `wizard_protection` table and `src/xenon/monitor_daemon/handlers/wizard_stop_monitor.py` (its `_crossed` + notify logic moves into `rules/combo_tp_alert.py`; the handler itself is replaced by the new `PositionRulesHandler` for all rule_kinds including `combo_tp_alert`).
 
 ### 4.3 Layered architecture
 
@@ -184,7 +187,7 @@ When Futu gets a write CLI, the handler gains one `elif` line in one method; not
 | `asset_class`          | Text NOT NULL                         | `stock` / `long_option` / `debit_combo` / `credit_spread` / `covered_call` / `unclassified` |
 | `rule_kind`            | Text NOT NULL                         | `stop_loss` / `trailing_tp` / `take_profit_fixed` / `combo_tp_alert`                        |
 | `state`                | Text NOT NULL default `PENDING_ARM`   | FSM (§7)                                                                                    |
-| `config`               | JSONB NOT NULL                        | Frozen at arm time                                                                          |
+| `config`               | JSONB NOT NULL                        | Frozen at row insert (PENDING_ARM); never re-read from `bracket_policies` after that        |
 | `state_data`           | JSONB NOT NULL default `{}`           | Runtime: MFE, last quote, retry counts                                                      |
 | `native_order_perm_id` | BigInt nullable                       | IB perm_id of broker-side STP/LMT if armed                                                  |
 | `native_order_state`   | Text nullable                         | Last-known broker-side status                                                               |
@@ -204,19 +207,19 @@ When Futu gets a write CLI, the handler gains one `elif` line in one method; not
 
 ### 5.2 `xenon.bracket_policies` (NEW — defaults seed)
 
-| Column           | Type                                  | Notes                                             |
-| ---------------- | ------------------------------------- | ------------------------------------------------- |
-| `policy_id`      | BigInt PK autoincrement               |                                                   |
-| `broker`         | Text nullable                         | NULL = wildcard                                   |
-| `account_env`    | Text nullable                         | NULL = wildcard                                   |
-| `broker_account` | Text nullable                         | NULL = wildcard                                   |
-| `asset_class`    | Text NOT NULL                         |                                                   |
-| `rule_kind`      | Text NOT NULL                         |                                                   |
-| `enabled`        | Bool NOT NULL default TRUE            | Kill switch                                       |
-| `auto_place`     | Bool NOT NULL default TRUE            | TRUE = MKT-flatten on trigger; FALSE = alert-only |
-| `config`         | JSONB NOT NULL                        | Default config merged into row at arm time        |
-| `created_at`     | TIMESTAMPTZ NOT NULL default `tz_now` |                                                   |
-| `updated_at`     | TIMESTAMPTZ NOT NULL default `tz_now` |                                                   |
+| Column           | Type                                  | Notes                                                                       |
+| ---------------- | ------------------------------------- | --------------------------------------------------------------------------- |
+| `policy_id`      | BigInt PK autoincrement               |                                                                             |
+| `broker`         | Text nullable                         | NULL = wildcard                                                             |
+| `account_env`    | Text nullable                         | NULL = wildcard                                                             |
+| `broker_account` | Text nullable                         | NULL = wildcard                                                             |
+| `asset_class`    | Text NOT NULL                         |                                                                             |
+| `rule_kind`      | Text NOT NULL                         |                                                                             |
+| `enabled`        | Bool NOT NULL default TRUE            | Kill switch                                                                 |
+| `auto_place`     | Bool NOT NULL default TRUE            | TRUE = MKT-flatten on trigger; FALSE = alert-only                           |
+| `config`         | JSONB NOT NULL                        | Default config copied into the new `position_protection` row at insert time |
+| `created_at`     | TIMESTAMPTZ NOT NULL default `tz_now` |                                                                             |
+| `updated_at`     | TIMESTAMPTZ NOT NULL default `tz_now` |                                                                             |
 
 **Constraint:** `UNIQUE(broker, account_env, broker_account, asset_class, rule_kind)` — handle NULL collations via `COALESCE(...,'*')` expression index.
 
@@ -272,6 +275,39 @@ INSERT INTO xenon.bracket_policies (asset_class, rule_kind, auto_place, config) 
 
 Note: `combo_tp_alert` is not in the seed because it's set per-session by the existing `combo_wizard/protect.py` pipeline, with `auto_place = FALSE` to preserve the wizard's existing alert-only semantics.
 
+### 5.5 JSONB schemas + CHECK constraints
+
+Two JSONB columns (`position_descriptor`, `config`, `state_data`) are otherwise schemaless — easy to typo, hard to debug. v1 ships explicit Pydantic models per shape and a CI guard validating seed rows + a Postgres CHECK on rule_kind enum.
+
+**`position_descriptor` shape** (frozen):
+
+```jsonc
+{
+  "asset_class": "credit_spread",
+  "opened_at": "2026-05-04T14:23:11Z",
+  "opener_user_id": "user_2A...",
+  "source": "fastapi_orders_place" | "combo_wizard" | "sweep_cli" | "reconcile_discovered",
+  "first_fill_id": 9876,
+  "anchor_price": 1.42,                         // see §6.4 — frozen entry-price anchor
+  "anchor_currency": "USD",
+  "legs": [
+    { "sec_type": "OPT", "symbol": "GOOG", "expiry": "20260417",
+      "strike": 315.0, "right": "C", "action": "BUY",
+      "ratio": 1, "fill_price": 5.20, "con_id": 123456789 }
+  ]
+}
+```
+
+**`config` shape** is rule_kind-specific. Each `rules/{kind}.py` exports a Pydantic `ConfigModel`. The `bracket_policies` queries module validates inserts against these models — typo'd seed rows fail at insert, not at handler eval.
+
+**Postgres-level CHECK constraints (v1):**
+
+- `position_protection.rule_kind IN ('stop_loss','trailing_tp','take_profit_fixed','combo_tp_alert')`
+- `position_protection.asset_class IN ('stock','long_option','debit_combo','credit_spread','covered_call','unclassified')`
+- `bracket_policies.rule_kind` and `bracket_policies.asset_class` — same enum values
+
+The CHECK constraints are intentionally narrow — adding a v2 rule_kind requires an Alembic migration, which is the right level of friction for "we're growing the engine."
+
 ## 6. Post-fill arming hook
 
 ### 6.1 Integration point
@@ -320,6 +356,88 @@ def classify_position(fill_record, full_position) -> AssetClass:
 
 `UNCLASSIFIED` is a legitimate v1 outcome — no rows inserted, operator notified.
 
+**Manual leg-by-leg construction (operator opens a credit spread one leg at a time through `/orders/place` rather than the combo wizard):** the classifier sees leg 1 with no parent BAG and would naïvely classify it as `LONG_OPTION` or `UNCLASSIFIED`, then leg 2 fills and the position is now a credit spread but leg-1's rule is wrong. Two layered defenses:
+
+1. The atomicity gate (§6.3) holds classification on any single-leg fill that has a sibling order at the same scope/symbol/expiry within `manual_assembly_window_s` (default 60s).
+2. v1 policy: **multi-leg structures should go through combo wizard or a parent-BAG order**. Manual leg-by-leg construction is unsupported and surfaces a `manual_multi_leg_unsupported` operator notification when detected. This matches existing combo wizard policy and the user's actual workflow.
+
+### 6.3 Multi-leg fill atomicity
+
+`record_fill()` fires per execution, not per parent order. A 4-leg condor produces 4 separate hook invocations. Without an atomicity gate, partial-state classification would arm wrong rules.
+
+Gate logic:
+
+```
+fill arrives →
+  parent_order_id = lookup_parent(fill.submission_id)            # via order_submissions
+  if parent is single-leg:
+      classify + arm immediately
+  else (parent is multi-leg BAG):
+      mark fill as 'partial' in state
+      check: have all expected legs of parent now filled?
+        no  → return without classifying (next fill will retry)
+        yes → fetch all sibling fills, build combined position, classify, arm
+```
+
+Implementation notes:
+
+- Parent leg-count comes from `order_submissions.legs_count` (existing column on the BAG order row) — no new state needed.
+- Reconciliation-discovered fills (post-restart) use the same gate against `order_submissions` history.
+- The classifier is called **once per parent order** when the last leg fills.
+- Single-leg orders bypass the gate entirely.
+
+This also handles the manual leg-by-leg edge case (§6.2) when paired with `manual_assembly_window_s`.
+
+### 6.4 Entry-price anchor semantics
+
+"Entry price" referenced throughout §3.1 and the seed config is defined precisely as: **the position's first-fill price at the moment the protection row was inserted**, frozen in `position_protection.state_data.anchor_price` at PENDING_ARM creation. Subsequent fills (add-ons) **do not move the anchor** — the existing rule keeps its original threshold. The unique index `(scope, position_key, rule_kind)` plus `ON CONFLICT DO NOTHING` ensures add-on fills do not create new rules.
+
+Per asset class, "first-fill price" resolves as:
+
+| Asset class     | Anchor                                                                                                              |
+| --------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `stock`         | volume-weighted average fill price across all child executions of the parent order                                  |
+| `long_option`   | volume-weighted average fill price                                                                                  |
+| `debit_combo`   | net debit paid (signed positive)                                                                                    |
+| `credit_spread` | net credit received (signed negative in IB convention) — also stored as `anchor_credit` for clarity in trigger math |
+| `covered_call`  | n/a (refused)                                                                                                       |
+
+Implication: **add-ons to an existing position are NOT auto-protected with their own rule.** The original rule still applies, sized to the original entry. If the operator wants protection at the new average cost, they must manually cancel the existing rule and re-arm via `xenon-position-rules sweep --apply` (recomputes anchor from current weighted cost). This is the v1 "dumb but safe" behavior; v2 may add re-anchoring on add-on detection.
+
+### 6.5 Coverage assumption — out-of-band fills
+
+The post-fill arming hook only fires for fills that flow through `orders_store.record_fill()`. Fills entered via:
+
+- IB mobile app
+- TWS direct entry (not through Xenon)
+- Broker-side options assignment / exercise
+- Corporate-action-induced position changes
+
+…bypass the hook entirely. Those positions appear in `IBClient.positions()` but have no `position_protection` row. v1 detects this via a daily reconciliation task (runs alongside the §10.4 quarter-end re-arm sweep, after market close):
+
+```
+for each position in IBClient.positions(scope):
+  if no position_protection row exists in non-terminal state:
+    emit outbox event kind='unprotected_position_detected'
+    increment health.unprotected_count
+    notify operator via macOS toast (rate-limited daily)
+```
+
+The operator's remediation is `xenon-position-rules sweep --apply --account-scope <…>` or per-position arming. The UI portfolio page surfaces these via the per-position shield badge in `UNCLASSIFIED`/none state with a tooltip "out-of-band fill — sweep to protect".
+
+### 6.6 Failure modes — arm hook
+
+The hook is wrapped in a try/except that catches everything except `KeyboardInterrupt`/`SystemExit`. Failures are categorised:
+
+| Failure                                                                                  | Handling                                                                                                                                                                                                                                                                          |
+| ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Classifier raises (e.g., malformed leg shape)                                            | Log + outbox event `kind='arm_hook_classify_error'`; fill record is not affected.                                                                                                                                                                                                 |
+| `INSERT INTO position_protection` raises (constraint violation other than `ON CONFLICT`) | Log + outbox event; fill record durable.                                                                                                                                                                                                                                          |
+| **DB connection lost mid-hook**                                                          | Degenerate case: `record_fill()` itself would have failed before the hook ran, since the fill INSERT and hook share the same DB transaction. The hook is called only if the fill was already durably written. So "DB down → hook silently skipped" is impossible by construction. |
+| Notify path raises (macOS not available)                                                 | Swallow; existing `_default_notify` does this already.                                                                                                                                                                                                                            |
+
+The hook **never raises** to the caller. `record_fill()` always returns successfully if the fill was durably written.
+
 ## 7. State machine
 
 ```
@@ -364,6 +482,8 @@ class PositionRulesHandler(BaseHandler):
 
     def execute(self) -> dict:
         rows = list_active_rows(state_in=("PENDING_ARM", "ARMED", "TRIGGERED"))
+        mark_cache: dict[ContractKey, Mark] = {}            # per-tick coalescing (§S3)
+        spot_cache: dict[Symbol, SpotPrice] = {}            # underlying spot per-tick coalescing
         for row in rows:
             rule = RULE_REGISTRY[row.rule_kind]
             scope = AccountScope.from_row(row)
@@ -374,9 +494,19 @@ class PositionRulesHandler(BaseHandler):
                 apply_arm_result(row, result)            # → ARMED | FAILED | retry
 
             elif row.state == "ARMED":
-                marks = read_marks(scope, position)      # in-process IBClient/FutuClient
-                if not marks_fresh(marks):               # staleness gate
+                # 1. Native-order liveness check (per-tick, not boot-only)
+                if row.native_order_perm_id is not None:
+                    live = verify_native_order_live(scope, row.native_order_perm_id)
+                    if not live:
+                        on_native_order_externally_canceled(row, scope)   # → CANCELED + cleanup
+                        continue
+
+                # 2. Read marks (cached within this tick)
+                marks = read_marks(scope, position, cache=mark_cache, spot_cache=spot_cache)
+                if not marks_fresh(marks):               # staleness gate (§10.1)
                     record_stale_skip(row); continue
+
+                # 3. Evaluate trigger
                 decision = rule.evaluate(scope, position, row.config, row.state_data, marks)
                 apply_evaluation(row, decision, scope)   # may → TRIGGERED → executor.flatten_mkt
 
@@ -384,6 +514,12 @@ class PositionRulesHandler(BaseHandler):
                 reconcile_triggered(row, scope)          # poll broker for close-order terminal
         return {"evaluated": len(rows)}
 ```
+
+**Per-tick semantics — explicit:**
+
+- **Native-order liveness check** (every tick, not boot-only): for ARMED rows with `native_order_perm_id`, the handler queries IB-side order state. If broker reports `Cancelled` / `Inactive` / `ApiCancelled`, the operator manually killed the child in TWS — row transitions to `CANCELED`, any orphaned siblings are cleaned, no re-arm. This closes the "user cancelled in TWS, system thinks it's still protected" silent-failure window.
+- **Mark / spot coalescing**: `mark_cache` and `spot_cache` are scoped to a single tick. If 30 credit-spread rows reference SPY, the underlying spot is read once per tick across all of them. With ~50 positions this keeps per-tick IB API calls in the low-double-digits — well within IB's ~50/sec pacing limit.
+- **Order of operations matters**: liveness check before mark read, because a cancelled native bracket is more urgent than a fresh trigger evaluation.
 
 ## 9. Rule plug-in interface
 
@@ -405,12 +541,12 @@ class RuleEvaluator(Protocol):
 
 ### 9.1 v1 implementations
 
-| Module                       | Behavior                                                                                                                                                                                                         |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `rules/stop_loss.py`         | `arm`: stocks + long_options try IB-native STP via subprocess; combos return `SYNTHETIC_ONLY`. `evaluate`: pure compare mark to threshold.                                                                       |
-| `rules/trailing_tp.py`       | `arm`: same pattern; tracks MFE in `state_data`. `evaluate`: updates MFE every tick, fires when mark drops by `trail_pct` from MFE _after_ `activation_pct` is met.                                              |
-| `rules/take_profit_fixed.py` | Credit-spread-only in v1. `arm`: returns `SYNTHETIC_ONLY` (no native bracket on BAG combos). `evaluate`: triggers when `debit_to_close ≤ (1 - close_at_credit_pct) × credit_received`.                           |
-| `rules/combo_tp_alert.py`    | Wraps existing `wizard_stop_monitor` logic. Migration B reroutes its read/write to `position_protection` (filtered to `rule_kind='combo_tp_alert'`). Preserves alert-only semantics (`auto_place=FALSE` always). |
+| Module                       | Behavior                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rules/stop_loss.py`         | `arm`: stocks + long_options try IB-native STP via subprocess; combos return `SYNTHETIC_ONLY`. `evaluate`: pure compare mark to threshold.                                                                                                                                                                                                                                                                                                              |
+| `rules/trailing_tp.py`       | `arm`: same pattern; tracks MFE in `state_data`. `evaluate`: updates MFE every tick, fires when mark drops by `trail_pct` from MFE _after_ `activation_pct` is met.                                                                                                                                                                                                                                                                                     |
+| `rules/take_profit_fixed.py` | Credit-spread-only in v1. `arm`: returns `SYNTHETIC_ONLY` (no native bracket on BAG combos). `evaluate`: triggers when `debit_to_close ≤ (1 - close_at_credit_pct) × credit_received`.                                                                                                                                                                                                                                                                  |
+| `rules/combo_tp_alert.py`    | Lifts the `_crossed` / notify path from `wizard_stop_monitor.py` (which is **deleted** in Migration B). Combo wizard's `combo_wizard/protect.py` writes rows here with `rule_kind='combo_tp_alert'` and `auto_place=FALSE`. The new `PositionRulesHandler` evaluates these rows alongside every other rule_kind via `RULE_REGISTRY` dispatch — no second handler runs. Preserves spec §9.2 alert-only semantics for combo-wizard sessions specifically. |
 
 ## 10. Failure modes & safety policies
 
@@ -444,13 +580,15 @@ class RuleEvaluator(Protocol):
 
 ### 10.4 Concurrency / restart
 
-- **Daemon singleton:** `pg_try_advisory_lock(LOCK_KEY_POSITION_RULES)`. Two instances → one wins, the other no-ops.
+- **Daemon singleton:** `pg_try_advisory_lock(LOCK_KEY_POSITION_RULES)`. Two instances → one wins, the other no-ops. Lock is connection-scoped (released by Postgres when the daemon's PG connection closes); a hung daemon process holding the connection will hold the lock — operationally surfaced via the health endpoint's `last_tick_age_seconds` going stale.
 - **Row-level CAS:** every state transition uses `UPDATE … WHERE state=$expected RETURNING …`.
-- **Boot reconcile** runs once on daemon start before the first tick:
+- **Boot reconcile** runs once on daemon start before the first tick. **If `IBClient` is not connected at boot, reconcile is deferred** — rows stay in their current state, the handler tick begins normally, and reconcile is re-attempted on the first successful IB connection event (next bullet). Boot reconcile steps:
   1. `ARMED` rows with `native_order_perm_id` set: verify IB order live; if not → `PENDING_ARM` (re-arm) or `CANCELED` (position also gone).
   2. `TRIGGERED` rows: cross-check IB executions for matching close — filled → `CLOSED`; working → leave; not found → revert to `ARMED`.
   3. `PENDING_ARM` rows: leave; first tick retries arm.
+- **Reconnect-triggered reconcile**: `IBClient` exposes a `connected` event. The handler subscribes once at startup; on every connection-restored event (after a disconnect of any duration) it re-runs the boot reconcile sequence before resuming normal ticks. This catches drift accumulated during long Gateway outages (e.g., a user-cancellation in TWS that happened while we were disconnected).
 - **Quarter-end re-arm sweep** (separate daily cron at 16:30 ET): IB cancels untriggered GTC orders at end of calendar quarter ([IBKR docs](https://interactivebrokers.github.io/tws-api/bracket_order.html)). Sweep scans `ARMED` rows with `native_order_perm_id`, transitions stale ones to `PENDING_ARM`.
+- **Daily out-of-band fill sweep** (same daily cron, immediately after re-arm): scans `IBClient.positions()` for entries with no matching `position_protection` row in non-terminal state; emits `kind='unprotected_position_detected'` outbox events and increments `health.unprotected_count`. See §6.5.
 
 ### 10.5 Slippage policy — explicit
 
@@ -461,9 +599,25 @@ class RuleEvaluator(Protocol):
 
 We do **not** use STP-LMT in v1 — the user's "rigid red line" requirement explicitly chose unconditional exit over fill-protection. `outsideRth=False` on all native brackets; flip per-policy if user later opts in.
 
+**Weekend / overnight gap behavior — explicit:**
+
+- The synthetic monitor handler does not tick outside RTH (`requires_market_hours=True` per `BaseHandler` semantics).
+- Native brackets on IB use `outsideRth=False` per default policy.
+- **Combined effect:** a 10% Sunday-night futures gap or a 3am crypto-correlated equity move does not trigger anything until 9:30 ET Monday RTH open. The native bracket fires at the opening auction print (or any RTH print thereafter); the synthetic handler resumes ticking ~30s into the open.
+- This is a deliberate trade-off: pre/post-market liquidity is too thin for a tight stop to fill cleanly, and we'd rather take the open-print fill than be filled in pre-market on a 5-share crossed quote.
+- Users who want overnight protection must flip `outsideRth=True` on the relevant `bracket_policies.config` rows manually. v1 does not auto-detect "I have a long position over the weekend, give me overnight protection."
+
 ### 10.6 Naked-short (Gate-4) interaction
 
 Almost all protective closes reduce exposure → guard always allows. Edge case: covered-call stop on the stock leg leaves the short call uncovered. v1 refuses to arm covered calls (§3.1).
+
+### 10.7 Corporate actions
+
+A ticker rename, split, merger, or spin-off changes the IB contract underneath us. The `position_descriptor.legs[*].con_id` becomes stale; `position_key` no longer matches a real position; reading marks fails. Per memory `[no corporate-action guessing]` we do **not** auto-update the descriptor — manual operator intervention is required.
+
+v1 detects via the daily reconciliation pass: for every ARMED row, if the position no longer appears in `IBClient.positions()` _but a similar-symbol position with a different `con_id` does_, the row transitions to `FAILED(reason="corporate_action_suspected")` with a loud operator alert. The new position appears in the daily out-of-band sweep (§6.5) and the operator re-arms manually.
+
+Failing loud beats silently re-keying a stale row — which would either match nothing (defensive but invisible) or match the wrong contract (catastrophic).
 
 ## 11. Backfill — existing-positions sweep
 
@@ -480,7 +634,7 @@ xenon-position-rules sweep [--dry-run | --apply]
 - No-arg = dry-run, prints per-position table of intended inserts.
 - `--apply` required to insert; rows go in as `PENDING_ARM`.
 - `--interactive` prompts y/n per position.
-- `--rate-limit-per-min` defaults to 30 — caps native arming attempts to avoid IB API throttle.
+- `--rate-limit-per-min` defaults to 30. **Applies to native-arming attempts only** (the IB-side STP/LMT submissions), not the Postgres INSERTs. Inserting all rows in a 50-position sweep is fast and unbounded; the rate limit only governs the rate at which the handler then dequeues `PENDING_ARM` rows for native arming on subsequent ticks. Keeps IB API pacing under 50/sec even for large sweeps.
 
 The post-fill hook (§6) fires automatically for new fills; the sweep is the _only_ operator-initiated action that touches existing book.
 
@@ -502,11 +656,39 @@ The post-fill hook (§6) fires automatically for new fills; the sweep is the _on
 
 Auth via existing Clerk; no special privileges beyond order-path access.
 
+**`GET /position-rules/health` response shape:**
+
+```jsonc
+{
+  "schema_version": 1,
+  "daemon_alive": true,
+  "advisory_lock_held": true,
+  "last_tick_at": "2026-05-04T14:23:11Z",
+  "last_tick_age_seconds": 18,
+  "rule_counts_by_state": {
+    "PENDING_ARM": 0,
+    "ARMED": 12,
+    "TRIGGERED": 1,
+    "FAILED": 0,
+    "CANCELED": 47,
+    "CLOSED": 1842,
+    "SUPERSEDED": 8,
+  },
+  "stale_quote_skips_last_hour": 0,
+  "unprotected_position_count": 0,
+  "ib_connected": true,
+  "scope": { "broker": "IB", "account_env": "live", "broker_account": "U..." },
+}
+```
+
+The global UI indicator computes its color from: green if `daemon_alive && advisory_lock_held && last_tick_age_seconds < 60 && rule_counts_by_state.FAILED == 0 && unprotected_position_count == 0`; amber if any of those soft-fail; red if `last_tick_age_seconds > 300` or `!daemon_alive`.
+
 ### 12.3 events.outbox payload
 
 ```jsonc
 {
   "kind": "position_rule_transition",
+  "payload_version": 1, // bump on shape change; consumers branch
   "protection_id": 12345,
   "position_key": "OPT::GOOG::20260417::315::C",
   "rule_kind": "stop_loss",
@@ -518,7 +700,7 @@ Auth via existing Clerk; no special privileges beyond order-path access.
 }
 ```
 
-This is the audit log. Every transition produces exactly one row. The future markout simulator reads this stream.
+This is the audit log. Every transition produces exactly one row. The `payload_version` field is **mandatory from v1** so future shape changes don't silently break downstream consumers (notably the future markout simulator). The future markout simulator reads this stream.
 
 ### 12.4 Notifications (macOS only in v1)
 
@@ -590,11 +772,11 @@ Mandatory before live promotion (per memory `[paper-first for IB order bugs]`). 
 
 ### 13.8 New CI guard
 
-`scripts/checks/frozen_config_at_arm.py` — static check that `rules/*.py` reads `config` only from the row passed in, never directly from `bracket_policies` mid-tick. Prevents retroactive-policy bugs.
+`scripts/checks/frozen_config_at_arm.py` — static check enforcing the frozen-config invariant. Implementation: AST-based scan of every file under `src/xenon/execution/brackets/rules/`. Fails the build if any module imports from `xenon.db.queries.bracket_policies` or contains string-literal references to the `bracket_policies` table. Rule modules must operate exclusively on the `config` dict passed in by the handler — which is sourced from `position_protection.config`, frozen at insert time. Prevents the class of bug where a `psql UPDATE bracket_policies` would silently change the threshold of an already-armed position mid-flight.
 
 ## 14. Migration sequence
 
-Single PR, single Alembic revision, atomic.
+Single PR, single Alembic revision, atomic. **Forward-only** (see rollback note below).
 
 ```
 Migration A (additive):
@@ -602,7 +784,7 @@ Migration A (additive):
   CREATE TABLE xenon.bracket_policies
   INSERT 9 seed rows into bracket_policies
   CREATE indexes (partial + lookup)
-  CREATE CheckConstraints
+  CREATE CheckConstraints (broker, account_env, state, rule_kind, asset_class enums)
 
 Migration B (combo-wizard repointing — same alembic revision):
   ASSERT (SELECT COUNT(*) FROM xenon.wizard_protection) = 0
@@ -610,16 +792,25 @@ Migration B (combo-wizard repointing — same alembic revision):
   DROP TABLE xenon.wizard_protection
 
 Code edits (same PR):
-  src/xenon/db/schema.py                                  drop wizard_protection table def
-  src/xenon/db/queries/combo_wizard.py                    point queries at position_protection (filter rule_kind='combo_tp_alert')
-  src/xenon/execution/combo_wizard/protect.py             write rule_kind='combo_tp_alert' rows to position_protection
-  src/xenon/monitor_daemon/handlers/wizard_stop_monitor.py read position_protection filtered to rule_kind='combo_tp_alert'
-  src/xenon/db/tests/test_combo_wizard.py                 update fixtures
-  src/xenon/db/tests/test_schema.py                       drop wizard_protection assertion, add position_protection
+  src/xenon/db/schema.py                                  drop wizard_protection table def; add position_protection + bracket_policies
+  src/xenon/db/queries/combo_wizard.py                    point INSERT/UPDATE/SELECT at position_protection (filter rule_kind='combo_tp_alert')
+  src/xenon/execution/combo_wizard/protect.py             write rule_kind='combo_tp_alert' rows to position_protection (with auto_place=FALSE)
+  src/xenon/monitor_daemon/handlers/wizard_stop_monitor.py  DELETE — logic absorbed into rules/combo_tp_alert.py
+  src/xenon/monitor_daemon/run.py                         remove WizardStopMonitorHandler registration; register PositionRulesHandler
+  src/xenon/db/tests/test_combo_wizard.py                 update fixtures (table name + new shape)
+  src/xenon/db/tests/test_schema.py                       drop wizard_protection assertion, add position_protection + bracket_policies
   scripts/migrations/migrate_to_postgres.py               drop the now-stale wizard_protection block
 ```
 
 Per memory `[zero-break shim refactors]`, this is technically the riskier "single atomic" approach the user normally avoids. Justified here because (a) the table is empty, (b) the rename is mechanical, (c) the test surface catches semantic drift before merge. PR review pays attention.
+
+**Rollback strategy — explicit.** The Alembic `downgrade()` recreates an empty `wizard_protection` table for schema parity, but **cannot restore data** since the migration runs against an empty table by precondition. If something goes catastrophically wrong post-deploy and a real rollback is needed:
+
+1. **Preferred:** restore the Postgres database from the snapshot taken immediately before the migration ran (production deploy procedure includes a snapshot precondition).
+2. **Fallback:** `alembic downgrade <prev>` recreates `wizard_protection` empty; the codebase rolls back to the prior commit; combo-wizard pipeline resumes against an empty table (which it was already running against, so no data loss).
+3. The new `position_protection` rows are abandoned (left as terminal CANCELED via app code, then `DROP TABLE`). The outbox audit log preserves the event history regardless.
+
+The pre-deploy snapshot is non-negotiable. Even though the table is empty, the migration touches a load-bearing combo-wizard pipeline; a behavioral regression that's not data-loss is still a real risk.
 
 ## 15. Build phasing (TDD progression)
 
@@ -657,21 +848,29 @@ Feature flag: `XENON_POSITION_RULES_ENABLED` defaults to `0`. Enabled per-enviro
 
 - **Unique-constraint shape for `position_protection`** — partial unique on non-terminal states, or full unique with `SUPERSEDED` rows generated? Implementation-time decision; both work, picking based on which yields cleaner queries during phase 2.
 - **Polling cadence per rule_kind** — single 30s for v1; future per-rule_kind (e.g., 5s for trailing on hot positions, 60s for cold). Profile-driven decision after v1 has live data.
-- **Outbox payload schema versioning** — `kind='position_rule_transition'` v1 shape locked here; if schema evolves, add `version` field and consumers branch. Not a v1 concern.
+- **Re-anchoring on add-on fills** — v1 freezes the entry-price anchor at first-fill (§6.4). For ramp-add positions (operator builds size over multiple fills), this means later adds are protected at the first-fill anchor — possibly far from the new average cost. v2 may detect adds and offer a re-anchor prompt; v1 punts to the operator's manual sweep workflow. Decision: do nothing automatically, surface the situation in the UI ("position size changed by N% since arm" indicator on the drawer).
+- **`manual_assembly_window_s` value** — §6.2 / §6.3 use 60s as the window in which sibling single-leg fills get held for atomicity gating. Profile-driven; if false-hold rate is significant, tune lower; if false-pair rate (separate single-leg fills wrongly grouped) is significant, tune lower aggressively.
 
 ## 18. Decisions log (during brainstorm)
 
-| ID  | Decision                                                                                                                                                                                                                | Reasoning                                                              |
-| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| Q1  | All asset classes; IB only v1                                                                                                                                                                                           | Futu replicates IB stack later                                         |
-| Q2  | New fills auto; existing positions via explicit sweep                                                                                                                                                                   | Don't disturb live book on day 1                                       |
-| Q3  | Hybrid policy resolution (asset-class defaults, scope overrides)                                                                                                                                                        | Tighten via Gate-3 cap if needed                                       |
-| Q4  | Trailing TP activates after threshold for options/combos; immediate for stocks                                                                                                                                          | "Don't trail until I'm actually winning"                               |
-| Q5  | Concrete defaults: stocks −8% / 5%, long options −20% / 25% / +30% activation, debit combos 50%-of-max-loss / 25% trail / +25% activation, credit spreads (2× credit OR strike-touch) / 50% TP, covered calls refuse v1 | User-tuned during brainstorm; will be data-driven once simulator ships |
-| D1  | Generalize `wizard_protection` → `position_protection`                                                                                                                                                                  | Cleaner; table is empty                                                |
-| D2  | Auto-place vs alert-only is per-policy flag, not per-system                                                                                                                                                             | Preserves wizard's existing `combo_tp_alert` semantics                 |
-| D3  | Opaque deterministic `position_key` string                                                                                                                                                                              | No prior convention; reversible via descriptor JSONB                   |
-| D4  | Single PR for migration A+B                                                                                                                                                                                             | Empty table; mechanical reshape; atomic is acceptable                  |
+| ID  | Decision                                                                                                                                                                                                                | Reasoning                                                                                                                                   |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Q1  | All asset classes; IB only v1                                                                                                                                                                                           | Futu replicates IB stack later                                                                                                              |
+| Q2  | New fills auto; existing positions via explicit sweep                                                                                                                                                                   | Don't disturb live book on day 1                                                                                                            |
+| Q3  | Hybrid policy resolution (asset-class defaults, scope overrides)                                                                                                                                                        | Tighten via Gate-3 cap if needed                                                                                                            |
+| Q4  | Trailing TP activates after threshold for options/combos; immediate for stocks                                                                                                                                          | "Don't trail until I'm actually winning"                                                                                                    |
+| Q5  | Concrete defaults: stocks −8% / 5%, long options −20% / 25% / +30% activation, debit combos 50%-of-max-loss / 25% trail / +25% activation, credit spreads (2× credit OR strike-touch) / 50% TP, covered calls refuse v1 | User-tuned during brainstorm; will be data-driven once simulator ships                                                                      |
+| D1  | Generalize `wizard_protection` → `position_protection`                                                                                                                                                                  | Cleaner; table is empty                                                                                                                     |
+| D2  | Auto-place vs alert-only is per-policy flag, not per-system                                                                                                                                                             | Preserves wizard's existing `combo_tp_alert` semantics                                                                                      |
+| D3  | Opaque deterministic `position_key` string                                                                                                                                                                              | No prior convention; reversible via descriptor JSONB                                                                                        |
+| D4  | Single PR for migration A+B                                                                                                                                                                                             | Empty table; mechanical reshape; atomic is acceptable                                                                                       |
+| R1  | `wizard_stop_monitor.py` is **deleted** in Migration B; `rules/combo_tp_alert.py` absorbs its logic; `PositionRulesHandler` is the only handler                                                                         | Self-review found: keeping both handlers would double-evaluate `combo_tp_alert` rows. One handler, dispatch-by-rule_kind                    |
+| R2  | `config` is frozen at **insert time (PENDING_ARM)**, not arm time; CI guard enforces                                                                                                                                    | Self-review found wording inconsistency. Insert-time freeze is what the post-fill hook actually does; arm-time was misleading               |
+| R3  | Multi-leg fill atomicity gate via parent BAG order_id lookup; classification deferred until all legs filled                                                                                                             | Self-review found: per-execution `record_fill` would partial-classify combos and arm wrong rules                                            |
+| R4  | Entry-price anchor frozen in `state_data.anchor_price` at insert; add-on fills don't re-anchor                                                                                                                          | Self-review found "entry price" was undefined for ramp-add positions; pinned to first-fill weighted average                                 |
+| R5  | Native-order liveness check runs every tick (not boot-only) for ARMED rows with `native_order_perm_id`                                                                                                                  | Self-review found: user-cancellation in TWS would silently leave system thinking position is protected                                      |
+| R6  | Alert-only debounce via `min_realert_interval_s` (default 1h); edge-triggered fire on threshold crossing                                                                                                                | Self-review found: per-tick alert re-fire on sustained breach would be operationally awful                                                  |
+| R7  | Out-of-band fills (TWS direct, mobile app, assignment) detected via daily reconciliation pass; surfaced as `unprotected_position_detected` outbox events                                                                | Self-review found: post-fill hook only fires for fills through `orders_store`; positions opened outside that path were silently unprotected |
 
 ## 19. Research / external sources
 
@@ -694,7 +893,14 @@ v1 ships when all of the following hold:
 - [ ] `xenon-position-rules list/show/cancel/sweep/health` CLIs work against the paper environment.
 - [ ] FastAPI `/position-rules` endpoints respond correctly through Clerk auth.
 - [ ] Web UI shield badge + drawer + cancel + live update verified in browser.
-- [ ] `XENON_POSITION_RULES_ENABLED=1` flag flipped on paper; flag stays at `0` for live until paper has at least 14 days of clean operation.
+- [ ] **14 days of "clean operation" on paper** before flipping `XENON_POSITION_RULES_ENABLED=1` on live (real-money). "Clean operation" defined explicitly as **all** of:
+  - Zero rows reach `FAILED` state for non-structural reasons (`naked_short_blocked` and `corporate_action_suspected` are structural, allowed)
+  - Zero unexpected triggers (a trigger that fires when the operator believes the threshold should not have been hit — judged manually against the daily outbox event review)
+  - At least 1 successful end-to-end trigger → MKT-flatten → CLOSED cycle observed in paper (proves the write path actually works under live IB conditions)
+  - At least 1 successful boot-reconcile observed (daemon kill + restart with ARMED rows, recovers cleanly)
+  - At least 1 successful native-bracket attach + IB-side liveness verification observed
+  - `health.unprotected_position_count` returned to zero within 1 daily-sweep cycle of any out-of-band fill detected
+  - Quote staleness skip rate (`stale_quote_skips_last_hour` / `rule_counts_by_state.ARMED`) stays below 5% in aggregate during RTH
 - [ ] `docs/reference/order-path-incident-history.md` gets a new row referencing this design (per CLAUDE.md convention for order-path changes).
 
 ---
