@@ -317,6 +317,47 @@ async function injectMockWebSocket(page: import("@playwright/test").Page) {
                 } as MessageEvent<string>);
               }, 5);
             }
+            if (Array.isArray(msg.contracts) && msg.contracts.length > 0) {
+              window.setTimeout(() => {
+                const updates: Record<string, unknown> = {};
+                for (const contract of msg.contracts) {
+                  if (contract.symbol !== "PLTR") continue;
+                  const expiry = String(contract.expiry).replace(/-/g, "");
+                  const strike = Number(contract.strike);
+                  const right = contract.right === "P" ? "P" : "C";
+                  const key = `PLTR_${expiry}_${strike}_${right}`;
+                  updates[key] = {
+                    symbol: key,
+                    last: right === "C" ? 3.4 : 4.6,
+                    lastIsCalculated: false,
+                    bid: right === "C" ? 3.3 : 4.5,
+                    ask: right === "C" ? 3.5 : 4.7,
+                    bidSize: 50,
+                    askSize: 50,
+                    volume: 1200,
+                    high: null,
+                    low: null,
+                    open: null,
+                    close: null,
+                    week52High: null,
+                    week52Low: null,
+                    avgVolume: null,
+                    delta: right === "C" ? 0.55 : -0.45,
+                    gamma: 0.03,
+                    theta: right === "C" ? -0.04 : -0.03,
+                    vega: right === "C" ? 0.12 : 0.11,
+                    impliedVol: right === "C" ? 0.42 : 0.44,
+                    undPrice: 88.5,
+                    timestamp: new Date().toISOString(),
+                  };
+                }
+                if (Object.keys(updates).length > 0) {
+                  this.onmessage?.({
+                    data: JSON.stringify({ type: "batch", updates }),
+                  } as MessageEvent<string>);
+                }
+              }, 5);
+            }
           }
         } catch {
           // ignore
