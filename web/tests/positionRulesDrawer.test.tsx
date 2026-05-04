@@ -53,16 +53,18 @@ describe("PositionRulesDrawer", () => {
   });
 
   it("cancels a rule and refreshes the filtered rows", async () => {
+    const onChanged = vi.fn();
     vi.mocked(api.fetchPositionRules)
       .mockResolvedValueOnce([makeRule()])
       .mockResolvedValueOnce([makeRule({ state: "CANCELED", native_order_perm_id: null })]);
     vi.mocked(api.cancelRule).mockResolvedValue({ protection_id: 101, state: "CANCELED" });
 
-    render(<PositionRulesDrawer positionKey="STK::AAPL" onClose={() => {}} />);
+    render(<PositionRulesDrawer positionKey="STK::AAPL" onClose={() => {}} onChanged={onChanged} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Cancel rule" }));
 
     await waitFor(() => expect(api.cancelRule).toHaveBeenCalledWith(101));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledOnce());
     await waitFor(() => expect(screen.getByText("CANCELED")).toBeTruthy());
   });
 });

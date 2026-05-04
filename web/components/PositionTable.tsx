@@ -640,6 +640,7 @@ export default function PositionTable({
   showExpiry = true,
   showUnderlying = false,
   positionRules,
+  onRulesChanged,
   prices,
   readonly = false,
   hideHeader = false,
@@ -649,6 +650,7 @@ export default function PositionTable({
   showExpiry?: boolean;
   showUnderlying?: boolean;
   positionRules?: PositionRule[];
+  onRulesChanged?: () => void;
   prices?: Record<string, PriceData>;
   /**
    * When true, blocks all navigation and order-entry affordances.
@@ -869,6 +871,7 @@ export default function PositionTable({
       {!readonly && drawerPositionKey ? (
         <PositionRulesDrawer
           positionKey={drawerPositionKey}
+          onChanged={onRulesChanged}
           onClose={() => setDrawerPositionKey(null)}
         />
       ) : null}

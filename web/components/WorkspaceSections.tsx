@@ -1253,7 +1253,8 @@ function PortfolioSections({
     extractPositionSearchText,
   );
   const structureFilter = useTableFilter(positions, extractPositionSearchText);
-  const { rules: positionRules } = usePositionRules(activeAccount === "ib");
+  const { rules: positionRules, refresh: refreshPositionRules } =
+    usePositionRules(activeAccount === "ib");
 
   // View mode hydration: null until we've read localStorage to avoid SSR flash.
   const [viewMode, setViewMode] = useState<PortfolioViewMode | null>(null);
@@ -1370,6 +1371,7 @@ function PortfolioSections({
           positions={structureFilter.filtered}
           prices={prices}
           positionRules={positionRules}
+          onRulesChanged={refreshPositionRules}
           activeAccount={activeAccount}
           lastSync={portfolio.last_sync}
         />
@@ -1407,6 +1409,7 @@ function PortfolioSections({
               showUnderlying={true}
               prices={prices}
               positionRules={positionRules}
+              onRulesChanged={refreshPositionRules}
               readonly={activeAccount === "futu"}
             />
           </div>
@@ -1442,6 +1445,7 @@ function PortfolioSections({
               showUnderlying={true}
               prices={prices}
               positionRules={positionRules}
+              onRulesChanged={refreshPositionRules}
               readonly={activeAccount === "futu"}
             />
           </div>
@@ -1475,6 +1479,7 @@ function PortfolioSections({
               showExpiry={false}
               prices={prices}
               positionRules={positionRules}
+              onRulesChanged={refreshPositionRules}
               readonly={activeAccount === "futu"}
             />
           </div>

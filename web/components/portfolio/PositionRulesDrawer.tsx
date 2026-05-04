@@ -7,6 +7,7 @@ import { cancelRule, fetchPositionRules, type PositionRule } from "@/lib/api/pos
 interface DrawerProps {
   positionKey: string;
   onClose: () => void;
+  onChanged?: () => void;
 }
 
 const CANCELABLE_STATES = new Set<PositionRule["state"]>(["PENDING_ARM", "ARMED", "TRIGGERED"]);
@@ -15,7 +16,7 @@ function filterRules(rules: PositionRule[], positionKey: string): PositionRule[]
   return rules.filter((rule) => rule.position_key === positionKey);
 }
 
-export function PositionRulesDrawer({ positionKey, onClose }: DrawerProps) {
+export function PositionRulesDrawer({ positionKey, onClose, onChanged }: DrawerProps) {
   const [rules, setRules] = useState<PositionRule[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -43,6 +44,7 @@ export function PositionRulesDrawer({ positionKey, onClose }: DrawerProps) {
       await cancelRule(id);
       const all = await fetchPositionRules();
       setRules(filterRules(all, positionKey));
+      onChanged?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }

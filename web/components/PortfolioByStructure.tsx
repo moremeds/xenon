@@ -31,6 +31,7 @@ type Props = {
   positions: PortfolioPosition[];
   prices?: Record<string, PriceData>;
   positionRules?: PositionRule[];
+  onRulesChanged?: () => void;
   activeAccount: "ib" | "futu";
   lastSync: string;
 };
@@ -59,6 +60,7 @@ export default function PortfolioByStructure({
   positions,
   prices,
   positionRules,
+  onRulesChanged,
   activeAccount,
   lastSync,
 }: Props) {
@@ -175,6 +177,7 @@ export default function PortfolioByStructure({
                   showUnderlying={true}
                   prices={prices}
                   positionRules={positionRules}
+                  onRulesChanged={onRulesChanged}
                   readonly={readonly}
                   hideHeader={takeHeaderSlot()}
                 />
@@ -283,6 +286,7 @@ export default function PortfolioByStructure({
                                   showUnderlying={true}
                                   prices={prices}
                                   positionRules={positionRules}
+                                  onRulesChanged={onRulesChanged}
                                   readonly={readonly}
                                   hideHeader={takeHeaderSlot()}
                                 />
