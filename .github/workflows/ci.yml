@@ -111,6 +111,7 @@ jobs:
 
   python-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Postgres is required: scripts/tests/conftest.py and src/xenon/api/tests/conftest.py
     # have autouse fixtures that truncate xenon.* tables before every test.
     services:
@@ -177,13 +178,14 @@ jobs:
       - name: Run pytest (affected on PR, full on master push)
         run: |
           IGNORES="--ignore=scripts/tests/test_trend_scan.py --ignore=scripts/tests/test_trend_scan_runtime.py --ignore=scripts/tests/test_trend_config.py --ignore=scripts/tests/test_trend_models.py --ignore=scripts/tests/test_trend_storage.py --ignore=scripts/tests/test_trend_ranking.py --ignore=scripts/tests/test_trend_scan_catalysts.py --ignore=scripts/tests/test_ta_prefilter.py --ignore=scripts/tests/test_flow_confirmation.py --ignore=scripts/tests/test_volatility.py --ignore=scripts/tests/test_parquet_store.py"
+          PYTEST_GUARD="--durations=25 --durations-min=1 -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true"
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             # `--` forwards $IGNORES to pytest via run_pytest_affected.py's
             # REMAINDER positional, instead of argparse rejecting them as
             # unknown flags.
-            uv run python scripts/infra/dev/run_pytest_affected.py --base origin/${{ github.base_ref }} -- $IGNORES
+            uv run python scripts/infra/dev/run_pytest_affected.py --base origin/${{ github.base_ref }} -- $IGNORES $PYTEST_GUARD
           else
-            uv run pytest $IGNORES
+            uv run pytest $IGNORES $PYTEST_GUARD
           fi
 
   version-sync:
