@@ -142,6 +142,7 @@ norecursedirs = [
     "scripts/infra/ib_realtime",
     ".venv",
     "node_modules",
+    "web/.next",
     ".claude",
     ".worktrees",
     "data",
