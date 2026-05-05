@@ -64,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
                 SELECT broker_account, position_key, DATE(submitted_at) AS day, COUNT(*) AS count
                 FROM xenon.position_close_claims
                 WHERE submitted_at >= :cutoff
-                  AND status IN ('SUBMITTED','FILLED','ABANDONED')
+                  AND status IN ('SUBMITTED','FILLED')
                   AND (CAST(:account AS text) IS NULL OR broker_account = :account)
                 GROUP BY broker_account, position_key, DATE(submitted_at)
                 HAVING COUNT(*) > 1
