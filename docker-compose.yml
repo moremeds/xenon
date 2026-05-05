@@ -35,8 +35,27 @@ services:
       context: .
       dockerfile: docker/api.Dockerfile
     image: xenon-api:dev
+    # Order matters: ./web/.env loads AFTER ./.env so its values take
+    # precedence on conflict. We rely on this precedence — swapping the
+    # order would silently invert behavior for any future overlapping key.
+    # `required: false` is defensive: it lets the api service parse
+    # cleanly when web/.env is absent. (Note: the web service below still
+    # requires web/.env, so `docker compose up` of the full stack still
+    # needs the file. macmini-bootstrap.sh always creates one.)
+    # Why both: UW_TOKEN and ANTHROPIC_API_KEY live in web/.env per the
+    # Credentials table in CLAUDE.md, but src/xenon/api/server.py and
+    # src/xenon/clients/menthorq_client.py read them from os.environ. The
+    # in-process load_dotenv at server.py:81-82 silently no-ops in the
+    # container because the api Dockerfile doesn't ship web/.env, so
+    # Compose injection is the only viable channel. Forwarding the whole
+    # file also exposes EXA/CEREBRAS/CLERK_SECRET to the api container
+    # (currently unused there) — accepted as a least-privilege tradeoff
+    # vs. brittle per-key shell interpolation. See
+    # docs/plans/2026-05-04-docker-uw-token-plumbing.md.
     env_file:
       - ./.env
+      - path: ./web/.env
+        required: false
     environment:
       # Futu OpenD is always a host-native daemon (Mac-only, no container
       # form), and it binds 127.0.0.1 by default. From inside a container,
