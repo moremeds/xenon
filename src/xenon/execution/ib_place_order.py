@@ -46,7 +46,15 @@ def place_order(params: dict) -> dict:
 
     try:
         # Build contract
-        if order_type == "combo":
+        if "conId" in params and "secType" in params:
+            contract = Contract()
+            contract.conId = int(params["conId"])
+            contract.symbol = symbol
+            contract.secType = str(params["secType"]).upper()
+            contract.exchange = params.get("exchange", "SMART")
+            contract.currency = params.get("currency", "USD")
+
+        elif order_type == "combo":
             legs_data = params["legs"]
             options = []
             for leg in legs_data:
@@ -141,10 +149,15 @@ def place_order(params: dict) -> dict:
                 outsideRth=False,
             )
 
+        order_ref = params.get("orderRef")
+        if order_ref:
+            order.orderRef = str(order_ref)
+
         if order_type == "combo":
             order.smartComboRoutingParams = [TagValue("NonGuaranteed", "1")]
             print(
-                f"  Combo order: {len(legs_data)} legs, NonGuaranteed=1, ratios={[int(l.get('ratio', 1)) for l in legs_data]}"
+                f"  Combo order: {len(legs_data)} legs, NonGuaranteed=1, ratios={[int(l.get('ratio', 1)) for l in legs_data]}",
+                file=sys.stderr,
             )
 
         # Place

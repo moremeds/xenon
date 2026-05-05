@@ -74,6 +74,38 @@ def test_flatten_mkt_subprocess_error_surfaces(scope):
         assert "Pacing violation" in str(exc.value)
 
 
+def test_flatten_combo_mkt_subprocess_payload_shape(scope):
+    fake_completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=json.dumps({"perm_id": 54321, "ib_order_id": 7777, "status": "Submitted"}),
+        stderr="",
+    )
+    legs = [
+        {"symbol": "SPY", "expiry": "20260516", "strike": 580.0, "right": "P", "action": "SELL", "ratio": 1},
+        {"symbol": "SPY", "expiry": "20260516", "strike": 575.0, "right": "P", "action": "BUY", "ratio": 1},
+    ]
+    with patch("subprocess.run", return_value=fake_completed) as run:
+        executor = IBExecutor()
+        result = executor.flatten_combo_mkt(
+            scope=scope,
+            symbol="SPY",
+            legs=legs,
+            qty=1,
+            order_ref="xenon-pr-42",
+        )
+        payload = json.loads(_passed_json(run))
+        assert payload["type"] == "combo"
+        assert payload["symbol"] == "SPY"
+        assert payload["action"] == "SELL"
+        assert payload["quantity"] == 1
+        assert payload["orderType"] == "MKT"
+        assert payload["outsideRth"] is False
+        assert payload["orderRef"] == "xenon-pr-42"
+        assert payload["legs"] == legs
+    assert result.perm_id == 54321
+
+
 def test_attach_native_stp_payload_shape(scope):
     fake_completed = subprocess.CompletedProcess(
         args=[],

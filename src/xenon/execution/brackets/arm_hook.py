@@ -90,6 +90,7 @@ def _process(engine: Engine, payload: dict[str, Any]) -> None:
         "qty_unit": "contract" if any(leg.get("sec_type") == "OPT" for leg in legs) else "share",
         "legs": legs,
     }
+    descriptor.update(_asset_class_descriptor_fields(classified.asset_class, descriptor))
     position_key = compute_position_key(classified.asset_class.value, descriptor)
 
     for policy in policies:
@@ -182,7 +183,49 @@ def _combo_legs_if_complete(
         )
         return None, None
 
-    return manifest_legs, {"asset_class": attempt_dict.get("structure_name")}
+    return _normalize_combo_legs(attempt_dict.get("ticker") or payload.get("ticker"), manifest_legs), {
+        "asset_class": attempt_dict.get("structure_name")
+    }
+
+
+def _normalize_combo_legs(ticker: str | None, legs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for leg in legs:
+        out = dict(leg)
+        out["sec_type"] = str(out.get("sec_type") or out.get("secType") or "OPT").upper()
+        out["symbol"] = str(out.get("symbol") or out.get("localSymbol") or ticker or "").upper()
+        out["action"] = str(out.get("action") or "").upper()
+        if out.get("right") is not None:
+            out["right"] = str(out["right"]).upper()
+        if out.get("strike") is not None:
+            out["strike"] = float(out["strike"])
+        if "con_id" not in out and out.get("conId") is not None:
+            out["con_id"] = int(out["conId"])
+        if "ratio" not in out:
+            out["ratio"] = 1
+        if out.get("fill_price") is not None:
+            out["fill_price"] = float(out["fill_price"])
+        normalized.append(out)
+    return normalized
+
+
+def _asset_class_descriptor_fields(asset_class: AssetClass, descriptor: dict[str, Any]) -> dict[str, Any]:
+    if asset_class != AssetClass.CREDIT_SPREAD:
+        return {}
+    legs = descriptor["legs"]
+    short = next((leg for leg in legs if leg.get("action") == "SELL"), None)
+    long_ = next((leg for leg in legs if leg.get("action") == "BUY"), None)
+    if short is None or long_ is None:
+        return {}
+
+    anchor_price = abs(float(descriptor.get("anchor_price") or 0.0))
+    leg_credit = float(short.get("fill_price") or 0.0) - float(long_.get("fill_price") or 0.0)
+    credit_received = anchor_price if anchor_price > 0 else max(leg_credit, 0.0)
+    return {
+        "credit_received": credit_received,
+        "short_strike": float(short["strike"]),
+        "short_right": short["right"],
+    }
 
 
 def _emit_unsupported(engine: Engine, payload: dict[str, Any], *, reason: str) -> None:

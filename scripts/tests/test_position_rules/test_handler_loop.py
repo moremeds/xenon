@@ -51,6 +51,47 @@ def _stock_descriptor(symbol="AAPL", price=100.0, con_id=12345):
     }
 
 
+def _credit_spread_descriptor(symbol="SPY"):
+    return {
+        "asset_class": "credit_spread",
+        "opened_at": "2026-05-04T14:00:00Z",
+        "source": "combo_wizard",
+        "anchor_price": -1.0,
+        "anchor_currency": "USD",
+        "opened_qty": 1,
+        "protected_qty": 1,
+        "multiplier": 100,
+        "qty_unit": "contract",
+        "credit_received": 1.0,
+        "short_strike": 580.0,
+        "short_right": "P",
+        "legs": [
+            {
+                "sec_type": "OPT",
+                "symbol": symbol,
+                "expiry": "20260516",
+                "strike": 580.0,
+                "right": "P",
+                "action": "SELL",
+                "ratio": 1,
+                "fill_price": 1.40,
+                "con_id": 58001,
+            },
+            {
+                "sec_type": "OPT",
+                "symbol": symbol,
+                "expiry": "20260516",
+                "strike": 575.0,
+                "right": "P",
+                "action": "BUY",
+                "ratio": 1,
+                "fill_price": 0.40,
+                "con_id": 57501,
+            },
+        ],
+    }
+
+
 def _scope():
     return AccountScope(broker="IB", account_env="paper", broker_account="DU1234567")
 
@@ -259,6 +300,65 @@ def test_alert_only_rule_does_not_submit_close_claim(engine):
     assert claim_count == 0
     assert alert is not None
     assert alert.payload["reason"] == "alert_only_threshold_crossed"
+    executor.flatten_mkt.assert_not_called()
+
+
+def test_credit_spread_take_profit_uses_net_debit_and_combo_close(engine):
+    descriptor = _credit_spread_descriptor()
+    pid = insert_pending_arm(
+        engine,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+        position_key="TEST::SPY_CREDIT_SPREAD",
+        position_descriptor=descriptor,
+        asset_class="credit_spread",
+        rule_kind="take_profit_fixed",
+        config={"close_at_credit_pct": 0.50, "anchor": "synthetic_mark"},
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE xenon.position_protection SET state='ARMED', armed_at=NOW() WHERE protection_id=:pid"),
+            {"pid": pid},
+        )
+
+    executor = MagicMock()
+    executor.flatten_combo_mkt.return_value = PlaceResult(perm_id=24680, ib_order_id=2, status="Submitted", raw={})
+    ib_client = MagicMock()
+    ib_client.connected = True
+    quotes = {
+        58001: Quote(symbol="SPY", price=0.80, ts=datetime.now(timezone.utc)),
+        57501: Quote(symbol="SPY", price=0.30, ts=datetime.now(timezone.utc)),
+    }
+    ib_client.get_quote.side_effect = lambda **kwargs: quotes.get(kwargs.get("con_id")) or Quote(
+        symbol="SPY", price=579.0, ts=datetime.now(timezone.utc)
+    )
+    ib_client.find_open_orders_by_order_ref.return_value = []
+    ib_client.find_executions_by_order_ref.return_value = []
+    ib_client.positions.return_value = [{"symbol": "SPY", "qty": -1, "con_id": 58001}]
+
+    handler = PositionRulesHandler(engine=engine, executor=executor, ib_client=ib_client, scope=_scope())
+    handler.execute()
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT state FROM xenon.position_protection WHERE protection_id=:pid"),
+            {"pid": pid},
+        ).first()
+        claim = conn.execute(
+            text(
+                "SELECT status, broker_perm_id, order_ref FROM xenon.position_close_claims "
+                "WHERE position_key='TEST::SPY_CREDIT_SPREAD'"
+            )
+        ).first()
+    assert row.state == "TRIGGERED"
+    assert claim.status == "SUBMITTED"
+    assert claim.broker_perm_id == 24680
+    executor.flatten_combo_mkt.assert_called_once()
+    combo_args = executor.flatten_combo_mkt.call_args.kwargs
+    assert combo_args["legs"] == descriptor["legs"]
+    assert combo_args["qty"] == 1
+    assert combo_args["order_ref"] == claim.order_ref
     executor.flatten_mkt.assert_not_called()
 
 

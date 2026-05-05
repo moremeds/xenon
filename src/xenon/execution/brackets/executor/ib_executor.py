@@ -120,6 +120,29 @@ class IBExecutor:
         }
         return _run_place_order(payload, scope)
 
+    def flatten_combo_mkt(
+        self,
+        *,
+        scope: AccountScope,
+        symbol: str,
+        legs: list[dict[str, Any]],
+        qty: int,
+        order_ref: str,
+    ) -> PlaceResult:
+        payload = {
+            "type": "combo",
+            "symbol": symbol,
+            "action": "SELL",
+            "quantity": qty,
+            "qty": qty,
+            "orderType": "MKT",
+            "tif": "DAY",
+            "outsideRth": False,
+            "orderRef": order_ref,
+            "legs": legs,
+        }
+        return _run_place_order(payload, scope)
+
     def cancel(self, *, scope: AccountScope, perm_id: int) -> dict[str, Any]:
         cmd = ["xenon-ib-order-manage", "cancel", "--perm-id", str(perm_id)]
         completed = subprocess.run(

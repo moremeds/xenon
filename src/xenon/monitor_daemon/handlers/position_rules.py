@@ -144,20 +144,13 @@ class PositionRulesHandler(BaseHandler):
                 self._mark_native_filled(row, native_perm_id)
                 return
 
-        leg = descriptor["legs"][0]
-        quote = mark_cache.get(con_id=leg["con_id"])
-        if quote is None or not is_quote_fresh(quote, max_age_s=_STALENESS_MAX_AGE_S):
+        marks = self._build_marks(descriptor, mark_cache=mark_cache, spot_cache=spot_cache)
+        if marks is None:
             self._handle_stale_quote(row)
             return
 
         if (row["state_data"] or {}).get("consecutive_stale_ticks", 0):
             self._patch_state_data(row["protection_id"], {"consecutive_stale_ticks": 0})
-
-        marks = {"mark": quote.price, "now": datetime.now(timezone.utc)}
-        if descriptor.get("asset_class") == "credit_spread":
-            spot = spot_cache.get(symbol=leg["symbol"])
-            if spot is not None:
-                marks["underlying_spot"] = spot.price
 
         rule = RULE_REGISTRY[row["rule_kind"]]
         decision = rule.evaluate(
@@ -250,17 +243,26 @@ class PositionRulesHandler(BaseHandler):
                     reason="position_already_flat",
                 )
                 return
-            close_action = "SELL" if leg["action"] == "BUY" else "BUY"
             try:
-                result = self._executor.flatten_mkt(
-                    scope=self._scope,
-                    con_id=leg["con_id"],
-                    symbol=leg["symbol"],
-                    sec_type=leg["sec_type"],
-                    close_action=close_action,
-                    qty=qty,
-                    order_ref=order_ref,
-                )
+                if descriptor.get("asset_class") in ("credit_spread", "debit_combo") and len(descriptor["legs"]) > 1:
+                    result = self._executor.flatten_combo_mkt(
+                        scope=self._scope,
+                        symbol=leg["symbol"],
+                        legs=descriptor["legs"],
+                        qty=qty,
+                        order_ref=order_ref,
+                    )
+                else:
+                    close_action = "SELL" if leg["action"] == "BUY" else "BUY"
+                    result = self._executor.flatten_mkt(
+                        scope=self._scope,
+                        con_id=leg["con_id"],
+                        symbol=leg["symbol"],
+                        sec_type=leg["sec_type"],
+                        close_action=close_action,
+                        qty=qty,
+                        order_ref=order_ref,
+                    )
             except Exception as exc:  # noqa: BLE001
                 increment_attempts(self._engine, claim_id=claim_id, last_error=str(exc))
                 return
@@ -335,6 +337,53 @@ class PositionRulesHandler(BaseHandler):
                     "scope": self._scope.as_dict(),
                 },
             )
+
+    def _build_marks(
+        self,
+        descriptor: dict[str, Any],
+        *,
+        mark_cache: MarkCache,
+        spot_cache: SpotCache,
+    ) -> dict[str, Any] | None:
+        legs = descriptor["legs"]
+        asset_class = descriptor.get("asset_class")
+        now = datetime.now(timezone.utc)
+
+        if asset_class == "credit_spread":
+            quotes = []
+            for leg in legs:
+                quote = mark_cache.get(con_id=leg["con_id"])
+                if quote is None or not is_quote_fresh(quote, max_age_s=_STALENESS_MAX_AGE_S):
+                    return None
+                quotes.append((leg, quote))
+            debit_to_close = sum(
+                (1 if leg["action"] == "SELL" else -1) * quote.price * int(leg.get("ratio", 1))
+                for leg, quote in quotes
+            )
+            marks = {"mark": max(debit_to_close, 0.0), "debit_to_close": max(debit_to_close, 0.0), "now": now}
+            spot = spot_cache.get(symbol=legs[0]["symbol"])
+            if spot is not None and is_quote_fresh(spot, max_age_s=_STALENESS_MAX_AGE_S):
+                marks["underlying_spot"] = spot.price
+            return marks
+
+        if asset_class == "debit_combo" and len(legs) > 1:
+            quotes = []
+            for leg in legs:
+                quote = mark_cache.get(con_id=leg["con_id"])
+                if quote is None or not is_quote_fresh(quote, max_age_s=_STALENESS_MAX_AGE_S):
+                    return None
+                quotes.append((leg, quote))
+            mark = sum(
+                (1 if leg["action"] == "BUY" else -1) * quote.price * int(leg.get("ratio", 1))
+                for leg, quote in quotes
+            )
+            return {"mark": max(mark, 0.0), "now": now}
+
+        leg = legs[0]
+        quote = mark_cache.get(con_id=leg["con_id"])
+        if quote is None or not is_quote_fresh(quote, max_age_s=_STALENESS_MAX_AGE_S):
+            return None
+        return {"mark": quote.price, "now": now}
 
     def _handle_position_presence(
         self,

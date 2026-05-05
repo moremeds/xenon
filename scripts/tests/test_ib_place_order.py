@@ -14,6 +14,7 @@ class _FakeIB:
 
 class _FakeClient:
     placed_order = None
+    placed_contract = None
 
     def __init__(self):
         self._ib = _FakeIB()
@@ -26,7 +27,8 @@ class _FakeClient:
             contract.conId = idx
         return list(contracts)
 
-    def place_order(self, _contract, order):
+    def place_order(self, contract, order):
+        self.__class__.placed_contract = contract
         self.__class__.placed_order = order
         return SimpleNamespace(
             order=SimpleNamespace(orderId=12345, permId=67890, tif=order.tif),
@@ -94,3 +96,25 @@ def test_place_order_accepts_stop_payload_without_limit_price(monkeypatch):
     assert result["status"] == "ok"
     assert _FakeClient.placed_order.orderType == "STP"
     assert _FakeClient.placed_order.auxPrice == 400.0
+
+
+def test_place_order_uses_con_id_contract_for_subprocess_payload(monkeypatch):
+    monkeypatch.setattr(ib_place_order, "IBClient", _FakeClient)
+
+    result = ib_place_order.place_order(
+        {
+            "conId": 987654321,
+            "secType": "OPT",
+            "symbol": "SPX",
+            "action": "SELL",
+            "quantity": 1,
+            "orderType": "MKT",
+            "tif": "DAY",
+            "orderRef": "xenon-pr-42",
+        }
+    )
+
+    assert result["status"] == "ok"
+    assert _FakeClient.placed_contract.conId == 987654321
+    assert _FakeClient.placed_contract.secType == "OPT"
+    assert _FakeClient.placed_order.orderRef == "xenon-pr-42"
