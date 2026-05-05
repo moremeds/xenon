@@ -412,7 +412,10 @@ def test_credit_spread_take_profit_uses_net_debit_and_combo_close(engine):
     )
     ib_client.find_open_orders_by_order_ref.return_value = []
     ib_client.find_executions_by_order_ref.return_value = []
-    ib_client.positions.return_value = [{"symbol": "SPY", "qty": -1, "con_id": 58001}]
+    ib_client.positions.return_value = [
+        {"symbol": "SPY", "qty": -1, "con_id": 58001},
+        {"symbol": "SPY", "qty": 1, "con_id": 57501},
+    ]
 
     handler = PositionRulesHandler(engine=engine, executor=executor, ib_client=ib_client, scope=_scope())
     handler.execute()
@@ -437,6 +440,102 @@ def test_credit_spread_take_profit_uses_net_debit_and_combo_close(engine):
     assert combo_args["qty"] == 1
     assert combo_args["order_ref"] == claim.order_ref
     executor.flatten_mkt.assert_not_called()
+
+
+def test_combo_close_caps_qty_to_minimum_leg_position(engine):
+    descriptor = _credit_spread_descriptor(symbol="IWM")
+    descriptor["opened_qty"] = 3
+    descriptor["protected_qty"] = 3
+    pid = insert_pending_arm(
+        engine,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+        position_key="TEST::IWM_CREDIT_SPREAD",
+        position_descriptor=descriptor,
+        asset_class="credit_spread",
+        rule_kind="take_profit_fixed",
+        config={"close_at_credit_pct": 0.50, "anchor": "synthetic_mark"},
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE xenon.position_protection SET state='ARMED', armed_at=NOW() WHERE protection_id=:pid"),
+            {"pid": pid},
+        )
+
+    executor = MagicMock()
+    executor.flatten_combo_mkt.return_value = PlaceResult(perm_id=24681, ib_order_id=3, status="Submitted", raw={})
+    ib_client = MagicMock()
+    ib_client.connected = True
+    quotes = {
+        58001: Quote(symbol="IWM", price=0.80, ts=datetime.now(timezone.utc)),
+        57501: Quote(symbol="IWM", price=0.30, ts=datetime.now(timezone.utc)),
+    }
+    ib_client.get_quote.side_effect = lambda **kwargs: quotes.get(kwargs.get("con_id")) or Quote(
+        symbol="IWM", price=220.0, ts=datetime.now(timezone.utc)
+    )
+    ib_client.find_open_orders_by_order_ref.return_value = []
+    ib_client.find_executions_by_order_ref.return_value = []
+    ib_client.positions.return_value = [
+        {"symbol": "IWM", "qty": -3, "con_id": 58001},
+        {"symbol": "IWM", "qty": 1, "con_id": 57501},
+    ]
+
+    handler = PositionRulesHandler(engine=engine, executor=executor, ib_client=ib_client, scope=_scope())
+    handler.execute()
+
+    executor.flatten_combo_mkt.assert_called_once()
+    assert executor.flatten_combo_mkt.call_args.kwargs["qty"] == 1
+
+
+def test_combo_close_abandons_when_any_leg_is_flat(engine):
+    descriptor = _credit_spread_descriptor(symbol="DIA")
+    pid = insert_pending_arm(
+        engine,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+        position_key="TEST::DIA_CREDIT_SPREAD",
+        position_descriptor=descriptor,
+        asset_class="credit_spread",
+        rule_kind="take_profit_fixed",
+        config={"close_at_credit_pct": 0.50, "anchor": "synthetic_mark"},
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE xenon.position_protection SET state='ARMED', armed_at=NOW() WHERE protection_id=:pid"),
+            {"pid": pid},
+        )
+
+    executor = MagicMock()
+    ib_client = MagicMock()
+    ib_client.connected = True
+    quotes = {
+        58001: Quote(symbol="DIA", price=0.80, ts=datetime.now(timezone.utc)),
+        57501: Quote(symbol="DIA", price=0.30, ts=datetime.now(timezone.utc)),
+    }
+    ib_client.get_quote.side_effect = lambda **kwargs: quotes.get(kwargs.get("con_id")) or Quote(
+        symbol="DIA", price=390.0, ts=datetime.now(timezone.utc)
+    )
+    ib_client.find_open_orders_by_order_ref.return_value = []
+    ib_client.find_executions_by_order_ref.return_value = []
+    ib_client.positions.return_value = [{"symbol": "DIA", "qty": -1, "con_id": 58001}]
+
+    handler = PositionRulesHandler(engine=engine, executor=executor, ib_client=ib_client, scope=_scope())
+    handler.execute()
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT state FROM xenon.position_protection WHERE protection_id=:pid"),
+            {"pid": pid},
+        ).one()
+        claim = conn.execute(
+            text("SELECT status, last_error FROM xenon.position_close_claims WHERE position_key='TEST::DIA_CREDIT_SPREAD'")
+        ).one()
+    assert row.state == "CANCELED"
+    assert claim.status == "ABANDONED"
+    assert claim.last_error == "position_already_flat"
+    executor.flatten_combo_mkt.assert_not_called()
 
 
 def test_armed_with_native_perm_id_detects_external_cancel(engine):
@@ -522,3 +621,43 @@ def test_stale_quote_skips_evaluation(engine):
     assert row.state == "ARMED"
     assert row.state_data["consecutive_stale_ticks"] >= 1
     executor.flatten_mkt.assert_not_called()
+
+
+def test_missing_position_ticks_do_not_increment_while_ib_disconnected(engine):
+    descriptor = _stock_descriptor(symbol="ORCL", price=100.0, con_id=88888)
+    pid = insert_pending_arm(
+        engine,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+        position_key="TEST::ORCL_DISCONNECTED",
+        position_descriptor=descriptor,
+        asset_class="stock",
+        rule_kind="stop_loss",
+        config={"threshold_pct": -0.08, "anchor": "entry_price"},
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE xenon.position_protection "
+                "SET state='ARMED', state_data='{\"position_missing_ticks\": 1}'::jsonb "
+                "WHERE protection_id=:pid"
+            ),
+            {"pid": pid},
+        )
+
+    executor = MagicMock()
+    ib_client = MagicMock()
+    ib_client.connected = False
+    ib_client.positions.return_value = []
+
+    handler = PositionRulesHandler(engine=engine, executor=executor, ib_client=ib_client, scope=_scope())
+    handler.execute()
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT state, state_data FROM xenon.position_protection WHERE protection_id=:pid"),
+            {"pid": pid},
+        ).one()
+    assert row.state == "ARMED"
+    assert row.state_data["position_missing_ticks"] == 1

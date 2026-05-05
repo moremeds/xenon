@@ -569,6 +569,7 @@ def test_signed_combo_pricing_preserved_for_credit(monkeypatch):
     config = prot.config
     assert Decimal(config["tp_target_price"]) == signed_target
     assert Decimal(config["alert_net_mid_threshold"]) == signed_threshold
+    assert config["polarity"] == "CREDIT"
 
 
 def test_credit_spread_wizard_protection_uses_credit_spread_key(monkeypatch):

@@ -101,3 +101,47 @@ def test_boot_reconcile_snaps_inflight_claim_to_filled(engine):
         ).first()
     assert protection.state == "CLOSED"
     assert claim.status == "FILLED"
+
+
+def test_boot_reconcile_native_cancelled_does_not_rearm_when_position_absent(engine):
+    pid = insert_pending_arm(
+        engine,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+        position_key="TEST::AAPL_RECON_ABSENT",
+        position_descriptor=_descriptor(),
+        asset_class="stock",
+        rule_kind="stop_loss",
+        config={"threshold_pct": -0.08, "anchor": "entry_price"},
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE xenon.position_protection
+                SET state='ARMED', native_order_perm_id=12345
+                WHERE protection_id=:pid
+                """
+            ),
+            {"pid": pid},
+        )
+
+    ib_client = MagicMock()
+    ib_client.connected = True
+    ib_client.get_order_state.return_value = {"status": "Cancelled", "permId": 12345}
+    ib_client.positions.return_value = []
+
+    counts = boot_reconcile(
+        engine=engine,
+        ib_client=ib_client,
+        scope=AccountScope(broker="IB", account_env="paper", broker_account="DU1234567"),
+    )
+
+    with engine.connect() as conn:
+        protection = conn.execute(
+            text("SELECT state FROM xenon.position_protection WHERE protection_id=:pid"),
+            {"pid": pid},
+        ).one()
+    assert protection.state == "CANCELED"
+    assert counts["armed_rows_re_armed"] == 0

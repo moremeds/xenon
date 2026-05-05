@@ -25,7 +25,12 @@ class ComboTpAlertRule:
 
         if config.get("alert_net_mid_threshold") is not None:
             threshold = float(config["alert_net_mid_threshold"])
-            if mark > threshold:
+            polarity = str(config.get("polarity") or "").upper()
+            if polarity == "DEBIT":
+                crossed = mark >= threshold
+            else:
+                crossed = mark <= threshold
+            if not crossed:
                 return Decision(kind="NO_OP")
         else:
             threshold = position["anchor_price"] * (1 + config["threshold_pct"])

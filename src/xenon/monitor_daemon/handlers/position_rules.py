@@ -238,7 +238,10 @@ class PositionRulesHandler(BaseHandler):
         else:
             descriptor = row["position_descriptor"]
             leg = descriptor["legs"][0]
-            qty = min(descriptor["protected_qty"], self._current_broker_qty(leg["symbol"], leg.get("con_id")))
+            is_combo = descriptor.get("asset_class") in ("credit_spread", "debit_combo") and len(descriptor["legs"]) > 1
+            qty = self._close_qty(descriptor) if is_combo else min(
+                descriptor["protected_qty"], self._current_broker_qty(leg["symbol"], leg.get("con_id"))
+            )
             if qty <= 0:
                 mark_terminal(
                     self._engine,
@@ -255,7 +258,7 @@ class PositionRulesHandler(BaseHandler):
                 )
                 return
             try:
-                if descriptor.get("asset_class") in ("credit_spread", "debit_combo") and len(descriptor["legs"]) > 1:
+                if is_combo:
                     result = self._executor.flatten_combo_mkt(
                         scope=self._scope,
                         symbol=leg["symbol"],
@@ -402,6 +405,8 @@ class PositionRulesHandler(BaseHandler):
         descriptor: dict[str, Any],
         positions: list[dict] | None,
     ) -> bool:
+        if not getattr(self._ib, "connected", True):
+            return False
         if positions is None:
             return True
         leg = descriptor["legs"][0]
@@ -469,6 +474,15 @@ class PositionRulesHandler(BaseHandler):
             if position.get("symbol") == symbol and (con_id is None or position.get("con_id") == con_id):
                 return abs(int(position.get("qty", 0)))
         return 0
+
+    def _close_qty(self, descriptor: dict[str, Any]) -> int:
+        broker_qtys = [
+            self._current_broker_qty(leg["symbol"], leg.get("con_id"))
+            for leg in descriptor["legs"]
+        ]
+        if not broker_qtys:
+            return 0
+        return min(int(descriptor["protected_qty"]), min(broker_qtys))
 
     def _safe_positions_snapshot(self) -> list[dict] | None:
         try:

@@ -193,3 +193,86 @@ def test_combo_credit_spread_descriptor_has_credit_metadata(engine):
     assert descriptor["short_right"] == "P"
     assert descriptor["legs"][0]["con_id"] == 58001
     assert descriptor["legs"][0]["sec_type"] == "OPT"
+
+
+def test_combo_with_incomplete_manifest_leg_is_not_armed(engine):
+    attempt_id = "TEST-BAD-ATTEMPT"
+    session_id = "TEST-BAD-SESSION"
+    legs = [
+        {
+            "secType": "OPT",
+            "symbol": "SPY",
+            "strike": 580.0,
+            "right": "P",
+            "action": "SELL",
+            "ratio": 1,
+            "fill_price": 1.40,
+            "conId": 58001,
+        },
+        {
+            "secType": "OPT",
+            "symbol": "SPY",
+            "expiry": "20260516",
+            "strike": 575.0,
+            "right": "P",
+            "action": "BUY",
+            "ratio": 1,
+            "fill_price": 0.40,
+            "conId": 57501,
+        },
+    ]
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO xenon.wizard_sessions
+                    (session_id, ticker, state, structure_name, created_at, updated_at,
+                     broker, account_env, broker_account)
+                VALUES
+                    (:session_id, 'SPY', 'working', 'credit_spread', NOW(), NOW(),
+                     'IB', 'paper', 'DU1234567')
+                """
+            ),
+            {"session_id": session_id},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO xenon.wizard_combo_attempts
+                    (attempt_id, session_id, ticker, structure_name, legs, state,
+                     submitted_at, updated_at, broker, account_env, broker_account)
+                VALUES
+                    (:attempt_id, :session_id, 'SPY', 'credit_spread', CAST(:legs AS jsonb),
+                     'FILLED', NOW(), NOW(), 'IB', 'paper', 'DU1234567')
+                """
+            ),
+            {"attempt_id": attempt_id, "session_id": session_id, "legs": json.dumps(legs)},
+        )
+
+    first = _fill_event("TEST-BAD-FILL-1", "SPY", "BUY", price=-1.0, sec_type="BAG")
+    first["combo_attempt_id"] = attempt_id
+    second = _fill_event("TEST-BAD-FILL-2", "SPY", "BUY", price=-1.0, sec_type="BAG")
+    second["combo_attempt_id"] = attempt_id
+    _persist_fill(engine, first)
+    _persist_fill(engine, second)
+
+    on_fill_event(engine, first)
+
+    with engine.connect() as conn:
+        protection_count = conn.execute(
+            text("SELECT COUNT(*) FROM xenon.position_protection WHERE position_key LIKE 'CS::SPY::%'")
+        ).scalar_one()
+        unsupported = conn.execute(
+            text(
+                """
+                SELECT payload FROM events.outbox
+                WHERE source = 'arm_hook_unsupported'
+                  AND payload->>'exec_id' = 'TEST-BAD-FILL-1'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+        ).one()
+
+    assert protection_count == 0
+    assert unsupported.payload["reason"] == "combo_leg_missing_expiry"

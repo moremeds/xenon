@@ -23,7 +23,7 @@ def boot_reconcile(*, engine, ib_client, scope: AccountScope) -> dict[str, Any]:
         logger.info("boot_reconcile: IB not connected, deferring")
         return {"status": "deferred"}
 
-    counts = {"claims_resolved": 0, "armed_rows_re_armed": 0}
+    counts = {"claims_resolved": 0, "armed_rows_re_armed": 0, "armed_rows_canceled": 0}
 
     with engine.connect() as conn:
         inflight = conn.execute(
@@ -80,14 +80,24 @@ def boot_reconcile(*, engine, ib_client, scope: AccountScope) -> dict[str, Any]:
     for row in armed_rows:
         state = verify_native_order_live(ib_client=ib_client, perm_id=row.native_order_perm_id)
         if state == NativeOrderState.CANCELLED:
-            cas_transition(
-                engine,
-                protection_id=row.protection_id,
-                expected_state="ARMED",
-                new_state="PENDING_ARM",
-                reason="boot_reconcile_native_cancelled",
-            )
-            counts["armed_rows_re_armed"] += 1
+            if _position_present(ib_client, row.position_descriptor):
+                cas_transition(
+                    engine,
+                    protection_id=row.protection_id,
+                    expected_state="ARMED",
+                    new_state="PENDING_ARM",
+                    reason="boot_reconcile_native_cancelled",
+                )
+                counts["armed_rows_re_armed"] += 1
+            else:
+                cas_transition(
+                    engine,
+                    protection_id=row.protection_id,
+                    expected_state="ARMED",
+                    new_state="CANCELED",
+                    reason="boot_reconcile_position_absent",
+                )
+                counts["armed_rows_canceled"] += 1
         elif state == NativeOrderState.FILLED:
             cas_transition(
                 engine,
@@ -99,3 +109,26 @@ def boot_reconcile(*, engine, ib_client, scope: AccountScope) -> dict[str, Any]:
             counts["claims_resolved"] += 1
 
     return counts
+
+
+def _position_present(ib_client, descriptor: dict[str, Any]) -> bool:
+    if not hasattr(ib_client, "positions"):
+        return True
+    try:
+        positions = ib_client.positions()
+    except Exception:  # noqa: BLE001
+        return True
+    if not isinstance(positions, list):
+        return True
+    legs = descriptor.get("legs") or []
+    if not legs:
+        return False
+    for leg in legs:
+        if not any(
+            position.get("symbol") == leg.get("symbol")
+            and (leg.get("con_id") is None or position.get("con_id") == leg.get("con_id"))
+            and abs(int(position.get("qty", 0))) > 0
+            for position in positions
+        ):
+            return False
+    return True

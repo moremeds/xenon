@@ -183,9 +183,12 @@ def _combo_legs_if_complete(
         )
         return None, None
 
-    return _normalize_combo_legs(attempt_dict.get("ticker") or payload.get("ticker"), manifest_legs), {
-        "asset_class": attempt_dict.get("structure_name")
-    }
+    try:
+        normalized_legs = _normalize_combo_legs(attempt_dict.get("ticker") or payload.get("ticker"), manifest_legs)
+    except ValueError as exc:
+        _emit_unsupported(engine, payload, reason=str(exc))
+        return None, None
+    return normalized_legs, {"asset_class": attempt_dict.get("structure_name")}
 
 
 def _normalize_combo_legs(ticker: str | None, legs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -205,8 +208,18 @@ def _normalize_combo_legs(ticker: str | None, legs: list[dict[str, Any]]) -> lis
             out["ratio"] = 1
         if out.get("fill_price") is not None:
             out["fill_price"] = float(out["fill_price"])
+        if out["sec_type"] == "OPT":
+            _require_combo_leg_field(out, "expiry")
+            _require_combo_leg_field(out, "strike")
+            _require_combo_leg_field(out, "right")
+            _require_combo_leg_field(out, "action")
         normalized.append(out)
     return normalized
+
+
+def _require_combo_leg_field(leg: dict[str, Any], field: str) -> None:
+    if leg.get(field) in (None, ""):
+        raise ValueError(f"combo_leg_missing_{field}")
 
 
 def _asset_class_descriptor_fields(asset_class: AssetClass, descriptor: dict[str, Any]) -> dict[str, Any]:
