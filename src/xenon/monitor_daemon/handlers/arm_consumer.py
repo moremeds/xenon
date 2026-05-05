@@ -1,9 +1,9 @@
 """Per-event arm-consumer DLQ harness. Spec §6.6."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-import asyncio
 import os
 from collections import defaultdict
 from typing import Any
@@ -27,36 +27,18 @@ def process_event_with_dlq(
 ) -> bool:
     """Return True when the event is processed or dead-lettered."""
     key = (CHANNEL_FILL_RECORDED, source_event_id)
-    if key not in _attempt_counter and _already_dead_lettered(engine, source_event_id):
+    if key not in _attempt_counter and _already_dead_lettered(engine, source_event_id, max_attempts=max_attempts):
         return True
 
     try:
         arm_hook.on_fill_event(engine, payload)
         _attempt_counter.pop(key, None)
+        _clear_retry_record(engine, source_event_id)
         return True
     except Exception as exc:  # noqa: BLE001
-        _attempt_counter[key] += 1
-        attempts = _attempt_counter[key]
+        attempts = _record_failure(engine, source_event_id=source_event_id, payload=payload, error=str(exc))
+        _attempt_counter[key] = attempts
         if attempts >= max_attempts:
-            with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO events.outbox_dlq
-                            (source_event_id, channel, source, payload, error, attempts)
-                        VALUES
-                            (:source_event_id, :channel, 'arm_consumer',
-                             CAST(:payload AS jsonb), :error, :attempts)
-                        """
-                    ),
-                    {
-                        "source_event_id": source_event_id,
-                        "channel": CHANNEL_FILL_RECORDED,
-                        "payload": json.dumps(payload),
-                        "error": str(exc),
-                        "attempts": attempts,
-                    },
-                )
             _attempt_counter.pop(key, None)
             return True
 
@@ -64,13 +46,87 @@ def process_event_with_dlq(
         return False
 
 
-def _already_dead_lettered(engine, source_event_id: int) -> bool:
+def _already_dead_lettered(engine, source_event_id: int, *, max_attempts: int) -> bool:
     with engine.connect() as conn:
-        count = conn.execute(
-            text("SELECT COUNT(*) FROM events.outbox_dlq WHERE source_event_id = :source_event_id"),
-            {"source_event_id": source_event_id},
-        ).scalar_one()
-    return bool(count)
+        attempts = conn.execute(
+            text(
+                """
+                SELECT attempts FROM events.outbox_dlq
+                WHERE source_event_id = :source_event_id
+                  AND channel = :channel
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ),
+            {"source_event_id": source_event_id, "channel": CHANNEL_FILL_RECORDED},
+        ).scalar()
+    return attempts is not None and int(attempts) >= max_attempts
+
+
+def _record_failure(engine, *, source_event_id: int, payload: dict[str, Any], error: str) -> int:
+    with engine.begin() as conn:
+        conn.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": source_event_id})
+        row = conn.execute(
+            text(
+                """
+                SELECT id, attempts FROM events.outbox_dlq
+                WHERE source_event_id = :source_event_id
+                  AND channel = :channel
+                ORDER BY id DESC
+                LIMIT 1
+                FOR UPDATE
+                """
+            ),
+            {"source_event_id": source_event_id, "channel": CHANNEL_FILL_RECORDED},
+        ).first()
+        if row is None:
+            attempts = 1
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO events.outbox_dlq
+                        (source_event_id, channel, source, payload, error, attempts)
+                    VALUES
+                        (:source_event_id, :channel, 'arm_consumer',
+                         CAST(:payload AS jsonb), :error, :attempts)
+                    """
+                ),
+                {
+                    "source_event_id": source_event_id,
+                    "channel": CHANNEL_FILL_RECORDED,
+                    "payload": json.dumps(payload),
+                    "error": error,
+                    "attempts": attempts,
+                },
+            )
+        else:
+            attempts = int(row.attempts) + 1
+            conn.execute(
+                text(
+                    """
+                    UPDATE events.outbox_dlq
+                    SET error = :error,
+                        attempts = :attempts
+                    WHERE id = :id
+                    """
+                ),
+                {"id": row.id, "error": error, "attempts": attempts},
+            )
+        return attempts
+
+
+def _clear_retry_record(engine, source_event_id: int) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                DELETE FROM events.outbox_dlq
+                WHERE source_event_id = :source_event_id
+                  AND channel = :channel
+                """
+            ),
+            {"source_event_id": source_event_id, "channel": CHANNEL_FILL_RECORDED},
+        )
 
 
 async def _listen_loop() -> None:

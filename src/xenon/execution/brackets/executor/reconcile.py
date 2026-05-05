@@ -58,13 +58,20 @@ def boot_reconcile(*, engine, ib_client, scope: AccountScope) -> dict[str, Any]:
                 reason="boot_reconcile_filled",
             )
             counts["claims_resolved"] += 1
-        elif not open_orders:
+        elif not open_orders and claim["status"] == "SUBMITTED":
             with engine.begin() as conn:
                 conn.execute(
                     update(position_close_claims)
                     .where(position_close_claims.c.claim_id == claim["claim_id"])
                     .values(status="PENDING")
                 )
+            cas_transition(
+                engine,
+                protection_id=claim["claimed_by_protection_id"],
+                expected_state="TRIGGERED",
+                new_state="ARMED",
+                reason="boot_reconcile_close_missing_retry",
+            )
 
     with engine.connect() as conn:
         armed_rows = conn.execute(

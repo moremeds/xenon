@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import text
 
 from xenon.db.engine import get_sync_engine
+from xenon.monitor_daemon.handlers import arm_consumer
 from xenon.monitor_daemon.handlers.arm_consumer import process_event_with_dlq
 
 
@@ -48,3 +49,31 @@ def test_event_moves_to_dlq_after_max_attempts(engine):
         ).scalar_one()
     assert count == 1
     assert counter["n"] == 5
+
+
+def test_dlq_attempts_survive_process_counter_reset(engine):
+    payload = {
+        "exec_id": "TEST-DLQ-RESTART",
+        "broker": "IB",
+        "account_env": "paper",
+        "broker_account": "DU1234567",
+    }
+    counter = {"n": 0}
+
+    def always_raise(eng, p):
+        counter["n"] += 1
+        raise RuntimeError("boom")
+
+    with patch("xenon.execution.brackets.arm_hook.on_fill_event", side_effect=always_raise):
+        assert process_event_with_dlq(engine=engine, source_event_id=-2, payload=payload, max_attempts=3) is False
+        assert process_event_with_dlq(engine=engine, source_event_id=-2, payload=payload, max_attempts=3) is False
+        arm_consumer._attempt_counter.clear()
+        assert process_event_with_dlq(engine=engine, source_event_id=-2, payload=payload, max_attempts=3) is True
+        assert process_event_with_dlq(engine=engine, source_event_id=-2, payload=payload, max_attempts=3) is True
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT attempts FROM events.outbox_dlq WHERE source_event_id = -2")
+        ).one()
+    assert row.attempts == 3
+    assert counter["n"] == 3

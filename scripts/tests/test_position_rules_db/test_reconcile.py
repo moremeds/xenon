@@ -103,6 +103,58 @@ def test_boot_reconcile_snaps_inflight_claim_to_filled(engine):
     assert claim.status == "FILLED"
 
 
+def test_boot_reconcile_missing_submitted_claim_rearms_protection_for_resubmit(engine):
+    pid = insert_pending_arm(
+        engine,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+        position_key="TEST::AAPL_RECON_RETRY",
+        position_descriptor=_descriptor(),
+        asset_class="stock",
+        rule_kind="stop_loss",
+        config={"threshold_pct": -0.08, "anchor": "entry_price"},
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE xenon.position_protection SET state='TRIGGERED' WHERE protection_id=:pid"),
+            {"pid": pid},
+        )
+    claim_id = try_claim(
+        engine,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+        position_key="TEST::AAPL_RECON_RETRY",
+        claimed_by_protection_id=pid,
+        claim_kind="synthetic_close",
+    )
+    mark_submitted(engine, claim_id=claim_id, broker_perm_id=54321)
+
+    ib_client = MagicMock()
+    ib_client.connected = True
+    ib_client.find_executions_by_order_ref.return_value = []
+    ib_client.find_open_orders_by_order_ref.return_value = []
+
+    boot_reconcile(
+        engine=engine,
+        ib_client=ib_client,
+        scope=AccountScope(broker="IB", account_env="paper", broker_account="DU1234567"),
+    )
+
+    with engine.connect() as conn:
+        protection = conn.execute(
+            text("SELECT state FROM xenon.position_protection WHERE protection_id=:pid"),
+            {"pid": pid},
+        ).one()
+        claim = conn.execute(
+            text("SELECT status FROM xenon.position_close_claims WHERE claim_id=:claim_id"),
+            {"claim_id": claim_id},
+        ).one()
+    assert protection.state == "ARMED"
+    assert claim.status == "PENDING"
+
+
 def test_boot_reconcile_native_cancelled_does_not_rearm_when_position_absent(engine):
     pid = insert_pending_arm(
         engine,
