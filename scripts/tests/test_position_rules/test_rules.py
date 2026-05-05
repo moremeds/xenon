@@ -172,6 +172,21 @@ def test_combo_tp_alert_first_crossing_fires():
     assert decision.context["alert_only"] is True
 
 
+def test_combo_tp_alert_absolute_wizard_threshold_fires_on_drop():
+    rule = ComboTpAlertRule()
+    config = {"alert_net_mid_threshold": "1.25", "auto_place": False, "min_realert_interval_s": 3600}
+    decision = rule.evaluate(
+        scope=None,
+        position=_pos("debit_combo", 2.50),
+        config=config,
+        state_data={"last_alert_at": None},
+        marks={"mark": 1.20, "now": datetime(2026, 5, 4, 14, 30, tzinfo=timezone.utc)},
+    )
+    assert decision.kind == "TRIGGERED"
+    assert decision.reason == "alert_only_threshold_crossed"
+    assert decision.context["threshold"] == 1.25
+
+
 def test_combo_tp_alert_second_crossing_within_debounce_no_op():
     rule = ComboTpAlertRule()
     config = {"threshold_pct": 0.50, "auto_place": False, "min_realert_interval_s": 3600}

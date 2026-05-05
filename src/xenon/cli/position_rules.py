@@ -118,6 +118,25 @@ def _positions_from_ib() -> list[dict[str, Any]]:
             client.disconnect()
 
 
+def _candidate_position_key(position: dict[str, Any]) -> str | None:
+    symbol = position.get("symbol")
+    if not symbol:
+        return None
+    sec_type = str(position.get("sec_type") or position.get("secType") or "STK").upper()
+    if sec_type == "STK":
+        return f"STK::{symbol}"
+    if sec_type == "OPT":
+        expiry = position.get("expiry")
+        strike = position.get("strike")
+        right = position.get("right")
+        if expiry is None or strike is None or right is None:
+            return None
+        strike_value = float(strike)
+        strike_text = str(int(strike_value)) if strike_value == int(strike_value) else str(strike).rstrip("0").rstrip(".")
+        return f"OPT::{symbol}::{expiry}::{strike_text}::{str(right).upper()}"
+    return None
+
+
 def _cmd_sweep(args: argparse.Namespace) -> int:
     scope = resolve_from_env()
     if args.apply and scope.account_env == "live" and not os.environ.get("XENON_OPERATOR_USER_ID"):
@@ -135,8 +154,8 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
     engine = get_sync_engine()
     candidates: list[dict[str, Any]] = []
     for position in _positions_from_ib():
-        symbol = position.get("symbol")
-        if not symbol:
+        position_key = _candidate_position_key(position)
+        if position_key is None:
             continue
         with engine.connect() as conn:
             existing = conn.execute(
@@ -146,7 +165,7 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
                     WHERE broker = :broker
                       AND account_env = :account_env
                       AND broker_account = :broker_account
-                      AND position_key LIKE :position_key
+                      AND position_key = :position_key
                       AND state IN ('PENDING_ARM','ARMED','TRIGGERED')
                     LIMIT 1
                     """
@@ -155,7 +174,7 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
                     "broker": scope.broker,
                     "account_env": scope.account_env,
                     "broker_account": scope.broker_account,
-                    "position_key": f"%::{symbol}%",
+                    "position_key": position_key,
                 },
             ).first()
         if existing is None:

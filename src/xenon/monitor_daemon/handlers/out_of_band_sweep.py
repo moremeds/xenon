@@ -12,6 +12,25 @@ from xenon.monitor_daemon.handlers.base import BaseHandler
 logger = logging.getLogger(__name__)
 
 
+def _candidate_position_key(position: dict) -> str | None:
+    symbol = position.get("symbol")
+    if not symbol:
+        return None
+    sec_type = str(position.get("sec_type") or position.get("secType") or "STK").upper()
+    if sec_type == "STK":
+        return f"STK::{symbol}"
+    if sec_type == "OPT":
+        expiry = position.get("expiry")
+        strike = position.get("strike")
+        right = position.get("right")
+        if expiry is None or strike is None or right is None:
+            return None
+        strike_value = float(strike)
+        strike_text = str(int(strike_value)) if strike_value == int(strike_value) else str(strike).rstrip("0").rstrip(".")
+        return f"OPT::{symbol}::{expiry}::{strike_text}::{str(right).upper()}"
+    return None
+
+
 class OutOfBandSweepHandler(BaseHandler):
     name = "position_rules_oob_sweep"
     interval_seconds = 24 * 60 * 60
@@ -71,8 +90,8 @@ class OutOfBandSweepHandler(BaseHandler):
         unprotected = 0
         with self._engine.connect() as conn:
             for position in positions:
-                symbol = position.get("symbol")
-                if not symbol:
+                position_key = _candidate_position_key(position)
+                if position_key is None:
                     continue
                 existing = conn.execute(
                     text(
@@ -81,7 +100,7 @@ class OutOfBandSweepHandler(BaseHandler):
                         WHERE broker = :broker
                           AND account_env = :account_env
                           AND broker_account = :broker_account
-                          AND position_key LIKE :position_key
+                          AND position_key = :position_key
                           AND state IN ('PENDING_ARM','ARMED','TRIGGERED')
                         LIMIT 1
                         """
@@ -90,7 +109,7 @@ class OutOfBandSweepHandler(BaseHandler):
                         "broker": self._scope.broker,
                         "account_env": self._scope.account_env,
                         "broker_account": self._scope.broker_account,
-                        "position_key": f"%::{symbol}%",
+                        "position_key": position_key,
                     },
                 ).first()
                 if existing is not None:
@@ -100,7 +119,7 @@ class OutOfBandSweepHandler(BaseHandler):
                     {
                         "payload_version": 1,
                         "kind": "unprotected_position_detected",
-                        "symbol": symbol,
+                        "symbol": position.get("symbol"),
                         "qty": position.get("qty"),
                         "scope": self._scope.as_dict(),
                     }

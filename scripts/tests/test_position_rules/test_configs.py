@@ -53,6 +53,11 @@ def test_combo_tp_alert_config():
     assert cfg.auto_place is False
 
 
+def test_combo_tp_alert_config_accepts_wizard_absolute_threshold():
+    cfg = ComboTpAlertConfig.model_validate({"alert_net_mid_threshold": "1.25", "auto_place": False})
+    assert cfg.alert_net_mid_threshold == 1.25
+
+
 def test_position_descriptor_minimum():
     descriptor = PositionDescriptor.model_validate(
         {

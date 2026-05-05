@@ -23,9 +23,14 @@ class ComboTpAlertRule:
         if mark is None:
             return Decision(kind="NO_OP", reason="missing_mark")
 
-        threshold = position["anchor_price"] * (1 + config["threshold_pct"])
-        if mark < threshold:
-            return Decision(kind="NO_OP")
+        if config.get("alert_net_mid_threshold") is not None:
+            threshold = float(config["alert_net_mid_threshold"])
+            if mark > threshold:
+                return Decision(kind="NO_OP")
+        else:
+            threshold = position["anchor_price"] * (1 + config["threshold_pct"])
+            if mark < threshold:
+                return Decision(kind="NO_OP")
 
         now = marks.get("now") or datetime.now(timezone.utc)
         raw_last = state_data.get("last_alert_at")

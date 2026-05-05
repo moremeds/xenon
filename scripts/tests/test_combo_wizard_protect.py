@@ -308,11 +308,15 @@ def test_protection_success_transitions_protected(monkeypatch):
     assert prot.asset_class == "debit_combo"
     assert prot.config["auto_place"] is False
     assert prot.position_descriptor["wizard_session_id"] == sid
+    assert prot.position_descriptor["asset_class"] == "debit_combo"
+    assert prot.position_descriptor["anchor_price"] == 2.5
     assert prot.position_descriptor["legs"][0]["symbol"] == "AAPL"
+    assert prot.position_descriptor["legs"][0]["con_id"] == 1001
     config = prot.config
     assert config["tp_enabled"] is True
     assert Decimal(config["tp_target_price"]) == Decimal("3.50")
     assert config["alert_enabled"] is True
+    assert Decimal(config["alert_net_mid_threshold"]) == Decimal("1.25")
 
 
 def test_protection_pending_retries_then_fails_if_tp_attach_never_acks(monkeypatch):

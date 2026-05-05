@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import os
-from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, text
 
-from xenon.execution import orders_store
 from xenon.execution.combo_wizard import session
 
 # --------------------------------------------------------------------------
@@ -109,7 +107,7 @@ def test_submit_combo_persists_wizard_attempt_and_client_attempt_id(tmp_path, mo
         row = conn.execute(
             text(
                 """
-                SELECT combo_contract, ib_order_id
+                SELECT combo_contract, ib_order_id, legs
                   FROM xenon.wizard_combo_attempts
                  WHERE session_id = :sid
                 """
@@ -124,6 +122,7 @@ def test_submit_combo_persists_wizard_attempt_and_client_attempt_id(tmp_path, mo
     assert client_attempt_id is not None
     assert client_attempt_id.startswith(f"wiz:{planned['session_id']}:combo:")
     assert row[1] == str(result["orderId"])
+    assert row[2] == _plan_payload()["legs"]
 
 
 def test_get_session_rejects_explicit_scope_mismatch():

@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class _Frozen(BaseModel):
@@ -78,9 +78,16 @@ class TakeProfitFixedConfig(_Frozen):
 
 
 class ComboTpAlertConfig(_Frozen):
-    threshold_pct: float
+    threshold_pct: float | None = None
+    alert_net_mid_threshold: float | None = None
     auto_place: bool = False
     min_realert_interval_s: int = 3600
+
+    @model_validator(mode="after")
+    def _has_threshold(self):
+        if self.threshold_pct is None and self.alert_net_mid_threshold is None:
+            raise ValueError("combo_tp_alert requires threshold_pct or alert_net_mid_threshold")
+        return self
 
 
 class StateData(BaseModel):

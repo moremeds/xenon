@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from xenon.db.engine import get_sync_engine
+from xenon.db.queries.position_protection import insert_pending_arm
 from xenon.execution.account_scope import AccountScope
 from xenon.monitor_daemon.handlers.out_of_band_sweep import OutOfBandSweepHandler
 
@@ -27,6 +28,54 @@ def test_sweep_emits_unprotected_for_unknown_position(engine):
     result = handler.execute()
     assert result["status"] == "ok"
     assert result["unprotected_count"] >= 1
+
+
+def test_sweep_does_not_treat_option_rule_as_stock_protection(engine):
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "DELETE FROM xenon.position_protection WHERE position_key IN ('STK::OOBSAME', 'OPT::OOBSAME::20260619::100::C')"
+        )
+    insert_pending_arm(
+        engine,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+        position_key="OPT::OOBSAME::20260619::100::C",
+        position_descriptor={
+            "asset_class": "long_option",
+            "anchor_price": 2.0,
+            "opened_qty": 1,
+            "protected_qty": 1,
+            "multiplier": 100,
+            "qty_unit": "contract",
+            "opened_at": "2026-05-04T14:00:00Z",
+            "source": "test",
+            "anchor_currency": "USD",
+            "legs": [
+                {
+                    "sec_type": "OPT",
+                    "symbol": "OOBSAME",
+                    "expiry": "20260619",
+                    "strike": 100.0,
+                    "right": "C",
+                    "action": "BUY",
+                    "ratio": 1,
+                    "fill_price": 2.0,
+                    "con_id": 99,
+                }
+            ],
+        },
+        asset_class="long_option",
+        rule_kind="stop_loss",
+        config={"threshold_pct": -0.2, "anchor": "entry_price"},
+    )
+    ib = MagicMock()
+    ib.connected = True
+    ib.positions.return_value = [{"symbol": "OOBSAME", "qty": 100, "con_id": 1, "sec_type": "STK"}]
+    handler = OutOfBandSweepHandler(engine=engine, ib_client=ib, scope=_scope())
+    result = handler.execute()
+    assert result["status"] == "ok"
+    assert result["unprotected_count"] == 1
 
 
 def test_sweep_aborts_when_positions_drop_70_pct(engine):

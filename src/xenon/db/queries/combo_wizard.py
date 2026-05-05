@@ -6,7 +6,6 @@ All functions take a sync sqlalchemy.Connection, not AsyncConnection.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-
 from typing import Any
 
 from sqlalchemy import Connection, insert, select, text, update
@@ -190,10 +189,19 @@ def _normalize_combo_legs(ticker: str, legs: list[dict[str, Any]]) -> list[dict[
     normalized: list[dict[str, Any]] = []
     for leg in legs:
         out = dict(leg)
-        out["symbol"] = str(out.get("symbol") or out.get("localSymbol") or ticker)
-        out["sec_type"] = str(out.get("sec_type") or out.get("secType") or "OPT")
+        out["symbol"] = str(out.get("symbol") or out.get("localSymbol") or ticker).upper()
+        out["sec_type"] = str(out.get("sec_type") or out.get("secType") or "OPT").upper()
+        out["action"] = str(out.get("action") or "").upper()
+        if out.get("right") is not None:
+            out["right"] = str(out["right"]).upper()
+        if out.get("strike") is not None:
+            out["strike"] = float(out["strike"])
+        if "con_id" not in out and out.get("conId") is not None:
+            out["con_id"] = int(out["conId"])
         if "ratio" not in out:
             out["ratio"] = 1
+        if out.get("fill_price") is not None:
+            out["fill_price"] = float(out["fill_price"])
         normalized.append(out)
     return normalized
 
@@ -209,11 +217,22 @@ def _combo_protection_context(conn: Connection, session_id: str) -> dict[str, An
         raise ValueError(f"Wizard session {session_id} has no combo legs for protection")
 
     ticker = str((attempt or {}).get("ticker") or session["ticker"])
+    anchor_price = float((attempt or {}).get("limit_price") or (session.get("payload") or {}).get("limitPrice") or 0.0)
+    quantity = int((session.get("payload") or {}).get("quantity") or 1)
     descriptor = {
+        "asset_class": "debit_combo",
         "wizard_session_id": session_id,
         "wizard_attempt_id": (attempt or {}).get("attempt_id"),
         "ticker": ticker,
         "structure_name": (attempt or {}).get("structure_name") or session.get("structure_name"),
+        "opened_at": datetime.now(timezone.utc).isoformat(),
+        "source": "combo_wizard",
+        "anchor_price": anchor_price,
+        "anchor_currency": "USD",
+        "opened_qty": quantity,
+        "protected_qty": quantity,
+        "multiplier": 100,
+        "qty_unit": "spread",
         "legs": _normalize_combo_legs(ticker, legs),
     }
     return {

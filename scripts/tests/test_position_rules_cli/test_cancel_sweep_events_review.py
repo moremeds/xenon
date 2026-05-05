@@ -74,6 +74,55 @@ def test_sweep_dry_run_reports_unprotected_ib_position(monkeypatch, capsys):
     assert body["would_insert"][0]["symbol"] == "CLISWEEP"
 
 
+def test_sweep_dry_run_does_not_treat_option_rule_as_stock_protection(monkeypatch, capsys):
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU1234567")
+    monkeypatch.setenv("XENON_BROKER", "IB")
+    monkeypatch.setattr(cli, "_positions_from_ib", lambda: [{"symbol": "CLISAME", "qty": 100, "con_id": 9, "sec_type": "STK"}])
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM xenon.position_protection WHERE position_key IN ('STK::CLISAME', 'OPT::CLISAME::20260619::100::C')"))
+    insert_pending_arm(
+        engine,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+        position_key="OPT::CLISAME::20260619::100::C",
+        position_descriptor={
+            "asset_class": "long_option",
+            "anchor_price": 2.0,
+            "opened_qty": 1,
+            "protected_qty": 1,
+            "multiplier": 100,
+            "qty_unit": "contract",
+            "opened_at": "2026-05-04T14:00:00Z",
+            "source": "test",
+            "anchor_currency": "USD",
+            "legs": [
+                {
+                    "sec_type": "OPT",
+                    "symbol": "CLISAME",
+                    "expiry": "20260619",
+                    "strike": 100.0,
+                    "right": "C",
+                    "action": "BUY",
+                    "ratio": 1,
+                    "fill_price": 2.0,
+                    "con_id": 99,
+                }
+            ],
+        },
+        asset_class="long_option",
+        rule_kind="stop_loss",
+        config={"threshold_pct": -0.2, "anchor": "entry_price"},
+    )
+
+    assert cli.main(["sweep"]) == 0
+    body = json.loads(capsys.readouterr().out)
+    assert body["count"] == 1
+    assert body["would_insert"][0]["symbol"] == "CLISAME"
+
+
 def test_positions_from_ib_connects_with_auto_client_id(monkeypatch):
     import xenon.clients.ib_client as ib_client_mod
 
