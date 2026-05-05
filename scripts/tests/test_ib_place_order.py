@@ -56,3 +56,41 @@ def test_place_order_returns_accepted_tif(monkeypatch):
 
     assert _FakeClient.placed_order.tif == "GTC"
     assert result["tif"] == "GTC"
+
+
+def test_place_order_accepts_market_payload_without_limit_price(monkeypatch):
+    monkeypatch.setattr(ib_place_order, "IBClient", _FakeClient)
+
+    result = ib_place_order.place_order(
+        {
+            "type": "stock",
+            "symbol": "QQQ",
+            "action": "SELL",
+            "quantity": 1,
+            "orderType": "MKT",
+            "tif": "DAY",
+        }
+    )
+
+    assert result["status"] == "ok"
+    assert _FakeClient.placed_order.orderType == "MKT"
+
+
+def test_place_order_accepts_stop_payload_without_limit_price(monkeypatch):
+    monkeypatch.setattr(ib_place_order, "IBClient", _FakeClient)
+
+    result = ib_place_order.place_order(
+        {
+            "type": "stock",
+            "symbol": "QQQ",
+            "action": "SELL",
+            "quantity": 1,
+            "orderType": "STP",
+            "stopPrice": 400.0,
+            "tif": "GTC",
+        }
+    )
+
+    assert result["status"] == "ok"
+    assert _FakeClient.placed_order.orderType == "STP"
+    assert _FakeClient.placed_order.auxPrice == 400.0

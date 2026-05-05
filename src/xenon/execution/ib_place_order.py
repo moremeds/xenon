@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 try:
-    from ib_async import ComboLeg, Contract, LimitOrder, Option, Stock, TagValue, util
+    from ib_async import ComboLeg, Contract, LimitOrder, MarketOrder, Option, Stock, StopOrder, TagValue, util
 except ImportError:
     print(json.dumps({"status": "error", "message": "ib_async not installed"}))
     sys.exit(1)
@@ -32,7 +32,9 @@ def place_order(params: dict) -> dict:
     symbol = params["symbol"].upper()
     action = params["action"].upper()
     quantity = int(params["quantity"])
-    limit_price = float(params["limitPrice"])
+    ib_order_type = str(params.get("orderType") or "LMT").upper()
+    limit_price = float(params["limitPrice"]) if ib_order_type == "LMT" else None
+    stop_price = float(params["stopPrice"]) if ib_order_type == "STP" else None
     tif = params.get("tif", "DAY").upper()
 
     client = IBClient()
@@ -115,13 +117,29 @@ def place_order(params: dict) -> dict:
         client._ib.errorEvent += _on_error
 
         # Build order
-        order = LimitOrder(
-            action=action,
-            totalQuantity=quantity,
-            lmtPrice=limit_price,
-            tif=tif,
-            outsideRth=False,
-        )
+        if ib_order_type == "MKT":
+            order = MarketOrder(
+                action=action,
+                totalQuantity=quantity,
+                tif=tif,
+                outsideRth=False,
+            )
+        elif ib_order_type == "STP":
+            order = StopOrder(
+                action=action,
+                totalQuantity=quantity,
+                stopPrice=stop_price,
+                tif=tif,
+                outsideRth=False,
+            )
+        else:
+            order = LimitOrder(
+                action=action,
+                totalQuantity=quantity,
+                lmtPrice=limit_price,
+                tif=tif,
+                outsideRth=False,
+            )
 
         if order_type == "combo":
             order.smartComboRoutingParams = [TagValue("NonGuaranteed", "1")]
@@ -181,7 +199,7 @@ def place_order(params: dict) -> dict:
             "permId": perm_id,
             "tif": accepted_tif,
             "initialStatus": status,
-            "message": f"{action} {quantity} {symbol} @ ${limit_price:.2f} {accepted_tif} — {status}",
+            "message": f"{action} {quantity} {symbol} {ib_order_type} {accepted_tif} — {status}",
         }
 
     except Exception as e:
@@ -208,7 +226,12 @@ def main():
         sys.exit(1)
 
     # Validate required fields
-    required = ["symbol", "action", "quantity", "limitPrice"]
+    params_order_type = str(params.get("orderType") or "LMT").upper()
+    required = ["symbol", "action", "quantity"]
+    if params_order_type == "LMT":
+        required.append("limitPrice")
+    elif params_order_type == "STP":
+        required.append("stopPrice")
     missing = [f for f in required if f not in params]
     if missing:
         print(json.dumps({"status": "error", "message": f"Missing fields: {', '.join(missing)}"}))
