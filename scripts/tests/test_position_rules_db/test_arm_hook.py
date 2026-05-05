@@ -90,6 +90,32 @@ def test_single_leg_stock_fill_arms_two_rules(engine):
     assert [row.rule_kind for row in rows] == ["stop_loss", "trailing_tp"]
 
 
+def test_single_leg_stock_sell_fill_does_not_arm(engine):
+    event = _fill_event("TEST-EX-SELL-CLOSE", "SPY", "SELL")
+    _persist_fill(engine, event)
+
+    on_fill_event(engine, event)
+
+    with engine.connect() as conn:
+        protection_count = conn.execute(
+            text("SELECT COUNT(*) FROM xenon.position_protection WHERE position_key = 'STK::SPY'")
+        ).scalar_one()
+        unsupported = conn.execute(
+            text(
+                """
+                SELECT payload FROM events.outbox
+                WHERE source = 'arm_hook_unsupported'
+                  AND payload->>'exec_id' = 'TEST-EX-SELL-CLOSE'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+        ).one()
+
+    assert protection_count == 0
+    assert unsupported.payload["reason"] == "single_leg_sell_fill_not_armed"
+
+
 def test_replay_is_idempotent(engine):
     """Consumer replays fill.recorded: no duplicate rows."""
     event = _fill_event("TEST-EX-2", "MSFT", "BUY")

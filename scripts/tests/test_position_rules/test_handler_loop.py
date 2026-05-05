@@ -96,6 +96,30 @@ def _scope():
     return AccountScope(broker="IB", account_env="paper", broker_account="DU1234567")
 
 
+def _quote_side_effect(quotes: dict[int, Quote], *, fallback_symbol: str, fallback_price: float):
+    def fetch(contract, snapshot=False, generic_ticks=""):
+        return quotes.get(getattr(contract, "conId", None)) or Quote(
+            symbol=fallback_symbol,
+            price=fallback_price,
+            ts=datetime.now(timezone.utc),
+        )
+
+    return fetch
+
+
+class _Ticker:
+    def __init__(self, *, price: float, symbol: str = "TEST"):
+        self.symbol = symbol
+        self.last = price
+        self.close = price
+        self.bid = price - 0.01
+        self.ask = price + 0.01
+        self.time = datetime.now(timezone.utc)
+
+    def marketPrice(self):
+        return self.last
+
+
 def test_pending_arm_transitions_to_armed(engine):
     descriptor = _stock_descriptor()
     pid = insert_pending_arm(
@@ -135,6 +159,66 @@ def test_pending_arm_transitions_to_armed(engine):
     assert row.state == "ARMED"
     assert row.native_order_perm_id == 999
     assert executor.attach_native_stp.call_args.kwargs["order_ref"] == f"xenon-pr-native-{pid}"
+
+
+def test_armed_mark_fetch_uses_contract_object_and_normalizes_ticker(engine):
+    descriptor = _stock_descriptor(symbol="IBM", price=100.0, con_id=11111)
+    pid = insert_pending_arm(
+        engine,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+        position_key="TEST::IBM_CONTRACT_QUOTE",
+        position_descriptor=descriptor,
+        asset_class="stock",
+        rule_kind="stop_loss",
+        config={"threshold_pct": -0.08, "anchor": "entry_price"},
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE xenon.position_protection SET state='ARMED', armed_at=NOW() WHERE protection_id=:pid"),
+            {"pid": pid},
+        )
+
+    class StrictIB:
+        connected = True
+
+        def __init__(self):
+            self.contracts = []
+
+        def positions(self):
+            return [{"symbol": "IBM", "qty": 100, "con_id": 11111}]
+
+        def get_quote(self, contract, snapshot=False, generic_ticks=""):
+            self.contracts.append((contract, snapshot, generic_ticks))
+            return _Ticker(price=91.0, symbol="IBM")
+
+        def find_open_orders_by_order_ref(self, order_ref):
+            return []
+
+        def find_executions_by_order_ref(self, order_ref):
+            return []
+
+    executor = MagicMock()
+    executor.flatten_mkt.return_value = PlaceResult(perm_id=12340, ib_order_id=1, status="Submitted", raw={})
+    ib_client = StrictIB()
+
+    handler = PositionRulesHandler(engine=engine, executor=executor, ib_client=ib_client, scope=_scope())
+    handler.execute()
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT state FROM xenon.position_protection WHERE protection_id=:pid"),
+            {"pid": pid},
+        ).first()
+
+    assert row.state == "TRIGGERED"
+    assert len(ib_client.contracts) == 1
+    contract, snapshot, generic_ticks = ib_client.contracts[0]
+    assert getattr(contract, "conId") == 11111
+    assert snapshot is True
+    assert generic_ticks == ""
+    executor.flatten_mkt.assert_called_once()
 
 
 def test_armed_below_threshold_triggers_and_claims(engine):
@@ -408,9 +492,8 @@ def test_credit_spread_take_profit_uses_net_debit_and_combo_close(engine):
         58001: Quote(symbol="SPY", price=0.80, ts=datetime.now(timezone.utc)),
         57501: Quote(symbol="SPY", price=0.30, ts=datetime.now(timezone.utc)),
     }
-    ib_client.get_quote.side_effect = lambda **kwargs: quotes.get(kwargs.get("con_id")) or Quote(
-        symbol="SPY", price=579.0, ts=datetime.now(timezone.utc)
-    )
+    ib_client.qualify_contract.side_effect = lambda contract: contract
+    ib_client.get_quote.side_effect = _quote_side_effect(quotes, fallback_symbol="SPY", fallback_price=579.0)
     ib_client.find_open_orders_by_order_ref.return_value = []
     ib_client.find_executions_by_order_ref.return_value = []
     ib_client.positions.return_value = [
@@ -472,9 +555,8 @@ def test_combo_close_caps_qty_to_minimum_leg_position(engine):
         58001: Quote(symbol="IWM", price=0.80, ts=datetime.now(timezone.utc)),
         57501: Quote(symbol="IWM", price=0.30, ts=datetime.now(timezone.utc)),
     }
-    ib_client.get_quote.side_effect = lambda **kwargs: quotes.get(kwargs.get("con_id")) or Quote(
-        symbol="IWM", price=220.0, ts=datetime.now(timezone.utc)
-    )
+    ib_client.qualify_contract.side_effect = lambda contract: contract
+    ib_client.get_quote.side_effect = _quote_side_effect(quotes, fallback_symbol="IWM", fallback_price=220.0)
     ib_client.find_open_orders_by_order_ref.return_value = []
     ib_client.find_executions_by_order_ref.return_value = []
     ib_client.positions.return_value = [
@@ -515,9 +597,8 @@ def test_combo_close_abandons_when_any_leg_is_flat(engine):
         58001: Quote(symbol="DIA", price=0.80, ts=datetime.now(timezone.utc)),
         57501: Quote(symbol="DIA", price=0.30, ts=datetime.now(timezone.utc)),
     }
-    ib_client.get_quote.side_effect = lambda **kwargs: quotes.get(kwargs.get("con_id")) or Quote(
-        symbol="DIA", price=390.0, ts=datetime.now(timezone.utc)
-    )
+    ib_client.qualify_contract.side_effect = lambda contract: contract
+    ib_client.get_quote.side_effect = _quote_side_effect(quotes, fallback_symbol="DIA", fallback_price=390.0)
     ib_client.find_open_orders_by_order_ref.return_value = []
     ib_client.find_executions_by_order_ref.return_value = []
     ib_client.positions.return_value = [{"symbol": "DIA", "qty": -1, "con_id": 58001}]
@@ -575,6 +656,69 @@ def test_armed_with_native_perm_id_detects_external_cancel(engine):
             text("SELECT state FROM xenon.position_protection WHERE protection_id=:pid"),
             {"pid": pid},
         ).first()
+    assert row.state == "CANCELED"
+    executor.flatten_mkt.assert_not_called()
+
+
+def test_handler_connects_ib_client_and_uses_get_positions_for_native_liveness(engine):
+    descriptor = _stock_descriptor(symbol="CRM", price=100.0, con_id=99991)
+    pid = insert_pending_arm(
+        engine,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+        position_key="TEST::CRM_NATIVE_CONNECT",
+        position_descriptor=descriptor,
+        asset_class="stock",
+        rule_kind="stop_loss",
+        config={"threshold_pct": -0.08, "anchor": "entry_price"},
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE xenon.position_protection SET state='ARMED', "
+                "native_order_perm_id=888, armed_at=NOW() WHERE protection_id=:pid"
+            ),
+            {"pid": pid},
+        )
+
+    class Position:
+        def __init__(self):
+            self.contract = type("Contract", (), {"symbol": "CRM", "conId": 99991})()
+            self.position = 100
+
+    class DisconnectedIB:
+        connected = False
+
+        def __init__(self):
+            self.connect_calls = []
+
+        def is_connected(self):
+            return self.connected
+
+        def connect(self, **kwargs):
+            self.connect_calls.append(kwargs)
+            self.connected = True
+
+        def get_positions(self):
+            return [Position()]
+
+        def get_order_state(self, perm_id):
+            return {"status": "Cancelled", "permId": perm_id}
+
+    executor = MagicMock()
+    ib_client = DisconnectedIB()
+
+    handler = PositionRulesHandler(engine=engine, executor=executor, ib_client=ib_client, scope=_scope())
+    handler.execute()
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT state FROM xenon.position_protection WHERE protection_id=:pid"),
+            {"pid": pid},
+        ).one()
+
+    assert ib_client.connect_calls
     assert row.state == "CANCELED"
     executor.flatten_mkt.assert_not_called()
 

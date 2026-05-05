@@ -51,6 +51,9 @@ def _process(engine: Engine, payload: dict[str, Any]) -> None:
         if legs is None:
             return
     else:
+        if _is_single_leg_sell_fill(fill):
+            _emit_unsupported(engine, payload, reason="single_leg_sell_fill_not_armed")
+            return
         legs = [_single_fill_leg(fill)]
         sibling_legs = _detect_manual_siblings(engine, fill)
 
@@ -120,6 +123,13 @@ def _single_fill_leg(fill: dict[str, Any]) -> dict[str, Any]:
         "fill_price": float(fill["price"]),
         "con_id": fill["con_id"] or 0,
     }
+
+
+def _is_single_leg_sell_fill(fill: dict[str, Any]) -> bool:
+    metadata = fill.get("metadata") or {}
+    sec_type = str(metadata.get("sec_type") or "STK").upper()
+    side = str(fill.get("side") or "").upper()
+    return sec_type in {"STK", "OPT"} and side in {"SELL", "SLD", "SOLD"}
 
 
 def _detect_manual_siblings(engine: Engine, fill: dict[str, Any]) -> list[dict[str, Any]] | None:

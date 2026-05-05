@@ -730,6 +730,18 @@ class IBClient:
 
         return None
 
+    def get_order_state(self, *, perm_id: int) -> Optional[dict[str, Any]]:
+        """Return normalized order state for a permanent ID after refreshing IB orders."""
+        self.get_open_orders()
+        trade = self.get_order_status(perm_id=perm_id)
+        if trade is None:
+            return None
+        return {
+            "status": getattr(trade.orderStatus, "status", None),
+            "permId": getattr(trade.order, "permId", None),
+            "orderId": getattr(trade.order, "orderId", None),
+        }
+
     # -- market data --------------------------------------------------------
 
     def get_quote(self, contract: Any, snapshot: bool = False, generic_ticks: str = "") -> Any:
