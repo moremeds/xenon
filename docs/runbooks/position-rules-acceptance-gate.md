@@ -13,6 +13,12 @@ xenon-position-rules events --since 24h > "logs/transitions-${DAY}.json"
 xenon-position-rules health --json > "logs/health-${DAY}.json"
 ```
 
+Or run the equivalent helper:
+
+```bash
+uv run python scripts/checks/position_rules_acceptance_snapshot.py
+```
+
 Record the daily result:
 
 | Day | Date | DLQ count | FAILED rules | Triggers auto/alert | Reviewer | Verdict |
