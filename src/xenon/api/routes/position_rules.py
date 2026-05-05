@@ -10,9 +10,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from xenon.api.guards import get_account_scope
+from xenon.api.services.position_rules_cancel import cancel_protection
 from xenon.api.services.position_rules_health import compute_health
 from xenon.db.engine import get_sync_engine
-from xenon.db.queries.position_protection import cas_transition, get_by_id, list_active_rows
+from xenon.db.queries.position_protection import list_active_rows
 from xenon.execution.account_scope import AccountScope
 
 router = APIRouter(prefix="/position-rules", tags=["position-rules"])
@@ -76,18 +77,26 @@ def cancel(
         return auth_error
 
     engine = get_sync_engine()
-    row = get_by_id(engine, protection_id=protection_id)
-    if row is None:
+    try:
+        result = cancel_protection(
+            engine,
+            scope=scope,
+            protection_id=protection_id,
+            reason="operator_cancel_api",
+        )
+    except RuntimeError as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"reason_code": "broker_cancel_failed", "message": str(exc)},
+        )
+    if result.status == "not_found":
         raise HTTPException(status_code=404, detail="protection not found")
-    if row["state"] not in ("PENDING_ARM", "ARMED", "TRIGGERED"):
-        return JSONResponse(status_code=409, content={"reason_code": "already_terminal", "state": row["state"]})
-    if not cas_transition(
-        engine,
-        protection_id=protection_id,
-        expected_state=row["state"],
-        new_state="CANCELED",
-        reason="operator_cancel_api",
-    ):
+    if result.status == "already_terminal":
+        return JSONResponse(
+            status_code=409,
+            content={"reason_code": "already_terminal", "state": result.row["state"] if result.row else None},
+        )
+    if result.status == "concurrent_state_change":
         return JSONResponse(status_code=409, content={"reason_code": "concurrent_state_change"})
     return {"protection_id": protection_id, "state": "CANCELED"}
 

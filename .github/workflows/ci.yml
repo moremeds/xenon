@@ -154,6 +154,8 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test
         run: uv run alembic upgrade head
+      - name: Position rules duplicate close audit
+        run: uv run python scripts/checks/no_duplicate_close_audit.py --since 1d
       - name: Collection smoke test (import-level guard)
         # Catches missing deps / ImportError on files the affected-tests selector
         # would otherwise skip on a PR. ~1s, cheap insurance.

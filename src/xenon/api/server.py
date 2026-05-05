@@ -865,6 +865,7 @@ async def auth_middleware(request: Request, call_next):
     # Skip auth for server-to-server calls from localhost (Next.js → FastAPI)
     client_host = request.client.host if request.client else None
     if client_host in ("127.0.0.1", "::1"):
+        request.state.user = {"source": "localhost-bypass"}
         return await call_next(request)
 
     # API key auth — scoped to historical/contract endpoints only

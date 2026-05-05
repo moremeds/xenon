@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from xenon.cli import position_rules as cli
 from xenon.db.engine import get_sync_engine
+from xenon.db.queries.position_close_claims import find_inflight_for_position, mark_submitted, try_claim
 from xenon.db.queries.position_protection import get_by_id, insert_pending_arm
 
 
@@ -25,16 +26,28 @@ def _descriptor(symbol: str = "CLICANCEL") -> dict:
     }
 
 
-def _insert_rule(position_key: str = "STK::CLICANCEL") -> int:
+def _insert_rule(
+    position_key: str = "STK::CLICANCEL",
+    *,
+    account_env: str = "paper",
+    broker_account: str = "DU1234567",
+) -> int:
     engine = get_sync_engine()
     with engine.begin() as conn:
-        conn.execute(text("DELETE FROM xenon.position_protection WHERE position_key = :position_key"), {"position_key": position_key})
+        conn.execute(
+            text("DELETE FROM xenon.position_close_claims WHERE position_key = :position_key"),
+            {"position_key": position_key},
+        )
+        conn.execute(
+            text("DELETE FROM xenon.position_protection WHERE position_key = :position_key"),
+            {"position_key": position_key},
+        )
     symbol = position_key.split("::")[-1]
     return insert_pending_arm(
         engine,
         broker="IB",
-        account_env="paper",
-        broker_account="DU1234567",
+        account_env=account_env,
+        broker_account=broker_account,
         position_key=position_key,
         position_descriptor=_descriptor(symbol),
         asset_class="stock",
@@ -57,6 +70,101 @@ def test_cancel_transitions_active_row(monkeypatch, capsys):
         assert row["state"] == "CANCELED"
     finally:
         with get_sync_engine().begin() as conn:
+            conn.execute(text("DELETE FROM xenon.position_close_claims WHERE claimed_by_protection_id = :pid"), {"pid": protection_id})
+            conn.execute(text("DELETE FROM xenon.position_protection WHERE protection_id = :pid"), {"pid": protection_id})
+
+
+def test_cancel_live_requires_operator_user(monkeypatch, capsys):
+    import xenon.api.trading_mode as trading_mode
+
+    monkeypatch.setenv("XENON_TRADING_MODE", "live")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "U1234567")
+    monkeypatch.setenv("XENON_BROKER", "IB")
+    monkeypatch.delenv("XENON_OPERATOR_USER_ID", raising=False)
+    monkeypatch.setattr(trading_mode, "MODE", "live")
+
+    assert cli.main(["cancel", "999999999"]) == 1
+    body = json.loads(capsys.readouterr().err)
+    assert body["reason_code"] == "live_trading_auth_unconfigured"
+
+
+def test_cancel_is_scoped_and_cannot_cancel_live_row_from_paper_cli(monkeypatch):
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU1234567")
+    monkeypatch.setenv("XENON_BROKER", "IB")
+    protection_id = _insert_rule(
+        "STK::CLICROSSLIVE",
+        account_env="live",
+        broker_account="U1234567",
+    )
+
+    try:
+        assert cli.main(["cancel", str(protection_id)]) == 1
+        row = get_by_id(get_sync_engine(), protection_id=protection_id)
+        assert row is not None
+        assert row["state"] == "PENDING_ARM"
+    finally:
+        with get_sync_engine().begin() as conn:
+            conn.execute(text("DELETE FROM xenon.position_close_claims WHERE claimed_by_protection_id = :pid"), {"pid": protection_id})
+            conn.execute(text("DELETE FROM xenon.position_protection WHERE protection_id = :pid"), {"pid": protection_id})
+
+
+def test_cancel_cancels_native_order_and_abandons_inflight_claim(monkeypatch):
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU1234567")
+    monkeypatch.setenv("XENON_BROKER", "IB")
+    engine = get_sync_engine()
+    position_key = "STK::CLINATIVE"
+    protection_id = _insert_rule(position_key)
+    claim_id = try_claim(
+        engine,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+        position_key=position_key,
+        claimed_by_protection_id=protection_id,
+        claim_kind="synthetic_close",
+    )
+    assert claim_id is not None
+    mark_submitted(engine, claim_id=claim_id, broker_perm_id=222)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE xenon.position_protection
+                SET state = 'ARMED', native_order_perm_id = 111
+                WHERE protection_id = :pid
+                """
+            ),
+            {"pid": protection_id},
+        )
+
+    canceled: list[int] = []
+
+    class FakeExecutor:
+        def cancel(self, *, scope, perm_id):
+            canceled.append(perm_id)
+            return {"status": "Cancelled", "perm_id": perm_id}
+
+    monkeypatch.setattr("xenon.api.services.position_rules_cancel.IBExecutor", lambda: FakeExecutor())
+
+    try:
+        assert cli.main(["cancel", str(protection_id)]) == 0
+        assert canceled == [111, 222]
+        row = get_by_id(engine, protection_id=protection_id)
+        assert row is not None
+        assert row["state"] == "CANCELED"
+        claim = find_inflight_for_position(
+            engine,
+            broker="IB",
+            account_env="paper",
+            broker_account="DU1234567",
+            position_key=position_key,
+        )
+        assert claim is None
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM xenon.position_close_claims WHERE claimed_by_protection_id = :pid"), {"pid": protection_id})
             conn.execute(text("DELETE FROM xenon.position_protection WHERE protection_id = :pid"), {"pid": protection_id})
 
 

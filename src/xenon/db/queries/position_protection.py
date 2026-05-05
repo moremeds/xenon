@@ -94,9 +94,19 @@ def cas_transition(
     context: dict[str, Any] | None = None,
     state_data_patch: dict[str, Any] | None = None,
     native_order_perm_id: int | None = None,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
 ) -> bool:
     """Optimistic state transition plus outbox emit. Return True on success."""
     now = datetime.now(timezone.utc)
+    scope_filters = []
+    if broker is not None:
+        scope_filters.append(position_protection.c.broker == broker)
+    if account_env is not None:
+        scope_filters.append(position_protection.c.account_env == account_env)
+    if broker_account is not None:
+        scope_filters.append(position_protection.c.broker_account == broker_account)
 
     with engine.begin() as conn:
         existing = conn.execute(
@@ -107,7 +117,7 @@ def cas_transition(
                 position_protection.c.broker_account,
                 position_protection.c.position_key,
                 position_protection.c.rule_kind,
-            ).where(position_protection.c.protection_id == protection_id)
+            ).where(position_protection.c.protection_id == protection_id, *scope_filters)
         ).first()
         if existing is None:
             return False
@@ -128,6 +138,7 @@ def cas_transition(
             .where(
                 position_protection.c.protection_id == protection_id,
                 position_protection.c.state == expected_state,
+                *scope_filters,
             )
             .values(**values)
             .returning(position_protection.c.protection_id)
@@ -178,9 +189,23 @@ def list_active_rows(
         return [dict(row._mapping) for row in result]
 
 
-def get_by_id(engine: Engine, *, protection_id: int) -> dict[str, Any] | None:
+def get_by_id(
+    engine: Engine,
+    *,
+    protection_id: int,
+    broker: str | None = None,
+    account_env: str | None = None,
+    broker_account: str | None = None,
+) -> dict[str, Any] | None:
+    scope_filters = []
+    if broker is not None:
+        scope_filters.append(position_protection.c.broker == broker)
+    if account_env is not None:
+        scope_filters.append(position_protection.c.account_env == account_env)
+    if broker_account is not None:
+        scope_filters.append(position_protection.c.broker_account == broker_account)
     with engine.connect() as conn:
         row = conn.execute(
-            select(position_protection).where(position_protection.c.protection_id == protection_id)
+            select(position_protection).where(position_protection.c.protection_id == protection_id, *scope_filters)
         ).first()
         return dict(row._mapping) if row else None

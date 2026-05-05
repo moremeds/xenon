@@ -104,6 +104,27 @@ def find_by_order_ref(engine: Engine, *, order_ref: str) -> dict[str, Any] | Non
         return dict(row._mapping) if row else None
 
 
+def find_inflight_for_position(
+    engine: Engine,
+    *,
+    broker: str,
+    account_env: str,
+    broker_account: str,
+    position_key: str,
+) -> dict[str, Any] | None:
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(position_close_claims).where(
+                position_close_claims.c.broker == broker,
+                position_close_claims.c.account_env == account_env,
+                position_close_claims.c.broker_account == broker_account,
+                position_close_claims.c.position_key == position_key,
+                position_close_claims.c.status.in_(("PENDING", "SUBMITTED")),
+            )
+        ).first()
+        return dict(row._mapping) if row else None
+
+
 def increment_attempts(engine: Engine, *, claim_id: int, last_error: str | None = None) -> None:
     with engine.begin() as conn:
         conn.execute(

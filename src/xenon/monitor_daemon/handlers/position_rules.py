@@ -9,6 +9,7 @@ from sqlalchemy import and_, select, update
 import xenon.execution.brackets.rules  # noqa: F401 - populate RULE_REGISTRY
 from xenon.db.events import emit_outbox_in_txn
 from xenon.db.queries.position_close_claims import (
+    find_inflight_for_position,
     increment_attempts,
     mark_submitted,
     mark_terminal,
@@ -205,14 +206,24 @@ class PositionRulesHandler(BaseHandler):
             claim_kind="synthetic_close",
         )
         if claim_id is None:
-            cas_transition(
+            existing_claim = find_inflight_for_position(
                 self._engine,
-                protection_id=row["protection_id"],
-                expected_state="ARMED",
-                new_state="SUPERSEDED",
-                reason="claim_held_by_other_rule",
+                broker=self._scope.broker,
+                account_env=self._scope.account_env,
+                broker_account=self._scope.broker_account,
+                position_key=row["position_key"],
             )
-            return
+            if existing_claim is not None and existing_claim["claimed_by_protection_id"] == row["protection_id"]:
+                claim_id = existing_claim["claim_id"]
+            else:
+                cas_transition(
+                    self._engine,
+                    protection_id=row["protection_id"],
+                    expected_state="ARMED",
+                    new_state="SUPERSEDED",
+                    reason="claim_held_by_other_rule",
+                )
+                return
 
         order_ref = derive_order_ref(claim_id=claim_id)
         open_orders = self._find_open_orders_by_order_ref(order_ref)

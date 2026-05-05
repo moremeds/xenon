@@ -10,13 +10,14 @@ from typing import Any
 
 from sqlalchemy import text
 
+from xenon.api.services.position_rules_cancel import ACTIVE_STATES, cancel_protection
 from xenon.api.services.position_rules_health import compute_health
 from xenon.db.engine import get_sync_engine
-from xenon.db.queries.position_protection import cas_transition, get_by_id, list_active_rows
+from xenon.db.queries.position_protection import get_by_id, list_active_rows
 from xenon.db.queries.position_rules_review import add_annotation
 from xenon.execution.account_scope import resolve_from_env
 
-_ACTIVE_STATES = ("PENDING_ARM", "ARMED", "TRIGGERED")
+_ACTIVE_STATES = ACTIVE_STATES
 
 
 def _json_safe(value: Any) -> Any:
@@ -67,21 +68,39 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
 
 def _cmd_cancel(args: argparse.Namespace) -> int:
+    scope = resolve_from_env()
+    if scope.account_env == "live" and not os.environ.get("XENON_OPERATOR_USER_ID"):
+        print(
+            json.dumps(
+                {
+                    "reason_code": "live_trading_auth_unconfigured",
+                    "message": "XENON_OPERATOR_USER_ID must be set for live cancel",
+                }
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
     engine = get_sync_engine()
-    row = get_by_id(engine, protection_id=args.protection_id)
-    if row is None:
+    try:
+        result = cancel_protection(
+            engine,
+            scope=scope,
+            protection_id=args.protection_id,
+            reason="operator_cancel_cli",
+            force=args.force,
+        )
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if result.status == "not_found":
         print(f"protection_id={args.protection_id} not found", file=sys.stderr)
         return 1
-    if row["state"] not in _ACTIVE_STATES and not args.force:
-        print(f"row is already terminal ({row['state']}); use --force to override", file=sys.stderr)
+    if result.status == "already_terminal":
+        state = result.row["state"] if result.row else "unknown"
+        print(f"row is already terminal ({state}); use --force to override", file=sys.stderr)
         return 1
-    if not cas_transition(
-        engine,
-        protection_id=args.protection_id,
-        expected_state=row["state"],
-        new_state="CANCELED",
-        reason="operator_cancel_cli",
-    ):
+    if result.status == "concurrent_state_change":
         print("CAS transition failed", file=sys.stderr)
         return 1
     print(f"canceled protection_id={args.protection_id}")

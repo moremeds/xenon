@@ -569,3 +569,70 @@ def test_signed_combo_pricing_preserved_for_credit(monkeypatch):
     config = prot.config
     assert Decimal(config["tp_target_price"]) == signed_target
     assert Decimal(config["alert_net_mid_threshold"]) == signed_threshold
+
+
+def test_credit_spread_wizard_protection_uses_credit_spread_key(monkeypatch):
+    payload = {
+        "symbol": "SPY",
+        "type": "combo",
+        "action": "BUY",
+        "quantity": 1,
+        "limitPrice": "-1.00",
+        "legs": [
+            {
+                "conId": 58001,
+                "sec_type": "OPT",
+                "symbol": "SPY",
+                "expiry": "20260516",
+                "strike": 580,
+                "right": "P",
+                "action": "SELL",
+                "ratio": 1,
+                "fill_price": 1.40,
+            },
+            {
+                "conId": 57501,
+                "sec_type": "OPT",
+                "symbol": "SPY",
+                "expiry": "20260516",
+                "strike": 575,
+                "right": "P",
+                "action": "BUY",
+                "ratio": 1,
+                "fill_price": 0.40,
+            },
+        ],
+    }
+    sid = _init_session(state="FILLED", payload=payload)
+    ib = _StubIB(
+        tp_acks=[{"order_id": 9001, "perm_id": "p"}],
+        alert_acks=[{"virtual_id": "alert-1"}],
+    )
+
+    protect.attach_protection(
+        sid,
+        ib=ib,
+        tp_target_price=Decimal("-0.10"),
+        alert_net_mid_threshold=Decimal("-0.45"),
+        polarity="CREDIT",
+        sleep=lambda _s: None,
+    )
+
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        prot = conn.execute(
+            text(
+                """
+                SELECT asset_class, position_key, position_descriptor
+                FROM xenon.position_protection
+                WHERE position_descriptor->>'wizard_session_id' = :sid
+                """
+            ),
+            {"sid": sid},
+        ).one()
+    engine.dispose()
+
+    assert prot.asset_class == "credit_spread"
+    assert prot.position_descriptor["asset_class"] == "credit_spread"
+    assert prot.position_descriptor["credit_received"] == 1.0
+    assert prot.position_key == "CS::SPY::20260516::580::575::P"

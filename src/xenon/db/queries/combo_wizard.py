@@ -16,6 +16,7 @@ from xenon.db.schema import (
     wizard_events,
     wizard_sessions,
 )
+from xenon.execution.brackets.asset_class import AssetClass, classify_position
 from xenon.execution.brackets.position_key import compute_position_key
 
 
@@ -217,10 +218,13 @@ def _combo_protection_context(conn: Connection, session_id: str) -> dict[str, An
         raise ValueError(f"Wizard session {session_id} has no combo legs for protection")
 
     ticker = str((attempt or {}).get("ticker") or session["ticker"])
+    normalized_legs = _normalize_combo_legs(ticker, legs)
+    classified = classify_position(legs=normalized_legs, wizard_session_payload=None, sibling_legs=None)
+    asset_class = classified.asset_class.value
     anchor_price = float((attempt or {}).get("limit_price") or (session.get("payload") or {}).get("limitPrice") or 0.0)
     quantity = int((session.get("payload") or {}).get("quantity") or 1)
     descriptor = {
-        "asset_class": "debit_combo",
+        "asset_class": asset_class,
         "wizard_session_id": session_id,
         "wizard_attempt_id": (attempt or {}).get("attempt_id"),
         "ticker": ticker,
@@ -233,13 +237,34 @@ def _combo_protection_context(conn: Connection, session_id: str) -> dict[str, An
         "protected_qty": quantity,
         "multiplier": 100,
         "qty_unit": "spread",
-        "legs": _normalize_combo_legs(ticker, legs),
+        "legs": normalized_legs,
     }
+    descriptor.update(_asset_class_descriptor_fields(classified.asset_class, descriptor))
     return {
         "session": session,
         "attempt": attempt,
         "descriptor": descriptor,
-        "position_key": compute_position_key("debit_combo", descriptor),
+        "asset_class": asset_class,
+        "position_key": compute_position_key(asset_class, descriptor),
+    }
+
+
+def _asset_class_descriptor_fields(asset_class: AssetClass, descriptor: dict[str, Any]) -> dict[str, Any]:
+    if asset_class != AssetClass.CREDIT_SPREAD:
+        return {}
+    legs = descriptor["legs"]
+    short = next((leg for leg in legs if leg.get("action") == "SELL"), None)
+    long_ = next((leg for leg in legs if leg.get("action") == "BUY"), None)
+    if short is None or long_ is None:
+        return {}
+
+    anchor_price = abs(float(descriptor.get("anchor_price") or 0.0))
+    leg_credit = float(short.get("fill_price") or 0.0) - float(long_.get("fill_price") or 0.0)
+    credit_received = anchor_price if anchor_price > 0 else max(leg_credit, 0.0)
+    return {
+        "credit_received": credit_received,
+        "short_strike": float(short["strike"]),
+        "short_right": short["right"],
     }
 
 
@@ -248,6 +273,7 @@ def upsert_protection(conn: Connection, session_id: str, **fields) -> None:
     session = ctx["session"]
     descriptor = ctx["descriptor"]
     position_key = ctx["position_key"]
+    asset_class = ctx["asset_class"]
     config = dict(fields.get("config") or {})
     config["auto_place"] = False
     now = datetime.now(timezone.utc)
@@ -287,7 +313,7 @@ def upsert_protection(conn: Connection, session_id: str, **fields) -> None:
             broker_account=session["broker_account"],
             position_key=position_key,
             position_descriptor=descriptor,
-            asset_class="debit_combo",
+            asset_class=asset_class,
             rule_kind="combo_tp_alert",
             state=state,
             config=config,

@@ -185,6 +185,83 @@ def test_armed_below_threshold_triggers_and_claims(engine):
     assert executor.flatten_mkt.call_args.kwargs["order_ref"] == claim.order_ref
 
 
+def test_transient_close_error_reuses_same_pending_claim(engine):
+    descriptor = _stock_descriptor(symbol="AMD", price=100.0, con_id=22446)
+    pid = insert_pending_arm(
+        engine,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+        position_key="TEST::AMD_RETRY_HANDLER",
+        position_descriptor=descriptor,
+        asset_class="stock",
+        rule_kind="stop_loss",
+        config={"threshold_pct": -0.08, "anchor": "entry_price"},
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE xenon.position_protection SET state='ARMED', armed_at=NOW() WHERE protection_id=:pid"),
+            {"pid": pid},
+        )
+
+    executor = MagicMock()
+    executor.flatten_mkt.side_effect = [
+        RuntimeError("subprocess timeout"),
+        PlaceResult(perm_id=12346, ib_order_id=2, status="Submitted", raw={}),
+    ]
+    ib_client = MagicMock()
+    ib_client.connected = True
+    ib_client.get_quote.return_value = Quote(symbol="AMD", price=91.0, ts=datetime.now(timezone.utc))
+    ib_client.find_open_orders_by_order_ref.return_value = []
+    ib_client.find_executions_by_order_ref.return_value = []
+    ib_client.positions.return_value = [{"symbol": "AMD", "qty": 100, "con_id": 22446}]
+
+    handler = PositionRulesHandler(engine=engine, executor=executor, ib_client=ib_client, scope=_scope())
+    handler.execute()
+
+    with engine.connect() as conn:
+        after_first = conn.execute(
+            text("SELECT state FROM xenon.position_protection WHERE protection_id=:pid"),
+            {"pid": pid},
+        ).first()
+        pending_claim = conn.execute(
+            text(
+                """
+                SELECT claim_id, status, attempts, claimed_by_protection_id
+                FROM xenon.position_close_claims
+                WHERE position_key='TEST::AMD_RETRY_HANDLER'
+                """
+            )
+        ).one()
+    assert after_first.state == "ARMED"
+    assert pending_claim.status == "PENDING"
+    assert pending_claim.attempts == 1
+    assert pending_claim.claimed_by_protection_id == pid
+
+    handler.execute()
+
+    with engine.connect() as conn:
+        after_second = conn.execute(
+            text("SELECT state FROM xenon.position_protection WHERE protection_id=:pid"),
+            {"pid": pid},
+        ).first()
+        submitted_claim = conn.execute(
+            text(
+                """
+                SELECT claim_id, status, broker_perm_id
+                FROM xenon.position_close_claims
+                WHERE position_key='TEST::AMD_RETRY_HANDLER'
+                """
+            )
+        ).one()
+
+    assert after_second.state == "TRIGGERED"
+    assert submitted_claim.claim_id == pending_claim.claim_id
+    assert submitted_claim.status == "SUBMITTED"
+    assert submitted_claim.broker_perm_id == 12346
+    assert executor.flatten_mkt.call_count == 2
+
+
 def test_two_rules_same_position_only_one_mkt(engine):
     descriptor = _stock_descriptor(symbol="GOOG", price=100.0, con_id=33333)
     insert_pending_arm(
