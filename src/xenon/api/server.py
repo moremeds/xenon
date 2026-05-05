@@ -2884,13 +2884,48 @@ async def _orders_place_from_body(body: dict):
         )
         raise HTTPException(status_code=502, detail=result.error)
     if result.data and result.data.get("status") == "error":
+        ib_code = result.data.get("code")
+        initial_status = str(result.data.get("initialStatus") or result.data.get("statusText") or "")
+        has_broker_order = bool(result.data.get("orderId") or result.data.get("permId"))
+        if str(ib_code) == "2161" and has_broker_order and initial_status in {
+            "PendingSubmit",
+            "PreSubmitted",
+            "Submitted",
+        }:
+            orders_store.mark_submitted(
+                submission_id=submission_id,
+                ib_order_id=str(result.data.get("orderId") or ""),
+                perm_id=str(result.data.get("permId") or ""),
+                placing_client_id=int(result.data.get("clientId") or 26),
+            )
+            try:
+                orders_store.record_event(
+                    submission_id,
+                    "IB_WARNING",
+                    {
+                        "ib_code": ib_code,
+                        "ib_message": result.data.get("message"),
+                        "initial_status": initial_status,
+                    },
+                )
+            except Exception:  # pragma: no cover — event writes are best-effort
+                logger.warning(
+                    "Failed to record IB_WARNING event for submission %s",
+                    submission_id,
+                    exc_info=True,
+                )
+            warning_response = dict(result.data)
+            warning_response["status"] = "ok"
+            warning_response["warning_code"] = ib_code
+            warning_response["warning_message"] = result.data.get("message")
+            return warning_response
+
         # B6 — write a reason_code the UI toast map can resolve. Most IB
         # rejections collapse to IB_REJECT, but tick-rule rejections
         # (code 110) re-map to LIMIT_OFF_TICK so the user sees a clean
         # actionable message instead of raw IB error text. The raw IB
         # numeric code + message always go into the orders_events audit
         # row so we don't lose the info.
-        ib_code = result.data.get("code")
         ib_message = result.data.get("message", "Order failed")
         if str(ib_code) == "110":
             reason_code = ReasonCode.LIMIT_OFF_TICK.value

@@ -486,11 +486,7 @@ class PositionRulesHandler(BaseHandler):
         if positions is None:
             return True
         leg = descriptor["legs"][0]
-        present = any(
-            position.get("symbol") == leg["symbol"]
-            and (position.get("con_id") in (None, leg.get("con_id")))
-            for position in positions
-        )
+        present = any(self._position_matches_leg(position, leg) for position in positions)
         missing_ticks = (row["state_data"] or {}).get("position_missing_ticks", 0)
         if present:
             if missing_ticks:
@@ -571,7 +567,25 @@ class PositionRulesHandler(BaseHandler):
             return None
         if not isinstance(positions, list):
             return None
-        return [self._normalize_position(position) for position in positions]
+        normalized = [self._normalize_position(position) for position in positions]
+
+        portfolio_fn = getattr(self._ib, "get_portfolio", None)
+        if callable(portfolio_fn):
+            try:
+                portfolio = portfolio_fn()
+            except Exception:  # noqa: BLE001
+                portfolio = None
+            if isinstance(portfolio, list):
+                seen_con_ids = {position.get("con_id") for position in normalized if position.get("con_id") is not None}
+                for item in portfolio:
+                    normalized_item = self._normalize_position(item)
+                    con_id = normalized_item.get("con_id")
+                    if con_id is not None and con_id in seen_con_ids:
+                        continue
+                    normalized.append(normalized_item)
+                    if con_id is not None:
+                        seen_con_ids.add(con_id)
+        return normalized
 
     def _ensure_ib_connected(self) -> None:
         if self._is_ib_connected():
@@ -600,13 +614,50 @@ class PositionRulesHandler(BaseHandler):
     @staticmethod
     def _normalize_position(position: Any) -> dict[str, Any]:
         if isinstance(position, dict):
-            return position
+            out = dict(position)
+            if "con_id" not in out and out.get("conId") is not None:
+                out["con_id"] = out.get("conId")
+            if "sec_type" not in out and out.get("secType") is not None:
+                out["sec_type"] = out.get("secType")
+            if "qty" not in out:
+                out["qty"] = out.get("position", out.get("quantity", 0))
+            return out
         contract = getattr(position, "contract", None)
         return {
             "symbol": getattr(contract, "symbol", None),
             "con_id": getattr(contract, "conId", None),
+            "sec_type": getattr(contract, "secType", None),
+            "expiry": getattr(contract, "lastTradeDateOrContractMonth", None),
+            "strike": getattr(contract, "strike", None),
+            "right": getattr(contract, "right", None),
             "qty": getattr(position, "position", 0),
         }
+
+    @staticmethod
+    def _position_matches_leg(position: dict[str, Any], leg: dict[str, Any]) -> bool:
+        try:
+            if abs(float(position.get("qty") or 0)) <= 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+        if str(position.get("symbol") or "").upper() != str(leg.get("symbol") or "").upper():
+            return False
+
+        position_con_id = position.get("con_id")
+        leg_con_id = leg.get("con_id")
+        if position_con_id is not None and leg_con_id is not None:
+            return int(position_con_id) == int(leg_con_id)
+
+        leg_sec_type = str(leg.get("sec_type") or "").upper()
+        position_sec_type = str(position.get("sec_type") or leg_sec_type).upper()
+        if leg_sec_type == "OPT":
+            return (
+                position_sec_type == "OPT"
+                and str(position.get("expiry") or "") == str(leg.get("expiry") or "")
+                and float(position.get("strike") or 0) == float(leg.get("strike") or 0)
+                and str(position.get("right") or "").upper() == str(leg.get("right") or "").upper()
+            )
+        return position_sec_type in ("", leg_sec_type, "STK")
 
     def _find_open_orders_by_order_ref(self, order_ref: str) -> list[dict[str, Any]]:
         if not hasattr(self._ib, "find_open_orders_by_order_ref"):

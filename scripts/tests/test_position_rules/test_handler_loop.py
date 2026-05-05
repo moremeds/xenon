@@ -51,6 +51,33 @@ def _stock_descriptor(symbol="AAPL", price=100.0, con_id=12345):
     }
 
 
+def _long_option_descriptor(symbol="SPY", price=0.01, con_id=875935117):
+    return {
+        "asset_class": "long_option",
+        "opened_at": "2026-05-04T14:00:00Z",
+        "source": "fastapi_orders_place",
+        "anchor_price": price,
+        "anchor_currency": "USD",
+        "opened_qty": 1,
+        "protected_qty": 1,
+        "multiplier": 100,
+        "qty_unit": "contract",
+        "legs": [
+            {
+                "sec_type": "OPT",
+                "symbol": symbol,
+                "expiry": "20260505",
+                "strike": 740.0,
+                "right": "C",
+                "action": "BUY",
+                "ratio": 1,
+                "fill_price": price,
+                "con_id": con_id,
+            }
+        ],
+    }
+
+
 def _credit_spread_descriptor(symbol="SPY"):
     return {
         "asset_class": "credit_spread",
@@ -806,3 +833,61 @@ def test_missing_position_ticks_do_not_increment_while_ib_disconnected(engine):
         ).one()
     assert row.state == "ARMED"
     assert row.state_data["position_missing_ticks"] == 1
+
+
+def test_option_liveness_uses_portfolio_when_positions_snapshot_is_empty(engine):
+    descriptor = _long_option_descriptor()
+    pid = insert_pending_arm(
+        engine,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+        position_key="TEST::SPY_OPTION_PORTFOLIO_FALLBACK",
+        position_descriptor=descriptor,
+        asset_class="long_option",
+        rule_kind="stop_loss",
+        config={"threshold_pct": -0.50, "anchor": "entry_price"},
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE xenon.position_protection "
+                "SET state='ARMED', state_data='{\"position_missing_ticks\": 1}'::jsonb, "
+                "native_order_perm_id=777, armed_at=NOW() WHERE protection_id=:pid"
+            ),
+            {"pid": pid},
+        )
+
+    class OptionContract:
+        symbol = "SPY"
+        secType = "OPT"
+        conId = 875935117
+        lastTradeDateOrContractMonth = "20260505"
+        strike = 740.0
+        right = "C"
+
+    class PortfolioItem:
+        contract = OptionContract()
+        position = 1
+
+    executor = MagicMock()
+    ib_client = MagicMock()
+    ib_client.connected = True
+    ib_client.positions.return_value = []
+    ib_client.get_portfolio.return_value = [PortfolioItem()]
+    ib_client.get_order_state.return_value = {"status": "Submitted", "permId": 777}
+    ib_client.get_quote.return_value = Quote(symbol="SPY", price=0.01, ts=datetime.now(timezone.utc))
+
+    handler = PositionRulesHandler(engine=engine, executor=executor, ib_client=ib_client, scope=_scope())
+    handler.execute()
+    handler.execute()
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT state, state_data FROM xenon.position_protection WHERE protection_id=:pid"),
+            {"pid": pid},
+        ).one()
+
+    assert row.state == "ARMED"
+    assert row.state_data.get("position_missing_ticks", 0) == 0
+    executor.flatten_mkt.assert_not_called()
