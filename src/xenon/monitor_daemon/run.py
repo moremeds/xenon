@@ -26,7 +26,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from xenon.clients.ib_client import IBClient
+from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, IBClient
 from xenon.db.engine import get_sync_engine
 from xenon.execution.account_scope import resolve_from_env
 from xenon.execution.brackets.executor.ib_executor import IBExecutor
@@ -75,7 +75,7 @@ def create_daemon() -> MonitorDaemon:
     )
 
     # Register handlers
-    daemon.register(FillMonitorHandler(ib_port=4001, client_id=70, send_notifications=True))
+    daemon.register(FillMonitorHandler(ib_port=DEFAULT_GATEWAY_PORT, client_id=70, send_notifications=True))
 
     daemon.register(PresetRebalanceHandler())
 
