@@ -5,6 +5,19 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **Forward `UW_TOKEN` into the FastAPI container (#99).** `docker-compose.yml` api service now also loads `./web/.env` (after `./.env`, marked `required: false`). Previously the container booted without `UW_TOKEN` because the credential lives in `web/.env` per CLAUDE.md and the api Dockerfile never ships the `web/` tree, so the in-process `load_dotenv(web/.env)` at `server.py:81-82` silently no-opped — and every UW-backed endpoint failed with the existing `"UW_TOKEN not set"` warning. Side benefit: same channel now plumbs `ANTHROPIC_API_KEY` through to `menthorq_client`. Regression test in `scripts/tests/test_docker_compose_env_plumbing.py` pins env_file order + optional flag.
+- **`scripts/infra/dev.sh` paper-mode now works off-LAN (#98).** Per-mode IB Gateway host resolution: `paper` always pins `127.0.0.1:4002`, `live` honors `IB_GATEWAY_HOST` from `.env`. `.env.example` documents the new var.
+
+### Changed
+
+- **GHCR image tags standardized on `X.Y.Z` (no `v` prefix) (#97).** Aligns with Docker convention; the matching tag in `release.yml::ghcr-push` was the previous odd-one-out.
+
+### Documentation
+
+- Stage C auto-deploy planning handover (#88), backlog status updates (#93), GHCR per-package ACL prerequisite (#94), `XENON_BROKER_ACCOUNT` runbook + Clerk dev-limit correction (#92), and archival of completed plans + top-level docs (#95, #96).
+
 ## [0.0.4] — 2026-05-04
 
 ### Added
