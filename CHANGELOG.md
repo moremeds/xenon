@@ -5,6 +5,9 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.0.5] — 2026-05-05
+
+
 ### Fixed
 
 - **Forward `UW_TOKEN` into the FastAPI container (#99).** `docker-compose.yml` api service now also loads `./web/.env` (after `./.env`, marked `required: false`). Previously the container booted without `UW_TOKEN` because the credential lives in `web/.env` per CLAUDE.md and the api Dockerfile never ships the `web/` tree, so the in-process `load_dotenv(web/.env)` at `server.py:81-82` silently no-opped — and every UW-backed endpoint failed with the existing `"UW_TOKEN not set"` warning. Side benefit: same channel now plumbs `ANTHROPIC_API_KEY` through to `menthorq_client`. Regression test in `scripts/tests/test_docker_compose_env_plumbing.py` pins env_file order + optional flag.
@@ -17,7 +20,6 @@ All notable changes to Xenon are documented here. Format loosely based on
 ### Documentation
 
 - Stage C auto-deploy planning handover (#88), backlog status updates (#93), GHCR per-package ACL prerequisite (#94), `XENON_BROKER_ACCOUNT` runbook + Clerk dev-limit correction (#92), and archival of completed plans + top-level docs (#95, #96).
-
 ## [0.0.4] — 2026-05-04
 
 ### Added
