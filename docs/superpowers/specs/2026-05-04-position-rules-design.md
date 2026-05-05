@@ -30,7 +30,7 @@ This document specifies the v1 rule engine that fixes that, designed so future r
 | 9   | STP-LMT instead of STP-MKT                    | User explicit: rigid red line = MKT; STP-LMT defeats the purpose                                     |
 | 10  | `outsideRth=True` on native brackets          | Default RTH-only; pre/post-market liquidity is unsafe for tight stops                                |
 | 11  | Per-rule_kind polling intervals               | Single 30s tick for all rule_kinds in v1                                                             |
-| 12  | Laddered TPs                                  | One SL + one TP per position; `ib_insync` chokes on multiple TPs in a bracket                        |
+| 12  | Laddered TPs                                  | One SL + one TP per position; the legacy IB client stack choked on multiple TPs in a bracket         |
 | 13  | Delta-aware / IV-aware option stops           | Hard % on premium; convention; simulator decides v2 refinement                                       |
 | 14  | Auto-roll instead of close                    | Rolling is strategic, not defensive                                                                  |
 | 15  | Additional rule_kinds beyond the four shipped | Plug-in interface is open; v2+ rule_kinds ship additively                                            |
@@ -1155,8 +1155,8 @@ Findings that shaped the design:
 
 - [IBKR Bracket Orders TWS API](https://interactivebrokers.github.io/tws-api/bracket_order.html) — confirms native bracket + TRAIL semantics, OCA linkage, GTC support.
 - [Supa.is — IBKR Bracket 2026 Guide](https://www.supa.is/article/interactive-brokers-bracket-order-oco-stop-loss-take-profit-tws-2026) — confirms quarterly auto-cancel of untriggered GTC orders. Drove the §10.4 quarter-end re-arm cron.
-- [ib_insync issue #216 — adjustable stop bug](https://github.com/erdewit/ib_insync/issues/216) — drove the decision to implement activation-threshold logic ourselves rather than using IB's adjustable-stop feature.
-- [ib_insync issue #85 — market bracket price offset](https://github.com/erdewit/ib_insync/issues/85) — drove the "submit children only after fill confirmation" pattern.
+- Legacy IB client issue #216 — adjustable stop bug — drove the decision to implement activation-threshold logic ourselves rather than using IB's adjustable-stop feature.
+- Legacy IB client issue #85 — market bracket price offset — drove the "submit children only after fill confirmation" pattern.
 - [QuantConnect Lean — TrailingStopRiskManagementModel](https://github.com/QuantConnect/Lean/blob/master/Algorithm.Framework/Risk/TrailingStopRiskManagementModel.py) — reference architecture for the synthetic monitor.
 - [mattsta/icli](https://github.com/mattsta/icli) — closest open-source prior art for auto-attached IB stops.
 

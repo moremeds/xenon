@@ -639,7 +639,7 @@ def arm(self, *, scope, position, config, state_data, executor=None) -> ArmResul
         return ArmResult(kind="RETRY", reason=str(exc))
 ```
 
-(Symmetric edit for `trailing_tp.py` — but since IB's TRAIL bracket has known bugs per ib_insync issue #216 referenced in spec §19, the v1 `trailing_tp` arm path returns `SYNTHETIC_ONLY` for everything. We track the trail in `state_data.mfe` and fire MKT-flatten at trigger time.)
+(Symmetric edit for `trailing_tp.py` — but since IB's TRAIL bracket has known bugs per legacy IB client issue #216 referenced in spec §19, the v1 `trailing_tp` arm path returns `SYNTHETIC_ONLY` for everything. We track the trail in `state_data.mfe` and fire MKT-flatten at trigger time.)
 
 - [ ] **Step 3: Update `TrailingTpRule.arm()` to remain synthetic**
 
