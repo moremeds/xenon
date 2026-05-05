@@ -203,6 +203,65 @@ def test_two_rules_same_position_only_one_mkt(engine):
     assert sorted(row.state for row in rows) == ["SUPERSEDED", "TRIGGERED"]
 
 
+def test_alert_only_rule_does_not_submit_close_claim(engine):
+    descriptor = _stock_descriptor(symbol="META", price=100.0, con_id=77777)
+    pid = insert_pending_arm(
+        engine,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+        position_key="TEST::META_ALERT_ONLY",
+        position_descriptor=descriptor,
+        asset_class="stock",
+        rule_kind="combo_tp_alert",
+        config={"threshold_pct": 0.50, "auto_place": False, "min_realert_interval_s": 3600},
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE xenon.position_protection SET state='ARMED', armed_at=NOW() WHERE protection_id=:pid"),
+            {"pid": pid},
+        )
+
+    executor = MagicMock()
+    ib_client = MagicMock()
+    ib_client.connected = True
+    ib_client.get_quote.return_value = Quote(symbol="META", price=160.0, ts=datetime.now(timezone.utc))
+    ib_client.find_open_orders_by_order_ref.return_value = []
+    ib_client.find_executions_by_order_ref.return_value = []
+    ib_client.positions.return_value = [{"symbol": "META", "qty": 100, "con_id": 77777}]
+
+    handler = PositionRulesHandler(engine=engine, executor=executor, ib_client=ib_client, scope=_scope())
+    handler.execute()
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT state, state_data FROM xenon.position_protection WHERE protection_id=:pid"),
+            {"pid": pid},
+        ).first()
+        claim_count = conn.execute(
+            text("SELECT COUNT(*) FROM xenon.position_close_claims WHERE position_key='TEST::META_ALERT_ONLY'")
+        ).scalar_one()
+        alert = conn.execute(
+            text(
+                """
+                SELECT payload FROM events.outbox
+                WHERE channel = 'position_rule.transition'
+                  AND source = 'position_rules_alert'
+                  AND payload->>'position_key' = 'TEST::META_ALERT_ONLY'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+        ).first()
+
+    assert row.state == "ARMED"
+    assert row.state_data["last_alert_at"] is not None
+    assert claim_count == 0
+    assert alert is not None
+    assert alert.payload["reason"] == "alert_only_threshold_crossed"
+    executor.flatten_mkt.assert_not_called()
+
+
 def test_armed_with_native_perm_id_detects_external_cancel(engine):
     descriptor = _stock_descriptor(symbol="NVDA", price=100.0, con_id=44444)
     pid = insert_pending_arm(

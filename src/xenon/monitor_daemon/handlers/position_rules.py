@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import and_, select, update
 
 import xenon.execution.brackets.rules  # noqa: F401 - populate RULE_REGISTRY
+from xenon.db.events import emit_outbox_in_txn
 from xenon.db.queries.position_close_claims import (
     increment_attempts,
     mark_submitted,
@@ -167,7 +168,10 @@ class PositionRulesHandler(BaseHandler):
             marks=marks,
         )
         if decision.kind == "TRIGGERED":
-            self._submit_close(row, decision)
+            if self._is_alert_only(row, decision):
+                self._record_alert_only(row, decision)
+            else:
+                self._submit_close(row, decision)
         elif decision.kind == "UPDATE_STATE":
             self._patch_state_data(row["protection_id"], decision.state_data_patch or {})
 
@@ -291,6 +295,46 @@ class PositionRulesHandler(BaseHandler):
             new_state="CLOSED",
             reason="native_bracket_filled",
         )
+
+    def _is_alert_only(self, row: dict[str, Any], decision) -> bool:
+        return row["config"].get("auto_place") is False or bool((decision.context or {}).get("alert_only"))
+
+    def _record_alert_only(self, row: dict[str, Any], decision) -> None:
+        patch = dict(decision.state_data_patch or {})
+        patch["last_alert_reason"] = decision.reason or "alert_only_trigger"
+        now = datetime.now(timezone.utc)
+        with self._engine.begin() as conn:
+            existing = conn.execute(
+                select(position_protection.c.state_data).where(
+                    position_protection.c.protection_id == row["protection_id"]
+                )
+            ).first()
+            state_data = dict(existing.state_data or {}) if existing else {}
+            state_data.update(patch)
+            conn.execute(
+                update(position_protection)
+                .where(
+                    position_protection.c.protection_id == row["protection_id"],
+                    position_protection.c.state == "ARMED",
+                )
+                .values(state_data=state_data, last_evaluated_at=now, updated_at=now)
+            )
+            emit_outbox_in_txn(
+                conn,
+                channel="position_rule.transition",
+                source="position_rules_alert",
+                payload={
+                    "payload_version": 1,
+                    "protection_id": row["protection_id"],
+                    "position_key": row["position_key"],
+                    "rule_kind": row["rule_kind"],
+                    "old_state": "ARMED",
+                    "new_state": "ARMED",
+                    "reason": decision.reason or "alert_only_trigger",
+                    "context": decision.context or {},
+                    "scope": self._scope.as_dict(),
+                },
+            )
 
     def _handle_position_presence(
         self,
