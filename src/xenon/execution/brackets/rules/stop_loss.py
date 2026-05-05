@@ -20,6 +20,7 @@ class StopLossRule:
         leg = position["legs"][0]
         close_action = "SELL" if leg["action"] == "BUY" else "BUY"
         qty_multiplier = position.get("multiplier", 1) if leg["sec_type"] == "STK" else 1
+        protection_id = position.get("protection_id")
         try:
             result = executor.attach_native_stp(
                 scope=scope,
@@ -30,6 +31,7 @@ class StopLossRule:
                 qty=position["protected_qty"] * qty_multiplier,
                 stop_price=stop_price,
                 tif="GTC",
+                order_ref=f"xenon-pr-native-{protection_id}" if protection_id is not None else None,
             )
         except Exception as exc:  # noqa: BLE001
             return ArmResult(kind="RETRY", reason=str(exc))

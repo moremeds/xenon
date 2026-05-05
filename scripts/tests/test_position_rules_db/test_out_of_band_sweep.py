@@ -4,6 +4,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import text
 
 from xenon.db.engine import get_sync_engine
 from xenon.db.queries.position_protection import insert_pending_arm
@@ -94,3 +95,29 @@ def test_sweep_skips_when_ib_disconnected(engine):
     handler = OutOfBandSweepHandler(engine=engine, ib_client=ib, scope=_scope())
     result = handler.execute()
     assert result["status"] == "skipped_disconnected"
+
+
+def test_last_known_count_is_scoped_by_broker_and_env(engine):
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO events.outbox(channel, source, payload)
+                VALUES (
+                    'position_rule.transition',
+                    'oob_sweep',
+                    '{
+                        "kind": "oob_sweep_position_count",
+                        "broker": "IB",
+                        "account_env": "live",
+                        "broker_account": "DU1234567",
+                        "count": 10
+                    }'::jsonb
+                )
+                """
+            )
+        )
+    ib = MagicMock()
+    ib.connected = True
+    handler = OutOfBandSweepHandler(engine=engine, ib_client=ib, scope=_scope())
+    assert handler._last_known_position_count == 0

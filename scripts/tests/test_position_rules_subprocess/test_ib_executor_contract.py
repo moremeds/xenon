@@ -124,9 +124,11 @@ def test_attach_native_stp_payload_shape(scope):
             qty=100,
             stop_price=87.40,
             tif="GTC",
+            order_ref="xenon-pr-native-123",
         )
         payload = json.loads(_passed_json(run))
         assert payload["orderType"] == "STP"
+        assert payload["orderRef"] == "xenon-pr-native-123"
         assert payload["stopPrice"] == 87.40
         assert payload["tif"] == "GTC"
         assert payload["outsideRth"] is False

@@ -134,6 +134,7 @@ def test_pending_arm_transitions_to_armed(engine):
         ).first()
     assert row.state == "ARMED"
     assert row.native_order_perm_id == 999
+    assert executor.attach_native_stp.call_args.kwargs["order_ref"] == f"xenon-pr-native-{pid}"
 
 
 def test_armed_below_threshold_triggers_and_claims(engine):

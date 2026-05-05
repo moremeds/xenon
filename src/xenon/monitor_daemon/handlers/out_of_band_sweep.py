@@ -54,12 +54,18 @@ class OutOfBandSweepHandler(BaseHandler):
                         WHERE channel = 'position_rule.transition'
                           AND source = 'oob_sweep'
                           AND payload->>'kind' = 'oob_sweep_position_count'
+                          AND payload->>'broker' = :broker
+                          AND payload->>'account_env' = :account_env
                           AND payload->>'broker_account' = :broker_account
                         ORDER BY id DESC
                         LIMIT 1
                         """
                     ),
-                    {"broker_account": self._scope.broker_account},
+                    {
+                        "broker": self._scope.broker,
+                        "account_env": self._scope.account_env,
+                        "broker_account": self._scope.broker_account,
+                    },
                 ).first()
         except Exception:  # noqa: BLE001
             return 0
@@ -129,6 +135,8 @@ class OutOfBandSweepHandler(BaseHandler):
             {
                 "payload_version": 1,
                 "kind": "oob_sweep_position_count",
+                "broker": self._scope.broker,
+                "account_env": self._scope.account_env,
                 "broker_account": self._scope.broker_account,
                 "count": observed,
             }

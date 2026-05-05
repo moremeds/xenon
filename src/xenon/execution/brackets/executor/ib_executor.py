@@ -80,6 +80,7 @@ class IBExecutor:
         qty: int,
         stop_price: float,
         tif: str = "GTC",
+        order_ref: str | None = None,
     ) -> PlaceResult:
         payload = {
             "conId": con_id,
@@ -93,6 +94,8 @@ class IBExecutor:
             "tif": tif,
             "outsideRth": False,
         }
+        if order_ref is not None:
+            payload["orderRef"] = order_ref
         return _run_place_order(payload, scope)
 
     def flatten_mkt(

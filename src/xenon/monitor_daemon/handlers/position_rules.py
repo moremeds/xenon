@@ -68,6 +68,7 @@ class PositionRulesHandler(BaseHandler):
     def _handle_pending_arm(self, row: dict[str, Any]) -> None:
         rule = RULE_REGISTRY[row["rule_kind"]]
         position = dict(row["position_descriptor"])
+        position["protection_id"] = row["protection_id"]
         result = rule.arm(
             scope=self._scope,
             position=position,
