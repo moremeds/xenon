@@ -61,6 +61,22 @@ jobs:
     # flex_token_config.json). Only written when absent, so dev machines with
     # real state aren't touched.
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: xenon_app
+          POSTGRES_PASSWORD: xenon_dev
+          POSTGRES_DB: xenon_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xenon_app -d xenon_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL_TEST: postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -70,6 +86,16 @@ jobs:
       - run: uv python install 3.13
       - name: Sync Python deps (provides .venv/ + xenon-* CLIs for integration tests)
         run: uv sync --frozen --extra test
+      - name: Pre-create xenon/events schemas
+        env:
+          PGPASSWORD: xenon_dev
+        run: >-
+          psql -h localhost -U xenon_app -d xenon_test
+          -c "CREATE SCHEMA IF NOT EXISTS xenon; CREATE SCHEMA IF NOT EXISTS events;"
+      - name: Apply alembic migrations to test DB
+        env:
+          DATABASE_URL: postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test
+        run: uv run alembic upgrade head
       - uses: actions/setup-node@v4
         with:
           node-version: 20
