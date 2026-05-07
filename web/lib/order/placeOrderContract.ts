@@ -37,6 +37,9 @@ export function buildFastApiPlaceOrderPayload(body: PlaceOrderBodyValidated) {
   if (body.acknowledge_limit_override === true) {
     payload.acknowledge_limit_override = true;
   }
+  if (body.outsideRth === true) {
+    payload.outsideRth = true;
+  }
 
   return payload;
 }

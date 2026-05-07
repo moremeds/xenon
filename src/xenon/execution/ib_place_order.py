@@ -36,6 +36,7 @@ def place_order(params: dict) -> dict:
     limit_price = float(params["limitPrice"]) if ib_order_type == "LMT" else None
     stop_price = float(params["stopPrice"]) if ib_order_type == "STP" else None
     tif = params.get("tif", "DAY").upper()
+    outside_rth = bool(params.get("outsideRth", False))
 
     client = IBClient()
 
@@ -118,8 +119,12 @@ def place_order(params: dict) -> dict:
         ib_errors: list = []
 
         def _on_error(reqId, errorCode, errorString, contract=None):
-            # Ignore informational codes
-            if errorCode not in (2104, 2106, 2108, 2158, 10358):
+            # Ignore informational and advisory codes.
+            # 399  = "Order Message: will not be placed until pre-market opens"
+            #   — order IS accepted by IB, just queued for the next session.
+            # 2109 = "outsideRth attribute ignored for MKT/SMART; PlaceOrder
+            #   is now being processed" — order IS placed, routing ignores flag.
+            if errorCode not in (399, 2109, 2104, 2106, 2108, 2158, 10358):
                 ib_errors.append((errorCode, errorString))
 
         client._ib.errorEvent += _on_error
@@ -130,7 +135,7 @@ def place_order(params: dict) -> dict:
                 action=action,
                 totalQuantity=quantity,
                 tif=tif,
-                outsideRth=False,
+                outsideRth=outside_rth,
             )
         elif ib_order_type == "STP":
             order = StopOrder(
@@ -138,7 +143,7 @@ def place_order(params: dict) -> dict:
                 totalQuantity=quantity,
                 stopPrice=stop_price,
                 tif=tif,
-                outsideRth=False,
+                outsideRth=outside_rth,
             )
         else:
             order = LimitOrder(
@@ -146,7 +151,7 @@ def place_order(params: dict) -> dict:
                 totalQuantity=quantity,
                 lmtPrice=limit_price,
                 tif=tif,
-                outsideRth=False,
+                outsideRth=outside_rth,
             )
 
         order_ref = params.get("orderRef")

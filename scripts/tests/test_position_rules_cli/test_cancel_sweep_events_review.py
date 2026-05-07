@@ -1,4 +1,5 @@
 """xenon-position-rules CLI cancel/sweep/events/review coverage."""
+
 from __future__ import annotations
 
 import json
@@ -70,8 +71,13 @@ def test_cancel_transitions_active_row(monkeypatch, capsys):
         assert row["state"] == "CANCELED"
     finally:
         with get_sync_engine().begin() as conn:
-            conn.execute(text("DELETE FROM xenon.position_close_claims WHERE claimed_by_protection_id = :pid"), {"pid": protection_id})
-            conn.execute(text("DELETE FROM xenon.position_protection WHERE protection_id = :pid"), {"pid": protection_id})
+            conn.execute(
+                text("DELETE FROM xenon.position_close_claims WHERE claimed_by_protection_id = :pid"),
+                {"pid": protection_id},
+            )
+            conn.execute(
+                text("DELETE FROM xenon.position_protection WHERE protection_id = :pid"), {"pid": protection_id}
+            )
 
 
 def test_cancel_live_requires_operator_user(monkeypatch, capsys):
@@ -105,8 +111,13 @@ def test_cancel_is_scoped_and_cannot_cancel_live_row_from_paper_cli(monkeypatch)
         assert row["state"] == "PENDING_ARM"
     finally:
         with get_sync_engine().begin() as conn:
-            conn.execute(text("DELETE FROM xenon.position_close_claims WHERE claimed_by_protection_id = :pid"), {"pid": protection_id})
-            conn.execute(text("DELETE FROM xenon.position_protection WHERE protection_id = :pid"), {"pid": protection_id})
+            conn.execute(
+                text("DELETE FROM xenon.position_close_claims WHERE claimed_by_protection_id = :pid"),
+                {"pid": protection_id},
+            )
+            conn.execute(
+                text("DELETE FROM xenon.position_protection WHERE protection_id = :pid"), {"pid": protection_id}
+            )
 
 
 def test_cancel_cancels_native_order_and_abandons_inflight_claim(monkeypatch):
@@ -164,8 +175,13 @@ def test_cancel_cancels_native_order_and_abandons_inflight_claim(monkeypatch):
         assert claim is None
     finally:
         with engine.begin() as conn:
-            conn.execute(text("DELETE FROM xenon.position_close_claims WHERE claimed_by_protection_id = :pid"), {"pid": protection_id})
-            conn.execute(text("DELETE FROM xenon.position_protection WHERE protection_id = :pid"), {"pid": protection_id})
+            conn.execute(
+                text("DELETE FROM xenon.position_close_claims WHERE claimed_by_protection_id = :pid"),
+                {"pid": protection_id},
+            )
+            conn.execute(
+                text("DELETE FROM xenon.position_protection WHERE protection_id = :pid"), {"pid": protection_id}
+            )
 
 
 def test_sweep_dry_run_reports_unprotected_ib_position(monkeypatch, capsys):
@@ -186,10 +202,16 @@ def test_sweep_dry_run_does_not_treat_option_rule_as_stock_protection(monkeypatc
     monkeypatch.setenv("XENON_TRADING_MODE", "paper")
     monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU1234567")
     monkeypatch.setenv("XENON_BROKER", "IB")
-    monkeypatch.setattr(cli, "_positions_from_ib", lambda: [{"symbol": "CLISAME", "qty": 100, "con_id": 9, "sec_type": "STK"}])
+    monkeypatch.setattr(
+        cli, "_positions_from_ib", lambda: [{"symbol": "CLISAME", "qty": 100, "con_id": 9, "sec_type": "STK"}]
+    )
     engine = get_sync_engine()
     with engine.begin() as conn:
-        conn.execute(text("DELETE FROM xenon.position_protection WHERE position_key IN ('STK::CLISAME', 'OPT::CLISAME::20260619::100::C')"))
+        conn.execute(
+            text(
+                "DELETE FROM xenon.position_protection WHERE position_key IN ('STK::CLISAME', 'OPT::CLISAME::20260619::100::C')"
+            )
+        )
     insert_pending_arm(
         engine,
         broker="IB",
@@ -236,11 +258,17 @@ def test_positions_from_ib_connects_with_auto_client_id(monkeypatch):
 
     class Contract:
         symbol = "CLIAUTO"
+        secType = "STK"
         conId = 77
+        lastTradeDateOrContractMonth = ""
+        strike = 0.0
+        right = ""
+        multiplier = ""
 
     class Position:
         contract = Contract()
         position = 3
+        avgCost = 42.5
 
     class FakeIBClient:
         instance = None
@@ -270,9 +298,75 @@ def test_positions_from_ib_connects_with_auto_client_id(monkeypatch):
 
     rows = cli._positions_from_ib()
 
-    assert rows == [{"symbol": "CLIAUTO", "qty": 3, "con_id": 77}]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["symbol"] == "CLIAUTO"
+    assert row["qty"] == 3
+    assert row["con_id"] == 77
+    assert row["sec_type"] == "STK"
+    assert row["avg_cost"] == 42.5
     assert FakeIBClient.instance.connect_kwargs["client_id"] == "auto"
     assert FakeIBClient.instance.disconnected is True
+
+
+def test_positions_from_ib_preserves_option_contract_details(monkeypatch):
+    """Regression: option positions surfaced via get_positions() must keep
+    sec_type/expiry/strike/right/avg_cost so _candidate_position_key emits
+    OPT::SYM::expiry::strike::right (not the STK fallback) and downstream
+    sweep_insert has a non-zero anchor.
+    """
+    import xenon.clients.ib_client as ib_client_mod
+
+    class Contract:
+        symbol = "CLIOPT"
+        secType = "OPT"
+        conId = 88
+        lastTradeDateOrContractMonth = "20260619"
+        strike = 100.0
+        right = "C"
+        multiplier = "100"
+
+    class Position:
+        contract = Contract()
+        position = 2
+        avgCost = 150.0  # ib_async: per-contract dollars (premium * 100)
+
+    class FakeIBClient:
+        def __init__(self):
+            self._connected = False
+
+        def is_connected(self):
+            return self._connected
+
+        def connect(self, **kwargs):
+            self._connected = True
+
+        def get_positions(self):
+            return [Position()]
+
+        def disconnect(self):
+            self._connected = False
+
+    monkeypatch.setattr(ib_client_mod, "IBClient", FakeIBClient)
+
+    rows = cli._positions_from_ib()
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["symbol"] == "CLIOPT"
+    assert row["sec_type"] == "OPT"
+    assert row["expiry"] == "20260619"
+    assert row["strike"] == 100.0
+    assert row["right"] == "C"
+    assert row["qty"] == 2
+    assert row["con_id"] == 88
+    # ib_async OPT avgCost is per-contract dollars (premium * multiplier);
+    # _positions_from_ib normalizes to per-contract premium so downstream
+    # anchor_price math (entry * 0.92 etc.) operates in price-quote units.
+    assert row["avg_cost"] == 1.5
+
+    # Smoke-check the position_key uses the OPT scheme, not the STK fallback.
+    assert cli._candidate_position_key(row) == "OPT::CLIOPT::20260619::100::C"
 
 
 def test_sweep_apply_live_requires_operator_user(monkeypatch, capsys):
@@ -333,5 +427,7 @@ def test_events_and_review_commands(monkeypatch, capsys):
         assert body["review_id"] is not None
     finally:
         with engine.begin() as conn:
-            conn.execute(text("DELETE FROM xenon.position_rules_review WHERE event_id = :event_id"), {"event_id": event_id})
+            conn.execute(
+                text("DELETE FROM xenon.position_rules_review WHERE event_id = :event_id"), {"event_id": event_id}
+            )
             conn.execute(text("DELETE FROM events.outbox WHERE id = :event_id"), {"event_id": event_id})

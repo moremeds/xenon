@@ -1,4 +1,5 @@
 """Operator CLI for position rules."""
+
 from __future__ import annotations
 
 import argparse
@@ -123,13 +124,44 @@ def _positions_from_ib() -> list[dict[str, Any]]:
             out: list[dict[str, Any]] = []
             for pos in client.get_positions() or []:
                 contract = getattr(pos, "contract", None)
-                out.append(
-                    {
-                        "symbol": getattr(contract, "symbol", None),
-                        "qty": getattr(pos, "position", 0),
-                        "con_id": getattr(contract, "conId", None),
-                    }
-                )
+                sec_type = (getattr(contract, "secType", None) or "STK").upper()
+                avg_cost_raw = getattr(pos, "avgCost", None)
+                try:
+                    avg_cost: float | None = float(avg_cost_raw) if avg_cost_raw is not None else None
+                except (TypeError, ValueError):
+                    avg_cost = None
+                row: dict[str, Any] = {
+                    "symbol": getattr(contract, "symbol", None),
+                    "qty": getattr(pos, "position", 0),
+                    "con_id": getattr(contract, "conId", None),
+                    "sec_type": sec_type,
+                }
+                if avg_cost is not None:
+                    if sec_type == "OPT":
+                        # ib_async Position.avgCost for OPT is per-contract dollars
+                        # (premium * multiplier); normalize to per-contract premium.
+                        try:
+                            multiplier = float(getattr(contract, "multiplier", "") or 100)
+                        except (TypeError, ValueError):
+                            multiplier = 100.0
+                        if multiplier > 0:
+                            row["avg_cost"] = avg_cost / multiplier
+                        else:
+                            row["avg_cost"] = avg_cost
+                    else:
+                        row["avg_cost"] = avg_cost
+                if sec_type == "OPT":
+                    row["expiry"] = getattr(contract, "lastTradeDateOrContractMonth", None) or None
+                    strike_val = getattr(contract, "strike", None)
+                    if strike_val is not None:
+                        try:
+                            row["strike"] = float(strike_val)
+                        except (TypeError, ValueError):
+                            row["strike"] = strike_val
+                    right = getattr(contract, "right", None)
+                    if right:
+                        row["right"] = str(right)
+                out.append(row)
             return out
         return []
     finally:
@@ -151,7 +183,9 @@ def _candidate_position_key(position: dict[str, Any]) -> str | None:
         if expiry is None or strike is None or right is None:
             return None
         strike_value = float(strike)
-        strike_text = str(int(strike_value)) if strike_value == int(strike_value) else str(strike).rstrip("0").rstrip(".")
+        strike_text = (
+            str(int(strike_value)) if strike_value == int(strike_value) else str(strike).rstrip("0").rstrip(".")
+        )
         return f"OPT::{symbol}::{expiry}::{strike_text}::{str(right).upper()}"
     return None
 

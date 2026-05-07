@@ -1,4 +1,5 @@
 """Arm-hook outbox consumer. Spec §6.1, §6.3."""
+
 from __future__ import annotations
 
 import json
@@ -8,7 +9,8 @@ import pytest
 from sqlalchemy import text
 
 from xenon.db.engine import get_sync_engine
-from xenon.execution.brackets.arm_hook import on_fill_event
+from xenon.execution.account_scope import AccountScope
+from xenon.execution.brackets.arm_hook import on_fill_event, sweep_insert
 
 
 @pytest.fixture
@@ -302,3 +304,47 @@ def test_combo_with_incomplete_manifest_leg_is_not_armed(engine):
 
     assert protection_count == 0
     assert unsupported.payload["reason"] == "combo_leg_missing_expiry"
+
+
+def test_sweep_insert_uses_avg_cost_as_anchor_when_mark_missing(engine):
+    """Regression: sweep CLI candidates from IBClient.get_positions() arrive
+    with avg_cost but no mark/price. sweep_insert must fall back to avg_cost
+    rather than persisting anchor_price=0.0 (which breaks downstream stop_loss
+    threshold math like entry * 0.92).
+    """
+    scope = AccountScope(broker="IB", account_env="paper", broker_account="DU1234567")
+    candidate = {
+        "symbol": "SWEEPAVG",
+        "qty": 100,
+        "con_id": 4242,
+        "sec_type": "STK",
+        "avg_cost": 73.50,
+    }
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM xenon.position_protection WHERE position_key = 'STK::SWEEPAVG'"))
+    try:
+        sweep_insert(engine, scope=scope, candidate=candidate)
+
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT rule_kind, position_descriptor
+                    FROM xenon.position_protection
+                    WHERE position_key = 'STK::SWEEPAVG'
+                      AND broker = 'IB' AND account_env = 'paper' AND broker_account = 'DU1234567'
+                    ORDER BY rule_kind
+                    """
+                )
+            ).all()
+
+        assert len(rows) >= 1, "sweep_insert should produce at least one rule row"
+        for row in rows:
+            descriptor = row.position_descriptor
+            assert descriptor["anchor_price"] == 73.50, (
+                f"anchor_price must inherit avg_cost when mark/price absent; got {descriptor['anchor_price']!r}"
+            )
+            assert descriptor["legs"][0]["fill_price"] == 73.50
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM xenon.position_protection WHERE position_key = 'STK::SWEEPAVG'"))

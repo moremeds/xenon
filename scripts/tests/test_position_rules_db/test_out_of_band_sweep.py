@@ -31,6 +31,20 @@ def test_sweep_emits_unprotected_for_unknown_position(engine):
     assert result["unprotected_count"] >= 1
 
 
+def test_sweep_uses_ib_client_get_positions_wrapper(engine):
+    class WrappedIb:
+        connected = True
+
+        def get_positions(self):
+            return [{"symbol": "OOB-WRAPPED", "qty": 100, "con_id": 2}]
+
+    handler = OutOfBandSweepHandler(engine=engine, ib_client=WrappedIb(), scope=_scope())
+    result = handler.execute()
+    assert result["status"] == "ok"
+    assert result["observed"] == 1
+    assert result["unprotected_count"] >= 1
+
+
 def test_sweep_does_not_treat_option_rule_as_stock_protection(engine):
     with engine.begin() as conn:
         conn.exec_driver_sql(

@@ -39,6 +39,7 @@ type PlaceBody = {
   quote_token?: string;
   con_id?: number;
   acknowledge_limit_override?: boolean;
+  outsideRth?: boolean;
 };
 
 export async function POST(request: Request): Promise<Response> {

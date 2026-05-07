@@ -12,6 +12,21 @@ from xenon.monitor_daemon.handlers.base import BaseHandler
 logger = logging.getLogger(__name__)
 
 
+def _normalize_position(position) -> dict:
+    if isinstance(position, dict):
+        return position
+    contract = getattr(position, "contract", None)
+    return {
+        "symbol": getattr(contract, "symbol", None),
+        "qty": getattr(position, "position", None),
+        "con_id": getattr(contract, "conId", None),
+        "sec_type": getattr(contract, "secType", None),
+        "expiry": getattr(contract, "lastTradeDateOrContractMonth", None),
+        "strike": getattr(contract, "strike", None),
+        "right": getattr(contract, "right", None),
+    }
+
+
 def _candidate_position_key(position: dict) -> str | None:
     symbol = position.get("symbol")
     if not symbol:
@@ -75,7 +90,13 @@ class OutOfBandSweepHandler(BaseHandler):
         if not getattr(self._ib, "connected", True):
             return {"status": "skipped_disconnected"}
 
-        positions = list(self._ib.positions() if hasattr(self._ib, "positions") else [])
+        if hasattr(type(self._ib), "get_positions"):
+            raw_positions = self._ib.get_positions()
+        elif hasattr(self._ib, "positions"):
+            raw_positions = self._ib.positions()
+        else:
+            raw_positions = []
+        positions = [_normalize_position(position) for position in raw_positions]
         observed = len(positions)
         if self._last_known_position_count > 0:
             floor = max(1, int(self._last_known_position_count * 0.7))

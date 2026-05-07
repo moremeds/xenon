@@ -1,4 +1,5 @@
 """Arm-hook outbox consumer. Spec §6.1, §6.2, §6.3."""
+
 from __future__ import annotations
 
 import logging
@@ -273,13 +274,14 @@ def _emit_unsupported(engine: Engine, payload: dict[str, Any], *, reason: str) -
 
 def sweep_insert(engine: Engine, *, scope, candidate: dict[str, Any]) -> None:
     """Operator-driven sweep insert for an existing unprotected position."""
+    fill_price = float(candidate.get("mark") or candidate.get("price") or candidate.get("avg_cost") or 0.0)
     legs = [
         {
             "sec_type": candidate.get("sec_type", "STK"),
             "symbol": candidate["symbol"],
             "action": "BUY" if int(candidate.get("qty", 0)) >= 0 else "SELL",
             "ratio": 1,
-            "fill_price": float(candidate.get("mark") or candidate.get("price") or 0.0),
+            "fill_price": fill_price,
             "con_id": candidate.get("con_id") or 0,
         }
     ]

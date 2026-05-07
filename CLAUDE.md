@@ -16,6 +16,12 @@ Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` fi
 
 Every execution/portfolio row carries `broker`, `account_env`, `broker_account` columns so paper and live data never blend in a shared Postgres. Resolve scope via `AccountScope` (`src/xenon/execution/account_scope.py`); FastAPI depends on `get_account_scope`, sync subprocesses read `XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`. Full policy: `docs/architecture/production-database-strategy.md` § Broker Account Scope.
 
+## Order Audit Trail
+
+Every paper or live order action must leave a durable Postgres trail. This includes order placement, cancel/modify attempts, fills, broker acknowledgements, external TWS actions detected by reconciliation, position-rule protection rows, close claims, and outbox events.
+
+Do not clean up audit state by deleting rows from `xenon.order_submissions`, `xenon.order_events`, `xenon.order_fills`, `xenon.position_protection`, `xenon.position_close_claims`, or `events.outbox`. Use explicit state transitions such as `CANCELED`, `FAILED`, `SUPERSEDED`, `CLOSED`, or compensating audit events instead. Test/smoke orders must record enough evidence to reconstruct the broker path: `broker`, `account_env`, `broker_account`, `submission_id` when present, `perm_id`, `order_id`, `client_id`, `order_ref`, `exec_id`, timestamps, and the cleanup action.
+
 ## Scanner Hierarchy
 
 - `src/xenon/scanners/_shared/` — shared foundation (cache, executor, models, scoring, universe)
@@ -72,6 +78,7 @@ To audit the current allowlists: `python3 scripts/checks/no_json_fallback_on_ord
 5. **API keys** in `.env` files (see Credentials below). Fallback: `~/.zshrc`.
 6. **Options structure reference:** `docs/trading/options-structures.json` + `docs/trading/options-structures.md` — 58 structures, guard decisions, P&L attribution labels. Use for order entry, structure classification, and naked short guard logic.
 7. **Todo capture.** When the user says "todo" (e.g. "todo: explore X", "add this as a todo"), append the idea to the **Inbox** section at the bottom of `docs/todo-backlog.md` with today's date. Do not start work on it. Do not silently drop it. The backlog is a queue for future planning sessions, not active work. **Add your own commentary** under each entry — hypotheses, suspected file sites, dependencies on other backlog items, design questions, references to commits/CLAUDE.md guidance — anything that would save future-you from rebuilding the context from scratch. Use a `**Notes:**` sub-bullet to keep your commentary visually separate from the user's original framing.
+8. **Order audit trail.** Never place, cancel, modify, sweep, reconcile, or smoke-test paper/live broker orders without preserving the Postgres audit trail described above.
 
 ## Identity
 

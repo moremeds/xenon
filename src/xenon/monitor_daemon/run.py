@@ -26,10 +26,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, IBClient
+from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 from xenon.db.engine import get_sync_engine
 from xenon.execution.account_scope import resolve_from_env
 from xenon.execution.brackets.executor.ib_executor import IBExecutor
+from xenon.execution.brackets.executor.reconcile import boot_reconcile
 from xenon.monitor_daemon.daemon import MonitorDaemon
 from xenon.monitor_daemon.handlers import FillMonitorHandler, PresetRebalanceHandler
 from xenon.monitor_daemon.handlers.flex_token_check import FlexTokenCheck
@@ -40,6 +41,8 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent.parent.parent
 STATE_FILE = PROJECT_DIR / "data" / "daemon_state.json"
 LOG_DIR = PROJECT_DIR / "logs"
 LOG_FILE = LOG_DIR / "monitor-daemon.log"
+
+logger = logging.getLogger(__name__)
 
 
 # Configure logging
@@ -66,6 +69,45 @@ def setup_logging(verbose: bool = False):
     logging.root.addHandler(console_handler)
 
 
+def _ib_client_connected(client) -> bool:
+    is_connected = getattr(client, "is_connected", None)
+    if callable(is_connected):
+        return bool(is_connected())
+    connected = getattr(client, "connected", None)
+    if isinstance(connected, bool):
+        return connected
+    return False
+
+
+def _connect_position_rules_ib_client(client) -> bool:
+    if _ib_client_connected(client):
+        return True
+    connect = getattr(client, "connect", None)
+    if not callable(connect):
+        return False
+    try:
+        connect(
+            host=os.environ.get("IB_GATEWAY_HOST", DEFAULT_HOST),
+            port=int(os.environ.get("IB_GATEWAY_PORT", str(DEFAULT_GATEWAY_PORT))),
+            client_id=int(os.environ.get("XENON_POSITION_RULES_CLIENT_ID", "71")),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("position_rules boot reconcile deferred: IB connect failed: %s", exc)
+        return False
+    return True
+
+
+def _run_position_rules_boot_reconcile(*, engine, ib_client, scope) -> None:
+    if not _connect_position_rules_ib_client(ib_client):
+        logger.info("position_rules boot reconcile deferred: IB client unavailable")
+        return
+    try:
+        counts = boot_reconcile(engine=engine, ib_client=ib_client, scope=scope)
+        logger.info("position_rules boot reconcile completed: %s", counts)
+    except Exception:  # noqa: BLE001
+        logger.warning("position_rules boot reconcile failed", exc_info=True)
+
+
 def create_daemon() -> MonitorDaemon:
     """Create and configure the daemon with all handlers."""
     daemon = MonitorDaemon(
@@ -85,6 +127,7 @@ def create_daemon() -> MonitorDaemon:
         engine = get_sync_engine()
         scope = resolve_from_env()
         ib_client = IBClient()
+        _run_position_rules_boot_reconcile(engine=engine, ib_client=ib_client, scope=scope)
         daemon.register(
             PositionRulesHandler(
                 engine=engine,
