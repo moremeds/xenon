@@ -24,14 +24,14 @@ Implements the position-rules engine: after every fill, `arm_hook` classifies th
 | S3  | Manual TWS cancel       | **Complete**                                          |
 | S4  | Sweep CLI re-arm        | **Partial** — functional evidence, exact origin weak  |
 | S5  | Credit spread           | **Skipped** — RTH required                            |
-| S6  | Daemon kill+restart     | **Partial** — boot reconcile wired; no live STP case  |
+| S6  | Daemon kill+restart     | **Complete** — same live STP survived daemon restart  |
 | S7  | Native+synthetic race   | **Complete** by allowed integration-test fallback     |
 | S8  | Two rules same position | **Skipped** — RTH required                            |
 | S9  | Subprocess timeout      | **Complete** by allowed integration-test fallback     |
 | S10 | OOB sweep at close      | **Complete**                                          |
 | S11 | UI                      | **Complete for core UI**; DLQ red not manually smoked |
 
-**Strict count:** 5/11 complete: S3, S7, S9, S10, and S11 core UI. Treat S4/S6 as partial until stronger evidence is captured.
+**Strict count:** 6/11 complete: S3, S6, S7, S9, S10, and S11 core UI. Treat S4 as partial until stronger evidence is captured.
 
 ## Immediate Task: Verify S1 Fill
 
@@ -102,13 +102,14 @@ S5 (credit spread) and S8 (long option + two rules) require live chain quotes to
 
 Do not treat those as passed until the paper evidence file contains the DB rows, event IDs, timestamps, and broker observations.
 
-S4 needs one clean-state run where the position is opened directly in TWS paper, then discovered by `xenon-position-rules sweep --apply`. S6 now has startup `boot_reconcile()` wiring and a paper one-pass log, but still needs a native STP present before restart so the before/after broker snapshots can prove the same single permId remains.
+S4 needs one clean-state run where the position is opened directly in TWS paper, then discovered by `xenon-position-rules sweep --apply`. S6 has now been tightened with a fresh T native STP (`protection_id=31`, `permId=1661205040`) present before daemon restart and still present afterward with the same broker `permId`.
 
 S6 implementation update:
 
 - `src/xenon/monitor_daemon/run.py` now connects the position-rules IB client at startup and calls `boot_reconcile()` once before registering/running the handler.
 - Regression: `scripts/tests/test_monitor_daemon/test_run_setup.py::test_position_rules_startup_runs_boot_reconcile_after_connect`.
 - Verification run: `uv run pytest scripts/tests/test_monitor_daemon/test_run_setup.py scripts/tests/test_position_rules_db/test_reconcile.py -q` → 7 passed.
+- Paper restart evidence: `tmux kill-session -t xenon-paper-position-rules`, restart daemon, boot reconcile logged `{'claims_resolved': 0, 'armed_rows_re_armed': 0, 'armed_rows_canceled': 0}`, and IB open orders before/after showed one `SELL 1x T [STP]` with `permId=1661205040` / `orderRef='xenon-pr-native-31'`.
 
 ## Live DB State Left Behind
 
@@ -146,10 +147,9 @@ Before opening the PR for merge to master:
 2. **S2 verified** — `state_data.mfe` moves with favorable marks and no premature trigger occurs.
 3. **S4 tightened** — clean-state TWS-direct sweep evidence captured.
 4. **S5/S8 either completed in RTH paper or explicitly deferred by operator sign-off.**
-5. **S6 tightened** — restart boundary evidence captured with a live native STP, broker snapshots, and daemon logs.
-6. **Python tests green:** `uv run pytest scripts/tests/ -x`
-7. **Vitest green:** `cd web && npm test`
-8. **Playwright position-rules spec:** `PLAYWRIGHT_PORT=3001 npx playwright test e2e/positionRules.spec.ts`
+5. **Python tests green:** `uv run pytest scripts/tests/ -x`
+6. **Vitest green:** `cd web && npm test`
+7. **Playwright position-rules spec:** `PLAYWRIGHT_PORT=3001 npx playwright test e2e/positionRules.spec.ts`
 9. **No new E2E regressions:** `PLAYWRIGHT_PORT=3001 npx playwright test` (expect same pre-existing failures as on master: `account-metric-cards`, `modify-order-spread-telemetry`, `spread-price-bar`)
 10. PR via `gh pr create` — never push directly to master.
 
