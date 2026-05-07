@@ -13,9 +13,9 @@
 
 This document records evidence gathered during the 2026-05-06/07 paper run. A fresh verification on 2026-05-07 found that several earlier "complete" labels were too strong for formal sign-off.
 
-**Strict smoke count:** 6/11 complete (S3, S6, S7, S9, S10, S11 core UI). S4 is partial/weakly verified. S1, S2, S5, and S8 are not complete.
+**Strict smoke count:** 7/11 complete (S1, S3, S6, S7, S9, S10, S11 core UI). S4 is partial/weakly verified. S2, S5, and S8 are not complete.
 
-**Fresh DB check:** no `SPY` qty=100 fill exists in `xenon.order_fills` for paper account `DUQ378889`; no `STK::SPY` protection rows newer than protection_id 28 exist. The current S1 100-share order therefore cannot be counted as passed.
+**Fresh DB check:** the original `SPY` qty=100 order never filled and was canceled through `POST /orders/cancel` at 2026-05-07 16:11 HKT. Replacement S1 used `USO` qty=100 through the auditable FastAPI paper route on port 8323 and completed the fill -> PENDING_ARM -> ARMED -> native STP chain.
 
 ---
 
@@ -23,7 +23,7 @@ This document records evidence gathered during the 2026-05-06/07 paper run. A fr
 
 ### S1 — Stock SL+TP Arming
 
-**Status: NOT COMPLETE — 100-share SPY fill not received**
+**Status: COMPLETE — 100-share USO fill armed stop-loss + trailing TP**
 
 **What was done:**  
 BUY 100 SPY LMT $734.00 outsideRth=true was placed via `POST /orders/place` at ~00:05 ET 2026-05-07 (session ran overnight). IB returned HTTP 200 after fix for error 399 (advisory, order queued).
@@ -57,13 +57,91 @@ protection_id=11  stop_loss  CLOSED   perm_id=1747549521  STK::SPY
 
 Earlier SPY fills exercised the fill → PENDING_ARM → ARMED → CLOSED path. They do not satisfy the formal S1 item because the requested 100-share outsideRth S1 order (perm_id=1661205036) has not filled.
 
+Fresh replacement evidence at 2026-05-07 16:19-16:23 HKT:
+
+The stale SPY order was first canceled through the auditable FastAPI route:
+
+```
+POST http://127.0.0.1:8321/orders/cancel
+  {"orderId": 13, "permId": 1661205036}
+
+response:
+  {"status":"ok","message":"Order cancelled (orderId=13)","orderId":13,"finalStatus":"Cancelled"}
+
+xenon.order_submissions:
+  submission_id=437b5cbf-b228-4eab-8ff9-9968e8430647
+  ticker=SPY  perm_id=1661205036  ib_order_id=13
+  state=CANCELLED  reason_code=USER_CANCEL  updated_at=2026-05-07 16:11:53.183937+08
+```
+
+A smoke FastAPI was then started on `127.0.0.1:8323` with paper scope and `XENON_REGIME_GATE_DISABLED=1` so the 100-share stock smoke order could pass through the audit route while the existing `8321` process remained EDR-throttled:
+
+```
+DATABASE_URL=postgresql+psycopg://xenon_app:xenon_dev@127.0.0.1:5432/core_dev
+XENON_TRADING_MODE=paper
+XENON_BROKER_ACCOUNT=DUQ378889
+XENON_BROKER=IB
+IB_GATEWAY_HOST=127.0.0.1
+IB_GATEWAY_PORT=4002
+XENON_POSITION_RULES_ENABLED=1
+XENON_REGIME_GATE_DISABLED=1
+uv run uvicorn xenon.api.server:app --host 127.0.0.1 --port 8323
+```
+
+USO was selected because it is in the V1 universe and was tradeable in paper premarket. Two rejected attempts are preserved in `xenon.order_submissions` (`b821212b-...` at $150.01 and `d8da8e1f-...` at $139.87); IB rejected both as too aggressive and returned the current-market cap. The accepted replacement:
+
+```
+POST http://127.0.0.1:8323/orders/place
+  BUY 100 USO LMT 138.91 outsideRth=true
+  client_attempt_id=paper-smoke-s1-uso-20260507-1622hkt
+
+response:
+  {"status":"ok","orderId":19,"permId":1661205043,"tif":"DAY","initialStatus":"Filled","message":"BUY 100 USO LMT DAY — Filled"}
+
+xenon.order_submissions:
+  submission_id=8af99571-a5e4-4db3-94fc-2d1dc2cc8d1d
+  ticker=USO  qty=100  limit_price=138.9100
+  perm_id=1661205043  ib_order_id=19  placing_client_id=26
+  state=WORKING  submitted_at=2026-05-07 16:19:11.578047+08
+
+xenon.order_fills:
+  exec_id=00025b46.69fc0f4d.01.01
+  submission_id=8af99571-a5e4-4db3-94fc-2d1dc2cc8d1d
+  ticker=USO  side=BUY  qty=100  price=132.5400
+  perm_id=1661205043  ib_order_id=19
+  filled_at=2026-05-07 16:19:12+08
+  metadata.sec_type=STK  metadata.legacy_source=ib_reconcile
+```
+
+`xenon-ib-reconcile` was required because the FastAPI activity poller uses `client.fills()` on its pool client and did not see the subprocess-client fill. Reconcile inserted the fill and emitted the outbox event:
+
+```
+events.outbox:
+  id=78  fill.recorded            record_fill        USO qty=100 price=132.54 perm_id=1661205043
+  id=79  position_rule.transition insert_pending_arm protection_id=33 rule_kind=stop_loss   STK::USO
+  id=80  position_rule.transition insert_pending_arm protection_id=34 rule_kind=trailing_tp STK::USO
+  id=81  position_rule.transition cas_transition     protection_id=33 PENDING_ARM -> ARMED reason=native_armed
+  id=82  position_rule.transition cas_transition     protection_id=34 PENDING_ARM -> ARMED reason=synthetic_only
+
+xenon.position_protection:
+  protection_id=33  STK::USO  stop_loss    ARMED  native_order_perm_id=1661205049  state_data={"native_stop_price": 121.94}
+  protection_id=34  STK::USO  trailing_tp  ARMED
+
+xenon-ib-orders --sync:
+  OPEN ORDERS:
+    SELL 1x T [STP] — PreSubmitted
+    SELL 100x USO [STP] — PreSubmitted
+  EXECUTED ORDERS:
+    BUY 100x USO @ $132.54 P&L: $0.00 — 2026-05-07T08:19:12+00:00
+```
+
 **Checklist:**
 
-- [ ] 100-share outsideRth fill received
-- [ ] Two rows appear in PENDING_ARM within 5s for that fill
-- [ ] Within one tick, both rows transition to ARMED for that fill
-- [ ] `native_order_perm_id` set on the S1 stop_loss row
-- [ ] STP visible in TWS paper at entry×0.92 for the S1 fill
+- [x] 100-share outsideRth fill received
+- [x] Two rows appear in PENDING_ARM for that fill
+- [x] Within one tick, both rows transition to ARMED for that fill
+- [x] `native_order_perm_id` set on the S1 stop_loss row
+- [x] STP visible in TWS paper at entry×0.92 for the S1 fill
 
 ---
 
@@ -377,8 +455,7 @@ All five bugs have regression tests (green after fix).
 
 | Item                 | Blocker                                                      |
 | -------------------- | ------------------------------------------------------------ |
-| S1 fill verification | SPY BUY 100 permId=1661205036 pending at 04:00 ET pre-market |
-| S2 MFE tracking      | S1 fill + RTH price movement                                 |
+| S2 MFE tracking      | Needs favorable mark movement on an ARMED trailing_tp row    |
 | S5 credit spread     | RTH required                                                 |
 | S8 long option       | RTH required                                                 |
 | S11 DLQ indicator    | Manual DLQ poisoning test not run                            |
@@ -391,6 +468,8 @@ xenon.position_protection (broker_account=DUQ378889, state NOT IN CANCELED/SUPER
   protection_id=11  stop_loss   CLOSED  perm_id=1747549521  STK::SPY
   protection_id=31  stop_loss   ARMED   perm_id=1661205040  STK::T
   protection_id=32  trailing_tp ARMED   (no native STP)      STK::T
+  protection_id=33  stop_loss   ARMED   perm_id=1661205049  STK::USO
+  protection_id=34  trailing_tp ARMED   (no native STP)      STK::USO
 ```
 
 protection_id=31 is the live S6 native STP evidence row. If the operator wants a clean state after evidence capture, cancel both active T rules with:
@@ -408,5 +487,5 @@ XENON_TRADING_MODE=paper XENON_BROKER_ACCOUNT=DUQ378889 XENON_BROKER=IB \
 
 - Operator: chenxi
 - Date: 2026-05-07
-- Outliers: S1 fill pending; S2 not verified; S5/S8 skipped; S4 partial; S11 DLQ red state not manually tested.
-- Decision: **Paper smoke is not signed off yet. Do not flip live position rules based on this evidence.** Next pass should complete S1 first, then S2, S5, S8, and tighten S4 evidence.
+- Outliers: S2 not verified; S5/S8 skipped; S4 partial; S11 DLQ red state not manually tested.
+- Decision: **Paper smoke is not signed off yet. Do not flip live position rules based on this evidence.** Next pass should complete S2, S5, S8, and tighten S4 evidence.

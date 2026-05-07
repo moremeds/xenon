@@ -19,7 +19,7 @@ Implements the position-rules engine: after every fill, `arm_hook` classifies th
 
 | S#  | Scenario                | Result                                                |
 | --- | ----------------------- | ----------------------------------------------------- |
-| S1  | Stock SL+TP arming      | **Not complete** — SPY qty=100 fill not received      |
+| S1  | Stock SL+TP arming      | **Complete** — USO qty=100 filled and armed           |
 | S2  | Trailing TP MFE         | **Not verified** — needs fill plus mark movement      |
 | S3  | Manual TWS cancel       | **Complete**                                          |
 | S4  | Sweep CLI re-arm        | **Partial** — functional evidence, exact origin weak  |
@@ -31,17 +31,32 @@ Implements the position-rules engine: after every fill, `arm_hook` classifies th
 | S10 | OOB sweep at close      | **Complete**                                          |
 | S11 | UI                      | **Complete for core UI**; DLQ red not manually smoked |
 
-**Strict count:** 6/11 complete: S3, S6, S7, S9, S10, and S11 core UI. Treat S4 as partial until stronger evidence is captured.
+**Strict count:** 7/11 complete: S1, S3, S6, S7, S9, S10, and S11 core UI. Treat S4 as partial until stronger evidence is captured.
 
-## Immediate Task: Verify S1 Fill
+## Immediate Task: Continue With S2
 
-A BUY 100 SPY LMT $734.00 outsideRth=true order (permId=1661205036) was placed and is queued for 04:00 AM ET pre-market on 2026-05-07. **Before doing anything else, check if it filled:**
+S1 is now complete using a replacement `USO` paper fill. The stale SPY order was canceled through the auditable route, and the replacement fill created `STK::USO` protection rows:
 
-Last verified at 2026-05-07 01:59 ET:
+```
+Canceled stale SPY:
+  POST /orders/cancel {"orderId":13,"permId":1661205036}
+  order_submissions submission_id=437b5cbf-b228-4eab-8ff9-9968e8430647
+  state=CANCELLED  reason_code=USER_CANCEL
 
-- IB open orders: `BUY 100x SPY @ $734.0 [LMT] — Submitted`
-- DB order trail: `submission_id=437b5cbf-b228-4eab-8ff9-9968e8430647`, `perm_id=1661205036`, `ib_order_id=13`, `placing_client_id=26`, `state=WORKING`
-- DB fills: no `SPY` qty=100 row for `broker_account='DUQ378889'`
+Replacement S1:
+  BUY 100 USO LMT 138.91 outsideRth=true
+  response: orderId=19 permId=1661205043 initialStatus=Filled
+  order_fills exec_id=00025b46.69fc0f4d.01.01
+  fill price=132.54 filled_at=2026-05-07 16:19:12+08
+  events.outbox ids=78-82
+  protection_id=33 STK::USO stop_loss ARMED native_order_perm_id=1661205049 state_data={"native_stop_price":121.94}
+  protection_id=34 STK::USO trailing_tp ARMED
+  broker open order: SELL 100x USO [STP] — PreSubmitted
+```
+
+The FastAPI activity poller did not mirror the subprocess-client fill; `uv run xenon-ib-reconcile` inserted it into `xenon.order_fills` and emitted `fill.recorded`. Do not manually insert or delete audit rows.
+
+Next strongest smoke target is S2: observe `protection_id=34` trailing TP `state_data.mfe` move on mark updates and confirm it does not trigger prematurely.
 
 Paper monitor daemon was restarted in detached tmux session `xenon-paper-position-rules` at 2026-05-07 14:12 HKT:
 
@@ -51,7 +66,7 @@ tmux attach -t xenon-paper-position-rules
 tmux kill-session -t xenon-paper-position-rules
 ```
 
-Startup evidence in that pane shows `position_rules boot reconcile completed`, `EventSubscriber listening on ['fill.recorded']`, and the same SPY order `permId=1661205036` as `Submitted`.
+Startup evidence in that pane shows `position_rules boot reconcile completed` and `EventSubscriber listening on ['fill.recorded']`.
 
 ```bash
 PGPASSWORD=xenon_dev psql -h 127.0.0.1 -U xenon_app -d core_dev -c \
@@ -60,26 +75,35 @@ PGPASSWORD=xenon_dev psql -h 127.0.0.1 -U xenon_app -d core_dev -c \
    ORDER BY filled_at DESC LIMIT 3"
 ```
 
-If a qty=100 fill appears, check whether `arm_hook` fired:
+Useful S1/S2 check queries:
 
 ```bash
 PGPASSWORD=xenon_dev psql -h 127.0.0.1 -U xenon_app -d core_dev -c \
-  "SELECT protection_id, rule_kind, state, native_order_perm_id
+  "SELECT exec_id, submission_id, ticker, side, qty, price, perm_id, ib_order_id, filled_at
+   FROM xenon.order_fills
+   WHERE ticker='USO' AND broker_account='DUQ378889'
+   ORDER BY filled_at DESC LIMIT 5"
+
+PGPASSWORD=xenon_dev psql -h 127.0.0.1 -U xenon_app -d core_dev -c \
+  "SELECT protection_id, rule_kind, state, native_order_perm_id, state_data, updated_at
    FROM xenon.position_protection
-   WHERE broker_account='DUQ378889' AND position_key='STK::SPY'
+   WHERE broker_account='DUQ378889' AND position_key='STK::USO'
    ORDER BY protection_id DESC LIMIT 6"
 ```
 
-**If the fill exists but no new PENDING_ARM/ARMED rows appeared for the SPY 100-share position** (protection_ids > 28), the daemon was likely not running when FastAPI emitted the NOTIFY. To trigger `arm_hook` retroactively, start FastAPI (port 8323, paper mode) and the monitor daemon. The fills replay on boot should re-insert the fill, and the daemon's arm_consumer should pick up the NOTIFY.
-
-Start services:
+If FastAPI is needed for order-route work, the dedicated S1 smoke instance was:
 
 ```bash
 cd /Users/chenxi/projects/xenon/.worktrees/position-rules-implementation
-scripts/infra/dev.sh paper   # sets IB_GATEWAY_HOST=127.0.0.1:4002, runs alembic, starts FastAPI+Next.js
-# In a separate shell:
-XENON_TRADING_MODE=paper XENON_BROKER_ACCOUNT=DUQ378889 XENON_BROKER=IB \
-  uv run xenon-monitor-daemon --daemon --ignore-market-hours
+DATABASE_URL=postgresql+psycopg://xenon_app:xenon_dev@127.0.0.1:5432/core_dev \
+XENON_TRADING_MODE=paper \
+XENON_BROKER_ACCOUNT=DUQ378889 \
+XENON_BROKER=IB \
+IB_GATEWAY_HOST=127.0.0.1 \
+IB_GATEWAY_PORT=4002 \
+XENON_POSITION_RULES_ENABLED=1 \
+XENON_REGIME_GATE_DISABLED=1 \
+uv run uvicorn xenon.api.server:app --host 127.0.0.1 --port 8323
 ```
 
 ## Known Infrastructure Gotcha: Playwright Port Conflict
@@ -147,15 +171,14 @@ Regression tests for all five: green.
 
 Before opening the PR for merge to master:
 
-1. **S1 fill confirmed** — qty=100 SPY fill appears in `order_fills`, and ARMED stop_loss row exists with valid `native_order_perm_id`.
-2. **S2 verified** — `state_data.mfe` moves with favorable marks and no premature trigger occurs.
-3. **S4 tightened** — clean-state TWS-direct sweep evidence captured.
-4. **S5/S8 either completed in RTH paper or explicitly deferred by operator sign-off.**
-5. **Python tests green:** `uv run pytest scripts/tests/ -x`
-6. **Vitest green:** `cd web && npm test`
-7. **Playwright position-rules spec:** `PLAYWRIGHT_PORT=3001 npx playwright test e2e/positionRules.spec.ts`
-9. **No new E2E regressions:** `PLAYWRIGHT_PORT=3001 npx playwright test` (expect same pre-existing failures as on master: `account-metric-cards`, `modify-order-spread-telemetry`, `spread-price-bar`)
-10. PR via `gh pr create` — never push directly to master.
+1. **S2 verified** — `state_data.mfe` moves with favorable marks and no premature trigger occurs.
+2. **S4 tightened** — clean-state TWS-direct sweep evidence captured.
+3. **S5/S8 either completed in RTH paper or explicitly deferred by operator sign-off.**
+4. **Python tests green:** `uv run pytest scripts/tests/ -x`
+5. **Vitest green:** `cd web && npm test`
+6. **Playwright position-rules spec:** `PLAYWRIGHT_PORT=3001 npx playwright test e2e/positionRules.spec.ts`
+7. **No new E2E regressions:** `PLAYWRIGHT_PORT=3001 npx playwright test` (expect same pre-existing failures as on master: `account-metric-cards`, `modify-order-spread-telemetry`, `spread-price-bar`)
+8. PR via `gh pr create` — never push directly to master.
 
 ## Key Files
 
