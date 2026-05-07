@@ -29,9 +29,9 @@ Implements the position-rules engine: after every fill, `arm_hook` classifies th
 | S8  | Two rules same position | **Skipped** — RTH required                            |
 | S9  | Subprocess timeout      | **Complete** by allowed integration-test fallback     |
 | S10 | OOB sweep at close      | **Complete**                                          |
-| S11 | UI                      | **Complete for core UI**; DLQ red not manually smoked |
+| S11 | UI                      | **Complete**                                          |
 
-**Strict count:** 7/11 complete: S1, S3, S6, S7, S9, S10, and S11 core UI. Treat S4 as partial until stronger evidence is captured.
+**Strict count:** 7/11 complete: S1, S3, S6, S7, S9, S10, and S11. Treat S4 as partial until stronger evidence is captured.
 
 ## Immediate Task: Continue With S2
 

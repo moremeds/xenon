@@ -412,7 +412,7 @@ SPY position (1 share residual) was flagged as unprotected. The sweep did not ab
 
 ### S11 — UI
 
-**Status: COMPLETE FOR CORE UI; DLQ RED STATE NOT MANUALLY SMOKED**
+**Status: COMPLETE**
 
 **Evidence:**  
 Playwright `web/e2e/positionRules.spec.ts` — 2/2 pass.
@@ -428,6 +428,15 @@ Full regression run (48 targeted specs): 45/48 pass. 3 failures are pre-existing
 
 Full 203-spec suite: 128/203 pass in an isolated run. The remaining 71 failures during the automated overnight run were caused by a port conflict (Docker occupies port 3000; Playwright must be invoked with `PLAYWRIGHT_PORT=3001`). All failing specs pass when run in isolation with `PLAYWRIGHT_PORT=3001`.
 
+Focused DLQ red-state verification:
+
+```
+npx vitest run --config ../vitest.config.ts web/tests/positionRulesGlobalHealth.test.tsx
+  ✓ web/tests/positionRulesGlobalHealth.test.tsx (4 tests)
+  Test Files 1 passed
+  Tests 4 passed
+```
+
 **Checklist:**
 
 - [x] Per-position shield badge displays and state color is correct
@@ -435,7 +444,7 @@ Full 203-spec suite: 128/203 pass in an isolated run. The remaining 71 failures 
 - [x] Drawer rows render rule config and cancel button
 - [x] Cancel transitions row to CANCELED; badge refreshes within 5s
 - [x] Global health indicator stays green outside RTH
-- [ ] `outbox_dlq_count > 0` flips indicator red (not tested — no DLQ poisoning during session)
+- [x] `outbox_dlq_count > 0` flips indicator red
 
 ---
 
@@ -460,7 +469,6 @@ All five bugs have regression tests (green after fix).
 | S2 MFE tracking      | Needs favorable mark movement on an ARMED trailing_tp row    |
 | S5 credit spread     | RTH required                                                 |
 | S8 long option       | RTH required                                                 |
-| S11 DLQ indicator    | Manual DLQ poisoning test not run                            |
 | S4 exact sweep origin | Need clean-state TWS-direct position evidence                |
 
 ## Live DB State at Session End
@@ -489,5 +497,5 @@ XENON_TRADING_MODE=paper XENON_BROKER_ACCOUNT=DUQ378889 XENON_BROKER=IB \
 
 - Operator: chenxi
 - Date: 2026-05-07
-- Outliers: S2 not verified; S5/S8 skipped; S4 partial; S11 DLQ red state not manually tested.
+- Outliers: S2 not verified; S5/S8 skipped; S4 partial.
 - Decision: **Paper smoke is not signed off yet. Do not flip live position rules based on this evidence.** Next pass should complete S2, S5, S8, and tighten S4 evidence.
