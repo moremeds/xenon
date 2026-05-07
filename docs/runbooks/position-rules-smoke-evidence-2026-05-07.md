@@ -177,7 +177,7 @@ xenon-position-rules sweep --apply
   {"applied": 2, "skipped": -1}
 ```
 
-The negative `skipped` value is a CLI display/counting bug caused by measuring active rows before/after insert; it did not affect the DB result. Two rows were inserted and armed:
+The negative `skipped` value was a CLI display/counting bug caused by measuring active rule rows before/after insert while subtracting from candidate count. It did not affect the DB result and was fixed after this smoke observation. Two rows were inserted and armed:
 
 ```
 xenon.position_protection:
@@ -367,8 +367,9 @@ Full 203-spec suite: 128/203 pass in an isolated run. The remaining 71 failures 
 | IB error 2109 treated as fatal (502 on MKT outsideRth)             | same                                       | Added 2109 to ignore list                          |
 | `_positions_from_ib()` drops sec_type/expiry/strike/right/avg_cost | `src/xenon/cli/position_rules.py`          | Extract all contract fields; normalize OPT avgCost |
 | `sweep_insert()` uses anchor_price=0.0 when no mark/price          | `src/xenon/execution/brackets/arm_hook.py` | Added avg_cost fallback                            |
+| `sweep --apply` can report negative skipped count                  | `src/xenon/cli/position_rules.py`          | Count skipped candidates separately from inserted rows |
 
-All four bugs have regression tests (green after fix).
+All five bugs have regression tests (green after fix).
 
 ---
 

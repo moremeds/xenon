@@ -253,6 +253,58 @@ def test_sweep_dry_run_does_not_treat_option_rule_as_stock_protection(monkeypatc
     assert body["would_insert"][0]["symbol"] == "CLISAME"
 
 
+def test_sweep_apply_does_not_report_negative_skipped(monkeypatch, capsys):
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU1234567")
+    monkeypatch.setenv("XENON_BROKER", "IB")
+    monkeypatch.setattr(
+        cli,
+        "_positions_from_ib",
+        lambda: [{"symbol": "CLISWEEPAPPLY", "qty": 1, "con_id": 91, "sec_type": "STK", "avg_cost": 42.0}],
+    )
+    engine = get_sync_engine()
+    position_key = "STK::CLISWEEPAPPLY"
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM xenon.position_protection WHERE position_key = :position_key"), {"position_key": position_key})
+
+    def fake_sweep_insert(engine, *, scope, candidate):
+        descriptor = _descriptor(candidate["symbol"])
+        insert_pending_arm(
+            engine,
+            broker=scope.broker,
+            account_env=scope.account_env,
+            broker_account=scope.broker_account,
+            position_key=position_key,
+            position_descriptor=descriptor,
+            asset_class="stock",
+            rule_kind="stop_loss",
+            config={"threshold_pct": -0.08, "anchor": "entry_price"},
+        )
+        insert_pending_arm(
+            engine,
+            broker=scope.broker,
+            account_env=scope.account_env,
+            broker_account=scope.broker_account,
+            position_key=position_key,
+            position_descriptor=descriptor,
+            asset_class="stock",
+            rule_kind="trailing_tp",
+            config={"trigger_pct": 0.15, "trail_pct": 0.05, "anchor": "entry_price"},
+        )
+
+    import xenon.execution.brackets.arm_hook as arm_hook
+
+    monkeypatch.setattr(arm_hook, "sweep_insert", fake_sweep_insert)
+
+    try:
+        assert cli.main(["sweep", "--apply"]) == 0
+        body = json.loads(capsys.readouterr().out)
+        assert body == {"applied": 2, "skipped": 0}
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM xenon.position_protection WHERE position_key = :position_key"), {"position_key": position_key})
+
+
 def test_positions_from_ib_connects_with_auto_client_id(monkeypatch):
     import xenon.clients.ib_client as ib_client_mod
 

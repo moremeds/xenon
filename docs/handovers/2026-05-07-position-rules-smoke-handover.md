@@ -116,14 +116,17 @@ S6 implementation update:
 ```
 xenon.position_protection (DUQ378889, non-terminal):
   protection_id=11  stop_loss   CLOSED  STK::SPY  (finished, no action needed)
-  protection_id=30  trailing_tp ARMED   STK::T    (alert-only, no native STP)
+  protection_id=31  stop_loss   ARMED   STK::T    perm_id=1661205040
+  protection_id=32  trailing_tp ARMED   STK::T    (alert-only, no native STP)
 ```
 
-If you want a clean state before live flip, cancel protection_id=30:
+If you want a clean state before live flip, cancel protection_id=31 and protection_id=32:
 
 ```bash
 XENON_TRADING_MODE=paper XENON_BROKER_ACCOUNT=DUQ378889 XENON_BROKER=IB \
-  uv run xenon-position-rules cancel 30
+  uv run xenon-position-rules cancel 31
+XENON_TRADING_MODE=paper XENON_BROKER_ACCOUNT=DUQ378889 XENON_BROKER=IB \
+  uv run xenon-position-rules cancel 32
 ```
 
 ## Bugs Fixed During Smoke
@@ -136,8 +139,9 @@ Present in the current worktree/branch:
 | IB error 2109 fatal → 502 on MKT outsideRth    | same                                       | Same fix path; 2109 added to ignore list                           |
 | `_positions_from_ib()` drops contract fields   | `src/xenon/cli/position_rules.py`          | OPT positions keyed as STK::SYM; anchor_price=0.0 for all sweeps   |
 | `sweep_insert()` anchor_price=0.0 without mark | `src/xenon/execution/brackets/arm_hook.py` | Stop threshold at 0→always triggered immediately                   |
+| `sweep --apply` negative skipped count         | `src/xenon/cli/position_rules.py`          | One candidate inserting two rows printed `skipped=-1`              |
 
-Regression tests for all four: green.
+Regression tests for all five: green.
 
 ## Merge Checklist
 

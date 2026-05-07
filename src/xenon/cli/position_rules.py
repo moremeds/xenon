@@ -240,6 +240,7 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
     from xenon.execution.brackets.arm_hook import sweep_insert
 
     inserted = 0
+    skipped = 0
     for candidate in candidates:
         before = len(
             list_active_rows(
@@ -258,8 +259,11 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
                 broker_account=scope.broker_account,
             )
         )
-        inserted += max(0, after - before)
-    _print_json({"applied": inserted, "skipped": len(candidates) - inserted})
+        inserted_for_candidate = max(0, after - before)
+        inserted += inserted_for_candidate
+        if inserted_for_candidate == 0:
+            skipped += 1
+    _print_json({"applied": inserted, "skipped": skipped})
     return 0
 
 
