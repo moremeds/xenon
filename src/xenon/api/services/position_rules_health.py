@@ -98,10 +98,16 @@ def compute_health(*, engine, scope: AccountScope) -> dict[str, Any]:
             text(
                 """
                 SELECT MAX(emitted_at) FROM events.outbox
-                WHERE channel = 'position_rule.transition'
-                  AND source = 'cas_transition'
+                WHERE (
+                    (channel = 'position_rule.transition' AND source = 'cas_transition')
+                    OR (channel = 'position_rule.heartbeat' AND source = 'position_rules_handler')
+                  )
+                  AND payload->'scope'->>'broker' = :broker
+                  AND payload->'scope'->>'account_env' = :account_env
+                  AND payload->'scope'->>'broker_account' = :broker_account
                 """
-            )
+            ),
+            params,
         ).scalar_one()
 
     for state in _ALL_RULE_STATES:

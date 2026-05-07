@@ -69,7 +69,22 @@ class PositionRulesHandler(BaseHandler):
             elif row["state"] == "TRIGGERED":
                 self._handle_triggered(row)
 
+        self._emit_heartbeat(evaluated=len(rows))
         return {"evaluated": len(rows)}
+
+    def _emit_heartbeat(self, *, evaluated: int) -> None:
+        with self._engine.begin() as conn:
+            emit_outbox_in_txn(
+                conn,
+                channel="position_rule.heartbeat",
+                source="position_rules_handler",
+                payload={
+                    "payload_version": 1,
+                    "kind": "position_rules_heartbeat",
+                    "evaluated": evaluated,
+                    "scope": self._scope.as_dict(),
+                },
+            )
 
     def _handle_pending_arm(self, row: dict[str, Any]) -> None:
         rule = RULE_REGISTRY[row["rule_kind"]]

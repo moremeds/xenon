@@ -128,6 +128,8 @@ Do not treat those as passed until the paper evidence file contains the DB rows,
 
 S4 has a clean-state GM pass in `docs/runbooks/position-rules-smoke-evidence-2026-05-07.md`: direct broker BUY 1 GM, `sweep --dry-run` returned only GM after the combo-leg filter, `sweep --apply` inserted rows 45/46, and daemon arming placed native STP `permId=789792324`. S6 has now been tightened with a fresh T native STP (`protection_id=31`, `permId=1661205040`) present before daemon restart and still present afterward with the same broker `permId`.
 
+Health note: a later smoke pass found that daemon liveness could go red during quiet ticks with no rule transitions. The handler now emits scoped `position_rule.heartbeat` events and health uses heartbeat-or-transition max timestamp for `last_tick_at`.
+
 S6 implementation update:
 
 - `src/xenon/monitor_daemon/run.py` now connects the position-rules IB client at startup and calls `boot_reconcile()` once before registering/running the handler.

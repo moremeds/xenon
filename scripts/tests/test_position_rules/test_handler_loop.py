@@ -123,6 +123,36 @@ def _scope():
     return AccountScope(broker="IB", account_env="paper", broker_account="DU1234567")
 
 
+def test_execute_emits_heartbeat_even_without_transitions(engine):
+    handler = PositionRulesHandler(
+        engine=engine,
+        executor=MagicMock(),
+        ib_client=MagicMock(),
+        scope=_scope(),
+    )
+
+    result = handler.execute()
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT payload
+                FROM events.outbox
+                WHERE channel = 'position_rule.heartbeat'
+                  AND source = 'position_rules_handler'
+                  AND payload->'scope'->>'broker_account' = 'DU1234567'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+        ).one()
+
+    assert result == {"evaluated": 0}
+    assert row.payload["kind"] == "position_rules_heartbeat"
+    assert row.payload["evaluated"] == 0
+
+
 def _quote_side_effect(quotes: dict[int, Quote], *, fallback_symbol: str, fallback_price: float):
     def fetch(contract, snapshot=False, generic_ticks=""):
         return quotes.get(getattr(contract, "conId", None)) or Quote(

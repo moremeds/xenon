@@ -628,8 +628,9 @@ npx vitest run --config ../vitest.config.ts web/tests/positionRulesGlobalHealth.
 | Combo wizard rehydrate left filled attempts `WORKING`              | `src/xenon/execution/combo_wizard/rehydrate.py` | Update `wizard_combo_attempts.state` together with `wizard_sessions.state` |
 | Sweep proposed individual option legs already owned by a combo      | `src/xenon/cli/position_rules.py`          | Skip OPT candidates whose `con_id` appears in active combo protection descriptors |
 | `ib_order_id` fallback linked direct fills to unrelated submissions | `src/xenon/execution/ib_reconcile.py`      | Only fall back to `ib_order_id` when the submission permId is blank/zero and ticker/security type match |
+| Health liveness went red during quiet daemon ticks                  | `src/xenon/api/services/position_rules_health.py`, `src/xenon/monitor_daemon/handlers/position_rules.py` | Emit and read `position_rule.heartbeat` events instead of using state transitions as the only daemon-liveness signal |
 
-All ten bugs have regression tests (green after fix). The audit-trail fixes are covered by:
+All eleven bugs have regression tests (green after fix). The audit-trail and health fixes are covered by:
 
 ```bash
 uv run pytest \
@@ -637,7 +638,9 @@ uv run pytest \
   scripts/tests/test_record_external_fills_resolves_submission.py::test_order_id_fallback_ignores_reused_order_id_with_existing_perm_id \
   src/xenon/api/tests/test_orders_routes_failures.py::test_place_pending_cancel_ack_is_not_left_working \
   scripts/tests/test_combo_wizard_rehydrate.py::test_combo_rehydrate_marks_attempt_filled_when_every_leg_filled \
-  scripts/tests/test_position_rules_cli/test_cancel_sweep_events_review.py::test_sweep_dry_run_skips_option_legs_owned_by_active_combo -q
+  scripts/tests/test_position_rules_cli/test_cancel_sweep_events_review.py::test_sweep_dry_run_skips_option_legs_owned_by_active_combo \
+  scripts/tests/test_position_rules/test_handler_loop.py::test_execute_emits_heartbeat_even_without_transitions \
+  scripts/tests/test_position_rules_db/test_position_rules_health.py::test_health_uses_position_rule_heartbeat_for_daemon_liveness -q
 ```
 
 ---
