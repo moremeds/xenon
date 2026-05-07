@@ -22,16 +22,16 @@ Implements the position-rules engine: after every fill, `arm_hook` classifies th
 | S1  | Stock SL+TP arming      | **Complete** — USO qty=100 filled and armed           |
 | S2  | Trailing TP MFE         | **Not verified** — needs fill plus mark movement      |
 | S3  | Manual TWS cancel       | **Complete**                                          |
-| S4  | Sweep CLI re-arm        | **Partial** — functional evidence, exact origin weak  |
-| S5  | Credit spread           | **Skipped** — RTH required                            |
+| S4  | Sweep CLI re-arm        | **Complete** — GM direct broker position swept/armed  |
+| S5  | Credit spread           | **Partial** — filled/armed; triggers need marks       |
 | S6  | Daemon kill+restart     | **Complete** — same live STP survived daemon restart  |
 | S7  | Native+synthetic race   | **Complete** by allowed integration-test fallback     |
-| S8  | Two rules same position | **Skipped** — RTH required                            |
+| S8  | Two rules same position | **Partial** — filled/armed; trigger race needs marks  |
 | S9  | Subprocess timeout      | **Complete** by allowed integration-test fallback     |
 | S10 | OOB sweep at close      | **Complete**                                          |
 | S11 | UI                      | **Complete**                                          |
 
-**Strict count:** 7/11 complete: S1, S3, S6, S7, S9, S10, and S11. Treat S4 as partial until stronger evidence is captured.
+**Strict count:** 8/11 complete: S1, S3, S4, S6, S7, S9, S10, and S11. S5 and S8 are partial. S2 is not verified.
 
 ## Immediate Task: Continue With S2
 
@@ -126,7 +126,7 @@ S5 (credit spread) and S8 (long option + two rules) require live chain quotes to
 
 Do not treat those as passed until the paper evidence file contains the DB rows, event IDs, timestamps, and broker observations.
 
-S4 needs one clean-state run where the position is opened directly in TWS paper, then discovered by `xenon-position-rules sweep --apply`. S6 has now been tightened with a fresh T native STP (`protection_id=31`, `permId=1661205040`) present before daemon restart and still present afterward with the same broker `permId`.
+S4 has a clean-state GM pass in `docs/runbooks/position-rules-smoke-evidence-2026-05-07.md`: direct broker BUY 1 GM, `sweep --dry-run` returned only GM after the combo-leg filter, `sweep --apply` inserted rows 45/46, and daemon arming placed native STP `permId=789792324`. S6 has now been tightened with a fresh T native STP (`protection_id=31`, `permId=1661205040`) present before daemon restart and still present afterward with the same broker `permId`.
 
 S6 implementation update:
 

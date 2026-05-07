@@ -89,6 +89,37 @@ def _seed_snapshot_row(perm_id: str, *, scope: AccountScope = SCOPE) -> str:
     return submission_id
 
 
+def _seed_order_id_only_row(ib_order_id: str, *, scope: AccountScope = SCOPE) -> str:
+    """Seed a Xenon-authored row whose submit ack did not yet have permId."""
+    submission_id = f"uuid-order-{ib_order_id}"
+    engine = get_sync_engine()
+    now = datetime(2026, 5, 7, 16, 16, tzinfo=timezone.utc)
+    with engine.begin() as conn:
+        conn.execute(
+            insert(order_submissions).values(
+                submission_id=submission_id,
+                user_id="local",
+                client_attempt_id=f"attempt-{ib_order_id}",
+                ticker="SPY",
+                security_type="OPT",
+                action="BUY",
+                quantity=1,
+                multiplier=100,
+                ib_order_id=ib_order_id,
+                perm_id="",
+                limit_price=0,
+                state="WORKING",
+                submitted_at=now,
+                updated_at=now,
+                modify_sequence=0,
+                broker=scope.broker,
+                account_env=scope.account_env,
+                broker_account=scope.broker_account,
+            )
+        )
+    return submission_id
+
+
 def test_fill_links_to_existing_snapshot_submission():
     """Real bug repro: SPX combo filled in TWS; xenon.order_fills row should
     point to the snapshot submission so the blotter can join them."""
@@ -112,6 +143,98 @@ def test_fill_links_to_existing_snapshot_submission():
     assert row is not None
     assert row.submission_id == submission_id
     assert row.perm_id == "9300001"
+
+
+def test_fill_falls_back_to_ib_order_id_when_submit_ack_perm_id_was_zero():
+    """MKT orders can return permId=0 from /orders/place, then fill with a
+    real permId seconds later. The fill must still link to the Xenon
+    submission by ib_order_id and backfill the real permId onto the row."""
+    from xenon.execution.ib_reconcile import record_external_fills
+
+    submission_id = _seed_order_id_only_row("21")
+    result = record_external_fills(
+        [
+            _execution(perm_id="789792141", exec_id="ex-order-id-fallback")
+            | {"ib_order_id": "21", "symbol": "SPY", "sec_type": "OPT"}
+        ],
+        scope=SCOPE,
+    )
+
+    assert result["inserted"] == 1
+
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        fill = conn.execute(
+            select(order_fills.c.submission_id, order_fills.c.perm_id).where(
+                order_fills.c.exec_id == "ex-order-id-fallback"
+            )
+        ).one()
+        submission = conn.execute(
+            select(order_submissions.c.perm_id).where(order_submissions.c.submission_id == submission_id)
+        ).one()
+
+    assert fill.submission_id == submission_id
+    assert fill.perm_id == "789792141"
+    assert submission.perm_id == "789792141"
+
+
+def test_order_id_fallback_ignores_reused_order_id_with_existing_perm_id():
+    """IB orderId is scoped to a client session and can be reused. A later
+    external fill must not attach to an unrelated row that already has its
+    own real permId just because the numeric orderId matches."""
+    from xenon.execution.ib_reconcile import record_external_fills
+
+    engine = get_sync_engine()
+    now = datetime(2026, 5, 8, 0, 15, tzinfo=timezone.utc)
+    with engine.begin() as conn:
+        conn.execute(order_fills.delete().where(order_fills.c.exec_id == "ex-reused-order-id"))
+        conn.execute(
+            order_submissions.delete().where(order_submissions.c.submission_id == "existing-perm-order-4")
+        )
+        conn.execute(
+            insert(order_submissions).values(
+                submission_id="existing-perm-order-4",
+                user_id="local",
+                client_attempt_id="paper-smoke-existing-order-4",
+                ticker="SPY",
+                security_type="OPT",
+                action="BUY",
+                quantity=1,
+                multiplier=100,
+                ib_order_id="4",
+                perm_id="789792140",
+                limit_price=0.01,
+                state="WORKING",
+                submitted_at=now,
+                updated_at=now,
+                modify_sequence=0,
+                broker=SCOPE.broker,
+                account_env=SCOPE.account_env,
+                broker_account=SCOPE.broker_account,
+            )
+        )
+
+    result = record_external_fills(
+        [
+            _execution(perm_id="789792288", exec_id="ex-reused-order-id")
+            | {"ib_order_id": "4", "symbol": "GM", "sec_type": "STK", "price": 78.9}
+        ],
+        scope=SCOPE,
+    )
+
+    assert result["inserted"] == 1
+    assert len(result["affected_legacy_ids"]) == 1
+
+    with engine.connect() as conn:
+        fill = conn.execute(
+            select(order_fills.c.submission_id).where(order_fills.c.exec_id == "ex-reused-order-id")
+        ).one()
+        submission = conn.execute(
+            select(order_submissions.c.perm_id).where(order_submissions.c.submission_id == "existing-perm-order-4")
+        ).one()
+
+    assert fill.submission_id is None
+    assert submission.perm_id == "789792140"
 
 
 def test_orphan_fill_with_no_matching_submission_keeps_legacy_id_grouping():

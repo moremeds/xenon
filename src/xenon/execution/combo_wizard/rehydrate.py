@@ -104,6 +104,12 @@ def _set_session_state(session_id: str, state: str) -> None:
         combo_wizard.update_session(conn, session_id, state=state)
 
 
+def _set_attempt_state(attempt_id: str, state: str) -> None:
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        combo_wizard.update_attempt(conn, attempt_id, state=state)
+
+
 def _record_event(session_id: str, kind: str, detail: dict) -> None:
     engine = get_sync_engine()
     with engine.begin() as conn:
@@ -336,6 +342,7 @@ def rehydrate_combo_sessions(
             "WORKING": "working",
         }[to_state]
         _set_session_state(sid, db_state)
+        _set_attempt_state(attempt["attempt_id"], to_state)
         _record_event(sid, "REHYDRATE_RECONCILED", detail)
 
         decisions.append(

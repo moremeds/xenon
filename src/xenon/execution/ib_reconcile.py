@@ -24,11 +24,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Optional
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 from xenon.db.engine import get_sync_engine
-from xenon.db.schema import account_snapshots
+from xenon.db.schema import account_snapshots, order_submissions
 from xenon.execution.account_scope import AccountScope, resolve_from_env
 from xenon.execution.orders_store import record_fill, update_fill_commission
 from xenon.execution.trade_aggregator import aggregate_trade_from_fills
@@ -255,15 +255,11 @@ def _resolve_submission_id_by_perm_id(perm_id: str | None, *, scope: AccountScop
     """
     if not perm_id:
         return None
-    from sqlalchemy import select as _select
-
-    from xenon.db.engine import get_sync_engine
-    from xenon.db.schema import order_submissions
 
     engine = get_sync_engine()
     with engine.connect() as conn:
         row = conn.execute(
-            _select(order_submissions.c.submission_id).where(
+            select(order_submissions.c.submission_id).where(
                 order_submissions.c.perm_id == str(perm_id),
                 order_submissions.c.broker == scope.broker,
                 order_submissions.c.account_env == scope.account_env,
@@ -271,6 +267,44 @@ def _resolve_submission_id_by_perm_id(perm_id: str | None, *, scope: AccountScop
             )
         ).first()
     return row[0] if row else None
+
+
+def _resolve_submission_id_for_execution(
+    *,
+    perm_id: str | None,
+    ib_order_id: str | None,
+    symbol: str | None,
+    sec_type: str | None,
+    scope: AccountScope,
+) -> str | None:
+    submission_id = _resolve_submission_id_by_perm_id(perm_id, scope=scope)
+    if submission_id is not None or not ib_order_id:
+        return submission_id
+
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        row = conn.execute(
+            select(order_submissions.c.submission_id, order_submissions.c.perm_id)
+            .where(
+                order_submissions.c.ib_order_id == str(ib_order_id),
+                or_(order_submissions.c.perm_id.is_(None), order_submissions.c.perm_id.in_(["", "0"])),
+                order_submissions.c.broker == scope.broker,
+                order_submissions.c.account_env == scope.account_env,
+                order_submissions.c.broker_account == scope.broker_account,
+                order_submissions.c.ticker == str(symbol) if symbol else True,
+                order_submissions.c.security_type == str(sec_type).upper() if sec_type else True,
+            )
+            .limit(1)
+        ).first()
+        if row is None:
+            return None
+        if perm_id and str(row.perm_id or "") in {"", "0"}:
+            conn.execute(
+                update(order_submissions)
+                .where(order_submissions.c.submission_id == row.submission_id)
+                .values(perm_id=str(perm_id))
+            )
+        return row.submission_id
 
 
 def record_external_fills(
@@ -296,7 +330,14 @@ def record_external_fills(
 
     for execution in executions:
         perm_id = str(_field(execution, "perm_id", "permId") or "") or None
-        submission_id = _resolve_submission_id_by_perm_id(perm_id, scope=resolved)
+        ib_order_id = str(_field(execution, "ib_order_id", "order_id", "orderId") or "") or None
+        submission_id = _resolve_submission_id_for_execution(
+            perm_id=perm_id,
+            ib_order_id=ib_order_id,
+            symbol=str(_field(execution, "symbol", "ticker") or "") or None,
+            sec_type=str(_field(execution, "sec_type", "security_type", "secType") or "") or None,
+            scope=resolved,
+        )
         legacy_id = _legacy_group_id(execution)
         exec_id = _execution_exec_id(execution)
         commission = _commission_for_record(execution)
@@ -305,7 +346,7 @@ def record_external_fills(
             submission_id=submission_id,
             combo_attempt_id=None,
             perm_id=perm_id,
-            ib_order_id=str(_field(execution, "ib_order_id", "order_id", "orderId") or "") or None,
+            ib_order_id=ib_order_id,
             con_id=_field(execution, "con_id", "conId"),
             ticker=str(_field(execution, "symbol", "ticker")),
             side=_normalize_fill_side(_field(execution, "side")),

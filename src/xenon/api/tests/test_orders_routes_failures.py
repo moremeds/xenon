@@ -579,3 +579,63 @@ def test_place_combo_ib_2161_with_order_ids_is_working_not_rejected(client, tmp_
     assert row.ib_order_id == "8"
     assert row.perm_id == "1747550348"
     assert row.reason_code is None
+
+
+def test_place_pending_cancel_ack_is_not_left_working(client, tmp_db, monkeypatch):
+    """If IB immediately reports PendingCancel after submit, DB must not show
+    a live WORKING order that operators cannot find at the broker."""
+    monkeypatch.setenv("XENON_REGIME_GATE_DISABLED", "1")
+    client_attempt_id = "combo-pending-cancel-smoke"
+
+    async def fake_runner(entry, args, timeout=30):
+        return ScriptResult(
+            ok=True,
+            data={
+                "status": "ok",
+                "orderId": 4,
+                "permId": 789792140,
+                "initialStatus": "PendingCancel",
+                "tif": "DAY",
+            },
+        )
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post(
+        "/orders/place",
+        json={
+            "type": "combo",
+            "symbol": "SPY",
+            "action": "BUY",
+            "quantity": 1,
+            "limitPrice": "1.00",
+            "client_attempt_id": client_attempt_id,
+            "legs": [
+                {"expiry": "20260508", "strike": 760, "right": "C", "action": "BUY", "ratio": 1},
+                {"expiry": "20260508", "strike": 761, "right": "C", "action": "SELL", "ratio": 1},
+            ],
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+
+    engine = _pg_engine()
+    try:
+        with engine.connect() as con:
+            row = con.execute(
+                text(
+                    """
+                    SELECT state, ib_order_id, perm_id, reason_code
+                    FROM xenon.order_submissions
+                    WHERE client_attempt_id = :client_attempt_id
+                    """
+                ),
+                {"client_attempt_id": client_attempt_id},
+            ).one()
+    finally:
+        engine.dispose()
+
+    assert row.state == "CANCELLED"
+    assert row.ib_order_id == "4"
+    assert row.perm_id == "789792140"
+    assert row.reason_code == "IB_PENDING_CANCEL_ON_SUBMIT"

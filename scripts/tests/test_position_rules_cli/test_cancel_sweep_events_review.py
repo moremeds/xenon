@@ -253,6 +253,103 @@ def test_sweep_dry_run_does_not_treat_option_rule_as_stock_protection(monkeypatc
     assert body["would_insert"][0]["symbol"] == "CLISAME"
 
 
+def test_sweep_dry_run_skips_option_legs_owned_by_active_combo(monkeypatch, capsys):
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU1234567")
+    monkeypatch.setenv("XENON_BROKER", "IB")
+    monkeypatch.setattr(
+        cli,
+        "_positions_from_ib",
+        lambda: [
+            {
+                "symbol": "CLICOMBO",
+                "qty": 1,
+                "con_id": 7001,
+                "sec_type": "OPT",
+                "avg_cost": 0.20,
+                "expiry": "20260619",
+                "strike": 95.0,
+                "right": "P",
+            },
+            {
+                "symbol": "CLICOMBO",
+                "qty": -1,
+                "con_id": 7002,
+                "sec_type": "OPT",
+                "avg_cost": 0.45,
+                "expiry": "20260619",
+                "strike": 100.0,
+                "right": "P",
+            },
+            {"symbol": "CLIGM", "qty": 1, "con_id": 8001, "sec_type": "STK", "avg_cost": 79.0},
+        ],
+    )
+    engine = get_sync_engine()
+    combo_key = "CS::CLICOMBO::20260619::100::95::P"
+    stock_key = "STK::CLIGM"
+    with engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM xenon.position_protection WHERE position_key IN (:combo_key, :stock_key)"),
+            {"combo_key": combo_key, "stock_key": stock_key},
+        )
+    descriptor = {
+        "asset_class": "credit_spread",
+        "anchor_price": -0.25,
+        "opened_qty": 1,
+        "protected_qty": 1,
+        "multiplier": 100,
+        "qty_unit": "contract",
+        "opened_at": "2026-05-08T14:00:00Z",
+        "source": "test",
+        "anchor_currency": "USD",
+        "legs": [
+            {
+                "sec_type": "OPT",
+                "symbol": "CLICOMBO",
+                "expiry": "20260619",
+                "strike": 100.0,
+                "right": "P",
+                "action": "SELL",
+                "ratio": 1,
+                "con_id": 7002,
+            },
+            {
+                "sec_type": "OPT",
+                "symbol": "CLICOMBO",
+                "expiry": "20260619",
+                "strike": 95.0,
+                "right": "P",
+                "action": "BUY",
+                "ratio": 1,
+                "con_id": 7001,
+            },
+        ],
+    }
+    insert_pending_arm(
+        engine,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+        position_key=combo_key,
+        position_descriptor=descriptor,
+        asset_class="credit_spread",
+        rule_kind="stop_loss",
+        config={"short_strike": 100.0},
+    )
+
+    try:
+        assert cli.main(["sweep"]) == 0
+        body = json.loads(capsys.readouterr().out)
+        assert body["count"] == 1
+        assert body["would_insert"][0]["symbol"] == "CLIGM"
+    finally:
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM xenon.position_protection WHERE position_key IN (:combo_key, :stock_key)"),
+                {"combo_key": combo_key, "stock_key": stock_key},
+            )
+
+
 def test_sweep_apply_does_not_report_negative_skipped(monkeypatch, capsys):
     monkeypatch.setenv("XENON_TRADING_MODE", "paper")
     monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU1234567")

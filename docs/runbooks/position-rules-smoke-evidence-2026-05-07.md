@@ -13,7 +13,7 @@
 
 This document records evidence gathered during the 2026-05-06/07 paper run. A fresh verification on 2026-05-07 found that several earlier "complete" labels were too strong for formal sign-off.
 
-**Strict smoke count:** 7/11 complete (S1, S3, S6, S7, S9, S10, S11 core UI). S4 is partial/weakly verified. S2, S5, and S8 are not complete.
+**Strict smoke count:** 8/11 complete (S1, S3, S4, S6, S7, S9, S10, S11 core UI). S5 and S8 are partial. S2 is not complete.
 
 **Fresh DB check:** the original `SPY` qty=100 order never filled and was canceled through `POST /orders/cancel` at 2026-05-07 16:11 HKT. Replacement S1 used `USO` qty=100 through the auditable FastAPI paper route on port 8323 and completed the fill -> PENDING_ARM -> ARMED -> native STP chain.
 
@@ -194,7 +194,7 @@ protection_id=1  stop_loss  STK::SPY
 
 ### S4 — Sweep CLI Re-Arm
 
-**Status: PARTIAL — functionally supported, exact TWS-direct origin not proven**
+**Status: COMPLETE — clean direct broker stock position discovered by sweep and armed**
 
 **Bugs fixed before verification:**
 
@@ -216,27 +216,137 @@ xenon.order_fills:
 
 STP placed at $24.10 = 26.192303 × 0.92 (8% threshold).
 
-The evidence proves that sweep insertion and daemon arming worked for an existing T broker position. It does not strictly prove the runbook variant where the position was opened directly in TWS paper and then discovered by the CLI sweep from a clean state.
+The T evidence proved that sweep insertion and daemon arming worked for an existing broker position, but it did not strictly prove the clean TWS-direct origin. A fresh clean-state S4 pass was captured on 2026-05-08 HKT:
+
+```
+Pre-check:
+  no xenon.position_protection rows for STK::GM
+  no IB paper GM position
+
+Daemon paused:
+  tmux kill-session -t xenon-paper-position-rules
+
+Direct broker order:
+  BUY 1 GM MKT
+  orderRef=paper-smoke-s4-direct-gm-20260508
+  orderId=4  permId=789792288
+  fill exec_id=00025b44.69fee11c.01.01
+  fill price=78.90  filled_at=2026-05-08 00:40:16+08
+
+Sweep dry-run after combo-leg filter:
+  {"would_insert":[{"symbol":"GM","qty":1.0,"con_id":80986742,"sec_type":"STK","avg_cost":79.692003}],"count":1}
+
+Sweep apply:
+  {"applied":2,"skipped":0}
+
+xenon.position_protection immediately after apply:
+  protection_id=45  STK::GM stop_loss   PENDING_ARM anchor_price=79.692003
+  protection_id=46  STK::GM trailing_tp PENDING_ARM anchor_price=79.692003
+
+Daemon restarted:
+  uv run xenon-monitor-daemon --daemon --ignore-market-hours --verbose
+
+xenon.position_protection after daemon tick:
+  protection_id=45  stop_loss   ARMED native_order_perm_id=789792324 native_stop_price=73.32
+  protection_id=46  trailing_tp ARMED synthetic-only
+
+events.outbox:
+  id=102 insert_pending_arm protection_id=45 reason=fill_recorded  emitted_at=2026-05-08 00:43:42.393659+08
+  id=103 insert_pending_arm protection_id=46 reason=fill_recorded  emitted_at=2026-05-08 00:43:42.401142+08
+  id=104 cas_transition     protection_id=45 reason=native_armed   emitted_at=2026-05-08 00:44:22.748639+08
+  id=105 cas_transition     protection_id=46 reason=synthetic_only emitted_at=2026-05-08 00:44:22.759454+08
+
+Broker observation:
+  OPEN ORDERS includes SELL 1x GM [STP] -- PreSubmitted
+  stop orderRef=xenon-pr-native-45
+
+Audit repair:
+  xenon.order_fills exec_id=00025b44.69fee11c.01.01 ticker=GM side=BUY qty=1 price=78.9000 perm_id=789792288
+  submission_id=NULL, because the order was a true direct broker order outside Xenon
+```
+
+During this run, `sweep --dry-run` initially also proposed the individual SPY option legs from the already-protected credit spread. That was unsafe to apply because it would create single-leg protection for a combo. The CLI now skips option positions whose `con_id` is already owned by active combo protection.
 
 **Regression tests added:**
 
 - `test_positions_from_ib_preserves_option_contract_details` — asserts sec_type, expiry, strike, right, avg_cost normalization
 - `test_sweep_insert_uses_avg_cost_as_anchor_when_mark_missing` — asserts anchor_price=73.50 from avg_cost
+- `test_sweep_dry_run_skips_option_legs_owned_by_active_combo` — asserts sweep does not propose individual option legs already covered by active combo protection
 
 **Checklist:**
 
 - [x] `sweep --apply` inserts PENDING_ARM rows (events 67/68)
 - [x] Daemon tick arms those rows (events 69/70, within 10s)
 - [x] Regression tests cover contract-field and avg-cost handling
-- [ ] Exact TWS-direct clean-state sweep origin captured
+- [x] Exact TWS-direct clean-state sweep origin captured (GM events 102-105)
 
 ---
 
 ### S5 — Credit Spread Dual-Trigger
 
-**Status: SKIPPED — requires RTH**
+**Status: PARTIAL — wizard fill + protection rows verified; trigger behavior not verified**
 
-Could not open a short bull put spread through the wizard during overnight session. Market data unavailable outside 09:30–16:00 ET; combo qualification requires live chain quotes.
+2026-05-08 HKT / 2026-05-07 ET market-hour run opened a one-lot SPY bull put spread through the wizard path on the paper account.
+
+```
+POST /wizard/plan
+  session_id=wiz-96aca0808ce6
+  structure_name=Bull Put Spread
+  signed_mid_price=-0.05
+
+POST /wizard/sessions/wiz-96aca0808ce6/submit
+  attempt_id=cecdffa8b61946cf9794ed71d6d5740d
+  client_attempt_id=wiz:wiz-96aca0808ce6:combo:cecdffa8b61946cf9794ed71d6d5740d
+  IB orderId=12
+  IB permId=789792151
+  initialStatus=PreSubmitted
+
+IB executions:
+  BAG  BUY  1x SPY Spread @ -0.18  exec_id=00025d10.69fcbbbc.01.01
+  LEG  SELL 1x SPY 20260508 720P @ 0.36  exec_id=00020057.69fc9907.02.01.01
+  LEG  BUY  1x SPY 20260508 715P @ 0.18  exec_id=00020057.69fc9907.03.01.01
+```
+
+`rehydrate_combo_sessions()` reconciled the filled wizard order:
+
+```
+WizardReconcileDecision(
+  session_id='wiz-96aca0808ce6',
+  from_state='working',
+  to_state='FILLED',
+  detail={'perm_id': '789792151', 'sources': {'open_orders': False, 'executions': True}}
+)
+
+xenon.wizard_sessions:
+  session_id=wiz-96aca0808ce6
+  state=filled
+  current_attempt_id=cecdffa8b61946cf9794ed71d6d5740d
+
+xenon.order_fills:
+  combo_attempt_id=cecdffa8b61946cf9794ed71d6d5740d
+  three rows recorded for BAG + both option legs
+```
+
+The arm consumer inserted and armed the credit-spread rules:
+
+```
+xenon.position_protection:
+  protection_id=37  CS::SPY::20260508::720::715::P  stop_loss          ARMED
+  protection_id=38  CS::SPY::20260508::720::715::P  take_profit_fixed  ARMED
+  credit_received=0.18
+  short_strike=720.0
+  short_right=P
+```
+
+Not complete: trigger verification still needs working IB `reqMktData` marks for the spread legs and underlying. During this run, direct probes for SPY and the SPY option legs returned `nan` bid/ask/last/close/marketPrice, and the daemon continued logging IB 10197 / no usable quote data. Therefore neither `underlying_breach_short_strike` nor `debit-to-close <= 50% of credit` was exercised.
+
+**Checklist:**
+
+- [x] Wizard-created credit spread filled in paper
+- [x] `position_protection` shows `stop_loss` and `take_profit_fixed` rows
+- [x] Both rows reached `ARMED`
+- [ ] Underlying breach of short strike triggers `stop_loss`
+- [ ] Debit-to-close at <= 50% of credit triggers `take_profit_fixed`
 
 ---
 
@@ -370,9 +480,65 @@ Per runbook: "If paper timing cannot reproduce this race deterministically, mark
 
 ### S8 — Two Rules Same Position
 
-**Status: SKIPPED — requires RTH**
+**Status: PARTIAL — long option fill + two ARMED rows verified; same-tick trigger race not verified**
 
-Long option test requires live chain quotes to open the position and set a realistic threshold. Blocked for the same reason as S5.
+2026-05-08 HKT / 2026-05-07 ET market-hour run opened one SPY long call through the auditable FastAPI order route.
+
+First attempt:
+
+```
+client_attempt_id=paper-smoke-s8-spy-760c-20260508-0014hkt
+result=REJECTED
+detail="IB error 2119: Market data farm is connecting:usopt"
+```
+
+Second limit attempt:
+
+```
+client_attempt_id=paper-smoke-s8-spy-760c-20260508-0015hkt
+IB orderId=4
+IB permId=789792140
+initialStatus=PendingCancel
+no fill
+```
+
+Filled market attempt:
+
+```
+client_attempt_id=paper-smoke-s8-spy-750c-mkt-20260508-0017hkt
+IB orderId=21
+route response permId=0
+
+IB execution:
+  BUY 1x SPY 20260508 750C @ 0.03
+  exec_id=00020057.69fc94b9.01.01
+  permId=789792141
+  filled_at=2026-05-08 00:16:48+08
+```
+
+`xenon-ib-reconcile` inserted the fill and the arm consumer armed both rules:
+
+```
+xenon.position_protection:
+  protection_id=35  OPT::SPY::20260508::750::C  stop_loss    ARMED  native_order_perm_id=789792144  native_stop_price=0.02
+  protection_id=36  OPT::SPY::20260508::750::C  trailing_tp  ARMED
+
+IB open orders:
+  SELL 1x SPY C750 [STP] — PreSubmitted
+```
+
+Not complete: the required same-tick trigger race was not exercised. IB market data probes for the option returned `nan`, so the synthetic `trailing_tp` path never received a mark. The native option STP is live, but that alone does not prove the close-claim race between two rules.
+
+Audit gap surfaced: the route response for the filled MKT option order returned `permId=0`; IB later reported execution `permId=789792141`. Because `record_external_fills()` resolves fills by permId only, the inserted `xenon.order_fills` row has `submission_id=NULL` even though `xenon.order_submissions` has `ib_order_id=21`. This should be fixed before live promotion so MKT fills remain linked to their submission row.
+
+**Checklist:**
+
+- [x] Long option opened in paper
+- [x] `stop_loss` and `trailing_tp` rows armed for the same position
+- [x] Native option STP visible in IB
+- [ ] One MKT close reaches IB when both rules can fire on the same tick
+- [ ] One rule reaches `CLOSED`
+- [ ] The other reaches `SUPERSEDED`
 
 ---
 
@@ -457,8 +623,22 @@ npx vitest run --config ../vitest.config.ts web/tests/positionRulesGlobalHealth.
 | `_positions_from_ib()` drops sec_type/expiry/strike/right/avg_cost | `src/xenon/cli/position_rules.py`          | Extract all contract fields; normalize OPT avgCost |
 | `sweep_insert()` uses anchor_price=0.0 when no mark/price          | `src/xenon/execution/brackets/arm_hook.py` | Added avg_cost fallback                            |
 | `sweep --apply` can report negative skipped count                  | `src/xenon/cli/position_rules.py`          | Count skipped candidates separately from inserted rows |
+| MKT option fill orphaned when submit ack had `permId=0`            | `src/xenon/execution/ib_reconcile.py`      | Resolve fill submissions by scoped `ib_order_id` fallback and backfill the real `perm_id` |
+| Submit ack with `PendingCancel` left an audit row `WORKING`         | `src/xenon/api/server.py`                  | Mark the submission terminal `CANCELLED` immediately with `IB_PENDING_CANCEL_ON_SUBMIT` |
+| Combo wizard rehydrate left filled attempts `WORKING`              | `src/xenon/execution/combo_wizard/rehydrate.py` | Update `wizard_combo_attempts.state` together with `wizard_sessions.state` |
+| Sweep proposed individual option legs already owned by a combo      | `src/xenon/cli/position_rules.py`          | Skip OPT candidates whose `con_id` appears in active combo protection descriptors |
+| `ib_order_id` fallback linked direct fills to unrelated submissions | `src/xenon/execution/ib_reconcile.py`      | Only fall back to `ib_order_id` when the submission permId is blank/zero and ticker/security type match |
 
-All five bugs have regression tests (green after fix).
+All ten bugs have regression tests (green after fix). The audit-trail fixes are covered by:
+
+```bash
+uv run pytest \
+  scripts/tests/test_record_external_fills_resolves_submission.py::test_fill_falls_back_to_ib_order_id_when_submit_ack_perm_id_was_zero \
+  scripts/tests/test_record_external_fills_resolves_submission.py::test_order_id_fallback_ignores_reused_order_id_with_existing_perm_id \
+  src/xenon/api/tests/test_orders_routes_failures.py::test_place_pending_cancel_ack_is_not_left_working \
+  scripts/tests/test_combo_wizard_rehydrate.py::test_combo_rehydrate_marks_attempt_filled_when_every_leg_filled \
+  scripts/tests/test_position_rules_cli/test_cancel_sweep_events_review.py::test_sweep_dry_run_skips_option_legs_owned_by_active_combo -q
+```
 
 ---
 
@@ -466,10 +646,9 @@ All five bugs have regression tests (green after fix).
 
 | Item                 | Blocker                                                      |
 | -------------------- | ------------------------------------------------------------ |
-| S2 MFE tracking      | Needs favorable mark movement on an ARMED trailing_tp row    |
-| S5 credit spread     | RTH required                                                 |
-| S8 long option       | RTH required                                                 |
-| S4 exact sweep origin | Need clean-state TWS-direct position evidence                |
+| S2 MFE tracking      | IB `reqMktData` returns `nan`; daemon cannot update MFE      |
+| S5 credit spread     | Filled and armed, but trigger checks blocked by missing marks |
+| S8 long option       | Filled and armed, but same-tick trigger race blocked by missing marks |
 
 ## Live DB State at Session End
 
@@ -480,6 +659,14 @@ xenon.position_protection (broker_account=DUQ378889, state NOT IN CANCELED/SUPER
   protection_id=32  trailing_tp ARMED   (no native STP)      STK::T
   protection_id=33  stop_loss   ARMED   perm_id=1661205049  STK::USO
   protection_id=34  trailing_tp ARMED   (no native STP)      STK::USO
+  protection_id=35  stop_loss   ARMED   perm_id=789792144   OPT::SPY::20260508::750::C
+  protection_id=36  trailing_tp ARMED   (no native STP)      OPT::SPY::20260508::750::C
+  protection_id=37  stop_loss   ARMED   (synthetic only)     CS::SPY::20260508::720::715::P
+  protection_id=38  take_profit_fixed ARMED (synthetic only) CS::SPY::20260508::720::715::P
+  protection_id=43  stop_loss   ARMED   perm_id=789792262    STK::F
+  protection_id=44  trailing_tp ARMED   (no native STP)      STK::F
+  protection_id=45  stop_loss   ARMED   perm_id=789792324    STK::GM
+  protection_id=46  trailing_tp ARMED   (no native STP)      STK::GM
 ```
 
 protection_id=31 is the live S6 native STP evidence row. If the operator wants a clean state after evidence capture, cancel both active T rules with:
@@ -497,5 +684,5 @@ XENON_TRADING_MODE=paper XENON_BROKER_ACCOUNT=DUQ378889 XENON_BROKER=IB \
 
 - Operator: chenxi
 - Date: 2026-05-07
-- Outliers: S2 not verified; S5/S8 skipped; S4 partial.
+- Outliers: S2 not verified; S5/S8 partial. IB market data is blocked/blank for `reqMktData`, despite portfolio updates carrying marks.
 - Decision: **Paper smoke is not signed off yet. Do not flip live position rules based on this evidence.** Next pass should complete S2, S5, S8, and tighten S4 evidence.

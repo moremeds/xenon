@@ -2579,6 +2579,7 @@ def _resolve_scope_kwargs() -> dict[str, str]:
 
 
 _REGIME_OVERRIDE_MIN_REASON_CHARS = 10
+_PLACE_CANCELLED_ON_ACK_STATUSES = {"PendingCancel", "Cancelled", "ApiCancelled"}
 
 
 def _resolve_scope_obj():
@@ -2963,6 +2964,15 @@ async def _orders_place_from_body(body: dict):
             perm_id=str(result.data.get("permId") or ""),
             placing_client_id=int(result.data.get("clientId") or 26),
         )
+        initial_status = str(result.data.get("initialStatus") or result.data.get("statusText") or "")
+        if initial_status in _PLACE_CANCELLED_ON_ACK_STATUSES:
+            orders_store.mark_terminal(
+                submission_id=submission_id,
+                state="CANCELLED",
+                reason_code="IB_PENDING_CANCEL_ON_SUBMIT",
+                filled_qty=0,
+                avg_fill_price=None,
+            )
     return result.data
 
 

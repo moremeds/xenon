@@ -190,6 +190,43 @@ def _candidate_position_key(position: dict[str, Any]) -> str | None:
     return None
 
 
+def _candidate_owned_by_active_combo(conn, *, scope, position: dict[str, Any]) -> bool:
+    sec_type = str(position.get("sec_type") or position.get("secType") or "STK").upper()
+    if sec_type != "OPT":
+        return False
+    con_id = position.get("con_id") or position.get("conId")
+    if con_id is None:
+        return False
+    return bool(
+        conn.execute(
+            text(
+                """
+                SELECT 1
+                FROM xenon.position_protection pp
+                WHERE pp.broker = :broker
+                  AND pp.account_env = :account_env
+                  AND pp.broker_account = :broker_account
+                  AND pp.state IN ('PENDING_ARM','ARMED','TRIGGERED')
+                  AND pp.asset_class IN ('debit_combo','credit_spread','covered_call')
+                  AND EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(COALESCE(pp.position_descriptor->'legs', '[]'::jsonb)) AS leg
+                    WHERE leg->>'con_id' = :con_id
+                       OR leg->>'conId' = :con_id
+                  )
+                LIMIT 1
+                """
+            ),
+            {
+                "broker": scope.broker,
+                "account_env": scope.account_env,
+                "broker_account": scope.broker_account,
+                "con_id": str(con_id),
+            },
+        ).first()
+    )
+
+
 def _cmd_sweep(args: argparse.Namespace) -> int:
     scope = resolve_from_env()
     if args.apply and scope.account_env == "live" and not os.environ.get("XENON_OPERATOR_USER_ID"):
@@ -211,6 +248,8 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
         if position_key is None:
             continue
         with engine.connect() as conn:
+            if _candidate_owned_by_active_combo(conn, scope=scope, position=position):
+                continue
             existing = conn.execute(
                 text(
                     """
