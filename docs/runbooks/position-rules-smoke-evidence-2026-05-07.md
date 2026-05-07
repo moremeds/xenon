@@ -154,6 +154,8 @@ The trailing_tp rule arms correctly (protection_id=30, state=ARMED, reason=synth
 
 Fresh S1 replacement created `protection_id=34` (`STK::USO` trailing_tp, ARMED), but S2 could not be advanced because IB paper returned no usable snapshot marks. Direct quote probes at 2026-05-07 16:30 HKT returned `nan` bid/ask/last/close/marketPrice and `time=None` for `USO`, `T`, and `SPY`; the daemon therefore increments `consecutive_stale_ticks` and does not evaluate MFE.
 
+Fresh retry at 2026-05-08 01:25 HKT confirmed the gateway and daemon were up, but market data was still blocked. `xenon-position-rules health --json` returned `daemon_alive=true`, `market_window=open`, `in_flight_claims=0`, and `outbox_dlq_count=0`. Direct IB probes for `USO`, `GM`, `SPY 750C`, `SPY 720P`, and `SPY 715P` returned `nan` for bid/ask/last/close/marketPrice across market data types 1, 2, 3, and 4. A second `reqTickers` probe returned IB error 10197: `No market data during competing live session`.
+
 **Checklist:**
 
 - [ ] `state_data.mfe` increases on each tick after favorable mark movement
@@ -649,7 +651,7 @@ uv run pytest \
 
 | Item                 | Blocker                                                      |
 | -------------------- | ------------------------------------------------------------ |
-| S2 MFE tracking      | IB `reqMktData` returns `nan`; daemon cannot update MFE      |
+| S2 MFE tracking      | IB `reqMktData`/`reqTickers` blocked by 10197 competing live session; daemon cannot update MFE |
 | S5 credit spread     | Filled and armed, but trigger checks blocked by missing marks |
 | S8 long option       | Filled and armed, but same-tick trigger race blocked by missing marks |
 
@@ -687,5 +689,5 @@ XENON_TRADING_MODE=paper XENON_BROKER_ACCOUNT=DUQ378889 XENON_BROKER=IB \
 
 - Operator: chenxi
 - Date: 2026-05-07
-- Outliers: S2 not verified; S5/S8 partial. IB market data is blocked/blank for `reqMktData`, despite portfolio updates carrying marks.
+- Outliers: S2 not verified; S5/S8 partial. IB market data is blocked/blank for `reqMktData`; latest retry at 2026-05-08 01:25 HKT returned IB 10197 `No market data during competing live session`.
 - Decision: **Paper smoke is not signed off yet. Do not flip live position rules based on this evidence.** Next pass should complete S2, S5, S8, and tighten S4 evidence.

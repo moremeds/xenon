@@ -56,7 +56,7 @@ Replacement S1:
 
 The FastAPI activity poller did not mirror the subprocess-client fill; `uv run xenon-ib-reconcile` inserted it into `xenon.order_fills` and emitted `fill.recorded`. Do not manually insert or delete audit rows.
 
-Next strongest smoke target is S2: observe `protection_id=34` trailing TP `state_data.mfe` move on mark updates and confirm it does not trigger prematurely. Last direct paper quote probe at 2026-05-07 16:30 HKT returned `nan` bid/ask/last/close/marketPrice for `USO`, `T`, and `SPY`, so S2 is currently blocked on usable IB marks.
+Next strongest smoke target is S2: observe `protection_id=34` trailing TP `state_data.mfe` move on mark updates and confirm it does not trigger prematurely. Latest retry at 2026-05-08 01:25 HKT found the paper gateway and daemon up, but direct IB market-data probes still returned no usable marks. `USO`, `GM`, `SPY 750C`, `SPY 720P`, and `SPY 715P` returned `nan` bid/ask/last/close/marketPrice across market-data types 1, 2, 3, and 4; a `reqTickers` probe returned IB error 10197, `No market data during competing live session`. S2 remains blocked until the competing live session is cleared or the paper account gets an independent market-data stream.
 
 Paper monitor daemon was restarted in detached tmux session `xenon-paper-position-rules` at 2026-05-07 14:12 HKT:
 
