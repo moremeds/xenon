@@ -152,6 +152,8 @@ xenon-ib-orders --sync:
 **Evidence:**  
 The trailing_tp rule arms correctly (protection_id=30, state=ARMED, reason=synthetic_only — no native STP, alert-only). That is not enough to pass S2. The smoke item requires observing `state_data.mfe` move as market marks update, then confirming no premature trigger.
 
+Fresh S1 replacement created `protection_id=34` (`STK::USO` trailing_tp, ARMED), but S2 could not be advanced because IB paper returned no usable snapshot marks. Direct quote probes at 2026-05-07 16:30 HKT returned `nan` bid/ask/last/close/marketPrice and `time=None` for `USO`, `T`, and `SPY`; the daemon therefore increments `consecutive_stale_ticks` and does not evaluate MFE.
+
 **Checklist:**
 
 - [ ] `state_data.mfe` increases on each tick after favorable mark movement
