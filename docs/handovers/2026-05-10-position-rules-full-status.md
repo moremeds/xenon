@@ -4,7 +4,7 @@ Date: 2026-05-10 HKT
 Branch: `feature/position-rules-implementation`  
 Worktree: `/Users/chenxi/projects/xenon/.worktrees/position-rules-implementation`  
 PR: https://github.com/moremeds/xenon/pull/100  
-Latest pushed commit checked locally: `c712c22f`
+Latest pushed commit checked locally: `7b96ba0a`
 
 ## Executive Status
 
@@ -24,16 +24,22 @@ Do not mark the active goal complete until S2/S5/S8 are verified or explicitly o
 
 ## Git / PR State
 
-Local check at handover time:
+Local check at handover time before this file was committed:
 
 ```text
 ## feature/position-rules-implementation...origin/feature/position-rules-implementation
 c712c22f
 ```
 
-The branch was clean and aligned with origin when this status file was written.
+This file was then committed and pushed as:
 
-Latest committed handover artifact:
+```text
+7b96ba0a docs(position-rules): save full smoke status
+```
+
+The branch was clean and aligned with origin after the status commit was pushed.
+
+Previous committed handover artifact:
 
 ```text
 c712c22f docs(position-rules): add smoke handover script
@@ -41,7 +47,7 @@ c712c22f docs(position-rules): add smoke handover script
 
 ## Current PR Checks
 
-After the docs-only handover commit, CI reran. Current observed state:
+After the docs-only handover commit, CI reran. Observed state before this full-status commit:
 
 ```text
 version-sync      pass     7s
@@ -53,6 +59,16 @@ python-tests      pending
 ```
 
 Earlier, before the docs-only handover push, all PR checks were green, including `python-tests` at 26m42s. The current pending Python job is from the docs-only rerun.
+
+After this full-status commit (`7b96ba0a`) was pushed, GitHub Actions did not start the jobs. The check-run annotation for `order-path-guards` reported:
+
+```text
+The job was not started because recent account payments have failed or your
+spending limit needs to be increased. Please check the 'Billing & plans'
+section in your settings
+```
+
+That is a GitHub billing/runner-startup issue, not a repository test failure. The last functional CI run before the billing failure had all non-Python checks green with `python-tests` still pending from the docs-only rerun; the earlier functional run before docs-only commits had all checks green.
 
 ## Smoke Checklist Status
 
@@ -208,9 +224,8 @@ If cleanup is needed, use operator cancel paths and preserve audit rows.
 
 ## Current Verdict
 
-Implementation/PR side: good, with current docs-only rerun waiting on `python-tests`.
+Implementation/PR side: code was green before docs-only status pushes. The latest GitHub Actions run is blocked by GitHub billing/runner startup, not by test output.
 
 Paper smoke side: **not signed off**.
 
 Goal status: **not complete** until S2/S5/S8 are completed or explicitly operator-deferred.
-
