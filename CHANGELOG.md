@@ -5,6 +5,57 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+### Changed
+
+- **Pure-portfolio pivot.** Xenon is now a broker terminal for options
+  portfolio management — IB (primary, live + paper) + Futu (read-only
+  positions tab). All signal-generation surfaces removed: scanners (VCG,
+  GEX, CRI, GARCH, leap-IV, leap-UW, trend, UW discover, UW analyze),
+  flow-analysis page, regime gate + scan loop, CTA / MenthorQ pipelines,
+  share-card generators. ChatPanel reframed for portfolio Q&A only.
+  See `docs/plans/2026-05-22-pure-portfolio-pivot.md` for the full
+  rationale + four-PR breakdown. UW token retained as a historic-data
+  source for portfolio_performance + portfolio_report CLIs only.
+
+### Removed
+
+- Python signal layer: `src/xenon/scanners/`, `src/xenon/analysis/`,
+  `src/xenon/fetchers/`, `src/xenon/shares/`,
+  `src/xenon/services/cta_sync_service.py`, the signal-only
+  `api/routes/{regime,uw_analyze,uw_stats}.py` + matching
+  `api/services/{regime_*,uw_analyze_*}.py`, the strategy-eval
+  `reports/{evaluate,kelly,risk_reversal,free_trade_analyzer,
+verify_options_oi,scenario_*}.py`, `clients/{menthorq,massive,
+inspect_dashboard,map_*}.py`. ~22k Python LOC.
+- server.py inline routes: `/scan`, `/discover`, `/flow-analysis`,
+  `/cta/share`, `/regime`, `/regime/scan`, `/regime/share`, `/vcg`,
+  `/vcg/scan`, `/vcg/share`, `/gex`, `/gex/scan`, `/gex/share`,
+  `/internals/share`, `/internals/skew-history` (18 handlers + 14
+  helpers + vcg_cri lifespan + `/health.vcg_cri_loop` field).
+- Web pages: `/cta`, `/discover`, `/flow-analysis`, `/internals`,
+  `/kit`, `/regime`, `/scanner`, `/uw-analyze`. ~10k web LOC.
+- Web components: `CtaPage`, `GexPanel`, `RegimePanel`,
+  `InternalsPanel`, `CriHistoryChart`, `SharePnlButton`,
+  `ShareReportModal`, `VcgPanel`, `RegimeRelationshipView`, etc.
+- Sidebar UW telemetry footer + `useUwStats` / `useUwStatsHistory` hooks.
+- pyproject.toml: ~31 CLI entry points (`xenon-fetch-*`, `xenon-*-scan`,
+  `xenon-evaluate`, `xenon-kelly`, `xenon-scenario-*`, `xenon-leap-*`,
+  `xenon-trend-scan`, `xenon-garch`, `xenon-uw-*`, `xenon-discover*`,
+  `xenon-generate-*-share`, `xenon-cta-sync-service`,
+  `xenon-repair-cri-rvol`). Dropped `playwright` + `yfinance` deps.
+- Launchd plists: `com.xenon.{cri-scan,cta-sync,data-refresh}.plist`
+  and companion shell scripts under `scripts/services/`.
+- Env vars: `MENTHORQ_USER` / `MENTHORQ_PASS` / `MASSIVE_API_KEY`
+  (clients gone), `CEREBRAS_API_KEY` (always dead).
+
+### Deferred (separate follow-up)
+
+- Postgres tables `uw_analyze_snapshots` (+ child tables), `vcg_series`,
+  `gex_snapshots`, `scan_results`, `regime_state_view`,
+  `regime_overrides`, `uw_flow_events` are intentionally left in place.
+  A separate Alembic downgrade will drop them once we've confirmed
+  zero readers in the running services.
+
 ## [0.0.6] — 2026-05-26
 
 ### Documentation
@@ -12,7 +63,6 @@ All notable changes to Xenon are documented here. Format loosely based on
 - **Clarify Docker-to-IB Gateway routing for Mac mini deploys.** `docs/runbooks/remote-deploy.md` now distinguishes co-located IB Gateway (`host.docker.internal`) from IB running on another LAN/Tailscale host or behind a localhost-only SSH tunnel. The bootstrap step no longer rewrites `IB_GATEWAY_HOST` unconditionally, and `docker-compose.yml` comments now describe the same topology boundary.
 
 ## [0.0.5] — 2026-05-05
-
 
 ### Fixed
 
@@ -26,6 +76,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 ### Documentation
 
 - Stage C auto-deploy planning handover (#88), backlog status updates (#93), GHCR per-package ACL prerequisite (#94), `XENON_BROKER_ACCOUNT` runbook + Clerk dev-limit correction (#92), and archival of completed plans + top-level docs (#95, #96).
+
 ## [0.0.4] — 2026-05-04
 
 ### Added

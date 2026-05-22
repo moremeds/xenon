@@ -1,6 +1,6 @@
 # web/ — CLAUDE.md
 
-Frontend (Next.js App Router) + all user-facing calculations, pricing, share cards. Root `CLAUDE.md` is authoritative for policy. Component-level reference (regime, VCG, reports, share cards, WS state machine, seasonality): `docs/reference/web-ui-reference.md`. Brand spec: `brand/CLAUDE.md`.
+Frontend (Next.js App Router) + all user-facing calculations and pricing. Root `CLAUDE.md` is authoritative for policy. Brand spec: `brand/CLAUDE.md`.
 
 ## ⛔ UI Verification
 
@@ -118,14 +118,6 @@ JSON data files: always `"ticker"`. IB contracts: `"symbol"`. Read defensively: 
 ## Position-Row Order Button (IB tab)
 
 Each IB position row exposes a direct order-entry button (commit a7cbbbc4). Clicking pre-fills the Order tab with the selected leg(s). Quote resolution goes through the real IB snapshot via `/orders/quote` (commit 8ef479ab); option contracts are qualified with `SMART/USD` before quoting (commit b3605cfc). Note: the `quote_token` flow (#34) was reverted (#35) — do not re-ship as-is.
-
-## uw-analyze — Cache-First Loading
-
-`/uw-analyze` loads from disk cache instantly on page open, then refreshes in background via SSE. Do not block initial render on a fresh fetch. Hook: `useUwAnalyze.ts`. Cross-mount snapshot cache keeps tickers warm across route changes (commit 6cd7b49). Last-known-good merge preserves sticky enrichment fields across refreshes (commit 1faa663). Contract tests: `web/tests/uw-analyze-*.test.ts`.
-
-## UW API Telemetry
-
-`useUwStats.ts` polls `/api/uw-stats` every 10s. The "UW Today" sidebar row shows **daily-scoped** counters aligned to UW's 8PM ET quota reset: request count, cache-hit %, 2xx/4xx/5xx breakdown, and latency p95. Backed by the process-wide `src/xenon/utils/uw_api_stats.py` singleton, which rolls up hourly buckets across the current daily window (`get_stats_with_daily()` returns session + daily under a single lock). DST boundary via `ZoneInfo("America/New_York")`. Silent-fail hook — sidebar shows `—` placeholders when unavailable.
 
 ## Dev Commands
 

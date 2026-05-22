@@ -8,6 +8,12 @@ When the user says "todo" (e.g. "todo: explore X"), append to the **Inbox** at t
 bottom of this file with the current date — do not silently drop ideas, and do
 not start work on them unless explicitly asked.
 
+> **2026-05-22 — Pure-portfolio pivot note.** Many items below refer to surfaces
+> removed in the pivot (`uw-analyze`, `vcg-scan`, `regime`, `cta`, `gex`,
+> `discover`, share-card generators, MenthorQ, etc.). Treat them as
+> **RESOLVED-BY-REMOVAL** unless the underlying portfolio-side concern is
+> still applicable. See `docs/plans/2026-05-22-pure-portfolio-pivot.md`.
+
 ---
 
 ## 1. Rule-based portfolio management (alerts + order placement)

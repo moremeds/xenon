@@ -1,6 +1,6 @@
 # src/xenon/api/ — CLAUDE.md
 
-FastAPI bridge between Next.js and IB/UW/MenthorQ. Root `CLAUDE.md` is authoritative for policy. Infrastructure reference (files, ports, gateway modes, auth component map, deployment): `docs/architecture/api-infrastructure.md`.
+FastAPI bridge between Next.js and IB Gateway / Futu OpenD. Root `CLAUDE.md` is authoritative for policy. Infrastructure reference (files, ports, gateway modes, auth component map, deployment): `docs/architecture/api-infrastructure.md`.
 
 **Read this before touching the order/cancel/modify/blotter/rehydrate path:** `docs/reference/order-path-incident-history.md` — chronological table of every non-trivial bug in this surface, with root cause, solution, and the regression test that protects against recurrence. Append a row when you ship a similar fix.
 
@@ -10,13 +10,19 @@ Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xeno
 
 ## Module Layout
 
-- `server.py` — endpoint dispatch, IB pool lifecycle, background schedulers (CTA sync)
+- `server.py` — endpoint dispatch, IB pool lifecycle, portfolio + orders + Futu inline routes
 - `routes/` — per-topic FastAPI routers, included from `server.py`:
-  - `uw_analyze.py` — `/uw-analyze/*` (portfolio bias, refresh, SSE streaming for progressive enrichment)
-  - `uw_stats.py` — `/uw-stats`, `/uw-stats/reset`
-  - `historical.py` — historical bars
+  - `orders.py` — `/orders/*` (list, refresh, dependencies)
+  - `historical.py` — historical bars / fills
+  - `journal.py` — trade journal entries
+  - `trades.py` — closed trades
+  - `position_rules.py` — position-close rule CRUD
+  - `wizard.py` — combo order wizard (plan/submit/reprice/abort/protect)
 - `services/` — business logic (stateful, testable without HTTP):
-  - `uw_analyze_cache.py`, `uw_analyze_candidates.py`, `uw_analyze_daily_job.py`, `uw_analyze_diff.py`, `uw_analyze_flow_tracker.py`, `uw_analyze_oi_snapshots.py`, `uw_analyze_oi_tracker.py`, `uw_analyze_portfolio_bias.py`
+  - `advisory_lock.py` — Postgres advisory locks
+  - `ib_activity_mirror.py` — IB→PG fills + open-orders mirror
+  - `journal_auto_import.py` — PG-event-driven journal auto-import
+  - `position_rules_cancel.py`, `position_rules_health.py` — position-rule supervision
 - `ib_pool.py` — persistent IB connection pool (clientId 0–9)
 - `pool_order_manage.py` — pool-based helpers (but see cancel/modify rule below — real cancel/modify uses subprocess)
 - `ws_ticket.py` — 30s single-use WebSocket auth tickets
@@ -81,8 +87,6 @@ On-demand scripts MUST use `client_id="auto"` (range 20-49). Never hardcode — 
 
 **Graceful fallback:** When `CLERK_JWKS_URL` is not set, auth middleware passes all requests through.
 
-**Public share routes** (no auth): `/api/regime/share`, `/api/vcg/share`, `/api/internals/share`, `/api/menthorq/cta/share`.
-
 Component map, files, ticket flow: `docs/architecture/api-infrastructure.md`.
 
 ## Dev probes (never enabled in production)
@@ -113,5 +117,6 @@ The script is **not idempotent** — it writes a sentinel `orders_events` row (`
 
 ```bash
 curl http://localhost:8321/health
-# Returns: ib_gateway, ib_pool (sync/orders/data), uw
+# Returns: ib_gateway, ib_pool (sync/orders/data), uw, futu, trading_mode,
+# account, mode_verified, snapshotter, order_submissions, flex_divergence
 ```
