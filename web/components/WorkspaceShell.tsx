@@ -186,11 +186,6 @@ export default function WorkspaceShell({
     return contracts;
   }, [orders?.open_orders]);
 
-  const regimeStocks = useMemo(
-    () => (activeSection === "regime" ? ["SPY"] : []),
-    [activeSection],
-  );
-
   const tickerSymbols = useMemo(
     () => (tickerParam ? [tickerParam] : []),
     [tickerParam],
@@ -198,14 +193,9 @@ export default function WorkspaceShell({
 
   const allSymbols = useMemo(
     () => [
-      ...new Set([
-        ...portfolioSymbols,
-        ...orderSymbols,
-        ...regimeStocks,
-        ...tickerSymbols,
-      ]),
+      ...new Set([...portfolioSymbols, ...orderSymbols, ...tickerSymbols]),
     ],
-    [portfolioSymbols, orderSymbols, regimeStocks, tickerSymbols],
+    [portfolioSymbols, orderSymbols, tickerSymbols],
   );
 
   const tickerDetail = useTickerDetail();
@@ -220,18 +210,6 @@ export default function WorkspaceShell({
     [portfolioContracts, orderContracts, tickerDetail.chainContracts],
   );
 
-  const regimeIndexes = useMemo<IndexContract[]>(
-    () =>
-      activeSection === "regime"
-        ? [
-            { symbol: "VIX", exchange: "CBOE" },
-            { symbol: "VVIX", exchange: "CBOE" },
-            { symbol: "COR1M", exchange: "CBOE" },
-          ]
-        : [],
-    [activeSection],
-  );
-
   const {
     prices: rawPrices,
     fundamentals,
@@ -242,7 +220,7 @@ export default function WorkspaceShell({
   } = usePrices({
     symbols: allSymbols,
     contracts: allContracts,
-    indexes: regimeIndexes,
+    indexes: [],
   });
 
   // Debounce ibConnected: disconnections must persist >2s before surfacing to UI.

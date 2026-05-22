@@ -27,7 +27,7 @@ afterEach(() => {
 // Import after mock setup — these are pure functions that use fetch internally
 // ---------------------------------------------------------------------------
 
-import { requestAssistantReply, requestPiReply, streamMessage } from "../lib/chat";
+import { requestAssistantReply, streamMessage } from "../lib/chat";
 
 // =============================================================================
 // requestAssistantReply
@@ -97,8 +97,8 @@ describe("requestAssistantReply", () => {
 
     const result = await requestAssistantReply([], "unknown question");
 
-    // fallbackReply default
-    expect(result).toContain("review any ticker");
+    // Portfolio-pivot default fallbackReply
+    expect(result).toContain("portfolio");
   });
 
   it("passes conversation history to the API", async () => {
@@ -126,7 +126,7 @@ describe("requestAssistantReply", () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: async () => ({
-        content: JSON.stringify({ ticker: "AAPL", price: 175.50 }),
+        content: JSON.stringify({ ticker: "AAPL", price: 175.5 }),
       }),
     });
 
@@ -141,151 +141,6 @@ describe("requestAssistantReply", () => {
 // =============================================================================
 // requestPiReply
 // =============================================================================
-
-describe("requestPiReply", () => {
-  it("returns formatted output on success", async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        command: "portfolio",
-        status: "ok",
-        output: JSON.stringify({
-          bankroll: 50000,
-          position_count: 3,
-          defined_risk_count: 2,
-          undefined_risk_count: 1,
-          last_sync: "2026-03-05",
-          positions: [],
-        }),
-      }),
-    });
-
-    const result = await requestPiReply("/portfolio");
-
-    expect(result).toContain("Portfolio");
-    expect(result).toContain("50,000");
-  });
-
-  it("returns error message with details on command failure", async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        command: "scan",
-        status: "error",
-        output: "Connection timed out",
-        stderr: "IB gateway not responding on port 4001",
-      }),
-    });
-
-    const result = await requestPiReply("/scan");
-
-    expect(result).toContain("scan");
-    expect(result).toContain("Connection timed out");
-    expect(result).toContain("IB gateway not responding");
-  });
-
-  it("returns error message without details when stderr is absent", async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        command: "evaluate",
-        status: "error",
-        output: "Ticker not found",
-      }),
-    });
-
-    const result = await requestPiReply("/evaluate FAKE");
-
-    expect(result).toContain("evaluate");
-    expect(result).toContain("Ticker not found");
-    expect(result).not.toContain("Details");
-  });
-
-  it("returns HTTP error message when fetch fails", async () => {
-    mockFetch.mockResolvedValue({
-      ok: false,
-      json: async () => ({
-        command: "",
-        status: "error",
-        output: "",
-        error: "Internal server error",
-      }),
-    });
-
-    const result = await requestPiReply("/portfolio");
-
-    expect(result).toBe("Error: Internal server error");
-  });
-
-  it("returns generic error when HTTP error has no error field", async () => {
-    mockFetch.mockResolvedValue({
-      ok: false,
-      json: async () => ({
-        command: "",
-        status: "error",
-        output: "",
-      }),
-    });
-
-    const result = await requestPiReply("/scan");
-
-    expect(result).toBe("PI command request failed.");
-  });
-
-  it("returns no-output message when output is empty on success", async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        command: "sync",
-        status: "ok",
-        output: "",
-      }),
-    });
-
-    const result = await requestPiReply("/sync");
-
-    expect(result).toBe("No output returned from PI command.");
-  });
-
-  it("sends correct request body", async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        command: "evaluate",
-        status: "ok",
-        output: "AAPL: PASS",
-      }),
-    });
-
-    await requestPiReply("/evaluate AAPL");
-
-    const [url, options] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/pi");
-    expect(options.method).toBe("POST");
-    const body = JSON.parse(options.body);
-    expect(body.input).toBe("/evaluate AAPL");
-  });
-
-  it("formats journal command output as journal", async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        command: "journal",
-        status: "ok",
-        output: JSON.stringify({
-          trades: [
-            { id: 1, date: "2026-03-04", ticker: "GOOG", decision: "ENTER" },
-          ],
-        }),
-      }),
-    });
-
-    const result = await requestPiReply("/journal");
-
-    expect(result).toContain("Journal");
-    expect(result).toContain("GOOG");
-  });
-});
 
 // =============================================================================
 // streamMessage
@@ -303,7 +158,9 @@ describe("streamMessage", () => {
     const lastCall = setMessages.mock.calls[setMessages.mock.calls.length - 1];
     const updater = lastCall[0];
     // The updater is a function; call it with a mock current state
-    const current = [{ id: "msg-1", role: "assistant", content: "", timestamp: "10:00" }];
+    const current = [
+      { id: "msg-1", role: "assistant", content: "", timestamp: "10:00" },
+    ];
     const result = updater(current);
     expect(result[0].content).toBe("Hello, this is a test message.");
   });
@@ -315,12 +172,14 @@ describe("streamMessage", () => {
 
     expect(setMessages).toHaveBeenCalled();
 
-    // Should use fallback "No output returned from PI command."
+    // Should use fallback "No output returned."
     const lastCall = setMessages.mock.calls[setMessages.mock.calls.length - 1];
     const updater = lastCall[0];
-    const current = [{ id: "msg-2", role: "assistant", content: "", timestamp: "10:00" }];
+    const current = [
+      { id: "msg-2", role: "assistant", content: "", timestamp: "10:00" },
+    ];
     const result = updater(current);
-    expect(result[0].content).toBe("No output returned from PI command.");
+    expect(result[0].content).toBe("No output returned.");
   });
 
   it("preserves other messages in the array", async () => {
@@ -333,7 +192,12 @@ describe("streamMessage", () => {
     const lastCall = setMessages.mock.calls[setMessages.mock.calls.length - 1];
     const updater = lastCall[0];
     const current = [
-      { id: "msg-other", role: "user", content: "User question", timestamp: "09:59" },
+      {
+        id: "msg-other",
+        role: "user",
+        content: "User question",
+        timestamp: "09:59",
+      },
       { id: "msg-target", role: "assistant", content: "", timestamp: "10:00" },
     ];
     const result = updater(current);
@@ -357,7 +221,9 @@ describe("streamMessage", () => {
     // Final call should have the full text
     const lastCall = setMessages.mock.calls[setMessages.mock.calls.length - 1];
     const updater = lastCall[0];
-    const current = [{ id: "msg-3", role: "assistant", content: "", timestamp: "10:00" }];
+    const current = [
+      { id: "msg-3", role: "assistant", content: "", timestamp: "10:00" },
+    ];
     const result = updater(current);
     expect(result[0].content).toBe(longText);
   });

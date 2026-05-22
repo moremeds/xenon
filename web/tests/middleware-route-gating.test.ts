@@ -19,32 +19,29 @@ describe("middleware route gating", () => {
     "/orders",
     "/orders/quote",
     "/journal",
-    "/internals",
     "/dashboard",
     "/performance",
     "/", // workspace shell
     "/AAPL", // dynamic [ticker] route
-  ])("private: %s requires auth", (path) => {
-    expect(matches(path)).toBe(false);
-  });
-
-  it.each([
-    "/sign-in",
-    "/sign-in/factor-one",
-    "/sign-up",
-    "/api/portfolio",
+    // Removed in the pure-portfolio pivot — must inherit auth + return 404
     "/scanner",
-    "/scanner/uw",
     "/discover",
     "/regime",
     "/flow-analysis",
     "/uw-analyze",
-    "/uw-analyze/AAPL",
     "/cta",
     "/kit",
-  ])("public: %s allowed without auth", (path) => {
-    expect(matches(path)).toBe(true);
+    "/internals",
+  ])("private: %s requires auth", (path) => {
+    expect(matches(path)).toBe(false);
   });
+
+  it.each(["/sign-in", "/sign-in/factor-one", "/sign-up", "/api/portfolio"])(
+    "public: %s allowed without auth",
+    (path) => {
+      expect(matches(path)).toBe(true);
+    },
+  );
 
   it("PUBLIC_ROUTES never matches an unlisted top-level segment", () => {
     // Sanity: a freshly-introduced route like /admin must default to private

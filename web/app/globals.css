@@ -262,10 +262,6 @@ body {
   margin: 10px 0 8px;
 }
 
-.uw-stats-errors {
-  color: var(--negative);
-}
-
 .status-dot-wrap {
   display: flex;
   align-items: center;
