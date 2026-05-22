@@ -140,8 +140,8 @@ Bootstrap creates `.env` and `web/.env` with empty fields. Fill them, then
 kickstart the services so they pick up the new values:
 
 ```bash
-$EDITOR ~/projects/xenon/.env       # MENTHORQ_*, MASSIVE_API_KEY, CLERK_*, R2_*, ALLOWED_USER_IDS
-$EDITOR ~/projects/xenon/web/.env   # ANTHROPIC_API_KEY, UW_TOKEN, EXA_API_KEY, CEREBRAS_API_KEY, NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY, CLERK_SECRET_KEY
+$EDITOR ~/projects/xenon/.env       # CLERK_*, R2_*, ALLOWED_USER_IDS, IB_FLEX_TOKEN
+$EDITOR ~/projects/xenon/web/.env   # ANTHROPIC_API_KEY, UW_TOKEN, EXA_API_KEY (optional), NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY, CLERK_SECRET_KEY
 
 launchctl kickstart -k gui/$UID/com.xenon.api
 launchctl kickstart -k gui/$UID/com.xenon.web
