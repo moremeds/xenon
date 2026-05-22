@@ -139,35 +139,18 @@ when scoping starts.
   put-skew wing (long puts, put spreads), which is exactly where stress
   scenarios hurt most.
 
-- 2026-04-27 — **Bug: uw-analyze periodic refresh not firing** — the
-  `/uw-analyze` page is documented to refresh periodically (cache-first load,
-  then background SSE refresh on the 30-min TTL during open hours), but the
-  periodic update doesn't appear to be happening in practice. User reports
-  feature is "stated but not actually working". Repro: open `/uw-analyze`
-  during market hours, leave it open past the TTL window (default 30 min via
-  `XENON_UW_TTL_OPEN_S`), observe whether the snapshot updates without manual
-  refresh.
-  **Notes:** Multiple suspect surfaces — could be any of (a) the SSE channel
-  isn't wired to a recurring tick, only a one-shot load, (b) the closed-market
-  gate in `UwAnalyzeCache.get_or_run()` is over-firing during open hours
-  (timezone bug? holiday-calendar absence already noted in root CLAUDE.md),
-  (c) the `useUwAnalyze.ts` hook doesn't poll/listen continuously, (d) the
-  TTL check exists but the refresh path itself is short-circuited by the
-  cross-mount snapshot cache (commit 6cd7b49) returning warm data without
-  re-fetching. Investigate in this order: confirm with browser devtools whether
-  the SSE connection stays open and whether ticks arrive; only then look at
-  the backend gate. Files to start from: `web/lib/hooks/useUwAnalyze.ts`,
-  `src/xenon/api/services/uw_analyze_cache.py`, `src/xenon/api/routes/uw_analyze.py`.
-  Watch the daily UW budget while debugging — a misfiring polling loop could
-  blow through the 20k/day cap in a few hours.
-  **Status (2026-05-04):** Still open. PR #84 (`209ff6cc`, "PG migration clean
-  cutoff: drop data/\*.json runtime reads + UW cache hardening") is **orthogonal**
-  — it migrated the cache from `data/uw_analyze_cache.json` to
-  `xenon.uw_analyze_snapshots` (Postgres) but did not touch the periodic-refresh
-  path. Confirmed: `web/lib/hooks/useUwAnalyze.ts` has zero matches for
-  `setInterval`, `setTimeout`, `EventSource`, or `stream` — there is no client
-  refresh loop wired up at all. So hypothesis (a) "SSE channel isn't wired to a
-  recurring tick, only a one-shot load" looks like the live theory. Start there.
+- 2026-04-27 — **Bug: uw-analyze periodic refresh not firing** — _RESOLVED-BY-REMOVAL (2026-05-22)._
+  The entire `/uw-analyze` product surface (page, three Next API routes, FastAPI
+  router, `UwAnalyzeCache` and friends) was deleted, so the periodic-refresh bug
+  is moot. The `xenon-uw-analyze` scanner CLI and the `xenon.uw_analyze_snapshots`
+  Postgres table are intentionally retained but they are not the page surface
+  this entry described. Original framing kept below for historical context.
+
+  > Original: `/uw-analyze` page documented to refresh periodically on a 30-min TTL,
+  > but the snapshot didn't update without manual refresh. Suspected one-shot SSE
+  > load, missing client poll, or closed-market gate over-firing. Files cited
+  > (`web/lib/hooks/useUwAnalyze.ts`, `src/xenon/api/services/uw_analyze_cache.py`,
+  > `src/xenon/api/routes/uw_analyze.py`) no longer exist.
 
 - 2026-04-27 — **🔴 TOP PRIORITY — Bug: single-leg orders rejected with "quote expired"** —
   placing a single-leg option order raises a "quote expired" alert and the

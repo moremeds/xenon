@@ -13,8 +13,6 @@
 | `data/cri_scheduled/`               | Intraday CRI time-series                                                                                                                                                                 |
 | `data/vcg.json`                     | VCG scan cache (signal, 20-session history)                                                                                                                                              |
 | `data/price_history_cache/`         | Stock + option price histories (auto-pruned at 500)                                                                                                                                      |
-| `data/uw_analyze_cache.json`        | Live uw-analyze snapshots (TTL'd, LRU-bounded, atomic write). Eager-loaded on FastAPI startup                                                                                            |
-| `data/uw_analyze_history/<TICKER>/` | Append-only per-refresh archive (`YYYYMMDD-HHMMSS-ffffff.json`). Read via `UwAnalyzeCache.load_history()`. No retention janitor in v1 — add when >500K files or `load_history` p99 >50ms |
 
 ## Apex R2 Mirror
 

@@ -97,8 +97,8 @@ install() {
     chmod +x "$WRAPPER"
 
     # 2. Verify Python scanner modules exist
-    # flow_analysis.py removed: the page is now served from the shared
-    # uw-analyze cache via FastAPI POST /flow-analysis.
+    # flow_analysis.py removed: the page is now served by FastAPI
+    # POST /flow-analysis.
     for module in scanner.py discover.py; do
         if [[ ! -f "$PROJECT_DIR/src/xenon/scanners/$module" ]]; then
             echo "ERROR: xenon.scanners.${module%.py} not found at $PROJECT_DIR/src/xenon/scanners/$module"

@@ -3,9 +3,8 @@
 /**
  * GexProfileChart — divergent SVG bar chart of net gamma by strike.
  *
- * Extracted from web/components/GexPanel.tsx so the UW Analyze page can
- * render the same visualization. Both consumers import this single
- * source of truth.
+ * Extracted from web/components/GexPanel.tsx so GEX-related views can share
+ * one visualization source of truth.
  */
 
 import { useMemo, useRef } from "react";

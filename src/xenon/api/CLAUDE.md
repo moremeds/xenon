@@ -12,11 +12,10 @@ Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xeno
 
 - `server.py` — endpoint dispatch, IB pool lifecycle, background schedulers (CTA sync)
 - `routes/` — per-topic FastAPI routers, included from `server.py`:
-  - `uw_analyze.py` — `/uw-analyze/*` (portfolio bias, refresh, SSE streaming for progressive enrichment)
   - `uw_stats.py` — `/uw-stats`, `/uw-stats/reset`
   - `historical.py` — historical bars
 - `services/` — business logic (stateful, testable without HTTP):
-  - `uw_analyze_cache.py`, `uw_analyze_candidates.py`, `uw_analyze_daily_job.py`, `uw_analyze_diff.py`, `uw_analyze_flow_tracker.py`, `uw_analyze_oi_snapshots.py`, `uw_analyze_oi_tracker.py`, `uw_analyze_portfolio_bias.py`
+  - `flow_analysis.py`, `flow_analysis_cache.py`
 - `ib_pool.py` — persistent IB connection pool (clientId 0–9)
 - `pool_order_manage.py` — pool-based helpers (but see cancel/modify rule below — real cancel/modify uses subprocess)
 - `ws_ticket.py` — 30s single-use WebSocket auth tickets

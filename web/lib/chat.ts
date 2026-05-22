@@ -211,10 +211,6 @@ export function resolveSectionFromPath(pathname: string | null, fallback: Worksp
     return "discover";
   }
 
-  if (pathname.startsWith("/uw-analyze")) {
-    return "uw-analyze";
-  }
-
   if (pathname.startsWith("/journal")) {
     return "journal";
   }

@@ -395,8 +395,7 @@ def fetch_ticker_data(ticker: str, client, *, deep: bool = False) -> TickerData:
     oi_changes = None
 
     # Max pain - nearest-expiry strike where total option holders lose the most.
-    # Used by uw-analyze portfolio diff (MAX_PAIN_SHIFT change rule). Optional;
-    # falls back to None on any failure.
+    # Optional; falls back to None on any failure.
     max_pain: Optional[float] = None
     try:
         mp_resp = client.get_max_pain(ticker) or {}

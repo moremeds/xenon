@@ -48,7 +48,6 @@ from xenon.api.routes.orders import orders_payload_for_scope
 from xenon.api.routes.orders import router as orders_router
 from xenon.api.routes.regime import router as regime_router
 from xenon.api.routes.trades import router as trades_router
-from xenon.api.routes.uw_analyze import router as uw_analyze_router
 from xenon.api.routes.uw_stats import router as uw_stats_router
 from xenon.api.routes.wizard import router as wizard_router
 from xenon.api.services.regime_gate import (
@@ -135,6 +134,7 @@ def _get_futu_client() -> FutuClient:
 # ---------------------------------------------------------------------------
 ib_pool: Optional[IBPool] = None
 uw_available: bool = False
+_flow_analysis_cache = None
 
 
 def _is_test_mode() -> bool:
@@ -148,6 +148,49 @@ def _is_test_mode() -> bool:
 # gates MUST call _is_test_mode() — do not branch on this value.
 test_mode: bool = _is_test_mode()
 test_order_counter: int = 900000
+
+
+def get_flow_analysis_cache():
+    global _flow_analysis_cache
+    if _flow_analysis_cache is None:
+        from xenon.api.services.flow_analysis_cache import FlowAnalysisCache
+
+        _flow_analysis_cache = FlowAnalysisCache()
+    return _flow_analysis_cache
+
+
+async def _run_flow_analysis_for_ticker(ticker: str) -> dict[str, Any]:
+    """Fetch one ticker's UW summaries for `/flow-analysis`."""
+    from xenon.analysis.dark_pool_summary import summarize_dark_pool
+    from xenon.analysis.options_flow_summary import summarize_options_flow
+    from xenon.fetchers.fetch_flow import analyze_darkpool
+    from xenon.scanners.uw.analyze import run_analysis_with_data
+
+    _report, td = await asyncio.wait_for(
+        asyncio.to_thread(run_analysis_with_data, ticker),
+        timeout=60.0,
+    )
+    dp = td.darkpool if isinstance(td.darkpool, dict) else None
+    trades = (dp or {}).get("data") or []
+    aggregate = analyze_darkpool(trades)
+    daily = [
+        {
+            "flow_direction": aggregate.get("flow_direction"),
+            "flow_strength": aggregate.get("flow_strength", 0),
+            "num_prints": aggregate.get("num_prints", 0),
+        }
+    ]
+    options_flow_summary = summarize_options_flow(list(td.flow_alerts or []))
+    dark_pool_summary = summarize_dark_pool(
+        {
+            "dark_pool": {"aggregate": aggregate, "daily": daily},
+            "options_flow": options_flow_summary,
+        }
+    )
+    return {
+        "dark_pool_summary": dark_pool_summary,
+        "options_flow_summary": options_flow_summary,
+    }
 
 
 def _next_test_order_ids() -> tuple[int, int]:
@@ -548,110 +591,6 @@ async def lifespan(app: FastAPI):
     if not uw_available:
         logger.warning("UW_TOKEN not set — UW-dependent endpoints will fail")
 
-    # Eager-load the uw_analyze cache so the most recent snapshots are in
-    # memory before the first request. The cache is lazy-loaded by
-    # construction; all_entries() triggers _ensure_loaded() exactly once
-    # and is a no-op on subsequent calls. Suppressed in test mode so unit
-    # tests seeing an empty singleton aren't polluted by the real PG state.
-    try:
-        from xenon.api.routes.uw_analyze import get_portfolio_cache as _get_portfolio_cache
-
-        _cache_singleton = _get_portfolio_cache()
-        _preloaded = _cache_singleton.all_entries()
-        logger.info("uw_analyze_cache preloaded from PG: %d entries", len(_preloaded))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("uw_analyze_cache preload failed: %s", exc)
-
-    # UW Analyze daily job (15:50 ET) — runs OI snapshot + advances open
-    # unusual-flow events. Background asyncio task; cancelled on shutdown.
-    #
-    # Multi-worker guard: only worker 0 runs the daily job. Under
-    # `uvicorn --workers N`, every worker would otherwise spin up its own
-    # cron loop and fire N× at 15:50 ET. Uvicorn doesn't set a per-worker
-    # env var by default, so we check XENON_DAILY_JOB_WORKER_ID which
-    # operators can set per-worker (default "0" runs; any other value
-    # suppresses). Fall-through for single-worker deployments (no env var).
-    uw_daily_task = None
-    _daily_worker_id = os.environ.get("XENON_DAILY_JOB_WORKER_ID", "0")
-    if _daily_worker_id != "0":
-        logger.info(
-            "uw_analyze_daily_job suppressed on worker_id=%s (multi-worker guard)",
-            _daily_worker_id,
-        )
-    else:
-        try:
-            from xenon.api.routes.uw_analyze import get_flow_log, get_portfolio_cache
-            from xenon.api.services.uw_analyze_daily_job import run_loop as uw_daily_run_loop
-            from xenon.clients.uw_client import UWClient
-
-            _uw_client = UWClient() if uw_available else None
-
-            async def _default_contract_fetcher(*, ticker: str, side: str, strike: float, expiry: str):
-                """Resolve a single OCC contract's current oi/mid/underlying/volume.
-
-                Fetches the full chain for the expiry, finds the matching strike+side row.
-                Returns None on any failure so the caller falls back to expiry-only closeout.
-                """
-                if _uw_client is None:
-                    return None
-                try:
-                    resp = await asyncio.to_thread(_uw_client.get_option_chain, ticker, expiry=expiry)
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("default contract_fetcher chain fetch failed for %s: %s", ticker, exc)
-                    return None
-                rows = resp.get("data") if isinstance(resp, dict) else None
-                if not isinstance(rows, list):
-                    return None
-                for r in rows:
-                    if not isinstance(r, dict):
-                        continue
-                    try:
-                        if abs(float(r.get("strike", -1)) - float(strike)) > 1e-6:
-                            continue
-                    except (TypeError, ValueError):
-                        continue
-                    key = "call" if side == "call" else "put"
-                    try:
-                        return {
-                            "oi": int(float(r.get(f"{key}_oi") or 0)),
-                            "mid": float(r.get(f"{key}_mid") or r.get(f"{key}_last") or 0.0),
-                            "underlying_price": float(r.get("underlying_price") or 0.0),
-                            "volume": int(float(r.get(f"{key}_volume") or 0)),
-                        }
-                    except (TypeError, ValueError):
-                        return None
-                return None
-
-            from xenon.api.services.advisory_lock import (
-                LOCK_KEY_UW_DAILY,
-                pg_try_advisory_lock,
-            )
-
-            async def _supervised_uw_daily() -> None:
-                """Run the UW-daily loop only if we hold the singleton lock.
-
-                The env-var XENON_DAILY_JOB_WORKER_ID lets an operator
-                explicitly suppress the loop on a worker; this advisory
-                lock is the strict singleton guarantee — even if multiple
-                workers share worker_id="0" by accident, only the lock
-                holder actually runs.
-                """
-                async with pg_try_advisory_lock(LOCK_KEY_UW_DAILY) as got_lock:
-                    if not got_lock:
-                        logger.info("uw_analyze_daily_job already running on another worker (advisory lock held)")
-                        return
-                    await uw_daily_run_loop(
-                        cache=get_portfolio_cache(),
-                        flow_log=get_flow_log(),
-                        uw_client=_uw_client,
-                        contract_fetcher=_default_contract_fetcher,
-                    )
-
-            uw_daily_task = asyncio.create_task(_supervised_uw_daily())
-            logger.info("uw_analyze_daily_job background task started")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("uw_analyze_daily_job failed to start: %s", exc)
-
     # Consolidated VCG/CRI scanner loop. Single-worker singleton via
     # advisory lock LOCK_KEY_VCG_CRI; runs every XENON_VCG_CRI_INTERVAL_S
     # (default 30 min). Emits regime_transition events to events.outbox
@@ -739,12 +678,6 @@ async def lifespan(app: FastAPI):
                 await listener.stop()
             except Exception:  # noqa: BLE001
                 logger.exception("journal auto-import listener failed to stop")
-        if uw_daily_task is not None:
-            uw_daily_task.cancel()
-            try:
-                await uw_daily_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
         vcg_cri_task = getattr(app.state, "vcg_cri_task", None)
         if vcg_cri_task is not None:
             vcg_cri_task.cancel()
@@ -769,37 +702,6 @@ async def lifespan(app: FastAPI):
                 _futu_client.disconnect()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("FutuClient disconnect on shutdown failed: %s", exc)
-        # Clear long-lived in-memory singletons so `uvicorn --reload` doesn't
-        # double-allocate them on module reimport. Also releases cached report
-        # dicts that would otherwise pin ~100s of MB across a reload cycle.
-        try:
-            from xenon.api.routes import uw_analyze as _uw_route_mod
-
-            # Null the singletons so `get_portfolio_cache()` creates a fresh
-            # instance on the next reload cycle. The previous approach
-            # (_entries.clear()) left `_loaded=True` on the surviving object,
-            # which made `_ensure_loaded()` skip the disk read — every ticker
-            # re-scanned from scratch after --reload.
-            _uw_route_mod._portfolio_cache = None
-            _uw_route_mod._flow_log = None
-            # Recreate the OI semaphore so it binds to the new event loop
-            # on the next reload cycle (asyncio.Semaphore captures the loop
-            # on first acquire).
-            _uw_route_mod._ON_DEMAND_OI_SEM = asyncio.Semaphore(3)
-            # Close the shared UWClient if one was constructed. Leaves
-            # the underlying requests.Session idle connections to be
-            # released rather than lingering across reload cycles.
-            _shared_client = _uw_route_mod._uw_client_singleton
-            if _shared_client is not None:
-                try:
-                    _close = getattr(_shared_client, "close", None)
-                    if callable(_close):
-                        _close()
-                except Exception as close_exc:  # noqa: BLE001
-                    logger.debug("shared UWClient close failed: %s", close_exc)
-                _uw_route_mod._uw_client_singleton = None
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("uw_analyze singleton clear on shutdown failed: %s", exc)
         # Persist UW API stats hourly history so daily stats survive a
         # FastAPI restart. Best-effort — never block shutdown on I/O.
         try:
@@ -818,7 +720,6 @@ app.include_router(journal_router)
 app.include_router(orders_router)
 app.include_router(regime_router)
 app.include_router(trades_router)
-app.include_router(uw_analyze_router)
 app.include_router(uw_stats_router)
 app.include_router(wizard_router)
 
@@ -1821,18 +1722,20 @@ async def discover():
 async def flow_analysis_post(account: str = "ib"):
     """Portfolio flow alignment view for the given broker account.
 
-    POSTs trigger a cache fill on missing tickers (bounded concurrency),
-    so the returned payload is always complete. Reads dark-pool and
-    options-flow summaries from the shared uw-analyze LRU cache — no
-    second UW API pipeline, no stale JSON files on disk.
+    POSTs trigger a bounded cache fill on missing tickers, so the returned
+    payload is complete from the flow-analysis service itself.
     """
-    from xenon.api.routes.uw_analyze import _runner, get_portfolio_cache
-    from xenon.api.services.uw_analyze_portfolio_bias import classify_portfolio
+    from xenon.api.services.flow_analysis import classify_portfolio
 
     if account not in ("ib", "futu"):
         raise HTTPException(status_code=400, detail=f"Unknown account: {account!r}")
-    cache = get_portfolio_cache()
-    data = await classify_portfolio(account=account, cache=cache, runner=_runner, read_only=False)
+    cache = get_flow_analysis_cache()
+    data = await classify_portfolio(
+        account=account,
+        cache=cache,
+        runner=_run_flow_analysis_for_ticker,
+        read_only=False,
+    )
     return data
 
 
@@ -1840,16 +1743,14 @@ async def flow_analysis_post(account: str = "ib"):
 async def flow_analysis_get(account: str = "ib"):
     """Read-only snapshot of portfolio flow alignment.
 
-    Serves whatever the uw-analyze cache already has without triggering
-    a refresh. Used by ``web/lib/useSyncHook`` on initial page load so
-    the first render is fast; a subsequent POST fills missing tickers.
+    Serves whatever the flow-analysis cache already has without triggering
+    a refresh. Used by ``web/lib/useSyncHook`` on initial page load.
     """
-    from xenon.api.routes.uw_analyze import get_portfolio_cache
-    from xenon.api.services.uw_analyze_portfolio_bias import classify_portfolio
+    from xenon.api.services.flow_analysis import classify_portfolio
 
     if account not in ("ib", "futu"):
         raise HTTPException(status_code=400, detail=f"Unknown account: {account!r}")
-    cache = get_portfolio_cache()
+    cache = get_flow_analysis_cache()
     data = await classify_portfolio(account=account, cache=cache, runner=None, read_only=True)
     return data
 

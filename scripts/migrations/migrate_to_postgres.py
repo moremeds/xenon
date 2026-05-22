@@ -468,15 +468,6 @@ def migrate_scan_results(engine):
 def migrate_uw_data(engine):
     count = 0
     with engine.begin() as conn:
-        # uw_analyze_snapshots: writer was rewritten in 2026-04-26 normalize_payloads.
-        # Use scripts/migrations/_2026_04_26_backfill_uw_analyze_history.py instead.
-        path = DATA_DIR / "uw_analyze_cache.json"
-        if path.exists():
-            print(
-                "  SKIP uw_analyze_snapshots from uw_analyze_cache.json — "
-                "use _2026_04_26_backfill_uw_analyze_history.py instead"
-            )
-
         # UW flow events — JSON format is {"events": {event_id: event_dict}}
         path = DATA_DIR / "uw_unusual_flow_log.json"
         if path.exists():
@@ -559,12 +550,8 @@ def migrate_uw_data(engine):
 
 
 def migrate_uw_history(engine):
-    """DEPRECATED — superseded by 2026-04-26 normalize_payloads.
-
-    Use scripts/migrations/_2026_04_26_backfill_uw_analyze_history.py to load
-    data/uw_analyze_history/ into the new uw_analyze_snapshots schema.
-    """
-    print("  SKIP migrate_uw_history — superseded by scripts/migrations/_2026_04_26_backfill_uw_analyze_history.py")
+    """DEPRECATED — old UW analysis history import is no longer supported."""
+    print("  SKIP migrate_uw_history — old UW analysis history import is no longer supported")
     return 0
 
 

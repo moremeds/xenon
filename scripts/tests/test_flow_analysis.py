@@ -1,4 +1,4 @@
-"""Tests for uw_analyze_portfolio_bias.classify_portfolio.
+"""Tests for flow_analysis.classify_portfolio.
 
 Covers alignment logic (supports / against / mixed / non_directional /
 neutral) and the NVDA repro case that motivated the rewrite.
@@ -8,8 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-from xenon.api.services.uw_analyze_portfolio_bias import (
+from xenon.api.services.flow_analysis import (
     align,
     classify_portfolio,
 )
@@ -103,7 +102,7 @@ class TestNvdaRepro:
 
 # ── classify_portfolio integration ────────────────────────────────────────
 class FakeCache:
-    """Minimal UwAnalyzeCache fake for the classifier. Supplies entries
+    """Minimal flow-analysis cache fake for the classifier. Supplies entries
     synchronously via get_entry; get_or_run is invoked only on miss."""
 
     def __init__(self, entries: dict, misses: set[str] = None):

@@ -5,8 +5,11 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.0.5] — 2026-05-05
+### Removed
 
+- **`/uw-analyze` product surface.** The localhost `/uw-analyze` page, its three Next API routes (`route.ts`, `portfolio/route.ts`, `refresh/route.ts`), the FastAPI `/uw-analyze` router, and all backing services (`uw_analyze_cache`, `uw_analyze_candidates`, `uw_analyze_daily_job`, `uw_analyze_diff`, `uw_analyze_flow_tracker`, `uw_analyze_oi_snapshots`, `uw_analyze_oi_tracker`, `uw_analyze_portfolio_bias`) are deleted. Navigation, chat tools, and middleware no longer expose it. `/flow-analysis` is preserved — the portfolio-bias logic it depended on moved into dedicated `flow_analysis.py` + `flow_analysis_cache.py` services. The `xenon-uw-analyze` scanner CLI and the Postgres `xenon.uw_analyze_snapshots` table are intentionally retained (they're separate from the localhost surface and still feed stored signal payloads). New `scripts/tests/test_uw_analyze_removed.py` pins the FastAPI removal; `web/tests/{data,middleware-route-gating}.test.ts` pin the route/nav removal.
+
+## [0.0.5] — 2026-05-05
 
 ### Fixed
 
@@ -20,11 +23,12 @@ All notable changes to Xenon are documented here. Format loosely based on
 ### Documentation
 
 - Stage C auto-deploy planning handover (#88), backlog status updates (#93), GHCR per-package ACL prerequisite (#94), `XENON_BROKER_ACCOUNT` runbook + Clerk dev-limit correction (#92), and archival of completed plans + top-level docs (#95, #96).
+
 ## [0.0.4] — 2026-05-04
 
 ### Added
 
-- **Default-private route gating with explicit public allowlist (#90).** Inverts `web/middleware.ts` from "gate everything except sign-in/sign-up/api" to default-private with an explicit `PUBLIC_ROUTES` array of scanner / market-data surfaces (`/scanner`, `/discover`, `/regime`, `/flow-analysis`, `/uw-analyze`, `/cta`, `/kit`). Trading workspace (`/`), portfolio, orders, journal, internals, dashboard, performance, and `/[ticker]` stay private. New routes inherit auth automatically — opt out by adding to `PUBLIC_ROUTES`. Fail-closed default protects against scattered per-flow gating regressions called out in `project_universal_auth_gating` memory. New unit test `web/tests/middleware-route-gating.test.ts` pins 24 path classifications including the "unlisted route is private" invariant.
+- **Default-private route gating with explicit public allowlist (#90).** Inverts `web/middleware.ts` from "gate everything except sign-in/sign-up/api" to default-private with an explicit `PUBLIC_ROUTES` array of scanner / market-data surfaces (`/scanner`, `/discover`, `/regime`, `/flow-analysis`, `/cta`, `/kit`). Trading workspace (`/`), portfolio, orders, journal, internals, dashboard, performance, and `/[ticker]` stay private. New routes inherit auth automatically — opt out by adding to `PUBLIC_ROUTES`. Fail-closed default protects against scattered per-flow gating regressions called out in `project_universal_auth_gating` memory. New unit test `web/tests/middleware-route-gating.test.ts` pins path classifications including the "unlisted route is private" invariant.
 - **Mac mini Docker deploy runbook (#87).** New `docs/runbooks/remote-deploy.md` documents topology, first-time bootstrap, standard release flow, Colima auto-start via `brew services`, rollback, logs/diagnostics, and a reference compose template. `docs/runbooks/mac-mini.md` now points at it as the authoritative source.
 - **Stage C auto-deploy planning handover (#88).** `docs/handovers/2026-05-04-stage-c-auto-deploy.md` — three-item plan covering release verify, build-args, and Watchtower on the mini.
 

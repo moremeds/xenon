@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import InfoTooltip from "../InfoTooltip";
 
 /**
- * Shared metric card used by the GEX tab and the UW Analyze detail panel.
+ * Shared metric card used by GEX-related panels.
  *
  * Visuals are driven by the `.gex-metric-card` / `.gex-metric-label`
  * stack in `web/app/globals.css`. Consumers place one or more of these
@@ -48,8 +48,8 @@ export function MetricCard({
 
 /**
  * Small colour-coded badge tagging the provenance of a metric.
- * Kept here so both `GexPanel` and the UW Analyze detail panel can share
- * the same visual without a re-export intermediate.
+ * Kept here so GEX-related panels can share the same visual without a
+ * re-export intermediate.
  */
 export function SourceBadge({ source }: { source: "uw" | "mq" | "both" }) {
   const styles: Record<string, React.CSSProperties> = {

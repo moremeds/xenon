@@ -45,7 +45,7 @@ Postgres is the runtime source of truth for migrated analytics and portfolio sur
 
 - Portfolio UI reads `xenon.account_snapshots.payload` through FastAPI `GET /portfolio`, scoped by `AccountScope` (`XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`). `data/portfolio.json` is legacy/backfill input only, not a UI read path.
 - VCG History reads the latest `xenon.vcg_series` row through FastAPI `GET /vcg`. `data/vcg.json` is legacy/backfill input only; `/vcg/scan` cooldown/cache checks also stay in Postgres.
-- GEX writes to both `scan_results` and `gex_snapshots`; UW analyze snapshots keep full payload JSONB plus generated columns and fanout child tables.
+- GEX writes to both `scan_results` and `gex_snapshots`; legacy UW snapshot tables remain part of the migrated Postgres schema for stored signal payloads.
 - Next.js API routes proxy these migrated surfaces via `xenonFetch()`; no `readFile`, `readDataFile`, or cached JSON fallback on runtime paths.
 - Preserve CI guard tests that prove stale JSON files are not read (`scripts/tests/test_vcg_json_not_read.py`, portfolio payload/route tests).
 
@@ -110,19 +110,11 @@ TZ=America/New_York date +"%A %H:%M"   # 9:30–16:00 ET, Mon–Fri
 
 ### UW API budget controls
 
-Daily UW budget: **20,000 calls/day**. The `/uw-analyze` page stays within budget via:
+Daily UW budget: **20,000 calls/day**. Keep UW-backed surfaces conservative:
 
-- **30-min snapshot TTL** during open hours (overridable via env)
-- **Automatic refresh blocked entirely** outside 9:30–16:00 ET (weekdays)
-- **Weekday holidays treated as OPEN** (known gap — neither backend nor frontend has a holiday calendar; cost is ~1 day over-budget per US holiday)
-- **Refresh button always works** — `POST /uw-analyze/refresh` and `/uw-analyze?ticker=X` pass `user_initiated=True` which bypasses the closed-market gate
-
-Env vars (read per-call, runtime tunable):
-
-- `XENON_UW_TTL_OPEN_S` (default `1800`) — snapshot TTL during open hours
-- `XENON_UW_TTL_CLOSED_S` (default `3600`) — TTL for user-initiated fetches when market is closed
-
-The closed-market gate lives inside `UwAnalyzeCache.get_or_run()` and also covers the separate on-demand OI fetch in `_process_ticker`. See `src/xenon/api/services/uw_analyze_cache.py` + `src/xenon/api/routes/uw_analyze.py` for the implementation.
+- Prefer cached Postgres signal payloads before live UW calls.
+- During market-open paths, keep refresh intervals short enough for freshness but bounded enough to avoid budget spikes.
+- Closed-market workflows should use latest stored data unless a user explicitly requests a refresh.
 
 ## Output Rules
 

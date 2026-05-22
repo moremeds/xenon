@@ -150,17 +150,9 @@ describe("navItems", () => {
     expect(new Set(hrefs).size).toBe(hrefs.length);
   });
 
-  it("places uw-analyze directly after flow-analysis", () => {
+  it("does not expose the removed uw-analyze surface", () => {
     const routes = navItems.map((n) => n.route);
-    const flowIdx = routes.indexOf("flow-analysis");
-    const uwIdx = routes.indexOf("uw-analyze");
-    expect(flowIdx).toBeGreaterThanOrEqual(0);
-    expect(uwIdx).toBe(flowIdx + 1);
-  });
-
-  it("labels the uw-analyze entry as 'UW Analysis'", () => {
-    const uw = navItems.find((n) => n.route === "uw-analyze");
-    expect(uw?.label).toBe("UW Analysis");
+    expect(routes).not.toContain("uw-analyze");
   });
 });
 
@@ -181,7 +173,6 @@ describe("quickPromptsBySection", () => {
     "regime",
     "cta",
     "ticker-detail",
-    "uw-analyze",
   ];
 
   it("covers all WorkspaceSection keys", () => {
@@ -231,7 +222,6 @@ describe("sectionDescription", () => {
     "regime",
     "cta",
     "ticker-detail",
-    "uw-analyze",
   ];
 
   it("covers all WorkspaceSection keys", () => {

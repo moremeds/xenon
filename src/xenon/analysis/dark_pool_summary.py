@@ -2,8 +2,8 @@
 
 Consumes a `flow_data` dict shaped like `scripts/fetch_flow.fetch_flow()` output
 and returns scored signal metrics. Extracted from `scripts/scanner.analyze_signal`
-so that both /flow-analysis and /uw-analyze pipelines can share the same
-scoring path (and so the options-conflict penalty stops silently drifting).
+so `/flow-analysis` uses the scanner scoring path and the options-conflict
+penalty stops silently drifting.
 
 Bug fixes applied during extraction (see docs/plans/flickering-puzzling-sifakis.md):
   - Read `options_flow["bias"]` (fetch_flow emits `bias`, not `combined_bias`)

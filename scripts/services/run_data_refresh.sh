@@ -84,9 +84,9 @@ fi
 
 # --- flow-analysis (per-account: ib + futu) ---
 # Previously ran scripts/flow_analysis.py which wrote a stale JSON cache per
-# account. The page is now backed by the shared uw-analyze LRU cache via
-# FastAPI's POST /flow-analysis endpoint, so refreshing it means hitting the
-# endpoint to warm the per-ticker entries. No disk cache file is written.
+# account. The page is now backed by FastAPI's POST /flow-analysis endpoint,
+# so refreshing it means hitting the endpoint to warm per-ticker entries.
+# No disk cache file is written.
 FLOW_STATUS="OK"
 for ACCOUNT in ib futu; do
     if [ "$ACCOUNT" = "futu" ] && [ ! -f data/futu_portfolio.json ]; then

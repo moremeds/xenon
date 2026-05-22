@@ -7,7 +7,7 @@ Sync-only on purpose: the FastAPI hot path already has
 `xenon.db.queries.portfolio.get_latest_portfolio_payload` (async). This
 module exists for sync subprocesses (ib_sync, ib_reconcile,
 naked_short_audit), CLI scripts (scanners, ratings, reports), and
-non-async services (uw_analyze_candidates).
+sync services that need a scoped portfolio snapshot.
 """
 
 from __future__ import annotations

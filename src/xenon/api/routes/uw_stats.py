@@ -4,8 +4,7 @@ Exposes request counts, latency percentiles, cache hit rates, and
 per-ticker/per-endpoint breakdowns collected by the process-wide
 ``uw_api_stats.stats`` singleton.
 
-Also surfaces the rolling 96-hour hourly history used by the
-``UwApiUsageChart`` component on the /uw-analyze page.
+Also surfaces the rolling 96-hour hourly history for operator diagnostics.
 """
 
 from __future__ import annotations

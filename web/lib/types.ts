@@ -48,8 +48,7 @@ export type WorkspaceSection =
   | "journal"
   | "regime"
   | "cta"
-  | "ticker-detail"
-  | "uw-analyze";
+  | "ticker-detail";
 
 export type JsonValue =
   | string

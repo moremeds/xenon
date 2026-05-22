@@ -46,12 +46,6 @@ export const navItems: WorkspaceNavItem[] = [
     href: "/flow-analysis",
     icon: LineChart,
   },
-  {
-    label: "UW Analysis",
-    route: "uw-analyze",
-    href: "/uw-analyze",
-    icon: Sparkles,
-  },
   { label: "Portfolio", route: "portfolio", href: "/portfolio", icon: Circle },
   {
     label: "Performance",
@@ -107,7 +101,6 @@ export const quickPromptsBySection: Record<WorkspaceSection, string[]> = {
   regime: ["cri-scan", "portfolio", "scan --top 12", "help"],
   cta: ["menthorq-cta", "cri-scan", "portfolio", "help"],
   "ticker-detail": ["portfolio", "scan --top 12", "help"],
-  "uw-analyze": ["analyze aapl", "analyze tsla", "analyze spy", "help"],
 };
 
 export const sectionDescription: Record<WorkspaceSection, string> = {
@@ -124,6 +117,4 @@ export const sectionDescription: Record<WorkspaceSection, string> = {
   cta: "CTA positioning, vol-targeting exposure model and institutional flow.",
   "ticker-detail":
     "Instrument research surface — company, book, chain, position, orders, news, ratings, seasonality.",
-  "uw-analyze":
-    "Per-ticker UW signal analysis — bias, grade, bucket scores, GEX walls, setup thesis.",
 };

@@ -38,8 +38,6 @@ describe("middleware route gating", () => {
     "/discover",
     "/regime",
     "/flow-analysis",
-    "/uw-analyze",
-    "/uw-analyze/AAPL",
     "/cta",
     "/kit",
   ])("public: %s allowed without auth", (path) => {
@@ -51,5 +49,7 @@ describe("middleware route gating", () => {
     // until someone explicitly adds it to PUBLIC_ROUTES.
     expect(matches("/admin")).toBe(false);
     expect(matches("/billing")).toBe(false);
+    expect(matches("/uw-analyze")).toBe(false);
+    expect(matches("/uw-analyze/AAPL")).toBe(false);
   });
 });

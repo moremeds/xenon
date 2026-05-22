@@ -18,7 +18,6 @@ export const PUBLIC_ROUTES = [
   "/discover(.*)",
   "/regime(.*)",
   "/flow-analysis(.*)",
-  "/uw-analyze(.*)",
   "/cta(.*)",
   "/kit(.*)",
 ];
