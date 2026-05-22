@@ -46,18 +46,8 @@ from xenon.api.routes.historical import router as historical_router
 from xenon.api.routes.journal import router as journal_router
 from xenon.api.routes.orders import orders_payload_for_scope
 from xenon.api.routes.orders import router as orders_router
-from xenon.api.routes.regime import router as regime_router
 from xenon.api.routes.trades import router as trades_router
-from xenon.api.routes.uw_analyze import router as uw_analyze_router
-from xenon.api.routes.uw_stats import router as uw_stats_router
 from xenon.api.routes.wizard import router as wizard_router
-from xenon.api.services.regime_gate import (
-    GateDecision,
-    OrderGateOutcome,
-    evaluate_order_gate,
-    resolve_bankroll_usd,
-)
-from xenon.api.services.regime_state import get_regime_state_for_scope
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
@@ -96,7 +86,6 @@ from ib_async import Contract, Index, Option, Stock
 
 from xenon.clients.futu_client import FutuClient
 from xenon.clients.futu_exceptions import FutuConnectionError, FutuError
-from xenon.clients.uw_client import UWAPIError, UWClient, UWNotFoundError
 
 # Futu singleton — lazy-initialized on first /futu/sync call so the server
 # boots cleanly even when OpenD is not running. Guarded by an asyncio lock
@@ -362,133 +351,6 @@ def _get_managed_account_for_health() -> str:
     return accounts[0] if accounts else ""
 
 
-async def _run_vcg_scan_and_persist() -> None:
-    """Run xenon-vcg-scan and persist its JSON output to vcg_series.
-
-    Mirrors the inline path used by POST /vcg/scan. Failures are logged
-    and swallowed — the loop must keep ticking even if a single scan
-    fails (e.g. transient UW outage). Extracted as a top-level function
-    so tests can monkeypatch it without exercising the subprocess.
-    """
-    try:
-        result = await run_entry_point("xenon-vcg-scan", ["--json"], timeout=120)
-        if result.ok and result.data:
-            _write_scan_to_postgres("vcg.json", result.data)
-    except Exception:  # noqa: BLE001
-        logger.exception("vcg-scan tick failed")
-
-
-async def _run_cri_scan_and_persist() -> None:
-    """Run xenon-cri-scan and persist to cri_series. See sibling vcg helper."""
-    try:
-        result = await run_entry_point("xenon-cri-scan", ["--json"], timeout=120)
-        if result.ok and result.data:
-            _write_scan_to_postgres("cri.json", result.data)
-    except Exception:  # noqa: BLE001
-        logger.exception("cri-scan tick failed")
-
-
-async def _emit_regime_transition(*, from_pair: tuple[str, str], to_pair: tuple[str, str], state) -> None:
-    """Insert a regime_transition row into events.outbox.
-
-    Schema: outbox.payload (JSONB) carries the full transition envelope
-    so consumers can react without re-reading the regime view.
-    """
-    import sqlalchemy as _sa
-
-    from xenon.db.engine import get_engine
-    from xenon.db.schema import outbox
-
-    engine = get_engine()
-    async with engine.begin() as conn:
-        await conn.execute(
-            _sa.insert(outbox).values(
-                channel="regime_transition",
-                source="vcg_cri_scan_loop",
-                payload={
-                    "from": {"vcg": from_pair[0], "cri": from_pair[1]},
-                    "to": {"vcg": to_pair[0], "cri": to_pair[1]},
-                    "binding_tier": state.binding_tier,
-                    "binding_side": state.binding_side,
-                },
-            )
-        )
-
-
-async def _vcg_cri_tick(
-    last_seen: tuple[str, str] | None,
-) -> tuple[str, str] | None:
-    """One iteration of the consolidated VCG/CRI loop.
-
-    Steps:
-    1. Run both scans (best-effort; failures are logged in the helpers).
-    2. Read the freshly-persisted regime_state view, classify into tiers.
-    3. If (vcg_tier, cri_tier) changed AND neither endpoint is UNKNOWN,
-       emit a regime_transition event.
-    4. Return the new (vcg_tier, cri_tier) so the caller can update its
-       last_seen baseline.
-
-    UNKNOWN suppression rationale: a stale feed should not fire a "regime
-    change" alert. The first non-UNKNOWN observation after a stale gap
-    becomes the new baseline; emits resume on the NEXT real transition.
-    """
-    import datetime as _dt
-
-    from xenon.api.services.regime_state import _read_regime_row, classify
-
-    # Codex-review CODEX-3: gate the scan subprocesses behind market hours
-    # so we don't burn UW quota on weekends/after-close. The classify+emit
-    # path still runs every tick — useful for catching delayed transitions
-    # from the last scan of the session. Override via env for tests/manual
-    # operator runs.
-    skip_scans = os.environ.get("XENON_VCG_CRI_SCAN_GATE_OFF_HOURS", "1") != "0" and not _is_market_open_now()
-    if not skip_scans:
-        await _run_vcg_scan_and_persist()
-        await _run_cri_scan_and_persist()
-
-    max_age_s = int(os.environ.get("XENON_REGIME_MAX_AGE_S", str(90 * 60)))
-    row = await _read_regime_row()
-    state = classify(row, now=_dt.datetime.now(_dt.timezone.utc), max_age_s=max_age_s)
-    new_pair = (state.vcg_tier, state.cri_tier)
-
-    should_emit = (
-        last_seen is not None and new_pair != last_seen and "UNKNOWN" not in new_pair and "UNKNOWN" not in last_seen
-    )
-    if should_emit:
-        try:
-            await _emit_regime_transition(
-                from_pair=last_seen,  # type: ignore[arg-type]
-                to_pair=new_pair,
-                state=state,
-            )
-        except Exception:  # noqa: BLE001
-            # Don't advance last_seen — next tick re-attempts the emit so a
-            # transient outbox failure can't permanently lose the transition.
-            logger.exception("regime_transition emit failed; preserving last_seen for retry")
-            return last_seen
-
-    return new_pair
-
-
-async def _vcg_cri_scan_loop() -> None:
-    """Forever-loop driver — runs `_vcg_cri_tick` every interval.
-
-    Cadence: XENON_VCG_CRI_INTERVAL_S (default 1800s = 30 min). The loop
-    swallows per-tick exceptions so one bad tick can't kill the loop;
-    only cancellation breaks out.
-    """
-    interval_s = int(os.environ.get("XENON_VCG_CRI_INTERVAL_S", "1800"))
-    last_seen: tuple[str, str] | None = None
-    while True:
-        try:
-            last_seen = await _vcg_cri_tick(last_seen)
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001
-            logger.exception("_vcg_cri_tick raised")
-        await asyncio.sleep(interval_s)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start IB pool and UW client on startup, tear down on shutdown."""
@@ -548,153 +410,6 @@ async def lifespan(app: FastAPI):
     if not uw_available:
         logger.warning("UW_TOKEN not set — UW-dependent endpoints will fail")
 
-    # Eager-load the uw_analyze cache so the most recent snapshots are in
-    # memory before the first request. The cache is lazy-loaded by
-    # construction; all_entries() triggers _ensure_loaded() exactly once
-    # and is a no-op on subsequent calls. Suppressed in test mode so unit
-    # tests seeing an empty singleton aren't polluted by the real PG state.
-    try:
-        from xenon.api.routes.uw_analyze import get_portfolio_cache as _get_portfolio_cache
-
-        _cache_singleton = _get_portfolio_cache()
-        _preloaded = _cache_singleton.all_entries()
-        logger.info("uw_analyze_cache preloaded from PG: %d entries", len(_preloaded))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("uw_analyze_cache preload failed: %s", exc)
-
-    # UW Analyze daily job (15:50 ET) — runs OI snapshot + advances open
-    # unusual-flow events. Background asyncio task; cancelled on shutdown.
-    #
-    # Multi-worker guard: only worker 0 runs the daily job. Under
-    # `uvicorn --workers N`, every worker would otherwise spin up its own
-    # cron loop and fire N× at 15:50 ET. Uvicorn doesn't set a per-worker
-    # env var by default, so we check XENON_DAILY_JOB_WORKER_ID which
-    # operators can set per-worker (default "0" runs; any other value
-    # suppresses). Fall-through for single-worker deployments (no env var).
-    uw_daily_task = None
-    _daily_worker_id = os.environ.get("XENON_DAILY_JOB_WORKER_ID", "0")
-    if _daily_worker_id != "0":
-        logger.info(
-            "uw_analyze_daily_job suppressed on worker_id=%s (multi-worker guard)",
-            _daily_worker_id,
-        )
-    else:
-        try:
-            from xenon.api.routes.uw_analyze import get_flow_log, get_portfolio_cache
-            from xenon.api.services.uw_analyze_daily_job import run_loop as uw_daily_run_loop
-            from xenon.clients.uw_client import UWClient
-
-            _uw_client = UWClient() if uw_available else None
-
-            async def _default_contract_fetcher(*, ticker: str, side: str, strike: float, expiry: str):
-                """Resolve a single OCC contract's current oi/mid/underlying/volume.
-
-                Fetches the full chain for the expiry, finds the matching strike+side row.
-                Returns None on any failure so the caller falls back to expiry-only closeout.
-                """
-                if _uw_client is None:
-                    return None
-                try:
-                    resp = await asyncio.to_thread(_uw_client.get_option_chain, ticker, expiry=expiry)
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("default contract_fetcher chain fetch failed for %s: %s", ticker, exc)
-                    return None
-                rows = resp.get("data") if isinstance(resp, dict) else None
-                if not isinstance(rows, list):
-                    return None
-                for r in rows:
-                    if not isinstance(r, dict):
-                        continue
-                    try:
-                        if abs(float(r.get("strike", -1)) - float(strike)) > 1e-6:
-                            continue
-                    except (TypeError, ValueError):
-                        continue
-                    key = "call" if side == "call" else "put"
-                    try:
-                        return {
-                            "oi": int(float(r.get(f"{key}_oi") or 0)),
-                            "mid": float(r.get(f"{key}_mid") or r.get(f"{key}_last") or 0.0),
-                            "underlying_price": float(r.get("underlying_price") or 0.0),
-                            "volume": int(float(r.get(f"{key}_volume") or 0)),
-                        }
-                    except (TypeError, ValueError):
-                        return None
-                return None
-
-            from xenon.api.services.advisory_lock import (
-                LOCK_KEY_UW_DAILY,
-                pg_try_advisory_lock,
-            )
-
-            async def _supervised_uw_daily() -> None:
-                """Run the UW-daily loop only if we hold the singleton lock.
-
-                The env-var XENON_DAILY_JOB_WORKER_ID lets an operator
-                explicitly suppress the loop on a worker; this advisory
-                lock is the strict singleton guarantee — even if multiple
-                workers share worker_id="0" by accident, only the lock
-                holder actually runs.
-                """
-                async with pg_try_advisory_lock(LOCK_KEY_UW_DAILY) as got_lock:
-                    if not got_lock:
-                        logger.info("uw_analyze_daily_job already running on another worker (advisory lock held)")
-                        return
-                    await uw_daily_run_loop(
-                        cache=get_portfolio_cache(),
-                        flow_log=get_flow_log(),
-                        uw_client=_uw_client,
-                        contract_fetcher=_default_contract_fetcher,
-                    )
-
-            uw_daily_task = asyncio.create_task(_supervised_uw_daily())
-            logger.info("uw_analyze_daily_job background task started")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("uw_analyze_daily_job failed to start: %s", exc)
-
-    # Consolidated VCG/CRI scanner loop. Single-worker singleton via
-    # advisory lock LOCK_KEY_VCG_CRI; runs every XENON_VCG_CRI_INTERVAL_S
-    # (default 30 min). Emits regime_transition events to events.outbox
-    # on (vcg_tier, cri_tier) changes (UNKNOWN endpoints suppressed).
-    vcg_cri_task: asyncio.Task | None = None
-    if os.environ.get("XENON_VCG_CRI_LOOP", "1") != "0":
-        try:
-            from xenon.api.services.advisory_lock import (
-                LOCK_KEY_VCG_CRI,
-                pg_try_advisory_lock,
-            )
-
-            async def _supervised_vcg_cri() -> None:
-                async with pg_try_advisory_lock(LOCK_KEY_VCG_CRI) as got_lock:
-                    if not got_lock:
-                        logger.info("vcg_cri scan loop already running on another worker (advisory lock held)")
-                        return
-                    await _vcg_cri_scan_loop()
-
-            vcg_cri_task = asyncio.create_task(_supervised_vcg_cri())
-
-            # Codex-review ISSUE-1: surface unexpected supervisor exit. Without
-            # this, a dead lock-holder is silent — no other worker can take over
-            # because the lock is session-scoped on a connection that's still
-            # open from this worker.
-            def _vcg_cri_done(t: asyncio.Task) -> None:
-                if t.cancelled():
-                    logger.info("vcg_cri_scan_loop supervisor cancelled")
-                    return
-                exc = t.exception()
-                if exc is not None:
-                    logger.error("vcg_cri_scan_loop supervisor exited with exception", exc_info=exc)
-                else:
-                    logger.warning(
-                        "vcg_cri_scan_loop supervisor returned without error (lock contention or unexpected exit)"
-                    )
-
-            vcg_cri_task.add_done_callback(_vcg_cri_done)
-            app.state.vcg_cri_task = vcg_cri_task
-            logger.info("vcg_cri_scan_loop background task started")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("vcg_cri_scan_loop failed to start: %s", exc)
-
     # F7.2 — single-leg three-source rehydrate. Runs synchronously before
     # the server starts serving so our view of in-flight orders is accurate
     # on first request. Failures are logged + swallowed so boot cannot be
@@ -739,19 +454,6 @@ async def lifespan(app: FastAPI):
                 await listener.stop()
             except Exception:  # noqa: BLE001
                 logger.exception("journal auto-import listener failed to stop")
-        if uw_daily_task is not None:
-            uw_daily_task.cancel()
-            try:
-                await uw_daily_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
-        vcg_cri_task = getattr(app.state, "vcg_cri_task", None)
-        if vcg_cri_task is not None:
-            vcg_cri_task.cancel()
-            try:
-                await vcg_cri_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
         ib_activity_task = getattr(app.state, "ib_activity_poller_task", None)
         if ib_activity_task is not None:
             ib_activity_task.cancel()
@@ -769,45 +471,6 @@ async def lifespan(app: FastAPI):
                 _futu_client.disconnect()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("FutuClient disconnect on shutdown failed: %s", exc)
-        # Clear long-lived in-memory singletons so `uvicorn --reload` doesn't
-        # double-allocate them on module reimport. Also releases cached report
-        # dicts that would otherwise pin ~100s of MB across a reload cycle.
-        try:
-            from xenon.api.routes import uw_analyze as _uw_route_mod
-
-            # Null the singletons so `get_portfolio_cache()` creates a fresh
-            # instance on the next reload cycle. The previous approach
-            # (_entries.clear()) left `_loaded=True` on the surviving object,
-            # which made `_ensure_loaded()` skip the disk read — every ticker
-            # re-scanned from scratch after --reload.
-            _uw_route_mod._portfolio_cache = None
-            _uw_route_mod._flow_log = None
-            # Recreate the OI semaphore so it binds to the new event loop
-            # on the next reload cycle (asyncio.Semaphore captures the loop
-            # on first acquire).
-            _uw_route_mod._ON_DEMAND_OI_SEM = asyncio.Semaphore(3)
-            # Close the shared UWClient if one was constructed. Leaves
-            # the underlying requests.Session idle connections to be
-            # released rather than lingering across reload cycles.
-            _shared_client = _uw_route_mod._uw_client_singleton
-            if _shared_client is not None:
-                try:
-                    _close = getattr(_shared_client, "close", None)
-                    if callable(_close):
-                        _close()
-                except Exception as close_exc:  # noqa: BLE001
-                    logger.debug("shared UWClient close failed: %s", close_exc)
-                _uw_route_mod._uw_client_singleton = None
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("uw_analyze singleton clear on shutdown failed: %s", exc)
-        # Persist UW API stats hourly history so daily stats survive a
-        # FastAPI restart. Best-effort — never block shutdown on I/O.
-        try:
-            from xenon.utils.uw_api_stats import stats as _uw_stats
-
-            _uw_stats.flush_history()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("uw_api_stats history flush on shutdown failed: %s", exc)
         await dispose_engine()
         logger.info("Xenon API shut down")
 
@@ -816,10 +479,7 @@ app = FastAPI(title="Xenon API", version="1.0.0", lifespan=lifespan)
 app.include_router(historical_router)
 app.include_router(journal_router)
 app.include_router(orders_router)
-app.include_router(regime_router)
 app.include_router(trades_router)
-app.include_router(uw_analyze_router)
-app.include_router(uw_stats_router)
 app.include_router(wizard_router)
 
 app.add_middleware(
@@ -911,50 +571,6 @@ _SCAN_TYPE_MAP = {
     "vcg.json": "vcg",
     "cri.json": "cri",
 }
-
-
-def _write_scan_to_postgres(filename: str, data: dict) -> None:
-    """Write a scanner result to Postgres scan_results table (best-effort).
-
-    For 'vcg.json', also writes a row to xenon.vcg_series so generated columns
-    populate. For 'cri.json', also writes a row to xenon.cri_series — the
-    Phase 1 regime_state view reads cri_series, not scan_results.
-    (gex.json writes its own gex_snapshots row inside gex.py.)
-    """
-    scan_type = _SCAN_TYPE_MAP.get(filename)
-    if not scan_type:
-        return
-    try:
-        url = os.environ.get("DATABASE_URL")
-        if not url:
-            return
-        from sqlalchemy import create_engine as _cse
-        from sqlalchemy import insert
-
-        from xenon.db.schema import scan_results
-
-        sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
-        engine = _cse(sync_url)
-        with engine.begin() as conn:
-            conn.execute(insert(scan_results).values(scan_type=scan_type, payload=data))
-            if filename == "vcg.json":
-                from xenon.db.queries.scans import save_vcg_scan
-
-                save_vcg_scan(
-                    conn,
-                    payload=data,
-                    market_open=data.get("market_open"),
-                    credit_proxy=data.get("credit_proxy"),
-                )
-            elif filename == "cri.json":
-                from xenon.db.queries.scans import save_cri_scan
-
-                save_cri_scan(conn, payload=data)
-        engine.dispose()
-    except Exception:
-        logger.warning("scan archive to Postgres failed for %s", filename, exc_info=True)
-
-
 def _atomic_save(path: str, data: dict) -> str:
     """Use the project's atomic_save for portfolio/orders files."""
     from xenon.utils.atomic_io import atomic_save
@@ -987,60 +603,6 @@ def _coerce_date(value: object) -> Optional[datetime]:
             return None
 
 
-def _normalize_risk_reversal_series(raw: object) -> List[dict]:
-    """Normalize UW historical risk reversal payloads into a stable list."""
-    rows: Iterable[object] = []
-    if isinstance(raw, dict):
-        raw_rows = raw.get("data")
-        if isinstance(raw_rows, list):
-            rows = raw_rows
-    elif isinstance(raw, list):
-        rows = raw
-
-    normalized: List[dict] = []
-    seen_dates: set[str] = set()
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        date = row.get("date")
-        value = row.get("risk_reversal")
-        if not isinstance(date, str):
-            continue
-        numeric = _coerce_float(value)
-        if numeric is None:
-            continue
-        # Skip invalid or duplicate dates; keep the latest row for a date.
-        if date in seen_dates:
-            continue
-        seen_dates.add(date)
-        normalized.append({"date": date, "value": numeric})
-
-    normalized.sort(key=lambda item: item["date"])
-    return normalized
-
-
-def _extract_expiry_candidates(raw: object) -> List[str]:
-    rows: Iterable[object] = []
-    if isinstance(raw, dict):
-        raw_rows = raw.get("data")
-        if isinstance(raw_rows, list):
-            rows = raw_rows
-    elif isinstance(raw, list):
-        rows = raw
-
-    candidates: List[str] = []
-    for row in rows:
-        if isinstance(row, dict):
-            expiry = row.get("expiry")
-            if not isinstance(expiry, str):
-                expiry = row.get("expires")
-            if not isinstance(expiry, str):
-                expiry = row.get("expiration")
-            if isinstance(expiry, str) and expiry not in candidates:
-                candidates.append(expiry)
-    return candidates
-
-
 def _pick_preferred_expiry(raw: object, now: Optional[datetime] = None) -> Optional[str]:
     """Choose the nearest expiry that is today or newer, else the most recent expiry."""
     candidates = _extract_expiry_candidates(raw)
@@ -1064,53 +626,6 @@ def _pick_preferred_expiry(raw: object, now: Optional[datetime] = None) -> Optio
     if future_candidates:
         return min(future_candidates, key=lambda item: item[1])[0]
     return max(parsed, key=lambda item: item[1])[0]
-
-
-def _normalize_expiry_string(value: object) -> Optional[str]:
-    if not isinstance(value, str):
-        return None
-
-    parsed = _coerce_date(value)
-    if parsed is not None:
-        return parsed.date().isoformat()
-
-    compact = value.strip()
-    if len(compact) == 8 and compact.isdigit():
-        try:
-            return datetime.strptime(compact, "%Y%m%d").date().isoformat()
-        except ValueError:
-            return None
-
-    return None
-
-
-def _sort_expiry_candidates(expiries: Iterable[str], now: Optional[datetime] = None) -> List[str]:
-    parsed: List[Tuple[str, datetime]] = []
-    seen: set[str] = set()
-    for expiry in expiries:
-        normalized = _normalize_expiry_string(expiry)
-        if normalized is None or normalized in seen:
-            continue
-        parsed_date = _coerce_date(normalized)
-        if parsed_date is None:
-            continue
-        seen.add(normalized)
-        parsed.append((normalized, parsed_date))
-
-    if not parsed:
-        return []
-
-    current = now or datetime.now(timezone.utc)
-    future = sorted(
-        (item for item in parsed if item[1].date() >= current.date()),
-        key=lambda item: item[1],
-    )
-    past = sorted(
-        (item for item in parsed if item[1].date() < current.date()),
-        key=lambda item: item[1],
-        reverse=True,
-    )
-    return [expiry for expiry, _ in [*future, *past]]
 
 
 def _extract_ib_expiry_candidates(raw: object) -> List[str]:
@@ -1180,117 +695,6 @@ def _fetch_ib_index_option_chain(client: Any, ticker: str, exchange: str, sec_ty
     contract = Index(symbol=ticker, exchange=exchange or _preferred_index_exchange(ticker))
     qualified = client.qualify_contract(contract)
     return client.ib.reqSecDefOptParams(ticker, exchange, sec_type, qualified.conId)
-
-
-def _prepend_expiry(candidates: List[str], expiry: Optional[str]) -> List[str]:
-    normalized = _normalize_expiry_string(expiry)
-    if normalized is None:
-        return candidates
-    return [normalized, *[candidate for candidate in candidates if candidate != normalized]]
-
-
-def _limit_expiry_candidates(candidates: List[str], max_expiries: int) -> List[str]:
-    if max_expiries <= 0 or len(candidates) <= max_expiries:
-        return candidates
-    if max_expiries == 1:
-        return candidates[:1]
-
-    last_index = len(candidates) - 1
-    selected_indices = {0, last_index}
-    for slot in range(1, max_expiries - 1):
-        index = round(slot * last_index / (max_expiries - 1))
-        selected_indices.add(index)
-
-    return [candidates[index] for index in sorted(selected_indices)[:max_expiries]]
-
-
-def _build_internals_skew_cache_path(
-    nq_ticker: str,
-    spx_ticker: str,
-    timeframe: str,
-    nq_delta: int,
-    spx_delta: int,
-    nq_expiry: Optional[str],
-    spx_expiry: Optional[str],
-) -> Path:
-    key = (
-        f"v7-uw-skew-history|{nq_ticker}|{spx_ticker}|{timeframe}|"
-        f"{nq_delta}|{spx_delta}|{nq_expiry or ''}|{spx_expiry or ''}"
-    )
-    key_hash = hashlib.md5(key.encode()).hexdigest()[:16]
-    return INTERNALS_SKEW_CACHE_DIR / f"internals_skew_history_{key_hash}.json"
-
-
-def _read_internals_skew_cache(path: Path) -> Optional[dict]:
-    cached = _read_cache(path)
-    if not isinstance(cached, dict):
-        return None
-
-    generated_at = cached.get("generated_at")
-    if not isinstance(generated_at, str):
-        return None
-
-    parsed = _coerce_date(generated_at)
-    if parsed is None:
-        return None
-
-    age_seconds = (datetime.now(timezone.utc) - parsed.replace(tzinfo=timezone.utc)).total_seconds()
-    if age_seconds > INTERNALS_SKEW_CACHE_TTL_SECONDS:
-        return None
-    return cached
-
-
-def _internals_skew_cache_payload(
-    nq_ticker: str,
-    spx_ticker: str,
-    timeframe: str,
-    nq_delta: int,
-    spx_delta: int,
-    nq_expiry: Optional[str],
-    spx_expiry: Optional[str],
-    nq_rows: List[dict],
-    spx_rows: List[dict],
-    used_nq_expiries: List[str],
-    used_spx_expiries: List[str],
-) -> dict:
-    return {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "source": {
-            "expiry_discovery": "Unusual Whales",
-            "skew_history": "Unusual Whales",
-        },
-        "nq": {
-            "ticker": nq_ticker.upper(),
-            "expiry": used_nq_expiries[0] if used_nq_expiries else None,
-            "expiries": used_nq_expiries,
-            "delta": nq_delta,
-            "timeframe": timeframe,
-            "data": nq_rows,
-        },
-        "spx": {
-            "ticker": spx_ticker.upper(),
-            "expiry": used_spx_expiries[0] if used_spx_expiries else None,
-            "expiries": used_spx_expiries,
-            "delta": spx_delta,
-            "timeframe": timeframe,
-            "data": spx_rows,
-        },
-    }
-
-
-def _merge_risk_reversal_series(series_rows: Iterable[List[dict]]) -> List[dict]:
-    merged: dict[str, float] = {}
-    for rows in series_rows:
-        for row in rows:
-            date = row.get("date")
-            value = row.get("value")
-            if not isinstance(date, str) or not isinstance(value, (int, float)):
-                continue
-            if date not in merged:
-                merged[date] = float(value)
-    return [{"date": date, "value": merged[date]} for date in sorted(merged)]
-
-
 def _series_span_days(rows: List[dict]) -> int:
     if len(rows) < 2:
         return 0
@@ -1299,130 +703,6 @@ def _series_span_days(rows: List[dict]) -> int:
     if start is None or end is None:
         return 0
     return (end.date() - start.date()).days
-
-
-def _needs_deeper_backfill(rows: List[dict], timeframe: str) -> bool:
-    if not rows:
-        return True
-    span_days = _series_span_days(rows)
-    normalized = timeframe.upper().strip()
-    if normalized in {"5Y", "ALL"}:
-        return span_days < 700
-    if normalized == "2Y":
-        return span_days < 400
-    return False
-
-
-async def _resolve_expiry_candidates(
-    ticker: str,
-    expiry: Optional[str] = None,
-) -> Tuple[List[str], List[str], str]:
-    normalized_ticker = ticker.upper()
-    uw_candidates: List[str] = []
-    try:
-        with UWClient() as client:
-            expiry_breakdown = client.get_expiry_breakdown(normalized_ticker)
-        uw_candidates = _sort_expiry_candidates(_extract_expiry_candidates(expiry_breakdown))
-    except Exception:
-        uw_candidates = []
-
-    uw_candidates = _prepend_expiry(uw_candidates, expiry)
-    if uw_candidates:
-        return [], uw_candidates, "uw"
-
-    raise HTTPException(status_code=422, detail=f"No expiry available for {normalized_ticker}")
-
-
-def _compose_expiry_candidates(
-    ib_candidates: List[str],
-    uw_candidates: List[str],
-    max_expiries: int,
-) -> List[str]:
-    if not ib_candidates:
-        return _limit_expiry_candidates(uw_candidates, max_expiries)
-    if not uw_candidates:
-        return _limit_expiry_candidates(ib_candidates, max_expiries)
-
-    ib_budget = min(4, max_expiries)
-    selected = _limit_expiry_candidates(ib_candidates, ib_budget)
-    remaining = max_expiries - len(selected)
-    if remaining <= 0:
-        return selected
-
-    uw_only = [candidate for candidate in uw_candidates if candidate not in selected]
-    return selected + _limit_expiry_candidates(uw_only, remaining)
-
-
-async def _fetch_risk_reversal_history(
-    ticker: str,
-    timeframe: str,
-    delta: int,
-    expiry: Optional[str] = None,
-    max_expiries: int = 8,
-) -> Tuple[List[dict], List[str], str]:
-    normalized_ticker = ticker.upper()
-    ib_candidates, uw_candidates, expiry_source = await _resolve_expiry_candidates(normalized_ticker, expiry)
-    selected_candidates = _compose_expiry_candidates(ib_candidates, uw_candidates, max_expiries)
-
-    last_error: Optional[BaseException] = None
-    merged_rows: List[List[dict]] = []
-    used_expiries: List[str] = []
-    requested_expiry = _normalize_expiry_string(expiry)
-
-    for candidate_expiry in selected_candidates:
-        try:
-            with UWClient() as client:
-                payload = client.get_historical_risk_reversal_skew(
-                    normalized_ticker,
-                    expiry=candidate_expiry,
-                    timeframe=timeframe,
-                    delta=delta,
-                )
-            rows = _normalize_risk_reversal_series(payload)
-            if rows:
-                merged_rows.append(rows)
-                used_expiries.append(candidate_expiry)
-        except UWNotFoundError as exc:
-            last_error = exc
-            if requested_expiry and candidate_expiry == requested_expiry:
-                continue
-        except UWAPIError as exc:
-            last_error = exc
-            continue
-
-    merged = _merge_risk_reversal_series(merged_rows)
-    if "uw" in expiry_source and _needs_deeper_backfill(merged, timeframe):
-        extra_candidates = _limit_expiry_candidates(
-            [candidate for candidate in uw_candidates if candidate not in selected_candidates],
-            12,
-        )
-        for candidate_expiry in extra_candidates:
-            try:
-                with UWClient() as client:
-                    payload = client.get_historical_risk_reversal_skew(
-                        normalized_ticker,
-                        expiry=candidate_expiry,
-                        timeframe=timeframe,
-                        delta=delta,
-                    )
-                rows = _normalize_risk_reversal_series(payload)
-                if rows:
-                    merged_rows.append(rows)
-                    used_expiries.append(candidate_expiry)
-            except UWAPIError as exc:
-                last_error = exc
-                continue
-        merged = _merge_risk_reversal_series(merged_rows)
-
-    if merged:
-        return merged, used_expiries, expiry_source
-
-    if last_error is None:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch skew history for {normalized_ticker}")
-    raise HTTPException(
-        status_code=502,
-        detail=getattr(last_error, "args", (f"Failed to fetch skew history for {normalized_ticker}",))[0],
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1551,34 +831,7 @@ async def health():
         "snapshotter": _snapshotter_health(),
         "order_submissions": _order_submissions_health(),
         "flex_divergence": _flex_divergence_health(),
-        "vcg_cri_loop": _vcg_cri_loop_health(),
     }
-
-
-def _vcg_cri_loop_health() -> dict:
-    """Codex-review ISSUE-1: report supervisor task state so a dead loop is
-    observable to operators. `running=True` means the supervisor task is
-    alive and (presumably) holds the advisory lock; `running=False` plus
-    `exception` set indicates the lock-holder crashed and no worker is
-    currently scanning."""
-    task = getattr(app.state, "vcg_cri_task", None)
-    if task is None:
-        return {"configured": False}
-    if not task.done():
-        return {"configured": True, "running": True}
-    out: dict = {"configured": True, "running": False}
-    if task.cancelled():
-        out["cancelled"] = True
-        return out
-    exc = task.exception()
-    if exc is not None:
-        out["exception"] = f"{type(exc).__name__}: {exc}"
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Dev probes — gated on XENON_API_TEST_MODE or DEV_PROBES=1. Never in prod.
-# ---------------------------------------------------------------------------
 
 
 def _dev_probes_enabled() -> bool:
@@ -1725,40 +978,6 @@ async def ib_restart():
 # ---------------------------------------------------------------------------
 # Phase 1: Stateless UW-only endpoints (subprocess-based)
 # ---------------------------------------------------------------------------
-
-
-async def _load_latest_scan_payload(scan_type: str) -> dict | None:
-    from xenon.db.engine import get_engine
-    from xenon.db.queries.scans import get_latest_scan
-
-    try:
-        engine = get_engine()
-        async with engine.connect() as conn:
-            row = await get_latest_scan(conn, scan_type=scan_type)
-    except Exception:
-        logger.warning("[%s] failed to read latest scan payload from PG", scan_type, exc_info=True)
-        return None
-    if not row:
-        return None
-    payload = dict(row.get("payload") or {})
-    scanned_at = row.get("scanned_at")
-    if isinstance(scanned_at, datetime):
-        payload["_scanned_at"] = scanned_at.astimezone(timezone.utc).isoformat()
-    return payload
-
-
-def _empty_scan_payload() -> dict:
-    return {
-        "scan_id": "",
-        "scan_timestamp": "",
-        "market_context": {"spy_close": 0, "vix_close": 0, "regime": "unknown"},
-        "universe_size": 0,
-        "stage_a_survivors": 0,
-        "stage_b_survivors": 0,
-        "candidates": [],
-    }
-
-
 def _empty_discover_payload() -> dict:
     return {
         "discovery_time": "",
@@ -1783,75 +1002,6 @@ def _empty_cri_payload() -> dict:
         "history": [],
         "spy_closes": [],
     }
-
-
-@app.get("/scan")
-async def scan_get():
-    return await _load_latest_scan_payload("watchlist") or _empty_scan_payload()
-
-
-@app.post("/scan")
-async def scan():
-    """Run watchlist scanner (scanner.py --top 25)."""
-    result = await run_entry_point("xenon-scan", ["--top", "25"], timeout=120)
-    if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
-    _write_scan_to_postgres("scanner.json", result.data)
-    return result.data
-
-
-@app.get("/discover")
-async def discover_get():
-    return await _load_latest_scan_payload("discover") or _empty_discover_payload()
-
-
-@app.post("/discover")
-async def discover():
-    """Run market-wide discovery (discover.py --min-alerts 1)."""
-    result = await run_entry_point("xenon-discover", ["--min-alerts", "1"], timeout=120)
-    if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
-    if result.data and result.data.get("error"):
-        raise HTTPException(status_code=400, detail=result.data["error"])
-    _write_scan_to_postgres("discover.json", result.data)
-    return result.data
-
-
-@app.post("/flow-analysis")
-async def flow_analysis_post(account: str = "ib"):
-    """Portfolio flow alignment view for the given broker account.
-
-    POSTs trigger a cache fill on missing tickers (bounded concurrency),
-    so the returned payload is always complete. Reads dark-pool and
-    options-flow summaries from the shared uw-analyze LRU cache — no
-    second UW API pipeline, no stale JSON files on disk.
-    """
-    from xenon.api.routes.uw_analyze import _runner, get_portfolio_cache
-    from xenon.api.services.uw_analyze_portfolio_bias import classify_portfolio
-
-    if account not in ("ib", "futu"):
-        raise HTTPException(status_code=400, detail=f"Unknown account: {account!r}")
-    cache = get_portfolio_cache()
-    data = await classify_portfolio(account=account, cache=cache, runner=_runner, read_only=False)
-    return data
-
-
-@app.get("/flow-analysis")
-async def flow_analysis_get(account: str = "ib"):
-    """Read-only snapshot of portfolio flow alignment.
-
-    Serves whatever the uw-analyze cache already has without triggering
-    a refresh. Used by ``web/lib/useSyncHook`` on initial page load so
-    the first render is fast; a subsequent POST fills missing tickers.
-    """
-    from xenon.api.routes.uw_analyze import get_portfolio_cache
-    from xenon.api.services.uw_analyze_portfolio_bias import classify_portfolio
-
-    if account not in ("ib", "futu"):
-        raise HTTPException(status_code=400, detail=f"Unknown account: {account!r}")
-    cache = get_portfolio_cache()
-    data = await classify_portfolio(account=account, cache=cache, runner=None, read_only=True)
-    return data
 
 
 @app.get("/attribution")
@@ -3396,40 +2546,6 @@ async def _orders_modify_from_body(body: dict):
 # ---------------------------------------------------------------------------
 
 
-@app.post("/cta/share")
-async def cta_share():
-    """Generate CTA X share report (4 cards + preview HTML). Returns output path."""
-    result = await run_entry_point("xenon-generate-cta-share", ["--json", "--no-open"], timeout=120)
-    if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
-    return result.data
-
-
-@app.get("/regime")
-async def regime_get():
-    payload = await _load_latest_scan_payload("cri")
-    if not payload:
-        return _empty_cri_payload()
-    payload["market_open"] = _is_market_open_now()
-    return payload
-
-
-@app.post("/regime/scan")
-async def regime_scan():
-    """Run CRI scan (cri_scan.py --json). 120s timeout."""
-    result = await run_entry_point("xenon-cri-scan", ["--json"], timeout=120)
-    if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
-    _write_scan_to_postgres("cri.json", result.data)
-    return result.data
-
-
-# ── VCG (Volatility-Credit Gap) ─────────────────────────────────────
-
-_vcg_last_scan: float = 0.0
-_vcg_scan_lock: Optional[asyncio.Lock] = None
-VCG_COOLDOWN_S = 60
-
 
 def _is_market_open_now() -> bool:
     """Live ET market-hours check — used to override stamped market_open at read time."""
@@ -3441,85 +2557,6 @@ def _is_market_open_now() -> bool:
         return False
     minutes = et.hour * 60 + et.minute
     return 9 * 60 + 30 <= minutes <= 16 * 60
-
-
-@app.get("/vcg")
-async def vcg_get():
-    """Return the latest VCG snapshot from Postgres.
-
-    Sources from `xenon.vcg_series.payload` — the same JSONB the scanner
-    writes via `save_vcg_scan`. Replaces the prior `data/vcg.json` reader
-    in `web/app/api/vcg/route.ts`. Background refresh is still triggered
-    via `POST /vcg/scan` (the cron-or-manual path), so this endpoint is
-    purely read-side.
-
-    Returns an empty-shape envelope when no scan rows exist yet so the
-    web route can render the panel without 404 handling.
-    """
-    from xenon.db.engine import get_engine
-    from xenon.db.queries.scans import get_latest_vcg
-
-    engine = get_engine()
-    async with engine.connect() as conn:
-        payload = await get_latest_vcg(conn)
-
-    market_open_now = _is_market_open_now()
-    if not payload:
-        return {
-            "scan_time": "",
-            "market_open": market_open_now,
-            "credit_proxy": "HYG",
-            "signal": {},
-            "history": [],
-        }
-    payload["market_open"] = market_open_now
-    return payload
-
-
-async def _load_latest_vcg_from_pg() -> dict | None:
-    """Helper: read the latest vcg_series payload from Postgres."""
-    from xenon.db.engine import get_engine
-    from xenon.db.queries.scans import get_latest_vcg
-
-    try:
-        engine = get_engine()
-        async with engine.connect() as conn:
-            return await get_latest_vcg(conn)
-    except Exception:
-        logger.warning("[vcg] failed to read latest payload from PG", exc_info=True)
-        return None
-
-
-@app.post("/vcg/scan")
-async def vcg_scan():
-    """Run VCG scan (vcg_scan.py --json). 60s cooldown between scans.
-
-    During the cooldown window, returns the most recent payload from
-    xenon.vcg_series (Postgres) instead of re-reading data/vcg.json.
-    """
-    global _vcg_last_scan, _vcg_scan_lock
-    import time as _time
-
-    if _vcg_scan_lock is None:
-        _vcg_scan_lock = asyncio.Lock()
-    now = _time.monotonic()
-    if now - _vcg_last_scan < VCG_COOLDOWN_S:
-        cached = await _load_latest_vcg_from_pg()
-        if cached:
-            return cached
-    async with _vcg_scan_lock:
-        if _time.monotonic() - _vcg_last_scan < VCG_COOLDOWN_S:
-            cached = await _load_latest_vcg_from_pg()
-            if cached:
-                return cached
-        result = await run_entry_point("xenon-vcg-scan", ["--json"], timeout=120)
-        if not result.ok:
-            raise HTTPException(status_code=502, detail=result.error)
-        _write_scan_to_postgres("vcg.json", result.data)
-        _vcg_last_scan = _time.monotonic()
-        return result.data
-
-
 def _futu_in_cooldown() -> bool:
     """True if the last successful sync was less than FUTU_COOLDOWN_S ago.
 
@@ -3659,188 +2696,6 @@ async def futu_portfolio():
     if cached is None:
         return dict(_FUTU_NEVER_SYNCED)
     return {"ok": True, **cached}
-
-
-@app.post("/vcg/share")
-async def vcg_share():
-    """Generate VCG X share report (4 cards + preview HTML). Returns output path."""
-    result = await run_entry_point("xenon-generate-vcg-share", ["--json", "--no-open"], timeout=120)
-    if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
-    return result.data
-
-
-# ── GEX (Gamma Exposure Levels) ─────────────────────────────────────
-
-_gex_last_scan: float = 0.0
-_gex_scan_lock: Optional[asyncio.Lock] = None
-GEX_COOLDOWN_S = 60
-
-
-@app.post("/gex/share")
-async def gex_share():
-    """Generate GEX X share report (4 cards + preview HTML). Returns output path."""
-    result = await run_entry_point("xenon-generate-gex-share", ["--json", "--no-open"], timeout=120)
-    if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
-    return result.data
-
-
-def _empty_gex_payload(ticker: str) -> dict:
-    return {
-        "scan_time": "",
-        "market_open": _is_market_open_now(),
-        "ticker": ticker.upper(),
-        "spot": 0,
-        "close": None,
-        "day_change": None,
-        "day_change_pct": None,
-        "data_date": "",
-        "net_gex": 0,
-        "net_dex": 0,
-        "atm_iv": None,
-        "vol_pc": None,
-        "levels": {},
-        "profile": [],
-        "expected_range": {},
-        "bias": {},
-        "history": [],
-        "iv": None,
-        "mq": None,
-        "source_delta": None,
-    }
-
-
-async def _load_latest_gex_from_pg(ticker: str) -> dict | None:
-    from xenon.db.engine import get_engine
-    from xenon.db.queries.scans import get_latest_gex
-
-    try:
-        engine = get_engine()
-        async with engine.connect() as conn:
-            return await get_latest_gex(conn, ticker=ticker)
-    except Exception:
-        logger.warning("[gex] failed to read latest payload from PG", exc_info=True)
-        return None
-
-
-@app.get("/gex")
-async def gex_get(ticker: str = "SPX"):
-    payload = await _load_latest_gex_from_pg(ticker.upper())
-    if not payload:
-        return _empty_gex_payload(ticker)
-    payload["market_open"] = _is_market_open_now()
-    return payload
-
-
-@app.post("/gex/scan")
-async def gex_scan(ticker: str = "SPX"):
-    """Run GEX scan (gex_scan.py --json --ticker X). 60s cooldown between scans."""
-    global _gex_last_scan, _gex_scan_lock
-    import time as _time
-
-    if _gex_scan_lock is None:
-        _gex_scan_lock = asyncio.Lock()
-    now = _time.monotonic()
-    if now - _gex_last_scan < GEX_COOLDOWN_S:
-        cached = await _load_latest_gex_from_pg(ticker.upper())
-        if cached:
-            return cached
-    async with _gex_scan_lock:
-        if _time.monotonic() - _gex_last_scan < GEX_COOLDOWN_S:
-            cached = await _load_latest_gex_from_pg(ticker.upper())
-            if cached:
-                return cached
-        result = await run_entry_point("xenon-gex-scan", ["--json", "--ticker", ticker.upper()], timeout=120)
-        if not result.ok:
-            raise HTTPException(status_code=502, detail=result.error)
-        _write_scan_to_postgres("gex.json", result.data)
-        _gex_last_scan = _time.monotonic()
-        return result.data
-
-
-@app.post("/regime/share")
-async def regime_share():
-    """Generate Regime/CRI X share report (4 cards + preview HTML). Returns output path."""
-    result = await run_entry_point("xenon-generate-regime-share", ["--json", "--no-open"], timeout=120)
-    if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
-    return result.data
-
-
-@app.post("/internals/share")
-async def internals_share():
-    """Generate internals share report using the shared CRI report builder."""
-    result = await run_entry_point("xenon-generate-regime-share", ["--json", "--no-open"], timeout=120)
-    if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
-    return result.data
-
-
-@app.get("/internals/skew-history")
-async def internals_skew_history(
-    nq_ticker: str = Query(default="NDX"),
-    spx_ticker: str = Query(default="SPX"),
-    timeframe: str = Query(default="5Y"),
-    nq_delta: int = Query(default=25),
-    spx_delta: int = Query(default=25),
-    nq_expiry: Optional[str] = None,
-    spx_expiry: Optional[str] = None,
-):
-    if not uw_available:
-        raise HTTPException(status_code=503, detail="UW token is required for internals skew history")
-
-    normalized_timeframe = timeframe.upper().strip() or "5Y"
-    cache_path = _build_internals_skew_cache_path(
-        nq_ticker,
-        spx_ticker,
-        normalized_timeframe,
-        nq_delta,
-        spx_delta,
-        nq_expiry,
-        spx_expiry,
-    )
-    cached = _read_internals_skew_cache(cache_path)
-    if cached:
-        return cached
-
-    try:
-        nq_rows, used_nq_expiries, nq_expiry_source = await _fetch_risk_reversal_history(
-            nq_ticker,
-            normalized_timeframe,
-            nq_delta,
-            nq_expiry,
-            max_expiries=12,
-        )
-        spx_rows, used_spx_expiries, spx_expiry_source = await _fetch_risk_reversal_history(
-            spx_ticker,
-            normalized_timeframe,
-            spx_delta,
-            spx_expiry,
-            max_expiries=12,
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    payload = _internals_skew_cache_payload(
-        nq_ticker,
-        spx_ticker,
-        normalized_timeframe,
-        nq_delta,
-        spx_delta,
-        nq_expiry,
-        spx_expiry,
-        nq_rows,
-        spx_rows,
-        used_nq_expiries,
-        used_spx_expiries,
-    )
-    payload["nq"]["expiry_source"] = nq_expiry_source
-    payload["spx"]["expiry_source"] = spx_expiry_source
-    _write_cache(cache_path, payload)
-    return payload
 
 
 @app.post("/blotter")
