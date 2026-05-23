@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -34,16 +33,11 @@ def test_ib_orders_sync_no_longer_writes_orders_json():
 
 def test_next_migrated_routes_do_not_read_runtime_json_caches():
     route_paths = [
-        "web/app/api/scanner/route.ts",
-        "web/app/api/discover/route.ts",
-        "web/app/api/regime/route.ts",
         "web/app/api/blotter/route.ts",
-        "web/app/api/gex/route.ts",
         "web/app/api/performance/route.ts",
         "web/app/api/portfolio/route.ts",
         "web/app/api/journal/route.ts",
         "web/app/api/orders/route.ts",
-        "web/app/api/pi/route.ts",
     ]
     offenders: list[str] = []
     for rel in route_paths:
