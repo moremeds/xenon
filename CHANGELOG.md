@@ -5,6 +5,12 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.0.6] — 2026-05-26
+
+### Documentation
+
+- **Clarify Docker-to-IB Gateway routing for Mac mini deploys.** `docs/runbooks/remote-deploy.md` now distinguishes co-located IB Gateway (`host.docker.internal`) from IB running on another LAN/Tailscale host or behind a localhost-only SSH tunnel. The bootstrap step no longer rewrites `IB_GATEWAY_HOST` unconditionally, and `docker-compose.yml` comments now describe the same topology boundary.
+
 ## [0.0.5] — 2026-05-05
 
 
