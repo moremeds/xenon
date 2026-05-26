@@ -12,13 +12,28 @@ The old launchd path is no longer the deploy mechanism.
 
 | Host                                                      | Where things live                                                                                                                                                                                                                                                              |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Mac mini                                                  | Colima (Linux/arm64 VM running Docker), 4 containers (api / web / realtime / migrator), live IB Gateway 10.45 (`:4001`, host-native), Postgres 17 (`:5432`, host-native, schemas `xenon` / `apex` / `events`).                                                                 |
+| Mac mini                                                  | Colima (Linux/arm64 VM running Docker), 4 containers (api / web / realtime / migrator), Postgres 17 (`:5432`, host-native, schemas `xenon` / `apex` / `events`). IB Gateway may be host-native on the mini or reachable on another machine; see "IB Gateway reachability" below. |
 | This dev Mac                                              | Source of truth for builds + tag cuts. Paper IB Gateway local (`127.0.0.1:4002`).                                                                                                                                                                                              |
 | GHCR `ghcr.io/moremeds/xenon-{api,web,realtime,migrator}` | Owned by user `moremeds`; tags `:X.Y.Z` (no `v` prefix — see "Tag convention" below) and `:latest`. Visibility "private". Each package has `moremeds/xenon` linked under **Manage Actions access** with role **Write**; without that link, `release.yml::ghcr-push` is denied. |
 
-Containers reach Postgres + IB Gateway + Futu OpenD via `host.docker.internal`
-(Colima maps it to the host gateway). Postgres + IB Gateway never run in
-containers.
+Containers reach host-native Mac mini services through `host.docker.internal`
+(Colima maps it to the host gateway). That hostname only means "the Docker
+host." If IB Gateway is running on a different machine, use that machine's
+LAN/Tailscale address instead, or tunnel the Gateway port onto the mini.
+Postgres + IB Gateway never run in the Xenon app containers.
+
+### IB Gateway reachability
+
+Set `/opt/xenon/.env` based on where IB Gateway actually runs:
+
+| IB Gateway location | `IB_GATEWAY_HOST` | Notes |
+| --- | --- | --- |
+| Same Mac mini that runs Docker | `host.docker.internal` | Container-to-host path. `XENON_TRADING_MODE=live` uses port `4001`; `paper` uses `4002`. |
+| Another Mac/server on LAN or Tailscale | that machine's reachable IP or hostname | IB Gateway/TWS must allow API clients from the Mac mini or its Colima VM source IP. |
+| Another Mac/server but IB is localhost-only | `host.docker.internal` | Run an SSH tunnel on the mini, for example `ssh -N -L 4002:127.0.0.1:4002 <user>@<ib-host>`, then use `XENON_TRADING_MODE=paper`. |
+
+Do not set `IB_GATEWAY_HOST=127.0.0.1` for Docker deployment. Inside a
+container, `127.0.0.1` is the container itself.
 
 ## Layout on the mini (`/opt/xenon/`)
 
@@ -52,20 +67,21 @@ gh auth token | ssh moremeds@192.168.50.47 \
 # 3. Start Colima (uses the existing default profile: 2 CPU / 2 GiB / 100 GiB / arm64)
 ssh moremeds@192.168.50.47 'PATH=/opt/homebrew/bin:$PATH colima start'
 
-# 4. Push env files (fix DATABASE_URL host + IB_GATEWAY_HOST → host.docker.internal,
-#    and append XENON_BROKER_ACCOUNT — see follow-up #9 for why this is required)
+# 4. Push env files (fix DATABASE_URL host, set IB reachability, and append
+#    XENON_BROKER_ACCOUNT — see follow-up #9 for why this is required)
 scp .env       moremeds@192.168.50.47:/opt/xenon/.env
 scp web/.env   moremeds@192.168.50.47:/opt/xenon/web.env
 ssh moremeds@192.168.50.47 'cd /opt/xenon && \
-  sed -i "" -E "s|@192\.168\.50\.47:5432|@host.docker.internal:5432|g; \
-                s|^IB_GATEWAY_HOST=.*|IB_GATEWAY_HOST=host.docker.internal|" .env && \
+  sed -i "" -E "s|@192\.168\.50\.47:5432|@host.docker.internal:5432|g" .env && \
   ( grep -q "^XENON_BROKER_ACCOUNT=" .env || \
     echo "XENON_BROKER_ACCOUNT=<U-prefix-for-live-or-DU-prefix-for-paper>" >> .env )'
 
-# 4a. Edit the placeholder. Without this, the api boot raises
+# 4a. Edit the placeholders. Without XENON_BROKER_ACCOUNT, the api boot raises
 #     `ValueError: app.state.trading_mode and app.state.account must be set`
 #     and every IB-touching endpoint 500s — the lifespan guard fails closed.
-ssh moremeds@192.168.50.47 'vim /opt/xenon/.env'   # set XENON_BROKER_ACCOUNT to your real account ID
+ssh moremeds@192.168.50.47 'vim /opt/xenon/.env'
+# Set XENON_BROKER_ACCOUNT to your real account ID.
+# Set IB_GATEWAY_HOST per "IB Gateway reachability" above.
 
 # 5. compose.yml (image: refs only — see template at the bottom of this doc)
 scp <local-compose.yml-template> moremeds@192.168.50.47:/opt/xenon/compose.yml
@@ -157,9 +173,8 @@ follows the convention above.
    Expected:
    - `docker-compose ps` → `api` and `web` `Up (healthy)`, `realtime` `Up`.
    - `/health` → 200 with valid JSON.
-     - `ib_gateway.port_listening: true` only when the live Gateway at
-       `host.docker.internal:4001` is up. **Currently expected to be `false`** until
-       the Gateway is started on the mini.
+     - `ib_gateway.port_listening: true` only when the configured Gateway
+       (`IB_GATEWAY_HOST` plus the port derived from `XENON_TRADING_MODE`) is reachable.
    - `/sign-in` → 200.
 
 ## Auto-start on mini boot
@@ -324,8 +339,9 @@ Kept here as institutional memory — these are no longer open.
 
 ```yaml
 # Pulls 4 images from ghcr.io/moremeds/xenon-* (no build steps).
-# Postgres + IB Gateway live host-native; containers reach both via
-# host.docker.internal.
+# Postgres is host-native on the mini; containers reach it via
+# host.docker.internal. IB_GATEWAY_HOST comes from .env and must match where
+# IB Gateway actually runs.
 
 services:
   migrator:

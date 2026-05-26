@@ -1,8 +1,11 @@
 # Phase 1 Stage A — single compose file for both this Mac (dev workspace)
 # and the remote Mac mini (when Stage B lands). Postgres lives outside
-# compose at 192.168.50.47:5432; IB Gateway lives outside compose on the
-# host (Java GUI, not containerizable). Containers reach both via
-# host.docker.internal.
+# compose. IB Gateway also lives outside compose (Java GUI, not
+# containerizable), either on the Docker host or on another reachable machine.
+# Containers reach host-native services via host.docker.internal; if IB runs
+# elsewhere, set IB_GATEWAY_HOST to that machine's LAN/Tailscale address or to
+# host.docker.internal only after tunneling the Gateway port onto the Docker
+# host.
 #
 # Profiles
 #   default ............ api + web + realtime (long-running)
@@ -62,10 +65,10 @@ services:
       # `host.docker.internal` is the only hostname that actually reaches
       # it — a 127.0.0.1 default would dial the container's own loopback.
       FUTU_OPEND_HOST: host.docker.internal
-    # IB_GATEWAY_HOST comes from .env. On the remote Mac mini set
-    # IB_GATEWAY_HOST=host.docker.internal so the container reaches the
-    # host-native Gateway; on this dev Mac it stays at the LAN IP that
-    # actually has the Gateway running.
+    # IB_GATEWAY_HOST comes from .env. Use host.docker.internal only when the
+    # Gateway runs on the Docker host, or when an SSH tunnel on the Docker host
+    # forwards to a localhost-only Gateway on another machine. If the Gateway
+    # runs directly on another LAN/Tailscale host, set that reachable address.
     ports:
       - "8321:8321"
     volumes:
