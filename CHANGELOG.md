@@ -5,6 +5,9 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.0.7] — 2026-05-31
+
+
 ### Changed
 
 - **Pure-portfolio pivot.** Xenon is now a broker terminal for options
@@ -55,7 +58,6 @@ inspect_dashboard,map_*}.py`. ~22k Python LOC.
   `regime_overrides`, `uw_flow_events` are intentionally left in place.
   A separate Alembic downgrade will drop them once we've confirmed
   zero readers in the running services.
-
 ## [0.0.6] — 2026-05-26
 
 ### Documentation
