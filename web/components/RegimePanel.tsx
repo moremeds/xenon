@@ -175,6 +175,10 @@ export default function RegimePanel({
   const effectiveHasLiveSpy = marketOpen && hasLiveSpy;
   const effectiveHasLiveCor1m = marketOpen && hasLiveCor1m;
   const effectiveHasLive = marketOpen && hasLive;
+  const displayVixVal = marketOpen ? vixVal : data?.vix ?? null;
+  const displayVvixVal = marketOpen ? vvixVal : data?.vvix ?? null;
+  const displaySpyVal = marketOpen ? spyVal : data?.spy ?? null;
+  const displayCorrVal = marketOpen ? activeCorr : data?.cor1m ?? null;
 
   // Timestamps for last live VIX / VVIX value received
   const [vixLastTs, setVixLastTs] = useState<string | null>(null);
@@ -235,9 +239,9 @@ export default function RegimePanel({
     if (!data) return null;
     if (!effectiveHasLive) return null;
 
-    const vix = liveVix ?? data.vix;
-    const vvix = liveVvix ?? data.vvix;
-    const spy = liveSpy ?? data.spy;
+    const vix = displayVixVal ?? data.vix;
+    const vvix = displayVvixVal ?? data.vvix;
+    const spy = displaySpyVal ?? data.spy;
     const vvixVixRatio = vix > 0 ? vvix / vix : data.vvix_vix_ratio ?? 0;
     const ma = data.spx_100d_ma;
     const spxDistancePct = ma && ma > 0 ? ((spy / ma) - 1) * 100 : data.spx_distance_pct;
@@ -251,13 +255,13 @@ export default function RegimePanel({
       corr5dChange: activeCorrChange,
       spxDistancePct,
     });
-  }, [data, effectiveHasLive, liveVix, liveVvix, liveSpy, activeCorrChange, safeActiveCorr]);
+  }, [data, effectiveHasLive, displayVixVal, displayVvixVal, displaySpyVal, activeCorrChange, safeActiveCorr]);
 
   const cri = liveCri ?? (data?.cri ? { ...data.cri, level: data.cri.level as CriLevel } : { score: 0, level: "LOW" as CriLevel, components: { vix: 0, vvix: 0, correlation: 0, momentum: 0 } });
   const color = levelColor(cri.level);
   const ma = data?.spx_100d_ma;
-  const spxBelowMa = ma && spyVal != null
-    ? spyVal < ma
+  const spxBelowMa = ma && displaySpyVal != null
+    ? displaySpyVal < ma
     : data?.crash_trigger?.conditions.spx_below_100d_ma ?? false;
 
   const tabBar = (
@@ -355,24 +359,24 @@ export default function RegimePanel({
         <RegimeStripCell
           testId="strip-vix"
           label={<>VIX <LiveBadge live={effectiveHasLiveVix} /></>}
-          value={fmt(vixVal)}
-          change={<DayChange last={liveVix} close={vixClose} />}
+          value={fmt(displayVixVal)}
+          change={effectiveHasLiveVix ? <DayChange last={liveVix} close={vixClose} /> : null}
           sub={<>5d RoC: {fmtPct(data?.vix_5d_roc, 1)}</>}
           timestamp={vixLastTs ?? "---"}
         />
         <RegimeStripCell
           testId="strip-vvix"
           label={<>VVIX <LiveBadge live={effectiveHasLiveVvix} /></>}
-          value={fmt(vvixVal)}
-          change={<DayChange last={liveVvix} close={vvixClose} />}
+          value={fmt(displayVvixVal)}
+          change={effectiveHasLiveVvix ? <DayChange last={liveVvix} close={vvixClose} /> : null}
           sub={<>VVIX/VIX: {fmt(vvixVixRatio)}</>}
           timestamp={vvixLastTs ?? "---"}
         />
         <RegimeStripCell
           testId="strip-spy"
           label={<>SPY <LiveBadge live={effectiveHasLiveSpy} /></>}
-          value={`$${fmt(spyVal)}`}
-          change={<DayChange last={liveSpy} close={spyClose} prefix="$" />}
+          value={`$${fmt(displaySpyVal)}`}
+          change={effectiveHasLiveSpy ? <DayChange last={liveSpy} close={spyClose} prefix="$" /> : null}
           sub={<>vs 100d MA: {fmtPct(spxDistPct)}</>}
         />
         <RegimeStripCell
@@ -391,8 +395,8 @@ export default function RegimePanel({
         <RegimeStripCell
           testId="strip-cor1m"
           label={<>COR1M <LiveBadge live={effectiveHasLiveCor1m} /></>}
-          value={fmt(activeCorr, 2)}
-          change={<DayChange last={liveCor1m} close={cor1mPreviousClose} />}
+          value={fmt(displayCorrVal, 2)}
+          change={effectiveHasLiveCor1m ? <DayChange last={liveCor1m} close={cor1mPreviousClose} /> : null}
           sub={<>{`5d chg: ${corr5dChange != null ? `${fmtSigned(corr5dChange)} pts` : "---"}`}</>}
         />
         {nqSkew != null ? (

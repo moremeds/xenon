@@ -8,10 +8,11 @@ Supports state persistence and market hours awareness.
 
 import json
 import logging
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .handlers.base import BaseHandler
 
@@ -46,11 +47,30 @@ class MonitorDaemon:
         self.respect_market_hours = respect_market_hours
         self.loop_interval = loop_interval
         self._running = False
+        self.async_tasks: List[Callable[[], None]] = []
+        self._async_threads: List[threading.Thread] = []
     
     def register(self, handler: BaseHandler) -> None:
         """Register a handler with the daemon."""
         self.handlers.append(handler)
         logger.info(f"Registered handler: {handler.name} (interval: {handler.interval_seconds}s)")
+
+    def register_async_task(self, task: Callable[[], None]) -> None:
+        """Register a long-lived side task to run with the daemon loop."""
+        self.async_tasks.append(task)
+        logger.info("Registered async task: %s", getattr(task, "__name__", repr(task)))
+
+    def _start_async_tasks(self) -> None:
+        if self._async_threads:
+            return
+        for task in self.async_tasks:
+            thread = threading.Thread(
+                target=task,
+                name=f"monitor-daemon-{getattr(task, '__name__', 'async-task')}",
+                daemon=True,
+            )
+            thread.start()
+            self._async_threads.append(thread)
     
     def _is_market_hours_time(self, hour: int, minute: int, weekday: int) -> bool:
         """
@@ -76,16 +96,11 @@ class MonitorDaemon:
         return open_mins <= current_mins < close_mins
     
     def is_market_hours(self) -> bool:
-        """Check if current time is within US market hours."""
-        # Get current time in ET (approximate - doesn't handle DST perfectly)
-        from datetime import timezone, timedelta
-        
-        # EST is UTC-5, EDT is UTC-4
-        # For simplicity, assume EST (UTC-5)
-        utc_now = datetime.now(timezone.utc)
-        et_offset = timedelta(hours=-5)  # EST
-        et_now = utc_now + et_offset
-        
+        """Check if current time is within US market hours (DST-correct)."""
+        from zoneinfo import ZoneInfo
+
+        et_now = datetime.now(ZoneInfo("America/New_York"))
+
         return self._is_market_hours_time(
             et_now.hour,
             et_now.minute,
@@ -144,6 +159,7 @@ class MonitorDaemon:
         """
         self._running = True
         logger.info(f"Starting daemon loop (interval: {self.loop_interval}s)")
+        self._start_async_tasks()
         
         try:
             while self._running:

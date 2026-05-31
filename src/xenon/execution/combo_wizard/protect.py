@@ -6,8 +6,8 @@ For V1 defined-risk spreads, after a combo FILLED we:
 2. Arm a Risk Alert (assisted-exit) row — NOT a stop-loss per spec §9.2.
 
 Retries TP attach with exponential backoff. On terminal failure we leave the
-session in PROTECTION_PENDING and emit a session event; the monitor daemon
-(rehydrate + wizard_stop_monitor) will re-drive.
+session in PROTECTION_PENDING and emit a session event; rehydrate and the
+position-rules monitor can re-drive.
 
 Gate-4 guard: if the proposed TP would short an uncovered leg we refuse the
 TP attach and route to Risk Alert only.
@@ -79,6 +79,7 @@ def _upsert_protection(
     alert_enabled: bool,
     alert_threshold: Decimal | None,
     alert_virtual_id: str | None,
+    polarity: str,
 ) -> None:
     config = {
         "tp_enabled": tp_enabled,
@@ -87,6 +88,7 @@ def _upsert_protection(
         "alert_enabled": alert_enabled,
         "alert_net_mid_threshold": str(alert_threshold) if alert_threshold is not None else None,
         "alert_virtual_id": alert_virtual_id,
+        "polarity": polarity,
     }
     engine = get_sync_engine()
     with engine.begin() as conn:
@@ -266,6 +268,7 @@ def attach_protection(
                 alert_enabled=False,
                 alert_threshold=alert_net_mid_threshold,
                 alert_virtual_id=None,
+                polarity=polarity,
             )
             return {
                 "state": "PROTECTION_PENDING",
@@ -311,6 +314,7 @@ def attach_protection(
         alert_enabled=alert_armed,
         alert_threshold=alert_net_mid_threshold,
         alert_virtual_id=alert_virtual_id,
+        polarity=polarity,
     )
 
     # Determine final state.

@@ -8,7 +8,7 @@
  * - All RISK section cards have the `metric-card-clickable` class
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 
 // ── Mock data ────────────────────────────────────────────────────────────────
 
@@ -93,6 +93,16 @@ async function setupMocks(page: import("@playwright/test").Page) {
       }),
     }),
   );
+}
+
+async function expandRiskSection(page: Page) {
+  const buyingPowerCard = page.locator(".metric-card", { hasText: "Buying Power" }).first();
+  if (await buyingPowerCard.isVisible().catch(() => false)) {
+    return;
+  }
+
+  await page.locator(".section-label-toggle", { hasText: "RISK" }).click();
+  await expect(buyingPowerCard).toBeVisible({ timeout: 5_000 });
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -187,6 +197,7 @@ test.describe("Risk metric cards — all four are clickable with explanation mod
   test("BUYING POWER card has metric-card-clickable class", async ({ page }) => {
     await setupMocks(page);
     await page.goto("/portfolio");
+    await expandRiskSection(page);
 
     const card = page.locator(".metric-card", { hasText: "Buying Power" }).first();
     await card.waitFor({ timeout: 10_000 });
@@ -197,6 +208,7 @@ test.describe("Risk metric cards — all four are clickable with explanation mod
   test("MAINTENANCE MARGIN card has metric-card-clickable class", async ({ page }) => {
     await setupMocks(page);
     await page.goto("/portfolio");
+    await expandRiskSection(page);
 
     const card = page.locator(".metric-card", { hasText: "Maintenance Margin" }).first();
     await card.waitFor({ timeout: 10_000 });
@@ -207,6 +219,7 @@ test.describe("Risk metric cards — all four are clickable with explanation mod
   test("EXCESS LIQUIDITY card has metric-card-clickable class", async ({ page }) => {
     await setupMocks(page);
     await page.goto("/portfolio");
+    await expandRiskSection(page);
 
     const card = page.locator(".metric-card", { hasText: "Excess Liquidity" }).first();
     await card.waitFor({ timeout: 10_000 });
@@ -217,6 +230,7 @@ test.describe("Risk metric cards — all four are clickable with explanation mod
   test("SETTLED CASH card has metric-card-clickable class", async ({ page }) => {
     await setupMocks(page);
     await page.goto("/portfolio");
+    await expandRiskSection(page);
 
     const card = page.locator(".metric-card", { hasText: "Settled Cash" }).first();
     await card.waitFor({ timeout: 10_000 });
@@ -227,6 +241,7 @@ test.describe("Risk metric cards — all four are clickable with explanation mod
   test("clicking BUYING POWER opens modal with formula mentioning BuyingPower", async ({ page }) => {
     await setupMocks(page);
     await page.goto("/portfolio");
+    await expandRiskSection(page);
 
     const card = page.locator(".metric-card", { hasText: "Buying Power" }).first();
     await card.waitFor({ timeout: 10_000 });
@@ -243,6 +258,7 @@ test.describe("Risk metric cards — all four are clickable with explanation mod
   test("clicking MAINTENANCE MARGIN opens modal with margin call warning", async ({ page }) => {
     await setupMocks(page);
     await page.goto("/portfolio");
+    await expandRiskSection(page);
 
     const card = page.locator(".metric-card", { hasText: "Maintenance Margin" }).first();
     await card.waitFor({ timeout: 10_000 });
@@ -259,6 +275,7 @@ test.describe("Risk metric cards — all four are clickable with explanation mod
   test("clicking EXCESS LIQUIDITY opens modal with cushion formula", async ({ page }) => {
     await setupMocks(page);
     await page.goto("/portfolio");
+    await expandRiskSection(page);
 
     const card = page.locator(".metric-card", { hasText: "Excess Liquidity" }).first();
     await card.waitFor({ timeout: 10_000 });
@@ -275,6 +292,7 @@ test.describe("Risk metric cards — all four are clickable with explanation mod
   test("clicking SETTLED CASH opens modal with T+1/T+2 settlement note", async ({ page }) => {
     await setupMocks(page);
     await page.goto("/portfolio");
+    await expandRiskSection(page);
 
     const card = page.locator(".metric-card", { hasText: "Settled Cash" }).first();
     await card.waitFor({ timeout: 10_000 });
@@ -291,6 +309,7 @@ test.describe("Risk metric cards — all four are clickable with explanation mod
   test("modal can be dismissed by clicking the close button", async ({ page }) => {
     await setupMocks(page);
     await page.goto("/portfolio");
+    await expandRiskSection(page);
 
     const card = page.locator(".metric-card", { hasText: "Buying Power" }).first();
     await card.waitFor({ timeout: 10_000 });

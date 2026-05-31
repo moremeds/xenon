@@ -320,6 +320,67 @@ def test_combo_rehydrate_records_leg_fills_and_aggregates_trade(tmp_path, monkey
     assert len(_fetch_combo_outbox("fill.recorded")) == 2
 
 
+def test_combo_rehydrate_marks_attempt_filled_when_every_leg_filled(tmp_path, monkeypatch):
+    """Session and attempt rows must agree after a filled BAG rehydrate."""
+    monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
+    sid, aid = _seed_session(
+        tmp_path,
+        state="working",
+        perm_id="P-attempt-filled",
+        broker="IB",
+        account_env="paper",
+        broker_account="DU123456",
+    )
+
+    execs = [
+        {
+            "perm_id": "P-attempt-filled",
+            "con_id": 1001,
+            "exec_id": "exec-attempt-buy",
+            "ticker": "AAPL",
+            "side": "BOT",
+            "shares": 1,
+            "avg_price": 3.10,
+            "time": datetime(2026, 4, 28, 14, 31, tzinfo=timezone.utc),
+        },
+        {
+            "perm_id": "P-attempt-filled",
+            "con_id": 1002,
+            "exec_id": "exec-attempt-sell",
+            "ticker": "AAPL",
+            "side": "SLD",
+            "shares": 1,
+            "avg_price": 1.30,
+            "time": datetime(2026, 4, 28, 14, 31, tzinfo=timezone.utc),
+        },
+    ]
+    ib = _StubIB(executions=execs)
+
+    decisions = wiz_rehydrate.rehydrate_combo_sessions(
+        ib_client_factory=lambda: ib,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU123456",
+    )
+
+    assert decisions[0].to_state == "FILLED"
+
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        session_state = conn.execute(
+            text("SELECT state FROM xenon.wizard_sessions WHERE session_id = :sid"),
+            {"sid": sid},
+        ).scalar_one()
+        attempt_state = conn.execute(
+            text("SELECT state FROM xenon.wizard_combo_attempts WHERE attempt_id = :aid"),
+            {"aid": aid},
+        ).scalar_one()
+    engine.dispose()
+
+    assert session_state == "filled"
+    assert attempt_state == "FILLED"
+
+
 def test_combo_rehydrate_one_leg_missing_stays_partially_filled(tmp_path, monkeypatch):
     monkeypatch.setenv("XENON_ORDERS_DB_PATH", str(tmp_path / "orders.duckdb"))
     _seed_session(tmp_path, state="working", perm_id="P-3", quantity=1)

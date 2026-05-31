@@ -227,6 +227,15 @@ function installMockWebSocket(page: import("@playwright/test").Page) {
       onclose: ((event?: unknown) => void) | null = null;
       onerror: ((event?: unknown) => void) | null = null;
 
+      addEventListener(type: string, listener: (event?: unknown) => void) {
+        if (type === "open") this.onopen = listener;
+        if (type === "message") this.onmessage = listener as (event: { data: string }) => void;
+        if (type === "close") this.onclose = listener;
+        if (type === "error") this.onerror = listener;
+      }
+
+      removeEventListener() {}
+
       constructor(url: string) {
         this.url = url;
         setTimeout(() => {
@@ -329,7 +338,7 @@ test.describe("PLTR chain position focus", () => {
     await installMockWebSocket(page);
     stubApis(page);
 
-    await page.goto("http://127.0.0.1:3000/PLTR?posId=16&tab=chain");
+    await page.goto("/PLTR?tab=chain&posId=16");
 
     const detail = page.locator(".ticker-detail-page").last();
     await detail.locator(".chain-grid").waitFor();

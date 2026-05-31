@@ -168,6 +168,15 @@ async function installMockWebSocket(page: import("@playwright/test").Page) {
       onclose: ((event?: unknown) => void) | null = null;
       onerror: ((event?: unknown) => void) | null = null;
 
+      addEventListener(type: string, listener: (event?: unknown) => void) {
+        if (type === "open") this.onopen = listener;
+        if (type === "message") this.onmessage = listener as (event: { data: string }) => void;
+        if (type === "close") this.onclose = listener;
+        if (type === "error") this.onerror = listener;
+      }
+
+      removeEventListener() {}
+
       constructor(url: string) {
         this.url = url;
         setTimeout(() => {
@@ -274,7 +283,7 @@ test("synthetic combo telemetry shows MARK instead of stale LAST for IWM", async
   await installMockWebSocket(page);
   await stubApis(page);
 
-  await page.goto("http://127.0.0.1:3000/IWM?posId=13&tab=position");
+  await page.goto("/IWM?tab=position&posId=13");
 
   const hero = page.locator(".price-bar").first();
   await expect(hero).toContainText("MARK");

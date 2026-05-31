@@ -42,7 +42,7 @@ test.describe("Share PnL", () => {
   // --- Share popover UI tests ---
 
   test("clicking share button opens popover with checkboxes", async ({ page }) => {
-    await page.goto("http://127.0.0.1:3000/orders");
+    await page.goto("/orders");
     await page.locator("text=Today's Executed Orders").waitFor({ timeout: 10000 });
     const shareBtn = page.locator(".share-pnl-button").first();
     if (await shareBtn.count() === 0) {
@@ -61,7 +61,7 @@ test.describe("Share PnL", () => {
   });
 
   test("popover has Copy & Tweet and Copy buttons", async ({ page }) => {
-    await page.goto("http://127.0.0.1:3000/orders");
+    await page.goto("/orders");
     await page.locator("text=Today's Executed Orders").waitFor({ timeout: 10000 });
     const shareBtn = page.locator(".share-pnl-button").first();
     if (await shareBtn.count() === 0) {
@@ -341,13 +341,13 @@ test.describe("Share PnL signed combo basis", () => {
       return route.fulfill({ status: 200, contentType: "image/png", body: PNG_1X1 });
     });
 
-    await page.goto("http://127.0.0.1:3000/orders");
+    await page.goto("/orders");
 
     const shareButton = page.locator(".share-pnl-button").first();
     await expect(shareButton).toBeVisible({ timeout: 10_000 });
 
     const closedRow = shareButton.locator("xpath=ancestor::tr[1]");
-    await expect(closedRow).toContainText("Risk Reversal (Short $85 Put / Long $90 Call)");
+    await expect(closedRow).toContainText(/Risk Reversal .*Short \$85 Put \/ Long \$90 Call/);
     await expect(closedRow).toContainText("$1.00");
     await shareButton.click();
     const popover = page.locator(".share-pnl-popover");

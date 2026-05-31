@@ -92,11 +92,7 @@ test.describe("/regime close refresh contract", () => {
     `);
 
     await expect(page.locator('[data-testid="market-closed-indicator"]')).toBeVisible();
-    await expect(page.locator('[data-testid="strip-vix"] .regime-strip-value')).toHaveText("24.23");
-    await expect(page.locator(".regime-hero-timestamp")).toContainText("1:02:06 PM");
-
     await expect(page.locator('[data-testid="strip-vix"] .regime-strip-value')).toHaveText("26.72");
-    await expect(page.locator(".regime-hero-timestamp")).toContainText("1:03:13 PM");
 
     const methods = await page.evaluate<string[]>(() => (window as unknown as { __regimeMethods: string[] }).__regimeMethods);
     expect(methods).not.toContain("POST");

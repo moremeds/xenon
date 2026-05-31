@@ -352,6 +352,7 @@ async def submit_combo(session_id: str, request: dict[str, Any]) -> dict[str, An
             perm_id=str(result.get("permId") or ""),
             limit_price=Decimal(target),
             state="WORKING",
+            legs=list(payload.get("legs") or []),
             submitted_at=now,
             updated_at=now,
             combo_contract={

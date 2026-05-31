@@ -13,18 +13,10 @@ import { test, expect } from "@playwright/test";
 
 /** Open the SPXU ticker detail modal and navigate to the Order tab. */
 async function openSpxuOrderTab(page: import("@playwright/test").Page) {
-  // Navigate to portfolio page
-  await page.goto("/portfolio");
-
-  // Wait for the SPXU ticker link to appear
-  const spxuLink = page.locator('[aria-label="View details for SPXU"]').first();
-  await spxuLink.waitFor({ timeout: 10_000 });
-  await spxuLink.click();
-
-  // Click the Order tab in the modal
-  const orderTab = page.locator(".ticker-tab", { hasText: /^Order/ }).first();
-  await orderTab.waitFor({ timeout: 5_000 });
-  await orderTab.click();
+  await page.goto("/SPXU?tab=order&posId=23");
+  await expect(page.locator(".ticker-tab.active")).toContainText("Order", {
+    timeout: 10_000,
+  });
 }
 
 /** Fill in the combo order form and click Place Combo Order (first click). */

@@ -50,6 +50,7 @@ xenon-blotter-history       = "xenon.trade_blotter.flex_query:main"
 xenon-market-hours          = "xenon.utils.market_hours:main"
 xenon-presets               = "xenon.utils.presets:main"
 xenon-monitor-daemon        = "xenon.monitor_daemon.run:main"
+xenon-position-rules        = "xenon.cli.position_rules:main"
 xenon-cta-sync-service      = "xenon.services.cta_sync_service:main"
 xenon-preset-rebalance      = "xenon.monitor_daemon.handlers.preset_rebalance:main"
 xenon-fetch-flow            = "xenon.fetchers.fetch_flow:main"
@@ -141,6 +142,7 @@ norecursedirs = [
     "scripts/infra/ib_realtime",
     ".venv",
     "node_modules",
+    "web/.next",
     ".claude",
     ".worktrees",
     "data",

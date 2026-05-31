@@ -90,6 +90,15 @@ function installMockWebSocket(page: import("@playwright/test").Page) {
       onclose: ((event?: unknown) => void) | null = null;
       onerror: ((event?: unknown) => void) | null = null;
 
+      addEventListener(type: string, listener: (event?: unknown) => void) {
+        if (type === "open") this.onopen = listener;
+        if (type === "message") this.onmessage = listener as (event: { data: string }) => void;
+        if (type === "close") this.onclose = listener;
+        if (type === "error") this.onerror = listener;
+      }
+
+      removeEventListener() {}
+
       constructor(url: string) {
         this.url = url;
         setTimeout(() => {
@@ -166,7 +175,7 @@ test("modify modal shows the resting sell limit as the effective ask", async ({ 
   await installMockWebSocket(page);
   stubApis(page);
 
-  await page.goto("http://127.0.0.1:3000/orders");
+  await page.goto("/orders");
 
   const row = page.getByRole("row", { name: /AAOI Short \$90 Put 2026-03-27/ });
   await expect(row).toBeVisible();

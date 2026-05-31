@@ -1,5 +1,5 @@
-import { redirect } from "next/navigation";
+import WorkspaceShell from "@/components/WorkspaceShell";
 
 export default function InternalsPage() {
-  redirect("/regime");
+  return <WorkspaceShell section="internals" />;
 }

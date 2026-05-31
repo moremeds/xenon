@@ -508,3 +508,134 @@ def test_place_reason_code_constants_exist():
 
     assert ReasonCode.IB_REJECT.value == "IB_REJECT"
     assert ReasonCode.SUBPROCESS_ERROR.value == "SUBPROCESS_ERROR"
+
+
+def test_place_combo_ib_2161_with_order_ids_is_working_not_rejected(client, tmp_db, monkeypatch):
+    """IB code 2161 is a price-cap warning that can still leave the order live.
+
+    If the subprocess payload includes order identifiers and a working status,
+    /orders/place must keep DB ownership of that broker order instead of
+    marking it REJECTED and returning a terminal 502.
+    """
+    monkeypatch.setenv("XENON_REGIME_GATE_DISABLED", "1")
+    client_attempt_id = "combo-2161-warning-owned"
+
+    async def fake_runner(entry, args, timeout=30):
+        return ScriptResult(
+            ok=True,
+            data={
+                "status": "error",
+                "code": 2161,
+                "message": "IB error 2161: order price capped but still live",
+                "orderId": 8,
+                "permId": 1747550348,
+                "initialStatus": "Submitted",
+                "tif": "DAY",
+            },
+        )
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post(
+        "/orders/place",
+        json={
+            "type": "combo",
+            "symbol": "SPY",
+            "action": "BUY",
+            "quantity": 1,
+            "limitPrice": "0.05",
+            "client_attempt_id": client_attempt_id,
+            "legs": [
+                {"expiry": "20260505", "strike": 735, "right": "C", "action": "BUY", "ratio": 1},
+                {"expiry": "20260505", "strike": 736, "right": "C", "action": "SELL", "ratio": 1},
+            ],
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["warning_code"] == 2161
+    assert body["orderId"] == 8
+    assert body["permId"] == 1747550348
+
+    engine = _pg_engine()
+    try:
+        with engine.connect() as con:
+            row = con.execute(
+                text(
+                    """
+                    SELECT state, ib_order_id, perm_id, reason_code
+                    FROM xenon.order_submissions
+                    WHERE client_attempt_id = :client_attempt_id
+                    """
+                ),
+                {"client_attempt_id": client_attempt_id},
+            ).one()
+    finally:
+        engine.dispose()
+
+    assert row.state == "WORKING"
+    assert row.ib_order_id == "8"
+    assert row.perm_id == "1747550348"
+    assert row.reason_code is None
+
+
+def test_place_pending_cancel_ack_is_not_left_working(client, tmp_db, monkeypatch):
+    """If IB immediately reports PendingCancel after submit, DB must not show
+    a live WORKING order that operators cannot find at the broker."""
+    monkeypatch.setenv("XENON_REGIME_GATE_DISABLED", "1")
+    client_attempt_id = "combo-pending-cancel-smoke"
+
+    async def fake_runner(entry, args, timeout=30):
+        return ScriptResult(
+            ok=True,
+            data={
+                "status": "ok",
+                "orderId": 4,
+                "permId": 789792140,
+                "initialStatus": "PendingCancel",
+                "tif": "DAY",
+            },
+        )
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post(
+        "/orders/place",
+        json={
+            "type": "combo",
+            "symbol": "SPY",
+            "action": "BUY",
+            "quantity": 1,
+            "limitPrice": "1.00",
+            "client_attempt_id": client_attempt_id,
+            "legs": [
+                {"expiry": "20260508", "strike": 760, "right": "C", "action": "BUY", "ratio": 1},
+                {"expiry": "20260508", "strike": 761, "right": "C", "action": "SELL", "ratio": 1},
+            ],
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+
+    engine = _pg_engine()
+    try:
+        with engine.connect() as con:
+            row = con.execute(
+                text(
+                    """
+                    SELECT state, ib_order_id, perm_id, reason_code
+                    FROM xenon.order_submissions
+                    WHERE client_attempt_id = :client_attempt_id
+                    """
+                ),
+                {"client_attempt_id": client_attempt_id},
+            ).one()
+    finally:
+        engine.dispose()
+
+    assert row.state == "CANCELLED"
+    assert row.ib_order_id == "4"
+    assert row.perm_id == "789792140"
+    assert row.reason_code == "IB_PENDING_CANCEL_ON_SUBMIT"

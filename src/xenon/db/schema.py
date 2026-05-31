@@ -384,27 +384,147 @@ wizard_combo_attempts = Table(
     Index("ix_wizard_attempts_session_updated", "session_id", "updated_at"),
 )
 
-wizard_protection = Table(
-    "wizard_protection",
+position_protection = Table(
+    "position_protection",
     xenon_metadata,
     Column("protection_id", BigInteger, primary_key=True, autoincrement=True),
-    Column(
-        "session_id",
-        Text,
-        ForeignKey(f"{XENON_SCHEMA}.wizard_sessions.session_id"),
-        nullable=False,
-    ),
-    Column(
-        "attempt_id",
-        Text,
-        ForeignKey(f"{XENON_SCHEMA}.wizard_combo_attempts.attempt_id"),
-    ),
-    Column("protection_type", Text, nullable=False),
+    Column("broker", Text, nullable=False),
+    Column("account_env", Text, nullable=False),
+    Column("broker_account", Text, nullable=False),
+    Column("position_key", Text, nullable=False),
+    Column("position_descriptor", JSONB, nullable=False),
+    Column("asset_class", Text, nullable=False),
+    Column("rule_kind", Text, nullable=False),
+    Column("state", Text, nullable=False, server_default=text("'PENDING_ARM'")),
     Column("config", JSONB, nullable=False),
-    Column("state", Text, nullable=False, server_default=text("'active'")),
+    Column("state_data", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("native_order_perm_id", BigInteger),
+    Column("native_order_state", Text),
+    Column("armed_at", TIMESTAMP(timezone=True)),
     Column("triggered_at", TIMESTAMP(timezone=True)),
+    Column("closed_at", TIMESTAMP(timezone=True)),
+    Column("last_evaluated_at", TIMESTAMP(timezone=True)),
     Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
-    UniqueConstraint("session_id", name="uq_wizard_protection_session"),
+    Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    CheckConstraint("broker IN ('IB','FUTU')", name="ck_position_protection_broker"),
+    CheckConstraint(
+        "account_env IN ('paper','live','sim','legacy_unknown')",
+        name="ck_position_protection_account_env",
+    ),
+    CheckConstraint(
+        "state IN ('PENDING_ARM','ARMED','TRIGGERED','CLOSED','CANCELED','FAILED','SUPERSEDED')",
+        name="ck_position_protection_state",
+    ),
+    CheckConstraint(
+        "rule_kind IN ('stop_loss','trailing_tp','take_profit_fixed','combo_tp_alert')",
+        name="ck_position_protection_rule_kind",
+    ),
+    CheckConstraint(
+        "asset_class IN ('stock','long_option','debit_combo','credit_spread','covered_call','unclassified')",
+        name="ck_position_protection_asset_class",
+    ),
+    Index(
+        "uq_position_protection_active",
+        "broker",
+        "account_env",
+        "broker_account",
+        "position_key",
+        "rule_kind",
+        unique=True,
+        postgresql_where=text("state IN ('PENDING_ARM','ARMED','TRIGGERED')"),
+    ),
+    Index(
+        "ix_position_protection_hot",
+        "state",
+        "broker",
+        "account_env",
+        "broker_account",
+        postgresql_where=text("state IN ('PENDING_ARM','ARMED')"),
+    ),
+    Index(
+        "ix_position_protection_lookup",
+        "broker",
+        "account_env",
+        "broker_account",
+        "position_key",
+    ),
+)
+
+bracket_policies = Table(
+    "bracket_policies",
+    xenon_metadata,
+    Column("policy_id", BigInteger, primary_key=True, autoincrement=True),
+    Column("broker", Text),
+    Column("account_env", Text),
+    Column("broker_account", Text),
+    Column("asset_class", Text, nullable=False),
+    Column("rule_kind", Text, nullable=False),
+    Column("enabled", Boolean, nullable=False, server_default=text("TRUE")),
+    Column("auto_place", Boolean, nullable=False, server_default=text("TRUE")),
+    Column("config", JSONB, nullable=False),
+    Column("created_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    CheckConstraint(
+        "rule_kind IN ('stop_loss','trailing_tp','take_profit_fixed','combo_tp_alert')",
+        name="ck_bracket_policies_rule_kind",
+    ),
+    CheckConstraint(
+        "asset_class IN ('stock','long_option','debit_combo','credit_spread','covered_call','unclassified')",
+        name="ck_bracket_policies_asset_class",
+    ),
+    Index(
+        "uq_bracket_policies_scope_class_kind",
+        text("COALESCE(broker,'*')"),
+        text("COALESCE(account_env,'*')"),
+        text("COALESCE(broker_account,'*')"),
+        "asset_class",
+        "rule_kind",
+        unique=True,
+    ),
+)
+
+position_close_claims = Table(
+    "position_close_claims",
+    xenon_metadata,
+    Column("claim_id", BigInteger, primary_key=True, autoincrement=True),
+    Column("broker", Text, nullable=False),
+    Column("account_env", Text, nullable=False),
+    Column("broker_account", Text, nullable=False),
+    Column("position_key", Text, nullable=False),
+    Column("claimed_by_protection_id", BigInteger, nullable=False),
+    Column("claim_kind", Text, nullable=False),
+    Column("status", Text, nullable=False, server_default=text("'PENDING'")),
+    Column("order_ref", Text, nullable=False),
+    Column("broker_perm_id", BigInteger),
+    Column("attempts", Integer, nullable=False, server_default=text("0")),
+    Column("claimed_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Column("submitted_at", TIMESTAMP(timezone=True)),
+    Column("terminal_at", TIMESTAMP(timezone=True)),
+    Column("last_error", Text),
+    CheckConstraint("broker IN ('IB','FUTU')", name="ck_position_close_claims_broker"),
+    CheckConstraint(
+        "account_env IN ('paper','live','sim','legacy_unknown')",
+        name="ck_position_close_claims_account_env",
+    ),
+    CheckConstraint(
+        "status IN ('PENDING','SUBMITTED','FILLED','FAILED','ABANDONED')",
+        name="ck_position_close_claims_status",
+    ),
+    CheckConstraint(
+        "claim_kind IN ('synthetic_close','native_reconcile_close')",
+        name="ck_position_close_claims_kind",
+    ),
+    Index(
+        "uq_position_close_claims_inflight",
+        "broker",
+        "account_env",
+        "broker_account",
+        "position_key",
+        unique=True,
+        postgresql_where=text("status IN ('PENDING','SUBMITTED')"),
+    ),
+    UniqueConstraint("order_ref", name="uq_position_close_claims_order_ref"),
+    Index("ix_position_close_claims_cleanup", "broker", "account_env", "broker_account", "status"),
 )
 
 regime_overrides = Table(
@@ -451,6 +571,24 @@ regime_overrides = Table(
         "broker_account",
         text("ts DESC"),
     ),
+)
+
+position_rules_review = Table(
+    "position_rules_review",
+    xenon_metadata,
+    Column("review_id", BigInteger, primary_key=True, autoincrement=True),
+    Column("protection_id", BigInteger, nullable=False),
+    Column("event_id", BigInteger, nullable=False),
+    Column("reviewed_by", Text, nullable=False),
+    Column("reviewed_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    Column("verdict", Text, nullable=False),
+    Column("note", Text),
+    CheckConstraint(
+        "verdict IN ('expected','unexpected','structural')",
+        name="ck_position_rules_review_verdict",
+    ),
+    UniqueConstraint("event_id", name="uq_position_rules_review_event"),
+    Index("ix_position_rules_review_protection", "protection_id", "reviewed_at"),
 )
 
 # ---------- Scanner Results ----------
@@ -911,4 +1049,17 @@ outbox = Table(
     Column("consumed_by", JSONB, server_default=text("'[]'::jsonb")),
     CheckConstraint("length(channel) <= 63", name="ck_outbox_channel_length"),
     Index("ix_outbox_channel_time", "channel", "emitted_at"),
+)
+
+outbox_dlq = Table(
+    "outbox_dlq",
+    events_metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("source_event_id", BigInteger, nullable=False),
+    Column("channel", Text, nullable=False),
+    Column("source", Text, nullable=False),
+    Column("payload", JSONB, nullable=False),
+    Column("error", Text, nullable=False),
+    Column("attempts", Integer, nullable=False, server_default=text("0")),
+    Column("dead_lettered_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
 )

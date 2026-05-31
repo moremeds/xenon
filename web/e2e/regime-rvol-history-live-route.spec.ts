@@ -9,6 +9,10 @@ const TEST_SCHEDULED_PATH = path.join(SCHEDULED_DIR, "cri-2099-12-31T23-59.json"
 const CACHE_BACKUP_PATH = `${CACHE_PATH}.rvol-backup`;
 const SCHEDULED_BACKUP_PATH = `${TEST_SCHEDULED_PATH}.rvol-backup`;
 
+function todayET(now = new Date()): string {
+  return now.toLocaleDateString("sv", { timeZone: "America/New_York" });
+}
+
 const PORTFOLIO_EMPTY = {
   bankroll: 100_000,
   positions: [],
@@ -131,16 +135,29 @@ async function setupNonRegimeMocks(page: import("@playwright/test").Page) {
   );
 }
 
+async function setupRegimeMock(page: import("@playwright/test").Page, payload: typeof LEGACY_CACHE) {
+  await page.route("**/api/regime", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(payload),
+    }),
+  );
+}
+
 test.describe("/regime page — RVOL history live route cache selection", () => {
   test.beforeEach(async ({ page }) => {
     await mkdir(SCHEDULED_DIR, { recursive: true });
     await backupIfPresent(CACHE_PATH, CACHE_BACKUP_PATH);
     await backupIfPresent(TEST_SCHEDULED_PATH, SCHEDULED_BACKUP_PATH);
 
-    await writeFile(CACHE_PATH, JSON.stringify(LEGACY_CACHE, null, 2));
-    await writeFile(TEST_SCHEDULED_PATH, JSON.stringify(STALE_SCHEDULED_CACHE, null, 2));
+    const currentDate = todayET();
+    const liveRoutePayload = { ...LEGACY_CACHE, date: currentDate };
+    await writeFile(CACHE_PATH, JSON.stringify(liveRoutePayload, null, 2));
+    await writeFile(TEST_SCHEDULED_PATH, JSON.stringify({ ...STALE_SCHEDULED_CACHE, date: currentDate }, null, 2));
 
     await setupNonRegimeMocks(page);
+    await setupRegimeMock(page, liveRoutePayload);
   });
 
   test.afterEach(async () => {

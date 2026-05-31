@@ -21,20 +21,28 @@ Usage:
 import argparse
 import json
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
+from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
+from xenon.db.engine import get_sync_engine
+from xenon.execution.account_scope import resolve_from_env
+from xenon.execution.brackets.executor.ib_executor import IBExecutor
+from xenon.execution.brackets.executor.reconcile import boot_reconcile
 from xenon.monitor_daemon.daemon import MonitorDaemon
 from xenon.monitor_daemon.handlers import FillMonitorHandler, PresetRebalanceHandler
 from xenon.monitor_daemon.handlers.flex_token_check import FlexTokenCheck
-from xenon.monitor_daemon.handlers.wizard_stop_monitor import WizardStopMonitorHandler
+from xenon.monitor_daemon.handlers.position_rules import PositionRulesHandler
 
 # Paths — repo root is 4 parents up (src/xenon/monitor_daemon/run.py → repo root)
 PROJECT_DIR = Path(__file__).resolve().parent.parent.parent.parent
 STATE_FILE = PROJECT_DIR / "data" / "daemon_state.json"
 LOG_DIR = PROJECT_DIR / "logs"
 LOG_FILE = LOG_DIR / "monitor-daemon.log"
+
+logger = logging.getLogger(__name__)
 
 
 # Configure logging
@@ -61,6 +69,45 @@ def setup_logging(verbose: bool = False):
     logging.root.addHandler(console_handler)
 
 
+def _ib_client_connected(client) -> bool:
+    is_connected = getattr(client, "is_connected", None)
+    if callable(is_connected):
+        return bool(is_connected())
+    connected = getattr(client, "connected", None)
+    if isinstance(connected, bool):
+        return connected
+    return False
+
+
+def _connect_position_rules_ib_client(client) -> bool:
+    if _ib_client_connected(client):
+        return True
+    connect = getattr(client, "connect", None)
+    if not callable(connect):
+        return False
+    try:
+        connect(
+            host=os.environ.get("IB_GATEWAY_HOST", DEFAULT_HOST),
+            port=int(os.environ.get("IB_GATEWAY_PORT", str(DEFAULT_GATEWAY_PORT))),
+            client_id=int(os.environ.get("XENON_POSITION_RULES_CLIENT_ID", "71")),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("position_rules boot reconcile deferred: IB connect failed: %s", exc)
+        return False
+    return True
+
+
+def _run_position_rules_boot_reconcile(*, engine, ib_client, scope) -> None:
+    if not _connect_position_rules_ib_client(ib_client):
+        logger.info("position_rules boot reconcile deferred: IB client unavailable")
+        return
+    try:
+        counts = boot_reconcile(engine=engine, ib_client=ib_client, scope=scope)
+        logger.info("position_rules boot reconcile completed: %s", counts)
+    except Exception:  # noqa: BLE001
+        logger.warning("position_rules boot reconcile failed", exc_info=True)
+
+
 def create_daemon() -> MonitorDaemon:
     """Create and configure the daemon with all handlers."""
     daemon = MonitorDaemon(
@@ -70,13 +117,32 @@ def create_daemon() -> MonitorDaemon:
     )
 
     # Register handlers
-    daemon.register(FillMonitorHandler(ib_port=4001, client_id=70, send_notifications=True))
+    daemon.register(FillMonitorHandler(ib_port=DEFAULT_GATEWAY_PORT, client_id=70, send_notifications=True))
 
     daemon.register(PresetRebalanceHandler())
 
     daemon.register(FlexTokenCheck())
 
-    daemon.register(WizardStopMonitorHandler())
+    if os.environ.get("XENON_POSITION_RULES_ENABLED", "0") == "1":
+        engine = get_sync_engine()
+        scope = resolve_from_env()
+        ib_client = IBClient()
+        _run_position_rules_boot_reconcile(engine=engine, ib_client=ib_client, scope=scope)
+        daemon.register(
+            PositionRulesHandler(
+                engine=engine,
+                executor=IBExecutor(),
+                ib_client=ib_client,
+                scope=scope,
+            )
+        )
+        from xenon.monitor_daemon.handlers.out_of_band_sweep import OutOfBandSweepHandler
+
+        daemon.register(OutOfBandSweepHandler(engine=engine, ib_client=ib_client, scope=scope))
+
+        from xenon.monitor_daemon.handlers.arm_consumer import start_listen_loop
+
+        daemon.register_async_task(start_listen_loop)
 
     # Load previous state
     daemon.load_state()
@@ -143,6 +209,7 @@ def list_handlers():
     print("  fill_monitor       - Monitor orders for fills (60s)")
     print("  preset_rebalance   - Index constituent updates (weekly)")
     print("  flex_token_check   - IB Flex token expiry reminders (daily)")
+    print("  position_rules     - Position protection rules (flagged)")
     print()
     print("Add new handlers by:")
     print("  1. Create scripts/monitor_daemon/handlers/my_handler.py")

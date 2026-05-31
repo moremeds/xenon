@@ -46,6 +46,7 @@ from xenon.api.routes.historical import router as historical_router
 from xenon.api.routes.journal import router as journal_router
 from xenon.api.routes.orders import orders_payload_for_scope
 from xenon.api.routes.orders import router as orders_router
+from xenon.api.routes.position_rules import router as position_rules_router
 from xenon.api.routes.regime import router as regime_router
 from xenon.api.routes.trades import router as trades_router
 from xenon.api.routes.uw_analyze import router as uw_analyze_router
@@ -489,6 +490,15 @@ async def _vcg_cri_scan_loop() -> None:
         await asyncio.sleep(interval_s)
 
 
+def _resolve_lifespan_account_state(managed_account: str | None) -> tuple[str, bool]:
+    """Resolve FastAPI account state without self-verifying a down Gateway."""
+    managed = (managed_account or "").strip()
+    if managed:
+        return managed, trading_mode.verify_account(managed)
+    fallback = os.environ.get("XENON_BROKER_ACCOUNT", "").strip()
+    return fallback, False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start IB pool and UW client on startup, tear down on shutdown."""
@@ -503,7 +513,7 @@ async def lifespan(app: FastAPI):
         await _run_rehydrate_on_boot()
         app.state.trading_mode = trading_mode.MODE
         # Tests monkeypatch _get_managed_account_for_health; honor that.
-        account = _get_managed_account_for_health()
+        account = _get_managed_account_for_health() or os.environ.get("XENON_BROKER_ACCOUNT", "")
         app.state.account = account
         app.state.mode_verified = trading_mode.verify_account(account)
         yield
@@ -523,8 +533,8 @@ async def lifespan(app: FastAPI):
     # Trading-mode prefix guard — verify Gateway login matches XENON_TRADING_MODE.
     # Failure does not abort startup; it sets app.state.mode_verified=False
     # and the order routes refuse to serve until .env + Gateway are aligned.
-    account = await asyncio.to_thread(_get_managed_account_for_health)
-    verified = trading_mode.verify_account(account)
+    managed_account = await asyncio.to_thread(_get_managed_account_for_health)
+    account, verified = _resolve_lifespan_account_state(managed_account)
     app.state.trading_mode = trading_mode.MODE
     app.state.account = account
     app.state.mode_verified = verified
@@ -816,6 +826,7 @@ app = FastAPI(title="Xenon API", version="1.0.0", lifespan=lifespan)
 app.include_router(historical_router)
 app.include_router(journal_router)
 app.include_router(orders_router)
+app.include_router(position_rules_router)
 app.include_router(regime_router)
 app.include_router(trades_router)
 app.include_router(uw_analyze_router)
@@ -854,6 +865,7 @@ async def auth_middleware(request: Request, call_next):
     # Skip auth for server-to-server calls from localhost (Next.js → FastAPI)
     client_host = request.client.host if request.client else None
     if client_host in ("127.0.0.1", "::1"):
+        request.state.user = {"source": "localhost-bypass"}
         return await call_next(request)
 
     # API key auth — scoped to historical/contract endpoints only
@@ -2567,6 +2579,7 @@ def _resolve_scope_kwargs() -> dict[str, str]:
 
 
 _REGIME_OVERRIDE_MIN_REASON_CHARS = 10
+_PLACE_CANCELLED_ON_ACK_STATUSES = {"PendingCancel", "Cancelled", "ApiCancelled"}
 
 
 def _resolve_scope_obj():
@@ -2872,13 +2885,48 @@ async def _orders_place_from_body(body: dict):
         )
         raise HTTPException(status_code=502, detail=result.error)
     if result.data and result.data.get("status") == "error":
+        ib_code = result.data.get("code")
+        initial_status = str(result.data.get("initialStatus") or result.data.get("statusText") or "")
+        has_broker_order = bool(result.data.get("orderId") or result.data.get("permId"))
+        if str(ib_code) == "2161" and has_broker_order and initial_status in {
+            "PendingSubmit",
+            "PreSubmitted",
+            "Submitted",
+        }:
+            orders_store.mark_submitted(
+                submission_id=submission_id,
+                ib_order_id=str(result.data.get("orderId") or ""),
+                perm_id=str(result.data.get("permId") or ""),
+                placing_client_id=int(result.data.get("clientId") or 26),
+            )
+            try:
+                orders_store.record_event(
+                    submission_id,
+                    "IB_WARNING",
+                    {
+                        "ib_code": ib_code,
+                        "ib_message": result.data.get("message"),
+                        "initial_status": initial_status,
+                    },
+                )
+            except Exception:  # pragma: no cover — event writes are best-effort
+                logger.warning(
+                    "Failed to record IB_WARNING event for submission %s",
+                    submission_id,
+                    exc_info=True,
+                )
+            warning_response = dict(result.data)
+            warning_response["status"] = "ok"
+            warning_response["warning_code"] = ib_code
+            warning_response["warning_message"] = result.data.get("message")
+            return warning_response
+
         # B6 — write a reason_code the UI toast map can resolve. Most IB
         # rejections collapse to IB_REJECT, but tick-rule rejections
         # (code 110) re-map to LIMIT_OFF_TICK so the user sees a clean
         # actionable message instead of raw IB error text. The raw IB
         # numeric code + message always go into the orders_events audit
         # row so we don't lose the info.
-        ib_code = result.data.get("code")
         ib_message = result.data.get("message", "Order failed")
         if str(ib_code) == "110":
             reason_code = ReasonCode.LIMIT_OFF_TICK.value
@@ -2916,6 +2964,15 @@ async def _orders_place_from_body(body: dict):
             perm_id=str(result.data.get("permId") or ""),
             placing_client_id=int(result.data.get("clientId") or 26),
         )
+        initial_status = str(result.data.get("initialStatus") or result.data.get("statusText") or "")
+        if initial_status in _PLACE_CANCELLED_ON_ACK_STATUSES:
+            orders_store.mark_terminal(
+                submission_id=submission_id,
+                state="CANCELLED",
+                reason_code="IB_PENDING_CANCEL_ON_SUBMIT",
+                filled_qty=0,
+                avg_fill_price=None,
+            )
     return result.data
 
 

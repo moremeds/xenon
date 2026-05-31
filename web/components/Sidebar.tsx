@@ -4,6 +4,7 @@ import Link from "next/link";
 import type { WorkspaceSection } from "@/lib/types";
 import { navItems } from "@/lib/data";
 import { useUwStats } from "@/lib/useUwStats";
+import { GlobalHealthIndicator } from "@/components/portfolio/GlobalHealthIndicator";
 
 type SidebarProps = {
   activeSection: WorkspaceSection;
@@ -85,6 +86,10 @@ export default function Sidebar({
         <div className="status-row">
           <span>Source</span>
           <span>IB Gateway</span>
+        </div>
+        <div className="status-row">
+          <span>Protection</span>
+          <GlobalHealthIndicator />
         </div>
 
         <div className="sidebar-footer-divider" />

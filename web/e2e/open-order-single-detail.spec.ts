@@ -200,7 +200,7 @@ async function stubApis(page: import("@playwright/test").Page) {
 test.describe("Orders open-order single detail rendering", () => {
   test("renders single option order detail alongside combo detail", async ({ page }) => {
     await stubApis(page);
-    await page.goto("http://127.0.0.1:3000/orders");
+    await page.goto("/orders");
 
     const singleOptionRow = page.locator("tbody tr").filter({ hasText: "AAOI" }).filter({ hasText: "$5.00" }).first();
     await expect(singleOptionRow).toBeVisible({ timeout: 10_000 });

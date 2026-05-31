@@ -157,11 +157,11 @@ test.describe("UW Analysis page", () => {
     await expect(tiers.getByText("FIXED INCOME")).toBeVisible();
     await expect(tiers.getByText("VOLATILITY", { exact: true })).toBeVisible();
     await expect(tiers.getByText("SECTOR ETFS")).toBeVisible();
-    await expect(tiers.getByText("SINGLE NAMES")).toBeVisible();
+    await expect(tiers.getByText("WATCH · M7")).toBeVisible();
 
-    // Auto-selected NVDA (the only changed row).
+    // The first market-index row is selected by default; changed rows still carry alerts.
     const detail = page.getByTestId("uw-detail");
-    await expect(detail).toHaveAttribute("data-ticker", "NVDA");
+    await expect(detail).toHaveAttribute("data-ticker", "SPY");
     await expect(page.getByTestId("uw-card-NVDA")).toHaveAttribute(
       "data-alert",
       "true",

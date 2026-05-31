@@ -8,6 +8,7 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import create_engine as _create_sync
+from sqlalchemy import text
 
 from xenon.db.queries import combo_wizard as cwq
 
@@ -134,27 +135,118 @@ def test_record_event(sconn):
     assert row[0] == "SUBMITTED"
 
 
-# ── wizard_protection ──
+# ── position_protection-backed combo TP alert ──
+
+
+def _combo_legs() -> list[dict]:
+    return [
+        {
+            "sec_type": "OPT",
+            "symbol": "QQQ",
+            "expiry": "2026-06-19",
+            "strike": 430,
+            "right": "C",
+            "action": "BUY",
+            "ratio": 1,
+        },
+        {
+            "sec_type": "OPT",
+            "symbol": "QQQ",
+            "expiry": "2026-06-19",
+            "strike": 435,
+            "right": "C",
+            "action": "SELL",
+            "ratio": 1,
+        },
+    ]
 
 
 def test_upsert_protection(sconn):
-    cwq.create_session(sconn, session_id="wiz-p", ticker="QQQ", state="protected")
+    now = datetime.now(timezone.utc)
+    cwq.create_session(
+        sconn,
+        session_id="wiz-p",
+        ticker="QQQ",
+        state="protected",
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+    )
+    cwq.create_attempt(
+        sconn,
+        attempt_id="att-p",
+        session_id="wiz-p",
+        ticker="QQQ",
+        state="FILLED",
+        legs=_combo_legs(),
+        submitted_at=now,
+        updated_at=now,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+    )
     cwq.upsert_protection(sconn, "wiz-p", config={"tp_enabled": True, "tp_target_price": 5.0})
-    from sqlalchemy import text
 
-    row = sconn.execute(text("SELECT config FROM xenon.wizard_protection WHERE session_id = 'wiz-p'")).first()
+    row = sconn.execute(
+        text(
+            """
+            SELECT rule_kind, state, asset_class, position_descriptor, config
+            FROM xenon.position_protection
+            WHERE rule_kind = 'combo_tp_alert'
+              AND position_descriptor->>'wizard_session_id' = 'wiz-p'
+            """
+        )
+    ).first()
     assert row is not None
-    assert row[0]["tp_enabled"] is True
-    # Update existing
+    assert row.rule_kind == "combo_tp_alert"
+    assert row.state == "PENDING_ARM"
+    assert row.asset_class == "debit_combo"
+    assert row.position_descriptor["legs"] == _combo_legs()
+    assert row.config["auto_place"] is False
+    assert row.config["tp_enabled"] is True
+    # Existing active rows are frozen; reconfiguration supersedes + inserts.
     cwq.upsert_protection(sconn, "wiz-p", config={"tp_enabled": False, "alert_enabled": True})
-    row2 = sconn.execute(text("SELECT config FROM xenon.wizard_protection WHERE session_id = 'wiz-p'")).first()
-    assert row2[0]["tp_enabled"] is False
+    rows = sconn.execute(
+        text(
+            """
+            SELECT state, config
+            FROM xenon.position_protection
+            WHERE rule_kind = 'combo_tp_alert'
+              AND position_descriptor->>'wizard_session_id' = 'wiz-p'
+            ORDER BY protection_id
+            """
+        )
+    ).fetchall()
+    assert [row.state for row in rows] == ["SUPERSEDED", "PENDING_ARM"]
+    assert rows[-1].config["tp_enabled"] is False
 
 
 def test_list_protected_sessions(sconn):
-    cwq.create_session(sconn, session_id="wiz-lp", ticker="SPY", state="PROTECTED")
+    now = datetime.now(timezone.utc)
+    cwq.create_session(
+        sconn,
+        session_id="wiz-lp",
+        ticker="SPY",
+        state="PROTECTED",
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+    )
+    cwq.create_attempt(
+        sconn,
+        attempt_id="att-lp",
+        session_id="wiz-lp",
+        ticker="SPY",
+        state="FILLED",
+        legs=[{**leg, "symbol": "SPY"} for leg in _combo_legs()],
+        submitted_at=now,
+        updated_at=now,
+        broker="IB",
+        account_env="paper",
+        broker_account="DU1234567",
+    )
     cwq.upsert_protection(sconn, "wiz-lp", config={"alert_enabled": True, "alert_net_mid_threshold": 0.5})
-    rows = cwq.list_protected_sessions(sconn)
+    rows = cwq.list_protected_sessions(sconn, broker="IB", account_env="paper", broker_account="DU1234567")
     assert len(rows) >= 1
     assert any(r["session_id"] == "wiz-lp" for r in rows)
 

@@ -134,6 +134,15 @@ function installMockWebSocket(page: import("@playwright/test").Page) {
       onclose: ((event?: unknown) => void) | null = null;
       onerror: ((event?: unknown) => void) | null = null;
 
+      addEventListener(type: string, listener: (event?: unknown) => void) {
+        if (type === "open") this.onopen = listener;
+        if (type === "message") this.onmessage = listener as (event: { data: string }) => void;
+        if (type === "close") this.onclose = listener;
+        if (type === "error") this.onerror = listener;
+      }
+
+      removeEventListener() {}
+
       constructor(url: string) {
         this.url = url;
         setTimeout(() => {
@@ -187,20 +196,20 @@ function installMockWebSocket(page: import("@playwright/test").Page) {
   }, PRICE_FIXTURES);
 }
 
-function stubApis(page: import("@playwright/test").Page) {
-  page.route("**/api/portfolio", (route) =>
+async function stubApis(page: import("@playwright/test").Page) {
+  await page.route("**/api/portfolio", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(PORTFOLIO) }),
   );
-  page.route("**/api/orders", (route) =>
+  await page.route("**/api/orders", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(ORDERS) }),
   );
-  page.route("**/api/regime", (route) =>
+  await page.route("**/api/regime", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ score: 15, cri: { score: 15 } }) }),
   );
-  page.route("**/api/ib-status", (route) =>
+  await page.route("**/api/ib-status", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ connected: true }) }),
   );
-  page.route("**/api/blotter", (route) =>
+  await page.route("**/api/blotter", (route) =>
     route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -211,9 +220,9 @@ function stubApis(page: import("@playwright/test").Page) {
 
 test("portfolio day move prefers IB daily P&L over positive mark-to-close math for same-day WULF position", async ({ page }) => {
   await installMockWebSocket(page);
-  stubApis(page);
+  await stubApis(page);
 
-  await page.goto("http://127.0.0.1:3000/portfolio");
+  await page.goto("/portfolio");
 
   const todayPnlRow = page.locator(".metrics-grid-3").filter({ hasText: "Day Move" }).first();
   await expect(todayPnlRow).toContainText("Day Move");

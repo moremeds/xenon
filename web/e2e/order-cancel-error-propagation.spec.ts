@@ -105,6 +105,14 @@ test.afterAll(async () => {
 async function stubOrdersPageApis(page: import("@playwright/test").Page) {
   await page.unrouteAll({ behavior: "ignoreErrors" });
 
+  await page.route("**/api/orders/cancel", (route) => {
+    route.fulfill({
+      status: 502,
+      contentType: "application/json",
+      body: JSON.stringify({ detail: "Cancel not confirmed by refreshed IB open orders" }),
+    });
+  });
+
   await page.route("**/api/portfolio", (route) => {
     route.fulfill({
       status: 200,

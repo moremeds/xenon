@@ -141,4 +141,22 @@ describe("placeOrderBodySchema", () => {
       acknowledge_limit_override: true,
     });
   });
+
+  it("preserves outsideRth on stock order payloads", () => {
+    const payload = buildFastApiPlaceOrderPayload({
+      type: "stock",
+      symbol: "t",
+      action: "BUY",
+      quantity: 100,
+      limitPrice: 26.2,
+      client_attempt_id: "attempt-outside-rth",
+      outsideRth: true,
+    });
+
+    expect(payload).toMatchObject({
+      type: "stock",
+      symbol: "T",
+      outsideRth: true,
+    });
+  });
 });

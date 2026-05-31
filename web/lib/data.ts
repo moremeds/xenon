@@ -66,7 +66,7 @@ export const navItems: WorkspaceNavItem[] = [
   { label: "Journal", route: "journal", href: "/journal", icon: Wrench },
   { label: "Regime", route: "regime", href: "/regime", icon: Shield },
   { label: "CTA", route: "cta", href: "/cta", icon: Activity },
-  // { label: "Internals", route: "internals", href: "/internals", icon: Activity },
+  { label: "Internals", route: "internals", href: "/internals", icon: Activity, hidden: true },
 ];
 
 export const quickPromptsBySection: Record<WorkspaceSection, string[]> = {
@@ -105,6 +105,7 @@ export const quickPromptsBySection: Record<WorkspaceSection, string[]> = {
   discover: ["discover", "scan --top 12", "analyze aaoi", "journal", "help"],
   journal: ["journal --limit 25", "portfolio", "analyze nfLx", "help"],
   regime: ["cri-scan", "portfolio", "scan --top 12", "help"],
+  internals: ["cri-scan", "portfolio", "scan --top 12", "help"],
   cta: ["menthorq-cta", "cri-scan", "portfolio", "help"],
   "ticker-detail": ["portfolio", "scan --top 12", "help"],
   "uw-analyze": ["analyze aapl", "analyze tsla", "analyze spy", "help"],
@@ -121,6 +122,7 @@ export const sectionDescription: Record<WorkspaceSection, string> = {
   discover: "Opportunity discovery and watchlist growth.",
   journal: "Trade decision logs and history review.",
   regime: "Crash Risk Index — real-time CTA deleveraging monitor.",
+  internals: "Market internals skew and breadth monitor.",
   cta: "CTA positioning, vol-targeting exposure model and institutional flow.",
   "ticker-detail":
     "Instrument research surface — company, book, chain, position, orders, news, ratings, seasonality.",

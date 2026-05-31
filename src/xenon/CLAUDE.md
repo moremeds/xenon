@@ -73,6 +73,14 @@ Key rules:
 - FastAPI: depend on `xenon.api.guards.get_account_scope`.
 - Sync subprocesses: env vars `XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`.
 
+### Order Audit Trail
+
+Paper and live order paths are auditable systems, not throwaway scripts. Any code that places, cancels, modifies, reconciles, sweeps, or auto-closes broker orders must preserve a durable Postgres trail before relying on terminal output or TWS state.
+
+Required audit fields when available: `broker`, `account_env`, `broker_account`, `submission_id`, `perm_id`, `order_id`, `client_id`, `order_ref`, `exec_id`, status/state, timestamps, and the actor/source (`FastAPI`, CLI, daemon, sweep, TWS external action). For position rules, keep `position_protection`, `position_close_claims`, and `events.outbox` rows linked by protection id, claim id, order ref, and broker scope.
+
+Never delete audit rows to clean up paper smoke or failed tests. Mark orders/rules/claims `CANCELED`, `FAILED`, `SUPERSEDED`, or `CLOSED`, and emit or preserve events that explain why. If a broker action cannot be written to Postgres, stop and surface the failure instead of proceeding with an unaudited order action.
+
 ## Combo / BAG Order Guardrails
 
 1. **Never map combo `Order.action` from debit vs credit.**

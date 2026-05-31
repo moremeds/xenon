@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Convenience wrapper for Docker-managed IB Gateway.
-# Usage: scripts/docker_ib_gateway.sh {start|stop|restart|status|logs}
+# Usage: scripts/infra/docker_ib_gateway.sh {start|stop|restart|status|logs}
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMPOSE_DIR="$(cd "$SCRIPT_DIR/../docker/ib-gateway" && pwd)"
+COMPOSE_DIR="$(cd "$SCRIPT_DIR/../../docker/ib-gateway" && pwd)"
 COMPOSE_OVERRIDE=""
 if [[ -f "$COMPOSE_DIR/docker-compose.override.yml" ]]; then
     COMPOSE_OVERRIDE="-f $COMPOSE_DIR/docker-compose.override.yml"

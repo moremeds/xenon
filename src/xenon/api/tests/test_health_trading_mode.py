@@ -49,3 +49,20 @@ def test_health_mode_verified_false_on_mismatch(monkeypatch):
         assert body["trading_mode"] == "live"
         assert body["account"] == "DU***9999"
         assert body["mode_verified"] is False
+
+
+def test_lifespan_account_state_falls_back_to_env_without_verifying(monkeypatch):
+    """Gateway-down startup keeps read-route scope without self-verifying mode."""
+    monkeypatch.setenv("XENON_API_TEST_MODE", "0")
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU1234567")
+    import xenon.api.trading_mode as tm
+
+    importlib.reload(tm)
+    import xenon.api.server as server
+
+    importlib.reload(server)
+    account, verified = server._resolve_lifespan_account_state("")
+
+    assert account == "DU1234567"
+    assert verified is False

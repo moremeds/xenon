@@ -39,7 +39,7 @@ def _pg_engine():
 
 def _cleanup(engine):
     with engine.begin() as conn:
-        conn.execute(text("TRUNCATE xenon.wizard_protection CASCADE"))
+        conn.execute(text("TRUNCATE xenon.position_protection CASCADE"))
         conn.execute(text("TRUNCATE xenon.wizard_events CASCADE"))
         conn.execute(text("TRUNCATE xenon.wizard_combo_attempts CASCADE"))
         conn.execute(text("TRUNCATE xenon.wizard_sessions CASCADE"))
@@ -76,8 +76,26 @@ def _init_session(*, state: str = "FILLED", payload: dict | None = None) -> str:
         "quantity": 1,
         "limitPrice": "2.50",
         "legs": [
-            {"conId": 1001, "action": "BUY", "ratio": 1},
-            {"conId": 1002, "action": "SELL", "ratio": 1},
+            {
+                "conId": 1001,
+                "sec_type": "OPT",
+                "symbol": "AAPL",
+                "expiry": "2026-06-19",
+                "strike": 200,
+                "right": "C",
+                "action": "BUY",
+                "ratio": 1,
+            },
+            {
+                "conId": 1002,
+                "sec_type": "OPT",
+                "symbol": "AAPL",
+                "expiry": "2026-06-19",
+                "strike": 205,
+                "right": "C",
+                "action": "SELL",
+                "ratio": 1,
+            },
         ],
     }
     engine = _pg_engine()
@@ -90,6 +108,15 @@ def _init_session(*, state: str = "FILLED", payload: dict | None = None) -> str:
             structure_name="Bull Call Spread",
             intent="OPEN",
             payload=payload,
+        )
+        cwq.create_attempt(
+            conn,
+            attempt_id=f"att-{session_id}",
+            session_id=session_id,
+            ticker="AAPL",
+            structure_name="Bull Call Spread",
+            state="FILLED",
+            legs=payload["legs"],
         )
     engine.dispose()
     return session_id
@@ -112,16 +139,83 @@ def _init_scoped_session(*, account_env: str, broker_account: str, state: str = 
                 "action": "BUY",
                 "quantity": 1,
                 "legs": [
-                    {"conId": 1001, "action": "BUY", "ratio": 1},
-                    {"conId": 1002, "action": "SELL", "ratio": 1},
+                    {
+                        "conId": 1001,
+                        "sec_type": "OPT",
+                        "symbol": "AAPL",
+                        "expiry": "2026-06-19",
+                        "strike": 200,
+                        "right": "C",
+                        "action": "BUY",
+                        "ratio": 1,
+                    },
+                    {
+                        "conId": 1002,
+                        "sec_type": "OPT",
+                        "symbol": "AAPL",
+                        "expiry": "2026-06-19",
+                        "strike": 205,
+                        "right": "C",
+                        "action": "SELL",
+                        "ratio": 1,
+                    },
                 ],
             },
             broker="IB",
             account_env=account_env,
             broker_account=broker_account,
         )
+        cwq.create_attempt(
+            conn,
+            attempt_id=f"att-{session_id}",
+            session_id=session_id,
+            ticker="AAPL",
+            structure_name="Bull Call Spread",
+            state="FILLED",
+            legs=[
+                {
+                    "conId": 1001,
+                    "sec_type": "OPT",
+                    "symbol": "AAPL",
+                    "expiry": "2026-06-19",
+                    "strike": 200,
+                    "right": "C",
+                    "action": "BUY",
+                    "ratio": 1,
+                },
+                {
+                    "conId": 1002,
+                    "sec_type": "OPT",
+                    "symbol": "AAPL",
+                    "expiry": "2026-06-19",
+                    "strike": 205,
+                    "right": "C",
+                    "action": "SELL",
+                    "ratio": 1,
+                },
+            ],
+            broker="IB",
+            account_env=account_env,
+            broker_account=broker_account,
+        )
     engine.dispose()
     return session_id
+
+
+def _fetch_protection_row(conn, sid: str):
+    return conn.execute(
+        text(
+            """
+            SELECT rule_kind, state, asset_class, position_descriptor, config
+            FROM xenon.position_protection
+            WHERE rule_kind = 'combo_tp_alert'
+              AND position_descriptor->>'wizard_session_id' = :sid
+            ORDER BY protection_id DESC
+            LIMIT 1
+            """
+        ),
+        {"sid": sid},
+    ).fetchone()
 
 
 # --------------------------------------------------------------------------
@@ -204,18 +298,25 @@ def test_protection_success_transitions_protected(monkeypatch):
             text("SELECT state FROM xenon.wizard_sessions WHERE session_id = :sid"),
             {"sid": sid},
         ).fetchone()
-        prot = conn.execute(
-            text("SELECT config FROM xenon.wizard_protection WHERE session_id = :sid"),
-            {"sid": sid},
-        ).fetchone()
+        prot = _fetch_protection_row(conn, sid)
     engine.dispose()
 
     assert session[0] == "PROTECTED"
     assert prot is not None
-    config = prot[0]
+    assert prot.rule_kind == "combo_tp_alert"
+    assert prot.state == "PENDING_ARM"
+    assert prot.asset_class == "debit_combo"
+    assert prot.config["auto_place"] is False
+    assert prot.position_descriptor["wizard_session_id"] == sid
+    assert prot.position_descriptor["asset_class"] == "debit_combo"
+    assert prot.position_descriptor["anchor_price"] == 2.5
+    assert prot.position_descriptor["legs"][0]["symbol"] == "AAPL"
+    assert prot.position_descriptor["legs"][0]["con_id"] == 1001
+    config = prot.config
     assert config["tp_enabled"] is True
     assert Decimal(config["tp_target_price"]) == Decimal("3.50")
     assert config["alert_enabled"] is True
+    assert Decimal(config["alert_net_mid_threshold"]) == Decimal("1.25")
 
 
 def test_protection_pending_retries_then_fails_if_tp_attach_never_acks(monkeypatch):
@@ -427,14 +528,11 @@ def test_risk_alert_failure_keeps_session_pending(monkeypatch):
             text("SELECT state FROM xenon.wizard_sessions WHERE session_id = :sid"),
             {"sid": sid},
         ).fetchone()
-        prot = conn.execute(
-            text("SELECT config FROM xenon.wizard_protection WHERE session_id = :sid"),
-            {"sid": sid},
-        ).fetchone()
+        prot = _fetch_protection_row(conn, sid)
     engine.dispose()
 
     assert row[0] == "PROTECTION_PENDING"
-    config = prot[0]
+    config = prot.config
     assert config["tp_enabled"] is True
     assert config["alert_enabled"] is False
 
@@ -465,12 +563,77 @@ def test_signed_combo_pricing_preserved_for_credit(monkeypatch):
 
     engine = _pg_engine()
     with engine.connect() as conn:
-        prot = conn.execute(
-            text("SELECT config FROM xenon.wizard_protection WHERE session_id = :sid"),
-            {"sid": sid},
-        ).fetchone()
+        prot = _fetch_protection_row(conn, sid)
     engine.dispose()
 
-    config = prot[0]
+    config = prot.config
     assert Decimal(config["tp_target_price"]) == signed_target
     assert Decimal(config["alert_net_mid_threshold"]) == signed_threshold
+    assert config["polarity"] == "CREDIT"
+
+
+def test_credit_spread_wizard_protection_uses_credit_spread_key(monkeypatch):
+    payload = {
+        "symbol": "SPY",
+        "type": "combo",
+        "action": "BUY",
+        "quantity": 1,
+        "limitPrice": "-1.00",
+        "legs": [
+            {
+                "conId": 58001,
+                "sec_type": "OPT",
+                "symbol": "SPY",
+                "expiry": "20260516",
+                "strike": 580,
+                "right": "P",
+                "action": "SELL",
+                "ratio": 1,
+                "fill_price": 1.40,
+            },
+            {
+                "conId": 57501,
+                "sec_type": "OPT",
+                "symbol": "SPY",
+                "expiry": "20260516",
+                "strike": 575,
+                "right": "P",
+                "action": "BUY",
+                "ratio": 1,
+                "fill_price": 0.40,
+            },
+        ],
+    }
+    sid = _init_session(state="FILLED", payload=payload)
+    ib = _StubIB(
+        tp_acks=[{"order_id": 9001, "perm_id": "p"}],
+        alert_acks=[{"virtual_id": "alert-1"}],
+    )
+
+    protect.attach_protection(
+        sid,
+        ib=ib,
+        tp_target_price=Decimal("-0.10"),
+        alert_net_mid_threshold=Decimal("-0.45"),
+        polarity="CREDIT",
+        sleep=lambda _s: None,
+    )
+
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        prot = conn.execute(
+            text(
+                """
+                SELECT asset_class, position_key, position_descriptor
+                FROM xenon.position_protection
+                WHERE position_descriptor->>'wizard_session_id' = :sid
+                """
+            ),
+            {"sid": sid},
+        ).one()
+    engine.dispose()
+
+    assert prot.asset_class == "credit_spread"
+    assert prot.position_descriptor["asset_class"] == "credit_spread"
+    assert prot.position_descriptor["credit_received"] == 1.0
+    assert prot.position_key == "CS::SPY::20260516::580::575::P"

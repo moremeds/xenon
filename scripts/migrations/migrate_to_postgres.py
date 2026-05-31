@@ -215,7 +215,6 @@ def migrate_orders_duckdb(engine):
     count_ws = 0
     count_we = 0
     count_wca = 0
-    count_wp = 0
 
     with engine.begin() as conn:
         # Order submissions
@@ -374,41 +373,11 @@ def migrate_orders_duckdb(engine):
         except Exception as _cat_exc:  # duckdb.CatalogException when table missing
             print("  SKIP wizard_combo_attempts (table not found)")
 
-        # Wizard protection
-        try:
-            rows = duck.execute("SELECT * FROM wizard_protection").fetchall()
-            cols = [desc[0] for desc in duck.description]
-            for row in rows:
-                d = dict(zip(cols, row))
-                if isinstance(d.get("config"), str):
-                    d["config"] = json.loads(d["config"]) if d["config"] else {}
-                conn.execute(
-                    text("""
-                    INSERT INTO xenon.wizard_protection
-                        (session_id, attempt_id, protection_type, config,
-                         state, triggered_at, created_at)
-                    VALUES (:session_id, :attempt_id, :protection_type,
-                            CAST(:config AS jsonb), :state, :triggered_at, :created_at)
-                """),
-                    {
-                        "session_id": d["session_id"],
-                        "attempt_id": d.get("attempt_id"),
-                        "protection_type": d.get("protection_type", ""),
-                        "config": json.dumps(d.get("config", {})),
-                        "state": d.get("state", "active"),
-                        "triggered_at": d.get("triggered_at"),
-                        "created_at": d.get("created_at"),
-                    },
-                )
-                count_wp += 1
-        except Exception as _cat_exc:  # duckdb.CatalogException when table missing
-            print("  SKIP wizard_protection (table not found)")
-
     duck.close()
     print(
         f"  orders.duckdb → {count_sub} submissions, {count_evt} events, "
         f"{count_ws} wizard sessions, {count_we} wizard events, "
-        f"{count_wca} combo attempts, {count_wp} protections"
+        f"{count_wca} combo attempts"
     )
     return count_sub + count_evt
 
@@ -640,7 +609,7 @@ def verify(engine):
             "xenon.wizard_sessions",
             "xenon.wizard_events",
             "xenon.wizard_combo_attempts",
-            "xenon.wizard_protection",
+            "xenon.position_protection",
             "xenon.scan_results",
             "xenon.cri_series",
             "xenon.uw_analyze_snapshots",

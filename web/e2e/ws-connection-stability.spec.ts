@@ -241,8 +241,8 @@ async function injectMockWebSocket(page: import("@playwright/test").Page) {
           const updates: Record<string, unknown> = {};
           const strikes = [88, 90, 92];
           for (const strike of strikes) {
-            const callKey = `PLTR_20260417_${strike}_C`;
-            const putKey = `PLTR_20260417_${strike}_P`;
+            const callKey = `PLTR_20260515_${strike}_C`;
+            const putKey = `PLTR_20260515_${strike}_P`;
             updates[callKey] = {
               symbol: callKey,
               last: strike === 90 ? 3.4 : strike < 90 ? 5.2 : 1.8,
@@ -317,6 +317,47 @@ async function injectMockWebSocket(page: import("@playwright/test").Page) {
                 } as MessageEvent<string>);
               }, 5);
             }
+            if (Array.isArray(msg.contracts) && msg.contracts.length > 0) {
+              window.setTimeout(() => {
+                const updates: Record<string, unknown> = {};
+                for (const contract of msg.contracts) {
+                  if (contract.symbol !== "PLTR") continue;
+                  const expiry = String(contract.expiry).replace(/-/g, "");
+                  const strike = Number(contract.strike);
+                  const right = contract.right === "P" ? "P" : "C";
+                  const key = `PLTR_${expiry}_${strike}_${right}`;
+                  updates[key] = {
+                    symbol: key,
+                    last: right === "C" ? 3.4 : 4.6,
+                    lastIsCalculated: false,
+                    bid: right === "C" ? 3.3 : 4.5,
+                    ask: right === "C" ? 3.5 : 4.7,
+                    bidSize: 50,
+                    askSize: 50,
+                    volume: 1200,
+                    high: null,
+                    low: null,
+                    open: null,
+                    close: null,
+                    week52High: null,
+                    week52Low: null,
+                    avgVolume: null,
+                    delta: right === "C" ? 0.55 : -0.45,
+                    gamma: 0.03,
+                    theta: right === "C" ? -0.04 : -0.03,
+                    vega: right === "C" ? 0.12 : 0.11,
+                    impliedVol: right === "C" ? 0.42 : 0.44,
+                    undPrice: 88.5,
+                    timestamp: new Date().toISOString(),
+                  };
+                }
+                if (Object.keys(updates).length > 0) {
+                  this.onmessage?.({
+                    data: JSON.stringify({ type: "batch", updates }),
+                  } as MessageEvent<string>);
+                }
+              }, 5);
+            }
           }
         } catch {
           // ignore
@@ -330,7 +371,12 @@ async function injectMockWebSocket(page: import("@playwright/test").Page) {
         this.onclose?.(new Event("close"));
       }
 
-      addEventListener() {}
+      addEventListener(type: string, listener: EventListener) {
+        if (type === "open") this.onopen = listener as (event: Event) => void;
+        if (type === "message") this.onmessage = listener as (event: MessageEvent<string>) => void;
+        if (type === "close") this.onclose = listener as (event: Event) => void;
+        if (type === "error") this.onerror = listener as (event: Event) => void;
+      }
       removeEventListener() {}
       dispatchEvent() { return false; }
     }
@@ -355,7 +401,7 @@ test.describe("WebSocket connection stability on ticker detail page", () => {
     await page.goto("/PLTR?tab=chain");
 
     // Wait for page to render the sidebar status
-    const statusDot = page.locator(".sidebar-footer .status-dot-wrap");
+    const statusDot = page.locator(".sidebar-footer .status-dot-wrap").filter({ hasText: "CONNECTED" });
     await expect(statusDot).toBeVisible({ timeout: 10_000 });
 
     // Give time for portfolio, orders, and chain subscriptions to arrive sequentially
@@ -377,35 +423,39 @@ test.describe("WebSocket connection stability on ticker detail page", () => {
     const chainTable = page.locator(".chain-row");
     await expect(chainTable.first()).toBeVisible({ timeout: 15_000 });
 
-    // Wait for batch price data to arrive (100ms in mock + render time)
-    await page.waitForTimeout(1000);
-
     // At least some chain cells should show real bid/ask, not "---"
     const bidCells = page.locator(".chain-bid");
     const bidCount = await bidCells.count();
     expect(bidCount).toBeGreaterThan(0);
 
-    // Collect bid values — at least one should be a real number, not "---"
-    let realBidCount = 0;
-    for (let i = 0; i < Math.min(bidCount, 10); i++) {
-      const text = await bidCells.nth(i).textContent();
-      if (text && text.trim() !== "---" && text.trim() !== "") {
-        realBidCount++;
-      }
-    }
-    expect(realBidCount).toBeGreaterThan(0);
+    await expect
+      .poll(async () => {
+        let realBidCount = 0;
+        for (let i = 0; i < bidCount; i++) {
+          const text = await bidCells.nth(i).textContent();
+          if (text && text.trim() !== "---" && text.trim() !== "") {
+            realBidCount++;
+          }
+        }
+        return realBidCount;
+      }, { timeout: 10_000 })
+      .toBeGreaterThan(0);
 
     // Similarly for ask cells
     const askCells = page.locator(".chain-ask");
-    let realAskCount = 0;
     const askCount = await askCells.count();
-    for (let i = 0; i < Math.min(askCount, 10); i++) {
-      const text = await askCells.nth(i).textContent();
-      if (text && text.trim() !== "---" && text.trim() !== "") {
-        realAskCount++;
-      }
-    }
-    expect(realAskCount).toBeGreaterThan(0);
+    await expect
+      .poll(async () => {
+        let realAskCount = 0;
+        for (let i = 0; i < askCount; i++) {
+          const text = await askCells.nth(i).textContent();
+          if (text && text.trim() !== "---" && text.trim() !== "") {
+            realAskCount++;
+          }
+        }
+        return realAskCount;
+      }, { timeout: 10_000 })
+      .toBeGreaterThan(0);
   });
 
   test("usePrices does not tear down and recreate the WS when subscriptions change", async ({ page }) => {

@@ -33,7 +33,7 @@ def _pg_engine():
 
 def _cleanup(engine):
     with engine.begin() as conn:
-        conn.execute(sa_text("TRUNCATE xenon.wizard_protection CASCADE"))
+        conn.execute(sa_text("TRUNCATE xenon.position_protection CASCADE"))
         conn.execute(sa_text("TRUNCATE xenon.wizard_events CASCADE"))
         conn.execute(sa_text("TRUNCATE xenon.wizard_combo_attempts CASCADE"))
         conn.execute(sa_text("TRUNCATE xenon.wizard_sessions CASCADE"))

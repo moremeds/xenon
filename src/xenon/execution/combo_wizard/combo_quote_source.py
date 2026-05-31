@@ -259,8 +259,8 @@ def build_default_quote_fn(
             logger.warning("compute_combo_quote failed for %s: %s", session_id, exc)
             return None
 
-        # Return SIGNED mid — callers (wizard_stop_monitor._crossed) operate
-        # in signed space per combo_quotes.signed_mid. No abs().
+        # Return SIGNED mid; combo alert evaluation operates in signed space
+        # per combo_quotes.signed_mid. No abs().
         return combo_quote.signed_mid
 
     # Attach the cache so callers can invoke cleanup on terminal session

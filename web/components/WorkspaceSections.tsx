@@ -47,6 +47,7 @@ import { useDiscover } from "@/lib/useDiscover";
 import { useFlowAnalysis } from "@/lib/useFlowAnalysis";
 import { useUwAnalyze } from "@/lib/useUwAnalyze";
 import { useUwPortfolio } from "@/lib/useUwPortfolio";
+import { usePositionRules } from "@/lib/usePositionRules";
 import {
   groupByTier,
   groupSingleNames,
@@ -84,6 +85,7 @@ import CancelOrderDialog from "./CancelOrderDialog";
 import ModifyOrderModal from "./ModifyOrderModal";
 import type { ModifyOrderRequest } from "@/lib/orderModify";
 import RegimePanel from "./RegimePanel";
+import InternalsPanel from "./InternalsPanel";
 import CtaPage from "./CtaPage";
 import PerformancePanel from "./PerformancePanel";
 import InfoTooltip from "./InfoTooltip";
@@ -1252,6 +1254,8 @@ function PortfolioSections({
     extractPositionSearchText,
   );
   const structureFilter = useTableFilter(positions, extractPositionSearchText);
+  const { rules: positionRules, refresh: refreshPositionRules } =
+    usePositionRules(activeAccount === "ib");
 
   // View mode hydration: null until we've read localStorage to avoid SSR flash.
   const [viewMode, setViewMode] = useState<PortfolioViewMode | null>(null);
@@ -1367,6 +1371,8 @@ function PortfolioSections({
         <PortfolioByStructure
           positions={structureFilter.filtered}
           prices={prices}
+          positionRules={positionRules}
+          onRulesChanged={refreshPositionRules}
           activeAccount={activeAccount}
           lastSync={portfolio.last_sync}
         />
@@ -1403,6 +1409,8 @@ function PortfolioSections({
               positions={definedFilter.filtered}
               showUnderlying={true}
               prices={prices}
+              positionRules={positionRules}
+              onRulesChanged={refreshPositionRules}
               readonly={activeAccount === "futu"}
             />
           </div>
@@ -1437,6 +1445,8 @@ function PortfolioSections({
               positions={undefinedFilter.filtered}
               showUnderlying={true}
               prices={prices}
+              positionRules={positionRules}
+              onRulesChanged={refreshPositionRules}
               readonly={activeAccount === "futu"}
             />
           </div>
@@ -1469,6 +1479,8 @@ function PortfolioSections({
               positions={equityFilter.filtered}
               showExpiry={false}
               prices={prices}
+              positionRules={positionRules}
+              onRulesChanged={refreshPositionRules}
               readonly={activeAccount === "futu"}
             />
           </div>
@@ -4676,6 +4688,8 @@ export default function WorkspaceSections({
       return <JournalSections />;
     case "regime":
       return <RegimePanel prices={prices ?? {}} marketState={marketState} />;
+    case "internals":
+      return <InternalsPanel marketState={marketState} />;
     case "cta":
       return <CtaPage />;
     case "ticker-detail":

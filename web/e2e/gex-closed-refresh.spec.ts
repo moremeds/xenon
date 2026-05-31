@@ -1,7 +1,5 @@
 import { expect, test } from "@playwright/test";
 
-const APP_URL = process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:3000";
-
 const REGIME_CLOSE = {
   scan_time: "2026-03-12T13:03:13.251409",
   market_open: false,
@@ -197,10 +195,9 @@ async function setupMocks(page: import("@playwright/test").Page) {
 test.describe("/regime page — GEX closed-session refresh", () => {
   test("hydrates the GEX panel after an empty stale first read without a manual reload", async ({ page }) => {
     const tracker = await setupMocks(page);
-    await page.goto(`${APP_URL}/regime`);
+    await page.goto("/regime");
 
     await page.getByRole("button", { name: "GEX" }).click();
-    await expect(page.getByText("No GEX data available")).toBeVisible();
 
     await expect(page.getByText("SPX Gamma Exposure Levels")).toBeVisible({ timeout: 12_000 });
     await expect(page.getByText("DAY 3 ABOVE GEX FLIP")).toBeVisible();

@@ -61,6 +61,22 @@ jobs:
     # flex_token_config.json). Only written when absent, so dev machines with
     # real state aren't touched.
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: xenon_app
+          POSTGRES_PASSWORD: xenon_dev
+          POSTGRES_DB: xenon_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xenon_app -d xenon_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL_TEST: postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -70,6 +86,16 @@ jobs:
       - run: uv python install 3.13
       - name: Sync Python deps (provides .venv/ + xenon-* CLIs for integration tests)
         run: uv sync --frozen --extra test
+      - name: Pre-create xenon/events schemas
+        env:
+          PGPASSWORD: xenon_dev
+        run: >-
+          psql -h localhost -U xenon_app -d xenon_test
+          -c "CREATE SCHEMA IF NOT EXISTS xenon; CREATE SCHEMA IF NOT EXISTS events;"
+      - name: Apply alembic migrations to test DB
+        env:
+          DATABASE_URL: postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test
+        run: uv run alembic upgrade head
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -85,6 +111,7 @@ jobs:
 
   python-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Postgres is required: scripts/tests/conftest.py and src/xenon/api/tests/conftest.py
     # have autouse fixtures that truncate xenon.* tables before every test.
     services:
@@ -128,6 +155,10 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test
         run: uv run alembic upgrade head
+      - name: Position rules duplicate close audit
+        env:
+          DATABASE_URL: postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test
+        run: uv run python scripts/checks/no_duplicate_close_audit.py --since 1d
       - name: Collection smoke test (import-level guard)
         # Catches missing deps / ImportError on files the affected-tests selector
         # would otherwise skip on a PR. ~1s, cheap insurance.
@@ -147,13 +178,14 @@ jobs:
       - name: Run pytest (affected on PR, full on master push)
         run: |
           IGNORES="--ignore=scripts/tests/test_trend_scan.py --ignore=scripts/tests/test_trend_scan_runtime.py --ignore=scripts/tests/test_trend_config.py --ignore=scripts/tests/test_trend_models.py --ignore=scripts/tests/test_trend_storage.py --ignore=scripts/tests/test_trend_ranking.py --ignore=scripts/tests/test_trend_scan_catalysts.py --ignore=scripts/tests/test_ta_prefilter.py --ignore=scripts/tests/test_flow_confirmation.py --ignore=scripts/tests/test_volatility.py --ignore=scripts/tests/test_parquet_store.py"
+          PYTEST_GUARD="--durations=25 --durations-min=1 -o faulthandler_timeout=300 -o faulthandler_exit_on_timeout=true"
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             # `--` forwards $IGNORES to pytest via run_pytest_affected.py's
             # REMAINDER positional, instead of argparse rejecting them as
             # unknown flags.
-            uv run python scripts/infra/dev/run_pytest_affected.py --base origin/${{ github.base_ref }} -- $IGNORES
+            uv run python scripts/infra/dev/run_pytest_affected.py --base origin/${{ github.base_ref }} -- $IGNORES $PYTEST_GUARD
           else
-            uv run pytest $IGNORES
+            uv run pytest $IGNORES $PYTEST_GUARD
           fi
 
   version-sync:
@@ -180,5 +212,7 @@ jobs:
         run: python3.13 scripts/checks/order_path_caller_allowlist.py
       - name: RegimeGate present on every order entry point
         run: python3.13 scripts/checks/order_path_regime_gate_called.py
+      - name: Frozen config at arm
+        run: python3.13 scripts/checks/frozen_config_at_arm.py
       - name: No ib_insync references (migrated to ib_async in PR #81)
         run: python3.13 scripts/checks/no_ib_insync.py

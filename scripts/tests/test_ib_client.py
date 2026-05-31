@@ -624,6 +624,23 @@ class TestOrderOperations:
         assert found_trade is not None
         assert found_trade.order.permId == 99999
 
+    @patch("xenon.clients.ib_client.IB")
+    def test_get_order_state_refreshes_and_returns_status_dict(self, MockIB):
+        mock_ib = MockIB.return_value
+        mock_ib.isConnected.return_value = True
+
+        trade = _make_trade(order_id=42, status="Cancelled")
+        trade.order.permId = 99999
+        mock_ib.openTrades.return_value = []
+        mock_ib.trades.return_value = [trade]
+
+        client = IBClient()
+        client.connect(client_id=0)
+        state = client.get_order_state(perm_id=99999)
+
+        mock_ib.reqAllOpenOrders.assert_called_once()
+        assert state == {"status": "Cancelled", "permId": 99999, "orderId": 42}
+
 
 # ===========================================================================
 # MARKET DATA

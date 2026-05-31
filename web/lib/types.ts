@@ -47,6 +47,7 @@ export type WorkspaceSection =
   | "discover"
   | "journal"
   | "regime"
+  | "internals"
   | "cta"
   | "ticker-detail"
   | "uw-analyze";

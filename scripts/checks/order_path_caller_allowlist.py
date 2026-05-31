@@ -42,6 +42,9 @@ _ALLOWLIST = frozenset(
         # The single legitimate runtime caller — invokes via subprocess
         # after preflight + quote-gate have run.
         "src/xenon/api/server.py",
+        # Position-rules executor shim — subprocess-only wrapper used after
+        # a protection row has already passed fill-time policy freezing.
+        "src/xenon/execution/brackets/executor/ib_executor.py",
         # Console-script declaration.
         "pyproject.toml",
         # Static analysis — the guard itself names the symbol.

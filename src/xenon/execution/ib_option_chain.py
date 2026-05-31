@@ -11,15 +11,15 @@ import json
 import sys
 from pathlib import Path
 
-from xenon.clients.ib_client import IBClient
+from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, IBClient
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", required=True)
     parser.add_argument("--expiry", default=None, help="If provided, fetch strikes for this expiry")
-    parser.add_argument("--port", type=int, default=4001)
-    parser.add_argument("--client-id", type=int, default=27)
+    parser.add_argument("--port", type=int, default=DEFAULT_GATEWAY_PORT)
+    parser.add_argument("--client-id", default="auto")
     args = parser.parse_args()
 
     client = IBClient()

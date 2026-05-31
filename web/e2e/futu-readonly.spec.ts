@@ -238,7 +238,7 @@ test.describe('Futu tab read-only safety (T7)', () => {
       .filter({ hasText: 'TSLA' })
       .first();
     await tslaButton.click();
-    await page.waitForURL('**/TSLA', { timeout: 5000 });
+    await page.waitForURL('**/TSLA**', { timeout: 5000 });
     await expect(page.locator('.ticker-detail-page')).toBeVisible();
   });
 

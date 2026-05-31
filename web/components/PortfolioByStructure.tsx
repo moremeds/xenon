@@ -24,11 +24,14 @@ import type { PriceData } from "@/lib/pricesProtocol";
 import { buildTickerGroups } from "@/lib/portfolioByStructure";
 import { CATEGORY_LABELS, type CategoryKey } from "@/lib/structureCatalog";
 import { fmtUsd } from "@/lib/positionUtils";
+import type { PositionRule } from "@/lib/api/positionRules";
 import PositionTable from "./PositionTable";
 
 type Props = {
   positions: PortfolioPosition[];
   prices?: Record<string, PriceData>;
+  positionRules?: PositionRule[];
+  onRulesChanged?: () => void;
   activeAccount: "ib" | "futu";
   lastSync: string;
 };
@@ -56,6 +59,8 @@ function fmtPrice(n: number | null): string {
 export default function PortfolioByStructure({
   positions,
   prices,
+  positionRules,
+  onRulesChanged,
   activeAccount,
   lastSync,
 }: Props) {
@@ -171,6 +176,8 @@ export default function PortfolioByStructure({
                   showExpiry={true}
                   showUnderlying={true}
                   prices={prices}
+                  positionRules={positionRules}
+                  onRulesChanged={onRulesChanged}
                   readonly={readonly}
                   hideHeader={takeHeaderSlot()}
                 />
@@ -278,6 +285,8 @@ export default function PortfolioByStructure({
                                   positions={sg.positions}
                                   showUnderlying={true}
                                   prices={prices}
+                                  positionRules={positionRules}
+                                  onRulesChanged={onRulesChanged}
                                   readonly={readonly}
                                   hideHeader={takeHeaderSlot()}
                                 />

@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { createHmac } from "node:crypto";
 import { NextRequest } from "next/server";
 import { ensureTestFastApi } from "./fastapiHarness";
 
@@ -21,6 +22,48 @@ if (!fastApiHarness.available && fastApiHarness.skipReason) {
 afterAll(async () => {
   await fastApiHarness.close();
 });
+
+const QUOTE_SECRET =
+  "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+function b64url(data: Buffer | string) {
+  return Buffer.from(data).toString("base64url");
+}
+
+function quoteToken({
+  conId,
+  ticker = "AAPL",
+  bid,
+  ask,
+}: {
+  conId: number;
+  ticker?: string;
+  bid: string;
+  ask: string;
+}) {
+  const body = JSON.stringify(
+    {
+      ask,
+      ask_size: 10,
+      bid,
+      bid_size: 10,
+      con_id: conId,
+      ticker,
+      ts_server_ms: Date.now(),
+    },
+    Object.keys({
+      ask,
+      ask_size: 10,
+      bid,
+      bid_size: 10,
+      con_id: conId,
+      ticker,
+      ts_server_ms: 0,
+    }).sort(),
+  );
+  const sig = createHmac("sha256", QUOTE_SECRET).update(body).digest();
+  return `${b64url(body)}.${b64url(sig)}`;
+}
 
 // ---------------------------------------------------------------------------
 // Place route — IB rejection handling
@@ -50,11 +93,19 @@ describe(
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             type: "stock",
-            symbol: "AAPL",
+            symbol: "SPY",
             action: "BUY",
-            quantity: 100,
-            limitPrice: 200.0,
+            quantity: 1,
+            limitPrice: 500.0,
             tif: "DAY",
+            client_attempt_id: "order-e2e-stock-1",
+            con_id: 1001,
+            quote_token: quoteToken({
+              conId: 1001,
+              ticker: "SPY",
+              bid: "499.99",
+              ask: "500.01",
+            }),
           }),
         });
         const res = await placePOST(req);
@@ -70,14 +121,22 @@ describe(
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             type: "option",
-            symbol: "AAPL",
+            symbol: "QQQ",
             action: "BUY",
-            quantity: 10,
+            quantity: 1,
             limitPrice: 5.0,
             tif: "GTC",
             expiry: "20260417",
             strike: 200,
             right: "C",
+            client_attempt_id: "order-e2e-option-1",
+            con_id: 2001,
+            quote_token: quoteToken({
+              conId: 2001,
+              ticker: "QQQ",
+              bid: "4.99",
+              ask: "5.01",
+            }),
           }),
         });
         const res = await placePOST(req);
@@ -93,9 +152,9 @@ describe(
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             type: "combo",
-            symbol: "AAPL",
+            symbol: "QQQ",
             action: "BUY",
-            quantity: 10,
+            quantity: 1,
             limitPrice: 2.5,
             tif: "GTC",
             legs: [
@@ -114,6 +173,7 @@ describe(
                 ratio: 1,
               },
             ],
+            client_attempt_id: "order-e2e-combo-1",
           }),
         });
         const res = await placePOST(req);
@@ -129,10 +189,18 @@ describe(
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             type: "stock",
-            symbol: "AAPL",
+            symbol: "SPY",
             action: "BUY",
-            quantity: 100,
-            limitPrice: 200.0,
+            quantity: 1,
+            limitPrice: 500.0,
+            client_attempt_id: "order-e2e-stock-default-tif-1",
+            con_id: 1002,
+            quote_token: quoteToken({
+              conId: 1002,
+              ticker: "SPY",
+              bid: "499.99",
+              ask: "500.01",
+            }),
             // tif not specified
           }),
         });
@@ -168,9 +236,9 @@ describe(
             permId: 12345,
             replaceOrder: {
               type: "combo",
-              symbol: "AAPL",
+              symbol: "QQQ",
               action: "SELL",
-              quantity: 10,
+              quantity: 1,
               limitPrice: 3.0,
               tif: "GTC",
               legs: [
@@ -189,6 +257,7 @@ describe(
                   ratio: 1,
                 },
               ],
+              client_attempt_id: "order-e2e-combo-replace-1",
             },
           }),
         });

@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 # Ensure scripts/ is on path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -509,6 +511,8 @@ class TestRealData:
 
         trade_data = json.loads(trade_log_path.read_text())
         trades = trade_data.get("trades", [])
+        if not trades:
+            pytest.skip("real trade_log.json has no trades")
         result = build_attribution(trades, STRATEGY_NAMES)
 
         # Basic structure checks
