@@ -66,7 +66,7 @@ async def run_entry_point(
         entry: Entry-point name (e.g. "xenon-trend-scan"), must exist in .venv/bin/
         args: CLI arguments
         timeout: Seconds before SIGKILL
-        cwd: Working directory (defaults to scripts/)
+        cwd: Working directory (defaults to PROJECT_ROOT)
 
     Returns:
         ScriptResult with parsed JSON data or error string.
