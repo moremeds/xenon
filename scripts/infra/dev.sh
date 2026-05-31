@@ -65,14 +65,9 @@ esac
 
 log_info "Trading mode: $MODE  →  IB Gateway $IB_HOST:$IB_PORT"
 
-# Next.js dev port. 3000 (Next default) often collides with Docker Desktop on
-# this Mac, so paper mode binds 3001 instead. Live runs on shared infra where
-# 3000 is free, so the default is preserved. Honored by `next dev` via PORT.
+# Next.js dev port stays on the Next default (3000) for both paper and live.
+# Override via the PORT env var if 3000 is taken.
 # Internal IB Gateway port lives in IB_PORT — `PORT` is reserved for Next.js.
-if [[ "$MODE" == "paper" ]]; then
-  export PORT=3001
-  log_info "Next.js dev port: $PORT (paper override; 3000 collides with Docker locally)"
-fi
 
 # 2. Apply pending Postgres migrations. Postgres is the primary persistence
 # layer — running new code against a stale schema causes obscure runtime

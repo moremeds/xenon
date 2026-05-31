@@ -1,13 +1,12 @@
 import type { Dispatch, SetStateAction } from "react";
-import type { ApiMessage, AssistantResponse, Message, PiResponse, WorkspaceSection } from "./types";
+import type {
+  ApiMessage,
+  AssistantResponse,
+  Message,
+  WorkspaceSection,
+} from "./types";
 import { PI_COMMAND_ALIASES, PI_COMMAND_SET } from "./data";
-import {
-  createTimestamp,
-  formatAssistantPayload,
-  formatPiPayload,
-  normalizeTextLines,
-  sleep,
-} from "./utils";
+import { createTimestamp, formatAssistantPayload, sleep } from "./utils";
 
 export function isPiCommandInput(raw: string) {
   const normalized = raw.trim().toLowerCase();
@@ -36,27 +35,12 @@ export function routeToPiPrompt(raw: string): string | null {
     return alias;
   }
 
-  if (lower.startsWith("analyze ")) {
-    const tokenized = lower.replace(/^\s*analyze\s+/, "").trim().split(/\s+/)[0];
-    if (tokenized) {
-      return `/evaluate ${tokenized.toUpperCase()}`;
-    }
-  }
-
   if (/\bportfolio\b/.test(lower) || /\bpositions?\b/.test(lower)) {
     return "/portfolio";
   }
 
-  if (/\bdiscover\b/.test(lower)) {
-    return "/discover";
-  }
-
   if (/\bjournal\b/.test(lower)) {
     return "/journal";
-  }
-
-  if (/\bscan\b/.test(lower)) {
-    return `/scan`;
   }
 
   return null;
@@ -66,47 +50,35 @@ export function fallbackReply(input: string) {
   const query = input.trim().toLowerCase();
 
   if (!query) {
-    return "I can analyze flow structure, scan alignment, and risk, then map to a decision view.";
-  }
-
-  if (query.includes("analyze brze") || query.includes("brze")) {
-    return "BRZE is against-flow. You are long 300x Mar 20 calls, and flow is negative with 29% distributed bias. If this continues near expiry, reduce risk or hedge immediately.";
-  }
-
-  if (query.includes("analyze rr") || query.includes(" rr")) {
-    return "RR shows 36% distributed flow and a sustained signal. Keep a hard risk gate: no add, and ensure thesis still controls risk.";
-  }
-
-  if (query.includes("compare support vs against") || query.includes("support against") || query.includes("support vs against")) {
-    return "Support side currently has 6 positions with confirmation; against side has 2 with a higher urgency profile. Treat against as active monitor tier.";
-  }
-
-  if (query.includes("action") || query.includes("items")) {
-    return "Priority list: BRZE, RR, then MSFT. Confirm any additional prints before adding exposure.";
-  }
-
-  if (query.includes("watch list") || query.includes("watch closely")) {
-    return "Watch list is flagged from mixed intraday flow. MSFT and BKD need one full session before any structural decision.";
+    return "I can summarize your open positions, recent fills, and Greeks exposure. Ask about a specific ticker or panel.";
   }
 
   if (query.includes("portfolio") || query.includes("positions")) {
-    return "Portfolio snapshot: 19 positions total. 7 defined structure, 12 undefined. Net liquidation is $981,353. Flow-aligned positions currently lead.";
+    return "Open the Portfolio page for the live positions table — it covers IB and Futu accounts with structure grouping and per-leg P&L.";
   }
 
-  return "I can review any ticker, compare support/against groups, or walk through risk and Kelly logic for any position.";
+  if (query.includes("journal")) {
+    return "Trade decisions and reasoning live on the Journal page. Filter by date or ticker; auto-imported from order fills.";
+  }
+
+  if (query.includes("orders")) {
+    return "Open orders and recent fills are on the Orders page. Use the Order tab to place / modify / cancel via IB Gateway.";
+  }
+
+  return "I can answer questions about your portfolio, orders, or recent fills. For market views, use your own sources — Xenon does not generate trade ideas.";
 }
 
-export async function requestAssistantReply(history: ApiMessage[], latestMessage: string): Promise<string> {
+export async function requestAssistantReply(
+  history: ApiMessage[],
+  latestMessage: string,
+): Promise<string> {
   const response = await fetch("/api/assistant", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      messages: [
-        ...history,
-        { role: "user", content: latestMessage },
-      ],
+      messages: [...history, { role: "user", content: latestMessage }],
     }),
   });
 
@@ -126,69 +98,46 @@ export async function requestAssistantReply(history: ApiMessage[], latestMessage
   return fallbackReply(latestMessage);
 }
 
-export async function requestPiReply(command: string): Promise<string> {
-  const response = await fetch("/api/pi", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ input: command }),
-  });
-
-  const payload = (await response.json()) as PiResponse;
-  const normalized = normalizeTextLines(payload.output || "");
-  const canonicalCommand = command.trim().replace(/^\//, "").split(/\s+/)[0] ?? "";
-
-  if (!response.ok) {
-    if (payload.error) {
-      return `Error: ${payload.error}`;
-    }
-    return "PI command request failed.";
-  }
-
-  if (payload.status === "error") {
-    const details = payload.stderr ? `\n\nDetails:\n${payload.stderr}` : "";
-    return `Command '${payload.command}' failed: ${normalized}${details}`;
-  }
-
-  if (!normalized) {
-    return "No output returned from PI command.";
-  }
-
-  return formatPiPayload(canonicalCommand, normalized);
-}
-
-export async function streamMessage(messageId: string, fullText: string, setMessages: Dispatch<SetStateAction<Message[]>>) {
+export async function streamMessage(
+  messageId: string,
+  fullText: string,
+  setMessages: Dispatch<SetStateAction<Message[]>>,
+) {
   const chunk = 120;
   let rendered = "";
-  const source = fullText.length ? fullText : "No output returned from PI command.";
+  const source = fullText.length ? fullText : "No output returned.";
   const parts = source.match(new RegExp(`.{1,${chunk}}`, "gs"));
 
   if (!parts) {
     setMessages((current) =>
-      current.map((message) => (message.id === messageId ? { ...message, content: source } : message)),
+      current.map((message) =>
+        message.id === messageId ? { ...message, content: source } : message,
+      ),
     );
     return;
   }
 
   for (const piece of parts) {
     rendered += piece;
-    setMessages((current) => current.map((message) => (message.id === messageId ? { ...message, content: rendered } : message)));
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === messageId ? { ...message, content: rendered } : message,
+      ),
+    );
     await sleep(8);
   }
 }
 
-export function resolveSectionFromPath(pathname: string | null, fallback: WorkspaceSection): WorkspaceSection {
+export function resolveSectionFromPath(
+  pathname: string | null,
+  fallback: WorkspaceSection,
+): WorkspaceSection {
   if (!pathname) {
     return fallback;
   }
 
   if (pathname === "/" || pathname === "/dashboard") {
     return "dashboard";
-  }
-
-  if (pathname.startsWith("/flow-analysis")) {
-    return "flow-analysis";
   }
 
   if (pathname.startsWith("/portfolio")) {
@@ -203,30 +152,25 @@ export function resolveSectionFromPath(pathname: string | null, fallback: Worksp
     return "orders";
   }
 
-  if (pathname.startsWith("/scanner")) {
-    return "scanner";
-  }
-
-  if (pathname.startsWith("/discover")) {
-    return "discover";
-  }
-
-  if (pathname.startsWith("/uw-analyze")) {
-    return "uw-analyze";
-  }
-
   if (pathname.startsWith("/journal")) {
     return "journal";
   }
 
-  if (pathname.startsWith("/regime")) {
-    return "regime";
-  }
-
-  // Dynamic ticker route: /AAPL, /GOOG, etc. (1-5 alpha chars)
+  // Dynamic ticker route: /AAPL, /GOOG, etc.
   if (/^\/[A-Za-z]{1,5}$/.test(pathname)) {
     return "ticker-detail";
   }
 
   return fallback;
 }
+
+// Backwards-compat re-exports for surfaces that still import these.
+// They were the chat command runner — now no-op since /api/pi is gone.
+export const formatPiPayload = (
+  _command: string,
+  _normalized: string,
+): string => "No output returned.";
+export const normalizeTextLines = (s: string): string => s;
+export const requestPiReply = async (_command: string): Promise<string> => {
+  return "PI commands were removed in the pure-portfolio pivot.";
+};

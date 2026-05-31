@@ -4,7 +4,7 @@ when IB Flex Query credentials are unset.
 Plan: docs/plans/2026-04-28-postgres-migration-completion-IMPL.md § W2.1
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -92,8 +92,11 @@ def test_blotter_returns_postgres_rows_when_flex_unconfigured(monkeypatch):
 
     monkeypatch.setattr(server, "run_module", flex_unconfigured)
 
-    opened_at = datetime(2026, 4, 28, 14, 30, tzinfo=timezone.utc)
-    closed_at = datetime(2026, 4, 28, 15, 30, tzinfo=timezone.utc)
+    # Anchor relative to now so fetch_blotter_pg's days=30 filter always
+    # includes us — a hardcoded date silently fell out of the window after
+    # 30 days of calendar drift.
+    opened_at = datetime.now(timezone.utc) - timedelta(days=2)
+    closed_at = opened_at + timedelta(hours=1)
     engine = get_sync_engine()
     with engine.begin() as conn:
         conn.execute(
@@ -152,7 +155,7 @@ def test_blotter_get_returns_postgres_rows_without_flex(monkeypatch):
 
     monkeypatch.setattr(server, "run_module", fail_if_flex_called)
 
-    opened_at = datetime(2026, 4, 28, 14, 30, tzinfo=timezone.utc)
+    opened_at = datetime.now(timezone.utc) - timedelta(days=2)
     engine = get_sync_engine()
     with engine.begin() as conn:
         conn.execute(

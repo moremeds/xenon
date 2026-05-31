@@ -9,19 +9,7 @@ import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 // fetches don't carry Clerk session cookies. FastAPI's Clerk JWT middleware
 // still gates the actual data calls — middleware controls page reachability,
 // FastAPI controls data access.
-export const PUBLIC_ROUTES = [
-  "/sign-in(.*)",
-  "/sign-up(.*)",
-  "/api/(.*)",
-  // Public-facing scanner / market data surfaces (no user-private data)
-  "/scanner(.*)",
-  "/discover(.*)",
-  "/regime(.*)",
-  "/flow-analysis(.*)",
-  "/uw-analyze(.*)",
-  "/cta(.*)",
-  "/kit(.*)",
-];
+export const PUBLIC_ROUTES = ["/sign-in(.*)", "/sign-up(.*)", "/api/(.*)"];
 
 const isPublicRoute = createRouteMatcher(PUBLIC_ROUTES);
 

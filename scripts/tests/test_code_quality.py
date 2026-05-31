@@ -62,28 +62,6 @@ class TestSafeValue:
         assert self._safe_value("hello") == "hello"
 
 
-# ── Import sanity checks ──────────────────────────────────────────
-
-
-class TestImports:
-    """Verify key modules can be imported without side effects."""
-
-    def test_fetch_ticker_importable(self):
-        from xenon.fetchers import fetch_ticker  # noqa: F401
-
-    def test_fetch_ticker_has_main(self):
-        from xenon.fetchers import fetch_ticker
-
-        assert hasattr(fetch_ticker, "main")
-        assert callable(fetch_ticker.main)
-
-    def test_fetch_ticker_has_fetch_ticker_info(self):
-        from xenon.fetchers import fetch_ticker
-
-        assert hasattr(fetch_ticker, "fetch_ticker_info")
-        assert callable(fetch_ticker.fetch_ticker_info)
-
-
 # ── No bare except: clauses ───────────────────────────────────────
 
 

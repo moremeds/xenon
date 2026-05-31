@@ -39,17 +39,11 @@ export type PiResponse = {
 
 export type WorkspaceSection =
   | "dashboard"
-  | "flow-analysis"
   | "portfolio"
   | "performance"
   | "orders"
-  | "scanner"
-  | "discover"
   | "journal"
-  | "regime"
-  | "cta"
-  | "ticker-detail"
-  | "uw-analyze";
+  | "ticker-detail";
 
 export type JsonValue =
   | string

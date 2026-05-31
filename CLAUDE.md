@@ -4,8 +4,8 @@ Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` fi
 
 | Area                                             | File                      |
 | ------------------------------------------------ | ------------------------- |
-| Frontend, pricing, P&L, share cards, reports     | `web/CLAUDE.md`           |
-| Python pipelines, scanners, commands, data files | `src/xenon/CLAUDE.md`     |
+| Frontend, pricing, P&L                           | `web/CLAUDE.md`           |
+| Python execution, reports, IB/Futu CLIs          | `src/xenon/CLAUDE.md`     |
 | FastAPI, Clerk auth, IB Gateway, order lifecycle | `src/xenon/api/CLAUDE.md` |
 | Brand tokens, typography, spectrum, UI rules     | `brand/CLAUDE.md`         |
 
@@ -16,14 +16,6 @@ Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` fi
 
 Every execution/portfolio row carries `broker`, `account_env`, `broker_account` columns so paper and live data never blend in a shared Postgres. Resolve scope via `AccountScope` (`src/xenon/execution/account_scope.py`); FastAPI depends on `get_account_scope`, sync subprocesses read `XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`. Full policy: `docs/architecture/production-database-strategy.md` § Broker Account Scope.
 
-## Scanner Hierarchy
-
-- `src/xenon/scanners/_shared/` — shared foundation (cache, executor, models, scoring, universe)
-- `src/xenon/scanners/trend/` (entry: `xenon-trend-scan`) — **DEPRECATED.** Code retained for repurposing; R2/ta_lib data source removed 2026-04-26. Scheduler removed from server.py.
-- `src/xenon/scanners/uw/` (entries: `xenon-uw-scan`, `xenon-uw-analyze`) — tiered UW signal scanner with Type F confluence
-
-New scanners MUST build on `src/xenon/scanners/_shared/` — do not duplicate universe/executor/scoring logic.
-
 ## Portfolio Structure Classification
 
 - Preserve recognized multi-leg structures: verticals, straddles, synthetics, covered calls, risk reversals, butterflies/condors where classified.
@@ -31,23 +23,22 @@ New scanners MUST build on `src/xenon/scanners/_shared/` — do not duplicate un
 - Keep 3+ leg fall-through combos intact unless there is explicit order lineage or a recognized structure; splitting unknown complex orders can misrepresent user intent.
 - IB position snapshots do not carry originating combo order id. If exact lineage is needed, join against order submission records instead of guessing from symbol/expiry alone.
 
-## Data Source Priority
+## Data Sources
 
-1. Interactive Brokers — real-time quotes, chains, execution, live portfolio
-2. Unusual Whales (`$UW_TOKEN`) — dark pool, sweeps, alerts (Stage B/C).
-3. Web scrape — last resort.
+1. **Interactive Brokers** — real-time quotes, chains, execution, live portfolio. Primary.
+2. **Futu OpenD** — read-only positions snapshot for the Futu account tab.
+3. **Unusual Whales (`$UW_TOKEN`)** — historic OHLC + option contract history for `xenon-portfolio-perf` and `xenon-portfolio-report`. Not used for signal generation (removed in the pure-portfolio pivot).
+4. **IB Flex Query** — historical fills audit overlay (`xenon-blotter-history`).
 
 **Never use Yahoo Finance.**
 
 ## Runtime Data Read Paths
 
-Postgres is the runtime source of truth for migrated analytics and portfolio surfaces. Do not reintroduce silent file fallbacks.
+Postgres is the runtime source of truth for portfolio, orders, fills, and journal surfaces. Do not reintroduce silent file fallbacks.
 
 - Portfolio UI reads `xenon.account_snapshots.payload` through FastAPI `GET /portfolio`, scoped by `AccountScope` (`XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`). `data/portfolio.json` is legacy/backfill input only, not a UI read path.
-- VCG History reads the latest `xenon.vcg_series` row through FastAPI `GET /vcg`. `data/vcg.json` is legacy/backfill input only; `/vcg/scan` cooldown/cache checks also stay in Postgres.
-- GEX writes to both `scan_results` and `gex_snapshots`; UW analyze snapshots keep full payload JSONB plus generated columns and fanout child tables.
-- Next.js API routes proxy these migrated surfaces via `xenonFetch()`; no `readFile`, `readDataFile`, or cached JSON fallback on runtime paths.
-- Preserve CI guard tests that prove stale JSON files are not read (`scripts/tests/test_vcg_json_not_read.py`, portfolio payload/route tests).
+- Orders, fills, journal, attribution surfaces read from `xenon.order_submissions`, `xenon.order_fills`, `xenon.trades`, `xenon.journal_entries` via FastAPI routes.
+- Next.js API routes proxy these surfaces via `xenonFetch()`; no `readFile`, `readDataFile`, or cached JSON fallback on runtime paths.
 
 ## Order-Path Guards (Layers 1+2)
 
@@ -75,27 +66,22 @@ To audit the current allowlists: `python3 scripts/checks/no_json_fallback_on_ord
 
 ## Identity
 
-**Xenon** — market structure reconstruction system. Surfaces convex opportunities from dark pool/OTC flow, vol surfaces, cross-asset positioning. Detects institutional positioning, constructs convex options structures, sizes with fractional Kelly. **Flow signal or nothing.**
+**Xenon** — broker terminal for options portfolio management. Live IB + read-only Futu integration. Places orders, tracks fills, enforces position-close rules, surfaces P&L and Greeks attribution. **No signal generation, no scanner output — bring your own thesis.**
 
 Brand spec: `brand/CLAUDE.md` + `docs/reference/brand-identity.md`.
 
-## ⛔ Four Gates — Mandatory, Sequential, No Exceptions
+## ⛔ Naked-Short Guard — Mandatory, No Exceptions
 
-```
-GATE 1 — CONVEXITY      : Potential gain ≥ 2× potential loss. Defined-risk only (long options, verticals).
-GATE 2 — EDGE           : Specific, data-backed dark pool/OTC signal that hasn't moved price yet.
-GATE 3 — RISK MGMT      : Fractional Kelly sizing. Hard cap: 2.5% of bankroll per position.
-GATE 4 — NO NAKED SHORTS: Never naked short stock, calls, futures, or bonds. Every short call must be fully covered by long shares (1 contract = 100 shares). Violation = immediate cancel.
-```
+The system must never allow naked short exposure. Every short call must be covered by long shares (1 contract = 100 shares) or by long calls at the same expiry. Cash-secured puts are allowed. Combos that net to uncovered short calls are blocked at three layers: UI pre-submission (`web/lib/nakedShortGuard.ts`), API gate (`/api/orders/place` returns 403), and post-sync audit (`naked_short_audit.py` cancels violators after every `ib_sync`).
 
-**Any gate fails → stop. No rationalization.** Enforcement details: `src/xenon/CLAUDE.md` (naked-short table + combo guardrails).
+Full enforcement matrix and combo logic: `src/xenon/CLAUDE.md` § Naked Short Protection.
 
 ## Credentials
 
-| File          | Loader          | Contains                                                                                                                                                                                                                                                                          |
-| ------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `.env` (root) | `python-dotenv` | `DATABASE_URL`, `DATABASE_URL_TEST`, `MENTHORQ_USER`, `MENTHORQ_PASS`, `MASSIVE_API_KEY`, `CLERK_JWKS_URL`, `CLERK_ISSUER`, `ALLOWED_USER_IDS`, `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `IB_FLEX_TOKEN` (optional), `IB_FLEX_QUERY_ID` (optional) |
-| `web/.env`    | Next.js         | `ANTHROPIC_API_KEY`, `UW_TOKEN`, `EXA_API_KEY`, `CEREBRAS_API_KEY`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`                                                                                                                                                       |
+| File          | Loader          | Contains                                                                                                                                                                                                                     |
+| ------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.env` (root) | `python-dotenv` | `DATABASE_URL`, `DATABASE_URL_TEST`, `CLERK_JWKS_URL`, `CLERK_ISSUER`, `ALLOWED_USER_IDS`, `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `IB_FLEX_TOKEN` (optional), `IB_FLEX_QUERY_ID` (optional) |
+| `web/.env`    | Next.js         | `ANTHROPIC_API_KEY` (chat), `UW_TOKEN` (portfolio reports), `EXA_API_KEY` (optional ticker-page enrichment), `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`                                                         |
 
 `IB_FLEX_TOKEN` + `IB_FLEX_QUERY_ID` are optional. When unset, the Historical Trades panel renders an empty state with a setup hint instead of erroring; `xenon-blotter-history` and `POST /blotter` exit gracefully with `configured=false`. Set both to enable IB Flex Query as an audit overlay (see `uv run python -m xenon.trade_blotter.flex_query --setup`).
 
@@ -105,42 +91,16 @@ GATE 4 — NO NAKED SHORTS: Never naked short stock, calls, futures, or bonds. E
 TZ=America/New_York date +"%A %H:%M"   # 9:30–16:00 ET, Mon–Fri
 ```
 
-- **Open**: Fetch fresh. Cache TTL: flow 5min, ratings 15min.
-- **Closed**: Use latest. Flag stale data.
-
-### UW API budget controls
-
-Daily UW budget: **20,000 calls/day**. The `/uw-analyze` page stays within budget via:
-
-- **30-min snapshot TTL** during open hours (overridable via env)
-- **Automatic refresh blocked entirely** outside 9:30–16:00 ET (weekdays)
-- **Weekday holidays treated as OPEN** (known gap — neither backend nor frontend has a holiday calendar; cost is ~1 day over-budget per US holiday)
-- **Refresh button always works** — `POST /uw-analyze/refresh` and `/uw-analyze?ticker=X` pass `user_initiated=True` which bypasses the closed-market gate
-
-Env vars (read per-call, runtime tunable):
-
-- `XENON_UW_TTL_OPEN_S` (default `1800`) — snapshot TTL during open hours
-- `XENON_UW_TTL_CLOSED_S` (default `3600`) — TTL for user-initiated fetches when market is closed
-
-The closed-market gate lives inside `UwAnalyzeCache.get_or_run()` and also covers the separate on-demand OI fetch in `_process_ticker`. See `src/xenon/api/services/uw_analyze_cache.py` + `src/xenon/api/routes/uw_analyze.py` for the implementation.
-
-## Output Rules
-
-- Always: `signal → structure → Kelly math → decision`
-- State probabilities; flag uncertainty
-- Failing gate = immediate stop, name the gate
-- **Never rationalize a bad trade**
-- Executed → `trade_log.json` | NO_TRADE → `docs/status.md`
+Quotes, fills, and position updates flow whenever IB Gateway is connected. Outside RTH the portfolio still renders from the last `account_snapshots.payload`; flag stale data in the UI rather than swap to a different source.
 
 ## Startup Checklist
 
-- [ ] `scripts/cloud.sh` (default — local dev services + VPS IB Gateway via Tailscale) — OR `scripts/local.sh` (fully local with Docker gateway)
-- [ ] If local mode: approve 2FA on IBKR mobile for cold start
-- [ ] `psql -h localhost -U xenon_app xenon_db -c "SELECT 1"` — verify Postgres accessible
+- [ ] `scripts/infra/dev.sh paper` (paper IB on local `127.0.0.1:4002`) — OR `scripts/infra/dev.sh live` (live IB on remote `192.168.50.47:4001`)
+- [ ] If cold start: approve 2FA on IBKR mobile
+- [ ] `psql -h 192.168.50.47 -U xenon_app core_dev -c "SELECT 1"` — verify Postgres reachable
 - [ ] `curl http://localhost:8321/health` — verify `ib_gateway.port_listening: true`
-- [ ] Reconciliation auto-runs → `data/reconciliation.json`
-- [ ] Consolidated VCG/CRI scan loop running (30-min intervals; advisory-lock singleton, opt-out via `XENON_VCG_CRI_LOOP=0`). Emits `regime_transition` rows to `events.outbox` on (vcg_tier, cri_tier) change.
-- [ ] X scan if >12h stale
+- [ ] Reconciliation auto-runs on lifespan boot (single-leg rehydrate + fills replay)
+- [ ] IB activity poller running (60s default — TWS-side edits + fills mirrored into Postgres)
 - [ ] Check market hours
 
 ## Serena (symbol-aware code tools)
