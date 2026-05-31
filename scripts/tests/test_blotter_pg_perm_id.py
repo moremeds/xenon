@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+# Anchor fixture timestamps relative to "now" so fetch_blotter_pg's
+# days=30 filter always includes them; hardcoded dates silently fell out
+# of the window after 30 days of calendar drift.
+_NOW = datetime.now(timezone.utc)
+_SUBMITTED = _NOW - timedelta(days=2, hours=1)
+_OPENED = _NOW - timedelta(days=2)
+_CLOSED = _OPENED + timedelta(hours=1)
 
 import pytest
 from sqlalchemy import insert
@@ -26,7 +34,7 @@ def _insert_submission(conn, submission_id: str, perm_id: str | None) -> None:
             limit_price=100,
             state="COMPLETED",
             perm_id=perm_id,
-            submitted_at=datetime(2026, 4, 27, tzinfo=timezone.utc),
+            submitted_at=_SUBMITTED,
             broker=_SCOPE.broker,
             account_env=_SCOPE.account_env,
             broker_account=_SCOPE.broker_account,
@@ -44,8 +52,8 @@ def _insert_trade(conn, *, submission_id: str | None, ticker: str = "AAPL") -> i
             entry_cost=100,
             exit_cost=110,
             realized_pnl=10,
-            opened_at=datetime(2026, 4, 27, 14, tzinfo=timezone.utc),
-            closed_at=datetime(2026, 4, 27, 15, tzinfo=timezone.utc),
+            opened_at=_OPENED,
+            closed_at=_CLOSED,
             state="CLOSED",
             submission_id=submission_id,
             broker=_SCOPE.broker,

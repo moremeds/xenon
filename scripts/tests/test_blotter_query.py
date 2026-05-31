@@ -1,6 +1,6 @@
 """W3 — Postgres-backed blotter query shape."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from sqlalchemy import insert
@@ -26,8 +26,11 @@ def _insert_trade(**values) -> None:
 def test_fetch_blotter_pg_returns_scoped_closed_and_open_trades():
     from xenon.db.queries.blotter import fetch_blotter_pg
 
-    opened_at = datetime(2026, 4, 28, 14, 30, tzinfo=timezone.utc)
-    closed_at = datetime(2026, 4, 28, 15, 30, tzinfo=timezone.utc)
+    # Anchor relative to now so fetch_blotter_pg's days=30 filter always
+    # includes the row (hardcoded dates silently fell out of the window
+    # after 30 days of calendar drift).
+    opened_at = datetime.now(timezone.utc) - timedelta(days=2)
+    closed_at = opened_at + timedelta(hours=1)
 
     _insert_trade(
         ticker="AAPL",
