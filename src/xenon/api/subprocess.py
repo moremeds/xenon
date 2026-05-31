@@ -16,10 +16,10 @@ from typing import Any, List, Optional
 logger = logging.getLogger("xenon.subprocess")
 
 # run_entry_point() invokes installed .venv/bin/xenon-* console entry points directly.
-# SCRIPTS_DIR is retained as the default cwd for subprocesses (config files, relative paths
-# in data/ still resolve from there).
+# Default cwd is PROJECT_ROOT — the only directory guaranteed to exist in every deploy
+# (the Docker image ships src/, .venv/, data/ but not scripts/). Any relative path used
+# by an entry point — e.g. `Path("data/foo")` — resolves correctly from there.
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 VENV_BIN = PROJECT_ROOT / ".venv" / "bin"
 
 
@@ -66,7 +66,7 @@ async def run_entry_point(
         entry: Entry-point name (e.g. "xenon-trend-scan"), must exist in .venv/bin/
         args: CLI arguments
         timeout: Seconds before SIGKILL
-        cwd: Working directory (defaults to scripts/)
+        cwd: Working directory (defaults to PROJECT_ROOT)
 
     Returns:
         ScriptResult with parsed JSON data or error string.
@@ -76,7 +76,7 @@ async def run_entry_point(
         return ScriptResult(ok=False, error=f"Entry point not found: {entry}")
 
     cmd = [str(entry_path)] + (args or [])
-    work_dir = cwd or str(SCRIPTS_DIR)
+    work_dir = cwd or str(PROJECT_ROOT)
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -156,7 +156,7 @@ async def run_module(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=str(SCRIPTS_DIR),
+            cwd=str(PROJECT_ROOT),
         )
 
         stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
