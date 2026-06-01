@@ -9,6 +9,7 @@ from sqlalchemy.engine import Engine
 
 from xenon._test_db import (
     _BoundEngine,
+    _ensure_worker_db,  # noqa: F401 — autouse session fixture (Phase 3 xdist DB clone)
     app_engine_bound_to_test,  # noqa: F401 — re-exported for pytest fixture discovery
     get_session_engine,
     is_pg_reachable,
