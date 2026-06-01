@@ -1,4 +1,5 @@
 """Tests for performance.compute() service (spec § service)."""
+
 import math
 from datetime import date, timedelta
 
@@ -12,8 +13,7 @@ from xenon.execution.account_scope import AccountScope
 pytestmark = pytest.mark.asyncio
 
 
-async def _seed(engine, n, *, broker="IB", env="paper", account="T_PERF",
-                start_nav=50000.0, daily_pnl=100.0):
+async def _seed(engine, n, *, broker="IB", env="paper", account="T_PERF", start_nav=50000.0, daily_pnl=100.0):
     async with engine.begin() as c:
         await c.execute(sa.delete(nav_history).where(nav_history.c.broker_account == account))
         nav = start_nav
@@ -22,9 +22,13 @@ async def _seed(engine, n, *, broker="IB", env="paper", account="T_PERF",
             nav += daily_pnl
             await c.execute(
                 sa.insert(nav_history).values(
-                    broker=broker, account_env=env, broker_account=account,
-                    date=d, nav=str(nav), daily_pnl=str(daily_pnl),
-                    source="intraday",
+                    broker=broker,
+                    account_env=env,
+                    broker_account=account,
+                    date=d,
+                    nav=str(nav),
+                    daily_pnl=str(daily_pnl),
+                    nav_type="intraday",
                 )
             )
     return account
@@ -91,20 +95,41 @@ async def test_IB_returns_use_daily_pnl_over_prev_nav(async_engine, monkeypatch)
     await _purge(async_engine, account)
     async with async_engine.begin() as c:
         # day 1: nav=100, daily_pnl=0
-        await c.execute(sa.insert(nav_history).values(
-            broker="IB", account_env="paper", broker_account=account,
-            date=date(2026, 1, 1), nav="100.0", daily_pnl="0.0", source="intraday",
-        ))
+        await c.execute(
+            sa.insert(nav_history).values(
+                broker="IB",
+                account_env="paper",
+                broker_account=account,
+                date=date(2026, 1, 1),
+                nav="100.0",
+                daily_pnl="0.0",
+                nav_type="intraday",
+            )
+        )
         # day 2: nav=200 (deposit), daily_pnl=5 (only $5 of trading)
-        await c.execute(sa.insert(nav_history).values(
-            broker="IB", account_env="paper", broker_account=account,
-            date=date(2026, 1, 2), nav="200.0", daily_pnl="5.0", source="intraday",
-        ))
+        await c.execute(
+            sa.insert(nav_history).values(
+                broker="IB",
+                account_env="paper",
+                broker_account=account,
+                date=date(2026, 1, 2),
+                nav="200.0",
+                daily_pnl="5.0",
+                nav_type="intraday",
+            )
+        )
         for i in range(3, 8):
-            await c.execute(sa.insert(nav_history).values(
-                broker="IB", account_env="paper", broker_account=account,
-                date=date(2026, 1, i), nav="200.0", daily_pnl="0.0", source="intraday",
-            ))
+            await c.execute(
+                sa.insert(nav_history).values(
+                    broker="IB",
+                    account_env="paper",
+                    broker_account=account,
+                    date=date(2026, 1, i),
+                    nav="200.0",
+                    daily_pnl="0.0",
+                    nav_type="intraday",
+                )
+            )
     data = await compute(async_engine, AccountScope("IB", "paper", account))
     await _purge(async_engine, account)
     series = data["series"]
@@ -118,15 +143,29 @@ async def test_first_IB_return_zeroed(async_engine, monkeypatch):
     account = "T_RET0"
     await _purge(async_engine, account)
     async with async_engine.begin() as c:
-        await c.execute(sa.insert(nav_history).values(
-            broker="IB", account_env="paper", broker_account=account,
-            date=date(2026, 1, 1), nav="100.0", daily_pnl="999.0", source="intraday",
-        ))
+        await c.execute(
+            sa.insert(nav_history).values(
+                broker="IB",
+                account_env="paper",
+                broker_account=account,
+                date=date(2026, 1, 1),
+                nav="100.0",
+                daily_pnl="999.0",
+                nav_type="intraday",
+            )
+        )
         for i in range(2, 8):
-            await c.execute(sa.insert(nav_history).values(
-                broker="IB", account_env="paper", broker_account=account,
-                date=date(2026, 1, i), nav="100.0", daily_pnl="0.0", source="intraday",
-            ))
+            await c.execute(
+                sa.insert(nav_history).values(
+                    broker="IB",
+                    account_env="paper",
+                    broker_account=account,
+                    date=date(2026, 1, i),
+                    nav="100.0",
+                    daily_pnl="0.0",
+                    nav_type="intraday",
+                )
+            )
     data = await compute(async_engine, AccountScope("IB", "paper", account))
     await _purge(async_engine, account)
     assert data["series"][0]["daily_return"] == 0.0  # NOT 999/100=9.99

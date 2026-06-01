@@ -142,3 +142,41 @@ def _is_trading_day(dt: datetime) -> bool:
     date_str = dt.strftime("%Y-%m-%d")
     holidays = load_holidays(dt.year)
     return date_str not in holidays
+
+
+# ── pandas_market_calendars-backed NYSE helpers (spec 2026-06-01) ─────────
+# Used by the Futu history reconstruction pipeline where holiday accuracy
+# back to 2024-05-01 matters. The JSON-config path above stays as the
+# single source of truth for is_market_open/current_session_date_et to
+# avoid changing behavior of existing callers.
+
+from functools import lru_cache as _lru_cache
+from typing import List as _List
+
+import pandas_market_calendars as _mcal
+
+
+@_lru_cache(maxsize=1)
+def _nyse():
+    return _mcal.get_calendar("NYSE")
+
+
+@_lru_cache(maxsize=8192)
+def is_trading_day(d: date) -> bool:
+    """True if NYSE is open on `d` (cached)."""
+    sched = _nyse().schedule(start_date=d.isoformat(), end_date=d.isoformat())
+    return not sched.empty
+
+
+def previous_trading_day(d: date) -> date:
+    """Strictly earlier NYSE trading day before `d`."""
+    cursor = d - timedelta(days=1)
+    while not is_trading_day(cursor):
+        cursor -= timedelta(days=1)
+    return cursor
+
+
+def trading_days_in_range(start: date, end: date) -> _List[date]:
+    """Inclusive on both ends. Returns dates in ascending order."""
+    sched = _nyse().schedule(start_date=start.isoformat(), end_date=end.isoformat())
+    return [ts.date() for ts in sched.index]

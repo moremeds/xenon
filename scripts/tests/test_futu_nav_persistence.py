@@ -4,6 +4,7 @@ Covers happy-path persistence, daily_pnl computation across day boundaries,
 cross-env collision raising NavAccountEnvConflict, and the guard-list
 (missing _acc_id, missing matched_trd_env, missing net_liquidation).
 """
+
 from datetime import date
 from unittest.mock import MagicMock
 
@@ -34,9 +35,7 @@ def _payload(net_liq=100000.00):
 
 async def _purge(async_engine, account):
     async with async_engine.begin() as conn:
-        await conn.execute(
-            sa.delete(nav_history).where(nav_history.c.broker_account == account)
-        )
+        await conn.execute(sa.delete(nav_history).where(nav_history.c.broker_account == account))
 
 
 # ---------- happy path ----------
@@ -50,8 +49,7 @@ async def test_first_call_inserts_FUTU_paper_row(async_engine):
         row = (
             await conn.execute(
                 sa.select(nav_history).where(
-                    (nav_history.c.broker == "FUTU")
-                    & (nav_history.c.broker_account == "T_INS_PAPER")
+                    (nav_history.c.broker == "FUTU") & (nav_history.c.broker_account == "T_INS_PAPER")
                 )
             )
         ).first()
@@ -60,7 +58,7 @@ async def test_first_call_inserts_FUTU_paper_row(async_engine):
     assert row.account_env == "paper"
     assert float(row.nav) == 100000.00
     assert row.daily_pnl is None
-    assert row.source == "intraday"
+    assert row.nav_type == "intraday"
 
 
 async def test_REAL_maps_to_live(async_engine):
@@ -68,11 +66,7 @@ async def test_REAL_maps_to_live(async_engine):
     await persist_futu_nav(async_engine, _client(acc_id="T_INS_LIVE"), "REAL", _payload())
     async with async_engine.begin() as conn:
         env = (
-            await conn.execute(
-                sa.select(nav_history.c.account_env).where(
-                    nav_history.c.broker_account == "T_INS_LIVE"
-                )
-            )
+            await conn.execute(sa.select(nav_history.c.account_env).where(nav_history.c.broker_account == "T_INS_LIVE"))
         ).scalar()
     await _purge(async_engine, "T_INS_LIVE")
     assert env == "live"
@@ -89,7 +83,7 @@ async def test_daily_pnl_computed_from_prev_row(async_engine):
                 date=date(2025, 1, 1),  # arbitrary past date
                 nav="95000.00",
                 daily_pnl="0.00",
-                source="intraday",
+                nav_type="intraday",
             )
         )
     await persist_futu_nav(async_engine, _client(acc_id="T_PNL"), "REAL", _payload(net_liq=100000.00))
@@ -117,11 +111,7 @@ async def test_ignores_payload_daily_pnl(async_engine):
     )
     async with async_engine.begin() as conn:
         dp = (
-            await conn.execute(
-                sa.select(nav_history.c.daily_pnl).where(
-                    nav_history.c.broker_account == "T_IGN_DPNL"
-                )
-            )
+            await conn.execute(sa.select(nav_history.c.daily_pnl).where(nav_history.c.broker_account == "T_IGN_DPNL"))
         ).scalar()
     await _purge(async_engine, "T_IGN_DPNL")
     assert dp is None  # no prev row → None, NOT 9999.99
@@ -144,7 +134,7 @@ async def test_cross_env_collision_raises(async_engine):
                 date=today,
                 nav="100000.00",
                 daily_pnl="0.00",
-                source="intraday",
+                nav_type="intraday",
             )
         )
     with pytest.raises(NavAccountEnvConflict):
@@ -168,7 +158,5 @@ async def test_unknown_matched_trd_env_returns_early(async_engine, caplog):
 
 
 async def test_missing_net_liquidation_returns_early(async_engine, caplog):
-    await persist_futu_nav(
-        async_engine, _client(acc_id="X"), "REAL", {"account_summary": {}}
-    )
+    await persist_futu_nav(async_engine, _client(acc_id="X"), "REAL", {"account_summary": {}})
     assert any("missing net_liquidation" in r.message for r in caplog.records)

@@ -1,4 +1,5 @@
 """Tests for nav_history + benchmark cache query helpers."""
+
 from datetime import date
 
 import pytest
@@ -22,9 +23,13 @@ pytestmark = pytest.mark.asyncio
 async def _seed(conn, broker, env, account, d, nav):
     await conn.execute(
         sa.insert(nav_history).values(
-            broker=broker, account_env=env, broker_account=account,
-            date=d, nav=str(nav), daily_pnl=str(round(nav * 0.001, 2)),
-            source="intraday",
+            broker=broker,
+            account_env=env,
+            broker_account=account,
+            date=d,
+            nav=str(nav),
+            daily_pnl=str(round(nav * 0.001, 2)),
+            nav_type="intraday",
         )
     )
 
@@ -90,11 +95,7 @@ async def _purge_bench(engine, symbol):
 async def test_load_benchmark_cached_hit_no_fetch(async_engine):
     await _purge_bench(async_engine, "_T_HIT_")
     async with async_engine.begin() as c:
-        await c.execute(
-            sa.insert(benchmark_closes).values(
-                symbol="_T_HIT_", date=date(2026, 6, 1), close="450.00"
-            )
-        )
+        await c.execute(sa.insert(benchmark_closes).values(symbol="_T_HIT_", date=date(2026, 6, 1), close="450.00"))
     # No ib_pool — but cache is populated, so no fetch is attempted.
     df, err = await load_benchmark_cached(async_engine, None, "_T_HIT_", date(2026, 5, 1))
     await _purge_bench(async_engine, "_T_HIT_")

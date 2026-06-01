@@ -7,6 +7,7 @@ Pre-execution corrections applied:
   - #4 race-safe cross-env guard (catch IntegrityError + re-query → 409)
   - #18 SIMULATE→"paper" via account_scope.env_from_trd_env
 """
+
 from __future__ import annotations
 
 import logging
@@ -106,9 +107,7 @@ async def persist_futu_nav(
         logger.warning("persist_futu_nav skipped: _acc_id is None")
         return
     if matched_trd_env not in {"REAL", "SIMULATE"}:
-        logger.warning(
-            "persist_futu_nav skipped: unknown matched_trd_env=%r", matched_trd_env
-        )
+        logger.warning("persist_futu_nav skipped: unknown matched_trd_env=%r", matched_trd_env)
         return
     net_liq = _safe_extract_net_liq(payload)
     if net_liq is None:
@@ -124,9 +123,7 @@ async def persist_futu_nav(
 
     async with engine.begin() as conn:
         # Defense-in-depth app-level guard (Decisions §13).
-        existing = await _existing_account_env(
-            conn, scope.broker, scope.broker_account, today
-        )
+        existing = await _existing_account_env(conn, scope.broker, scope.broker_account, today)
         if existing is not None and existing != scope.account_env:
             raise NavAccountEnvConflict(scope, existing, today)
 
@@ -145,11 +142,11 @@ async def persist_futu_nav(
                 date=today,
                 nav=net_liq,
                 daily_pnl=daily_pnl,
-                source="intraday",
+                nav_type="intraday",
             )
             .on_conflict_do_update(
                 index_elements=["broker", "account_env", "broker_account", "date"],
-                set_={"nav": net_liq, "daily_pnl": daily_pnl, "source": "intraday"},
+                set_={"nav": net_liq, "daily_pnl": daily_pnl, "nav_type": "intraday"},
             )
         )
         try:
@@ -159,9 +156,7 @@ async def persist_futu_nav(
             # Use a fresh begin() since the original transaction is poisoned.
             await conn.rollback()
             async with engine.begin() as conn2:
-                winner_env = await _existing_account_env(
-                    conn2, scope.broker, scope.broker_account, today
-                )
+                winner_env = await _existing_account_env(conn2, scope.broker, scope.broker_account, today)
             if winner_env is not None and winner_env != scope.account_env:
                 raise NavAccountEnvConflict(scope, winner_env, today) from exc
             raise

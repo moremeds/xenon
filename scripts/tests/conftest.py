@@ -5,7 +5,8 @@ import sys
 from pathlib import Path
 
 import pytest
-from sqlalchemy.engine import Engine
+from sqlalchemy import text
+from sqlalchemy.engine import Engine  # noqa: F401 — re-exported for tests that type-hint Engine
 
 from xenon._test_db import (
     _BoundEngine,
@@ -141,6 +142,45 @@ async def async_engine():
         yield eng
     finally:
         await eng.dispose()
+
+
+@pytest.fixture
+def seed_fx():
+    """Insert an xenon.fx_daily row; auto-cleans after test.
+
+    Used by Task 3 (Futu FX backfill) tests. Skips when test DB unreachable.
+    """
+    from decimal import Decimal as _Dec
+
+    if not is_pg_reachable():
+        pytest.skip(f"PG test DB unreachable at {sync_test_db_url()}")
+    eng = get_session_engine()
+    inserted: list[tuple[str, "date"]] = []
+
+    def _seed(currency: str, d, rate) -> None:
+        if not isinstance(rate, _Dec):
+            rate = _Dec(str(rate))
+        with eng.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO xenon.fx_daily (currency, date, currency_per_usd) "
+                    "VALUES (:c, :d, :r) "
+                    "ON CONFLICT (currency, date) DO UPDATE SET "
+                    "currency_per_usd = EXCLUDED.currency_per_usd"
+                ),
+                {"c": currency, "d": d, "r": rate},
+            )
+        inserted.append((currency, d))
+
+    try:
+        yield _seed
+    finally:
+        with eng.begin() as conn:
+            for c, d in inserted:
+                conn.execute(
+                    text("DELETE FROM xenon.fx_daily WHERE currency=:c AND date=:d"),
+                    {"c": c, "d": d},
+                )
 
 
 @pytest.fixture

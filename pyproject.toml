@@ -35,6 +35,7 @@ dependencies = [
     "asyncpg>=0.30.0",
     "psycopg[binary]>=3.2.0",
     "alembic>=1.15.0",
+    "pandas-market-calendars>=5.4.0",
 ]
 
 [project.scripts]

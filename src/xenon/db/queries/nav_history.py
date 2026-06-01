@@ -9,6 +9,7 @@ Corrections applied:
         runtime guard so v1 can ship without the full IB integration.
   - #10: IB historical bar dates normalized via pd.to_datetime(...).date().
 """
+
 from __future__ import annotations
 
 import logging
@@ -29,10 +30,8 @@ class BenchmarkUnavailable(Exception):
     """Raised when the IB pool cannot serve a benchmark fetch."""
 
 
-async def load_nav_curve(
-    engine: AsyncEngine, scope: AccountScope, period_start: date
-) -> pd.DataFrame:
-    """Return DataFrame[date, nav, daily_pnl, source] ascending by date, scope-filtered.
+async def load_nav_curve(engine: AsyncEngine, scope: AccountScope, period_start: date) -> pd.DataFrame:
+    """Return DataFrame[date, nav, daily_pnl, nav_type] ascending by date, scope-filtered.
 
     Treats every row as authoritative for v1 (only 'intraday' rows exist).
     v2 follow-up will add prefer-close dedupe once an EOD scheduler ships.
@@ -43,7 +42,7 @@ async def load_nav_curve(
                 nav_history.c.date,
                 nav_history.c.nav,
                 nav_history.c.daily_pnl,
-                nav_history.c.source,
+                nav_history.c.nav_type,
             )
             .where(
                 (nav_history.c.broker == scope.broker)
@@ -54,7 +53,7 @@ async def load_nav_curve(
             .order_by(nav_history.c.date.asc())
         )
         rows = result.fetchall()
-    df = pd.DataFrame(rows, columns=["date", "nav", "daily_pnl", "source"])
+    df = pd.DataFrame(rows, columns=["date", "nav", "daily_pnl", "nav_type"])
     if not df.empty:
         df["nav"] = df["nav"].astype(float)
         df["daily_pnl"] = df["daily_pnl"].astype(float).where(df["daily_pnl"].notna(), None)
@@ -76,10 +75,7 @@ async def load_benchmark_cached(
         rows = (
             await conn.execute(
                 sa.select(benchmark_closes.c.date, benchmark_closes.c.close)
-                .where(
-                    (benchmark_closes.c.symbol == symbol)
-                    & (benchmark_closes.c.date >= period_start)
-                )
+                .where((benchmark_closes.c.symbol == symbol) & (benchmark_closes.c.date >= period_start))
                 .order_by(benchmark_closes.c.date.asc())
             )
         ).fetchall()
@@ -102,10 +98,7 @@ async def load_benchmark_cached(
         rows = (
             await conn.execute(
                 sa.select(benchmark_closes.c.date, benchmark_closes.c.close)
-                .where(
-                    (benchmark_closes.c.symbol == symbol)
-                    & (benchmark_closes.c.date >= period_start)
-                )
+                .where((benchmark_closes.c.symbol == symbol) & (benchmark_closes.c.date >= period_start))
                 .order_by(benchmark_closes.c.date.asc())
             )
         ).fetchall()
@@ -115,9 +108,7 @@ async def load_benchmark_cached(
     return df, None
 
 
-async def fetch_and_cache_benchmark(
-    engine: AsyncEngine, ib_pool, symbol: str, period_start: date
-) -> None:
+async def fetch_and_cache_benchmark(engine: AsyncEngine, ib_pool, symbol: str, period_start: date) -> None:
     """Fetch daily closes from IB pool's 'data' role and upsert into benchmark_closes.
 
     Uses IBPool.get("data") (correction #9). Normalizes bar dates via
@@ -132,9 +123,7 @@ async def fetch_and_cache_benchmark(
     import os
 
     if os.environ.get("XENON_PERF_BENCHMARK_FETCH_ENABLED", "false").lower() != "true":
-        raise BenchmarkUnavailable(
-            "benchmark fetch disabled (set XENON_PERF_BENCHMARK_FETCH_ENABLED=true to enable)"
-        )
+        raise BenchmarkUnavailable("benchmark fetch disabled (set XENON_PERF_BENCHMARK_FETCH_ENABLED=true to enable)")
 
     client = ib_pool.get("data") if hasattr(ib_pool, "get") else None
     if client is None:
@@ -154,10 +143,7 @@ async def fetch_and_cache_benchmark(
             useRTH=True,
             formatDate=1,
         )
-        return [
-            {"date": pd.to_datetime(b.date).date(), "close": float(b.close)}
-            for b in bars
-        ]
+        return [{"date": pd.to_datetime(b.date).date(), "close": float(b.close)} for b in bars]
 
     loop = asyncio.get_running_loop()
     rows = await loop.run_in_executor(None, _sync_fetch)

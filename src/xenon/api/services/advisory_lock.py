@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 # new entry here when introducing a new singleton loop.
 LOCK_KEY_UW_DAILY = 7341001
 LOCK_KEY_VCG_CRI = 7342001
+LOCK_KEY_FUTU_HISTORY_SYNC = 7343001
 
 
 @asynccontextmanager

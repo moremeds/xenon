@@ -186,14 +186,20 @@ nav_history = Table(
     Column("cash", Numeric(14, 2)),
     Column("stock_value", Numeric(14, 2)),
     Column("options_value", Numeric(14, 2)),
-    # spec §12 / migration 260fabba18d6 — distinguish post-close from intraday snapshots
-    Column("source", Text, nullable=False, server_default=text("'intraday'")),
+    # spec §12 / migration 260fabba18d6 — distinguish post-close from intraday snapshots.
+    # Renamed source → nav_type (2026_06_01_0001) when the four-value union
+    # ('close','intraday','reported','reconstructed') was introduced to also
+    # discriminate Futu's anchor-vs-backward-walked reconstruction rows.
+    Column("nav_type", Text, nullable=False, server_default=text("'intraday'")),
     CheckConstraint("broker IN ('IB', 'FUTU')", name="ck_nav_broker"),
     CheckConstraint(
         "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
         name="ck_nav_account_env",
     ),
-    CheckConstraint("source IN ('close', 'intraday')", name="ck_nav_history_source"),
+    CheckConstraint(
+        "nav_type IN ('close', 'intraday', 'reported', 'reconstructed')",
+        name="ck_nav_history_nav_type",
+    ),
     # spec Decisions §13 / migration 489476c351cc — atomic dual-curve protection.
     # Excludes account_env so two rows with different envs cannot coexist for
     # the same (broker, broker_account, date).
@@ -207,6 +213,149 @@ benchmark_closes = Table(
     Column("symbol", Text, primary_key=True),
     Column("date", Date, primary_key=True),
     Column("close", Numeric(14, 4), nullable=False),
+)
+
+# ---------- Futu History Reconstruction (spec 2026-06-01) ----------
+
+futu_trades = Table(
+    "futu_trades",
+    xenon_metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("futu_deal_id", Text, nullable=False),
+    Column("futu_order_id", Text, nullable=False),
+    Column("ticker", Text, nullable=False),
+    Column("futu_code", Text, nullable=False),
+    Column("market", Text, nullable=False),
+    Column("action", Text, nullable=False),
+    Column("quantity", Integer, nullable=False),
+    Column("price", Numeric(12, 4), nullable=False),
+    Column("fees", Numeric(10, 4), nullable=False, server_default=text("0")),
+    Column("realized_pnl", Numeric(12, 2)),
+    Column("filled_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("raw", JSONB, nullable=False),
+    Column("broker", Text, nullable=False, server_default=text("'FUTU'")),
+    Column("account_env", Text, nullable=False),
+    Column("broker_account", Text, nullable=False),
+    CheckConstraint("broker = 'FUTU'", name="ck_futu_trades_broker"),
+    CheckConstraint(
+        "account_env IN ('paper','live','sim','legacy_unknown')",
+        name="ck_futu_trades_env",
+    ),
+    CheckConstraint("market = 'US'", name="ck_futu_trades_market_us"),
+    UniqueConstraint(
+        "broker",
+        "account_env",
+        "broker_account",
+        "futu_deal_id",
+        name="uq_futu_trades_scope_deal",
+    ),
+    Index(
+        "ix_futu_trades_scope_filled",
+        "broker",
+        "account_env",
+        "broker_account",
+        "filled_at",
+    ),
+    Index("ix_futu_trades_ticker_filled", "ticker", "filled_at"),
+)
+
+futu_cash_flow = Table(
+    "futu_cash_flow",
+    xenon_metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("futu_flow_id", Text, nullable=False),
+    Column("flow_type", Text, nullable=False),
+    Column("futu_type_raw", Text, nullable=False),
+    # amount is intentionally NULLABLE: missing-FX rows insert NULL until
+    # the FX backfill pass converts amount_original/original_currency.
+    Column("amount", Numeric(12, 2)),
+    Column("amount_original", Numeric(12, 2), nullable=False),
+    Column("original_currency", Text, nullable=False),
+    Column("fx_rate_used", Numeric(12, 6)),
+    Column("ticker", Text),
+    Column("description", Text),
+    Column("flow_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("raw", JSONB, nullable=False),
+    Column("broker", Text, nullable=False, server_default=text("'FUTU'")),
+    Column("account_env", Text, nullable=False),
+    Column("broker_account", Text, nullable=False),
+    CheckConstraint("broker = 'FUTU'", name="ck_futu_cash_flow_broker"),
+    CheckConstraint(
+        "account_env IN ('paper','live','sim','legacy_unknown')",
+        name="ck_futu_cash_flow_env",
+    ),
+    CheckConstraint(
+        "flow_type IN ('deposit','withdraw','dividend','interest','fee','other')",
+        name="ck_futu_cash_flow_type",
+    ),
+    UniqueConstraint(
+        "broker",
+        "account_env",
+        "broker_account",
+        "futu_flow_id",
+        name="uq_futu_cash_flow_scope_flow",
+    ),
+    Index(
+        "ix_futu_cash_flow_scope_at",
+        "broker",
+        "account_env",
+        "broker_account",
+        "flow_at",
+    ),
+)
+
+corporate_actions = Table(
+    "corporate_actions",
+    xenon_metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("ticker", Text, nullable=False),
+    Column("action_type", Text, nullable=False),
+    Column("effective_date", Date, nullable=False),
+    Column("ratio_numerator", Numeric(8, 4)),
+    Column("ratio_denominator", Numeric(8, 4)),
+    Column("new_ticker", Text),
+    Column("source", Text, nullable=False, server_default=text("'FUTU_GET_REHAB'")),
+    Column("notes", JSONB),
+    UniqueConstraint(
+        "ticker",
+        "action_type",
+        "effective_date",
+        name="uq_corp_actions",
+    ),
+    Index("ix_corp_actions_ticker_date", "ticker", "effective_date"),
+)
+
+futu_reconciliation_log = Table(
+    "futu_reconciliation_log",
+    xenon_metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("kind", Text, nullable=False),
+    Column("recon_date", Date, nullable=False),
+    Column("reported_nav", Numeric(14, 2)),
+    Column("reconstructed_nav", Numeric(14, 2)),
+    Column("delta", Numeric(14, 2)),
+    Column("threshold", Numeric(14, 2)),
+    Column("exceeded", Boolean),
+    Column("notes", JSONB),
+    Column(
+        "computed_at",
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    Column("broker", Text, nullable=False, server_default=text("'FUTU'")),
+    Column("account_env", Text, nullable=False),
+    Column("broker_account", Text, nullable=False),
+    CheckConstraint("kind IN ('daily','anomaly')", name="ck_futu_recon_kind"),
+)
+
+fx_daily = Table(
+    "fx_daily",
+    xenon_metadata,
+    Column("currency", Text, primary_key=True),
+    Column("date", Date, primary_key=True),
+    Column("currency_per_usd", Numeric(12, 6), nullable=False),
+    Column("source", Text, nullable=False, server_default=text("'FRED'")),
 )
 
 # ---------- Order Lifecycle ----------
