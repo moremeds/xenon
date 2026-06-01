@@ -145,6 +145,71 @@ async def async_engine():
 
 
 @pytest.fixture
+def clean_scope():
+    """Wipe Futu-history test-scope rows + non-scoped tables touched by tests.
+
+    The autouse `_postgres_orders_test_db` already truncates most tables,
+    but `corporate_actions` has no scope columns and `fx_daily` is filled by
+    FX backfill — clear both explicitly so cross-test contamination cannot
+    bleed in when a test runs without the autouse.
+    """
+    url = _sync_test_db_url()
+    eng = create_engine(url, pool_pre_ping=True, connect_args={"connect_timeout": 2})
+    if not _pg_reachable(eng):
+        eng.dispose()
+        pytest.skip(f"PG test DB unreachable at {url}")
+    where = "broker='FUTU' AND account_env='paper' AND broker_account='pytest'"
+    scoped = [
+        "futu_trades",
+        "futu_cash_flow",
+        "futu_reconciliation_log",
+        "nav_history",
+        "account_snapshots",
+    ]
+
+    def _wipe(conn):
+        for t in scoped:
+            conn.execute(text(f"DELETE FROM xenon.{t} WHERE {where}"))
+        conn.execute(
+            text("DELETE FROM xenon.corporate_actions WHERE ticker = ANY(:tickers)"),
+            {"tickers": ["AAPL", "NVDA", "MSFT", "00700", "XYZ"]},
+        )
+        conn.execute(text("DELETE FROM xenon.fx_daily WHERE date < DATE '2024-06-01'"))
+
+    try:
+        with eng.begin() as conn:
+            _wipe(conn)
+        yield
+    finally:
+        with eng.begin() as conn:
+            _wipe(conn)
+        eng.dispose()
+
+
+@pytest.fixture
+def futu_pytest_app_scope(monkeypatch):
+    """Force xenon.api.guards.get_account_scope to return FUTU/paper/pytest.
+
+    The autouse `_trading_mode_paper_default` pins IB/paper/DU0000000 for
+    every TestClient(app) call. Routes that depend on `get_account_scope`
+    would miss the seeded FUTU rows without this override.
+    """
+    monkeypatch.setenv("XENON_BROKER", "FUTU")
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "pytest")
+    try:
+        import xenon.api.server as server
+
+        server.app.state.broker = "FUTU"
+        server.app.state.account = "pytest"
+        server.app.state.trading_mode = "paper"
+        server.app.state.mode_verified = True
+    except Exception:
+        pass
+    yield
+
+
+@pytest.fixture
 def seed_fx():
     """Insert an xenon.fx_daily row; auto-cleans after test.
 
