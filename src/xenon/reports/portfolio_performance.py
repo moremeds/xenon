@@ -1429,6 +1429,21 @@ def build_payload(benchmark_symbol: str = "SPY") -> dict:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    import warnings as _warnings
+
+    _DEPRECATION_BANNER = (
+        "\033[33m[DEPRECATED]\033[0m xenon-portfolio-perf is superseded by the "
+        "FastAPI GET /performance route backed by xenon.nav_history. "
+        "This CLI will be removed in a future release. "
+        "See docs/superpowers/specs/2026-05-31-performance-rebuild-design.md."
+    )
+    _warnings.warn(
+        "xenon-portfolio-perf is deprecated; use GET /performance instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    print(_DEPRECATION_BANNER, file=sys.stderr)
+
     parser = argparse.ArgumentParser(description="Generate YTD portfolio performance metrics")
     parser.add_argument("--json", action="store_true", help="Emit JSON payload")
     parser.add_argument("--benchmark", default="SPY", help="Benchmark symbol (default: SPY)")

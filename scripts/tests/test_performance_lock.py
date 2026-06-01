@@ -1,9 +1,18 @@
 """Tests for performance endpoint deduplication and atomic cache writes.
 
-Uses httpx.AsyncClient against the FastAPI app with mocked deps (no IB/network).
+DEPRECATED: the legacy POST /performance + subprocess-spawning cache path was
+replaced by FastAPI's in-process compute() with scope-keyed market-aware TTL
+(xenon.api.services.perf_cache). The new behavior is covered by
+test_perf_cache.py + test_performance_service.py + test_performance_route.py.
 """
 
 from __future__ import annotations
+
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="Deprecated: superseded by test_perf_cache.py + test_performance_service.py + test_performance_route.py (perf-rebuild)"
+)
 
 import asyncio
 import json

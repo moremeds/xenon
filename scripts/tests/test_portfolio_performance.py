@@ -1,6 +1,18 @@
-"""Tests for reconstructed portfolio performance analytics."""
+"""Tests for reconstructed portfolio performance analytics.
+
+DEPRECATED: this suite covers the legacy xenon-portfolio-perf CLI, superseded
+by the FastAPI GET /performance route backed by xenon.nav_history. Kept under
+skip so reviewers can still inspect the old behavior; remove after a release.
+See docs/superpowers/specs/2026-05-31-performance-rebuild-design.md.
+"""
 
 from __future__ import annotations
+
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="Deprecated: superseded by test_performance_service.py + test_performance_route.py (perf-rebuild)"
+)
 
 import math
 import os
