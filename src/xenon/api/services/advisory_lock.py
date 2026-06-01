@@ -51,6 +51,34 @@ LOCK_KEY_VCG_CRI = 7342001
 LOCK_KEY_FUTU_HISTORY_SYNC = 7343001
 
 
+from contextlib import contextmanager as _contextmanager
+
+
+@_contextmanager
+def try_advisory_lock(conn, key: int):
+    """Sync-engine variant of pg_try_advisory_lock for subprocess callers.
+
+    The Futu-history sync runs inside a synchronous orchestrator (called
+    from CLI + FastAPI), so it needs the sync-engine version. Yields a
+    bool indicating whether the lock was acquired. Unlock errors are
+    swallowed because Postgres releases session locks on connection close
+    anyway — the explicit unlock is best-effort cleanup.
+    """
+    locked = conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": key}).scalar()
+    try:
+        yield bool(locked)
+    finally:
+        if locked:
+            try:
+                conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
+            except Exception:
+                logger.warning(
+                    "advisory_unlock(%d) failed; relying on session-close release",
+                    key,
+                    exc_info=True,
+                )
+
+
 @asynccontextmanager
 async def pg_try_advisory_lock(
     key: int,
