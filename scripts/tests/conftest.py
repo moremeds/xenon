@@ -153,11 +153,9 @@ def clean_scope():
     FX backfill — clear both explicitly so cross-test contamination cannot
     bleed in when a test runs without the autouse.
     """
-    url = _sync_test_db_url()
-    eng = create_engine(url, pool_pre_ping=True, connect_args={"connect_timeout": 2})
-    if not _pg_reachable(eng):
-        eng.dispose()
-        pytest.skip(f"PG test DB unreachable at {url}")
+    if not is_pg_reachable():
+        pytest.skip(f"PG test DB unreachable at {sync_test_db_url()}")
+    eng = get_session_engine()
     where = "broker='FUTU' AND account_env='paper' AND broker_account='pytest'"
     scoped = [
         "futu_trades",
@@ -198,7 +196,6 @@ def clean_scope():
         with eng.begin() as conn:
             _wipe(conn)
         _clear_module_caches()
-        eng.dispose()
 
 
 @pytest.fixture
