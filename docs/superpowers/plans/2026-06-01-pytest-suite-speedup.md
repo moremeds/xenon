@@ -577,6 +577,37 @@ Expected: ~4x speedup on Phase 2 numbers. Watch for failures that only surface u
 
 Open PR. Measure final CI delta. Target: ~250s → ~80s (with 4-way parallelism on the 4-core GH runner; the test setup overhead now amortizes over 4 workers).
 
+### Phase 3 implementation notes (2026-06-02)
+
+Two things diverged from the original plan:
+
+1. **Per-worker DB creation is in `src/xenon/_test_db.py`, not the CI workflow.**
+   A session-scoped autouse fixture (`_ensure_worker_db`) DROPs and CREATEs
+   `xenon_test_<wid>` from `TEMPLATE xenon_test` on every worker startup.
+   Putting it in the fixture (vs `psql` in CI yaml) gives one code path for
+   both CI and local — and the autouse handles cleanup if a prior session
+   crashed (`WITH (FORCE)` on Postgres 14+).
+2. **Local dev needs `xenon_app` to have CREATEDB. If it doesn't, the
+   fixture catches `InsufficientPrivilege` and flips `_WORKER_DB_DISABLED`
+   so all xdist workers fall back to the master `xenon_test`.** This keeps
+   the suite runnable locally but loses isolation (workers contend on
+   committed-state and async-path writes — saw ~127 races out of ~1700
+   tests on the dev box). CI is unaffected because the postgres-image
+   `xenon_app` is superuser.
+
+   Local users who want full parallelism: `psql ... -c "ALTER ROLE
+xenon_app CREATEDB"` against the dev PG. Otherwise stay on serial.
+
+3. **`scripts/infra/dev/run_pytest_affected.py` is NOT changed to `-n auto`.**
+   With the fallback in effect, default-parallel local would regress vs
+   Phase 2 serial. Users opt in explicitly via `uv run pytest -n auto` (or
+   `... -- -n auto` through the affected runner).
+
+4. **`--dist loadgroup` deferred.** The original plan suggested it to keep
+   `importlib.reload`-based tests on the same worker, but each xdist worker
+   is its own Python process — `xenon.api.trading_mode` reloads don't leak
+   across workers. Default `--dist load` is fine.
+
 ---
 
 ## Verification gates (run after every phase)

@@ -48,7 +48,9 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test
         run: uv run alembic upgrade head
-      - run: uv run pytest
+      # Phase 3: -n 4 matches ci.yml::python-tests parallelism. CI's
+      # postgres-image xenon_app is superuser so per-worker DB cloning works.
+      - run: uv run pytest -n 4
       - uses: actions/setup-node@v4
         with:
           node-version: 20

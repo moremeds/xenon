@@ -145,15 +145,20 @@ jobs:
           --ignore=scripts/tests/test_volatility.py
           --ignore=scripts/tests/test_parquet_store.py
       - name: Run pytest (affected on PR, full on master push)
+        # Phase 3: `-n 4` parallelizes across 4 workers. The autouse fixture
+        # in src/xenon/_test_db.py clones xenon_test → xenon_test_gw{0..3}
+        # from template on worker startup; CI's postgres-image xenon_app is a
+        # superuser, so CREATE DATABASE succeeds and workers run on isolated
+        # physical DBs (no cross-worker contention on the same tables).
         run: |
           IGNORES="--ignore=scripts/tests/test_trend_scan.py --ignore=scripts/tests/test_trend_scan_runtime.py --ignore=scripts/tests/test_trend_config.py --ignore=scripts/tests/test_trend_models.py --ignore=scripts/tests/test_trend_storage.py --ignore=scripts/tests/test_trend_ranking.py --ignore=scripts/tests/test_trend_scan_catalysts.py --ignore=scripts/tests/test_ta_prefilter.py --ignore=scripts/tests/test_flow_confirmation.py --ignore=scripts/tests/test_volatility.py --ignore=scripts/tests/test_parquet_store.py"
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             # `--` forwards $IGNORES to pytest via run_pytest_affected.py's
             # REMAINDER positional, instead of argparse rejecting them as
             # unknown flags.
-            uv run python scripts/infra/dev/run_pytest_affected.py --base origin/${{ github.base_ref }} -- $IGNORES
+            uv run python scripts/infra/dev/run_pytest_affected.py --base origin/${{ github.base_ref }} -- -n 4 $IGNORES
           else
-            uv run pytest $IGNORES
+            uv run pytest -n 4 $IGNORES
           fi
 
   version-sync:
