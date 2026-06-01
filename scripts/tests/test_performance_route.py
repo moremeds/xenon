@@ -85,6 +85,44 @@ def test_performance_unknown_broker_returns_400(client: TestClient) -> None:
     assert resp.status_code == 400
 
 
+def test_performance_ib_falls_back_to_env_when_app_state_account_empty(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression — surfaced by live test 2026-06-01.
+
+    When IB Gateway TCP is open but the API handshake times out (e.g. client
+    ID conflict, 2FA pending), the lifespan leaves app.state.account="".
+    The perf-rebuild read path is Postgres-only, so the route must still
+    serve via the XENON_BROKER_ACCOUNT + XENON_TRADING_MODE env fallback
+    instead of crashing with ValueError → 500.
+    """
+    # Force the empty-state condition the live failure produced.
+    server.app.state.account = ""
+    # The autouse conftest fixture set XENON_TRADING_MODE=paper and module-loaded
+    # xenon.api.trading_mode with MODE="paper". For this regression we use a paper
+    # account ID (DU…) so resolve_from_env() validates cleanly without reloading
+    # the trading_mode module — the bug we're locking in is "env fallback fires
+    # instead of crashing on empty app.state.account", which is broker/env agnostic.
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU9999999")
+
+    captured: dict[str, AccountScope] = {}
+
+    async def _fake(engine, scope, *, ib_pool=None):
+        captured["scope"] = scope
+        return {"status": "ok", "summary": {}, "series": [], "warnings": [], "scope": scope.as_dict()}
+
+    with patch("xenon.api.routes.performance.cached_compute", new=_fake):
+        resp = client.get("/performance?broker=IB")
+
+    # Restore so other tests don't see the empty account.
+    server.app.state.account = "DU0000000"
+
+    assert resp.status_code == 200, resp.text
+    assert captured["scope"].broker == "IB"
+    assert captured["scope"].account_env == "paper"
+    assert captured["scope"].broker_account == "DU9999999"
+
+
 def test_performance_nav_conflict_returns_409(client: TestClient) -> None:
     scope = AccountScope("FUTU", "live", "12345")
     conflict = NavAccountEnvConflict(scope, "paper", date(2026, 6, 1))

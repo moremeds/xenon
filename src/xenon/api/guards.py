@@ -77,7 +77,25 @@ def get_performance_scope(request: Request, broker: str | None = None) -> Accoun
     """
     b = (broker or "IB").upper()
     if b == "IB":
-        return resolve_from_app_state(request.app.state)
+        try:
+            return resolve_from_app_state(request.app.state)
+        except ValueError:
+            # IB Gateway API handshake failed (TCP open, auth not accepted —
+            # commonly "needs 2FA on IBKR mobile" or "client IP not in trusted
+            # list"). app.state.account stays empty. The /performance read path
+            # is Postgres-only, so degrade gracefully via env vars (dev.sh
+            # exports XENON_BROKER_ACCOUNT + XENON_TRADING_MODE before boot).
+            from xenon.execution.account_scope import resolve_from_env
+            try:
+                return resolve_from_env()
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"IB account scope unresolved (Gateway handshake pending and "
+                        f"env fallback unavailable): {exc}"
+                    ),
+                )
     if b != "FUTU":
         raise HTTPException(status_code=400, detail=f"Unknown broker: {broker!r}")
 
