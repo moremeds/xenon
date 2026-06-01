@@ -5,25 +5,23 @@ from __future__ import annotations
 import os
 
 import pytest
-from sqlalchemy import create_engine, text
-from sqlalchemy.exc import OperationalError
 
-_PG_UNREACHABLE: bool | None = None
+from xenon._test_db import truncate_all_xenon_tables
 
 
 @pytest.fixture(autouse=True)
 def _postgres_orders_test_db(monkeypatch):
     """Point sync Postgres callers at the test DB and clean order tables.
 
-    Tolerates an unreachable test DB (offline development) — see the matching
-    pattern in `scripts/tests/conftest.py`.
+    Tolerates an unreachable test DB (offline development) — the shared
+    helper in `scripts/tests/_db_fixture.py` no-ops when PG is unreachable
+    or when the schema is missing.
     """
     url = os.environ.get(
         "DATABASE_URL_TEST",
         "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
     )
     monkeypatch.setenv("DATABASE_URL", url)
-    sync_url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
 
     try:
         import xenon.db.engine as engine_mod
@@ -38,45 +36,9 @@ def _postgres_orders_test_db(monkeypatch):
     except Exception:
         pass
 
-    def truncate() -> None:
-        global _PG_UNREACHABLE
-        if _PG_UNREACHABLE is True:
-            return
-        engine = create_engine(sync_url, pool_pre_ping=True, connect_args={"connect_timeout": 2})
-        try:
-            with engine.begin() as conn:
-                for table in (
-                    "events.outbox",
-                    "xenon.order_events",
-                    "xenon.order_submissions",
-                    "xenon.wizard_protection",
-                    "xenon.wizard_events",
-                    "xenon.wizard_combo_attempts",
-                    "xenon.wizard_sessions",
-                    "xenon.uw_flow_events",
-                    "xenon.uw_api_stats",
-                    "xenon.uw_analyze_snapshots",
-                    "xenon.order_fills",
-                    "xenon.positions",
-                    "xenon.account_snapshots",
-                    "xenon.journal_entries",
-                    "xenon.trades",
-                    "xenon.nav_history",
-                    "xenon.gex_snapshots",
-                    "xenon.scan_results",
-                    "xenon.cri_series",
-                    "xenon.vcg_series",
-                    "xenon.ticker_cache",
-                ):
-                    conn.execute(text(f"TRUNCATE {table} CASCADE"))
-        except OperationalError:
-            _PG_UNREACHABLE = True
-        finally:
-            engine.dispose()
-
-    truncate()
+    truncate_all_xenon_tables()
     yield
-    truncate()
+    truncate_all_xenon_tables()
 
 
 @pytest.fixture(autouse=True)

@@ -11,10 +11,10 @@ from __future__ import annotations
 import os
 
 import pytest
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
-import scripts.tests.conftest as shared_conftest
+import xenon._test_db as db_fixture
 from xenon.execution.account_scope import AccountScope, resolve_from_env
 
 
@@ -55,7 +55,12 @@ def test_pg_test_engine_points_at_test_db(pg_test_engine):
 
 
 def test_truncate_postgres_tables_treats_missing_schema_as_offline(monkeypatch):
-    """A reachable but unmigrated test DB should not fail unrelated tests."""
+    """A reachable but unmigrated test DB should not fail unrelated tests.
+
+    Contract guarded here: when TRUNCATE fails with SQLAlchemyError (the
+    typical symptom of a missing schema), the helper must swallow it and
+    flip the reachability cache to False so subsequent tests skip TRUNCATE.
+    """
 
     class FakeConnection:
         def execute(self, _statement):
@@ -69,19 +74,14 @@ def test_truncate_postgres_tables_treats_missing_schema_as_offline(monkeypatch):
             return False
 
     class FakeEngine:
-        disposed = False
-
         def begin(self):
             return FakeBegin()
 
-        def dispose(self):
-            self.disposed = True
+    # Skip the reachability probe (pretend the DB is up) and inject our fake
+    # session engine so TRUNCATE attempts hit it.
+    monkeypatch.setattr(db_fixture, "_PG_REACHABLE", True)
+    monkeypatch.setattr(db_fixture, "_SESSION_ENGINE", FakeEngine())
 
-    fake_engine = FakeEngine()
-    monkeypatch.setattr(shared_conftest, "_PG_REACHABLE_CACHE", True)
-    monkeypatch.setattr(shared_conftest, "create_engine", lambda *_args, **_kwargs: fake_engine)
+    db_fixture.truncate_all_xenon_tables()
 
-    shared_conftest._truncate_postgres_tables()
-
-    assert shared_conftest._PG_REACHABLE_CACHE is False
-    assert fake_engine.disposed is True
+    assert db_fixture._PG_REACHABLE is False
