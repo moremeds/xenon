@@ -208,6 +208,11 @@ def futu_pytest_app_scope(monkeypatch):
     The autouse `_trading_mode_paper_default` pins IB/paper/DU0000000 for
     every TestClient(app) call. Routes that depend on `get_account_scope`
     would miss the seeded FUTU rows without this override.
+
+    The FastAPI lifespan in test mode overwrites app.state.account from
+    `_get_managed_account_for_health()` (which returns ""), so a one-time
+    pre-TestClient state mutation is not enough — we monkeypatch the
+    helper too so the lifespan resolves to "pytest".
     """
     monkeypatch.setenv("XENON_BROKER", "FUTU")
     monkeypatch.setenv("XENON_TRADING_MODE", "paper")
@@ -215,6 +220,7 @@ def futu_pytest_app_scope(monkeypatch):
     try:
         import xenon.api.server as server
 
+        monkeypatch.setattr(server, "_get_managed_account_for_health", lambda: "pytest")
         server.app.state.broker = "FUTU"
         server.app.state.account = "pytest"
         server.app.state.trading_mode = "paper"

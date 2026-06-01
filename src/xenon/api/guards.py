@@ -66,6 +66,37 @@ def get_account_scope(request: Request) -> AccountScope:
     return resolve_from_app_state(request.app.state)
 
 
+def get_futu_account_scope(request: Request) -> AccountScope:
+    """FastAPI dependency: resolve the FUTU account scope.
+
+    `get_account_scope` returns the IB scope by default — `/futu/*` routes
+    would silently read empty data because `broker` would be wrong (C29).
+    Resolution order:
+      1. `XENON_FUTU_ACCOUNT` env var (production .env)
+      2. `app.state.futu_account` (dev/test override)
+      3. IB scope's `broker_account` (test convenience — both stay 'pytest'
+         under `futu_pytest_app_scope`)
+    `account_env` mirrors the current trading mode from app.state.
+    """
+    import os
+
+    account = os.environ.get("XENON_FUTU_ACCOUNT")
+    if not account:
+        account = getattr(request.app.state, "futu_account", None)
+    if not account:
+        try:
+            ib_scope = resolve_from_app_state(request.app.state)
+            account = ib_scope.broker_account
+        except Exception:
+            account = "legacy_unknown"
+    trading_mode = getattr(request.app.state, "trading_mode", "paper")
+    return AccountScope(
+        broker="FUTU",
+        account_env=trading_mode,
+        broker_account=account,
+    )
+
+
 def get_performance_scope(request: Request, broker: str | None = None) -> AccountScope:
     """Broker-aware scope dep for the performance route.
 
@@ -86,14 +117,14 @@ def get_performance_scope(request: Request, broker: str | None = None) -> Accoun
             # is Postgres-only, so degrade gracefully via env vars (dev.sh
             # exports XENON_BROKER_ACCOUNT + XENON_TRADING_MODE before boot).
             from xenon.execution.account_scope import resolve_from_env
+
             try:
                 return resolve_from_env()
             except ValueError as exc:
                 raise HTTPException(
                     status_code=503,
                     detail=(
-                        f"IB account scope unresolved (Gateway handshake pending and "
-                        f"env fallback unavailable): {exc}"
+                        f"IB account scope unresolved (Gateway handshake pending and env fallback unavailable): {exc}"
                     ),
                 )
     if b != "FUTU":

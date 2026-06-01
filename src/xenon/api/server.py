@@ -42,6 +42,8 @@ from xenon.api.guards import get_account_scope, mask_account, require_mode_verif
 from xenon.api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_mode, is_docker_mode, restart_ib_gateway
 from xenon.api.ib_pool import IBPool
 from xenon.api.pool_order_manage import pool_cancel_order, pool_modify_order
+from xenon.api.routes.equity_curve_cross_broker import router as equity_curve_cross_broker_router
+from xenon.api.routes.futu_history import router as futu_history_router
 from xenon.api.routes.historical import router as historical_router
 from xenon.api.routes.journal import router as journal_router
 from xenon.api.routes.orders import orders_payload_for_scope
@@ -483,6 +485,8 @@ app.include_router(orders_router)
 app.include_router(performance_router)
 app.include_router(trades_router)
 app.include_router(wizard_router)
+app.include_router(futu_history_router)
+app.include_router(equity_curve_cross_broker_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -573,6 +577,8 @@ _SCAN_TYPE_MAP = {
     "vcg.json": "vcg",
     "cri.json": "cri",
 }
+
+
 def _atomic_save(path: str, data: dict) -> str:
     """Use the project's atomic_save for portfolio/orders files."""
     from xenon.utils.atomic_io import atomic_save
@@ -697,6 +703,8 @@ def _fetch_ib_index_option_chain(client: Any, ticker: str, exchange: str, sec_ty
     contract = Index(symbol=ticker, exchange=exchange or _preferred_index_exchange(ticker))
     qualified = client.qualify_contract(contract)
     return client.ib.reqSecDefOptParams(ticker, exchange, sec_type, qualified.conId)
+
+
 def _series_span_days(rows: List[dict]) -> int:
     if len(rows) < 2:
         return 0
@@ -2548,7 +2556,6 @@ async def _orders_modify_from_body(body: dict):
 # ---------------------------------------------------------------------------
 
 
-
 def _is_market_open_now() -> bool:
     """Live ET market-hours check — used to override stamped market_open at read time."""
     from datetime import datetime as _dt
@@ -2559,6 +2566,8 @@ def _is_market_open_now() -> bool:
         return False
     minutes = et.hour * 60 + et.minute
     return 9 * 60 + 30 <= minutes <= 16 * 60
+
+
 def _futu_in_cooldown() -> bool:
     """True if the last successful sync was less than FUTU_COOLDOWN_S ago.
 

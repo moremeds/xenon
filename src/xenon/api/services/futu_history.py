@@ -1045,3 +1045,380 @@ def write_today_reported_nav(scope: AccountScope, trade_ctx, today: date) -> Dec
         notes={"unrealized_pl_today": str(unrealized)},
     )
     return reported
+
+
+# ===== Task 18: equity curve + reconciliation read paths =====
+
+
+def _scope_filter() -> str:
+    return "broker = :broker AND account_env = :env AND broker_account = :acc"
+
+
+def _scope_params(scope: AccountScope) -> dict:
+    return {
+        "broker": scope.broker,
+        "env": scope.account_env,
+        "acc": scope.broker_account,
+    }
+
+
+def get_equity_curve(scope: AccountScope, start: date, end: date) -> list[dict]:
+    """NAV series + recon deltas merged by date.
+
+    The DB column is `nav_type` (renamed from `source` in M1 migration), but
+    the API response exposes it as `source` for the existing UI contract.
+    """
+    nav_rows = list(fetch_nav_history(scope, start, end))
+    with get_sync_engine().connect() as conn:
+        recon_rows = conn.execute(
+            text(
+                f"""
+                SELECT recon_date, delta, exceeded, notes
+                  FROM xenon.futu_reconciliation_log
+                 WHERE {_scope_filter()} AND kind='daily'
+                   AND recon_date BETWEEN :start AND :end
+                """
+            ),
+            {**_scope_params(scope), "start": start, "end": end},
+        ).fetchall()
+    recon_by_date = {r.recon_date: r for r in recon_rows}
+    out: list[dict] = []
+    prev_nav: Decimal | None = None
+    for row in nav_rows:
+        recon = recon_by_date.get(row["date"])
+        cur_nav = Decimal(str(row["nav"]))
+        daily_pnl = (cur_nav - prev_nav) if prev_nav is not None else None
+        prev_nav = cur_nav
+        out.append(
+            {
+                "date": row["date"].isoformat(),
+                "nav": float(cur_nav),
+                "source": row["nav_type"],
+                "daily_pnl": float(daily_pnl) if daily_pnl is not None else None,
+                "recon": (
+                    {
+                        "delta": float(recon.delta) if recon.delta else 0.0,
+                        "exceeded": bool(recon.exceeded),
+                        "notes": recon.notes,
+                    }
+                    if recon
+                    else None
+                ),
+            }
+        )
+    return out
+
+
+def get_reconciliation_summary(scope: AccountScope, limit: int = 30) -> dict:
+    with get_sync_engine().connect() as conn:
+        rows = conn.execute(
+            text(
+                f"""
+                SELECT kind, recon_date, reported_nav, reconstructed_nav,
+                       delta, threshold, exceeded, notes, computed_at
+                  FROM xenon.futu_reconciliation_log
+                 WHERE {_scope_filter()}
+                 ORDER BY computed_at DESC
+                 LIMIT :lim
+                """
+            ),
+            {**_scope_params(scope), "lim": limit},
+        ).fetchall()
+        current = conn.execute(
+            text(
+                f"""
+                SELECT delta FROM xenon.futu_reconciliation_log
+                 WHERE {_scope_filter()} AND kind='daily'
+                 ORDER BY recon_date DESC LIMIT 1
+                """
+            ),
+            _scope_params(scope),
+        ).scalar()
+    return {
+        "current_delta": float(current) if current is not None else None,
+        "rows": [
+            {
+                "kind": r.kind,
+                "recon_date": r.recon_date.isoformat(),
+                "reported_nav": float(r.reported_nav) if r.reported_nav is not None else None,
+                "reconstructed_nav": float(r.reconstructed_nav) if r.reconstructed_nav is not None else None,
+                "delta": float(r.delta) if r.delta is not None else None,
+                "threshold": float(r.threshold) if r.threshold is not None else None,
+                "exceeded": bool(r.exceeded) if r.exceeded is not None else None,
+                "notes": r.notes,
+                "computed_at": r.computed_at.isoformat(),
+            }
+            for r in rows
+        ],
+    }
+
+
+# ===== Task 19: trades pagination + performance stats =====
+
+
+def encode_cursor(filled_at, deal_id: str) -> str:
+    import base64
+    import json as _json
+
+    payload = {"t": filled_at.isoformat(), "id": deal_id}
+    return base64.urlsafe_b64encode(_json.dumps(payload).encode()).decode().rstrip("=")
+
+
+def decode_cursor(c: str) -> dict | None:
+    import base64
+    import json as _json
+
+    if not c:
+        return None
+    pad = "=" * (-len(c) % 4)
+    return _json.loads(base64.urlsafe_b64decode(c + pad).decode())
+
+
+def list_trades(
+    scope: AccountScope,
+    start: date,
+    end: date,
+    *,
+    ticker: str | None = None,
+    action: str | None = None,
+    sort: str = "filled_at",
+    direction: str = "desc",
+    limit: int = 50,
+    cursor: str | None = None,
+) -> dict:
+    """Paginated trades list with cursor + sort + filter.
+
+    C34: cursor predicate is keyed on (filled_at, futu_deal_id), so it
+    only makes sense alongside sort=filled_at. Pairing with another sort
+    produces meaningless skip/repeat behavior — reject loudly.
+    """
+    from fastapi import HTTPException
+
+    if cursor and sort != "filled_at":
+        raise HTTPException(
+            status_code=422,
+            detail={"reason_code": "cursor_requires_filled_at_sort"},
+        )
+    cur = decode_cursor(cursor) if cursor else None
+    order = "DESC" if direction.lower() == "desc" else "ASC"
+    sort_col = {
+        "filled_at": "filled_at",
+        "realized_pnl": "realized_pnl",
+        "ticker": "ticker",
+        "fees": "fees",
+    }.get(sort, "filled_at")
+    where_parts = [
+        _scope_filter(),
+        "(filled_at AT TIME ZONE 'America/New_York')::date BETWEEN :start AND :end",
+    ]
+    params: dict = {
+        **_scope_params(scope),
+        "start": start,
+        "end": end,
+        "lim": limit + 1,
+    }
+    if ticker:
+        where_parts.append("ticker = :ticker")
+        params["ticker"] = ticker.upper()
+    if action:
+        where_parts.append("action = :action")
+        params["action"] = action.upper()
+    if cur:
+        comparator = "<" if order == "DESC" else ">"
+        where_parts.append(f"(filled_at, futu_deal_id) {comparator} (:cur_t, :cur_id)")
+        params["cur_t"] = cur["t"]
+        params["cur_id"] = cur["id"]
+    sql = text(
+        f"""
+        SELECT futu_deal_id, ticker, action, quantity, price, fees,
+               realized_pnl, filled_at, futu_order_id
+          FROM xenon.futu_trades
+         WHERE {" AND ".join(where_parts)}
+         ORDER BY {sort_col} {order}, futu_deal_id {order}
+         LIMIT :lim
+        """
+    )
+    with get_sync_engine().connect() as conn:
+        rows = [dict(r._mapping) for r in conn.execute(sql, params)]
+    next_cursor: str | None = None
+    if len(rows) > limit:
+        last = rows[limit - 1]
+        next_cursor = encode_cursor(last["filled_at"], last["futu_deal_id"])
+        rows = rows[:limit]
+    return {
+        "rows": [
+            {
+                "futu_deal_id": r["futu_deal_id"],
+                "ticker": r["ticker"],
+                "action": r["action"],
+                "quantity": int(r["quantity"]),
+                "price": float(r["price"]),
+                "fees": float(r["fees"]),
+                "realized_pnl": float(r["realized_pnl"]) if r["realized_pnl"] is not None else None,
+                "filled_at": r["filled_at"].isoformat(),
+            }
+            for r in rows
+        ],
+        "next_cursor": next_cursor,
+    }
+
+
+def _empty_stats() -> dict:
+    return {
+        "total_return_twr": 0.0,
+        "cagr": 0.0,
+        "max_drawdown": 0.0,
+        "win_rate": None,
+        "avg_holding_days": None,
+        "best_trade": None,
+        "worst_trade": None,
+        "total_commissions": None,
+        "monthly_pnl": {},
+        "external_cash_flows": {"deposits": 0.0, "withdrawals": 0.0},
+    }
+
+
+def compute_performance_stats(scope: AccountScope, start: date, end: date) -> dict:
+    """TWR by sub-periods bracketed by external cash flows + closed-trade
+    aggregations.
+
+    C35: max_drawdown uses the running peak walking left-to-right (not
+    the global max). The V-shape series 100 → 50 → 200 has trough-after-
+    peak 0% with a global-peak DD, but the actual max DD on that series
+    is (50 − 100) / 100 = −50%. A running peak captures that.
+
+    C8: spec-mandated outputs include win_rate, avg_holding_days,
+    best/worst trade, total_commissions, monthly_pnl — populated here
+    from closed SELL rows + their FIFO BUYs on the same ticker.
+    """
+    nav_series = list(fetch_nav_history(scope, start, end))
+    flows = [
+        cf
+        for cf in fetch_cash_flows(scope, start, end)
+        if cf["flow_type"] in ("deposit", "withdraw") and cf["amount"] is not None
+    ]
+    if len(nav_series) < 2:
+        return _empty_stats()
+
+    nav_by_date = {r["date"]: Decimal(str(r["nav"])) for r in nav_series}
+    flow_by_date: dict[date, Decimal] = {}
+    for cf in flows:
+        d = cf["flow_at"].date()
+        flow_by_date[d] = flow_by_date.get(d, Decimal("0")) + Decimal(str(cf["amount"]))
+
+    sorted_dates = sorted(nav_by_date.keys())
+    sub_returns: list[Decimal] = []
+    prev_d = sorted_dates[0]
+    for d in sorted_dates[1:]:
+        nav_start = nav_by_date[prev_d]
+        nav_end = nav_by_date[d]
+        cf = flow_by_date.get(d, Decimal("0"))
+        if nav_start == 0:
+            sub_returns.append(Decimal("0"))
+        else:
+            sub_returns.append((nav_end - nav_start - cf) / nav_start)
+        prev_d = d
+
+    twr = Decimal("1")
+    for r in sub_returns:
+        twr *= Decimal("1") + r
+    twr -= Decimal("1")
+
+    days = (sorted_dates[-1] - sorted_dates[0]).days or 1
+    cagr = (Decimal("1") + twr) ** (Decimal("365") / Decimal(days)) - Decimal("1")
+
+    # C35: running peak so the V-shape sees the trough.
+    sorted_navs = [nav_by_date[d] for d in sorted_dates]
+    running_peak = sorted_navs[0]
+    max_dd = Decimal("0")
+    for nav in sorted_navs:
+        if nav > running_peak:
+            running_peak = nav
+        dd = (nav - running_peak) / running_peak if running_peak > 0 else Decimal("0")
+        if dd < max_dd:
+            max_dd = dd
+
+    # C8: closed-trade aggregations.
+    closed_sql = text(
+        f"""
+        SELECT ticker, action, quantity, price, fees, realized_pnl, filled_at
+          FROM xenon.futu_trades
+         WHERE {_scope_filter()}
+           AND (filled_at AT TIME ZONE 'America/New_York')::date
+               BETWEEN :start AND :end
+         ORDER BY ticker, filled_at
+        """
+    )
+    with get_sync_engine().connect() as conn:
+        rows = [
+            dict(r._mapping)
+            for r in conn.execute(
+                closed_sql,
+                {**_scope_params(scope), "start": start, "end": end},
+            )
+        ]
+
+    closed_sells = [r for r in rows if r["action"] == "SELL" and r["realized_pnl"] is not None]
+    wins = [r for r in closed_sells if r["realized_pnl"] > 0]
+    win_rate = (len(wins) / len(closed_sells)) if closed_sells else None
+    best = max(closed_sells, key=lambda r: r["realized_pnl"], default=None)
+    worst = min(closed_sells, key=lambda r: r["realized_pnl"], default=None)
+    total_commissions = sum((Decimal(str(r["fees"])) for r in rows), Decimal("0"))
+
+    # Holding days: per SELL, find first prior BUY on same ticker (FIFO).
+    holding_days: list[int] = []
+    open_buys_by_ticker: dict[str, list[dict]] = {}
+    for r in sorted(rows, key=lambda x: x["filled_at"]):
+        if r["action"] == "BUY":
+            open_buys_by_ticker.setdefault(r["ticker"], []).append(r)
+        elif r["action"] == "SELL" and open_buys_by_ticker.get(r["ticker"]):
+            opening = open_buys_by_ticker[r["ticker"]].pop(0)
+            holding_days.append((r["filled_at"].date() - opening["filled_at"].date()).days)
+    avg_hd = (sum(holding_days) / len(holding_days)) if holding_days else None
+
+    monthly: dict[str, float] = {}
+    for r in closed_sells:
+        key = r["filled_at"].strftime("%Y-%m")
+        monthly[key] = monthly.get(key, 0.0) + float(r["realized_pnl"])
+
+    return {
+        "total_return_twr": float(twr),
+        "cagr": float(cagr),
+        "max_drawdown": float(max_dd),
+        "win_rate": win_rate,
+        "avg_holding_days": avg_hd,
+        "best_trade": (
+            {
+                "ticker": best["ticker"],
+                "realized_pnl": float(best["realized_pnl"]),
+                "filled_at": best["filled_at"].isoformat(),
+            }
+            if best
+            else None
+        ),
+        "worst_trade": (
+            {
+                "ticker": worst["ticker"],
+                "realized_pnl": float(worst["realized_pnl"]),
+                "filled_at": worst["filled_at"].isoformat(),
+            }
+            if worst
+            else None
+        ),
+        "total_commissions": float(total_commissions),
+        "monthly_pnl": monthly,
+        "external_cash_flows": {
+            "deposits": float(
+                sum(
+                    (cf["amount"] for cf in flows if cf["flow_type"] == "deposit" and cf["amount"] is not None),
+                    Decimal("0"),
+                )
+            ),
+            "withdrawals": float(
+                sum(
+                    (cf["amount"] for cf in flows if cf["flow_type"] == "withdraw" and cf["amount"] is not None),
+                    Decimal("0"),
+                )
+            ),
+        },
+    }
