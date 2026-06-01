@@ -1030,11 +1030,19 @@ def _scope_from_env() -> tuple[str, str, str]:
 
 
 def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
-    """Upsert today's NAV into Postgres nav_history."""
+    """Upsert today's NAV into Postgres nav_history.
+
+    Cross-env conflict guard (spec Decisions §13, perf-rebuild correction #2):
+    if an existing row for (broker, broker_account, date) has a different
+    account_env, raise NavAccountEnvConflict — symmetry with persist_futu_nav.
+    """
     import pytz
+    import sqlalchemy as sa
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+    from xenon.api.services.futu_nav_persistence import NavAccountEnvConflict
     from xenon.db.schema import nav_history
+    from xenon.execution.account_scope import AccountScope
 
     et = pytz.timezone("America/New_York")
     today = datetime.now(et).date()
@@ -1045,6 +1053,21 @@ def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
 
     engine = get_sync_engine()
     with engine.begin() as conn:
+        # Decisions §13 / correction #2 — read-before-write cross-env guard.
+        existing = conn.execute(
+            sa.select(nav_history.c.account_env).where(
+                (nav_history.c.broker == broker)
+                & (nav_history.c.broker_account == broker_account)
+                & (nav_history.c.date == today)
+            )
+        ).first()
+        if existing is not None and existing.account_env != account_env:
+            raise NavAccountEnvConflict(
+                AccountScope(broker=broker, account_env=account_env, broker_account=broker_account),
+                existing.account_env,
+                today,
+            )
+
         stmt = pg_insert(nav_history).values(
             broker=broker,
             account_env=account_env,

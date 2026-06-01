@@ -51,7 +51,44 @@ from xenon.clients.futu_exceptions import (
 from xenon.utils.symbol_norm import futu_to_ib
 from xenon.utils.time_norm import iso_z, now_utc
 
+# Module-level imports of futu SDK symbols. Previously imported lazily inside
+# connect() — that prevented unittest.mock.patch from intercepting them
+# (correction #8 from the perf-rebuild plan review). Failing futu-api means
+# the client cannot connect; raising at import time would block downstream
+# code that just imports the module. Hence the try/except fallback to None.
+try:
+    from futu import (
+        RET_OK,
+        OpenSecTradeContext,
+        SecurityFirm,
+        TrdEnv,
+        TrdMarket,
+    )
+except ImportError:  # pragma: no cover — only hit when futu-api not installed
+    RET_OK = None  # type: ignore[assignment]
+    OpenSecTradeContext = None  # type: ignore[assignment]
+    SecurityFirm = None  # type: ignore[assignment]
+    TrdEnv = None  # type: ignore[assignment]
+    TrdMarket = None  # type: ignore[assignment]
+
 logger = logging.getLogger("xenon.futu")
+
+
+def _enum_to_str(value: Any) -> str:
+    """Map a futu TrdEnv enum value back to its name ('REAL'/'SIMULATE').
+
+    Returns the value's `.name` attribute when present (enum), otherwise the
+    value itself when it's already a string. Raises on anything else so a
+    silent mismatch can't propagate.
+    """
+    if value is None:
+        raise ValueError("trd_env is None")
+    name = getattr(value, "name", None)
+    if name is not None:
+        return str(name)
+    if isinstance(value, str):
+        return value
+    raise ValueError(f"Unknown TrdEnv value: {value!r}")
 
 
 # Defaults chosen to match Futu's 10 calls / 30s rate limit with safety margin.
@@ -83,6 +120,11 @@ class FutuClient:
 
         self._trd_ctx: Any = None
         self._acc_id: Optional[int] = None
+        # Spec §10: ground-truth env of the actually-matched account row.
+        # self.trd_env above is the *requested* env (logging only). This is
+        # the *matched row's* env — the single source of truth for any
+        # nav_history / scope persistence. None when not connected.
+        self._matched_trd_env: Optional[str] = None
         self._connected = False
 
         self._lock = threading.RLock()
@@ -106,16 +148,8 @@ class FutuClient:
             FutuConnectionError: if OpenD is unreachable or returns no accounts.
             FutuAuthError: if OpenD rejects the connection.
         """
-        try:
-            from futu import (
-                RET_OK,
-                OpenSecTradeContext,
-                SecurityFirm,
-                TrdEnv,
-                TrdMarket,
-            )
-        except ImportError as exc:
-            raise FutuConnectionError("futu-api is not installed. `pip install futu-api`") from exc
+        if OpenSecTradeContext is None:
+            raise FutuConnectionError("futu-api is not installed. `pip install futu-api`")
 
         trd_market = getattr(TrdMarket, self.filter_trading_market, TrdMarket.US)
         sec_firm = getattr(SecurityFirm, self.security_firm, SecurityFirm.FUTUSECURITIES)
@@ -139,14 +173,20 @@ class FutuClient:
             env_enum = getattr(TrdEnv, self.trd_env, TrdEnv.REAL)
             matching = data[data["trd_env"] == env_enum]
             if matching.empty:
+                # Spec §10: connect-time fallback — record the actual matched env
+                # so callers don't get a silent lie (self.trd_env stays as the
+                # *requested* value for logging).
                 self._acc_id = int(data["acc_id"].iloc[0])
+                self._matched_trd_env = _enum_to_str(data["trd_env"].iloc[0])
                 logger.warning(
-                    "No %s account on OpenD, falling back to first acc_id=%s",
+                    "No %s account on OpenD, falling back to first acc_id=%s env=%s",
                     self.trd_env,
                     self._acc_id,
+                    self._matched_trd_env,
                 )
             else:
                 self._acc_id = int(matching["acc_id"].iloc[0])
+                self._matched_trd_env = _enum_to_str(matching["trd_env"].iloc[0])
 
             self._connected = True
             logger.info(
@@ -169,10 +209,20 @@ class FutuClient:
                 logger.warning("FutuClient disconnect error: %s", exc)
             self._trd_ctx = None
         self._acc_id = None
+        self._matched_trd_env = None
         self._connected = False
 
     def is_connected(self) -> bool:
         return self._connected and self._trd_ctx is not None and self._acc_id is not None
+
+    def trd_env_of_matched_account(self) -> Optional[str]:
+        """Ground-truth env of the matched OpenD account row (spec §10).
+
+        Returns 'REAL'/'SIMULATE' if connected, None otherwise. Always prefer
+        this over `self.trd_env`, which is only the *requested* value and may
+        not match after a connect-time fallback at line 184.
+        """
+        return self._matched_trd_env
 
     def _ensure_connected(self) -> None:
         if not self.is_connected():
