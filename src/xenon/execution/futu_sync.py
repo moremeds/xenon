@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -83,13 +84,59 @@ def main() -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_save(str(out_path), result)
 
+    # Persist NAV row to xenon.nav_history (spec §10). Gated on
+    # DATABASE_URL — when unset, this CLI still works for offline smoke
+    # tests. A cross-env collision exits with code 4 so an operator can
+    # see it; any other persistence failure is logged and ignored.
+    persist_status = "skipped"
+    if os.environ.get("DATABASE_URL"):
+        import asyncio
+
+        from xenon.api.services.futu_nav_persistence import (
+            NavAccountEnvConflict,
+            persist_futu_nav,
+        )
+        from xenon.db.engine import create_engine, dispose_engine
+
+        async def _persist() -> str:
+            engine = create_engine()
+            try:
+                # Re-connect briefly to read matched_trd_env (CLI disconnected
+                # client above to avoid hanging the test loop).
+                _client = FutuClient(
+                    host=args.host, port=args.port, security_firm=args.firm,
+                    trd_env=args.env, filter_trading_market=args.market,
+                )
+                _client.connect()
+                try:
+                    matched_env = _client.trd_env_of_matched_account()
+                    await persist_futu_nav(engine, _client, matched_env, result)
+                finally:
+                    try:
+                        _client.disconnect()
+                    except Exception:
+                        pass
+                return "ok"
+            finally:
+                await engine.dispose()
+                await dispose_engine()
+
+        try:
+            persist_status = asyncio.run(_persist())
+        except NavAccountEnvConflict as exc:
+            print(f"NAV CONFLICT: {exc}", file=sys.stderr)
+            return 4
+        except Exception as exc:  # noqa: BLE001
+            persist_status = f"failed: {type(exc).__name__}: {exc}"
+
     n = result.get("count", 0)
     acct = result.get("account_summary", {})
     print(
         f"Synced {n} Futu position(s) → {out_path} "
         f"(account={result.get('account_id')}, "
         f"net_liq=${acct.get('net_liquidation', 0):,.2f}, "
-        f"unrealized=${acct.get('unrealized_pnl', 0):,.2f})",
+        f"unrealized=${acct.get('unrealized_pnl', 0):,.2f}, "
+        f"nav_persist={persist_status})",
         file=sys.stderr,
     )
     if args.print_json:
