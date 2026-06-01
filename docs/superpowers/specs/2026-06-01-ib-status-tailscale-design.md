@@ -22,6 +22,22 @@ IB Gateway itself is genuinely connected the whole time (`GET /health` reports `
 - Realtime relay `scripts/infra/ib_realtime/ib_realtime_server.js` is up, connected to IB (clientId 10), publishing `status` messages. Its auth gate (lines ~360-368) bypasses ticket validation when `CLERK_JWKS_URL` is unset — and it is unset in `/opt/xenon/.env` — so the relay accepts **all** WS upgrades. Auth is **not** a factor.
 - `:8765` is published on all interfaces (`*:8765` via the Colima ssh forward); plain `ws://`, no Tailscale Serve configured. So reachability and TLS are **not** the blockers — only the host string is wrong.
 
+### Re-verified live 2026-06-01 (from a remote dev Mac over Tailscale)
+
+```
+$ curl -sS http://macmini.tail20094b.ts.net:3000/api/ib/ws-config
+{"url":"ws://0.0.0.0:8765"}
+
+$ curl -sS -H 'Host: macmini.tail20094b.ts.net:3000' \
+        http://macmini.tail20094b.ts.net:3000/api/ib/ws-config
+{"url":"ws://0.0.0.0:8765"}        # route ignores the Host header
+```
+
+Companion checks confirm everything else is healthy:
+
+- `GET http://macmini.tail20094b.ts.net:8321/health` → `ib_gateway.port_listening: true`; `ib_pool.{sync,orders,data}.connected: true`; `trading_mode: live`. IB is **not** down.
+- `GET http://macmini.tail20094b.ts.net:8765/` → `HTTP 426 "WebSocket upgrade required"` (matches the relay's plain-HTTP handler). A forged WS-upgrade reaches the `ws` library's handshake validation — confirming the upgrade pipeline is wide open (consistent with the `CLERK_JWKS_URL`-unset bypass). Auth, reachability, and TLS are all ruled out — only the host string is wrong.
+
 ## Decisions
 
 - **WS URL resolution:** header-derived host (chosen over a same-origin reverse proxy and over a client-only fallback). Smallest change, no new infra, correct for the current setup (plain HTTP over Tailscale with `:8765` published).
