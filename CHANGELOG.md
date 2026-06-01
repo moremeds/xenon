@@ -5,10 +5,12 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.0.10] — 2026-06-02
+
+
 ### Fixed
 
 - **Realtime relay silently stopped reconnecting after `ECONNREFUSED` (#113).** `classifyIBConnectionError()` built its detector regex by interpolating the configured IB host (e.g. `host.docker.internal:4001`), but Node's `net` module emits the **resolved IP** in the error text (`connect ECONNREFUSED 192.168.5.2:4001`). The regex never matched in Docker deployments, so `scheduleReconnect()` was not called from the `ib.on("error")` handler and the relay sat silent until the process restarted. Symptom: portfolio page rendered positions from Postgres but every live-tick column (`last`, `bid`, `ask`, `close`, `volume`) stayed `—` indefinitely. Fix matches the connect-error code family directly and widens coverage to `ETIMEDOUT`/`EHOSTUNREACH`/`ENETUNREACH`/`ENOTFOUND`/`EAI_AGAIN`/`EADDRNOTAVAIL` — the same silent-death failure mode applied to any of them.
-
 ## [0.0.8] — 2026-06-01
 
 ### Fixed
