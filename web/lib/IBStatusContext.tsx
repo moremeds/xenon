@@ -10,8 +10,12 @@ import {
   type ReactNode,
 } from "react";
 import { useAuth } from "@clerk/nextjs";
-import { createReconnectStrategy, type ReconnectState } from "./reconnectStrategy";
+import {
+  createReconnectStrategy,
+  type ReconnectState,
+} from "./reconnectStrategy";
 import { resolveBrowserIbRealtimeWsUrl } from "./ibRealtimeWsClient";
+import { useIbHealthFallback } from "./ibHealthFallback";
 
 /* ─── Types ───────────────────────────────────────────── */
 
@@ -57,7 +61,9 @@ export function IBStatusProvider({ children }: { children: ReactNode }) {
   const { getToken } = useAuth();
   const [wsConnected, setWsConnected] = useState(false);
   const [ibConnected, setIbConnected] = useState(true); // assume connected until told otherwise
-  const [disconnectedSince, setDisconnectedSince] = useState<number | null>(null);
+  const [disconnectedSince, setDisconnectedSince] = useState<number | null>(
+    null,
+  );
 
   const wsRef = useRef<WebSocket | null>(null);
   const mountedRef = useRef(true);
@@ -66,7 +72,7 @@ export function IBStatusProvider({ children }: { children: ReactNode }) {
   const stalenessTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastMessageRef = useRef<number>(Date.now());
   const strategyRef = useRef<ReconnectState>(
-    createReconnectStrategy({ maxAttempts: 0 }) // unlimited for status
+    createReconnectStrategy({ maxAttempts: 0 }), // unlimited for status
   );
 
   const clearReconnectTimer = useCallback(() => {
@@ -86,20 +92,26 @@ export function IBStatusProvider({ children }: { children: ReactNode }) {
   const getTokenRef = useRef(getToken);
   getTokenRef.current = getToken;
 
-  const buildAuthenticatedUrl = useCallback(async (baseUrl: string): Promise<string> => {
-    if (!getTokenRef.current) return baseUrl;
-    try {
-      const token = await getTokenRef.current();
-      if (!token) return baseUrl;
-      const { getWsTicket } = await import("./wsTicket");
-      const ticket = await getWsTicket(token);
-      const separator = baseUrl.includes("?") ? "&" : "?";
-      return `${baseUrl}${separator}ticket=${ticket}`;
-    } catch (err) {
-      console.debug("[IBStatus] Failed to get WS ticket, connecting without auth:", err);
-      return baseUrl;
-    }
-  }, []);
+  const buildAuthenticatedUrl = useCallback(
+    async (baseUrl: string): Promise<string> => {
+      if (!getTokenRef.current) return baseUrl;
+      try {
+        const token = await getTokenRef.current();
+        if (!token) return baseUrl;
+        const { getWsTicket } = await import("./wsTicket");
+        const ticket = await getWsTicket(token);
+        const separator = baseUrl.includes("?") ? "&" : "?";
+        return `${baseUrl}${separator}ticket=${ticket}`;
+      } catch (err) {
+        console.debug(
+          "[IBStatus] Failed to get WS ticket, connecting without auth:",
+          err,
+        );
+        return baseUrl;
+      }
+    },
+    [],
+  );
 
   const socketGenRef = useRef(0);
 
@@ -120,77 +132,77 @@ export function IBStatusProvider({ children }: { children: ReactNode }) {
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
-    ws.onopen = () => {
-      if (!mountedRef.current) return;
-      setWsConnected(true);
-      strategyRef.current.reset();
-      lastMessageRef.current = Date.now();
+      ws.onopen = () => {
+        if (!mountedRef.current) return;
+        setWsConnected(true);
+        strategyRef.current.reset();
+        lastMessageRef.current = Date.now();
 
-      // Start staleness check
-      clearStalenessTimer();
-      stalenessTimerRef.current = setInterval(() => {
-        if (Date.now() - lastMessageRef.current > STALENESS_THRESHOLD_MS) {
-          // Force reconnect on stale connection
-          ws.close();
-        }
-      }, STALENESS_CHECK_INTERVAL_MS);
-    };
-
-    ws.onmessage = (event) => {
-      if (!mountedRef.current) return;
-      lastMessageRef.current = Date.now();
-      try {
-        const msg = JSON.parse(event.data) as StatusMessage | PingMessage;
-
-        if (msg.type === "ping") {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ action: "pong" }));
+        // Start staleness check
+        clearStalenessTimer();
+        stalenessTimerRef.current = setInterval(() => {
+          if (Date.now() - lastMessageRef.current > STALENESS_THRESHOLD_MS) {
+            // Force reconnect on stale connection
+            ws.close();
           }
-          return;
-        }
+        }, STALENESS_CHECK_INTERVAL_MS);
+      };
 
-        if (msg.type === "status") {
-          const nowConnected = (msg as StatusMessage).ib_connected;
-          setIbConnected(nowConnected);
+      ws.onmessage = (event) => {
+        if (!mountedRef.current) return;
+        lastMessageRef.current = Date.now();
+        try {
+          const msg = JSON.parse(event.data) as StatusMessage | PingMessage;
 
-          if (nowConnected) {
-            setDisconnectedSince(null);
-          } else {
-            setDisconnectedSince((prev) => prev ?? Date.now());
+          if (msg.type === "ping") {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ action: "pong" }));
+            }
+            return;
           }
 
-          prevConnectedRef.current = nowConnected;
+          if (msg.type === "status") {
+            const nowConnected = (msg as StatusMessage).ib_connected;
+            setIbConnected(nowConnected);
+
+            if (nowConnected) {
+              setDisconnectedSince(null);
+            } else {
+              setDisconnectedSince((prev) => prev ?? Date.now());
+            }
+
+            prevConnectedRef.current = nowConnected;
+          }
+        } catch {
+          // ignore parse errors for non-status messages
         }
-      } catch {
-        // ignore parse errors for non-status messages
-      }
-    };
+      };
 
-    ws.onclose = () => {
-      if (!mountedRef.current) return;
-      setWsConnected(false);
-      clearStalenessTimer();
+      ws.onclose = () => {
+        if (!mountedRef.current) return;
+        setWsConnected(false);
+        clearStalenessTimer();
 
-      // If WS drops, treat as disconnected
-      if (prevConnectedRef.current !== false) {
-        setIbConnected(false);
-        setDisconnectedSince((prev) => prev ?? Date.now());
-        prevConnectedRef.current = false;
-      }
+        // WS just dropped — track when, but do NOT force ibConnected=false.
+        // The /api/health fallback below is authoritative for IB state.
+        if (prevConnectedRef.current !== false) {
+          setDisconnectedSince((prev) => prev ?? Date.now());
+          prevConnectedRef.current = false;
+        }
 
-      // Schedule reconnect with backoff
-      if (strategyRef.current.canRetry()) {
-        const delay = strategyRef.current.nextDelay();
-        reconnectTimerRef.current = setTimeout(() => {
-          if (mountedRef.current) connect();
-        }, delay);
-      }
-    };
+        // Schedule reconnect with backoff
+        if (strategyRef.current.canRetry()) {
+          const delay = strategyRef.current.nextDelay();
+          reconnectTimerRef.current = setTimeout(() => {
+            if (mountedRef.current) connect();
+          }, delay);
+        }
+      };
 
-    ws.onerror = () => {
-      if (!mountedRef.current) return;
-      ws.close();
-    };
+      ws.onerror = () => {
+        if (!mountedRef.current) return;
+        ws.close();
+      };
     })();
   }, [clearReconnectTimer, clearStalenessTimer, buildAuthenticatedUrl]);
 
@@ -211,17 +223,29 @@ export function IBStatusProvider({ children }: { children: ReactNode }) {
     };
   }, [connect, clearReconnectTimer, clearStalenessTimer]);
 
+  // When the realtime WS is down, source ibConnected from /api/health instead
+  // of leaving it at its last WS-message value.
+  const healthIbConnected = useIbHealthFallback(!wsConnected);
+  const effectiveIbConnected = wsConnected
+    ? ibConnected
+    : healthIbConnected === true;
+
   // Derive three-state connection status
   const connectionState: ConnectionState =
-    wsConnected && ibConnected
+    wsConnected && effectiveIbConnected
       ? "connected"
-      : wsConnected && !ibConnected
+      : wsConnected && !effectiveIbConnected
         ? "ib_offline"
         : "relay_offline";
 
   return (
     <IBStatusContext.Provider
-      value={{ wsConnected, ibConnected, disconnectedSince, connectionState }}
+      value={{
+        wsConnected,
+        ibConnected: effectiveIbConnected,
+        disconnectedSince,
+        connectionState,
+      }}
     >
       {children}
     </IBStatusContext.Provider>
