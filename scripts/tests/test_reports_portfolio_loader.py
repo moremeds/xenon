@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
+
+# Phase 2 carve-out: report modules open their own SQLAlchemy engine, so the
+# test's BEGIN/ROLLBACK can't cover them. Stays on Phase 1 TRUNCATE pre+post.
+pytestmark = pytest.mark.committed_db
+
 from scripts.tests.helpers.portfolio_seed import seed_portfolio_snapshot
 
 PAYLOAD = {

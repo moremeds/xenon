@@ -106,4 +106,5 @@ norecursedirs = [
 ]
 markers = [
     "e2e: end-to-end tests requiring live external services",
+    "committed_db: test needs row-level commits visible across separate SQLAlchemy engines (subprocess CLIs, ad-hoc create_engine helpers). Uses Phase 1 TRUNCATE pre+post instead of Phase 2 txn rollback.",
 ]

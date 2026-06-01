@@ -25,6 +25,14 @@ import os
 from datetime import datetime, timezone
 
 import pytest
+# Phase 2 carve-out: this module's tests open their own SQLAlchemy engine
+# (helpers calling sqlalchemy.create_engine directly, or subprocess CLIs)
+# and therefore can't share the test's BEGIN/ROLLBACK transaction. They
+# stay on Phase 1 TRUNCATE pre+post isolation via this marker. Migration
+# to txn-rollback would require refactoring those local engine helpers to
+# go through xenon.db.engine.get_sync_engine().
+pytestmark = pytest.mark.committed_db
+
 from sqlalchemy import create_engine, insert, select, text
 
 from xenon.db.engine import get_sync_engine

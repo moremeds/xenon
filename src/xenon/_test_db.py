@@ -207,6 +207,33 @@ class _BoundConnectionProxy:
         return getattr(self._conn, name)
 
 
+class _BoundBeginContext:
+    """Context manager returned by `_BoundEngine.begin()`.
+
+    Mirrors `Engine.begin()` semantics: yields a Connection, commits the
+    savepoint on clean exit, rolls back on exception. App code typically writes
+    `with engine.begin() as conn: conn.execute(...)`, so `__enter__` must
+    return the bare Connection (not a transaction object).
+    """
+
+    def __init__(self, conn: Connection) -> None:
+        self._conn = conn
+        self._savepoint: Any = None
+
+    def __enter__(self) -> Connection:
+        self._savepoint = self._conn.begin_nested()
+        return self._conn
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        if self._savepoint is None:
+            return None
+        if exc_type is None and self._savepoint.is_active:
+            self._savepoint.commit()
+        elif self._savepoint.is_active:
+            self._savepoint.rollback()
+        self._savepoint = None
+
+
 class _BoundEngine:
     """Engine-shaped wrapper that hands out the test's connection.
 
@@ -223,9 +250,8 @@ class _BoundEngine:
     def connect(self) -> _BoundConnectionProxy:
         return _BoundConnectionProxy(self._conn)
 
-    def begin(self) -> Any:
-        # `engine.begin()` is a savepoint context manager in our world.
-        return self._conn.begin_nested()
+    def begin(self) -> _BoundBeginContext:
+        return _BoundBeginContext(self._conn)
 
     def dispose(self) -> None:
         return None

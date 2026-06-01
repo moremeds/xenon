@@ -7,13 +7,19 @@ separate pg_clean fixture.
 
 from __future__ import annotations
 
+import pytest
+
+# Phase 2 carve-out: helpers and seeding routines in this module open their own
+# SQLAlchemy engine, so the test's BEGIN/ROLLBACK can't cover them. Stays on
+# Phase 1 TRUNCATE pre+post isolation.
+pytestmark = pytest.mark.committed_db
+
+from scripts.tests.helpers.portfolio_seed import seed_portfolio_snapshot
+from xenon.execution.account_scope import AccountScope
 from xenon.utils.portfolio_loader import (
     get_portfolio_tickers_sync,
     load_portfolio_payload_sync,
 )
-
-from scripts.tests.helpers.portfolio_seed import seed_portfolio_snapshot
-from xenon.execution.account_scope import AccountScope
 
 PAYLOAD_LIVE = {
     "positions": [{"ticker": "AAPL", "structure": "Stock", "legs": []}],
