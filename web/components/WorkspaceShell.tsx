@@ -33,6 +33,8 @@ import AccountTabBar, {
 } from "@/components/AccountTabBar";
 import { computeFutuStaleness } from "@/lib/futuStaleness";
 import ToastContainer from "@/components/Toast";
+import { FutuHistoryPanel } from "@/components/futu/FutuHistoryPanel";
+import { EquityCurveCrossBroker } from "@/components/EquityCurveCrossBroker";
 
 const WorkspaceSections = dynamic(
   () => import("@/components/WorkspaceSections"),
@@ -442,6 +444,7 @@ export default function WorkspaceShell({
           {activeSection !== "dashboard" &&
           activeSection !== "ticker-detail" ? (
             <>
+              <EquityCurveCrossBroker />
               <AccountTabBar
                 active={activeAccount}
                 onChange={setActiveAccount}
@@ -478,6 +481,7 @@ export default function WorkspaceShell({
                 executedOrders={executedOrders}
                 section={activeSection}
               />
+              {activeAccount === "futu" ? <FutuHistoryPanel /> : null}
             </>
           ) : null}
 
