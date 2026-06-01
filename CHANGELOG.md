@@ -5,11 +5,13 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.0.8] — 2026-06-01
+
+
 ### Fixed
 
 - **IB status badge over Tailscale (#110).** `/api/ib/ws-config` now derives the realtime WS URL from the request's `Host` / `X-Forwarded-Host` headers (with `0.0.0.0` / `::` / empty rejected) and respects `X-Forwarded-Proto=https` → `wss://`, instead of echoing back the server's bind address. Previously every request from a remote Tailscale device received `ws://0.0.0.0:8765`, the browser couldn't open it, and the sidebar IB Gateway badge was stuck on "disconnected" even when IB Gateway was fully connected.
 - **Connected badge survives realtime relay drops.** `IBStatusContext` + `usePrices` now fall back to polling `/api/health` (15 s) when the WS is offline; if any `ib_pool` role reports `connected: true`, the badge stays green and a new warning banner shows `Live data stream offline — IB Gateway is still connected; prices may be delayed.` rather than telling the user IB itself is down. Distinguishes "relay down" from "broker down" in the UI.
-
 ## [0.0.7] — 2026-05-31
 
 ### Changed
