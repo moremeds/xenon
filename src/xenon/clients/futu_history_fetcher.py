@@ -1,14 +1,35 @@
 """Read-only history fetcher for Futu OpenSecTradeContext.
 
-Wraps history_deal_list_query / history_order_list_query / get_acc_cash_flow
-with 90-day paging, US-market filter, rate-limit retry, malformed-row
-tolerance. Records per-call stats via FutuApiStats.
+Wraps history_deal_list_query / get_acc_cash_flow with rate-limit retry and
+malformed-row tolerance. Records per-call stats via FutuApiStats.
 
-**SDK-probe caveat (C23)**: this module assumes Futu's `create_time` field
-is emitted as naive `YYYY-MM-DD HH:MM:SS` strings interpreted in
-America/New_York time. Step 0 of plan Task 5 documents how to verify this
-against a live OpenD instance. If the operator probe shows UTC instead,
-patch `_parse_ny_dt` per the plan's alternative implementation.
+SDK contract pinned against futu==10.03.6308 + Futu official OpenAPI docs
+(checked 2026-06-01 during the C23 verification pass). Key facts:
+
+  - history_deal_list_query(code='', start='YYYY-MM-DD HH:MM:SS',
+        end='YYYY-MM-DD HH:MM:SS', trd_env='REAL', acc_id=0, ...).
+    Returned columns: code, stock_name, deal_market, deal_id, order_id,
+    qty, price, trd_side, create_time, counter_broker_id,
+    counter_broker_name, status, jp_acc_type. **No fee columns** — fees
+    are reconciled at sync-time from get_acc_cash_flow rows with
+    cashflow_type in {'COMMISSION', 'PLATFORM_FEE', 'CLEARING_FEE'}.
+    Range supported (max 90 days per call).
+
+  - get_acc_cash_flow(clearing_date='YYYY-MM-DD', trd_env='REAL',
+        acc_id=0, acc_index=0, cashflow_direction='N/A').
+    Takes a SINGLE clearing date — to backfill a date range we iterate
+    day-by-day. Returned columns: cashflow_id, clearing_date,
+    settlement_date, currency, cashflow_type, cashflow_direction,
+    cashflow_amount, cashflow_remark.
+
+`create_time` timezone caveat (C23): Futu emits the deal create_time
+exactly as configured in OpenD's settings — the SDK does not transform
+it. OpenD ships with no fixed default; operators set the timezone
+explicitly. `_parse_ny_dt` assumes America/New_York; an OpenD configured
+to UTC or HK will silently bucket fills to the wrong calendar date.
+Plan Task 5 Step 0 describes the operator probe. The sync orchestrator
+SHOULD persist the detected OpenD TZ on first run and refuse to run on
+mismatch — that automation is a follow-up.
 """
 
 from __future__ import annotations
@@ -26,30 +47,6 @@ log = logging.getLogger(__name__)
 _PAGE_DAYS = 90
 _RATE_LIMIT_KEYWORDS = ("rate limit", "frequency control", "too frequent")
 
-# Sum ALL fee components rather than picking one; Futu may return commission +
-# platform fee + clearing fee on the same row. Update via Step 0 probe if
-# Futu has added/renamed fee columns in newer releases.
-_FEE_COLUMNS = (
-    "counter_broker_commission",
-    "platform_fee",
-    "clearing_fee",
-    "commission",
-    "fee",
-)
-
-
-def _sum_fees(row: dict[str, Any]) -> Decimal:
-    total = Decimal("0")
-    for col in _FEE_COLUMNS:
-        v = row.get(col)
-        if v in (None, ""):
-            continue
-        try:
-            total += Decimal(str(v))
-        except Exception:
-            continue
-    return total
-
 
 @dataclass
 class FutuFill:
@@ -61,6 +58,10 @@ class FutuFill:
     action: str
     quantity: int
     price: Decimal
+    # Fees are ALWAYS Decimal('0') on deal rows: the deal_list endpoint does
+    # not return any fee column. Real fees are reconciled in the sync
+    # orchestrator by joining cash-flow rows whose cashflow_type is a fee
+    # type and whose row references the deal via cashflow_remark.
     fees: Decimal
     filled_at: datetime
     raw: dict[str, Any]
@@ -86,9 +87,28 @@ def _normalize_code(code: str) -> tuple[str, str]:
 
 
 def _parse_ny_dt(s: str) -> datetime:
+    """Parse a Futu 'YYYY-MM-DD HH:MM:SS[.ms]' string as America/New_York.
+
+    Tolerates an optional millisecond fragment that the SDK passes through
+    when OpenD reports sub-second precision.
+    """
     from zoneinfo import ZoneInfo
 
-    return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("America/New_York"))
+    s = s.strip()
+    fmt = "%Y-%m-%d %H:%M:%S.%f" if "." in s else "%Y-%m-%d %H:%M:%S"
+    return datetime.strptime(s, fmt).replace(tzinfo=ZoneInfo("America/New_York"))
+
+
+def _parse_ny_date_to_dt(s: str) -> datetime:
+    """Coerce a 'YYYY-MM-DD' date string to 00:00:00 America/New_York.
+
+    get_acc_cash_flow returns clearing_date as a date only; the schema's
+    flow_at column is TIMESTAMP(timezone=True), so we anchor at midnight ET.
+    """
+    from zoneinfo import ZoneInfo
+
+    d = date.fromisoformat(s.strip())
+    return datetime(d.year, d.month, d.day, tzinfo=ZoneInfo("America/New_York"))
 
 
 def _is_rate_limit_error(message: str) -> bool:
@@ -116,6 +136,12 @@ class FutuHistoryFetcher:
             chunk_end = min(cursor + timedelta(days=_PAGE_DAYS - 1), end)
             yield cursor, chunk_end
             cursor = chunk_end + timedelta(days=1)
+
+    def _iter_days(self, start: date, end: date) -> Iterator[date]:
+        cursor = start
+        while cursor <= end:
+            yield cursor
+            cursor += timedelta(days=1)
 
     def _call_with_retry(self, fn_name: str, fn, *args, **kwargs):
         for attempt in range(self._max_retries):
@@ -173,7 +199,8 @@ class FutuHistoryFetcher:
                 action=str(row.get("trd_side", "")).upper(),
                 quantity=int(row.get("qty", 0)),
                 price=Decimal(str(row.get("price", "0"))),
-                fees=_sum_fees(row),
+                # No fee columns on deal rows — see module docstring.
+                fees=Decimal("0"),
                 filled_at=_parse_ny_dt(str(row.get("create_time"))),
                 raw=row,
             )
@@ -182,36 +209,63 @@ class FutuHistoryFetcher:
             return None
 
     def fetch_cash_flow(self, start: date, end: date, acc_id: str) -> Iterator[FutuCashFlowRow]:
-        for s, e in self._chunks(start, end):
+        """Iterate day-by-day — get_acc_cash_flow takes a SINGLE clearing_date.
+
+        The Futu SDK signature is `get_acc_cash_flow(clearing_date='', ...)`
+        with one date per call; there is no range form. To backfill a
+        window we call once per day and concatenate.
+        """
+        for d in self._iter_days(start, end):
             df = self._call_with_retry(
                 "get_acc_cash_flow",
                 self._ctx.get_acc_cash_flow,
-                clearing_date_start=s.strftime("%Y-%m-%d"),
-                clearing_date_end=e.strftime("%Y-%m-%d"),
+                clearing_date=d.strftime("%Y-%m-%d"),
                 acc_id=acc_id,
                 trd_env=self._trd_env,
             )
             if df is None or df.empty:
                 continue
             for row in df.to_dict(orient="records"):
-                cf = self._row_to_cash_flow(row)
+                cf = self._row_to_cash_flow(row, fallback_date=d)
                 if cf is not None:
                     yield cf
 
-    def _row_to_cash_flow(self, row: dict[str, Any]) -> FutuCashFlowRow | None:
-        fid = row.get("flow_id") or row.get("cashflow_id")
+    def _row_to_cash_flow(self, row: dict[str, Any], fallback_date: date | None = None) -> FutuCashFlowRow | None:
+        # SDK column is `cashflow_id`; legacy fallback to `flow_id` kept
+        # in case Futu releases an older OpenD with the older name.
+        fid = row.get("cashflow_id") or row.get("flow_id")
         if not fid:
             log.warning("dropping malformed Futu cash flow row: %s", row)
             return None
         try:
+            # SDK keys: cashflow_type, cashflow_amount, clearing_date,
+            # currency, cashflow_remark, cashflow_direction, settlement_date.
+            cf_type = row.get("cashflow_type") or row.get("type", "")
+            amount = row.get("cashflow_amount")
+            if amount is None:
+                # Legacy mock fallback only — real SDK always emits cashflow_amount.
+                amount = row.get("amount", "0")
+            currency = row.get("currency", "USD")
+            description = row.get("cashflow_remark") or row.get("remark")
+            ticker = row.get("stock_code") or None
+
+            clearing = row.get("clearing_date")
+            if clearing:
+                flow_at = _parse_ny_date_to_dt(str(clearing))
+            elif fallback_date is not None:
+                flow_at = _parse_ny_date_to_dt(fallback_date.isoformat())
+            else:
+                # Last-resort legacy fallback for mocks emitting full timestamps.
+                flow_at = _parse_ny_dt(str(row.get("create_time", row.get("cashflow_time"))))
+
             return FutuCashFlowRow(
                 futu_flow_id=str(fid),
-                futu_type_raw=str(row.get("cashflow_type", row.get("type", ""))),
-                amount_original=Decimal(str(row.get("amount", "0"))),
-                original_currency=str(row.get("currency", "USD")).upper(),
-                description=row.get("remark") or row.get("cashflow_remark"),
-                ticker=row.get("stock_code") or None,
-                flow_at=_parse_ny_dt(str(row.get("create_time", row.get("cashflow_time")))),
+                futu_type_raw=str(cf_type),
+                amount_original=Decimal(str(amount)),
+                original_currency=str(currency).upper(),
+                description=description,
+                ticker=ticker,
+                flow_at=flow_at,
                 raw=row,
             )
         except Exception:
