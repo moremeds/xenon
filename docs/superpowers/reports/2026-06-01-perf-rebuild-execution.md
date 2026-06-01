@@ -75,6 +75,59 @@ git log master..HEAD --oneline
 
 ---
 
+## Update — Phases 2 + 3 also executed (commits `4d68e9e`, `4f5cfa6`)
+
+After the user authorized a separate local Postgres instance (port 2000, no
+conflict with the Docker stack), all 3 migrations applied cleanly, and Phases
+2 + 3 landed with full test coverage.
+
+### Phase 2 — Backend foundations (24 tests, 8.2s)
+
+| Artifact                                                                                                | Tests                                     | Status |
+| ------------------------------------------------------------------------------------------------------- | ----------------------------------------- | ------ |
+| `src/xenon/clients/futu_client.py` — `_matched_trd_env` + accessor + module-level futu imports          | `test_futu_client_matched_trd_env.py` × 4 | ✅     |
+| `src/xenon/execution/account_scope.py` — `env_from_trd_env` + FUTU rejection (SIMULATE→"paper" per #18) | `test_account_scope_env_helpers.py` × 10  | ✅     |
+| `src/xenon/api/services/futu_nav_persistence.py` — race-safe cross-env guard                            | `test_futu_nav_persistence.py` × 8        | ✅     |
+| `src/xenon/execution/ib_sync.py::_append_nav_snapshot` — symmetry guard                                 | `test_ib_sync_cross_env_guard.py` × 2     | ✅     |
+
+### Phase 3 — Service + queries + cache + metrics (42 tests, 9.8s)
+
+| Artifact                                                                                                                                 | Tests                              | Status |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- | ------ |
+| `src/xenon/reports/performance_metrics.py` — pure math + `sharpe_se`                                                                     | `test_performance_metrics.py` × 16 | ✅     |
+| `src/xenon/db/queries/nav_history.py` — `load_nav_curve` + `load_benchmark_cached` (cache-only path live; IB-fetch gated behind env)     | `test_nav_history_queries.py` × 6  | ✅     |
+| `src/xenon/api/services/performance.py` — `compute()` with Phase-0 mask + low-confidence + date-join benchmark + correct returns formula | `test_performance_service.py` × 12 | ✅     |
+| `src/xenon/api/services/perf_cache.py` — scope-keyed memoize + market-aware TTL                                                          | `test_perf_cache.py` × 8           | ✅     |
+
+**Full regression: 73/73 tests passing in 18s.**
+
+Verification commands:
+
+```bash
+cd /Users/moremeds/projects/xenon/.worktrees/perf-rebuild-impl
+DATABASE_URL_TEST="postgresql+asyncpg://xenon_app:xenon_dev@localhost:2000/core_dev" \
+  uv run pytest scripts/tests/test_{current_session,schema_perf,futu_client_matched,account_scope_env,futu_nav_persistence,ib_sync_cross_env,performance_metrics,nav_history_queries,perf_cache,performance_service}*.py
+# → 73 passed
+```
+
+### Local DB setup (port 2000, isolated from Docker stack)
+
+```bash
+docker run -d --name xenon-perf-test-pg -p 2000:5432 \
+  -e POSTGRES_USER=xenon_app -e POSTGRES_PASSWORD=xenon_dev \
+  -e POSTGRES_DB=core_dev postgres:15
+# Schema bootstrap:
+DATABASE_URL="postgresql+psycopg://xenon_app:xenon_dev@localhost:2000/core_dev" \
+  uv run python -c "import sqlalchemy as sa,os; e=sa.create_engine(os.environ['DATABASE_URL']); \
+    e.begin().__enter__().execute(sa.text('CREATE SCHEMA IF NOT EXISTS xenon')); \
+    e.begin().__enter__().execute(sa.text('CREATE SCHEMA IF NOT EXISTS events'))"
+# Apply all migrations (15 baseline + 3 perf-rebuild):
+DATABASE_URL="postgresql+asyncpg://xenon_app:xenon_dev@localhost:2000/core_dev" \
+  uv run alembic upgrade head  # → 489476c351cc (head)
+```
+
+---
+
 ## What was BLOCKED (and why)
 
 ### Blocker 1: Migration 489476c351cc cannot apply to `core_dev` (shared DB)
