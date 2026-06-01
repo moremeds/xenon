@@ -13,8 +13,12 @@ import {
   contractsKey,
   optionKey,
 } from "./pricesProtocol";
-import { createReconnectStrategy, type ReconnectState } from "./reconnectStrategy";
+import {
+  createReconnectStrategy,
+  type ReconnectState,
+} from "./reconnectStrategy";
 import { resolveBrowserIbRealtimeWsUrl } from "./ibRealtimeWsClient";
+import { useIbHealthFallback } from "./ibHealthFallback";
 
 export type PriceUpdate = {
   symbol: string;
@@ -89,7 +93,9 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
   } = options;
 
   const [prices, setPrices] = useState<Record<string, PriceData>>({});
-  const [fundamentals, setFundamentals] = useState<Record<string, FundamentalsData>>({});
+  const [fundamentals, setFundamentals] = useState<
+    Record<string, FundamentalsData>
+  >({});
   const [connected, setConnected] = useState(false);
   const [ibConnected, setIbConnected] = useState(false);
   const [ibIssue, setIbIssue] = useState<string | null>(null);
@@ -97,7 +103,9 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
   const [error, setError] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const stalenessTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastMessageRef = useRef<number>(Date.now());
   const mountedRef = useRef(true);
@@ -107,7 +115,9 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
   const socketGenRef = useRef(0);
 
   // Reconnect strategy (shared utility)
-  const reconnectStrategyRef = useRef<ReconnectState>(createReconnectStrategy());
+  const reconnectStrategyRef = useRef<ReconnectState>(
+    createReconnectStrategy(),
+  );
 
   // Desired subscription tracking (ref — not rendered)
   const desiredRef = useRef<{
@@ -126,7 +136,11 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
   const symbolHash = symbolKey(symbols);
   const contractHash = contractsKey(contracts);
   const indexHash = useMemo(
-    () => indexes.map((i) => `${i.symbol}@${i.exchange}`).sort().join(","),
+    () =>
+      indexes
+        .map((i) => `${i.symbol}@${i.exchange}`)
+        .sort()
+        .join(","),
     [indexes],
   );
   // Hash keys avoid recomputation when parents pass new array identities with the same subscription set.
@@ -195,12 +209,17 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
       if (ws.readyState !== WebSocket.OPEN) return;
 
       const desired = desiredRef.current;
-      const currentHash = buildHash(desired.symbols, desired.contracts, desired.indexes);
+      const currentHash = buildHash(
+        desired.symbols,
+        desired.contracts,
+        desired.indexes,
+      );
 
       if (currentHash === lastSentHashRef.current) return; // No change
 
       // Parse last-sent state to compute diff
-      const [lastSyms = "", lastCts = "", lastIdxs = ""] = lastSentHashRef.current.split("|");
+      const [lastSyms = "", lastCts = "", lastIdxs = ""] =
+        lastSentHashRef.current.split("|");
       const prevSymbolSet = new Set(lastSyms.split(",").filter(Boolean));
       const prevContractSet = new Set(lastCts.split(",").filter(Boolean));
       const prevIndexSet = new Set(lastIdxs.split(",").filter(Boolean));
@@ -220,12 +239,18 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
       );
 
       // Compute removes
-      const removedSymbols = [...prevSymbolSet].filter((s) => !currSymbolSet.has(s));
+      const removedSymbols = [...prevSymbolSet].filter(
+        (s) => !currSymbolSet.has(s),
+      );
       const removedContractKeys = [...prevContractSet].filter(
         (k) => !currContractSet.has(k),
       );
-      const removedIndexKeys = [...prevIndexSet].filter((k) => !currIndexSet.has(k));
-      const removedIndexSymbols = [...new Set(removedIndexKeys.map((indexKey) => indexKey.split("@")[0]))];
+      const removedIndexKeys = [...prevIndexSet].filter(
+        (k) => !currIndexSet.has(k),
+      );
+      const removedIndexSymbols = [
+        ...new Set(removedIndexKeys.map((indexKey) => indexKey.split("@")[0])),
+      ];
 
       const addedIndexes = desired.indexes.filter(
         (idx) => !prevIndexSet.has(`${idx.symbol}@${idx.exchange}`),
@@ -250,12 +275,8 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
           JSON.stringify({
             action: "subscribe",
             symbols: addedSymbols,
-            ...(addedContracts.length > 0
-              ? { contracts: addedContracts }
-              : {}),
-            ...(addedIndexes.length > 0
-              ? { indexes: addedIndexes }
-              : {}),
+            ...(addedContracts.length > 0 ? { contracts: addedContracts } : {}),
+            ...(addedIndexes.length > 0 ? { indexes: addedIndexes } : {}),
           }),
         );
       }
@@ -298,20 +319,23 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
   // ---------------------------------------------------------------------------
   // buildAuthenticatedUrl — append ticket query param for WS auth
   // ---------------------------------------------------------------------------
-  const buildAuthenticatedUrl = useCallback(async (baseUrl: string): Promise<string> => {
-    if (!getTokenRef.current) return baseUrl;
-    try {
-      const token = await getTokenRef.current();
-      if (!token) return baseUrl;
-      const { getWsTicket } = await import("./wsTicket");
-      const ticket = await getWsTicket(token);
-      const separator = baseUrl.includes("?") ? "&" : "?";
-      return `${baseUrl}${separator}ticket=${ticket}`;
-    } catch (err) {
-      wsLog("Failed to get WS ticket, connecting without auth:", err);
-      return baseUrl;
-    }
-  }, []);
+  const buildAuthenticatedUrl = useCallback(
+    async (baseUrl: string): Promise<string> => {
+      if (!getTokenRef.current) return baseUrl;
+      try {
+        const token = await getTokenRef.current();
+        if (!token) return baseUrl;
+        const { getWsTicket } = await import("./wsTicket");
+        const ticket = await getWsTicket(token);
+        const separator = baseUrl.includes("?") ? "&" : "?";
+        return `${baseUrl}${separator}ticket=${ticket}`;
+      } catch (err) {
+        wsLog("Failed to get WS ticket, connecting without auth:", err);
+        return baseUrl;
+      }
+    },
+    [],
+  );
 
   // ---------------------------------------------------------------------------
   // scheduleReconnect — ref-based to break circular dep with connect
@@ -354,116 +378,128 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
       const ws = new WebSocket(url);
       wsRef.current = ws;
 
-    ws.onopen = () => {
-      if (gen !== socketGenRef.current || !mountedRef.current) return;
-      connStateRef.current = "open";
-      reconnectStrategyRef.current.reset(); // Reset backoff on success
-      lastMessageRef.current = Date.now();
-      setConnected(true);
-      setError(null);
-      onConnectionChangeRef.current?.(true);
-      // Force full send on new connection
-      lastSentHashRef.current = "";
-      syncSubscriptions(ws);
-      wsLog("open", { gen });
+      ws.onopen = () => {
+        if (gen !== socketGenRef.current || !mountedRef.current) return;
+        connStateRef.current = "open";
+        reconnectStrategyRef.current.reset(); // Reset backoff on success
+        lastMessageRef.current = Date.now();
+        setConnected(true);
+        setError(null);
+        onConnectionChangeRef.current?.(true);
+        // Force full send on new connection
+        lastSentHashRef.current = "";
+        syncSubscriptions(ws);
+        wsLog("open", { gen });
 
-      // Start staleness check
-      clearStalenessTimer();
-      stalenessTimerRef.current = setInterval(() => {
-        if (Date.now() - lastMessageRef.current > STALENESS_THRESHOLD_MS) {
-          wsLog("stale-connection", { silentMs: Date.now() - lastMessageRef.current });
-          ws.close();
-        }
-      }, STALENESS_CHECK_INTERVAL_MS);
-    };
-
-    ws.onmessage = (event) => {
-      if (gen !== socketGenRef.current || !mountedRef.current) return;
-      lastMessageRef.current = Date.now();
-      try {
-        const message = JSON.parse(event.data as string) as WSMessage;
-
-        switch (message.type) {
-          case "price":
-          case "snapshot": {
-            const { data } = message;
-            setPrices((prev) => ({
-              ...prev,
-              [data.symbol]: data,
-            }));
-            onPriceUpdateRef.current?.({
-              symbol: data.symbol,
-              data,
-              receivedAt: new Date(),
+        // Start staleness check
+        clearStalenessTimer();
+        stalenessTimerRef.current = setInterval(() => {
+          if (Date.now() - lastMessageRef.current > STALENESS_THRESHOLD_MS) {
+            wsLog("stale-connection", {
+              silentMs: Date.now() - lastMessageRef.current,
             });
-            break;
+            ws.close();
           }
-          case "batch": {
-            const { updates } = message;
-            setPrices((prev) => ({ ...prev, ...updates }));
-            const now = new Date();
-            for (const [sym, data] of Object.entries(updates)) {
-              onPriceUpdateRef.current?.({ symbol: sym, data, receivedAt: now });
+        }, STALENESS_CHECK_INTERVAL_MS);
+      };
+
+      ws.onmessage = (event) => {
+        if (gen !== socketGenRef.current || !mountedRef.current) return;
+        lastMessageRef.current = Date.now();
+        try {
+          const message = JSON.parse(event.data as string) as WSMessage;
+
+          switch (message.type) {
+            case "price":
+            case "snapshot": {
+              const { data } = message;
+              setPrices((prev) => ({
+                ...prev,
+                [data.symbol]: data,
+              }));
+              onPriceUpdateRef.current?.({
+                symbol: data.symbol,
+                data,
+                receivedAt: new Date(),
+              });
+              break;
             }
-            break;
-          }
-          case "fundamentals": {
-            const { symbol: fundSymbol, data: fundData } = message;
-            setFundamentals((prev) => ({
-              ...prev,
-              [fundSymbol]: fundData,
-            }));
-            break;
-          }
-          case "status":
-            setIbConnected(message.ib_connected);
-            setIbIssue(message.ib_issue ?? null);
-            setIbStatusMessage(message.ib_status_message ?? null);
-            break;
-          case "error":
-            setError(message.message);
-            break;
-          case "ping":
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ action: "pong" }));
+            case "batch": {
+              const { updates } = message;
+              setPrices((prev) => ({ ...prev, ...updates }));
+              const now = new Date();
+              for (const [sym, data] of Object.entries(updates)) {
+                onPriceUpdateRef.current?.({
+                  symbol: sym,
+                  data,
+                  receivedAt: now,
+                });
+              }
+              break;
             }
-            break;
-          case "pong":
-          case "subscribed":
-          case "unsubscribed":
-            break;
-          default:
-            break;
+            case "fundamentals": {
+              const { symbol: fundSymbol, data: fundData } = message;
+              setFundamentals((prev) => ({
+                ...prev,
+                [fundSymbol]: fundData,
+              }));
+              break;
+            }
+            case "status":
+              setIbConnected(message.ib_connected);
+              setIbIssue(message.ib_issue ?? null);
+              setIbStatusMessage(message.ib_status_message ?? null);
+              break;
+            case "error":
+              setError(message.message);
+              break;
+            case "ping":
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ action: "pong" }));
+              }
+              break;
+            case "pong":
+            case "subscribed":
+            case "unsubscribed":
+              break;
+            default:
+              break;
+          }
+        } catch (error_) {
+          console.error("Failed to parse price message:", error_);
         }
-      } catch (error_) {
-        console.error("Failed to parse price message:", error_);
-      }
-    };
+      };
 
-    ws.onclose = () => {
-      if (gen !== socketGenRef.current || !mountedRef.current) return;
-      connStateRef.current = "closed";
-      clearStalenessTimer();
-      setConnected(false);
-      setIbIssue(null);
-      setIbStatusMessage(null);
-      onConnectionChangeRef.current?.(false);
-      lastSentHashRef.current = ""; // Next connect must full-sync
-      wsLog("close", { gen });
-      scheduleReconnectRef.current();
-    };
+      ws.onclose = () => {
+        if (gen !== socketGenRef.current || !mountedRef.current) return;
+        connStateRef.current = "closed";
+        clearStalenessTimer();
+        setConnected(false);
+        setIbIssue(null);
+        setIbStatusMessage(null);
+        onConnectionChangeRef.current?.(false);
+        lastSentHashRef.current = ""; // Next connect must full-sync
+        wsLog("close", { gen });
+        scheduleReconnectRef.current();
+      };
 
-    ws.onerror = () => {
-      if (gen !== socketGenRef.current || !mountedRef.current) return;
-      connStateRef.current = "closed";
-      setConnected(false);
-      setError("Connection lost");
-      onConnectionChangeRef.current?.(false);
-      wsLog("error", { gen });
-      ws.close();
-    };
+      ws.onerror = () => {
+        if (gen !== socketGenRef.current || !mountedRef.current) return;
+        connStateRef.current = "closed";
+        setConnected(false);
+        setError("Connection lost");
+        onConnectionChangeRef.current?.(false);
+        wsLog("error", { gen });
+        ws.close();
+      };
     })();
-  }, [enabled, clearReconnectTimer, clearStalenessTimer, syncSubscriptions, buildAuthenticatedUrl]);
+  }, [
+    enabled,
+    clearReconnectTimer,
+    clearStalenessTimer,
+    syncSubscriptions,
+    buildAuthenticatedUrl,
+  ]);
 
   // Wire scheduleReconnect via ref to avoid circular dep
   const scheduleReconnect = useCallback(() => {
@@ -478,7 +514,10 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
     }
 
     const delay = strategy.nextDelay();
-    wsLog("reconnect-scheduled", { attempt: strategy.attempt, delay: Math.round(delay) });
+    wsLog("reconnect-scheduled", {
+      attempt: strategy.attempt,
+      delay: Math.round(delay),
+    });
 
     clearReconnectTimer();
     reconnectTimeoutRef.current = setTimeout(() => {
@@ -604,7 +643,13 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
       connStateRef.current = "idle";
       lastSentHashRef.current = "";
     };
-  }, [enabled, hasSubscriptions, connect, clearReconnectTimer, clearStalenessTimer]);
+  }, [
+    enabled,
+    hasSubscriptions,
+    connect,
+    clearReconnectTimer,
+    clearStalenessTimer,
+  ]);
 
   // ---------------------------------------------------------------------------
   // Subscription sync effect — sends diffs over open connection
@@ -617,11 +662,22 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
     // If still connecting, onopen will flush via syncSubscriptions
   }, [symbolHash, contractHash, indexHash, syncSubscriptions]);
 
+  // When the realtime WS is down, the WS `status` message can't tell us the IB
+  // state. Fall back to the authoritative /api/health probe so a dead stream
+  // is not reported as "IB Gateway down". Gate on enabled + hasSubscriptions +
+  // !connected to avoid hammering /api/health when the hook is idle.
+  const healthIbConnected = useIbHealthFallback(
+    enabled && hasSubscriptions && !connected,
+  );
+  const effectiveIbConnected = connected
+    ? ibConnected
+    : healthIbConnected === true;
+
   return {
     prices,
     fundamentals,
     connected,
-    ibConnected,
+    ibConnected: effectiveIbConnected,
     ibIssue,
     ibStatusMessage,
     error,

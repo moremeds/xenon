@@ -4,7 +4,7 @@
  * Unit tests for IBStatusContext — shared IB connection status via React Context.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { renderHook, act } from "@testing-library/react";
+import { renderHook, act, waitFor } from "@testing-library/react";
 import React from "react";
 import { IBStatusProvider, useIBStatusContext } from "../lib/IBStatusContext";
 import type { ReactNode } from "react";
@@ -217,5 +217,26 @@ describe("IBStatusProvider", () => {
     act(() => latestWs().simulateClose());
     expect(result.current.wsConnected).toBe(false);
     expect(result.current.disconnectedSince).toBeTypeOf("number");
+  });
+
+  it("keeps ibConnected from /api/health after the WS closes", async () => {
+    vi.useRealTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        String(url).includes("/api/health")
+          ? {
+              ok: true,
+              json: async () => ({ ib_pool: { sync: { connected: true } } }),
+            }
+          : { ok: true, json: async () => ({ url: "ws://localhost:8765" }) },
+      ) as unknown as typeof fetch,
+    );
+    const { result } = renderHook(() => useIBStatusContext(), { wrapper });
+    await act(async () => {});
+    act(() => latestWs().simulateOpen());
+    act(() => latestWs().simulateClose());
+    await waitFor(() => expect(result.current.wsConnected).toBe(false));
+    await waitFor(() => expect(result.current.ibConnected).toBe(true));
   });
 });
