@@ -47,7 +47,7 @@ def test_append_raises_when_existing_row_has_different_env(sync_engine, monkeypa
                 date=today,
                 nav="100000.00",
                 daily_pnl="0.00",
-                source="intraday",
+                nav_type="intraday",
             )
         )
 

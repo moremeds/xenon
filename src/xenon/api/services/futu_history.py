@@ -31,7 +31,7 @@ Step order (spec § 5.3):
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -48,14 +48,18 @@ from xenon.db.queries.futu_history import (
     cursor_for_cash_flows,
     cursor_for_corp_actions,
     cursor_for_fills,
+    fetch_cash_flows,
     fetch_corp_actions_for_tickers,
     fetch_fills,
+    fetch_nav_history,
     insert_cash_flows,
     insert_corporate_actions,
     insert_fills,
     null_realized_for_ticker,
     update_realized_pnl,
+    write_nav_row,
     write_recon_anomaly,
+    write_recon_daily,
 )
 from xenon.execution.account_scope import AccountScope
 from xenon.execution.futu_fifo_matcher import (
@@ -499,14 +503,42 @@ def _run_sync_under_lock(
         # Step 6: snapshot current account.
         snapshot_account_state(scope, trade_ctx)
 
-        # Step 7 (NAV backwalk / daily forward UPSERT) — filled by Task 14.
-        warnings.append("step_7_nav_walk_not_yet_implemented")
+        # Step 7: NAV — backward walk if first run OR --rematch; today's
+        # reported NAV always.
+        backfill_done = list(fetch_nav_history(scope, MIN_HISTORICAL_DATE, MIN_HISTORICAL_DATE))
+        nav_rows_added = 0
+        if rematch or not backfill_done:
+            if rematch:
+                # C25: wipe historical reconstructed rows so the walk can
+                # rewrite them with corrected values.
+                with get_sync_engine().begin() as conn:
+                    conn.execute(
+                        text(
+                            """
+                            DELETE FROM xenon.nav_history
+                             WHERE broker=:b AND account_env=:e
+                               AND broker_account=:a
+                               AND nav_type = 'reconstructed'
+                               AND date < :today
+                            """
+                        ),
+                        {
+                            "b": scope.broker,
+                            "e": scope.account_env,
+                            "a": scope.broker_account,
+                            "today": today,
+                        },
+                    )
+            anchor = _build_anchor_from_live_account(scope, trade_ctx)
+            anchor = AnchorState(today=today, cash=anchor.cash, positions=anchor.positions)
+            nav_rows_added = run_backward_walk(scope, anchor, walk_to=MIN_HISTORICAL_DATE)
+        write_today_reported_nav(scope, trade_ctx, today)
 
         return {
             "status": "ok",
             "fills_added": fills_added,
             "cash_flows_added": cash_flows_added,
-            "nav_rows_added": 0,  # filled in Task 14
+            "nav_rows_added": nav_rows_added,
             "warnings": warnings,
             "started_at": start.isoformat(),
             "completed_at": today.isoformat(),
@@ -697,3 +729,319 @@ def pull_corporate_actions(scope: AccountScope, quote_ctx) -> int:
                 }
             )
     return insert_corporate_actions(rows)
+
+
+# ===== Task 14: NAV backward walk + daily forward UPSERT =====
+
+
+@dataclass
+class _PositionState:
+    qty: Decimal
+    avg_cost: Decimal
+
+
+@dataclass
+class AnchorState:
+    """END-OF-`today` state used as the walk anchor.
+
+    `cash` is the raw cash balance from accinfo. `positions` is
+    ticker -> _PositionState (qty + cost basis). cost_basis_NAV =
+    cash + sum(qty * avg_cost).
+    """
+
+    today: date
+    cash: Decimal
+    positions: dict[str, _PositionState] = field(default_factory=dict)
+
+    def cost_basis_nav(self) -> Decimal:
+        stock = sum((p.qty * p.avg_cost for p in self.positions.values()), Decimal("0"))
+        return self.cash + stock
+
+    def stock_value(self) -> Decimal:
+        return sum((p.qty * p.avg_cost for p in self.positions.values()), Decimal("0"))
+
+
+def _unapply_buy(pos: _PositionState, qty: Decimal, price: Decimal, fees: Decimal) -> _PositionState:
+    """Reverse a forward BUY: END-OF-D qty = END-OF-(D+1) qty − Q.
+
+    C18 (supersedes C7): the walk processes D = today-1, today-2 ...
+    un-applying trades that happened on next_day = D+1. So `pos` arrives
+    as END-OF-next_day state and we compute END-OF-D state (BEFORE
+    next_day's fills happened).
+
+    Forward FIFO adds Q shares at avg_cost=price (fees tracked on the
+    cash side, NOT in cost basis), so total_cost_basis goes up by
+    price*Q. Reverse: pre_total = post_total − price*Q. The `fees`
+    parameter is kept for symmetry; cash adjustment is done by the
+    caller (state_cash += price*qty + fees mirrors the forward drain).
+    """
+    pre_qty = pos.qty - qty
+    if pre_qty <= 0:
+        return _PositionState(qty=Decimal("0"), avg_cost=Decimal("0"))
+    post_total = pos.qty * pos.avg_cost
+    pre_total = post_total - price * qty
+    return _PositionState(qty=pre_qty, avg_cost=pre_total / pre_qty)
+
+
+def _unapply_sell(pos: _PositionState, qty: Decimal) -> _PositionState:
+    """FIFO sell — un-applying restores qty; avg_cost is the post-sell
+    aggregate."""
+    return _PositionState(qty=pos.qty + qty, avg_cost=pos.avg_cost)
+
+
+def _unapply_sell_with_history(
+    scope: AccountScope,
+    ticker: str,
+    pos: _PositionState,
+    qty: Decimal,
+    deal_id: str,
+    on_date: date,
+) -> _PositionState:
+    """C19: standard un-apply when pos.qty > 0; reopen recovery from
+    _LOT_HISTORY_CACHE when pos.qty == 0. Falls back to writing an
+    anomaly + qty/avg_cost=0 sentinel when lot_history is missing
+    entirely.
+    """
+    if pos.qty > 0:
+        return _unapply_sell(pos, qty)
+    key = (scope.broker, scope.account_env, scope.broker_account, ticker)
+    history = _LOT_HISTORY_CACHE.get(key, [])
+    close_event = next(
+        (e for e in history if e.get("kind") == "close" and e.get("deal_id") == deal_id),
+        None,
+    )
+    if not close_event:
+        write_recon_anomaly(
+            scope,
+            on_date,
+            notes={
+                "anomaly_type": "missing_lot_history",
+                "ticker": ticker,
+                "deal_id": deal_id,
+            },
+        )
+        return _PositionState(qty=qty, avg_cost=Decimal("0"))
+    open_events = [e for e in history if e.get("kind") == "open"]
+    pre_qty = Decimal("0")
+    pre_cost_sum = Decimal("0")
+    for ev in open_events:
+        if ev["filled_at"] >= close_event["filled_at"]:
+            break
+        pre_qty += Decimal(str(ev["qty"]))
+        pre_cost_sum += Decimal(str(ev["qty"])) * Decimal(str(ev["avg_cost"]))
+    if pre_qty == 0:
+        return _PositionState(qty=qty, avg_cost=Decimal("0"))
+    return _PositionState(qty=pre_qty, avg_cost=pre_cost_sum / pre_qty)
+
+
+def _bucket_by_et_date(rows: list[dict], ts_field: str) -> dict[date, list[dict]]:
+    from zoneinfo import ZoneInfo
+
+    bucket: dict[date, list[dict]] = {}
+    for r in rows:
+        ts = r[ts_field]
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        et_date = ts.astimezone(ZoneInfo("America/New_York")).date()
+        bucket.setdefault(et_date, []).append(r)
+    return bucket
+
+
+def _bucket_corp(rows: list[dict]) -> dict[date, list[dict]]:
+    bucket: dict[date, list[dict]] = {}
+    for r in rows:
+        bucket.setdefault(r["effective_date"], []).append(r)
+    return bucket
+
+
+def run_backward_walk(scope: AccountScope, anchor: AnchorState, walk_to: date) -> int:
+    """Walk back from anchor.today - 1 to walk_to (inclusive).
+
+    C24: today's row is NOT written into nav_history here — the caller
+    follows up with write_today_reported_nav, which writes today's row
+    as nav_type='reported'. Instead, drop the cost-basis anchor into
+    the reconciliation log so the historical reconstruction can be
+    audited against the live reported NAV.
+
+    Historical rows are immutable: this function only INSERTs via the
+    `is_today=False` guard inside write_nav_row.
+    """
+    nav_today_cost_basis = anchor.cost_basis_nav()
+    threshold = max(Decimal("25"), nav_today_cost_basis * Decimal("0.001"))
+    write_recon_daily(
+        scope,
+        anchor.today,
+        reported=None,  # write_today_reported_nav fills this
+        reconstructed=nav_today_cost_basis,
+        threshold=threshold,
+        notes={"anchor_reason": "first_run_backfill"},
+    )
+    rows_written = 0
+
+    # Pre-fetch the window. fetch_fills/fetch_cash_flows partition by
+    # ET trade date — the upper bound covers today's events too.
+    all_fills = list(fetch_fills(scope, walk_to, anchor.today + timedelta(days=1)))
+    all_flows = list(fetch_cash_flows(scope, walk_to, anchor.today + timedelta(days=1)))
+    tickers_in_history = {f["ticker"] for f in all_fills}
+    # Ensure lot_history is populated for every ticker in the window
+    # (so _unapply_sell_with_history can recover reopen avg_cost).
+    for t in tickers_in_history:
+        key = (scope.broker, scope.account_env, scope.broker_account, t)
+        if key not in _LOT_HISTORY_CACHE:
+            _rematch_ticker(scope, t)
+    all_corp = list(fetch_corp_actions_for_tickers(list(tickers_in_history)))
+
+    by_date_fills = _bucket_by_et_date(all_fills, "filled_at")
+    by_date_flows = _bucket_by_et_date(all_flows, "flow_at")
+    by_date_corp = _bucket_corp(all_corp)
+
+    # C32: scope-wide deal-id set, not per-day. A T+1 settlement-date
+    # fee whose deal_id ties to a fill on a different ET date would
+    # otherwise be double-counted as a standalone cash flow during walk.
+    known_deal_ids = {f["futu_deal_id"] for f in all_fills}
+
+    state_cash = anchor.cash
+    state_pos = {t: _PositionState(p.qty, p.avg_cost) for t, p in anchor.positions.items()}
+
+    cursor = anchor.today
+    while cursor > walk_to:
+        next_day = cursor
+        cursor = cursor - timedelta(days=1)
+
+        # Un-apply fills from next_day.
+        for fill in by_date_fills.get(next_day, []):
+            pos = state_pos.get(
+                fill["ticker"],
+                _PositionState(qty=Decimal("0"), avg_cost=Decimal("0")),
+            )
+            qty = Decimal(str(fill["quantity"]))
+            price = Decimal(str(fill["price"]))
+            fees = Decimal(str(fill["fees"]))
+            if fill["action"] == "BUY":
+                state_cash += price * qty + fees
+                state_pos[fill["ticker"]] = _unapply_buy(pos, qty, price, fees)
+            else:  # SELL
+                state_cash -= price * qty - fees
+                state_pos[fill["ticker"]] = _unapply_sell_with_history(
+                    scope, fill["ticker"], pos, qty, fill["futu_deal_id"], cursor
+                )
+
+        # Un-apply cash-flow events from next_day, skipping fee-on-deal
+        # (scope-wide deal_id set per C32).
+        for cf in by_date_flows.get(next_day, []):
+            cf_deal = (cf["raw"] or {}).get("deal_id")
+            if cf_deal and cf_deal in known_deal_ids:
+                continue
+            if cf["amount"] is None:
+                continue  # missing-FX day — already anomaly-logged
+            state_cash -= Decimal(str(cf["amount"]))
+
+        # Un-apply corporate actions on next_day.
+        for ca in by_date_corp.get(next_day, []):
+            ratio = Decimal(str(ca["ratio_numerator"])) / Decimal(str(ca["ratio_denominator"]))
+            tk = ca["ticker"]
+            if tk in state_pos:
+                state_pos[tk] = _PositionState(
+                    qty=state_pos[tk].qty / ratio,
+                    avg_cost=state_pos[tk].avg_cost * ratio,
+                )
+            if ca["action_type"] == "symbol_change" and ca.get("new_ticker"):
+                state_pos[ca["new_ticker"]] = state_pos.pop(tk, _PositionState(qty=Decimal("0"), avg_cost=Decimal("0")))
+
+        stock = sum((p.qty * p.avg_cost for p in state_pos.values()), Decimal("0"))
+        nav_D = state_cash + stock
+        write_nav_row(
+            scope,
+            cursor,
+            nav_D,
+            nav_type="reconstructed",
+            cash=state_cash,
+            stock_value=stock,
+        )
+        rows_written += 1
+
+    return rows_written
+
+
+def _build_anchor_from_live_account(scope: AccountScope, trade_ctx) -> AnchorState:
+    """Build an AnchorState by calling accinfo + position_list against an
+    OpenSecTradeContext.
+
+    The trade_ctx parameter is the same one used by the rest of the
+    orchestrator — passing it in lets tests substitute a MagicMock.
+
+    C26: Futu emits `total_assets` (not `net_liquidation`).
+    """
+    code, accinfo_df = trade_ctx.accinfo_query(acc_id=scope.broker_account, trd_env="REAL")
+    if code != 0:
+        raise RuntimeError(f"accinfo_query failed: {accinfo_df!r}")
+    summary = accinfo_df.to_dict(orient="records")[0]
+    if summary.get("total_assets") is None:
+        raise RuntimeError(
+            "Futu accinfo_query returned no `total_assets` column — "
+            "verify SDK version against C26 (run Task 5 Step 0 probe)"
+        )
+    cash = Decimal(str(summary.get("cash", 0)))
+
+    code, pos_df = trade_ctx.position_list_query(acc_id=scope.broker_account, trd_env="REAL")
+    if code != 0:
+        raise RuntimeError(f"position_list_query failed: {pos_df!r}")
+    positions: dict[str, _PositionState] = {}
+    for row in pos_df.to_dict(orient="records"):
+        code_str = str(row.get("code") or "")
+        market, ticker = code_str.split(".", 1) if "." in code_str else ("", code_str)
+        if market.upper() != "US":
+            continue
+        positions[ticker.upper()] = _PositionState(
+            qty=Decimal(str(row.get("qty", 0))),
+            avg_cost=Decimal(str(row.get("cost_price", 0))),
+        )
+    return AnchorState(
+        today=datetime.now(timezone.utc).date(),
+        cash=cash,
+        positions=positions,
+    )
+
+
+def write_today_reported_nav(scope: AccountScope, trade_ctx, today: date) -> Decimal:
+    """Daily forward: write today's reported NAV from accinfo + UPSERT the
+    daily reconciliation row.
+
+    C26: Futu emits `total_assets`, not `net_liquidation`.
+    C24: write_recon_daily UPSERTs, so today's `reported_nav` merges with
+    the anchor row's `reconstructed_nav` written by run_backward_walk
+    on first run.
+    """
+    code, accinfo_df = trade_ctx.accinfo_query(acc_id=scope.broker_account, trd_env="REAL")
+    if code != 0:
+        raise RuntimeError(f"accinfo_query failed: {accinfo_df!r}")
+    summary = accinfo_df.to_dict(orient="records")[0]
+    raw_total = summary.get("total_assets")
+    if raw_total is None:
+        raise RuntimeError(
+            "Futu accinfo_query returned no `total_assets` column — "
+            "verify SDK version against C26 (run Task 5 Step 0 probe)"
+        )
+    reported = Decimal(str(raw_total))
+    cash = Decimal(str(summary.get("cash", 0)))
+    unrealized = Decimal(str(summary.get("unrealized_pl", 0)))
+    cost_basis = reported - unrealized
+    write_nav_row(
+        scope,
+        today,
+        reported,
+        nav_type="reported",
+        cash=cash,
+        stock_value=reported - cash,
+        is_today=True,
+    )
+    threshold = max(Decimal("25"), reported * Decimal("0.001"))
+    write_recon_daily(
+        scope,
+        today,
+        reported=reported,
+        reconstructed=cost_basis,
+        threshold=threshold,
+        notes={"unrealized_pl_today": str(unrealized)},
+    )
+    return reported

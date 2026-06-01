@@ -176,13 +176,28 @@ def clean_scope():
         )
         conn.execute(text("DELETE FROM xenon.fx_daily WHERE date < DATE '2024-06-01'"))
 
+    def _clear_module_caches():
+        # _LOT_HISTORY_CACHE is module-level state used by run_backward_walk
+        # to recover ticker-reopen avg_cost. Tests that share a (broker, env,
+        # broker_account, ticker) key would otherwise see stale FIFO state.
+        try:
+            from xenon.api.services import futu_history as fh
+
+            keys_to_drop = [k for k in fh._LOT_HISTORY_CACHE if k[:3] == ("FUTU", "paper", "pytest")]
+            for k in keys_to_drop:
+                fh._LOT_HISTORY_CACHE.pop(k, None)
+        except Exception:
+            pass
+
     try:
         with eng.begin() as conn:
             _wipe(conn)
+        _clear_module_caches()
         yield
     finally:
         with eng.begin() as conn:
             _wipe(conn)
+        _clear_module_caches()
         eng.dispose()
 
 
