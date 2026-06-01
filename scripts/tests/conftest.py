@@ -8,8 +8,10 @@ import pytest
 from sqlalchemy.engine import Engine
 
 from xenon._test_db import (
+    app_engine_bound_to_test,  # noqa: F401 — re-exported for pytest fixture discovery
     get_session_engine,
     is_pg_reachable,
+    pg_session,  # noqa: F401 — re-exported for pytest fixture discovery
     sync_test_db_url,
     truncate_all_xenon_tables,
 )
