@@ -14,6 +14,12 @@ from pathlib import Path
 import pytest
 
 # test_mode must be False so the real classification logic runs.
+# Phase 2 carve-out: this module's tests exercise FastAPI routes via
+# TestClient, which calls through the async engine path that Phase 2's
+# sync `_BoundEngine` patch can't reach. Stays on Phase 1 TRUNCATE
+# pre+post isolation via this marker.
+pytestmark = pytest.mark.committed_db
+
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine, text
 
