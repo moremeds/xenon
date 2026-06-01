@@ -5,15 +5,15 @@ Revises: 260fabba18d6
 Create Date: 2026-06-01 01:18:29.358326
 
 """
+
 from typing import Sequence, Union
 
-from alembic import op
 import sqlalchemy as sa
-
+from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = '489476c351cc'
-down_revision: Union[str, Sequence[str], None] = '260fabba18d6'
+revision: str = "489476c351cc"
+down_revision: Union[str, Sequence[str], None] = "260fabba18d6"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -26,7 +26,7 @@ def upgrade() -> None:
     The existing PK (broker, account_env, broker_account, date) is preserved.
     """
     op.execute(
-        "CREATE UNIQUE INDEX nav_history_one_env_per_day "
+        "CREATE UNIQUE INDEX IF NOT EXISTS nav_history_one_env_per_day "
         "ON xenon.nav_history (broker, broker_account, date)"
     )
 

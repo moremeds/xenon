@@ -1,4 +1,5 @@
 """ib_sync._append_nav_snapshot cross-env guard (Decisions §13 + correction #2)."""
+
 from datetime import date, datetime
 
 import pytest
@@ -20,9 +21,10 @@ def test_append_raises_when_existing_row_has_different_env(sync_engine, monkeypa
     monkeypatch.setenv("XENON_BROKER", "IB")
     monkeypatch.setenv("XENON_TRADING_MODE", "live")
     monkeypatch.setenv("XENON_BROKER_ACCOUNT", "U_GUARD_TEST")
-    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://xenon_app:xenon_dev@localhost:2000/core_dev")
-    # Force the sync engine module to repick up DATABASE_URL.
+    # DATABASE_URL is set by conftest's autouse _postgres_orders_test_db fixture
+    # to whatever DATABASE_URL_TEST points to; do not hardcode a dev-env URL.
     import xenon.db.engine as eng_mod
+
     eng_mod._sync_engine = None  # type: ignore[attr-defined]
 
     today = _today_et()
@@ -54,8 +56,9 @@ def test_append_proceeds_when_env_matches(sync_engine, monkeypatch):
     monkeypatch.setenv("XENON_BROKER", "IB")
     monkeypatch.setenv("XENON_TRADING_MODE", "paper")
     monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU_GUARD_OK")
-    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://xenon_app:xenon_dev@localhost:2000/core_dev")
+    # DATABASE_URL is set by conftest's autouse fixture; do not hardcode.
     import xenon.db.engine as eng_mod
+
     eng_mod._sync_engine = None  # type: ignore[attr-defined]
 
     try:
@@ -63,9 +66,7 @@ def test_append_proceeds_when_env_matches(sync_engine, monkeypatch):
             c.execute(sa.delete(nav_history).where(nav_history.c.broker_account == "DU_GUARD_OK"))
         _append_nav_snapshot(50000.00, 0.00)
         with sync_engine.begin() as c:
-            row = c.execute(
-                sa.select(nav_history).where(nav_history.c.broker_account == "DU_GUARD_OK")
-            ).first()
+            row = c.execute(sa.select(nav_history).where(nav_history.c.broker_account == "DU_GUARD_OK")).first()
         assert row is not None
         assert float(row.nav) == 50000.00
     finally:
