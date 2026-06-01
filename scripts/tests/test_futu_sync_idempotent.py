@@ -54,6 +54,14 @@ def test_double_sync_is_a_noop(clean_scope, monkeypatch):
     trade_ctx = MagicMock()
     trade_ctx.history_deal_list_query.return_value = _fake_deals_df()
     trade_ctx.get_acc_cash_flow.return_value = _fake_cash_df()
+    trade_ctx.accinfo_query.return_value = (
+        0,
+        pd.DataFrame([{"total_assets": 11000, "cash": 10000, "unrealized_pl": 0}]),
+    )
+    trade_ctx.position_list_query.return_value = (
+        0,
+        pd.DataFrame([{"code": "US.AAPL", "qty": 100, "cost_price": 150.0, "market_val": 16000}]),
+    )
     trade_ctx.close.return_value = None
 
     quote_ctx = MagicMock()

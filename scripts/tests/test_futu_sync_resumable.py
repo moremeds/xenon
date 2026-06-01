@@ -41,6 +41,14 @@ def test_crash_after_fills_resumes_cleanly(clean_scope, monkeypatch):
         RuntimeError("simulated OpenD disconnect"),
         (0, pd.DataFrame([])),
     ]
+    trade_ctx.accinfo_query.return_value = (
+        0,
+        pd.DataFrame([{"total_assets": 1, "cash": 1, "unrealized_pl": 0}]),
+    )
+    trade_ctx.position_list_query.return_value = (
+        0,
+        pd.DataFrame([{"code": "US.AAPL", "qty": 1, "cost_price": 1.0}]),
+    )
     trade_ctx.close.return_value = None
 
     quote_ctx = MagicMock()

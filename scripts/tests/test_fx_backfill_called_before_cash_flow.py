@@ -32,6 +32,11 @@ def test_fx_backfill_called_before_cash_flow(clean_scope, monkeypatch):
         return (0, pd.DataFrame())
 
     trade_ctx.get_acc_cash_flow.side_effect = fake_get_acc_cash_flow
+    trade_ctx.accinfo_query.return_value = (
+        0,
+        pd.DataFrame([{"total_assets": 0, "cash": 0, "unrealized_pl": 0}]),
+    )
+    trade_ctx.position_list_query.return_value = (0, pd.DataFrame())
     trade_ctx.close.return_value = None
 
     quote_ctx = MagicMock()

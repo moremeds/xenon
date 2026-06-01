@@ -48,11 +48,21 @@ from xenon.db.queries.futu_history import (
     cursor_for_cash_flows,
     cursor_for_corp_actions,
     cursor_for_fills,
+    fetch_corp_actions_for_tickers,
+    fetch_fills,
     insert_cash_flows,
+    insert_corporate_actions,
     insert_fills,
+    null_realized_for_ticker,
+    update_realized_pnl,
     write_recon_anomaly,
 )
 from xenon.execution.account_scope import AccountScope
+from xenon.execution.futu_fifo_matcher import (
+    CorpActionInput,
+    FillInput,
+    match_fills,
+)
 from xenon.utils.futu_fx import (
     FxBackfillFailed,
     FxRateMissing,
@@ -294,7 +304,7 @@ def sum_cash_flow_for_date(scope: AccountScope, d: date) -> Decimal:
 def detect_tickers_needing_rematch(scope: AccountScope) -> set[str]:
     """Return the set of tickers whose realized_pnl is stale.
 
-    Two cases trigger rematch:
+    Three cases trigger rematch:
 
     1. **Never matched.** Ticker has fills but no row has realized_pnl.
        Happens on a first sync or after a manual NULL-out.
@@ -303,6 +313,11 @@ def detect_tickers_needing_rematch(scope: AccountScope) -> set[str]:
        the newest matched-SELL's `id` (so it was inserted AFTER the FIFO
        pass) AND whose `filled_at` precedes that SELL's `filled_at` (so
        it would re-order the lot stack).
+
+    3. **New corporate action.** A corporate_actions row exists for the
+       ticker with effective_date >= the trade-date of the newest
+       realized_pnl row. A freshly-pulled split would re-scale earlier
+       lots, so realized_pnl on rows past the split date is stale (C28).
 
     The schema has no `created_at` column, so the auto-increment `id`
     serves as a proxy for insertion order. New BUYs always get higher
@@ -314,17 +329,21 @@ def detect_tickers_needing_rematch(scope: AccountScope) -> set[str]:
             text(
                 """
                 WITH per_ticker AS (
-                    SELECT ticker,
-                           MAX(id) FILTER (WHERE realized_pnl IS NOT NULL)
+                    SELECT t.ticker,
+                           MAX(t.id) FILTER (WHERE realized_pnl IS NOT NULL)
                                                        AS max_pnl_id,
-                           MAX(filled_at)
+                           MAX(t.filled_at)
                              FILTER (WHERE realized_pnl IS NOT NULL)
-                                                       AS max_pnl_at
-                      FROM xenon.futu_trades
-                     WHERE broker = :broker
-                       AND account_env = :env
-                       AND broker_account = :acc
-                     GROUP BY ticker
+                                                       AS max_pnl_at,
+                           (SELECT MAX(ca.effective_date)
+                              FROM xenon.corporate_actions ca
+                             WHERE ca.ticker = t.ticker)
+                                                       AS last_corp_at
+                      FROM xenon.futu_trades t
+                     WHERE t.broker = :broker
+                       AND t.account_env = :env
+                       AND t.broker_account = :acc
+                     GROUP BY t.ticker
                 )
                 SELECT DISTINCT p.ticker
                   FROM per_ticker p
@@ -340,6 +359,9 @@ def detect_tickers_needing_rematch(scope: AccountScope) -> set[str]:
                                AND t.filled_at < p.max_pnl_at)
                        )
                  )
+                 OR (p.last_corp_at IS NOT NULL
+                     AND (p.max_pnl_at IS NULL
+                          OR p.last_corp_at >= (p.max_pnl_at AT TIME ZONE 'America/New_York')::date))
                 """
             ),
             {
@@ -442,13 +464,43 @@ def _run_sync_under_lock(
         # Step 3: cash flow (FX-aware)
         cash_flows_added = _pull_cash_flow(scope, trade_ctx, start, today)
 
-        # Steps 4-7 (corp actions, rematch, snapshot, NAV walk) live in
-        # Tasks 12, 13, 14. Their orchestration MUST: pull corp actions
-        # BEFORE rematch (C28); --rematch wipes historical reconstructed
-        # rows + _LOT_HISTORY_CACHE before walking (C25); first sync writes
-        # the cost-basis anchor as a recon-log row, not into nav_history
-        # (C24).
-        warnings.append("steps_4_to_7_not_yet_implemented")
+        # Step 4 prerequisite (C28): pull corp actions BEFORE rematch so
+        # rematch sees split-aware lot accounting for any newly-pulled
+        # corp action.
+        pull_corporate_actions(scope, quote_ctx)
+
+        # Step 5: recompute realized P&L for tickers needing rematch.
+        # --rematch wipes _LOT_HISTORY_CACHE for the scope (C25 from Task 14).
+        if rematch:
+            for key in [
+                k for k in _LOT_HISTORY_CACHE if k[:3] == (scope.broker, scope.account_env, scope.broker_account)
+            ]:
+                _LOT_HISTORY_CACHE.pop(key, None)
+            with get_sync_engine().connect() as conn:
+                tickers = {
+                    r[0]
+                    for r in conn.execute(
+                        text(
+                            "SELECT DISTINCT ticker FROM xenon.futu_trades "
+                            "WHERE broker=:b AND account_env=:e AND broker_account=:a"
+                        ),
+                        {
+                            "b": scope.broker,
+                            "e": scope.account_env,
+                            "a": scope.broker_account,
+                        },
+                    ).fetchall()
+                }
+        else:
+            tickers = detect_tickers_needing_rematch(scope)
+        for t in tickers:
+            _rematch_ticker(scope, t)
+
+        # Step 6: snapshot current account.
+        snapshot_account_state(scope, trade_ctx)
+
+        # Step 7 (NAV backwalk / daily forward UPSERT) — filled by Task 14.
+        warnings.append("step_7_nav_walk_not_yet_implemented")
 
         return {
             "status": "ok",
@@ -469,3 +521,179 @@ def _run_sync_under_lock(
             quote_ctx.close()
         except Exception:  # noqa: BLE001
             log.warning("quote_ctx.close failed", exc_info=True)
+
+
+# C19: module-level cache of per-ticker FIFO lot history, used by the
+# backward NAV walk in Task 14 to recover state when a ticker was closed
+# and reopened (qty=0 mid-walk). Keyed by
+# (broker, account_env, broker_account, ticker). Cleared by --rematch (C25).
+_LOT_HISTORY_CACHE: dict[tuple[str, str, str, str], list[dict]] = {}
+
+
+def _rematch_ticker(scope: AccountScope, ticker: str) -> None:
+    """Re-run FIFO over the full history for this ticker.
+
+    Writes realized_pnl back to each SELL row, AND populates
+    _LOT_HISTORY_CACHE for the backward NAV walk to consume
+    (spec § Failure modes: ticker-reopen).
+    """
+    null_realized_for_ticker(scope, ticker)
+    fills_raw = [r for r in fetch_fills(scope, MIN_HISTORICAL_DATE, date(2099, 12, 31)) if r["ticker"] == ticker]
+    fills = [
+        FillInput(
+            futu_deal_id=r["futu_deal_id"],
+            action=r["action"],
+            quantity=int(r["quantity"]),
+            price=Decimal(str(r["price"])),
+            fees=Decimal(str(r["fees"])),
+            filled_at=r["filled_at"],
+        )
+        for r in fills_raw
+    ]
+    corp = [
+        CorpActionInput(
+            id=f"{ca['ticker']}-{ca['effective_date']}",
+            action_type=ca["action_type"],
+            effective_date=ca["effective_date"],
+            ratio_numerator=Decimal(str(ca["ratio_numerator"] or 1)),
+            ratio_denominator=Decimal(str(ca["ratio_denominator"] or 1)),
+        )
+        for ca in fetch_corp_actions_for_tickers([ticker])
+    ]
+    # Request the side-channel lot_history — Task 14's backwalk consumes it.
+    result = match_fills(fills, corp_actions=corp, return_lot_history=True)
+    _LOT_HISTORY_CACHE[(scope.broker, scope.account_env, scope.broker_account, ticker)] = result.lot_history
+    for f in result.fills:
+        if f.action == "SELL":
+            update_realized_pnl(scope, f.futu_deal_id, f.realized_pnl)
+
+
+def snapshot_account_state(scope: AccountScope, trade_ctx) -> None:
+    """Pull live accinfo + positions and write one row to xenon.account_snapshots.
+
+    Futu's raw accinfo_query returns `total_assets` (not `net_liquidation` —
+    C26). We map it to the canonical xenon column name `net_liquidation`
+    and mirror into `bankroll` (used by sizing helpers).
+    """
+    import json
+
+    code, accinfo_df = trade_ctx.accinfo_query(acc_id=scope.broker_account, trd_env="REAL")
+    if code != 0:
+        raise RuntimeError(f"accinfo_query failed: {accinfo_df!r}")
+    code, pos_df = trade_ctx.position_list_query(acc_id=scope.broker_account, trd_env="REAL")
+    if code != 0:
+        raise RuntimeError(f"position_list_query failed: {pos_df!r}")
+
+    summary = accinfo_df.to_dict(orient="records")[0]
+    raw_total = summary.get("total_assets")
+    if raw_total is None:
+        raise RuntimeError(
+            "Futu accinfo_query returned no `total_assets` column — "
+            "verify SDK version against C26 (run the Task 5 Step 0 probe)"
+        )
+    nl = Decimal(str(raw_total))
+    positions: list[dict] = []
+    for r in pos_df.to_dict(orient="records"):
+        positions.append(
+            {
+                "code": r.get("code"),
+                "qty": float(r.get("qty", 0)),
+                "cost_price": float(r.get("cost_price", 0)),
+                "nominal_price": float(r.get("nominal_price", 0)),
+                "market_value": float(r.get("market_val", 0)),
+            }
+        )
+    payload = {"account_summary": summary, "positions": positions}
+
+    with get_sync_engine().begin() as conn:
+        prev_peak = conn.execute(
+            text(
+                "SELECT MAX(peak_value) FROM xenon.account_snapshots "
+                "WHERE broker=:b AND account_env=:e AND broker_account=:a"
+            ),
+            {
+                "b": scope.broker,
+                "e": scope.account_env,
+                "a": scope.broker_account,
+            },
+        ).scalar() or Decimal("0")
+        peak = max(Decimal(str(prev_peak)), nl)
+        # C3: account_snapshots.account is NOT NULL with no default.
+        # Bind it to scope.broker_account (the same value as the broker_account
+        # column — they coexist for cross-broker query compatibility).
+        conn.execute(
+            text(
+                """
+                INSERT INTO xenon.account_snapshots (
+                    account, broker, account_env, broker_account,
+                    net_liquidation, bankroll, peak_value, payload, snapshot_at)
+                VALUES (:acc, :broker, :env, :acc, :nl, :nl, :peak,
+                        CAST(:payload AS jsonb), now())
+                """
+            ),
+            {
+                "broker": scope.broker,
+                "env": scope.account_env,
+                "acc": scope.broker_account,
+                "nl": nl,
+                "peak": peak,
+                "payload": json.dumps(payload, default=str),
+            },
+        )
+
+
+def pull_corporate_actions(scope: AccountScope, quote_ctx) -> int:
+    """For every ticker ever held in this scope, call get_rehab and persist.
+
+    Per-ticker failures are logged + recorded as anomalies; they do NOT
+    abort the sync — a single corrupt or rate-limited ticker should not
+    block the whole window's worth of trade data.
+    """
+    from xenon.clients.futu_quote_client import FutuQuoteClient
+
+    client = FutuQuoteClient(quote_ctx=quote_ctx)
+    with get_sync_engine().connect() as conn:
+        tickers = [
+            r[0]
+            for r in conn.execute(
+                text(
+                    "SELECT DISTINCT ticker FROM xenon.futu_trades "
+                    "WHERE broker=:b AND account_env=:e AND broker_account=:a"
+                ),
+                {
+                    "b": scope.broker,
+                    "e": scope.account_env,
+                    "a": scope.broker_account,
+                },
+            ).fetchall()
+        ]
+
+    rows: list[dict] = []
+    for ticker in tickers:
+        try:
+            actions = list(client.fetch_corporate_actions(f"US.{ticker}"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_rehab(%s) failed: %s", ticker, exc)
+            write_recon_anomaly(
+                scope,
+                datetime.now(timezone.utc).date(),
+                notes={
+                    "anomaly_type": "missing_rehab",
+                    "ticker": ticker,
+                    "error": str(exc),
+                },
+            )
+            continue
+        for ca in actions:
+            rows.append(
+                {
+                    "ticker": ca.ticker,
+                    "action_type": ca.action_type,
+                    "effective_date": ca.effective_date,
+                    "ratio_numerator": ca.ratio_numerator,
+                    "ratio_denominator": ca.ratio_denominator,
+                    "new_ticker": ca.new_ticker,
+                    "notes": {"raw": ca.raw},
+                }
+            )
+    return insert_corporate_actions(rows)
