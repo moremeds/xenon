@@ -64,3 +64,64 @@ def get_account_scope(request: Request) -> AccountScope:
     `require_mode_verified` which produces the operator-friendly 503.
     """
     return resolve_from_app_state(request.app.state)
+
+
+def get_performance_scope(request: Request, broker: str | None = None) -> AccountScope:
+    """Broker-aware scope dep for the performance route.
+
+    `?broker=IB` (default) resolves the live IB scope from app.state.
+    `?broker=FUTU` resolves from the lazily-connected FutuClient's matched
+    account — connecting if necessary. Raises 503 when the Futu OpenD is
+    unreachable so the UI can render a connect-prompt distinctly from a
+    fatal error.
+    """
+    b = (broker or "IB").upper()
+    if b == "IB":
+        try:
+            return resolve_from_app_state(request.app.state)
+        except ValueError:
+            # IB Gateway API handshake failed (TCP open, auth not accepted —
+            # commonly "needs 2FA on IBKR mobile" or "client IP not in trusted
+            # list"). app.state.account stays empty. The /performance read path
+            # is Postgres-only, so degrade gracefully via env vars (dev.sh
+            # exports XENON_BROKER_ACCOUNT + XENON_TRADING_MODE before boot).
+            from xenon.execution.account_scope import resolve_from_env
+            try:
+                return resolve_from_env()
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"IB account scope unresolved (Gateway handshake pending and "
+                        f"env fallback unavailable): {exc}"
+                    ),
+                )
+    if b != "FUTU":
+        raise HTTPException(status_code=400, detail=f"Unknown broker: {broker!r}")
+
+    # FUTU path — connect on demand and read ground truth from the SDK.
+    # Importing here avoids a circular import with server.py (which imports
+    # this module during route registration).
+    from xenon.api import server as _server
+    from xenon.clients.futu_exceptions import FutuConnectionError, FutuError
+    from xenon.execution.account_scope import env_from_trd_env
+
+    client = _server._get_futu_client()
+    if not client.is_connected():
+        try:
+            client.connect()
+        except FutuConnectionError as exc:
+            raise HTTPException(status_code=503, detail=f"Futu OpenD unreachable: {exc}")
+        except FutuError as exc:
+            raise HTTPException(status_code=502, detail=f"Futu error: {exc}")
+    trd_env = client.trd_env_of_matched_account()
+    if trd_env is None:
+        raise HTTPException(status_code=503, detail="Futu account not matched yet")
+    acc_id = getattr(client, "_acc_id", None)
+    if acc_id is None:
+        raise HTTPException(status_code=503, detail="Futu account id unavailable")
+    try:
+        env = env_from_trd_env(trd_env)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return AccountScope(broker="FUTU", account_env=env, broker_account=str(acc_id))

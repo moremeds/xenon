@@ -33,12 +33,38 @@ class AccountScope:
 _MODE_TO_PREFIX: dict[str, str] = {"paper": "DU", "live": "U"}
 
 
+def env_from_trd_env(trd_env: str) -> str:
+    """Map FutuClient's matched_trd_env to xenon's account_env value.
+
+    Spec §10 (perf-rebuild). REAL→"live", SIMULATE→"paper". Aligned with IB's
+    convention so the unique-index on (broker, broker_account, date) cannot
+    collide between the FUTU path and any historical sync that used MODE.
+    Raises on unknown input — callers must validate via
+    FutuClient.trd_env_of_matched_account() first.
+    """
+    if trd_env == "REAL":
+        return "live"
+    if trd_env == "SIMULATE":
+        return "paper"
+    raise ValueError(f"Unknown Futu trd_env: {trd_env!r}")
+
+
 def resolve_from_env() -> AccountScope:
-    """Build scope from environment variables. Used by sync callers."""
+    """Build scope from environment variables. Used by sync IB callers only.
+
+    Spec §10: FUTU scope cannot be resolved from env — use `persist_futu_nav`
+    or `get_performance_scope` instead. The matched OpenD account is the only
+    authoritative source for FUTU's env (not a global env var).
+    """
     from xenon.api.trading_mode import MODE
 
     broker = os.environ.get("XENON_BROKER", "IB").strip().upper() or "IB"
-    if broker not in ("IB", "FUTU"):
+    if broker == "FUTU":
+        raise ValueError(
+            "FUTU scope cannot be resolved from env vars — "
+            "use persist_futu_nav or get_performance_scope (spec §10)."
+        )
+    if broker != "IB":
         raise ValueError(f"XENON_BROKER={broker!r} is not supported")
     account = os.environ.get("XENON_BROKER_ACCOUNT", "").strip()
     if not account:
@@ -46,8 +72,6 @@ def resolve_from_env() -> AccountScope:
             "XENON_BROKER_ACCOUNT must be set (e.g. DU1234567). "
             "The IB sync path should set this from managedAccounts()[0]."
         )
-    if broker == "FUTU":
-        return AccountScope(broker="FUTU", account_env=MODE, broker_account=account)
     expected_prefix = _MODE_TO_PREFIX.get(MODE, "")
     if expected_prefix == "U":
         if not account.startswith("U") or account.startswith("DU"):

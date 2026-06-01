@@ -186,11 +186,27 @@ nav_history = Table(
     Column("cash", Numeric(14, 2)),
     Column("stock_value", Numeric(14, 2)),
     Column("options_value", Numeric(14, 2)),
+    # spec §12 / migration 260fabba18d6 — distinguish post-close from intraday snapshots
+    Column("source", Text, nullable=False, server_default=text("'intraday'")),
     CheckConstraint("broker IN ('IB', 'FUTU')", name="ck_nav_broker"),
     CheckConstraint(
         "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
         name="ck_nav_account_env",
     ),
+    CheckConstraint("source IN ('close', 'intraday')", name="ck_nav_history_source"),
+    # spec Decisions §13 / migration 489476c351cc — atomic dual-curve protection.
+    # Excludes account_env so two rows with different envs cannot coexist for
+    # the same (broker, broker_account, date).
+    Index("nav_history_one_env_per_day", "broker", "broker_account", "date", unique=True),
+)
+
+# spec § Schema changes Migration 1 — SPY/benchmark close cache.
+benchmark_closes = Table(
+    "benchmark_closes",
+    xenon_metadata,
+    Column("symbol", Text, primary_key=True),
+    Column("date", Date, primary_key=True),
+    Column("close", Numeric(14, 4), nullable=False),
 )
 
 # ---------- Order Lifecycle ----------

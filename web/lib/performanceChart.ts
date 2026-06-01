@@ -1,4 +1,4 @@
-import type { PerformanceData } from "./types";
+import type { PerformanceOk } from "./types";
 
 export type ChartMargins = {
   top: number;
@@ -54,7 +54,9 @@ const axisDateFormatter = new Intl.DateTimeFormat("en-US", {
 
 function formatAxisDate(value: string): string {
   const parsed = new Date(`${value}T00:00:00Z`);
-  return Number.isNaN(parsed.getTime()) ? value : axisDateFormatter.format(parsed);
+  return Number.isNaN(parsed.getTime())
+    ? value
+    : axisDateFormatter.format(parsed);
 }
 
 function formatAxisUsd(value: number): string {
@@ -83,7 +85,8 @@ function buildLinePath(
   const span = domainMax - domainMin || 1;
   return values
     .map((value, index) => {
-      const x = margins.left + (index / Math.max(values.length - 1, 1)) * innerWidth;
+      const x =
+        margins.left + (index / Math.max(values.length - 1, 1)) * innerWidth;
       const y = bottom - ((value - domainMin) / span) * (bottom - top);
       return `${index === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
     })
@@ -99,7 +102,14 @@ function buildAreaPath(
   domainMax: number,
 ): string {
   if (values.length === 0) return "";
-  const line = buildLinePath(values, width, height, margins, domainMin, domainMax);
+  const line = buildLinePath(
+    values,
+    width,
+    height,
+    margins,
+    domainMin,
+    domainMax,
+  );
   const baselineY = height - margins.bottom;
   const endX = width - margins.right;
   const startX = margins.left;
@@ -118,11 +128,15 @@ function buildNiceTicks(values: number[], desiredTickCount: number) {
   const magnitude = 10 ** Math.floor(Math.log10(roughStep || 1));
   const normalized = roughStep / magnitude;
   const multiplier =
-    normalized <= 1 ? 1
-    : normalized <= 2 ? 2
-    : normalized <= 2.5 ? 2.5
-    : normalized <= 5 ? 5
-    : 10;
+    normalized <= 1
+      ? 1
+      : normalized <= 2
+        ? 2
+        : normalized <= 2.5
+          ? 2.5
+          : normalized <= 5
+            ? 5
+            : 10;
   const step = multiplier * magnitude;
   const domainMin = Math.floor(rawMin / step) * step;
   const domainMax = Math.ceil(rawMax / step) * step;
@@ -138,8 +152,15 @@ function buildNiceTicks(values: number[], desiredTickCount: number) {
     ticks:
       ticks.length <= desiredTickCount
         ? ticks
-        : Array.from({ length: desiredTickCount }, (_, index) =>
-            ticks[Math.round((index * (ticks.length - 1)) / Math.max(desiredTickCount - 1, 1))],
+        : Array.from(
+            { length: desiredTickCount },
+            (_, index) =>
+              ticks[
+                Math.round(
+                  (index * (ticks.length - 1)) /
+                    Math.max(desiredTickCount - 1, 1),
+                )
+              ],
           ),
   };
 }
@@ -158,16 +179,31 @@ function buildIndexTicks(length: number, desiredTickCount: number): number[] {
 }
 
 export function buildPerformanceChartModel(
-  data: PerformanceData,
+  data: PerformanceOk,
   width = DEFAULT_PERFORMANCE_CHART_WIDTH,
   height = DEFAULT_PERFORMANCE_CHART_HEIGHT,
   margins: ChartMargins = DEFAULT_PERFORMANCE_CHART_MARGINS,
 ): PerformanceChartModel {
   const startEquity = data.summary.starting_equity;
-  const startBenchmark = data.series[0]?.benchmark_close ?? 1;
+  // First non-null benchmark close is the rebase anchor. Falls back to 1
+  // so the math stays defined when no benchmark is available.
+  const firstBenchmark =
+    data.series.find((p) => p.benchmark_close != null)?.benchmark_close ?? 1;
+  const startBenchmark = firstBenchmark || 1;
   const equityValues = data.series.map((point) => point.equity);
-  const rebasedBenchmarkValues = data.series.map((point) => (point.benchmark_close / startBenchmark) * startEquity);
-  const { domainMin, domainMax, ticks } = buildNiceTicks([...equityValues, ...rebasedBenchmarkValues], 4);
+  // Carry-forward the last known rebased value through null gaps so the line
+  // stays continuous instead of crashing to 0.
+  let lastRebased = startEquity;
+  const rebasedBenchmarkValues = data.series.map((point) => {
+    if (point.benchmark_close != null) {
+      lastRebased = (point.benchmark_close / startBenchmark) * startEquity;
+    }
+    return lastRebased;
+  });
+  const { domainMin, domainMax, ticks } = buildNiceTicks(
+    [...equityValues, ...rebasedBenchmarkValues],
+    4,
+  );
   const plotBottom = height - margins.bottom;
   const plotLeft = margins.left;
   const plotRight = width - margins.right;
@@ -180,15 +216,39 @@ export function buildPerformanceChartModel(
   const xAxisTicks = buildIndexTicks(data.series.length, 4).map((index) => ({
     index,
     label: formatAxisDate(data.series[index]?.date ?? ""),
-    x: plotLeft + (index / Math.max(data.series.length - 1, 1)) * (plotRight - plotLeft),
+    x:
+      plotLeft +
+      (index / Math.max(data.series.length - 1, 1)) * (plotRight - plotLeft),
   }));
 
   return {
-    equityPath: buildLinePath(equityValues, width, height, margins, domainMin, domainMax),
-    benchmarkPath: buildLinePath(rebasedBenchmarkValues, width, height, margins, domainMin, domainMax),
-    areaPath: buildAreaPath(equityValues, width, height, margins, domainMin, domainMax),
+    equityPath: buildLinePath(
+      equityValues,
+      width,
+      height,
+      margins,
+      domainMin,
+      domainMax,
+    ),
+    benchmarkPath: buildLinePath(
+      rebasedBenchmarkValues,
+      width,
+      height,
+      margins,
+      domainMin,
+      domainMax,
+    ),
+    areaPath: buildAreaPath(
+      equityValues,
+      width,
+      height,
+      margins,
+      domainMin,
+      domainMax,
+    ),
     latestEquity: equityValues[equityValues.length - 1] ?? startEquity,
-    latestBenchmark: rebasedBenchmarkValues[rebasedBenchmarkValues.length - 1] ?? startEquity,
+    latestBenchmark:
+      rebasedBenchmarkValues[rebasedBenchmarkValues.length - 1] ?? startEquity,
     rebasedBenchmarkValues,
     domainMin,
     domainMax,

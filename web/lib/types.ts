@@ -209,75 +209,108 @@ export type PerformanceSeriesPoint = {
   equity: number;
   daily_return: number | null;
   drawdown: number;
-  benchmark_close: number;
-  benchmark_return: number;
+  benchmark_close: number | null;
+  benchmark_return: number | null;
 };
 
+/** Backend returns null for metrics that are masked (FUTU, IB unverified)
+ *  or unavailable (insufficient history, no benchmark). */
 export type PerformanceSummary = {
   starting_equity: number;
   ending_equity: number;
   pnl: number;
   trading_days: number;
   total_return: number;
-  annualized_return: number;
-  annualized_volatility: number;
-  downside_deviation: number;
-  sharpe_ratio: number;
-  sortino_ratio: number;
-  calmar_ratio: number;
   max_drawdown: number;
   current_drawdown: number;
   max_drawdown_duration_days: number;
-  beta: number;
-  alpha: number;
-  correlation: number;
-  r_squared: number;
-  tracking_error: number;
-  information_ratio: number;
-  treynor_ratio: number;
-  upside_capture: number;
-  downside_capture: number;
-  var_95: number;
-  cvar_95: number;
-  tail_ratio: number;
-  ulcer_index: number;
-  skew: number;
-  kurtosis: number;
-  hit_rate: number;
-  positive_days: number;
-  negative_days: number;
-  flat_days: number;
-  best_day: number;
-  worst_day: number;
-  average_up_day: number;
-  average_down_day: number;
-  win_loss_ratio: number;
+  /** Low-confidence indicator (30 ≤ n < 126); see spec §4. */
+  low_confidence: boolean;
+  sharpe_se: number | null;
+  sortino_se: number | null;
+  // Annualized risk fields — null when masked
+  annualized_return: number | null;
+  annualized_volatility: number | null;
+  downside_deviation: number | null;
+  sharpe_ratio: number | null;
+  sortino_ratio: number | null;
+  calmar_ratio: number | null;
+  var_95: number | null;
+  cvar_95: number | null;
+  tail_ratio: number | null;
+  ulcer_index: number | null;
+  // Benchmark-relative — null when no benchmark or masked
+  beta: number | null;
+  alpha: number | null;
+  correlation: number | null;
+  r_squared: number | null;
+  tracking_error: number | null;
+  information_ratio: number | null;
+  treynor_ratio: number | null;
+  upside_capture: number | null;
+  downside_capture: number | null;
+  // Distribution
+  hit_rate: number | null;
+  positive_days: number | null;
+  negative_days: number | null;
+  flat_days: number | null;
+  best_day: number | null;
+  worst_day: number | null;
+  average_up_day: number | null;
+  average_down_day: number | null;
+  win_loss_ratio: number | null;
+  skew: number | null;
+  kurtosis: number | null;
 };
 
-export type PerformanceData = {
+export type PerformanceScope = {
+  broker: "IB" | "FUTU";
+  account_env: "paper" | "live" | "sim" | "legacy_unknown";
+  broker_account: string;
+};
+
+/** Cold-start envelope (< 5 sessions of NAV history). */
+export type PerformanceInsufficient = {
+  status: "insufficient_history";
+  reason: string;
+  days_collected: number;
+  days_required_for_curve: number;
+  days_required_for_metrics: number;
+  inception_date: string | null;
+  hero_net_liq: number | null;
+  currency: string;
+  last_sync?: string | null;
+  as_of?: string | null;
+};
+
+/** Full performance payload (n >= 5 sessions). */
+export type PerformanceOk = {
+  status: "ok";
   as_of: string;
   last_sync: string;
   period_start: string;
   period_end: string;
   period_label: string;
-  benchmark: string;
-  benchmark_total_return: number;
+  scope: PerformanceScope;
+  currency: string;
+  benchmark: string | null;
+  benchmark_total_return: number | null;
   trades_source: string;
   price_sources: {
-    stocks: string;
-    options: string;
+    primary: string;
+    benchmark: string;
   };
   methodology: {
-    curve_type: string;
-    return_basis: string;
-    risk_free_rate: number;
-    library_strategy: string;
+    basis: string;
+    annualization_periods: number;
   };
   summary: PerformanceSummary;
+  series: PerformanceSeriesPoint[];
   warnings: string[];
   contracts_missing_history: string[];
-  series: PerformanceSeriesPoint[];
 };
+
+export type PerformanceData = PerformanceOk | PerformanceInsufficient;
 
 // Trade journal types
 export type TradeEdgeAnalysis = {

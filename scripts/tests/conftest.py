@@ -136,6 +136,40 @@ def pg_test_engine() -> Engine:
     return eng
 
 
+# Aliases added per perf-rebuild plan correction #6 (2026-06-01).
+# Phase 2+ tests use `sync_engine` / `async_engine`; provide both shapes.
+@pytest.fixture
+def sync_engine(pg_test_engine) -> Engine:
+    return pg_test_engine
+
+
+import pytest_asyncio
+
+
+@pytest_asyncio.fixture
+async def async_engine():
+    """Async SQLAlchemy engine pointed at DATABASE_URL_TEST.
+
+    Per-test instance (avoids cross-test connection pool issues). Skips when
+    DATABASE_URL_TEST is unreachable. Requires `@pytest_asyncio.fixture`
+    (not `@pytest.fixture`) because asyncio_mode is strict.
+    """
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    url = _sync_test_db_url().replace("postgresql+psycopg://", "postgresql+asyncpg://")
+    eng = create_async_engine(url, pool_pre_ping=True)
+    try:
+        async with eng.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception:
+        await eng.dispose()
+        pytest.skip(f"PG test DB unreachable at {url}")
+    try:
+        yield eng
+    finally:
+        await eng.dispose()
+
+
 @pytest.fixture
 def scope_fixture() -> AccountScope:
     """Default paper-mode IB scope used by every migrated CLI test.

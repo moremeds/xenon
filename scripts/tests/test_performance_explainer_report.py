@@ -1,3 +1,15 @@
+"""DEPRECATED: tests for xenon-perf-explainer.
+
+The /performance route now returns self-describing methodology + warnings;
+the standalone HTML explainer is no longer wired into the UI. Kept here
+under skip for one release in case the operator-facing CLI is still useful.
+"""
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="Deprecated: /performance methodology/warnings are now inline in the payload (perf-rebuild)"
+)
+
 from xenon.reports.performance_explainer_report import (
     build_html,
     chart_family_contract,

@@ -1015,6 +1015,21 @@ def write_report(output_path: Path) -> Path:
 
 
 def main() -> int:
+    import sys as _sys
+    import warnings as _warnings
+
+    _warnings.warn(
+        "xenon-perf-explainer is deprecated; the FastAPI /performance route "
+        "now serves a self-describing payload (methodology + warnings inline).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    print(
+        "\033[33m[DEPRECATED]\033[0m xenon-perf-explainer is superseded by the "
+        "inline methodology/warnings in GET /performance.",
+        file=_sys.stderr,
+    )
+
     parser = argparse.ArgumentParser(description="Generate an HTML explainer for the /performance page")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Output HTML path")
     parser.add_argument("--no-open", action="store_true", help="Do not open the report in the browser")

@@ -1,4 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+/**
+ * /api/performance proxy route tests.
+ *
+ * Contract (post perf-rebuild):
+ *   - GET reads ?broker= from NextRequest, defaults to IB.
+ *   - Forwards verbatim to FastAPI `/performance?broker=<b>` (GET, not POST).
+ *   - No second-level cache in the Next route — FastAPI owns the TTL cache
+ *     (market-aware 60s open / 30min closed). Duplicating the cache here
+ *     caused stale-after-write surprises.
+ *   - Preserves upstream HTTPException status (409 cross-env, 503 OpenD down).
+ */
+import { describe, expect, it, vi } from "vitest";
 
 vi.mock("next/server", () => ({
   NextResponse: {
@@ -13,206 +24,92 @@ vi.mock("next/server", () => ({
   },
 }));
 
-const mockReadFile = vi.fn();
-const mockStat = vi.fn();
+const mockXenonFetch = vi.fn();
 
-vi.mock("fs/promises", () => ({
-  readFile: mockReadFile,
-  stat: mockStat,
+class FakeXenonApiError extends Error {
+  constructor(
+    public status: number,
+    public detail: string,
+  ) {
+    super(`Xenon API ${status}: ${detail}`);
+    this.name = "XenonApiError";
+  }
+}
+
+vi.mock("@/lib/xenonApi", () => ({
+  xenonFetch: mockXenonFetch,
+  XenonApiError: FakeXenonApiError,
 }));
 
-const mockXenonFetch = vi.fn();
-vi.mock("@/lib/xenonApi", () => ({ xenonFetch: mockXenonFetch }));
+function makeRequest(url: string): { nextUrl: URL } {
+  return { nextUrl: new URL(url) };
+}
 
-const originalOpenTtl = process.env.XENON_PERFORMANCE_TTL_OPEN_S;
-const originalClosedTtl = process.env.XENON_PERFORMANCE_TTL_CLOSED_S;
-
-describe("/api/performance route", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-03-13T16:00:00Z"));
-    vi.clearAllMocks();
-    mockReadFile.mockReset();
-    mockStat.mockReset();
-    mockReadFile.mockImplementation(async (path: string) => {
-      throw new Error(`route must not read JSON files: ${path}`);
-    });
-    mockStat.mockImplementation(async (path: string) => {
-      throw new Error(`route must not stat JSON files: ${path}`);
-    });
-    delete process.env.XENON_PERFORMANCE_TTL_OPEN_S;
-    delete process.env.XENON_PERFORMANCE_TTL_CLOSED_S;
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-    if (originalOpenTtl === undefined) {
-      delete process.env.XENON_PERFORMANCE_TTL_OPEN_S;
-    } else {
-      process.env.XENON_PERFORMANCE_TTL_OPEN_S = originalOpenTtl;
-    }
-    if (originalClosedTtl === undefined) {
-      delete process.env.XENON_PERFORMANCE_TTL_CLOSED_S;
-    } else {
-      process.env.XENON_PERFORMANCE_TTL_CLOSED_S = originalClosedTtl;
-    }
-  });
-
-  it("GET cold start fetches performance from FastAPI without reading JSON files", async () => {
+describe("/api/performance proxy route", () => {
+  it("GET defaults broker=IB and forwards verbatim", async () => {
     mockXenonFetch.mockResolvedValueOnce({
-      as_of: "2026-03-13",
-      last_sync: "2026-03-13T16:00:00Z",
-      summary: { total_return: 0.18 },
+      status: "ok",
+      summary: { total_return: 0.05 },
       series: [],
     });
-
     const { GET } = await import("../app/api/performance/route");
-    const res = await GET();
+    const res = await GET(makeRequest("http://test/api/performance") as never);
     const body = await res.json();
-
     expect(res.status).toBe(200);
-    expect(body.summary.total_return).toBe(0.18);
-    expect(mockReadFile).not.toHaveBeenCalled();
-    expect(mockStat).not.toHaveBeenCalled();
-    expect(mockXenonFetch).toHaveBeenCalledOnce();
+    expect(body.summary.total_return).toBe(0.05);
     expect(mockXenonFetch).toHaveBeenCalledWith(
-      "/performance",
-      expect.objectContaining({ method: "POST", timeout: 180_000 }),
+      "/performance?broker=IB",
+      expect.objectContaining({ timeout: 180_000 }),
     );
+    mockXenonFetch.mockReset();
   });
 
-  it("GET serves the route cache within the open-market TTL", async () => {
+  it("GET forwards ?broker=FUTU", async () => {
     mockXenonFetch.mockResolvedValueOnce({
-      as_of: "2026-03-13",
-      last_sync: "2026-03-13T16:00:00Z",
-      summary: { sharpe_ratio: 1.2 },
+      status: "ok",
+      summary: {},
       series: [],
     });
-
     const { GET } = await import("../app/api/performance/route");
-    await GET();
-
-    vi.advanceTimersByTime(4 * 60_000);
-    const res = await GET();
-    const body = await res.json();
-
-    expect(res.status).toBe(200);
-    expect(body.summary.sharpe_ratio).toBe(1.2);
-    expect(mockXenonFetch).toHaveBeenCalledOnce();
-    expect(mockReadFile).not.toHaveBeenCalled();
-    expect(mockStat).not.toHaveBeenCalled();
-  });
-
-  it("GET returns stale route cache and refreshes in the background after the open-market TTL", async () => {
-    mockXenonFetch
-      .mockResolvedValueOnce({
-        as_of: "2026-03-13",
-        last_sync: "2026-03-13T16:00:00Z",
-        summary: { ending_equity: 100_000 },
-        series: [],
-      })
-      .mockResolvedValueOnce({
-        as_of: "2026-03-13",
-        last_sync: "2026-03-13T16:06:00Z",
-        summary: { ending_equity: 101_000 },
-        series: [],
-      });
-
-    const { GET } = await import("../app/api/performance/route");
-    await GET();
-
-    vi.advanceTimersByTime(6 * 60_000);
-    const res = await GET();
-    const body = await res.json();
-
-    expect(res.status).toBe(200);
-    expect(body.summary.ending_equity).toBe(100_000);
-    expect(mockXenonFetch).toHaveBeenCalledTimes(2);
-    expect(mockXenonFetch).toHaveBeenNthCalledWith(
-      2,
-      "/performance",
-      expect.objectContaining({ method: "POST", timeout: 180_000 }),
+    await GET(makeRequest("http://test/api/performance?broker=FUTU") as never);
+    expect(mockXenonFetch).toHaveBeenCalledWith(
+      "/performance?broker=FUTU",
+      expect.anything(),
     );
+    mockXenonFetch.mockReset();
   });
 
-  it("GET uses the closed-market TTL environment override", async () => {
-    process.env.XENON_PERFORMANCE_TTL_CLOSED_S = "120";
-    vi.setSystemTime(new Date("2026-03-14T15:00:00Z"));
-    mockXenonFetch
-      .mockResolvedValueOnce({
-        as_of: "2026-03-13",
-        last_sync: "2026-03-13T21:00:00Z",
-        summary: { total_return: 0.12 },
-        series: [],
-      })
-      .mockResolvedValueOnce({
-        as_of: "2026-03-13",
-        last_sync: "2026-03-14T15:02:01Z",
-        summary: { total_return: 0.13 },
-        series: [],
-      });
-
+  it("GET preserves upstream 409 cross-env conflict", async () => {
+    mockXenonFetch.mockRejectedValueOnce(
+      new FakeXenonApiError(409, "NAV account_env conflict"),
+    );
     const { GET } = await import("../app/api/performance/route");
-    await GET();
-
-    vi.advanceTimersByTime(119_000);
-    await GET();
-    expect(mockXenonFetch).toHaveBeenCalledOnce();
-
-    vi.advanceTimersByTime(2_000);
-    const res = await GET();
+    const res = await GET(makeRequest("http://test/api/performance") as never);
+    expect(res.status).toBe(409);
     const body = await res.json();
-
-    expect(res.status).toBe(200);
-    expect(body.summary.total_return).toBe(0.12);
-    expect(mockXenonFetch).toHaveBeenCalledTimes(2);
+    expect(body.detail ?? body.error).toContain("conflict");
+    mockXenonFetch.mockReset();
   });
 
-  it("GET cold start returns 502 when FastAPI generation fails", async () => {
-    mockXenonFetch.mockRejectedValueOnce(new Error("FastAPI down"));
-
+  it("GET preserves upstream 503 Futu OpenD unreachable", async () => {
+    mockXenonFetch.mockRejectedValueOnce(
+      new FakeXenonApiError(503, "Futu OpenD unreachable"),
+    );
     const { GET } = await import("../app/api/performance/route");
-    const res = await GET();
-    const body = await res.json();
+    const res = await GET(
+      makeRequest("http://test/api/performance?broker=FUTU") as never,
+    );
+    expect(res.status).toBe(503);
+    mockXenonFetch.mockReset();
+  });
 
+  it("GET returns 502 on non-XenonApiError network failures", async () => {
+    mockXenonFetch.mockRejectedValueOnce(new Error("ECONNREFUSED"));
+    const { GET } = await import("../app/api/performance/route");
+    const res = await GET(makeRequest("http://test/api/performance") as never);
     expect(res.status).toBe(502);
-    expect(body.error).toContain("FastAPI down");
-    expect(mockReadFile).not.toHaveBeenCalled();
-    expect(mockStat).not.toHaveBeenCalled();
-  });
-
-  it("POST refreshes performance through FastAPI and updates the route cache", async () => {
-    mockXenonFetch
-      .mockResolvedValueOnce({
-        as_of: "2026-03-13",
-        last_sync: "2026-03-13T16:00:00Z",
-        summary: { sharpe_ratio: 1.84 },
-        series: [],
-      })
-      .mockResolvedValueOnce({
-        as_of: "2026-03-13",
-        last_sync: "2026-03-13T16:01:00Z",
-        summary: { sharpe_ratio: 1.91 },
-        series: [],
-      });
-
-    const { GET, POST } = await import("../app/api/performance/route");
-    await GET();
-
-    const postRes = await POST();
-    const postBody = await postRes.json();
-    const cachedRes = await GET();
-    const cachedBody = await cachedRes.json();
-
-    expect(postRes.status).toBe(200);
-    expect(postBody.summary.sharpe_ratio).toBe(1.91);
-    expect(cachedBody.summary.sharpe_ratio).toBe(1.91);
-    expect(mockXenonFetch).toHaveBeenCalledTimes(2);
-    expect(mockXenonFetch).toHaveBeenNthCalledWith(
-      2,
-      "/performance",
-      expect.objectContaining({ method: "POST", timeout: 190_000 }),
-    );
+    const body = await res.json();
+    expect(body.error).toContain("ECONNREFUSED");
+    mockXenonFetch.mockReset();
   });
 });

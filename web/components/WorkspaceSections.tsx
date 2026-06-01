@@ -2602,6 +2602,7 @@ export default function WorkspaceSections({
         <PerformancePanel
           portfolioLastSync={portfolioLastSync}
           marketState={marketState}
+          broker={activeAccount === "futu" ? "FUTU" : "IB"}
         />
       );
     case "orders":

@@ -46,6 +46,7 @@ from xenon.api.routes.historical import router as historical_router
 from xenon.api.routes.journal import router as journal_router
 from xenon.api.routes.orders import orders_payload_for_scope
 from xenon.api.routes.orders import router as orders_router
+from xenon.api.routes.performance import router as performance_router
 from xenon.api.routes.trades import router as trades_router
 from xenon.api.routes.wizard import router as wizard_router
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
@@ -479,6 +480,7 @@ app = FastAPI(title="Xenon API", version="1.0.0", lifespan=lifespan)
 app.include_router(historical_router)
 app.include_router(journal_router)
 app.include_router(orders_router)
+app.include_router(performance_router)
 app.include_router(trades_router)
 app.include_router(wizard_router)
 
@@ -2665,6 +2667,25 @@ async def futu_sync():
 
         _atomic_save(str(DATA_DIR / "futu_portfolio.json"), result)
         _futu_last_sync_monotonic = _time.monotonic()
+
+        # Persist FUTU NAV to xenon.nav_history (spec §10). Best-effort —
+        # a persistence failure must NOT mask a successful OpenD fetch.
+        # NavAccountEnvConflict bubbles to a 409 so the operator sees it.
+        engine = getattr(app.state, "db_engine", None)
+        if engine is not None:
+            from xenon.api.services.futu_nav_persistence import (
+                NavAccountEnvConflict,
+                persist_futu_nav,
+            )
+
+            matched_env = client.trd_env_of_matched_account()
+            try:
+                await persist_futu_nav(engine, client, matched_env, result)
+            except NavAccountEnvConflict as exc:
+                raise HTTPException(status_code=409, detail=str(exc))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("persist_futu_nav failed (continuing): %s", exc)
+
         return {"ok": True, **result}
 
 

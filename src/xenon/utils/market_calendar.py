@@ -5,8 +5,10 @@ Holidays are loaded from src/xenon/config/market_holidays.json.
 """
 
 import json
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
+
+import pytz
 
 # src/xenon/utils/market_calendar.py → src/xenon/config/market_holidays.json
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "market_holidays.json"
@@ -116,6 +118,18 @@ def get_last_n_trading_days(n: int, from_date: datetime = None, include_today: b
             break
 
     return trading_days
+
+
+def current_session_date_et() -> date:
+    """Return the current US-Eastern session date as a `date` object.
+
+    Used by performance / nav_history paths (spec §11) so same-day rows always
+    land on the same date regardless of host timezone. Symmetric with
+    `ib_sync._append_nav_snapshot` which already keys to ET via
+    `datetime.now(et).date()`.
+    """
+    et = pytz.timezone("America/New_York")
+    return datetime.now(et).date()
 
 
 # ── internal helpers ──────────────────────────────────────────────────
