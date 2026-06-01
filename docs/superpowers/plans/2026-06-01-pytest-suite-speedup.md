@@ -55,7 +55,7 @@ Known baseline as of 2026-06-01: `python-tests: 872s` on master CI run `26734950
 
 - Modify: `scripts/tests/conftest.py:55-130` (truncate fixture + helpers)
 - Modify: `src/xenon/api/tests/conftest.py:14-90` (duplicate truncate fixture)
-- Create: `scripts/tests/_db_fixture.py` (shared helper extracted from both conftests)
+- Create: `src/xenon/_test_db.py` (shared helper extracted from both conftests)
 
 ### Task 1: Extract shared truncate helper
 
@@ -65,7 +65,7 @@ Known baseline as of 2026-06-01: `python-tests: 872s` on master CI run `26734950
 
 ```python
 # scripts/tests/test_db_fixture.py
-from scripts.tests._db_fixture import truncate_all_xenon_tables, get_session_engine
+from xenon._test_db import truncate_all_xenon_tables, get_session_engine
 
 def test_session_engine_is_singleton():
     e1 = get_session_engine()
@@ -83,7 +83,7 @@ def test_truncate_uses_session_engine():
 Run: `uv run pytest scripts/tests/test_db_fixture.py -xvs`
 Expected: `ImportError: cannot import name 'truncate_all_xenon_tables'`
 
-- [ ] **Step 3: Implement `scripts/tests/_db_fixture.py`**
+- [ ] **Step 3: Implement `src/xenon/_test_db.py`**
 
 ```python
 """Shared Postgres test-DB helpers used by scripts/tests/ and src/xenon/api/tests/.
@@ -170,7 +170,7 @@ Expected: both tests pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add scripts/tests/_db_fixture.py scripts/tests/test_db_fixture.py
+git add src/xenon/_test_db.py scripts/tests/test_db_fixture.py
 git commit -m "test: extract shared session-scoped PG truncate helper"
 ```
 
@@ -181,7 +181,7 @@ git commit -m "test: extract shared session-scoped PG truncate helper"
 In `scripts/tests/conftest.py`, replace lines 27-105 (the helpers) with:
 
 ```python
-from scripts.tests._db_fixture import (
+from xenon._test_db import (
     get_session_engine,
     is_pg_reachable,
     sync_test_db_url,
@@ -239,7 +239,7 @@ Same pattern as Task 2 against the duplicate fixture.
 - [ ] **Step 1: Replace lines 14-90 of `src/xenon/api/tests/conftest.py` with imports + thinned fixture**
 
 ```python
-from scripts.tests._db_fixture import (
+from xenon._test_db import (
     get_session_engine,
     is_pg_reachable,
     sync_test_db_url,
@@ -291,7 +291,7 @@ Open PR. Measure CI delta on a real master push. Target: 872s → ~550s.
 
 **Files:**
 
-- Modify: `scripts/tests/_db_fixture.py` (add txn fixture + connection injection)
+- Modify: `src/xenon/_test_db.py` (add txn fixture + connection injection)
 - Modify: `scripts/tests/conftest.py` (swap autouse from TRUNCATE-pre/post to txn savepoint)
 - Modify: `src/xenon/api/tests/conftest.py` (same swap)
 - Modify: `src/xenon/db/engine.py` (only if app engine can't be redirected via monkeypatch — verify in Task 4)
@@ -342,10 +342,10 @@ def test_app_engine_writes_use_test_connection(pg_session):
 
 Expected: `fixture 'pg_session' not found`.
 
-- [ ] **Step 3: Implement the txn fixture in `_db_fixture.py`**
+- [ ] **Step 3: Implement the txn fixture in `_test_db.py`**
 
 ```python
-# Append to scripts/tests/_db_fixture.py
+# Append to src/xenon/_test_db.py
 
 import pytest
 from sqlalchemy.engine import Connection
@@ -371,7 +371,7 @@ def pg_session():
 
 - [ ] **Step 4: Implement app-engine connection injection**
 
-In `_db_fixture.py`, add a fixture that monkey-patches `xenon.db.engine.get_sync_engine` to return an engine bound to the test connection. SQLAlchemy supports `Engine.create()` from an existing connection via `Connection.execution_options(bind_arguments=...)`, or simpler: replace `engine_mod._sync_engine` with a thin wrapper whose `.connect()` returns the test connection.
+In `_test_db.py`, add a fixture that monkey-patches `xenon.db.engine.get_sync_engine` to return an engine bound to the test connection. SQLAlchemy supports `Engine.create()` from an existing connection via `Connection.execution_options(bind_arguments=...)`, or simpler: replace `engine_mod._sync_engine` with a thin wrapper whose `.connect()` returns the test connection.
 
 ```python
 @pytest.fixture
@@ -400,7 +400,7 @@ Expected: all green, including the cross-engine visibility test.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add scripts/tests/_db_fixture.py scripts/tests/test_txn_rollback_isolation.py
+git add src/xenon/_test_db.py scripts/tests/test_txn_rollback_isolation.py
 git commit -m "test: add per-test transactional rollback fixture (pg_session, app_engine_bound_to_test)"
 ```
 
@@ -420,7 +420,7 @@ def _postgres_orders_test_db(monkeypatch, pg_session):
     monkeypatch.setenv("DATABASE_URL", sync_test_db_url())
     try:
         import xenon.db.engine as engine_mod
-        from scripts.tests._db_fixture import _BoundEngine  # exported in Task 4
+        from xenon._test_db import _BoundEngine  # exported in Task 4
         monkeypatch.setattr(engine_mod, "_sync_engine", _BoundEngine(pg_session))
     except Exception:
         pass
@@ -505,7 +505,7 @@ Open PR. Measure CI delta. Target: ~550s → ~250s.
 **Files:**
 
 - Modify: `pyproject.toml` (add `pytest-xdist` to `[project.optional-dependencies].test`)
-- Modify: `scripts/tests/_db_fixture.py` (per-worker DB selection)
+- Modify: `src/xenon/_test_db.py` (per-worker DB selection)
 - Modify: `.github/workflows/ci.yml` (`python-tests:` job — pre-create per-worker DBs)
 - Modify: `scripts/infra/dev/run_pytest_affected.py` (pass `-n auto` for local runs)
 
@@ -519,10 +519,10 @@ git add pyproject.toml uv.lock
 git commit -m "test: add pytest-xdist for parallel test execution"
 ```
 
-- [ ] **Step 2: Teach `_db_fixture.py` about `worker_id`**
+- [ ] **Step 2: Teach `_test_db.py` about `worker_id`**
 
 ```python
-# scripts/tests/_db_fixture.py
+# src/xenon/_test_db.py
 def sync_test_db_url(worker_id: str | None = None) -> str:
     base = os.environ.get(
         "DATABASE_URL_TEST",

@@ -1,15 +1,18 @@
 """Shared pytest configuration and fixtures for scripts tests."""
 
 import importlib
-import os
 import sys
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import SQLAlchemyError
 
+from xenon._test_db import (
+    get_session_engine,
+    is_pg_reachable,
+    sync_test_db_url,
+    truncate_all_xenon_tables,
+)
 from xenon.execution.account_scope import AccountScope
 
 # Add repo root, scripts/, and src/ so tests can import via:
@@ -24,80 +27,9 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SRC_DIR))
 
 
-def _sync_test_db_url() -> str:
-    url = os.environ.get(
-        "DATABASE_URL_TEST",
-        "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
-    )
-    return url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
-
-
-_PG_REACHABLE_CACHE: bool | None = None
-
-
-def _pg_reachable(engine: Engine) -> bool:
-    """Lazily probe PG with a real SELECT 1 + short connect timeout, cache result.
-
-    Lazy because conftest imports BEFORE pytest-dotenv loads .env, so the URL
-    available at module-import time may not match the URL the test uses.
-
-    A TCP-only probe is not sufficient: a NAT/firewall may accept the handshake
-    while the PG protocol negotiation times out.
-    """
-    global _PG_REACHABLE_CACHE
-    if _PG_REACHABLE_CACHE is not None:
-        return _PG_REACHABLE_CACHE
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        _PG_REACHABLE_CACHE = True
-    except Exception:
-        _PG_REACHABLE_CACHE = False
-    return _PG_REACHABLE_CACHE
-
-
-def _truncate_postgres_tables() -> None:
-    global _PG_REACHABLE_CACHE
-    if _PG_REACHABLE_CACHE is False:
-        return
-    engine = create_engine(_sync_test_db_url(), pool_pre_ping=True, connect_args={"connect_timeout": 2})
-    try:
-        if not _pg_reachable(engine):
-            return
-        try:
-            with engine.begin() as conn:
-                for table in (
-                    "events.outbox",
-                    "xenon.order_fills",
-                    "xenon.order_events",
-                    "xenon.order_submissions",
-                    "xenon.wizard_protection",
-                    "xenon.wizard_events",
-                    "xenon.wizard_combo_attempts",
-                    "xenon.wizard_sessions",
-                    "xenon.uw_flow_event_ticks",
-                    "xenon.uw_flow_events",
-                    "xenon.uw_api_stats",
-                    "xenon.uw_analyze_flow_alerts",
-                    "xenon.uw_analyze_gex_strikes",
-                    "xenon.uw_analyze_short_volume_trend",
-                    "xenon.uw_analyze_snapshots",
-                    "xenon.positions",
-                    "xenon.account_snapshots",
-                    "xenon.journal_entries",
-                    "xenon.trades",
-                    "xenon.nav_history",
-                    "xenon.gex_snapshots",
-                    "xenon.scan_results",
-                    "xenon.vcg_series",
-                    "xenon.cri_series",
-                    "xenon.ticker_cache",
-                ):
-                    conn.execute(text(f"TRUNCATE {table} CASCADE"))
-        except SQLAlchemyError:
-            _PG_REACHABLE_CACHE = False
-    finally:
-        engine.dispose()
+# Backwards-compat aliases: a handful of tests import `_sync_test_db_url`
+# from this module. The implementation now lives in `_db_fixture`.
+_sync_test_db_url = sync_test_db_url
 
 
 @pytest.fixture(autouse=True)
@@ -108,7 +40,7 @@ def _postgres_orders_test_db(monkeypatch):
     silently skipped and tests that actually need PG should depend on the
     `pg_test_engine` fixture, which calls `pytest.skip()` when offline.
     """
-    monkeypatch.setenv("DATABASE_URL", _sync_test_db_url())
+    monkeypatch.setenv("DATABASE_URL", sync_test_db_url())
 
     try:
         import xenon.db.engine as engine_mod
@@ -117,9 +49,9 @@ def _postgres_orders_test_db(monkeypatch):
     except Exception:
         pass
 
-    _truncate_postgres_tables()
+    truncate_all_xenon_tables()
     yield
-    _truncate_postgres_tables()
+    truncate_all_xenon_tables()
 
 
 @pytest.fixture
@@ -128,12 +60,13 @@ def pg_test_engine() -> Engine:
 
     Skips the test if the test DB is unreachable (offline development).
     Migration tests that need to seed PG should depend on this fixture.
+
+    Returns the session-scoped shared engine (see `_db_fixture.py`); tests
+    must not `.dispose()` it.
     """
-    eng = create_engine(_sync_test_db_url(), pool_pre_ping=True, connect_args={"connect_timeout": 2})
-    if not _pg_reachable(eng):
-        eng.dispose()
-        pytest.skip(f"PG test DB unreachable at {_sync_test_db_url()}")
-    return eng
+    if not is_pg_reachable():
+        pytest.skip(f"PG test DB unreachable at {sync_test_db_url()}")
+    return get_session_engine()
 
 
 # Aliases added per perf-rebuild plan correction #6 (2026-06-01).
