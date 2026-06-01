@@ -1,4 +1,18 @@
+/**
+ * DEPRECATED: built for the legacy reconstructed-NAV payload shape (with
+ * methodology.curve_type / price_sources.stocks / etc). Superseded by
+ * performance-broker-switch.spec.ts + performance-futu-cold-start.spec.ts
+ * which exercise the perf-rebuild discriminated-union contract.
+ *
+ * Kept skipped for one release in case any operator runs it directly.
+ */
 import { expect, test } from "@playwright/test";
+
+test.describe.configure({ mode: "serial" });
+test.skip(
+  true,
+  "Deprecated: see performance-broker-switch.spec.ts (perf-rebuild)",
+);
 
 const PERFORMANCE_MOCK = {
   as_of: "2026-03-10",
@@ -17,7 +31,8 @@ const PERFORMANCE_MOCK = {
     curve_type: "reconstructed_net_liquidation",
     return_basis: "daily_close_to_close",
     risk_free_rate: 0,
-    library_strategy: "in_repo_formulas_aligned_to_empyrical_quantstats_conventions",
+    library_strategy:
+      "in_repo_formulas_aligned_to_empyrical_quantstats_conventions",
   },
   summary: {
     starting_equity: 1_050_000,
@@ -109,13 +124,25 @@ const ORDERS_EMPTY = {
 async function setupMocks(page: import("@playwright/test").Page) {
   await page.unrouteAll({ behavior: "ignoreErrors" });
   await page.route("**/api/performance", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(PERFORMANCE_MOCK) }),
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(PERFORMANCE_MOCK),
+    }),
   );
   await page.route("**/api/portfolio", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(PORTFOLIO_EMPTY) }),
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(PORTFOLIO_EMPTY),
+    }),
   );
   await page.route("**/api/orders", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(ORDERS_EMPTY) }),
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(ORDERS_EMPTY),
+    }),
   );
   await page.route("**/api/blotter", (route) =>
     route.fulfill({
@@ -123,7 +150,12 @@ async function setupMocks(page: import("@playwright/test").Page) {
       contentType: "application/json",
       body: JSON.stringify({
         as_of: "2026-03-10T18:55:00Z",
-        summary: { closed_trades: 0, open_trades: 0, total_commissions: 0, realized_pnl: 0 },
+        summary: {
+          closed_trades: 0,
+          open_trades: 0,
+          total_commissions: 0,
+          realized_pnl: 0,
+        },
         closed_trades: [],
         open_trades: [],
       }),
@@ -136,17 +168,27 @@ test.describe("/performance page", () => {
     await setupMocks(page);
     await page.goto("/performance");
 
-    await expect(page.locator('[data-testid="performance-panel"]')).toBeVisible({ timeout: 10_000 });
-    await expect(page.locator('[data-testid="performance-panel"] .section-label-mono').filter({ hasText: "RECONSTRUCTED YTD" })).toBeVisible();
+    await expect(page.locator('[data-testid="performance-panel"]')).toBeVisible(
+      { timeout: 10_000 },
+    );
+    await expect(
+      page
+        .locator('[data-testid="performance-panel"] .section-label-mono')
+        .filter({ hasText: "RECONSTRUCTED YTD" }),
+    ).toBeVisible();
     await expect(page.locator("text=Sharpe Ratio")).toBeVisible();
     await expect(page.locator("text=Sortino Ratio")).toBeVisible();
     await expect(page.locator("text=Max Drawdown")).toBeVisible();
-    await expect(page.locator('[data-testid="performance-equity-chart"]')).toBeVisible();
+    await expect(
+      page.locator('[data-testid="performance-equity-chart"]'),
+    ).toBeVisible();
     await expect(page.locator("text=Methodology")).toBeVisible();
     await expect(page.locator("text=Warnings")).toBeVisible();
   });
 
-  test("performance metric cards are clickable and open explainability modals", async ({ page }) => {
+  test("performance metric cards are clickable and open explainability modals", async ({
+    page,
+  }) => {
     await setupMocks(page);
     await page.goto("/performance");
 
@@ -160,7 +202,9 @@ test.describe("/performance page", () => {
     await expect(modal).toBeVisible();
     await expect(modal).toContainText("YTD Return");
     await expect(modal).toContainText("Cumulative return");
-    await expect(modal).toContainText("YTD Return = (Ending Equity / Starting Equity) - 1");
+    await expect(modal).toContainText(
+      "YTD Return = (Ending Equity / Starting Equity) - 1",
+    );
     await modal.getByRole("button", { name: "Close" }).click();
     await expect(modal).toBeHidden();
 
@@ -168,10 +212,14 @@ test.describe("/performance page", () => {
     await expect(modal).toBeVisible();
     await expect(modal).toContainText("Beta");
     await expect(modal).toContainText("Sensitivity");
-    await expect(modal).toContainText("Covariance(Portfolio Returns, SPY Returns)");
+    await expect(modal).toContainText(
+      "Covariance(Portfolio Returns, SPY Returns)",
+    );
   });
 
-  test("refreshes stale cached ending equity to the current portfolio net liquidation snapshot", async ({ page }) => {
+  test("refreshes stale cached ending equity to the current portfolio net liquidation snapshot", async ({
+    page,
+  }) => {
     await page.unrouteAll({ behavior: "ignoreErrors" });
 
     let performanceGetCalls = 0;
@@ -184,10 +232,14 @@ test.describe("/performance page", () => {
         body: JSON.stringify({
           ...PERFORMANCE_MOCK,
           as_of: performanceGetCalls === 1 ? "2026-03-10" : "2026-03-11",
-          last_sync: performanceGetCalls === 1 ? "2026-03-10T18:55:00Z" : "2026-03-11T13:37:14Z",
+          last_sync:
+            performanceGetCalls === 1
+              ? "2026-03-10T18:55:00Z"
+              : "2026-03-11T13:37:14Z",
           summary: {
             ...PERFORMANCE_MOCK.summary,
-            ending_equity: performanceGetCalls === 1 ? 1_063_031.86 : 1_313_112.03,
+            ending_equity:
+              performanceGetCalls === 1 ? 1_063_031.86 : 1_313_112.03,
             pnl: performanceGetCalls === 1 ? 13_031.86 : 263_112.03,
             total_return: performanceGetCalls === 1 ? 0.01241 : 0.25058,
           },
@@ -209,7 +261,11 @@ test.describe("/performance page", () => {
       }),
     );
     await page.route("**/api/orders", (route) =>
-      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(ORDERS_EMPTY) }),
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(ORDERS_EMPTY),
+      }),
     );
     await page.route("**/api/blotter", (route) =>
       route.fulfill({
@@ -217,7 +273,12 @@ test.describe("/performance page", () => {
         contentType: "application/json",
         body: JSON.stringify({
           as_of: "2026-03-10T18:55:00Z",
-          summary: { closed_trades: 0, open_trades: 0, total_commissions: 0, realized_pnl: 0 },
+          summary: {
+            closed_trades: 0,
+            open_trades: 0,
+            total_commissions: 0,
+            realized_pnl: 0,
+          },
           closed_trades: [],
           open_trades: [],
         }),
@@ -226,12 +287,18 @@ test.describe("/performance page", () => {
 
     await page.goto("/performance");
 
-    await expect(page.locator('[data-testid="performance-panel"]')).toBeVisible({ timeout: 10_000 });
-    await expect(page.locator("text=Ending equity $1,313,112.03")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('[data-testid="performance-panel"]')).toBeVisible(
+      { timeout: 10_000 },
+    );
+    await expect(page.locator("text=Ending equity $1,313,112.03")).toBeVisible({
+      timeout: 10_000,
+    });
     expect(performanceGetCalls).toBeGreaterThan(1);
   });
 
-  test("refreshes the hero as_of date after route revalidation returns the current session", async ({ page }) => {
+  test("refreshes the hero as_of date after route revalidation returns the current session", async ({
+    page,
+  }) => {
     await page.unrouteAll({ behavior: "ignoreErrors" });
 
     let performanceGetCalls = 0;
@@ -270,7 +337,11 @@ test.describe("/performance page", () => {
       }),
     );
     await page.route("**/api/orders", (route) =>
-      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(ORDERS_EMPTY) }),
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(ORDERS_EMPTY),
+      }),
     );
     await page.route("**/api/blotter", (route) =>
       route.fulfill({
@@ -278,7 +349,12 @@ test.describe("/performance page", () => {
         contentType: "application/json",
         body: JSON.stringify({
           as_of: "2026-03-13T20:02:06Z",
-          summary: { closed_trades: 0, open_trades: 0, total_commissions: 0, realized_pnl: 0 },
+          summary: {
+            closed_trades: 0,
+            open_trades: 0,
+            total_commissions: 0,
+            realized_pnl: 0,
+          },
           closed_trades: [],
           open_trades: [],
         }),
@@ -287,12 +363,18 @@ test.describe("/performance page", () => {
 
     await page.goto("/performance");
 
-    await expect(page.locator('[data-testid="performance-panel"]')).toBeVisible({ timeout: 10_000 });
-    await expect(page.locator("text=AS OF 2026-03-13")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('[data-testid="performance-panel"]')).toBeVisible(
+      { timeout: 10_000 },
+    );
+    await expect(page.locator("text=AS OF 2026-03-13")).toBeVisible({
+      timeout: 10_000,
+    });
     expect(performanceGetCalls).toBeGreaterThan(1);
   });
 
-  test("revalidates reconstructed YTD after portfolio sync advances the shell snapshot", async ({ page }) => {
+  test("revalidates reconstructed YTD after portfolio sync advances the shell snapshot", async ({
+    page,
+  }) => {
     await page.unrouteAll({ behavior: "ignoreErrors" });
 
     let performanceGetCalls = 0;
@@ -352,7 +434,11 @@ test.describe("/performance page", () => {
       });
     });
     await page.route("**/api/orders", (route) =>
-      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(ORDERS_EMPTY) }),
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(ORDERS_EMPTY),
+      }),
     );
     await page.route("**/api/blotter", (route) =>
       route.fulfill({
@@ -360,7 +446,12 @@ test.describe("/performance page", () => {
         contentType: "application/json",
         body: JSON.stringify({
           as_of: "2026-03-12T21:01:00Z",
-          summary: { closed_trades: 0, open_trades: 0, total_commissions: 0, realized_pnl: 0 },
+          summary: {
+            closed_trades: 0,
+            open_trades: 0,
+            total_commissions: 0,
+            realized_pnl: 0,
+          },
           closed_trades: [],
           open_trades: [],
         }),
@@ -369,20 +460,28 @@ test.describe("/performance page", () => {
 
     await page.goto("/performance");
 
-    await expect(page.locator('[data-testid="performance-panel"]')).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('[data-testid="performance-panel"]')).toBeVisible(
+      { timeout: 10_000 },
+    );
     await expect(page.locator("text=AS OF 2026-03-12")).toBeVisible();
 
     const callsBeforeSync = performanceGetCalls;
     await page.getByRole("button", { name: "Sync Now" }).click();
 
-    await expect(page.locator("text=Ending equity $1,218,410.03")).toBeVisible({ timeout: 10_000 });
-    await expect(page.locator("text=AS OF 2026-03-13")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("text=Ending equity $1,218,410.03")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.locator("text=AS OF 2026-03-13")).toBeVisible({
+      timeout: 10_000,
+    });
     expect(performanceGetCalls).toBeGreaterThan(callsBeforeSync);
   });
 
   test("sidebar exposes the performance route", async ({ page }) => {
     await setupMocks(page);
     await page.goto("/performance");
-    await expect(page.locator("a[href='/performance']")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("a[href='/performance']")).toBeVisible({
+      timeout: 10_000,
+    });
   });
 });
