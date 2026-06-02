@@ -35,6 +35,21 @@ PG_HOST="${PGHOST:-localhost}"
 PG_PORT="${PGPORT:-5432}"
 PG_USER="${PGUSER:-xenon_migrator}"
 
+# Prefer the highest-version PG client tools available. pg_dump must be
+# >= the server's major version (a 15.x client cannot dump a 17.x
+# server — fails with "aborting because of server version mismatch").
+# Probe homebrew slots from newest to oldest; first hit wins. Falls
+# through to the system PATH when nothing is installed under
+# /opt/homebrew (e.g. on the macmini if PG ships via a different path).
+for _pg_major in 18 17 16 15; do
+  _pg_bin="/opt/homebrew/opt/postgresql@${_pg_major}/bin"
+  if [[ -x "$_pg_bin/pg_dump" ]]; then
+    PATH="$_pg_bin:$PATH"
+    break
+  fi
+done
+unset _pg_major _pg_bin
+
 DRY=0
 for arg in "$@"; do
   case "$arg" in
@@ -82,10 +97,22 @@ if [[ "$DRY" == "1" ]]; then
   fi
 fi
 
+# pg_restore --clean drops objects one-by-one, but a referenced table
+# (e.g. xenon.futu_trades) cannot be dropped while other objects depend
+# on it — pg_restore lacks CASCADE semantics for that path. Pre-drop
+# the application schemas with CASCADE so the restore lands on a clean
+# slate. Failure here is a warning (the restore may still succeed for
+# objects that don't conflict), not fatal — log loudly and continue.
+log "Pre-drop: dropping xenon + events schemas with CASCADE."
+if ! psql -v ON_ERROR_STOP=1 -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$DST_DB" \
+     -c "DROP SCHEMA IF EXISTS xenon CASCADE;" \
+     -c "DROP SCHEMA IF EXISTS events CASCADE;" 2>>"$LOG_FILE"; then
+  log "WARN: pre-drop failed — restore may emit residual 'already exists' / FK errors."
+fi
+
 # Production path: pipe the custom-format dump straight into pg_restore.
-# --clean --if-exists drops existing objects in the destination so the
-# schema matches the source exactly (handles dropped tables, renamed
-# columns, etc).
+# --clean --if-exists drops anything the pre-drop missed (extensions,
+# the public-schema objects we don't pre-drop, etc).
 if pg_dump -Fc -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$SRC_DB" 2>>"$LOG_FILE" \
    | pg_restore --clean --if-exists --no-owner --no-privileges \
        -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$DST_DB" 2>>"$LOG_FILE"; then

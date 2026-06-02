@@ -59,6 +59,7 @@ xenon-portfolio-report   = "xenon.reports.portfolio_report:main"
 xenon-portfolio-attrib   = "xenon.reports.portfolio_attribution:main"
 xenon-portfolio-perf     = "xenon.reports.portfolio_performance:main"
 xenon-perf-explainer     = "xenon.reports.performance_explainer_report:main"
+xenon-nav-flex-refresh   = "xenon.jobs.nav_flex_refresh:main"
 
 [project.optional-dependencies]
 test = [

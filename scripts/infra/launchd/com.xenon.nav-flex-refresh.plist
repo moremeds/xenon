@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  com.xenon.nav-flex-refresh.plist — Daily IB Flex NAV refresh LaunchAgent.
+
+  Runs on the macmini at 17:30 ET (one hour after market close) to pull
+  the latest IB Flex EquitySummaryByReportDateInBase rows and upsert
+  them into xenon.nav_history with source='close'.
+
+  Architecture: the saved Flex query is a rolling ~2-week reconciliation
+  window — a one-day miss is absorbed by tomorrow's run. Historical
+  backfill is a separate one-shot path, not this schedule.
+
+  Install:
+    1. Substitute placeholders in this template:
+       __XENON_ROOT__    → /Users/<user>/projects/xenon
+       __HOMEBREW_PATH__ → /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+    2. Copy to ~/Library/LaunchAgents/com.xenon.nav-flex-refresh.plist
+    3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.xenon.nav-flex-refresh.plist
+    4. Verify schedule:
+       launchctl list | grep com.xenon.nav-flex-refresh
+       launchctl print gui/$(id -u)/com.xenon.nav-flex-refresh | grep -A5 calendar
+
+  Logs:
+    /var/log/xenon/nav-flex-refresh.stdout.log
+    /var/log/xenon/nav-flex-refresh.stderr.log
+    /var/log/xenon/nav-flex-refresh.log (wrapper output)
+
+  Uninstall:
+    launchctl bootout gui/$(id -u)/com.xenon.nav-flex-refresh
+    rm ~/Library/LaunchAgents/com.xenon.nav-flex-refresh.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.xenon.nav-flex-refresh</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__XENON_ROOT__/scripts/infra/nav-flex-refresh.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOMEBREW_PATH__</string>
+    <key>XENON_ROOT</key>
+    <string>__XENON_ROOT__</string>
+    <key>TZ</key>
+    <string>America/New_York</string>
+  </dict>
+
+  <!-- 17:30 ET, every day. launchd interprets in local TZ; the TZ env
+       var above pins the calendar resolution to ET even if the macmini
+       system TZ changes. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>17</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/var/log/xenon/nav-flex-refresh.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/var/log/xenon/nav-flex-refresh.stderr.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
