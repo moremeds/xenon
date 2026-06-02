@@ -95,6 +95,19 @@ if [[ "$MODE" == "paper" ]]; then
     DATABASE_URL_TEST="$DATABASE_URL_TEST_PAPER"
   fi
 fi
+if [[ "$MODE" == "live" ]]; then
+  # Live dev sessions debug against the live IB Gateway but must never
+  # write prod (core_dev). Substitute DATABASE_URL_TEST (core_test) so the
+  # read-side hits the dev mirror; XENON_READ_ONLY=1 below blocks writes
+  # anyway. Without this, the guard at line ~106 kills dev.sh live every
+  # time because .env's DATABASE_URL targets core_dev.
+  if [[ -n "${DATABASE_URL_TEST:-}" ]]; then
+    DATABASE_URL="$DATABASE_URL_TEST"
+    log_info "Using DATABASE_URL_TEST (core_test) for live-debug mode (read-only)."
+  else
+    log_warn "DATABASE_URL_TEST not set — live mode will use DATABASE_URL ($DATABASE_URL)."
+  fi
+fi
 export DATABASE_URL DATABASE_URL_TEST
 
 # dev.sh never targets prod. core_dev is written exclusively by the
