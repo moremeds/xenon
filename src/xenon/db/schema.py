@@ -262,10 +262,9 @@ futu_cash_flow = Table(
         name="ck_futu_cash_flow_account_env",
     ),
     CheckConstraint("currency = 'USD'", name="ck_futu_cash_flow_currency_usd_only"),
-    CheckConstraint(
-        "cashflow_type IN ('DEPOSIT', 'WITHDRAW', 'TRANSFER_IN', 'TRANSFER_OUT')",
-        name="ck_futu_cash_flow_type",
-    ),
+    # No CHECK on cashflow_type — Futu returns a long open enum
+    # (Cash Dividend, Fund Subscription, IPO Subscription, Others, ...).
+    # M5 walk decides which raw types move NAV externally.
     Index(
         "ix_futu_cash_flow_scope_occurred_at",
         "broker",

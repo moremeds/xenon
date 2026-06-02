@@ -185,27 +185,44 @@ def test_fetch_history_deals_raises_on_sdk_error():
         )
 
 
-def test_fetch_capital_flow_returns_normalized_rows():
+def test_fetch_capital_flow_persists_usd_rows_verbatim():
+    """Futu's cashflow_type is an open enum (Cash Dividend, Fund Subscription,
+    Others, ...). We persist verbatim and trust Futu's sign on cashflow_amount.
+    """
     c, ctx = _client_with_mocked_ctx(
         flow_rows=[
-            _flow_row("f1", cashflow_type="MoneyIn", amount="1000"),
-            _flow_row("f2", cashflow_type="MoneyOut", amount="500"),
+            _flow_row("f1", cashflow_type="Others", amount="-1500"),
+            _flow_row("f2", cashflow_type="Cash Dividend", amount="2.5"),
+            _flow_row("f3", cashflow_type="Fund Subscription", amount="-6818.36"),
         ]
     )
+    c.CASHFLOW_THROTTLE_SEC = 0
     flows = c.fetch_capital_flow(
         start=datetime(2024, 5, 1, tzinfo=timezone.utc),
-        end=datetime(2024, 5, 31, tzinfo=timezone.utc),
+        end=datetime(2024, 5, 1, tzinfo=timezone.utc),
     )
-    assert len(flows) == 2
-    f1 = flows[0]
-    assert f1["futu_flow_id"] == "f1"
-    assert f1["cashflow_type"] == "DEPOSIT"
-    assert f1["amount"] == 1000.0
-    assert f1["currency"] == "USD"
-    # outflow gets negative sign
-    f2 = flows[1]
-    assert f2["cashflow_type"] == "WITHDRAW"
-    assert f2["amount"] == -500.0
+    assert len(flows) == 3
+    by_id = {f["futu_flow_id"]: f for f in flows}
+    assert by_id["f1"]["cashflow_type"] == "Others"
+    assert by_id["f1"]["amount"] == -1500.0
+    assert by_id["f2"]["cashflow_type"] == "Cash Dividend"
+    assert by_id["f2"]["amount"] == 2.5
+    assert by_id["f3"]["cashflow_type"] == "Fund Subscription"
+
+
+def test_fetch_capital_flow_drops_non_usd_rows():
+    c, ctx = _client_with_mocked_ctx(
+        flow_rows=[
+            _flow_row("f1", cashflow_type="Others", amount="-1500", currency="USD"),
+            _flow_row("f2", cashflow_type="IPO Subscription", amount="-251107", currency="HKD"),
+        ]
+    )
+    c.CASHFLOW_THROTTLE_SEC = 0
+    flows = c.fetch_capital_flow(
+        start=datetime(2024, 5, 1, tzinfo=timezone.utc),
+        end=datetime(2024, 5, 1, tzinfo=timezone.utc),
+    )
+    assert {f["futu_flow_id"] for f in flows} == {"f1"}
 
 
 def test_fetch_capital_flow_loops_one_call_per_weekday():

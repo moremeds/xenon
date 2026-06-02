@@ -637,15 +637,11 @@ class FutuClient:
     # short-range pulls (one window) pay no penalty. Tests may set to 0.
     DEAL_THROTTLE_SEC: float = 3.5
 
-    # Futu cashflow type → our normalized union. Anything outside this map
-    # is dropped at the writer (M4) — covers fees / dividends / interest
-    # which do not move external NAV on their own.
-    _CASHFLOW_TYPE_MAP = {
-        "MoneyIn": "DEPOSIT",
-        "MoneyOut": "WITHDRAW",
-        "AccTransIn": "TRANSFER_IN",
-        "AccTransOut": "TRANSFER_OUT",
-    }
+    # No client-side cashflow_type mapping. Futu returns descriptive English
+    # strings ('Cash Dividend', 'Fund Subscription', 'IPO Subscription',
+    # 'Others', etc.) — a fully open set. We persist them verbatim; M5 walk
+    # decides which raw types move NAV externally (currently: 'Others' with
+    # empty remark = external deposit/withdrawal).
 
     def _iter_windows(self, start: datetime, end: datetime):
         """Yield (window_start, window_end) tuples ≤ _HISTORY_WINDOW_DAYS wide."""
@@ -801,25 +797,26 @@ class FutuClient:
                 raise classify_futu_exception(Exception(str(data)))
             if data is not None and not data.empty:
                 for _, row in data.iterrows():
-                    raw_type = str(row.get("cashflow_type", ""))
-                    normalized = self._CASHFLOW_TYPE_MAP.get(raw_type)
-                    if normalized is None:
-                        # Skip fees, dividends, interest — they don't move
-                        # external NAV.
+                    raw_type = str(row.get("cashflow_type", "")).strip()
+                    if not raw_type:
                         continue
+                    currency = str(row.get("currency", "")).strip()
+                    if currency != "USD":
+                        # USD-only policy (per user decision). HKD/CNH rows are
+                        # filtered here rather than at the DB CHECK so M5 walk
+                        # never has to think about FX.
+                        continue
+                    # Futu signs cashflow_amount already (negative = outflow,
+                    # positive = inflow); keep verbatim.
                     amount = float(row.get("cashflow_amount", 0) or 0)
-                    if normalized in ("WITHDRAW", "TRANSFER_OUT"):
-                        amount = -abs(amount)
-                    else:
-                        amount = abs(amount)
                     out.append(
                         {
                             "futu_flow_id": str(
                                 row.get("cashflow_id") or row.get("ref_id") or f"{cur_day.isoformat()}-{row.name}"
                             ),
-                            "cashflow_type": normalized,
+                            "cashflow_type": raw_type,
                             "amount": amount,
-                            "currency": str(row.get("currency", "USD")),
+                            "currency": currency,
                             "occurred_at": self._parse_futu_ts(
                                 row.get("clearing_date") or cur_day.strftime("%Y-%m-%d 00:00:00")
                             ),

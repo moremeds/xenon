@@ -91,4 +91,6 @@ def test_futu_cash_flow_check_constraints_present():
     constraint_names = {c.name for c in schema.futu_cash_flow.constraints if c.name}
     assert "ck_futu_cash_flow_broker" in constraint_names
     assert "ck_futu_cash_flow_currency_usd_only" in constraint_names
-    assert "ck_futu_cash_flow_type" in constraint_names
+    # cashflow_type is intentionally unrestricted — Futu returns an open enum
+    # (Cash Dividend, Fund Subscription, Others, ...). v1 stores verbatim.
+    assert "ck_futu_cash_flow_type" not in constraint_names
