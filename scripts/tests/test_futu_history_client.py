@@ -146,12 +146,28 @@ def test_fetch_history_deals_handles_fractional_seconds_in_timestamp():
 
 def test_fetch_history_deals_paginates_over_90_day_windows():
     c, ctx = _client_with_mocked_ctx(deal_rows=[_deal_row("d1")])
+    c.DEAL_THROTTLE_SEC = 0  # don't sleep in tests
     c.fetch_history_deals(
         start=datetime(2024, 1, 1, tzinfo=timezone.utc),
         end=datetime(2024, 12, 31, tzinfo=timezone.utc),
     )
     # 365 days / 90 = at least 5 windows (4 full + 1 partial)
     assert ctx.history_deal_list_query.call_count >= 5
+
+
+def test_fetch_history_deals_single_window_skips_throttle():
+    """One window = no inter-call sleep. Documents the contract."""
+    c, ctx = _client_with_mocked_ctx(deal_rows=[_deal_row("d1")])
+    # Default throttle 3.5s — but only one window, so no sleep should fire
+    import time as _t
+
+    t0 = _t.perf_counter()
+    c.fetch_history_deals(
+        start=datetime(2024, 5, 1, tzinfo=timezone.utc),
+        end=datetime(2024, 5, 2, tzinfo=timezone.utc),  # 1 day < 90 → 1 call
+    )
+    elapsed = _t.perf_counter() - t0
+    assert elapsed < 1.0, f"single window should be near-instant, got {elapsed:.2f}s"
 
 
 def test_fetch_history_deals_raises_on_sdk_error():

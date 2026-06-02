@@ -632,6 +632,11 @@ class FutuClient:
     # least this many seconds between cashflow calls. Tests may set to 0.
     CASHFLOW_THROTTLE_SEC: float = 1.6
 
+    # history_deal_list_query is capped at 10 calls / 30s. 3.5s gives
+    # headroom (≈ 8.5 req/30s). Only kicks in between window calls so
+    # short-range pulls (one window) pay no penalty. Tests may set to 0.
+    DEAL_THROTTLE_SEC: float = 3.5
+
     # Futu cashflow type → our normalized union. Anything outside this map
     # is dropped at the writer (M4) — covers fees / dividends / interest
     # which do not move external NAV on their own.
@@ -686,7 +691,15 @@ class FutuClient:
 
         env_enum = getattr(TrdEnv, self._matched_trd_env or self.trd_env, TrdEnv.REAL)
         out: List[Dict[str, Any]] = []
+        # Futu caps history_deal_list_query at 10 req / 30s. Throttle between
+        # window calls — single-window pulls pay nothing.
+        import time as _time
+
+        first_call = True
         for w_start, w_end in self._iter_windows(start, end):
+            if not first_call and self.DEAL_THROTTLE_SEC > 0:
+                _time.sleep(self.DEAL_THROTTLE_SEC)
+            first_call = False
             try:
                 ret, data = self._trd_ctx.history_deal_list_query(
                     code="",
