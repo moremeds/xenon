@@ -5,8 +5,16 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.1.3] — 2026-06-03
+### Added
 
+- **Option-chain archive snapshotter — scaffolding (#125).** New long-running service skeleton that will capture full IB option chains for the four CBOE-listed index underliers (SPX, NDX, RUT, VIX) every 10 min into a TimescaleDB-backed Postgres archive. This PR lands design + IMPL plan + the first executable foundation only; the full 10-PR rollout (limiter, pool, persister, workers, launchd) is staged for follow-up. Includes: design spec (`docs/plans/2026-06-02-option-chain-snapshotter-design.md`, hardened through a six-pass review-cycle) + 3,352-line IMPL plan; pre-work — `CLIENT_IDS["option_chain_snapshotter_a"]=95` / `_b=96`, `LOCK_KEY_OPTION_CHAIN_SNAPSHOTTER=7343001` for the single-instance advisory-lock guard, `exchange-calendars>=4.5,<5.0` dependency (resolved 4.13.2); a separate alembic environment at `scripts/migrations/option_chain/` with an initial schema migration creating five tables (`snapshot_config` seeded with the 4-ticker cadence, `option_universe`, `snapshot_run`, `option_chain`, `underlying_ohlcv`), two TimescaleDB hypertables with `add_compression_policy`, the `v_staleness` operator-dashboard view, and conditional `READ` grants for `xenon_prod` / `xenon_dev` / `argon_app`; and a minimal end-to-end spike (`scripts/spike/option_chain_minimal.py`) that proved the live IB → Postgres flow against all four tickers on 2026-06-02 (six rows persisted to `archive.option_chain` with bid/ask/IV/delta intact for SPX/RUT/VIX; NDX correctly reported `partial` with NULL greeks owing to a known market-data subscription gap).
+
+### Fixed
+
+- **`v_staleness` no longer reports `health='fresh'` for never-run tickers (codex tribunal — Pass 2 of `/review-cycle`).** The original `CASE WHEN now() - last_run.finished_at > make_interval(secs => c.cadence_seconds * 4) THEN 'stale' ELSE 'fresh' END` mis-classified the NULL case: `now() - NULL` is NULL, `NULL > interval` is NULL, the `CASE` fell through to `ELSE 'fresh'`. A freshly seeded enabled ticker with zero runs would silently report healthy, defeating the operator dashboard. Explicit `WHEN last_run.finished_at IS NULL THEN 'stale'` branch added; verified against tmp DB with never-run, recently-run, and stale fixtures.
+- **`scripts/migrations/option_chain/env.py` handles plain `postgresql://` URLs.** SQLAlchemy defaults `postgresql://` to psycopg2, which xenon does not install. `get_url()` now normalises plain URLs to `postgresql+psycopg://` so a copy-pasted `OPTION_CHAIN_DATABASE_URL` works on the first alembic run; explicit driver prefixes (`+asyncpg`, `+psycopg`) are left alone. Verified end-to-end by running `alembic upgrade head` against a fresh DB with a driverless URL.
+
+## [0.1.3] — 2026-06-03
 
 ### Added
 
@@ -19,6 +27,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 - **`dev.sh live` no longer hard-fails on the core_dev guard.** Paper mode substitutes `DATABASE_URL_PAPER → DATABASE_URL`; live mode had no equivalent and so kept `.env`'s `DATABASE_URL=core_dev`, tripping the guard on every invocation. Live mode now substitutes `DATABASE_URL_TEST → DATABASE_URL` _only when DATABASE_URL points at core_dev_ — empty / custom URLs are respected so the `test_dev_sh_exports.py` harness doesn't pick up an inherited `DATABASE_URL_TEST` (`XENON_READ_ONLY=1` continues to block writes).
 - **`test_dev_sh_db_guard` actually exercises the guard.** Tests had been silently red — `dev.sh` hardcoded its env-file path, so the operator's live `.env` (with `DATABASE_URL_PAPER` substituting `core_test` for any `core_dev` value) bypassed the guard in test runs. Added `XENON_ENV_FILE` override; rewrote tests to write a per-test tmpdir stub. Expanded coverage: refuse in both modes, pass-path tests for `core_test` in both modes.
 - **`scripts/infra/refresh-core-test.sh` produces a clean restore.** Two latent bugs had been preventing the nightly `core_dev → core_test` LaunchAgent from working: (1) `pg_restore --clean` cannot drop tables with FK dependents, so prior runs generated 7 errors per pass and left `core_test` with a phantom partially-migrated schema; (2) operator MacBooks default to homebrew's `pg15` client tools, which abort against the macmini's `pg17` server with a version mismatch. Added: pre-drop `xenon` + `events` schemas with `CASCADE` before the restore; auto-pick the highest available `postgresql@N` from `/opt/homebrew/opt/`.
+
 ## [0.1.0] — 2026-06-02
 
 ### Added
