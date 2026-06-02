@@ -69,12 +69,23 @@ async def fetch_underlying_spot(ib: IB, contract: Index, timeout: float = 5.0) -
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         await asyncio.sleep(0.1)
-        # For an Index, .last or .close is the relevant field
-        for fld in ("last", "close", "marketPrice"):
+        # For an Index, .last or .close is the relevant field. NOT .marketPrice
+        # (that's a method, not an attribute — calling it before any tick arrives
+        # returns NaN). Order: live `last` (during RTH) → `close` (overnight) →
+        # markPrice attribute → call marketPrice() method as fallback.
+        for fld in ("last", "close", "markPrice"):
             v = getattr(ticker, fld, None)
-            if v is not None and v == v and v > 0:  # not NaN, not zero
+            if v is not None and isinstance(v, (int, float)) and v == v and v > 0:
                 ib.cancelMktData(contract)
                 return float(v)
+        # Fallback: marketPrice() method (computes from available fields)
+        try:
+            mp = ticker.marketPrice()
+            if mp is not None and mp == mp and mp > 0:
+                ib.cancelMktData(contract)
+                return float(mp)
+        except Exception:
+            pass
     ib.cancelMktData(contract)
     return None
 
@@ -203,36 +214,76 @@ async def snapshot_one_ticker(ib: IB, conn, ticker: str) -> dict:
     if not params:
         return {"ticker": ticker, "status": "no_secdef_params"}
 
-    # Pick the params object with the most expirations (typically the main trading class)
-    p = max(params, key=lambda x: len(x.expirations))
-    expiry = pick_front_expiry(list(p.expirations), min_dte=7)
-    if not expiry:
-        return {"ticker": ticker, "status": "no_eligible_expiry"}
-    strikes = sorted(p.strikes)
-    atm = pick_atm_strike(strikes, spot if spot else strikes[len(strikes) // 2])
-    log.info(
-        "[%s]   expiry=%s strike=%.2f tradingClass=%s exchange=%s spot=%s",
-        ticker,
-        expiry,
-        atm,
-        p.tradingClass,
-        p.exchange,
-        spot,
-    )
+    # secdef can return MULTIPLE (exchange, tradingClass) combos per underlier
+    # (e.g. NDX returns NDXP/IBUSOPT but the option actually qualifies on CBOE).
+    # Try each combo plus a CBOE-override fallback until one qualifies.
+    candidates = []
+    for p_iter in sorted(params, key=lambda x: -len(x.expirations)):
+        candidates.append(
+            (p_iter.exchange, p_iter.tradingClass, p_iter.multiplier, list(p_iter.expirations), list(p_iter.strikes))
+        )
+        if p_iter.exchange != "CBOE":
+            candidates.append(
+                ("CBOE", p_iter.tradingClass, p_iter.multiplier, list(p_iter.expirations), list(p_iter.strikes))
+            )
 
-    opt = Option(
-        ticker,
-        expiry,
-        float(atm),
-        "C",
-        exchange=p.exchange,
-        tradingClass=p.tradingClass,
-        multiplier=str(p.multiplier),
-        currency="USD",
-    )
-    await ib.qualifyContractsAsync(opt)
-    if not opt.conId:
+    opt = None
+    chosen_exchange = chosen_tc = None
+    chosen_mult = None
+    expiry = None
+    atm = None
+    for exchange, trading_class, multiplier, expirations, strikes in candidates:
+        cand_expiry = pick_front_expiry(expirations, min_dte=7)
+        if not cand_expiry:
+            continue
+        strikes_sorted = sorted(strikes)
+        cand_atm = pick_atm_strike(strikes_sorted, spot if spot else strikes_sorted[len(strikes_sorted) // 2])
+        log.info(
+            "[%s]   try expiry=%s strike=%.2f tradingClass=%s exchange=%s",
+            ticker,
+            cand_expiry,
+            cand_atm,
+            trading_class,
+            exchange,
+        )
+        cand_opt = Option(
+            ticker,
+            cand_expiry,
+            float(cand_atm),
+            "C",
+            exchange=exchange,
+            tradingClass=trading_class,
+            multiplier=str(multiplier),
+            currency="USD",
+        )
+        await ib.qualifyContractsAsync(cand_opt)
+        if cand_opt.conId:
+            log.info(
+                "[%s]   QUALIFIED conId=%d on %s/%s",
+                ticker,
+                cand_opt.conId,
+                exchange,
+                trading_class,
+            )
+            opt = cand_opt
+            chosen_exchange = exchange
+            chosen_tc = trading_class
+            chosen_mult = multiplier
+            expiry = cand_expiry
+            atm = cand_atm
+            break
+
+    if opt is None:
         return {"ticker": ticker, "status": "option_unqualified"}
+
+    # Construct a lightweight namespace for downstream code that referenced `p.*`
+    class _P:
+        pass
+
+    p = _P()
+    p.exchange = chosen_exchange
+    p.tradingClass = chosen_tc
+    p.multiplier = chosen_mult
 
     snapshot_ts = datetime.now(tz=timezone.utc)
     run_started = snapshot_ts
