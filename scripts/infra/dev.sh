@@ -105,12 +105,21 @@ if [[ "$MODE" == "live" ]]; then
   # read-side hits the dev mirror; XENON_READ_ONLY=1 below blocks writes
   # anyway. Without this, the guard at line ~106 kills dev.sh live every
   # time because .env's DATABASE_URL targets core_dev.
-  if [[ -n "${DATABASE_URL_TEST:-}" ]]; then
+  #
+  # Only substitute when DATABASE_URL actually points at core_dev. If the
+  # caller has set DATABASE_URL to something else (an empty string in the
+  # test harness, a custom local DB, etc.), respect that. Bash can't
+  # distinguish empty-string from unset reliably, so explicit name match
+  # is the cleanest invariant.
+  _live_db_name="${DATABASE_URL##*/}"
+  _live_db_name="${_live_db_name%%\?*}"
+  if [[ "$_live_db_name" == "core_dev" && -n "${DATABASE_URL_TEST:-}" ]]; then
     DATABASE_URL="$DATABASE_URL_TEST"
     log_info "Using DATABASE_URL_TEST (core_test) for live-debug mode (read-only)."
-  else
-    log_warn "DATABASE_URL_TEST not set — live mode will use DATABASE_URL ($DATABASE_URL)."
+  elif [[ "$_live_db_name" == "core_dev" ]]; then
+    log_warn "DATABASE_URL_TEST not set — live mode will use DATABASE_URL=core_dev which the guard below will refuse."
   fi
+  unset _live_db_name
 fi
 export DATABASE_URL DATABASE_URL_TEST
 
