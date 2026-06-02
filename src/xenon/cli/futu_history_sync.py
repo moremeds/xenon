@@ -31,7 +31,10 @@ from typing import Any, Callable, Optional
 
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from xenon.api.services.futu_history_sync import backfill_history_sync
+from xenon.api.services.futu_history_sync import (
+    backfill_history_sync,
+    resolve_incremental_since,
+)
 from xenon.api.services.futu_nav_backfill import backfill_futu_nav
 from xenon.clients.futu_client import FutuClient
 from xenon.execution.account_scope import AccountScope
@@ -68,7 +71,7 @@ async def run_history_sync(
     try:
         # Today's NAV anchor from accinfo_query.
         acct = client.fetch_account()
-        today_nav = Decimal(str(acct["account_summary"]["net_liquidation"]))
+        today_nav = Decimal(str(acct["net_liquidation"]))
 
         # M4 uses its own client_factory; pass a no-op factory that returns
         # the SAME already-connected client so we don't open a second OpenD
@@ -117,8 +120,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--since",
         type=lambda s: datetime.strptime(s, "%Y-%m-%d").date(),
-        default=_DEFAULT_INCEPTION,
-        help="Earliest date to fetch (YYYY-MM-DD). Default: 2024-01-01.",
+        default=None,
+        help=(
+            "Earliest date to fetch (YYYY-MM-DD). Default: incremental — "
+            "max persisted timestamp minus 7 days, falling back to 2024-01-01 "
+            "on an empty DB."
+        ),
     )
     return p
 
@@ -138,15 +145,28 @@ def main() -> int:
         )
         return 2
 
-    # Scope from env. Broker is pinned to FUTU; trading mode + account
-    # come from XENON_TRADING_MODE / XENON_BROKER_ACCOUNT per the standard
-    # subprocess pattern.
-    scope = AccountScope.resolve_from_env(broker="FUTU")
+    # Spec §10: FUTU scope is NOT resolvable from env vars. Connect once to
+    # discover the matched OpenD account, build scope from it, then disconnect
+    # before the main pipeline reconnects.
+    probe = FutuClient()
+    probe.connect()
+    try:
+        matched_env = (probe._matched_trd_env or probe.trd_env or "REAL").upper()
+        acc_id = str(probe._acc_id)
+    finally:
+        probe.disconnect()
+    account_env = {"REAL": "live", "SIMULATE": "paper"}.get(matched_env, "paper")
+    scope = AccountScope(broker="FUTU", account_env=account_env, broker_account=acc_id)
 
     async def _run():
         engine = create_async_engine(db_url, pool_pre_ping=True)
         try:
-            return await run_history_sync(engine, scope, since=args.since)
+            if args.since is None:
+                resolved = await resolve_incremental_since(engine, scope, inception=_DEFAULT_INCEPTION)
+                logger.info("incremental --since resolved to %s", resolved)
+            else:
+                resolved = args.since
+            return await run_history_sync(engine, scope, since=resolved)
         finally:
             await engine.dispose()
 

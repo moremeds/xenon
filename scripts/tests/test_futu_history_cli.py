@@ -33,7 +33,9 @@ def _fake_client(deals: list[dict], cashflows: list[dict], today_nav: float):
     m.fetch_capital_flow = MagicMock(return_value=cashflows)
     m.fetch_account = MagicMock(
         return_value={
-            "account_summary": {"net_liquidation": today_nav},
+            # M3 fetch_account returns net_liquidation at the top level
+            # (NOT nested under account_summary — that's fetch_portfolio).
+            "net_liquidation": today_nav,
             "fetched_at": "2024-05-04T00:00:00Z",
         }
     )

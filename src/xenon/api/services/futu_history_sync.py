@@ -19,14 +19,16 @@ Design:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable, Optional
 
+import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from xenon.clients.futu_client import FutuClient
 from xenon.db.queries.futu_history import insert_cashflows, insert_trades
+from xenon.db.schema import futu_cash_flow, futu_trades
 from xenon.execution.account_scope import AccountScope
 
 logger = logging.getLogger(__name__)
@@ -69,6 +71,41 @@ def _json_safe(raw: dict) -> dict:
         else:
             safe[k] = str(v)
     return safe
+
+
+async def resolve_incremental_since(
+    engine: AsyncEngine,
+    scope: AccountScope,
+    inception: date,
+    lookback_days: int = 7,
+) -> date:
+    """Return the earliest date a nightly incremental pull should fetch from.
+
+    No persisted rows yet → return `inception` (full backfill).
+    Otherwise → max(futu_trades.filled_at, futu_cash_flow.occurred_at) minus
+    `lookback_days`. The lookback re-covers late-arriving rows (dividend tax,
+    post-settlement fee corrections, retro deal updates) that Futu can post
+    against a previous date.
+    """
+    async with engine.begin() as conn:
+        scope_t = (
+            (futu_trades.c.broker == scope.broker)
+            & (futu_trades.c.account_env == scope.account_env)
+            & (futu_trades.c.broker_account == scope.broker_account)
+        )
+        scope_f = (
+            (futu_cash_flow.c.broker == scope.broker)
+            & (futu_cash_flow.c.account_env == scope.account_env)
+            & (futu_cash_flow.c.broker_account == scope.broker_account)
+        )
+        max_trade = (await conn.execute(sa.select(sa.func.max(futu_trades.c.filled_at)).where(scope_t))).scalar()
+        max_flow = (await conn.execute(sa.select(sa.func.max(futu_cash_flow.c.occurred_at)).where(scope_f))).scalar()
+
+    candidates = [d for d in (max_trade, max_flow) if d is not None]
+    if not candidates:
+        return inception
+    watermark = max(candidates).astimezone(timezone.utc).date()
+    return watermark - timedelta(days=lookback_days)
 
 
 async def backfill_history_sync(
@@ -124,4 +161,4 @@ async def backfill_history_sync(
     }
 
 
-__all__ = ("backfill_history_sync",)
+__all__ = ("backfill_history_sync", "resolve_incremental_since")
