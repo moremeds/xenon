@@ -10,7 +10,11 @@ Prerequisites:
 
 - macmini has the xenon checkout at `~/projects/xenon`.
 - `.env` in that checkout includes: `IB_FLEX_TOKEN`, `IB_FLEX_NAV_QUERY_ID`, `XENON_LIVE_ACCOUNT`, `DATABASE_URL` pointing at `core_dev` via the `xenon_prod` role.
-- IB Flex query saved with period **Last 2 Weeks** (or `Last 7 Days` / `Last 30 Days` — anything rolling). Do NOT use `Custom Date Range` with a fixed endpoint that goes stale. Update in IB Account Management → Reports → Flex Queries → Edit.
+- IB Flex query saved with:
+  - **Format: XML** — `fetch_ib_nav_series` uses the legacy `Universal/servlet/FlexStatementService.*` endpoint, which is XML-only. A CSV-format saved query returns `ErrorCode 1001` ("Statement could not be generated at this time") on this endpoint, forever. Diagnosed 2026-06-02 — older endpoint refuses CSV queries permanently, newer endpoint serves any format but isn't what the parser expects.
+  - **Period: Last 2 Weeks** (or `Last 7 Days` / `Last 30 Days` — anything rolling). Do NOT use `Custom Date Range` with a fixed endpoint that goes stale.
+  - Sections to include: at minimum `EquitySummaryInBase`. Additional sections (CashTransactions, etc.) are ignored by `fetch_ib_nav_series` but don't break anything.
+  - Update in IB Account Management → Reports → Flex Queries → Edit.
 - `/var/log/xenon/` exists and is writable: `sudo mkdir -p /var/log/xenon && sudo chown $(whoami) /var/log/xenon`.
 
 Install steps:
