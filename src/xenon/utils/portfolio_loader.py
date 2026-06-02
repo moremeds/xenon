@@ -132,27 +132,31 @@ def upsert_nav_sync(
     cash: _Decimal | float | int | None = None,
     stock_value: _Decimal | float | int | None = None,
     options_value: _Decimal | float | int | None = None,
+    source: str | None = None,
 ) -> None:
     """Sync mirror of `xenon.db.queries.portfolio.upsert_nav`.
 
     NULL-safe on every nullable column: when a caller passes ``None`` for a
     breakdown field (or daily_pnl), the existing PG value is preserved rather
-    than overwritten. ib_sync only knows ``nav``; the IB Flex importer
-    (`fetch_ib_nav_series`) supplies the full breakdown — both can write to
-    the same row without erasing each other's contributions.
+    than overwritten. ``source`` follows the same rule: omit to keep the
+    existing value on conflict (so a daily 'close' row from xenon-nav-flex-
+    refresh is not clobbered by an intraday ib_sync write the same day).
     """
-    stmt = _pg_insert(nav_history).values(
-        broker=scope.broker,
-        account_env=scope.account_env,
-        broker_account=scope.broker_account,
-        date=day,
-        nav=nav,
-        daily_pnl=daily_pnl,
-        total=total,
-        cash=cash,
-        stock_value=stock_value,
-        options_value=options_value,
-    )
+    values: dict[str, object] = {
+        "broker": scope.broker,
+        "account_env": scope.account_env,
+        "broker_account": scope.broker_account,
+        "date": day,
+        "nav": nav,
+        "daily_pnl": daily_pnl,
+        "total": total,
+        "cash": cash,
+        "stock_value": stock_value,
+        "options_value": options_value,
+    }
+    if source is not None:
+        values["source"] = source
+    stmt = _pg_insert(nav_history).values(**values)
     set_columns: dict[str, object] = {"nav": stmt.excluded.nav}
     if daily_pnl is not None:
         set_columns["daily_pnl"] = stmt.excluded.daily_pnl
@@ -164,6 +168,8 @@ def upsert_nav_sync(
         set_columns["stock_value"] = stmt.excluded.stock_value
     if options_value is not None:
         set_columns["options_value"] = stmt.excluded.options_value
+    if source is not None:
+        set_columns["source"] = stmt.excluded.source
     stmt = stmt.on_conflict_do_update(
         index_elements=[
             nav_history.c.broker,
