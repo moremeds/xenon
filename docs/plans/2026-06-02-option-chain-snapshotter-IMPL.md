@@ -312,6 +312,14 @@ from xenon.clients.ib_client import CLIENT_IDS
 
 TICKERS = ["SPX", "NDX", "RUT", "VIX"]
 
+# C-6: IB Index() underlier qualification requires different exchanges per
+# ticker. Verified against live IB on 2026-06-02 (clientId 199, read-only):
+#   SPX/CBOE → conId 416904    NDX/CBOE → Error 200 (no security definition)
+#   NDX/NASDAQ → conId 416843  RUT/CBOE → Error 200
+#   RUT/RUSSELL → conId 416888  VIX/CBOE → conId 13455763
+# Keep in sync with src/xenon/option_chain_snapshotter/config.py::INDEX_EXCHANGE.
+INDEX_EXCHANGE = {"SPX": "CBOE", "NDX": "NASDAQ", "RUT": "RUSSELL", "VIX": "CBOE"}
+
 
 @dataclass
 class ProbeResult:
@@ -331,7 +339,7 @@ class ProbeResult:
 
 async def qualify_underliers(ib: IB, result: ProbeResult) -> dict[str, Index]:
     """Step 1: qualify SPX/NDX/RUT/VIX as Index contracts on CBOE."""
-    contracts = {t: Index(symbol=t, exchange="CBOE", currency="USD") for t in TICKERS}
+    contracts = {t: Index(symbol=t, exchange=INDEX_EXCHANGE[t], currency="USD") for t in TICKERS}
     qualified = await ib.qualifyContractsAsync(*contracts.values())
     for t, c in contracts.items():
         if c.conId:
@@ -622,9 +630,10 @@ Probe results landed here. Throughput floor for PR 8's regression test will use 
 On macmini:
 
 ```bash
-brew install timescaledb
+brew tap timescale/tap                    # I-8: formula lives in 3rd-party tap, not core
+brew install timescaledb                  # 2.27.x as of 2026-06-02
 timescaledb-tune --quiet --yes
-brew services restart postgresql
+brew services restart postgresql@17       # pin version: timescaledb 2.x ships against PG17
 ```
 
 - [ ] **Step 2: Create role + DB**
@@ -963,6 +972,10 @@ def upgrade() -> None:
         )
     """)
     op.execute("SELECT create_hypertable('archive.option_chain', 'snapshot_ts', chunk_time_interval => INTERVAL '1 day')")
+    # C-7: TimescaleDB 2.18+ refuses add_compression_policy unless columnstore
+    # is enabled on the table first. Verified empirically against 2.24 — bare
+    # `add_compression_policy` returns: ERROR: columnstore not enabled on hypertable.
+    op.execute("ALTER TABLE archive.option_chain SET (timescaledb.compress = true)")
     op.execute("SELECT add_compression_policy('archive.option_chain', INTERVAL '7 days')")
     op.execute("CREATE INDEX ON archive.option_chain (ticker, trading_class, expiry, snapshot_ts DESC)")
     op.execute("CREATE INDEX ON archive.option_chain (con_id, snapshot_ts DESC)")
@@ -982,6 +995,7 @@ def upgrade() -> None:
         )
     """)
     op.execute("SELECT create_hypertable('archive.underlying_ohlcv', 'bar_ts', chunk_time_interval => INTERVAL '7 days')")
+    op.execute("ALTER TABLE archive.underlying_ohlcv SET (timescaledb.compress = true)")  # C-7
     op.execute("SELECT add_compression_policy('archive.underlying_ohlcv', INTERVAL '30 days')")
 
     # 6. v_staleness view
@@ -1400,8 +1414,10 @@ Create `src/xenon/option_chain_snapshotter/queue.py`:
 ```python
 """Priority queue for the continuous snapshot poller.
 
-Each entry is (priority, due_at, ticker). Pop_due returns the highest-
-priority due ticker (or the most overdue if priorities are equal).
+Each entry is (priority, due_at, ticker, seq). Pop_due returns the highest-
+priority due ticker (or the most overdue if priorities are equal). Upserting
+the same ticker invalidates earlier heap entries via a per-ticker version
+counter (I-1: the prior add/discard pattern was a no-op).
 """
 from __future__ import annotations
 
@@ -1414,6 +1430,7 @@ from datetime import datetime
 class _Entry:
     priority_neg: int   # negative so larger priority pops first via min-heap
     due_at: datetime
+    seq: int            # version counter; stale when != latest for ticker
     ticker: str = field(compare=False)
 
 
@@ -1421,35 +1438,41 @@ class TickerQueue:
     """Continuous priority queue keyed by (priority desc, due_at asc).
 
     Pop returns the highest-priority entry whose due_at <= now, or None.
-    Upsert replaces any existing entry for that ticker.
+    Upsert replaces any existing entry for that ticker via a version counter:
+    each upsert bumps `_latest_seq[ticker]`, and pop_due skips heap entries
+    whose seq doesn't match the latest. The skipped entries are popped and
+    discarded lazily during the pop_due walk, keeping the data structure
+    correct even under high upsert frequency.
     """
 
     def __init__(self) -> None:
         self._heap: list[_Entry] = []
-        self._removed: set[str] = set()
+        self._latest_seq: dict[str, int] = {}
 
     def upsert(self, ticker: str, due_at: datetime, priority: int = 0) -> None:
-        # Mark prior entry as removed (lazy delete)
-        self._removed.add(ticker)
-        # Push fresh
-        self._removed.discard(ticker)
-        heapq.heappush(self._heap, _Entry(-priority, due_at, ticker))
+        self._latest_seq[ticker] = self._latest_seq.get(ticker, 0) + 1
+        heapq.heappush(self._heap, _Entry(-priority, due_at, self._latest_seq[ticker], ticker))
 
     def pop_due(self, now: datetime) -> str | None:
         while self._heap:
             top = self._heap[0]
-            if top.ticker in self._removed:
+            # Stale (superseded by a later upsert)? drop it and continue.
+            if top.seq != self._latest_seq.get(top.ticker):
                 heapq.heappop(self._heap)
-                self._removed.discard(top.ticker)
                 continue
             if top.due_at > now:
                 return None
             heapq.heappop(self._heap)
+            # We popped the latest entry for this ticker; reset seq so a
+            # subsequent upsert starts fresh and any orphan entries (none
+            # in practice, but defensively) compare unequal and get skipped.
+            self._latest_seq.pop(top.ticker, None)
             return top.ticker
         return None
 
     def size(self) -> int:
-        return sum(1 for e in self._heap if e.ticker not in self._removed)
+        """Count of live (non-stale) entries on the heap."""
+        return sum(1 for e in self._heap if e.seq == self._latest_seq.get(e.ticker))
 ```
 
 - [ ] **Step 4: Verify**
@@ -1556,15 +1579,13 @@ async def test_aimd_halve_on_violation():
     lim.report_pacing_violation()
     assert lim.msg_per_sec_cap == 25
     # We can't wait 30s in unit tests, so check the AI step directly
-    lim._aimd_tick()
+    lim.aimd_tick()
     assert lim.msg_per_sec_cap == 26
 ```
 
-- [ ] **Step 2: Add pytest-asyncio dep if not present**
+- [ ] **Step 2: (skip — already in deps)**
 
-```bash
-uv add --group dev 'pytest-asyncio>=0.23'
-```
+`pytest-asyncio>=0.24` is already in `pyproject.toml` (line 67); `[tool.pytest.ini_options].asyncio_mode = "strict"` is set at line 98. The `@pytest.mark.asyncio` markers in this test file work as-is. No `uv add` needed (it would attempt a downgrade to `>=0.23`).
 
 - [ ] **Step 3: Run + fail**
 
@@ -1673,7 +1694,7 @@ class ResizableLimiter:
         """AIMD: halve msg_per_sec_cap immediately."""
         self.resize(msg_per_sec_cap=max(1, self._msg_per_sec_cap // 2))
 
-    def _aimd_tick(self) -> None:
+    def aimd_tick(self) -> None:
         """Additive increase step (called every 30s by a background task)."""
         if self._msg_per_sec_cap < self._ceiling:
             self.resize(msg_per_sec_cap=self._msg_per_sec_cap + 1)
@@ -1778,7 +1799,7 @@ def mock_ib_client_factory(monkeypatch):
 
     def factory(*args, **kwargs):
         m = MagicMock()
-        m.connect = AsyncMock()
+        m.connect = MagicMock()   # IBClient.connect is sync, not async (C-2)
         m.disconnect = MagicMock()
         m.ib = MagicMock()
         m.is_connected = MagicMock(return_value=True)
@@ -1846,9 +1867,14 @@ from typing import Any
 from xenon.clients.ib_client import IBClient
 
 
-def _make_ib_client(host: str, port: int, client_name: str) -> IBClient:
-    """Factory wrapper for test seam (monkey-patchable)."""
-    return IBClient(host=host, port=port)
+def _make_ib_client() -> IBClient:
+    """Factory wrapper for test seam (monkey-patchable).
+
+    C-1: IBClient.__init__(self) -> None takes no args (verified at
+    src/xenon/clients/ib_client.py:185). host/port/client_name are passed to
+    IBClient.connect() separately, not to the constructor.
+    """
+    return IBClient()
 
 
 class IBConnectionPool:
@@ -1868,9 +1894,18 @@ class IBConnectionPool:
         self._rr_index = 0
 
     async def connect_all(self) -> None:
+        """Connect all clients.
+
+        C-2: IBClient.connect is **sync** (xenon wrapper, NOT raw ib_async)
+        — signature at src/xenon/clients/ib_client.py:223. The original
+        plan `await client.connect(...)` raised TypeError (awaiting None).
+        Call directly; this method is invoked once at boot before workers
+        start, so the brief event-loop block during TCP handshake +
+        IB Gateway auth is acceptable (no other tasks running yet).
+        """
         for name in self._client_names:
-            client = _make_ib_client(self._host, self._port, client_name=name)
-            await client.connect(client_name=name)
+            client = _make_ib_client()
+            client.connect(host=self._host, port=self._port, client_name=name)
             self._connections.append(client)
 
     def next_connection(self):
@@ -2275,6 +2310,24 @@ from ib_async import Index, Option
 from .storage import OptionChainStorage, UniverseRow
 
 INDEX_EXCHANGE = {"SPX": "CBOE", "NDX": "NASDAQ", "RUT": "RUSSELL", "VIX": "CBOE"}
+"""IB Index() underlier exchange per ticker. Verified live 2026-06-02:
+SPX/CBOE conId=416904, NDX/NASDAQ conId=416843, RUT/RUSSELL conId=416888,
+VIX/CBOE conId=13455763. NDX/CBOE and RUT/CBOE return IB Error 200.
+Keep in sync with `scripts/research/probe_ib_option_chain.py::INDEX_EXCHANGE`."""
+
+
+def _parse_ib_date(s: str) -> date:
+    """M-1: IB `lastTradeDateOrContractMonth` is YYYYMMDD for daily expiries
+    OR YYYYMM for monthly contracts (per ib_async/contract.py Option docstring).
+    Index options qualify as 8-char in practice, but parse defensively."""
+    if len(s) == 8:
+        return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+    if len(s) == 6:
+        # Monthly: standard equity-option monthly expiry is the 3rd Friday;
+        # for index options this is also conventional. Day 21 is a safe
+        # upper bound for 3rd Friday across all months.
+        return date(int(s[:4]), int(s[4:6]), 21)
+    raise ValueError(f"Unparseable IB date: {s!r} (expected YYYYMMDD or YYYYMM)")
 
 
 @dataclass
@@ -2332,9 +2385,7 @@ async def refresh_universe(
                 exchange=c.exchange,
                 multiplier=int(c.multiplier),
                 local_symbol=c.localSymbol or "",
-                expiry=date.fromisoformat(c.lastTradeDateOrContractMonth[:4] + "-" +
-                                          c.lastTradeDateOrContractMonth[4:6] + "-" +
-                                          c.lastTradeDateOrContractMonth[6:8]),
+                expiry=_parse_ib_date(c.lastTradeDateOrContractMonth),  # M-1: handles YYYYMM and YYYYMMDD
                 strike=float(c.strike),
                 right=c.right,
             ))
@@ -2600,8 +2651,21 @@ Implementation follows the spec's "Snapshot lifecycle (per contract)" section in
 
 1. Acquire lease from limiter
 2. Record request_ts
-3. Call `ib.reqMktData(contract, "", snapshot=True, regulatorySnapshot=False)`
-4. Wait on `pendingTickersEvent` + `ticker.snapshotEndEvent` with 12s hard cap
+3. Call `ib.reqMktData(contract, "", snapshot=True, regulatorySnapshot=False)` (returns a `Ticker`)
+4. Subscribe to `ib.pendingTickersEvent` and poll the returned `Ticker`'s
+   state. Finalize when **any** of the following hold:
+   - `ticker.bid > 0` AND `ticker.ask > 0` AND `ticker.modelGreeks.delta is not None` — full data
+   - Wrapper-level `tickSnapshotEnd(reqId)` callback fires for this reqId — IB declares snapshot complete
+   - 12s hard timeout — give up, persist whatever populated
+
+   **C-4 note:** `ticker.snapshotEndEvent` does NOT exist on the Ticker class
+   (verified via `ib_async/ticker.py:51 — events: ClassVar = ("updateEvent",)`).
+   The `tickSnapshotEnd` IB callback lives at the wrapper level
+   (`ib_async/wrapper.py:1108`); to hook it, subclass `IB.wrapper` and
+   override `tickSnapshotEnd` to set a `dict[reqId, asyncio.Event]`, OR
+   simply rely on polling + the 12s timeout (cleaner; what the day-1 probe
+   already does and what v1 should ship).
+
 5. Record quote_ts when bid+ask both present
 6. Record greeks_ts when modelGreeks tick arrives
 7. Call `ib.cancelMktData(contract)`
@@ -2752,7 +2816,7 @@ import os
 import signal
 import sys
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta  # I-4: timedelta for scheduler arithmetic
 from pathlib import Path
 
 import psycopg
@@ -2769,7 +2833,11 @@ from .snapshot_worker import SnapshotWorker
 from .storage import OptionChainStorage
 from .universe import refresh_universe
 
-PID_FILE = Path("/var/run/option-chain-snapshotter.pid")
+PID_FILE = Path(os.path.expanduser("~/Library/Caches/xenon/option-chain-snapshotter.pid"))
+"""C-3: /var/run is root:daemon-owned on macOS (verified `ls -ld /var/run`).
+LaunchAgents run as the operator user and cannot write there. ~/Library/Caches/
+is the LaunchAgent-appropriate path; the PG advisory lock is the authoritative
+single-instance guard, so loss-on-reboot is not a real concern."""
 
 
 def main() -> int:
@@ -2824,7 +2892,7 @@ async def _run(config: SnapshotterConfig, dry_run: bool = False) -> int:
         queue.upsert(t, due_at=datetime.now(tz=gate._cal.tz))
 
     stop = asyncio.Event()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()  # M-3: get_event_loop is deprecated inside coroutines (3.10+)
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
 
@@ -2833,6 +2901,7 @@ async def _run(config: SnapshotterConfig, dry_run: bool = False) -> int:
         asyncio.create_task(ohlcv_worker.run()),
         *[asyncio.create_task(w.run()) for w in snapshot_workers],
         asyncio.create_task(_aimd_ticker(limiter)),
+        asyncio.create_task(_universe_scheduler(pool, storage, stop)),  # I-4: daily 08:30 ET refresh
     ]
     try:
         await stop.wait()
@@ -2853,7 +2922,42 @@ async def _run(config: SnapshotterConfig, dry_run: bool = False) -> int:
 async def _aimd_ticker(limiter: ResizableLimiter):
     while True:
         await asyncio.sleep(30)
-        limiter._aimd_tick()
+        limiter.aimd_tick()  # I-7: public API
+
+
+async def _universe_scheduler(pool, storage, stop: asyncio.Event):
+    """I-4: Daily 08:30 ET universe refresh (spec § 'Daily universe refresh').
+
+    Sleeps until next 08:30 America/New_York, then runs refresh_universe.
+    Honors NYSE holidays via MarketHoursGate's calendar — refresh runs on
+    session days only. Cancelled via the stop Event on SIGTERM.
+    """
+    from zoneinfo import ZoneInfo
+    from .hours import MarketHoursGate
+    gate = MarketHoursGate()
+    et = ZoneInfo("America/New_York")
+    while not stop.is_set():
+        now = datetime.now(tz=et)
+        # Next 08:30 ET — today if not yet 08:30, else tomorrow
+        target = now.replace(hour=8, minute=30, second=0, microsecond=0)
+        if now >= target:
+            target = target + timedelta(days=1)
+        sleep_s = (target - now).total_seconds()
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=sleep_s)
+            return  # stop fired during sleep
+        except asyncio.TimeoutError:
+            pass
+        # Skip non-sessions (weekends, NYSE holidays)
+        today = datetime.now(tz=et).date()
+        if not gate._cal.is_session(today):
+            logging.info("universe_scheduler: %s not an NYSE session, skipping", today)
+            continue
+        try:
+            await refresh_universe(pool, storage, tickers=TICKERS, today=today)
+            logging.info("universe_scheduler: refresh complete for %s", today)
+        except Exception:
+            logging.exception("universe_scheduler: refresh failed for %s", today)
 
 
 def _acquire_pid_file() -> bool:
@@ -2869,6 +2973,7 @@ def _acquire_pid_file() -> bool:
                 return False  # real duplicate
         except (OSError, ValueError):
             pass  # stale
+    PID_FILE.parent.mkdir(parents=True, exist_ok=True)  # ~/Library/Caches/xenon/
     PID_FILE.write_text(str(os.getpid()))
     return True
 
@@ -2987,11 +3092,16 @@ Create `scripts/infra/launchd/com.xenon.option-chain-snapshotter.plist.template`
     <key>Label</key>
     <string>com.xenon.option-chain-snapshotter</string>
 
+    <!-- C-5: launchd ProgramArguments is exec(), not shell. A bare `&&`
+         entry is interpreted as a literal argv to the first command, not as
+         a shell operator. Wrap in /bin/sh -c so the chain runs as intended.
+         `exec` on the snapshotter ensures launchd's monitored PID is the
+         service PID, not the shell wrapper. -->
     <key>ProgramArguments</key>
     <array>
-        <string>__XENON_ROOT__/scripts/infra/option-chain-prestart.sh</string>
-        <string>&amp;&amp;</string>
-        <string>__XENON_ROOT__/.venv/bin/xenon-option-chain-snapshotter</string>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>__XENON_ROOT__/scripts/infra/option-chain-prestart.sh &amp;&amp; exec __XENON_ROOT__/.venv/bin/xenon-option-chain-snapshotter</string>
     </array>
 
     <key>WorkingDirectory</key>

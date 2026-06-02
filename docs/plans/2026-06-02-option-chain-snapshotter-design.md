@@ -119,8 +119,11 @@ computation, or chain scoping by ATM band).
 ### Process model
 
 - **One process per snapshotter instance.** Single-instance guard via PID
-  file at `/tmp/option-chain-snapshotter.pid` AND a Postgres advisory lock
-  on a known key — refuses to start if another instance holds either.
+  file at `~/Library/Caches/xenon/option-chain-snapshotter.pid` AND a Postgres
+  advisory lock on a known key — refuses to start if another instance holds
+  either. (Path corrected per IMPL C-3: `/var/run` is root-only on macOS,
+  `/tmp` clears on reboot; `~/Library/Caches/` is the LaunchAgent-appropriate
+  location and the PG advisory lock is the authoritative guard regardless.)
   Prevents the IB clientId collision pattern (IB silently disconnects the
   earlier client when a duplicate clientId connects).
 - **Internal concurrency** uses `asyncio` + ib_async's `*Async` variants
@@ -464,10 +467,15 @@ Per Pass-2 findings C-1 (line release timing), C-6 (8s vs tickSnapshotEnd):
 1. `lease = await limiter.acquire()` — admission control.
 2. `request_ts = now()` recorded.
 3. `ticker = ib.reqMktData(contract, genericTickList='', snapshot=True, regulatorySnapshot=False)`.
-4. Wait on `ib.pendingTickersEvent` and/or `ticker.snapshotEndEvent` until:
+4. Subscribe to `ib.pendingTickersEvent` and poll the returned `Ticker`'s
+   populated state. (Note: `ticker.snapshotEndEvent` is NOT a Ticker-level
+   event — verified against `ib_async/ticker.py:51 events: ClassVar = ("updateEvent",)`.
+   The `tickSnapshotEnd(reqId)` callback fires at the IB wrapper level —
+   `ib_async/wrapper.py:1108`. v1 polls Ticker state with a 12s hard
+   timeout; if wrapper-level hook is needed later, subclass `IB.wrapper`.):
    - bid + ask both present → `quote_ts = now()`
    - `modelGreeks` tick arrives → `greeks_ts = now()`, IV/delta/gamma/vega/theta filled
-   - OR `tickSnapshotEnd` fires → snapshot complete, persist whatever we have
+   - OR wrapper-level `tickSnapshotEnd(reqId)` fires → snapshot complete, persist whatever we have
    - OR 12s hard timeout (above IB's documented 11s `tickSnapshotEnd`) → persist whatever we have
 5. **Explicitly call `ib.cancelMktData(contract)`.** Whether this releases
    the line early or IB holds it until the 11s `tickSnapshotEnd` window
@@ -694,8 +702,11 @@ If the day-1 IB behavior probe (rollout step 1) reveals:
   if the same condition persists (avoids hammering a known-broken state).
 
 **Single-instance guard (Pass-2 finding C-15):** PID file at
-`/var/run/option-chain-snapshotter.pid` (NOT /tmp — /tmp is cleared on
-reboot which loses our state for stale-PID detection). Stale-PID
+`~/Library/Caches/xenon/option-chain-snapshotter.pid` (NOT `/var/run` — it's
+root:daemon-owned on macOS and unwritable by the LaunchAgent's operator user.
+NOT `/tmp` — clears on reboot. `~/Library/Caches/` is the
+LaunchAgent-appropriate location; the PG advisory lock is the authoritative
+guard, so PID-on-reboot-loss is not a correctness concern). Stale-PID
 validation:
 
 1. Read PID from file.
