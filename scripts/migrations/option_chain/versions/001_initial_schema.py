@@ -166,6 +166,10 @@ def upgrade() -> None:
     op.execute("SELECT add_compression_policy('archive.underlying_ohlcv', INTERVAL '30 days')")
 
     # 6. v_staleness — operator dashboard view
+    # Pass-2 (codex) finding: NULL last_run.finished_at (no run yet) made
+    # `now() - NULL > interval` evaluate to NULL, which the original CASE
+    # treated as ELSE → 'fresh'. A never-run enabled ticker would silently
+    # report healthy. Explicit NULL → 'stale' so the operator dashboard alerts.
     op.execute(
         """
         CREATE VIEW archive.v_staleness AS
@@ -175,8 +179,11 @@ def upgrade() -> None:
             EXTRACT(EPOCH FROM (now() - last_run.finished_at))::INT AS seconds_since_last,
             last_run.contracts_persisted,
             last_run.status,
-            CASE WHEN now() - last_run.finished_at > make_interval(secs => c.cadence_seconds * 4)
-                 THEN 'stale' ELSE 'fresh' END AS health
+            CASE
+                WHEN last_run.finished_at IS NULL THEN 'stale'
+                WHEN now() - last_run.finished_at > make_interval(secs => c.cadence_seconds * 4) THEN 'stale'
+                ELSE 'fresh'
+            END AS health
         FROM archive.snapshot_config c
         LEFT JOIN LATERAL (
             SELECT * FROM archive.snapshot_run r

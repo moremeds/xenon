@@ -28,8 +28,14 @@ def get_url() -> str:
     if not url:
         raise RuntimeError(
             "OPTION_CHAIN_DATABASE_URL not set. Example: "
-            "postgresql://option_chain_writer:<pw>@127.0.0.1:5432/option_chain"
+            "postgresql+psycopg://option_chain_writer:<pw>@127.0.0.1:5432/option_chain"
         )
+    # SQLAlchemy defaults `postgresql://` to psycopg2, which xenon does not
+    # install. Normalize to the psycopg (v3) dialect we actually depend on.
+    # An explicit driver (e.g. `+asyncpg`, `+psycopg`) is left alone so the
+    # caller can opt out if they need a different dialect.
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg://" + url[len("postgresql://") :]
     return url
 
 
