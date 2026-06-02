@@ -1,5 +1,24 @@
 """Shared pytest configuration and fixtures for scripts tests."""
 
+# === Workaround: futu SDK's ft_logger calls os.makedirs() at import time
+# WITHOUT exist_ok=True. Under pytest-xdist with 2+ workers, the second
+# worker to import futu in the same shared filesystem fails with
+# FileExistsError. Patch os.makedirs to always set exist_ok=True so the
+# race is harmless. Applied here at conftest top so it lands before any
+# test module's `import futu` statement.
+import os as _os
+
+_ORIG_MAKEDIRS = _os.makedirs
+
+
+def _safe_makedirs(*args, **kwargs):
+    kwargs.setdefault("exist_ok", True)
+    return _ORIG_MAKEDIRS(*args, **kwargs)
+
+
+_os.makedirs = _safe_makedirs
+
+
 import importlib
 import sys
 from pathlib import Path
