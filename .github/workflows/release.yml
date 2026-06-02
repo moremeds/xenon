@@ -48,8 +48,18 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test
         run: uv run alembic upgrade head
-      # Phase 3: -n 4 matches ci.yml::python-tests parallelism. CI's
-      # postgres-image xenon_app is superuser so per-worker DB cloning works.
+      - name: Pre-create per-worker DBs (Phase 3 pytest-xdist)
+        env:
+          PGPASSWORD: xenon_dev
+        run: |
+          for i in 0 1 2 3; do
+            psql -h localhost -U xenon_app -d postgres \
+              -c "DROP DATABASE IF EXISTS xenon_test_gw$i WITH (FORCE);" \
+              -c "CREATE DATABASE xenon_test_gw$i WITH TEMPLATE xenon_test;"
+          done
+      # Phase 3: -n 4 matches ci.yml::python-tests parallelism. The
+      # pre-create step above already populated per-worker DBs from the
+      # alembic-current xenon_test template.
       - run: uv run pytest -n 4
       - uses: actions/setup-node@v4
         with:

@@ -365,24 +365,28 @@ def app_engine_bound_to_test(pg_session: Connection, monkeypatch: Any) -> Connec
 
 @pytest.fixture(scope="session", autouse=True)
 def _ensure_worker_db() -> Any:
-    """Clone `xenon_test` → `xenon_test_<worker_id>` at worker startup.
+    """Per-worker test-DB guard for pytest-xdist runs.
 
-    Why this exists: even with Phase 2's per-test BEGIN/ROLLBACK, two pytest
-    workers hitting the same physical database fight each other for table-level
-    locks and WAL contention — SAVEPOINTs on one outer transaction are not
-    isolated from another worker's outer transaction. Per-worker DBs make each
-    worker run in true isolation.
+    Each xdist worker needs its own physical database (xenon_test_gwN) so
+    workers don't contend on shared tables — Phase 2's per-test BEGIN/ROLLBACK
+    is connection-scoped, not cross-worker.
 
-    Behavior:
-      - Serial pytest (worker_id resolves to None) → no-op
-      - PG unreachable → no-op (offline dev workflow)
-      - xdist worker → DROP IF EXISTS + CREATE FROM TEMPLATE on session start
+    Two creation paths, no race:
+      1. **CI** pre-creates the per-worker DBs in the workflow yaml, serially,
+         before pytest starts. This fixture then just verifies the DB exists.
+      2. **Local opt-in**: the user grants CREATEDB to xenon_app and runs the
+         one-time bootstrap (see docs). This fixture detects the missing DB
+         and creates it on demand for that worker.
 
-    DROP IF EXISTS uses `WITH (FORCE)` (Postgres 14+) so a `committed_db` test
-    that crashed in a previous session can't leave the worker DB pinned by an
-    orphan connection. The template (`xenon_test`) must be idle at clone time;
-    CI runs `alembic upgrade head` on the template before workers start, then
-    workers fan out and clone in parallel.
+    If the DB still doesn't exist after this check (no CREATEDB perm, no
+    pre-create), `_WORKER_DB_DISABLED` is flipped so the suite falls back to
+    the master DB — the worker still runs, just without Phase 3 isolation.
+
+    Design note: an earlier version did `DROP+CREATE … TEMPLATE` from inside
+    the fixture under an advisory lock. That sounds clean but produced races
+    in CI when multiple workers fought to hold an admin connection during
+    pytest's tight worker-startup phase. Moving the create work into the CI
+    workflow (serial, deterministic) removed an entire class of failure modes.
     """
     wid = _resolve_worker_id(None)
     if wid is None:
@@ -397,9 +401,6 @@ def _ensure_worker_db() -> Any:
     template_db = template_url.database
     admin_url = target_url.set(database="postgres")
 
-    # Probe the admin DB directly. `is_pg_reachable()` probes the worker URL
-    # we're about to create — would always report False on first run and we'd
-    # no-op the clone we need.
     admin_engine = create_engine(
         admin_url,
         isolation_level="AUTOCOMMIT",
@@ -408,31 +409,23 @@ def _ensure_worker_db() -> Any:
     global _WORKER_DB_DISABLED, _SESSION_ENGINE, _PG_REACHABLE
     try:
         with admin_engine.connect() as conn:
-            # Postgres advisory lock serializes the clone across the 4 workers.
-            # Without it, `CREATE DATABASE … TEMPLATE xenon_test` from worker A
-            # races against worker B's same statement and one fails with "source
-            # database is being accessed by other users" (PG blocks template
-            # clone while the template has any live session). Lock is session-
-            # scoped and auto-released on connection close.
-            conn.execute(text("SELECT pg_advisory_lock(8421052)"))
-            conn.execute(text(f'DROP DATABASE IF EXISTS "{target_db}" WITH (FORCE)'))
-            conn.execute(text(f'CREATE DATABASE "{target_db}" TEMPLATE "{template_db}"'))
+            exists = conn.execute(
+                text("SELECT 1 FROM pg_database WHERE datname = :n"),
+                {"n": target_db},
+            ).scalar()
+            if not exists:
+                # Local opt-in path: try to create on demand. Wrapped in its
+                # own try so a permission denied here cleanly falls back.
+                try:
+                    conn.execute(text(f'CREATE DATABASE "{target_db}" TEMPLATE "{template_db}"'))
+                except SQLAlchemyError:
+                    raise
     except SQLAlchemyError:
-        # ANY clone failure → fall back to master DB. This is the right answer
-        # for both failure modes the original code distinguished:
-        #   - InsufficientPrivilege (shared dev PG where xenon_app lacks
-        #     CREATEDB): obvious — there's no other path
-        #   - Anything else (busy template, connect refused, etc.): if we
-        #     leave the suffix in place, tests that build their own engine
-        #     from `DATABASE_URL` (committed_db carve-outs) crash with
-        #     "database xenon_test_gwN does not exist". Falling back to the
-        #     master DB lets those tests run on shared state — sub-optimal but
-        #     never broken.
+        # Worker DB doesn't exist and we can't create it → fall back to master.
         _WORKER_DB_DISABLED = True
         if _SESSION_ENGINE is not None:
             _SESSION_ENGINE.dispose()
             _SESSION_ENGINE = None
-        # Re-probe reachability against the master URL on next call.
         _PG_REACHABLE = None
     finally:
         admin_engine.dispose()
