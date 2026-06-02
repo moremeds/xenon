@@ -5,6 +5,9 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-06-03
+
+
 ### Added
 
 - **Option-chain archive snapshotter — scaffolding (#125).** New long-running service skeleton that will capture full IB option chains for the four CBOE-listed index underliers (SPX, NDX, RUT, VIX) every 10 min into a TimescaleDB-backed Postgres archive. This PR lands design + IMPL plan + the first executable foundation only; the full 10-PR rollout (limiter, pool, persister, workers, launchd) is staged for follow-up. Includes: design spec (`docs/plans/2026-06-02-option-chain-snapshotter-design.md`, hardened through a six-pass review-cycle) + 3,352-line IMPL plan; pre-work — `CLIENT_IDS["option_chain_snapshotter_a"]=95` / `_b=96`, `LOCK_KEY_OPTION_CHAIN_SNAPSHOTTER=7343001` for the single-instance advisory-lock guard, `exchange-calendars>=4.5,<5.0` dependency (resolved 4.13.2); a separate alembic environment at `scripts/migrations/option_chain/` with an initial schema migration creating five tables (`snapshot_config` seeded with the 4-ticker cadence, `option_universe`, `snapshot_run`, `option_chain`, `underlying_ohlcv`), two TimescaleDB hypertables with `add_compression_policy`, the `v_staleness` operator-dashboard view, and conditional `READ` grants for `xenon_prod` / `xenon_dev` / `argon_app`; and a minimal end-to-end spike (`scripts/spike/option_chain_minimal.py`) that proved the live IB → Postgres flow against all four tickers on 2026-06-02 (six rows persisted to `archive.option_chain` with bid/ask/IV/delta intact for SPX/RUT/VIX; NDX correctly reported `partial` with NULL greeks owing to a known market-data subscription gap).
@@ -13,7 +16,6 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 - **`v_staleness` no longer reports `health='fresh'` for never-run tickers (codex tribunal — Pass 2 of `/review-cycle`).** The original `CASE WHEN now() - last_run.finished_at > make_interval(secs => c.cadence_seconds * 4) THEN 'stale' ELSE 'fresh' END` mis-classified the NULL case: `now() - NULL` is NULL, `NULL > interval` is NULL, the `CASE` fell through to `ELSE 'fresh'`. A freshly seeded enabled ticker with zero runs would silently report healthy, defeating the operator dashboard. Explicit `WHEN last_run.finished_at IS NULL THEN 'stale'` branch added; verified against tmp DB with never-run, recently-run, and stale fixtures.
 - **`scripts/migrations/option_chain/env.py` handles plain `postgresql://` URLs.** SQLAlchemy defaults `postgresql://` to psycopg2, which xenon does not install. `get_url()` now normalises plain URLs to `postgresql+psycopg://` so a copy-pasted `OPTION_CHAIN_DATABASE_URL` works on the first alembic run; explicit driver prefixes (`+asyncpg`, `+psycopg`) are left alone. Verified end-to-end by running `alembic upgrade head` against a fresh DB with a driverless URL.
-
 ## [0.1.3] — 2026-06-03
 
 ### Added
