@@ -41,6 +41,8 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+import pandas as pd
+
 from xenon.clients.futu_exceptions import (
     FutuConnectionError,
     FutuDataError,
@@ -616,3 +618,200 @@ class FutuClient:
             "short_mv": maybe(row.get("short_mv")),
             "is_stale": False,
         }
+
+    # ─────────────────────────────────────────────────────────────
+    # Historical pulls (M3 — for backward NAV walk)
+    # ─────────────────────────────────────────────────────────────
+
+    # Futu OpenD documents a 90-day max window per call on
+    # history_deal_list_query. We page the full requested range in chunks
+    # of this size.
+    _HISTORY_WINDOW_DAYS = 90
+
+    # Futu rate-limits get_acc_cash_flow to ~20 calls / 30s. Sleep at
+    # least this many seconds between cashflow calls. Tests may set to 0.
+    CASHFLOW_THROTTLE_SEC: float = 1.6
+
+    # Futu cashflow type → our normalized union. Anything outside this map
+    # is dropped at the writer (M4) — covers fees / dividends / interest
+    # which do not move external NAV on their own.
+    _CASHFLOW_TYPE_MAP = {
+        "MoneyIn": "DEPOSIT",
+        "MoneyOut": "WITHDRAW",
+        "AccTransIn": "TRANSFER_IN",
+        "AccTransOut": "TRANSFER_OUT",
+    }
+
+    def _iter_windows(self, start: datetime, end: datetime):
+        """Yield (window_start, window_end) tuples ≤ _HISTORY_WINDOW_DAYS wide."""
+        from datetime import timedelta
+
+        cur = start
+        step = timedelta(days=self._HISTORY_WINDOW_DAYS)
+        while cur < end:
+            window_end = min(cur + step, end)
+            yield cur, window_end
+            cur = window_end
+
+    @staticmethod
+    def _fmt_futu_ts(dt: datetime) -> str:
+        # Futu wants "YYYY-MM-DD HH:MM:SS" (local broker tz); UTC is fine
+        # because Futu normalises internally.
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _parse_futu_ts(s: Any) -> datetime:
+        """Parse Futu's timestamp strings (which sometimes include fractional
+        seconds like '2026-05-01 10:00:00.582'). Returns timezone-aware UTC.
+        """
+        if isinstance(s, datetime):
+            return s if s.tzinfo else s.replace(tzinfo=timezone.utc)
+        ts = pd.to_datetime(str(s))
+        # pd.to_datetime returns a Timestamp; coerce to stdlib datetime
+        py_dt = ts.to_pydatetime()
+        return py_dt if py_dt.tzinfo else py_dt.replace(tzinfo=timezone.utc)
+
+    def fetch_history_deals(self, start: datetime, end: datetime) -> List[Dict[str, Any]]:
+        """Pull historical fills from Futu OpenD in [start, end].
+
+        Returns rows shaped for `xenon.db.queries.futu_history.insert_trades`:
+        the writer (M4) filters by market='US' before persistence. Non-US
+        rows pass through here unchanged so audit logs can reference them.
+        """
+        self._ensure_connected()
+        try:
+            from futu import RET_OK, TrdEnv  # type: ignore
+        except ImportError as exc:
+            raise FutuConnectionError("futu-api missing") from exc
+
+        env_enum = getattr(TrdEnv, self._matched_trd_env or self.trd_env, TrdEnv.REAL)
+        out: List[Dict[str, Any]] = []
+        for w_start, w_end in self._iter_windows(start, end):
+            try:
+                ret, data = self._trd_ctx.history_deal_list_query(
+                    code="",
+                    trd_env=env_enum,
+                    acc_id=self._acc_id,
+                    start=self._fmt_futu_ts(w_start),
+                    end=self._fmt_futu_ts(w_end),
+                )
+            except Exception as exc:
+                raise classify_futu_exception(exc)
+            if ret != RET_OK:
+                raise classify_futu_exception(Exception(str(data)))
+            if data is None or data.empty:
+                continue
+            for _, row in data.iterrows():
+                code = str(row.get("code", ""))
+                market, _, ticker = code.partition(".")
+                if not ticker:
+                    ticker, market = code, ""
+                raw_action = str(row.get("trd_side", "")).upper()
+                # Futu reports four sides: BUY (open long), SELL (close long),
+                # SELL_SHORT (open short), BUY_BACK (close short). For NAV
+                # cashflow purposes, opens-vs-closes don't matter — only the
+                # cash direction does. Map down to BUY/SELL; preserve the
+                # original in `raw` for audit.
+                action = {
+                    "BUY": "BUY",
+                    "SELL": "SELL",
+                    "SELL_SHORT": "SELL",
+                    "BUY_BACK": "BUY",
+                }.get(raw_action)
+                if action is None:
+                    logger.warning(
+                        "skipping futu deal with unrecognized trd_side=%r (deal_id=%s)",
+                        raw_action,
+                        row.get("deal_id"),
+                    )
+                    continue
+                out.append(
+                    {
+                        "futu_deal_id": str(row.get("deal_id")),
+                        "futu_order_id": (str(row.get("order_id")) if row.get("order_id") is not None else None),
+                        "ticker": ticker,
+                        "futu_code": code,
+                        "market": market,
+                        "action": action,
+                        "quantity": float(row.get("qty", 0) or 0),
+                        "price": float(row.get("price", 0) or 0),
+                        "fees": 0.0,  # Futu reports fees separately via order detail; v1 sets 0
+                        "filled_at": self._parse_futu_ts(row.get("create_time")),
+                        "raw": {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()},
+                    }
+                )
+        return out
+
+    def fetch_capital_flow(self, start: datetime, end: datetime) -> List[Dict[str, Any]]:
+        """Pull cashflow events from Futu OpenD in [start, end].
+
+        Futu's `get_acc_cash_flow` is one-day-at-a-time (the documented range
+        endpoint does not exist on OpenSecTradeContext). Loop daily; skip empty
+        days silently.
+
+        Returns rows shaped for `xenon.db.queries.futu_history.insert_cashflows`.
+        Maps Futu's cashflow_type onto the normalized union; signs amounts
+        (negative for outflows) so the backward walk can sum directly.
+        """
+        self._ensure_connected()
+        try:
+            from futu import RET_OK, TrdEnv  # type: ignore
+        except ImportError as exc:
+            raise FutuConnectionError("futu-api missing") from exc
+
+        env_enum = getattr(TrdEnv, self._matched_trd_env or self.trd_env, TrdEnv.REAL)
+        out: List[Dict[str, Any]] = []
+        cur_day = start.date()
+        end_day = end.date()
+        # Futu enforces ~20 cashflow queries / 30s. Throttle (CASHFLOW_THROTTLE_SEC).
+        import time as _time
+
+        first_call = True
+        while cur_day <= end_day:
+            # Skip weekends — banks closed, no clearing activity.
+            if cur_day.weekday() >= 5:
+                cur_day = cur_day + timedelta(days=1)
+                continue
+            if not first_call and self.CASHFLOW_THROTTLE_SEC > 0:
+                _time.sleep(self.CASHFLOW_THROTTLE_SEC)
+            first_call = False
+            try:
+                ret, data = self._trd_ctx.get_acc_cash_flow(
+                    clearing_date=cur_day.strftime("%Y-%m-%d"),
+                    trd_env=env_enum,
+                    acc_id=self._acc_id,
+                    cashflow_direction="N/A",
+                )
+            except Exception as exc:
+                raise classify_futu_exception(exc)
+            if ret != RET_OK:
+                raise classify_futu_exception(Exception(str(data)))
+            if data is not None and not data.empty:
+                for _, row in data.iterrows():
+                    raw_type = str(row.get("cashflow_type", ""))
+                    normalized = self._CASHFLOW_TYPE_MAP.get(raw_type)
+                    if normalized is None:
+                        # Skip fees, dividends, interest — they don't move
+                        # external NAV.
+                        continue
+                    amount = float(row.get("cashflow_amount", 0) or 0)
+                    if normalized in ("WITHDRAW", "TRANSFER_OUT"):
+                        amount = -abs(amount)
+                    else:
+                        amount = abs(amount)
+                    out.append(
+                        {
+                            "futu_flow_id": str(
+                                row.get("cashflow_id") or row.get("ref_id") or f"{cur_day.isoformat()}-{row.name}"
+                            ),
+                            "cashflow_type": normalized,
+                            "amount": amount,
+                            "currency": str(row.get("currency", "USD")),
+                            "occurred_at": self._parse_futu_ts(
+                                row.get("clearing_date") or cur_day.strftime("%Y-%m-%d 00:00:00")
+                            ),
+                            "raw": {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()},
+                        }
+                    )
+            cur_day = cur_day + timedelta(days=1)
+        return out
