@@ -14,7 +14,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ENV_FILE="$REPO_ROOT/.env"
+# Allow tests to inject a stub env file. Without this, dev.sh always
+# sources the operator's real .env, so test_dev_sh_db_guard cannot
+# simulate "what if .env had DATABASE_URL=core_dev" — the live .env's
+# DATABASE_URL_PAPER substitution bypasses the guard at runtime.
+ENV_FILE="${XENON_ENV_FILE:-$REPO_ROOT/.env}"
 
 log_info() { printf '\033[32m[dev.sh]\033[0m %s\n' "$*"; }
 log_warn() { printf '\033[33m[dev.sh]\033[0m %s\n' "$*" >&2; }
