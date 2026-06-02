@@ -5,6 +5,20 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-06-02
+
+### Added
+
+- **FUTU NAV curve in the Performance tab (#120).** The FUTU account tab now renders a real backward-walked NAV curve in the existing Performance page — no UI changes, no new components. Persistence layer pulls historical trades + cashflows from Futu OpenD into two new tables (`xenon.futu_trades` + `xenon.futu_cash_flow`), then a FIFO-matched backward walk (with 100× contract multiplier for OCC-format options) populates `xenon.nav_history` rows the existing `/performance?broker=FUTU` route already reads. Verified end-to-end against the operator's live account: 6,189 trades + 424 cashflows over 2024-07-15 → 2026-06-02 produce 688 daily NAV rows anchored at today's `accinfo_query.net_liquidation`.
+- **Automatic nightly Futu sync.** New FastAPI lifespan loop runs at 16:30 ET every weekday, calling `xenon-futu-history-sync` end-to-end inside the running xenon-api process. Incremental watermark (`max(filled_at, occurred_at) - 7d`) keeps each tick at ~8 seconds instead of re-walking inception. Disabled in test mode and via `XENON_FUTU_HISTORY_LOOP=0`. Single-day failures log + retry tomorrow; no schedule poisoning.
+- **`xenon-futu-history-sync` CLI.** Operator-runnable command that chains the OpenD pulls, persistence UPSERTs, and backward walk. Defaults to incremental; `--since YYYY-MM-DD` forces a deeper rewalk. Resolves FUTU scope from the matched OpenD account per spec §10 (never trusts env vars for FUTU).
+
+### Fixed
+
+- **Futu cashflow type is an open enum.** Prior assumption (`MoneyIn` / `MoneyOut` / …) missed every actual value Futu returns (`Cash Dividend`, `Fund Subscription`, `IPO Subscription`, `Currency Exchange`, `Others`, …). Dropped the `cashflow_type` CHECK and persist verbatim; M5 NAV walk decides which raw types move NAV externally.
+- **Bulk insert chunked under Postgres' 32767 bind-param cap.** Live inception backfill of 6,189 deals tripped asyncpg's `InterfaceError: the number of query arguments cannot exceed 32767` on a single `pg_insert.values(...)` call. Now batched at 2000 rows per statement within one transaction.
+- **`history_deal_list_query` throttle (10 req/30s).** Multi-window pulls (e.g. 6+ years across 26 paginated windows) tripped Futu's per-endpoint rate limit. Sleeps 3.5s between window calls; single-window pulls pay nothing.
+
 ## [0.0.10] — 2026-06-02
 
 
