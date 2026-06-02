@@ -24,7 +24,9 @@ RET_ERROR = -1
 
 
 def _client_with_mocked_ctx(
-    deal_rows: list[dict] | None = None, flow_rows: list[dict] | None = None
+    deal_rows: list[dict] | None = None,
+    flow_rows: list[dict] | None = None,
+    fee_rows: list[dict] | None = None,
 ) -> tuple[FutuClient, MagicMock]:
     c = FutuClient()
     c._connected = True
@@ -45,6 +47,8 @@ def _client_with_mocked_ctx(
             return (RET_OK, pd.DataFrame())
 
         ctx.get_acc_cash_flow = MagicMock(side_effect=_side_effect)
+    if fee_rows is not None:
+        ctx.order_fee_query = MagicMock(return_value=(RET_OK, pd.DataFrame(fee_rows)))
     c._trd_ctx = ctx
     return c, ctx
 
@@ -85,6 +89,14 @@ def _flow_row(
         "cashflow_remark": "",
         "currency": currency,
         "cashflow_amount": float(amount),
+    }
+
+
+def _fee_row(order_id: str = "o1", amount: float = 1.25) -> dict:
+    return {
+        "order_id": order_id,
+        "fee_amount": amount,
+        "fee_details": [("Commission", amount)],
     }
 
 
@@ -260,3 +272,23 @@ def test_fetch_capital_flow_raises_on_sdk_error():
             start=datetime(2024, 5, 1, tzinfo=timezone.utc),
             end=datetime(2024, 5, 2, tzinfo=timezone.utc),
         )
+
+
+def test_fetch_order_fees_batches_at_400_ids():
+    c, ctx = _client_with_mocked_ctx(fee_rows=[_fee_row("o1")])
+    c.ORDER_FEE_THROTTLE_SEC = 0
+    fees = c.fetch_order_fees([str(i) for i in range(401)])
+    assert ctx.order_fee_query.call_count == 2
+    assert fees[0]["futu_order_id"] == "o1"
+
+
+def test_fetch_order_fees_throttles_between_batches(monkeypatch):
+    c, ctx = _client_with_mocked_ctx(fee_rows=[_fee_row("o1")])
+    c.ORDER_FEE_THROTTLE_SEC = 3.5
+    sleeps: list[float] = []
+    monkeypatch.setattr("time.sleep", sleeps.append)
+
+    c.fetch_order_fees([str(i) for i in range(801)])
+
+    assert ctx.order_fee_query.call_count == 3
+    assert sleeps == [3.5, 3.5]

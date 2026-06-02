@@ -234,6 +234,16 @@ futu_trades = Table(
     ),
     CheckConstraint("market = 'US'", name="ck_futu_trades_market_us_only"),
     CheckConstraint("action IN ('BUY', 'SELL')", name="ck_futu_trades_action"),
+    ForeignKeyConstraint(
+        ["broker", "account_env", "broker_account", "futu_order_id"],
+        [
+            "xenon.futu_orders.broker",
+            "xenon.futu_orders.account_env",
+            "xenon.futu_orders.broker_account",
+            "xenon.futu_orders.futu_order_id",
+        ],
+        name="fk_futu_trades_order",
+    ),
     Index(
         "ix_futu_trades_scope_filled_at",
         "broker",
@@ -272,6 +282,78 @@ futu_cash_flow = Table(
         "broker_account",
         "occurred_at",
     ),
+)
+
+futu_orders = Table(
+    "futu_orders",
+    xenon_metadata,
+    Column("broker", Text, primary_key=True),
+    Column("account_env", Text, primary_key=True),
+    Column("broker_account", Text, primary_key=True),
+    Column("futu_order_id", Text, primary_key=True),
+    Column("ticker", Text),
+    Column("futu_code", Text),
+    Column("market", Text, nullable=False),
+    Column("trd_side", Text),
+    Column("order_type", Text, nullable=False),
+    Column("order_status", Text, nullable=False),
+    Column("quantity", Numeric(20, 8)),
+    Column("price", Numeric(14, 4)),
+    Column("dealt_quantity", Numeric(20, 8)),
+    Column("dealt_avg_price", Numeric(14, 4)),
+    Column("currency", Text, nullable=False),
+    Column("created_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("source", Text, nullable=False, server_default=text("'history_order'")),
+    Column("is_combo", Boolean, nullable=False, server_default=text("false")),
+    Column("leg_count", Integer),
+    Column("raw", JSONB, nullable=False),
+    Column("ingested_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    CheckConstraint("broker = 'FUTU'", name="ck_futu_orders_broker"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim')",
+        name="ck_futu_orders_account_env",
+    ),
+    CheckConstraint("market = 'US'", name="ck_futu_orders_market_us_only"),
+    CheckConstraint("currency = 'USD'", name="ck_futu_orders_currency_usd_only"),
+    CheckConstraint("source IN ('history_order', 'deal_derived')", name="ck_futu_orders_source"),
+    Index(
+        "ix_futu_orders_scope_created_at",
+        "broker",
+        "account_env",
+        "broker_account",
+        "created_at",
+    ),
+)
+
+futu_order_fees = Table(
+    "futu_order_fees",
+    xenon_metadata,
+    Column("broker", Text, primary_key=True),
+    Column("account_env", Text, primary_key=True),
+    Column("broker_account", Text, primary_key=True),
+    Column("futu_order_id", Text, primary_key=True),
+    Column("fee_amount", Numeric(14, 4), nullable=False),
+    Column("currency", Text, nullable=False),
+    Column("raw", JSONB, nullable=False),
+    Column("ingested_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    ForeignKeyConstraint(
+        ["broker", "account_env", "broker_account", "futu_order_id"],
+        [
+            "xenon.futu_orders.broker",
+            "xenon.futu_orders.account_env",
+            "xenon.futu_orders.broker_account",
+            "xenon.futu_orders.futu_order_id",
+        ],
+        name="fk_futu_order_fees_order",
+        ondelete="CASCADE",
+    ),
+    CheckConstraint("broker = 'FUTU'", name="ck_futu_order_fees_broker"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim')",
+        name="ck_futu_order_fees_account_env",
+    ),
+    CheckConstraint("currency = 'USD'", name="ck_futu_order_fees_currency_usd_only"),
 )
 
 

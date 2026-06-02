@@ -637,6 +637,11 @@ class FutuClient:
     # short-range pulls (one window) pay no penalty. Tests may set to 0.
     DEAL_THROTTLE_SEC: float = 3.5
 
+    # order_fee_query is also capped at 10 calls / 30s. Full account history
+    # can exceed 4000 order IDs, so batch requests need the same inter-call
+    # pacing as deal/order history windows.
+    ORDER_FEE_THROTTLE_SEC: float = 3.5
+
     # No client-side cashflow_type mapping. Futu returns descriptive English
     # strings ('Cash Dividend', 'Fund Subscription', 'IPO Subscription',
     # 'Others', etc.) — a fully open set. We persist them verbatim; M5 walk
@@ -671,6 +676,19 @@ class FutuClient:
         # pd.to_datetime returns a Timestamp; coerce to stdlib datetime
         py_dt = ts.to_pydatetime()
         return py_dt if py_dt.tzinfo else py_dt.replace(tzinfo=timezone.utc)
+
+    @staticmethod
+    def _raw_cell(value: Any) -> Any:
+        if isinstance(value, (list, tuple)):
+            return [FutuClient._raw_cell(v) for v in value]
+        if isinstance(value, dict):
+            return {str(k): FutuClient._raw_cell(v) for k, v in value.items()}
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
+        return value
 
     def fetch_history_deals(self, start: datetime, end: datetime) -> List[Dict[str, Any]]:
         """Pull historical fills from Futu OpenD in [start, end].
@@ -746,7 +764,118 @@ class FutuClient:
                         "price": float(row.get("price", 0) or 0),
                         "fees": 0.0,  # Futu reports fees separately via order detail; v1 sets 0
                         "filled_at": self._parse_futu_ts(row.get("create_time")),
-                        "raw": {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()},
+                        "raw": {k: self._raw_cell(v) for k, v in row.to_dict().items()},
+                    }
+                )
+        return out
+
+    def fetch_history_orders(self, start: datetime, end: datetime) -> List[Dict[str, Any]]:
+        """Pull historical orders from Futu OpenD in [start, end].
+
+        Includes all order statuses returned by OpenD: filled, cancelled,
+        failed, submitted, etc. This is the order-level ledger that deal rows
+        link to via `order_id`.
+        """
+        self._ensure_connected()
+        try:
+            from futu import RET_OK, TrdEnv  # type: ignore
+        except ImportError as exc:
+            raise FutuConnectionError("futu-api missing") from exc
+
+        env_enum = getattr(TrdEnv, self._matched_trd_env or self.trd_env, TrdEnv.REAL)
+        out: List[Dict[str, Any]] = []
+        import time as _time
+
+        first_call = True
+        for w_start, w_end in self._iter_windows(start, end):
+            if not first_call and self.DEAL_THROTTLE_SEC > 0:
+                _time.sleep(self.DEAL_THROTTLE_SEC)
+            first_call = False
+            try:
+                ret, data = self._trd_ctx.history_order_list_query(
+                    code="",
+                    trd_env=env_enum,
+                    acc_id=self._acc_id,
+                    start=self._fmt_futu_ts(w_start),
+                    end=self._fmt_futu_ts(w_end),
+                )
+            except Exception as exc:
+                raise classify_futu_exception(exc)
+            if ret != RET_OK:
+                raise classify_futu_exception(Exception(str(data)))
+            if data is None or data.empty:
+                continue
+            for _, row in data.iterrows():
+                code = str(row.get("code", ""))
+                market, _, ticker = code.partition(".")
+                if not ticker:
+                    ticker, market = code, ""
+                out.append(
+                    {
+                        "futu_order_id": str(row.get("order_id")),
+                        "ticker": ticker,
+                        "futu_code": code,
+                        "market": market,
+                        "trd_side": str(row.get("trd_side", "")),
+                        "order_type": str(row.get("order_type", "")),
+                        "order_status": str(row.get("order_status", "")),
+                        "quantity": float(row.get("qty", 0) or 0),
+                        "price": float(row.get("price", 0) or 0),
+                        "dealt_quantity": float(row.get("dealt_qty", 0) or 0),
+                        "dealt_avg_price": float(row.get("dealt_avg_price", 0) or 0),
+                        "currency": str(row.get("currency", "")).strip(),
+                        "created_at": self._parse_futu_ts(row.get("create_time")),
+                        "updated_at": self._parse_futu_ts(row.get("updated_time")),
+                        "raw": {k: self._raw_cell(v) for k, v in row.to_dict().items()},
+                    }
+                )
+        return out
+
+    def fetch_order_fees(self, order_ids: List[str]) -> List[Dict[str, Any]]:
+        """Pull order fee details from Futu OpenD.
+
+        OpenD caps this endpoint at 400 order IDs per request. The response is
+        keyed by `order_id` and does not include currency, so Xenon stores USD
+        after filtering to US/USD orders in the sync writer.
+        """
+        self._ensure_connected()
+        if not order_ids:
+            return []
+        try:
+            from futu import RET_OK, TrdEnv  # type: ignore
+        except ImportError as exc:
+            raise FutuConnectionError("futu-api missing") from exc
+
+        env_enum = getattr(TrdEnv, self._matched_trd_env or self.trd_env, TrdEnv.REAL)
+        out: List[Dict[str, Any]] = []
+        batch_size = 400
+        import time as _time
+
+        first_call = True
+        for i in range(0, len(order_ids), batch_size):
+            if not first_call and self.ORDER_FEE_THROTTLE_SEC > 0:
+                _time.sleep(self.ORDER_FEE_THROTTLE_SEC)
+            first_call = False
+            batch = [str(order_id) for order_id in order_ids[i : i + batch_size]]
+            try:
+                ret, data = self._trd_ctx.order_fee_query(
+                    order_id_list=batch,
+                    trd_env=env_enum,
+                    acc_id=self._acc_id,
+                )
+            except Exception as exc:
+                raise classify_futu_exception(exc)
+            if ret != RET_OK:
+                raise classify_futu_exception(Exception(str(data)))
+            if data is None or data.empty:
+                continue
+            for _, row in data.iterrows():
+                out.append(
+                    {
+                        "futu_order_id": str(row.get("order_id")),
+                        "fee_amount": float(row.get("fee_amount", 0) or 0),
+                        "currency": "USD",
+                        "raw": {k: self._raw_cell(v) for k, v in row.to_dict().items()},
                     }
                 )
         return out
