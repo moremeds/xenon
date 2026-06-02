@@ -75,3 +75,76 @@ def test_fetch_ib_nav_series_writes_source_close(monkeypatch, pg_test_engine):
         ).first()
     assert row is not None, "fetch_ib_nav_series did not persist to PG"
     assert row.source == "close", f"expected 'close', got {row.source!r}"
+
+
+# CSV-format body — matches what saved query 1529248 actually returns.
+# Two NAV rows + the second-section header (CashTransactions) to verify the
+# break-on-repeat-header logic in fetch_ib_nav_series.
+_SAMPLE_FLEX_CSV = (
+    '"ClientAccountID","ReportDate","Total","TotalLong","TotalShort","Cash",'
+    '"CashLong","CashShort","Stock","StockLong","StockShort","Options",'
+    '"OptionsLong","OptionsShort","Bonds","BondsLong","BondsShort",'
+    '"Commodities","CommoditiesLong","CommoditiesShort","Funds","FundsLong",'
+    '"FundsShort","DividendAccruals","DividendAccrualsLong",'
+    '"DividendAccrualsShort","InterestAccruals","InterestAccrualsLong",'
+    '"InterestAccrualsShort"\n'
+    '"DUQ999999","20260601","100","100","0","50","50","0","40","40","0",'
+    '"10","10","0","0","0","0","0","0","0","0","0","0","0","0","0","0",'
+    '"0","0"\n'
+    '"DUQ999999","20260602","110","110","0","55","55","0","45","45","0",'
+    '"10","10","0","0","0","0","0","0","0","0","0","0","0","0","0","0",'
+    '"0","0"\n'
+    # Second-section header (e.g. CashTransactions). The parser must stop
+    # here — IB Flex multi-section CSV concatenates sections with repeated
+    # ClientAccountID header rows as separators.
+    '"ClientAccountID","Date/Time","Type","Description","Amount",'
+    '"CurrencyPrimary","Symbol","AssetClass","TransactionID"\n'
+)
+
+
+def test_fetch_ib_nav_series_csv_format_writes_source_close(monkeypatch, pg_test_engine):
+    """Same source='close' contract, but the response body is CSV (real
+    saved-query 1529248 format, not the XML the legacy endpoint assumed)."""
+    monkeypatch.setenv("IB_FLEX_TOKEN", "x" * 24)
+    monkeypatch.setenv("IB_FLEX_NAV_QUERY_ID", "1234567")
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_PAPER_ACCOUNT", "DUQ999999")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DUQ999999")
+
+    def fake_urlopen(url, timeout=30):
+        class _R:
+            def __init__(self, body: str) -> None:
+                self._body = body
+
+            def read(self) -> bytes:
+                return self._body.encode()
+
+        if "SendRequest" in url:
+            return _R(
+                '<?xml version="1.0"?><FlexStatementResponse>'
+                "<Status>Success</Status><ReferenceCode>REF456</ReferenceCode>"
+                "</FlexStatementResponse>"
+            )
+        return _R(_SAMPLE_FLEX_CSV)
+
+    with patch("urllib.request.urlopen", fake_urlopen), patch("time.sleep"):
+        from xenon.reports.portfolio_performance import fetch_ib_nav_series
+
+        entries = fetch_ib_nav_series()
+
+    # 2 NAV rows; second-section header must NOT be parsed as a 3rd row.
+    assert entries is not None
+    assert len(entries) == 2, f"expected 2 entries, got {len(entries)}: {entries!r}"
+
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT date, source FROM xenon.nav_history "
+                "WHERE broker='IB' AND account_env='paper' "
+                "AND broker_account='DUQ999999' "
+                "AND date IN ('2026-06-01', '2026-06-02') ORDER BY date"
+            )
+        ).fetchall()
+    assert len(rows) == 2
+    assert all(r.source == "close" for r in rows), [r.source for r in rows]
