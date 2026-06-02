@@ -405,26 +405,35 @@ def _ensure_worker_db() -> Any:
         isolation_level="AUTOCOMMIT",
         connect_args={"connect_timeout": 2},
     )
-    global _WORKER_DB_DISABLED
+    global _WORKER_DB_DISABLED, _SESSION_ENGINE, _PG_REACHABLE
     try:
         with admin_engine.connect() as conn:
+            # Postgres advisory lock serializes the clone across the 4 workers.
+            # Without it, `CREATE DATABASE … TEMPLATE xenon_test` from worker A
+            # races against worker B's same statement and one fails with "source
+            # database is being accessed by other users" (PG blocks template
+            # clone while the template has any live session). Lock is session-
+            # scoped and auto-released on connection close.
+            conn.execute(text("SELECT pg_advisory_lock(8421052)"))
             conn.execute(text(f'DROP DATABASE IF EXISTS "{target_db}" WITH (FORCE)'))
             conn.execute(text(f'CREATE DATABASE "{target_db}" TEMPLATE "{template_db}"'))
-    except SQLAlchemyError as exc:
-        # Two failure modes worth distinguishing:
-        #   1. Insufficient privilege — common on shared dev PGs where xenon_app
-        #      is locked down. Fall back to the master DB so tests still run
-        #      (Phase 2-level isolation only — workers contend on shared tables).
-        #   2. Anything else (template missing, connect refused) — mark offline.
-        msg = str(exc).lower()
-        if "permission denied" in msg or "insufficient" in msg:
-            _WORKER_DB_DISABLED = True
-            global _SESSION_ENGINE
-            if _SESSION_ENGINE is not None:
-                _SESSION_ENGINE.dispose()
-                _SESSION_ENGINE = None
-        else:
-            mark_offline()
+    except SQLAlchemyError:
+        # ANY clone failure → fall back to master DB. This is the right answer
+        # for both failure modes the original code distinguished:
+        #   - InsufficientPrivilege (shared dev PG where xenon_app lacks
+        #     CREATEDB): obvious — there's no other path
+        #   - Anything else (busy template, connect refused, etc.): if we
+        #     leave the suffix in place, tests that build their own engine
+        #     from `DATABASE_URL` (committed_db carve-outs) crash with
+        #     "database xenon_test_gwN does not exist". Falling back to the
+        #     master DB lets those tests run on shared state — sub-optimal but
+        #     never broken.
+        _WORKER_DB_DISABLED = True
+        if _SESSION_ENGINE is not None:
+            _SESSION_ENGINE.dispose()
+            _SESSION_ENGINE = None
+        # Re-probe reachability against the master URL on next call.
+        _PG_REACHABLE = None
     finally:
         admin_engine.dispose()
     yield

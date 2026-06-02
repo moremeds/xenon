@@ -16,7 +16,19 @@ import pytest
 # rest of the helper-touching tests in this tree.
 pytestmark = pytest.mark.committed_db
 
+import xenon._test_db as _tdb
 from xenon._test_db import sync_test_db_url
+
+
+@pytest.fixture(autouse=True)
+def _reset_worker_disabled_flag(monkeypatch):
+    """Pin _WORKER_DB_DISABLED=False for these URL-rewrite assertions.
+
+    The session-scoped autouse in `_test_db.py` flips the flag True under
+    xdist when CREATEDB perm is missing OR the template clone races. These
+    tests target the URL-rewrite logic which only runs when the flag is False.
+    """
+    monkeypatch.setattr(_tdb, "_WORKER_DB_DISABLED", False)
 
 
 def test_master_worker_uses_unsuffixed_db(monkeypatch):
