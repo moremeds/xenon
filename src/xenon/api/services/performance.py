@@ -15,13 +15,15 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, datetime, time, timezone
 from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from xenon.db.queries.futu_history import list_cashflows
 from xenon.db.queries.nav_history import load_benchmark_cached, load_nav_curve
 from xenon.execution.account_scope import AccountScope
 from xenon.reports import performance_metrics as M
@@ -46,6 +48,17 @@ DISTRIBUTION_FIELDS = (
     "best_day", "worst_day", "average_up_day", "average_down_day",
     "win_loss_ratio", "skew", "kurtosis",
 )
+
+
+@dataclass(frozen=True)
+class FutuOfficialPerformance:
+    returns: np.ndarray
+    net_inflows: np.ndarray
+    income_by_day: np.ndarray
+    net_inflow: float
+    income: float
+    simple_return: float
+    time_weighted_return: float
 
 
 def _env_int(key: str, default: int) -> int:
@@ -220,6 +233,84 @@ def _futu_returns(curve: pd.DataFrame) -> np.ndarray:
     return returns
 
 
+def _is_futu_net_inflow(row: dict) -> bool:
+    """Return True for Futu cashflows that change invested capital.
+
+    Dividends, interest, taxes, and fees are investment income/costs; treating
+    them as net inflow would subtract real performance from the numerator.
+    The current OpenD backfill marks user cash movement as `Others` with an
+    empty remark, which is the same conservative classification used by the
+    Futu NAV backfill.
+    """
+    if str(row.get("cashflow_type") or "") != "Others":
+        return False
+    raw = row.get("raw") or {}
+    remark = str(raw.get("cashflow_remark") or "").strip()
+    return remark == ""
+
+
+def _cashflow_date(row: dict) -> date:
+    value = row.get("occurred_at")
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc).date()
+    if isinstance(value, date):
+        return value
+    return pd.to_datetime(value).date()
+
+
+def _futu_official_performance(curve: pd.DataFrame, cashflows: list[dict]) -> FutuOfficialPerformance:
+    """Futu official simple/time-weighted return formulas.
+
+    Daily income = NAV[t] - NAV[t-1] - daily net inflow.
+    Daily return = income / (NAV[t-1] + 0.5 * daily net inflow).
+    TWR = product(1 + daily return) - 1.
+    Simple return = period income / (start NAV + 0.5 * period net inflow).
+    """
+    nav = curve["nav"].astype(float).to_numpy()
+    if len(nav) == 0:
+        empty = np.array([])
+        return FutuOfficialPerformance(empty, empty, empty, 0.0, 0.0, 0.0, 0.0)
+
+    flows_by_date: dict[date, float] = {}
+    for row in cashflows:
+        if not _is_futu_net_inflow(row):
+            continue
+        d = _cashflow_date(row)
+        flows_by_date[d] = flows_by_date.get(d, 0.0) + float(row.get("amount") or 0.0)
+
+    returns = np.zeros(len(nav), dtype=float)
+    net_inflows = np.zeros(len(nav), dtype=float)
+    income_by_day = np.zeros(len(nav), dtype=float)
+    twr = 1.0
+
+    dates = list(curve["date"])
+    for i in range(1, len(nav)):
+        d = dates[i]
+        flow = flows_by_date.get(d, 0.0)
+        income = nav[i] - nav[i - 1] - flow
+        denominator = nav[i - 1] + 0.5 * flow
+        daily_return = income / denominator if denominator else 0.0
+        net_inflows[i] = flow
+        income_by_day[i] = income
+        returns[i] = daily_return
+        twr *= 1.0 + daily_return
+
+    period_net_inflow = float(net_inflows.sum())
+    period_income = float(income_by_day.sum())
+    simple_denominator = nav[0] + 0.5 * period_net_inflow
+    simple_return = period_income / simple_denominator if simple_denominator else 0.0
+
+    return FutuOfficialPerformance(
+        returns=returns,
+        net_inflows=net_inflows,
+        income_by_day=income_by_day,
+        net_inflow=period_net_inflow,
+        income=period_income,
+        simple_return=simple_return,
+        time_weighted_return=twr - 1.0,
+    )
+
+
 def _build_series(curve: pd.DataFrame, bench_df: pd.DataFrame | None,
                   returns: np.ndarray) -> list[dict[str, Any]]:
     """Wire-shape series. daily_return = returns[i] (correction #6)."""
@@ -281,31 +372,37 @@ async def compute(
 
     bench_df, bench_err = await load_benchmark_cached(engine, ib_pool, "SPY", period_start)
 
+    futu_official: FutuOfficialPerformance | None = None
     if scope.broker == "IB":
         returns = _ib_returns(curve)
     else:
-        returns = _futu_returns(curve)
+        cashflows = await list_cashflows(
+            engine,
+            scope,
+            since=datetime.combine(period_start, time.min, tzinfo=timezone.utc),
+        )
+        futu_official = _futu_official_performance(curve, cashflows)
+        returns = futu_official.returns
 
     nav = curve["nav"].astype(float).to_numpy()
     summary = _base_summary(nav, days_collected)
+    if futu_official is not None:
+        summary["pnl"] = futu_official.income
+        summary["total_return"] = futu_official.time_weighted_return
+        summary["simple_return"] = futu_official.simple_return
+        summary["time_weighted_return"] = futu_official.time_weighted_return
+        summary["net_inflow"] = futu_official.net_inflow
 
     warnings: list[str] = []
     metrics_unlocked = days_collected >= min_metrics
-    futu_mask = scope.broker == "FUTU"
     ib_mask = scope.broker == "IB" and _ib_should_mask_metrics()
     if ib_mask:
         warnings.append(
             "IB TWR requires cash-flow tracking — follow-up. "
             "See docs/superpowers/reports/2026-06-01-ib-dailypnl-verification.md."
         )
-    if futu_mask:
-        warnings.append(
-            "FUTU NAV-change returns include external cash flows "
-            "(deposits, withdrawals, dividends). True Time-Weighted Return "
-            "requires cash-flow tracking — follow-up."
-        )
 
-    risk_masked = futu_mask or ib_mask or not metrics_unlocked
+    risk_masked = ib_mask or not metrics_unlocked
     if not risk_masked:
         # First-pass returns excluding the synthetic returns[0]
         returns_for_metrics = returns[1:] if len(returns) > 1 else returns
@@ -340,7 +437,7 @@ async def compute(
         "last_sync": str(curve["date"].iloc[-1]),
         "period_start": str(period_start),
         "period_end": str(curve["date"].iloc[-1]),
-        "period_label": _period_label(curve["date"].iloc[0]),
+        "period_label": "YTD RETURN" if scope.broker == "FUTU" else _period_label(curve["date"].iloc[0]),
         "scope": {
             "broker": scope.broker,
             "account_env": scope.account_env,
@@ -350,7 +447,10 @@ async def compute(
         "benchmark": "SPY" if bench_df is not None and not bench_df.empty else None,
         "benchmark_total_return": _bench_total_return(bench_df),
         "trades_source": "nav_history",
-        "methodology": {"basis": "NAV change", "annualization_periods": PERIODS_PER_YEAR},
+        "methodology": {
+            "basis": "Futu official TWR" if scope.broker == "FUTU" else "NAV change",
+            "annualization_periods": PERIODS_PER_YEAR,
+        },
         "price_sources": {"primary": "nav_history", "benchmark": "ib_historical_daily"},
         "summary": summary,
         "series": series,

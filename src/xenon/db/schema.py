@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     MetaData,
     Numeric,
     SmallInteger,
@@ -271,6 +272,77 @@ futu_cash_flow = Table(
         "account_env",
         "broker_account",
         "occurred_at",
+    ),
+)
+
+
+# Futu daily statement — official daily NAV / Portfolio / Cash / Funds from
+# the password-protected PDF emailed by Futu HK. Pulled via Outlook IMAP +
+# pikepdf decrypt + pdfplumber text extraction; persisted here.
+#
+# Why we need this: futu_nav_history is synthetic (flat-line MTM between
+# trades). The Futu app's Performance view uses comprehensive income which
+# includes daily mark-to-market on open positions — the statement gives us
+# that NAV series directly per trading day in HKD + per-currency breakdown.
+#
+# raw_pdf stores the original encrypted PDF bytes so the source-of-truth is
+# preserved; re-decryption requires FUTU_STATEMENT_PASSWORD (env-only).
+futu_daily_statement = Table(
+    "futu_daily_statement",
+    xenon_metadata,
+    Column("broker", Text, primary_key=True),
+    Column("account_env", Text, primary_key=True),
+    Column("broker_account", Text, primary_key=True),
+    Column("statement_date", Date, primary_key=True),
+    Column("preparation_date", Date, nullable=False),
+    Column("account_number", Text, nullable=False),
+    Column("account_suffix", Text, nullable=False),
+    Column("client_name", Text, nullable=False),
+    Column("base_currency", Text, nullable=False),
+    # Portfolio summary in base currency (HKD for the 5668 account)
+    Column("starting_portfolio_base", Numeric(20, 4), nullable=False),
+    Column("ending_portfolio_base", Numeric(20, 4), nullable=False),
+    Column("starting_funds_base", Numeric(20, 4), nullable=False),
+    Column("ending_funds_base", Numeric(20, 4), nullable=False),
+    Column("starting_cash_base", Numeric(20, 4), nullable=False),
+    Column("ending_cash_base", Numeric(20, 4), nullable=False),
+    Column("starting_nav_base", Numeric(20, 4), nullable=False),
+    Column("ending_nav_base", Numeric(20, 4), nullable=False),
+    # Per-currency NAV breakdown — JSONB so we can add currencies later
+    # without a migration. Example: {"HKD": 25264.93, "USD": 222269.38, ...}
+    Column("starting_nav_by_currency", JSONB, nullable=False),
+    Column("ending_nav_by_currency", JSONB, nullable=False),
+    # Reference rates the statement used. JSONB so format is flexible.
+    # Example: {"USD/HKD": 7.836615, "CNH/HKD": 1.158600, ...}
+    Column("exchange_rates", JSONB, nullable=False),
+    # Plain-text per page (JSONB array) — saved alongside the encrypted raw_pdf
+    # so downstream queries / future parsers don't need to re-decrypt.
+    Column("page_text", JSONB, nullable=True),
+    # Page 9: financing overview (margin interest + securities lending interest).
+    # Example: {"margin_interest": [{"date": "...", "currency": "USD", "amount": 7.17,
+    # "rate": 0.048, "principal": 53766.52, "cumulative": 113.85}],
+    # "securities_lending": [{"date": "...", "symbol": "LITX", ...}]}
+    Column("financing", JSONB, nullable=True),
+    # Page 8: daily transaction totals by currency.
+    # Example: {"USD": {"transaction_amount": 34271.89, "commission": 24.40,
+    # "platform_fees": 9.39, "change_in_amount": 1052.16, ...}}
+    Column("transaction_totals", JSONB, nullable=True),
+    # Source PDF for reproducibility — encrypted bytes, re-decryptable with env password
+    Column("raw_pdf", LargeBinary, nullable=True),
+    Column("source_uid", Text, nullable=True),  # IMAP UID of the email
+    Column("source_subject", Text, nullable=True),
+    Column("ingested_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    CheckConstraint("broker = 'FUTU'", name="ck_futu_daily_statement_broker"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim')",
+        name="ck_futu_daily_statement_account_env",
+    ),
+    Index(
+        "ix_futu_daily_statement_scope_date",
+        "broker",
+        "account_env",
+        "broker_account",
+        "statement_date",
     ),
 )
 

@@ -22,7 +22,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xenon.db.schema import futu_cash_flow, futu_trades
+from xenon.db.schema import futu_cash_flow, futu_daily_statement, futu_trades
 from xenon.execution.account_scope import AccountScope
 
 # Postgres' wire protocol caps a single statement at 32767 bind params.
@@ -140,9 +140,75 @@ async def list_cashflows(
     return [dict(r) for r in rows]
 
 
+async def insert_daily_statement(engine: AsyncEngine, scope: AccountScope, row: dict) -> int:
+    """UPSERT one daily-statement row keyed by (scope, statement_date)."""
+    scoped = _scoped(row, scope)
+    async with engine.begin() as conn:
+        stmt = pg_insert(futu_daily_statement).values(**scoped)
+        # Re-pulls replace mutable fields. PK columns + ingested_at stay put.
+        update_cols = {
+            c.name: getattr(stmt.excluded, c.name)
+            for c in futu_daily_statement.columns
+            if c.name
+            not in {
+                "broker",
+                "account_env",
+                "broker_account",
+                "statement_date",
+                "ingested_at",
+            }
+        }
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[
+                "broker",
+                "account_env",
+                "broker_account",
+                "statement_date",
+            ],
+            set_=update_cols,
+        )
+        result = await conn.execute(stmt)
+    return result.rowcount or 0
+
+
+async def list_daily_statements(
+    engine: AsyncEngine,
+    scope: AccountScope,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    *,
+    include_raw_pdf: bool = False,
+) -> list[dict]:
+    """Return statements for the scope in ascending statement_date order.
+
+    `raw_pdf` is excluded by default since it's bytes-heavy; pass
+    include_raw_pdf=True for re-parsing or re-archival flows.
+    """
+    where = (
+        (futu_daily_statement.c.broker == scope.broker)
+        & (futu_daily_statement.c.account_env == scope.account_env)
+        & (futu_daily_statement.c.broker_account == scope.broker_account)
+    )
+    if since is not None:
+        if isinstance(since, datetime):
+            since = since.date()
+        where = where & (futu_daily_statement.c.statement_date >= since)
+    if until is not None:
+        if isinstance(until, datetime):
+            until = until.date()
+        where = where & (futu_daily_statement.c.statement_date <= until)
+    cols = [c for c in futu_daily_statement.columns if c.name != "raw_pdf" or include_raw_pdf]
+    stmt = sa.select(*cols).where(where).order_by(futu_daily_statement.c.statement_date.asc())
+    async with engine.begin() as conn:
+        rows = (await conn.execute(stmt)).mappings().all()
+    return [dict(r) for r in rows]
+
+
 __all__: Sequence[str] = (
     "insert_trades",
     "insert_cashflows",
+    "insert_daily_statement",
     "list_trades",
     "list_cashflows",
+    "list_daily_statements",
 )

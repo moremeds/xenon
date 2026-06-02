@@ -5,11 +5,40 @@ from datetime import date, timedelta
 import pytest
 import sqlalchemy as sa
 
+from xenon.api.services import performance
 from xenon.api.services.performance import compute
-from xenon.db.schema import nav_history
+from xenon.db.schema import futu_cash_flow, nav_history
 from xenon.execution.account_scope import AccountScope
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_futu_official_performance_math_matches_help_example():
+    curve = performance.pd.DataFrame(
+        [
+            {"date": date(2026, 1, 1), "nav": 100.0, "daily_pnl": None, "source": "intraday"},
+            {"date": date(2026, 1, 2), "nav": 150.0, "daily_pnl": None, "source": "intraday"},
+            {"date": date(2026, 1, 3), "nav": 1050.0, "daily_pnl": None, "source": "intraday"},
+        ]
+    )
+    cashflows = [
+        {
+            "cashflow_type": "Others",
+            "amount": 1000.0,
+            "occurred_at": date(2026, 1, 3),
+            "raw": {"cashflow_remark": ""},
+        }
+    ]
+
+    perf = performance._futu_official_performance(curve, cashflows)
+
+    assert perf.returns[0] == 0.0
+    assert perf.returns[1] == pytest.approx(0.5)
+    assert perf.returns[2] == pytest.approx(-100 / 650)
+    assert perf.time_weighted_return == pytest.approx((1.5 * (1 - 100 / 650)) - 1)
+    assert perf.simple_return == pytest.approx(-50 / 600)
+    assert perf.income == pytest.approx(-50.0)
+    assert perf.net_inflow == pytest.approx(1000.0)
 
 
 async def _seed(engine, n, *, broker="IB", env="paper", account="T_PERF",
@@ -33,6 +62,7 @@ async def _seed(engine, n, *, broker="IB", env="paper", account="T_PERF",
 async def _purge(engine, account):
     async with engine.begin() as c:
         await c.execute(sa.delete(nav_history).where(nav_history.c.broker_account == account))
+        await c.execute(sa.delete(futu_cash_flow).where(futu_cash_flow.c.broker_account == account))
 
 
 # ---------- threshold ladder ----------
@@ -135,14 +165,57 @@ async def test_first_IB_return_zeroed(async_engine, monkeypatch):
 # ---------- FUTU masking ----------
 
 
-async def test_FUTU_30_plus_metrics_masked(async_engine):
+async def test_FUTU_30_plus_metrics_unmasked_with_official_cashflow_adjusted_returns(async_engine):
     await _seed(async_engine, 40, broker="FUTU", env="live", account="T_FUTU")
     data = await compute(async_engine, AccountScope("FUTU", "live", "T_FUTU"))
     await _purge(async_engine, "T_FUTU")
     assert data["status"] == "ok"
     s = data["summary"]
-    assert s["sharpe_ratio"] is None
-    assert "FUTU NAV-change returns include external cash flows" in " ".join(data["warnings"])
+    assert s["sharpe_ratio"] is not None
+    assert s["annualized_return"] is not None
+    assert "FUTU NAV-change returns include external cash flows" not in " ".join(data["warnings"])
+    assert data["methodology"]["basis"] == "Futu official TWR"
+
+
+async def test_FUTU_uses_official_cashflow_adjusted_twr_and_simple_return(async_engine, monkeypatch):
+    monkeypatch.setenv("XENON_PERF_MIN_DAYS_CURVE", "2")
+    account = "T_FUTU_OFFICIAL"
+    await _purge(async_engine, account)
+    async with async_engine.begin() as c:
+        for d, nav in [
+            (date(2026, 1, 1), "100.0"),
+            (date(2026, 1, 2), "150.0"),
+            (date(2026, 1, 3), "1050.0"),
+            (date(2026, 1, 4), "1050.0"),
+            (date(2026, 1, 5), "1050.0"),
+        ]:
+            await c.execute(sa.insert(nav_history).values(
+                broker="FUTU", account_env="live", broker_account=account,
+                date=d, nav=nav, daily_pnl=None, source="intraday",
+            ))
+        await c.execute(sa.insert(futu_cash_flow).values(
+            broker="FUTU",
+            account_env="live",
+            broker_account=account,
+            futu_flow_id="deposit-1",
+            cashflow_type="Others",
+            amount="1000.0",
+            currency="USD",
+            occurred_at=date(2026, 1, 3),
+            raw={"cashflow_remark": ""},
+        ))
+
+    data = await compute(async_engine, AccountScope("FUTU", "live", account))
+    await _purge(async_engine, account)
+
+    summary = data["summary"]
+    assert summary["pnl"] == pytest.approx(-50.0)
+    assert summary["net_inflow"] == pytest.approx(1000.0)
+    assert summary["simple_return"] == pytest.approx(-50.0 / 600.0)
+    assert summary["total_return"] == pytest.approx((1.5 * (1 - 100 / 650)) - 1)
+    assert data["series"][1]["daily_return"] == pytest.approx(0.5)
+    assert data["series"][2]["daily_return"] == pytest.approx(-100 / 650)
+    assert "FUTU NAV-change returns include external cash flows" not in " ".join(data["warnings"])
 
 
 # ---------- low-confidence (spec §4) ----------
