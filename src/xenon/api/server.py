@@ -278,6 +278,66 @@ def _maybe_start_activity_poller() -> None:
     logger.info("ib activity poller started: interval=%ss", interval_s)
 
 
+def _maybe_start_futu_history_loop() -> None:
+    """Start the nightly Futu trades + cashflows + NAV walk loop.
+
+    Runs at 16:30 ET every weekday inside the running xenon-api process.
+    Idempotent at every layer (UPSERTs on natural keys); a failure on one
+    day does not poison the schedule.
+
+    Enabled by default. Set XENON_FUTU_HISTORY_LOOP=0 to disable. Skipped
+    in test mode. The task handle lives on app.state for clean shutdown.
+    """
+    import asyncio as _asyncio
+
+    if _is_test_mode():
+        logger.info("test_mode: skipping futu history loop")
+        return
+
+    flag = os.environ.get("XENON_FUTU_HISTORY_LOOP", "").strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        logger.info("futu history loop disabled (XENON_FUTU_HISTORY_LOOP=%s)", flag)
+        return
+
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        logger.info("futu history loop skipped: DATABASE_URL not set")
+        return
+
+    from datetime import date as _date
+
+    from sqlalchemy.ext.asyncio import create_async_engine as _create_engine
+
+    from xenon.api.services.futu_history_scheduler import futu_history_loop
+    from xenon.cli.futu_history_sync import run_history_sync
+    from xenon.execution.account_scope import AccountScope
+
+    def _engine_factory():
+        return _create_engine(db_url, pool_pre_ping=True)
+
+    def _scope_factory():
+        client = _get_futu_client()
+        if not client.is_connected():
+            client.connect()
+        matched_env = (client._matched_trd_env or client.trd_env or "REAL").upper()
+        account_env = {"REAL": "live", "SIMULATE": "paper"}.get(matched_env, "paper")
+        return AccountScope(
+            broker="FUTU",
+            account_env=account_env,
+            broker_account=str(client._acc_id),
+        )
+
+    task = _asyncio.create_task(
+        futu_history_loop(
+            engine_factory=_engine_factory,
+            scope_factory=_scope_factory,
+            runner=run_history_sync,
+        )
+    )
+    app.state.futu_history_loop_task = task
+    logger.info("futu history loop started (target: 16:30 ET weekdays)")
+
+
 async def _run_fills_replay_on_boot() -> None:
     """Replay IB fills into xenon.order_fills once on boot. Best-effort.
 
@@ -442,6 +502,11 @@ async def lifespan(app: FastAPI):
         # to suppress. Cadence env: XENON_IB_ACTIVITY_POLL_S.
         _maybe_start_activity_poller()
 
+    # Nightly Futu trades + cashflows + NAV walk. Runs at 16:30 ET every
+    # weekday. Idempotent via UPSERT on natural keys. Enabled by default;
+    # set XENON_FUTU_HISTORY_LOOP=0 to suppress.
+    _maybe_start_futu_history_loop()
+
     # W4.7 — PG-event-driven journal auto-import listener.
     # Replaces the legacy periodic /journal/sync flow. Failures must not
     # block boot.
@@ -469,6 +534,13 @@ async def lifespan(app: FastAPI):
             ib_activity_task.cancel()
             try:
                 await ib_activity_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        futu_loop_task = getattr(app.state, "futu_history_loop_task", None)
+        if futu_loop_task is not None:
+            futu_loop_task.cancel()
+            try:
+                await futu_loop_task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         if ib_pool:

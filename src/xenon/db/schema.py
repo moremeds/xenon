@@ -200,6 +200,81 @@ nav_history = Table(
     Index("nav_history_one_env_per_day", "broker", "broker_account", "date", unique=True),
 )
 
+# ---------- Futu history (read-only persistence) ----------
+# Source for the backward NAV walk. Trades + cashflows pulled from Futu
+# OpenD and written here once; downstream backfill reads from here so we
+# can re-derive nav_history without re-pulling from Futu.
+#
+# v1 scope: US stocks only, USD-only cashflows. Non-US / non-USD rows are
+# filtered at the sync writer and never persisted. Filter is enforced by
+# the CHECK constraints below — corrupt rows cannot be silently inserted.
+
+futu_trades = Table(
+    "futu_trades",
+    xenon_metadata,
+    Column("broker", Text, primary_key=True),
+    Column("account_env", Text, primary_key=True),
+    Column("broker_account", Text, primary_key=True),
+    Column("futu_deal_id", Text, primary_key=True),
+    Column("futu_order_id", Text),
+    Column("ticker", Text, nullable=False),  # e.g. "AAPL"
+    Column("futu_code", Text, nullable=False),  # e.g. "US.AAPL"
+    Column("market", Text, nullable=False),  # 'US' only for v1
+    Column("action", Text, nullable=False),  # 'BUY' or 'SELL'
+    Column("quantity", Numeric(20, 8), nullable=False),
+    Column("price", Numeric(14, 4), nullable=False),
+    Column("fees", Numeric(14, 4), nullable=False, server_default=text("0")),
+    Column("filled_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("raw", JSONB, nullable=False),
+    Column("ingested_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    CheckConstraint("broker = 'FUTU'", name="ck_futu_trades_broker"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim')",
+        name="ck_futu_trades_account_env",
+    ),
+    CheckConstraint("market = 'US'", name="ck_futu_trades_market_us_only"),
+    CheckConstraint("action IN ('BUY', 'SELL')", name="ck_futu_trades_action"),
+    Index(
+        "ix_futu_trades_scope_filled_at",
+        "broker",
+        "account_env",
+        "broker_account",
+        "filled_at",
+    ),
+)
+
+futu_cash_flow = Table(
+    "futu_cash_flow",
+    xenon_metadata,
+    Column("broker", Text, primary_key=True),
+    Column("account_env", Text, primary_key=True),
+    Column("broker_account", Text, primary_key=True),
+    Column("futu_flow_id", Text, primary_key=True),
+    Column("cashflow_type", Text, nullable=False),  # 'DEPOSIT' | 'WITHDRAW' | 'TRANSFER_IN' | 'TRANSFER_OUT'
+    Column("amount", Numeric(14, 4), nullable=False),  # signed: +inflow, -outflow
+    Column("currency", Text, nullable=False),  # 'USD' only for v1
+    Column("occurred_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("raw", JSONB, nullable=False),
+    Column("ingested_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    CheckConstraint("broker = 'FUTU'", name="ck_futu_cash_flow_broker"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim')",
+        name="ck_futu_cash_flow_account_env",
+    ),
+    CheckConstraint("currency = 'USD'", name="ck_futu_cash_flow_currency_usd_only"),
+    # No CHECK on cashflow_type — Futu returns a long open enum
+    # (Cash Dividend, Fund Subscription, IPO Subscription, Others, ...).
+    # M5 walk decides which raw types move NAV externally.
+    Index(
+        "ix_futu_cash_flow_scope_occurred_at",
+        "broker",
+        "account_env",
+        "broker_account",
+        "occurred_at",
+    ),
+)
+
+
 # spec § Schema changes Migration 1 — SPY/benchmark close cache.
 benchmark_closes = Table(
     "benchmark_closes",
