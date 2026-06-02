@@ -106,6 +106,8 @@ CLIENT_IDS: dict = {
     "vcg_scanner": 50,  # scanner range
     "cri_scanner": 5,  # pool data role
     "ib_realtime_server": 10,  # relay range
+    "option_chain_snapshotter_a": 95,  # daemon range — pool A for option_chain archive snapshotter
+    "option_chain_snapshotter_b": 96,  # daemon range — pool B for option_chain archive snapshotter
 }
 
 DEFAULT_HOST = os.environ.get("IB_GATEWAY_HOST", "127.0.0.1")
