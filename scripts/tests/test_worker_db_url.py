@@ -91,6 +91,26 @@ def test_worker_db_disabled_flag_falls_back_to_master(monkeypatch):
     assert url.endswith("/xenon_test"), f"fallback should drop the gw0 suffix, got {url}"
 
 
+def test_suffix_rewrite_is_idempotent(monkeypatch):
+    """Calling sync_test_db_url after the autouse fixture has rewritten
+    DATABASE_URL_TEST in env must NOT append a second `_gwN` suffix.
+
+    The autouse fixture sets DATABASE_URL_TEST to the worker-suffixed URL
+    so test helpers reading the env directly land on the right DB. The next
+    call to sync_test_db_url() reads that already-suffixed env value — the
+    function must detect and skip the second rewrite.
+    """
+    monkeypatch.setenv(
+        "DATABASE_URL_TEST",
+        "postgresql+asyncpg://u:p@h:5432/xenon_test_gw0",
+    )
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw0")
+    url = sync_test_db_url()
+    assert url == "postgresql+psycopg://u:p@h:5432/xenon_test_gw0"
+    # Calling again must return the same thing — not xenon_test_gw0_gw0.
+    assert sync_test_db_url() == url
+
+
 def test_async_url_matches_sync_url_db_name(monkeypatch):
     """async_test_db_url must point at the same DB as sync_test_db_url —
     a mismatch would cause the FastAPI route engine and the test's

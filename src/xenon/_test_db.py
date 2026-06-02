@@ -133,7 +133,14 @@ def sync_test_db_url(worker_id: str | None = None) -> str:
     if wid is None:
         return url
     base, _, dbname = url.rpartition("/")
-    return f"{base}/{dbname}_{wid}"
+    # Idempotent suffix: the autouse fixture rewrites DATABASE_URL_TEST in env
+    # so test helpers reading it directly land on the worker DB. The NEXT call
+    # to this function reads the already-suffixed env value — without this
+    # guard we'd append `_gw0` to `xenon_test_gw0` and get `xenon_test_gw0_gw0`.
+    suffix = f"_{wid}"
+    if dbname.endswith(suffix):
+        return url
+    return f"{base}/{dbname}{suffix}"
 
 
 def get_session_engine() -> Engine:
