@@ -38,7 +38,7 @@ INTERNALS_SKEW_CACHE_TTL_SECONDS = 60 * 15
 
 from xenon.api import trading_mode
 from xenon.api.auth import verify_api_key, verify_clerk_jwt
-from xenon.api.guards import get_account_scope, mask_account, require_mode_verified
+from xenon.api.guards import get_account_scope, is_read_only, mask_account, read_only_403, require_mode_verified
 from xenon.api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_mode, is_docker_mode, restart_ib_gateway
 from xenon.api.ib_pool import IBPool
 from xenon.api.pool_order_manage import pool_cancel_order, pool_modify_order
@@ -411,27 +411,36 @@ async def lifespan(app: FastAPI):
     if not uw_available:
         logger.warning("UW_TOKEN not set — UW-dependent endpoints will fail")
 
-    # F7.2 — single-leg three-source rehydrate. Runs synchronously before
-    # the server starts serving so our view of in-flight orders is accurate
-    # on first request. Failures are logged + swallowed so boot cannot be
-    # blocked by a transient IB hiccup. Known limitation: positions_changed
-    # heuristic has no persisted baseline on boot, so unknowns map to
-    # UNKNOWN rather than auto-CANCELLED (per F7.1 design).
-    await _run_rehydrate_on_boot()
+    # Read-only mode (set by `dev.sh live`) blocks every persistence path
+    # below: rehydrate writes new rows to xenon.order_submissions; the
+    # fills-replay and activity poller both write to xenon.order_fills
+    # and xenon.trades. In read-only sessions the live IB connection is
+    # still up so the dev workflow can inspect TWS-side state, but
+    # nothing lands in core_test.
+    if is_read_only():
+        logger.warning("XENON_READ_ONLY=1 — skipping rehydrate, fills replay, and activity poller (no PG writes).")
+    else:
+        # F7.2 — single-leg three-source rehydrate. Runs synchronously before
+        # the server starts serving so our view of in-flight orders is accurate
+        # on first request. Failures are logged + swallowed so boot cannot be
+        # blocked by a transient IB hiccup. Known limitation: positions_changed
+        # heuristic has no persisted baseline on boot, so unknowns map to
+        # UNKNOWN rather than auto-CANCELLED (per F7.1 design).
+        await _run_rehydrate_on_boot()
 
-    # IB→Postgres activity mirror — boot replay of fills. Pulls executions
-    # from the same long-lived IB sync client and inserts new ones into
-    # xenon.order_fills + aggregated xenon.trades. Best-effort: any failure
-    # is logged and swallowed. Without this, fills from TWS-modified or
-    # TWS-placed orders never reach the blotter unless an operator runs
-    # `xenon-ib-reconcile` manually.
-    await _run_fills_replay_on_boot()
+        # IB→Postgres activity mirror — boot replay of fills. Pulls executions
+        # from the same long-lived IB sync client and inserts new ones into
+        # xenon.order_fills + aggregated xenon.trades. Best-effort: any failure
+        # is logged and swallowed. Without this, fills from TWS-modified or
+        # TWS-placed orders never reach the blotter unless an operator runs
+        # `xenon-ib-reconcile` manually.
+        await _run_fills_replay_on_boot()
 
-    # Periodic IB activity poller. Mirrors TWS-side activity (price/qty
-    # edits, new fills, cancels expressed by disappearance) into Postgres
-    # on a fixed cadence. Enabled by default; set XENON_IB_ACTIVITY_POLLER=0
-    # to suppress. Cadence env: XENON_IB_ACTIVITY_POLL_S.
-    _maybe_start_activity_poller()
+        # Periodic IB activity poller. Mirrors TWS-side activity (price/qty
+        # edits, new fills, cancels expressed by disappearance) into Postgres
+        # on a fixed cadence. Enabled by default; set XENON_IB_ACTIVITY_POLLER=0
+        # to suppress. Cadence env: XENON_IB_ACTIVITY_POLL_S.
+        _maybe_start_activity_poller()
 
     # W4.7 — PG-event-driven journal auto-import listener.
     # Replaces the legacy periodic /journal/sync flow. Failures must not
@@ -573,6 +582,8 @@ _SCAN_TYPE_MAP = {
     "vcg.json": "vcg",
     "cri.json": "cri",
 }
+
+
 def _atomic_save(path: str, data: dict) -> str:
     """Use the project's atomic_save for portfolio/orders files."""
     from xenon.utils.atomic_io import atomic_save
@@ -697,6 +708,8 @@ def _fetch_ib_index_option_chain(client: Any, ticker: str, exchange: str, sec_ty
     contract = Index(symbol=ticker, exchange=exchange or _preferred_index_exchange(ticker))
     qualified = client.qualify_contract(contract)
     return client.ib.reqSecDefOptParams(ticker, exchange, sec_type, qualified.conId)
+
+
 def _series_span_days(rows: List[dict]) -> int:
     if len(rows) < 2:
         return 0
@@ -1697,6 +1710,8 @@ async def orders_quote(ticker: str, con_id: int):
 @app.post("/orders/place")
 async def orders_place(request: Request):
     """Place an order via IB (on-demand connection, client_id=26)."""
+    if is_read_only():
+        return read_only_403()
     broker = str(getattr(request.app.state, "broker", "IB") or "IB").upper()
     if broker == "IB":
         require_mode_verified(request)
@@ -2144,6 +2159,8 @@ async def orders_cancel(request: Request):
       classification=ib_reject  → 400 (or 404 for 10147/10148) IB_REJECT
     The full upstream payload (code + message) is preserved in detail.
     """
+    if is_read_only():
+        return read_only_403()
     body = await request.json()
     return await _orders_cancel_from_body(body)
 
@@ -2243,6 +2260,8 @@ async def orders_modify(request: Request):
       - stale sequence          → 409 MODIFY_STALE (detail.applied=<current>)
     Subprocess failures classified the same as cancel.
     """
+    if is_read_only():
+        return read_only_403()
     body = await request.json()
     return await _orders_modify_from_body(body)
 
@@ -2548,7 +2567,6 @@ async def _orders_modify_from_body(body: dict):
 # ---------------------------------------------------------------------------
 
 
-
 def _is_market_open_now() -> bool:
     """Live ET market-hours check — used to override stamped market_open at read time."""
     from datetime import datetime as _dt
@@ -2559,6 +2577,8 @@ def _is_market_open_now() -> bool:
         return False
     minutes = et.hour * 60 + et.minute
     return 9 * 60 + 30 <= minutes <= 16 * 60
+
+
 def _futu_in_cooldown() -> bool:
     """True if the last successful sync was less than FUTU_COOLDOWN_S ago.
 

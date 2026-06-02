@@ -40,19 +40,45 @@ Postgres is the runtime source of truth for portfolio, orders, fills, and journa
 - Orders, fills, journal, attribution surfaces read from `xenon.order_submissions`, `xenon.order_fills`, `xenon.trades`, `xenon.journal_entries` via FastAPI routes.
 - Next.js API routes proxy these surfaces via `xenonFetch()`; no `readFile`, `readDataFile`, or cached JSON fallback on runtime paths.
 
+## Dev/Prod DB Split
+
+Two databases on the macmini Postgres, written by two distinct roles. **Everything writes to Postgres first; the website only reads.** Full policy + role/grant SQL: `docs/architecture/production-database-strategy.md` § Dev/Prod DB Split. Operator cutover steps: `docs/runbooks/dev-prod-db-cutover.md`.
+
+| DB          | Role         | Writers                                                 | Refresh                                                                                                              |
+| ----------- | ------------ | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `core_dev`  | `xenon_prod` | macmini Docker stack (api, migrator, realtime services) | source of truth                                                                                                      |
+| `core_test` | `xenon_dev`  | MacBook dev sessions via `scripts/infra/dev.sh paper`   | `pg_dump core_dev → pg_restore core_test` nightly at 04:00 ET (`scripts/infra/refresh-core-test.sh` via LaunchAgent) |
+
+Defense in depth — three layers prevent dev sessions from touching prod:
+
+1. **PG role grants** — `xenon_dev` has no write permission on `core_dev`; `xenon_prod` is the only role granted INSERT/UPDATE/DELETE there, with `ALTER DEFAULT PRIVILEGES` so new tables inherit the ACL.
+2. **`dev.sh` startup guard** — refuses to boot when `DATABASE_URL` parses to `core_dev`, regardless of the role. Test: `scripts/tests/test_dev_sh_db_guard.py`.
+3. **CI write-side guard** — `scripts/checks/no_json_write_on_order_path.py` fails new `writeFile` / `Path(...).write_text` / `_atomic_save` against `data/*.json` in `web/app/api/`, `web/lib/order/`, `src/xenon/api/`, `src/xenon/execution/`. Mirror of the existing read-side guard; locks in DB-first as a CI invariant.
+
+### `dev.sh live` is read-only
+
+`scripts/infra/dev.sh live` exports `XENON_READ_ONLY=1`. The flag forces a hard refusal on every write surface so a dev session against live IB never pollutes `core_test` with live fills:
+
+- `POST /orders/{place,cancel,modify}` and `POST /journal` return 403 with top-level `reason_code: READ_ONLY_MODE` (see `src/xenon/api/guards.py::read_only_403`; the toast helper reads `body.reason_code`, not `body.detail.reason_code`).
+- `ib_sync._save_portfolio_to_postgres` and `_append_nav_snapshot` are no-ops.
+- FastAPI lifespan skips `_run_rehydrate_on_boot`, `_run_fills_replay_on_boot`, and `_maybe_start_activity_poller`.
+
+Real live trading must go through the macmini Docker stack, which writes `core_dev`. Tests: `src/xenon/api/tests/test_read_only_mode.py`, `scripts/tests/test_ib_sync_read_only.py`.
+
 ## Order-Path Guards (Layers 1+2)
 
 **Read first:** `docs/reference/order-path-incident-history.md` — chronological log of every non-trivial order-path bug, root cause, fix, and regression test. Append a row when you ship a similar fix.
 
-Two automated guards lock in regression patterns from PR #61. Full design: `docs/plans/2026-04-28-order-path-regression-prevention.md`.
+Three automated guards lock in regression patterns. Original two from PR #61; the write-side guard ships with the dev/prod DB split. Full design: `docs/plans/2026-04-28-order-path-regression-prevention.md`.
 
 - **Edit-time reminder** (`.claude/hooks/order-path-reminder.sh`) — PreToolUse hook prints an order-path checklist when Claude edits files under `src/xenon/execution/`, `src/xenon/api/server.py`, `web/app/api/orders/`, or `web/lib/order/`. Advisory, never blocks.
 - **CI guards** (`.github/workflows/ci.yml::order-path-guards`):
   - `scripts/checks/no_json_fallback_on_order_path.py` — fails new `readDataFile`/`json.load` against `data/*.json` in `web/app/api/` or `src/xenon/api/`. Existing legacy reads are pinned in `_ALLOWLIST`; the list is intended to shrink to zero.
+  - `scripts/checks/no_json_write_on_order_path.py` — write-side mirror. Fails new `writeFile` / `Path(...).write_text` / `_atomic_save` against `data/*.json` in `web/app/api/`, `web/lib/order/`, `src/xenon/api/`, `src/xenon/execution/`. Enforces the DB-first principle from § Dev/Prod DB Split.
   - `scripts/checks/order_path_caller_allowlist.py` — fails imports/CLI invocations of `xenon.execution.ib_place_order` outside the allowlist (`server.py`, the module itself, tests). Locks down [In-process route bypass].
-- **Local pre-commit** (optional): `scripts/checks/install-pre-commit.sh` drops a managed `.git/hooks/pre-commit` that runs both guards.
+- **Local pre-commit** (optional): `scripts/checks/install-pre-commit.sh` drops a managed `.git/hooks/pre-commit` that runs all three guards.
 
-To audit the current allowlists: `python3 scripts/checks/no_json_fallback_on_order_path.py --show-allowlist` (and the corresponding flag on the caller guard).
+To audit the current allowlists: `python3 scripts/checks/no_json_fallback_on_order_path.py --show-allowlist` (and the corresponding flags on the write-side and caller guards).
 
 ## ⛔ Mandatory Rules
 
@@ -95,12 +121,12 @@ Quotes, fills, and position updates flow whenever IB Gateway is connected. Outsi
 
 ## Startup Checklist
 
-- [ ] `scripts/infra/dev.sh paper` (paper IB on local `127.0.0.1:4002`) — OR `scripts/infra/dev.sh live` (live IB on remote `192.168.50.47:4001`)
+- [ ] `scripts/infra/dev.sh paper` (paper IB on local `127.0.0.1:4002`, writes `core_test`) — OR `scripts/infra/dev.sh live` (live IB on macmini `100.66.147.98:4001`, **read-only — `XENON_READ_ONLY=1`**)
 - [ ] If cold start: approve 2FA on IBKR mobile
-- [ ] `psql -h 192.168.50.47 -U xenon_app core_dev -c "SELECT 1"` — verify Postgres reachable
+- [ ] `psql -h 100.66.147.98 -U xenon_dev core_test -c "SELECT 1"` — verify Postgres reachable. `dev.sh` refuses to start if `DATABASE_URL` points at `core_dev` (prod).
 - [ ] `curl http://localhost:8321/health` — verify `ib_gateway.port_listening: true`
-- [ ] Reconciliation auto-runs on lifespan boot (single-leg rehydrate + fills replay)
-- [ ] IB activity poller running (60s default — TWS-side edits + fills mirrored into Postgres)
+- [ ] Reconciliation auto-runs on lifespan boot (single-leg rehydrate + fills replay) — **skipped under `XENON_READ_ONLY=1`**
+- [ ] IB activity poller running (60s default — TWS-side edits + fills mirrored into Postgres) — **skipped under `XENON_READ_ONLY=1`**
 - [ ] Check market hours
 
 ## Serena (symbol-aware code tools)
@@ -162,6 +188,21 @@ cd web && npx playwright test                                       # E2E
 ```
 
 Order-route integration tests use `web/tests/fastapiHarness.ts` with `XENON_API_TEST_MODE` to stub broker calls — no live IB required.
+
+### Pytest infrastructure (3-phase speedup)
+
+The full Python suite is intentionally cheap to run locally. Don't disable or bypass these layers:
+
+- **Phase 1** — session-scoped engine + single `TRUNCATE` reset (`src/xenon/_test_db.py::truncate_all_xenon_tables`).
+- **Phase 2** — autouse `BEGIN/ROLLBACK` per test, via `_postgres_orders_test_db` in `scripts/tests/conftest.py`. Each test sees an empty schema; the app engine is monkeypatched to share the test's outer transaction. ~10× cheaper than Phase 1 and avoids locking tables the test never touches.
+- **Phase 3** — `pytest-xdist` per-worker DB clones (`_ensure_worker_db`). `pytest -n auto` works because each `gwN` worker gets its own database template.
+
+Two escape hatches:
+
+- **`@pytest.mark.committed_db`** — when a test forks a subprocess CLI (e.g. `ib_sync`, `xenon-ib-place-order`) or builds its own `create_engine()`, that opens a _second physical connection_ that cannot see the outer transaction. Marker switches that test back to Phase 1 TRUNCATE pre+post semantics. Use sparingly — most new tests should leave the marker off.
+- **Offline dev** — when Postgres isn't reachable, the autouse fixture silently no-ops. Tests that genuinely require PG depend on the `pg_test_engine` fixture, which skips explicitly when offline.
+
+`DATABASE_URL` and `DATABASE_URL_TEST` are both rewritten to the per-worker DB so subprocess CLIs and helpers that build their own engine from those env vars land on the same database as the parent test.
 
 ## CI / Release
 

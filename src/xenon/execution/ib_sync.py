@@ -1036,6 +1036,10 @@ def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
     if an existing row for (broker, broker_account, date) has a different
     account_env, raise NavAccountEnvConflict — symmetry with persist_futu_nav.
     """
+    if os.environ.get("XENON_READ_ONLY") == "1":
+        print(f"⏭  XENON_READ_ONLY=1 — skipping NAV snapshot write (net_liq=${net_liq:,.2f})")
+        return
+
     import pytz
     import sqlalchemy as sa
     from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -1100,6 +1104,11 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
     exists in the in-memory dict at sync time. See
     docs/plans/2026-04-27-portfolio-postgres-read-path.md.
     """
+    if os.environ.get("XENON_READ_ONLY") == "1":
+        n = len(portfolio.get("positions") or [])
+        print(f"⏭  XENON_READ_ONLY=1 — skipping portfolio→PG write ({n} positions, snapshot not persisted)")
+        return
+
     from sqlalchemy import delete, insert, text
 
     from xenon.db.schema import account_snapshots, positions

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Nightly core_dev → core_test mirror, installed on the macmini.
+
+  Install:
+    cp scripts/infra/launchd/com.xenon.refresh-core-test.plist ~/Library/LaunchAgents/
+    # Edit ~/Library/LaunchAgents/com.xenon.refresh-core-test.plist:
+    #   - replace __XENON_ROOT__ with the absolute path to the xenon checkout
+    #     used by the Docker stack
+    #   - replace __HOMEBREW_PATH__ with the appropriate PATH (typically
+    #     /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin)
+    #   - replace __PGPASSFILE__ with the absolute path to a chmod 600
+    #     ~/.pgpass-style file holding xenon_migrator credentials
+    launchctl load ~/Library/LaunchAgents/com.xenon.refresh-core-test.plist
+
+  Inspect:
+    launchctl list | grep com.xenon.refresh-core-test
+    tail -f /var/log/xenon/refresh-core-test.log
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.xenon.refresh-core-test.plist
+    rm ~/Library/LaunchAgents/com.xenon.refresh-core-test.plist
+
+  Scheduling note: StartCalendarInterval uses local time, so 04:00 here =
+  04:00 in whatever time zone the macmini is set to. Verify with
+  `sudo systemsetup -gettimezone` — should be America/New_York for ET.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.xenon.refresh-core-test</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__XENON_ROOT__/scripts/infra/refresh-core-test.sh</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>4</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOMEBREW_PATH__</string>
+    <key>PGHOST</key>
+    <string>localhost</string>
+    <key>PGPORT</key>
+    <string>5432</string>
+    <key>PGUSER</key>
+    <string>xenon_migrator</string>
+    <key>PGPASSFILE</key>
+    <string>__PGPASSFILE__</string>
+    <key>XENON_REFRESH_SRC</key>
+    <string>core_dev</string>
+    <key>XENON_REFRESH_DST</key>
+    <string>core_test</string>
+    <key>XENON_REFRESH_LOG_DIR</key>
+    <string>/var/log/xenon</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/var/log/xenon/refresh-core-test.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/xenon/refresh-core-test.stderr.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
