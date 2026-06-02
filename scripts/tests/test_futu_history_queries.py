@@ -13,14 +13,14 @@ import pytest
 import pytest_asyncio
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import create_async_engine
+
+from xenon._test_db import is_pg_reachable, sync_test_db_url
 from xenon.db.queries.futu_history import (
     insert_cashflows,
     insert_trades,
     list_cashflows,
     list_trades,
 )
-
-from xenon._test_db import is_pg_reachable, sync_test_db_url
 from xenon.db.schema import futu_cash_flow, futu_trades
 from xenon.execution.account_scope import AccountScope
 
@@ -148,6 +148,18 @@ async def test_list_cashflows_scope_filter(aengine):
     await insert_cashflows(aengine, OTHER_SCOPE, [_flow("f2")])
     rows = await list_cashflows(aengine, SCOPE)
     assert {r["futu_flow_id"] for r in rows} == {"f1"}
+
+
+@pytest.mark.asyncio
+async def test_insert_trades_chunks_past_postgres_bind_param_cap(aengine):
+    """Bulk inserts must chunk so a single statement never exceeds the
+    32767-bind-param Postgres wire protocol cap. 6000 rows × 15 cols =
+    90,000 params — only survives if the writer batches internally.
+    """
+    rows = [_trade(f"bulk-{i}") for i in range(6000)]
+    n = await insert_trades(aengine, SCOPE, rows)
+    assert n >= 6000
+    assert len(await list_trades(aengine, SCOPE)) == 6000
 
 
 @pytest.mark.asyncio

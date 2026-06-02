@@ -25,6 +25,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from xenon.db.schema import futu_cash_flow, futu_trades
 from xenon.execution.account_scope import AccountScope
 
+# Postgres' wire protocol caps a single statement at 32767 bind params.
+# Chunk so (rows_per_batch * cols_per_row) stays well under that ceiling.
+# futu_trades has 15 columns → 2000 rows = 30k params (safe).
+# futu_cash_flow has 10 columns → 3000 rows = 30k params (safe).
+# Single constant keeps the math conservative for both shapes.
+_INSERT_BATCH_ROWS = 2000
+
 
 def _scoped(row: dict, scope: AccountScope) -> dict:
     return {
@@ -35,49 +42,60 @@ def _scoped(row: dict, scope: AccountScope) -> dict:
     }
 
 
+def _chunks(seq: list, size: int):
+    for i in range(0, len(seq), size):
+        yield seq[i : i + size]
+
+
 async def insert_trades(engine: AsyncEngine, scope: AccountScope, rows: Iterable[dict]) -> int:
     rows_list = [_scoped(r, scope) for r in rows]
     if not rows_list:
         return 0
-    stmt = pg_insert(futu_trades).values(rows_list)
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["broker", "account_env", "broker_account", "futu_deal_id"],
-        set_={
-            "futu_order_id": stmt.excluded.futu_order_id,
-            "ticker": stmt.excluded.ticker,
-            "futu_code": stmt.excluded.futu_code,
-            "market": stmt.excluded.market,
-            "action": stmt.excluded.action,
-            "quantity": stmt.excluded.quantity,
-            "price": stmt.excluded.price,
-            "fees": stmt.excluded.fees,
-            "filled_at": stmt.excluded.filled_at,
-            "raw": stmt.excluded.raw,
-        },
-    )
+    total = 0
     async with engine.begin() as conn:
-        result = await conn.execute(stmt)
-    return result.rowcount or 0
+        for batch in _chunks(rows_list, _INSERT_BATCH_ROWS):
+            stmt = pg_insert(futu_trades).values(batch)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["broker", "account_env", "broker_account", "futu_deal_id"],
+                set_={
+                    "futu_order_id": stmt.excluded.futu_order_id,
+                    "ticker": stmt.excluded.ticker,
+                    "futu_code": stmt.excluded.futu_code,
+                    "market": stmt.excluded.market,
+                    "action": stmt.excluded.action,
+                    "quantity": stmt.excluded.quantity,
+                    "price": stmt.excluded.price,
+                    "fees": stmt.excluded.fees,
+                    "filled_at": stmt.excluded.filled_at,
+                    "raw": stmt.excluded.raw,
+                },
+            )
+            result = await conn.execute(stmt)
+            total += result.rowcount or 0
+    return total
 
 
 async def insert_cashflows(engine: AsyncEngine, scope: AccountScope, rows: Iterable[dict]) -> int:
     rows_list = [_scoped(r, scope) for r in rows]
     if not rows_list:
         return 0
-    stmt = pg_insert(futu_cash_flow).values(rows_list)
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["broker", "account_env", "broker_account", "futu_flow_id"],
-        set_={
-            "cashflow_type": stmt.excluded.cashflow_type,
-            "amount": stmt.excluded.amount,
-            "currency": stmt.excluded.currency,
-            "occurred_at": stmt.excluded.occurred_at,
-            "raw": stmt.excluded.raw,
-        },
-    )
+    total = 0
     async with engine.begin() as conn:
-        result = await conn.execute(stmt)
-    return result.rowcount or 0
+        for batch in _chunks(rows_list, _INSERT_BATCH_ROWS):
+            stmt = pg_insert(futu_cash_flow).values(batch)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["broker", "account_env", "broker_account", "futu_flow_id"],
+                set_={
+                    "cashflow_type": stmt.excluded.cashflow_type,
+                    "amount": stmt.excluded.amount,
+                    "currency": stmt.excluded.currency,
+                    "occurred_at": stmt.excluded.occurred_at,
+                    "raw": stmt.excluded.raw,
+                },
+            )
+            result = await conn.execute(stmt)
+            total += result.rowcount or 0
+    return total
 
 
 async def list_trades(
