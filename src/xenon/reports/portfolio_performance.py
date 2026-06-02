@@ -387,6 +387,7 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                     stock_v = _Decimal(str(e["stock"])) if e.get("stock") is not None else None
                     opt_v = _Decimal(str(e["options"])) if e.get("options") is not None else None
                     # nav column mirrors total for IB Flex (single authoritative source).
+                    # source='close' — EquitySummaryByReportDateInBase rows are post-close.
                     upsert_nav_sync(
                         scope=scope,
                         day=day,
@@ -395,6 +396,7 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                         cash=cash_v,
                         stock_value=stock_v,
                         options_value=opt_v,
+                        source="close",
                     )
             except Exception as exc:  # noqa: BLE001
                 # PG unavailable / scope unset — return entries anyway so the
