@@ -1,5 +1,3 @@
-import os
-
 import pytest
 import pytest_asyncio
 from sqlalchemy import create_engine as create_sync_engine
@@ -7,16 +5,25 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from xenon._test_db import (
+    _ensure_worker_db,  # noqa: F401 — autouse session fixture (Phase 3 xdist DB clone)
+    async_test_db_url,
+)
 from xenon.db.engine import create_engine
 from xenon.db.schema import events_metadata, xenon_metadata
 from xenon.execution.account_scope import AccountScope
 
 
 def _default_pg_url() -> str:
-    return os.environ.get(
-        "DATABASE_URL_TEST",
-        "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
-    )
+    """Per-worker test DB URL (Phase 3 xdist-safe).
+
+    `async_test_db_url()` resolves `PYTEST_XDIST_WORKER` at call time and
+    suffixes the DB name (`xenon_test` → `xenon_test_gw0`, `..._gw1`, ...)
+    so the autouse `clean_tables` TRUNCATE below cannot collide across
+    workers. Reading raw `DATABASE_URL_TEST` would pin every worker to the
+    same shared `xenon_test` and deadlock the TRUNCATE pre-test.
+    """
+    return async_test_db_url()
 
 
 def _sync_pg_url(pg_url: str) -> str:
