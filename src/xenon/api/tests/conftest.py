@@ -6,16 +6,30 @@ import os
 
 import pytest
 
-from xenon._test_db import truncate_all_xenon_tables
+from xenon._test_db import (
+    _BoundEngine,
+    app_engine_bound_to_test,  # noqa: F401 — re-exported for fixture discovery
+    is_pg_reachable,
+    pg_session,  # noqa: F401 — re-exported for fixture discovery
+    sync_test_db_url,
+    truncate_all_xenon_tables,
+)
 
 
 @pytest.fixture(autouse=True)
-def _postgres_orders_test_db(monkeypatch):
-    """Point sync Postgres callers at the test DB and clean order tables.
+def _postgres_orders_test_db(monkeypatch, request):
+    """Autouse: per-test txn rollback (Phase 2) with committed_db opt-out.
 
-    Tolerates an unreachable test DB (offline development) — the shared
-    helper in `scripts/tests/_db_fixture.py` no-ops when PG is unreachable
-    or when the schema is missing.
+    Mirrors the dual-path autouse in `scripts/tests/conftest.py`:
+      - Default → BEGIN/ROLLBACK on a connection bound to `get_sync_engine()`.
+      - `@pytest.mark.committed_db` → Phase 1 TRUNCATE pre+post (required for
+        tests whose helpers open their own `create_engine()` or whose route
+        flows commit via the async engine — the sync-side binding can't reach
+        either of those).
+
+    Async engine is initialized regardless of path because routes that touch
+    `get_engine()` (e.g. `GET /portfolio`) raise without it. Tests that use
+    `TestClient(app)` without `with` skip the lifespan, so we seed init here.
     """
     url = os.environ.get(
         "DATABASE_URL_TEST",
@@ -26,19 +40,36 @@ def _postgres_orders_test_db(monkeypatch):
     try:
         import xenon.db.engine as engine_mod
 
-        monkeypatch.setattr(engine_mod, "_sync_engine", None)
-        # Routes that touch the async engine (e.g. GET /portfolio) call
-        # `get_engine()` which raises if init_engine() never ran. Tests use
-        # TestClient(app) without `with`, so the lifespan that normally
-        # initializes it is skipped — seed it here.
+        # Async engine: required by route handlers; not affected by Phase 2.
         engine_mod._engine = None  # type: ignore[attr-defined]
         engine_mod.init_engine(url)
     except Exception:
         pass
 
-    truncate_all_xenon_tables()
+    if not is_pg_reachable():
+        yield
+        return
+
+    if request.node.get_closest_marker("committed_db"):
+        try:
+            import xenon.db.engine as engine_mod
+
+            monkeypatch.setattr(engine_mod, "_sync_engine", None)
+        except Exception:
+            pass
+        truncate_all_xenon_tables()
+        yield
+        truncate_all_xenon_tables()
+        return
+
+    conn = request.getfixturevalue("pg_session")
+    try:
+        import xenon.db.engine as engine_mod
+
+        monkeypatch.setattr(engine_mod, "_sync_engine", _BoundEngine(conn))
+    except Exception:
+        pass
     yield
-    truncate_all_xenon_tables()
 
 
 @pytest.fixture(autouse=True)

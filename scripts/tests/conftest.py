@@ -8,8 +8,11 @@ import pytest
 from sqlalchemy.engine import Engine
 
 from xenon._test_db import (
+    _BoundEngine,
+    app_engine_bound_to_test,  # noqa: F401 — re-exported for pytest fixture discovery
     get_session_engine,
     is_pg_reachable,
+    pg_session,  # noqa: F401 — re-exported for pytest fixture discovery
     sync_test_db_url,
     truncate_all_xenon_tables,
 )
@@ -33,25 +36,62 @@ _sync_test_db_url = sync_test_db_url
 
 
 @pytest.fixture(autouse=True)
-def _postgres_orders_test_db(monkeypatch):
-    """Point sync Postgres callers at the test DB and clean order tables.
+def _postgres_orders_test_db(monkeypatch, request):
+    """Autouse: every test runs inside a transaction that rolls back at end.
 
-    Tolerates an unreachable test DB (offline development): truncation is
-    silently skipped and tests that actually need PG should depend on the
-    `pg_test_engine` fixture, which calls `pytest.skip()` when offline.
+    Phase 2 of the pytest suite speedup. Phase 1 used TRUNCATE pre+post on
+    26 tables (one statement); Phase 2 swaps that for BEGIN/ROLLBACK on a
+    single connection bound to the app engine via monkeypatch. ~10x cheaper
+    per test and eliminates lock acquisition on tables the test never touched.
+
+    Dual-path:
+      - Default → Phase 2 txn rollback. Cheapest, but only sees writes made
+        through `xenon.db.engine.get_sync_engine()`.
+      - `@pytest.mark.committed_db` → Phase 1 TRUNCATE pre+post. Required for
+        tests that fork subprocess CLIs or build their own `create_engine()`
+        — those open a SECOND physical connection that bypasses the test's
+        outer transaction.
+
+    Two contracts preserved from Phase 1:
+      - PG unreachable → silently no-op (offline dev workflow keeps working).
+        Tests that genuinely need PG depend on `pg_test_engine`, which skips
+        explicitly when offline.
+      - `DATABASE_URL` is pointed at the test DB so subprocess CLIs talk to
+        the same DB.
     """
     monkeypatch.setenv("DATABASE_URL", sync_test_db_url())
 
+    if not is_pg_reachable():
+        # Offline dev: keep the suite runnable without a live PG.
+        yield
+        return
+
+    if request.node.get_closest_marker("committed_db"):
+        # Phase 1 legacy path: TRUNCATE pre+post, no txn isolation.
+        # The app engine cache is cleared so the next caller rebuilds against
+        # the test DB URL set above.
+        try:
+            import xenon.db.engine as engine_mod
+
+            monkeypatch.setattr(engine_mod, "_sync_engine", None)
+        except Exception:
+            pass
+        truncate_all_xenon_tables()
+        yield
+        truncate_all_xenon_tables()
+        return
+
+    # Phase 2 default path: bind the app engine to the test's txn connection.
+    # Pull pg_session lazily so the offline branch above doesn't trigger its
+    # pytest.skip() — we want offline tests to *run* (and most don't touch PG).
+    conn = request.getfixturevalue("pg_session")
     try:
         import xenon.db.engine as engine_mod
 
-        monkeypatch.setattr(engine_mod, "_sync_engine", None)
+        monkeypatch.setattr(engine_mod, "_sync_engine", _BoundEngine(conn))
     except Exception:
         pass
-
-    truncate_all_xenon_tables()
     yield
-    truncate_all_xenon_tables()
 
 
 @pytest.fixture

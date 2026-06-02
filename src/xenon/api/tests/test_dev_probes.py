@@ -16,6 +16,12 @@ import os
 os.environ["XENON_API_TEST_MODE"] = "1"
 
 import pytest  # noqa: E402
+# Phase 2 carve-out: this module's tests exercise FastAPI routes via
+# TestClient, which calls through the async engine path that Phase 2's
+# sync `_BoundEngine` patch can't reach. Stays on Phase 1 TRUNCATE
+# pre+post isolation via this marker.
+pytestmark = pytest.mark.committed_db
+
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine, text  # noqa: E402
 
