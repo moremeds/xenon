@@ -5,6 +5,9 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-06-03
+
+
 ### Added
 
 - **Daily IB Flex NAV auto-refresh (#124).** New `xenon-nav-flex-refresh` CLI invoked by a macOS LaunchAgent at 17:30 ET on the macmini. Polls IB Flex Web Service for `EquitySummaryByReportDateInBase` rows and upserts them into `xenon.nav_history` with `source='close'`. The shell wrapper sources `.env` so the plist stays secret-free (matches the `refresh-core-test.sh` pattern). Architecture is a rolling ~2-week reconciliation window — a single missed run is absorbed by the next day; historical backfill stays on the one-shot CSV-download path. Install procedure documented in `docs/runbooks/nav-flex-refresh.md`.
@@ -16,7 +19,6 @@ All notable changes to Xenon are documented here. Format loosely based on
 - **`dev.sh live` no longer hard-fails on the core_dev guard.** Paper mode substitutes `DATABASE_URL_PAPER → DATABASE_URL`; live mode had no equivalent and so kept `.env`'s `DATABASE_URL=core_dev`, tripping the guard on every invocation. Live mode now substitutes `DATABASE_URL_TEST → DATABASE_URL` _only when DATABASE_URL points at core_dev_ — empty / custom URLs are respected so the `test_dev_sh_exports.py` harness doesn't pick up an inherited `DATABASE_URL_TEST` (`XENON_READ_ONLY=1` continues to block writes).
 - **`test_dev_sh_db_guard` actually exercises the guard.** Tests had been silently red — `dev.sh` hardcoded its env-file path, so the operator's live `.env` (with `DATABASE_URL_PAPER` substituting `core_test` for any `core_dev` value) bypassed the guard in test runs. Added `XENON_ENV_FILE` override; rewrote tests to write a per-test tmpdir stub. Expanded coverage: refuse in both modes, pass-path tests for `core_test` in both modes.
 - **`scripts/infra/refresh-core-test.sh` produces a clean restore.** Two latent bugs had been preventing the nightly `core_dev → core_test` LaunchAgent from working: (1) `pg_restore --clean` cannot drop tables with FK dependents, so prior runs generated 7 errors per pass and left `core_test` with a phantom partially-migrated schema; (2) operator MacBooks default to homebrew's `pg15` client tools, which abort against the macmini's `pg17` server with a version mismatch. Added: pre-drop `xenon` + `events` schemas with `CASCADE` before the restore; auto-pick the highest available `postgresql@N` from `/opt/homebrew/opt/`.
-
 ## [0.1.0] — 2026-06-02
 
 ### Added
