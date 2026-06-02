@@ -105,9 +105,11 @@ class FlexQueryFetcher:
         print(f"Report requested. Reference: {reference_code.text}")
         print("Waiting for report generation...")
 
-        # Step 2: Poll for the report
+        # Step 2: Poll for the report. Inception-to-date pulls (600+ fills
+        # with a wide field set) can exceed the original 120s ceiling; bumped
+        # to 300s (100 attempts × 3s) which still fails fast on real errors.
         statement_url = f"{self.FLEX_SERVICE_URL}.GetStatement"
-        max_attempts = 40
+        max_attempts = 100
 
         for attempt in range(max_attempts):
             time.sleep(3)  # Wait before polling
@@ -133,7 +135,7 @@ class FlexQueryFetcher:
             print("Report ready. Parsing...")
             return self._parse_xml(response_text)
 
-        raise RuntimeError("Flex Query timed out after 120 seconds")
+        raise RuntimeError("Flex Query timed out after 300 seconds")
 
     def _parse_xml(self, xml_content: str) -> List[Execution]:
         """Parse Flex Query XML response into executions."""
@@ -414,6 +416,17 @@ def print_blotter(blotter: TradeBlotter, filter_symbol: str = None):
 
 
 def main():
+    # Standalone CLI — load project .env so IB_FLEX_TOKEN / IB_FLEX_QUERY_ID
+    # resolve when invoked outside a process that already imported ib_client.
+    try:
+        from pathlib import Path as _Path
+
+        from dotenv import load_dotenv
+
+        load_dotenv(_Path(__file__).resolve().parents[3] / ".env")
+    except ImportError:
+        pass
+
     parser = argparse.ArgumentParser(
         description="Fetch historical trades from IB via Flex Query",
         formatter_class=argparse.RawDescriptionHelpFormatter,
