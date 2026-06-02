@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from xenon._test_db import (
     _BoundEngine,
+    _ensure_worker_db,  # noqa: F401 — autouse session fixture (Phase 3 xdist DB clone)
     app_engine_bound_to_test,  # noqa: F401 — re-exported for fixture discovery
+    async_test_db_url,
     is_pg_reachable,
     pg_session,  # noqa: F401 — re-exported for fixture discovery
-    sync_test_db_url,
     truncate_all_xenon_tables,
 )
 
@@ -31,11 +30,14 @@ def _postgres_orders_test_db(monkeypatch, request):
     `get_engine()` (e.g. `GET /portfolio`) raise without it. Tests that use
     `TestClient(app)` without `with` skip the lifespan, so we seed init here.
     """
-    url = os.environ.get(
-        "DATABASE_URL_TEST",
-        "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
-    )
+    # Worker-aware: under pytest-xdist this resolves to the per-worker DB
+    # (xenon_test_gwN) so route tests don't write to the master template.
+    # Also rewrite DATABASE_URL_TEST so test helpers that build their own
+    # engine from that env var (instead of going through sync_test_db_url)
+    # also land on the worker DB.
+    url = async_test_db_url()
     monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("DATABASE_URL_TEST", url)
 
     try:
         import xenon.db.engine as engine_mod

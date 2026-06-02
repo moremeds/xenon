@@ -128,6 +128,19 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test
         run: uv run alembic upgrade head
+      - name: Pre-create per-worker DBs (Phase 3 pytest-xdist)
+        # Serial loop in workflow yaml, not inside pytest, to avoid the race
+        # that fails CREATE … TEMPLATE when multiple workers fight for the
+        # same template under load. WITH TEMPLATE xenon_test clones the
+        # schema-current alembic state into each per-worker DB.
+        env:
+          PGPASSWORD: xenon_dev
+        run: |
+          for i in 0 1 2 3; do
+            psql -h localhost -U xenon_app -d postgres \
+              -c "DROP DATABASE IF EXISTS xenon_test_gw$i WITH (FORCE);" \
+              -c "CREATE DATABASE xenon_test_gw$i WITH TEMPLATE xenon_test;"
+          done
       - name: Collection smoke test (import-level guard)
         # Catches missing deps / ImportError on files the affected-tests selector
         # would otherwise skip on a PR. ~1s, cheap insurance.
@@ -145,15 +158,19 @@ jobs:
           --ignore=scripts/tests/test_volatility.py
           --ignore=scripts/tests/test_parquet_store.py
       - name: Run pytest (affected on PR, full on master push)
+        # Phase 3: `-n 4` parallelizes across 4 workers. The Pre-create step
+        # above already populated xenon_test_gw{0..3} from the schema-current
+        # xenon_test template, so each worker connects to its own physical DB
+        # and there is no cross-worker contention on shared tables.
         run: |
           IGNORES="--ignore=scripts/tests/test_trend_scan.py --ignore=scripts/tests/test_trend_scan_runtime.py --ignore=scripts/tests/test_trend_config.py --ignore=scripts/tests/test_trend_models.py --ignore=scripts/tests/test_trend_storage.py --ignore=scripts/tests/test_trend_ranking.py --ignore=scripts/tests/test_trend_scan_catalysts.py --ignore=scripts/tests/test_ta_prefilter.py --ignore=scripts/tests/test_flow_confirmation.py --ignore=scripts/tests/test_volatility.py --ignore=scripts/tests/test_parquet_store.py"
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             # `--` forwards $IGNORES to pytest via run_pytest_affected.py's
             # REMAINDER positional, instead of argparse rejecting them as
             # unknown flags.
-            uv run python scripts/infra/dev/run_pytest_affected.py --base origin/${{ github.base_ref }} -- $IGNORES
+            uv run python scripts/infra/dev/run_pytest_affected.py --base origin/${{ github.base_ref }} -- -n 4 $IGNORES
           else
-            uv run pytest $IGNORES
+            uv run pytest -n 4 $IGNORES
           fi
 
   version-sync:

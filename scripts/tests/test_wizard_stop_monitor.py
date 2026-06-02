@@ -15,6 +15,10 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+
+# Phase 3: opt out of Phase 2 BoundEngine binding — this file owns its
+# own TRUNCATE-based teardown that needs committed cross-test state.
+pytestmark = pytest.mark.committed_db
 from sqlalchemy import create_engine, text
 
 from xenon.db.queries import combo_wizard as cwq
@@ -25,15 +29,11 @@ from xenon.monitor_daemon.handlers.wizard_stop_monitor import WizardStopMonitorH
 # Postgres helpers
 # --------------------------------------------------------------------------
 
-_TEST_DB_URL = os.environ.get(
-    "DATABASE_URL_TEST",
-    "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
-)
-_SYNC_URL = _TEST_DB_URL.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+from xenon._test_db import sync_test_db_url as _sync_url  # worker-aware URL resolver
 
 
 def _pg_engine():
-    return create_engine(_SYNC_URL, pool_pre_ping=True)
+    return create_engine(_sync_url(), pool_pre_ping=True)
 
 
 def _cleanup(engine):
@@ -47,7 +47,7 @@ def _cleanup(engine):
 @pytest.fixture(autouse=True)
 def _setup_pg(monkeypatch):
     """Point get_sync_engine() at the test database and clean tables."""
-    monkeypatch.setenv("DATABASE_URL", _SYNC_URL)
+    monkeypatch.setenv("DATABASE_URL", _sync_url())
     # Tests seed rows with default (legacy_unknown) scope. Clear scope env
     # vars so the handler doesn't filter them out by inherited shell/.env state.
     monkeypatch.delenv("XENON_BROKER", raising=False)

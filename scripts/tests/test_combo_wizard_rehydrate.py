@@ -35,15 +35,11 @@ from xenon.execution.combo_wizard import rehydrate as wiz_rehydrate
 # Postgres helpers
 # --------------------------------------------------------------------------
 
-_TEST_DB_URL = os.environ.get(
-    "DATABASE_URL_TEST",
-    "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
-)
-_SYNC_URL = _TEST_DB_URL.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+from xenon._test_db import sync_test_db_url as _sync_url  # worker-aware URL resolver
 
 
 def _pg_engine():
-    return create_engine(_SYNC_URL, pool_pre_ping=True)
+    return create_engine(_sync_url(), pool_pre_ping=True)
 
 
 def _cleanup(engine):
@@ -56,7 +52,7 @@ def _cleanup(engine):
 @pytest.fixture(autouse=True)
 def _setup_pg(monkeypatch):
     """Point get_sync_engine() at the test database and clean tables."""
-    monkeypatch.setenv("DATABASE_URL", _SYNC_URL)
+    monkeypatch.setenv("DATABASE_URL", _sync_url())
     import xenon.db.engine as eng_mod
 
     monkeypatch.setattr(eng_mod, "_sync_engine", None)

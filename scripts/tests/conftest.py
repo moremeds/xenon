@@ -9,6 +9,7 @@ from sqlalchemy.engine import Engine
 
 from xenon._test_db import (
     _BoundEngine,
+    _ensure_worker_db,  # noqa: F401 — autouse session fixture (Phase 3 xdist DB clone)
     app_engine_bound_to_test,  # noqa: F401 — re-exported for pytest fixture discovery
     get_session_engine,
     is_pg_reachable,
@@ -58,8 +59,17 @@ def _postgres_orders_test_db(monkeypatch, request):
         explicitly when offline.
       - `DATABASE_URL` is pointed at the test DB so subprocess CLIs talk to
         the same DB.
+      - `DATABASE_URL_TEST` is also rewritten so test helpers (e.g. inline
+        `_fetch_one`, `_pg_engine` in committed_db tests) that build their
+        own engine from this env var land on the per-worker DB, not master.
     """
-    monkeypatch.setenv("DATABASE_URL", sync_test_db_url())
+    sync_url = sync_test_db_url()
+    monkeypatch.setenv("DATABASE_URL", sync_url)
+    # Worker-suffixed asyncpg form for helpers that read DATABASE_URL_TEST.
+    monkeypatch.setenv(
+        "DATABASE_URL_TEST",
+        sync_url.replace("postgresql+psycopg://", "postgresql+asyncpg://"),
+    )
 
     if not is_pg_reachable():
         # Offline dev: keep the suite runnable without a live PG.

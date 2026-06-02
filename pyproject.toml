@@ -64,6 +64,7 @@ test = [
     "moto[s3]>=5.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "pytest-xdist>=3.8",
     "responses>=0.25",
     "freezegun>=1.5",
 ]
@@ -108,3 +109,4 @@ markers = [
     "e2e: end-to-end tests requiring live external services",
     "committed_db: test needs row-level commits visible across separate SQLAlchemy engines (subprocess CLIs, ad-hoc create_engine helpers). Uses Phase 1 TRUNCATE pre+post instead of Phase 2 txn rollback.",
 ]
+
