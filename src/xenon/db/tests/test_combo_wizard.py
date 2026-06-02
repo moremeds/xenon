@@ -14,14 +14,24 @@ from xenon.db.queries import combo_wizard as cwq
 
 @pytest.fixture
 def sconn():
-    """Sync Connection for combo_wizard query functions."""
+    """Sync Connection for combo_wizard query functions.
+
+    Each test runs inside a transaction that is rolled back at end-of-fixture
+    so writes never leak across tests. Reads DATABASE_URL_TEST at call time so
+    pytest-xdist's per-worker DB clone (Phase 3) is honored — snapshotting at
+    module-import time would pin every worker to the same shared DB.
+    """
     url = os.environ.get(
         "DATABASE_URL_TEST",
         "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
     ).replace("postgresql+asyncpg://", "postgresql+psycopg://")
     engine = _create_sync(url)
-    with engine.begin() as conn:
-        yield conn
+    with engine.connect() as conn:
+        trans = conn.begin()
+        try:
+            yield conn
+        finally:
+            trans.rollback()
     engine.dispose()
 
 

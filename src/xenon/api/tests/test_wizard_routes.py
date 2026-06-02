@@ -15,15 +15,23 @@ from xenon.db.queries import combo_wizard as cwq
 # Postgres helpers
 # --------------------------------------------------------------------------
 
-_TEST_DB_URL = os.environ.get(
-    "DATABASE_URL_TEST",
-    "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
-)
-_SYNC_URL = _TEST_DB_URL.replace("postgresql+asyncpg://", "postgresql+psycopg://")
+
+def _sync_url() -> str:
+    """Resolve the per-worker test DB URL at call time.
+
+    Reading at module-import time would snapshot the value BEFORE pytest-xdist's
+    Phase 3 conftest rewrites DATABASE_URL_TEST to the per-worker DB clone, so
+    every worker would race TRUNCATE on the same shared `xenon_test` database.
+    """
+    url = os.environ.get(
+        "DATABASE_URL_TEST",
+        "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
+    )
+    return url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
 
 
 def _pg_engine():
-    return create_engine(_SYNC_URL, pool_pre_ping=True)
+    return create_engine(_sync_url(), pool_pre_ping=True)
 
 
 def _truncate(engine):
@@ -38,8 +46,13 @@ def _truncate(engine):
 
 @pytest.fixture(autouse=True)
 def _setup_pg(monkeypatch):
-    """Point get_sync_engine() at the test DB."""
-    monkeypatch.setenv("DATABASE_URL", _SYNC_URL)
+    """Point get_sync_engine() at the per-worker test DB.
+
+    Resolves DATABASE_URL_TEST at call time so pytest-xdist's per-worker DB
+    clone (Phase 3) is honored — module-level snapshotting would pin every
+    worker to the same shared DB and cross-worker TRUNCATEs would deadlock.
+    """
+    monkeypatch.setenv("DATABASE_URL", _sync_url())
 
     import xenon.db.engine as eng_mod
 
