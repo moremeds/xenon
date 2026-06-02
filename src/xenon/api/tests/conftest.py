@@ -32,8 +32,12 @@ def _postgres_orders_test_db(monkeypatch, request):
     """
     # Worker-aware: under pytest-xdist this resolves to the per-worker DB
     # (xenon_test_gwN) so route tests don't write to the master template.
+    # Also rewrite DATABASE_URL_TEST so test helpers that build their own
+    # engine from that env var (instead of going through sync_test_db_url)
+    # also land on the worker DB.
     url = async_test_db_url()
     monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("DATABASE_URL_TEST", url)
 
     try:
         import xenon.db.engine as engine_mod
