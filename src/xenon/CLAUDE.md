@@ -42,6 +42,14 @@ Add or update the matching `src/xenon/db/queries/` module in the same change. Us
 
 Database events use `events.py` plus the Postgres outbox trigger. Emit durable events by writing outbox rows; subscribe with the LISTEN/NOTIFY helpers for reactive services.
 
+### Dev/Prod DB Split
+
+Two DBs on the macmini Postgres: `core_dev` (prod, written exclusively by the macmini Docker stack via the `xenon_prod` role) and `core_test` (dev mirror, written from MacBook sessions via `xenon_dev`). One-way nightly refresh `core_dev → core_test` at 04:00 ET (`scripts/infra/refresh-core-test.sh`). `dev.sh` refuses to boot when `DATABASE_URL` parses to `core_dev`. Adding a new migration: run `uv run alembic upgrade head` against your dev DB only — the macmini Docker `migrator` service applies it to `core_dev` on next deploy. Full policy: root `CLAUDE.md` § Dev/Prod DB Split.
+
+### Writer CLIs respect `XENON_READ_ONLY=1`
+
+`ib_sync._save_portfolio_to_postgres` and `_append_nav_snapshot` no-op when `XENON_READ_ONLY=1` is set (exported by `dev.sh live` for debugging-against-live-IB sessions). Naked-short audit, fills replay, and similar writer CLIs called from the FastAPI lifespan are skipped at boot under the same flag. New persistence code in this package must check the flag — see `src/xenon/api/CLAUDE.md` § Read-Only Mode for the full surface map.
+
 ### Broker Account Scope
 
 All execution and portfolio tables carry `broker`, `account_env`, `broker_account` columns so paper/live data never blends in a shared Postgres. Full policy: `docs/architecture/production-database-strategy.md`.

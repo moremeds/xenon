@@ -7,10 +7,45 @@ fastapi. Only routes/lifespan code touches this module.
 
 from __future__ import annotations
 
+import os
+
 from fastapi import HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from xenon.api import trading_mode
 from xenon.execution.account_scope import AccountScope, resolve_from_app_state
+
+
+def is_read_only() -> bool:
+    """True when XENON_READ_ONLY=1 — set by `scripts/infra/dev.sh live`.
+
+    Lets dev sessions hit live IB for debugging without persisting fills,
+    snapshots, journal entries, or orders. Real live trading goes through
+    the macmini Docker stack (writes core_dev). See
+    docs/runbooks/dev-prod-db-cutover.md.
+    """
+    return os.environ.get("XENON_READ_ONLY") == "1"
+
+
+def read_only_403() -> JSONResponse:
+    """Standard 403 for write routes when read-only mode is active.
+
+    Top-level `reason_code` so the web toast helpers can render it
+    directly. HTTPException(detail={...}) would nest it under .detail
+    and break the toast — see CLAUDE.md feedback memory
+    `httpexception_dict_detail_breaks_toast`.
+    """
+    return JSONResponse(
+        status_code=403,
+        content={
+            "reason_code": "READ_ONLY_MODE",
+            "detail": (
+                "Write disabled: this session was started with XENON_READ_ONLY=1 "
+                "(typically `dev.sh live`). Use the macmini Docker stack for prod "
+                "writes, or restart in paper mode for dev writes."
+            ),
+        },
+    )
 
 
 def mask_account(account: str | None) -> str:
@@ -86,14 +121,14 @@ def get_performance_scope(request: Request, broker: str | None = None) -> Accoun
             # is Postgres-only, so degrade gracefully via env vars (dev.sh
             # exports XENON_BROKER_ACCOUNT + XENON_TRADING_MODE before boot).
             from xenon.execution.account_scope import resolve_from_env
+
             try:
                 return resolve_from_env()
             except ValueError as exc:
                 raise HTTPException(
                     status_code=503,
                     detail=(
-                        f"IB account scope unresolved (Gateway handshake pending and "
-                        f"env fallback unavailable): {exc}"
+                        f"IB account scope unresolved (Gateway handshake pending and env fallback unavailable): {exc}"
                     ),
                 )
     if b != "FUTU":

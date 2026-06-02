@@ -136,6 +136,65 @@ Recommended credentials:
 - `signal_writer`: writes `signals` and selected `backtests` rows only.
 - `backtest_writer`: writes `backtests` only.
 
+## Dev/Prod DB Split (implemented)
+
+The previous section describes the _target_. The implemented form, as
+of 2026-06, is concrete:
+
+| Database    | Host                    | Writers (role) | Readers (role)                     | Purpose                                                                                               |
+| ----------- | ----------------------- | -------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `core_dev`  | macmini (LAN/Tailscale) | `xenon_prod`   | `xenon_prod`, `xenon_dev` (SELECT) | Production. Written exclusively by the macmini Docker stack.                                          |
+| `core_test` | macmini (LAN/Tailscale) | `xenon_dev`    | `xenon_dev`, `xenon_prod` (SELECT) | Dev mirror. Written by `scripts/infra/dev.sh` sessions and pytest. Refreshed nightly from `core_dev`. |
+
+**Refresh direction is one-way: `core_dev → core_test`.**
+At 04:00 ET (08:00 UTC) the macmini's LaunchAgent
+(`com.xenon.refresh-core-test`) runs
+`scripts/infra/refresh-core-test.sh`, which `pg_dump`s `core_dev` and
+`pg_restore --clean --if-exists` into `core_test`. Dev work on
+`core_test` is therefore ephemeral — any in-progress local-only
+migration is rolled back overnight. Re-apply after refresh.
+
+**Enforcement (defense in depth):**
+
+1. **Postgres role grants** — `xenon_dev` has SELECT only on `core_dev`
+   and full DML on `core_test`. `xenon_prod` is the mirror. A
+   misconfigured `.env` that points the wrong role at the wrong DB
+   gets a permission-denied at insert time, not a silent corruption.
+2. **`scripts/infra/dev.sh` startup guard** — parses the database name
+   from `DATABASE_URL`; aborts with `FATAL: dev.sh refuses to start
+against core_dev` if it sees prod. Locked in by
+   `scripts/tests/test_dev_sh_db_guard.py`.
+3. **CI write-side guard** —
+   `scripts/checks/no_json_write_on_order_path.py` blocks any new
+   `json.dump`/`writeFile` to `data/*.json` from the API/execution
+   surface, so operational state cannot regress to a file-first model
+   that would bypass the DB split. Pair with the existing read-side
+   guard `no_json_fallback_on_order_path.py`.
+
+**Read-only live mode.** `dev.sh live` exports `XENON_READ_ONLY=1`.
+FastAPI's lifespan skips rehydrate/fills-replay/activity-poller;
+`POST /orders/{place,cancel,modify}` and `POST /journal` return 403
+with `reason_code: READ_ONLY_MODE`; `ib_sync` skips
+`_save_portfolio_to_postgres` and `_append_nav_snapshot`. Live IBKR
+data still flows in for debugging, but nothing is persisted —
+preventing dev-machine sessions from drifting `core_test` away from
+the nightly snapshot.
+
+**Migration ordering rule:**
+
+1. Author the alembic revision locally on a feature branch.
+2. Apply it to `core_test` via `dev.sh` to test it. (Ephemeral — the
+   next refresh rolls it back.)
+3. Merge the PR. Docker `migrator` service applies it to `core_dev`.
+4. The next 04:00 refresh propagates it into `core_test`.
+
+Step 2 and step 4 are independent — a developer with an unmerged
+migration just keeps re-applying it locally after each refresh until
+the PR lands. The system never holds the prod DB hostage to a dev
+branch.
+
+Full cutover procedure: [`docs/runbooks/dev-prod-db-cutover.md`](../runbooks/dev-prod-db-cutover.md).
+
 ## Synchronization Strategy
 
 Avoid bidirectional synchronization for execution state. Live execution state

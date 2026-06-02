@@ -49,6 +49,23 @@ Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xeno
 
   **Known gap — TWS cancels not mirrored.** The current poller does not transition `WORKING` snapshot-* rows to `CANCELLED` when they disappear from `get_open_orders()`. Naïve disappearance-detection is unsafe: an order that *fills\* mid-tick also disappears, and we'd misclassify it as `CANCELLED`. The right fix combines the disappeared set with `xenon.order_fills` for the same `(perm_id, scope)` to disambiguate fill vs cancel, plus an idle-grace window. Tracked as follow-up.
 
+## Read-Only Mode (`XENON_READ_ONLY=1`)
+
+Set automatically by `scripts/infra/dev.sh live` so dev sessions can read live IB data without polluting `core_test` with live fills. Real live trading goes through the macmini Docker stack against `core_dev`. Full policy: root `CLAUDE.md` § Dev/Prod DB Split.
+
+Helpers live in `xenon.api.guards`:
+
+- `is_read_only()` — reads the env flag.
+- `read_only_403()` — returns a `JSONResponse(status_code=403, content={"reason_code": "READ_ONLY_MODE", "detail": "..."})`. **Top-level `reason_code`** so the web toast helpers render it (toast reads `body.reason_code`, not `body.detail.reason_code` — see root memory `httpexception_dict_detail_breaks_toast`). Never wrap the same payload in `HTTPException(detail={...})`.
+
+Surfaces that gate on the flag:
+
+- **FastAPI write routes** — return 403 early: `POST /orders/place`, `POST /orders/cancel`, `POST /orders/modify` (`server.py`), `POST /journal` (`routes/journal.py`). `GET` siblings stay open.
+- **Lifespan tasks** — `_run_rehydrate_on_boot`, `_run_fills_replay_on_boot`, and `_maybe_start_activity_poller` are skipped with a warning log when the flag is set. The poller task handle on `app.state.ib_activity_poller_task` is `None` in that case; shutdown logic already tolerates `None`.
+- **Writer modules** — `xenon.execution.ib_sync._save_portfolio_to_postgres` and `_append_nav_snapshot` are no-ops. Any new persistence helper called from this package or from a subprocess CLI invoked by the lifespan must short-circuit on the flag, not silently write.
+
+Tests: `src/xenon/api/tests/test_read_only_mode.py` (routes), `scripts/tests/test_ib_sync_read_only.py` (writer no-ops).
+
 ## Cancel / Modify Failure Propagation
 
 1. **Cancel and modify MUST use subprocess with original clientId.**

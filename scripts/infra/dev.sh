@@ -89,13 +89,28 @@ if [[ "$MODE" == "paper" ]]; then
     log_info "Using DATABASE_URL_PAPER (local) for paper mode."
   else
     log_warn "DATABASE_URL_PAPER not set — paper mode will use DATABASE_URL ($DATABASE_URL)."
-    log_warn "Off-LAN dev: add DATABASE_URL_PAPER=postgresql+asyncpg://xenon_app:xenon_dev@127.0.0.1:5432/core_dev to .env"
+    log_warn "Off-LAN dev: add DATABASE_URL_PAPER=postgresql+asyncpg://xenon_dev:<dev-pw>@127.0.0.1:5432/core_test to .env"
   fi
   if [[ -n "${DATABASE_URL_TEST_PAPER:-}" ]]; then
     DATABASE_URL_TEST="$DATABASE_URL_TEST_PAPER"
   fi
 fi
 export DATABASE_URL DATABASE_URL_TEST
+
+# dev.sh never targets prod. core_dev is written exclusively by the
+# Docker stack on the macmini (see docs/runbooks/dev-prod-db-cutover.md
+# and docs/architecture/production-database-strategy.md §dev/prod split).
+# Strip query-string and trailing `/` to extract the bare db name.
+_db_name="${DATABASE_URL##*/}"
+_db_name="${_db_name%%\?*}"
+if [[ "$_db_name" == "core_dev" ]]; then
+  log_err "FATAL: dev.sh refuses to start against core_dev."
+  log_err "  core_dev is the prod DB — written only by the macmini Docker stack."
+  log_err "  Point DATABASE_URL at core_test (or a local dev DB) and retry."
+  log_err "  See docs/runbooks/dev-prod-db-cutover.md for the split policy."
+  exit 2
+fi
+
 if [[ -n "${DATABASE_URL:-}" ]]; then
   log_info "Applying alembic migrations…"
   (cd "$REPO_ROOT" && uv run alembic upgrade head)
@@ -124,6 +139,16 @@ fi
 export XENON_TRADING_MODE="$MODE"
 export IB_GATEWAY_HOST="$IB_HOST"
 export IB_GATEWAY_PORT="$IB_PORT"
+
+# Live mode from dev.sh is for *debugging* against live IB — the data
+# flows in but nothing persists. Real live trading goes through the
+# Docker stack on the macmini, which writes core_dev. Forcing read-only
+# here keeps dev experiments from polluting core_test with live fills.
+if [[ "$MODE" == "live" ]]; then
+  export XENON_READ_ONLY=1
+  log_warn "dev.sh live: XENON_READ_ONLY=1 — order placement and ib_sync writes are disabled."
+  log_warn "  For real live trading, deploy the Docker stack on the macmini instead."
+fi
 
 # Pin Next.js → FastAPI proxy target to IPv4. xenonApi.ts defaults to
 # `http://localhost:8321`, but Node ≥18's fetch (undici) resolves `localhost`

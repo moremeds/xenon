@@ -30,6 +30,7 @@ set -euo pipefail
 REPO_ROOT="\$(git rev-parse --show-toplevel)"
 cd "\$REPO_ROOT"
 python3 scripts/checks/no_json_fallback_on_order_path.py
+python3 scripts/checks/no_json_write_on_order_path.py
 python3 scripts/checks/order_path_caller_allowlist.py
 EOF
 chmod +x "$HOOK_PATH"

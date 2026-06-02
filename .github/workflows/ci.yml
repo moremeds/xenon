@@ -193,6 +193,8 @@ jobs:
           python-version: "3.13"
       - name: No JSON fallback on order/migrated routes
         run: python3.13 scripts/checks/no_json_fallback_on_order_path.py
+      - name: No JSON writes to data/ on order/API path
+        run: python3.13 scripts/checks/no_json_write_on_order_path.py
       - name: ib_place_order caller allowlist
         run: python3.13 scripts/checks/order_path_caller_allowlist.py
       - name: RegimeGate present on every order entry point
