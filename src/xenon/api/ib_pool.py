@@ -8,11 +8,13 @@ asyncio.Lock per role ensures serialized access (IB socket is not concurrent-saf
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from typing import Dict, Iterator, Optional
+from typing import Any, Callable, Dict, Iterator, Optional
 
 logger = logging.getLogger("xenon.ib_pool")
 
@@ -115,11 +117,22 @@ class IBPool:
         # callers (boot rehydrate / fills replay / activity poller tick) so
         # only one reconnect attempt hits the IB clientId slot at a time.
         self._sync_reconnect_locks: Dict[str, threading.Lock] = {}
+        # Per-role single-worker executors. Pinning every sync IB operation
+        # for a role to ONE thread keeps the asyncio event loop ib_async sets
+        # up at connect time current for every subsequent call. With the
+        # default ``asyncio.to_thread`` executor (variable worker pool),
+        # a later tick lands on a thread that never saw the loop and
+        # ib_async raises ``no current event loop``.
+        self._role_executors: Dict[str, ThreadPoolExecutor] = {}
         self._connected: Dict[str, bool] = {}
 
         for role in POOL_ROLES:
             self._locks[role] = asyncio.Lock()
             self._sync_reconnect_locks[role] = threading.Lock()
+            self._role_executors[role] = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix=f"ib_pool_{role}",
+            )
             self._connected[role] = False
 
     async def connect_all(self) -> Dict[str, bool]:
@@ -129,6 +142,7 @@ class IBPool:
         IB-dependent endpoints will return 503; UW-only endpoints still work.
         """
         status = {}
+        loop = asyncio.get_running_loop()
         for i, (role, client_id) in enumerate(POOL_ROLES.items()):
             # IB Gateway rate-limits rapid successive connections — stagger by 1s
             if i > 0:
@@ -137,7 +151,11 @@ class IBPool:
             connected = False
             for attempt in range(3):
                 try:
-                    client = await asyncio.to_thread(
+                    # Pin connect to the role's executor so the event loop
+                    # ib_async creates lands on the worker that every later
+                    # run_sync call will reuse.
+                    client = await loop.run_in_executor(
+                        self._role_executors[role],
                         _connect_in_thread,
                         self._host,
                         self._port,
@@ -162,15 +180,20 @@ class IBPool:
         return status
 
     async def disconnect_all(self) -> None:
-        """Disconnect all pool connections."""
-        for role, client in self._clients.items():
+        """Disconnect all pool connections + shut down role executors."""
+        loop = asyncio.get_running_loop()
+        for role, client in list(self._clients.items()):
             try:
-                await asyncio.to_thread(client.disconnect)
+                await loop.run_in_executor(
+                    self._role_executors[role], client.disconnect
+                )
                 logger.info("IB pool: %s disconnected", role)
             except Exception as e:
                 logger.warning("IB pool: %s disconnect error: %s", role, e)
             self._connected[role] = False
         self._clients.clear()
+        for role, executor in self._role_executors.items():
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def get(self, role: str) -> Optional[IBClient]:
         """Get the client for a role (may be None if not connected)."""
@@ -237,10 +260,12 @@ class IBPool:
         return _PoolContext(self, role)
 
     async def _reconnect(self, role: str) -> bool:
-        """Attempt to reconnect a disconnected role."""
+        """Attempt to reconnect a disconnected role on its pinned worker."""
         client_id = POOL_ROLES[role]
+        loop = asyncio.get_running_loop()
         try:
-            client = await asyncio.to_thread(
+            client = await loop.run_in_executor(
+                self._role_executors[role],
                 _connect_in_thread,
                 self._host,
                 self._port,
@@ -255,6 +280,29 @@ class IBPool:
             self._connected[role] = False
             logger.warning("IB pool: %s reconnect failed: %s", role, e)
             return False
+
+    async def run_sync(self, role: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Run ``fn(*args, **kwargs)`` on the role's pinned worker thread.
+
+        Every sync IB call for a role MUST be dispatched through this method
+        rather than ``asyncio.to_thread``. The role's executor is a single
+        worker, so the asyncio event loop that ``_connect_in_thread`` set up
+        at connect time stays current for every subsequent call. With bare
+        ``asyncio.to_thread`` the default executor's worker rotation drops
+        future calls onto threads with no loop, and ib_async raises
+        ``There is no current event loop in thread '...'``.
+
+        Callable inside ``fn`` may freely use ``pool.get_with_reconnect_sync``;
+        the reconnect runs inline on the same worker thread, preserving the
+        loop invariant.
+        """
+        if role not in POOL_ROLES:
+            raise ValueError(f"Unknown pool role: {role}. Valid: {list(POOL_ROLES.keys())}")
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._role_executors[role],
+            functools.partial(fn, *args, **kwargs),
+        )
 
     def status(self) -> dict:
         """Return pool status for health endpoint."""

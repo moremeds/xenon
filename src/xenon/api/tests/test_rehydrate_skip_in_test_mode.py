@@ -55,7 +55,17 @@ async def test_rehydrate_runs_outside_test_mode(monkeypatch):
         fake_rehydrate,
     )
     monkeypatch.setattr(server_mod, "_is_test_mode", lambda: False)
-    monkeypatch.setattr(server_mod, "ib_pool", object())
+
+    # Minimal pool stand-in: rehydrate dispatch now flows through
+    # ib_pool.run_sync, so the fake must satisfy that surface.
+    class _FakePool:
+        async def run_sync(self, role, fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        def get_with_reconnect_sync(self, role):
+            raise RuntimeError("test fake — should not be called")
+
+    monkeypatch.setattr(server_mod, "ib_pool", _FakePool())
 
     await server_mod._run_rehydrate_on_boot()
 

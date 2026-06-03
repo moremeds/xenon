@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable, Optional
 
 from xenon.execution.account_scope import AccountScope
 from xenon.execution.ib_orders import fetch_open_orders as _fetch_open_orders
@@ -139,19 +139,34 @@ def run_activity_poll_tick(
     }
 
 
+async def _default_async_runner(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Fallback dispatcher: ``asyncio.to_thread``. Used only when no role-pinned
+    runner is wired by the caller (existing unit tests, ad-hoc invocations)."""
+    return await asyncio.to_thread(fn, *args, **kwargs)
+
+
 async def activity_poller_loop(
     *,
     ib_client_factory: Callable[[], Any],
     scope: AccountScope,
     interval_s: float = DEFAULT_POLL_INTERVAL_S,
     lookback_days: int = 7,
+    async_runner: Optional[Callable[..., Awaitable[Any]]] = None,
 ) -> None:
     """Forever-loop wrapper around run_activity_poll_tick.
 
     Called from the FastAPI lifespan as a background task. Survives any
     single-tick failure (logged + slept off). Exits cleanly on
     ``asyncio.CancelledError`` from the lifespan shutdown path.
+
+    ``async_runner`` lets the caller pin the tick to a specific worker
+    thread — production wires this to ``ib_pool.run_sync("sync", ...)`` so
+    every tick runs on the role-pinned thread whose loop ib_async owns. If
+    omitted, falls back to bare ``asyncio.to_thread`` (test/dev only — this
+    is the path that was raising ``no current event loop in thread`` after
+    a Gateway bounce in production).
     """
+    runner = async_runner or _default_async_runner
     logger.info(
         "ib_activity_mirror: poller starting for scope=%s interval=%ss",
         scope.as_dict(),
@@ -159,7 +174,7 @@ async def activity_poller_loop(
     )
     while True:
         try:
-            result = await asyncio.to_thread(
+            result = await runner(
                 run_activity_poll_tick,
                 ib_client_factory=ib_client_factory,
                 scope=scope,

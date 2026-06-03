@@ -181,7 +181,8 @@ async def _run_rehydrate_on_boot() -> None:
 
     try:
         await asyncio.wait_for(
-            asyncio.to_thread(
+            ib_pool.run_sync(
+                "sync",
                 _rehydrate_mod.rehydrate_on_boot,
                 ib_client_factory=_ib_client_factory,
                 orders_store=_orders_store_mod,
@@ -201,7 +202,8 @@ async def _run_rehydrate_on_boot() -> None:
         from xenon.execution.combo_wizard import rehydrate as _combo_rehydrate_mod
 
         await asyncio.wait_for(
-            asyncio.to_thread(
+            ib_pool.run_sync(
+                "sync",
                 _combo_rehydrate_mod.rehydrate_combo_sessions,
                 ib_client_factory=_ib_client_factory,
                 **_scope_kwargs,
@@ -256,6 +258,12 @@ def _maybe_start_activity_poller() -> None:
             raise RuntimeError("ib_pool not initialized")
         return ib_pool.get_with_reconnect_sync("sync")
 
+    async def _sync_role_runner(fn, /, *args, **kwargs):
+        """Dispatch each tick onto the sync role's pinned worker so the IB
+        client's event loop (set up at connect time) is still current when
+        ib_async's internals dispatch awaitables."""
+        return await ib_pool.run_sync("sync", fn, *args, **kwargs)
+
     try:
         interval_s = float(os.environ.get("XENON_IB_ACTIVITY_POLL_S", DEFAULT_POLL_INTERVAL_S))
     except ValueError:
@@ -266,6 +274,7 @@ def _maybe_start_activity_poller() -> None:
             ib_client_factory=_ib_client_factory,
             scope=scope,
             interval_s=interval_s,
+            async_runner=_sync_role_runner,
         )
     )
     app.state.ib_activity_poller_task = task
@@ -311,7 +320,8 @@ async def _run_fills_replay_on_boot() -> None:
 
     try:
         await asyncio.wait_for(
-            asyncio.to_thread(
+            ib_pool.run_sync(
+                "sync",
                 reconcile_fills_on_boot,
                 ib_client_factory=_ib_client_factory,
                 scope=scope,
