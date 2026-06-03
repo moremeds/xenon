@@ -186,18 +186,35 @@ nav_history = Table(
     Column("cash", Numeric(14, 2)),
     Column("stock_value", Numeric(14, 2)),
     Column("options_value", Numeric(14, 2)),
-    # spec §12 / migration 260fabba18d6 — distinguish post-close from intraday snapshots
-    Column("source", Text, nullable=False, server_default=text("'intraday'")),
+    # spec §12 / migration 260fabba18d6 — distinguish post-close from intraday snapshots.
+    # Pass-2 E1(a) / migration 2026_06_03_nav_history_source_in_pk: `source` is part
+    # of the PK so intraday + close rows for the same scope+date coexist as separate
+    # audit rows (nav_history IS the audit table).
+    Column(
+        "source",
+        Text,
+        primary_key=True,
+        nullable=False,
+        server_default=text("'intraday'"),
+    ),
     CheckConstraint("broker IN ('IB', 'FUTU')", name="ck_nav_broker"),
     CheckConstraint(
         "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
         name="ck_nav_account_env",
     ),
     CheckConstraint("source IN ('close', 'intraday')", name="ck_nav_history_source"),
-    # spec Decisions §13 / migration 489476c351cc — atomic dual-curve protection.
+    # spec Decisions §13 + Pass-2 E1(a) — atomic dual-curve protection per source.
     # Excludes account_env so two rows with different envs cannot coexist for
-    # the same (broker, broker_account, date).
-    Index("nav_history_one_env_per_day", "broker", "broker_account", "date", unique=True),
+    # the same (broker, broker_account, date, source). Includes source so
+    # intraday and close coexist for the same scope+date.
+    Index(
+        "nav_history_one_env_per_day_per_source",
+        "broker",
+        "broker_account",
+        "date",
+        "source",
+        unique=True,
+    ),
 )
 
 # ---------- Futu history (read-only persistence) ----------

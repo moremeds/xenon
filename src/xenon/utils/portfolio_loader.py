@@ -17,6 +17,7 @@ from datetime import date as _date
 from decimal import Decimal as _Decimal
 from typing import Any
 
+import sqlalchemy as sa
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as _pg_insert
 
@@ -122,25 +123,24 @@ def load_nav_history_sync(*, scope: AccountScope) -> list[dict[str, Any]]:
         return [dict(row._mapping) for row in result]
 
 
-def upsert_nav_sync(
-    *,
+def _build_upsert_stmt(
     scope: AccountScope,
     day: _date,
-    nav: _Decimal | float | int,
-    daily_pnl: _Decimal | float | int | None = None,
-    total: _Decimal | float | int | None = None,
-    cash: _Decimal | float | int | None = None,
-    stock_value: _Decimal | float | int | None = None,
-    options_value: _Decimal | float | int | None = None,
-    source: str | None = None,
-) -> None:
-    """Sync mirror of `xenon.db.queries.portfolio.upsert_nav`.
+    nav,
+    daily_pnl,
+    total,
+    cash,
+    stock_value,
+    options_value,
+    source: str | None,
+):
+    """Compose the pg_insert(nav_history)…on_conflict_do_update statement.
 
-    NULL-safe on every nullable column: when a caller passes ``None`` for a
-    breakdown field (or daily_pnl), the existing PG value is preserved rather
-    than overwritten. ``source`` follows the same rule: omit to keep the
-    existing value on conflict (so a daily 'close' row from xenon-nav-flex-
-    refresh is not clobbered by an intraday ib_sync write the same day).
+    Pass-3 A1: ``index_elements`` MUST match the post-migration 5-col PK
+    ``(broker, account_env, broker_account, date, source)``. The 4-col form
+    references a constraint that no longer exists post-migration and every
+    UPSERT would raise `there is no unique or exclusion constraint matching
+    the ON CONFLICT specification`.
     """
     values: dict[str, object] = {
         "broker": scope.broker,
@@ -158,30 +158,164 @@ def upsert_nav_sync(
         values["source"] = source
     stmt = _pg_insert(nav_history).values(**values)
     set_columns: dict[str, object] = {"nav": stmt.excluded.nav}
-    if daily_pnl is not None:
-        set_columns["daily_pnl"] = stmt.excluded.daily_pnl
-    if total is not None:
-        set_columns["total"] = stmt.excluded.total
-    if cash is not None:
-        set_columns["cash"] = stmt.excluded.cash
-    if stock_value is not None:
-        set_columns["stock_value"] = stmt.excluded.stock_value
-    if options_value is not None:
-        set_columns["options_value"] = stmt.excluded.options_value
-    if source is not None:
-        set_columns["source"] = stmt.excluded.source
-    stmt = stmt.on_conflict_do_update(
+    for col_name, col_val in (
+        ("daily_pnl", daily_pnl),
+        ("total", total),
+        ("cash", cash),
+        ("stock_value", stock_value),
+        ("options_value", options_value),
+    ):
+        if col_val is not None:
+            set_columns[col_name] = getattr(stmt.excluded, col_name)
+    return stmt.on_conflict_do_update(
         index_elements=[
             nav_history.c.broker,
             nav_history.c.account_env,
             nav_history.c.broker_account,
             nav_history.c.date,
+            nav_history.c.source,
         ],
         set_=set_columns,
     )
+
+
+def upsert_nav_sync(
+    *,
+    scope: AccountScope,
+    day: _date,
+    nav: _Decimal | float | int,
+    daily_pnl: _Decimal | float | int | None = None,
+    total: _Decimal | float | int | None = None,
+    cash: _Decimal | float | int | None = None,
+    stock_value: _Decimal | float | int | None = None,
+    options_value: _Decimal | float | int | None = None,
+    source: str | None = None,
+    enforce_account_env_guard: bool = True,
+) -> None:
+    """Unified sync nav_history writer.
+
+    NULL-safe on every nullable column (None → preserve existing value on
+    conflict). ``source`` distinguishes post-close from intraday rows; after
+    migration 2026_06_03_nav_history_source_in_pk both can coexist for the
+    same (broker, account_env, broker_account, date).
+
+    ``enforce_account_env_guard`` (Pass-2 T3 — default ON): when True,
+    refuses to write a row whose (broker, broker_account, date) already
+    has a different ``account_env``. The defense has two tiers:
+
+      1. SELECT-before-INSERT for the in-process case.
+      2. IntegrityError catch + rollback + re-query winner for the
+         inter-process race (two writers both pass the SELECT, only one
+         wins the unique-index INSERT). Pass-2 T5: SELECT alone is NOT
+         race-safe; the catch is the actual mechanism.
+
+    Legacy unscoped callers can opt out via ``_upsert_nav_sync_unguarded``.
+    """
+    # Lazy import to avoid circular dependency with futu_nav_persistence.
+    from xenon.api.services.futu_nav_persistence import NavAccountEnvConflict
+
     engine = get_sync_engine()
-    with engine.begin() as conn:
-        conn.execute(stmt)
+
+    if enforce_account_env_guard:
+        with engine.begin() as conn:
+            existing = conn.execute(
+                sa.select(nav_history.c.account_env).where(
+                    (nav_history.c.broker == scope.broker)
+                    & (nav_history.c.broker_account == scope.broker_account)
+                    & (nav_history.c.date == day)
+                )
+            ).first()
+        if existing is not None and existing.account_env != scope.account_env:
+            raise NavAccountEnvConflict(scope, existing.account_env, day)
+
+    stmt = _build_upsert_stmt(scope, day, nav, daily_pnl, total, cash, stock_value, options_value, source)
+    try:
+        with engine.begin() as conn:
+            conn.execute(stmt)
+    except sa.exc.IntegrityError:
+        if not enforce_account_env_guard:
+            raise
+        # Inter-process race: re-query and surface NavAccountEnvConflict if
+        # the winner had a different account_env. Otherwise re-raise the
+        # original IntegrityError (some other constraint fired).
+        with engine.begin() as conn2:
+            winner = conn2.execute(
+                sa.select(nav_history.c.account_env).where(
+                    (nav_history.c.broker == scope.broker)
+                    & (nav_history.c.broker_account == scope.broker_account)
+                    & (nav_history.c.date == day)
+                )
+            ).first()
+        if winner is not None and winner.account_env != scope.account_env:
+            raise NavAccountEnvConflict(scope, winner.account_env, day)
+        raise
+
+
+def _upsert_nav_sync_unguarded(**kwargs) -> None:
+    """ESCAPE HATCH — bypasses the cross-env guard.
+
+    Only for legacy unscoped backfill code that proves no concurrent writers
+    exist. New code MUST use ``upsert_nav_sync`` directly.
+    """
+    upsert_nav_sync(enforce_account_env_guard=False, **kwargs)
+
+
+async def upsert_nav_async(
+    engine,  # AsyncEngine
+    *,
+    scope: AccountScope,
+    day: _date,
+    nav: _Decimal | float | int,
+    daily_pnl: _Decimal | float | int | None = None,
+    total: _Decimal | float | int | None = None,
+    cash: _Decimal | float | int | None = None,
+    stock_value: _Decimal | float | int | None = None,
+    options_value: _Decimal | float | int | None = None,
+    source: str | None = None,
+    enforce_account_env_guard: bool = True,
+) -> None:
+    """Async surface — used by FastAPI callers (persist_futu_nav).
+
+    Same race-safe semantics as ``upsert_nav_sync`` but against an AsyncEngine.
+    Pass-2 T6: no event-loop blocking from ``get_sync_engine()`` inside an
+    async route.
+    """
+    from xenon.api.services.futu_nav_persistence import NavAccountEnvConflict
+
+    if enforce_account_env_guard:
+        async with engine.begin() as conn:
+            existing = (
+                await conn.execute(
+                    sa.select(nav_history.c.account_env).where(
+                        (nav_history.c.broker == scope.broker)
+                        & (nav_history.c.broker_account == scope.broker_account)
+                        & (nav_history.c.date == day)
+                    )
+                )
+            ).first()
+        if existing is not None and existing.account_env != scope.account_env:
+            raise NavAccountEnvConflict(scope, existing.account_env, day)
+
+    stmt = _build_upsert_stmt(scope, day, nav, daily_pnl, total, cash, stock_value, options_value, source)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(stmt)
+    except sa.exc.IntegrityError:
+        if not enforce_account_env_guard:
+            raise
+        async with engine.begin() as conn2:
+            winner = (
+                await conn2.execute(
+                    sa.select(nav_history.c.account_env).where(
+                        (nav_history.c.broker == scope.broker)
+                        & (nav_history.c.broker_account == scope.broker_account)
+                        & (nav_history.c.date == day)
+                    )
+                )
+            ).first()
+        if winner is not None and winner.account_env != scope.account_env:
+            raise NavAccountEnvConflict(scope, winner.account_env, day)
+        raise
 
 
 def load_entry_date_lookups_sync(*, scope: AccountScope) -> EntryDateLookups:

@@ -1030,23 +1030,22 @@ def _scope_from_env() -> tuple[str, str, str]:
 
 
 def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
-    """Upsert today's NAV into Postgres nav_history.
+    """Upsert today's intraday NAV via the unified writer.
 
-    Cross-env conflict guard (spec Decisions §13, perf-rebuild correction #2):
-    if an existing row for (broker, broker_account, date) has a different
-    account_env, raise NavAccountEnvConflict — symmetry with persist_futu_nav.
+    Pass-2 (writer unification): delegates to
+    ``xenon.utils.portfolio_loader.upsert_nav_sync``. The cross-env guard
+    (Decisions §13) and race-safe IntegrityError catch live inside the
+    shared helper now — guard is default-on; do NOT pass
+    ``enforce_account_env_guard=False`` here.
     """
     if os.environ.get("XENON_READ_ONLY") == "1":
         print(f"⏭  XENON_READ_ONLY=1 — skipping NAV snapshot write (net_liq=${net_liq:,.2f})")
         return
 
     import pytz
-    import sqlalchemy as sa
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-    from xenon.api.services.futu_nav_persistence import NavAccountEnvConflict
-    from xenon.db.schema import nav_history
     from xenon.execution.account_scope import AccountScope
+    from xenon.utils.portfolio_loader import upsert_nav_sync
 
     et = pytz.timezone("America/New_York")
     today = datetime.now(et).date()
@@ -1054,42 +1053,15 @@ def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
     nav_val = Decimal(str(round(net_liq, 2)))
     pnl_val = Decimal(str(round(float(daily_pnl), 2))) if daily_pnl is not None else None
     broker, account_env, broker_account = _scope_from_env()
+    scope = AccountScope(broker=broker, account_env=account_env, broker_account=broker_account)
 
-    engine = get_sync_engine()
-    with engine.begin() as conn:
-        # Decisions §13 / correction #2 — read-before-write cross-env guard.
-        existing = conn.execute(
-            sa.select(nav_history.c.account_env).where(
-                (nav_history.c.broker == broker)
-                & (nav_history.c.broker_account == broker_account)
-                & (nav_history.c.date == today)
-            )
-        ).first()
-        if existing is not None and existing.account_env != account_env:
-            raise NavAccountEnvConflict(
-                AccountScope(broker=broker, account_env=account_env, broker_account=broker_account),
-                existing.account_env,
-                today,
-            )
-
-        stmt = pg_insert(nav_history).values(
-            broker=broker,
-            account_env=account_env,
-            broker_account=broker_account,
-            date=today,
-            nav=nav_val,
-            daily_pnl=pnl_val,
-        )
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[
-                nav_history.c.broker,
-                nav_history.c.account_env,
-                nav_history.c.broker_account,
-                nav_history.c.date,
-            ],
-            set_={"nav": stmt.excluded.nav, "daily_pnl": stmt.excluded.daily_pnl},
-        )
-        conn.execute(stmt)
+    upsert_nav_sync(
+        scope=scope,
+        day=today,
+        nav=nav_val,
+        daily_pnl=pnl_val,
+        source="intraday",
+    )
 
     print(f"✓ NAV snapshot: {today} → ${net_liq:,.2f}")
 
