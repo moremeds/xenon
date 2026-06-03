@@ -261,7 +261,25 @@ export type PerformanceSummary = {
   win_loss_ratio: number | null;
   skew: number | null;
   kurtosis: number | null;
+  /** PR-2 honest-% headline: `(end - start - net_external_flows) / start`. */
+  simple_total_return: number | null;
+  /** PR-2: time-weighted return — `∏(1 + r_i) - 1` over flow-adjusted daily returns. */
+  twr_total_return: number | null;
+  /** PR-2: money-weighted IRR. `null` when scipy unavailable, no sign change, or convergence fails. */
+  irr_total_return: number | null;
+  /** PR-2: signed sum of cash flows in the window. Positive = net deposit. */
+  net_external_flows: number | null;
 };
+
+/** Window for the /performance endpoint. */
+export type PerformancePeriod = "1M" | "3M" | "YTD" | "All";
+
+export const PERFORMANCE_PERIODS: readonly PerformancePeriod[] = [
+  "1M",
+  "3M",
+  "YTD",
+  "All",
+] as const;
 
 export type PerformanceScope = {
   broker: "IB" | "FUTU";
