@@ -7,6 +7,7 @@ caches per worker (v1 limitation; v2 follow-up: shared cache).
 Correction #26 (perf-rebuild): half-day market sessions are NOT handled
 (13:00 ET close → 60s TTL until 16:00). Acceptable for v1; revisit later.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -20,8 +21,8 @@ _ET = zoneinfo.ZoneInfo("America/New_York")
 _TTL_OPEN_SEC = 60
 _TTL_CLOSED_SEC = 30 * 60
 
-# {(broker, account_env, broker_account): (result, stored_at_epoch)}
-_cache: dict[tuple[str, str, str], tuple[Any, float]] = {}
+# {(broker, account_env, broker_account, period_lower): (result, stored_at_epoch)}
+_cache: dict[tuple[str, str, str, str], tuple[Any, float]] = {}
 
 
 def _ttl_for_now(now: dt.datetime | None = None) -> int:
@@ -39,8 +40,8 @@ def _ttl_for_now(now: dt.datetime | None = None) -> int:
     return _TTL_CLOSED_SEC
 
 
-def _key(scope: AccountScope) -> tuple[str, str, str]:
-    return (scope.broker, scope.account_env, scope.broker_account)
+def _key(scope: AccountScope, period: str = "YTD") -> tuple[str, str, str, str]:
+    return (scope.broker, scope.account_env, scope.broker_account, period.lower())
 
 
 def clear_cache() -> None:
@@ -48,23 +49,27 @@ def clear_cache() -> None:
     _cache.clear()
 
 
-async def cached_compute(engine, scope: AccountScope, *, ib_pool=None) -> Any:
-    """Memoized wrapper around `xenon.api.services.performance.compute`."""
+async def cached_compute(engine, scope: AccountScope, *, ib_pool=None, period: str = "YTD") -> Any:
+    """Memoized wrapper around `xenon.api.services.performance.compute`.
+
+    The cache key includes (broker, account_env, broker_account, period) —
+    period switches return live results, not stale YTD.
+    """
     # Import lazily to avoid circular dep at module import time.
     from xenon.api.services.performance import compute as _inner
 
-    k = _key(scope)
+    k = _key(scope, period)
     ttl = _ttl_for_now()
     now = time.time()
     cached = _cache.get(k)
     if cached is not None and (now - cached[1]) < ttl:
         return cached[0]
-    result = await _inner(engine, scope, ib_pool=ib_pool)
+    result = await _inner(engine, scope, ib_pool=ib_pool, period=period)
     _cache[k] = (result, now)
     return result
 
 
-def warm(engine, scope: AccountScope, *, ib_pool=None) -> None:
+def warm(engine, scope: AccountScope, *, ib_pool=None, period: str = "YTD") -> None:
     """Fire-and-forget warmup. Used by deprecated POST /performance/background.
 
     Returns immediately; the compute happens on the event loop in the background.
@@ -76,4 +81,4 @@ def warm(engine, scope: AccountScope, *, ib_pool=None) -> None:
     except RuntimeError:
         # No running loop — caller must arrange one (test scaffolding).
         return
-    loop.create_task(cached_compute(engine, scope, ib_pool=ib_pool))
+    loop.create_task(cached_compute(engine, scope, ib_pool=ib_pool, period=period))
