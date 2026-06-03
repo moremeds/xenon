@@ -163,10 +163,7 @@ async def _run_rehydrate_on_boot() -> None:
     def _ib_client_factory():
         if ib_pool is None:
             raise RuntimeError("ib_pool not initialized")
-        client = ib_pool.get("sync")
-        if client is None:
-            raise RuntimeError("ib_pool sync role has no client")
-        return client
+        return ib_pool.get_with_reconnect_sync("sync")
 
     if _is_test_mode():
         logger.info("test_mode: skipping rehydrate")
@@ -184,7 +181,8 @@ async def _run_rehydrate_on_boot() -> None:
 
     try:
         await asyncio.wait_for(
-            asyncio.to_thread(
+            ib_pool.run_sync(
+                "sync",
                 _rehydrate_mod.rehydrate_on_boot,
                 ib_client_factory=_ib_client_factory,
                 orders_store=_orders_store_mod,
@@ -204,7 +202,8 @@ async def _run_rehydrate_on_boot() -> None:
         from xenon.execution.combo_wizard import rehydrate as _combo_rehydrate_mod
 
         await asyncio.wait_for(
-            asyncio.to_thread(
+            ib_pool.run_sync(
+                "sync",
                 _combo_rehydrate_mod.rehydrate_combo_sessions,
                 ib_client_factory=_ib_client_factory,
                 **_scope_kwargs,
@@ -257,10 +256,13 @@ def _maybe_start_activity_poller() -> None:
     def _ib_client_factory():
         if ib_pool is None:
             raise RuntimeError("ib_pool not initialized")
-        client = ib_pool.get("sync")
-        if client is None:
-            raise RuntimeError("ib_pool sync role has no client")
-        return client
+        return ib_pool.get_with_reconnect_sync("sync")
+
+    async def _sync_role_runner(fn, /, *args, **kwargs):
+        """Dispatch each tick onto the sync role's pinned worker so the IB
+        client's event loop (set up at connect time) is still current when
+        ib_async's internals dispatch awaitables."""
+        return await ib_pool.run_sync("sync", fn, *args, **kwargs)
 
     try:
         interval_s = float(os.environ.get("XENON_IB_ACTIVITY_POLL_S", DEFAULT_POLL_INTERVAL_S))
@@ -272,6 +274,7 @@ def _maybe_start_activity_poller() -> None:
             ib_client_factory=_ib_client_factory,
             scope=scope,
             interval_s=interval_s,
+            async_runner=_sync_role_runner,
         )
     )
     app.state.ib_activity_poller_task = task
@@ -361,10 +364,7 @@ async def _run_fills_replay_on_boot() -> None:
     def _ib_client_factory():
         if ib_pool is None:
             raise RuntimeError("ib_pool not initialized")
-        client = ib_pool.get("sync")
-        if client is None:
-            raise RuntimeError("ib_pool sync role has no client")
-        return client
+        return ib_pool.get_with_reconnect_sync("sync")
 
     _scope_account_env = getattr(app.state, "trading_mode", None)
     _scope_account = getattr(app.state, "account", None)
@@ -380,7 +380,8 @@ async def _run_fills_replay_on_boot() -> None:
 
     try:
         await asyncio.wait_for(
-            asyncio.to_thread(
+            ib_pool.run_sync(
+                "sync",
                 reconcile_fills_on_boot,
                 ib_client_factory=_ib_client_factory,
                 scope=scope,
@@ -741,7 +742,8 @@ async def _fetch_ib_expiry_candidates(ticker: str) -> List[str]:
     for exchange, sec_type in attempts:
         try:
             async with ib_pool.acquire("data") as client:
-                chains = await asyncio.to_thread(
+                chains = await ib_pool.run_sync(
+                    "data",
                     _fetch_ib_index_option_chain,
                     client,
                     normalized_ticker,
@@ -1612,7 +1614,8 @@ async def _fetch_quote_snapshot(ticker: str, con_id: int) -> dict:
 
     try:
         async with pool.acquire("data") as client:
-            return await asyncio.to_thread(
+            return await pool.run_sync(
+                "data",
                 _fetch_quote_snapshot_with_client,
                 client,
                 ticker,
@@ -1634,7 +1637,8 @@ async def _fetch_order_quote_snapshot(body: dict) -> tuple[int, dict]:
 
     try:
         async with pool.acquire("data") as client:
-            return await asyncio.to_thread(
+            return await pool.run_sync(
+                "data",
                 _fetch_order_quote_snapshot_with_client,
                 client,
                 dict(body),
@@ -1654,7 +1658,8 @@ async def _qualify_order_con_id(body: dict) -> int:
 
     try:
         async with pool.acquire("data") as client:
-            return await asyncio.to_thread(
+            return await pool.run_sync(
+                "data",
                 _qualify_order_con_id_with_client,
                 client,
                 dict(body),
