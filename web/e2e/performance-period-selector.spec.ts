@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 test.describe("Performance period selector", () => {
   test("defaults to YTD and switches to 1M", async ({ page }) => {
     await page.goto("/performance");
-    await page.waitForLoadState("networkidle");
+    await page.waitForLoadState("domcontentloaded");
 
     // Selector is mounted.
     const selector = page.getByTestId("performance-period-selector");
@@ -37,7 +37,7 @@ test.describe("Performance period selector", () => {
     page,
   }) => {
     await page.goto("/performance");
-    await page.waitForLoadState("networkidle");
+    await page.waitForLoadState("domcontentloaded");
 
     const info = page.getByTestId("performance-headline-info");
     await expect(info).toBeVisible();
@@ -53,7 +53,7 @@ test.describe("Performance period selector", () => {
 
   test("freshness subtitle shows source mix", async ({ page }) => {
     await page.goto("/performance");
-    await page.waitForLoadState("networkidle");
+    await page.waitForLoadState("domcontentloaded");
 
     const freshness = page.getByTestId("performance-freshness");
     await expect(freshness).toBeVisible();
