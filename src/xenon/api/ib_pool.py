@@ -110,10 +110,16 @@ class IBPool:
         self._port = port
         self._clients: Dict[str, IBClient] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
+        # Sync reconnect serialization — coexists with the async _locks above.
+        # Used only by ``get_with_reconnect_sync`` to coalesce racing sync
+        # callers (boot rehydrate / fills replay / activity poller tick) so
+        # only one reconnect attempt hits the IB clientId slot at a time.
+        self._sync_reconnect_locks: Dict[str, threading.Lock] = {}
         self._connected: Dict[str, bool] = {}
 
         for role in POOL_ROLES:
             self._locks[role] = asyncio.Lock()
+            self._sync_reconnect_locks[role] = threading.Lock()
             self._connected[role] = False
 
     async def connect_all(self) -> Dict[str, bool]:
@@ -181,6 +187,45 @@ class IBPool:
             return client.ib.isConnected()
         except Exception:
             return False
+
+    def get_with_reconnect_sync(self, role: str) -> IBClient:
+        """Sync sibling of ``acquire()`` for callers running in worker threads.
+
+        Boot rehydrate, fills replay, and the activity poller dispatch work to
+        ``asyncio.to_thread`` and receive their IB client via a sync factory.
+        Plain ``get(role)`` returns whatever is cached — including a client
+        whose socket dropped during a Gateway bounce — so the caller hits
+        ``Not connected to IB`` on every tick until the FastAPI container is
+        manually restarted. This method closes that gap: it checks liveness
+        and, if stale, performs the same reconnect ``acquire()`` does, but
+        without the async lock (we're already off-loop).
+
+        Concurrent callers coalesce via a per-role ``threading.Lock`` so we
+        never race two connects on the same IB clientId slot. Raises
+        ``ConnectionError`` on reconnect failure (same shape as ``acquire()``).
+        """
+        if role not in POOL_ROLES:
+            raise ValueError(f"Unknown pool role: {role}. Valid: {list(POOL_ROLES.keys())}")
+
+        if self.is_connected(role):
+            return self._clients[role]
+
+        with self._sync_reconnect_locks[role]:
+            if self.is_connected(role):
+                return self._clients[role]
+
+            client_id = POOL_ROLES[role]
+            try:
+                client = _connect_in_thread(self._host, self._port, client_id, 5)
+            except Exception as exc:
+                self._connected[role] = False
+                logger.warning("IB pool: %s sync reconnect failed: %s", role, exc)
+                raise ConnectionError(f"IB pool: {role} reconnect failed: {exc}") from exc
+
+            self._clients[role] = client
+            self._connected[role] = True
+            logger.info("IB pool: %s sync-reconnected (client_id=%d)", role, client_id)
+            return client
 
     def acquire(self, role: str) -> _PoolContext:
         """Acquire exclusive access to a role's connection.
