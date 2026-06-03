@@ -9,6 +9,7 @@ Corrections applied:
         runtime guard so v1 can ship without the full IB integration.
   - #10: IB historical bar dates normalized via pd.to_datetime(...).date().
 """
+
 from __future__ import annotations
 
 import logging
@@ -30,35 +31,79 @@ class BenchmarkUnavailable(Exception):
 
 
 async def load_nav_curve(
-    engine: AsyncEngine, scope: AccountScope, period_start: date
+    engine: AsyncEngine,
+    scope: AccountScope,
+    period_start: date,
+    period_end: date | None = None,
 ) -> pd.DataFrame:
-    """Return DataFrame[date, nav, daily_pnl, source] ascending by date, scope-filtered.
+    """Return DataFrame[date, nav, daily_pnl, source] ascending by date,
+    scope-filtered, optionally upper-bounded by ``period_end`` (inclusive).
 
-    Treats every row as authoritative for v1 (only 'intraday' rows exist).
-    v2 follow-up will add prefer-close dedupe once an EOD scheduler ships.
+    Prefer-close semantics (Pass-1 addition): when two rows exist for the
+    same date with different ``source`` values, the ``close`` row wins. Under
+    the post-2026_06_03 schema the PK includes ``source`` so intraday + close
+    rows coexist; the ``DISTINCT ON (date)`` keeps the chart from
+    double-counting. Pre-migration scopes (one row per date) get a no-op.
     """
-    async with engine.begin() as conn:
-        result = await conn.execute(
-            sa.select(
-                nav_history.c.date,
-                nav_history.c.nav,
-                nav_history.c.daily_pnl,
-                nav_history.c.source,
-            )
-            .where(
-                (nav_history.c.broker == scope.broker)
-                & (nav_history.c.account_env == scope.account_env)
-                & (nav_history.c.broker_account == scope.broker_account)
-                & (nav_history.c.date >= period_start)
-            )
-            .order_by(nav_history.c.date.asc())
+    where = (
+        (nav_history.c.broker == scope.broker)
+        & (nav_history.c.account_env == scope.account_env)
+        & (nav_history.c.broker_account == scope.broker_account)
+        & (nav_history.c.date >= period_start)
+    )
+    if period_end is not None:
+        where = where & (nav_history.c.date <= period_end)
+
+    # DISTINCT ON (date) — PG-specific. ORDER BY date ASC for the outer
+    # iteration, then source ranked so 'close' (rank=0) wins over 'intraday'
+    # (rank=1) when both rows exist for the same date.
+    source_rank = sa.case(
+        (nav_history.c.source == "close", 0),
+        else_=1,
+    ).label("_source_rank")
+
+    stmt = (
+        sa.select(
+            nav_history.c.date,
+            nav_history.c.nav,
+            nav_history.c.daily_pnl,
+            nav_history.c.source,
+            source_rank,
         )
+        .where(where)
+        .distinct(nav_history.c.date)
+        .order_by(nav_history.c.date.asc(), source_rank.asc())
+    )
+
+    async with engine.begin() as conn:
+        result = await conn.execute(stmt)
         rows = result.fetchall()
-    df = pd.DataFrame(rows, columns=["date", "nav", "daily_pnl", "source"])
+    df = pd.DataFrame(rows, columns=["date", "nav", "daily_pnl", "source", "_source_rank"])
+    df = df.drop(columns=["_source_rank"])
     if not df.empty:
         df["nav"] = df["nav"].astype(float)
         df["daily_pnl"] = df["daily_pnl"].astype(float).where(df["daily_pnl"].notna(), None)
     return df
+
+
+async def load_inception_date(engine: AsyncEngine, scope: AccountScope) -> date | None:
+    """Return the earliest ``nav_history.date`` for the scope, or None.
+
+    Used by the /performance route to resolve ``period=All`` to a concrete
+    start date. Cheap (PK-prefix indexed) so safe to call on every request.
+    """
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            sa.select(sa.func.min(nav_history.c.date)).where(
+                (nav_history.c.broker == scope.broker)
+                & (nav_history.c.account_env == scope.account_env)
+                & (nav_history.c.broker_account == scope.broker_account)
+            )
+        )
+        row = result.first()
+    if row is None or row[0] is None:
+        return None
+    return row[0]
 
 
 async def load_benchmark_cached(
@@ -76,10 +121,7 @@ async def load_benchmark_cached(
         rows = (
             await conn.execute(
                 sa.select(benchmark_closes.c.date, benchmark_closes.c.close)
-                .where(
-                    (benchmark_closes.c.symbol == symbol)
-                    & (benchmark_closes.c.date >= period_start)
-                )
+                .where((benchmark_closes.c.symbol == symbol) & (benchmark_closes.c.date >= period_start))
                 .order_by(benchmark_closes.c.date.asc())
             )
         ).fetchall()
@@ -102,10 +144,7 @@ async def load_benchmark_cached(
         rows = (
             await conn.execute(
                 sa.select(benchmark_closes.c.date, benchmark_closes.c.close)
-                .where(
-                    (benchmark_closes.c.symbol == symbol)
-                    & (benchmark_closes.c.date >= period_start)
-                )
+                .where((benchmark_closes.c.symbol == symbol) & (benchmark_closes.c.date >= period_start))
                 .order_by(benchmark_closes.c.date.asc())
             )
         ).fetchall()
@@ -115,9 +154,7 @@ async def load_benchmark_cached(
     return df, None
 
 
-async def fetch_and_cache_benchmark(
-    engine: AsyncEngine, ib_pool, symbol: str, period_start: date
-) -> None:
+async def fetch_and_cache_benchmark(engine: AsyncEngine, ib_pool, symbol: str, period_start: date) -> None:
     """Fetch daily closes from IB pool's 'data' role and upsert into benchmark_closes.
 
     Uses IBPool.get("data") (correction #9). Normalizes bar dates via
@@ -132,9 +169,7 @@ async def fetch_and_cache_benchmark(
     import os
 
     if os.environ.get("XENON_PERF_BENCHMARK_FETCH_ENABLED", "false").lower() != "true":
-        raise BenchmarkUnavailable(
-            "benchmark fetch disabled (set XENON_PERF_BENCHMARK_FETCH_ENABLED=true to enable)"
-        )
+        raise BenchmarkUnavailable("benchmark fetch disabled (set XENON_PERF_BENCHMARK_FETCH_ENABLED=true to enable)")
 
     client = ib_pool.get("data") if hasattr(ib_pool, "get") else None
     if client is None:
@@ -154,10 +189,7 @@ async def fetch_and_cache_benchmark(
             useRTH=True,
             formatDate=1,
         )
-        return [
-            {"date": pd.to_datetime(b.date).date(), "close": float(b.close)}
-            for b in bars
-        ]
+        return [{"date": pd.to_datetime(b.date).date(), "close": float(b.close)} for b in bars]
 
     loop = asyncio.get_running_loop()
     rows = await loop.run_in_executor(None, _sync_fetch)
