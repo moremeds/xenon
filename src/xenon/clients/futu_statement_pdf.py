@@ -417,6 +417,99 @@ def _parse_financing(pages: list[str]) -> dict:
     return {"margin_interest": margin_rows, "securities_lending": lending_rows}
 
 
+def _parse_modern_cash_movements(pages: list[str]) -> list[dict]:
+    """Cash Movement section (modern statements only).
+
+    Format per row:
+      Date Direction Type+ Currency Amount Remarks*
+    Examples:
+      2025/12/15 In Corporate Action USD +1.06 GOOGL 5.02 SHARES DIVIDENDS ...
+      2024/07/16 Out Account Upgrade USD -100.50 Account Upgrade
+      2025/12/15 Out Corporate Action USD -0.11 GOOGL ... WITHHOLDING TAX ...
+
+    Captures dividends, withholding tax, FX, fees, account-upgrade transfers.
+    These are the small cash flows that explain day-over-day NAV gaps the
+    Fund Movement section doesn't.
+    """
+    movements: list[dict] = []
+    sect_re = re.compile(
+        r"Cash Movement([\s\S]*?)(?:Ending Net Asset|Starting Net Asset|Transactions[ ]?-|Portfolio Movement|Preparation Date|\Z)"
+    )
+    row_re = re.compile(
+        r"^(\d{4}/\d{1,2}/\d{1,2})[^\S\n]+(In|Out)[^\S\n]+"
+        r"([A-Za-z][A-Za-z ]+?)[^\S\n]+"
+        r"([A-Z]{3})[^\S\n]+"
+        r"([+\-]?[\d,]+\.\d+)"
+        r"(?:[^\S\n]+([^\n]+))?",
+        re.MULTILINE,
+    )
+    for txt in pages:
+        for sect in sect_re.finditer(txt):
+            for m in row_re.finditer(sect.group(1)):
+                movements.append(
+                    {
+                        "date": m.group(1),
+                        "direction": m.group(2),
+                        "type": m.group(3).strip(),
+                        "currency": m.group(4),
+                        "amount": str(_to_decimal(m.group(5))),
+                        "remarks": (m.group(6) or "").strip(),
+                    }
+                )
+    return movements
+
+
+def _parse_modern_portfolio_movement(pages: list[str]) -> list[dict]:
+    """Portfolio Movement section — per-symbol trade-like flows.
+
+    Format per row:
+      Date Direction Type Symbol(Description) Currency Quantity Amount Remarks
+    Examples:
+      2024/07/13 Out Account Upgrade ZK(ZEEKR) USD -100 -0.00 Account Upgrade
+      2024/07/13 In  Account Upgrade AAPL(Apple) USD +1 +243.67 Account Upgrade
+
+    Note: option symbols (e.g. PYPL250117C140000(PYPL 250117 140.00C)) often
+    span two lines in the PDF — those rows are skipped silently. Captures
+    the simple stock/symbol rows which cover ~95% of historical activity.
+    """
+    movements: list[dict] = []
+    sect_re = re.compile(
+        r"Portfolio Movement([\s\S]*?)(?:Ending Assets|Cash Movement|Transactions[ ]?-|Preparation Date|\Z)"
+    )
+    row_re = re.compile(
+        r"^(\d{4}/\d{1,2}/\d{1,2})[^\S\n]+(In|Out)[^\S\n]+"
+        r"([A-Za-z][A-Za-z ]+?)[^\S\n]+"
+        r"([A-Z][A-Z0-9.]{0,9}(?:\([^)\n]+\))?)[^\S\n]+"  # Symbol like AAPL(Apple)
+        r"([A-Z]{3})[^\S\n]+"
+        r"([+\-]?[\d,]+(?:\.\d+)?)[^\S\n]+"
+        r"([+\-]?[\d,]+\.\d+)"
+        r"(?:[^\S\n]+([^\n]+))?",
+        re.MULTILINE,
+    )
+    for txt in pages:
+        for sect in sect_re.finditer(txt):
+            for m in row_re.finditer(sect.group(1)):
+                # Extract ticker + description from "AAPL(Apple)" → "AAPL", "Apple"
+                sym_raw = m.group(4)
+                paren_m = re.match(r"([A-Z][A-Z0-9.]*)(?:\(([^)]+)\))?", sym_raw)
+                ticker = paren_m.group(1) if paren_m else sym_raw
+                description = paren_m.group(2) if paren_m and paren_m.lastindex == 2 else ""
+                movements.append(
+                    {
+                        "date": m.group(1),
+                        "direction": m.group(2),
+                        "type": m.group(3).strip(),
+                        "ticker": ticker,
+                        "description": description,
+                        "currency": m.group(5),
+                        "quantity": str(_to_decimal(m.group(6))),
+                        "amount": str(_to_decimal(m.group(7))),
+                        "remarks": (m.group(8) or "").strip(),
+                    }
+                )
+    return movements
+
+
 def _parse_transaction_totals(pages: list[str]) -> dict:
     """Page 8 prints a 'Total <label>: HKD: ... USD: ... CNH: ... etc.' block.
 
@@ -538,6 +631,16 @@ def parse(pdf_bytes: bytes, password: Optional[str] = None) -> FutuDailyStatemen
     except Exception as exc:
         logger.warning("transaction totals parse failed: %s", exc)
         transaction_totals = {}
+    try:
+        transaction_totals["cash_movements"] = _parse_modern_cash_movements(raw.text_by_page)
+    except Exception as exc:
+        logger.warning("cash movements parse failed: %s", exc)
+        transaction_totals.setdefault("cash_movements", [])
+    try:
+        transaction_totals["portfolio_movements"] = _parse_modern_portfolio_movement(raw.text_by_page)
+    except Exception as exc:
+        logger.warning("portfolio movements parse failed: %s", exc)
+        transaction_totals.setdefault("portfolio_movements", [])
 
     return FutuDailyStatement(
         statement_date=statement_date,
