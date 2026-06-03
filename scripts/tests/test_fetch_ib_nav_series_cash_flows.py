@@ -198,3 +198,86 @@ def test_parse_cash_transactions_filters_non_deposit_rows():
     rows = _parse_ib_cash_transactions_section(section)
     assert len(rows) == 2
     assert {r["transaction_id"] for r in rows} == {"T1", "T4"}
+
+
+def test_parse_cash_transactions_account_filter_rejects_cross_scope():
+    """account_filter must reject rows whose ClientAccountID doesn't match.
+
+    Protects against the operator misconfiguring the saved Flex query to
+    point at a different account than the env (e.g., paper mode but query
+    pointing at live U... account) — those rows would otherwise persist
+    with the wrong scope. account_env mismatch is a silent corruption
+    risk that broker_account scope columns exist specifically to prevent.
+    """
+    from xenon.reports.portfolio_performance import _parse_ib_cash_transactions_section
+
+    section = [
+        '"ClientAccountID","Date/Time","Type","Description","Amount","CurrencyPrimary","Symbol","AssetClass","TransactionID"',
+        '"U18007831","20260107","Deposits/Withdrawals","WIRE IN","100","USD","","","T_LIVE"',
+        '"DUQ378889","20260108","Deposits/Withdrawals","WIRE IN","200","USD","","","T_PAPER"',
+    ]
+    # Operator running paper mode — saved query mistakenly returns live rows.
+    rows = _parse_ib_cash_transactions_section(section, account_filter="DUQ378889")
+    assert len(rows) == 1
+    assert rows[0]["transaction_id"] == "T_PAPER"
+
+
+def test_fetch_ib_nav_series_skips_cross_account_rows(monkeypatch, pg_test_engine):
+    """Integration: fetch_ib_nav_series must filter NAV + CashTransactions
+    rows by the env-resolved broker_account when the saved Flex query
+    contains rows from another account."""
+    cross_account_csv = (
+        # Section 1: NAV (1 row matching env, 1 row from a different acct)
+        '"ClientAccountID","ReportDate","Total","TotalLong","TotalShort","Cash",'
+        '"CashLong","CashShort","Stock","StockLong","StockShort","Options",'
+        '"OptionsLong","OptionsShort","Bonds","BondsLong","BondsShort",'
+        '"Commodities","CommoditiesLong","CommoditiesShort","Funds","FundsLong",'
+        '"FundsShort","DividendAccruals","DividendAccrualsLong",'
+        '"DividendAccrualsShort","InterestAccruals","InterestAccrualsLong",'
+        '"InterestAccrualsShort"\n'
+        '"DUQ999999","20260601","100","100","0","50","50","0","40","40","0",'
+        '"10","10","0","0","0","0","0","0","0","0","0","0","0","0","0","0",'
+        '"0","0"\n'
+        '"U18007831","20260601","999999","999999","0","0","0","0","0","0","0",'
+        '"0","0","0","0","0","0","0","0","0","0","0","0","0","0","0","0",'
+        '"0","0"\n'
+        # Section 2: CashTransactions (matching + non-matching)
+        '"ClientAccountID","Date/Time","Type","Description","Amount",'
+        '"CurrencyPrimary","Symbol","AssetClass","TransactionID"\n'
+        '"DUQ999999","20260107","Deposits/Withdrawals","WIRE IN","100","USD","","","T_OK"\n'
+        '"U18007831","20260108","Deposits/Withdrawals","WIRE OTHER","500","USD","","","T_OTHER"\n'
+    )
+
+    monkeypatch.setenv("IB_FLEX_TOKEN", "x" * 24)
+    monkeypatch.setenv("IB_FLEX_NAV_QUERY_ID", "1529248")
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_PAPER_ACCOUNT", "DUQ999999")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DUQ999999")
+
+    with patch("urllib.request.urlopen", _fake_urlopen_factory(cross_account_csv)), patch("time.sleep"):
+        from xenon.reports.portfolio_performance import fetch_ib_nav_series
+
+        entries = fetch_ib_nav_series()
+
+    # Only the DUQ999999 NAV row, not the U18007831 row
+    assert entries is not None and len(entries) == 1
+    assert entries[0]["total"] == 100.0
+
+    # Cash flow: only T_OK persisted, T_OTHER rejected
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        txn_ids = [
+            r.transaction_id
+            for r in conn.execute(
+                text(
+                    "SELECT transaction_id FROM xenon.ib_cash_flow "
+                    "WHERE broker='IB' AND account_env='paper' "
+                    "AND broker_account='DUQ999999'"
+                )
+            ).fetchall()
+        ]
+    assert txn_ids == ["T_OK"]
+    # T_OTHER must not appear ANYWHERE under the paper scope
+    with engine.begin() as conn:
+        bad = conn.execute(text("SELECT COUNT(*) FROM xenon.ib_cash_flow WHERE transaction_id='T_OTHER'")).scalar()
+    assert bad == 0

@@ -496,6 +496,22 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                 import csv as _csv
                 import io as _io
 
+                # Resolve scope once so we can defensively filter rows whose
+                # ClientAccountID doesn't match the env. Guards against an
+                # operator misconfiguring the saved Flex query to point at a
+                # live account while running in paper mode (which would
+                # otherwise persist live TransactionIDs under the paper
+                # scope — silent cross-account corruption). When the scope
+                # cannot be resolved (e.g., migration scripts running without
+                # env vars), fall through to no filtering — same behavior as
+                # before the guard was added.
+                try:
+                    from xenon.execution.account_scope import resolve_from_env as _resolve_scope
+
+                    _expected_account = _resolve_scope().broker_account
+                except Exception:  # noqa: BLE001
+                    _expected_account = None
+
                 sections = _split_ib_flex_csv_sections(body)
                 for section_lines in sections:
                     section_reader = _csv.DictReader(_io.StringIO("\n".join(section_lines)))
@@ -503,6 +519,18 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                     if "ReportDate" in field_names and "Total" in field_names:
                         # EquitySummaryInBase section.
                         for csv_row in section_reader:
+                            if (
+                                _expected_account is not None
+                                and csv_row.get("ClientAccountID", "").strip() != _expected_account
+                            ):
+                                logger.warning(
+                                    "fetch_ib_nav_series: skipping NAV row for "
+                                    "ClientAccountID=%r (expected %r) — saved "
+                                    "Flex query may be misconfigured",
+                                    csv_row.get("ClientAccountID"),
+                                    _expected_account,
+                                )
+                                continue
                             dt_raw = csv_row.get("ReportDate", "").strip()
                             if len(dt_raw) == 8:
                                 dt = f"{dt_raw[:4]}-{dt_raw[4:6]}-{dt_raw[6:8]}"
@@ -520,7 +548,9 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                     elif "TransactionID" in field_names:
                         # CashTransactions section (Deposits/Withdrawals
                         # subset only — see _parse_ib_cash_transactions_section).
-                        cash_flow_rows.extend(_parse_ib_cash_transactions_section(section_lines))
+                        cash_flow_rows.extend(
+                            _parse_ib_cash_transactions_section(section_lines, account_filter=_expected_account)
+                        )
             elif "<FlexStatements" in body:
                 # XML-format saved query — kept for forward-compat in case
                 # a future saved query is configured as XML.
