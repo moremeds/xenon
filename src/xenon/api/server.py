@@ -659,7 +659,8 @@ async def _fetch_ib_expiry_candidates(ticker: str) -> List[str]:
     for exchange, sec_type in attempts:
         try:
             async with ib_pool.acquire("data") as client:
-                chains = await asyncio.to_thread(
+                chains = await ib_pool.run_sync(
+                    "data",
                     _fetch_ib_index_option_chain,
                     client,
                     normalized_ticker,
@@ -1528,7 +1529,8 @@ async def _fetch_quote_snapshot(ticker: str, con_id: int) -> dict:
 
     try:
         async with pool.acquire("data") as client:
-            return await asyncio.to_thread(
+            return await pool.run_sync(
+                "data",
                 _fetch_quote_snapshot_with_client,
                 client,
                 ticker,
@@ -1550,7 +1552,8 @@ async def _fetch_order_quote_snapshot(body: dict) -> tuple[int, dict]:
 
     try:
         async with pool.acquire("data") as client:
-            return await asyncio.to_thread(
+            return await pool.run_sync(
+                "data",
                 _fetch_order_quote_snapshot_with_client,
                 client,
                 dict(body),
@@ -1570,7 +1573,8 @@ async def _qualify_order_con_id(body: dict) -> int:
 
     try:
         async with pool.acquire("data") as client:
-            return await asyncio.to_thread(
+            return await pool.run_sync(
+                "data",
                 _qualify_order_con_id_with_client,
                 client,
                 dict(body),

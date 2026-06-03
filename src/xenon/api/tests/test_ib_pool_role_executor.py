@@ -168,6 +168,45 @@ async def test_run_sync_after_connect_runs_on_same_thread(monkeypatch):
     )
 
 
+@pytest.mark.asyncio
+async def test_disconnect_all_then_connect_all_succeeds(monkeypatch):
+    """The /ib/restart endpoint and the auto-restart wrapper both call
+    disconnect_all() then connect_all() on the SAME pool instance. If
+    disconnect_all leaves executors in a shut-down state, the next
+    connect_all hits ``RuntimeError: cannot schedule new futures after
+    shutdown`` for every role — silently reporting the pool dead.
+    """
+    pool = IBPool()
+
+    def fake_connect(host, port, client_id, timeout):
+        return _make_fake_client(connected=True)
+
+    monkeypatch.setattr("xenon.api.ib_pool._connect_in_thread", fake_connect)
+
+    # First connect — populates clients, executors are fresh.
+    status1 = await pool.connect_all()
+    assert all(status1.values()), f"first connect_all failed: {status1}"
+
+    # Disconnect — must NOT permanently kill the executors.
+    await pool.disconnect_all()
+
+    # Re-connect on the same pool instance — must succeed.
+    status2 = await pool.connect_all()
+    assert all(status2.values()), (
+        f"second connect_all failed: {status2} — "
+        f"disconnect_all left executors unusable"
+    )
+
+    # And run_sync on a re-created executor must work.
+    captured: dict = {}
+
+    def sync_fn():
+        captured["thread_name"] = threading.current_thread().name
+
+    await pool.run_sync("sync", sync_fn)
+    assert "ib_pool_sync" in captured["thread_name"]
+
+
 def test_server_factories_pass_role_runner_to_pool(monkeypatch):
     """Regression: rehydrate, fills replay, and activity poller must dispatch
     sync work via ib_pool.run_sync (not bare asyncio.to_thread). Source inspect
@@ -191,3 +230,55 @@ def test_server_factories_pass_role_runner_to_pool(monkeypatch):
         "_maybe_start_activity_poller must wire an async_runner backed by "
         "ib_pool.run_sync('sync', ...) into activity_poller_loop"
     )
+
+
+def test_acquire_callers_dispatch_via_run_sync_not_to_thread():
+    """Regression: every ``async with pool.acquire(role)`` block must dispatch
+    its IB work through ``pool.run_sync(role, ...)``, not bare
+    ``asyncio.to_thread``. Otherwise the IB call runs on the default executor
+    pool and misses the role's pinned event loop — same bug class as the one
+    this PR fixes for the sync role's boot/poller path.
+
+    Source-string check; brittle on rename but matches the
+    `test_replay_unknown_orders.py:154` precedent. A behavioral test would
+    require booting the full async surface for each route.
+    """
+    import inspect
+
+    from xenon.api import server as server_mod
+    from xenon.api.routes import historical as historical_mod
+    from xenon.api.routes import wizard as wizard_mod
+
+    # Each entry: (callable, expected role for run_sync dispatch)
+    targets = [
+        (server_mod._fetch_ib_expiry_candidates, "data"),
+        (server_mod._fetch_quote_snapshot, "data"),
+        (server_mod._fetch_order_quote_snapshot, "data"),
+        (server_mod._qualify_order_con_id, "data"),
+        (historical_mod.qualify_contracts, "data"),
+        (historical_mod.head_timestamp, "data"),
+        (historical_mod.historical_bars, "data"),
+        (wizard_mod.wizard_protect, "orders"),
+    ]
+    for fn, role in targets:
+        source = inspect.getsource(fn)
+        assert "run_sync" in source, (
+            f"{fn.__qualname__} must dispatch IB work via "
+            f"pool.run_sync('{role}', ...) so the call runs on the role-pinned "
+            f"worker thread (not the default asyncio.to_thread executor)"
+        )
+        # Confirm the bare to_thread pattern on a client method is gone in
+        # this function. We allow asyncio.to_thread elsewhere — only flag
+        # patterns clearly using the pool client.
+        forbidden_patterns = [
+            "asyncio.to_thread(client.",
+            "asyncio.to_thread(ib_client.",
+            "asyncio.to_thread(\n                client.",
+            "asyncio.to_thread(\n                ib_client.",
+        ]
+        for pat in forbidden_patterns:
+            assert pat not in source, (
+                f"{fn.__qualname__} still uses bare asyncio.to_thread on a "
+                f"pool client — that bypasses the role-pinned executor and "
+                f"resurrects the event-loop bug (matched: {pat!r})"
+            )

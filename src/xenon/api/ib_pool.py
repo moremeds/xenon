@@ -129,11 +129,28 @@ class IBPool:
         for role in POOL_ROLES:
             self._locks[role] = asyncio.Lock()
             self._sync_reconnect_locks[role] = threading.Lock()
-            self._role_executors[role] = ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix=f"ib_pool_{role}",
-            )
             self._connected[role] = False
+
+        self._ensure_role_executors()
+
+    def _ensure_role_executors(self) -> None:
+        """Idempotently (re)create the per-role executors.
+
+        Called from ``__init__`` for first start, and from ``connect_all`` so
+        the operator-facing ``/ib/restart`` recovery flow (which calls
+        ``disconnect_all → connect_all`` on the same pool instance) keeps
+        working after ``disconnect_all`` has shut its executors down. Without
+        this, ``connect_all`` would hit ``RuntimeError: cannot schedule new
+        futures after shutdown`` on every role and silently report the pool
+        dead.
+        """
+        for role in POOL_ROLES:
+            existing = self._role_executors.get(role)
+            if existing is None or existing._shutdown:
+                self._role_executors[role] = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix=f"ib_pool_{role}",
+                )
 
     async def connect_all(self) -> Dict[str, bool]:
         """Connect all pool roles. Returns status per role.
@@ -141,6 +158,10 @@ class IBPool:
         Non-blocking: if IB Gateway is down, roles start disconnected.
         IB-dependent endpoints will return 503; UW-only endpoints still work.
         """
+        # Defensive: /ib/restart and the auto-restart wrapper call this on
+        # the same pool instance after disconnect_all has shut executors down.
+        self._ensure_role_executors()
+
         status = {}
         loop = asyncio.get_running_loop()
         for i, (role, client_id) in enumerate(POOL_ROLES.items()):

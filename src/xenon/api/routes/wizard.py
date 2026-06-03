@@ -155,7 +155,8 @@ async def wizard_protect(session_id: str, body: ProtectRequest) -> dict[str, Any
     async with server_mod.ib_pool.acquire("orders") as ib_client:
         adapter = ComboWizardIbAdapter(ib_client)
         try:
-            return await asyncio.to_thread(
+            return await server_mod.ib_pool.run_sync(
+                "orders",
                 attach_protection,
                 session_id,
                 ib=adapter,
