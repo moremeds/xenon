@@ -509,7 +509,7 @@ export default function PerformancePanel({
         <div className="section-body performance-hero-body">
           <div>
             <div className="section-label-mono">
-              {ok.methodology.basis.toUpperCase()} {ok.period_label}
+              {ok.period_label.toUpperCase()}
             </div>
             <div className="performance-hero-value">
               <PerformanceHeadlineTooltip
