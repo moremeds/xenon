@@ -299,8 +299,18 @@ def _ib_returns(curve: pd.DataFrame) -> np.ndarray:
 def _futu_returns(curve: pd.DataFrame, flows_per_day: "pd.Series | None" = None) -> np.ndarray:
     """Flow-adjusted daily return: ``r_t = (NAV_t - NAV_{t-1} - flow_t) / NAV_{t-1}``.
 
-    ``flows_per_day`` is signed (deposit = +, withdrawal = -). Missing dates are
-    filled with 0. ``returns[0] = 0`` by convention (no prior NAV to chain from).
+    ``flows_per_day`` is signed (deposit = +, withdrawal = -). ``returns[0] = 0``
+    by convention (no prior NAV to chain from).
+
+    Off-calendar flow handling: IB Flex CashTransactions can be timestamped on
+    weekends or US holidays (banks settle 24/7 even when exchanges don't), but
+    ``load_nav_curve`` only emits trading-day rows. We aggregate each flow into
+    the next curve date >= flow_date so a Saturday deposit is attributed to the
+    following Monday's NAV interval. A naive exact-date reindex would silently
+    drop the weekend flow and Monday's NAV jump (which includes the deposit)
+    would mis-attribute as investment performance — biasing TWR upward.
+    Flows past the last curve date have no interval to attribute to and are
+    dropped (matches the prior reindex behavior at the tail end).
     """
     nav = curve["nav"].astype(float).to_numpy()
     if len(nav) < 1:
@@ -308,7 +318,16 @@ def _futu_returns(curve: pd.DataFrame, flows_per_day: "pd.Series | None" = None)
     prev = np.concatenate(([nav[0]], nav[:-1]))
 
     if flows_per_day is not None and not flows_per_day.empty:
-        flows_aligned = flows_per_day.reindex(curve["date"], fill_value=0.0).to_numpy(dtype=float)
+        # np.searchsorted needs sorted curve dates (load_nav_curve orders ASC).
+        # side='left' returns the position of the first curve date >= flow date,
+        # which is exactly the NAV interval that captures the flow.
+        curve_dates = np.asarray(curve["date"].tolist())
+        flow_dates = np.asarray(list(flows_per_day.index))
+        positions = np.searchsorted(curve_dates, flow_dates, side="left")
+        flows_aligned = np.zeros(len(nav), dtype=float)
+        for pos, val in zip(positions, flows_per_day.to_numpy(dtype=float)):
+            if pos < len(nav):
+                flows_aligned[pos] += val
     else:
         flows_aligned = np.zeros(len(nav), dtype=float)
 

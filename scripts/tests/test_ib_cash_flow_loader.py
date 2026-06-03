@@ -172,6 +172,29 @@ def test_upsert_unsupported_currency_raises(pg_test_engine):
     assert _read("EUR_ID") is None
 
 
+def test_upsert_malformed_amount_raises_invalid_operation(pg_test_engine):
+    """A non-numeric Amount string raises decimal.InvalidOperation, not ValueError.
+
+    Caller (``_persist_ib_cash_transactions``) needs to catch this — otherwise a
+    single bad row in a Flex response halts the entire NAV ingest. Pinning the
+    exception type so the caller's `except (ValueError, InvalidOperation)`
+    clause stays correctly scoped.
+    """
+    import decimal as _decimal
+
+    with pytest.raises(_decimal.InvalidOperation):
+        upsert_ib_cash_flow_sync(
+            scope=SCOPE,
+            transaction_id="BAD_AMT",
+            txn_type="Deposits/Withdrawals",
+            description="x",
+            amount_native="not-a-number",
+            currency="USD",
+            occurred_at=datetime(2026, 4, 1, 0, 0, 0, tzinfo=timezone.utc),
+            raw={},
+        )
+
+
 def test_upsert_rejects_non_ib_broker(pg_test_engine):
     futu_scope = AccountScope(broker="FUTU", account_env="live", broker_account="123")
     with pytest.raises(ValueError, match="IB-only"):

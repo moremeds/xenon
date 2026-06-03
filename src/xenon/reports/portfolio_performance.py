@@ -384,7 +384,13 @@ def _parse_ib_cash_transactions_section(
                 int(time_part[4:6]) if len(time_part) >= 6 else 0,
                 tzinfo=et,
             )
-        except (ValueError, IndexError):
+        except (ValueError, IndexError) as exc:
+            logger.warning(
+                "fetch_ib_nav_series: skipping CashTransaction %s — could not parse Date/Time %r (%s)",
+                txn_id,
+                dt_raw,
+                exc,
+            )
             continue
         out.append(
             {
@@ -400,21 +406,32 @@ def _parse_ib_cash_transactions_section(
     return out
 
 
-def _persist_ib_cash_transactions(rows: List[Dict[str, Any]]) -> int:
-    """Upsert parsed CashTransactions rows. Returns number of rows ingested.
+def _persist_ib_cash_transactions(rows: List[Dict[str, Any]]) -> tuple[int, int]:
+    """Upsert parsed CashTransactions rows.
 
-    Unknown currencies (anything beyond USD/HKD) are skipped with a warning
-    rather than raising — one bad row shouldn't block the rest. Persistence
-    failures (PG down, etc.) are caught at the call site.
+    Returns ``(inserted, updated)`` so the caller can log the breakdown
+    accurately — a re-run against the same Flex window legitimately produces
+    all-updates (the new transactions are the delta), and the prior unified
+    "ingested" count made replay vs first-run indistinguishable.
+
+    Per-row exceptions are caught and logged WARNING so one bad row never
+    blocks the rest: ``ValueError`` (unsupported currency, IB-only guard,
+    bad scope), ``InvalidOperation`` (malformed Amount that can't become a
+    Decimal), generic ``Exception`` (DB FK error on a wrong-shape row).
+    Persistence failures at the engine level (PG down, etc.) propagate to
+    the caller's outer try/except.
     """
+    import decimal as _decimal
+
     from xenon.execution.account_scope import resolve_from_env
     from xenon.utils.ib_cash_flow_loader import upsert_ib_cash_flow_sync
 
     scope = resolve_from_env()
-    ingested = 0
+    inserted = 0
+    updated = 0
     for r in rows:
         try:
-            upsert_ib_cash_flow_sync(
+            was_inserted = upsert_ib_cash_flow_sync(
                 scope=scope,
                 transaction_id=r["transaction_id"],
                 txn_type=r["txn_type"],
@@ -424,16 +441,19 @@ def _persist_ib_cash_transactions(rows: List[Dict[str, Any]]) -> int:
                 occurred_at=r["occurred_at"],
                 raw=r["raw"],
             )
-            ingested += 1
-        except ValueError as exc:
-            # unsupported currency — surface and skip
+            if was_inserted:
+                inserted += 1
+            else:
+                updated += 1
+        except (ValueError, _decimal.InvalidOperation) as exc:
             logger.warning(
-                "fetch_ib_nav_series: skipping cash flow %s (%s): %s",
+                "fetch_ib_nav_series: skipping cash flow %s (currency=%r, amount=%r): %s",
                 r.get("transaction_id"),
                 r.get("currency"),
+                r.get("amount_native"),
                 exc,
             )
-    return ingested
+    return inserted, updated
 
 
 def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
@@ -625,10 +645,13 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
             # it falls back gracefully when rows are missing.
             if cash_flow_rows:
                 try:
-                    ingested = _persist_ib_cash_transactions(cash_flow_rows)
+                    inserted, updated = _persist_ib_cash_transactions(cash_flow_rows)
                     logger.info(
-                        "fetch_ib_nav_series: ingested %d/%d IB CashTransactions row(s) into xenon.ib_cash_flow",
-                        ingested,
+                        "fetch_ib_nav_series: ib_cash_flow ingest — %d inserted, "
+                        "%d updated (replays), %d skipped (of %d total CashTransactions row(s))",
+                        inserted,
+                        updated,
+                        len(cash_flow_rows) - inserted - updated,
                         len(cash_flow_rows),
                     )
                 except Exception as exc:  # noqa: BLE001
