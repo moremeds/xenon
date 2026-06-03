@@ -92,7 +92,8 @@ async def _run(args: argparse.Namespace) -> int:
 
     print(
         f"fetched={report.fetched} parsed={report.parsed} "
-        f"inserted={report.inserted} skipped={len(report.skipped)} "
+        f"inserted={report.inserted} inbox={report.inbox} "
+        f"skipped={len(report.skipped)} "
         f"anomalies={len(report.continuity_anomalies)}"
     )
     if report.skipped:

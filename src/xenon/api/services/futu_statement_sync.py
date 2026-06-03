@@ -28,7 +28,11 @@ from xenon.clients.futu_statement_pdf import (
     parse,
 )
 from xenon.clients.outlook_imap import OutlookFetcher, StatementEmail
-from xenon.db.queries.futu_history import insert_daily_statement, list_daily_statements
+from xenon.db.queries.futu_history import (
+    insert_daily_statement,
+    insert_statement_inbox,
+    list_daily_statements,
+)
 from xenon.execution.account_scope import AccountScope
 
 logger = logging.getLogger(__name__)
@@ -43,6 +47,7 @@ class SyncReport:
     fetched: int  # IMAP messages downloaded
     parsed: int  # successfully decrypted + parsed
     inserted: int  # rows upserted (rowcount sum)
+    inbox: int  # raw-only rows persisted to inbox (parse/decrypt failure)
     skipped: list[tuple[str, str]]  # (uid, reason)
     continuity_anomalies: list[str]  # human-readable warnings
 
@@ -107,6 +112,7 @@ async def sync_statements(
     fetched = 0
     parsed = 0
     inserted = 0
+    inbox = 0
     skipped: list[tuple[str, str]] = []
     parsed_dates: list[date] = []
 
@@ -121,13 +127,15 @@ async def sync_statements(
                 continue
             try:
                 stmt = parse(email.attachment_bytes)
-            except StatementDecryptError as exc:
-                skipped.append((uid, f"decrypt: {exc}"))
-                logger.warning("decrypt failed UID=%s: %s", uid, exc)
-                continue
-            except StatementParseError as exc:
-                skipped.append((uid, f"parse: {exc}"))
-                logger.warning("parse failed UID=%s: %s", uid, exc)
+            except (StatementDecryptError, StatementParseError) as exc:
+                # Preserve the raw bytes so a later parser revision can drain
+                # the inbox without re-fetching from IMAP. Older statement
+                # layouts (no "Ending Assets Overview" header) land here.
+                kind = type(exc).__name__
+                logger.warning("%s UID=%s: %s — saving to inbox", kind, uid, exc)
+                inbox_row = _inbox_row(email, parse_error=f"{kind}: {exc}")
+                inbox += await insert_statement_inbox(engine, scope, inbox_row)
+                skipped.append((uid, f"{kind}: {exc}"))
                 continue
 
             if until is not None and stmt.statement_date > until:
@@ -145,10 +153,11 @@ async def sync_statements(
 
     anomalies = await validate_continuity(engine, scope, since=since, until=until)
     logger.info(
-        "sync done: fetched=%d parsed=%d inserted=%d skipped=%d anomalies=%d",
+        "sync done: fetched=%d parsed=%d inserted=%d inbox=%d skipped=%d anomalies=%d",
         fetched,
         parsed,
         inserted,
+        inbox,
         len(skipped),
         len(anomalies),
     )
@@ -156,9 +165,23 @@ async def sync_statements(
         fetched=fetched,
         parsed=parsed,
         inserted=inserted,
+        inbox=inbox,
         skipped=skipped,
         continuity_anomalies=anomalies,
     )
+
+
+def _inbox_row(email: StatementEmail, parse_error: str) -> dict:
+    """Map a fetched email + error string into the futu_statement_inbox row shape."""
+    return {
+        "source_uid": email.uid,
+        "subject": email.subject,
+        "sender": email.sender,
+        "received_at": email.received_at,
+        "attachment_name": email.attachment_name,
+        "raw_pdf": email.attachment_bytes,
+        "parse_error": parse_error,
+    }
 
 
 async def validate_continuity(

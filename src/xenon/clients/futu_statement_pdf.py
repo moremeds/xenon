@@ -63,9 +63,9 @@ class FutuDailyStatement:
     """
 
     statement_date: date
-    preparation_date: date
+    preparation_date: Optional[date]
     account_number: str
-    account_suffix: str
+    account_suffix: Optional[str]
     client_name: str
     base_currency: str
     starting_portfolio_base: Decimal
@@ -101,6 +101,51 @@ def decrypt(pdf_bytes: bytes, password: Optional[str] = None) -> bytes:
         raise StatementDecryptError("PDF password rejected") from exc
 
 
+_DOUBLED_WORD = re.compile(r"[A-Za-z]{4,}")
+_DOUBLED_NUM = re.compile(r"[\d.,+\-]{6,}")
+
+
+def _dedupe_doubled_letters(text: str) -> str:
+    """Collapse doubled-character spans: `AAccccoouunntt` → `Account`,
+    `iinn` → `in`, `11,,880044,,661100..8877` → `1,804,610.87`.
+
+    Some Futu PDF variants (e.g. Universal Account - Securities transition
+    Aug-Dec 2024, and 2024-2025 5668 composite statements) render certain
+    spans in a heavier font weight that pdfplumber reads as every character
+    duplicated. The doubling can apply selectively to alphabetic headers,
+    numeric values, or both — on the same line.
+
+    Strategy: collapse any [A-Za-z] run ≥4 chars OR any [\\d.,+\\-] run ≥6
+    chars where every 2-char window has matching characters. Length cutoffs
+    protect real tokens (4-char tickers like AABB; small numbers like 1100
+    that would falsely match pair-equality).
+    """
+
+    def fix_alpha(m: re.Match) -> str:
+        w = m.group(0)
+        if len(w) % 2 != 0:
+            return w
+        if len(w) == 4 and w.isupper():
+            return w  # ticker-like (e.g. AABB)
+        pairs = [w[i : i + 2] for i in range(0, len(w), 2)]
+        if all(p[0] == p[1] for p in pairs):
+            return "".join(p[0] for p in pairs)
+        return w
+
+    def fix_num(m: re.Match) -> str:
+        w = m.group(0)
+        if len(w) % 2 != 0:
+            return w
+        pairs = [w[i : i + 2] for i in range(0, len(w), 2)]
+        if all(p[0] == p[1] for p in pairs):
+            return "".join(p[0] for p in pairs)
+        return w
+
+    text = _DOUBLED_WORD.sub(fix_alpha, text)
+    text = _DOUBLED_NUM.sub(fix_num, text)
+    return text
+
+
 def inspect(pdf_bytes: bytes, password: Optional[str] = None) -> RawStatement:
     """Decrypt and return per-page text + table layouts for inspection."""
     clear = decrypt(pdf_bytes, password=password)
@@ -108,7 +153,7 @@ def inspect(pdf_bytes: bytes, password: Optional[str] = None) -> RawStatement:
     table_pages: list[list[list[list[Optional[str]]]]] = []
     with pdfplumber.open(io.BytesIO(clear)) as pdf:
         for page in pdf.pages:
-            text_pages.append(page.extract_text() or "")
+            text_pages.append(_dedupe_doubled_letters(page.extract_text() or ""))
             try:
                 tables = page.extract_tables() or []
             except Exception as exc:  # pdfplumber occasionally crashes on layout edge cases
@@ -177,12 +222,22 @@ def _parse_statement_date(s: str) -> date:
 def _parse_portfolio_summary_row(text: str, label: str) -> tuple[Decimal, Decimal]:
     """Find 'label <start> <end> <change>' on page 1 and return (start, end).
 
-    The 'Portfolio' / 'Stocks and Stock' multi-line header on page 1 means
-    the Stocks+Options row's label is 'Stocks and Stock' followed by three
-    numbers, then 'Options' on the next line. For Funds/Cash Balance/Net
-    Asset Value the label is on the same line as the numbers.
+    The 'Portfolio' / 'Stocks and Stock' header sits on page 1. Two layout
+    variants observed:
+
+      * 2026+ statements: 'Stocks and Stock' on the row, 'Options' wrapped
+        to the next line. Matcher: 'Stocks and Stock <NUM> <NUM> <NUM>'.
+      * 2024-2025 statements + Universal transition: 'Stocks and Stock
+        Options' all on one line. Matcher accepts optional trailing word(s)
+        between the label and the first number.
+
+    For Funds/Cash Balance/Net Asset Value the label is on the same line
+    as the numbers in both layouts.
     """
-    pattern = rf"^\s*{re.escape(label)}\s+({_NUM})\s+({_NUM})\s+{_NUM}\s*$"
+    # Allow up to two optional words (e.g. "Options" or "Options ") between
+    # the label and the first number — covers both layouts without false
+    # positives on other rows whose labels are unique.
+    pattern = rf"^\s*{re.escape(label)}(?:\s+[A-Za-z]+){{0,2}}\s+({_NUM})\s+({_NUM})\s+{_NUM}\s*$"
     for line in text.splitlines():
         m = re.match(pattern, line)
         if m:
@@ -235,6 +290,26 @@ def _parse_exchange_rates(text: str) -> dict[str, Decimal]:
     if not rates:
         raise StatementParseError("no exchange rates found")
     return rates
+
+
+def _find_starting_overview_page(pages: list[str]) -> Optional[str]:
+    """Return the text of the page that contains 'Starting Assets Overview'
+    AND a 'Net Asset Value' row with the multi-currency breakdown.
+
+    2024-2026 5668 statements put this on page 2. Universal-transition
+    statements (Aug-Dec 2024) put it on the same page as the Ending
+    overview (typically page 4). Locate by header so both work.
+    """
+    nav_pattern = re.compile(
+        rf"^\s*Net Asset Value((?:\s+{_NUM}){{6,}})\s*$",
+        re.MULTILINE,
+    )
+    for txt in pages:
+        if "Starting Assets Overview" not in txt:
+            continue
+        if nav_pattern.search(txt):
+            return txt
+    return None
 
 
 def _find_ending_overview_page(pages: list[str]) -> Optional[str]:
@@ -387,10 +462,10 @@ def parse(pdf_bytes: bytes, password: Optional[str] = None) -> FutuDailyStatemen
         raise StatementParseError(f"statement has only {raw.page_count} pages; expected ≥5")
 
     page1 = raw.text_by_page[0]
-    # Page 2 always carries "Starting Assets Overview" with the per-currency NAV.
-    # The "Ending Assets Overview" page index varies with the position count
-    # (16- to 17-page statements observed) — locate it by section header.
-    page2 = raw.text_by_page[1]
+    starting_page = _find_starting_overview_page(raw.text_by_page)
+    if starting_page is None:
+        # Fallback: 5668 statements always put it on page 2.
+        starting_page = raw.text_by_page[1] if len(raw.text_by_page) > 1 else ""
     ending_page = _find_ending_overview_page(raw.text_by_page)
     if ending_page is None:
         raise StatementParseError("could not locate 'Ending Assets Overview' page")
@@ -401,17 +476,18 @@ def parse(pdf_bytes: bytes, password: Optional[str] = None) -> FutuDailyStatemen
         raise StatementParseError("page 1 too short to contain a statement date")
     statement_date = _parse_statement_date(lines[1])
 
-    # account_suffix from "Margin Universal Account (5668)"
+    # account_suffix from "Margin Universal Account (5668)" — present in
+    # current-format subjects but absent in the transition-era cover.
+    # Fall back to the trailing 4 digits of the full account number.
     m = _SUFFIX_RE.search(page1)
-    if not m:
-        raise StatementParseError("account suffix not found on page 1")
-    account_suffix = m.group(1)
+    account_suffix = m.group(1) if m else None
 
-    # preparation_date + client_name + account_number from the footer line
+    # preparation_date + client_name + account_number from the footer line.
+    # Transition-era statements may omit the prepared-on line; default to the
+    # statement_date in that case (the value still flows into the typed row
+    # but loses the "actually generated at" nuance).
     m = _PREP_DATE_RE.search(page1)
-    if not m:
-        raise StatementParseError("preparation date not found")
-    preparation_date = _parse_statement_date(m.group(1))
+    preparation_date = _parse_statement_date(m.group(1)) if m else None
 
     m = _CLIENT_NAME_RE.search(page1)
     client_name = m.group(1).strip() if m else "UNKNOWN"
@@ -420,6 +496,10 @@ def parse(pdf_bytes: bytes, password: Optional[str] = None) -> FutuDailyStatemen
     if not m:
         raise StatementParseError("account number not found")
     account_number = m.group(1)
+    if account_suffix is None and len(account_number) >= 4:
+        # Transition-era cover lacks the "(NNNN)" decoration; derive from
+        # the trailing 4 digits of the full account number.
+        account_suffix = account_number[-4:]
 
     # base currency: the "Base Currency" column on the account info row
     m = re.search(r"Base Currency\s+([A-Z]{3})", page1)
@@ -435,8 +515,8 @@ def parse(pdf_bytes: bytes, password: Optional[str] = None) -> FutuDailyStatemen
     start_nav, end_nav = _parse_portfolio_summary_row(page1, "Net Asset Value")
     start_port, end_port = _parse_portfolio_summary_row(page1, "Stocks and Stock")
 
-    # Per-currency NAV: starting on page 2, ending wherever "Ending Assets Overview" landed
-    starting_by_ccy = _parse_currency_nav_row(page2)
+    # Per-currency NAV: from located Starting / Ending pages.
+    starting_by_ccy = _parse_currency_nav_row(starting_page)
     ending_by_ccy = _parse_currency_nav_row(ending_page)
 
     # Reference exchange rates from page 1

@@ -22,7 +22,12 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from xenon.db.schema import futu_cash_flow, futu_daily_statement, futu_trades
+from xenon.db.schema import (
+    futu_cash_flow,
+    futu_daily_statement,
+    futu_statement_inbox,
+    futu_trades,
+)
 from xenon.execution.account_scope import AccountScope
 
 # Postgres' wire protocol caps a single statement at 32767 bind params.
@@ -169,6 +174,54 @@ async def insert_daily_statement(engine: AsyncEngine, scope: AccountScope, row: 
         )
         result = await conn.execute(stmt)
     return result.rowcount or 0
+
+
+async def insert_statement_inbox(engine: AsyncEngine, scope: AccountScope, row: dict) -> int:
+    """UPSERT one raw-PDF row keyed by (scope, source_uid).
+
+    Used when the typed parser raises StatementDecryptError or
+    StatementParseError — the raw bytes are preserved so we can re-parse
+    offline once the parser learns the missing layout.
+    """
+    scoped = _scoped(row, scope)
+    async with engine.begin() as conn:
+        stmt = pg_insert(futu_statement_inbox).values(**scoped)
+        update_cols = {
+            c.name: getattr(stmt.excluded, c.name)
+            for c in futu_statement_inbox.columns
+            if c.name
+            not in {
+                "broker",
+                "account_env",
+                "broker_account",
+                "source_uid",
+                "ingested_at",
+            }
+        }
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[
+                "broker",
+                "account_env",
+                "broker_account",
+                "source_uid",
+            ],
+            set_=update_cols,
+        )
+        result = await conn.execute(stmt)
+    return result.rowcount or 0
+
+
+async def list_statement_inbox_uids(engine: AsyncEngine, scope: AccountScope) -> set[str]:
+    """Return the set of IMAP UIDs already persisted to the inbox for this scope."""
+    where = (
+        (futu_statement_inbox.c.broker == scope.broker)
+        & (futu_statement_inbox.c.account_env == scope.account_env)
+        & (futu_statement_inbox.c.broker_account == scope.broker_account)
+    )
+    stmt = sa.select(futu_statement_inbox.c.source_uid).where(where)
+    async with engine.begin() as conn:
+        result = await conn.execute(stmt)
+        return {row[0] for row in result.fetchall()}
 
 
 async def list_daily_statements(

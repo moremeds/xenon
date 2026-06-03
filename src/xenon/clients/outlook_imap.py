@@ -100,7 +100,9 @@ class OutlookFetcher:
             )
 
     def __enter__(self) -> "OutlookFetcher":
-        self._conn = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+        # Acquire the OAuth token BEFORE opening the IMAP socket. The device-flow
+        # path blocks for minutes while the user authenticates; an IMAP socket
+        # opened first would time out idle and break on AUTHENTICATE.
         if self.oauth_client_id:
             try:
                 token = acquire_token(client_id=self.oauth_client_id)
@@ -109,10 +111,11 @@ class OutlookFetcher:
             import base64
 
             sasl = build_xoauth2_sasl(self.user, token.access_token)
+            b64 = base64.b64encode(sasl).decode("ascii")
+            self._conn = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
             # Outlook IMAP XOAUTH2 requires the SASL response inline (SASL-IR)
             # — imaplib.authenticate() uses the challenge/response flow and
-            # Outlook closes the socket if no inline body arrives ("Broken pipe").
-            b64 = base64.b64encode(sasl).decode("ascii")
+            # Outlook closes the socket if no inline body arrives.
             try:
                 typ, _ = self._conn._simple_command("AUTHENTICATE", "XOAUTH2", b64)
                 if typ != "OK":
@@ -121,6 +124,7 @@ class OutlookFetcher:
             except imaplib.IMAP4.error as exc:
                 raise OutlookAuthError(f"IMAP XOAUTH2 failed: {exc}") from exc
         else:
+            self._conn = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
             try:
                 self._conn.login(self.user, self.password)
             except imaplib.IMAP4.error as exc:

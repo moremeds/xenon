@@ -347,6 +347,38 @@ futu_daily_statement = Table(
 )
 
 
+# Catch-all for raw statement PDFs we couldn't parse — keyed on IMAP UID so
+# re-running the sync is idempotent. When the parser learns an older layout,
+# rows here can be drained into `futu_daily_statement` offline.
+futu_statement_inbox = Table(
+    "futu_statement_inbox",
+    xenon_metadata,
+    Column("broker", Text, primary_key=True),
+    Column("account_env", Text, primary_key=True),
+    Column("broker_account", Text, primary_key=True),
+    Column("source_uid", Text, primary_key=True),
+    Column("subject", Text, nullable=True),
+    Column("sender", Text, nullable=True),
+    Column("received_at", TIMESTAMP(timezone=True), nullable=True),
+    Column("attachment_name", Text, nullable=True),
+    Column("raw_pdf", LargeBinary, nullable=False),
+    Column("parse_error", Text, nullable=True),
+    Column("ingested_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    CheckConstraint("broker = 'FUTU'", name="ck_futu_statement_inbox_broker"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim')",
+        name="ck_futu_statement_inbox_account_env",
+    ),
+    Index(
+        "ix_futu_statement_inbox_scope_received",
+        "broker",
+        "account_env",
+        "broker_account",
+        "received_at",
+    ),
+)
+
+
 # spec § Schema changes Migration 1 — SPY/benchmark close cache.
 benchmark_closes = Table(
     "benchmark_closes",
