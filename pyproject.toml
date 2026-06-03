@@ -36,6 +36,7 @@ dependencies = [
     "psycopg[binary]>=3.2.0",
     "alembic>=1.15.0",
     "exchange-calendars>=4.5,<5.0",
+    "scipy>=1.17.1",
 ]
 
 [project.scripts]
