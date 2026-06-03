@@ -330,7 +330,11 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
     from urllib.request import urlopen
 
     try:
-        url = "https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService.SendRequest"
+        # AccountManagement/FlexWebService is the current IB-recommended Flex
+        # endpoint. The legacy Universal/servlet/FlexStatementService.*
+        # endpoint is XML-only — it returns permanent ErrorCode 1001 for
+        # CSV-format saved queries. See [[flex-legacy-endpoint-xml-only]].
+        url = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/SendRequest"
         params = urlencode({"t": token, "q": nav_query_id, "v": "3"})
         resp = urlopen(f"{url}?{params}", timeout=30)
         text = resp.read().decode("utf-8")
@@ -340,36 +344,70 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
             return None
         ref_code = ref_node.text
 
-        stmt_url = "https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService.GetStatement"
+        stmt_url = "https://gdcdyn.interactivebrokers.com/AccountManagement/FlexWebService/GetStatement"
         for _ in range(30):
             time.sleep(3)
             params2 = urlencode({"t": token, "q": ref_code, "v": "3"})
             resp2 = urlopen(f"{stmt_url}?{params2}", timeout=30)
-            xml_text = resp2.read().decode("utf-8")
-            if "<FlexStatements" not in xml_text:
-                continue
-
-            root2 = ET.fromstring(xml_text)
-            navs = root2.findall(".//EquitySummaryByReportDateInBase")
-            if not navs:
-                return None
+            body = resp2.read().decode("utf-8")
+            body_stripped = body.lstrip()
 
             entries: List[Dict[str, Any]] = []
-            for nav in navs:
-                dt_raw = nav.get("reportDate", "")
-                if len(dt_raw) == 8:
-                    dt = f"{dt_raw[:4]}-{dt_raw[4:6]}-{dt_raw[6:8]}"
-                else:
-                    dt = dt_raw
-                entries.append(
-                    {
-                        "date": dt,
-                        "total": safe_float(nav.get("total")),
-                        "cash": safe_float(nav.get("cash")),
-                        "stock": safe_float(nav.get("stock")),
-                        "options": safe_float(nav.get("options")),
-                    }
-                )
+            if body_stripped.startswith('"ClientAccountID"'):
+                # CSV-format saved query (current xenon configuration).
+                # IB concatenates sections (EquitySummaryInBase,
+                # CashTransactions, ...) — break at the next section's
+                # repeat header row.
+                import csv as _csv
+                import io as _io
+
+                for csv_row in _csv.DictReader(_io.StringIO(body)):
+                    if csv_row.get("ClientAccountID", "").strip() == "ClientAccountID":
+                        break
+                    dt_raw = csv_row.get("ReportDate", "").strip()
+                    if len(dt_raw) == 8:
+                        dt = f"{dt_raw[:4]}-{dt_raw[4:6]}-{dt_raw[6:8]}"
+                    else:
+                        dt = dt_raw
+                    entries.append(
+                        {
+                            "date": dt,
+                            "total": safe_float(csv_row.get("Total")),
+                            "cash": safe_float(csv_row.get("Cash")),
+                            "stock": safe_float(csv_row.get("Stock")),
+                            "options": safe_float(csv_row.get("Options")),
+                        }
+                    )
+            elif "<FlexStatements" in body:
+                # XML-format saved query — kept for forward-compat in case
+                # a future saved query is configured as XML.
+                root2 = ET.fromstring(body)
+                navs = root2.findall(".//EquitySummaryByReportDateInBase")
+                if not navs:
+                    return None
+                for nav in navs:
+                    dt_raw = nav.get("reportDate", "")
+                    if len(dt_raw) == 8:
+                        dt = f"{dt_raw[:4]}-{dt_raw[4:6]}-{dt_raw[6:8]}"
+                    else:
+                        dt = dt_raw
+                    entries.append(
+                        {
+                            "date": dt,
+                            "total": safe_float(nav.get("total")),
+                            "cash": safe_float(nav.get("cash")),
+                            "stock": safe_float(nav.get("stock")),
+                            "options": safe_float(nav.get("options")),
+                        }
+                    )
+            else:
+                # Statement still generating (Status=Warn ErrorCode=1019) —
+                # poll again. Real failures (1001/1018) also fall here and
+                # quietly time out after 90s, matching prior behavior.
+                continue
+
+            if not entries:
+                return None
 
             # Persist to PG (replaces data/nav_history_ib.json cache).
             try:
@@ -387,6 +425,7 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                     stock_v = _Decimal(str(e["stock"])) if e.get("stock") is not None else None
                     opt_v = _Decimal(str(e["options"])) if e.get("options") is not None else None
                     # nav column mirrors total for IB Flex (single authoritative source).
+                    # source='close' — EquitySummaryByReportDateInBase rows are post-close.
                     upsert_nav_sync(
                         scope=scope,
                         day=day,
@@ -395,6 +434,7 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                         cash=cash_v,
                         stock_value=stock_v,
                         options_value=opt_v,
+                        source="close",
                     )
             except Exception as exc:  # noqa: BLE001
                 # PG unavailable / scope unset — return entries anyway so the

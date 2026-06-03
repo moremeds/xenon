@@ -14,7 +14,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ENV_FILE="$REPO_ROOT/.env"
+# Allow tests to inject a stub env file. Without this, dev.sh always
+# sources the operator's real .env, so test_dev_sh_db_guard cannot
+# simulate "what if .env had DATABASE_URL=core_dev" — the live .env's
+# DATABASE_URL_PAPER substitution bypasses the guard at runtime.
+ENV_FILE="${XENON_ENV_FILE:-$REPO_ROOT/.env}"
 
 log_info() { printf '\033[32m[dev.sh]\033[0m %s\n' "$*"; }
 log_warn() { printf '\033[33m[dev.sh]\033[0m %s\n' "$*" >&2; }
@@ -94,6 +98,28 @@ if [[ "$MODE" == "paper" ]]; then
   if [[ -n "${DATABASE_URL_TEST_PAPER:-}" ]]; then
     DATABASE_URL_TEST="$DATABASE_URL_TEST_PAPER"
   fi
+fi
+if [[ "$MODE" == "live" ]]; then
+  # Live dev sessions debug against the live IB Gateway but must never
+  # write prod (core_dev). Substitute DATABASE_URL_TEST (core_test) so the
+  # read-side hits the dev mirror; XENON_READ_ONLY=1 below blocks writes
+  # anyway. Without this, the guard at line ~106 kills dev.sh live every
+  # time because .env's DATABASE_URL targets core_dev.
+  #
+  # Only substitute when DATABASE_URL actually points at core_dev. If the
+  # caller has set DATABASE_URL to something else (an empty string in the
+  # test harness, a custom local DB, etc.), respect that. Bash can't
+  # distinguish empty-string from unset reliably, so explicit name match
+  # is the cleanest invariant.
+  _live_db_name="${DATABASE_URL##*/}"
+  _live_db_name="${_live_db_name%%\?*}"
+  if [[ "$_live_db_name" == "core_dev" && -n "${DATABASE_URL_TEST:-}" ]]; then
+    DATABASE_URL="$DATABASE_URL_TEST"
+    log_info "Using DATABASE_URL_TEST (core_test) for live-debug mode (read-only)."
+  elif [[ "$_live_db_name" == "core_dev" ]]; then
+    log_warn "DATABASE_URL_TEST not set — live mode will use DATABASE_URL=core_dev which the guard below will refuse."
+  fi
+  unset _live_db_name
 fi
 export DATABASE_URL DATABASE_URL_TEST
 

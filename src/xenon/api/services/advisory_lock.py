@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 # new entry here when introducing a new singleton loop.
 LOCK_KEY_UW_DAILY = 7341001
 LOCK_KEY_VCG_CRI = 7342001
+LOCK_KEY_OPTION_CHAIN_SNAPSHOTTER = 7343001  # single-instance guard for option_chain archive snapshotter
 
 
 @asynccontextmanager
