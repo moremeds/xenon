@@ -329,6 +329,9 @@ def _build_series(curve: pd.DataFrame, bench_df: pd.DataFrame | None, returns: n
                 "drawdown": float(drawdown[i]),
                 "benchmark_close": close,
                 "benchmark_return": bret,
+                # Pass-3 A4: surfaces source mix so the freshness subtitle can
+                # show the user that intraday + close coexist after 17:30 ET.
+                "source": row.get("source") if "source" in curve.columns else None,
             }
         )
         if close is not None:

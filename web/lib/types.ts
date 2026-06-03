@@ -211,6 +211,9 @@ export type PerformanceSeriesPoint = {
   drawdown: number;
   benchmark_close: number | null;
   benchmark_return: number | null;
+  /** Pass-3 A4: per-row source — present once the Pass-2 schema migration ships.
+   *  Surfaced via PerformanceFreshness so the user sees when close + intraday coexist. */
+  source?: "intraday" | "close" | null;
 };
 
 /** Backend returns null for metrics that are masked (FUTU, IB unverified)
