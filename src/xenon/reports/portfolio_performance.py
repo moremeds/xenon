@@ -309,12 +309,146 @@ def parse_option_id(option_id: str) -> Tuple[str, str, str, float]:
     return symbol, expiry, right, strike
 
 
+def _split_ib_flex_csv_sections(body: str) -> List[List[str]]:
+    """Split a multi-section IB Flex CSV body into per-section line groups.
+
+    IB Flex Web Service concatenates section CSVs in a single response
+    (EquitySummaryInBase, then optionally CashTransactions, Transfers, …).
+    Each section starts with a header row whose first column is
+    ``ClientAccountID``. ``csv.DictReader`` only remembers the FIRST header
+    so iterating across sections without a split yields garbage.
+
+    Returns a list of per-section line lists. Empty list when ``body`` has
+    no recognizable section header.
+    """
+    sections: List[List[str]] = []
+    current: List[str] = []
+    for line in body.splitlines():
+        if line.lstrip().startswith(('"ClientAccountID"', "ClientAccountID")):
+            if current:
+                sections.append(current)
+            current = [line]
+        elif current:
+            current.append(line)
+    if current:
+        sections.append(current)
+    return sections
+
+
+def _parse_ib_cash_transactions_section(
+    section_lines: List[str],
+    *,
+    account_filter: str | None = None,
+) -> List[Dict[str, Any]]:
+    """Parse a CashTransactions section into deposit/withdrawal dicts.
+
+    Only ``Type == "Deposits/Withdrawals"`` rows are returned — dividends,
+    fees, interest are internal investment activity and stay out of
+    ``xenon.ib_cash_flow``. Date/Time strings come in two shapes from IB
+    Flex: ``YYYYMMDD`` (date-only) and ``YYYYMMDD;HHMMSS`` (datetime).
+
+    Returns rows ready for ``upsert_ib_cash_flow_sync`` plus the parsed
+    ``occurred_at`` ET datetime; the raw row is preserved as the ``raw``
+    field for auditability.
+    """
+    import csv as _csv
+    import io as _io
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo as _ZI
+
+    et = _ZI("America/New_York")
+    out: List[Dict[str, Any]] = []
+    reader = _csv.DictReader(_io.StringIO("\n".join(section_lines)))
+    if not reader.fieldnames or "TransactionID" not in reader.fieldnames:
+        return out
+    for row in reader:
+        if account_filter and row.get("ClientAccountID", "").strip() != account_filter:
+            continue
+        txn_type = (row.get("Type") or "").strip()
+        if "Deposit" not in txn_type and "Withdraw" not in txn_type:
+            continue
+        txn_id = (row.get("TransactionID") or "").strip()
+        if not txn_id:
+            continue
+        dt_raw = (row.get("Date/Time") or "").strip()
+        # Format: YYYYMMDD or YYYYMMDD;HHMMSS
+        date_part = dt_raw.split(";", 1)[0]
+        time_part = dt_raw.split(";", 1)[1] if ";" in dt_raw else "000000"
+        try:
+            occurred_at = _dt(
+                int(date_part[:4]),
+                int(date_part[4:6]),
+                int(date_part[6:8]),
+                int(time_part[:2]) if len(time_part) >= 2 else 0,
+                int(time_part[2:4]) if len(time_part) >= 4 else 0,
+                int(time_part[4:6]) if len(time_part) >= 6 else 0,
+                tzinfo=et,
+            )
+        except (ValueError, IndexError):
+            continue
+        out.append(
+            {
+                "transaction_id": txn_id,
+                "txn_type": txn_type,
+                "description": (row.get("Description") or "").strip() or None,
+                "amount_native": (row.get("Amount") or "0").strip(),
+                "currency": (row.get("CurrencyPrimary") or "").strip(),
+                "occurred_at": occurred_at,
+                "raw": dict(row),
+            }
+        )
+    return out
+
+
+def _persist_ib_cash_transactions(rows: List[Dict[str, Any]]) -> int:
+    """Upsert parsed CashTransactions rows. Returns number of rows ingested.
+
+    Unknown currencies (anything beyond USD/HKD) are skipped with a warning
+    rather than raising — one bad row shouldn't block the rest. Persistence
+    failures (PG down, etc.) are caught at the call site.
+    """
+    from xenon.execution.account_scope import resolve_from_env
+    from xenon.utils.ib_cash_flow_loader import upsert_ib_cash_flow_sync
+
+    scope = resolve_from_env()
+    ingested = 0
+    for r in rows:
+        try:
+            upsert_ib_cash_flow_sync(
+                scope=scope,
+                transaction_id=r["transaction_id"],
+                txn_type=r["txn_type"],
+                description=r["description"],
+                amount_native=r["amount_native"],
+                currency=r["currency"],
+                occurred_at=r["occurred_at"],
+                raw=r["raw"],
+            )
+            ingested += 1
+        except ValueError as exc:
+            # unsupported currency — surface and skip
+            logger.warning(
+                "fetch_ib_nav_series: skipping cash flow %s (%s): %s",
+                r.get("transaction_id"),
+                r.get("currency"),
+                exc,
+            )
+    return ingested
+
+
 def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
     """Fetch daily NAV from IB Flex Query (EquitySummaryInBase) and persist to PG.
 
     Uses ``IB_FLEX_NAV_QUERY_ID`` env var (separate from trade query).
     Each entry is upserted into ``xenon.nav_history`` so a later
     ``load_ib_nav_cache()`` call can replay it without another Flex round-trip.
+
+    Side effect: when the saved query also includes a CashTransactions
+    section (Deposits/Withdrawals), those rows are upserted into
+    ``xenon.ib_cash_flow`` via :func:`_persist_ib_cash_transactions`. The
+    return value still reflects only the NAV entries; cash-flow counts are
+    logged.
+
     Returns list of ``{date, total, cash, stock, options}`` or None on failure.
     """
     token = os.environ.get("IB_FLEX_TOKEN")
@@ -353,31 +487,40 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
             body_stripped = body.lstrip()
 
             entries: List[Dict[str, Any]] = []
+            cash_flow_rows: List[Dict[str, Any]] = []
             if body_stripped.startswith('"ClientAccountID"'):
                 # CSV-format saved query (current xenon configuration).
                 # IB concatenates sections (EquitySummaryInBase,
-                # CashTransactions, ...) — break at the next section's
-                # repeat header row.
+                # CashTransactions, ...) — split into per-section line
+                # groups so each can be parsed with its own DictReader.
                 import csv as _csv
                 import io as _io
 
-                for csv_row in _csv.DictReader(_io.StringIO(body)):
-                    if csv_row.get("ClientAccountID", "").strip() == "ClientAccountID":
-                        break
-                    dt_raw = csv_row.get("ReportDate", "").strip()
-                    if len(dt_raw) == 8:
-                        dt = f"{dt_raw[:4]}-{dt_raw[4:6]}-{dt_raw[6:8]}"
-                    else:
-                        dt = dt_raw
-                    entries.append(
-                        {
-                            "date": dt,
-                            "total": safe_float(csv_row.get("Total")),
-                            "cash": safe_float(csv_row.get("Cash")),
-                            "stock": safe_float(csv_row.get("Stock")),
-                            "options": safe_float(csv_row.get("Options")),
-                        }
-                    )
+                sections = _split_ib_flex_csv_sections(body)
+                for section_lines in sections:
+                    section_reader = _csv.DictReader(_io.StringIO("\n".join(section_lines)))
+                    field_names = section_reader.fieldnames or []
+                    if "ReportDate" in field_names and "Total" in field_names:
+                        # EquitySummaryInBase section.
+                        for csv_row in section_reader:
+                            dt_raw = csv_row.get("ReportDate", "").strip()
+                            if len(dt_raw) == 8:
+                                dt = f"{dt_raw[:4]}-{dt_raw[4:6]}-{dt_raw[6:8]}"
+                            else:
+                                dt = dt_raw
+                            entries.append(
+                                {
+                                    "date": dt,
+                                    "total": safe_float(csv_row.get("Total")),
+                                    "cash": safe_float(csv_row.get("Cash")),
+                                    "stock": safe_float(csv_row.get("Stock")),
+                                    "options": safe_float(csv_row.get("Options")),
+                                }
+                            )
+                    elif "TransactionID" in field_names:
+                        # CashTransactions section (Deposits/Withdrawals
+                        # subset only — see _parse_ib_cash_transactions_section).
+                        cash_flow_rows.extend(_parse_ib_cash_transactions_section(section_lines))
             elif "<FlexStatements" in body:
                 # XML-format saved query — kept for forward-compat in case
                 # a future saved query is configured as XML.
@@ -445,6 +588,24 @@ def fetch_ib_nav_series() -> Optional[List[Dict[str, Any]]]:
                     "fetch_ib_nav_series PG persist failed (%s) — returning fresh entries; cache will miss next run",
                     exc,
                 )
+
+            # Side-effect: persist any CashTransactions rows from this
+            # response into xenon.ib_cash_flow. Failures don't block NAV
+            # return — flow-adjusted performance is the only consumer and
+            # it falls back gracefully when rows are missing.
+            if cash_flow_rows:
+                try:
+                    ingested = _persist_ib_cash_transactions(cash_flow_rows)
+                    logger.info(
+                        "fetch_ib_nav_series: ingested %d/%d IB CashTransactions row(s) into xenon.ib_cash_flow",
+                        ingested,
+                        len(cash_flow_rows),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "fetch_ib_nav_series: ib_cash_flow persist failed (%s) — NAV rows still returned",
+                        exc,
+                    )
             return entries
         return None
     except Exception:

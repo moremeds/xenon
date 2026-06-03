@@ -18,6 +18,7 @@ reconciliation path, not a historical backfill.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -48,6 +49,11 @@ from xenon.reports.portfolio_performance import fetch_ib_nav_series  # noqa: E40
 
 def main() -> int:
     _load_env()
+
+    # Surface xenon.* INFO logs (e.g. "ingested N IB CashTransactions row(s)")
+    # to stderr so the launchd-captured log includes the cash-flow ingest count.
+    # idempotent — basicConfig is a no-op once root logger has handlers.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
 
     # Pass-1 / Pass-2 T8: refuse to write under XENON_READ_ONLY=1. A MacBook
     # `dev.sh live` session sets the flag so this CLI fired against the live
