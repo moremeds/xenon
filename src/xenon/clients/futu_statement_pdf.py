@@ -502,7 +502,12 @@ def parse(pdf_bytes: bytes, password: Optional[str] = None) -> FutuDailyStatemen
         account_suffix = account_number[-4:]
 
     # base currency: the "Base Currency" column on the account info row
-    m = re.search(r"Base Currency\s+([A-Z]{3})", page1)
+    # Same-line constraint via [^\S\n] — under the doubled-letter rendering
+    # the 'Base Currency' header sits ALONE on its line with the actual code
+    # ('HKD') wrapped to the data row below. A `\s+` here would consume the
+    # newline and grab the first 3-upper letters of the next line (e.g.
+    # 'LLI' from 'LLII CHEN XXII ...'). All known modern statements are HKD.
+    m = re.search(r"Base Currency[^\S\n]+([A-Z]{3})", page1)
     base_currency = m.group(1) if m else "HKD"
 
     # Portfolio summary rows. Funds is absent when the account holds no
@@ -556,3 +561,246 @@ def parse(pdf_bytes: bytes, password: Optional[str] = None) -> FutuDailyStatemen
         financing=financing,
         transaction_totals=transaction_totals,
     )
+
+
+# ---------------------------------------------------------------------------
+# Legacy parser — covers pre-Aug-2024 statements (Universal account didn't
+# exist yet). Three pre-consolidation accounts: 6337 US Stocks Margin,
+# 6415 HK Stocks Margin, 5270 US Fund. Each was a separate brokerage
+# account with its own statement format. Subjects + bodies show in either
+# English or Traditional Chinese — same data, different field labels.
+#
+# Layout: 3-4 pages, single-currency. No "Assets Overview" pages, no
+# exchange-rate table. NAV / Portfolio Value / Cash Balance are flat
+# fields on page 1; fund movements (cash flow) on page 1; closing fields
+# usually on page 2 (English) or still page 1 (Chinese).
+# ---------------------------------------------------------------------------
+
+# Currency label → ISO code. The Chinese variants spell currency in the
+# native script (港幣 = HKD, 美元 = USD, 人民幣 = CNY/CNH).
+_CCY_NAME_TO_ISO = {
+    "港幣": "HKD",
+    "美元": "USD",
+    "人民幣": "CNY",
+    "人民币": "CNY",
+    "港币": "HKD",
+}
+
+
+def _parse_legacy_date(s: str) -> date:
+    """Accept the multiple legacy date formats:
+    'Oct 04, 2022' (en-us-stocks)
+    '2023/08/29'   (en-us-fund)
+    '2020年08月25日' (zh-trad)
+    """
+    s = s.strip().replace(",", "")
+    # YYYY年MM月DD日
+    m = re.match(r"(\d{4})年(\d{1,2})月(\d{1,2})日", s)
+    if m:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    # YYYY/MM/DD
+    m = re.match(r"(\d{4})/(\d{1,2})/(\d{1,2})", s)
+    if m:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    # Mon DD YYYY (after comma strip)
+    try:
+        return datetime.strptime(s, "%b %d %Y").date()
+    except ValueError:
+        pass
+    raise StatementParseError(f"legacy date format not recognised: {s!r}")
+
+
+def _detect_legacy_format(page1: str) -> str:
+    """Classify a legacy statement by its title line. Returns one of:
+    'en-us-stocks', 'en-hk-stocks', 'en-us-fund',
+    'zh-hk-margin', 'zh-us-margin', 'zh-us-fund'.
+    """
+    head = page1.lstrip().splitlines()[0] if page1.strip() else ""
+    if "Daily Statement of US Stock" in head:
+        return "en-us-stocks"
+    if "Daily Statement of HK Stocks" in head:
+        return "en-hk-stocks"
+    if "Daily Statement of US Fund" in head:
+        return "en-us-fund"
+    if "港股保證金" in head or "港股保证金" in head:
+        return "zh-hk-margin"
+    if "美股保證金" in head or "美股保证金" in head or "美股孖展" in head:
+        return "zh-us-margin"
+    if "美元基金" in head:
+        return "zh-us-fund"
+    raise StatementParseError(f"legacy format not recognised: head={head[:80]!r}")
+
+
+def _find_amount(text: str, *patterns: str) -> Optional[Decimal]:
+    """Find the first NUM after any of the labels and return it as Decimal.
+    Patterns are tried in order; first match wins. Returns None if none match.
+    """
+    for pat in patterns:
+        m = re.search(rf"{pat}\s+({_NUM})", text)
+        if m:
+            return _to_decimal(m.group(1))
+    return None
+
+
+def _parse_legacy_fund_movements(text: str, fmt: str) -> list[dict]:
+    """Extract cash-flow rows under 'Fund Movement' / '資金進出'.
+    Each row: Direction Amount Date OrderNumber [Remarks]
+    """
+    movements: list[dict] = []
+    is_chinese = fmt.startswith("zh-")
+    # Section regexes intentionally NOT MULTILINE — under MULTILINE `$` in
+    # the alternation matches end-of-line, collapsing the non-greedy
+    # [\s\S]*? capture to empty. \Z (string-end) is the safe anchor.
+    #
+    # Row regexes use [^\S\n] for inter-field whitespace so the optional
+    # remarks field can't reach across newlines and gobble the next row.
+    if is_chinese:
+        sect_re = re.compile(r"資金進出([\s\S]*?)(?:融資總覽|盤後概況|盤後證券市值|\Z)")
+        row_re = re.compile(
+            r"^([一-鿿]+)[^\S\n]+([+\-]?[\d,]+\.\d+)[^\S\n]+(\d{4}/\d{1,2}/\d{1,2})[^\S\n]+(\d+)(?:[^\S\n]+([^\n]+))?",
+            re.MULTILINE,
+        )
+    else:
+        sect_re = re.compile(r"Fund Movement([\s\S]*?)(?:Financing|Ending Overview|Ending Portfolio|Maintenance|\Z)")
+        row_re = re.compile(
+            r"^(In|Out)[^\S\n]+([+\-]?[\d,]+\.\d+)[^\S\n]+(\d{1,2}/\d{1,2}/\d{4}|\d{4}/\d{1,2}/\d{1,2})[^\S\n]+(\d+)(?:[^\S\n]+([^\n]+))?",
+            re.MULTILINE,
+        )
+    sect_m = sect_re.search(text)
+    if not sect_m:
+        return movements
+    for m in row_re.finditer(sect_m.group(1)):
+        movements.append(
+            {
+                "direction": m.group(1),
+                "amount": str(_to_decimal(m.group(2))),
+                "date": m.group(3),
+                "order_number": m.group(4),
+                "remarks": (m.group(5) or "").strip() if m.lastindex and m.lastindex >= 5 else "",
+            }
+        )
+    return movements
+
+
+def parse_legacy(pdf_bytes: bytes, password: Optional[str] = None) -> "FutuDailyStatement":
+    """Parse a legacy (pre-Aug-2024) Futu daily statement.
+
+    Returns a FutuDailyStatement just like the modern parser — the legacy
+    rows fit the same table with the trade-off that:
+      * starting_nav_by_currency / ending_nav_by_currency hold a single
+        currency entry (e.g. {"USD": <amount>}).
+      * exchange_rates is empty (single-currency statements need none).
+      * financing / transaction_totals capture fund movements + financing
+        overview when present.
+    """
+    raw = inspect(pdf_bytes, password=password)
+    if raw.page_count < 1:
+        raise StatementParseError("statement has 0 pages")
+    page1 = raw.text_by_page[0]
+    full = "\n".join(raw.text_by_page)
+    fmt = _detect_legacy_format(page1)
+    is_chinese = fmt.startswith("zh-")
+
+    # Date (line 2 of page 1 in every legacy variant).
+    lines = [ln.strip() for ln in page1.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        raise StatementParseError("page 1 too short for date")
+    statement_date = _parse_legacy_date(lines[1])
+
+    # Account number — appears as "Account Number 100..." (en) or
+    # "賬戶號碼 100..." (zh). 16 digits.
+    m = re.search(r"(?:Account Number|賬戶號碼|账户号码)[:：\s]+(\d{14,})", page1)
+    if not m:
+        raise StatementParseError("legacy account number not found")
+    account_number = m.group(1)
+    account_suffix = account_number[-4:]
+
+    # Client name — first non-empty line after the title that is letters or
+    # CJK only (no digits, no punctuation).
+    client_name = lines[2] if len(lines) > 2 else "UNKNOWN"
+
+    # Base currency.
+    if is_chinese:
+        m = re.search(r"賬戶幣種[ :]+([港人美]\S{1,2})", page1)
+        base_currency = _CCY_NAME_TO_ISO.get(m.group(1), "HKD") if m else "HKD"
+    else:
+        m = re.search(r"Currency[: ]+([A-Z]{3})", page1)
+        base_currency = m.group(1) if m else "USD"
+
+    # NAV / Portfolio / Cash — labels differ by language.
+    if is_chinese:
+        # Starting values on page 1 (raw labels) and Ending values appear
+        # under 盤後 prefix when section is present.
+        start_nav = _find_amount(full, "資產淨值") or Decimal("0")
+        start_port = _find_amount(full, "證券市值") or Decimal("0")
+        start_cash = _find_amount(full, "現金結餘") or Decimal("0")
+        end_nav = _find_amount(full, "盤後資產淨值[:：]", "盤後資產總淨值[:：]") or start_nav
+        end_port = _find_amount(full, "盤後證券市值[:：]") or start_port
+        end_cash = _find_amount(full, "盤後現金結餘[:：]") or start_cash
+    else:
+        # English legacy uses "Portfolio Value", "Cash Balance", "NAV" for
+        # ending values (on page 1) and "Starting <X>" / "Ending <X>:" for
+        # explicit period markers. US Fund uses "Beginning" / "Ending Assets".
+        start_nav = _find_amount(full, "Starting NAV", r"Beginning Assets[:：]") or Decimal("0")
+        start_port = _find_amount(full, "Starting Portfolio Value", r"Beginning Fund Value[:：]") or Decimal("0")
+        start_cash = _find_amount(full, "Starting Cash Balance", r"Beginning Cash Balance[:：]") or Decimal("0")
+        end_nav = (
+            _find_amount(full, "Ending NAV[:：]", "Ending Assets[:：]") or _find_amount(page1, r"^NAV\b") or start_nav
+        )
+        end_port = (
+            _find_amount(full, "Ending Portfolio Value[:：]", "Ending Fund Value[:：]")
+            or _find_amount(page1, r"^Portfolio Value\b")
+            or start_port
+        )
+        end_cash = (
+            _find_amount(full, "Ending Cash Balance[:：]") or _find_amount(page1, r"^Cash Balance\b") or start_cash
+        )
+
+    # Cash flows under "Fund Movement" / "資金進出".
+    fund_movements = _parse_legacy_fund_movements(full, fmt)
+
+    return FutuDailyStatement(
+        statement_date=statement_date,
+        preparation_date=None,
+        account_number=account_number,
+        account_suffix=account_suffix,
+        client_name=client_name,
+        base_currency=base_currency,
+        starting_portfolio_base=start_port,
+        ending_portfolio_base=end_port,
+        starting_funds_base=Decimal("0"),
+        ending_funds_base=Decimal("0"),
+        starting_cash_base=start_cash,
+        ending_cash_base=end_cash,
+        starting_nav_base=start_nav,
+        ending_nav_base=end_nav,
+        starting_nav_by_currency={base_currency: start_nav},
+        ending_nav_by_currency={base_currency: end_nav},
+        exchange_rates={},
+        page_text=raw.text_by_page,
+        financing={"format": fmt, "fund_movements": fund_movements},
+        transaction_totals={},
+    )
+
+
+def parse_any(pdf_bytes: bytes, password: Optional[str] = None) -> "FutuDailyStatement":
+    """Auto-detect modern vs legacy and dispatch.
+
+    Modern (Universal / 5668) layouts get the 6+ page parser with the
+    multi-currency NAV table. Legacy (US Stocks / HK Stocks / US Fund,
+    English or Traditional Chinese) get the compact 3-4 page parser.
+    """
+    raw = inspect(pdf_bytes, password=password)
+    page1 = raw.text_by_page[0] if raw.text_by_page else ""
+    head = page1.lstrip().splitlines()[0] if page1.strip() else ""
+    is_legacy = (
+        "US Stock" in head
+        or "HK Stock" in head
+        or "US Fund" in head
+        or "港股" in head
+        or "美股" in head
+        or "美元基金" in head
+    )
+    if is_legacy:
+        return parse_legacy(pdf_bytes, password=password)
+    return parse(pdf_bytes, password=password)
