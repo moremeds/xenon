@@ -21,11 +21,27 @@ def test_main_exits_2_when_token_missing(monkeypatch, capsys):
     # empty value stays). 'if not token' still trips on the empty string.
     monkeypatch.setenv("IB_FLEX_TOKEN", "")
     monkeypatch.setenv("IB_FLEX_NAV_QUERY_ID", "")
+    monkeypatch.delenv("XENON_READ_ONLY", raising=False)
     m = _reimport_module()
     rc = m.main()
     assert rc == 2
     err = capsys.readouterr().err
     assert "FLEX_NOT_CONFIGURED" in err
+
+
+def test_main_exits_3_when_read_only(monkeypatch, capsys):
+    """Pass-1: refuse to write when XENON_READ_ONLY=1. A MacBook `dev.sh live`
+    session would otherwise pollute core_test with live close NAVs."""
+    monkeypatch.setenv("XENON_READ_ONLY", "1")
+    # Even with valid token + query — the read-only flag short-circuits first.
+    monkeypatch.setenv("IB_FLEX_TOKEN", "x" * 24)
+    monkeypatch.setenv("IB_FLEX_NAV_QUERY_ID", "1234567")
+    m = _reimport_module()
+    rc = m.main()
+    assert rc == 3
+    err = capsys.readouterr().err
+    assert "READ_ONLY" in err
+    assert "XENON_READ_ONLY=1" in err
 
 
 def test_main_exits_1_when_fetch_returns_none(monkeypatch):
