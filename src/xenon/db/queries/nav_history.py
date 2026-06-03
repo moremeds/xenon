@@ -87,10 +87,16 @@ async def load_nav_curve(
 
 
 async def load_inception_date(engine: AsyncEngine, scope: AccountScope) -> date | None:
-    """Return the earliest ``nav_history.date`` for the scope, or None.
+    """Return the earliest *funded* ``nav_history.date`` (NAV > 0) for the scope, or None.
 
     Used by the /performance route to resolve ``period=All`` to a concrete
-    start date. Cheap (PK-prefix indexed) so safe to call on every request.
+    start date. The ``nav > 0`` filter trims leading rows from before the
+    first deposit landed — a brokerage account can sit open with NAV=0 for
+    weeks or months between opening and funding. Including those rows
+    pushes the inception-to-date denominator to 0, which surfaces as
+    spurious 1000%+ returns in the UI.
+
+    Cheap (PK-prefix indexed) so safe to call on every request.
     """
     async with engine.begin() as conn:
         result = await conn.execute(
@@ -98,6 +104,7 @@ async def load_inception_date(engine: AsyncEngine, scope: AccountScope) -> date 
                 (nav_history.c.broker == scope.broker)
                 & (nav_history.c.account_env == scope.account_env)
                 & (nav_history.c.broker_account == scope.broker_account)
+                & (nav_history.c.nav > 0)
             )
         )
         row = result.first()
