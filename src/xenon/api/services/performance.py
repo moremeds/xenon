@@ -15,6 +15,7 @@ Corrections applied (see plan's PRE-EXECUTION CORRECTIONS):
 from __future__ import annotations
 
 import logging
+import math
 import os
 from datetime import date
 from typing import Any, Optional
@@ -116,8 +117,21 @@ def _period_start(as_of: Optional[date]) -> date:
     return date(today.year, 1, 1)
 
 
-def _period_label(inception: date) -> str:
-    return "YTD NAV Change" if inception <= date(inception.year, 1, 2) else "INCEPTION-TO-DATE NAV CHANGE"
+def _period_label(period: str) -> str:
+    """Human-facing label for the headline. Matches the period selector chips.
+
+    Says "Performance" rather than "Return" or "NAV Change" because the
+    headline number is now TWR (Time-Weighted Return) when available — the
+    standard industry metric for how a strategy performed, deposit-timing
+    removed. Falls back to flow-adjusted simple return when TWR is null.
+    """
+    p = period.upper()
+    return {
+        "1M": "1-Month Performance",
+        "3M": "3-Month Performance",
+        "YTD": "YTD Performance",
+        "ALL": "Inception-to-Date Performance",
+    }.get(p, f"{p} Performance")
 
 
 def _base_summary(nav: np.ndarray, n: int) -> dict[str, Any]:
@@ -347,6 +361,23 @@ def _bench_total_return(bench_df: pd.DataFrame | None) -> float | None:
     return (last - first) / first if first else None
 
 
+def _sanitize_nan(obj: Any) -> Any:
+    """Recursively replace NaN/Inf floats with None.
+
+    FastAPI's default JSONResponse refuses to encode NaN. Long inception-to-date
+    windows on sparse-NAV scopes hit metric edge cases (zero-variance windows,
+    div-by-zero in skew/kurtosis) that produce NaN; without this sanitizer
+    those requests return HTTP 500. Defensive boundary at the route exit.
+    """
+    if isinstance(obj, dict):
+        return {k: _sanitize_nan(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_nan(v) for v in obj]
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    return obj
+
+
 async def compute(
     engine: AsyncEngine,
     scope: AccountScope,
@@ -384,8 +415,14 @@ async def compute(
     bench_df, bench_err = await load_benchmark_cached(engine, ib_pool, "SPY", period_start)
 
     if scope.broker == "IB":
-        returns = _ib_returns(curve)
-        flows_per_day = None
+        # IB branch: load CashTransactions (Deposits/Withdrawals) from
+        # xenon.ib_cash_flow — sourced from IB Flex via the "account" saved
+        # query — and adjust daily returns to isolate investment-driven
+        # performance. Falls through to flows-empty when no rows ingested yet.
+        from xenon.api.services.performance_ib_flows import load_ib_flows_per_day
+
+        flows_per_day = await load_ib_flows_per_day(engine, scope, since=period_start, until=as_of_d)
+        returns = _futu_returns(curve, flows_per_day)
     else:
         # FUTU branch: load cash flows for the window and adjust daily returns
         # so they isolate investment-driven performance from external flows.
@@ -403,11 +440,19 @@ async def compute(
     warnings: list[str] = []
     metrics_unlocked = days_collected >= min_metrics
     futu_mask = False  # PR-2: lifted now that flow-adjusted returns + IRR ship
-    ib_mask = scope.broker == "IB" and _ib_should_mask_metrics()
+    # IB now has flow-adjusted returns + IRR via xenon.ib_cash_flow (sourced
+    # from IB Flex Deposits/Withdrawals). The mask still applies when the
+    # XENON_IB_DAILYPNL_INCLUDES_CASHFLOWS env gate hasn't been disabled, but
+    # the data path is wired.
+    ib_mask = scope.broker == "IB" and _ib_should_mask_metrics() and (flows_per_day is None or flows_per_day.empty)
     if ib_mask:
         warnings.append(
-            "IB TWR requires cash-flow tracking — follow-up. "
-            "See docs/superpowers/reports/2026-06-01-ib-dailypnl-verification.md."
+            "IB risk metrics masked: cash flow ingestion incomplete. "
+            "Backfill xenon.ib_cash_flow from IB Flex CashTransactions."
+        )
+    if scope.broker == "IB" and flows_per_day is not None and not flows_per_day.empty:
+        warnings.append(
+            "IB returns are flow-adjusted via xenon.ib_cash_flow (Deposits/Withdrawals from IB Flex CashTransactions)."
         )
     if scope.broker == "FUTU":
         # Soft note — risk metrics ship now; operator should know the
@@ -444,26 +489,31 @@ async def compute(
 
     series = _build_series(curve, bench_df, returns)
 
-    return {
-        "status": "ok",
-        "as_of": str(current_session_date_et()),
-        "last_sync": str(curve["date"].iloc[-1]),
-        "period_start": str(period_start),
-        "period_end": str(curve["date"].iloc[-1]),
-        "period_label": _period_label(curve["date"].iloc[0]),
-        "scope": {
-            "broker": scope.broker,
-            "account_env": scope.account_env,
-            "broker_account": scope.broker_account,
-        },
-        "currency": "USD",
-        "benchmark": "SPY" if bench_df is not None and not bench_df.empty else None,
-        "benchmark_total_return": _bench_total_return(bench_df),
-        "trades_source": "nav_history",
-        "methodology": {"basis": "NAV change", "annualization_periods": PERIODS_PER_YEAR},
-        "price_sources": {"primary": "nav_history", "benchmark": "ib_historical_daily"},
-        "summary": summary,
-        "series": series,
-        "warnings": warnings,
-        "contracts_missing_history": [],
-    }
+    return _sanitize_nan(
+        {
+            "status": "ok",
+            "as_of": str(current_session_date_et()),
+            "last_sync": str(curve["date"].iloc[-1]),
+            "period_start": str(period_start),
+            "period_end": str(curve["date"].iloc[-1]),
+            "period_label": _period_label(period),
+            "scope": {
+                "broker": scope.broker,
+                "account_env": scope.account_env,
+                "broker_account": scope.broker_account,
+            },
+            "currency": "USD",
+            "benchmark": "SPY" if bench_df is not None and not bench_df.empty else None,
+            "benchmark_total_return": _bench_total_return(bench_df),
+            "trades_source": "nav_history",
+            "methodology": {
+                "basis": "Time-Weighted Return (TWR)",
+                "annualization_periods": PERIODS_PER_YEAR,
+            },
+            "price_sources": {"primary": "nav_history", "benchmark": "ib_historical_daily"},
+            "summary": summary,
+            "series": series,
+            "warnings": warnings,
+            "contracts_missing_history": [],
+        }
+    )

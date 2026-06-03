@@ -292,6 +292,49 @@ futu_cash_flow = Table(
 )
 
 
+# IB CashTransactions ingested from IB Flex Web Service (Deposits/Withdrawals
+# section of the "account" saved query). Mirrors xenon.futu_cash_flow for the
+# IB broker. Used by performance.py to flow-adjust the IB headline return so
+# deposits aren't counted as investment performance.
+#
+# Source of truth is IB Flex `CashTransaction` rows. The Type "Deposits/Withdrawals"
+# is the only external category we ingest; everything else (dividends, fees,
+# interest) is internal investment activity and stays out.
+#
+# Amount sign convention matches Futu: positive = money INTO account (deposit),
+# negative = money OUT (withdrawal). Native amounts are stored alongside USD-
+# equivalent so we can audit FX conversion.
+ib_cash_flow = Table(
+    "ib_cash_flow",
+    xenon_metadata,
+    Column("broker", Text, primary_key=True),
+    Column("account_env", Text, primary_key=True),
+    Column("broker_account", Text, primary_key=True),
+    Column("transaction_id", Text, primary_key=True),  # IB's TransactionID
+    Column("txn_type", Text, nullable=False),  # IB's Type field, e.g. "Deposits/Withdrawals"
+    Column("description", Text, nullable=True),  # IB's Description, e.g. "CASH RECEIPTS / ELECTRONIC FUND TRANSFERS"
+    Column("amount_native", Numeric(14, 4), nullable=False),  # signed amount in native currency
+    Column("currency", Text, nullable=False),  # 'USD', 'HKD', etc.
+    Column("amount_usd", Numeric(14, 4), nullable=False),  # signed USD-equivalent
+    Column("fx_rate", Numeric(14, 6), nullable=False),  # native→USD rate applied (1.0 for USD)
+    Column("occurred_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("raw", JSONB, nullable=False),
+    Column("ingested_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    CheckConstraint("broker = 'IB'", name="ck_ib_cash_flow_broker"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim')",
+        name="ck_ib_cash_flow_account_env",
+    ),
+    Index(
+        "ix_ib_cash_flow_scope_occurred_at",
+        "broker",
+        "account_env",
+        "broker_account",
+        "occurred_at",
+    ),
+)
+
+
 # spec § Schema changes Migration 1 — SPY/benchmark close cache.
 benchmark_closes = Table(
     "benchmark_closes",

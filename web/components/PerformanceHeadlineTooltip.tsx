@@ -33,8 +33,15 @@ export default function PerformanceHeadlineTooltip({
   currency: string;
 }) {
   const [open, setOpen] = useState(false);
-  // Headline uses simple if present, falls back to total_return.
-  const headline = summary.simple_total_return ?? summary.total_return ?? null;
+  // Headline prefers TWR (industry-standard "manager performance" — removes
+  // deposit-timing effects), falls back to flow-adjusted simple, then raw
+  // total_return. When TWR is null (broker lacks cash-flow data), the simple
+  // return is still flow-adjusted vs raw NAV change.
+  const headline =
+    summary.twr_total_return ??
+    summary.simple_total_return ??
+    summary.total_return ??
+    null;
   const tone =
     headline == null ? "neutral" : headline >= 0 ? "positive" : "negative";
   return (
