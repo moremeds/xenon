@@ -57,9 +57,21 @@ fi
 # shellcheck disable=SC1090
 set -a; source "$ENV_FILE"; set +a
 
-# Default to live for the prod scheduled run; operators can override
-# XENON_TRADING_MODE in .env for paper.
-export XENON_TRADING_MODE="${XENON_TRADING_MODE:-live}"
+# Pass-2 T7 — no silent default. The macmini runs both paper and live
+# stacks; silently defaulting to `live` risks scope-collision when `.env`
+# is misconfigured. The prod runbook (docs/runbooks/nav-flex-refresh.md)
+# sets XENON_TRADING_MODE=live explicitly in the macmini .env.
+if [[ -z "${XENON_TRADING_MODE:-}" ]]; then
+  log "FATAL: XENON_TRADING_MODE not set. Source .env first (and ensure it sets the mode), or set the var explicitly."
+  exit 2
+fi
+case "$XENON_TRADING_MODE" in
+  live|paper) ;;
+  *)
+    log "FATAL: invalid XENON_TRADING_MODE=$XENON_TRADING_MODE (must be 'live' or 'paper')."
+    exit 2
+    ;;
+esac
 
 if [[ "$DRY" == "1" ]]; then
   log "DRY: env sourced, mode=$XENON_TRADING_MODE — exiting before CLI invocation."
