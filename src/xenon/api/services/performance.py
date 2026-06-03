@@ -15,7 +15,6 @@ Corrections applied (see plan's PRE-EXECUTION CORRECTIONS):
 from __future__ import annotations
 
 import logging
-import math
 import os
 from datetime import date
 from typing import Any, Optional
@@ -117,21 +116,8 @@ def _period_start(as_of: Optional[date]) -> date:
     return date(today.year, 1, 1)
 
 
-def _period_label(period: str) -> str:
-    """Human-facing label for the headline number.
-
-    Matches the period selector chips (1M / 3M / YTD / All). Says "Return"
-    not "NAV change" because the headline is now `simple_total_return`,
-    which subtracts net external flows when they're known (FUTU today; IB
-    once Flex CashTransaction lands).
-    """
-    p = period.upper()
-    return {
-        "1M": "1-Month Return",
-        "3M": "3-Month Return",
-        "YTD": "YTD Return",
-        "ALL": "Inception-to-Date Return",
-    }.get(p, f"{p} Return")
+def _period_label(inception: date) -> str:
+    return "YTD NAV Change" if inception <= date(inception.year, 1, 2) else "INCEPTION-TO-DATE NAV CHANGE"
 
 
 def _base_summary(nav: np.ndarray, n: int) -> dict[str, Any]:
@@ -361,23 +347,6 @@ def _bench_total_return(bench_df: pd.DataFrame | None) -> float | None:
     return (last - first) / first if first else None
 
 
-def _sanitize_nan(obj: Any) -> Any:
-    """Replace NaN/Inf with None recursively — JSON cannot serialize them.
-
-    Surfaced by `period=All` on IB scopes when a long inception-to-date window
-    hits a metric edge case (e.g. zero-variance window) and a downstream field
-    computes NaN. FastAPI's default JSONResponse fails with 500 instead of
-    sending null. This sanitizer is a defensive boundary at the route exit.
-    """
-    if isinstance(obj, dict):
-        return {k: _sanitize_nan(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_sanitize_nan(v) for v in obj]
-    if isinstance(obj, float) and not math.isfinite(obj):
-        return None
-    return obj
-
-
 async def compute(
     engine: AsyncEngine,
     scope: AccountScope,
@@ -475,28 +444,26 @@ async def compute(
 
     series = _build_series(curve, bench_df, returns)
 
-    return _sanitize_nan(
-        {
-            "status": "ok",
-            "as_of": str(current_session_date_et()),
-            "last_sync": str(curve["date"].iloc[-1]),
-            "period_start": str(period_start),
-            "period_end": str(curve["date"].iloc[-1]),
-            "period_label": _period_label(period),
-            "scope": {
-                "broker": scope.broker,
-                "account_env": scope.account_env,
-                "broker_account": scope.broker_account,
-            },
-            "currency": "USD",
-            "benchmark": "SPY" if bench_df is not None and not bench_df.empty else None,
-            "benchmark_total_return": _bench_total_return(bench_df),
-            "trades_source": "nav_history",
-            "methodology": {"basis": "Total Return", "annualization_periods": PERIODS_PER_YEAR},
-            "price_sources": {"primary": "nav_history", "benchmark": "ib_historical_daily"},
-            "summary": summary,
-            "series": series,
-            "warnings": warnings,
-            "contracts_missing_history": [],
-        }
-    )
+    return {
+        "status": "ok",
+        "as_of": str(current_session_date_et()),
+        "last_sync": str(curve["date"].iloc[-1]),
+        "period_start": str(period_start),
+        "period_end": str(curve["date"].iloc[-1]),
+        "period_label": _period_label(curve["date"].iloc[0]),
+        "scope": {
+            "broker": scope.broker,
+            "account_env": scope.account_env,
+            "broker_account": scope.broker_account,
+        },
+        "currency": "USD",
+        "benchmark": "SPY" if bench_df is not None and not bench_df.empty else None,
+        "benchmark_total_return": _bench_total_return(bench_df),
+        "trades_source": "nav_history",
+        "methodology": {"basis": "NAV change", "annualization_periods": PERIODS_PER_YEAR},
+        "price_sources": {"primary": "nav_history", "benchmark": "ib_historical_daily"},
+        "summary": summary,
+        "series": series,
+        "warnings": warnings,
+        "contracts_missing_history": [],
+    }
