@@ -25,7 +25,7 @@ preserving the intraday row (closer to v1 behavior). Operators can re-run
 from alembic import op
 
 revision = "2026_06_03_nav_src_pk"
-down_revision = "2026_06_02_cf_open"
+down_revision = "2026_06_03_futu_inbox"
 branch_labels = None
 depends_on = None
 

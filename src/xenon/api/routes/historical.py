@@ -140,8 +140,8 @@ async def qualify_contracts(req: QualifyRequest, request: Request):
 
     try:
         async with pool.acquire("data") as client:
-            qualified = await asyncio.to_thread(
-                client.qualify_contracts, *contracts
+            qualified = await pool.run_sync(
+                "data", client.qualify_contracts, *contracts
             )
     except ConnectionError as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -157,8 +157,9 @@ async def head_timestamp(req: HeadTimestampRequest, request: Request):
 
     try:
         async with pool.acquire("data") as client:
-            await asyncio.to_thread(client.qualify_contracts, contract)
-            ts = await asyncio.to_thread(
+            await pool.run_sync("data", client.qualify_contracts, contract)
+            ts = await pool.run_sync(
+                "data",
                 client.get_head_timestamp,
                 contract,
                 what_to_show=req.what_to_show,
@@ -181,8 +182,9 @@ async def historical_bars(req: HistoricalBarsRequest, request: Request):
 
     try:
         async with pool.acquire("data") as client:
-            await asyncio.to_thread(client.qualify_contracts, contract)
-            bars = await asyncio.to_thread(
+            await pool.run_sync("data", client.qualify_contracts, contract)
+            bars = await pool.run_sync(
+                "data",
                 client.get_historical_data,
                 contract,
                 end_date=req.end_date_time,

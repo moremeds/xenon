@@ -79,6 +79,17 @@ def test_quote_route_runs_snapshot_worker_with_event_loop(client, monkeypatch):
             seen["role"] = role
             return FakeAcquire()
 
+        async def run_sync(self, role, fn, *args, **kwargs):
+            # Mirror IBPool.run_sync's contract: dispatch the sync worker
+            # to a thread so _ensure_thread_event_loop installs a loop.
+            import functools as _ft
+
+            seen["role"] = role
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                None, _ft.partial(fn, *args, **kwargs)
+            )
+
     monkeypatch.setattr(server, "ib_pool", FakePool())
 
     resp = client.get("/orders/quote", params={"ticker": "SPY", "con_id": 756733})

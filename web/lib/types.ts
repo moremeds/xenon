@@ -224,6 +224,9 @@ export type PerformanceSummary = {
   pnl: number;
   trading_days: number;
   total_return: number;
+  simple_return?: number | null;
+  time_weighted_return?: number | null;
+  net_inflow?: number | null;
   max_drawdown: number;
   current_drawdown: number;
   max_drawdown_duration_days: number;

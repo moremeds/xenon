@@ -35,6 +35,11 @@ dependencies = [
     "asyncpg>=0.30.0",
     "psycopg[binary]>=3.2.0",
     "alembic>=1.15.0",
+    # Futu daily statement ingestion (IMAP fetch + AES-encrypted PDF parse)
+    "pikepdf>=9.0",
+    "pdfplumber>=0.11",
+    # Microsoft OAuth (IMAP XOAUTH2 — consumer Outlook is OAuth-only)
+    "msal>=1.30",
     "exchange-calendars>=4.5,<5.0",
     "scipy>=1.17.1",
 ]
@@ -57,6 +62,7 @@ xenon-ib-sync            = "xenon.execution.ib_sync:main"
 xenon-naked-short-audit  = "xenon.execution.naked_short_audit:main"
 xenon-futu-sync          = "xenon.execution.futu_sync:main"
 xenon-futu-history-sync  = "xenon.cli.futu_history_sync:main"
+xenon-futu-statement-sync = "xenon.cli.futu_statement_sync:main"
 xenon-portfolio-report   = "xenon.reports.portfolio_report:main"
 xenon-portfolio-attrib   = "xenon.reports.portfolio_attribution:main"
 xenon-portfolio-perf     = "xenon.reports.portfolio_performance:main"

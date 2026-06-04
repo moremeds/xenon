@@ -18,10 +18,11 @@ const SUMMARY = {
 };
 
 describe("PerformanceHeadlineTooltip", () => {
-  it("renders the headline (simple) value", () => {
+  it("renders the headline (TWR) value when present, with simple fallback", () => {
+    // Component prefers twr_total_return > simple_total_return > total_return.
     render(<PerformanceHeadlineTooltip summary={SUMMARY} currency="USD" />);
     expect(screen.getByTestId("performance-headline").textContent).toContain(
-      "+12.30%",
+      "+11.80%",
     );
   });
 

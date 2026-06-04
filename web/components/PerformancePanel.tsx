@@ -333,20 +333,30 @@ export default function PerformancePanel({
     if (!data || data.status !== "ok") return [];
     const { summary, benchmark } = data;
     const benchmarkLabel = benchmark ?? "—";
+    const isFutu = data.scope.broker === "FUTU";
 
     return [
       {
         id: "ytd-return",
-        label: "YTD Return",
-        title: "YTD Return",
+        label: isFutu ? "YTD TWR" : "YTD Return",
+        title: isFutu ? "YTD Time-Weighted Return" : "YTD Return",
         value: fmtPct(summary.total_return),
-        change: `${fmtUsd(summary.pnl)} P&L`,
+        change:
+          isFutu && summary.simple_return != null
+            ? `Simple ${fmtPct(summary.simple_return)}`
+            : `${fmtUsd(summary.pnl)} P&L`,
         tone: toneClass(summary.total_return),
         definition:
-          "Cumulative return from the first trading session of the year through the current portfolio snapshot.",
+          isFutu
+            ? "Cash-flow adjusted return from the first trading session of the year through the current Futu account snapshot."
+            : "Cumulative return from the first trading session of the year through the current portfolio snapshot.",
         formula:
-          "YTD Return = (Ending Equity / Starting Equity) - 1\n" +
-          "P&L = Ending Equity - Starting Equity",
+          isFutu
+            ? "Daily Return = Daily Income / (Prior NAV + 0.5 * Daily Net Inflow)\n" +
+              "TWR = Product(1 + Daily Return) - 1\n" +
+              "Simple Return = Period Income / (Starting NAV + 0.5 * Period Net Inflow)"
+            : "YTD Return = (Ending Equity / Starting Equity) - 1\n" +
+              "P&L = Ending Equity - Starting Equity",
       },
       {
         id: "sharpe-ratio",

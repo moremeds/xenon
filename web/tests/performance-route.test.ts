@@ -58,7 +58,7 @@ describe("/api/performance proxy route", () => {
     expect(res.status).toBe(200);
     expect(body.summary.total_return).toBe(0.05);
     expect(mockXenonFetch).toHaveBeenCalledWith(
-      "/performance?broker=IB",
+      "/performance?broker=IB&period=YTD",
       expect.objectContaining({ timeout: 180_000 }),
     );
     mockXenonFetch.mockReset();
@@ -73,7 +73,7 @@ describe("/api/performance proxy route", () => {
     const { GET } = await import("../app/api/performance/route");
     await GET(makeRequest("http://test/api/performance?broker=FUTU") as never);
     expect(mockXenonFetch).toHaveBeenCalledWith(
-      "/performance?broker=FUTU",
+      "/performance?broker=FUTU&period=YTD",
       expect.anything(),
     );
     mockXenonFetch.mockReset();
