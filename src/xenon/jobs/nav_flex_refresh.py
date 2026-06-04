@@ -9,6 +9,7 @@ Exit codes:
   0 — fetched and persisted N>0 rows
   1 — fetch returned None or empty (token rejected, poll timeout, no rows)
   2 — FLEX_NOT_CONFIGURED (missing IB_FLEX_TOKEN or IB_FLEX_NAV_QUERY_ID)
+  3 — READ_ONLY (XENON_READ_ONLY=1) — refusing to write (Pass-1)
 
 Per the [[flex-is-reconciliation-not-history]] architecture, the saved
 Flex query should be a ~2-week rolling window — this CLI is the
@@ -17,6 +18,7 @@ reconciliation path, not a historical backfill.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -47,6 +49,25 @@ from xenon.reports.portfolio_performance import fetch_ib_nav_series  # noqa: E40
 
 def main() -> int:
     _load_env()
+
+    # Surface xenon.* INFO logs (e.g. "ingested N IB CashTransactions row(s)")
+    # to stderr so the launchd-captured log includes the cash-flow ingest count.
+    # idempotent — basicConfig is a no-op once root logger has handlers.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
+
+    # Pass-1 / Pass-2 T8: refuse to write under XENON_READ_ONLY=1. A MacBook
+    # `dev.sh live` session sets the flag so this CLI fired against the live
+    # IB connection would otherwise pollute `core_test` with live close NAVs.
+    # Real live trading writes via the macmini Docker stack, which does NOT
+    # set the flag.
+    if os.environ.get("XENON_READ_ONLY") == "1":
+        print(
+            "READ_ONLY: XENON_READ_ONLY=1 — refusing to ingest NAV rows. "
+            "Unset the flag (or run on the macmini prod stack) to enable.",
+            file=sys.stderr,
+        )
+        return 3
+
     _ensure_broker_account_env()
 
     if not os.environ.get("IB_FLEX_TOKEN") or not os.environ.get("IB_FLEX_NAV_QUERY_ID"):

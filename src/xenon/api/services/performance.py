@@ -11,9 +11,11 @@ Corrections applied (see plan's PRE-EXECUTION CORRECTIONS):
   - Phase 0 env gate (XENON_IB_DAILYPNL_INCLUDES_CASHFLOWS) selects whether
     IB risk metrics ship (default true = mask, safe-by-default)
 """
+
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
@@ -34,19 +36,40 @@ logger = logging.getLogger(__name__)
 PERIODS_PER_YEAR = 252
 
 ANNUALIZED_RISK_FIELDS = (
-    "sharpe_ratio", "sortino_ratio", "calmar_ratio",
-    "annualized_return", "annualized_volatility", "downside_deviation",
-    "var_95", "cvar_95", "tail_ratio", "ulcer_index",
+    "sharpe_ratio",
+    "sortino_ratio",
+    "calmar_ratio",
+    "annualized_return",
+    "annualized_volatility",
+    "downside_deviation",
+    "var_95",
+    "cvar_95",
+    "tail_ratio",
+    "ulcer_index",
 )
 BENCH_RELATIVE_FIELDS = (
-    "beta", "alpha", "correlation", "r_squared",
-    "tracking_error", "information_ratio", "treynor_ratio",
-    "upside_capture", "downside_capture",
+    "beta",
+    "alpha",
+    "correlation",
+    "r_squared",
+    "tracking_error",
+    "information_ratio",
+    "treynor_ratio",
+    "upside_capture",
+    "downside_capture",
 )
 DISTRIBUTION_FIELDS = (
-    "hit_rate", "positive_days", "negative_days", "flat_days",
-    "best_day", "worst_day", "average_up_day", "average_down_day",
-    "win_loss_ratio", "skew", "kurtosis",
+    "hit_rate",
+    "positive_days",
+    "negative_days",
+    "flat_days",
+    "best_day",
+    "worst_day",
+    "average_up_day",
+    "average_down_day",
+    "win_loss_ratio",
+    "skew",
+    "kurtosis",
 )
 
 
@@ -87,8 +110,9 @@ def _ib_should_mask_metrics() -> bool:
     return _env_bool("XENON_IB_DAILYPNL_INCLUDES_CASHFLOWS", True)
 
 
-def _insufficient(*, reason: str, days_collected: int,
-                  hero_net_liq: float | None, inception: str | None) -> dict[str, Any]:
+def _insufficient(
+    *, reason: str, days_collected: int, hero_net_liq: float | None, inception: str | None
+) -> dict[str, Any]:
     return {
         "status": "insufficient_history",
         "reason": reason,
@@ -106,12 +130,21 @@ def _period_start(as_of: Optional[date]) -> date:
     return date(today.year, 1, 1)
 
 
-def _period_label(inception: date) -> str:
-    return (
-        "YTD NAV Change"
-        if inception <= date(inception.year, 1, 2)
-        else "INCEPTION-TO-DATE NAV CHANGE"
-    )
+def _period_label(period: str) -> str:
+    """Human-facing label for the headline. Matches the period selector chips.
+
+    Says "Performance" rather than "Return" or "NAV Change" because the
+    headline number is now TWR (Time-Weighted Return) when available — the
+    standard industry metric for how a strategy performed, deposit-timing
+    removed. Falls back to flow-adjusted simple return when TWR is null.
+    """
+    p = period.upper()
+    return {
+        "1M": "1-Month Performance",
+        "3M": "3-Month Performance",
+        "YTD": "YTD Performance",
+        "ALL": "Inception-to-Date Performance",
+    }.get(p, f"{p} Performance")
 
 
 def _base_summary(nav: np.ndarray, n: int) -> dict[str, Any]:
@@ -135,7 +168,74 @@ def _base_summary(nav: np.ndarray, n: int) -> dict[str, Any]:
     # initialize every nullable field
     for k in ANNUALIZED_RISK_FIELDS + BENCH_RELATIVE_FIELDS + DISTRIBUTION_FIELDS:
         out[k] = None
+    # PR-2 honest-% surface: populated by `_fill_return_flavors`. simple_total_return
+    # mirrors total_return when no flows exist; the others stay None for IB until
+    # Flex CashTransaction support lands.
+    out["simple_total_return"] = None
+    out["twr_total_return"] = None
+    out["irr_total_return"] = None
+    out["net_external_flows"] = None
     return out
+
+
+def _fill_return_flavors(
+    summary: dict,
+    curve: pd.DataFrame,
+    returns: np.ndarray,
+    flows_per_day: pd.Series | None,
+) -> None:
+    """Populate the four PR-2 honest-% fields on the summary dict.
+
+    IB (flows_per_day is None): simple == total_return (no deposits known),
+    net_external_flows = 0.0, twr / irr stay None.
+
+    FUTU: all four populated. Simple uses retail sign convention (deposits +).
+    IRR uses CashFlow's investor-POV sign convention (deposits −, withdrawals +,
+    closing NAV +, opening NAV −).
+    """
+    from xenon.api.services.performance_returns import (
+        CashFlow,
+        money_weighted_return_irr,
+        simple_flow_adjusted_return,
+        time_weighted_return,
+    )
+
+    if len(curve) == 0:
+        return
+
+    start_nav = float(curve["nav"].iloc[0])
+    end_nav = float(curve["nav"].iloc[-1])
+    if flows_per_day is None or flows_per_day.empty:
+        net_flows = 0.0
+        irr = None
+        twr = None
+    else:
+        net_flows = float(flows_per_day.sum())
+        # TWR uses the same flow-adjusted daily returns we already computed.
+        # Skip returns[0] (synthetic zero) so single-day curves still produce 0.
+        twr = time_weighted_return(returns[1:] if len(returns) > 1 else returns)
+        irr_flows = [CashFlow(d=curve["date"].iloc[0], amount=-start_nav)]
+        for d, amt in flows_per_day.items():
+            # retail-sign amt (deposit = +) → investor-POV (deposit = -).
+            irr_flows.append(CashFlow(d=d, amount=-float(amt)))
+        irr_flows.append(CashFlow(d=curve["date"].iloc[-1], amount=end_nav))
+        irr = money_weighted_return_irr(irr_flows)
+
+    summary["simple_total_return"] = simple_flow_adjusted_return(start=start_nav, end=end_nav, net_flows=net_flows)
+    summary["twr_total_return"] = twr
+    summary["irr_total_return"] = irr
+    summary["net_external_flows"] = net_flows
+    # Frontend (PerformancePanel.tsx) reads summary.total_return / simple_return /
+    # net_inflow / pnl. _base_summary populates raw NAV-change values into those;
+    # when flows exist, overwrite with the flow-adjusted figures so the headline
+    # card shows TWR rather than raw NAV change inflated by deposits.
+    if flows_per_day is not None and not flows_per_day.empty:
+        if twr is not None:
+            summary["total_return"] = twr
+        summary["simple_return"] = summary["simple_total_return"]
+        summary["net_inflow"] = net_flows
+        # Income = end - start - net_flows (Futu official "pnl" semantics)
+        summary["pnl"] = end_nav - start_nav - net_flows
 
 
 def _fill_annualized(summary: dict, returns: np.ndarray) -> None:
@@ -148,8 +248,7 @@ def _fill_annualized(summary: dict, returns: np.ndarray) -> None:
     summary["annualized_volatility"] = ann_vol
     downside = returns[returns < 0]
     summary["downside_deviation"] = (
-        float(np.std(downside, ddof=1) * np.sqrt(PERIODS_PER_YEAR))
-        if len(downside) > 1 else 0.0
+        float(np.std(downside, ddof=1) * np.sqrt(PERIODS_PER_YEAR)) if len(downside) > 1 else 0.0
     )
     summary["var_95"], summary["cvar_95"] = M.var_cvar(returns, 0.05)
     summary["tail_ratio"] = M.tail_ratio(returns)
@@ -204,8 +303,7 @@ def _fill_distribution(summary: dict, returns: np.ndarray) -> None:
     summary["average_up_day"] = float(np.mean(pos_rets)) if len(pos_rets) else 0.0
     summary["average_down_day"] = float(np.mean(neg_rets)) if len(neg_rets) else 0.0
     summary["win_loss_ratio"] = (
-        (summary["average_up_day"] / abs(summary["average_down_day"]))
-        if summary["average_down_day"] else 0.0
+        (summary["average_up_day"] / abs(summary["average_down_day"])) if summary["average_down_day"] else 0.0
     )
     summary["skew"] = M.skew(returns)
     summary["kurtosis"] = M.kurtosis(returns)
@@ -222,13 +320,42 @@ def _ib_returns(curve: pd.DataFrame) -> np.ndarray:
     return returns
 
 
-def _futu_returns(curve: pd.DataFrame) -> np.ndarray:
-    """(nav_t - nav_{t-1}) / nav_{t-1}. returns[0] = 0."""
+def _futu_returns(curve: pd.DataFrame, flows_per_day: "pd.Series | None" = None) -> np.ndarray:
+    """Flow-adjusted daily return: ``r_t = (NAV_t - NAV_{t-1} - flow_t) / NAV_{t-1}``.
+
+    ``flows_per_day`` is signed (deposit = +, withdrawal = -). ``returns[0] = 0``
+    by convention (no prior NAV to chain from).
+
+    Off-calendar flow handling: IB Flex CashTransactions can be timestamped on
+    weekends or US holidays (banks settle 24/7 even when exchanges don't), but
+    ``load_nav_curve`` only emits trading-day rows. We aggregate each flow into
+    the next curve date >= flow_date so a Saturday deposit is attributed to the
+    following Monday's NAV interval. A naive exact-date reindex would silently
+    drop the weekend flow and Monday's NAV jump (which includes the deposit)
+    would mis-attribute as investment performance — biasing TWR upward.
+    Flows past the last curve date have no interval to attribute to and are
+    dropped (matches the prior reindex behavior at the tail end).
+    """
     nav = curve["nav"].astype(float).to_numpy()
     if len(nav) < 1:
         return np.array([])
     prev = np.concatenate(([nav[0]], nav[:-1]))
-    returns = np.where(prev > 0, (nav - prev) / prev, 0.0)
+
+    if flows_per_day is not None and not flows_per_day.empty:
+        # np.searchsorted needs sorted curve dates (load_nav_curve orders ASC).
+        # side='left' returns the position of the first curve date >= flow date,
+        # which is exactly the NAV interval that captures the flow.
+        curve_dates = np.asarray(curve["date"].tolist())
+        flow_dates = np.asarray(list(flows_per_day.index))
+        positions = np.searchsorted(curve_dates, flow_dates, side="left")
+        flows_aligned = np.zeros(len(nav), dtype=float)
+        for pos, val in zip(positions, flows_per_day.to_numpy(dtype=float)):
+            if pos < len(nav):
+                flows_aligned[pos] += val
+    else:
+        flows_aligned = np.zeros(len(nav), dtype=float)
+
+    returns = np.where(prev > 0, (nav - prev - flows_aligned) / prev, 0.0)
     returns[0] = 0.0
     return returns
 
@@ -311,8 +438,7 @@ def _futu_official_performance(curve: pd.DataFrame, cashflows: list[dict]) -> Fu
     )
 
 
-def _build_series(curve: pd.DataFrame, bench_df: pd.DataFrame | None,
-                  returns: np.ndarray) -> list[dict[str, Any]]:
+def _build_series(curve: pd.DataFrame, bench_df: pd.DataFrame | None, returns: np.ndarray) -> list[dict[str, Any]]:
     """Wire-shape series. daily_return = returns[i] (correction #6)."""
     nav = curve["nav"].astype(float).to_numpy()
     peak = np.maximum.accumulate(nav)
@@ -330,14 +456,19 @@ def _build_series(curve: pd.DataFrame, bench_df: pd.DataFrame | None,
         bret = None
         if close is not None and prev_close is not None and prev_close != 0:
             bret = (close - prev_close) / prev_close
-        out.append({
-            "date": str(d),
-            "equity": float(nav[i]),
-            "daily_return": float(returns[i]) if i < len(returns) else None,
-            "drawdown": float(drawdown[i]),
-            "benchmark_close": close,
-            "benchmark_return": bret,
-        })
+        out.append(
+            {
+                "date": str(d),
+                "equity": float(nav[i]),
+                "daily_return": float(returns[i]) if i < len(returns) else None,
+                "drawdown": float(drawdown[i]),
+                "benchmark_close": close,
+                "benchmark_return": bret,
+                # Pass-3 A4: surfaces source mix so the freshness subtitle can
+                # show the user that intraday + close coexist after 17:30 ET.
+                "source": row.get("source") if "source" in curve.columns else None,
+            }
+        )
         if close is not None:
             prev_close = close
     return out
@@ -351,12 +482,44 @@ def _bench_total_return(bench_df: pd.DataFrame | None) -> float | None:
     return (last - first) / first if first else None
 
 
+def _sanitize_nan(obj: Any) -> Any:
+    """Recursively replace NaN/Inf floats with None.
+
+    FastAPI's default JSONResponse refuses to encode NaN. Long inception-to-date
+    windows on sparse-NAV scopes hit metric edge cases (zero-variance windows,
+    div-by-zero in skew/kurtosis) that produce NaN; without this sanitizer
+    those requests return HTTP 500. Defensive boundary at the route exit.
+    """
+    if isinstance(obj, dict):
+        return {k: _sanitize_nan(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_nan(v) for v in obj]
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    return obj
+
+
 async def compute(
-    engine: AsyncEngine, scope: AccountScope, *, ib_pool=None, as_of: date | None = None,
+    engine: AsyncEngine,
+    scope: AccountScope,
+    *,
+    ib_pool=None,
+    as_of: date | None = None,
+    period: str = "YTD",
 ) -> dict[str, Any]:
-    """Build the PerformanceData dict for one (broker, account_env, broker_account)."""
-    period_start = _period_start(as_of)
-    curve = await load_nav_curve(engine, scope, period_start)
+    """Build the PerformanceData dict for one (broker, account_env, broker_account).
+
+    ``period`` ∈ {"1M", "3M", "YTD", "All"}; case-insensitive. Default "YTD"
+    preserves prior behavior. "All" reads the scope's inception from
+    nav_history. Raises ``InvalidPeriodError`` on unknown values.
+    """
+    from xenon.api.services.performance_periods import resolve_period_start
+    from xenon.db.queries.nav_history import load_inception_date
+
+    as_of_d = as_of or current_session_date_et()
+    inception = await load_inception_date(engine, scope)
+    period_start = resolve_period_start(period, as_of=as_of_d, inception=inception)
+    curve = await load_nav_curve(engine, scope, period_start, period_end=as_of_d)
     days_collected = len(curve)
     min_curve = _env_int("XENON_PERF_MIN_DAYS_CURVE", 5)
     min_metrics = _env_int("XENON_PERF_MIN_DAYS_METRICS", 30)
@@ -374,32 +537,51 @@ async def compute(
 
     futu_official: FutuOfficialPerformance | None = None
     if scope.broker == "IB":
-        returns = _ib_returns(curve)
+        # IB branch: load CashTransactions (Deposits/Withdrawals) from
+        # xenon.ib_cash_flow — sourced from IB Flex via the "account" saved
+        # query — and adjust daily returns to isolate investment-driven
+        # performance. Falls through to flows-empty when no rows ingested yet.
+        from xenon.api.services.performance_ib_flows import load_ib_flows_per_day
+
+        flows_per_day = await load_ib_flows_per_day(engine, scope, since=period_start, until=as_of_d)
+        returns = _futu_returns(curve, flows_per_day)
     else:
-        cashflows = await list_cashflows(
-            engine,
-            scope,
-            since=datetime.combine(period_start, time.min, tzinfo=timezone.utc),
+        # FUTU branch: load cash flows for the window and adjust daily returns
+        # so they isolate investment-driven performance from external flows.
+        from xenon.api.services.performance_futu_flows import (
+            load_futu_flows_per_day,
         )
-        futu_official = _futu_official_performance(curve, cashflows)
-        returns = futu_official.returns
+
+        flows_per_day = await load_futu_flows_per_day(engine, scope, since=period_start, until=as_of_d)
+        returns = _futu_returns(curve, flows_per_day)
 
     nav = curve["nav"].astype(float).to_numpy()
     summary = _base_summary(nav, days_collected)
-    if futu_official is not None:
-        summary["pnl"] = futu_official.income
-        summary["total_return"] = futu_official.time_weighted_return
-        summary["simple_return"] = futu_official.simple_return
-        summary["time_weighted_return"] = futu_official.time_weighted_return
-        summary["net_inflow"] = futu_official.net_inflow
+    _fill_return_flavors(summary, curve, returns, flows_per_day)
 
     warnings: list[str] = []
     metrics_unlocked = days_collected >= min_metrics
-    ib_mask = scope.broker == "IB" and _ib_should_mask_metrics()
+    futu_mask = False  # PR-2: lifted now that flow-adjusted returns + IRR ship
+    # IB now has flow-adjusted returns + IRR via xenon.ib_cash_flow (sourced
+    # from IB Flex Deposits/Withdrawals). The mask still applies when the
+    # XENON_IB_DAILYPNL_INCLUDES_CASHFLOWS env gate hasn't been disabled, but
+    # the data path is wired.
+    ib_mask = scope.broker == "IB" and _ib_should_mask_metrics() and (flows_per_day is None or flows_per_day.empty)
     if ib_mask:
         warnings.append(
-            "IB TWR requires cash-flow tracking — follow-up. "
-            "See docs/superpowers/reports/2026-06-01-ib-dailypnl-verification.md."
+            "IB risk metrics masked: cash flow ingestion incomplete. "
+            "Backfill xenon.ib_cash_flow from IB Flex CashTransactions."
+        )
+    if scope.broker == "IB" and flows_per_day is not None and not flows_per_day.empty:
+        warnings.append(
+            "IB returns are flow-adjusted via xenon.ib_cash_flow (Deposits/Withdrawals from IB Flex CashTransactions)."
+        )
+    if scope.broker == "FUTU":
+        # Soft note — risk metrics ship now; operator should know the
+        # honest-return backbone is xenon.futu_cash_flow.
+        warnings.append(
+            "FUTU returns are flow-adjusted via xenon.futu_cash_flow. "
+            "Simple total return uses retail convention; TWR / IRR also shown."
         )
 
     risk_masked = ib_mask or not metrics_unlocked
@@ -422,38 +604,38 @@ async def compute(
             warnings.append(f"benchmark_unavailable: {bench_err}")
 
     # Low-confidence indicator (spec §4)
-    summary["low_confidence"] = (
-        not risk_masked and metrics_unlocked and days_collected < low_conf_threshold
-    )
+    summary["low_confidence"] = not risk_masked and metrics_unlocked and days_collected < low_conf_threshold
     if summary["low_confidence"]:
         summary["sharpe_se"] = M.sharpe_se(days_collected, PERIODS_PER_YEAR)
         summary["sortino_se"] = M.sharpe_se(days_collected, PERIODS_PER_YEAR)
 
     series = _build_series(curve, bench_df, returns)
 
-    return {
-        "status": "ok",
-        "as_of": str(current_session_date_et()),
-        "last_sync": str(curve["date"].iloc[-1]),
-        "period_start": str(period_start),
-        "period_end": str(curve["date"].iloc[-1]),
-        "period_label": "YTD RETURN" if scope.broker == "FUTU" else _period_label(curve["date"].iloc[0]),
-        "scope": {
-            "broker": scope.broker,
-            "account_env": scope.account_env,
-            "broker_account": scope.broker_account,
-        },
-        "currency": "USD",
-        "benchmark": "SPY" if bench_df is not None and not bench_df.empty else None,
-        "benchmark_total_return": _bench_total_return(bench_df),
-        "trades_source": "nav_history",
-        "methodology": {
-            "basis": "Futu official TWR" if scope.broker == "FUTU" else "NAV change",
-            "annualization_periods": PERIODS_PER_YEAR,
-        },
-        "price_sources": {"primary": "nav_history", "benchmark": "ib_historical_daily"},
-        "summary": summary,
-        "series": series,
-        "warnings": warnings,
-        "contracts_missing_history": [],
-    }
+    return _sanitize_nan(
+        {
+            "status": "ok",
+            "as_of": str(current_session_date_et()),
+            "last_sync": str(curve["date"].iloc[-1]),
+            "period_start": str(period_start),
+            "period_end": str(curve["date"].iloc[-1]),
+            "period_label": _period_label(period),
+            "scope": {
+                "broker": scope.broker,
+                "account_env": scope.account_env,
+                "broker_account": scope.broker_account,
+            },
+            "currency": "USD",
+            "benchmark": "SPY" if bench_df is not None and not bench_df.empty else None,
+            "benchmark_total_return": _bench_total_return(bench_df),
+            "trades_source": "nav_history",
+            "methodology": {
+                "basis": "Time-Weighted Return (TWR)",
+                "annualization_periods": PERIODS_PER_YEAR,
+            },
+            "price_sources": {"primary": "nav_history", "benchmark": "ib_historical_daily"},
+            "summary": summary,
+            "series": series,
+            "warnings": warnings,
+            "contracts_missing_history": [],
+        }
+    )

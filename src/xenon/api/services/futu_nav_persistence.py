@@ -7,6 +7,7 @@ Pre-execution corrections applied:
   - #4 race-safe cross-env guard (catch IntegrityError + re-query → 409)
   - #18 SIMULATE→"paper" via account_scope.env_from_trd_env
 """
+
 from __future__ import annotations
 
 import logging
@@ -106,9 +107,7 @@ async def persist_futu_nav(
         logger.warning("persist_futu_nav skipped: _acc_id is None")
         return
     if matched_trd_env not in {"REAL", "SIMULATE"}:
-        logger.warning(
-            "persist_futu_nav skipped: unknown matched_trd_env=%r", matched_trd_env
-        )
+        logger.warning("persist_futu_nav skipped: unknown matched_trd_env=%r", matched_trd_env)
         return
     net_liq = _safe_extract_net_liq(payload)
     if net_liq is None:
@@ -122,46 +121,22 @@ async def persist_futu_nav(
     )
     today = current_session_date_et()
 
+    from decimal import Decimal
+
+    from xenon.utils.portfolio_loader import upsert_nav_async
+
+    # _prev_nav uses a short read-only transaction; the upsert opens its own.
     async with engine.begin() as conn:
-        # Defense-in-depth app-level guard (Decisions §13).
-        existing = await _existing_account_env(
-            conn, scope.broker, scope.broker_account, today
-        )
-        if existing is not None and existing != scope.account_env:
-            raise NavAccountEnvConflict(scope, existing, today)
-
         prev_nav = await _prev_nav(conn, scope, today)
-        daily_pnl = (net_liq - prev_nav) if prev_nav is not None else None
+    daily_pnl = (net_liq - prev_nav) if prev_nav is not None else None
 
-        # Race-safe upsert: catch the unique-index violation that fires if a
-        # concurrent writer raced past the app-level guard and inserted a row
-        # with a different account_env.
-        stmt = (
-            pg_insert(nav_history)
-            .values(
-                broker=scope.broker,
-                account_env=scope.account_env,
-                broker_account=scope.broker_account,
-                date=today,
-                nav=net_liq,
-                daily_pnl=daily_pnl,
-                source="intraday",
-            )
-            .on_conflict_do_update(
-                index_elements=["broker", "account_env", "broker_account", "date"],
-                set_={"nav": net_liq, "daily_pnl": daily_pnl, "source": "intraday"},
-            )
-        )
-        try:
-            await conn.execute(stmt)
-        except sa.exc.IntegrityError as exc:
-            # Re-query to determine the winner's env and surface a clean 409.
-            # Use a fresh begin() since the original transaction is poisoned.
-            await conn.rollback()
-            async with engine.begin() as conn2:
-                winner_env = await _existing_account_env(
-                    conn2, scope.broker, scope.broker_account, today
-                )
-            if winner_env is not None and winner_env != scope.account_env:
-                raise NavAccountEnvConflict(scope, winner_env, today) from exc
-            raise
+    # Pass-2 T6: delegate to async wrapper. Race-safe pattern (SELECT +
+    # IntegrityError catch + re-query winner) lives inside the shared helper.
+    await upsert_nav_async(
+        engine,
+        scope=scope,
+        day=today,
+        nav=Decimal(str(net_liq)),
+        daily_pnl=Decimal(str(daily_pnl)) if daily_pnl is not None else None,
+        source="intraday",
+    )

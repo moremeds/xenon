@@ -198,42 +198,24 @@ async def upsert_nav(
     broker: str = "IB",
     account_env: str = "legacy_unknown",
     broker_account: str = "legacy_unknown",
+    source: str | None = None,
 ) -> None:
-    stmt = pg_insert(nav_history).values(
-        broker=broker,
-        account_env=account_env,
-        broker_account=broker_account,
-        date=day,
-        nav=nav,
-        daily_pnl=daily_pnl,
-        total=total,
-        cash=cash,
-        stock_value=stock_value,
-        options_value=options_value,
-    )
-    set_columns: dict[str, object] = {"nav": stmt.excluded.nav}
-    # Only overwrite columns when this caller actually has values —
-    # ib_sync's daily upsert sends nav only; the IB Flex importer sends the
-    # full breakdown. Skipping NULLs preserves whichever source last filled them.
-    if daily_pnl is not None:
-        set_columns["daily_pnl"] = stmt.excluded.daily_pnl
-    if total is not None:
-        set_columns["total"] = stmt.excluded.total
-    if cash is not None:
-        set_columns["cash"] = stmt.excluded.cash
-    if stock_value is not None:
-        set_columns["stock_value"] = stmt.excluded.stock_value
-    if options_value is not None:
-        set_columns["options_value"] = stmt.excluded.options_value
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[
-            nav_history.c.broker,
-            nav_history.c.account_env,
-            nav_history.c.broker_account,
-            nav_history.c.date,
-        ],
-        set_=set_columns,
-    )
+    """Legacy connection-based async writer.
+
+    Pass-2 T4: delegates to ``xenon.utils.portfolio_loader._build_upsert_stmt``
+    so the single ``pg_insert(nav_history)`` surface stays in portfolio_loader.
+    The connection-scoped signature is preserved because callers (notably
+    ``api.routes.portfolio_state``) own the outer transaction.
+
+    Skips the cross-env guard because the caller owns the transaction and
+    is responsible for the guard. New code should use
+    ``xenon.utils.portfolio_loader.upsert_nav_async(engine, ...)`` instead.
+    """
+    from xenon.execution.account_scope import AccountScope
+    from xenon.utils.portfolio_loader import _build_upsert_stmt
+
+    scope = AccountScope(broker=broker, account_env=account_env, broker_account=broker_account)
+    stmt = _build_upsert_stmt(scope, day, nav, daily_pnl, total, cash, stock_value, options_value, source)
     await conn.execute(stmt)
 
 

@@ -173,20 +173,29 @@ async def _upsert_nav_history(
     scope: AccountScope,
     rows: list[dict],
 ) -> int:
+    """Backward-walk persistence — delegates each row to the unified writer.
+
+    Pass-2 (writer unification): batch insert replaced with per-row
+    ``upsert_nav_async`` so the single ``pg_insert(nav_history)`` surface stays
+    in ``portfolio_loader``. The cost is N transactions instead of 1 for a
+    backfill that runs once per FUTU account — acceptable for the audit
+    guarantee. Rows already carry per-day ``source`` (intraday) so the new
+    5-col PK semantics (Pass-2 E1-a) apply.
+    """
     if not rows:
         return 0
-    stmt = pg_insert(nav_history).values(rows)
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["broker", "account_env", "broker_account", "date"],
-        set_={
-            "nav": stmt.excluded.nav,
-            "daily_pnl": stmt.excluded.daily_pnl,
-            "source": stmt.excluded.source,
-        },
-    )
-    async with engine.begin() as conn:
-        result = await conn.execute(stmt)
-    return result.rowcount or len(rows)
+    from xenon.utils.portfolio_loader import upsert_nav_async
+
+    for row in rows:
+        await upsert_nav_async(
+            engine,
+            scope=scope,
+            day=row["date"],
+            nav=row["nav"],
+            daily_pnl=row.get("daily_pnl"),
+            source=row.get("source"),
+        )
+    return len(rows)
 
 
 async def backfill_futu_nav(

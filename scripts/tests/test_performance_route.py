@@ -4,6 +4,7 @@ Pattern follows test_server_futu_routes.py — boot the FastAPI app in test
 mode so lifespan skips IB pool startup; mock the cache/service/Futu
 singleton for route-plumbing tests.
 """
+
 from __future__ import annotations
 
 import os
@@ -61,7 +62,7 @@ def test_performance_ib_default_returns_payload(client: TestClient) -> None:
 def test_performance_scope_passes_ib_account_scope_to_service(client: TestClient) -> None:
     captured: dict[str, AccountScope] = {}
 
-    async def _fake(engine, scope, *, ib_pool=None):
+    async def _fake(engine, scope, *, ib_pool=None, period="YTD"):
         captured["scope"] = scope
         return {"status": "ok", "summary": {}, "series": [], "warnings": [], "scope": scope.as_dict()}
 
@@ -107,7 +108,7 @@ def test_performance_ib_falls_back_to_env_when_app_state_account_empty(
 
     captured: dict[str, AccountScope] = {}
 
-    async def _fake(engine, scope, *, ib_pool=None):
+    async def _fake(engine, scope, *, ib_pool=None, period="YTD"):
         captured["scope"] = scope
         return {"status": "ok", "summary": {}, "series": [], "warnings": [], "scope": scope.as_dict()}
 
@@ -160,12 +161,14 @@ def test_performance_futu_resolves_scope_from_matched_account(client: TestClient
 
     captured: dict[str, AccountScope] = {}
 
-    async def _fake(engine, scope, *, ib_pool=None):
+    async def _fake(engine, scope, *, ib_pool=None, period="YTD"):
         captured["scope"] = scope
         return {"status": "ok", "summary": {}, "series": [], "warnings": [], "scope": scope.as_dict()}
 
-    with patch("xenon.api.server._get_futu_client", return_value=fake_client), \
-         patch("xenon.api.routes.performance.cached_compute", new=_fake):
+    with (
+        patch("xenon.api.server._get_futu_client", return_value=fake_client),
+        patch("xenon.api.routes.performance.cached_compute", new=_fake),
+    ):
         resp = client.get("/performance?broker=FUTU")
     assert resp.status_code == 200, resp.text
     assert captured["scope"].broker == "FUTU"
@@ -181,12 +184,14 @@ def test_performance_futu_simulate_maps_to_paper(client: TestClient) -> None:
 
     captured: dict[str, AccountScope] = {}
 
-    async def _fake(engine, scope, *, ib_pool=None):
+    async def _fake(engine, scope, *, ib_pool=None, period="YTD"):
         captured["scope"] = scope
         return {"status": "ok", "summary": {}, "series": [], "warnings": [], "scope": scope.as_dict()}
 
-    with patch("xenon.api.server._get_futu_client", return_value=fake_client), \
-         patch("xenon.api.routes.performance.cached_compute", new=_fake):
+    with (
+        patch("xenon.api.server._get_futu_client", return_value=fake_client),
+        patch("xenon.api.routes.performance.cached_compute", new=_fake),
+    ):
         resp = client.get("/performance?broker=FUTU")
     assert resp.status_code == 200
     # Correction #18: SIMULATE → "paper" (aligned with IB convention)
@@ -216,8 +221,10 @@ def test_futu_sync_calls_persist_futu_nav(client: TestClient) -> None:
     fake_client.fetch_portfolio.return_value = fake_payload
 
     persist_mock = AsyncMock()
-    with patch("xenon.api.server._get_futu_client", return_value=fake_client), \
-         patch("xenon.api.services.futu_nav_persistence.persist_futu_nav", new=persist_mock):
+    with (
+        patch("xenon.api.server._get_futu_client", return_value=fake_client),
+        patch("xenon.api.services.futu_nav_persistence.persist_futu_nav", new=persist_mock),
+    ):
         resp = client.post("/futu/sync")
     assert resp.status_code == 200
     persist_mock.assert_called_once()
@@ -239,11 +246,13 @@ def test_futu_sync_persist_conflict_returns_409(client: TestClient) -> None:
     }
     scope = AccountScope("FUTU", "live", "12345")
     conflict = NavAccountEnvConflict(scope, "paper", date(2026, 6, 1))
-    with patch("xenon.api.server._get_futu_client", return_value=fake_client), \
-         patch(
-             "xenon.api.services.futu_nav_persistence.persist_futu_nav",
-             new=AsyncMock(side_effect=conflict),
-         ):
+    with (
+        patch("xenon.api.server._get_futu_client", return_value=fake_client),
+        patch(
+            "xenon.api.services.futu_nav_persistence.persist_futu_nav",
+            new=AsyncMock(side_effect=conflict),
+        ),
+    ):
         resp = client.post("/futu/sync")
     assert resp.status_code == 409
 
@@ -263,11 +272,13 @@ def test_futu_sync_persist_other_failure_still_returns_200(client: TestClient) -
         "account_summary": {"net_liquidation": 100000.0},
         "warnings": [],
     }
-    with patch("xenon.api.server._get_futu_client", return_value=fake_client), \
-         patch(
-             "xenon.api.services.futu_nav_persistence.persist_futu_nav",
-             new=AsyncMock(side_effect=RuntimeError("transient db hiccup")),
-         ):
+    with (
+        patch("xenon.api.server._get_futu_client", return_value=fake_client),
+        patch(
+            "xenon.api.services.futu_nav_persistence.persist_futu_nav",
+            new=AsyncMock(side_effect=RuntimeError("transient db hiccup")),
+        ),
+    ):
         resp = client.post("/futu/sync")
     assert resp.status_code == 200
     assert resp.json()["ok"] is True

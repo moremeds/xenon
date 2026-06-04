@@ -1,4 +1,5 @@
 """Tests for performance.compute() service (spec § service)."""
+
 import math
 from datetime import date, timedelta
 
@@ -41,8 +42,7 @@ async def test_futu_official_performance_math_matches_help_example():
     assert perf.net_inflow == pytest.approx(1000.0)
 
 
-async def _seed(engine, n, *, broker="IB", env="paper", account="T_PERF",
-                start_nav=50000.0, daily_pnl=100.0):
+async def _seed(engine, n, *, broker="IB", env="paper", account="T_PERF", start_nav=50000.0, daily_pnl=100.0):
     async with engine.begin() as c:
         await c.execute(sa.delete(nav_history).where(nav_history.c.broker_account == account))
         nav = start_nav
@@ -51,8 +51,12 @@ async def _seed(engine, n, *, broker="IB", env="paper", account="T_PERF",
             nav += daily_pnl
             await c.execute(
                 sa.insert(nav_history).values(
-                    broker=broker, account_env=env, broker_account=account,
-                    date=d, nav=str(nav), daily_pnl=str(daily_pnl),
+                    broker=broker,
+                    account_env=env,
+                    broker_account=account,
+                    date=d,
+                    nav=str(nav),
+                    daily_pnl=str(daily_pnl),
                     source="intraday",
                 )
             )
@@ -121,20 +125,41 @@ async def test_IB_returns_use_daily_pnl_over_prev_nav(async_engine, monkeypatch)
     await _purge(async_engine, account)
     async with async_engine.begin() as c:
         # day 1: nav=100, daily_pnl=0
-        await c.execute(sa.insert(nav_history).values(
-            broker="IB", account_env="paper", broker_account=account,
-            date=date(2026, 1, 1), nav="100.0", daily_pnl="0.0", source="intraday",
-        ))
+        await c.execute(
+            sa.insert(nav_history).values(
+                broker="IB",
+                account_env="paper",
+                broker_account=account,
+                date=date(2026, 1, 1),
+                nav="100.0",
+                daily_pnl="0.0",
+                source="intraday",
+            )
+        )
         # day 2: nav=200 (deposit), daily_pnl=5 (only $5 of trading)
-        await c.execute(sa.insert(nav_history).values(
-            broker="IB", account_env="paper", broker_account=account,
-            date=date(2026, 1, 2), nav="200.0", daily_pnl="5.0", source="intraday",
-        ))
+        await c.execute(
+            sa.insert(nav_history).values(
+                broker="IB",
+                account_env="paper",
+                broker_account=account,
+                date=date(2026, 1, 2),
+                nav="200.0",
+                daily_pnl="5.0",
+                source="intraday",
+            )
+        )
         for i in range(3, 8):
-            await c.execute(sa.insert(nav_history).values(
-                broker="IB", account_env="paper", broker_account=account,
-                date=date(2026, 1, i), nav="200.0", daily_pnl="0.0", source="intraday",
-            ))
+            await c.execute(
+                sa.insert(nav_history).values(
+                    broker="IB",
+                    account_env="paper",
+                    broker_account=account,
+                    date=date(2026, 1, i),
+                    nav="200.0",
+                    daily_pnl="0.0",
+                    source="intraday",
+                )
+            )
     data = await compute(async_engine, AccountScope("IB", "paper", account))
     await _purge(async_engine, account)
     series = data["series"]
@@ -148,15 +173,29 @@ async def test_first_IB_return_zeroed(async_engine, monkeypatch):
     account = "T_RET0"
     await _purge(async_engine, account)
     async with async_engine.begin() as c:
-        await c.execute(sa.insert(nav_history).values(
-            broker="IB", account_env="paper", broker_account=account,
-            date=date(2026, 1, 1), nav="100.0", daily_pnl="999.0", source="intraday",
-        ))
+        await c.execute(
+            sa.insert(nav_history).values(
+                broker="IB",
+                account_env="paper",
+                broker_account=account,
+                date=date(2026, 1, 1),
+                nav="100.0",
+                daily_pnl="999.0",
+                source="intraday",
+            )
+        )
         for i in range(2, 8):
-            await c.execute(sa.insert(nav_history).values(
-                broker="IB", account_env="paper", broker_account=account,
-                date=date(2026, 1, i), nav="100.0", daily_pnl="0.0", source="intraday",
-            ))
+            await c.execute(
+                sa.insert(nav_history).values(
+                    broker="IB",
+                    account_env="paper",
+                    broker_account=account,
+                    date=date(2026, 1, i),
+                    nav="100.0",
+                    daily_pnl="0.0",
+                    source="intraday",
+                )
+            )
     data = await compute(async_engine, AccountScope("IB", "paper", account))
     await _purge(async_engine, account)
     assert data["series"][0]["daily_return"] == 0.0  # NOT 999/100=9.99
@@ -165,57 +204,17 @@ async def test_first_IB_return_zeroed(async_engine, monkeypatch):
 # ---------- FUTU masking ----------
 
 
-async def test_FUTU_30_plus_metrics_unmasked_with_official_cashflow_adjusted_returns(async_engine):
-    await _seed(async_engine, 40, broker="FUTU", env="live", account="T_FUTU")
-    data = await compute(async_engine, AccountScope("FUTU", "live", "T_FUTU"))
-    await _purge(async_engine, "T_FUTU")
-    assert data["status"] == "ok"
-    s = data["summary"]
-    assert s["sharpe_ratio"] is not None
-    assert s["annualized_return"] is not None
-    assert "FUTU NAV-change returns include external cash flows" not in " ".join(data["warnings"])
-    assert data["methodology"]["basis"] == "Futu official TWR"
-
-
-async def test_FUTU_uses_official_cashflow_adjusted_twr_and_simple_return(async_engine, monkeypatch):
-    monkeypatch.setenv("XENON_PERF_MIN_DAYS_CURVE", "2")
-    account = "T_FUTU_OFFICIAL"
-    await _purge(async_engine, account)
-    async with async_engine.begin() as c:
-        for d, nav in [
-            (date(2026, 1, 1), "100.0"),
-            (date(2026, 1, 2), "150.0"),
-            (date(2026, 1, 3), "1050.0"),
-            (date(2026, 1, 4), "1050.0"),
-            (date(2026, 1, 5), "1050.0"),
-        ]:
-            await c.execute(sa.insert(nav_history).values(
-                broker="FUTU", account_env="live", broker_account=account,
-                date=d, nav=nav, daily_pnl=None, source="intraday",
-            ))
-        await c.execute(sa.insert(futu_cash_flow).values(
-            broker="FUTU",
-            account_env="live",
-            broker_account=account,
-            futu_flow_id="deposit-1",
-            cashflow_type="Others",
-            amount="1000.0",
-            currency="USD",
-            occurred_at=date(2026, 1, 3),
-            raw={"cashflow_remark": ""},
-        ))
-
-    data = await compute(async_engine, AccountScope("FUTU", "live", account))
-    await _purge(async_engine, account)
-
-    summary = data["summary"]
-    assert summary["pnl"] == pytest.approx(-50.0)
-    assert summary["net_inflow"] == pytest.approx(1000.0)
-    assert summary["simple_return"] == pytest.approx(-50.0 / 600.0)
-    assert summary["total_return"] == pytest.approx((1.5 * (1 - 100 / 650)) - 1)
-    assert data["series"][1]["daily_return"] == pytest.approx(0.5)
-    assert data["series"][2]["daily_return"] == pytest.approx(-100 / 650)
-    assert "FUTU NAV-change returns include external cash flows" not in " ".join(data["warnings"])
+# Two FUTU integration tests previously here
+# (`test_FUTU_30_plus_metrics_unmasked_with_official_cashflow_adjusted_returns`,
+# `test_FUTU_uses_official_cashflow_adjusted_twr_and_simple_return`) asserted
+# the interim half-flow Futu-official formula and the legacy "Futu official TWR"
+# methodology basis. Both are superseded by the PR #130 holistic upgrade which
+# replaces `_futu_official_performance`'s call site with `_futu_returns` +
+# `_fill_return_flavors` (Simple / TWR / IRR) under a uniform "Time-Weighted
+# Return (TWR)" methodology basis. Equivalent integration coverage now lives in
+# `test_performance_futu_unmasked.py::test_futu_deposit_excluded_from_simple_total_return`.
+# The underlying helper `_futu_official_performance` itself is still exercised
+# by `test_futu_official_performance_math_matches_help_example` above.
 
 
 # ---------- low-confidence (spec §4) ----------

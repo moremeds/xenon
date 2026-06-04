@@ -187,18 +187,35 @@ nav_history = Table(
     Column("cash", Numeric(14, 2)),
     Column("stock_value", Numeric(14, 2)),
     Column("options_value", Numeric(14, 2)),
-    # spec §12 / migration 260fabba18d6 — distinguish post-close from intraday snapshots
-    Column("source", Text, nullable=False, server_default=text("'intraday'")),
+    # spec §12 / migration 260fabba18d6 — distinguish post-close from intraday snapshots.
+    # Pass-2 E1(a) / migration 2026_06_03_nav_history_source_in_pk: `source` is part
+    # of the PK so intraday + close rows for the same scope+date coexist as separate
+    # audit rows (nav_history IS the audit table).
+    Column(
+        "source",
+        Text,
+        primary_key=True,
+        nullable=False,
+        server_default=text("'intraday'"),
+    ),
     CheckConstraint("broker IN ('IB', 'FUTU')", name="ck_nav_broker"),
     CheckConstraint(
         "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
         name="ck_nav_account_env",
     ),
     CheckConstraint("source IN ('close', 'intraday')", name="ck_nav_history_source"),
-    # spec Decisions §13 / migration 489476c351cc — atomic dual-curve protection.
+    # spec Decisions §13 + Pass-2 E1(a) — atomic dual-curve protection per source.
     # Excludes account_env so two rows with different envs cannot coexist for
-    # the same (broker, broker_account, date).
-    Index("nav_history_one_env_per_day", "broker", "broker_account", "date", unique=True),
+    # the same (broker, broker_account, date, source). Includes source so
+    # intraday and close coexist for the same scope+date.
+    Index(
+        "nav_history_one_env_per_day_per_source",
+        "broker",
+        "broker_account",
+        "date",
+        "source",
+        unique=True,
+    ),
 )
 
 # ---------- Futu history (read-only persistence) ----------
@@ -268,6 +285,49 @@ futu_cash_flow = Table(
     # M5 walk decides which raw types move NAV externally.
     Index(
         "ix_futu_cash_flow_scope_occurred_at",
+        "broker",
+        "account_env",
+        "broker_account",
+        "occurred_at",
+    ),
+)
+
+
+# IB CashTransactions ingested from IB Flex Web Service (Deposits/Withdrawals
+# section of the "account" saved query). Mirrors xenon.futu_cash_flow for the
+# IB broker. Used by performance.py to flow-adjust the IB headline return so
+# deposits aren't counted as investment performance.
+#
+# Source of truth is IB Flex `CashTransaction` rows. The Type "Deposits/Withdrawals"
+# is the only external category we ingest; everything else (dividends, fees,
+# interest) is internal investment activity and stays out.
+#
+# Amount sign convention matches Futu: positive = money INTO account (deposit),
+# negative = money OUT (withdrawal). Native amounts are stored alongside USD-
+# equivalent so we can audit FX conversion.
+ib_cash_flow = Table(
+    "ib_cash_flow",
+    xenon_metadata,
+    Column("broker", Text, primary_key=True),
+    Column("account_env", Text, primary_key=True),
+    Column("broker_account", Text, primary_key=True),
+    Column("transaction_id", Text, primary_key=True),  # IB's TransactionID
+    Column("txn_type", Text, nullable=False),  # IB's Type field, e.g. "Deposits/Withdrawals"
+    Column("description", Text, nullable=True),  # IB's Description, e.g. "CASH RECEIPTS / ELECTRONIC FUND TRANSFERS"
+    Column("amount_native", Numeric(14, 4), nullable=False),  # signed amount in native currency
+    Column("currency", Text, nullable=False),  # 'USD', 'HKD', etc.
+    Column("amount_usd", Numeric(14, 4), nullable=False),  # signed USD-equivalent
+    Column("fx_rate", Numeric(14, 6), nullable=False),  # native→USD rate applied (1.0 for USD)
+    Column("occurred_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("raw", JSONB, nullable=False),
+    Column("ingested_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    CheckConstraint("broker = 'IB'", name="ck_ib_cash_flow_broker"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim')",
+        name="ck_ib_cash_flow_account_env",
+    ),
+    Index(
+        "ix_ib_cash_flow_scope_occurred_at",
         "broker",
         "account_env",
         "broker_account",

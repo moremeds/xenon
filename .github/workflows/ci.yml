@@ -201,3 +201,5 @@ jobs:
         run: python3.13 scripts/checks/order_path_regime_gate_called.py
       - name: No ib_insync references (migrated to ib_async in PR #81)
         run: python3.13 scripts/checks/no_ib_insync.py
+      - name: nav_history single-writer guard (Pass-2 T4)
+        run: python3.13 scripts/checks/no_pg_insert_nav_history.py

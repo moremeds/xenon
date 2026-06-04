@@ -41,6 +41,7 @@ dependencies = [
     # Microsoft OAuth (IMAP XOAUTH2 — consumer Outlook is OAuth-only)
     "msal>=1.30",
     "exchange-calendars>=4.5,<5.0",
+    "scipy>=1.17.1",
 ]
 
 [project.scripts]
@@ -67,6 +68,7 @@ xenon-portfolio-attrib   = "xenon.reports.portfolio_attribution:main"
 xenon-portfolio-perf     = "xenon.reports.portfolio_performance:main"
 xenon-perf-explainer     = "xenon.reports.performance_explainer_report:main"
 xenon-nav-flex-refresh   = "xenon.jobs.nav_flex_refresh:main"
+xenon-nav-reconcile      = "xenon.jobs.nav_reconcile:main"
 
 [project.optional-dependencies]
 test = [

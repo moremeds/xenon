@@ -18,12 +18,16 @@ import { isPerformanceBehindPortfolioSync } from "@/lib/performanceFreshness";
 import type {
   PerformanceData,
   PerformanceOk,
+  PerformancePeriod,
   PerformanceSeriesPoint,
 } from "@/lib/types";
 import { usePerformance } from "@/lib/usePerformance";
 import { MarketState } from "@/lib/useMarketHours";
 import ChartPanel from "./charts/ChartPanel";
 import MetricDefinitionModal from "./MetricDefinitionModal";
+import PerformanceFreshness from "./PerformanceFreshness";
+import PerformanceHeadlineTooltip from "./PerformanceHeadlineTooltip";
+import PerformancePeriodSelector from "./PerformancePeriodSelector";
 
 const DASH = "---";
 
@@ -308,9 +312,11 @@ export default function PerformancePanel({
   broker = "IB",
 }: PerformancePanelProps) {
   const isMarketActive = marketState !== MarketState.CLOSED;
+  const [period, setPeriod] = useState<PerformancePeriod>("YTD");
   const { data, loading, error, syncNow } = usePerformance(
     isMarketActive,
     broker,
+    period,
   );
   const [activeCardId, setActiveCardId] = useState<string | null>(null);
   const requestedPortfolioSyncRef = useRef<string | null>(null);
@@ -513,12 +519,13 @@ export default function PerformancePanel({
         <div className="section-body performance-hero-body">
           <div>
             <div className="section-label-mono">
-              {ok.methodology.basis.toUpperCase()} {ok.period_label}
+              {ok.period_label.toUpperCase()}
             </div>
             <div className="performance-hero-value">
-              <span className={toneClass(summary.total_return)}>
-                {fmtPct(summary.total_return)}
-              </span>
+              <PerformanceHeadlineTooltip
+                summary={summary}
+                currency={ok.currency}
+              />
             </div>
             <div className="performance-hero-subtitle">
               Ending equity {fmtUsdExact(summary.ending_equity)}
@@ -530,8 +537,10 @@ export default function PerformancePanel({
               ) : null}
               {" · as of "} {ok.as_of}
             </div>
+            <PerformanceFreshness data={data} />
           </div>
           <div className="performance-hero-pills">
+            <PerformancePeriodSelector value={period} onChange={setPeriod} />
             <span className="pill neutral">
               {ok.scope.broker} {ok.scope.account_env.toUpperCase()}
             </span>
