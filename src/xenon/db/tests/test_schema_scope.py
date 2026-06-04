@@ -38,8 +38,10 @@ def test_scope_columns_exist(table):
 
 
 def test_nav_history_pk_is_scoped():
+    # Migration 2026_06_03_nav_src_pk widened the PK so intraday and close NAV
+    # rows for the same scope+date coexist as side-by-side audit rows.
     pk_cols = [c.name for c in nav_history.primary_key.columns]
-    assert pk_cols == ["broker", "account_env", "broker_account", "date"]
+    assert pk_cols == ["broker", "account_env", "broker_account", "date", "source"]
 
 
 def test_order_idempotency_constraint_is_scoped():
