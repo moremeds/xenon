@@ -60,7 +60,7 @@ Key rules:
 - Every query in an active workflow (rehydrate, monitor, working-orders) must filter by scope.
 - `legacy_unknown` rows are excluded from active flows when scope filters are active.
 - Order idempotency key is `(broker, account_env, broker_account, user_id, client_attempt_id)`.
-- `nav_history` PK is `(broker, account_env, broker_account, date)`.
+- `nav_history` PK is `(broker, account_env, broker_account, date, source)` — `source` joined the PK in migration `2026_06_03_nav_src_pk` so intraday and close NAV rows for the same scope+date coexist as audit rows.
 - Use `AccountScope` from `src/xenon/execution/account_scope.py` — never hardcode scope values in query code.
 - FastAPI: depend on `xenon.api.guards.get_account_scope`.
 - Sync subprocesses: env vars `XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`.

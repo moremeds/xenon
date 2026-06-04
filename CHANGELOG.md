@@ -5,8 +5,19 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.2.0] — 2026-06-03
+### Added
 
+- **Performance page — period selector + honest returns + IB cash-flow ingest (#130).** End-to-end rebuild of the `/performance` surface. **Period selector** lets the user pick `1M / 3M / YTD / 1Y / ALL` (default `YTD`); the choice flows from the page → Next route `/api/performance?broker=&period=` → FastAPI `/performance` → the compute layer, which slices `nav_history` accordingly and caches per-(scope, period). **Honest returns** replaces the single ambiguous "total return %" with three flavors computed inside `src/xenon/api/services/performance.py`: `simple_total_return` (raw `(end_nav − start_nav) / start_nav`), `twr_total_return` (Time-Weighted Return, multiplicative chain of daily returns with deposit days excluded), and `irr_total_return` (Money-Weighted IRR, Newton-solved against the cash-flow series). The headline tooltip now surfaces all three plus net deposits, and the methodology basis label is uniformly "Time-Weighted Return (TWR)" across IB and FUTU. **IB cash-flow ingest** parses Section 2 of the existing IB Flex CSV (`Xenon_NAV.csv` deposit/withdrawal/transfer rows) into a new `ib_cash_flow` table, so TWR can correctly null-out the deposit days. Naming compatibility shim mirrors the new field set (`twr_total_return`, `simple_total_return`, `net_external_flows`) onto legacy keys (`total_return`, `simple_return`, `net_inflow`, `pnl`) when flows are present, so the existing `PerformancePanel.tsx` keeps rendering through the transition.
+
+### Changed
+
+- **`nav_history` primary key widened to include `source` (#130).** Migration `2026_06_03_nav_src_pk` drops the 4-column PK `(broker, account_env, broker_account, date)` and recreates it as `(broker, account_env, broker_account, date, source)`. Intraday (`ib_sync`) and post-close (`xenon-nav-flex-refresh`) NAV rows for the same scope+date now coexist as separate audit rows — `nav_history` IS the audit table. The cross-env collision guard is preserved by a new partial unique index `nav_history_one_env_per_day_per_source` on `(broker, broker_account, date, source)`. Downgrade is destructive on `close` twins (the old 4-col PK rejects them as duplicates); the downgrade path DELETEs them first, preserving the intraday row, and operators can re-run `xenon-nav-flex-refresh` to recover close NAVs.
+
+### Fixed
+
+- **`test_nav_history_pk_is_scoped` matches the new 5-column PK.** The post-merge CI run on master HEAD `17de90aa` failed solely because the assertion in `src/xenon/db/tests/test_schema_scope.py:42` still expected the old 4-column PK, while the schema definition and the `2026_06_03_nav_src_pk` migration had already moved to the 5-column form. Assertion updated; `src/xenon/CLAUDE.md` PK note also refreshed.
+
+## [0.2.0] — 2026-06-03
 
 ### Added
 
@@ -16,6 +27,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 - **`v_staleness` no longer reports `health='fresh'` for never-run tickers (codex tribunal — Pass 2 of `/review-cycle`).** The original `CASE WHEN now() - last_run.finished_at > make_interval(secs => c.cadence_seconds * 4) THEN 'stale' ELSE 'fresh' END` mis-classified the NULL case: `now() - NULL` is NULL, `NULL > interval` is NULL, the `CASE` fell through to `ELSE 'fresh'`. A freshly seeded enabled ticker with zero runs would silently report healthy, defeating the operator dashboard. Explicit `WHEN last_run.finished_at IS NULL THEN 'stale'` branch added; verified against tmp DB with never-run, recently-run, and stale fixtures.
 - **`scripts/migrations/option_chain/env.py` handles plain `postgresql://` URLs.** SQLAlchemy defaults `postgresql://` to psycopg2, which xenon does not install. `get_url()` now normalises plain URLs to `postgresql+psycopg://` so a copy-pasted `OPTION_CHAIN_DATABASE_URL` works on the first alembic run; explicit driver prefixes (`+asyncpg`, `+psycopg`) are left alone. Verified end-to-end by running `alembic upgrade head` against a fresh DB with a driverless URL.
+
 ## [0.1.3] — 2026-06-03
 
 ### Added
