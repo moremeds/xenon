@@ -69,6 +69,7 @@ xenon-portfolio-perf     = "xenon.reports.portfolio_performance:main"
 xenon-perf-explainer     = "xenon.reports.performance_explainer_report:main"
 xenon-nav-flex-refresh   = "xenon.jobs.nav_flex_refresh:main"
 xenon-nav-reconcile      = "xenon.jobs.nav_reconcile:main"
+xenon-option-chain-snapshot = "xenon.option_chain_snapshotter.__main__:main"
 
 [project.optional-dependencies]
 test = [
