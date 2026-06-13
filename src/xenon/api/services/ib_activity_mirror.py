@@ -111,6 +111,175 @@ def _safe_fills_tick(client: Any, *, scope: AccountScope, lookback_days: int) ->
         return {"error": str(exc)}
 
 
+TWS_CANCEL_REASON = "TWS_CANCEL_MIRROR"
+
+# submission_ids that were missing from the open-order snapshot on the
+# previous sweep. One-tick grace: an order that fills mid-tick disappears
+# before its fill row lands; cancelling on first disappearance would
+# misclassify it. Module-level on purpose — survives across poller ticks
+# within one FastAPI process; a restart just waits one extra tick.
+_SWEEP_GRACE: set[str] = set()
+
+
+def sweep_disappeared_orders(
+    open_orders: list[dict],
+    *,
+    scope: AccountScope,
+    grace: set[str] | None = None,
+) -> dict:
+    """Transition WORKING/PARTIALLY_FILLED rows that vanished from IB's
+    open-order snapshot to FILLED (fills cover quantity) or CANCELLED
+    (missing two consecutive sweeps). Returns counters for the tick log.
+    """
+    from decimal import Decimal
+
+    from sqlalchemy import func, select
+
+    from xenon.db.engine import get_sync_engine
+    from xenon.db.schema import order_fills, order_submissions
+    from xenon.execution import orders_store
+
+    tracked = _SWEEP_GRACE if grace is None else grace
+    # Match IB's identity logic in sync_open_orders_to_postgres: a BAG
+    # fetched from a non-originating client has orderId=0 and is keyed by
+    # permId; a fresh order has permId=0 until the openOrder ack (the
+    # documented permId=0 race) and is keyed by orderId. An order is
+    # "present" if EITHER its perm_id OR its ib_order_id appears in the
+    # snapshot — otherwise the permId=0 race would mark live orders as
+    # disappeared and cancel them.
+    open_perm_ids = {str(o.get("permId")) for o in open_orders if o.get("permId")}
+    open_order_ids = {str(o.get("orderId")) for o in open_orders if o.get("orderId")}
+
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        rows = (
+            conn.execute(
+                select(
+                    order_submissions.c.submission_id,
+                    order_submissions.c.perm_id,
+                    order_submissions.c.ib_order_id,
+                    order_submissions.c.quantity,
+                    order_submissions.c.security_type,
+                ).where(
+                    order_submissions.c.state.in_(("WORKING", "PARTIALLY_FILLED")),
+                    order_submissions.c.perm_id.isnot(None),
+                    order_submissions.c.broker == scope.broker,
+                    order_submissions.c.account_env == scope.account_env,
+                    order_submissions.c.broker_account == scope.broker_account,
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+    # Safety against the production Gateway-bounce failure mode: an empty
+    # snapshot while WORKING rows exist is far more likely a stale/
+    # post-reconnect read than every order vanishing at once. Skip the
+    # whole sweep — never mass-cancel on an empty snapshot. (Cost: a TWS
+    # cancel of your *only* open order isn't mirrored until the next
+    # non-empty snapshot or boot rehydrate — acceptable vs mass-cancel.)
+    if not open_orders and rows:
+        logger.warning(
+            "cancel_sweep: empty open-order snapshot with %d working row(s) — skipping sweep",
+            len(rows),
+        )
+        return {"filled": 0, "cancelled": 0, "graced": 0, "skipped": "empty_snapshot"}
+
+    filled = cancelled = graced = 0
+    missing_now: set[str] = set()
+
+    for row in rows:
+        sid = row["submission_id"]
+        present = str(row["perm_id"]) in open_perm_ids or (
+            row["ib_order_id"] and str(row["ib_order_id"]) in open_order_ids
+        )
+        if present:
+            tracked.discard(sid)
+            continue
+
+        is_bag = row["security_type"] == "BAG"
+        with engine.connect() as conn:
+            scope_where = (
+                order_fills.c.perm_id == str(row["perm_id"]),
+                order_fills.c.broker == scope.broker,
+                order_fills.c.account_env == scope.account_env,
+                order_fills.c.broker_account == scope.broker_account,
+            )
+            q = select(
+                func.coalesce(func.sum(order_fills.c.qty), 0),
+                func.coalesce(func.sum(order_fills.c.qty * order_fills.c.price), 0),
+            ).where(*scope_where)
+            if is_bag:
+                # Per-leg rows duplicate the envelope economically; count
+                # only the envelope fill against the combo quantity.
+                q = q.where(order_fills.c.metadata["sec_type"].astext == "BAG")
+            fill_qty, fill_value = conn.execute(q).one()
+            # For a BAG we must distinguish "no fills at all" (genuine
+            # cancel candidate) from "leg fills exist but no envelope row"
+            # (ambiguous — IB didn't emit a combo-level execution). The
+            # latter must NOT be auto-cancelled: a filled combo whose
+            # envelope we can't read would be wrongly killed.
+            any_fill = False
+            if is_bag:
+                any_fill = bool(
+                    conn.execute(select(func.count()).select_from(order_fills).where(*scope_where)).scalar()
+                )
+
+        fill_qty = Decimal(str(fill_qty or 0))
+        if is_bag and fill_qty == 0 and any_fill:
+            # Ambiguous combo: leg fills present, envelope absent. Stay
+            # WORKING, hold in grace, and log — favour never wrongly
+            # cancelling a filled combo over closing the gap fast.
+            logger.warning(
+                "cancel_sweep: BAG %s has leg fills but no envelope row — skipping cancel",
+                sid,
+            )
+            missing_now.add(sid)
+            graced += 1
+            continue
+        order_qty = Decimal(str(row["quantity"]))
+        # `fill_qty > 0` guard: a quantity-0 working row (e.g. a fractional
+        # open order truncated by the Integer order_submissions.quantity
+        # column — see Task 5's note) must never be marked FILLED on zero
+        # fills (0 >= 0 would otherwise be True).
+        if fill_qty > 0 and fill_qty >= order_qty:
+            avg = (Decimal(str(fill_value)) / fill_qty) if fill_qty else None
+            orders_store.mark_terminal(
+                submission_id=sid,
+                state="FILLED",
+                reason_code=None,
+                filled_qty=int(fill_qty),
+                avg_fill_price=avg,
+            )
+            orders_store.record_event(sid, "RECONCILED", {"source": "cancel_sweep", "filled_qty": str(fill_qty)})
+            tracked.discard(sid)
+            filled += 1
+        elif sid in tracked:
+            orders_store.mark_terminal(
+                submission_id=sid,
+                state="CANCELLED",
+                reason_code=TWS_CANCEL_REASON,
+                filled_qty=int(fill_qty),
+                avg_fill_price=None,
+            )
+            orders_store.record_event(sid, TWS_CANCEL_REASON, {"source": "cancel_sweep"})
+            tracked.discard(sid)
+            cancelled += 1
+        else:
+            missing_now.add(sid)
+            graced += 1
+
+    # Grace = exactly the ids missing on THIS sweep. Reappeared/filled/
+    # cancelled ids were discarded in the loop; stale ids from prior sweeps
+    # (orders that left WORKING by another path, e.g. user cancel) are
+    # dropped by the clear(). NOTE: module-global _SWEEP_GRACE is shared
+    # process-wide — safe today (one scope per process). If a process ever
+    # polls multiple scopes, key the grace by scope.
+    tracked.clear()
+    tracked.update(missing_now)
+    return {"filled": filled, "cancelled": cancelled, "graced": graced}
+
+
 def run_activity_poll_tick(
     *,
     ib_client_factory: Callable[[], Any],
@@ -133,10 +302,36 @@ def run_activity_poll_tick(
             "fills": {"skipped": True, "reason": str(exc)},
         }
 
-    return {
-        "open_orders": _safe_open_orders_tick(client, scope=scope),
-        "fills": _safe_fills_tick(client, scope=scope, lookback_days=lookback_days),
-    }
+    try:
+        open_orders = _fetch_open_orders(client)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ib_activity_mirror tick: fetch_open_orders failed: %s", exc)
+        open_orders = None
+
+    if open_orders is None:
+        oo_result: dict = {"error": "fetch_open_orders failed"}
+    else:
+        try:
+            oo_result = _sync_open_orders_to_postgres(open_orders, scope=scope)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ib_activity_mirror tick: sync_open_orders_to_postgres failed: %s", exc)
+            oo_result = {"error": str(exc)}
+
+    fills_result = _safe_fills_tick(client, scope=scope, lookback_days=lookback_days)
+
+    # Sweep only when BOTH feeds succeeded this tick — a failed open-order
+    # fetch would otherwise mass-cancel everything, and missing fills data
+    # would misclassify mid-tick fills as cancels.
+    if open_orders is not None and "error" not in fills_result:
+        try:
+            sweep_result = sweep_disappeared_orders(open_orders, scope=scope)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ib_activity_mirror tick: cancel sweep failed: %s", exc)
+            sweep_result = {"error": str(exc)}
+    else:
+        sweep_result = {"skipped": True}
+
+    return {"open_orders": oo_result, "fills": fills_result, "cancel_sweep": sweep_result}
 
 
 async def _default_async_runner(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
@@ -182,14 +377,19 @@ async def activity_poller_loop(
             )
             oo = result.get("open_orders") or {}
             fills = result.get("fills") or {}
+            sweep = result.get("cancel_sweep") or {}
             logger.info(
-                "ib_activity_mirror tick: open_orders[reg=%s upd=%s skip=%s] fills[ins=%s upd=%s rep=%s]",
+                "ib_activity_mirror tick: open_orders[reg=%s upd=%s skip=%s] "
+                "fills[ins=%s upd=%s rep=%s] sweep[f=%s c=%s g=%s]",
                 oo.get("registered"),
                 oo.get("updated"),
                 oo.get("skipped"),
                 fills.get("inserted"),
                 fills.get("updated"),
                 fills.get("replayed"),
+                sweep.get("filled"),
+                sweep.get("cancelled"),
+                sweep.get("graced"),
             )
         except asyncio.CancelledError:
             logger.info("ib_activity_mirror: poller cancelled, exiting")
