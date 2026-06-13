@@ -235,7 +235,7 @@ def _is_closed(fills: list[dict[str, Any]]) -> bool:
     has_buy = False
     has_sell = False
     for fill in fills:
-        qty = int(fill["qty"])
+        qty = Decimal(str(fill["qty"]))
         if fill["side"] == "BUY":
             net[_instrument_key(fill)] += qty
             has_buy = True
@@ -267,7 +267,7 @@ def _costs(
             entry_cash += signed_cash
         else:
             exit_cash += signed_cash
-        net_qty[key] += direction * int(fill["qty"])
+        net_qty[key] += direction * Decimal(str(fill["qty"]))
         if side == "BUY":
             buy_cost += value + commission
         elif side == "SELL":
@@ -289,10 +289,10 @@ def _is_entry_fill(current_net_qty: int, fill_direction: int) -> bool:
     )
 
 
-def _quantity(fills: list[dict[str, Any]]) -> int:
-    by_instrument: dict[str, dict[str, int]] = defaultdict(lambda: {"BUY": 0, "SELL": 0})
+def _quantity(fills: list[dict[str, Any]]) -> Decimal:
+    by_instrument: dict[str, dict[str, Decimal]] = defaultdict(lambda: {"BUY": Decimal(0), "SELL": Decimal(0)})
     for fill in fills:
-        by_instrument[_instrument_key(fill)][fill["side"]] += int(fill["qty"])
+        by_instrument[_instrument_key(fill)][fill["side"]] += Decimal(str(fill["qty"]))
     return max(max(sides.values()) for sides in by_instrument.values())
 
 
@@ -340,7 +340,7 @@ def _metadata(fills: list[dict[str, Any]], *, legacy_id: str | None) -> dict[str
                 "con_id": fill["con_id"],
                 "ticker": fill["ticker"],
                 "side": fill["side"],
-                "qty": int(fill["qty"]),
+                "qty": float(fill["qty"]),
                 "price": str(fill["price"]),
                 "commission": str(fill["commission"] or 0),
                 "filled_at": _iso(fill["filled_at"]),
