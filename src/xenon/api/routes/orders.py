@@ -134,7 +134,7 @@ def _executed_order(row: dict[str, Any]) -> dict[str, Any]:
             expiry=metadata.get("expiry"),
         ),
         "side": "BOT" if side == "BUY" else "SLD" if side == "SELL" else side,
-        "quantity": int(row["qty"]),
+        "quantity": float(row["qty"]),
         "avgPrice": _float_or_none(row.get("price")),
         "commission": _float_or_none(row.get("commission")),
         "realizedPNL": _float_or_none(metadata.get("realized_pnl")),
