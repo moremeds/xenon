@@ -40,6 +40,7 @@ import { useOrderActions } from "@/lib/OrderActionsContext";
 import type { PriceData } from "@/lib/pricesProtocol";
 import { optionKey } from "@/lib/pricesProtocol";
 import { useJournal } from "@/lib/useJournal";
+import { formatEtTime } from "@/lib/timeFormat";
 import { MetricCard, SourceBadge } from "@/components/ui/MetricCard";
 import { SourcePill } from "./SourcePill";
 import { useBlotter } from "@/lib/useBlotter";
@@ -2088,7 +2089,7 @@ function OrdersSections({
                               })()
                             : "—"}
                         </td>
-                        <td>{new Date(group.time).toLocaleTimeString()}</td>
+                        <td>{formatEtTime(group.time)}</td>
                         <td />
                       </tr>
                       {/* Expanded fill detail rows */}
@@ -2158,7 +2159,7 @@ function OrdersSections({
                                   : "—"}
                               </td>
                               <td style={{ color: "var(--text-secondary)" }}>
-                                {new Date(e.time).toLocaleTimeString()}
+                                {formatEtTime(e.time)}
                               </td>
                               <td></td>
                             </tr>
