@@ -137,6 +137,21 @@ if [[ "$_db_name" == "core_dev" ]]; then
   exit 2
 fi
 
+# Refuse to start when the FastAPI port is already bound. Zombie uvicorn
+# pairs (e.g. surviving a deleted worktree) otherwise coexist with the
+# fresh stack and serve stale code/env from a checkout that no longer
+# exists. Detect-and-refuse, never auto-kill — the holder could be the
+# operator's own session or an unrelated service (cleanup is the manual
+# Task-1 step: verify cwd is a dead worktree, then kill). XENON_API_PORT
+# is a test seam; production stays 8321.
+API_PORT="${XENON_API_PORT:-8321}"
+if lsof -nP -iTCP:"$API_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  log_err "FATAL: port $API_PORT already has a listener — a previous xenon-api is still running."
+  lsof -nP -iTCP:"$API_PORT" -sTCP:LISTEN >&2 || true
+  log_err "Kill it first:  kill \$(lsof -t -iTCP:$API_PORT -sTCP:LISTEN)"
+  exit 3
+fi
+
 if [[ -n "${DATABASE_URL:-}" ]]; then
   log_info "Applying alembic migrations…"
   (cd "$REPO_ROOT" && uv run alembic upgrade head)
