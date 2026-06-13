@@ -279,7 +279,7 @@ function deriveGroupDescription(
   return buildExecutedGroupDescription(fills, isClosing, portfolioPositions);
 }
 
-function groupExecutedOrders(
+export function groupExecutedOrders(
   fills: ExecutedOrder[],
   portfolioPositions?: readonly PortfolioPosition[],
 ): PositionFillGroup[] {
@@ -290,7 +290,7 @@ function groupExecutedOrders(
   const real = fills.filter((f) => f.side !== "CANCELLED");
 
   const isClosingFill = (fill: ExecutedOrder): boolean =>
-    fill.contract.secType === "OPT" &&
+    (fill.contract.secType === "OPT" || fill.contract.secType === "STK") &&
     fill.realizedPNL != null &&
     Math.abs(fill.realizedPNL) > 0.01;
 
