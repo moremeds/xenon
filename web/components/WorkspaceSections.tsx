@@ -2352,11 +2352,31 @@ export function HistoricalTradesSection() {
             </div>
           </div>
         )}
-        {!loading && !hasData && !error && data?.configured !== false && (
+        {!loading && !error && data?.flex_error && (
           <div className="alert-item section-message">
-            No historical trades. Click REFRESH to fetch from IB.
+            <div>Flex sync failed: {data.flex_error}</div>
+            {data?.message ? (
+              <div
+                style={{
+                  marginTop: "0.5rem",
+                  opacity: 0.7,
+                  fontSize: "0.85em",
+                }}
+              >
+                {data.message}
+              </div>
+            ) : null}
           </div>
         )}
+        {!loading &&
+          !hasData &&
+          !error &&
+          data?.configured !== false &&
+          !data?.flex_error && (
+            <div className="alert-item section-message">
+              No historical trades. Click REFRESH to fetch from IB.
+            </div>
+          )}
         {!loading && pageRows.length > 0 && (
           <>
             <table>

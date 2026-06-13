@@ -471,6 +471,10 @@ export type BlotterData = {
   source?: BlotterSource;
   /** Human-readable hint shown alongside the empty state when configured=false. */
   message?: string;
+  /** Set when Flex is configured but the fetch failed (e.g. ErrorCode 1001 —
+   * CSV format on the XML-only legacy servlet). Surfaced as an actionable
+   * banner instead of an opaque 502. */
+  flex_error?: string | null;
 };
 
 // Scanner types — Trend Scanner v2

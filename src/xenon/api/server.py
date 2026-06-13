@@ -2859,8 +2859,28 @@ async def blotter_sync(scope=Depends(get_account_scope)):
                 ),
             }
         if pg_has:
+            pg_payload["configured"] = True
+            pg_payload["flex_error"] = result.error
             return pg_payload
-        raise HTTPException(status_code=502, detail=result.error)
+        return {
+            "configured": True,
+            "flex_error": result.error,
+            "as_of": None,
+            "summary": {
+                "closed_trades": 0,
+                "open_trades": 0,
+                "total_commissions": 0,
+                "realized_pnl": 0,
+            },
+            "closed_trades": [],
+            "open_trades": [],
+            "source": "none",
+            "message": (
+                "IB Flex Query is configured but the fetch failed. "
+                "If the error mentions code 1001, set the saved Flex query's "
+                "format to XML in the IB portal (the legacy servlet rejects CSV)."
+            ),
+        }
 
     flex_payload = {**result.data, "configured": True}
     merged = merge_pg_and_flex(pg_payload, flex_payload)
