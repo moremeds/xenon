@@ -507,3 +507,62 @@ for ${sym}"`) survives, but the wrapping prefix is gone.
   `.github/workflows/release.yml` and the Mac mini's launchd / Colima
   setup; cross-references the Tailscale connectivity used today by
   `scripts/cloud.sh`. No order-path or trading-loop coupling — pure infra.
+
+- 2026-06-13 — **Futu order integration (multi-broker order system)** — extend the IB order
+  system to Futu: same behavior, different API. Explicitly deferred from the 2026-06-13
+  order-system repair plan.
+  - **Notes:** Inventory from the 2026-06-13 review: data layer is ~70% ready —
+    `AccountScope` carries `broker: "IB"|"FUTU"`; `order_fills`/`positions`/
+    `account_snapshots`/`nav_history` already allow FUTU; `futu_orders` + `futu_order_fees`
+    tables exist (migration `2026_06_02_futu_orders_and_fees.py`) but have no writer.
+    Blockers: `order_submissions` has `CheckConstraint("broker = 'IB'")` (schema.py ~483)
+    plus IB-only identity columns (`con_id`, `ib_order_id`, `perm_id`, `placing_client_id`);
+    `server.py` `_orders_place_from_body` hard-403s non-IB; execution modules
+    (`ib_place_order`, `ib_order_manage`, `single_leg_rehydrate`, `combo_wizard/ib_adapter`)
+    import `ib_async` directly; `FutuClient` is read-only by design (no order methods wrapped).
+    Natural seam: the subprocess boundary — each broker op is already JSON-in/JSON-out over a
+    CLI; spec the stdout/exit-code contract, then a `xenon-futu-place-order` CLI slots in
+    behind the dispatch point without touching gate logic. Sequencing: (1) generalize
+    order_submissions (lift constraint, generic broker-ref columns), (2) write the subprocess
+    JSON contract doc, (3) Futu read-side order/deal ingestion via `order_list_query`/
+    `deal_list_query` polling into the same UI surfaces, (4) write-side single-leg only
+    (no combo concept on Futu), simulated env first per paper-first rule. The external-fills
+    path is what Futu will stress — hardened by the 2026-06-13 fractional-qty fix.
+
+- 2026-06-13 — **Order-surface hardening deferred from the repair plan**
+  - **Notes:** (a) `permId`/`orderId` serialized as `0` when NULL in
+    `routes/orders.py::_open_order` — indistinguishable from the genuine client-side
+    permId=0 race; emit `null` and update frontend types (also Futu groundwork).
+    (b) Executed-orders grouping uses symbol+minute buckets
+    (`WorkspaceSections.tsx::groupExecutedOrders`) — combos straddling a minute boundary
+    split; group by `perm_id` lineage instead (already on every fill row). Also closes the
+    break-even stock/option close gap (realizedPNL ≈ 0 → currently classified OPEN by the
+    Task-8 heuristic).
+    (c) Persist BAG combo legs on `order_submissions` (JSONB) — unblocks BAG qty-increase
+    modify at restrictive tiers and gives structure classification real order lineage.
+    (d) Structured reason codes for `/blotter` and `/options/chain` subprocess failures
+    (pattern: `READ_ONLY_MODE`/`LIMIT_OFF_TICK`).
+    (e) Cancel-sweep BAG gap (Task 12): a genuinely TWS-cancelled _partially-filled_
+    combo whose envelope fill never materialises stays WORKING until the next boot
+    rehydrate (the sweep deliberately won't cancel it — favouring "never wrongly
+    cancel a filled combo"). Robust fix needs envelope-or-leg reconciliation or a
+    position-change third source like single_leg_rehydrate uses.
+    (f) `ib_option_chain.py` defaults to a hardcoded `--client-id 27` instead of the
+    `client_id="auto"` pool-range allocation the other subprocess CLIs use — a
+    separate clientId-collision path that can also surface as a chain error. Switch
+    to auto allocation (argparse default can't be the string "auto" with `type=int`;
+    make `--client-id` optional and pass `"auto"` when unset).
+    (g) Cancel-sweep state-transition race (Task 12): `orders_store.mark_terminal`
+    does an unconditional `UPDATE ... WHERE submission_id = ?` with no state guard,
+    so a sweep that read a row as WORKING can clobber a state another path
+    (user `/orders/cancel`, fills aggregation) set in the interim. Low probability
+    at the 60s cadence and the clobber is usually benign (both paths agree the order
+    left WORKING), but the correct fix is a conditional update —
+    `WHERE submission_id = ? AND state IN ('WORKING','PARTIALLY_FILLED')` — applied
+    in mark_terminal or a sweep-specific variant.
+    (h) Alembic divergence: remote `core_dev`/`core_test` carry phantom revision
+    `821e494b1b71` (no migration file — documented in the archived 2026-05-10
+    system-consistency handover), which blocks `alembic upgrade head`. The
+    `2026_06_13_fill_qty_numeric` migration was applied to `core_test` via raw DDL as a
+    workaround; resolve the divergence (restore the missing file or `alembic stamp`
+    core_dev to a known-good rev) before the macmini migrator can apply new migrations.
