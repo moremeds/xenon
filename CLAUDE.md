@@ -122,9 +122,10 @@ Quotes, fills, and position updates flow whenever IB Gateway is connected. Outsi
 ## Startup Checklist
 
 - [ ] `scripts/infra/dev.sh paper` (paper IB on local `127.0.0.1:4002`, writes `core_test`) — OR `scripts/infra/dev.sh live` (live IB on macmini `100.66.147.98:4001`, **read-only — `XENON_READ_ONLY=1`**)
+- [ ] Dev stack binds **3200** (Next), **8421** (FastAPI), **8866** (realtime WS). Production launchd keeps 3000/8321/8765; the dev ports are offset so the xenon dev stack coexists with the local radon stack.
 - [ ] If cold start: approve 2FA on IBKR mobile
 - [ ] `psql -h 100.66.147.98 -U xenon_dev core_test -c "SELECT 1"` — verify Postgres reachable. `dev.sh` refuses to start if `DATABASE_URL` points at `core_dev` (prod).
-- [ ] `curl http://localhost:8321/health` — verify `ib_gateway.port_listening: true`
+- [ ] `curl http://localhost:8421/health` — verify `ib_gateway.port_listening: true`
 - [ ] Reconciliation auto-runs on lifespan boot (single-leg rehydrate + fills replay) — **skipped under `XENON_READ_ONLY=1`**
 - [ ] IB activity poller running (60s default — TWS-side edits + fills mirrored into Postgres) — **skipped under `XENON_READ_ONLY=1`**
 - [ ] Check market hours

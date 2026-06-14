@@ -69,9 +69,10 @@ esac
 
 log_info "Trading mode: $MODE  →  IB Gateway $IB_HOST:$IB_PORT"
 
-# Next.js dev port stays on the Next default (3000) for both paper and live.
-# Override via the PORT env var if 3000 is taken.
-# Internal IB Gateway port lives in IB_PORT — `PORT` is reserved for Next.js.
+# Next.js dev port is 3200 for both paper and live (set via `-p 3200` in
+# web/package.json's dev script). 3200/8421/8866 (next/api/realtime) keep the
+# xenon dev stack off radon, which holds the legacy 3000/8321/8765 locally.
+# Internal IB Gateway port lives in IB_PORT — distinct from the web ports.
 
 # 2. Apply pending Postgres migrations. Postgres is the primary persistence
 # layer — running new code against a stale schema causes obscure runtime
@@ -143,8 +144,8 @@ fi
 # exists. Detect-and-refuse, never auto-kill — the holder could be the
 # operator's own session or an unrelated service (cleanup is the manual
 # Task-1 step: verify cwd is a dead worktree, then kill). XENON_API_PORT
-# is a test seam; production stays 8321.
-API_PORT="${XENON_API_PORT:-8321}"
+# is a test seam; the dev stack uses 8421 (production launchd stays 8321).
+API_PORT="${XENON_API_PORT:-8421}"
 if lsof -nP -iTCP:"$API_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   log_err "FATAL: port $API_PORT already has a listener — a previous xenon-api is still running."
   lsof -nP -iTCP:"$API_PORT" -sTCP:LISTEN >&2 || true
@@ -191,12 +192,12 @@ if [[ "$MODE" == "live" ]]; then
   log_warn "  For real live trading, deploy the Docker stack on the macmini instead."
 fi
 
-# Pin Next.js → FastAPI proxy target to IPv4. xenonApi.ts defaults to
-# `http://localhost:8321`, but Node ≥18's fetch (undici) resolves `localhost`
+# Pin Next.js → FastAPI proxy target to IPv4. The dev stack runs uvicorn on
+# 8421 (see API_PORT above). Node ≥18's fetch (undici) resolves `localhost`
 # to IPv6 `::1` on macOS while uvicorn binds only `127.0.0.1`. The dual-stack
 # mismatch causes intermittent 502s after the 5s connect timeout. Forcing the
 # IPv4 literal sidesteps the whole DNS-order issue.
-export XENON_API_URL="${XENON_API_URL:-http://127.0.0.1:8321}"
+export XENON_API_URL="${XENON_API_URL:-http://127.0.0.1:${API_PORT}}"
 
 # Per-mode broker account placeholder. AccountScope.resolve_from_env() raises
 # if XENON_BROKER_ACCOUNT is unset, and many sync subprocesses (ib_sync,

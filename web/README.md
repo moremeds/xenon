@@ -22,14 +22,18 @@ cp .env.example .env
 # 3. Start everything (Next.js + IB price server)
 npm run dev
 
-# 4. Open http://localhost:3000
+# 4. Open http://localhost:3200
 ```
 
 The `npm run dev` command starts three services:
 
-- Next.js dev server (port 3000)
-- IB real-time price server (port 8765)
-- FastAPI server (port 8321) — Python script execution, IB Gateway auto-restart
+- Next.js dev server (port 3200)
+- IB real-time price server (port 8866)
+- FastAPI server (port 8421) — Python script execution, IB Gateway auto-restart
+
+> Dev ports are 3200 / 8421 / 8866. Production launchd keeps the legacy
+> 3000 / 8321 / 8765; the dev offset lets this stack run alongside the local
+> radon stack.
 
 **Note:** Frontend data polling automatically respects market hours. During CLOSED market (weekends, holidays, overnight), all polls stop. During regular hours (9:30 AM - 4:00 PM ET) polling is most frequent. See [Market-Hours Polling](#market-hours-polling) for details.
 
@@ -172,7 +176,7 @@ The realtime server preserves the typed IB contract for stock, option, and index
 **Snapshot (one-time):**
 
 ```bash
-curl -X POST http://localhost:3000/api/prices \
+curl -X POST http://localhost:3200/api/prices \
   -H "Content-Type: application/json" \
   -d '{"symbols": ["AAPL", "MSFT"]}'
 ```
@@ -322,7 +326,7 @@ npm run dev:next
 npm run dev:prices
 
 # Health check (FastAPI + IB Gateway status)
-curl http://localhost:8321/health
+curl http://localhost:8421/health
 
 # Build for production
 npm run build
