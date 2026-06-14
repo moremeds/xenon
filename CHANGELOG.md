@@ -5,6 +5,9 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-06-14
+
+
 ### Added
 
 - **TWS cancel mirroring (#134).** The IB activity poller now sweeps `WORKING`/`PARTIALLY_FILLED` orders that vanish from the open-order snapshot and transitions them to `FILLED` (when `order_fills` for the same `(perm_id, scope)` cover the order quantity) or `CANCELLED` (`reason_code=TWS_CANCEL_MIRROR`, after a one-tick grace), closing the long-standing gap where an order cancelled in TWS stayed `WORKING` forever (`sweep_disappeared_orders` in `ib_activity_mirror.py`). Safety guards: an empty snapshot skips the whole sweep (never mass-cancel on a stale post-reconnect read), presence is matched on perm_id **or** ib_order_id (survives the permId=0 race), a BAG with leg fills but no envelope row stays `WORKING`, and `mark_terminal` gained an optimistic `expected_states` guard so a concurrent fill/cancel is never clobbered. Deliberate limitations: a TWS cancel of your only open order mirrors on the next non-empty sweep or boot rehydrate, not instantly.
@@ -20,7 +23,6 @@ All notable changes to Xenon are documented here. Format loosely based on
 ### Changed
 
 - **Blotter fill times pinned to exchange time (ET) (#134).** `formatEtTime` renders fill timestamps in `America/New_York` rather than browser-local, so a 15:17 ET fill no longer shows as 03:17 for a UTC+8 operator.
-
 ## [0.3.0] — 2026-06-04
 
 ### Added
