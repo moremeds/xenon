@@ -101,7 +101,7 @@ export default function Sidebar({
             const liveness = classifySubscriber(s);
             const age =
               liveness === "offline"
-                ? `offline ${formatAge(s.offlineForMs)}`
+                ? `offline ${formatAge(s.offlineForMs ?? s.lastSeenMsAgo)}`
                 : formatAge(s.lastPongMsAgo);
             return (
               <div className="status-row" key={s.id}>

@@ -243,7 +243,8 @@ export default function WorkspaceShell({
     };
   }, [rawIbConnected]);
 
-  // Realtime WS subscriber health (external ?id= price-stream clients on :8765).
+  // Realtime WS subscriber health (external ?id= price-stream clients; the
+  // realtime relay binds :8765 in prod, :8866 in dev — resolved via runtime file).
   const subscriberHealth = useSubscriberHealth();
 
   // Backfill missing previous-close from Yahoo Finance / UW for day-change calc

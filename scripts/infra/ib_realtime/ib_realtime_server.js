@@ -436,8 +436,6 @@ httpServer.on("upgrade", async (req, socket, head) => {
   }
 });
 
-httpServer.listen(cli.port, WS_HOST);
-
 const clients = new Set();
 const symbolSubscribers = new Map();
 const clientSymbols = new Map();
@@ -546,6 +544,12 @@ let reconnectTimer = null;
 let nextRequestId = 1;
 let statusBroadcastTick = null;
 let ibConnectionIssue = null;
+
+// Start accepting connections only after all module-level state the request
+// handlers close over (clients, subscriberRegistry, clientId, ibConnected) is
+// declared — guards the GET /status handler against a TDZ ReferenceError if an
+// `await` is ever introduced between createServer() and these declarations.
+httpServer.listen(cli.port, WS_HOST);
 
 /* ─── Stale Data Detection ─────────────────────────────────────────────────
  * IB Gateway can enter a state where the TCP connection is alive but the
