@@ -5,8 +5,23 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.3.0] — 2026-06-04
+### Added
 
+- **TWS cancel mirroring (#134).** The IB activity poller now sweeps `WORKING`/`PARTIALLY_FILLED` orders that vanish from the open-order snapshot and transitions them to `FILLED` (when `order_fills` for the same `(perm_id, scope)` cover the order quantity) or `CANCELLED` (`reason_code=TWS_CANCEL_MIRROR`, after a one-tick grace), closing the long-standing gap where an order cancelled in TWS stayed `WORKING` forever (`sweep_disappeared_orders` in `ib_activity_mirror.py`). Safety guards: an empty snapshot skips the whole sweep (never mass-cancel on a stale post-reconnect read), presence is matched on perm_id **or** ib_order_id (survives the permId=0 race), a BAG with leg fills but no envelope row stays `WORKING`, and `mark_terminal` gained an optimistic `expected_states` guard so a concurrent fill/cancel is never clobbered. Deliberate limitations: a TWS cancel of your only open order mirrors on the next non-empty sweep or boot rehydrate, not instantly.
+
+### Fixed
+
+- **Fractional-share fills no longer recorded as `qty=0` (#134).** `order_fills.qty` and `trades.quantity` widened `Integer` → `Numeric(20,8)` (migration `2026_06_13_fill_qty_numeric`); all four `record_fill` feeders — `ib_reconcile`, `single_leg_rehydrate`, `combo_wizard` rehydrate, and `ib_execute` — preserve `Decimal` end to end. Recurring fractional QQQ/SPY buys now show their true quantity and cost in the blotter and in derived `xenon.trades`. A one-shot script (`scripts/migrations/_2026_06_13_repair_zero_qty_fills.py`) patches the historical `qty=0` rows from IB statements.
+- **Stock fills with realized P&L classify as closing (#134).** `isClosingFill` now treats `STK` (not just `OPT`) positions with realized P&L > $0.01 as closing fills in the executed-orders panel.
+- **SPX/NDX/RUT CHAIN tab no longer 502s (#134).** `ib_option_chain` qualifies index symbols as `Index` on their home exchange (CBOE/NASDAQ) with `underlyingSecType="IND"` instead of hardcoding `Stock`/`SMART`; the `/options/chain` route also passes the resolved gateway port (4002 paper / 4001 live) instead of defaulting to 4001.
+- **Flex blotter failures surface an actionable banner instead of an opaque 502 (#134).** `POST /blotter` returns a structured payload (`configured`, `flex_error`, `message`) and the Historical Trades panel renders the error plus the XML-format hint for IB ErrorCode 1001.
+- **`dev.sh` refuses to start when the API port is already bound (#134).** Detects a zombie `uvicorn` on the API port (e.g. one surviving a deleted worktree) and exits with the kill command instead of silently coexisting and serving stale code.
+
+### Changed
+
+- **Blotter fill times pinned to exchange time (ET) (#134).** `formatEtTime` renders fill timestamps in `America/New_York` rather than browser-local, so a 15:17 ET fill no longer shows as 03:17 for a UTC+8 operator.
+
+## [0.3.0] — 2026-06-04
 
 ### Added
 
@@ -19,6 +34,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 ### Fixed
 
 - **`test_nav_history_pk_is_scoped` matches the new 5-column PK.** The post-merge CI run on master HEAD `17de90aa` failed solely because the assertion in `src/xenon/db/tests/test_schema_scope.py:42` still expected the old 4-column PK, while the schema definition and the `2026_06_03_nav_src_pk` migration had already moved to the 5-column form. Assertion updated; `src/xenon/CLAUDE.md` PK note also refreshed.
+
 ## [0.2.0] — 2026-06-03
 
 ### Added
