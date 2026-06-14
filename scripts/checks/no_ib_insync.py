@@ -46,6 +46,7 @@ EXCLUDE_DIRS = {
     ".serena",
     ".pi",
     "archive",  # docs/plans/archive, docs/superpowers/archive, etc.
+    "_archive",  # docs/handovers/_archive, docs/note/_archive — archived historical docs
     "tasks",  # tasks/lessons.md, tasks/PROGRESS.md — historical context
     "output",  # test-output captures
 }
