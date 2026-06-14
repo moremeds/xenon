@@ -98,7 +98,8 @@ function findPortfolioLegDirection(
     for (const leg of position.legs) {
       if (leg.type !== (right === "C" ? "Call" : "Put")) continue;
       if (leg.strike !== strike) continue;
-      if (leg.direction === "LONG" || leg.direction === "SHORT") return leg.direction;
+      if (leg.direction === "LONG" || leg.direction === "SHORT")
+        return leg.direction;
     }
   }
   return null;
@@ -115,7 +116,8 @@ function findSingleStockDirection(
     if (position.legs.length !== 1) continue;
     const leg = position.legs[0];
     if (leg?.type !== "Stock") continue;
-    if (leg.direction === "LONG" || leg.direction === "SHORT") return leg.direction;
+    if (leg.direction === "LONG" || leg.direction === "SHORT")
+      return leg.direction;
   }
   return null;
 }
@@ -137,7 +139,8 @@ function buildSingleOrderSummary(
       strike,
       right,
     );
-    const direction = portfolioDirection ?? (order.action === "BUY" ? "LONG" : "SHORT");
+    const direction =
+      portfolioDirection ?? (order.action === "BUY" ? "LONG" : "SHORT");
     const directionLabel = direction === "LONG" ? "Long" : "Short";
     const optionType = right === "C" ? "Call" : "Put";
 
@@ -145,8 +148,12 @@ function buildSingleOrderSummary(
   }
 
   if (order.contract.secType === "STK") {
-    const portfolioDirection = findSingleStockDirection(portfolioPositions, order.contract.symbol);
-    const direction = portfolioDirection ?? (order.action === "BUY" ? "LONG" : "SHORT");
+    const portfolioDirection = findSingleStockDirection(
+      portfolioPositions,
+      order.contract.symbol,
+    );
+    const direction =
+      portfolioDirection ?? (order.action === "BUY" ? "LONG" : "SHORT");
     return `${direction === "LONG" ? "Long" : "Short"} Stock`;
   }
 
@@ -210,17 +217,23 @@ export function buildExecutedGroupDescription(
   if (!first) return "Unknown";
 
   if (first.contract.secType !== "OPT") {
-    const side = first.side === "BOT"
-      ? (isClosing ? "Closed" : "Bought")
-      : (isClosing ? "Closed" : "Sold");
-    return `${side} ${first.contract.symbol}`;
+    // Single-instrument fills carry no structure to describe. The ticker badge
+    // and OPEN/CLOSE pill already convey symbol and direction, so restating
+    // them ("Bought QQQ") is pure redundancy. Mirror how option rows show a
+    // structure label by showing the instrument type instead.
+    return first.contract.secType === "STK" ? "Stock" : first.contract.secType;
   }
 
   const legs = fills.filter((fill) => fill.contract.secType === "OPT");
   if (legs.length === 0) {
-    const side = first.side === "BOT"
-      ? (isClosing ? "Closed" : "Bought")
-      : (isClosing ? "Closed" : "Sold");
+    const side =
+      first.side === "BOT"
+        ? isClosing
+          ? "Closed"
+          : "Bought"
+        : isClosing
+          ? "Closed"
+          : "Sold";
     return `${side} ${first.contract.symbol}`;
   }
 
@@ -236,39 +249,46 @@ export function buildExecutedGroupDescription(
   const legExpiries: string[] = [];
   for (const legGroup of legGroups.values()) {
     const c = legGroup[0].contract;
-    const right = c.right === "C" || c.right === "CALL"
-      ? "Call"
-      : c.right === "P" || c.right === "PUT"
-        ? "Put"
-        : "Unknown";
+    const right =
+      c.right === "C" || c.right === "CALL"
+        ? "Call"
+        : c.right === "P" || c.right === "PUT"
+          ? "Put"
+          : "Unknown";
     const strike = c.strike != null ? `$${c.strike}` : "Unknown";
 
     if (c.expiry) legExpiries.push(c.expiry);
 
     const explicitDir = inferExecutedLegDirectionFromFills(legGroup, isClosing);
-    const portfolioDir = c.right == null || c.expiry == null || c.strike == null
-      ? null
-      : findPortfolioLegDirection(
-          portfolioPositions,
-          c.symbol,
-          c.expiry,
-          c.strike,
-          c.right === "C" || c.right === "CALL" ? "C" : "P",
-      );
+    const portfolioDir =
+      c.right == null || c.expiry == null || c.strike == null
+        ? null
+        : findPortfolioLegDirection(
+            portfolioPositions,
+            c.symbol,
+            c.expiry,
+            c.strike,
+            c.right === "C" || c.right === "CALL" ? "C" : "P",
+          );
 
     const direction = explicitDir
       ? explicitDir
       : portfolioDir
-        ? (portfolioDir === "LONG" ? "Long" : "Short")
+        ? portfolioDir === "LONG"
+          ? "Long"
+          : "Short"
         : "Long";
 
     const expiryShort = c.expiry ? formatExpiryShort(c.expiry) : "";
-    parts.push(`${direction} ${strike} ${right}${expiryShort ? ` ${expiryShort}` : ""}`);
+    parts.push(
+      `${direction} ${strike} ${right}${expiryShort ? ` ${expiryShort}` : ""}`,
+    );
   }
 
   // If all legs share the same expiry, show it once at structure level instead of per-leg
   const uniqueExpiries = [...new Set(legExpiries)];
-  const sharedExpiry = uniqueExpiries.length === 1 ? formatExpiryShort(uniqueExpiries[0]) : null;
+  const sharedExpiry =
+    uniqueExpiries.length === 1 ? formatExpiryShort(uniqueExpiries[0]) : null;
   const displayParts = sharedExpiry
     ? parts.map((p) => p.replace(` ${sharedExpiry}`, ""))
     : parts;
@@ -298,14 +318,20 @@ export function buildExecutedGroupDescription(
         const right = rights.has("C") ? "Call" : "Put";
         const strikes = [...legGroups.values()].map((g) => ({
           strike: g[0].contract.strike ?? 0,
-          dir: displayParts.find((p) => p.includes(`$${g[0].contract.strike}`))?.startsWith("Long") ? "Long" : "Short",
+          dir: displayParts
+            .find((p) => p.includes(`$${g[0].contract.strike}`))
+            ?.startsWith("Long")
+            ? "Long"
+            : "Short",
         }));
         const longStrike = strikes.find((s) => s.dir === "Long")?.strike ?? 0;
         const shortStrike = strikes.find((s) => s.dir === "Short")?.strike ?? 0;
         if (right === "Call") {
-          structure = longStrike < shortStrike ? "Bull Call Spread" : "Bear Call Spread";
+          structure =
+            longStrike < shortStrike ? "Bull Call Spread" : "Bear Call Spread";
         } else {
-          structure = longStrike > shortStrike ? "Bear Put Spread" : "Bull Put Spread";
+          structure =
+            longStrike > shortStrike ? "Bear Put Spread" : "Bull Put Spread";
         }
       } else {
         structure = "Spread";
@@ -321,7 +347,10 @@ export function buildExecutedGroupDescription(
   return `${base} ${fills[0].contract.symbol} ${structure}${expirySuffix} (${displayParts.join(" / ")})`;
 }
 
-function makeComboLeg(order: OpenOrder, index: number): OptionLegCandidate | null {
+function makeComboLeg(
+  order: OpenOrder,
+  index: number,
+): OptionLegCandidate | null {
   if (order.contract.secType !== "OPT") return null;
   const action = normalizeAction(order.action);
   const right = normalizeRight(order.contract.right);
@@ -440,11 +469,16 @@ function buildComboStructureAndSummary(
   return { structure, summary: `${structure} (${parts.join(" / ")})` };
 }
 
-export function resolveOpenOrderComboPrice(orders: OpenOrder[], prices?: Record<string, PriceData>): number | null {
+export function resolveOpenOrderComboPrice(
+  orders: OpenOrder[],
+  prices?: Record<string, PriceData>,
+): number | null {
   if (!prices) return null;
   if (orders.length === 0) return null;
 
-  const nonZeroLegSizes = orders.map((order) => Math.abs(order.totalQuantity)).filter((q) => q > 0);
+  const nonZeroLegSizes = orders
+    .map((order) => Math.abs(order.totalQuantity))
+    .filter((q) => q > 0);
   if (nonZeroLegSizes.length === 0) return null;
   const baseQuantity = Math.min(...nonZeroLegSizes);
 
@@ -452,18 +486,30 @@ export function resolveOpenOrderComboPrice(orders: OpenOrder[], prices?: Record<
 
   for (const order of orders) {
     if (order.contract.secType !== "OPT") return null;
-    if (order.contract.strike == null || order.contract.right == null || !order.contract.expiry) return null;
+    if (
+      order.contract.strike == null ||
+      order.contract.right == null ||
+      !order.contract.expiry
+    )
+      return null;
 
     const right = normalizeRight(order.contract.right);
     const expiry = normalizeExpiry(order.contract.expiry);
     if (!right || !expiry) return null;
 
     const symbol = order.contract.symbol.toUpperCase();
-    const key = optionKey({ symbol, expiry: expiry.replace(/-/g, ""), strike: order.contract.strike, right });
+    const key = optionKey({
+      symbol,
+      expiry: expiry.replace(/-/g, ""),
+      strike: order.contract.strike,
+      right,
+    });
     const pd = prices[key];
     if (!pd) return null;
 
-    const quote = pd.last ?? (pd.bid == null || pd.ask == null ? null : (pd.bid + pd.ask) / 2);
+    const quote =
+      pd.last ??
+      (pd.bid == null || pd.ask == null ? null : (pd.bid + pd.ask) / 2);
     if (quote == null) return null;
 
     const sign = order.action === "BUY" ? 1 : -1;
@@ -500,7 +546,10 @@ export function buildOpenOrderDisplayRows(
       continue;
     }
 
-    const { structure, summary } = buildComboStructureAndSummary(candidates, portfolioPositions);
+    const { structure, summary } = buildComboStructureAndSummary(
+      candidates,
+      portfolioPositions,
+    );
     if (!structure) {
       continue;
     }
@@ -509,11 +558,15 @@ export function buildOpenOrderDisplayRows(
     const totalQuantity = ordersInCombo[0].totalQuantity;
     const firstOrder = ordersInCombo[0];
 
-    const sameLimit = ordersInCombo.every((o) => o.limitPrice === firstOrder.limitPrice);
+    const sameLimit = ordersInCombo.every(
+      (o) => o.limitPrice === firstOrder.limitPrice,
+    );
     const limitPrice = sameLimit ? firstOrder.limitPrice : null;
 
     const sameTif = ordersInCombo.every((o) => o.tif === firstOrder.tif);
-    const sameStatus = ordersInCombo.every((o) => o.status === firstOrder.status);
+    const sameStatus = ordersInCombo.every(
+      (o) => o.status === firstOrder.status,
+    );
     const symbol = firstOrder.contract.symbol.toUpperCase();
 
     const combo: OpenOrderComboRow = {

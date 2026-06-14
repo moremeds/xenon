@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import desc, select
@@ -17,6 +18,20 @@ from xenon.execution.account_scope import AccountScope
 router = APIRouter()
 
 ACTIVE_STATES = {"PENDING", "WORKING", "PARTIALLY_FILLED"}
+
+_ET_ZONE = ZoneInfo("America/New_York")
+
+
+def _today_et_start_utc(now: datetime | None = None) -> datetime:
+    """Start of the current ET calendar day, as a UTC instant.
+
+    The "Today's Executed Orders" panel and the Realized P&L card both mean the
+    current Eastern trading day; this mirrors web/lib/realized-pnl.ts
+    (fillDateET/todayET) so the executed-fills query agrees with them.
+    """
+    current = (now or datetime.now(timezone.utc)).astimezone(_ET_ZONE)
+    start_et = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start_et.astimezone(timezone.utc)
 
 
 def _int_or_zero(value: Any) -> int:
@@ -191,6 +206,7 @@ def orders_payload_for_scope(scope: AccountScope, *, limit: int = 200) -> dict[s
                     order_fills.c.broker == scope.broker,
                     order_fills.c.account_env == scope.account_env,
                     order_fills.c.broker_account == scope.broker_account,
+                    order_fills.c.filled_at >= _today_et_start_utc(),
                 )
                 .order_by(desc(order_fills.c.filled_at), desc(order_fills.c.exec_id))
                 .limit(limit)

@@ -1,17 +1,28 @@
 import { describe, expect, it } from "vitest";
 import type { ExecutedOrder, OpenOrder, PortfolioPosition } from "../lib/types";
-import { buildExecutedGroupDescription, buildOpenOrderDisplayRows, resolveOpenOrderComboPrice } from "../lib/openOrderCombos";
+import {
+  buildExecutedGroupDescription,
+  buildOpenOrderDisplayRows,
+  resolveOpenOrderComboPrice,
+} from "../lib/openOrderCombos";
 import type { PriceData } from "../lib/pricesProtocol";
 
-function makeOrder(overrides: Partial<OpenOrder> & { symbol?: string; right?: string; strike?: number; expiry?: string } = {}): OpenOrder {
+function makeOrder(
+  overrides: Partial<OpenOrder> & {
+    symbol?: string;
+    right?: string;
+    strike?: number;
+    expiry?: string;
+  } = {},
+): OpenOrder {
   const symbol = overrides.symbol ?? "AAPL";
   const contract: OpenOrder["contract"] = {
     conId: overrides.contract?.conId ?? 1234,
     symbol,
     secType: overrides.contract?.secType ?? "OPT",
-    strike: overrides.contract?.strike ?? (overrides.strike ?? 0),
+    strike: overrides.contract?.strike ?? overrides.strike ?? 0,
     right: overrides.contract?.right ?? overrides.right ?? "C",
-    expiry: overrides.contract?.expiry ?? (overrides.expiry ?? "2026-04-17"),
+    expiry: overrides.contract?.expiry ?? overrides.expiry ?? "2026-04-17",
     ...(overrides.contract ? { comboLegs: overrides.contract.comboLegs } : {}),
   };
 
@@ -36,7 +47,10 @@ function makeOrder(overrides: Partial<OpenOrder> & { symbol?: string; right?: st
 
 function makeStockOrder(overrides: Partial<OpenOrder> = {}): OpenOrder {
   return {
-    ...makeOrder({ ...overrides, totalQuantity: overrides.totalQuantity ?? 20 }),
+    ...makeOrder({
+      ...overrides,
+      totalQuantity: overrides.totalQuantity ?? 20,
+    }),
     contract: {
       conId: overrides.contract?.conId ?? 9999,
       symbol: overrides.contract?.symbol ?? "AAPL",
@@ -44,7 +58,9 @@ function makeStockOrder(overrides: Partial<OpenOrder> = {}): OpenOrder {
       strike: null,
       right: null,
       expiry: null,
-      ...(overrides.contract ? { comboLegs: overrides.contract.comboLegs } : {}),
+      ...(overrides.contract
+        ? { comboLegs: overrides.contract.comboLegs }
+        : {}),
     },
     action: overrides.action ?? "BUY",
   };
@@ -82,7 +98,9 @@ function makePrice(overrides: {
   };
 }
 
-function makePortfolioPosition(overrides: Partial<PortfolioPosition> = {}): PortfolioPosition {
+function makePortfolioPosition(
+  overrides: Partial<PortfolioPosition> = {},
+): PortfolioPosition {
   return {
     id: overrides.id ?? 9001,
     ticker: overrides.ticker ?? "AAPL",
@@ -96,8 +114,26 @@ function makePortfolioPosition(overrides: Partial<PortfolioPosition> = {}): Port
     max_risk: overrides.max_risk ?? null,
     market_value: overrides.market_value ?? 0,
     legs: overrides.legs ?? [
-      { direction: "SHORT", contracts: 10, type: "Put", strike: 85, entry_cost: 0, avg_cost: 0, market_price: 1.2, market_value: 1200 },
-      { direction: "LONG", contracts: 10, type: "Call", strike: 90, entry_cost: 0, avg_cost: 0, market_price: 0.9, market_value: 900 },
+      {
+        direction: "SHORT",
+        contracts: 10,
+        type: "Put",
+        strike: 85,
+        entry_cost: 0,
+        avg_cost: 0,
+        market_price: 1.2,
+        market_value: 1200,
+      },
+      {
+        direction: "LONG",
+        contracts: 10,
+        type: "Call",
+        strike: 90,
+        entry_cost: 0,
+        avg_cost: 0,
+        market_price: 0.9,
+        market_value: 900,
+      },
     ],
     ib_daily_pnl: overrides.ib_daily_pnl ?? null,
     kelly_optimal: overrides.kelly_optimal ?? null,
@@ -107,7 +143,11 @@ function makePortfolioPosition(overrides: Partial<PortfolioPosition> = {}): Port
   };
 }
 
-function makeExecutedFill(overrides: Partial<ExecutedOrder> & { contract?: Partial<ExecutedOrder["contract"]> } = {}): ExecutedOrder {
+function makeExecutedFill(
+  overrides: Partial<ExecutedOrder> & {
+    contract?: Partial<ExecutedOrder["contract"]>;
+  } = {},
+): ExecutedOrder {
   const { contract: contractOverrides, ...rest } = overrides;
   return {
     execId: "exec-1",
@@ -135,8 +175,24 @@ function makeExecutedFill(overrides: Partial<ExecutedOrder> & { contract?: Parti
 describe("buildOpenOrderDisplayRows", () => {
   it("combines short put + long call as a risk reversal", () => {
     const rows = buildOpenOrderDisplayRows([
-      makeOrder({ orderId: 1, permId: 101, action: "SELL", right: "P", strike: 150, expiry: "2026-04-17", totalQuantity: 12 }),
-      makeOrder({ orderId: 2, permId: 102, action: "BUY", right: "C", strike: 165, expiry: "2026-04-17", totalQuantity: 12 }),
+      makeOrder({
+        orderId: 1,
+        permId: 101,
+        action: "SELL",
+        right: "P",
+        strike: 150,
+        expiry: "2026-04-17",
+        totalQuantity: 12,
+      }),
+      makeOrder({
+        orderId: 2,
+        permId: 102,
+        action: "BUY",
+        right: "C",
+        strike: 165,
+        expiry: "2026-04-17",
+        totalQuantity: 12,
+      }),
     ]);
 
     expect(rows).toHaveLength(1);
@@ -154,8 +210,24 @@ describe("buildOpenOrderDisplayRows", () => {
 
   it("keeps short put / long call orientation for a closing risk reversal", () => {
     const rows = buildOpenOrderDisplayRows([
-      makeOrder({ orderId: 1, permId: 101, action: "BUY", right: "P", strike: 85, expiry: "2026-04-17", totalQuantity: 10 }),
-      makeOrder({ orderId: 2, permId: 102, action: "SELL", right: "C", strike: 90, expiry: "2026-04-17", totalQuantity: 10 }),
+      makeOrder({
+        orderId: 1,
+        permId: 101,
+        action: "BUY",
+        right: "P",
+        strike: 85,
+        expiry: "2026-04-17",
+        totalQuantity: 10,
+      }),
+      makeOrder({
+        orderId: 2,
+        permId: 102,
+        action: "SELL",
+        right: "C",
+        strike: 90,
+        expiry: "2026-04-17",
+        totalQuantity: 10,
+      }),
     ]);
 
     expect(rows).toHaveLength(1);
@@ -166,22 +238,61 @@ describe("buildOpenOrderDisplayRows", () => {
     expect(row.structure).toBe("Risk Reversal");
     expect(row.summary).toContain("Short Put 85");
     expect(row.summary).toContain("Long Call 90");
-    expect(row.summary.indexOf("Short Put 85")).toBeLessThan(row.summary.indexOf("Long Call 90"));
+    expect(row.summary.indexOf("Short Put 85")).toBeLessThan(
+      row.summary.indexOf("Long Call 90"),
+    );
   });
 
   it("prefers portfolio leg direction when a risk reversal is closing an existing position", () => {
-    const rows = buildOpenOrderDisplayRows([
-      makeOrder({ orderId: 1, permId: 101, action: "SELL", right: "C", strike: 90, expiry: "2026-04-17", totalQuantity: 10 }),
-      makeOrder({ orderId: 2, permId: 102, action: "BUY", right: "P", strike: 85, expiry: "2026-04-17", totalQuantity: 10 }),
-    ], [
-      makePortfolioPosition({
-        ticker: "AAPL",
-        legs: [
-          { direction: "SHORT", contracts: 10, type: "Put", strike: 85, entry_cost: 0, avg_cost: 0, market_price: 1.2, market_value: 1200 },
-          { direction: "LONG", contracts: 10, type: "Call", strike: 90, entry_cost: 0, avg_cost: 0, market_price: 0.9, market_value: 900 },
-        ],
-      }),
-    ]);
+    const rows = buildOpenOrderDisplayRows(
+      [
+        makeOrder({
+          orderId: 1,
+          permId: 101,
+          action: "SELL",
+          right: "C",
+          strike: 90,
+          expiry: "2026-04-17",
+          totalQuantity: 10,
+        }),
+        makeOrder({
+          orderId: 2,
+          permId: 102,
+          action: "BUY",
+          right: "P",
+          strike: 85,
+          expiry: "2026-04-17",
+          totalQuantity: 10,
+        }),
+      ],
+      [
+        makePortfolioPosition({
+          ticker: "AAPL",
+          legs: [
+            {
+              direction: "SHORT",
+              contracts: 10,
+              type: "Put",
+              strike: 85,
+              entry_cost: 0,
+              avg_cost: 0,
+              market_price: 1.2,
+              market_value: 1200,
+            },
+            {
+              direction: "LONG",
+              contracts: 10,
+              type: "Call",
+              strike: 90,
+              entry_cost: 0,
+              avg_cost: 0,
+              market_price: 0.9,
+              market_value: 900,
+            },
+          ],
+        }),
+      ],
+    );
 
     expect(rows).toHaveLength(1);
     const row = rows[0];
@@ -189,7 +300,9 @@ describe("buildOpenOrderDisplayRows", () => {
     if (row.kind !== "combo") return;
     expect(row.summary).toContain("Short Put 85");
     expect(row.summary).toContain("Long Call 90");
-    expect(row.summary.indexOf("Short Put 85")).toBeLessThan(row.summary.indexOf("Long Call 90"));
+    expect(row.summary.indexOf("Short Put 85")).toBeLessThan(
+      row.summary.indexOf("Long Call 90"),
+    );
   });
 
   it("does not combine same-direction same-right legs", () => {
@@ -205,8 +318,20 @@ describe("buildOpenOrderDisplayRows", () => {
 
   it("does not combine different expiries into one combo", () => {
     const rows = buildOpenOrderDisplayRows([
-      makeOrder({ orderId: 1, action: "SELL", right: "P", strike: 150, expiry: "2026-04-17" }),
-      makeOrder({ orderId: 2, action: "BUY", right: "C", strike: 165, expiry: "2026-05-17" }),
+      makeOrder({
+        orderId: 1,
+        action: "SELL",
+        right: "P",
+        strike: 150,
+        expiry: "2026-04-17",
+      }),
+      makeOrder({
+        orderId: 2,
+        action: "BUY",
+        right: "C",
+        strike: 165,
+        expiry: "2026-05-17",
+      }),
     ]);
 
     expect(rows).toHaveLength(2);
@@ -215,8 +340,20 @@ describe("buildOpenOrderDisplayRows", () => {
 
   it("does not combine different quantities into one combo", () => {
     const rows = buildOpenOrderDisplayRows([
-      makeOrder({ orderId: 1, action: "SELL", right: "P", strike: 150, totalQuantity: 10 }),
-      makeOrder({ orderId: 2, action: "BUY", right: "C", strike: 165, totalQuantity: 11 }),
+      makeOrder({
+        orderId: 1,
+        action: "SELL",
+        right: "P",
+        strike: 150,
+        totalQuantity: 10,
+      }),
+      makeOrder({
+        orderId: 2,
+        action: "BUY",
+        right: "C",
+        strike: 165,
+        totalQuantity: 11,
+      }),
     ]);
 
     expect(rows).toHaveLength(2);
@@ -225,9 +362,27 @@ describe("buildOpenOrderDisplayRows", () => {
 
   it("keeps non-option orders as singles", () => {
     const rows = buildOpenOrderDisplayRows([
-      makeStockOrder({ orderId: 3, permId: 303, symbol: "AAPL", action: "BUY", totalQuantity: 10 }),
-      makeOrder({ orderId: 1, action: "SELL", right: "P", strike: 150, totalQuantity: 10 }),
-      makeOrder({ orderId: 2, action: "BUY", right: "C", strike: 165, totalQuantity: 10 }),
+      makeStockOrder({
+        orderId: 3,
+        permId: 303,
+        symbol: "AAPL",
+        action: "BUY",
+        totalQuantity: 10,
+      }),
+      makeOrder({
+        orderId: 1,
+        action: "SELL",
+        right: "P",
+        strike: 150,
+        totalQuantity: 10,
+      }),
+      makeOrder({
+        orderId: 2,
+        action: "BUY",
+        right: "C",
+        strike: 165,
+        totalQuantity: 10,
+      }),
     ]);
 
     expect(rows).toHaveLength(2);
@@ -237,9 +392,27 @@ describe("buildOpenOrderDisplayRows", () => {
 
   it("combines any multi-leg matching option set into a combo", () => {
     const rows = buildOpenOrderDisplayRows([
-      makeOrder({ orderId: 1, action: "BUY", right: "C", strike: 120, totalQuantity: 5 }),
-      makeOrder({ orderId: 2, action: "SELL", right: "C", strike: 140, totalQuantity: 5 }),
-      makeOrder({ orderId: 3, action: "SELL", right: "P", strike: 110, totalQuantity: 5 }),
+      makeOrder({
+        orderId: 1,
+        action: "BUY",
+        right: "C",
+        strike: 120,
+        totalQuantity: 5,
+      }),
+      makeOrder({
+        orderId: 2,
+        action: "SELL",
+        right: "C",
+        strike: 140,
+        totalQuantity: 5,
+      }),
+      makeOrder({
+        orderId: 3,
+        action: "SELL",
+        right: "P",
+        strike: 110,
+        totalQuantity: 5,
+      }),
     ]);
 
     expect(rows).toHaveLength(1);
@@ -252,11 +425,31 @@ describe("buildOpenOrderDisplayRows", () => {
 
 describe("resolveOpenOrderComboPrice", () => {
   it("computes signed net quote from option legs", () => {
-    const shortPut = makeOrder({ orderId: 1, action: "SELL", right: "P", strike: 150, totalQuantity: 10 });
-    const longCall = makeOrder({ orderId: 2, action: "BUY", right: "C", strike: 165, totalQuantity: 10 });
+    const shortPut = makeOrder({
+      orderId: 1,
+      action: "SELL",
+      right: "P",
+      strike: 150,
+      totalQuantity: 10,
+    });
+    const longCall = makeOrder({
+      orderId: 2,
+      action: "BUY",
+      right: "C",
+      strike: 165,
+      totalQuantity: 10,
+    });
     const prices: Record<string, PriceData> = {
-      AAPL_20260417_150_P: makePrice({ symbol: "AAPL_20260417_150_P", bid: 4.8, ask: 5.2 }),
-      AAPL_20260417_165_C: makePrice({ symbol: "AAPL_20260417_165_C", bid: 1.8, ask: 2.2 }),
+      AAPL_20260417_150_P: makePrice({
+        symbol: "AAPL_20260417_150_P",
+        bid: 4.8,
+        ask: 5.2,
+      }),
+      AAPL_20260417_165_C: makePrice({
+        symbol: "AAPL_20260417_165_C",
+        bid: 1.8,
+        ask: 2.2,
+      }),
     };
 
     const net = resolveOpenOrderComboPrice([shortPut, longCall], prices);
@@ -264,11 +457,31 @@ describe("resolveOpenOrderComboPrice", () => {
   });
 
   it("weights legs by relative quantity for ratio combos", () => {
-    const shortPut = makeOrder({ orderId: 1, action: "SELL", right: "P", strike: 150, totalQuantity: 25 });
-    const longCall = makeOrder({ orderId: 2, action: "BUY", right: "C", strike: 165, totalQuantity: 50 });
+    const shortPut = makeOrder({
+      orderId: 1,
+      action: "SELL",
+      right: "P",
+      strike: 150,
+      totalQuantity: 25,
+    });
+    const longCall = makeOrder({
+      orderId: 2,
+      action: "BUY",
+      right: "C",
+      strike: 165,
+      totalQuantity: 50,
+    });
     const prices: Record<string, PriceData> = {
-      AAPL_20260417_150_P: makePrice({ symbol: "AAPL_20260417_150_P", bid: 4.5, ask: 5.5 }),
-      AAPL_20260417_165_C: makePrice({ symbol: "AAPL_20260417_165_C", bid: 2.0, ask: 2.2 }),
+      AAPL_20260417_150_P: makePrice({
+        symbol: "AAPL_20260417_150_P",
+        bid: 4.5,
+        ask: 5.5,
+      }),
+      AAPL_20260417_165_C: makePrice({
+        symbol: "AAPL_20260417_165_C",
+        bid: 2.0,
+        ask: 2.2,
+      }),
     };
 
     const net = resolveOpenOrderComboPrice([shortPut, longCall], prices);
@@ -276,11 +489,31 @@ describe("resolveOpenOrderComboPrice", () => {
   });
 
   it("returns null when a leg lacks quote data", () => {
-    const shortPut = makeOrder({ orderId: 1, action: "SELL", right: "P", strike: 150, totalQuantity: 10 });
-    const longCall = makeOrder({ orderId: 2, action: "BUY", right: "C", strike: 165, totalQuantity: 10 });
+    const shortPut = makeOrder({
+      orderId: 1,
+      action: "SELL",
+      right: "P",
+      strike: 150,
+      totalQuantity: 10,
+    });
+    const longCall = makeOrder({
+      orderId: 2,
+      action: "BUY",
+      right: "C",
+      strike: 165,
+      totalQuantity: 10,
+    });
     const prices: Record<string, PriceData> = {
-      AAPL_20260417_150_P: makePrice({ symbol: "AAPL_20260417_150_P", bid: 4.8, ask: 5.2 }),
-      AAPL_20260417_165_C: makePrice({ symbol: "AAPL_20260417_165_C", bid: null, ask: null }),
+      AAPL_20260417_150_P: makePrice({
+        symbol: "AAPL_20260417_150_P",
+        bid: 4.8,
+        ask: 5.2,
+      }),
+      AAPL_20260417_165_C: makePrice({
+        symbol: "AAPL_20260417_165_C",
+        bid: null,
+        ask: null,
+      }),
     };
 
     const net = resolveOpenOrderComboPrice([shortPut, longCall], prices);
@@ -288,7 +521,11 @@ describe("resolveOpenOrderComboPrice", () => {
   });
 
   it("returns null when mix includes non-option legs", () => {
-    const stockOrder = makeStockOrder({ orderId: 3, action: "BUY", totalQuantity: 10 });
+    const stockOrder = makeStockOrder({
+      orderId: 3,
+      action: "BUY",
+      totalQuantity: 10,
+    });
     const net = resolveOpenOrderComboPrice([stockOrder], {});
     expect(net).toBeNull();
   });
@@ -300,13 +537,27 @@ describe("buildExecutedGroupDescription", () => {
       makeExecutedFill({
         symbol: "AAOI",
         side: "BOT",
-        contract: { conId: 111, symbol: "AAOI", secType: "OPT", strike: 85, right: "P", expiry: "2026-04-17" },
+        contract: {
+          conId: 111,
+          symbol: "AAOI",
+          secType: "OPT",
+          strike: 85,
+          right: "P",
+          expiry: "2026-04-17",
+        },
       }),
       makeExecutedFill({
         execId: "exec-2",
         side: "SLD",
         avgPrice: 0.6,
-        contract: { conId: 222, symbol: "AAOI", secType: "OPT", strike: 90, right: "C", expiry: "2026-04-17" },
+        contract: {
+          conId: 222,
+          symbol: "AAOI",
+          secType: "OPT",
+          strike: 90,
+          right: "C",
+          expiry: "2026-04-17",
+        },
       }),
     ];
 
@@ -314,7 +565,24 @@ describe("buildExecutedGroupDescription", () => {
     expect(description).toContain("Closed AAOI Risk Reversal");
     expect(description).toContain("Short $85 Put");
     expect(description).toContain("Long $90 Call");
-    expect(description.indexOf("Short $85 Put")).toBeLessThan(description.indexOf("Long $90 Call"));
+    expect(description.indexOf("Short $85 Put")).toBeLessThan(
+      description.indexOf("Long $90 Call"),
+    );
+  });
+
+  it("describes a stock fill as 'Stock' instead of restating symbol/action ('Bought QQQ')", () => {
+    const fills = [
+      makeExecutedFill({
+        symbol: "QQQ",
+        side: "BOT",
+        contract: { conId: 1, symbol: "QQQ", secType: "STK" },
+      }),
+    ];
+    // The ticker badge + OPEN/CLOSE pill already convey symbol and direction;
+    // the description must not duplicate them. Mirror how option rows show a
+    // structure label by showing the instrument type instead.
+    expect(buildExecutedGroupDescription(fills, false)).toBe("Stock");
+    expect(buildExecutedGroupDescription(fills, true)).toBe("Stock");
   });
 
   it("uses portfolio direction when available for closing risk reversal descriptions", () => {
@@ -322,13 +590,27 @@ describe("buildExecutedGroupDescription", () => {
       makeExecutedFill({
         symbol: "AAOI",
         side: "BUY",
-        contract: { conId: 111, symbol: "AAOI", secType: "OPT", strike: 85, right: "P", expiry: "2026-04-17" },
+        contract: {
+          conId: 111,
+          symbol: "AAOI",
+          secType: "OPT",
+          strike: 85,
+          right: "P",
+          expiry: "2026-04-17",
+        },
       }),
       makeExecutedFill({
         execId: "exec-2",
         side: "SELL",
         avgPrice: 0.6,
-        contract: { conId: 222, symbol: "AAOI", secType: "OPT", strike: 90, right: "C", expiry: "2026-04-17" },
+        contract: {
+          conId: 222,
+          symbol: "AAOI",
+          secType: "OPT",
+          strike: 90,
+          right: "C",
+          expiry: "2026-04-17",
+        },
       }),
     ];
 
@@ -346,8 +628,26 @@ describe("buildExecutedGroupDescription", () => {
         max_risk: null,
         market_value: 0,
         legs: [
-          { direction: "SHORT", contracts: 25, type: "Put", strike: 85, entry_cost: 0, avg_cost: 0, market_price: 0, market_value: 0 },
-          { direction: "LONG", contracts: 25, type: "Call", strike: 90, entry_cost: 0, avg_cost: 0, market_price: 0, market_value: 0 },
+          {
+            direction: "SHORT",
+            contracts: 25,
+            type: "Put",
+            strike: 85,
+            entry_cost: 0,
+            avg_cost: 0,
+            market_price: 0,
+            market_value: 0,
+          },
+          {
+            direction: "LONG",
+            contracts: 25,
+            type: "Call",
+            strike: 90,
+            entry_cost: 0,
+            avg_cost: 0,
+            market_price: 0,
+            market_value: 0,
+          },
         ],
         ib_daily_pnl: null,
         kelly_optimal: null,
@@ -360,7 +660,9 @@ describe("buildExecutedGroupDescription", () => {
     expect(description).toContain("Closed AAOI Risk Reversal");
     expect(description).toContain("Short $85 Put");
     expect(description).toContain("Long $90 Call");
-    expect(description.indexOf("Short $85 Put")).toBeLessThan(description.indexOf("Long $90 Call"));
+    expect(description.indexOf("Short $85 Put")).toBeLessThan(
+      description.indexOf("Long $90 Call"),
+    );
   });
 
   it("uses explicit closing fill sides when they are present", () => {
@@ -368,13 +670,27 @@ describe("buildExecutedGroupDescription", () => {
       makeExecutedFill({
         symbol: "AAOI",
         side: "SLD",
-        contract: { conId: 111, symbol: "AAOI", secType: "OPT", strike: 85, right: "P", expiry: "2026-04-17" },
+        contract: {
+          conId: 111,
+          symbol: "AAOI",
+          secType: "OPT",
+          strike: 85,
+          right: "P",
+          expiry: "2026-04-17",
+        },
       }),
       makeExecutedFill({
         execId: "exec-2",
         side: "BOT",
         avgPrice: 0.6,
-        contract: { conId: 222, symbol: "AAOI", secType: "OPT", strike: 90, right: "C", expiry: "2026-04-17" },
+        contract: {
+          conId: 222,
+          symbol: "AAOI",
+          secType: "OPT",
+          strike: 90,
+          right: "C",
+          expiry: "2026-04-17",
+        },
       }),
     ];
 
@@ -392,8 +708,26 @@ describe("buildExecutedGroupDescription", () => {
         max_risk: null,
         market_value: 0,
         legs: [
-          { direction: "SHORT", contracts: 25, type: "Put", strike: 85, entry_cost: 0, avg_cost: 0, market_price: 0, market_value: 0 },
-          { direction: "LONG", contracts: 25, type: "Call", strike: 90, entry_cost: 0, avg_cost: 0, market_price: 0, market_value: 0 },
+          {
+            direction: "SHORT",
+            contracts: 25,
+            type: "Put",
+            strike: 85,
+            entry_cost: 0,
+            avg_cost: 0,
+            market_price: 0,
+            market_value: 0,
+          },
+          {
+            direction: "LONG",
+            contracts: 25,
+            type: "Call",
+            strike: 90,
+            entry_cost: 0,
+            avg_cost: 0,
+            market_price: 0,
+            market_value: 0,
+          },
         ],
         ib_daily_pnl: null,
         kelly_optimal: null,
