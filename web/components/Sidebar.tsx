@@ -18,6 +18,7 @@ export default function Sidebar({
   lastSync,
 }: SidebarProps) {
   const syncTime = lastSync ? new Date(lastSync).toLocaleTimeString() : "—";
+  const appVersion = process.env.NEXT_PUBLIC_APP_VERSION;
 
   return (
     <aside className="sidebar">
@@ -65,6 +66,10 @@ export default function Sidebar({
         <div className="status-row">
           <span>Source</span>
           <span>IB Gateway</span>
+        </div>
+        <div className="status-row">
+          <span>Version</span>
+          <span>{appVersion ? `v${appVersion}` : "—"}</span>
         </div>
       </div>
     </aside>

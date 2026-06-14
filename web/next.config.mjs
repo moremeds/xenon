@@ -1,7 +1,19 @@
+import { readFileSync } from "fs";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Source of truth for the app version is the root VERSION file (kept in sync
+// with the root package.json by scripts/release/version_sync_check.py). The
+// web/ package.json version is independent and not the release version.
+function readAppVersion() {
+  try {
+    return readFileSync(resolve(__dirname, "..", "VERSION"), "utf8").trim();
+  } catch {
+    return "";
+  }
+}
 
 /** Baseline security headers for all routes. HSTS only when explicitly safe (see below). */
 function securityHeaders() {
@@ -27,6 +39,11 @@ function securityHeaders() {
 const config = {
   output: "standalone",
   outputFileTracingRoot: resolve(__dirname, ".."),
+  // Inlined into the client bundle at build time so the sidebar can show the
+  // shipped release version.
+  env: {
+    NEXT_PUBLIC_APP_VERSION: readAppVersion(),
+  },
   turbopack: {},
   webpack: (config) => {
     config.resolve.alias["@tools"] = resolve(__dirname, "..", "lib", "tools");
