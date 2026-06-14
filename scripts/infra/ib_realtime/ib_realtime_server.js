@@ -360,7 +360,9 @@ const httpServer = http.createServer((req, res) => {
       remote === "127.0.0.1" ||
       remote === "::1" ||
       remote === "::ffff:127.0.0.1";
-    if (!isLoopback) {
+    const tokenOk =
+      STATUS_TOKEN !== "" && req.headers["x-status-token"] === STATUS_TOKEN;
+    if (!isLoopback && !tokenOk) {
       res.writeHead(403, { "Content-Type": "text/plain" });
       res.end("Forbidden");
       return;
@@ -533,6 +535,11 @@ const subscriberRegistry = createSubscriberRegistry({
   ttlMs: SUBSCRIBER_TTL_MS,
 });
 const clientId = new Map(); // ws -> id (only for identified subscribers)
+// Optional shared secret: when set, GET /status also accepts requests carrying
+// a matching `X-Status-Token` header (in addition to loopback). Lets the api
+// container read /status across the Docker network in prod without exposing
+// subscriber ids on the host-published :8765 port. Empty in single-host dev.
+const STATUS_TOKEN = process.env.IB_REALTIME_STATUS_TOKEN || "";
 
 /* ─── Snapshot Rate Limiter ──────────────────────────────────────────────
  * IB allows ~100 snapshot requests/sec. We cap at 50 to leave headroom. */

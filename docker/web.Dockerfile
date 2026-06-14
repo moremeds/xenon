@@ -24,6 +24,10 @@ RUN npm install --no-audit --no-fund --legacy-peer-deps \
 # available in this image and is not needed when the file is already
 # checked in). Calling `next build` directly bypasses the prebuild hook.
 COPY web/ ./web/
+# Root VERSION is the release source of truth; next.config.mjs reads ../VERSION
+# at build time to inline NEXT_PUBLIC_APP_VERSION. Without this the version row
+# renders "—" in the prod web image.
+COPY VERSION ./VERSION
 COPY lib/ ./lib/
 COPY brand/ ./brand/
 COPY context/ ./context/

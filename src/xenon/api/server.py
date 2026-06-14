@@ -923,18 +923,32 @@ def _resolve_realtime_port() -> int:
     return 8765
 
 
-def _fetch_realtime_status_json(port: int, timeout: float = 0.5) -> dict:
+def _resolve_realtime_status_url() -> str:
+    """Realtime /status URL. Explicit IB_REALTIME_STATUS_URL wins (prod cross-
+    container, e.g. http://realtime:8765/status); else loopback on the resolved
+    port (single-host dev, where /status is reachable on 127.0.0.1)."""
+    explicit = os.environ.get("IB_REALTIME_STATUS_URL")
+    if explicit:
+        return explicit
+    return f"http://127.0.0.1:{_resolve_realtime_port()}/status"
+
+
+def _fetch_realtime_status_json(url: str, timeout: float = 0.5) -> dict:
     import urllib.request
 
-    url = f"http://127.0.0.1:{port}/status"
-    with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+    headers = {}
+    token = os.environ.get("IB_REALTIME_STATUS_TOKEN")
+    if token:
+        headers["X-Status-Token"] = token
+    request = urllib.request.Request(url, headers=headers)  # noqa: S310
+    with urllib.request.urlopen(request, timeout=timeout) as resp:  # noqa: S310
         return json.loads(resp.read().decode("utf-8"))
 
 
 def _realtime_subscribers_health() -> dict:
     """Realtime WS subscriber health, silent-degrade when the server is down."""
     try:
-        payload = _fetch_realtime_status_json(_resolve_realtime_port())
+        payload = _fetch_realtime_status_json(_resolve_realtime_status_url())
     except Exception:  # noqa: BLE001
         logger.warning("[health] realtime /status unreachable", exc_info=True)
         return {"reachable": False, "subscribers": [], "anonymous_count": 0}
