@@ -286,6 +286,11 @@ body {
   animation: none;
 }
 
+.status-dot-stale {
+  background: var(--warning);
+  animation: none;
+}
+
 @keyframes pulse {
   0%,
   100% {
