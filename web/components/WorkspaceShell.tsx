@@ -17,6 +17,7 @@ import { useOrderActions } from "@/lib/OrderActionsContext";
 import { usePrices } from "@/lib/usePrices";
 import { computeRealizedPnlFromFills } from "@/lib/realized-pnl";
 import { usePreviousClose } from "@/lib/usePreviousClose";
+import { useSubscriberHealth } from "@/lib/useSubscriberHealth";
 import {
   type OptionContract,
   type IndexContract,
@@ -242,6 +243,9 @@ export default function WorkspaceShell({
     };
   }, [rawIbConnected]);
 
+  // Realtime WS subscriber health (external ?id= price-stream clients on :8765).
+  const subscriberHealth = useSubscriberHealth();
+
   // Backfill missing previous-close from Yahoo Finance / UW for day-change calc
   const prices = usePreviousClose(rawPrices);
 
@@ -398,6 +402,9 @@ export default function WorkspaceShell({
         actionTone={actionTone}
         ibConnected={ibConnected}
         lastSync={lastSync}
+        subscribers={subscriberHealth.subscribers}
+        subscribersReachable={subscriberHealth.reachable}
+        anonymousCount={subscriberHealth.anonymousCount}
       />
 
       <main className="main">
