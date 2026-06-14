@@ -533,14 +533,25 @@ def mark_terminal(
     reason_code: str | None,
     filled_qty: int,
     avg_fill_price: Decimal | None,
-) -> None:
+    expected_states: tuple[str, ...] | None = None,
+) -> int:
+    """Transition a submission to a terminal state. Returns the affected
+    rowcount.
+
+    ``expected_states`` is an optional optimistic-concurrency guard: when
+    provided, the UPDATE only applies if the row is still in one of those
+    states. A concurrent transition (e.g. a user cancel or a fill event
+    landing between a caller's read and this write) leaves the row untouched
+    and returns 0, so the caller can avoid clobbering a newer terminal state.
+    """
     now = datetime.now(timezone.utc)
     engine = get_sync_engine()
+    stmt = update(order_submissions).where(order_submissions.c.submission_id == submission_id)
+    if expected_states is not None:
+        stmt = stmt.where(order_submissions.c.state.in_(expected_states))
     with engine.begin() as conn:
-        conn.execute(
-            update(order_submissions)
-            .where(order_submissions.c.submission_id == submission_id)
-            .values(
+        result = conn.execute(
+            stmt.values(
                 state=state,
                 reason_code=reason_code,
                 filled_qty=filled_qty,
@@ -548,6 +559,7 @@ def mark_terminal(
                 updated_at=now,
             )
         )
+    return result.rowcount
 
 
 def record_fill(

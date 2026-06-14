@@ -242,29 +242,38 @@ def sweep_disappeared_orders(
         # open order truncated by the Integer order_submissions.quantity
         # column — see Task 5's note) must never be marked FILLED on zero
         # fills (0 >= 0 would otherwise be True).
+        # expected_states guards a TOCTOU: rows were read as WORKING above, but
+        # a concurrent fill event or user cancel (different request) can
+        # transition one between that read and this write. The guard makes the
+        # UPDATE a no-op (rowcount 0) in that case, so the sweep never clobbers
+        # a newer terminal state — only count/emit when the write actually won.
         if fill_qty > 0 and fill_qty >= order_qty:
             avg = (Decimal(str(fill_value)) / fill_qty) if fill_qty else None
-            orders_store.mark_terminal(
+            applied = orders_store.mark_terminal(
                 submission_id=sid,
                 state="FILLED",
                 reason_code=None,
                 filled_qty=int(fill_qty),
                 avg_fill_price=avg,
+                expected_states=("WORKING", "PARTIALLY_FILLED"),
             )
-            orders_store.record_event(sid, "RECONCILED", {"source": "cancel_sweep", "filled_qty": str(fill_qty)})
             tracked.discard(sid)
-            filled += 1
+            if applied:
+                orders_store.record_event(sid, "RECONCILED", {"source": "cancel_sweep", "filled_qty": str(fill_qty)})
+                filled += 1
         elif sid in tracked:
-            orders_store.mark_terminal(
+            applied = orders_store.mark_terminal(
                 submission_id=sid,
                 state="CANCELLED",
                 reason_code=TWS_CANCEL_REASON,
                 filled_qty=int(fill_qty),
                 avg_fill_price=None,
+                expected_states=("WORKING", "PARTIALLY_FILLED"),
             )
-            orders_store.record_event(sid, TWS_CANCEL_REASON, {"source": "cancel_sweep"})
             tracked.discard(sid)
-            cancelled += 1
+            if applied:
+                orders_store.record_event(sid, TWS_CANCEL_REASON, {"source": "cancel_sweep"})
+                cancelled += 1
         else:
             missing_now.add(sid)
             graced += 1

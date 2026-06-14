@@ -101,7 +101,7 @@ def _legacy_cli_fill_records(result: Dict[str, Any], contract: Any, side: str, n
                 "con_id": _fill_get(fill, "con_id", "conId") or getattr(contract, "conId", None),
                 "ticker": _fill_get(fill, "ticker", "symbol") or result["symbol"],
                 "side": _fill_get(fill, "side", "action") or side,
-                "qty": int(qty),
+                "qty": Decimal(str(qty)),
                 "price": Decimal(str(price)),
                 "commission": Decimal(str(commission or 0)),
                 "filled_at": _coerce_fill_time(_fill_get(fill, "filled_at", "time"), now_utc),
