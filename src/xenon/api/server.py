@@ -901,6 +901,52 @@ def _flex_divergence_health() -> dict:
     }
 
 
+def _resolve_realtime_port() -> int:
+    """Resolve the IB realtime WS port from the runtime file, else 8765.
+
+    Mirror of web/lib/server/ibRealtimeRuntime.ts: IB_REALTIME_RUNTIME_FILE env,
+    else <tmpdir>/xenon-ib-realtime.json; fall back to 8765 when absent/invalid.
+    """
+    import tempfile
+    from pathlib import Path
+
+    runtime_file = os.environ.get("IB_REALTIME_RUNTIME_FILE") or str(
+        Path(tempfile.gettempdir()) / "xenon-ib-realtime.json"
+    )
+    try:
+        data = json.loads(Path(runtime_file).read_text())
+        port = int(data.get("port"))
+        if port > 0:
+            return port
+    except Exception:  # noqa: BLE001
+        pass
+    return 8765
+
+
+def _fetch_realtime_status_json(port: int, timeout: float = 0.5) -> dict:
+    import urllib.request
+
+    url = f"http://127.0.0.1:{port}/status"
+    with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _realtime_subscribers_health() -> dict:
+    """Realtime WS subscriber health, silent-degrade when the server is down."""
+    try:
+        payload = _fetch_realtime_status_json(_resolve_realtime_port())
+    except Exception:  # noqa: BLE001
+        logger.warning("[health] realtime /status unreachable", exc_info=True)
+        return {"reachable": False, "subscribers": [], "anonymous_count": 0}
+    return {
+        "reachable": True,
+        "ib_connected": payload.get("ib_connected"),
+        "subscribers": payload.get("subscribers", []),
+        "anonymous_count": payload.get("anonymous_count", 0),
+        "ttl_ms": payload.get("ttl_ms"),
+    }
+
+
 @app.get("/health")
 async def health():
     gw = await check_ib_gateway()
@@ -920,6 +966,7 @@ async def health():
         "snapshotter": _snapshotter_health(),
         "order_submissions": _order_submissions_health(),
         "flex_divergence": _flex_divergence_health(),
+        "realtime_subscribers": await asyncio.to_thread(_realtime_subscribers_health),
     }
 
 
