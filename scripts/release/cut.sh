@@ -56,6 +56,7 @@ cat <<EOF
 Will:
   - rewrite VERSION: $current -> $next
   - rewrite package.json version: $current -> $next
+  - rewrite web/package.json version: $current -> $next
   - CHANGELOG: insert '## [$next] — $today' below Unreleased, move current Unreleased bullets under it
   - commit: 'release: v$next'
   - annotated tag: v$next (message = CHANGELOG section)
@@ -79,6 +80,20 @@ data["version"] = nxt
 print(json.dumps(data, indent=2))
 PY
 mv "$tmp" package.json
+
+# web/package.json: bumped in lockstep with root (single release procedure for
+# backend + frontend; see version_sync_check.py). Surgical line replace keeps the
+# large dep-heavy file byte-stable except the version field. site/ is excluded —
+# the marketing site deploys separately on Vercel and versions on its own.
+python3.13 - "$current" "$next" <<'PY'
+import sys
+current, nxt = sys.argv[1], sys.argv[2]
+path = "web/package.json"
+text = open(path).read()
+old, new = f'"version": "{current}"', f'"version": "{nxt}"'
+assert text.count(old) == 1, f"{path}: expected exactly one {old!r}, found {text.count(old)}"
+open(path, "w").write(text.replace(old, new))
+PY
 
 # CHANGELOG rewrite — single deterministic pass.
 # Move the body currently under ## [Unreleased] to a new ## [X.Y.Z] — DATE heading,
@@ -106,7 +121,7 @@ with open(path, "w") as f:
     f.write(updated)
 PY
 
-git add VERSION package.json CHANGELOG.md
+git add VERSION package.json web/package.json CHANGELOG.md
 git commit -m "release: v$next"
 
 section="$(extract_changelog_section CHANGELOG.md "$next")"
