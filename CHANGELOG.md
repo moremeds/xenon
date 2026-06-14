@@ -5,6 +5,9 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-06-14
+
+
 ### Added
 
 - **App version in the health sidebar (#135).** The sidebar footer gains a `Version` row showing the release version (e.g. `v0.3.1`), injected at build time into `NEXT_PUBLIC_APP_VERSION` from the root `VERSION` file via `next.config.mjs` (the release source of truth, not `web/package.json`).
@@ -12,7 +15,6 @@ All notable changes to Xenon are documented here. Format loosely based on
 ### Changed
 
 - **`web/package.json` version is now tracked by the release tooling (#135).** It had silently drifted to `0.6.1` while the release version was `0.3.1`. Since backend and frontend ship from a single release procedure today, `version_sync_check.py` (the CI `version-sync` job) now validates `web/package.json` against `VERSION` and `cut.sh` bumps it in lockstep. `site/package.json` (the separate Vercel marketing site) stays independent.
-
 ## [0.3.1] — 2026-06-14
 
 ### Added
