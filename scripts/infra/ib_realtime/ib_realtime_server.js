@@ -33,6 +33,7 @@ import {
 } from "./ib_tick_handler.js";
 import { LRUCache } from "../../lib/lru-cache.js";
 import { RateLimiter } from "../../lib/rate-limiter.js";
+import { createSubscriberRegistry } from "./subscriber_registry.js";
 
 const DEFAULT_WS_PORT = 8765;
 const DEFAULT_IB_HOST = process.env.IB_GATEWAY_HOST || "127.0.0.1";
@@ -349,7 +350,34 @@ if (!loopbackAvailable || !wildcardAvailable) {
 const TICKET_VALIDATE_URL =
   process.env.TICKET_VALIDATE_URL || "http://127.0.0.1:8321/ws-ticket/validate";
 
-const httpServer = http.createServer((_req, res) => {
+const httpServer = http.createServer((req, res) => {
+  if (
+    req.method === "GET" &&
+    (req.url === "/status" || req.url.startsWith("/status?"))
+  ) {
+    const remote = req.socket.remoteAddress || "";
+    const isLoopback =
+      remote === "127.0.0.1" ||
+      remote === "::1" ||
+      remote === "::ffff:127.0.0.1";
+    if (!isLoopback) {
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("Forbidden");
+      return;
+    }
+    const now = Date.now();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        ib_connected: ibConnected,
+        now_ms: now,
+        ttl_ms: SUBSCRIBER_TTL_MS,
+        subscribers: subscriberRegistry.snapshot(now),
+        anonymous_count: Math.max(0, clients.size - clientId.size),
+      }),
+    );
+    return;
+  }
   res.writeHead(426, { "Content-Type": "text/plain" });
   res.end("WebSocket upgrade required");
 });
@@ -407,8 +435,6 @@ httpServer.on("upgrade", async (req, socket, head) => {
     socket.destroy();
   }
 });
-
-httpServer.listen(cli.port, WS_HOST);
 
 const clients = new Set();
 const symbolSubscribers = new Map();
@@ -500,6 +526,14 @@ loadCloseCache();
 const clientLastPong = new Map(); // client → timestamp (ms)
 let pingIntervalTimer = null;
 
+/* ─── Subscriber Registry (identified WS clients via ?id=) ──────────────── */
+const SUBSCRIBER_TTL_MS =
+  Number(process.env.IB_REALTIME_SUBSCRIBER_TTL_MS) || 900_000;
+const subscriberRegistry = createSubscriberRegistry({
+  ttlMs: SUBSCRIBER_TTL_MS,
+});
+const clientId = new Map(); // ws -> id (only for identified subscribers)
+
 /* ─── Snapshot Rate Limiter ──────────────────────────────────────────────
  * IB allows ~100 snapshot requests/sec. We cap at 50 to leave headroom. */
 const snapshotLimiter = new RateLimiter(50);
@@ -510,6 +544,12 @@ let reconnectTimer = null;
 let nextRequestId = 1;
 let statusBroadcastTick = null;
 let ibConnectionIssue = null;
+
+// Start accepting connections only after all module-level state the request
+// handlers close over (clients, subscriberRegistry, clientId, ibConnected) is
+// declared — guards the GET /status handler against a TDZ ReferenceError if an
+// `await` is ever introduced between createServer() and these declarations.
+httpServer.listen(cli.port, WS_HOST);
 
 /* ─── Stale Data Detection ─────────────────────────────────────────────────
  * IB Gateway can enter a state where the TCP connection is alive but the
@@ -1175,6 +1215,8 @@ async function handleClientMessage(client, data) {
     }
     case "pong": {
       clientLastPong.set(client, Date.now());
+      const sid = clientId.get(client);
+      if (sid) subscriberRegistry.onPong(sid, Date.now());
       return;
     }
     case "search": {
@@ -1472,10 +1514,27 @@ function wireIBEvents() {
 // Wire events on initial instance
 wireIBEvents();
 
-wss.on("connection", (client) => {
+wss.on("connection", (client, req) => {
   clients.add(client);
   clientLastPong.set(client, Date.now());
-  verbose(`WS client connected (total: ${clients.size})`);
+
+  let subId = null;
+  try {
+    subId = new URL(
+      req.url || "/",
+      `http://${req.headers.host || "localhost"}`,
+    ).searchParams.get("id");
+  } catch {
+    subId = null;
+  }
+  if (subId) {
+    clientId.set(client, subId);
+    subscriberRegistry.onConnect(subId, Date.now());
+  }
+
+  verbose(
+    `WS client connected (total: ${clients.size}${subId ? `, id=${subId}` : ""})`,
+  );
   sendStatus(client);
 
   client.on("message", (raw) => {
@@ -1498,11 +1557,21 @@ wss.on("connection", (client) => {
 
   client.on("close", () => {
     verbose(`WS client disconnected (remaining: ${clients.size - 1})`);
+    const sid = clientId.get(client);
+    if (sid) {
+      subscriberRegistry.onDisconnect(sid, Date.now());
+      clientId.delete(client);
+    }
     disconnectClient(client);
     clients.delete(client);
   });
 
   client.on("error", () => {
+    const sid = clientId.get(client);
+    if (sid) {
+      subscriberRegistry.onDisconnect(sid, Date.now());
+      clientId.delete(client);
+    }
     disconnectClient(client);
     clients.delete(client);
   });

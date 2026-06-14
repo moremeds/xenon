@@ -122,11 +122,15 @@ Each IB position row exposes a direct order-entry button (commit a7cbbbc4). Clic
 ## Dev Commands
 
 ```bash
-npm run dev           # next + IB realtime server + FastAPI (concurrent, from web/)
+npm run dev           # next :3200 + IB realtime :8866 + FastAPI :8421 (concurrent, from web/)
 npm run typecheck     # tsc --noEmit
 npm test              # Vitest (ASSISTANT_MOCK=1, NODE_ENV=test)
 npm run test:e2e      # Playwright (no-server config)
 ```
+
+Dev ports are **3200 / 8421 / 8866** (next / FastAPI / realtime WS) — offset from the
+legacy 3000 / 8321 / 8765 (still used by production launchd and the local radon stack).
+Override the API port with `XENON_API_PORT`; Next with `-p`; realtime with `--port`.
 
 ## ⛔ Brand Identity — Mandatory for UI Work
 

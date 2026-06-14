@@ -268,6 +268,22 @@ body {
   gap: 6px;
 }
 
+.status-row-header {
+  margin-top: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-primary);
+}
+
+.status-sub-id {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+
+.status-muted {
+  opacity: 0.7;
+}
+
 .status-dot {
   width: 6px;
   height: 6px;
@@ -283,6 +299,11 @@ body {
 
 .status-dot-dead {
   background: var(--negative);
+  animation: none;
+}
+
+.status-dot-stale {
+  background: var(--warning);
   animation: none;
 }
 
