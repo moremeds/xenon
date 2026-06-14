@@ -5,8 +5,15 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.3.2] — 2026-06-14
+### Added
 
+- **Realtime subscriber connection health in the health sidebar (#138).** The sidebar gains a **Subscribers** section listing each identified WS price-stream client (clients that connect to the IB realtime relay with `?id=<name>`): a liveness dot (green `<35s` since last pong, amber `35–65s`, red `offline <age>` within a 15-min TTL, `IB_REALTIME_SUBSCRIBER_TTL_MS`) and a last-seen age, plus a muted `+N app clients` count of anonymous browser-tab connections. Backed by a new in-memory `subscriber_registry.js` and a loopback-only `GET /status` on the realtime server, surfaced through a silent-degrading `realtime_subscribers` block on FastAPI `/health` (resolves the relay port from the runtime file; `reachable:false` when the relay is down), and polled by a dedicated `useSubscriberHealth` hook. `/status` is localhost-only; `remote` IPs are never forwarded to the public `/health`.
+
+### Changed
+
+- **Dev stack moved to ports 3200 / 8421 / 8866 (#138).** Next.js, FastAPI, and the IB realtime relay now bind 3200 / 8421 / 8866 in development (was 3000 / 8321 / 8765), so the xenon dev stack coexists with another local stack holding the legacy ports. Production launchd keeps 3000 / 8321 / 8765; the `8321`/`8765` code defaults are prod-shared and unchanged, with dev overriding via env. `XENON_API_PORT` is now honored end-to-end by `npm run dev` (uvicorn `--port` + the Next proxy URL), and `web/playwright.config.ts` defaults to 3200.
+
+## [0.3.2] — 2026-06-14
 
 ### Added
 
@@ -15,6 +22,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 ### Changed
 
 - **`web/package.json` version is now tracked by the release tooling (#135).** It had silently drifted to `0.6.1` while the release version was `0.3.1`. Since backend and frontend ship from a single release procedure today, `version_sync_check.py` (the CI `version-sync` job) now validates `web/package.json` against `VERSION` and `cut.sh` bumps it in lockstep. `site/package.json` (the separate Vercel marketing site) stays independent.
+
 ## [0.3.1] — 2026-06-14
 
 ### Added
