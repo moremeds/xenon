@@ -2859,8 +2859,28 @@ async def blotter_sync(scope=Depends(get_account_scope)):
                 ),
             }
         if pg_has:
+            pg_payload["configured"] = True
+            pg_payload["flex_error"] = result.error
             return pg_payload
-        raise HTTPException(status_code=502, detail=result.error)
+        return {
+            "configured": True,
+            "flex_error": result.error,
+            "as_of": None,
+            "summary": {
+                "closed_trades": 0,
+                "open_trades": 0,
+                "total_commissions": 0,
+                "realized_pnl": 0,
+            },
+            "closed_trades": [],
+            "open_trades": [],
+            "source": "none",
+            "message": (
+                "IB Flex Query is configured but the fetch failed. "
+                "If the error mentions code 1001, set the saved Flex query's "
+                "format to XML in the IB portal (the legacy servlet rejects CSV)."
+            ),
+        }
 
     flex_payload = {**result.data, "configured": True}
     merged = merge_pg_and_flex(pg_payload, flex_payload)
@@ -2918,7 +2938,10 @@ async def performance_background():
 @app.get("/options/chain")
 async def options_chain(symbol: str, expiry: Optional[str] = None):
     """Fetch options chain for a symbol."""
-    args = ["--symbol", symbol.upper()]
+    # Pass the resolved gateway port (4002 paper / 4001 live) — the CLI
+    # otherwise defaults to 4001, which fails in paper mode. Mirrors the
+    # sync routes (see /sync, /orders/sync).
+    args = ["--symbol", symbol.upper(), "--port", str(DEFAULT_GATEWAY_PORT)]
     if expiry:
         args.extend(["--expiry", expiry])
     result = await _run_ib_script_with_recovery("xenon-ib-option-chain", args, timeout=15)
@@ -2932,7 +2955,11 @@ async def options_chain(symbol: str, expiry: Optional[str] = None):
 @app.get("/options/expirations")
 async def options_expirations(symbol: str):
     """List option expirations for a symbol."""
-    result = await run_entry_point("xenon-ib-option-chain", ["--symbol", symbol.upper()], timeout=15)
+    result = await run_entry_point(
+        "xenon-ib-option-chain",
+        ["--symbol", symbol.upper(), "--port", str(DEFAULT_GATEWAY_PORT)],
+        timeout=15,
+    )
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     if result.data and result.data.get("error"):

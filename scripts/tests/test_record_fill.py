@@ -112,3 +112,61 @@ def test_record_fill_rejects_legacy_unknown_scope():
 
     with pytest.raises(ValueError, match="explicit account scope"):
         _record_fill(broker_account="legacy_unknown")
+
+
+def _state_of(submission_id: str) -> str:
+    with get_sync_engine().connect() as conn:
+        return conn.execute(
+            select(order_submissions.c.state).where(order_submissions.c.submission_id == submission_id)
+        ).scalar_one()
+
+
+def test_mark_terminal_expected_states_guards_concurrent_transition():
+    """The cancel-sweep reads rows as WORKING then writes a terminal state in a
+    separate txn. expected_states makes that write optimistic: a row already
+    transitioned to FILLED (e.g. by a concurrent fill event) must not be
+    clobbered back to CANCELLED. rowcount 0 signals the no-op."""
+    _insert_submission("sub-guard-001")
+
+    # First transition wins — row is WORKING, no guard needed.
+    assert (
+        orders_store.mark_terminal(
+            submission_id="sub-guard-001",
+            state="FILLED",
+            reason_code=None,
+            filled_qty=100,
+            avg_fill_price=Decimal("190.00"),
+        )
+        == 1
+    )
+
+    # Guarded cancel-sweep transition must NOT clobber the FILLED state.
+    assert (
+        orders_store.mark_terminal(
+            submission_id="sub-guard-001",
+            state="CANCELLED",
+            reason_code="TWS_CANCEL_MIRROR",
+            filled_qty=0,
+            avg_fill_price=None,
+            expected_states=("WORKING", "PARTIALLY_FILLED"),
+        )
+        == 0
+    )
+    assert _state_of("sub-guard-001") == "FILLED"
+
+
+def test_mark_terminal_expected_states_applies_when_state_matches():
+    _insert_submission("sub-guard-002")
+
+    assert (
+        orders_store.mark_terminal(
+            submission_id="sub-guard-002",
+            state="CANCELLED",
+            reason_code="TWS_CANCEL_MIRROR",
+            filled_qty=0,
+            avg_fill_price=None,
+            expected_states=("WORKING", "PARTIALLY_FILLED"),
+        )
+        == 1
+    )
+    assert _state_of("sub-guard-002") == "CANCELLED"

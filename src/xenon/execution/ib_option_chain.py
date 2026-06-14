@@ -11,7 +11,29 @@ import json
 import sys
 from pathlib import Path
 
+from ib_async import Index, Stock
+
 from xenon.clients.ib_client import IBClient
+
+# CBOE is the home exchange for SPX/RUT index options; NDX lives on NASDAQ.
+# Mirrors _preferred_index_exchange in src/xenon/api/server.py.
+_PREFERRED_INDEX_EXCHANGE = {"NDX": "NASDAQ"}
+
+
+def underlying_contract(symbol: str):
+    """Return (contract, underlyingSecType) for chain qualification.
+
+    Indices in the V1 universe (universe.is_index raises KeyError for
+    unknown tickers, hence the is_known gate) qualify as Index on their
+    home exchange; everything else stays Stock/SMART.
+    """
+    from xenon.execution.universe import is_index, is_known
+
+    upper = symbol.upper()
+    if is_known(upper) and is_index(upper):
+        exchange = _PREFERRED_INDEX_EXCHANGE.get(upper, "CBOE")
+        return Index(upper, exchange), "IND"
+    return Stock(symbol, "SMART", "USD"), "STK"
 
 
 def main():
@@ -28,15 +50,13 @@ def main():
         client.connect(port=args.port, client_id=args.client_id)
 
         # Qualify the underlying to get a valid conId (required by reqSecDefOptParams)
-        from ib_async import Stock
-
-        stk = Stock(args.symbol, "SMART", "USD")
-        client._ib.qualifyContracts(stk)
-        if not stk.conId:
+        contract, sec_type = underlying_contract(args.symbol)
+        client._ib.qualifyContracts(contract)
+        if not contract.conId:
             print(json.dumps({"error": f"Could not qualify {args.symbol}"}))
             return
 
-        chains = client._ib.reqSecDefOptParams(args.symbol, "", "STK", stk.conId)
+        chains = client._ib.reqSecDefOptParams(contract.symbol, "", sec_type, contract.conId)
 
         if args.expiry:
             # Find the matching chain

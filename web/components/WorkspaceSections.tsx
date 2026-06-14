@@ -40,6 +40,7 @@ import { useOrderActions } from "@/lib/OrderActionsContext";
 import type { PriceData } from "@/lib/pricesProtocol";
 import { optionKey } from "@/lib/pricesProtocol";
 import { useJournal } from "@/lib/useJournal";
+import { formatEtTime } from "@/lib/timeFormat";
 import { MetricCard, SourceBadge } from "@/components/ui/MetricCard";
 import { SourcePill } from "./SourcePill";
 import { useBlotter } from "@/lib/useBlotter";
@@ -279,7 +280,7 @@ function deriveGroupDescription(
   return buildExecutedGroupDescription(fills, isClosing, portfolioPositions);
 }
 
-function groupExecutedOrders(
+export function groupExecutedOrders(
   fills: ExecutedOrder[],
   portfolioPositions?: readonly PortfolioPosition[],
 ): PositionFillGroup[] {
@@ -290,7 +291,7 @@ function groupExecutedOrders(
   const real = fills.filter((f) => f.side !== "CANCELLED");
 
   const isClosingFill = (fill: ExecutedOrder): boolean =>
-    fill.contract.secType === "OPT" &&
+    (fill.contract.secType === "OPT" || fill.contract.secType === "STK") &&
     fill.realizedPNL != null &&
     Math.abs(fill.realizedPNL) > 0.01;
 
@@ -2088,7 +2089,7 @@ function OrdersSections({
                               })()
                             : "—"}
                         </td>
-                        <td>{new Date(group.time).toLocaleTimeString()}</td>
+                        <td>{formatEtTime(group.time)}</td>
                         <td />
                       </tr>
                       {/* Expanded fill detail rows */}
@@ -2158,7 +2159,7 @@ function OrdersSections({
                                   : "—"}
                               </td>
                               <td style={{ color: "var(--text-secondary)" }}>
-                                {new Date(e.time).toLocaleTimeString()}
+                                {formatEtTime(e.time)}
                               </td>
                               <td></td>
                             </tr>
@@ -2351,11 +2352,31 @@ export function HistoricalTradesSection() {
             </div>
           </div>
         )}
-        {!loading && !hasData && !error && data?.configured !== false && (
+        {!loading && !error && data?.flex_error && (
           <div className="alert-item section-message">
-            No historical trades. Click REFRESH to fetch from IB.
+            <div>Flex sync failed: {data.flex_error}</div>
+            {data?.message ? (
+              <div
+                style={{
+                  marginTop: "0.5rem",
+                  opacity: 0.7,
+                  fontSize: "0.85em",
+                }}
+              >
+                {data.message}
+              </div>
+            ) : null}
           </div>
         )}
+        {!loading &&
+          !hasData &&
+          !error &&
+          data?.configured !== false &&
+          !data?.flex_error && (
+            <div className="alert-item section-message">
+              No historical trades. Click REFRESH to fetch from IB.
+            </div>
+          )}
         {!loading && pageRows.length > 0 && (
           <>
             <table>

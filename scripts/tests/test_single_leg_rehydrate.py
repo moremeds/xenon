@@ -12,6 +12,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+
 # Phase 2 carve-out: this module's tests open their own SQLAlchemy engine
 # (helpers calling sqlalchemy.create_engine directly, or subprocess CLIs)
 # and therefore can't share the test's BEGIN/ROLLBACK transaction. They
@@ -724,6 +725,30 @@ def test_index_executions_reads_ib_fill_objects():
     indexed = _index_executions([fill])
 
     assert indexed == {"123": {"shares": 2, "avg_price": 1.25}}
+
+
+def test_normalize_execution_record_preserves_fractional_shares():
+    """Boot rehydrate is a sibling path into orders_store.record_fill. Like the
+    ib_reconcile fix, fractional-share executions (recurring QQQ/SPY buys) must
+    reach record_fill as a Decimal — int(shares) would truncate 0.4977 to 0,
+    re-creating the qty=0 blotter bug via a different code path."""
+    from xenon.execution.single_leg_rehydrate import _normalize_execution_record
+
+    # dict branch
+    dict_rec = _normalize_execution_record({"perm_id": 1, "shares": "0.4977", "avg_price": "500.10", "side": "BUY"})
+    assert dict_rec is not None
+    assert dict_rec["qty"] == Decimal("0.4977")
+
+    # ib_async object branch
+    obj_rec = _normalize_execution_record(
+        SimpleNamespace(
+            execution=SimpleNamespace(permId=2, shares=0.5023, avgPrice=500.10),
+            contract=SimpleNamespace(symbol="QQQ", conId=1),
+            commissionReport=None,
+        )
+    )
+    assert obj_rec is not None
+    assert obj_rec["qty"] == Decimal("0.5023")
 
 
 def test_build_positions_snapshot_from_list():

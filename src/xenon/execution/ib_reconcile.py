@@ -309,7 +309,7 @@ def record_external_fills(
             con_id=_field(execution, "con_id", "conId"),
             ticker=str(_field(execution, "symbol", "ticker")),
             side=_normalize_fill_side(_field(execution, "side")),
-            qty=int(_field(execution, "shares", "qty")),
+            qty=_decimal(_field(execution, "shares", "qty")),
             price=_decimal(_field(execution, "price")),
             commission=commission,
             filled_at=_coerce_datetime(_field(execution, "time", "filled_at")),
