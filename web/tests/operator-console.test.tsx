@@ -62,9 +62,27 @@ const DATA: OperatorData = {
 
 describe("OperatorConsole", () => {
   it("renders tiles + writer table from a fetch", async () => {
+    // OperatorConsole fetches /api/admin/operator; UwQuotaTile fetches
+    // /api/admin/uw-quota — route the mock by URL.
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue({ ok: true, json: async () => DATA }),
+      vi.fn().mockImplementation((url: string) =>
+        Promise.resolve({
+          ok: true,
+          json: async () =>
+            String(url).includes("/uw-quota")
+              ? {
+                  configured: true,
+                  daily_count: 12,
+                  daily_limit: 100000,
+                  minute_count: 1,
+                  minute_remaining: 119,
+                  minute_reset_ms: 1000,
+                  fetched_at: "x",
+                }
+              : DATA,
+        }),
+      ),
     );
     render(<OperatorConsole />);
     await waitFor(() =>

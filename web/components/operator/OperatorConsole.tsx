@@ -10,6 +10,7 @@ import { IbGatewayCard } from "./IbGatewayCard";
 import { IbPoolRoles } from "./IbPoolRoles";
 import { ReliabilityRollupHeader } from "./ReliabilityRollupHeader";
 import { SignalTile } from "./SignalTile";
+import { UwQuotaTile } from "./UwQuotaTile";
 import { WriterFreshnessTable } from "./WriterFreshnessTable";
 
 const POLL_MS = 8_000;
@@ -153,16 +154,9 @@ export default function OperatorConsole() {
           sub={fmtAgeShort(data.futu.last_sync_age_s)}
           tone={data.futu.connected ? "core" : "neutral"}
         />
-        <SignalTile
-          label="UW API"
-          value={data.uw ? `${data.uw.requests} req` : "no data"}
-          sub={
-            data.uw && data.uw.latency_avg_ms != null
-              ? `${data.uw.latency_avg_ms}ms`
-              : "—"
-          }
-          tone={data.uw && data.uw.status_5xx > 0 ? "fault" : "neutral"}
-        />
+        {/* Live UW quota from x-uw-* headers — self-fetches (30-min RTH auto +
+            manual). Replaces the uw_api_stats "no data" tile. */}
+        <UwQuotaTile market={market} />
       </div>
       <WriterFreshnessTable writers={data.writers} market={market} />
     </div>

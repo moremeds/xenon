@@ -57,6 +57,19 @@ export type UwInfo = {
   latency_avg_ms: number | null;
 } | null;
 
+// Live UW rate-limit / quota snapshot, sourced from the x-uw-* response
+// headers on a Next-side probe (UW_TOKEN lives in web/.env).
+export type UwQuota = {
+  configured: boolean;
+  daily_count: number | null; // x-uw-daily-req-count
+  daily_limit: number | null; // x-uw-token-req-limit
+  minute_count: number | null; // x-uw-minute-req-counter
+  minute_remaining: number | null; // x-uw-req-per-minute-remaining
+  minute_reset_ms: number | null; // x-uw-req-per-minute-reset
+  fetched_at: string | null;
+  error?: string;
+};
+
 export type WriterRow = {
   service: string;
   state: string; // "ok" | "error" | "syncing" | "paused" | "missing"

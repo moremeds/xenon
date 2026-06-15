@@ -7377,6 +7377,29 @@ tr {
   font-size: 10px;
   color: var(--text-muted);
 }
+.operator-tile__label--row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.operator-tile__refresh {
+  background: none;
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1;
+  padding: 1px 5px;
+  cursor: pointer;
+}
+.operator-tile__refresh:hover:not(:disabled) {
+  color: var(--signal-core);
+  border-color: var(--signal-core);
+}
+.operator-tile__refresh:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
 
 .operator-pill {
   font-family: var(--font-mono);
