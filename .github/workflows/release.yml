@@ -96,13 +96,25 @@ jobs:
             extract_changelog_section CHANGELOG.md "$VERSION"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
+      - name: Classify release
+        id: rel
+        # A prerelease tag carries a semver pre-release suffix (hyphen), e.g.
+        # v0.3.6-rc1. Keep it out of "Latest" so it doesn't front the release
+        # page and stays aligned with the GHCR :latest gating in ghcr-push.
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: softprops/action-gh-release@v3
         with:
           name: ${{ github.ref_name }}
           body: ${{ steps.changelog.outputs.body }}
           draft: false
-          prerelease: false
-          make_latest: true
+          prerelease: ${{ steps.rel.outputs.prerelease }}
+          make_latest: ${{ steps.rel.outputs.prerelease == 'false' }}
 
   ghcr-push:
     # Phase 1 Stage A — build the 4 deploy images and push to GHCR. Tag-only
@@ -142,10 +154,22 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           REPO_OWNER="${GITHUB_REPOSITORY_OWNER,,}"
           IMAGE="ghcr.io/${REPO_OWNER}/xenon-${{ matrix.image }}"
+          # Always publish the immutable version tag. Float :latest ONLY for
+          # final releases — a prerelease tag (semver build with a hyphen, e.g.
+          # v0.3.6-rc1) must never become :latest, because the Mac mini's
+          # Watchtower auto-deploys whatever :latest points at. RC tags thus
+          # build a verifiable image without shipping it to production.
+          TAGS="${IMAGE}:${VERSION}"
+          if [[ "$VERSION" != *-* ]]; then
+            TAGS="${TAGS}"$'\n'"${IMAGE}:latest"
+          fi
           {
             echo "image=${IMAGE}"
             echo "version=${VERSION}"
             echo "revision=${GITHUB_SHA}"
+            echo "tags<<TAGS_EOF"
+            echo "${TAGS}"
+            echo "TAGS_EOF"
           } >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v7
         with:
@@ -153,9 +177,8 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/arm64
           push: true
-          tags: |
-            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
-            ${{ steps.meta.outputs.image }}:latest
+          # :version always; :latest only for final releases (see meta step).
+          tags: ${{ steps.meta.outputs.tags }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.meta.outputs.revision }}
