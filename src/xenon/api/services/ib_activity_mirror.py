@@ -23,6 +23,7 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable, Optional
 
+from xenon.db.service_health import record_service_health
 from xenon.execution.account_scope import AccountScope
 from xenon.execution.ib_orders import fetch_open_orders as _fetch_open_orders
 from xenon.execution.ib_orders import sync_open_orders_to_postgres as _sync_open_orders_to_postgres
@@ -400,14 +401,32 @@ async def activity_poller_loop(
                 sweep.get("cancelled"),
                 sweep.get("graced"),
             )
+            # Liveness heartbeat: the loop completed a tick. Per-subtask errors
+            # are caught inside run_activity_poll_tick and surface via
+            # order_submissions/snapshotter signals, not here.
+            record_service_health(
+                "ib_activity_poller",
+                "ok",
+                broker=scope.broker,
+                account_env=scope.account_env,
+                broker_account=scope.broker_account,
+            )
         except asyncio.CancelledError:
             logger.info("ib_activity_mirror: poller cancelled, exiting")
             raise
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             # to_thread should not raise — run_activity_poll_tick catches —
             # but if a programmer adds an un-caught path, we still don't want
             # the loop to die.
             logger.exception("ib_activity_mirror: poller tick raised unexpectedly")
+            record_service_health(
+                "ib_activity_poller",
+                "error",
+                error={"msg": str(exc)},
+                broker=scope.broker,
+                account_env=scope.account_env,
+                broker_account=scope.broker_account,
+            )
 
         try:
             await asyncio.sleep(interval_s)

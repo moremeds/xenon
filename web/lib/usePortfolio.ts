@@ -15,7 +15,11 @@ type UsePortfolioReturn = {
   syncNow: () => void;
 };
 
-export function usePortfolio(active: boolean = true): UsePortfolioReturn {
+export function usePortfolio(
+  active: boolean = true,
+  opts: { skipReads?: boolean } = {},
+): UsePortfolioReturn {
+  const { skipReads = false } = opts;
   const [data, setData] = useState<PortfolioData | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -45,13 +49,16 @@ export function usePortfolio(active: boolean = true): UsePortfolioReturn {
     }
   }, []);
 
-  const scheduleNext = useCallback((delay: number) => {
-    if (!active) return;
-    if (intervalRef.current) clearTimeout(intervalRef.current);
-    intervalRef.current = setTimeout(() => {
-      void doSyncRef.current();
-    }, delay);
-  }, [active]);
+  const scheduleNext = useCallback(
+    (delay: number) => {
+      if (!active) return;
+      if (intervalRef.current) clearTimeout(intervalRef.current);
+      intervalRef.current = setTimeout(() => {
+        void doSyncRef.current();
+      }, delay);
+    },
+    [active],
+  );
 
   const doSync = useCallback(async () => {
     if (syncingRef.current) return;
@@ -89,7 +96,14 @@ export function usePortfolio(active: boolean = true): UsePortfolioReturn {
 
   // Always read the cached portfolio once on mount. `active=false` only disables
   // polling and background sync so closed-market routes can still render.
+  // `skipReads` (operator console) suppresses even the mount GET, because
+  // `/api/portfolio` triggers a background-sync POST when the snapshot is stale —
+  // so a "read-only" page must not do that GET at all.
   useEffect(() => {
+    if (skipReads) {
+      setLoading(false);
+      return;
+    }
     if (initialLoadStartedRef.current) return;
     initialLoadStartedRef.current = true;
 
@@ -113,7 +127,7 @@ export function usePortfolio(active: boolean = true): UsePortfolioReturn {
         intervalRef.current = null;
       }
     };
-  }, [active, fetchPortfolio, scheduleNext]);
+  }, [active, skipReads, fetchPortfolio, scheduleNext]);
 
   // If the hook mounted while inactive, start syncing the first time it becomes active.
   useEffect(() => {

@@ -43,6 +43,7 @@ export type WorkspaceSection =
   | "performance"
   | "orders"
   | "journal"
+  | "operator"
   | "ticker-detail";
 
 export type JsonValue =

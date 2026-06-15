@@ -133,3 +133,58 @@ async def test_loop_survives_runner_exception(monkeypatch):
         pass
 
     assert call_count["n"] >= 2
+
+
+@pytest.mark.asyncio
+async def test_error_heartbeat_uses_futu_scope(monkeypatch):
+    """The error-path heartbeat must carry the FUTU scope (same partition as the
+    success path), not fall back to env/unknown — otherwise the operator console
+    can't reconcile a failed run against the prior successful one. No PG needed:
+    the runner raises before any query."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    real_sleep = asyncio.sleep
+
+    async def _instant_sleep(seconds):
+        return await real_sleep(0)
+
+    import xenon.api.services.futu_history_scheduler as sched_mod
+
+    monkeypatch.setattr(sched_mod.asyncio, "sleep", _instant_sleep)
+
+    calls: list[dict] = []
+    captured = asyncio.Event()
+
+    def _capture(service, state="ok", **kwargs):
+        calls.append({"service": service, "state": state, **kwargs})
+        if state == "error":
+            captured.set()
+
+    monkeypatch.setattr(sched_mod, "record_service_health", _capture)
+
+    async def _runner(engine, scope, since):
+        raise RuntimeError("synthetic failure")
+
+    def _engine_factory():
+        eng = MagicMock()
+        eng.dispose = AsyncMock()
+        return eng
+
+    task = asyncio.create_task(
+        futu_history_loop(
+            engine_factory=_engine_factory,
+            scope_factory=lambda: SCOPE,
+            runner=_runner,
+        )
+    )
+    await asyncio.wait_for(captured.wait(), timeout=5.0)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    err = next(c for c in calls if c["state"] == "error")
+    assert err["broker"] == "FUTU"
+    assert err["account_env"] == "paper"
+    assert err["broker_account"] == "pytest"

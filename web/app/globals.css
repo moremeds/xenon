@@ -7289,3 +7289,257 @@ tr {
     grid-template-columns: 1fr;
   }
 }
+
+/* ─── Operator console ─────────────────────────────────────── */
+.operator-surface {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.operator-surface--loading {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  padding: 24px;
+}
+
+.operator-rollup {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  padding: 12px 16px;
+  background: var(--bg-panel);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.operator-rollup__verdict {
+  color: var(--text-primary);
+}
+.operator-rollup__sep {
+  margin: 0 8px;
+  color: var(--text-muted);
+}
+.operator-rollup__updated {
+  color: var(--text-muted);
+}
+
+/* Unified Brokers card — IB + Futu sub-sections split by a vertical divider. */
+.operator-brokers {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+.operator-broker {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.operator-broker + .operator-broker {
+  border-left: 1px solid var(--border-dim);
+  padding-left: 20px;
+}
+.operator-surface__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.operator-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  padding: 12px 14px;
+  background: var(--bg-panel);
+}
+.operator-tile__label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.operator-tile__value {
+  font-family: var(--font-sans);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.operator-tile__value--core {
+  color: var(--signal-core);
+}
+.operator-tile__value--fault {
+  color: var(--fault);
+}
+.operator-tile__value--warn {
+  color: var(--warning);
+}
+.operator-tile__value--neutral {
+  color: var(--text-primary);
+}
+.operator-tile__sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.operator-tile__label--row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.operator-tile__refresh {
+  background: none;
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1;
+  padding: 1px 5px;
+  cursor: pointer;
+}
+.operator-tile__refresh:hover:not(:disabled) {
+  color: var(--signal-core);
+  border-color: var(--signal-core);
+}
+.operator-tile__refresh:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.operator-pill {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-dim);
+}
+.operator-pill--core {
+  color: var(--signal-core);
+  border-color: var(--signal-core);
+}
+.operator-pill--fault {
+  color: var(--fault);
+  border-color: var(--fault);
+}
+.operator-pill--warn {
+  color: var(--warning);
+  border-color: var(--warning);
+}
+.operator-pill--neutral {
+  color: var(--text-muted);
+}
+
+.operator-kv {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 16px;
+  margin: 0;
+}
+.operator-kv dt {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.operator-kv dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+/* Role pills embedded at the bottom of the IB / Futu gateway cards. */
+.operator-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+.operator-role {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border-dim);
+}
+.operator-role--off {
+  color: var(--text-muted);
+  border-style: dashed;
+}
+.operator-role__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+}
+.operator-role__dot--ok {
+  background: var(--signal-core);
+}
+.operator-role__dot--down {
+  background: var(--fault);
+}
+.operator-role__dot--off {
+  background: var(--text-muted);
+}
+
+.operator-writers__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.operator-writers__table th {
+  text-align: left;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 10px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-dim);
+}
+.operator-writers__table td {
+  padding: 8px;
+  border-bottom: 1px solid var(--border-dim);
+  color: var(--text-secondary);
+}
+.operator-writers__name {
+  color: var(--text-primary);
+}
+.operator-writers__fresh--fresh {
+  color: var(--signal-core);
+}
+.operator-writers__fresh--stale {
+  color: var(--fault);
+}
+.operator-writers__empty {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+@media (max-width: 900px) {
+  .operator-brokers {
+    grid-template-columns: 1fr;
+  }
+  .operator-broker + .operator-broker {
+    border-left: none;
+    border-top: 1px solid var(--border-dim);
+    padding-left: 0;
+    padding-top: 16px;
+  }
+  .operator-surface__grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}

@@ -28,6 +28,7 @@ import {
 import Sidebar from "@/components/Sidebar";
 import Header from "@/components/Header";
 import DashboardSurface from "@/components/dashboard/DashboardSurface";
+import OperatorConsole from "@/components/operator/OperatorConsole";
 import type { DashboardAccount } from "@/components/dashboard/PortfolioSnapshotCard";
 import MetricCards from "@/components/MetricCards";
 import AccountTabBar, {
@@ -71,8 +72,17 @@ export default function WorkspaceShell({
   const { activeAccount, setActiveAccount } = useActiveAccount();
 
   // Both accounts stay hot in the background so tab switching is instant.
-  const ibData = usePortfolio(isMarketActive);
-  const futuData = useFutuPortfolio(isMarketActive);
+  // The Operator section is read-only: gate the broker-sync hooks off so
+  // opening /admin never fires a portfolio/futu sync POST (cached GET reads
+  // on mount are harmless).
+  const isOperator = activeSection === "operator";
+  // skipReads on operator: not just polling off — the mount GET itself must be
+  // suppressed, because /api/portfolio fires a background-sync POST when the
+  // snapshot is stale. The Futu GET is a cached read with no sync side-effect.
+  const ibData = usePortfolio(isMarketActive && !isOperator, {
+    skipReads: isOperator,
+  });
+  const futuData = useFutuPortfolio(isMarketActive && !isOperator);
 
   // The `portfolio` variable the rest of the shell consumes is the
   // broker-appropriate one. Every downstream component sees a normal
@@ -107,8 +117,9 @@ export default function WorkspaceShell({
   const { drainNotifications, setOrdersUpdater } = useOrderActions();
 
   const isOrdersPage = activeSection === "orders";
-  // Fetch orders polling on orders page (always), and on other pages only during market hours.
-  const shouldAutoSyncOrders = isOrdersPage || isMarketActive;
+  // Fetch orders polling on orders page (always), and on other pages only during
+  // market hours. Never on the read-only Operator section.
+  const shouldAutoSyncOrders = (isOrdersPage || isMarketActive) && !isOperator;
   // Fetch orders polling based on context (market hours for non-order views, always for orders)
   // initial fetch always happens on mount
   const {
@@ -440,22 +451,25 @@ export default function WorkspaceShell({
           onToggleTheme={toggleTheme}
           theme={resolvedTheme}
         >
-          <div className="sync-controls">
-            <span
-              className={`sync-status ${error ? "sync-error" : syncing ? "sync-active" : ""}`}
-            >
-              {syncLabel}
-            </span>
-            <button
-              className="sync-button"
-              onClick={syncNow}
-              disabled={syncing}
-              title={`Sync ${syncTarget} from ${activeAccount === "futu" && !isOrdersPage ? "Futu OpenD" : "IB Gateway"}`}
-            >
-              <RefreshCw size={14} className={syncing ? "spin" : ""} />
-              {syncing ? "Syncing..." : "Sync Now"}
-            </button>
-          </div>
+          {/* Operator is read-only — no manual broker sync control. */}
+          {!isOperator ? (
+            <div className="sync-controls">
+              <span
+                className={`sync-status ${error ? "sync-error" : syncing ? "sync-active" : ""}`}
+              >
+                {syncLabel}
+              </span>
+              <button
+                className="sync-button"
+                onClick={syncNow}
+                disabled={syncing}
+                title={`Sync ${syncTarget} from ${activeAccount === "futu" && !isOrdersPage ? "Futu OpenD" : "IB Gateway"}`}
+              >
+                <RefreshCw size={14} className={syncing ? "spin" : ""} />
+                {syncing ? "Syncing..." : "Sync Now"}
+              </button>
+            </div>
+          ) : null}
         </Header>
 
         <ConnectionBanner
@@ -468,7 +482,8 @@ export default function WorkspaceShell({
 
         <div className="content">
           {activeSection !== "dashboard" &&
-          activeSection !== "ticker-detail" ? (
+          activeSection !== "ticker-detail" &&
+          activeSection !== "operator" ? (
             <AccountTabBar
               active={activeAccount}
               onChange={setActiveAccount}
@@ -508,8 +523,11 @@ export default function WorkspaceShell({
             />
           ) : null}
 
+          {activeSection === "operator" ? <OperatorConsole /> : null}
+
           {activeSection !== "dashboard" &&
-          activeSection !== "ticker-detail" ? (
+          activeSection !== "ticker-detail" &&
+          activeSection !== "operator" ? (
             <MetricCards
               portfolio={portfolio}
               prices={prices}
@@ -519,7 +537,7 @@ export default function WorkspaceShell({
             />
           ) : null}
 
-          {activeSection !== "dashboard" ? (
+          {activeSection !== "dashboard" && activeSection !== "operator" ? (
             <WorkspaceSections
               section={activeSection}
               portfolio={portfolio}

@@ -179,6 +179,11 @@ async def _run_rehydrate_on_boot() -> None:
         "broker_account": _scope_account or None,
     }
 
+    # Operator heartbeat: record "ok" only when BOTH phases finish without
+    # exception/timeout. This function swallows phase failures internally, so a
+    # bare "ok" after the call would mislabel a failed/timed-out boot as healthy.
+    single_ok = combo_ok = False
+
     try:
         await asyncio.wait_for(
             ib_pool.run_sync(
@@ -190,6 +195,7 @@ async def _run_rehydrate_on_boot() -> None:
             ),
             timeout=10.0,
         )
+        single_ok = True
         logger.info("single_leg rehydrate completed on boot")
     except asyncio.TimeoutError:
         logger.warning("single_leg rehydrate timed out after 10s; continuing to serve")
@@ -210,11 +216,25 @@ async def _run_rehydrate_on_boot() -> None:
             ),
             timeout=10.0,
         )
+        combo_ok = True
         logger.info("combo wizard rehydrate completed on boot")
     except asyncio.TimeoutError:
         logger.warning("combo wizard rehydrate timed out after 10s; continuing to serve")
     except Exception as exc:  # noqa: BLE001
         logger.warning("combo wizard rehydrate failed on boot; continuing to serve: %s", exc)
+
+    from xenon.db.service_health import record_service_health
+
+    _ok = single_ok and combo_ok
+    record_service_health(
+        "ib_rehydrate",
+        "ok" if _ok else "error",
+        error=None if _ok else {"msg": "rehydrate phase failed/timed out (see logs)"},
+        finished_at=datetime.now(timezone.utc),
+        broker="IB",
+        account_env=_scope_account_env,
+        broker_account=_scope_account,
+    )
 
 
 def _maybe_start_activity_poller() -> None:
@@ -378,8 +398,21 @@ async def _run_fills_replay_on_boot() -> None:
         broker_account=_scope_account,
     )
 
+    from xenon.db.service_health import record_service_health
+
+    def _hb(state: str, err: dict | None = None) -> None:
+        record_service_health(
+            "ib_fills_replay",
+            state,
+            error=err,
+            finished_at=datetime.now(timezone.utc),
+            broker="IB",
+            account_env=_scope_account_env,
+            broker_account=_scope_account,
+        )
+
     try:
-        await asyncio.wait_for(
+        result = await asyncio.wait_for(
             ib_pool.run_sync(
                 "sync",
                 reconcile_fills_on_boot,
@@ -388,10 +421,22 @@ async def _run_fills_replay_on_boot() -> None:
             ),
             timeout=30.0,
         )
+        # Derive heartbeat state from the actual result — reconcile_fills_on_boot
+        # returns {"skipped": ...}/{"error": ...} WITHOUT raising, so a bare "ok"
+        # after the await would mislabel skipped/failed boots as healthy.
+        r = result or {}
+        if r.get("error"):
+            _hb("error", {"msg": str(r.get("error"))})
+        elif r.get("skipped"):
+            _hb("paused", {"msg": str(r.get("skipped"))})
+        else:
+            _hb("ok")
     except asyncio.TimeoutError:
         logger.warning("ib fills replay timed out after 30s; continuing to serve")
+        _hb("error", {"msg": "timed out after 30s"})
     except Exception as exc:  # noqa: BLE001
         logger.warning("ib fills replay failed on boot; continuing to serve: %s", exc)
+        _hb("error", {"msg": str(exc)})
 
 
 def _get_managed_account_for_health() -> str:
@@ -837,11 +882,18 @@ def _iso_datetime(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).isoformat()
 
 
-def _snapshotter_health() -> dict:
+def _snapshotter_health(scope: dict | None = None) -> dict:
     try:
         engine = get_sync_engine()
         with engine.connect() as conn:
-            last_write_at = conn.execute(select(func.max(account_snapshots.c.snapshot_at))).scalar()
+            stmt = select(func.max(account_snapshots.c.snapshot_at))
+            if scope is not None:
+                stmt = stmt.where(
+                    account_snapshots.c.broker == scope["broker"],
+                    account_snapshots.c.account_env == scope["account_env"],
+                    account_snapshots.c.broker_account == scope["broker_account"],
+                )
+            last_write_at = conn.execute(stmt).scalar()
     except Exception:
         logger.warning("[health] failed to load snapshotter heartbeat", exc_info=True)
         return {"last_write_at": None, "stale_seconds": None}
@@ -854,19 +906,26 @@ def _snapshotter_health() -> dict:
     return {"last_write_at": _iso_datetime(last_write_at), "stale_seconds": stale_seconds}
 
 
-def _order_submissions_health() -> dict:
+def _order_submissions_health(scope: dict | None = None) -> dict:
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
         engine = get_sync_engine()
         with engine.connect() as conn:
-            unknown_count = conn.execute(
+            stmt = (
                 select(func.count())
                 .select_from(order_submissions)
                 .where(
                     order_submissions.c.state == "UNKNOWN",
                     order_submissions.c.submitted_at >= cutoff,
                 )
-            ).scalar()
+            )
+            if scope is not None:
+                stmt = stmt.where(
+                    order_submissions.c.broker == scope["broker"],
+                    order_submissions.c.account_env == scope["account_env"],
+                    order_submissions.c.broker_account == scope["broker_account"],
+                )
+            unknown_count = conn.execute(stmt).scalar()
     except Exception:
         logger.warning("[health] failed to load order submissions health", exc_info=True)
         return {"unknown_count": None, "alarm": False}
@@ -961,6 +1020,113 @@ def _realtime_subscribers_health() -> dict:
     }
 
 
+# --- Operator console helpers (Tier A/B reads) ---------------------------
+
+# Background writers the Operator console expects to see. Missing ones are
+# synthesized as state="missing" so a never-started writer is visible, not absent.
+EXPECTED_WRITERS = (
+    "ib_activity_poller",
+    "ib_fills_replay",
+    "ib_rehydrate",
+    "futu_history",
+    "naked_short_audit",
+)
+
+
+def _ib_auth_verdict(gw: dict, pool: dict) -> str:
+    """Derive an IB auth verdict from gateway + pool status."""
+    if not gw.get("port_listening"):
+        return "unreachable"
+    if gw.get("upstream_dead"):
+        return "awaiting"
+    any_connected = any((r or {}).get("connected") for r in pool.values()) if pool else False
+    return "authenticated" if any_connected else "unknown"
+
+
+def _service_health_rows() -> list[dict]:
+    """service_health rows for the active scope, sorted by service, with
+    age_secs + synthesized 'missing' rows for expected writers with no row.
+
+    futu_history is matched by service name across scopes (it runs under the
+    FUTU account, not the active IB scope); the latest row wins."""
+    try:
+        from sqlalchemy import and_, or_
+
+        from xenon.db.schema import service_health
+
+        kwargs = _resolve_scope_kwargs()
+        engine = get_sync_engine()
+        with engine.connect() as conn:
+            rows = (
+                conn.execute(
+                    select(service_health)
+                    .where(
+                        or_(
+                            and_(
+                                service_health.c.broker == kwargs["broker"],
+                                service_health.c.account_env == kwargs["account_env"],
+                                service_health.c.broker_account == kwargs["broker_account"],
+                            ),
+                            # futu_history runs under the FUTU account scope, not
+                            # the active IB scope — match it by service name across
+                            # scopes (latest row wins below) so it is not forever
+                            # synthesized as "missing".
+                            service_health.c.service == "futu_history",
+                        )
+                    )
+                    .order_by(
+                        service_health.c.service,
+                        service_health.c.updated_at.desc(),
+                    )
+                )
+                .mappings()
+                .all()
+            )
+    except Exception:
+        logger.warning("[operator] failed to load service_health", exc_info=True)
+        rows = []
+    now = datetime.now(timezone.utc)
+    out: list[dict] = []
+    seen: set[str] = set()
+    for r in rows:
+        if r["service"] in seen:
+            # ordered updated_at DESC within service → first row is the latest;
+            # skip older duplicates (e.g. prod+dev futu_history after the refresh).
+            continue
+        seen.add(r["service"])
+        updated = r["updated_at"]
+        if updated is not None and updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        out.append(
+            {
+                "service": r["service"],
+                "state": r["state"],
+                "detail": r["detail"],
+                "last_error": r["last_error"],
+                "last_started_at": _iso_datetime(r["last_started_at"]),
+                "last_finished_at": _iso_datetime(r["last_finished_at"]),
+                "updated_at": _iso_datetime(updated),
+                "age_secs": int((now - updated).total_seconds()) if updated else None,
+            }
+        )
+    for svc in EXPECTED_WRITERS:
+        if svc not in seen:
+            out.append(
+                {
+                    "service": svc,
+                    "state": "missing",
+                    "detail": None,
+                    "last_error": None,
+                    "last_started_at": None,
+                    "last_finished_at": None,
+                    "updated_at": None,
+                    "age_secs": None,
+                }
+            )
+    out.sort(key=lambda r: r["service"])
+    return out
+
+
 @app.get("/health")
 async def health():
     gw = await check_ib_gateway()
@@ -981,6 +1147,33 @@ async def health():
         "order_submissions": _order_submissions_health(),
         "flex_divergence": _flex_divergence_health(),
         "realtime_subscribers": await asyncio.to_thread(_realtime_subscribers_health),
+    }
+
+
+@app.get("/admin/operator")
+async def admin_operator():
+    """Operator console aggregate. Read-only. No per-route Depends — gated by
+    the global auth_middleware like every data route (a per-route Depends would
+    401 cross-container in Docker since the Next proxy forwards no token). The
+    DB helpers are called inline (not via to_thread) to match /health and to
+    stay on the Phase-2 test connection."""
+    gw = await check_ib_gateway()
+    pool = ib_pool.status() if ib_pool else {}
+    scope = _resolve_scope_kwargs()
+    return {
+        "generated_at": _iso_datetime(datetime.now(timezone.utc)),
+        "ib_gateway": gw,
+        "ib_pool": pool,
+        "ib_auth": _ib_auth_verdict(gw, pool),
+        "trading_mode": getattr(app.state, "trading_mode", trading_mode.MODE),
+        "account": mask_account(getattr(app.state, "account", "")),
+        "mode_verified": getattr(app.state, "mode_verified", False),
+        "snapshotter": _snapshotter_health(scope),
+        "order_submissions": _order_submissions_health(scope),
+        "flex_divergence": _flex_divergence_health(),
+        "realtime_subscribers": await asyncio.to_thread(_realtime_subscribers_health),
+        "futu": _compute_futu_health(),
+        "writers": _service_health_rows(),
     }
 
 

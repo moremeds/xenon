@@ -381,6 +381,9 @@ def test_activity_poller_loop_runs_until_cancelled(monkeypatch, scope):
         return {"open_orders": {}, "fills": {}}
 
     monkeypatch.setattr(ib_activity_mirror, "run_activity_poll_tick", fake_tick)
+    # Stub the per-tick heartbeat — this test asserts loop cadence, and a real
+    # (remote) service_health write per tick would blow the tight time window.
+    monkeypatch.setattr(ib_activity_mirror, "record_service_health", lambda *a, **k: None)
 
     async def _run():
         task = asyncio.create_task(
@@ -418,6 +421,9 @@ def test_activity_poller_loop_recovers_from_tick_failure(monkeypatch, scope):
         return {"open_orders": {}, "fills": {}}
 
     monkeypatch.setattr(ib_activity_mirror, "run_activity_poll_tick", fake_tick)
+    # Stub the per-tick heartbeat (see sibling test) so a real remote DB write
+    # doesn't dominate the 0.05s recovery window.
+    monkeypatch.setattr(ib_activity_mirror, "record_service_health", lambda *a, **k: None)
 
     async def _run():
         task = asyncio.create_task(

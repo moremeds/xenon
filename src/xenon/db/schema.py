@@ -14,6 +14,7 @@ from sqlalchemy import (
     LargeBinary,
     MetaData,
     Numeric,
+    PrimaryKeyConstraint,
     SmallInteger,
     Table,
     Text,
@@ -1139,6 +1140,27 @@ uw_api_stats = Table(
     Column("status_2xx", Integer, server_default=text("0")),
     Column("status_4xx", Integer, server_default=text("0")),
     Column("status_5xx", Integer, server_default=text("0")),
+)
+
+# Operator console — background-writer heartbeats (Tier B). Single row per
+# (service, AccountScope). Scope columns are REQUIRED by the repo rule: the
+# nightly core_dev→core_test refresh copies live (prod) heartbeats into the dev
+# DB where paper-session heartbeats share the same `service` key — without scope
+# they'd collide. Composite PK keeps live vs paper rows distinct.
+service_health = Table(
+    "service_health",
+    xenon_metadata,
+    Column("service", Text, nullable=False),
+    Column("broker", Text, nullable=False),
+    Column("account_env", Text, nullable=False),
+    Column("broker_account", Text, nullable=False),
+    Column("state", Text, nullable=False),
+    Column("detail", Text),
+    Column("last_error", Text),
+    Column("last_started_at", TIMESTAMP(timezone=True)),
+    Column("last_finished_at", TIMESTAMP(timezone=True)),
+    Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+    PrimaryKeyConstraint("service", "broker", "account_env", "broker_account", name="pk_service_health"),
 )
 
 # ---------- Caches ----------
