@@ -1,4 +1,5 @@
 import {
+  Activity,
   BarChart3,
   Circle,
   ClipboardList,
@@ -31,6 +32,7 @@ export const navItems: WorkspaceNavItem[] = [
   },
   { label: "Orders", route: "orders", href: "/orders", icon: ClipboardList },
   { label: "Journal", route: "journal", href: "/journal", icon: Wrench },
+  { label: "Operator", route: "operator", href: "/admin", icon: Activity },
 ];
 
 export const quickPromptsBySection: Record<WorkspaceSection, string[]> = {
@@ -39,6 +41,7 @@ export const quickPromptsBySection: Record<WorkspaceSection, string[]> = {
   performance: ["portfolio", "journal --limit 10", "help"],
   orders: ["portfolio", "journal --limit 10", "help"],
   journal: ["journal --limit 25", "portfolio", "help"],
+  operator: ["help"],
   "ticker-detail": ["portfolio", "help"],
 };
 
@@ -48,6 +51,7 @@ export const sectionDescription: Record<WorkspaceSection, string> = {
   performance: "Performance attribution and historical P&L.",
   orders: "Open orders and recent fills from IB Gateway.",
   journal: "Trade decision logs and history review.",
+  operator: "IB Gateway, writers, and reliability signals (read-only).",
   "ticker-detail":
     "Instrument detail — position, orders, options chain, history.",
 };
