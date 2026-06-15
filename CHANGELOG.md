@@ -5,10 +5,12 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-06-15
+
+
 ### Fixed
 
 - **"Today's Executed Orders" panel listed stale fills and malformed stock rows (#140).** The executed-orders payload had no date predicate, so the panel rendered every historical fill for the account under a "Today's" header. Single-name stock fills also showed a redundant `Bought QQQ`-style label. The payload now filters executed fills to the current Eastern-time day (matching the realized-P&L day boundary in `web/lib/realized-pnl.ts`), with a midnight-Eastern-as-UTC boundary helper, and stock fills render a clean `Stock` descriptor. The earlier zero-quantity rows were a separate fractional-share truncation (fixed in #134); the affected prod fills were repaired with their true IB quantities.
-
 ## [0.3.4] — 2026-06-14
 
 ### Fixed
