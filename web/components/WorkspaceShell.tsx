@@ -27,7 +27,8 @@ import {
 } from "@/lib/pricesProtocol";
 import Sidebar from "@/components/Sidebar";
 import Header from "@/components/Header";
-import ChatPanel from "@/components/ChatPanel";
+import DashboardSurface from "@/components/dashboard/DashboardSurface";
+import type { DashboardAccount } from "@/components/dashboard/PortfolioSnapshotCard";
 import MetricCards from "@/components/MetricCards";
 import AccountTabBar, {
   type AccountTabState,
@@ -261,6 +262,29 @@ export default function WorkspaceShell({
     [executedOrders],
   );
 
+  // Both accounts for the dashboard's merged Portfolio card (IB + FUTU).
+  const dashboardAccounts: DashboardAccount[] = [
+    {
+      source: "ib",
+      label: "IB",
+      accountId: ibData.data?.account_summary ? "IB Account" : null,
+      status: ibConnected ? "live" : "down",
+      portfolio: ibData.data,
+    },
+    {
+      source: "futu",
+      label: "FUTU",
+      accountId: futuData.envelope?.account_id ?? null,
+      status: computeFutuStaleness({
+        envelope: futuData.envelope,
+        error: futuData.error,
+        neverSynced: futuData.neverSynced,
+        marketOpen: isMarketActive,
+      }),
+      portfolio: futuData.data,
+    },
+  ];
+
   // Sync prices + portfolio into ticker-detail context (refs, no re-renders)
   const {
     setActiveTicker,
@@ -443,50 +467,56 @@ export default function WorkspaceShell({
         <FlexTokenBanner />
 
         <div className="content">
+          {activeSection !== "dashboard" &&
+          activeSection !== "ticker-detail" ? (
+            <AccountTabBar
+              active={activeAccount}
+              onChange={setActiveAccount}
+              ib={{
+                label: "IB",
+                accountId: ibData.data?.account_summary ? "IB Account" : null,
+                environment: "real",
+                positionCount: ibData.data?.positions.length ?? 0,
+                lastSync: ibData.lastSync,
+                netLiquidation:
+                  ibData.data?.account_summary?.net_liquidation ?? null,
+                status: ibConnected ? "live" : "down",
+              }}
+              futu={{
+                label: "FUTU",
+                accountId: futuData.envelope?.account_id ?? null,
+                environment: "real",
+                positionCount: futuData.data?.positions.length ?? 0,
+                lastSync: futuData.lastSync,
+                netLiquidation:
+                  futuData.data?.account_summary?.net_liquidation ?? null,
+                status: computeFutuStaleness({
+                  envelope: futuData.envelope,
+                  error: futuData.error,
+                  neverSynced: futuData.neverSynced,
+                  marketOpen: isMarketActive,
+                }),
+              }}
+            />
+          ) : null}
+
           {activeSection === "dashboard" ? (
-            <ChatPanel activeSection={activeSection} />
+            <DashboardSurface
+              accounts={dashboardAccounts}
+              orders={orders}
+              prices={prices}
+            />
           ) : null}
 
           {activeSection !== "dashboard" &&
           activeSection !== "ticker-detail" ? (
-            <>
-              <AccountTabBar
-                active={activeAccount}
-                onChange={setActiveAccount}
-                ib={{
-                  label: "IB",
-                  accountId: ibData.data?.account_summary ? "IB Account" : null,
-                  environment: "real",
-                  positionCount: ibData.data?.positions.length ?? 0,
-                  lastSync: ibData.lastSync,
-                  netLiquidation:
-                    ibData.data?.account_summary?.net_liquidation ?? null,
-                  status: ibConnected ? "live" : "down",
-                }}
-                futu={{
-                  label: "FUTU",
-                  accountId: futuData.envelope?.account_id ?? null,
-                  environment: "real",
-                  positionCount: futuData.data?.positions.length ?? 0,
-                  lastSync: futuData.lastSync,
-                  netLiquidation:
-                    futuData.data?.account_summary?.net_liquidation ?? null,
-                  status: computeFutuStaleness({
-                    envelope: futuData.envelope,
-                    error: futuData.error,
-                    neverSynced: futuData.neverSynced,
-                    marketOpen: isMarketActive,
-                  }),
-                }}
-              />
-              <MetricCards
-                portfolio={portfolio}
-                prices={prices}
-                realizedPnl={todayRealizedPnl}
-                executedOrders={executedOrders}
-                section={activeSection}
-              />
-            </>
+            <MetricCards
+              portfolio={portfolio}
+              prices={prices}
+              realizedPnl={todayRealizedPnl}
+              executedOrders={executedOrders}
+              section={activeSection}
+            />
           ) : null}
 
           {activeSection !== "dashboard" ? (
