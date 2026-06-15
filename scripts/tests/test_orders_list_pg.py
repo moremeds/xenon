@@ -65,6 +65,7 @@ def _insert_fill(
     price: str = "191.25",
     commission: str = "1.25",
     metadata: dict | None = None,
+    filled_at: datetime | None = None,
     account_env: str = "paper",
     broker_account: str = "DU0000000",
 ) -> None:
@@ -83,7 +84,7 @@ def _insert_fill(
                 qty=qty,
                 price=Decimal(price),
                 commission=Decimal(commission),
-                filled_at=datetime(2026, 3, 10, 15, 0, tzinfo=timezone.utc),
+                filled_at=filled_at if filled_at is not None else datetime.now(timezone.utc),
                 metadata=metadata
                 if metadata is not None
                 else {"legacy_source": "test", "legacy_id": exec_id, "sec_type": "STK", "exchange": "SMART"},
@@ -102,7 +103,9 @@ def test_orders_endpoint_reads_order_submissions_and_fills_by_scope():
 
     _insert_order(submission_id="open-paper", ticker="AAPL", state="WORKING")
     _insert_order(submission_id="done-paper", ticker="MSFT", state="FILLED")
-    _insert_order(submission_id="open-live", ticker="TSLA", state="WORKING", account_env="live", broker_account="U0000000")
+    _insert_order(
+        submission_id="open-live", ticker="TSLA", state="WORKING", account_env="live", broker_account="U0000000"
+    )
     _insert_fill(exec_id="fill-paper", ticker="AAPL")
     _insert_fill(exec_id="fill-live", ticker="TSLA", account_env="live", broker_account="U0000000")
 
