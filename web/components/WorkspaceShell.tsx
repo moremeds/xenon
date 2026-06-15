@@ -27,7 +27,7 @@ import {
 } from "@/lib/pricesProtocol";
 import Sidebar from "@/components/Sidebar";
 import Header from "@/components/Header";
-import ChatPanel from "@/components/ChatPanel";
+import DashboardSurface from "@/components/dashboard/DashboardSurface";
 import MetricCards from "@/components/MetricCards";
 import AccountTabBar, {
   type AccountTabState,
@@ -443,50 +443,55 @@ export default function WorkspaceShell({
         <FlexTokenBanner />
 
         <div className="content">
+          {activeSection !== "ticker-detail" ? (
+            <AccountTabBar
+              active={activeAccount}
+              onChange={setActiveAccount}
+              ib={{
+                label: "IB",
+                accountId: ibData.data?.account_summary ? "IB Account" : null,
+                environment: "real",
+                positionCount: ibData.data?.positions.length ?? 0,
+                lastSync: ibData.lastSync,
+                netLiquidation:
+                  ibData.data?.account_summary?.net_liquidation ?? null,
+                status: ibConnected ? "live" : "down",
+              }}
+              futu={{
+                label: "FUTU",
+                accountId: futuData.envelope?.account_id ?? null,
+                environment: "real",
+                positionCount: futuData.data?.positions.length ?? 0,
+                lastSync: futuData.lastSync,
+                netLiquidation:
+                  futuData.data?.account_summary?.net_liquidation ?? null,
+                status: computeFutuStaleness({
+                  envelope: futuData.envelope,
+                  error: futuData.error,
+                  neverSynced: futuData.neverSynced,
+                  marketOpen: isMarketActive,
+                }),
+              }}
+            />
+          ) : null}
+
           {activeSection === "dashboard" ? (
-            <ChatPanel activeSection={activeSection} />
+            <DashboardSurface
+              portfolio={portfolio}
+              orders={activeAccount === "ib" ? orders : null}
+              prices={prices}
+            />
           ) : null}
 
           {activeSection !== "dashboard" &&
           activeSection !== "ticker-detail" ? (
-            <>
-              <AccountTabBar
-                active={activeAccount}
-                onChange={setActiveAccount}
-                ib={{
-                  label: "IB",
-                  accountId: ibData.data?.account_summary ? "IB Account" : null,
-                  environment: "real",
-                  positionCount: ibData.data?.positions.length ?? 0,
-                  lastSync: ibData.lastSync,
-                  netLiquidation:
-                    ibData.data?.account_summary?.net_liquidation ?? null,
-                  status: ibConnected ? "live" : "down",
-                }}
-                futu={{
-                  label: "FUTU",
-                  accountId: futuData.envelope?.account_id ?? null,
-                  environment: "real",
-                  positionCount: futuData.data?.positions.length ?? 0,
-                  lastSync: futuData.lastSync,
-                  netLiquidation:
-                    futuData.data?.account_summary?.net_liquidation ?? null,
-                  status: computeFutuStaleness({
-                    envelope: futuData.envelope,
-                    error: futuData.error,
-                    neverSynced: futuData.neverSynced,
-                    marketOpen: isMarketActive,
-                  }),
-                }}
-              />
-              <MetricCards
-                portfolio={portfolio}
-                prices={prices}
-                realizedPnl={todayRealizedPnl}
-                executedOrders={executedOrders}
-                section={activeSection}
-              />
-            </>
+            <MetricCards
+              portfolio={portfolio}
+              prices={prices}
+              realizedPnl={todayRealizedPnl}
+              executedOrders={executedOrders}
+              section={activeSection}
+            />
           ) : null}
 
           {activeSection !== "dashboard" ? (
