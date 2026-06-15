@@ -14,6 +14,12 @@ const GW = {
   gateway_mode: "cloud",
 };
 
+const POOL = {
+  sync: { connected: true, client_id: 1 },
+  orders: { connected: true, client_id: 2 },
+  data: { connected: false, client_id: 3 },
+};
+
 describe("IbGatewayCard", () => {
   it("shows host:port and the auth verdict", () => {
     render(
@@ -23,6 +29,7 @@ describe("IbGatewayCard", () => {
         account="DU***889"
         tradingMode="paper"
         modeVerified
+        pool={POOL}
       />,
     );
     expect(screen.getByText(/100\.66\.147\.98:4001/)).toBeTruthy();
@@ -36,8 +43,28 @@ describe("IbGatewayCard", () => {
         account=""
         tradingMode="paper"
         modeVerified={false}
+        pool={{}}
       />,
     );
     expect(container.querySelector(".operator-pill--fault")).toBeTruthy();
+  });
+  it("embeds the pool roles as pills with status dots", () => {
+    const { container } = render(
+      <IbGatewayCard
+        gateway={GW}
+        verdict="authenticated"
+        account="DU***889"
+        tradingMode="paper"
+        modeVerified
+        pool={POOL}
+      />,
+    );
+    // sync/orders/data roles surface as inline pills inside the gateway card.
+    expect(screen.getByText("sync")).toBeTruthy();
+    expect(screen.getByText("orders")).toBeTruthy();
+    expect(screen.getByText("data")).toBeTruthy();
+    expect(container.querySelectorAll(".operator-role__dot").length).toBe(3);
+    // data is disconnected → down dot.
+    expect(container.querySelector(".operator-role__dot--down")).toBeTruthy();
   });
 });

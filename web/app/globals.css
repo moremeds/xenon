@@ -7325,11 +7325,22 @@ tr {
   color: var(--text-muted);
 }
 
-.operator-surface__cards {
+/* Unified Brokers card — IB + Futu sub-sections split by a vertical divider. */
+.operator-brokers {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+  gap: 20px;
   align-items: start;
+}
+.operator-broker {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.operator-broker + .operator-broker {
+  border-left: 1px solid var(--border-dim);
+  padding-left: 20px;
 }
 .operator-surface__grid {
   display: grid;
@@ -7446,43 +7457,41 @@ tr {
   color: var(--text-primary);
 }
 
-.operator-pool {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+/* Role pills embedded at the bottom of the IB / Futu gateway cards. */
+.operator-roles {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
   gap: 8px;
+  margin-top: 16px;
 }
-.operator-pool__row {
-  display: flex;
+.operator-role {
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  font-family: var(--font-mono);
-  font-size: 13px;
-}
-.operator-pool__dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-}
-.operator-pool__dot--ok {
-  background: var(--signal-core);
-}
-.operator-pool__dot--down {
-  background: var(--fault);
-}
-.operator-pool__role {
-  color: var(--text-primary);
-}
-.operator-pool__cid {
-  color: var(--text-muted);
-  margin-left: auto;
-}
-.operator-pool__empty {
-  color: var(--text-muted);
+  gap: 7px;
   font-family: var(--font-mono);
   font-size: 12px;
+  color: var(--text-primary);
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border-dim);
+}
+.operator-role--off {
+  color: var(--text-muted);
+  border-style: dashed;
+}
+.operator-role__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+}
+.operator-role__dot--ok {
+  background: var(--signal-core);
+}
+.operator-role__dot--down {
+  background: var(--fault);
+}
+.operator-role__dot--off {
+  background: var(--text-muted);
 }
 
 .operator-writers__table {
@@ -7521,8 +7530,14 @@ tr {
 }
 
 @media (max-width: 900px) {
-  .operator-surface__cards {
+  .operator-brokers {
     grid-template-columns: 1fr;
+  }
+  .operator-broker + .operator-broker {
+    border-left: none;
+    border-top: 1px solid var(--border-dim);
+    padding-left: 0;
+    padding-top: 16px;
   }
   .operator-surface__grid {
     grid-template-columns: 1fr 1fr;

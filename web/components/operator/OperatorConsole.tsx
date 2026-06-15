@@ -6,22 +6,13 @@ import { isWriterStale } from "@/lib/serviceHealthWindows";
 import type { OperatorData } from "@/lib/operatorTypes";
 import { useMarketHours } from "@/lib/useMarketHours";
 
-import { IbGatewayCard } from "./IbGatewayCard";
-import { IbPoolRoles } from "./IbPoolRoles";
+import { BrokersCard } from "./BrokersCard";
 import { ReliabilityRollupHeader } from "./ReliabilityRollupHeader";
 import { SignalTile } from "./SignalTile";
 import { UwQuotaTile } from "./UwQuotaTile";
 import { WriterFreshnessTable } from "./WriterFreshnessTable";
 
 const POLL_MS = 8_000;
-
-function fmtAgeShort(secs: number | null | undefined): string {
-  if (secs == null) return "—";
-  if (secs < 90) return `${Math.round(secs)}s`;
-  if (secs < 5400) return `${Math.round(secs / 60)}m`;
-  if (secs < 172800) return `${Math.round(secs / 3600)}h`;
-  return `${Math.round(secs / 86400)}d`;
-}
 
 export default function OperatorConsole() {
   const market = useMarketHours();
@@ -97,16 +88,7 @@ export default function OperatorConsole() {
         updatedSecsAgo={updatedSecsAgo}
         writerSummary={writerSummary}
       />
-      <div className="operator-surface__cards">
-        <IbGatewayCard
-          gateway={data.ib_gateway}
-          verdict={data.ib_auth}
-          account={data.account}
-          tradingMode={data.trading_mode}
-          modeVerified={data.mode_verified}
-        />
-        <IbPoolRoles pool={data.ib_pool} />
-      </div>
+      <BrokersCard data={data} />
       <div className="operator-surface__grid">
         <SignalTile
           label="Snapshotter"
@@ -115,7 +97,7 @@ export default function OperatorConsole() {
               ? `${data.snapshotter.stale_seconds}s`
               : "---"
           }
-          sub="staleness"
+          sub="since last portfolio snapshot"
           tone={snapTone}
         />
         <SignalTile
@@ -141,18 +123,6 @@ export default function OperatorConsole() {
           }
           sub={`${data.realtime_subscribers.anonymous_count} subs`}
           tone={data.realtime_subscribers.reachable ? "core" : "fault"}
-        />
-        <SignalTile
-          label="Futu"
-          value={
-            data.futu.connected
-              ? "connected"
-              : data.futu.configured
-                ? "idle"
-                : "off"
-          }
-          sub={fmtAgeShort(data.futu.last_sync_age_s)}
-          tone={data.futu.connected ? "core" : "neutral"}
         />
         {/* Live UW quota from x-uw-* headers — self-fetches (30-min RTH auto +
             manual). Replaces the uw_api_stats "no data" tile. */}

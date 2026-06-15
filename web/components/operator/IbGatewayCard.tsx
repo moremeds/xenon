@@ -1,4 +1,8 @@
-import type { IbAuthVerdict, IbGatewayInfo } from "@/lib/operatorTypes";
+import type {
+  IbAuthVerdict,
+  IbGatewayInfo,
+  IbPoolRole,
+} from "@/lib/operatorTypes";
 
 const VERDICT_TONE: Record<IbAuthVerdict, string> = {
   authenticated: "core",
@@ -13,16 +17,18 @@ export function IbGatewayCard({
   account,
   tradingMode,
   modeVerified,
+  pool,
 }: {
   gateway: IbGatewayInfo;
   verdict: IbAuthVerdict;
   account: string;
   tradingMode: string;
   modeVerified: boolean;
+  pool: Record<string, IbPoolRole>;
 }) {
+  const roles = Object.entries(pool);
   return (
-    <section className="snapshot-card">
-      <span className="panel-edge-trace" aria-hidden />
+    <div className="operator-broker">
       <header className="snapshot-card__header">
         <p className="panel-eyebrow">IB Gateway</p>
         <h3 className="panel-title">Gateway</h3>
@@ -56,6 +62,27 @@ export function IbGatewayCard({
           </dd>
         </div>
       </dl>
-    </section>
+      {roles.length > 0 ? (
+        <div className="operator-roles">
+          {roles.map(([role, info]) => (
+            <span
+              key={role}
+              className="operator-role"
+              title={`client ${info?.client_id ?? "?"} · ${
+                info?.connected ? "connected" : "disconnected"
+              }`}
+            >
+              <span
+                className={`operator-role__dot operator-role__dot--${
+                  info?.connected ? "ok" : "down"
+                }`}
+                aria-hidden
+              />
+              {role}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
   );
 }
