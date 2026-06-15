@@ -166,3 +166,22 @@ the cards rather than beside them.
 - **Modified:** `web/components/WorkspaceShell.tsx` (dashboard branch + tab-bar
   condition), `web/app/globals.css` (dashboard/snapshot styles + panel-\*).
 - **Reference only:** radon `web/components/dashboard/*`, radon `globals.css:1016-1210`.
+
+## Iteration — post-review layout (2026-06-15)
+
+After reviewing the first cut against live paper data, the layout pivoted on user
+direction. This supersedes the right-rail / per-account-tab arrangement above:
+
+- **Merged account model.** The separate full-width IB/FUTU `AccountTabBar` is
+  dropped on the dashboard. The Portfolio card shows **merged IB + FUTU totals**
+  by default (sign-preserving sums; FUTU Today-P&L from intraday prices). A header
+  toggle expands a **per-account breakdown** (IB / FUTU rows: status dot, position
+  count, net liq, Today P&L). Merge math is a pure, unit-tested lib:
+  `web/lib/accountMerge.ts` (`accountMetrics` + `mergeAccountMetrics`).
+- **Layout.** Top strip = Portfolio card **horizontal beside** Working & Filled;
+  **ChatPanel returns full-width below** (its original prominent place) — no right
+  rail. `.dashboard-surface` is a flex column (`__strip` grid + `__chat`).
+- **Working & Filled** is always IB orders (Futu has no orders); no longer gated
+  on a global account toggle.
+- **New:** `web/lib/accountMerge.ts` (+ `web/tests/account-merge.test.ts`).
+  `DashboardAccount` type + merged/breakdown UI in `PortfolioSnapshotCard.tsx`.

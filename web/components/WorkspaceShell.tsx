@@ -28,6 +28,7 @@ import {
 import Sidebar from "@/components/Sidebar";
 import Header from "@/components/Header";
 import DashboardSurface from "@/components/dashboard/DashboardSurface";
+import type { DashboardAccount } from "@/components/dashboard/PortfolioSnapshotCard";
 import MetricCards from "@/components/MetricCards";
 import AccountTabBar, {
   type AccountTabState,
@@ -261,6 +262,29 @@ export default function WorkspaceShell({
     [executedOrders],
   );
 
+  // Both accounts for the dashboard's merged Portfolio card (IB + FUTU).
+  const dashboardAccounts: DashboardAccount[] = [
+    {
+      source: "ib",
+      label: "IB",
+      accountId: ibData.data?.account_summary ? "IB Account" : null,
+      status: ibConnected ? "live" : "down",
+      portfolio: ibData.data,
+    },
+    {
+      source: "futu",
+      label: "FUTU",
+      accountId: futuData.envelope?.account_id ?? null,
+      status: computeFutuStaleness({
+        envelope: futuData.envelope,
+        error: futuData.error,
+        neverSynced: futuData.neverSynced,
+        marketOpen: isMarketActive,
+      }),
+      portfolio: futuData.data,
+    },
+  ];
+
   // Sync prices + portfolio into ticker-detail context (refs, no re-renders)
   const {
     setActiveTicker,
@@ -443,7 +467,8 @@ export default function WorkspaceShell({
         <FlexTokenBanner />
 
         <div className="content">
-          {activeSection !== "ticker-detail" ? (
+          {activeSection !== "dashboard" &&
+          activeSection !== "ticker-detail" ? (
             <AccountTabBar
               active={activeAccount}
               onChange={setActiveAccount}
@@ -477,8 +502,8 @@ export default function WorkspaceShell({
 
           {activeSection === "dashboard" ? (
             <DashboardSurface
-              portfolio={portfolio}
-              orders={activeAccount === "ib" ? orders : null}
+              accounts={dashboardAccounts}
+              orders={orders}
               prices={prices}
             />
           ) : null}

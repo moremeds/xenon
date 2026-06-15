@@ -4,186 +4,247 @@
 
 import React from "react";
 import { describe, it, expect, afterEach } from "vitest";
-import { cleanup, render } from "@testing-library/react";
-import { PortfolioSnapshotCard } from "@/components/dashboard/PortfolioSnapshotCard";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  PortfolioSnapshotCard,
+  type DashboardAccount,
+} from "@/components/dashboard/PortfolioSnapshotCard";
 import type { PortfolioData } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 
 afterEach(() => cleanup());
 
-function ibPortfolio(dailyPnl: number | null): PortfolioData {
+function ibPortfolio(): PortfolioData {
   return {
     source: "ib",
-    bankroll: 200000,
-    peak_value: 200000,
+    bankroll: 1_000_000,
+    peak_value: 1_000_000,
     last_sync: "2026-06-15T14:00:00Z",
     positions: [],
-    total_deployed_pct: 52.7,
-    total_deployed_dollars: 105501,
-    remaining_capacity_pct: 47.3,
-    position_count: 0,
+    total_deployed_pct: 1.3,
+    total_deployed_dollars: 13267,
+    remaining_capacity_pct: 98.7,
+    position_count: 2,
     defined_risk_count: 0,
     undefined_risk_count: 0,
     avg_kelly_optimal: null,
     account_summary: {
-      net_liquidation: 148000,
-      daily_pnl: dailyPnl,
+      net_liquidation: 1_003_726,
+      daily_pnl: -461,
       unrealized_pnl: 0,
       realized_pnl: 0,
-      settled_cash: 9000,
+      settled_cash: 990_229,
       maintenance_margin: 0,
       excess_liquidity: 0,
       buying_power: 0,
       dividends: null,
-      cash: -14585,
+      cash: 990_229,
     },
   };
 }
 
-const FUTU_PORTFOLIO: PortfolioData = {
-  source: "futu",
-  bankroll: 148000,
-  peak_value: 148000,
-  last_sync: "2026-06-15T14:00:00Z",
-  positions: [
-    {
-      id: 1,
-      ticker: "TSLA",
-      structure: "Stock",
-      structure_type: "Stock",
-      risk_profile: "equity",
-      expiry: "",
-      contracts: 300,
-      direction: "LONG",
-      entry_cost: 96213,
-      max_risk: null,
-      market_value: 105501,
-      legs: [
-        {
-          direction: "LONG",
-          contracts: 300,
-          type: "Stock",
-          strike: null,
-          entry_cost: 96213,
-          avg_cost: 320.71,
-          market_price: 351.67,
-          market_value: 105501,
-          market_price_is_calculated: false,
-        },
-      ],
-      kelly_optimal: null,
-      target: null,
-      stop: null,
-      entry_date: "2026-04-01",
+function futuPortfolio(): PortfolioData {
+  return {
+    source: "futu",
+    bankroll: 233_563,
+    peak_value: 233_563,
+    last_sync: "2026-06-02T00:01:17Z",
+    positions: [],
+    total_deployed_pct: 71.2,
+    total_deployed_dollars: 550_326,
+    remaining_capacity_pct: 28.8,
+    position_count: 39,
+    defined_risk_count: 0,
+    undefined_risk_count: 0,
+    avg_kelly_optimal: null,
+    account_summary: {
+      net_liquidation: 233_563,
+      daily_pnl: 9288,
+      unrealized_pnl: 9288,
+      realized_pnl: 0,
+      settled_cash: -24_797,
+      maintenance_margin: 0,
+      excess_liquidity: 0,
+      buying_power: 0,
+      dividends: null,
     },
-  ],
-  total_deployed_pct: 71.2,
-  total_deployed_dollars: 105501,
-  remaining_capacity_pct: 28.8,
-  position_count: 1,
-  defined_risk_count: 0,
-  undefined_risk_count: 1,
-  avg_kelly_optimal: null,
-  account_summary: {
-    net_liquidation: 148000,
-    daily_pnl: 9288,
-    unrealized_pnl: 9288,
-    realized_pnl: 0,
-    settled_cash: -14585,
-    maintenance_margin: 114285,
-    excess_liquidity: 33715,
-    buying_power: 29917,
-    dividends: null,
-  },
-};
+  };
+}
 
-const PRICES: Record<string, PriceData> = {
-  TSLA: {
-    symbol: "TSLA",
-    last: 351.67,
-    lastIsCalculated: false,
-    bid: 351.5,
-    ask: 351.8,
-    bidSize: 1,
-    askSize: 1,
-    volume: 100,
-    high: null,
-    low: null,
-    open: null,
-    close: 350.67,
-    week52High: null,
-    week52Low: null,
-    avgVolume: null,
-    delta: null,
-    gamma: null,
-    theta: null,
-    vega: null,
-    impliedVol: null,
-    undPrice: null,
-    timestamp: "2026-06-15T14:00:00Z",
-  },
-};
+function accounts(): DashboardAccount[] {
+  return [
+    {
+      source: "ib",
+      label: "IB",
+      accountId: "IB Account",
+      status: "live",
+      portfolio: ibPortfolio(),
+    },
+    {
+      source: "futu",
+      label: "FUTU",
+      accountId: "28175…3263",
+      status: "stale",
+      portfolio: futuPortfolio(),
+    },
+  ];
+}
 
-function todayCell(container: HTMLElement): HTMLElement | undefined {
+function mergedCell(
+  container: HTMLElement,
+  label: string,
+): HTMLElement | undefined {
   return Array.from(container.querySelectorAll(".snapshot-cell")).find((el) =>
-    el.textContent?.includes("Today"),
+    el.textContent?.includes(label),
   ) as HTMLElement | undefined;
 }
 
-describe("PortfolioSnapshotCard", () => {
-  it("renders the four account cells from an IB portfolio", () => {
+describe("PortfolioSnapshotCard (merged IB + FUTU)", () => {
+  it("shows merged totals across both accounts by default", () => {
     const { container } = render(
-      <PortfolioSnapshotCard portfolio={ibPortfolio(1234)} />,
+      <PortfolioSnapshotCard accounts={accounts()} />,
     );
-    const text = container.textContent ?? "";
-    expect(text).toContain("Net Liquidation");
-    expect(text).toContain("$148,000");
-    expect(text).toContain("Open Risk");
-    expect(text).toContain("$105,501");
-    expect(text).toContain("Cash");
-    expect(text).toContain("-$14,585");
-    expect(text).toContain("Today");
-    expect(text).toContain("+$1,234");
+    // 1,003,726 + 233,563 = 1,237,289 -> $1.24M
+    expect(mergedCell(container, "Net Liquidation")?.textContent).toContain(
+      "$1.24M",
+    );
+    // -461 + 300(futu intraday w/o prices = 0 here) ... no prices passed -> futu today null
+    // openRisk 13,267 + 550,326 = 563,593
+    expect(mergedCell(container, "Open Risk")?.textContent).toContain(
+      "$563,593",
+    );
+    // cash 990,229 + (-24,797) = 965,432
+    expect(mergedCell(container, "Cash")?.textContent).toContain("$965,432");
   });
 
-  it("applies core tone to positive Today P&L", () => {
+  it("merges Today P&L sign-correctly and tones it", () => {
+    // No prices -> FUTU today is null (skipped); merged = IB -461 only
     const { container } = render(
-      <PortfolioSnapshotCard portfolio={ibPortfolio(1234)} />,
+      <PortfolioSnapshotCard accounts={accounts()} />,
     );
-    const cell = todayCell(container);
-    expect(cell?.querySelector(".snapshot-cell__value--core")).toBeTruthy();
-  });
-
-  it("applies fault tone to negative Today P&L", () => {
-    const { container } = render(
-      <PortfolioSnapshotCard portfolio={ibPortfolio(-890)} />,
-    );
-    const cell = todayCell(container);
+    const cell = mergedCell(container, "Today");
+    expect(cell?.textContent).toContain("-$461");
     expect(cell?.querySelector(".snapshot-cell__value--fault")).toBeTruthy();
-    expect(cell?.textContent).toContain("-$890");
   });
 
-  it("applies neutral tone to null Today P&L", () => {
+  it("includes FUTU intraday P&L in the merge when prices are present", () => {
+    const prices: Record<string, PriceData> = {};
+    // give FUTU a position with live price so intraday computes
+    const futu = futuPortfolio();
+    futu.positions = [
+      {
+        id: 1,
+        ticker: "TSLA",
+        structure: "Stock",
+        structure_type: "Stock",
+        risk_profile: "equity",
+        expiry: "",
+        contracts: 300,
+        direction: "LONG",
+        entry_cost: 96213,
+        max_risk: null,
+        market_value: 105501,
+        legs: [
+          {
+            direction: "LONG",
+            contracts: 300,
+            type: "Stock",
+            strike: null,
+            entry_cost: 96213,
+            avg_cost: 320.71,
+            market_price: 351.67,
+            market_value: 105501,
+            market_price_is_calculated: false,
+          },
+        ],
+        kelly_optimal: null,
+        target: null,
+        stop: null,
+        entry_date: "2026-04-01",
+      },
+    ];
+    prices.TSLA = {
+      symbol: "TSLA",
+      last: 351.67,
+      lastIsCalculated: false,
+      bid: 351.5,
+      ask: 351.8,
+      bidSize: 1,
+      askSize: 1,
+      volume: 100,
+      high: null,
+      low: null,
+      open: null,
+      close: 350.67,
+      week52High: null,
+      week52Low: null,
+      avgVolume: null,
+      delta: null,
+      gamma: null,
+      theta: null,
+      vega: null,
+      impliedVol: null,
+      undPrice: null,
+      timestamp: "2026-06-15T14:00:00Z",
+    };
+    const accts: DashboardAccount[] = [
+      {
+        source: "ib",
+        label: "IB",
+        accountId: "IB",
+        status: "live",
+        portfolio: ibPortfolio(),
+      },
+      {
+        source: "futu",
+        label: "FUTU",
+        accountId: "F",
+        status: "stale",
+        portfolio: futu,
+      },
+    ];
     const { container } = render(
-      <PortfolioSnapshotCard portfolio={ibPortfolio(null)} />,
+      <PortfolioSnapshotCard accounts={accts} prices={prices} />,
     );
-    const cell = todayCell(container);
-    expect(cell?.querySelector(".snapshot-cell__value--neutral")).toBeTruthy();
-    expect(cell?.textContent).toContain("---");
+    // -461 (IB) + 300 (FUTU intraday) = -161
+    expect(mergedCell(container, "Today")?.textContent).toContain("-$161");
   });
 
-  it("uses FUTU intraday P&L from live prices, not snapshot daily_pnl", () => {
-    const { container } = render(
-      <PortfolioSnapshotCard portfolio={FUTU_PORTFOLIO} prices={PRICES} />,
-    );
-    const cell = todayCell(container);
-    // (351.67 - 350.67) * 300 = +$300
-    expect(cell?.textContent).toContain("+$300");
-    expect(cell?.textContent).not.toContain("9,288");
+  it("hides the per-account breakdown until the toggle is clicked", () => {
+    render(<PortfolioSnapshotCard accounts={accounts()} />);
+    const toggle = screen.getByRole("button", { name: /breakdown/i });
+    const body = document.getElementById("portfolio-breakdown")!;
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(body.hasAttribute("hidden")).toBe(true);
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(body.hasAttribute("hidden")).toBe(false);
+    // per-account full net liq shown in the breakdown
+    expect(body.textContent).toContain("IB");
+    expect(body.textContent).toContain("$1,003,726");
+    expect(body.textContent).toContain("FUTU");
+    expect(body.textContent).toContain("$233,563");
   });
 
-  it("renders --- for every cell when portfolio is null", () => {
-    const { container } = render(<PortfolioSnapshotCard portfolio={null} />);
+  it("renders --- for merged cells when all accounts are empty", () => {
+    const empty: DashboardAccount[] = [
+      {
+        source: "ib",
+        label: "IB",
+        accountId: null,
+        status: "down",
+        portfolio: null,
+      },
+      {
+        source: "futu",
+        label: "FUTU",
+        accountId: null,
+        status: "down",
+        portfolio: null,
+      },
+    ];
+    const { container } = render(<PortfolioSnapshotCard accounts={empty} />);
     const text = container.textContent ?? "";
     expect(text).toContain("Net Liquidation");
     expect((text.match(/---/g) ?? []).length).toBeGreaterThanOrEqual(4);
