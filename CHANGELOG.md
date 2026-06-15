@@ -5,13 +5,17 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.3.4] — 2026-06-14
+### Fixed
 
+- **"Today's Executed Orders" panel listed stale fills and malformed stock rows (#140).** The executed-orders payload had no date predicate, so the panel rendered every historical fill for the account under a "Today's" header. Single-name stock fills also showed a redundant `Bought QQQ`-style label. The payload now filters executed fills to the current Eastern-time day (matching the realized-P&L day boundary in `web/lib/realized-pnl.ts`), with a midnight-Eastern-as-UTC boundary helper, and stock fills render a clean `Stock` descriptor. The earlier zero-quantity rows were a separate fractional-share truncation (fixed in #134); the affected prod fills were repaired with their true IB quantities.
+
+## [0.3.4] — 2026-06-14
 
 ### Fixed
 
 - **Sidebar version row rendered "—" in prod (#139).** `next.config.mjs` inlines `NEXT_PUBLIC_APP_VERSION` from the root `VERSION` file at build time, but `docker/web.Dockerfile` never copied `VERSION` into the build context, so `readAppVersion()` hit its `catch` and the prod web image shipped an empty version. The builder stage now `COPY`s the root `VERSION`.
 - **Realtime subscriber health showed "stream offline" in prod (#139).** In the Docker topology the api and realtime run as separate containers, so the api could not read the realtime `/status`: runtime-file port discovery isn't shared across containers (fell back to `127.0.0.1:8765`, refused), and the loopback-only `/status` guard 403s a cross-container request. `/status` now also accepts a matching `X-Status-Token` header (`IB_REALTIME_STATUS_TOKEN`) in addition to loopback, and the api resolves the relay via `IB_REALTIME_STATUS_URL` (prod → `http://realtime:8765/status`) sending that token; single-host dev stays loopback-only with no token. Prod deploy adds `IB_REALTIME_STATUS_URL` to the api service and `IB_REALTIME_STATUS_TOKEN` to the shared `.env`.
+
 ## [0.3.3] — 2026-06-14
 
 ### Added
