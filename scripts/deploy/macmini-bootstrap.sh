@@ -14,7 +14,7 @@
 #   XENON_REPO=git@github.com:<owner>/xenon  # clone URL
 #   XENON_BRANCH=master                      # branch/tag to check out at bootstrap
 #   XENON_TRADING_MODE=paper                 # initial mode for plists; flip to live later via .env
-#   XENON_PG_VERSION=16                      # Homebrew postgres version
+#   XENON_PG_VERSION=17                      # Homebrew postgres version
 #   XENON_NODE_VERSION=22                    # Homebrew node version
 #   XENON_DB_NAME=xenon_db
 #   XENON_DB_ROLE=xenon_app
@@ -34,7 +34,7 @@ XENON_HOME="${XENON_HOME:-$HOME/projects/xenon}"
 XENON_REPO="${XENON_REPO:-git@github.com:lcxxcllcx/xenon.git}"
 XENON_BRANCH="${XENON_BRANCH:-master}"
 XENON_TRADING_MODE="${XENON_TRADING_MODE:-paper}"
-XENON_PG_VERSION="${XENON_PG_VERSION:-16}"
+XENON_PG_VERSION="${XENON_PG_VERSION:-17}"
 XENON_NODE_VERSION="${XENON_NODE_VERSION:-22}"
 XENON_DB_NAME="${XENON_DB_NAME:-xenon_db}"
 XENON_DB_ROLE="${XENON_DB_ROLE:-xenon_app}"

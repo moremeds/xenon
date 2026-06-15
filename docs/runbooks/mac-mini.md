@@ -91,7 +91,7 @@ XENON_HOME=~/projects/xenon          # repo location
 XENON_REPO=git@github.com:lcxxcllcx/xenon.git
 XENON_BRANCH=master                  # branch or tag
 XENON_TRADING_MODE=paper             # initial mode embedded in plists
-XENON_PG_VERSION=16
+XENON_PG_VERSION=17
 XENON_NODE_VERSION=22
 XENON_DB_NAME=xenon_db
 XENON_DB_ROLE=xenon_app
@@ -106,7 +106,7 @@ loudly with a `FAIL` reason.
 1. **Preflight** — verify macOS, Apple Silicon
 2. **Xcode CLT** — triggers the GUI installer if missing; you re-run after it finishes
 3. **Homebrew** — install if missing, source `brew shellenv`
-4. **Brew packages** — `uv`, `node@22`, `postgresql@16`, `git`, `gh`
+4. **Brew packages** — `uv`, `node@22`, `postgresql@17`, `git`, `gh`
 5. **Postgres service** — `brew services start`, wait for socket
 6. **DB role + DB** — creates `xenon_app` (prompts for password) and `xenon_db`
 7. **Repo clone** — `git@github.com:lcxxcllcx/xenon.git` → `$XENON_HOME`,

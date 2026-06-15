@@ -6,47 +6,38 @@
   <img alt="Test stack" src="https://img.shields.io/badge/Tests-pytest%20%7C%20Vitest%20%7C%20Playwright-0A7F6F" />
 </p>
 
-**Reconstructing market structure from institutional signals.**
+**Broker terminal for options portfolio management.**
 
-Xenon detects institutional positioning through dark pool flow, volatility signals, and cross-asset data, then turns it into convex options trades sized by fractional Kelly.
-
-**No narrative trades. No TA trades. Flow signal or nothing.**
+Xenon places orders, tracks fills, surfaces P&L and Greeks attribution, and enforces position-close rules against Interactive Brokers. **Bring your own thesis** — no scanners, no signal generation, no strategy recommendations.
 
 ---
 
-## Four Gates (sequential, no exceptions)
+## Brokers
 
-| Gate                   | Rule                                                                             |
-| ---------------------- | -------------------------------------------------------------------------------- |
-| **1. Convexity**       | Potential gain ≥ 2× potential loss. Defined-risk only.                           |
-| **2. Edge**            | Specific, data-backed dark pool / OTC signal that hasn't moved price yet.        |
-| **3. Risk**            | Fractional Kelly. Hard cap: 2.5% of bankroll per position.                       |
-| **4. No Naked Shorts** | Every short call must be covered by long shares (1:100). Violations auto-cancel. |
+- **Interactive Brokers** (primary) — quotes, chains, execution, portfolio. Never bypassed.
+- **Futu OpenD** (read-only) — positions snapshot from a local Futu OpenD instance. Surfaces as a separate account tab in the terminal. No orders, no fills, no quotes. Silent degrade when OpenD is unreachable.
 
-Any gate fails → stop. Full enforcement matrix: [`src/xenon/CLAUDE.md`](src/xenon/CLAUDE.md).
+Every execution and portfolio row carries `broker`, `account_env`, and `broker_account` columns so paper and live data never blend in a shared Postgres. Scope resolves via `AccountScope` (`src/xenon/execution/account_scope.py`); FastAPI depends on `get_account_scope`; sync subprocesses read `XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`.
 
-## Strategies
+## ⛔ Naked-Short Guard
 
-| Strategy                          | Signal                                         | Typical Structure              | Timeframe      |
-| --------------------------------- | ---------------------------------------------- | ------------------------------ | -------------- |
-| **Dark Pool Flow**                | Hidden institutional accumulation/distribution | Long options, vertical spreads | 2–6 weeks      |
-| **LEAP IV Mispricing**            | Realized vol above long-dated IV               | Long LEAPs, diagonals          | Weeks–9 months |
-| **GARCH Convergence**             | Cross-asset vol repricing lag                  | Calendars, verticals           | 2–8 weeks      |
-| **Risk Reversal**                 | Put/call skew distortion                       | Risk reversal                  | 2–8 weeks      |
-| **Volatility-Credit Gap (VCG-R)** | VIX>28 + VCG>2.5σ                              | HYG puts, bear put spreads     | 1–5 days       |
-| **Crash Risk Index (CRI)**        | CTA deleveraging + COR1M stress                | Index puts, tactical hedges    | 3–5 days       |
+The only hard-enforced trading rule. Every short call must be covered by long shares (1 contract = 100 shares) or by long calls at the same expiry. Cash-secured puts are allowed. Combos that net to uncovered short calls are blocked at three layers:
 
-Full specs: [`docs/trading/strategies.md`](docs/trading/strategies.md) · VCG math: [`docs/trading/strategy-vcg.md`](docs/trading/strategy-vcg.md).
+1. **UI pre-submission** — `web/lib/nakedShortGuard.ts`
+2. **API gate** — `POST /api/orders/place` returns 403 on violation
+3. **Post-sync audit** — `xenon-naked-short-audit` cancels violators after every `ib_sync`
+
+Full enforcement matrix: [`src/xenon/CLAUDE.md`](src/xenon/CLAUDE.md) § Naked Short Protection.
 
 ## Quick Start
 
 **Prerequisites**
 
-- Python `3.13` (3.14 has ib_async/eventkit incompatibility)
+- Python `3.13` via [`uv`](https://docs.astral.sh/uv/) (3.14 has an `ib_async` / `eventkit` incompatibility)
 - Node.js `18+`
-- [Interactive Brokers](https://ibkr.com/referral/joseph5632) Gateway (cloud via Tailscale, Docker, or local TWS)
-- [Unusual Whales](https://unusualwhales.com/referral#39985a64-656c-4642-a051-db89f6324d64) API access
-- (Optional) Futu OpenD — read-only positions from a Futu account
+- [Interactive Brokers](https://ibkr.com/referral/joseph5632) Gateway running for the target mode (paper on `127.0.0.1:4002`, live typically on a remote `:4001`)
+- Postgres reachable on the configured `DATABASE_URL`
+- (Optional) Futu OpenD — read-only positions for a Futu account tab
 
 ```bash
 git clone https://github.com/moremeds/xenon.git
@@ -54,57 +45,70 @@ cd xenon
 uv sync --extra test
 cd web && npm install && cd ..
 
-# Dev (default: local services + VPS IB Gateway via Tailscale)
-scripts/cloud.sh
+# Paper (local IB Gateway on :4002)
+scripts/infra/dev.sh paper
 
-# Fully local alternative
-scripts/local.sh
+# Live (remote IB Gateway, host from .env)
+scripts/infra/dev.sh live
 ```
 
 Terminal at `http://localhost:3000`. Health: `curl http://localhost:8321/health`.
 
+`dev.sh` does **not** edit `.env` and does **not** start IB Gateway — that step stays manual. Append `--no-auth` to bypass Clerk for the local session.
+
 ## Environment
 
-**`web/.env`** — frontend + API keys:
+**`.env`** (root) — Python services, database, auth, R2:
 
 ```bash
-ANTHROPIC_API_KEY=...
-UW_TOKEN=...
-EXA_API_KEY=...
+XENON_TRADING_MODE=paper                  # paper (port 4002) or live (port 4001)
+XENON_PAPER_ACCOUNT=DU0000000             # DU* prefix required for paper
+# XENON_LIVE_ACCOUNT=U1234567             # U* prefix required for live
+
+DATABASE_URL=postgresql+asyncpg://xenon_app:xenon_dev@<lan-host>:5432/core_dev
+DATABASE_URL_TEST=postgresql+asyncpg://xenon_app:xenon_dev@<lan-host>:5432/core_test
+
+# Auth (Clerk JWT validation in FastAPI)
+CLERK_JWKS_URL=...
+CLERK_ISSUER=...
+ALLOWED_USER_IDS=user_...
+
+# Object storage (snapshots, exports)
+R2_ENDPOINT=...
+R2_BUCKET=...
+R2_ACCESS_KEY_ID=...
+R2_SECRET_ACCESS_KEY=...
+
+# Optional — unlocks the Historical Trades panel (IB Flex Query audit overlay)
+IB_FLEX_TOKEN=...
+IB_FLEX_QUERY_ID=...
+```
+
+**`web/.env`** — Next.js terminal:
+
+```bash
+ANTHROPIC_API_KEY=...                     # portfolio Q&A chat
+UW_TOKEN=...                              # portfolio-perf / portfolio-report CLIs only
+EXA_API_KEY=...                           # optional ticker-page enrichment
 NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_...
 CLERK_SECRET_KEY=sk_...
 ```
 
-**`.env`** (root) — Python scripts, IB Gateway, auth:
-
-```bash
-MENTHORQ_USER=...
-MENTHORQ_PASS=...
-IB_GATEWAY_HOST=127.0.0.1           # or ib-gateway (cloud/Tailscale)
-IB_GATEWAY_PORT=4001
-IB_GATEWAY_MODE=docker              # docker | cloud | launchd
-CLERK_JWKS_URL=...
-CLERK_ISSUER=...
-ALLOWED_USER_IDS=user_...
-```
-
-MenthorQ workflows additionally need `pip install playwright httpx && playwright install chromium`.
+When `IB_FLEX_TOKEN` / `IB_FLEX_QUERY_ID` are unset, the Historical Trades panel renders an empty state with a setup hint and `xenon-blotter-history` exits gracefully with `configured=false`.
 
 ## Xenon Terminal
 
-Real-time trading terminal built with **Next.js 16**. Streams IB prices, computes live greeks, visualizes portfolio exposures, and drives scans, evaluation, and order management.
+Real-time trading terminal built with **Next.js 16**. Streams IB prices, computes live greeks, visualizes portfolio exposures, and drives order management.
 
 **Core capabilities**
 
-- Real-time price streaming with live greeks, shared `BID/MID/ASK/SPREAD` layout across ticker, chain, and modify views
-- Multi-leg position monitoring with per-leg P&L
+- Real-time price streaming with live greeks (shared BID / MID / ASK / SPREAD layout across ticker, chain, and modify views)
+- Multi-leg position monitoring with per-leg P&L and structure classification (verticals, straddles, synthetics, covered calls, risk reversals, butterflies / condors)
 - Multi-broker account tab bar: switch between IB (live trading) and Futu (read-only positions snapshot)
 - YTD portfolio performance with ET-session refresh guarding against stale snapshots
-- `/regime` strip: VIX/VVIX/SPY/RVOL/COR1M with day-change indicators and 20-session history charts
-- RVOL/COR1M relationship view (Systemic Panic / Fragile Calm / Stock Picker's / Goldilocks)
 - Combo spread order workflows with natural-market pricing
-- VCG/CRI regime panels with adaptive polling
-- AI chat for command execution and analysis
+- Historical Trades panel (IB Flex Query audit overlay — optional)
+- AI chat for portfolio Q&A and command execution
 
 Authentication via [Clerk](https://clerk.com) — Next.js middleware protects routes, FastAPI validates JWTs, WebSocket uses 30s single-use tickets. Local dev bypasses auth when `CLERK_JWKS_URL` is unset.
 
@@ -112,87 +116,98 @@ Component-level reference: [`docs/reference/web-ui-reference.md`](docs/reference
 
 ## CLI Commands
 
-**Scanning:** `scan` · `discover` · `leap-scan` · `garch-convergence` · `seasonal` · `analyst-ratings`
-**Evaluation:** `evaluate [TICKER]` · `stress-test` · `risk-reversal` · `vcg` · `cri-scan`
-**Portfolio:** `portfolio` · `free-trade` · `journal` · `sync` · `blotter` · `blotter-history`
-**Research:** `strategies` · `menthorq-cta` · `x-scan` · `commands`
+All entry points are installed by `uv sync` and invoked as `uv run <name> [args]`.
 
-Full table with descriptions: [`src/xenon/CLAUDE.md`](src/xenon/CLAUDE.md).
+| Group                | Commands                                                                                                            |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| **Server**           | `xenon-api` (FastAPI bridge)                                                                                        |
+| **Orders**           | `xenon-ib-place-order` · `xenon-ib-order-manage` · `xenon-ib-orders` · `xenon-ib-execute` · `xenon-ib-option-chain` |
+| **Sync / reconcile** | `xenon-ib-sync` · `xenon-ib-reconcile` · `xenon-futu-sync`                                                          |
+| **Risk / audit**     | `xenon-naked-short-audit`                                                                                           |
+| **Reports**          | `xenon-portfolio-report` · `xenon-portfolio-perf` · `xenon-portfolio-attrib` · `xenon-perf-explainer`               |
+| **Trade log**        | `xenon-blotter` · `xenon-blotter-history`                                                                           |
+| **Daemons**          | `xenon-monitor-daemon` · `xenon-preset-rebalance`                                                                   |
+| **Utilities**        | `xenon-market-hours` · `xenon-presets`                                                                              |
+
+Full descriptions: [`src/xenon/CLAUDE.md`](src/xenon/CLAUDE.md).
 
 ## Architecture
 
 ```text
-IB / UW / MenthorQ / Exa  →  Signal Detection  →  Strategy Evaluation
-                                                    │
-                                                    ▼
-                                        Convex Structure Builder
-                                                    │
-                                                    ▼
-                                        Kelly Position Sizing
-                                                    │
-                                                    ▼
-                                        Execution + Monitoring (IB)
+IB Gateway  ─┐
+             ├─►  FastAPI bridge  ─►  Postgres  ─►  Next.js terminal  ─►  User orders
+Futu OpenD  ─┘   (xenon.api.server)   (snapshots,        (web/)              │
+   (read-only)                          orders,                              │
+                                        fills,                               ▼
+                                        journal)                       IB Gateway
+                                              │
+                                              ▼
+                                       Monitor daemon
+                                     (fills mirror, exit
+                                      orders, naked-short
+                                      audit, log rotation)
 ```
 
-- `scripts/` — Python scanners, evaluators, broker clients, FastAPI bridge
-- `web/` — Next.js terminal (portfolio, orders, regime, AI)
+- `src/xenon/` — Python services (FastAPI, IB / Futu clients, execution, reports, monitor daemon)
+- `web/` — Next.js terminal (portfolio, orders, AI chat)
 - `site/` — standalone marketing site (separate deployment)
 - `brand/` — design system and tokens
 - `data/` — runtime artifacts (gitignored)
-- `docs/` — strategy specs, API refs, runbooks ([index](docs/README.md))
+- `docs/` — architecture, runbooks, references ([index](docs/README.md))
 
-High-throughput design, perf optimization, WS relay: [`docs/architecture/architecture.md`](docs/architecture/architecture.md).
-FastAPI, auth, IB Gateway modes: [`docs/architecture/api-infrastructure.md`](docs/architecture/api-infrastructure.md).
+Postgres is the runtime source of truth for portfolio, orders, fills, and journal surfaces. The terminal does **not** silently fall back to JSON files on runtime read paths — that boundary is enforced by CI (`scripts/checks/no_json_fallback_on_order_path.py`) plus a caller allowlist for `xenon.execution.ib_place_order` (`scripts/checks/order_path_caller_allowlist.py`).
 
-## Data Source Priority (strict)
+Deeper reading:
 
-1. **[Interactive Brokers](https://ibkr.com/referral/joseph5632)** — real-time quotes, chains, portfolio, execution
-2. **[Unusual Whales](https://unusualwhales.com/referral#39985a64-656c-4642-a051-db89f6324d64)** — dark pool, sweeps, flow, analysts
-3. **Exa** — research
-4. **Cboe** — COR1M historical fallback
-5. **Yahoo Finance** — strict last resort
+- High-throughput design and WS relay: [`docs/architecture/architecture.md`](docs/architecture/architecture.md)
+- FastAPI, auth, IB Gateway modes: [`docs/architecture/api-infrastructure.md`](docs/architecture/api-infrastructure.md)
+- Postgres as source of truth: [`docs/architecture/production-database-strategy.md`](docs/architecture/production-database-strategy.md)
+- Full order lifecycle (HTML + Markdown): [`docs/architecture/order-stack-end-to-end.md`](docs/architecture/order-stack-end-to-end.md)
+- Order-path incident history: [`docs/reference/order-path-incident-history.md`](docs/reference/order-path-incident-history.md)
 
-Auxiliary: **Futu OpenD** (read-only positions snapshot for Futu-held accounts — never written to), **MenthorQ** (CTA positioning for CRI), **xAI** (X sentiment).
+## Data Sources
 
-### Futu (read-only)
+| Source                                                                                        | Role                                                                                               |
+| --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| **[Interactive Brokers](https://ibkr.com/referral/joseph5632)**                               | Real-time quotes, chains, portfolio, execution, fills (primary — never bypassed)                   |
+| **Futu OpenD**                                                                                | Read-only positions snapshot for the Futu account tab                                              |
+| **[Unusual Whales](https://unusualwhales.com/referral#39985a64-656c-4642-a051-db89f6324d64)** | Historic OHLC + option contract history for `xenon-portfolio-perf` / `xenon-portfolio-report` only |
+| **IB Flex Query**                                                                             | Optional historical fills audit overlay (`xenon-blotter-history`)                                  |
 
-Futu support is intentionally observe-only: `src/xenon/clients/futu_client.py` fetches positions and account info from a local Futu OpenD instance, exposed via `/futu/sync` on the FastAPI bridge (10s cooldown, singleton-lifecycle, singleflight lock). The terminal surfaces it as a separate account tab alongside IB. No orders, no fills, no market-data subscriptions flow through Futu. Requires Futu OpenD running locally; the client stays quiet and degrades gracefully when unreachable.
+**Never Yahoo Finance.**
 
 ## Testing
 
-- **Python:** `pytest` — scanners, evaluation, utilities, adapters
-- **Frontend:** `Vitest` — web logic
-- **E2E:** `Playwright` — browser workflows
+- **Python** — `pytest` (execution, reports, adapters, monitor daemon, FastAPI routes)
+- **Frontend** — Vitest (web logic, order-path harness)
+- **E2E** — Playwright (browser workflows)
 
 ```bash
-python3.13 scripts/infra/dev/run_pytest_affected.py    # scoped — only affected tests
-cd web && npm test                            # Vitest
-cd web && npx playwright test                 # E2E
+uv sync --extra test                                              # one-time / after dep changes
+uv run python scripts/infra/dev/run_pytest_affected.py            # scoped — only affected tests (preferred)
+uv run pytest                                                     # full suite
+cd web && npm test                                                # Vitest
+cd web && npx playwright test                                     # E2E
 ```
 
-Prefer `run_pytest_affected.py` over a full repo run. Unit tests mock IB/UW, so most work needs no live connection. Order-route integration tests use an isolated FastAPI harness (`web/tests/fastapiHarness.ts`) that stubs broker calls — see `XENON_API_TEST_MODE`.
+Order-route integration tests use `web/tests/fastapiHarness.ts` with `XENON_API_TEST_MODE` to stub broker calls — no live IB required.
 
 ## Services
 
-| Service                           | Purpose                                                                        |
-| --------------------------------- | ------------------------------------------------------------------------------ |
-| IB Gateway (cloud/Docker/launchd) | Broker session for quotes, execution, reports                                  |
-| CRI scan service                  | Intraday crash-risk refresh with atomic cache snapshots                        |
-| CTA sync service                  | MenthorQ CTA cache at 4:15/5:00 PM ET with `RunAtLoad` catch-up                |
-| Monitor daemon                    | Fills, exit orders, off-hours rebalance, Flex token checks (10MB log rotation) |
+| Service                                 | Purpose                                                                              |
+| --------------------------------------- | ------------------------------------------------------------------------------------ |
+| IB Gateway (cloud / Docker / launchd)   | Broker session for quotes, execution, reports                                        |
+| Monitor daemon (`xenon-monitor-daemon`) | Fills mirror, exit orders, naked-short audit, Flex token checks (10 MB log rotation) |
 
-CTA freshness is an explicit contract: `data/menthorq_cache/health/cta-sync-latest.json` is the machine-readable health record; `/api/menthorq/cta` triggers background sync when stale and exposes `cache_meta` + `sync_health`.
+Ops runbooks: [`ib-connection-troubleshooting`](docs/runbooks/ib-connection-troubleshooting.md) · [`ib-gateway-docker`](docs/runbooks/ib-gateway-docker.md) · [`mac-mini`](docs/runbooks/mac-mini.md) · [`ops`](docs/runbooks/ops.md) · [`release`](docs/runbooks/release.md).
 
-Full ops runbooks: [`docs/runbooks/ib-connection-troubleshooting.md`](docs/runbooks/ib-connection-troubleshooting.md), [`docs/runbooks/ib-gateway-docker.md`](docs/runbooks/ib-gateway-docker.md), [`docs/runbooks/ops.md`](docs/runbooks/ops.md).
+## Release
 
-## Glossary
+`VERSION` (root) is the source of truth and is kept in parity with `package.json` by CI (`scripts/release/version_sync_check.py`). To cut a release:
 
-| Term                | Definition                                                             |
-| ------------------- | ---------------------------------------------------------------------- |
-| **Convexity**       | Asymmetric payoff — expected upside materially exceeds downside        |
-| **CRI**             | Crash Risk Index — composite crash-risk and deleveraging model         |
-| **CTA**             | Commodity Trading Advisor — systematic trend-following funds           |
-| **Dark Pool**       | Private off-exchange venue for institutional trading                   |
-| **Edge**            | Specific reason the market is mispricing an outcome                    |
-| **Kelly Criterion** | Position-sizing framework scaled to edge and odds                      |
-| **VCG-R**           | Volatility-Credit Gap — VIX>28 + VCG>2.5σ divergence triggers risk-off |
+```bash
+./scripts/release/cut.sh                # interactive: patch / minor / major / custom
+git push origin master --follow-tags    # release.yml fires on the tag
+```
+
+Changelog: [`CHANGELOG.md`](CHANGELOG.md).
