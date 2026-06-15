@@ -1006,6 +1006,122 @@ def _realtime_subscribers_health() -> dict:
     }
 
 
+# --- Operator console helpers (Tier A/B reads) ---------------------------
+
+# Background writers the Operator console expects to see. Missing ones are
+# synthesized as state="missing" so a never-started writer is visible, not absent.
+EXPECTED_WRITERS = (
+    "ib_activity_poller",
+    "ib_fills_replay",
+    "ib_rehydrate",
+    "futu_history",
+    "naked_short_audit",
+)
+
+
+def _ib_auth_verdict(gw: dict, pool: dict) -> str:
+    """Derive an IB auth verdict from gateway + pool status."""
+    if not gw.get("port_listening"):
+        return "unreachable"
+    if gw.get("upstream_dead"):
+        return "awaiting"
+    any_connected = any((r or {}).get("connected") for r in pool.values()) if pool else False
+    return "authenticated" if any_connected else "unknown"
+
+
+def _uw_api_health() -> dict | None:
+    """Latest hourly uw_api_stats bucket, or None when no rows exist."""
+    try:
+        from xenon.db.schema import uw_api_stats
+
+        engine = get_sync_engine()
+        with engine.connect() as conn:
+            row = (
+                conn.execute(select(uw_api_stats).order_by(uw_api_stats.c.bucket_hour.desc()).limit(1))
+                .mappings()
+                .first()
+            )
+    except Exception:
+        logger.warning("[operator] failed to load uw_api_stats", exc_info=True)
+        return None
+    if row is None:
+        return None
+    lat_count = int(row["latency_count"] or 0)
+    lat_sum = float(row["latency_sum"] or 0)
+    return {
+        "bucket_hour": _iso_datetime(row["bucket_hour"]),
+        "requests": int(row["requests"] or 0),
+        "cache_hits": int(row["cache_hits"] or 0),
+        "status_2xx": int(row["status_2xx"] or 0),
+        "status_4xx": int(row["status_4xx"] or 0),
+        "status_5xx": int(row["status_5xx"] or 0),
+        "latency_avg_ms": round(lat_sum / lat_count, 1) if lat_count else None,
+    }
+
+
+def _service_health_rows() -> list[dict]:
+    """service_health rows for the active scope, sorted by service, with
+    age_secs + synthesized 'missing' rows for expected writers with no row."""
+    try:
+        from xenon.db.schema import service_health
+
+        kwargs = _resolve_scope_kwargs()
+        engine = get_sync_engine()
+        with engine.connect() as conn:
+            rows = (
+                conn.execute(
+                    select(service_health)
+                    .where(
+                        service_health.c.broker == kwargs["broker"],
+                        service_health.c.account_env == kwargs["account_env"],
+                        service_health.c.broker_account == kwargs["broker_account"],
+                    )
+                    .order_by(service_health.c.service)
+                )
+                .mappings()
+                .all()
+            )
+    except Exception:
+        logger.warning("[operator] failed to load service_health", exc_info=True)
+        rows = []
+    now = datetime.now(timezone.utc)
+    out: list[dict] = []
+    seen: set[str] = set()
+    for r in rows:
+        seen.add(r["service"])
+        updated = r["updated_at"]
+        if updated is not None and updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        out.append(
+            {
+                "service": r["service"],
+                "state": r["state"],
+                "detail": r["detail"],
+                "last_error": r["last_error"],
+                "last_started_at": _iso_datetime(r["last_started_at"]),
+                "last_finished_at": _iso_datetime(r["last_finished_at"]),
+                "updated_at": _iso_datetime(updated),
+                "age_secs": int((now - updated).total_seconds()) if updated else None,
+            }
+        )
+    for svc in EXPECTED_WRITERS:
+        if svc not in seen:
+            out.append(
+                {
+                    "service": svc,
+                    "state": "missing",
+                    "detail": None,
+                    "last_error": None,
+                    "last_started_at": None,
+                    "last_finished_at": None,
+                    "updated_at": None,
+                    "age_secs": None,
+                }
+            )
+    out.sort(key=lambda r: r["service"])
+    return out
+
+
 @app.get("/health")
 async def health():
     gw = await check_ib_gateway()
@@ -1026,6 +1142,33 @@ async def health():
         "order_submissions": _order_submissions_health(),
         "flex_divergence": _flex_divergence_health(),
         "realtime_subscribers": await asyncio.to_thread(_realtime_subscribers_health),
+    }
+
+
+@app.get("/admin/operator")
+async def admin_operator():
+    """Operator console aggregate. Read-only. No per-route Depends — gated by
+    the global auth_middleware like every data route (a per-route Depends would
+    401 cross-container in Docker since the Next proxy forwards no token). The
+    DB helpers are called inline (not via to_thread) to match /health and to
+    stay on the Phase-2 test connection."""
+    gw = await check_ib_gateway()
+    pool = ib_pool.status() if ib_pool else {}
+    return {
+        "generated_at": _iso_datetime(datetime.now(timezone.utc)),
+        "ib_gateway": gw,
+        "ib_pool": pool,
+        "ib_auth": _ib_auth_verdict(gw, pool),
+        "trading_mode": getattr(app.state, "trading_mode", trading_mode.MODE),
+        "account": mask_account(getattr(app.state, "account", "")),
+        "mode_verified": getattr(app.state, "mode_verified", False),
+        "snapshotter": _snapshotter_health(),
+        "order_submissions": _order_submissions_health(),
+        "flex_divergence": _flex_divergence_health(),
+        "realtime_subscribers": await asyncio.to_thread(_realtime_subscribers_health),
+        "futu": _compute_futu_health(),
+        "uw": _uw_api_health(),
+        "writers": _service_health_rows(),
     }
 
 
