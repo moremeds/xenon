@@ -5,8 +5,18 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.4.0] — 2026-06-15
+## [0.4.1] — 2026-06-16
 
+### Fixed
+
+- **Order place 500 on every live submission (#147).** The pure-portfolio pivot (#104) deleted `xenon.api.services.regime_gate` but left its call sites in `_orders_place_from_body` and `_orders_modify_from_body`. Every live order placement raised `NameError: name 'get_regime_state_for_scope' is not defined`, returning HTTP 500. Removed the dead wiring blocks and five orphaned helpers (`_run_regime_gate`, `_run_modify_regime_gate`, `_is_regime_gate_risk_reducing_exit`, `_resolve_regime_bankroll_usd`, `_build_override_audit`, `_resolve_scope_obj`). `cover_ratio_for_preflight` reverts to its NORMAL/no-gate default (1.0). CI stayed green because the gate self-disabled under `_is_test_mode()`; a new regression test forces the gate path via `XENON_REGIME_GATE_IN_TESTS=1` to pin this forever.
+
+### Changed
+
+- **README realigned to pure-portfolio pivot (#148).** Removed Four Gates, Strategies, and VCG/CRI signal-layer sections; added Brokers table, Naked-Short Guard overview, Data Sources table, and a grouped CLI reference with paper/live setup notes.
+- **Bootstrap default PostgreSQL version bumped to 17 (#148).** `scripts/deploy/macmini-bootstrap.sh` and `docs/runbooks/mac-mini.md` now default `XENON_PG_VERSION=17`; the previous `=16` default was stale (timescaledb ships against PG17). Snapshotter design doc updated with verified IB Quote Booster pricing and pacing limits.
+
+## [0.4.0] — 2026-06-15
 
 ### Added
 
@@ -15,6 +25,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 ### Fixed
 
 - **Full-suite test isolation: nine schema tables leaked across tests (#146).** `XENON_TABLES` — the per-test/per-session reset list in `src/xenon/_test_db.py` — had drifted from the schema and was missing `service_health` plus eight others (`flex_divergence_runs`, `ib_cash_flow`, `regime_overrides`, `benchmark_closes`, and the four `futu_*` statement tables). A committed write to any of them (e.g. the `ib_activity_poller` heartbeat from a `committed_db` lifespan test) survived the whole session and surfaced as a flaky `pk_service_health` UniqueViolation in an unrelated test — green on affected-only PR runs, red on the full master suite (the operator console's first full-suite run on master). All nine tables are now reset, and a new metadata-derived guard (`test_xenon_tables_covers_every_schema_table`) turns future drift into a deterministic local failure instead of an intermittent cross-test leak.
+
 ## [0.3.5] — 2026-06-15
 
 ### Fixed
