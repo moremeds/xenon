@@ -368,11 +368,39 @@ pattern degrades gracefully. Realistic v1 expectations:
 
 Mitigations (none chosen for v1; documented for v1.1 planning):
 
-| Lever                                                                    | Effect                      | Cost                                    |
-| ------------------------------------------------------------------------ | --------------------------- | --------------------------------------- |
-| Use `reqHistoricalData(barSize='1 min', whatToShow='BID_ASK')` for chain | bypasses streaming line cap | needs IB doc verification; no IV/greeks |
-| Buy IB market-data line booster tier                                     | 100 → 500 lines             | ~$30-100/month, account admin           |
-| Per-ticker scope: `atm_band_25pct` for SPX                               | SPX universe ~70% smaller   | drops far-OTM SPX tails                 |
+| Lever                                                                    | Effect                      | Cost / Verdict                                                                                                                                                  |
+| ------------------------------------------------------------------------ | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Use `reqHistoricalData(barSize='1 min', whatToShow='BID_ASK')` for chain | bypasses streaming line cap | **Not viable.** Verified IB pacing: 50 simultaneous max + 60 requests / 10-min window. 24k contracts ÷ 6 req/min ≈ 67 hours per sweep. Worse than `reqMktData`. |
+| Buy IB Quote Booster packs                                               | +100 lines per pack         | **$30/pack/month** linear. See "Verified Quote Booster pricing" below.                                                                                          |
+| Narrow chain scope: front N expiries × ATM ± K strikes × C+P             | SPX universe ~95% smaller   | drops far-OTM tails + far-dated LEAPs; recommended v2 default                                                                                                   |
+
+### Verified Quote Booster pricing (sourced 2026-06-05)
+
+Quoted directly from IB's Market Data Pricing page (`interactivebrokers.com/en/index.php?f=14193`):
+
+> "Quote Booster: You can increase your allowance of simultaneous quotes windows by purchasing monthly Quote Booster packs at **USD 30.00 per pack**. Each booster pack provides **100 simultaneous Level I quotes** and 1 additional [Level II depth-of-book quote]."
+
+> "always have a minimum of **100 lines** of data. After the first month of trading, the quantity of market data is allocated using the greater value of: USD monthly commissions divided by 8 [or] USD equity multiplied by 100 divided by $1,000,000"
+
+Cost model — linear, no bulk discount found:
+
+| Target lines  | Packs needed | Monthly cost | Achievable full-SPX sweep (24k contracts @ 11s line hold) |
+| ------------- | ------------ | ------------ | --------------------------------------------------------- |
+| 100 (default) | 0            | $0           | 44 min (optimistic) / 62 min (pessimistic)                |
+| 500           | 4 packs      | $120/mo      | ~9 min                                                    |
+| 1000          | 9 packs      | $270/mo      | ~4.4 min                                                  |
+| 2000          | 19 packs     | $570/mo      | ~2 min                                                    |
+
+**Implication for "full chain" feasibility:** at default 100 lines, full-chain sweep is **structurally impossible** at 10-min cadence regardless of code optimization. Reaching 10-min cadence on full SPX requires at least 500 lines ($120/mo). Reaching it on SPX+VIX comfortably requires ~1000 lines ($270/mo).
+
+**Default-allocation caveat:** the 100-line floor is the minimum; accounts that meet either of these thresholds get more for free:
+
+- `monthly_commissions / 8` lines, OR
+- `equity × 100 / 1,000,000` lines
+
+So a $10M-equity account passively earns 1000 free lines. A $1M account stays at the 100 floor unless it generates ≥$800/mo in commissions. Check Client Portal → Settings → Market Data Subscriptions for the live per-account number — never recompute from these formulas alone.
+
+**Decision frame:** Path A (buy lines) is open-ended monthly OpEx. Path B (narrow band: front 5 expiries × ATM ± 20% × C+P ≈ 800 contracts/ticker, fits free in 100 lines) is a one-time code-only investment and the recommended v2 default. Defer the Path A purchase decision until v2 has been collecting the narrow band for several weeks and we have data on whether the wings/LEAPs are actually informative for our use case.
 
 **Why we are keeping `modelGreeks` despite the throughput hit:** IB's
 greeks/IV use IB's internal pricing assumptions (their dividend stream
