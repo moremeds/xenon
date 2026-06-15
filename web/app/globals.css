@@ -6870,3 +6870,307 @@ tr {
     max-width: 100vw;
   }
 }
+
+/* ───────────────────────────────────────────────────────────
+   Dashboard landing surface (ported from radon, re-skinned to
+   xenon brand tokens). 2-col: snapshot cards (left) + chat rail
+   (right). 4px max radius, flat tokens, no gradients/glass.
+   ─────────────────────────────────────────────────────────── */
+.dashboard-surface {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.dashboard-surface__main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.dashboard-surface__rail {
+  min-width: 0;
+  position: sticky;
+  top: 0;
+  /* .content has 20px vertical padding; header + banners sit above it. Bound
+     the rail so ChatPanel scrolls internally instead of stretching the page.
+     Tune the offset during browser verification (Task 7). */
+  height: calc(100vh - 160px);
+  display: flex;
+  flex-direction: column;
+}
+
+.dashboard-section {
+  min-width: 0;
+}
+
+.dashboard-section__toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 44px;
+  margin: 0 0 8px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+
+.dashboard-section__title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.dashboard-section__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.dashboard-section__body[hidden] {
+  display: none;
+}
+
+/* Panel header helpers — xenon lacked bare panel-eyebrow/title/edge-trace. */
+.panel-edge-trace {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(
+    --signal-core
+  ); /* flat — radon used a gradient (brand: none) */
+  pointer-events: none;
+  z-index: 1;
+}
+
+.panel-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  line-height: 1.2;
+  margin-bottom: 4px;
+  display: block;
+}
+
+.panel-title {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.005em;
+  line-height: 1.25;
+  color: var(--text-primary);
+  text-transform: none;
+}
+
+/* Snapshot cards — Portfolio / Orders */
+.snapshot-card {
+  position: relative;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.snapshot-card__header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.snapshot-card__header .panel-eyebrow {
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.snapshot-card__header .panel-title {
+  flex: 1;
+}
+
+.snapshot-card__see-all {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--signal-core);
+  text-decoration: none;
+  flex-shrink: 0;
+}
+
+.snapshot-card__see-all:hover {
+  text-decoration: underline;
+}
+
+.snapshot-card__empty {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 14px 0;
+}
+
+.snapshot-grid--portfolio {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.snapshot-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border-dim);
+}
+
+.snapshot-cell:nth-child(-n + 2) {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.snapshot-cell__label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.snapshot-cell__value {
+  font-family: var(--font-sans);
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.snapshot-cell__value--core {
+  color: var(--signal-core);
+}
+.snapshot-cell__value--fault {
+  color: var(--fault);
+}
+.snapshot-cell__value--neutral {
+  color: var(--text-primary);
+}
+
+/* Orders + fills two-column split */
+.snapshot-card__split {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.snapshot-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.snapshot-list__kicker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.snapshot-list__count {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--signal-core) 8%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--signal-core) 30%, var(--border-dim));
+  color: var(--signal-core);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+}
+
+.snapshot-list__empty {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 6px 0;
+}
+
+.snapshot-list__items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.snapshot-list__row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border-dim);
+}
+
+.snapshot-list__row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.snapshot-list__row-desc {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.snapshot-list__row-meta {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+@media (max-width: 1280px) {
+  .dashboard-surface {
+    grid-template-columns: 1fr;
+  }
+  .snapshot-card__split {
+    grid-template-columns: 1fr;
+  }
+  /* Below the dual-column breakpoint the rail stacks beneath the cards and
+     grows naturally — drop the sticky/clamp behaviour. */
+  .dashboard-surface__rail {
+    position: static;
+    height: auto;
+    min-height: 420px;
+  }
+}
