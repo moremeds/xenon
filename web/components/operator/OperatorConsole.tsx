@@ -14,6 +14,14 @@ import { WriterFreshnessTable } from "./WriterFreshnessTable";
 
 const POLL_MS = 8_000;
 
+function fmtAgeShort(secs: number | null | undefined): string {
+  if (secs == null) return "—";
+  if (secs < 90) return `${Math.round(secs)}s`;
+  if (secs < 5400) return `${Math.round(secs / 60)}m`;
+  if (secs < 172800) return `${Math.round(secs / 3600)}h`;
+  return `${Math.round(secs / 86400)}d`;
+}
+
 export default function OperatorConsole() {
   const market = useMarketHours();
   const [data, setData] = useState<OperatorData | null>(null);
@@ -142,11 +150,7 @@ export default function OperatorConsole() {
                 ? "idle"
                 : "off"
           }
-          sub={
-            data.futu.last_sync_age_s != null
-              ? `${data.futu.last_sync_age_s}s`
-              : "—"
-          }
+          sub={fmtAgeShort(data.futu.last_sync_age_s)}
           tone={data.futu.connected ? "core" : "neutral"}
         />
         <SignalTile
