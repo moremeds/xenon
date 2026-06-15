@@ -1,20 +1,29 @@
 # Remote Deploy Runbook (Mac mini, Docker)
 
 The authoritative runbook for shipping Xenon to the remote Mac mini
-(`192.168.50.47`, `moremeds@…`). Covers first-time bootstrap, tagged
+(`moremeds@100.66.147.98`). Covers first-time bootstrap, tagged
 releases via GHCR, smoke checks, rollback, and the open follow-ups for
 mini-side automation (Stage C).
+
+> **Host address:** the mini is reached over **Tailscale** at
+> `100.66.147.98` (it was previously the LAN IP `192.168.50.47`; all
+> `ssh`/`scp` examples below use the Tailscale address). On this dev Mac a
+> `Host macmini` alias in `~/.ssh/config` maps to `moremeds@100.66.147.98`,
+> so `ssh macmini …` is equivalent to the `ssh moremeds@100.66.147.98 …`
+> commands shown here. SSH runs a non-login shell, so brew tools aren't on
+> `PATH` by default — every remote command prefixes `PATH=/opt/homebrew/bin:$PATH`
+> (or `export PATH=…`) so `docker`/`docker-compose`/`colima` resolve.
 
 **Supersedes** `docs/runbooks/mac-mini.md` (launchd-based; pre-containers).
 The old launchd path is no longer the deploy mechanism.
 
 ## Topology
 
-| Host                                                      | Where things live                                                                                                                                                                                                                                                              |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Host                                                      | Where things live                                                                                                                                                                                                                                                                |
+| --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Mac mini                                                  | Colima (Linux/arm64 VM running Docker), 4 containers (api / web / realtime / migrator), Postgres 17 (`:5432`, host-native, schemas `xenon` / `apex` / `events`). IB Gateway may be host-native on the mini or reachable on another machine; see "IB Gateway reachability" below. |
-| This dev Mac                                              | Source of truth for builds + tag cuts. Paper IB Gateway local (`127.0.0.1:4002`).                                                                                                                                                                                              |
-| GHCR `ghcr.io/moremeds/xenon-{api,web,realtime,migrator}` | Owned by user `moremeds`; tags `:X.Y.Z` (no `v` prefix — see "Tag convention" below) and `:latest`. Visibility "private". Each package has `moremeds/xenon` linked under **Manage Actions access** with role **Write**; without that link, `release.yml::ghcr-push` is denied. |
+| This dev Mac                                              | Source of truth for builds + tag cuts. Paper IB Gateway local (`127.0.0.1:4002`).                                                                                                                                                                                                |
+| GHCR `ghcr.io/moremeds/xenon-{api,web,realtime,migrator}` | Owned by user `moremeds`; tags `:X.Y.Z` (no `v` prefix — see "Tag convention" below) and `:latest`. Visibility "private". Each package has `moremeds/xenon` linked under **Manage Actions access** with role **Write**; without that link, `release.yml::ghcr-push` is denied.   |
 
 Containers reach host-native Mac mini services through `host.docker.internal`
 (Colima maps it to the host gateway). That hostname only means "the Docker
@@ -26,11 +35,11 @@ Postgres + IB Gateway never run in the Xenon app containers.
 
 Set `/opt/xenon/.env` based on where IB Gateway actually runs:
 
-| IB Gateway location | `IB_GATEWAY_HOST` | Notes |
-| --- | --- | --- |
-| Same Mac mini that runs Docker | `host.docker.internal` | Container-to-host path. `XENON_TRADING_MODE=live` uses port `4001`; `paper` uses `4002`. |
-| Another Mac/server on LAN or Tailscale | that machine's reachable IP or hostname | IB Gateway/TWS must allow API clients from the Mac mini or its Colima VM source IP. |
-| Another Mac/server but IB is localhost-only | `host.docker.internal` | Run an SSH tunnel on the mini, for example `ssh -N -L 4002:127.0.0.1:4002 <user>@<ib-host>`, then use `XENON_TRADING_MODE=paper`. |
+| IB Gateway location                         | `IB_GATEWAY_HOST`                       | Notes                                                                                                                             |
+| ------------------------------------------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Same Mac mini that runs Docker              | `host.docker.internal`                  | Container-to-host path. `XENON_TRADING_MODE=live` uses port `4001`; `paper` uses `4002`.                                          |
+| Another Mac/server on LAN or Tailscale      | that machine's reachable IP or hostname | IB Gateway/TWS must allow API clients from the Mac mini or its Colima VM source IP.                                               |
+| Another Mac/server but IB is localhost-only | `host.docker.internal`                  | Run an SSH tunnel on the mini, for example `ssh -N -L 4002:127.0.0.1:4002 <user>@<ib-host>`, then use `XENON_TRADING_MODE=paper`. |
 
 Do not set `IB_GATEWAY_HOST=127.0.0.1` for Docker deployment. Inside a
 container, `127.0.0.1` is the container itself.
@@ -57,35 +66,35 @@ this Mac, and `read:packages` on the mini.
 
 ```bash
 # 1. /opt/xenon owned by moremeds (single sudo prompt on the mini)
-ssh moremeds@192.168.50.47 'sudo mkdir -p /opt/xenon && sudo chown moremeds:staff /opt/xenon'
+ssh moremeds@100.66.147.98 'sudo mkdir -p /opt/xenon && sudo chown moremeds:staff /opt/xenon'
 
 # 2. GHCR auth on the mini (use this Mac's classic PAT for now — see
 #    "Known follow-ups" for the fine-grained PAT path)
-gh auth token | ssh moremeds@192.168.50.47 \
+gh auth token | ssh moremeds@100.66.147.98 \
   'PATH=/opt/homebrew/bin:$PATH cat | docker login ghcr.io -u moremeds --password-stdin'
 
 # 3. Start Colima (uses the existing default profile: 2 CPU / 2 GiB / 100 GiB / arm64)
-ssh moremeds@192.168.50.47 'PATH=/opt/homebrew/bin:$PATH colima start'
+ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH colima start'
 
 # 4. Push env files (fix DATABASE_URL host, set IB reachability, and append
 #    XENON_BROKER_ACCOUNT — see follow-up #9 for why this is required)
-scp .env       moremeds@192.168.50.47:/opt/xenon/.env
-scp web/.env   moremeds@192.168.50.47:/opt/xenon/web.env
-ssh moremeds@192.168.50.47 'cd /opt/xenon && \
-  sed -i "" -E "s|@192\.168\.50\.47:5432|@host.docker.internal:5432|g" .env && \
+scp .env       moremeds@100.66.147.98:/opt/xenon/.env
+scp web/.env   moremeds@100.66.147.98:/opt/xenon/web.env
+ssh moremeds@100.66.147.98 'cd /opt/xenon && \
+  sed -i "" -E "s|@100\.66\.147\.98:5432|@host.docker.internal:5432|g" .env && \
   ( grep -q "^XENON_BROKER_ACCOUNT=" .env || \
     echo "XENON_BROKER_ACCOUNT=<U-prefix-for-live-or-DU-prefix-for-paper>" >> .env )'
 
 # 4a. Edit the placeholders. Without XENON_BROKER_ACCOUNT, the api boot raises
 #     `ValueError: app.state.trading_mode and app.state.account must be set`
 #     and every IB-touching endpoint 500s — the lifespan guard fails closed.
-ssh moremeds@192.168.50.47 'vim /opt/xenon/.env'
+ssh moremeds@100.66.147.98 'vim /opt/xenon/.env'
 # Set XENON_BROKER_ACCOUNT to your real account ID.
 # Set IB_GATEWAY_HOST per "IB Gateway reachability" above.
 
 # 5. compose.yml (image: refs only — see template at the bottom of this doc)
-scp <local-compose.yml-template> moremeds@192.168.50.47:/opt/xenon/compose.yml
-ssh moremeds@192.168.50.47 'mkdir -p /opt/xenon/data'
+scp <local-compose.yml-template> moremeds@100.66.147.98:/opt/xenon/compose.yml
+ssh moremeds@100.66.147.98 'mkdir -p /opt/xenon/data'
 ```
 
 After bootstrap, the mini is ready for `pull → migrator → up`.
@@ -144,18 +153,25 @@ follows the convention above.
 3. **Pull + restart on the mini**:
 
    ```bash
-   XV=0.0.4   # the version you just released (no `v` prefix)
-   ssh moremeds@192.168.50.47 "PATH=/opt/homebrew/bin:\$PATH; cd /opt/xenon && \
+   XV=0.3.5   # the version you just released (no `v` prefix)
+   ssh moremeds@100.66.147.98 "PATH=/opt/homebrew/bin:\$PATH; cd /opt/xenon && \
+     cp compose.yml compose.yml.bak.predeploy-${XV} && \
      sed -i '' -E 's|xenon-([a-z]+):[^[:space:]]+|xenon-\\1:${XV}|' compose.yml && \
-     docker-compose pull && \
+     docker-compose --profile migrate pull && \
      docker-compose --profile migrate run --rm migrator && \
      docker-compose up -d"
    ```
 
    The `sed` rewrites every `xenon-*:<old>` literal in compose.yml in
-   one pass, so all 4 services bump together. Once Stage C item 3
-   (Watchtower + `compose.yml` on `:latest`) lands, this step becomes
-   redundant — the mini auto-pulls within 60s of `ghcr-push` finishing.
+   one pass, so all 4 services bump together; the `cp` keeps a
+   per-deploy `compose.yml.bak.predeploy-<ver>` for a fast rollback.
+   `--profile migrate pull` pulls all 4 images **including the migrator**
+   up-front, so a bad tag fails at pull instead of mid-migrate (plain
+   `docker-compose pull` skips profile-gated services). The migrator runs
+   `alembic upgrade head` against the prod DB; on a release with no new
+   migration it is a clean no-op. Once Stage C item 3 (Watchtower +
+   `compose.yml` on `:latest`) lands, this step becomes redundant — the
+   mini auto-pulls within 60s of `ghcr-push` finishing.
 
    Note: the mini uses **`docker-compose`** (hyphenated v5.1.3 from brew),
    not the `docker compose` plugin. Use the hyphenated form on the mini;
@@ -164,7 +180,7 @@ follows the convention above.
 4. **Smoke** (from the mini):
 
    ```bash
-   ssh moremeds@192.168.50.47 'PATH=/opt/homebrew/bin:$PATH; \
+   ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; \
      docker-compose -f /opt/xenon/compose.yml ps && \
      curl -s http://localhost:8321/health && \
      curl -sI http://localhost:3000/sign-in | head -1'
@@ -182,7 +198,7 @@ follows the convention above.
 Colima is registered as a brew service so it launches at user login:
 
 ```bash
-ssh moremeds@192.168.50.47 'PATH=/opt/homebrew/bin:$PATH brew services start colima'
+ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH brew services start colima'
 # plist lands at ~/Library/LaunchAgents/homebrew.mxcl.colima.plist
 ```
 
@@ -192,7 +208,7 @@ moremeds either auto-logs in or someone logs in interactively. To check
 auto-login:
 
 ```bash
-ssh moremeds@192.168.50.47 'sudo defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null'
+ssh moremeds@100.66.147.98 'sudo defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null'
 ```
 
 To disable Colima auto-start later: `brew services stop colima`.
@@ -205,7 +221,7 @@ release v0.0.4 onwards, that's `X.Y.Z` (no `v`). For the legacy v0.0.3
 rollback target, use `v0.0.3` (see "Tag convention" → legacy exception).
 
 ```bash
-ssh moremeds@192.168.50.47 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && \
+ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && \
   sed -i "" -E "s|xenon-([a-z]+):[^[:space:]]+|xenon-\1:<prev-tag>|" compose.yml && \
   docker-compose pull && \
   docker-compose up -d'
@@ -224,13 +240,13 @@ edit + `docker-compose up -d`. Captured as a follow-up; not blocking.
 
 ```bash
 # Live tail of one service:
-ssh moremeds@192.168.50.47 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && docker-compose logs -f api'
+ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && docker-compose logs -f api'
 
 # Last 100 lines from all services:
-ssh moremeds@192.168.50.47 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && docker-compose logs --tail 100'
+ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; cd /opt/xenon && docker-compose logs --tail 100'
 
 # Container resource usage:
-ssh moremeds@192.168.50.47 'PATH=/opt/homebrew/bin:$PATH; docker stats --no-stream'
+ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; docker stats --no-stream'
 ```
 
 ## Known follow-ups
@@ -290,7 +306,7 @@ build-args, GHCR per-package ACL — all landed via PR #91 + PR #94).
    **hardcoded to `localhost`**. Clerk dev instances do not support adding
    arbitrary hosts via the dashboard — the "Domains" UI for a dev instance
    is read-only or limited to localhost variants. Visiting the web app at
-   `http://192.168.50.47:3000` triggers Clerk's dev-browser handshake to
+   `http://100.66.147.98:3000` triggers Clerk's dev-browser handshake to
    redirect back to `localhost:3000`, breaking sign-in from the LAN.
    Workarounds:
    - **Quick (current state):** append `XENON_DISABLE_AUTH=1` to
