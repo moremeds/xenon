@@ -13,7 +13,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import math
 import os
 import sys
 import time
@@ -1616,53 +1615,6 @@ def _portfolio_has_matching_long_option(
     return held >= quantity
 
 
-async def _is_regime_gate_risk_reducing_exit(body: dict) -> bool:
-    """True when /orders/place is reducing an existing exposure.
-
-    RegimeGate blocks new exposure. To bypass it, a SELL must be backed by
-    portfolio evidence — an existing long option for single-leg SELL, or
-    a per-leg inverse cover for combo SELL. Stock SELL bypasses (Gate 4
-    naked-short audit catches the rest).
-
-    Fail-closed on a stale or missing portfolio snapshot: a 30-min-old
-    snapshot during a fast-moving panic can falsely "prove" a long still
-    exists, so we refuse the bypass instead and let RegimeGate block.
-    """
-    action = str(body.get("action", "")).upper()
-    if action != "SELL":
-        return False
-    if body.get("type") == "stock":
-        return True
-
-    portfolio, snapshot_at = _unpack_portfolio_load(await _load_portfolio_view())
-    if portfolio is None:
-        return False
-    if _portfolio_snapshot_stale_response(snapshot_at) is not None:
-        return False
-
-    if body.get("type") == "combo":
-        try:
-            combo_req = _body_to_combo_preflight_request(body)
-        except (ValueError, ValidationError):
-            return False
-        return preflight.combo_close_covered_by_portfolio(combo_req, portfolio)
-
-    if body.get("type") != "option":
-        return False
-    try:
-        req = _body_to_preflight_request(body)
-    except (ValueError, ValidationError):
-        return False
-    return _portfolio_has_matching_long_option(
-        portfolio,
-        ticker=req.ticker,
-        expiry=req.expiry,
-        strike=req.strike,
-        right=req.right,
-        quantity=req.quantity,
-    )
-
-
 def _invalid_order_body_response(exc: Exception) -> Verdict:
     return Verdict(
         accept=False,
@@ -2064,160 +2016,6 @@ def _resolve_scope_kwargs() -> dict[str, str]:
     return {"broker": "IB", "account_env": "legacy_unknown", "broker_account": "legacy_unknown"}
 
 
-_REGIME_OVERRIDE_MIN_REASON_CHARS = 10
-
-
-def _resolve_scope_obj():
-    """Return AccountScope for in-process callers. Falls back when lifespan didn't run."""
-    from xenon.execution.account_scope import AccountScope
-
-    try:
-        return resolve_from_app_state(app.state)
-    except ValueError:
-        return AccountScope(broker="IB", account_env="legacy_unknown", broker_account="legacy_unknown")
-
-
-async def _resolve_regime_bankroll_usd(scope) -> float:
-    """Bankroll input for RegimeGate, sourced from real account NAV.
-
-    Precedence: env override (test/dev) → latest `account_snapshots.net_liquidation`
-    for this scope → small conservative fail-safe. The fail-safe is intentionally
-    tight — at TIER_2, a small bankroll yields a small max-loss cap, so an
-    unknown-NAV order is more likely to require the user to resize down rather
-    than slip through with a $100k assumption.
-    """
-    raw = os.environ.get("XENON_REGIME_BANKROLL_USD_OVERRIDE")
-    if raw is not None and raw.strip():
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    try:
-        from xenon.db.engine import get_engine
-        from xenon.db.queries.portfolio import get_latest_net_liquidation_for_scope
-
-        engine = get_engine()
-        async with engine.connect() as conn:
-            net_liq = await get_latest_net_liquidation_for_scope(
-                conn,
-                broker=scope.broker,
-                account_env=scope.account_env,
-                broker_account=scope.broker_account,
-            )
-        if net_liq is not None and net_liq > 0:
-            return float(net_liq)
-    except Exception as exc:
-        logger.warning("[regime] Could not load net_liquidation for %s: %s", scope.as_dict(), exc)
-    return resolve_bankroll_usd()
-
-
-async def _run_regime_gate(body: dict):
-    """Evaluate the regime gate against an order body.
-
-    Returns `(outcome_or_None, block_response_or_None)`:
-    - When the gate would BLOCK without a valid override → outcome=None,
-      block_response is a JSONResponse (409) the caller returns.
-    - When the gate would 422 (THROTTLE + max_loss > cap) → same shape
-      with status 422.
-    - When the gate decides OK or THROTTLE within cap, or BLOCK with a
-      valid override, → outcome is set, block_response is None and the
-      caller continues with cover_ratio + override_audit.
-    - When gating is disabled (test mode default), outcome is None and
-      block_response is None — caller proceeds with cover_ratio=1.0.
-    """
-    if os.environ.get("XENON_REGIME_GATE_DISABLED") == "1" or (
-        _is_test_mode() and os.environ.get("XENON_REGIME_GATE_IN_TESTS") != "1"
-    ):
-        return None, None
-
-    if await _is_regime_gate_risk_reducing_exit(body):
-        return None, None
-
-    try:
-        if body.get("type") == "combo":
-            gate_req = _body_to_combo_preflight_request(body)
-            net_price = Decimal(str(body["limitPrice"])) if body.get("limitPrice") is not None else None
-        else:
-            gate_req = _body_to_preflight_request(body)
-            net_price = None
-    except (ValueError, ValidationError) as exc:
-        return None, JSONResponse(
-            status_code=400,
-            content={
-                "detail": str(exc),
-                "reason_code": ReasonCode.INVALID_ORDER_BODY.value,
-                "reason_detail": str(exc),
-            },
-        )
-
-    scope = _resolve_scope_obj()
-    state = await get_regime_state_for_scope(scope)
-    bankroll_usd = await _resolve_regime_bankroll_usd(scope)
-    outcome = evaluate_order_gate(gate_req, state, bankroll_usd=bankroll_usd, net_price=net_price)
-
-    if outcome.decision is GateDecision.BLOCK:
-        override_requested = bool(body.get("override"))
-        override_reason = str(body.get("override_reason") or "").strip()
-        if not override_requested or len(override_reason) < _REGIME_OVERRIDE_MIN_REASON_CHARS:
-            return None, JSONResponse(
-                status_code=409,
-                content={
-                    "detail": outcome.reason,
-                    "reason_code": "REGIME_BLOCK",
-                    "decision": "block",
-                    "binding_tier": state.binding_tier,
-                    "binding_side": outcome.bind,
-                    "vcg_tier": state.vcg_tier,
-                    "cri_tier": state.cri_tier,
-                    "override_required": True,
-                    "override_min_reason_chars": _REGIME_OVERRIDE_MIN_REASON_CHARS,
-                },
-            )
-        return outcome, None
-
-    if outcome.exceeds_throttle_cap:
-        max_loss_payload = outcome.max_loss_usd if outcome.max_loss_usd != math.inf else None
-        return None, JSONResponse(
-            status_code=422,
-            content={
-                "detail": (
-                    f"{state.binding_tier} throttle: order's max loss exceeds the "
-                    f"per-order cap (${outcome.max_loss_cap_usd:.0f})"
-                ),
-                "reason_code": "REGIME_RESIZE_REQUIRED",
-                "decision": "resize_required",
-                "binding_tier": state.binding_tier,
-                "binding_side": outcome.bind,
-                "max_loss_usd": max_loss_payload,
-                "max_loss_cap_usd": outcome.max_loss_cap_usd,
-                "cover_ratio": outcome.cover_ratio,
-            },
-        )
-
-    return outcome, None
-
-
-def _build_override_audit(body: dict, outcome) -> dict | None:
-    """Pack override data for orders_store.reserve_attempt.
-
-    Returns None unless the order is proceeding via override (i.e. the
-    gate would have BLOCK'd but body['override'] + override_reason were
-    valid). Caller already validated the reason length in _run_regime_gate.
-    """
-    if outcome is None or outcome.decision is not GateDecision.BLOCK:
-        return None
-    state = outcome.state
-    return {
-        "route": "POST /orders/place",
-        "vcg_tier": state.vcg_tier,
-        "cri_tier": state.cri_tier,
-        "binding_side": outcome.bind,
-        "block_reason": outcome.reason,
-        "user_reason": str(body.get("override_reason") or "").strip(),
-        "order_payload": body,
-    }
-
-
 async def _orders_place_from_body(body: dict):
     broker = str(getattr(app.state, "broker", "IB") or "IB").upper()
     if broker != "IB":
@@ -2241,14 +2039,11 @@ async def _orders_place_from_body(body: dict):
             },
         )
 
-    # Phase 3 — RegimeGate. Runs before preflight so its cover_ratio
-    # (1.25 on TIER_2) tightens Gate 4 in the same pass. Tests bypass
-    # via XENON_REGIME_GATE_DISABLED=1 unless they want to exercise it.
-    gate_outcome, gate_block_response = await _run_regime_gate(body)
-    if gate_block_response is not None:
-        return gate_block_response
-    cover_ratio_for_preflight = gate_outcome.cover_ratio if gate_outcome else 1.0
-    override_audit = _build_override_audit(body, gate_outcome) if gate_outcome else None
+    # RegimeGate (VCG-CRI signal layer) was removed in the pure-portfolio
+    # pivot (#104). Order entry no longer gates on regime tiers; cover_ratio
+    # reverts to its NORMAL/no-gate default and there is no override audit.
+    cover_ratio_for_preflight = 1.0
+    override_audit = None
 
     # F2: server-side Gate 4. Run preflight before any subprocess invocation.
     verdict = await _run_preflight(body, cover_ratio=cover_ratio_for_preflight)
@@ -2597,151 +2392,6 @@ async def orders_modify(request: Request):
     return await _orders_modify_from_body(body)
 
 
-async def _run_modify_regime_gate(
-    *,
-    submission: dict,
-    new_quantity: int | None,
-    new_price: Any = None,
-):
-    """Apply RegimeGate to a /orders/modify body per spec §4.6.1.
-
-    Modify rules:
-    - Pure price (newQuantity is None or == old): skip gate.
-    - Quantity decrease: skip gate (reducing risk).
-    - Quantity increase: gate the synthetic delta order. BLOCK → 409,
-      THROTTLE over cap → 422. Combos are not gated yet (BAG modify
-      with quantity change is rare; tracked as follow-up).
-    - Side change: not supported by IB modify, would need a new place.
-
-    Returns `(outcome_or_None, response_or_None)`. When both are None,
-    the modify proceeds without gating.
-    """
-    if os.environ.get("XENON_REGIME_GATE_DISABLED") == "1" or (
-        _is_test_mode() and os.environ.get("XENON_REGIME_GATE_IN_TESTS") != "1"
-    ):
-        return None, None
-
-    if new_quantity is None:
-        return None, None  # pure price modify
-    try:
-        new_qty = int(new_quantity)
-    except (TypeError, ValueError):
-        return None, None  # malformed → bubble through normal validation
-    old_qty = int(submission.get("quantity") or 0)
-    if new_qty <= old_qty:
-        return None, None  # quantity decrease / unchanged
-
-    delta_qty = new_qty - old_qty
-    sec_type = submission.get("security_type")
-
-    scope = _resolve_scope_obj()
-    state = await get_regime_state_for_scope(scope)
-    bankroll_usd = await _resolve_regime_bankroll_usd(scope)
-
-    if sec_type == "BAG":
-        # order_submissions does not persist combo legs, so we can't build
-        # a synthetic delta order to evaluate. At NORMAL there is no gate
-        # anyway. At any restrictive tier, the conservative behavior is to
-        # refuse the modify and require the user to cancel + replace through
-        # the gated /orders/place path (which reconstructs legs from the
-        # request body). Without this, a BAG qty-increase silently bypasses
-        # the gate during PANIC.
-        if state.binding_tier == "NORMAL":
-            return None, None
-        logger.info(
-            "regime_gate(modify): BAG quantity-increase blocked at tier=%s (submission=%s)",
-            state.binding_tier,
-            submission.get("submission_id"),
-        )
-        return None, JSONResponse(
-            status_code=409,
-            content={
-                "detail": (
-                    f"{state.binding_tier} — combo quantity-increase modifies are "
-                    "not supported under regime gating; cancel and replace through /orders/place"
-                ),
-                "reason_code": "REGIME_BLOCK",
-                "decision": "block",
-                "binding_tier": state.binding_tier,
-                "binding_side": "vcg" if state.vcg_tier == state.binding_tier else "cri",
-                "vcg_tier": state.vcg_tier,
-                "cri_tier": state.cri_tier,
-                "delta_quantity": delta_qty,
-                "modify_path": True,
-                "modify_sec_type": "BAG",
-                "applied_sequence": int(submission.get("modify_sequence") or 0),
-            },
-        )
-
-    try:
-        limit_price = (
-            Decimal(str(new_price)) if new_price is not None else submission.get("limit_price") or Decimal("0")
-        )
-        delta_req = PreflightRequest(
-            ticker=submission["ticker"],
-            security_type=sec_type or "OPT",
-            action=submission["action"],
-            quantity=delta_qty,
-            right=submission.get("right"),
-            expiry=submission.get("expiry").isoformat() if submission.get("expiry") else None,
-            strike=submission.get("strike"),
-            multiplier=int(submission.get("multiplier") or 100),
-            limit_price=limit_price,
-        )
-    except (ValueError, ValidationError) as exc:
-        return None, JSONResponse(
-            status_code=400,
-            content={
-                "detail": str(exc),
-                "reason_code": ReasonCode.INVALID_ORDER_BODY.value,
-            },
-        )
-
-    outcome = evaluate_order_gate(delta_req, state, bankroll_usd=bankroll_usd)
-
-    applied_sequence = int(submission.get("modify_sequence") or 0)
-    if outcome.decision is GateDecision.BLOCK:
-        return None, JSONResponse(
-            status_code=409,
-            content={
-                "detail": outcome.reason,
-                "reason_code": "REGIME_BLOCK",
-                "decision": "block",
-                "binding_tier": state.binding_tier,
-                "binding_side": outcome.bind,
-                "vcg_tier": state.vcg_tier,
-                "cri_tier": state.cri_tier,
-                "delta_quantity": delta_qty,
-                "modify_path": True,
-                "applied_sequence": applied_sequence,
-                "override_required": True,
-                "override_min_reason_chars": _REGIME_OVERRIDE_MIN_REASON_CHARS,
-                "override_supported": False,
-            },
-        )
-    if outcome.exceeds_throttle_cap:
-        max_loss_payload = outcome.max_loss_usd if outcome.max_loss_usd != math.inf else None
-        return None, JSONResponse(
-            status_code=422,
-            content={
-                "detail": (
-                    f"{state.binding_tier} throttle: delta order exceeds "
-                    f"per-order cap (${outcome.max_loss_cap_usd:.0f})"
-                ),
-                "reason_code": "REGIME_RESIZE_REQUIRED",
-                "decision": "resize_required",
-                "binding_tier": state.binding_tier,
-                "binding_side": outcome.bind,
-                "max_loss_usd": max_loss_payload,
-                "max_loss_cap_usd": outcome.max_loss_cap_usd,
-                "delta_quantity": delta_qty,
-                "modify_path": True,
-                "applied_sequence": applied_sequence,
-            },
-        )
-    return outcome, None
-
-
 async def _orders_modify_from_body(body: dict):
     if _is_test_mode():
         return {
@@ -2791,19 +2441,6 @@ async def _orders_modify_from_body(body: dict):
             },
         )
     _scope = _resolve_scope_kwargs()
-    submission = orders_store.load_submission_for_modify(
-        order_id=str(order_id) if order_id else "",
-        perm_id=str(perm_id) if perm_id else "",
-        **_scope,
-    )
-    if submission is not None:
-        _gate_outcome, gate_response = await _run_modify_regime_gate(
-            submission=submission,
-            new_quantity=new_quantity,
-            new_price=new_price,
-        )
-        if gate_response is not None:
-            return gate_response
 
     if not order_id and perm_id:
         seq_outcome = orders_store.apply_modify_by_perm_id(str(perm_id), modify_sequence, **_scope)
