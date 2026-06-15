@@ -1402,6 +1402,13 @@ td.last-price-cell {
   padding-bottom: 16px;
 }
 
+/* On the dashboard the chat box is compact; don't reserve a tall empty thread
+   when there's no conversation (the global min-height is 220px). It still
+   scrolls internally once messages arrive. */
+.dashboard-chat-panel .chat-messages {
+  min-height: 72px;
+}
+
 .chat-messages {
   flex: 1;
   min-height: 220px;
@@ -6880,7 +6887,6 @@ tr {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  min-height: 100%;
 }
 
 /* Top strip: Portfolio (merged account) + Working/Filled, side by side. */
@@ -6891,12 +6897,11 @@ tr {
   align-items: start;
 }
 
-/* Chat returns to its original full-width spot below the strip; the thread
-   scrolls internally (ChatPanel is flex:1 / min-height:0) instead of growing
-   the page. */
+/* Chat returns to its original full-width spot below the strip. Bounded height
+   (not flex:1) so it doesn't balloon to fill the viewport — the thread scrolls
+   internally (ChatPanel is flex:1 / min-height:0 within this box). */
 .dashboard-surface__chat {
-  flex: 1;
-  min-height: 480px;
+  height: 320px;
   display: flex;
   flex-direction: column;
 }
