@@ -179,6 +179,11 @@ async def _run_rehydrate_on_boot() -> None:
         "broker_account": _scope_account or None,
     }
 
+    # Operator heartbeat: record "ok" only when BOTH phases finish without
+    # exception/timeout. This function swallows phase failures internally, so a
+    # bare "ok" after the call would mislabel a failed/timed-out boot as healthy.
+    single_ok = combo_ok = False
+
     try:
         await asyncio.wait_for(
             ib_pool.run_sync(
@@ -190,6 +195,7 @@ async def _run_rehydrate_on_boot() -> None:
             ),
             timeout=10.0,
         )
+        single_ok = True
         logger.info("single_leg rehydrate completed on boot")
     except asyncio.TimeoutError:
         logger.warning("single_leg rehydrate timed out after 10s; continuing to serve")
@@ -210,11 +216,25 @@ async def _run_rehydrate_on_boot() -> None:
             ),
             timeout=10.0,
         )
+        combo_ok = True
         logger.info("combo wizard rehydrate completed on boot")
     except asyncio.TimeoutError:
         logger.warning("combo wizard rehydrate timed out after 10s; continuing to serve")
     except Exception as exc:  # noqa: BLE001
         logger.warning("combo wizard rehydrate failed on boot; continuing to serve: %s", exc)
+
+    from xenon.db.service_health import record_service_health
+
+    _ok = single_ok and combo_ok
+    record_service_health(
+        "ib_rehydrate",
+        "ok" if _ok else "error",
+        error=None if _ok else {"msg": "rehydrate phase failed/timed out (see logs)"},
+        finished_at=datetime.now(timezone.utc),
+        broker="IB",
+        account_env=_scope_account_env,
+        broker_account=_scope_account,
+    )
 
 
 def _maybe_start_activity_poller() -> None:
@@ -378,8 +398,21 @@ async def _run_fills_replay_on_boot() -> None:
         broker_account=_scope_account,
     )
 
+    from xenon.db.service_health import record_service_health
+
+    def _hb(state: str, err: dict | None = None) -> None:
+        record_service_health(
+            "ib_fills_replay",
+            state,
+            error=err,
+            finished_at=datetime.now(timezone.utc),
+            broker="IB",
+            account_env=_scope_account_env,
+            broker_account=_scope_account,
+        )
+
     try:
-        await asyncio.wait_for(
+        result = await asyncio.wait_for(
             ib_pool.run_sync(
                 "sync",
                 reconcile_fills_on_boot,
@@ -388,10 +421,22 @@ async def _run_fills_replay_on_boot() -> None:
             ),
             timeout=30.0,
         )
+        # Derive heartbeat state from the actual result — reconcile_fills_on_boot
+        # returns {"skipped": ...}/{"error": ...} WITHOUT raising, so a bare "ok"
+        # after the await would mislabel skipped/failed boots as healthy.
+        r = result or {}
+        if r.get("error"):
+            _hb("error", {"msg": str(r.get("error"))})
+        elif r.get("skipped"):
+            _hb("paused", {"msg": str(r.get("skipped"))})
+        else:
+            _hb("ok")
     except asyncio.TimeoutError:
         logger.warning("ib fills replay timed out after 30s; continuing to serve")
+        _hb("error", {"msg": "timed out after 30s"})
     except Exception as exc:  # noqa: BLE001
         logger.warning("ib fills replay failed on boot; continuing to serve: %s", exc)
+        _hb("error", {"msg": str(exc)})
 
 
 def _get_managed_account_for_health() -> str:

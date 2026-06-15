@@ -443,6 +443,20 @@ def main(argv=None):
         print(json.dumps(summary, indent=2))
         sys.exit(2)
 
+    # Operator heartbeat for the monitored (default) audit path. The forensic
+    # --portfolio/--orders/--dry-run branches return earlier and intentionally
+    # don't heartbeat — they're not the monitored writer. No-ops under
+    # XENON_READ_ONLY. Scope resolves from XENON_TRADING_MODE/XENON_BROKER_ACCOUNT.
+    from datetime import datetime, timezone
+
+    from xenon.db.service_health import record_service_health
+
+    record_service_health(
+        "naked_short_audit",
+        "error" if summary.get("error") else "ok",
+        error={"msg": summary["error"]} if summary.get("error") else None,
+        finished_at=datetime.now(timezone.utc),
+    )
     print(json.dumps(summary, indent=2))
     return summary
 

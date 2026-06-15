@@ -26,6 +26,8 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from xenon.db.service_health import record_service_health
+
 logger = logging.getLogger(__name__)
 
 ET = ZoneInfo("America/New_York")
@@ -94,12 +96,21 @@ async def futu_history_loop(
                 result.get("cashflows_inserted"),
                 result.get("nav_rows_written"),
             )
+            record_service_health(
+                "futu_history",
+                "ok",
+                broker=scope.broker,
+                account_env=scope.account_env,
+                broker_account=scope.broker_account,
+                finished_at=datetime.now(tz=ET),
+            )
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             # One failure must not poison the schedule. Log and loop back —
             # the next 16:30 ET will try again.
             logger.exception("futu history sync failed; will retry next weekday")
+            record_service_health("futu_history", "error", error={"msg": str(exc)})
         finally:
             try:
                 await engine.dispose()
