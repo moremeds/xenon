@@ -35,6 +35,23 @@ def test_xenon_tables_list_is_non_empty_and_qualified():
         assert "." in table, f"table {table!r} must be schema-qualified"
 
 
+def test_xenon_tables_covers_every_schema_table():
+    """XENON_TABLES is the per-session/per-test reset list. Every table defined
+    in the schema MUST appear here — a missing table is never truncated or
+    rolled back, so a committed write to it (e.g. a heartbeat from a
+    ``committed_db`` lifespan test) leaks across the whole session and surfaces
+    as a flaky cross-test UniqueViolation in an unrelated test. This happened
+    with ``service_health`` (operator console). Deriving the expectation from
+    the live metadata turns future drift into a deterministic failure here,
+    instead of an intermittent leak somewhere else.
+    """
+    from xenon.db.schema import events_metadata, xenon_metadata
+
+    schema_tables = {f"{t.schema}.{t.name}" for md in (xenon_metadata, events_metadata) for t in md.tables.values()}
+    missing = schema_tables - set(XENON_TABLES)
+    assert not missing, f"XENON_TABLES is missing schema tables (they will leak across tests): {sorted(missing)}"
+
+
 def test_sync_test_db_url_uses_psycopg_driver():
     url = sync_test_db_url()
     assert "postgresql+psycopg" in url, (

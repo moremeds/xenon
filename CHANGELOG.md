@@ -5,12 +5,20 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.3.5] — 2026-06-15
+### Added
 
+- **Operator console at `/admin` (#144).** A read-only operations/health dashboard aggregating live system state behind the existing global auth gate: IB Gateway reachability + auth verdict + connection-pool roles, trading-mode/account verification, snapshotter freshness, unknown-state order submissions, Flex divergence, realtime WS subscribers, Futu connectivity, live Unusual Whales rate-limit quota, and a per-writer heartbeat table backed by a new `xenon.service_health` table (`record_service_health`, scoped per `(service, broker, account_env, broker_account)`). Surfaced via `GET /admin/operator`; the page issues no portfolio reads so visiting it never triggers a background sync. Writer heartbeats no-op under `XENON_READ_ONLY=1`.
+
+### Fixed
+
+- **Full-suite test isolation: nine schema tables leaked across tests (#146).** `XENON_TABLES` — the per-test/per-session reset list in `src/xenon/_test_db.py` — had drifted from the schema and was missing `service_health` plus eight others (`flex_divergence_runs`, `ib_cash_flow`, `regime_overrides`, `benchmark_closes`, and the four `futu_*` statement tables). A committed write to any of them (e.g. the `ib_activity_poller` heartbeat from a `committed_db` lifespan test) survived the whole session and surfaced as a flaky `pk_service_health` UniqueViolation in an unrelated test — green on affected-only PR runs, red on the full master suite (the operator console's first full-suite run on master). All nine tables are now reset, and a new metadata-derived guard (`test_xenon_tables_covers_every_schema_table`) turns future drift into a deterministic local failure instead of an intermittent cross-test leak.
+
+## [0.3.5] — 2026-06-15
 
 ### Fixed
 
 - **"Today's Executed Orders" panel listed stale fills and malformed stock rows (#140).** The executed-orders payload had no date predicate, so the panel rendered every historical fill for the account under a "Today's" header. Single-name stock fills also showed a redundant `Bought QQQ`-style label. The payload now filters executed fills to the current Eastern-time day (matching the realized-P&L day boundary in `web/lib/realized-pnl.ts`), with a midnight-Eastern-as-UTC boundary helper, and stock fills render a clean `Stock` descriptor. The earlier zero-quantity rows were a separate fractional-share truncation (fixed in #134); the affected prod fills were repaired with their true IB quantities.
+
 ## [0.3.4] — 2026-06-14
 
 ### Fixed
