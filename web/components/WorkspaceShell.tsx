@@ -76,7 +76,12 @@ export default function WorkspaceShell({
   // opening /admin never fires a portfolio/futu sync POST (cached GET reads
   // on mount are harmless).
   const isOperator = activeSection === "operator";
-  const ibData = usePortfolio(isMarketActive && !isOperator);
+  // skipReads on operator: not just polling off — the mount GET itself must be
+  // suppressed, because /api/portfolio fires a background-sync POST when the
+  // snapshot is stale. The Futu GET is a cached read with no sync side-effect.
+  const ibData = usePortfolio(isMarketActive && !isOperator, {
+    skipReads: isOperator,
+  });
   const futuData = useFutuPortfolio(isMarketActive && !isOperator);
 
   // The `portfolio` variable the rest of the shell consumes is the

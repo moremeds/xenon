@@ -882,11 +882,18 @@ def _iso_datetime(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).isoformat()
 
 
-def _snapshotter_health() -> dict:
+def _snapshotter_health(scope: dict | None = None) -> dict:
     try:
         engine = get_sync_engine()
         with engine.connect() as conn:
-            last_write_at = conn.execute(select(func.max(account_snapshots.c.snapshot_at))).scalar()
+            stmt = select(func.max(account_snapshots.c.snapshot_at))
+            if scope is not None:
+                stmt = stmt.where(
+                    account_snapshots.c.broker == scope["broker"],
+                    account_snapshots.c.account_env == scope["account_env"],
+                    account_snapshots.c.broker_account == scope["broker_account"],
+                )
+            last_write_at = conn.execute(stmt).scalar()
     except Exception:
         logger.warning("[health] failed to load snapshotter heartbeat", exc_info=True)
         return {"last_write_at": None, "stale_seconds": None}
@@ -899,19 +906,26 @@ def _snapshotter_health() -> dict:
     return {"last_write_at": _iso_datetime(last_write_at), "stale_seconds": stale_seconds}
 
 
-def _order_submissions_health() -> dict:
+def _order_submissions_health(scope: dict | None = None) -> dict:
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
         engine = get_sync_engine()
         with engine.connect() as conn:
-            unknown_count = conn.execute(
+            stmt = (
                 select(func.count())
                 .select_from(order_submissions)
                 .where(
                     order_submissions.c.state == "UNKNOWN",
                     order_submissions.c.submitted_at >= cutoff,
                 )
-            ).scalar()
+            )
+            if scope is not None:
+                stmt = stmt.where(
+                    order_submissions.c.broker == scope["broker"],
+                    order_submissions.c.account_env == scope["account_env"],
+                    order_submissions.c.broker_account == scope["broker_account"],
+                )
+            unknown_count = conn.execute(stmt).scalar()
     except Exception:
         logger.warning("[health] failed to load order submissions health", exc_info=True)
         return {"unknown_count": None, "alarm": False}
@@ -1029,40 +1043,15 @@ def _ib_auth_verdict(gw: dict, pool: dict) -> str:
     return "authenticated" if any_connected else "unknown"
 
 
-def _uw_api_health() -> dict | None:
-    """Latest hourly uw_api_stats bucket, or None when no rows exist."""
-    try:
-        from xenon.db.schema import uw_api_stats
-
-        engine = get_sync_engine()
-        with engine.connect() as conn:
-            row = (
-                conn.execute(select(uw_api_stats).order_by(uw_api_stats.c.bucket_hour.desc()).limit(1))
-                .mappings()
-                .first()
-            )
-    except Exception:
-        logger.warning("[operator] failed to load uw_api_stats", exc_info=True)
-        return None
-    if row is None:
-        return None
-    lat_count = int(row["latency_count"] or 0)
-    lat_sum = float(row["latency_sum"] or 0)
-    return {
-        "bucket_hour": _iso_datetime(row["bucket_hour"]),
-        "requests": int(row["requests"] or 0),
-        "cache_hits": int(row["cache_hits"] or 0),
-        "status_2xx": int(row["status_2xx"] or 0),
-        "status_4xx": int(row["status_4xx"] or 0),
-        "status_5xx": int(row["status_5xx"] or 0),
-        "latency_avg_ms": round(lat_sum / lat_count, 1) if lat_count else None,
-    }
-
-
 def _service_health_rows() -> list[dict]:
     """service_health rows for the active scope, sorted by service, with
-    age_secs + synthesized 'missing' rows for expected writers with no row."""
+    age_secs + synthesized 'missing' rows for expected writers with no row.
+
+    futu_history is matched by service name across scopes (it runs under the
+    FUTU account, not the active IB scope); the latest row wins."""
     try:
+        from sqlalchemy import and_, or_
+
         from xenon.db.schema import service_health
 
         kwargs = _resolve_scope_kwargs()
@@ -1072,11 +1061,23 @@ def _service_health_rows() -> list[dict]:
                 conn.execute(
                     select(service_health)
                     .where(
-                        service_health.c.broker == kwargs["broker"],
-                        service_health.c.account_env == kwargs["account_env"],
-                        service_health.c.broker_account == kwargs["broker_account"],
+                        or_(
+                            and_(
+                                service_health.c.broker == kwargs["broker"],
+                                service_health.c.account_env == kwargs["account_env"],
+                                service_health.c.broker_account == kwargs["broker_account"],
+                            ),
+                            # futu_history runs under the FUTU account scope, not
+                            # the active IB scope — match it by service name across
+                            # scopes (latest row wins below) so it is not forever
+                            # synthesized as "missing".
+                            service_health.c.service == "futu_history",
+                        )
                     )
-                    .order_by(service_health.c.service)
+                    .order_by(
+                        service_health.c.service,
+                        service_health.c.updated_at.desc(),
+                    )
                 )
                 .mappings()
                 .all()
@@ -1088,6 +1089,10 @@ def _service_health_rows() -> list[dict]:
     out: list[dict] = []
     seen: set[str] = set()
     for r in rows:
+        if r["service"] in seen:
+            # ordered updated_at DESC within service → first row is the latest;
+            # skip older duplicates (e.g. prod+dev futu_history after the refresh).
+            continue
         seen.add(r["service"])
         updated = r["updated_at"]
         if updated is not None and updated.tzinfo is None:
@@ -1154,6 +1159,7 @@ async def admin_operator():
     stay on the Phase-2 test connection."""
     gw = await check_ib_gateway()
     pool = ib_pool.status() if ib_pool else {}
+    scope = _resolve_scope_kwargs()
     return {
         "generated_at": _iso_datetime(datetime.now(timezone.utc)),
         "ib_gateway": gw,
@@ -1162,12 +1168,11 @@ async def admin_operator():
         "trading_mode": getattr(app.state, "trading_mode", trading_mode.MODE),
         "account": mask_account(getattr(app.state, "account", "")),
         "mode_verified": getattr(app.state, "mode_verified", False),
-        "snapshotter": _snapshotter_health(),
-        "order_submissions": _order_submissions_health(),
+        "snapshotter": _snapshotter_health(scope),
+        "order_submissions": _order_submissions_health(scope),
         "flex_divergence": _flex_divergence_health(),
         "realtime_subscribers": await asyncio.to_thread(_realtime_subscribers_health),
         "futu": _compute_futu_health(),
-        "uw": _uw_api_health(),
         "writers": _service_health_rows(),
     }
 

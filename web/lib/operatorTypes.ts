@@ -47,16 +47,6 @@ export type FutuInfo = {
   last_sync_age_s?: number | null;
 };
 
-export type UwInfo = {
-  bucket_hour: string;
-  requests: number;
-  cache_hits: number;
-  status_2xx: number;
-  status_4xx: number;
-  status_5xx: number;
-  latency_avg_ms: number | null;
-} | null;
-
 // Live UW rate-limit / quota snapshot, sourced from the x-uw-* response
 // headers on a Next-side probe (UW_TOKEN lives in web/.env).
 export type UwQuota = {
@@ -72,7 +62,7 @@ export type UwQuota = {
 
 export type WriterRow = {
   service: string;
-  state: string; // "ok" | "error" | "syncing" | "paused" | "missing"
+  state: string; // "ok" | "error" | "paused" | "missing"
   detail: string | null;
   last_error: string | null;
   last_started_at: string | null;
@@ -94,6 +84,5 @@ export type OperatorData = {
   flex_divergence: FlexDivergenceInfo;
   realtime_subscribers: RealtimeSubscribersInfo;
   futu: FutuInfo;
-  uw: UwInfo;
   writers: WriterRow[];
 };

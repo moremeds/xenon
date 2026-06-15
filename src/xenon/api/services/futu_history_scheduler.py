@@ -86,6 +86,7 @@ async def futu_history_loop(
         )
         await asyncio.sleep(sleep_s)
 
+        scope = None
         try:
             engine = engine_factory()
             scope = scope_factory()
@@ -108,9 +109,30 @@ async def futu_history_loop(
             raise
         except Exception as exc:  # noqa: BLE001
             # One failure must not poison the schedule. Log and loop back —
-            # the next 16:30 ET will try again.
+            # the next 16:30 ET will try again. Record the error heartbeat under
+            # the FUTU scope so it lands in the same partition as the success row
+            # (and stays visible to the operator console, which matches
+            # futu_history by service across scopes). scope is None only when
+            # scope_factory() itself raised — fall back to broker="FUTU".
             logger.exception("futu history sync failed; will retry next weekday")
-            record_service_health("futu_history", "error", error={"msg": str(exc)})
+            if scope is not None:
+                record_service_health(
+                    "futu_history",
+                    "error",
+                    error={"msg": str(exc)},
+                    broker=scope.broker,
+                    account_env=scope.account_env,
+                    broker_account=scope.broker_account,
+                    finished_at=datetime.now(tz=ET),
+                )
+            else:
+                record_service_health(
+                    "futu_history",
+                    "error",
+                    error={"msg": str(exc)},
+                    broker="FUTU",
+                    finished_at=datetime.now(tz=ET),
+                )
         finally:
             try:
                 await engine.dispose()

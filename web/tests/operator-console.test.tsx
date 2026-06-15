@@ -45,7 +45,6 @@ const DATA: OperatorData = {
     last_sync_at: null,
     last_sync_age_s: null,
   },
-  uw: null,
   writers: [
     {
       service: "ib_activity_poller",

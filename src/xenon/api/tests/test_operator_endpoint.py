@@ -20,10 +20,12 @@ def test_operator_payload_shape(pg_session):
         "flex_divergence",
         "realtime_subscribers",
         "futu",
-        "uw",
         "writers",
     ):
         assert key in body
+    # `uw` was removed: the live quota tile self-fetches /api/admin/uw-quota,
+    # so the aggregate no longer carries the dead uw_api_stats block.
+    assert "uw" not in body
     assert body["ib_auth"] in {"authenticated", "awaiting", "unreachable", "unknown"}
     # nested-shape contract asserts (not just top-level keys)
     assert isinstance(body["ib_gateway"]["port_listening"], bool)
