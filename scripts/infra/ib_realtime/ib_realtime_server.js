@@ -22,12 +22,18 @@ import net from "node:net";
 import { execSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { WebSocketServer } from "ws";
-import { IBApi, EventName } from "@stoqey/ib";
+import { IBApi, EventName, TickByTickDataType } from "@stoqey/ib";
 import {
   stockContract,
   optionContract,
   indexContract,
 } from "./ib_contracts.js";
+import {
+  applyDepthDelta,
+  serializeLadder,
+  summarizeOptionNbbo,
+} from "./depth_book.js";
+import { appendTrade } from "./tape_feed.js";
 import {
   classifyIBConnectionError,
   isInfoCode,
@@ -171,6 +177,33 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+/**
+ * Normalize a depth target from a subscribe-depth / unsubscribe-depth payload.
+ * Returns { symbol, expiry, strike, right, kind } or null. An option requires a
+ * valid 8-digit expiry + positive strike + C/P right; anything else is a stock.
+ */
+function normalizeDepthTarget(payload) {
+  const symbol =
+    typeof payload.symbol === "string"
+      ? payload.symbol.trim().toUpperCase()
+      : null;
+  if (!symbol) return null;
+  const expiry =
+    typeof payload.expiry === "string" ? payload.expiry.trim() : null;
+  const strike =
+    typeof payload.strike === "number" &&
+    Number.isFinite(payload.strike) &&
+    payload.strike > 0
+      ? payload.strike
+      : null;
+  const right =
+    payload.right === "C" || payload.right === "P" ? payload.right : null;
+  if (expiry && expiry.length === 8 && strike && right) {
+    return { symbol, expiry, strike, right, kind: "option" };
+  }
+  return { symbol, expiry: null, strike: null, right: null, kind: "stock" };
+}
+
 function parseActionMessage(raw) {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw))
     return null;
@@ -194,7 +227,11 @@ function parseActionMessage(raw) {
   const indexes = Array.isArray(payload.indexes)
     ? normalizeIndexes(payload.indexes)
     : [];
-  return { action, symbols, contracts, indexes };
+  const depth =
+    action === "subscribe-depth" || action === "unsubscribe-depth"
+      ? normalizeDepthTarget(payload)
+      : null;
+  return { action, symbols, contracts, indexes, depth };
 }
 
 const cli = parseArgs(process.argv.slice(2));
@@ -454,6 +491,26 @@ const requestIdToSymbol = new Map();
 const snapshotRequests = new Map();
 const fundamentalsStore = new LRUCache(500); // symbol → FundamentalsData (LRU-capped)
 
+/* ─── L2 Market Depth + Time-and-Sales tape (additive — Phase 3b) ─────────
+ * Ported from radon scripts/ib_realtime_server.js. Stock + option only this
+ * round (futures DEFERRED per the plan Scope Decision). The depth/tape stack
+ * is dormant until a client sends `subscribe-depth` — no current consumer does,
+ * so this changes nothing for the live L1 protocol. IB caps reqMktDepth at ~3
+ * concurrent tickets; the cockpit focuses ONE book at a time, so the cap is a
+ * safety net. State is keyed by the DEPTH KEY (optionKey for options, bare
+ * symbol for stocks) so it matches the frontend bookKey exactly.
+ */
+const MAX_CONCURRENT_DEPTH = 3; // IB baseline reqMktDepth line budget
+const DEPTH_NUM_ROWS = 10; // levels per side requested from IB
+// key → { depthTickerId, tapeTickerId, contract, kind, isFutures,
+//         ladders:{bid:[],ask:[]}, trades:Trade[], focusedAt }
+const symbolDepthStates = new Map();
+const depthRequestIdToSymbol = new Map(); // depthTickerId → key
+const tapeRequestIdToSymbol = new Map(); // tapeTickerId → key
+const depthSubscribers = new Map(); // key → Set<client>
+const clientDepthBuffers = new Map(); // client → Map<key, DepthBook>
+const clientTapeBuffers = new Map(); // client → Map<key, Trade[]>
+
 /* ─── Symbol Search Cache ─────────────────────────────────────────────── */
 const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000; // 5 min
 const SEARCH_CACHE_MAX = 200;
@@ -672,6 +729,7 @@ function flushBatches() {
     buf.clear();
     sendMessage(client, { type: "batch", updates });
   }
+  flushDepthAndTapeBatches();
 }
 
 function startBatchFlush() {
@@ -866,6 +924,9 @@ function unsubscribeClientFromSymbol(client, symbol) {
 function disconnectClient(client) {
   removeBatchBuffer(client);
   clientLastPong.delete(client);
+  // Depth/tape cleanup must run before the L1 early-return below — a client may
+  // subscribe to depth without any L1 symbol (clientSet would be null).
+  disconnectClientFromDepth(client);
   const clientSet = clientSymbols.get(client);
   if (!clientSet) {
     return;
@@ -897,6 +958,347 @@ function sendUnsubscribedConfirmation(client, symbols) {
     type: "unsubscribed",
     symbols,
   });
+}
+
+/* ─── L2 depth + tape lifecycle (Phase 3b, stock + option) ───────────────── */
+
+// Composite DEPTH KEY: optionKey for options, bare symbol for stocks. Must
+// match the frontend bookKey so depth-batch/tape-batch/depth-unavailable land
+// on the right state entry.
+function depthKeyFor(target) {
+  return target.kind === "option"
+    ? optionKey({
+        symbol: target.symbol,
+        expiry: target.expiry,
+        strike: target.strike,
+        right: target.right,
+      })
+    : target.symbol;
+}
+
+function depthContractFor(target) {
+  return target.kind === "option"
+    ? optionContract(target.symbol, target.expiry, target.strike, target.right)
+    : stockContract(target.symbol);
+}
+
+function depthFeedLabel(kind) {
+  // Futures (NATIVE/CME DEPTH) deferred; stock+option only this round.
+  return kind === "option" ? "OPRA BBO" : "SMART DEPTH";
+}
+
+// IB tick-by-tick `time` is a unix epoch in SECONDS.
+function isoFromUnix(seconds) {
+  const n = Number(seconds);
+  return Number.isFinite(n) ? new Date(n * 1000).toISOString() : nowIso();
+}
+
+function activeDepthCount() {
+  let n = 0;
+  for (const state of symbolDepthStates.values()) {
+    if (state.depthTickerId != null) n += 1;
+  }
+  return n;
+}
+
+function emitDepthUnavailable(key, reason, code) {
+  const subscribers = depthSubscribers.get(key);
+  if (!subscribers || subscribers.size === 0) return;
+  const payload = { type: "depth-unavailable", symbol: key, reason };
+  if (code != null) payload.code = code;
+  for (const client of subscribers) sendMessage(client, payload);
+}
+
+function teardownDepthTicket(key) {
+  const state = symbolDepthStates.get(key);
+  if (!state || state.depthTickerId == null) return;
+  try {
+    ib.cancelMktDepth(state.depthTickerId, !state.isFutures);
+  } catch {
+    // Ignore.
+  }
+  depthRequestIdToSymbol.delete(state.depthTickerId);
+  state.depthTickerId = null;
+}
+
+function teardownTapeTicket(key) {
+  const state = symbolDepthStates.get(key);
+  if (!state || state.tapeTickerId == null) return;
+  try {
+    ib.cancelTickByTickData(state.tapeTickerId);
+  } catch {
+    // Ignore.
+  }
+  tapeRequestIdToSymbol.delete(state.tapeTickerId);
+  state.tapeTickerId = null;
+}
+
+// Cancel the LRU depth ticket that has NO remaining subscribers, returning true
+// if one was freed. NEVER steals a live, actively-watched book — that would
+// recycle another tab's depth out from under it.
+function evictEvictableDepth() {
+  let oldestKey = null;
+  let oldestAt = Infinity;
+  for (const [key, state] of symbolDepthStates) {
+    if (state.depthTickerId == null) continue;
+    const subscribers = depthSubscribers.get(key);
+    if (subscribers && subscribers.size > 0) continue; // protected
+    if (state.focusedAt < oldestAt) {
+      oldestAt = state.focusedAt;
+      oldestKey = key;
+    }
+  }
+  if (oldestKey == null) return false;
+  teardownDepthTicket(oldestKey);
+  teardownTapeTicket(oldestKey);
+  symbolDepthStates.delete(oldestKey);
+  return true;
+}
+
+function subscribeClientToDepth(client, key) {
+  let subscribers = depthSubscribers.get(key);
+  if (!subscribers) {
+    subscribers = new Set();
+    depthSubscribers.set(key, subscribers);
+  }
+  subscribers.add(client);
+}
+
+function unsubscribeClientFromDepth(client, key) {
+  const subscribers = depthSubscribers.get(key);
+  if (!subscribers) return;
+  subscribers.delete(client);
+  // Only tear down the IB tickets when the LAST subscriber leaves — mirroring
+  // the L1 last-subscriber teardown so one tab's unsubscribe never kills
+  // another tab's book.
+  if (subscribers.size === 0) {
+    depthSubscribers.delete(key);
+    teardownDepthTicket(key);
+    teardownTapeTicket(key);
+    symbolDepthStates.delete(key);
+  }
+}
+
+// Open (or refresh) the depth + tape IB tickets for a key. Idempotent: only the
+// FIRST subscriber opens a ticket; later subscribers reuse it. Subscriber set
+// is updated by the caller BEFORE this runs, so our own key is protected from
+// eviction.
+function openDepthTickets(key, contract, kind) {
+  let state = symbolDepthStates.get(key);
+  if (!state) {
+    state = {
+      depthTickerId: null,
+      tapeTickerId: null,
+      contract,
+      kind,
+      isFutures: false,
+      ladders: { bid: [], ask: [] },
+      trades: [],
+      focusedAt: Date.now(),
+    };
+    symbolDepthStates.set(key, state);
+  } else {
+    state.contract = contract;
+    state.kind = kind;
+    state.focusedAt = Date.now();
+  }
+  if (!ibConnected) return;
+
+  if (state.depthTickerId == null) {
+    // Budget: free a zero-subscriber LRU ticket before exceeding the cap. If
+    // every active book is watched, reject this one rather than steal a live
+    // book.
+    while (activeDepthCount() >= MAX_CONCURRENT_DEPTH) {
+      if (!evictEvictableDepth()) {
+        emitDepthUnavailable(key, "recycled");
+        return;
+      }
+    }
+    const depthTickerId = (nextRequestId += 1);
+    const isSmartDepth = !state.isFutures;
+    try {
+      ib.reqMktDepth(depthTickerId, contract, DEPTH_NUM_ROWS, isSmartDepth);
+      state.depthTickerId = depthTickerId;
+      state.ladders.bid.length = 0;
+      state.ladders.ask.length = 0;
+      depthRequestIdToSymbol.set(depthTickerId, key);
+      verbose(`depth subscribe ${key} kind=${kind} ticket=${depthTickerId}`);
+    } catch (error) {
+      console.error(`Failed to subscribe depth ${key}:`, error);
+    }
+  }
+
+  if (state.tapeTickerId == null) {
+    const tapeTickerId = (nextRequestId += 1);
+    try {
+      // AllLast = every last-trade print; numberOfTicks=0 → continuous stream;
+      // ignoreSize=false keeps trade sizes.
+      ib.reqTickByTickData(
+        tapeTickerId,
+        contract,
+        TickByTickDataType.AllLast,
+        0,
+        false,
+      );
+      state.tapeTickerId = tapeTickerId;
+      tapeRequestIdToSymbol.set(tapeTickerId, key);
+      verbose(`tape subscribe ${key} ticket=${tapeTickerId}`);
+    } catch (error) {
+      console.error(`Failed to subscribe tape ${key}:`, error);
+    }
+  }
+}
+
+function onDepthDelta(id, position, marketMaker, operation, side, price, size) {
+  const key = depthRequestIdToSymbol.get(id);
+  if (!key) return;
+  const state = symbolDepthStates.get(key);
+  if (!state) return;
+  applyDepthDelta(
+    state.ladders,
+    position,
+    marketMaker,
+    operation,
+    side,
+    price,
+    size,
+  );
+  hydrateAndBroadcastDepth(key);
+}
+
+function onTapeTick(reqId, time, price, size, exchange) {
+  const key = tapeRequestIdToSymbol.get(reqId);
+  if (!key) return;
+  const state = symbolDepthStates.get(key);
+  if (!state) return;
+  state.trades = appendTrade(state.trades, {
+    price,
+    size,
+    exchange: exchange || null,
+    time: isoFromUnix(time),
+  });
+  const subscribers = depthSubscribers.get(key);
+  if (!subscribers || subscribers.size === 0) return;
+  const snapshot = state.trades.slice();
+  for (const client of subscribers) bufferTapeForClient(client, key, snapshot);
+}
+
+// Serialize both ladder sides → DepthBook and buffer for broadcast. When
+// `onlyClient` is set, send to that one client (late-joiner snapshot) instead
+// of the whole subscriber set.
+function hydrateAndBroadcastDepth(key, onlyClient = null) {
+  const state = symbolDepthStates.get(key);
+  if (!state) return;
+  const subscribers = depthSubscribers.get(key);
+  if (!subscribers || subscribers.size === 0) return;
+
+  const bid = serializeLadder(
+    state.ladders.bid,
+    state.isFutures,
+    state.kind,
+    "bid",
+  );
+  const ask = serializeLadder(
+    state.ladders.ask,
+    state.isFutures,
+    state.kind,
+    "ask",
+  );
+  const book = {
+    symbol: key,
+    kind: state.kind,
+    bid,
+    ask,
+    isSmartDepth: !state.isFutures,
+    feed: depthFeedLabel(state.kind),
+    entitled: true,
+    timestamp: nowIso(),
+  };
+  if (state.kind === "option") book.nbbo = summarizeOptionNbbo(bid, ask);
+
+  if (onlyClient) {
+    bufferDepthForClient(onlyClient, key, book);
+    return;
+  }
+  for (const client of subscribers) bufferDepthForClient(client, key, book);
+}
+
+function bufferDepthForClient(client, key, book) {
+  let buf = clientDepthBuffers.get(client);
+  if (!buf) {
+    buf = new Map();
+    clientDepthBuffers.set(client, buf);
+  }
+  buf.set(key, book);
+}
+
+function bufferTapeForClient(client, key, trades) {
+  let buf = clientTapeBuffers.get(client);
+  if (!buf) {
+    buf = new Map();
+    clientTapeBuffers.set(client, buf);
+  }
+  buf.set(key, trades);
+}
+
+// Flush buffered depth/tape frames as their own additive message types. Shares
+// the L1 100ms flush cadence (called from flushBatches) but uses independent
+// buffers and never touches the L1 `batch`/`price` protocol.
+function flushDepthAndTapeBatches() {
+  for (const [client, buf] of clientDepthBuffers) {
+    if (buf.size === 0) continue;
+    const updates = Object.fromEntries(buf);
+    buf.clear();
+    sendMessage(client, { type: "depth-batch", updates });
+  }
+  for (const [client, buf] of clientTapeBuffers) {
+    if (buf.size === 0) continue;
+    const updates = Object.fromEntries(buf);
+    buf.clear();
+    sendMessage(client, { type: "tape-batch", updates });
+  }
+}
+
+// Drop a disconnecting client from every depth subscription, tearing down IB
+// tickets when its departure empties a subscriber set.
+function disconnectClientFromDepth(client) {
+  clientDepthBuffers.delete(client);
+  clientTapeBuffers.delete(client);
+  for (const [key, subscribers] of [...depthSubscribers]) {
+    if (!subscribers.has(client)) continue;
+    subscribers.delete(client);
+    if (subscribers.size === 0) {
+      depthSubscribers.delete(key);
+      teardownDepthTicket(key);
+      teardownTapeTicket(key);
+      symbolDepthStates.delete(key);
+    }
+  }
+}
+
+// On IB reconnect, depth deltas are positional and desync across the gap — wipe
+// every ladder/tape/ticker-id, then re-open tickets for keys that still have
+// subscribers (emitting a transient `recycled` while rebuilding).
+function cleanupDepthForReconnect() {
+  depthRequestIdToSymbol.clear();
+  tapeRequestIdToSymbol.clear();
+  for (const state of symbolDepthStates.values()) {
+    state.depthTickerId = null;
+    state.tapeTickerId = null;
+    state.ladders.bid.length = 0;
+    state.ladders.ask.length = 0;
+    state.trades = [];
+  }
+}
+
+function restoreDepthSubscriptions() {
+  for (const [key, subscribers] of depthSubscribers) {
+    if (!subscribers || subscribers.size === 0) continue;
+    const state = symbolDepthStates.get(key);
+    if (!state || !state.contract) continue;
+    emitDepthUnavailable(key, "recycled");
+    openDepthTickets(key, state.contract, state.kind);
+  }
 }
 
 async function handleSnapshotRequest(client, symbols) {
@@ -1218,6 +1620,28 @@ async function handleClientMessage(client, data) {
       sendUnsubscribedConfirmation(client, unsubscribed);
       return;
     }
+    case "subscribe-depth": {
+      const target = message.depth;
+      if (!target) {
+        sendMessage(client, {
+          type: "error",
+          message: "subscribe-depth requires a symbol",
+        });
+        return;
+      }
+      const key = depthKeyFor(target);
+      const contract = depthContractFor(target);
+      subscribeClientToDepth(client, key); // add subscriber BEFORE opening
+      openDepthTickets(key, contract, target.kind);
+      // Late-joiner: send whatever ladder we already have to this client only.
+      hydrateAndBroadcastDepth(key, client);
+      return;
+    }
+    case "unsubscribe-depth": {
+      const target = message.depth;
+      if (target) unsubscribeClientFromDepth(client, depthKeyFor(target));
+      return;
+    }
     case "snapshot": {
       await handleSnapshotRequest(client, symbols);
       return;
@@ -1348,8 +1772,10 @@ function wireIBEvents() {
     // Type 4 cascades: Live → Delayed → Frozen → Delayed-Frozen
     ib.reqMarketDataType(4);
     cleanupSymbolStateForReconnect();
+    cleanupDepthForReconnect();
     searchCache.clear(); // Invalidate stale search results from IB-down period
     restoreSubscriptions();
+    restoreDepthSubscriptions();
     broadcastStatus();
   });
 
@@ -1372,6 +1798,22 @@ function wireIBEvents() {
       return;
     }
     const tickerId = reqId;
+    // Depth/tape-scoped failure — route to that key's subscribers, clear the
+    // failed ticket, and NEVER flip ib_connected (one bad book ≠ dead gateway).
+    // Route by reqId, not a hardcoded code list. Reason derives from known
+    // permission codes (10089/2152 = no entitlement); futures-no-depth deferred.
+    if (tickerId != null) {
+      const depthKey = depthRequestIdToSymbol.get(tickerId);
+      const tapeKey = tapeRequestIdToSymbol.get(tickerId);
+      if (depthKey || tapeKey) {
+        const key = depthKey || tapeKey;
+        verbose(`depth/tape error ${key} code=${code}: ${msg}`);
+        emitDepthUnavailable(key, "no-entitlement", code);
+        if (depthKey) teardownDepthTicket(depthKey);
+        if (tapeKey) teardownTapeTicket(tapeKey);
+        return;
+      }
+    }
     const symbol = tickerId != null ? requestIdToSymbol.get(tickerId) : null;
     const connectionIssue = classifyIBConnectionError(msg, {
       ibHost: cli.ibHost,
@@ -1462,6 +1904,26 @@ function wireIBEvents() {
   ib.on(EventName.fundamentalData, (reqId, data) => {
     onFundamentalData(reqId, data);
   });
+
+  // ── L2 depth + time-and-sales (Phase 3b) ──────────────────────────────
+  // updateMktDepth = single-venue (no MPID); updateMktDepthL2 = SMART (carries
+  // marketMaker/MPID). Both funnel into onDepthDelta. tickByTickAllLast feeds
+  // the tape ring.
+  ib.on(
+    EventName.updateMktDepth,
+    (id, position, operation, side, price, size) =>
+      onDepthDelta(id, position, null, operation, side, price, size),
+  );
+  ib.on(
+    EventName.updateMktDepthL2,
+    (id, position, marketMaker, operation, side, price, size) =>
+      onDepthDelta(id, position, marketMaker, operation, side, price, size),
+  );
+  ib.on(
+    EventName.tickByTickAllLast,
+    (reqId, _tickType, time, price, size, _attrib, exchange) =>
+      onTapeTick(reqId, time, price, size, exchange),
+  );
 
   ib.on(
     EventName.tickOptionComputation,
