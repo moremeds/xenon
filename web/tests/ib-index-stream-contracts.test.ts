@@ -25,9 +25,7 @@ describe("ib_realtime_server.js preserves typed contracts for cold-start restore
       source.match(
         /\/\/ Stock subscriptions[\s\S]*?\/\/ Option contract subscriptions/s,
       )?.[0] ?? "";
-    expect(stockBlock).toContain(
-      'const ibContract = ib.contract.stock(symbol, "SMART", "USD")',
-    );
+    expect(stockBlock).toContain("const ibContract = stockContract(symbol)");
     expect(stockBlock).toContain("ensureSymbolState(symbol, ibContract);");
 
     const optionBlock =
@@ -35,7 +33,7 @@ describe("ib_realtime_server.js preserves typed contracts for cold-start restore
         /\/\/ Option contract subscriptions[\s\S]*?\/\/ Index subscriptions/s,
       )?.[0] ?? "";
     expect(optionBlock).toMatch(
-      /const ibContract = ib\.contract\.option\(\s*c\.symbol,\s*c\.expiry,\s*c\.strike,\s*c\.right,\s*"SMART",\s*"USD",?\s*\);/s,
+      /const ibContract = optionContract\(\s*c\.symbol,\s*c\.expiry,\s*c\.strike,\s*c\.right,?\s*\);/s,
     );
     expect(optionBlock).toContain("ensureSymbolState(key, ibContract);");
 
@@ -44,7 +42,7 @@ describe("ib_realtime_server.js preserves typed contracts for cold-start restore
         /\/\/ Index subscriptions[\s\S]*?sendSubscribedConfirmation/s,
       )?.[0] ?? "";
     expect(indexBlock).toContain(
-      'const ibContract = ib.contract.index(idx.symbol, "USD", idx.exchange);',
+      "const ibContract = indexContract(idx.symbol, idx.exchange);",
     );
     expect(indexBlock).toContain("ensureSymbolState(key, ibContract);");
   });

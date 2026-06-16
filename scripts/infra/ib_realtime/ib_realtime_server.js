@@ -22,8 +22,16 @@ import net from "node:net";
 import { execSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { WebSocketServer } from "ws";
-import IB from "ib";
-import { classifyIBConnectionError } from "./ib_connection_status.js";
+import { IBApi, EventName } from "@stoqey/ib";
+import {
+  stockContract,
+  optionContract,
+  indexContract,
+} from "./ib_contracts.js";
+import {
+  classifyIBConnectionError,
+  isInfoCode,
+} from "./ib_connection_status.js";
 import {
   createPriceData,
   createFundamentalsData,
@@ -211,7 +219,7 @@ let activeClientIdIndex = 0;
 let ib = createIBClient(IB_CLIENT_ID_POOL[0]);
 
 function createIBClient(clientId) {
-  return new IB({
+  return new IBApi({
     host: cli.ibHost,
     port: cli.ibPort,
     clientId,
@@ -902,7 +910,7 @@ async function handleSnapshotRequest(client, symbols) {
     }
 
     const requestId = (nextRequestId += 1);
-    const contract = ib.contract.stock(symbol, "SMART", "USD");
+    const contract = stockContract(symbol);
     const requestState = {
       symbol,
       client,
@@ -1123,7 +1131,7 @@ async function handleClientMessage(client, data) {
       // Stock subscriptions (backward compatible)
       for (const symbol of symbols) {
         subscribeClientToSymbol(client, symbol);
-        const ibContract = ib.contract.stock(symbol, "SMART", "USD");
+        const ibContract = stockContract(symbol);
         ensureSymbolState(symbol, ibContract);
         if (ibConnected) {
           startLiveSubscription(symbol, ibContract);
@@ -1151,13 +1159,11 @@ async function handleClientMessage(client, data) {
       for (const c of contracts) {
         const key = optionKey(c);
         subscribeClientToSymbol(client, key);
-        const ibContract = ib.contract.option(
+        const ibContract = optionContract(
           c.symbol,
           c.expiry,
           c.strike,
           c.right,
-          "SMART",
-          "USD",
         );
         ensureSymbolState(key, ibContract);
         if (ibConnected) {
@@ -1177,7 +1183,7 @@ async function handleClientMessage(client, data) {
       for (const idx of indexes) {
         const key = idx.symbol;
         subscribeClientToSymbol(client, key);
-        const ibContract = ib.contract.index(idx.symbol, "USD", idx.exchange);
+        const ibContract = indexContract(idx.symbol, idx.exchange);
         ensureSymbolState(key, ibContract);
         if (ibConnected) {
           startLiveSubscription(key, ibContract);
@@ -1331,7 +1337,7 @@ function scheduleReconnect() {
 }
 
 function wireIBEvents() {
-  ib.on("connected", () => {
+  ib.on(EventName.connected, () => {
     ibConnected = true;
     ibConnectionIssue = null;
     console.log(
@@ -1347,7 +1353,7 @@ function wireIBEvents() {
     broadcastStatus();
   });
 
-  ib.on("disconnected", () => {
+  ib.on(EventName.disconnected, () => {
     if (ibConnected) {
       console.log("IB disconnected");
     }
@@ -1356,10 +1362,16 @@ function wireIBEvents() {
     scheduleReconnect();
   });
 
-  ib.on("error", (error, data) => {
+  ib.on(EventName.error, (error, code, reqId) => {
     const msg = String(error?.message ?? error);
-    const tickerId = data?.id;
-    const code = data?.code;
+    // @stoqey/ib error signature is (error, code, reqId) — there is no `data`
+    // object (unlike the dead ib@0.2.9 lib). Informational codes also surface
+    // here; short-circuit them so they never flip ib_connected.
+    if (isInfoCode(code)) {
+      verbose(`IB info ${code}: ${msg}`);
+      return;
+    }
+    const tickerId = reqId;
     const symbol = tickerId != null ? requestIdToSymbol.get(tickerId) : null;
     const connectionIssue = classifyIBConnectionError(msg, {
       ibHost: cli.ibHost,
@@ -1429,24 +1441,30 @@ function wireIBEvents() {
     }
   });
 
-  ib.on("tickPrice", (tickerId, tickType, price) => {
+  // @stoqey/ib routes informational notifications (data-farm OK chatter, etc.)
+  // onto a separate `info` channel — log only, never touch ibConnected.
+  ib.on(EventName.info, (message, code) => {
+    verbose(`IB info ${code}: ${message}`);
+  });
+
+  ib.on(EventName.tickPrice, (tickerId, tickType, price) => {
     onTickPrice(tickerId, tickType, price);
   });
 
-  ib.on("tickSize", (tickerId, sizeType, size) => {
+  ib.on(EventName.tickSize, (tickerId, sizeType, size) => {
     onTickSize(tickerId, sizeType, size);
   });
 
-  ib.on("tickSnapshotEnd", (tickerId) => {
+  ib.on(EventName.tickSnapshotEnd, (tickerId) => {
     onTickSnapshotEnd(tickerId);
   });
 
-  ib.on("fundamentalData", (reqId, data) => {
+  ib.on(EventName.fundamentalData, (reqId, data) => {
     onFundamentalData(reqId, data);
   });
 
   ib.on(
-    "tickOptionComputation",
+    EventName.tickOptionComputation,
     (
       tickerId,
       tickType,
@@ -1488,19 +1506,27 @@ function wireIBEvents() {
     },
   );
 
-  ib.on("symbolSamples", (reqId, contracts) => {
+  ib.on(EventName.symbolSamples, (reqId, contracts) => {
     const req = searchRequestClients.get(reqId);
     if (!req) return;
     searchRequestClients.delete(reqId);
 
-    const results = contracts.map((c) => ({
-      conId: c.conId,
-      symbol: c.symbol,
-      secType: c.secType,
-      primaryExchange: c.primaryExchange,
-      currency: c.currency,
-      derivativeSecTypes: c.derivativeSecTypes || [],
-    }));
+    // @stoqey/ib delivers ContractDescription[] with the contract fields NESTED
+    // under `c.contract` (and primaryExchange renamed `primaryExch`), unlike the
+    // dead ib@0.2.9 lib which had them flat on `c`. Read from `c.contract`
+    // (falling back to `c`) — otherwise secType is undefined and TickerSearch's
+    // ALLOWED_SEC_TYPES filter drops every result.
+    const results = contracts.map((c) => {
+      const k = c.contract ?? c;
+      return {
+        conId: k.conId,
+        symbol: k.symbol,
+        secType: k.secType,
+        primaryExchange: k.primaryExch ?? k.primaryExchange,
+        currency: k.currency,
+        derivativeSecTypes: c.derivativeSecTypes || [],
+      };
+    });
 
     if (searchCache.size >= SEARCH_CACHE_MAX) {
       const oldest = searchCache.keys().next().value;

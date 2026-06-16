@@ -3,9 +3,7 @@
  * Extracted from ib_realtime_server.js so they can be unit-tested independently.
  */
 
-import IB from "ib";
-
-const { TICK_TYPE } = IB;
+import { IBApiTickType as TICK_TYPE } from "@stoqey/ib";
 
 export function normalizeNumber(value) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
@@ -45,7 +43,17 @@ export function createPriceData(symbol) {
 // Cash indexes report value via CLOSE tick, not LAST. Stocks should NOT
 // fall back to CLOSE — IB's close is the PREVIOUS session's close and can
 // be days stale on weekends, giving wildly inaccurate "underlying" prices.
-const CASH_INDEX_SYMBOLS = new Set(["VIX", "VVIX", "COR1M", "SPX", "NDX", "RUT", "DJX", "OVX", "MOVE"]);
+const CASH_INDEX_SYMBOLS = new Set([
+  "VIX",
+  "VVIX",
+  "COR1M",
+  "SPX",
+  "NDX",
+  "RUT",
+  "DJX",
+  "OVX",
+  "MOVE",
+]);
 
 export function updateDerivedLast(data) {
   if (data.last == null && data.bid != null && data.ask != null) {
@@ -97,13 +105,13 @@ export function updatePriceFromTickPrice(data, tickType, value) {
       break;
 
     // ── Misc Stats (generic tick 165) ─────────────────────────────────────
-    case TICK_TYPE.LOW_52_WEEK:    // 19
+    case TICK_TYPE.LOW_52_WEEK: // 19
       data.week52Low = normalizeNumber(value);
       break;
-    case TICK_TYPE.HIGH_52_WEEK:   // 20
+    case TICK_TYPE.HIGH_52_WEEK: // 20
       data.week52High = normalizeNumber(value);
       break;
-    case TICK_TYPE.AVG_VOLUME:     // 21
+    case TICK_TYPE.AVG_VOLUME: // 21
       data.avgVolume = normalizeNumber(value);
       break;
 
@@ -111,31 +119,31 @@ export function updatePriceFromTickPrice(data, tickType, value) {
     // IB sends these instead of live types when a real-time subscription is
     // absent. VIX/VVIX always receive delayed ticks because they require a
     // separate CBOE index subscription.
-    case TICK_TYPE.DELAYED_BID:         // 66
+    case TICK_TYPE.DELAYED_BID: // 66
       data.bid = normalizeNumber(value);
       data.lastIsCalculated = false;
       break;
-    case TICK_TYPE.DELAYED_ASK:         // 67
+    case TICK_TYPE.DELAYED_ASK: // 67
       data.ask = normalizeNumber(value);
       data.lastIsCalculated = false;
       break;
-    case TICK_TYPE.DELAYED_LAST:        // 68
+    case TICK_TYPE.DELAYED_LAST: // 68
       data.last = normalizeNumber(value);
       data.lastIsCalculated = false;
       break;
-    case TICK_TYPE.DELAYED_HIGH:        // 72
+    case TICK_TYPE.DELAYED_HIGH: // 72
       data.high = normalizeNumber(value);
       break;
-    case TICK_TYPE.DELAYED_LOW:         // 73
+    case TICK_TYPE.DELAYED_LOW: // 73
       data.low = normalizeNumber(value);
       break;
-    case TICK_TYPE.DELAYED_VOLUME:      // 74
+    case TICK_TYPE.DELAYED_VOLUME: // 74
       data.volume = normalizeNumber(value);
       break;
-    case TICK_TYPE.DELAYED_CLOSE:       // 75
+    case TICK_TYPE.DELAYED_CLOSE: // 75
       data.close = normalizeNumber(value);
       break;
-    case TICK_TYPE.DELAYED_OPEN:        // 76
+    case TICK_TYPE.DELAYED_OPEN: // 76
       data.open = normalizeNumber(value);
       break;
 
@@ -162,7 +170,7 @@ export function updatePriceFromTickPrice(data, tickType, value) {
   ) {
     const mid = (data.bid + data.ask) / 2;
     const divergence = Math.abs(mid - data.last) / data.last;
-    if (divergence > 0.20) {
+    if (divergence > 0.2) {
       data.last = Number(mid.toFixed(4));
       data.lastIsCalculated = true;
     }
@@ -258,13 +266,13 @@ export function updatePriceFromTickSize(data, sizeType, value) {
     case TICK_TYPE.VOLUME:
       data.volume = normalizeNumber(value);
       break;
-    case TICK_TYPE.DELAYED_BID_SIZE:    // 69
+    case TICK_TYPE.DELAYED_BID_SIZE: // 69
       data.bidSize = normalizeNumber(value);
       break;
-    case TICK_TYPE.DELAYED_ASK_SIZE:    // 70
+    case TICK_TYPE.DELAYED_ASK_SIZE: // 70
       data.askSize = normalizeNumber(value);
       break;
-    case TICK_TYPE.DELAYED_VOLUME:      // 74
+    case TICK_TYPE.DELAYED_VOLUME: // 74
       data.volume = normalizeNumber(value);
       break;
     case TICK_TYPE.LAST_SIZE:

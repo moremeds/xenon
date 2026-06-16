@@ -25,3 +25,16 @@ export function classifyIBConnectionError(message) {
 export function getDefaultMfaApprovalMessage() {
   return DEFAULT_MFA_APPROVAL_MESSAGE;
 }
+
+// IB "informational" notification codes. Under @stoqey/ib these arrive on
+// EventName.info (and some still on EventName.error); they are data-farm
+// connect/OK chatter and must NEVER flip ib_connected. The `/farm connection is
+// OK/i` regex in the relay error handler is kept as a belt-and-suspenders
+// fallback for any informational text not covered by this list.
+const INFO_CODES = new Set([
+  1101, 1102, 2103, 2104, 2105, 2106, 2107, 2108, 2119, 2157, 2158,
+]);
+
+export function isInfoCode(code) {
+  return INFO_CODES.has(Number(code));
+}
