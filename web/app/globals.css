@@ -7808,15 +7808,23 @@ tr {
 }
 
 /* ── L2 depth + tape book (ported from radon globals.css :6838-7195) ────────
-   Montage (stock/option two-sided) + Time & Sales tape. Futures ladder
-   (.book-ladder-*/.book-lrow) is DEFERRED per the Phase-3 Scope Decision, so
-   those rules are intentionally not ported (no LadderDOM is rendered). All
-   colors are brand tokens; the depth-fill gradient encodes resting size and is
-   functional (consistent with existing xenon chart gradients). */
+   Montage (stock/option two-sided) + Time & Sales tape. The futures ladder
+   rules (book-ladder and book-lrow classes) are DEFERRED per the Phase-3 Scope
+   Decision, so they are intentionally not ported (no LadderDOM is rendered).
+   All colors are brand tokens; the depth-fill gradient encodes resting size and
+   is functional (consistent with existing xenon chart gradients). */
 .book-window {
   --book-hairline: color-mix(in srgb, var(--line-grid) 55%, transparent);
-  --book-depth-bid: color-mix(in srgb, var(--signal-core) calc(var(--fill, 0) * 1%), transparent);
-  --book-depth-ask: color-mix(in srgb, var(--fault) calc(var(--fill, 0) * 1%), transparent);
+  --book-depth-bid: color-mix(
+    in srgb,
+    var(--signal-core) calc(var(--fill, 0) * 1%),
+    transparent
+  );
+  --book-depth-ask: color-mix(
+    in srgb,
+    var(--fault) calc(var(--fill, 0) * 1%),
+    transparent
+  );
   border: 1px solid var(--line-grid);
   border-radius: 4px;
   background: var(--bg-panel);
@@ -7859,10 +7867,20 @@ tr {
   white-space: nowrap;
   flex: 0 0 auto;
 }
-.book-head-stat b { color: var(--text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
-.book-head-stat.bid b { color: var(--signal-core); }
-.book-head-stat.ask b { color: var(--fault); }
-.book-head-spacer { flex: 1; }
+.book-head-stat b {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.book-head-stat.bid b {
+  color: var(--signal-core);
+}
+.book-head-stat.ask b {
+  color: var(--fault);
+}
+.book-head-spacer {
+  flex: 1;
+}
 .book-feed-pill {
   font-family: var(--font-mono);
   font-size: 9px;
@@ -7904,7 +7922,9 @@ tr {
   height: 12px;
   border-radius: 3px;
   background: var(--text-muted);
-  transition: transform 200ms cubic-bezier(0.22, 0.61, 0.36, 1), background 160ms ease;
+  transition:
+    transform 200ms cubic-bezier(0.22, 0.61, 0.36, 1),
+    background 160ms ease;
 }
 .book-toggle[aria-checked="true"] .book-toggle-track {
   background: color-mix(in srgb, var(--signal-core) 40%, var(--line-grid));
@@ -7913,7 +7933,12 @@ tr {
   transform: translateX(14px);
   background: var(--signal-strong);
 }
-.book-toggle-text { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); white-space: nowrap; }
+.book-toggle-text {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
 
 /* reflow grid (montage | tape) */
 .book-body-grid {
@@ -7927,10 +7952,22 @@ tr {
   align-items: stretch;
   transition: grid-template-columns 320ms cubic-bezier(0.22, 0.61, 0.36, 1);
 }
-.book-body-grid.tape-hidden { grid-template-columns: 1fr 0fr; }
-.book-montage { border-right: 1px solid var(--line-grid); transition: border-color 200ms ease; min-width: 0; }
-.book-body-grid.tape-hidden .book-montage { border-right-color: transparent; }
-.book-tape-cell { position: relative; min-width: 0; overflow: hidden; }
+.book-body-grid.tape-hidden {
+  grid-template-columns: 1fr 0fr;
+}
+.book-montage {
+  border-right: 1px solid var(--line-grid);
+  transition: border-color 200ms ease;
+  min-width: 0;
+}
+.book-body-grid.tape-hidden .book-montage {
+  border-right-color: transparent;
+}
+.book-tape-cell {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+}
 .book-tape {
   position: absolute;
   inset: 0;
@@ -7942,17 +7979,27 @@ tr {
   opacity: 1;
   transition: opacity 200ms ease 80ms;
 }
-.book-tape.book-tape-hidden { opacity: 0; transition: opacity 140ms ease; }
-.book-tape > .book-colhead { flex: 0 0 auto; }
+.book-tape.book-tape-hidden {
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+.book-tape > .book-colhead {
+  flex: 0 0 auto;
+}
 .book-tape-rows {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--text-muted) 40%, transparent) transparent;
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 40%, transparent)
+    transparent;
 }
-.book-tape-rows::-webkit-scrollbar { width: 6px; }
-.book-tape-rows::-webkit-scrollbar-track { background: transparent; }
+.book-tape-rows::-webkit-scrollbar {
+  width: 6px;
+}
+.book-tape-rows::-webkit-scrollbar-track {
+  background: transparent;
+}
 .book-tape-rows::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--text-muted) 40%, transparent);
   border-radius: 3px;
@@ -7970,14 +8017,29 @@ tr {
   border-bottom: 1px solid var(--line-grid);
   background: var(--bg-panel-raised);
 }
-.book-colhead .r { text-align: right; }
-.book-colhead .c { text-align: center; }
+.book-colhead .r {
+  text-align: right;
+}
+.book-colhead .c {
+  text-align: center;
+}
 
 /* two-sided montage (stock / option) */
-.book-sides { display: grid; grid-template-columns: 1fr 1fr; }
-.book-side.bid { border-right: 1px solid var(--line-grid); }
-.book-side.bid .book-colhead, .book-side.bid .book-row { grid-template-columns: 52px 1fr 70px; }
-.book-side.ask .book-colhead, .book-side.ask .book-row { grid-template-columns: 70px 1fr 52px; }
+.book-sides {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+.book-side.bid {
+  border-right: 1px solid var(--line-grid);
+}
+.book-side.bid .book-colhead,
+.book-side.bid .book-row {
+  grid-template-columns: 52px 1fr 70px;
+}
+.book-side.ask .book-colhead,
+.book-side.ask .book-row {
+  grid-template-columns: 70px 1fr 52px;
+}
 .book-row {
   display: grid;
   align-items: center;
@@ -7988,21 +8050,59 @@ tr {
   border-bottom: 1px solid var(--book-hairline);
   position: relative;
 }
-.book-row .book-mkt { color: var(--text-secondary); font-size: 11px; }
-.book-row .book-shares { color: var(--text-secondary); font-variant-numeric: tabular-nums; text-align: right; }
-.book-row .book-px { font-weight: 600; font-variant-numeric: tabular-nums; }
-.book-side.bid .book-row .book-px { text-align: right; color: var(--signal-core); }
-.book-side.ask .book-row .book-px { text-align: left; color: var(--fault); }
-.book-side.ask .book-row .book-mkt { text-align: right; }
+.book-row .book-mkt {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.book-row .book-shares {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.book-row .book-px {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.book-side.bid .book-row .book-px {
+  text-align: right;
+  color: var(--signal-core);
+}
+.book-side.ask .book-row .book-px {
+  text-align: left;
+  color: var(--fault);
+}
+.book-side.ask .book-row .book-mkt {
+  text-align: right;
+}
 .book-side.bid .book-row {
-  background: linear-gradient(90deg, transparent 0%, color-mix(in srgb, var(--signal-core) calc(var(--fill, 0) * 0.5%), transparent) 58%, var(--book-depth-bid) 100%);
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(
+        in srgb,
+        var(--signal-core) calc(var(--fill, 0) * 0.5%),
+        transparent
+      )
+      58%,
+    var(--book-depth-bid) 100%
+  );
 }
 .book-side.ask .book-row {
-  background: linear-gradient(270deg, transparent 0%, color-mix(in srgb, var(--fault) calc(var(--fill, 0) * 0.5%), transparent) 58%, var(--book-depth-ask) 100%);
+  background: linear-gradient(
+    270deg,
+    transparent 0%,
+    color-mix(in srgb, var(--fault) calc(var(--fill, 0) * 0.5%), transparent)
+      58%,
+    var(--book-depth-ask) 100%
+  );
 }
 /* Click-to-fill affordance — brand tokens only. */
-.book-row-fill { cursor: pointer; }
-.book-row-fill:hover { background-color: color-mix(in srgb, var(--signal-core) 10%, transparent); }
+.book-row-fill {
+  cursor: pointer;
+}
+.book-row-fill:hover {
+  background-color: color-mix(in srgb, var(--signal-core) 10%, transparent);
+}
 .book-row-fill:hover::after {
   content: "";
   position: absolute;
@@ -8015,18 +8115,52 @@ tr {
   outline-offset: -1px;
 }
 @media (prefers-reduced-motion: no-preference) {
-  .book-row-fill:active { transform: translateY(0.5px); }
+  .book-row-fill:active {
+    transform: translateY(0.5px);
+  }
 }
-.book-row[data-lvlfirst="1"]::before { content: ""; position: absolute; top: 0; height: 100%; width: 3px; }
-.book-side.bid .book-row[data-lvlfirst="1"]::before { left: 0; background: color-mix(in srgb, var(--signal-core) 65%, transparent); }
-.book-side.ask .book-row[data-lvlfirst="1"]::before { right: 0; background: color-mix(in srgb, var(--fault) 65%, transparent); }
-.book-row.best { background-color: color-mix(in srgb, var(--bg-panel-raised) 75%, transparent); }
-.book-row.best .book-px { color: var(--text-primary); font-weight: 700; }
-.book-side.bid .book-row.best::after { content: ""; position: absolute; inset: 0 0 0 auto; width: 2px; background: var(--signal-core); }
-.book-side.ask .book-row.best::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 2px; background: var(--fault); }
+.book-row[data-lvlfirst="1"]::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  height: 100%;
+  width: 3px;
+}
+.book-side.bid .book-row[data-lvlfirst="1"]::before {
+  left: 0;
+  background: color-mix(in srgb, var(--signal-core) 65%, transparent);
+}
+.book-side.ask .book-row[data-lvlfirst="1"]::before {
+  right: 0;
+  background: color-mix(in srgb, var(--fault) 65%, transparent);
+}
+.book-row.best {
+  background-color: color-mix(in srgb, var(--bg-panel-raised) 75%, transparent);
+}
+.book-row.best .book-px {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+.book-side.bid .book-row.best::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 2px;
+  background: var(--signal-core);
+}
+.book-side.ask .book-row.best::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: var(--fault);
+}
 
 /* option per-exchange BBO montage — honest framing + NBBO cue */
-.book-montage-body { display: flex; flex-direction: column; }
+.book-montage-body {
+  display: flex;
+  flex-direction: column;
+}
 .book-montage-note {
   margin: 0;
   padding: 7px 12px;
@@ -8068,7 +8202,12 @@ tr {
 }
 
 /* time & sales */
-.book-tape .book-colhead, .book-tape .book-trow { grid-template-columns: 1fr 64px 58px 80px; display: grid; align-items: center; }
+.book-tape .book-colhead,
+.book-tape .book-trow {
+  grid-template-columns: 1fr 64px 58px 80px;
+  display: grid;
+  align-items: center;
+}
 .book-trow {
   font-family: var(--font-mono);
   font-size: 12px;
@@ -8076,20 +8215,62 @@ tr {
   border-bottom: 1px solid var(--book-hairline);
   position: relative;
 }
-.book-trow .book-t-px { font-weight: 600; font-variant-numeric: tabular-nums; }
-.book-trow .book-t-px.up { color: var(--signal-core); }
-.book-trow .book-t-px.down { color: var(--fault); }
-.book-trow .book-t-px.flat { color: var(--text-primary); }
-.book-trow .book-t-sz { text-align: right; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-.book-trow .book-t-mkt { text-align: right; color: var(--text-muted); font-size: 10.5px; }
-.book-trow .book-t-time { text-align: right; color: var(--text-muted); font-variant-numeric: tabular-nums; font-size: 10.5px; }
+.book-trow .book-t-px {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.book-trow .book-t-px.up {
+  color: var(--signal-core);
+}
+.book-trow .book-t-px.down {
+  color: var(--fault);
+}
+.book-trow .book-t-px.flat {
+  color: var(--text-primary);
+}
+.book-trow .book-t-sz {
+  text-align: right;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.book-trow .book-t-mkt {
+  text-align: right;
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+.book-trow .book-t-time {
+  text-align: right;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+}
 
 /* motion */
-@keyframes book-row-reveal { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-.book-reveal { animation: book-row-reveal 360ms cubic-bezier(0.22, 0.61, 0.36, 1) both; animation-delay: calc(var(--i, 0) * 20ms); }
-.book-row:hover, .book-trow:hover { background-color: var(--bg-panel-raised); box-shadow: inset 0 0 0 1px var(--book-hairline); }
+@keyframes book-row-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.book-reveal {
+  animation: book-row-reveal 360ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  animation-delay: calc(var(--i, 0) * 20ms);
+}
+.book-row:hover,
+.book-trow:hover {
+  background-color: var(--bg-panel-raised);
+  box-shadow: inset 0 0 0 1px var(--book-hairline);
+}
 @media (prefers-reduced-motion: reduce) {
-  .book-body-grid, .book-tape, .book-montage, .book-toggle-thumb, .book-reveal {
+  .book-body-grid,
+  .book-tape,
+  .book-montage,
+  .book-toggle-thumb,
+  .book-reveal {
     transition: none !important;
     animation: none !important;
   }
