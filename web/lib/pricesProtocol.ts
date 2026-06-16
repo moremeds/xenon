@@ -241,6 +241,24 @@ export function optionKey(c: OptionContract): string {
   return `${c.symbol.trim().toUpperCase()}_${c.expiry.trim()}_${c.strike}_${c.right}`;
 }
 
+/**
+ * Inverse of {@link optionKey}: parse a composite `SYMBOL_YYYYMMDD_STRIKE_RIGHT`
+ * key back into an OptionContract. The symbol may itself contain underscores, so
+ * we split from the RIGHT: last segment = right (C/P), then strike, then expiry,
+ * and everything before that is the symbol. Returns null for non-option keys
+ * (bare stock symbols, malformed input) — the caller treats those as stocks.
+ */
+export function parseOptionKey(key: string): OptionContract | null {
+  const parts = key.trim().split("_");
+  if (parts.length < 4) return null;
+  const right = parts[parts.length - 1];
+  if (right !== "C" && right !== "P") return null;
+  const strike = Number(parts[parts.length - 2]);
+  const expiry = parts[parts.length - 3];
+  const symbol = parts.slice(0, parts.length - 3).join("_");
+  return normalizeOptionContract({ symbol, expiry, strike, right });
+}
+
 export function uniqueOptionContracts(
   contracts: OptionContract[],
 ): OptionContract[] {
