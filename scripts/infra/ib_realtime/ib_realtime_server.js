@@ -37,6 +37,7 @@ import { appendTrade } from "./tape_feed.js";
 import {
   classifyIBConnectionError,
   isInfoCode,
+  isDepthPermissionError,
 } from "./ib_connection_status.js";
 import {
   createPriceData,
@@ -1798,19 +1799,27 @@ function wireIBEvents() {
       return;
     }
     const tickerId = reqId;
-    // Depth/tape-scoped failure — route to that key's subscribers, clear the
-    // failed ticket, and NEVER flip ib_connected (one bad book ≠ dead gateway).
-    // Route by reqId, not a hardcoded code list. Reason derives from known
-    // permission codes (10089/2152 = no entitlement); futures-no-depth deferred.
+    // Depth/tape-scoped failure — route to that key's subscribers and NEVER flip
+    // ib_connected (one bad book ≠ dead gateway). Only a GENUINE permission
+    // failure (isDepthPermissionError: 10089/10092 or the matching text) cancels
+    // the ticket + tells the client. Mid-stream operational codes IB routes to a
+    // depth reqId — 2152 (21xx system warning seen live on entitled QQQ), 316/317
+    // (halt/RESET) — must be logged and ignored: tearing the ticket down on those
+    // froze a working ladder after a few seconds. Mirrors radon server:2094.
     if (tickerId != null) {
       const depthKey = depthRequestIdToSymbol.get(tickerId);
       const tapeKey = tapeRequestIdToSymbol.get(tickerId);
       if (depthKey || tapeKey) {
         const key = depthKey || tapeKey;
-        verbose(`depth/tape error ${key} code=${code}: ${msg}`);
-        emitDepthUnavailable(key, "no-entitlement", code);
-        if (depthKey) teardownDepthTicket(depthKey);
-        if (tapeKey) teardownTapeTicket(tapeKey);
+        if (isDepthPermissionError(code, msg)) {
+          verbose(`depth/tape no-entitlement ${key} code=${code}: ${msg}`);
+          emitDepthUnavailable(key, "no-entitlement", code);
+          if (depthKey) teardownDepthTicket(depthKey);
+          if (tapeKey) teardownTapeTicket(tapeKey);
+        } else {
+          // Operational warning on an entitled book — keep the ticket alive.
+          verbose(`depth/tape info ${key} code=${code}: ${msg}`);
+        }
         return;
       }
     }

@@ -38,3 +38,22 @@ const INFO_CODES = new Set([
 export function isInfoCode(code) {
   return INFO_CODES.has(Number(code));
 }
+
+// Depth/tape errors scoped to a reqId fall into two classes. ONLY a genuine
+// permission failure should cancel the ticket + tell the client the book is
+// unavailable: 10089 (no L2 entitlement) or 10092 (deep depth unsupported for
+// this secType/exchange, e.g. index options on CBOE), plus the equivalent
+// human text. Everything else IB routes to a depth reqId — 2152 (undocumented
+// 21xx system warning seen live on entitled QQQ), 316 (halted), 317 (RESET),
+// 309 (max depth lines) — is mid-stream operational chatter on a WORKING book;
+// tearing the ticket down on those froze the ladder after a few seconds.
+// Mirrors radon ib_realtime_server.js:2094 (the narrow check the xenon port
+// accidentally widened to a catch-all).
+const DEPTH_PERMISSION_PATTERN =
+  /depth.*not (allowed|eligible)|not supported for this combination/i;
+
+export function isDepthPermissionError(code, message) {
+  const numeric = Number(code);
+  if (numeric === 10089 || numeric === 10092) return true;
+  return DEPTH_PERMISSION_PATTERN.test(String(message ?? ""));
+}

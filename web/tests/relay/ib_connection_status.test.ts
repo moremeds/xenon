@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   classifyIBConnectionError,
   isInfoCode,
+  isDepthPermissionError,
 } from "../../../scripts/infra/ib_realtime/ib_connection_status.js";
 
 describe("ib_connection_status — @stoqey/ib error/info split", () => {
@@ -32,6 +33,36 @@ describe("ib_connection_status — @stoqey/ib error/info split", () => {
       classifyIBConnectionError("Market data farm connection is OK:usfarm"),
     ).toBeNull();
     expect(classifyIBConnectionError("No security definition")).toBeNull();
+  });
+});
+
+describe("ib_connection_status — depth permission classification", () => {
+  // Only GENUINE no-entitlement signals should tear down a depth/tape ticket.
+  it("flags real no-entitlement codes + messages", () => {
+    expect(isDepthPermissionError(10089, "")).toBe(true);
+    expect(isDepthPermissionError(10092, "")).toBe(true);
+    expect(
+      isDepthPermissionError(
+        0,
+        "Market depth is not allowed for this exchange",
+      ),
+    ).toBe(true);
+    expect(isDepthPermissionError(0, "Market depth data is not eligible")).toBe(
+      true,
+    );
+    expect(
+      isDepthPermissionError(0, "not supported for this combination"),
+    ).toBe(true);
+  });
+
+  // Regression for the freeze: IB emits these on an ENTITLED book mid-stream
+  // (2152 = undocumented 21xx system warning seen live on QQQ; 317 = depth
+  // RESET; 316 = halted; 309 = max depth lines). Tearing down on any of them
+  // killed a working ladder after a few seconds. They are NOT entitlement loss.
+  it("does NOT flag mid-stream operational depth warnings", () => {
+    for (const code of [2152, 316, 317, 309]) {
+      expect(isDepthPermissionError(code, "")).toBe(false);
+    }
   });
 });
 
@@ -75,5 +106,13 @@ describe("relay error handler preserves triage post-migration", () => {
 
   it("registers a separate EventName.info channel", () => {
     expect(source).toMatch(/ib\.on\(\s*EventName\.info,/);
+  });
+
+  it("gates depth/tape teardown behind the narrow permission check (no broad no-entitlement)", () => {
+    // The freeze regressed because ANY depth/tape-scoped code emitted
+    // no-entitlement + teardown. The handler must route that decision through
+    // isDepthPermissionError so operational warnings (2152/317) never kill a
+    // live ticket.
+    expect(source).toContain("isDepthPermissionError(");
   });
 });
