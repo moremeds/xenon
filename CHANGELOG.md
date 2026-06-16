@@ -5,10 +5,12 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-06-16
+
+
 ### Added
 
 - **radon→xenon AssetCockpit port — Phases 1–2 (#149).** Ports the full AssetCockpit shell from radon: cockpit grid (`AssetCockpit`, `CockpitDeck`, `GlyphRail`), quick-win deck sections (CompanyTab with ETF-aware description, OptionsChainTab with Black-Scholes implied-vol column, BookTab/TapeTab stubs), and the `TickerDetailContent` adapter that wires the existing options chain + order flow into the cockpit frame. Includes height-threading fix (`globals.css` `:has(.cockpit-host)` block) so the cockpit fills its container on tall viewports instead of floating at intrinsic height with dead space below.
-
 ## [0.4.1] — 2026-06-16
 
 ### Fixed
