@@ -7543,3 +7543,58 @@ tr {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* ─── Star toggle (watchlist) ─── */
+.star-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    color 150ms ease-in-out,
+    background 150ms ease-in-out,
+    filter 150ms ease-in-out;
+}
+
+.star-toggle:hover {
+  color: var(--signal-strong);
+  background: color-mix(in srgb, var(--signal-core) 8%, transparent);
+}
+
+.star-toggle:focus-visible {
+  outline: 2px solid var(--signal-core);
+  outline-offset: 2px;
+}
+
+.star-toggle--active {
+  color: var(--signal-core);
+}
+
+.star-toggle--active .star-toggle__glyph {
+  filter: drop-shadow(
+    0 0 4px color-mix(in srgb, var(--signal-core) 60%, transparent)
+  );
+}
+
+.star-toggle--busy {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.star-toggle__glyph {
+  display: block;
+  flex-shrink: 0;
+}
+
+.star-toggle__label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
