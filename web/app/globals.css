@@ -7611,6 +7611,37 @@ tr {
    All colors via xenon brand tokens; 4px max radius; no soft shadows beyond
    the radon-equivalent deck flyout.
    ════════════════════════════════════════════════════════════════════════ */
+
+/* Height threading: the cockpit root carries `.cockpit-host`, which lets the
+   shell content wrapper + ticker-detail-page collapse to a full-height flex
+   column so `.cockpit { flex: 1 }` fills the shell content area at height:100%
+   and scrolls INTERNALLY (book rows, tape rows, deck body). Scoped to the
+   ticker-detail section only — other `.content` sections keep their scroll +
+   20px padding untouched. Without this the cockpit floats at intrinsic height
+   with dead space below on tall viewports (the parent .ticker-detail-page is
+   display:block, so the cockpit's flex:1 is inert and it sizes to content). */
+.app-shell .content:has(> .ticker-detail-page .cockpit-host),
+.app-shell .content:has(> .cockpit-host) {
+  overflow: hidden;
+  padding: 0;
+  min-height: 0;
+}
+.ticker-detail-page:has(.cockpit-host) {
+  max-width: none;
+  padding: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.ticker-detail-page:has(.cockpit-host) .ticker-back-nav {
+  /* Breathing room on both sides so "← Back" isn't sandwiched between the
+     global header strip and the quote row; left edge aligns with the book
+     gutter (14px). line-height:1 keeps the arrow + label vertically centered. */
+  margin: 12px 0 10px 14px;
+  line-height: 1;
+}
+
 .cockpit {
   flex: 1;
   min-height: 0;
