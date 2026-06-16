@@ -2,7 +2,9 @@
 
 import { useCallback, useMemo, useState } from "react";
 import type { OpenOrder, PortfolioData, PortfolioPosition } from "@/lib/types";
-import type { PriceData } from "@/lib/pricesProtocol";
+import type { PriceData, DepthBook, Trade } from "@/lib/pricesProtocol";
+import type { OrderPrefill } from "@/lib/TickerDetailContext";
+import { OrderBook } from "./OrderBook";
 import { fmtPrice } from "@/lib/positionUtils";
 import OrderErrorBanner from "@/components/OrderErrorBanner";
 import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
@@ -24,14 +26,14 @@ type BookTabProps = {
    *  embedding them here would duplicate them. Legacy/mobile layout leaves this
    *  false (the full book tab). */
   bookOnly?: boolean;
-  /** Phase-3 no-op props. The L2 depth montage + tape, click-to-fill, and the
-   *  resolved book key/kind are deferred to a separate plan; declared here so the
-   *  cockpit AssetCockpit call typechecks today and Phase 3 can fill them.
-   *  TODO(phase-3): type `depths`/`tape` against pricesProtocol DepthBook/Trade
-   *  and wire `onPriceClick` to the L2 OrderBook. */
-  onPriceClick?: (p: unknown) => void;
-  depths?: Record<string, unknown>;
-  tape?: Record<string, unknown>;
+  /** L2 depth montage + tape (Phase 3c). `depths`/`tape` are keyed by the depth
+   *  key (`bookKey`): the bare symbol for stocks, the composite optionKey for
+   *  options. `onPriceClick` publishes a click-to-fill prefill from the book/tape.
+   *  In `bookOnly` mode the L2 OrderBook renders the entitled book for `bookKey`,
+   *  falling back to the L1 panel when there is no entitled depth. */
+  onPriceClick?: (p: Omit<OrderPrefill, "nonce">) => void;
+  depths?: Record<string, DepthBook>;
+  tape?: Record<string, Trade[]>;
   bookKey?: string;
   bookKind?: "stock" | "option" | "future";
   /** Threaded so a SELL against held shares can short-circuit to a close-out
@@ -596,6 +598,11 @@ export default function BookTab({
   openOrders,
   tickerPriceData,
   bookOnly = false,
+  onPriceClick,
+  depths,
+  tape,
+  bookKey,
+  bookKind,
 }: BookTabProps) {
   const priceData = tickerPriceData ?? prices[ticker] ?? null;
   const bid = priceData?.bid ?? null;
@@ -617,13 +624,29 @@ export default function BookTab({
     />
   );
 
-  // Cockpit book-region: only the L1 book, wrapped in `.book-tab-only`. The
+  // Cockpit book-region: the L2 OrderBook (montage + tape) for the focused
+  // `bookKey`, wrapped in `.book-tab-only`. The OrderBook renders the L1 panel
+  // (`l1`) internally whenever there is no entitled depth book — so an account
+  // without L2 entitlement still gets the existing top-of-book view. The
   // position summary / stock order form / open-orders list are owned by the
   // cockpit's Act column, so they are suppressed here to avoid duplication.
   if (bookOnly) {
+    const book = (bookKey && depths?.[bookKey]) || null;
+    const subjectTrades = (bookKey && tape?.[bookKey]) || [];
     return (
       <div className="book-tab book-tab-only" style={{ padding: "16px 0" }}>
-        {l1}
+        <OrderBook
+          symbolLabel={ticker}
+          kind={bookKind ?? "stock"}
+          depth={book}
+          trades={subjectTrades}
+          last={last}
+          lastLabel={lastLabel}
+          bid={bid}
+          ask={ask}
+          l1Fallback={l1}
+          onPriceClick={onPriceClick}
+        />
       </div>
     );
   }
