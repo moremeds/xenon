@@ -1175,6 +1175,20 @@ ticker_cache = Table(
     Column("updated_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
 )
 
+# ---------- Watchlist ----------
+
+user_watchlist = Table(
+    "user_watchlist",
+    xenon_metadata,
+    Column("id", Text, primary_key=True),  # uuid4 hex
+    Column("user_id", Text, nullable=False),  # operator id; today always "local" (single-operator terminal)
+    Column("symbol", Text, nullable=False),
+    Column("sector", Text, nullable=True),
+    Column("added_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    UniqueConstraint("user_id", "symbol", name="uq_user_watchlist_user_symbol"),
+    Index("ix_user_watchlist_user_added", "user_id", "added_at"),
+)
+
 # ---------- Shared Event Bus ----------
 
 outbox = Table(

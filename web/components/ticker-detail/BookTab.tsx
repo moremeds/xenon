@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
-import type { OpenOrder, PortfolioPosition } from "@/lib/types";
+import type { OpenOrder, PortfolioData, PortfolioPosition } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 import { fmtPrice } from "@/lib/positionUtils";
 import OrderErrorBanner from "@/components/OrderErrorBanner";
@@ -18,6 +18,25 @@ type BookTabProps = {
   prices: Record<string, PriceData>;
   openOrders: OpenOrder[];
   tickerPriceData: PriceData | null;
+  /** Cockpit mode: render ONLY the L1 book region (wrapped in `.book-tab-only`),
+   *  suppressing the standalone position summary / stock order form / open-orders
+   *  list — in the cockpit those live in the always-docked Act column, so
+   *  embedding them here would duplicate them. Legacy/mobile layout leaves this
+   *  false (the full book tab). */
+  bookOnly?: boolean;
+  /** Phase-3 no-op props. The L2 depth montage + tape, click-to-fill, and the
+   *  resolved book key/kind are deferred to a separate plan; declared here so the
+   *  cockpit AssetCockpit call typechecks today and Phase 3 can fill them.
+   *  TODO(phase-3): type `depths`/`tape` against pricesProtocol DepthBook/Trade
+   *  and wire `onPriceClick` to the L2 OrderBook. */
+  onPriceClick?: (p: unknown) => void;
+  depths?: Record<string, unknown>;
+  tape?: Record<string, unknown>;
+  bookKey?: string;
+  bookKind?: "stock" | "option" | "future";
+  /** Threaded so a SELL against held shares can short-circuit to a close-out
+   *  branch (Phase 3 consumer). Unused in the Phase-2 L1 shell. */
+  portfolio?: PortfolioData | null;
 };
 
 type OrderAction = "BUY" | "SELL";
@@ -225,7 +244,7 @@ function PositionSummary({ position }: { position: PortfolioPosition }) {
               ? fmtPrice(
                   Math.abs(position.entry_cost) /
                     (position.contracts *
-                      (position.structure_type === "Stock" ? 1 : 100))
+                      (position.structure_type === "Stock" ? 1 : 100)),
                 )
               : "---"}
           </span>
@@ -297,7 +316,9 @@ function OpenOrdersList({ orders }: { orders: OpenOrder[] }) {
               <span>
                 {o.limitPrice != null ? fmtPrice(o.limitPrice) : "MKT"}
               </span>
-              <span style={{ color: "var(--text-secondary)", fontSize: "10px" }}>
+              <span
+                style={{ color: "var(--text-secondary)", fontSize: "10px" }}
+              >
                 {o.tif} / {o.status}
               </span>
             </div>
@@ -388,7 +409,7 @@ function StockOrderForm({
         attemptId.markTerminal();
       } else {
         setSuccess(
-          `Order placed: ${action} ${parsedQty} ${ticker} @ ${fmtPrice(parsedPrice)}`
+          `Order placed: ${action} ${parsedQty} ${ticker} @ ${fmtPrice(parsedPrice)}`,
         );
         setConfirmStep(false);
         attemptId.markTerminal();
@@ -574,6 +595,7 @@ export default function BookTab({
   prices,
   openOrders,
   tickerPriceData,
+  bookOnly = false,
 }: BookTabProps) {
   const priceData = tickerPriceData ?? prices[ticker] ?? null;
   const bid = priceData?.bid ?? null;
@@ -583,17 +605,32 @@ export default function BookTab({
   const last = priceData?.last ?? null;
   const lastLabel = priceData?.lastIsCalculated ? "MARK" : "LAST";
 
+  const l1 = (
+    <L1OrderBook
+      bid={bid}
+      ask={ask}
+      spread={spread}
+      last={last}
+      lastLabel={lastLabel}
+      bidSize={priceData?.bidSize ?? null}
+      askSize={priceData?.askSize ?? null}
+    />
+  );
+
+  // Cockpit book-region: only the L1 book, wrapped in `.book-tab-only`. The
+  // position summary / stock order form / open-orders list are owned by the
+  // cockpit's Act column, so they are suppressed here to avoid duplication.
+  if (bookOnly) {
+    return (
+      <div className="book-tab book-tab-only" style={{ padding: "16px 0" }}>
+        {l1}
+      </div>
+    );
+  }
+
   return (
     <div className="book-tab" style={{ padding: "16px 0" }}>
-      <L1OrderBook
-        bid={bid}
-        ask={ask}
-        spread={spread}
-        last={last}
-        lastLabel={lastLabel}
-        bidSize={priceData?.bidSize ?? null}
-        askSize={priceData?.askSize ?? null}
-      />
+      {l1}
 
       {position && <PositionSummary position={position} />}
 

@@ -34,7 +34,9 @@ describe("OrderTab — ModifyOrderModal wiring", () => {
   let orderTabSource: string;
 
   beforeAll(async () => {
-    orderTabSource = await readSource("../components/ticker-detail/OrderTab.tsx");
+    orderTabSource = await readSource(
+      "../components/ticker-detail/OrderTab.tsx",
+    );
   });
 
   it("imports ModifyOrderModal", () => {
@@ -78,7 +80,9 @@ describe("ExistingOrderRow — MODIFY button wiring", () => {
   let orderTabSource: string;
 
   beforeAll(async () => {
-    orderTabSource = await readSource("../components/ticker-detail/OrderTab.tsx");
+    orderTabSource = await readSource(
+      "../components/ticker-detail/OrderTab.tsx",
+    );
   });
 
   it("ExistingOrderRow accepts an onModify prop", () => {
@@ -113,27 +117,33 @@ describe("requestModify — outsideRth forwarding", () => {
 });
 
 // =============================================================================
-// TickerDetailContent: passes portfolio to OrderTab for BAG price resolution
+// AssetCockpit: passes portfolio to OrderTab for BAG price resolution
+//
+// The cockpit shell (AssetCockpit) now owns the act-region OrderTab; the
+// TickerDetailContent adapter threads `tickerOrders`/`prices`/`portfolio` into
+// it via AssetCockpit. These structural assertions therefore read AssetCockpit.
 // =============================================================================
 
-describe("TickerDetailContent — OrderTab props", () => {
-  let tickerDetailSource: string;
+describe("AssetCockpit — OrderTab props", () => {
+  let assetCockpitSource: string;
 
   beforeAll(async () => {
-    tickerDetailSource = await readSource("../components/TickerDetailContent.tsx");
+    assetCockpitSource = await readSource(
+      "../components/ticker-detail/AssetCockpit.tsx",
+    );
   });
 
   it("renders OrderTab with openOrders prop", () => {
-    expect(tickerDetailSource).toMatch(/openOrders=\{tickerOrders\}/);
+    expect(assetCockpitSource).toMatch(/openOrders=\{tickerOrders\}/);
   });
 
   it("renders OrderTab with prices prop", () => {
-    expect(tickerDetailSource).toMatch(/prices=\{prices\}/);
+    expect(assetCockpitSource).toMatch(/prices=\{prices\}/);
   });
 
   it("passes portfolio to OrderTab for BAG price resolution in ModifyOrderModal", () => {
     // OrderTab needs portfolio so it can pass it to ModifyOrderModal for BAG orders
-    expect(tickerDetailSource).toMatch(/portfolio=\{portfolio\}/);
+    expect(assetCockpitSource).toMatch(/portfolio=\{portfolio\}/);
   });
 });
 
@@ -145,7 +155,9 @@ describe("ExistingOrderRow — post-fix structure", () => {
   let orderTabSource: string;
 
   beforeAll(async () => {
-    orderTabSource = await readSource("../components/ticker-detail/OrderTab.tsx");
+    orderTabSource = await readSource(
+      "../components/ticker-detail/OrderTab.tsx",
+    );
   });
 
   it("ExistingOrderRow does NOT manage its own modifying boolean state", () => {

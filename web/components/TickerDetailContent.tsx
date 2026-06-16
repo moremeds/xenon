@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type {
   OpenOrder,
   PortfolioPosition,
@@ -8,68 +8,9 @@ import type {
   OrdersData,
 } from "@/lib/types";
 import type { PriceData, FundamentalsData } from "@/lib/pricesProtocol";
-import { legPriceKey, resolveSpreadPriceData } from "@/lib/positionUtils";
-import PriceChart from "./PriceChart";
-import PositionTab from "./ticker-detail/PositionTab";
-import OrderTab from "./ticker-detail/OrderTab";
-import NewsTab from "./ticker-detail/NewsTab";
-import RatingsTab from "./ticker-detail/RatingsTab";
-import SeasonalityTab from "./ticker-detail/SeasonalityTab";
-import CompanyTab from "./ticker-detail/CompanyTab";
-import { TickerQuoteTelemetry } from "./QuoteTelemetry";
-import BookTab from "./ticker-detail/BookTab";
-import OptionsChainTab from "./ticker-detail/OptionsChainTab";
-
-type TabId =
-  | "company"
-  | "book"
-  | "chain"
-  | "position"
-  | "order"
-  | "news"
-  | "ratings"
-  | "seasonality";
-
-/**
- * Resolve the best price data for the shared ticker quote telemetry wrapper.
- * - Stock positions → underlying ticker price
- * - Single-leg option → option contract price (bid/ask from WS)
- * - Multi-leg → net spread price computed from per-leg WS bid/ask (falls back to underlying)
- * - No position → underlying ticker price
- */
-function resolveTickerQuoteTelemetry(
-  ticker: string,
-  position: PortfolioPosition | null,
-  prices: Record<string, PriceData>,
-): { priceData: PriceData | null; label?: string; priceKey?: string } {
-  if (!position || position.structure_type === "Stock") {
-    return { priceData: prices[ticker] ?? null };
-  }
-
-  // Single-leg option: use option-level prices
-  if (position.legs.length === 1) {
-    const leg = position.legs[0];
-    const key = legPriceKey(ticker, position.expiry, leg);
-    if (key && prices[key]) {
-      const strike = leg.strike ? `$${leg.strike}` : "";
-      const type = leg.type === "Call" ? "C" : leg.type === "Put" ? "P" : "";
-      return {
-        priceData: prices[key],
-        priceKey: key,
-        label: `${ticker} ${position.expiry} ${strike} ${type}`,
-      };
-    }
-  }
-
-  // Multi-leg: compute net spread price from per-leg WS prices
-  const spreadData = resolveSpreadPriceData(ticker, position, prices);
-  if (spreadData) {
-    return { priceData: spreadData, label: `${ticker} ${position.structure}` };
-  }
-
-  // Fallback to underlying if leg prices unavailable
-  return { priceData: prices[ticker] ?? null, label: `${ticker} (underlying)` };
-}
+import { resolveTickerQuote } from "@/lib/tickerQuote";
+import { isUrlDeck, legacyTabToDeck, type DeckKey } from "@/lib/deckNav";
+import AssetCockpit from "./ticker-detail/AssetCockpit";
 
 export type TickerDetailContentProps = {
   ticker: string;
@@ -111,147 +52,75 @@ export default function TickerDetailContent({
     return orders.open_orders.filter((o) => o.contract.symbol === ticker);
   }, [ticker, orders]);
 
+  // Single source for the cockpit header / book / ticket. Carries the spread-net
+  // flag so combos render a signed net instead of a percent move.
   const {
     priceData,
-    label: priceLabel,
     priceKey: chartPriceKey,
+    isSpreadNet,
   } = useMemo(
-    () => resolveTickerQuoteTelemetry(ticker, position, prices),
+    () => resolveTickerQuote(ticker, position, prices),
     [ticker, position, prices],
   );
 
-  const resolvedTab: TabId = (
-    [
-      "company",
-      "book",
-      "chain",
-      "position",
-      "order",
-      "news",
-      "ratings",
-      "seasonality",
-    ] as TabId[]
-  ).includes(activeTab as TabId)
-    ? (activeTab as TabId)
-    : "company";
+  // Phase 2 has no L2 depth feed, so the header quote IS the resolved price (the
+  // depth-NBBO correction is deferred to Phase 3). bookKey is the single-leg
+  // option key when present, else the ticker.
+  const quotePriceData = priceData;
+  const bookKey = chartPriceKey ?? ticker;
 
-  const tabs: { id: TabId; label: string; hidden?: boolean }[] = [
-    { id: "company", label: "Company" },
-    { id: "book", label: "Book" },
-    { id: "chain", label: "Chain" },
-    { id: "position", label: "Position", hidden: !position },
-    {
-      id: "order",
-      label:
-        tickerOrders.length > 0 ? `Orders (${tickerOrders.length})` : "Order",
-    },
-    { id: "news", label: "News" },
-    { id: "ratings", label: "Ratings" },
-    { id: "seasonality", label: "Seasonal" },
-  ];
+  // Instrument kind for the book/header. A single-leg non-stock position is an
+  // option; everything else (stock, index, multi-leg, flat) is a stock book.
+  // xenon has no futures path (deferred), so there is no "future" branch here.
+  const bookKind: "stock" | "option" | "future" =
+    position &&
+    position.structure_type !== "Stock" &&
+    position.legs.length === 1
+      ? "option"
+      : "stock";
 
-  const positionSummary = position
-    ? `${position.direction} ${position.contracts}x ${position.structure}`
-    : "No Position";
+  // Deck arbitration. xenon's TickerWorkspace passes the deck key through
+  // `activeTab` (it may be a deck key like "c", a legacy tab-name like "chain",
+  // or "" for the bare book). URL-addressable decks live in the URL; the
+  // local-only command palette (":") and mobile order ticket ("o") live in
+  // component state so they never serialize to the URL.
+  const urlDeck: DeckKey | null = isUrlDeck(activeTab)
+    ? activeTab
+    : legacyTabToDeck(activeTab);
+  const [localDeck, setLocalDeck] = useState<DeckKey | null>(null);
+  const activeDeck: DeckKey | null = urlDeck ?? localDeck;
 
+  const onDeckChange = (deck: DeckKey | null) => {
+    // URL-addressable decks (and close → null) flow through onTabChange so
+    // TickerWorkspace writes/clears `?deck=`; clear any local-only deck.
+    if (deck == null || isUrlDeck(deck)) {
+      onTabChange(deck ?? "company");
+      setLocalDeck(null);
+      return;
+    }
+    // Local-only decks (":" / "o") have no URL form — drive them from state.
+    setLocalDeck(deck);
+  };
+
+  // The cockpit is the single ticker-detail layout on every viewport. It adapts
+  // internally: desktop = book + act column + glyph rail; mobile = book-first
+  // with a horizontal glyph strip and full-screen decks (see AssetCockpit).
   return (
-    <div className="ticker-detail-content">
-      {/* Hero row: telemetry (left) + chart (right) */}
-      <div className="ticker-detail-hero">
-        <div className="ticker-detail-hero-left">
-          <div className="ticker-detail-header">
-            <span
-              className={`pill ${position ? "defined" : "neutral"}`}
-              style={{ fontSize: "9px" }}
-            >
-              {positionSummary}
-            </span>
-          </div>
-          <TickerQuoteTelemetry priceData={priceData} label={priceLabel} />
-        </div>
-        <div className="ticker-detail-hero-right">
-          <PriceChart
-            ticker={ticker}
-            prices={prices}
-            priceKey={chartPriceKey}
-            theme={theme}
-          />
-        </div>
-      </div>
-
-      {/* Tab bar */}
-      <div className="ticker-tabs">
-        {tabs
-          .filter((t) => !t.hidden)
-          .map((tab) => (
-            <button
-              key={tab.id}
-              className={`ticker-tab ${resolvedTab === tab.id ? "active" : ""}`}
-              onClick={() => onTabChange(tab.id)}
-            >
-              {tab.label}
-            </button>
-          ))}
-      </div>
-
-      {/* Tab content */}
-      <div className="ticker-tab-content">
-        {resolvedTab === "company" && (
-          <CompanyTab
-            ticker={ticker}
-            active={resolvedTab === "company"}
-            priceData={prices[ticker] ?? null}
-            fundamentals={fundamentals[ticker] ?? null}
-          />
-        )}
-        {resolvedTab === "book" && (
-          <BookTab
-            ticker={ticker}
-            position={position}
-            prices={prices}
-            openOrders={tickerOrders}
-            tickerPriceData={priceData}
-          />
-        )}
-        {resolvedTab === "chain" && (
-          <OptionsChainTab
-            ticker={ticker}
-            prices={prices}
-            tickerPriceData={prices[ticker] ?? null}
-            focusPosition={positionId != null ? position : null}
-            focusPositionRequested={positionId != null}
-          />
-        )}
-        {resolvedTab === "position" && position && (
-          <PositionTab position={position} prices={prices} />
-        )}
-        {resolvedTab === "order" && (
-          <OrderTab
-            ticker={ticker}
-            position={position}
-            portfolio={portfolio}
-            prices={prices}
-            openOrders={tickerOrders}
-            tickerPriceData={priceData}
-          />
-        )}
-        {resolvedTab === "news" && (
-          <NewsTab ticker={ticker} active={resolvedTab === "news"} />
-        )}
-        {resolvedTab === "ratings" && (
-          <RatingsTab
-            ticker={ticker}
-            active={resolvedTab === "ratings"}
-            currentPrice={prices[ticker]?.last ?? priceData?.last}
-          />
-        )}
-        {resolvedTab === "seasonality" && (
-          <SeasonalityTab
-            ticker={ticker}
-            active={resolvedTab === "seasonality"}
-          />
-        )}
-      </div>
-    </div>
+    <AssetCockpit
+      ticker={ticker}
+      position={position}
+      prices={prices}
+      fundamentals={fundamentals}
+      portfolio={portfolio}
+      bookKey={bookKey}
+      bookKind={bookKind}
+      quotePriceData={quotePriceData}
+      priceData={priceData}
+      isSpreadNet={isSpreadNet}
+      tickerOrders={tickerOrders}
+      theme={theme}
+      activeDeck={activeDeck}
+      onDeckChange={onDeckChange}
+    />
   );
 }

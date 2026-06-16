@@ -5,6 +5,7 @@ import type { PriceData, OptionContract } from "@/lib/pricesProtocol";
 import { optionKey, normalizeOptionExpiry } from "@/lib/pricesProtocol";
 import type { PortfolioPosition } from "@/lib/types";
 import { fmtPrice } from "@/lib/positionUtils";
+import { computeLegImpliedValue } from "@/lib/impliedValue";
 import OrderErrorBanner from "@/components/OrderErrorBanner";
 import { useTickerDetail } from "@/lib/TickerDetailContext";
 import { useChainPrefetch } from "@/lib/useChainPrefetch";
@@ -72,6 +73,8 @@ function errorFromResponseBody(
 /* ─── Chain Strike Row ─── */
 
 function StrikeRow({
+  ticker,
+  expiry,
   strike,
   callKey,
   putKey,
@@ -82,6 +85,8 @@ function StrikeRow({
   atmRef,
   sideFilter,
 }: {
+  ticker: string;
+  expiry: string;
   strike: number;
   callKey: string;
   putKey: string;
@@ -114,6 +119,38 @@ function StrikeRow({
   const putIV = putData?.impliedVol;
   const putDelta = putData?.delta;
 
+  // Black-Scholes theoretical (implied) per-share value for each side.
+  const callImplied = useMemo(
+    () =>
+      computeLegImpliedValue(
+        {
+          ticker,
+          expiry,
+          strike,
+          type: "Call",
+          direction: "LONG",
+          contracts: 1,
+        },
+        prices,
+      ).perContract,
+    [ticker, expiry, strike, prices],
+  );
+  const putImplied = useMemo(
+    () =>
+      computeLegImpliedValue(
+        {
+          ticker,
+          expiry,
+          strike,
+          type: "Put",
+          direction: "LONG",
+          contracts: 1,
+        },
+        prices,
+      ).perContract,
+    [ticker, expiry, strike, prices],
+  );
+
   const rowClass = `chain-row ${isAtm ? "chain-row-atm" : ""}`;
   const showCalls = sideFilter !== "puts";
   const showPuts = sideFilter !== "calls";
@@ -128,6 +165,9 @@ function StrikeRow({
           </td>
           <td className="chain-cell chain-iv">
             {callIV != null ? (callIV * 100).toFixed(1) : ""}
+          </td>
+          <td className="chain-cell chain-implied">
+            {callImplied != null ? fmtPrice(callImplied) : ""}
           </td>
           <td className="chain-cell chain-vol">
             {callVol != null ? callVol.toLocaleString() : ""}
@@ -195,6 +235,9 @@ function StrikeRow({
           </td>
           <td className="chain-cell chain-vol">
             {putVol != null ? putVol.toLocaleString() : ""}
+          </td>
+          <td className="chain-cell chain-implied">
+            {putImplied != null ? fmtPrice(putImplied) : ""}
           </td>
           <td className="chain-cell chain-iv">
             {putIV != null ? (putIV * 100).toFixed(1) : ""}
@@ -638,18 +681,16 @@ function OrderBuilder({
   const wizardIsTerminal = wizardTerminalStates.includes(wizardState);
   const wizardCanSubmit = Boolean(
     wizardLauncher.sessionId &&
-      wizardState === "PLANNED" &&
-      !wizardSession.session?.current_attempt_id,
+    wizardState === "PLANNED" &&
+    !wizardSession.session?.current_attempt_id,
   );
   const wizardCanReprice = Boolean(
     wizardLauncher.sessionId &&
-      wizardSession.session?.current_attempt_id &&
-      !wizardIsTerminal &&
-      ["WORKING", "REPRICE_PENDING"].includes(wizardState),
+    wizardSession.session?.current_attempt_id &&
+    !wizardIsTerminal &&
+    ["WORKING", "REPRICE_PENDING"].includes(wizardState),
   );
-  const wizardCanAbort = Boolean(
-    wizardLauncher.sessionId && !wizardIsTerminal,
-  );
+  const wizardCanAbort = Boolean(wizardLauncher.sessionId && !wizardIsTerminal);
 
   return (
     <div className="order-builder">
@@ -665,7 +706,9 @@ function OrderBuilder({
         session={wizardSession}
         onClose={wizardLauncher.close}
         onSubmit={wizardCanSubmit ? handleWizardSubmit : undefined}
-        onRepriceNatural={wizardCanReprice ? handleWizardRepriceNatural : undefined}
+        onRepriceNatural={
+          wizardCanReprice ? handleWizardRepriceNatural : undefined
+        }
         onAbort={wizardCanAbort ? handleWizardAbort : undefined}
       />
       <div className="order-builder-header">
@@ -1473,6 +1516,12 @@ export default function OptionsChainTab({
                   <>
                     <th className="chain-header">Δ</th>
                     <th className="chain-header">IV</th>
+                    <th
+                      className="chain-header chain-header-implied"
+                      title="Black-Scholes implied (theoretical) per-share price"
+                    >
+                      Implied
+                    </th>
                     <th className="chain-header">Vol</th>
                     <th className="chain-header">Bid</th>
                     <th className="chain-header chain-header-mid">Mid</th>
@@ -1488,6 +1537,12 @@ export default function OptionsChainTab({
                     <th className="chain-header chain-header-mid">Mid</th>
                     <th className="chain-header">Ask</th>
                     <th className="chain-header">Vol</th>
+                    <th
+                      className="chain-header chain-header-implied"
+                      title="Black-Scholes implied (theoretical) per-share price"
+                    >
+                      Implied
+                    </th>
                     <th className="chain-header">IV</th>
                     <th className="chain-header">Δ</th>
                   </>
@@ -1495,13 +1550,13 @@ export default function OptionsChainTab({
               </tr>
               <tr>
                 {sideFilter !== "puts" && (
-                  <th className="chain-side-label" colSpan={7}>
+                  <th className="chain-side-label" colSpan={8}>
                     CALLS
                   </th>
                 )}
                 <th className="chain-side-label" />
                 {sideFilter !== "calls" && (
-                  <th className="chain-side-label" colSpan={7}>
+                  <th className="chain-side-label" colSpan={8}>
                     PUTS
                   </th>
                 )}
@@ -1513,6 +1568,8 @@ export default function OptionsChainTab({
                 return (
                   <StrikeRow
                     key={row.strike}
+                    ticker={ticker}
+                    expiry={selectedExpiry ?? ""}
                     strike={row.strike}
                     callKey={row.callKey}
                     putKey={row.putKey}

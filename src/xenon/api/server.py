@@ -47,6 +47,7 @@ from xenon.api.routes.orders import orders_payload_for_scope
 from xenon.api.routes.orders import router as orders_router
 from xenon.api.routes.performance import router as performance_router
 from xenon.api.routes.trades import router as trades_router
+from xenon.api.routes.watchlist import router as watchlist_router
 from xenon.api.routes.wizard import router as wizard_router
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
@@ -608,6 +609,7 @@ app.include_router(journal_router)
 app.include_router(orders_router)
 app.include_router(performance_router)
 app.include_router(trades_router)
+app.include_router(watchlist_router)
 app.include_router(wizard_router)
 
 app.add_middleware(

@@ -73,6 +73,7 @@ XENON_TABLES: tuple[str, ...] = (
     "xenon.ib_cash_flow",
     "xenon.regime_overrides",
     "xenon.benchmark_closes",
+    "xenon.user_watchlist",
     "xenon.futu_cash_flow",
     "xenon.futu_daily_statement",
     "xenon.futu_statement_inbox",

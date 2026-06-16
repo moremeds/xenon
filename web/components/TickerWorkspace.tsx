@@ -4,41 +4,57 @@ import { useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { useTickerDetail } from "@/lib/TickerDetailContext";
+import { isUrlDeck, legacyTabToDeck } from "@/lib/deckNav";
 import TickerDetailContent from "./TickerDetailContent";
-
-const VALID_TABS = new Set(["company", "book", "chain", "position", "order", "news", "ratings", "seasonality"]);
 
 type TickerWorkspaceProps = {
   ticker: string;
   theme: "dark" | "light";
 };
 
-export default function TickerWorkspace({ ticker, theme }: TickerWorkspaceProps) {
+export default function TickerWorkspace({
+  ticker,
+  theme,
+}: TickerWorkspaceProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { getPrices, getFundamentals, getPortfolio, getOrders } = useTickerDetail();
+  const { getPrices, getFundamentals, getPortfolio, getOrders } =
+    useTickerDetail();
 
   const prices = getPrices();
   const fundamentals = getFundamentals();
   const portfolio = getPortfolio();
   const orders = getOrders();
 
-  // Read tab from URL, validate, default to "company"
-  const rawTab = searchParams.get("tab");
-  const activeTab = rawTab && VALID_TABS.has(rawTab) ? rawTab : "company";
-  const positionId = searchParams.get("posId") ? Number(searchParams.get("posId")) : null;
+  // Deck model: `?deck=<c|p|n|r|s|i>` opens a reference deck; no deck = book-first
+  // landing. Legacy `?tab=` values are mapped through legacyTabToDeck so old
+  // links/bookmarks still resolve. The resolved deck key is fed through the
+  // existing `activeTab` prop ("" when no deck is open).
+  const rawDeck = searchParams.get("deck");
+  const deck = isUrlDeck(rawDeck)
+    ? rawDeck
+    : legacyTabToDeck(searchParams.get("tab"));
+  const positionId = searchParams.get("posId")
+    ? Number(searchParams.get("posId"))
+    : null;
 
-  // Tab change → router.replace (no history pollution)
-  const setTab = useCallback((tab: string) => {
-    const params = new URLSearchParams(searchParams.toString());
-    if (tab === "company") {
+  // Deck change → router.replace (no history pollution). Writes `?deck=` when a
+  // deck is open, deletes it otherwise. Always drops the legacy `tab` param so
+  // `deck` is the single source of truth. Preserves `posId`.
+  const setDeck = useCallback(
+    (value: string) => {
+      const params = new URLSearchParams(searchParams.toString());
       params.delete("tab");
-    } else {
-      params.set("tab", tab);
-    }
-    const qs = params.toString();
-    router.replace(`/${ticker}${qs ? `?${qs}` : ""}`, { scroll: false });
-  }, [router, ticker, searchParams]);
+      if (isUrlDeck(value)) {
+        params.set("deck", value);
+      } else {
+        params.delete("deck");
+      }
+      const qs = params.toString();
+      router.replace(`/${ticker}${qs ? `?${qs}` : ""}`, { scroll: false });
+    },
+    [router, ticker, searchParams],
+  );
 
   return (
     <div className="ticker-detail-page">
@@ -49,8 +65,8 @@ export default function TickerWorkspace({ ticker, theme }: TickerWorkspaceProps)
       <TickerDetailContent
         ticker={ticker}
         positionId={positionId}
-        activeTab={activeTab}
-        onTabChange={setTab}
+        activeTab={deck ?? ""}
+        onTabChange={setDeck}
         prices={prices}
         fundamentals={fundamentals}
         portfolio={portfolio}
