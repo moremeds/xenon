@@ -188,3 +188,13 @@ export function useTickerDetail(): TickerDetailContextValue {
     throw new Error("useTickerDetail must be used within TickerDetailProvider");
   return ctx;
 }
+
+/**
+ * Non-throwing accessor: returns null when there is no provider. Use this for
+ * progressive-enhancement consumers (click-to-fill) that must not crash when
+ * the component is rendered outside the ticker-detail tree (modals, tests).
+ * Ported from radon TickerDetailContext.
+ */
+export function useTickerDetailOptional(): TickerDetailContextValue | null {
+  return useContext(TickerDetailContext);
+}

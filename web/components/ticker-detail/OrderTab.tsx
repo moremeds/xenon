@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
 import type { OpenOrder, PortfolioData, PortfolioPosition } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 import { optionKey } from "@/lib/pricesProtocol";
 import { useOrderActions } from "@/lib/OrderActionsContext";
+import { useTickerDetailOptional } from "@/lib/TickerDetailContext";
 import { fmtPrice, legPriceKey, resolveEntryCost } from "@/lib/positionUtils";
 import ModifyOrderModal from "@/components/ModifyOrderModal";
 import OrderErrorBanner from "@/components/OrderErrorBanner";
@@ -389,6 +390,24 @@ function NewOrderForm({
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [regimePrompt, setRegimePrompt] = useState<RegimePrompt | null>(null);
+
+  // Click-to-fill: a depth level / tape print published a price (+ side when
+  // unambiguous) via TickerDetailContext. Keyed on the monotonic nonce so a
+  // repeat click at the SAME price/side re-fires. Quantity only fills when the
+  // field is still empty (never clobber a typed size). Optional context so a
+  // provider-less render (modals, unit tests) is a no-op rather than a crash.
+  const tickerDetail = useTickerDetailOptional();
+  const prefillNonce = tickerDetail?.orderPrefill?.nonce;
+  useEffect(() => {
+    const p = tickerDetail?.orderPrefill;
+    if (!p) return;
+    setLimitPrice(p.price.toFixed(2));
+    if (p.action) setAction(p.action);
+    if (p.quantity != null && quantity.trim() === "")
+      setQuantity(String(p.quantity));
+    setConfirmStep(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- re-fire on nonce only
+  }, [prefillNonce]);
 
   const parsedQty = parseInt(quantity, 10);
   const parsedPrice = parseFloat(limitPrice);
