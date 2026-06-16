@@ -220,28 +220,23 @@ function stubApis(page: import("@playwright/test").Page) {
 // Tests
 // ---------------------------------------------------------------------------
 
-test.describe("Risk reversal chart — mid-price fallback", () => {
-  // The positive-case test for the MIDPRICE badge was a test.fixme stub that
-  // required a WS mock fixture surviving route navigation — infra we don't
-  // have, so it never ran. PriceChart's badge-rendering behavior for
-  // isMid=true is asserted in the Vitest unit test
-  // web/tests/price-chart-shell.test.ts; the integration path through
-  // TickerDetailContent + navigation + live price selection is currently
-  // uncovered and will stay that way until the WS fixture is built.
+test.describe("Risk reversal cockpit — chain deck reachable", () => {
+  // The cockpit shell replaced the old tab-bar ticker detail (and its hero
+  // PriceChart). The mid-price badge it used to assert no longer exists on this
+  // surface — PriceChart's isMid badge behavior is covered by the Vitest unit
+  // test web/tests/price-chart-shell.test.ts. This spec now exercises the new
+  // URL deck model: `?deck=c` opens the cockpit chain deck directly.
 
-  test("does NOT show MIDPRICE badge when last-trade prices are available", async ({
+  test("opens the cockpit chain deck from the ?deck=c URL", async ({
     page,
   }) => {
     await page.unrouteAll({ behavior: "ignoreErrors" });
     stubApis(page);
 
-    await page.goto("/portfolio");
+    // Deep-link straight to the AAPL cockpit with the chain deck open.
+    await page.goto("/AAPL?deck=c");
 
-    // Inject prices WITH valid last values
-    const pricesWithLast = {
-      AAPL: { ...PRICES_MID_ONLY.AAPL, last: 268.65 },
-    };
-
+    // Inject the mid-only prices so the cockpit header has a quote to render.
     await page.evaluate((prices) => {
       for (const [, priceData] of Object.entries(prices)) {
         window.dispatchEvent(
@@ -254,38 +249,15 @@ test.describe("Risk reversal chart — mid-price fallback", () => {
           }),
         );
       }
-    }, pricesWithLast);
-
-    const aaplLink = page
-      .locator('[aria-label="View details for AAPL"]')
-      .first();
-    await aaplLink.waitFor({ timeout: 10_000 });
-    await aaplLink.click();
-    await page.waitForURL("**/AAPL**", { timeout: 5_000 });
+    }, PRICES_MID_ONLY);
 
     const detail = page.locator(".ticker-detail-page");
     await detail.waitFor({ timeout: 5_000 });
 
-    // Re-inject prices after page navigation (prices lost on route change)
-    await page.evaluate((prices) => {
-      for (const [, priceData] of Object.entries(prices)) {
-        window.dispatchEvent(
-          new CustomEvent("ws-price", {
-            detail: {
-              type: "price",
-              symbol: (priceData as { symbol: string }).symbol,
-              data: priceData,
-            },
-          }),
-        );
-      }
-    }, pricesWithLast);
+    // The cockpit grid renders (header / book / act / rail).
+    await expect(detail.locator(".cockpit")).toBeVisible();
 
-    // Give chart time to settle (price update may arrive after mount)
-    await page.waitForTimeout(500);
-
-    // Badge must NOT be present when last price is valid
-    const midBadge = detail.locator(".price-chart-mid-badge");
-    await expect(midBadge).not.toBeVisible();
+    // `?deck=c` opens the wide chain deck overlay.
+    await expect(detail.locator(".asset-deck--wide")).toBeVisible();
   });
 });

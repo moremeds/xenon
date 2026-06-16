@@ -2,8 +2,14 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import TickerDetailContent from "../components/TickerDetailContent";
+import { TickerDetailProvider } from "../lib/TickerDetailContext";
+import { OrderActionsProvider } from "../lib/OrderActionsContext";
 import type { PortfolioData } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
+
+vi.mock("@/lib/useWatchlist", () => ({
+  useWatchlist: () => ({ isWatched: () => false, toggleWatch: vi.fn() }),
+}));
 
 vi.mock("../components/PriceChart", () => ({
   default: () => createElement("div", { "data-testid": "mock-price-chart" }),
@@ -26,14 +32,17 @@ vi.mock("../components/ticker-detail/RatingsTab", () => ({
 }));
 
 vi.mock("../components/ticker-detail/SeasonalityTab", () => ({
-  default: () => createElement("div", { "data-testid": "mock-seasonality-tab" }),
+  default: () =>
+    createElement("div", { "data-testid": "mock-seasonality-tab" }),
 }));
 
 vi.mock("../components/ticker-detail/CompanyTab", () => ({
   default: () => createElement("div", { "data-testid": "mock-company-tab" }),
 }));
 
-function makePriceData(overrides: Partial<PriceData> & { symbol: string }): PriceData {
+function makePriceData(
+  overrides: Partial<PriceData> & { symbol: string },
+): PriceData {
   return {
     last: null,
     lastIsCalculated: false,
@@ -130,22 +139,38 @@ const orders = {
 };
 
 describe("TickerDetailContent spread telemetry", () => {
-  it("shows raw spread dollars and percent on the shared price bar", () => {
+  it("shows raw spread dollars and percent on the cockpit header", () => {
+    // The cockpit header (.ckh-spr) is now the single source for the bid/ask
+    // spread readout. For the single-leg AMD call (bid 45.30 / ask 46.40) that
+    // is $1.10 absolute and 2.40% of the $45.85 mid — rendered raw, never as
+    // "240 bps".
     const html = renderToStaticMarkup(
-      createElement(TickerDetailContent, {
-        ticker: "AMD",
-        positionId: 7,
-        activeTab: "company",
-        onTabChange: () => {},
-        prices,
-        fundamentals: {},
-        portfolio,
-        orders,
-        theme: "dark",
-      }),
+      createElement(
+        TickerDetailProvider,
+        null,
+        createElement(
+          OrderActionsProvider,
+          null,
+          createElement(TickerDetailContent, {
+            ticker: "AMD",
+            positionId: 7,
+            activeTab: "company",
+            onTabChange: () => {},
+            prices,
+            fundamentals: {},
+            portfolio,
+            orders,
+            theme: "dark",
+          }),
+        ),
+      ),
     );
 
-    expect(html).toContain("$1.10 / 2.40%");
-    expect(html).not.toContain("$110.00 / 240 bps");
+    // CockpitHeader renders the absolute spread in a <b> wrapper, so the dollar
+    // and percent parts straddle a tag boundary: `<b>$1.10</b> / 2.40%`.
+    expect(html).toContain("<b>$1.10</b> / 2.40%");
+    // Never the basis-points / cents-inflated forms.
+    expect(html).not.toContain("240 bps");
+    expect(html).not.toContain("$110.00");
   });
 });
