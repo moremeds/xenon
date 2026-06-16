@@ -18,13 +18,21 @@ export default function TickerWorkspace({
 }: TickerWorkspaceProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { getPrices, getFundamentals, getPortfolio, getOrders } =
-    useTickerDetail();
+  const {
+    getPrices,
+    getFundamentals,
+    getPortfolio,
+    getOrders,
+    getDepths,
+    getTape,
+  } = useTickerDetail();
 
   const prices = getPrices();
   const fundamentals = getFundamentals();
   const portfolio = getPortfolio();
   const orders = getOrders();
+  const depths = getDepths();
+  const tape = getTape();
 
   // Deck model: `?deck=<c|p|n|r|s|i>` opens a reference deck; no deck = book-first
   // landing. Legacy `?tab=` values are mapped through legacyTabToDeck so old
@@ -71,6 +79,8 @@ export default function TickerWorkspace({
         fundamentals={fundamentals}
         portfolio={portfolio}
         orders={orders}
+        depths={depths}
+        tape={tape}
         theme={theme}
       />
     </div>

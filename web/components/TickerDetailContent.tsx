@@ -1,14 +1,20 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   OpenOrder,
   PortfolioPosition,
   PortfolioData,
   OrdersData,
 } from "@/lib/types";
-import type { PriceData, FundamentalsData } from "@/lib/pricesProtocol";
+import type {
+  PriceData,
+  FundamentalsData,
+  DepthBook,
+  Trade,
+} from "@/lib/pricesProtocol";
 import { resolveTickerQuote } from "@/lib/tickerQuote";
+import { useTickerDetail } from "@/lib/TickerDetailContext";
 import { isUrlDeck, legacyTabToDeck, type DeckKey } from "@/lib/deckNav";
 import AssetCockpit from "./ticker-detail/AssetCockpit";
 
@@ -21,6 +27,8 @@ export type TickerDetailContentProps = {
   fundamentals: Record<string, FundamentalsData>;
   portfolio: PortfolioData | null;
   orders: OrdersData | null;
+  depths: Record<string, DepthBook>;
+  tape: Record<string, Trade[]>;
   theme: "dark" | "light";
 };
 
@@ -33,8 +41,11 @@ export default function TickerDetailContent({
   fundamentals,
   portfolio,
   orders,
+  depths,
+  tape,
   theme,
 }: TickerDetailContentProps) {
+  const { setFocusedBookKey } = useTickerDetail();
   const position: PortfolioPosition | null = useMemo(() => {
     if (!portfolio) return null;
     // Synthetic ids (negative) come from the fused virtual-pair path in
@@ -79,6 +90,14 @@ export default function TickerDetailContent({
       ? "option"
       : "stock";
 
+  // Publish the focused book key upward so WorkspaceShell (the usePrices
+  // callsite) can stream L2 depth + tape for exactly this subject. Cleared on
+  // unmount so leaving the ticker page releases the scarce depth ticket.
+  useEffect(() => {
+    setFocusedBookKey(bookKey);
+    return () => setFocusedBookKey(null);
+  }, [bookKey, setFocusedBookKey]);
+
   // Deck arbitration. xenon's TickerWorkspace passes the deck key through
   // `activeTab` (it may be a deck key like "c", a legacy tab-name like "chain",
   // or "" for the bare book). URL-addressable decks live in the URL; the
@@ -118,6 +137,8 @@ export default function TickerDetailContent({
       priceData={priceData}
       isSpreadNet={isSpreadNet}
       tickerOrders={tickerOrders}
+      depths={depths}
+      tape={tape}
       theme={theme}
       activeDeck={activeDeck}
       onDeckChange={onDeckChange}

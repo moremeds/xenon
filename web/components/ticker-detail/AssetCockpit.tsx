@@ -1,8 +1,15 @@
 "use client";
 
+import { useCallback } from "react";
 import type { OpenOrder, PortfolioData, PortfolioPosition } from "@/lib/types";
-import type { PriceData, FundamentalsData } from "@/lib/pricesProtocol";
+import type {
+  PriceData,
+  FundamentalsData,
+  DepthBook,
+  Trade,
+} from "@/lib/pricesProtocol";
 import type { DeckKey } from "@/lib/deckNav";
+import { useTickerDetail, type OrderPrefill } from "@/lib/TickerDetailContext";
 import { useViewport } from "@/lib/useViewport";
 import BookTab from "./BookTab";
 import OrderTab from "./OrderTab";
@@ -25,6 +32,10 @@ export type AssetCockpitProps = {
   priceData: PriceData | null;
   isSpreadNet?: boolean;
   tickerOrders: OpenOrder[];
+  /** L2 depth-of-book + tape keyed by depth key; only the focused `bookKey`
+   *  populates. Threaded to the book region. */
+  depths: Record<string, DepthBook>;
+  tape: Record<string, Trade[]>;
   theme: "dark" | "light";
   activeDeck: DeckKey | null;
   onDeckChange: (deck: DeckKey | null) => void;
@@ -42,6 +53,8 @@ export default function AssetCockpit({
   priceData,
   isSpreadNet,
   tickerOrders,
+  depths,
+  tape,
   activeDeck,
   onDeckChange,
 }: AssetCockpitProps) {
@@ -58,10 +71,17 @@ export default function AssetCockpit({
   const { isMobile, hasMounted } = useViewport();
   const mobile = isMobile && hasMounted;
 
-  // Click-to-fill from a depth level / tape print is depth-driven and lands in
-  // Phase 3 (the L2 Book + tape are a separate plan). For the Phase-2 L1 shell
-  // there is no prefill wiring, so the book gets no click handler.
-  // TODO(phase-3): wire click-to-fill via TickerDetailContext.setOrderPrefill
+  // Click-to-fill: a depth level / tape print publishes a price (+ side when
+  // unambiguous) to the order ticket via TickerDetailContext. On a phone the
+  // ticket lives in the `o` deck, so open it so the prefill is visible.
+  const { setOrderPrefill } = useTickerDetail();
+  const onBookPriceClick = useCallback(
+    (p: Omit<OrderPrefill, "nonce">) => {
+      setOrderPrefill(p);
+      if (mobile) onDeckChange("o");
+    },
+    [setOrderPrefill, mobile, onDeckChange],
+  );
 
   return (
     <div className={`cockpit cockpit-host ${mobile ? "cockpit--mobile" : ""}`}>
@@ -85,6 +105,9 @@ export default function AssetCockpit({
           tickerPriceData={priceData}
           bookKey={bookKey}
           bookKind={bookKind}
+          depths={depths}
+          tape={tape}
+          onPriceClick={onBookPriceClick}
           portfolio={portfolio}
           bookOnly
         />

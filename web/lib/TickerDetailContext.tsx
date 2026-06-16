@@ -11,6 +11,8 @@ import {
 import type {
   PriceData,
   FundamentalsData,
+  DepthBook,
+  Trade,
   OptionContract,
 } from "@/lib/pricesProtocol";
 import type { OrdersData, PortfolioData } from "@/lib/types";
@@ -41,12 +43,25 @@ type TickerDetailContextValue = {
   getFundamentals: () => Record<string, FundamentalsData>;
   getPortfolio: () => PortfolioData | null;
   getOrders: () => OrdersData | null;
+  /** L2 depth-of-book + tape, keyed by depth key. Transport refs mirroring
+   *  prices: WorkspaceShell (the usePrices callsite) writes, the ticker-detail
+   *  tree reads. Refs (no re-render); the cockpit re-renders off the WS state. */
+  getDepths: () => Record<string, DepthBook>;
+  getTape: () => Record<string, Trade[]>;
   setPrices: (p: Record<string, PriceData>) => void;
   setFundamentals: (f: Record<string, FundamentalsData>) => void;
   setPortfolio: (p: PortfolioData | null) => void;
   setOrders: (o: OrdersData | null) => void;
+  setDepths: (d: Record<string, DepthBook>) => void;
+  setTape: (t: Record<string, Trade[]>) => void;
   chainContracts: OptionContract[];
   setChainContracts: (c: OptionContract[]) => void;
+  /** The depth key the detail view wants L2 depth for (bare symbol for stocks,
+   *  composite optionKey for options). Published by TickerDetailContent and read
+   *  by WorkspaceShell to drive `usePrices({ depthSymbol })`. State (not a ref)
+   *  so the callsite re-renders and re-subscribes on a focus change. */
+  focusedBookKey: string | null;
+  setFocusedBookKey: (key: string | null) => void;
   /** Click-to-fill: latest price/side published from the book/tape, or null. */
   orderPrefill: OrderPrefill | null;
   /** Publish a click-to-fill; the nonce is stamped here (monotonic). */
@@ -68,11 +83,16 @@ export function TickerDetailProvider({ children }: { children: ReactNode }) {
   const [orderPrefill, setOrderPrefillState] = useState<OrderPrefill | null>(
     null,
   );
+  const [focusedBookKey, setFocusedBookKeyState] = useState<string | null>(
+    null,
+  );
   const prefillNonceRef = useRef(0);
   const pricesRef = useRef<Record<string, PriceData>>({});
   const fundamentalsRef = useRef<Record<string, FundamentalsData>>({});
   const portfolioRef = useRef<PortfolioData | null>(null);
   const ordersRef = useRef<OrdersData | null>(null);
+  const depthsRef = useRef<Record<string, DepthBook>>({});
+  const tapeRef = useRef<Record<string, Trade[]>>({});
 
   const setActiveTicker = useCallback((ticker: string | null) => {
     setActiveTickerState(ticker ? ticker.toUpperCase() : null);
@@ -95,10 +115,16 @@ export function TickerDetailProvider({ children }: { children: ReactNode }) {
     setOrderPrefillState({ ...p, nonce: prefillNonceRef.current });
   }, []);
 
+  const setFocusedBookKey = useCallback((key: string | null) => {
+    setFocusedBookKeyState((prev) => (prev === key ? prev : key));
+  }, []);
+
   const getPrices = useCallback(() => pricesRef.current, []);
   const getFundamentals = useCallback(() => fundamentalsRef.current, []);
   const getPortfolio = useCallback(() => portfolioRef.current, []);
   const getOrders = useCallback(() => ordersRef.current, []);
+  const getDepths = useCallback(() => depthsRef.current, []);
+  const getTape = useCallback(() => tapeRef.current, []);
 
   const setPrices = useCallback((p: Record<string, PriceData>) => {
     pricesRef.current = p;
@@ -116,6 +142,14 @@ export function TickerDetailProvider({ children }: { children: ReactNode }) {
     ordersRef.current = o;
   }, []);
 
+  const setDepths = useCallback((d: Record<string, DepthBook>) => {
+    depthsRef.current = d;
+  }, []);
+
+  const setTape = useCallback((t: Record<string, Trade[]>) => {
+    tapeRef.current = t;
+  }, []);
+
   return (
     <TickerDetailContext.Provider
       value={{
@@ -127,12 +161,18 @@ export function TickerDetailProvider({ children }: { children: ReactNode }) {
         getFundamentals,
         getPortfolio,
         getOrders,
+        getDepths,
+        getTape,
         setPrices,
         setFundamentals,
         setPortfolio,
         setOrders,
+        setDepths,
+        setTape,
         chainContracts,
         setChainContracts,
+        focusedBookKey,
+        setFocusedBookKey,
         orderPrefill,
         setOrderPrefill,
       }}

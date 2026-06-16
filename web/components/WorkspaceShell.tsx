@@ -226,6 +226,8 @@ export default function WorkspaceShell({
   const {
     prices: rawPrices,
     fundamentals,
+    depths,
+    tape,
     connected: wsConnected,
     ibConnected: rawIbConnected,
     ibIssue,
@@ -234,6 +236,10 @@ export default function WorkspaceShell({
     symbols: allSymbols,
     contracts: allContracts,
     indexes: [],
+    // The focused book subject (bare symbol for stocks, optionKey for options),
+    // published by TickerDetailContent. Only this single subject streams L2
+    // depth + tape (scarce IB resource). Null releases any active depth ticket.
+    depthSymbol: tickerDetail.focusedBookKey,
   });
 
   // Debounce ibConnected: disconnections must persist >2s before surfacing to UI.
@@ -303,6 +309,8 @@ export default function WorkspaceShell({
     setFundamentals: setTickerFundamentals,
     setPortfolio: setTickerPortfolio,
     setOrders: setTickerOrders,
+    setDepths: setTickerDepths,
+    setTape: setTickerTape,
   } = tickerDetail;
   useEffect(() => {
     setTickerPrices(prices);
@@ -316,6 +324,12 @@ export default function WorkspaceShell({
   useEffect(() => {
     setTickerOrders(orders);
   }, [orders, setTickerOrders]);
+  useEffect(() => {
+    setTickerDepths(depths);
+  }, [depths, setTickerDepths]);
+  useEffect(() => {
+    setTickerTape(tape);
+  }, [tape, setTickerTape]);
 
   // Sync tickerParam to context
   useEffect(() => {
