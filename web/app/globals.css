@@ -6246,6 +6246,10 @@ tr {
   color: var(--text-secondary);
   font-size: 10px;
 }
+.chain-implied {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
 .chain-vol {
   color: var(--text-secondary);
   font-size: 10px;
