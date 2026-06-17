@@ -1078,5 +1078,13 @@ For `/api/orders` POST, forward the same `?broker=` to `/orders/refresh`. For `/
 - **Spec §"order types #5"** → Task 8 `_FUTU_TYPE` map + pass-through; Task 4 stores raw label. ✔
 - **Spec §"DB-first / read-only"** → Tasks 6/8 guard with `is_read_only()`; reads are Postgres-only. ✔
 - **Spec §"poll cadence 60s"** → Task 6 open-orders poll (server.py loop). ✔
-- **Type consistency:** `futu_close_id` is the dedup key in Tasks 1/3/5; `OPEN_ORDER_STATUSES` defined in Task 4 and consumed in Task 8; `get_broker_scope` defined in Task 7 and consumed in Tasks 8/9.
-- **Open verification items flagged inline** (Task 0 note, `order_fee_query` existence, `on_conflict` with `text()` index element) — to confirm against the installed SDK / SQLAlchemy during implementation, never guessed.
+- **Type consistency:** `futu_close_id` = PK of `futu_closed_trades` (Task 1), `ClosedLot` field + close key `close_deal_id:open_deal_id` (Task 3), and a dedicated `journal_entries` column (Task 5); `OPEN_ORDER_STATUSES` defined Task 4, consumed Task 8; `get_broker_scope` defined Task 7, consumed Tasks 8/9; `sync_futu_orders` defined Task 6, consumed Tasks 8 (`/orders/refresh`) + 9 (`/blotter` POST); `match_closed_lots`/`closed_lots_to_rows` Task 3 → Task 6; `insert_closed_trades`/`list_closed_trades` Task 2 → Tasks 6/9.
+
+### Review-cycle resolutions (verified, not guessed)
+
+- **SDK shapes VERIFIED** against installed `futu-api` 0.137.0: `order_list_query`/`history_order_list_query` identical col_list; `order_fee_query(order_id_list)` → `(order_id, fee_amount, fee_details)`. Enums confirmed.
+- **File targets corrected (Pass 2):** `/blotter` GET+POST and `/orders/refresh` live in `src/xenon/api/server.py` (not route files); blotter shaping is in `db/queries/blotter.py`. `/orders` GET and `/journal` GET are in `routes/`.
+- **Idempotency (Pass 2/3):** `futu_close_id` = `close_deal_id:open_deal_id` with deterministic `(filled_at, futu_deal_id)` sort → stable across re-pulls; per-scope singleflight lock + single-transaction derived rebuild prevents poll/nightly races.
+- **DB-first resilience (Pass 3):** FUTU scope falls back to last-synced DB scope when OpenD is down — read path never 503s on cached data.
+- **JS-safe keys (Pass 3):** Futu `orderId` is a bounded SHA-1 surrogate (< 2^48); frontend keys on string `submissionId`.
+- **Remaining implementation-time confirmations (not blockers):** exact `journal_entry_to_payload` lifted-metadata keys + `list_journal_entries` signature (Task 5 note); exact `_trade_to_payload` blotter keys (Task 9 note); `import hashlib`/`import re` in `orders.py`. All flagged inline with "read the real code first."
