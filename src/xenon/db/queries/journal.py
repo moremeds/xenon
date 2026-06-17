@@ -213,19 +213,20 @@ def upsert_auto_import_entry(
     return journal_entry_to_payload(existing) if existing is not None else None
 
 
-def upsert_futu_auto_import_entry(
-    conn: Connection,
-    *,
-    scope: AccountScope,
-    closed_trade: Mapping[str, Any],
-) -> dict[str, Any] | None:
-    """Idempotently create a FUTU_AUTO_IMPORT journal entry for a closed Futu lot.
+FUTU_AUTO_IMPORT_CONFLICT = dict(
+    index_elements=["broker", "account_env", "broker_account", "futu_close_id"],
+    index_where=text("decision = 'FUTU_AUTO_IMPORT' AND futu_close_id IS NOT NULL"),
+)
 
-    Futu has no `trades` row to resolve scope from (the trades table is IB-locked),
-    so scope + closed-trade detail come from the caller. `trade_id` stays NULL;
-    dedup is on the dedicated `futu_close_id` column via the partial unique index
-    `uq_journal_futu_auto_import`. Metadata keys mirror those `journal_entry_to_payload`
-    lifts top-level so the journal table renders QTY / ENTRY COST / REALIZED P&L / ROR.
+
+def build_futu_auto_import_values(scope: AccountScope, closed_trade: Mapping[str, Any]) -> dict[str, Any]:
+    """Pure builder for a FUTU_AUTO_IMPORT journal_entries INSERT values dict.
+
+    Shared by the sync upsert (`upsert_futu_auto_import_entry`) and the async batch
+    insert (`xenon.db.queries.futu_history.insert_futu_journal_entries`) so the
+    metadata contract lives in one place. Metadata keys mirror those
+    `journal_entry_to_payload` lifts top-level (quantity / entry_cost / realized_pnl /
+    return_on_risk) so the journal table renders for Futu rows. `trade_id` stays NULL.
     """
     cost_basis = closed_trade.get("cost_basis")
     realized = closed_trade.get("realized_pnl")
@@ -249,24 +250,37 @@ def upsert_futu_auto_import_entry(
         else str(closed_at),
         "outcome": "WIN" if (realized is not None and float(realized) >= 0) else "LOSS",
     }
+    return {
+        "trade_id": None,
+        "ticker": closed_trade["ticker"],
+        "decision": "FUTU_AUTO_IMPORT",
+        "authored_by": "system",
+        "metadata": meta,
+        "futu_close_id": closed_trade["futu_close_id"],
+        "broker": scope.broker,
+        "account_env": scope.account_env,
+        "broker_account": scope.broker_account,
+        "authored_at": closed_at,
+    }
+
+
+def upsert_futu_auto_import_entry(
+    conn: Connection,
+    *,
+    scope: AccountScope,
+    closed_trade: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Idempotently create a FUTU_AUTO_IMPORT journal entry for a closed Futu lot.
+
+    Futu has no `trades` row to resolve scope from (the trades table is IB-locked),
+    so scope + closed-trade detail come from the caller. `trade_id` stays NULL;
+    dedup is on the dedicated `futu_close_id` column via the partial unique index
+    `uq_journal_futu_auto_import`.
+    """
     stmt = (
         pg_insert(journal_entries)
-        .values(
-            trade_id=None,
-            ticker=closed_trade["ticker"],
-            decision="FUTU_AUTO_IMPORT",
-            authored_by="system",
-            metadata=meta,
-            futu_close_id=closed_trade["futu_close_id"],
-            broker=scope.broker,
-            account_env=scope.account_env,
-            broker_account=scope.broker_account,
-            authored_at=closed_at,
-        )
-        .on_conflict_do_nothing(
-            index_elements=["broker", "account_env", "broker_account", "futu_close_id"],
-            index_where=text("decision = 'FUTU_AUTO_IMPORT' AND futu_close_id IS NOT NULL"),
-        )
+        .values(**build_futu_auto_import_values(scope, closed_trade))
+        .on_conflict_do_nothing(**FUTU_AUTO_IMPORT_CONFLICT)
         .returning(journal_entries)
     )
     inserted = conn.execute(stmt).first()

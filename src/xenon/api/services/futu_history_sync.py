@@ -27,7 +27,14 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from xenon.clients.futu_client import FutuClient
-from xenon.db.queries.futu_history import insert_cashflows, insert_trades
+from xenon.db.queries.futu_history import (
+    insert_cashflows,
+    insert_closed_trades,
+    insert_order_fees,
+    insert_orders,
+    insert_trades,
+    list_trades,
+)
 from xenon.db.schema import futu_cash_flow, futu_trades
 from xenon.execution.account_scope import AccountScope
 
@@ -161,4 +168,112 @@ async def backfill_history_sync(
     }
 
 
-__all__ = ("backfill_history_sync", "resolve_incremental_since")
+def _order_to_db_row(row: dict) -> dict:
+    """Coerce FutuClient order dict (floats) into DB types (Decimal monetary, JSON-safe raw)."""
+    out = dict(row)
+    out["quantity"] = Decimal(str(row["quantity"]))
+    out["filled_qty"] = Decimal(str(row.get("filled_qty") or 0))
+    for k in ("limit_price", "aux_price", "avg_fill_price"):
+        out[k] = Decimal(str(row[k])) if row.get(k) is not None else None
+    out["raw"] = _json_safe(row["raw"])
+    return out
+
+
+def _fee_to_db_row(row: dict) -> dict:
+    out = dict(row)
+    out["total_fee"] = Decimal(str(row["total_fee"]))
+    out["raw"] = _json_safe(row["raw"])
+    return out
+
+
+def _today_et_start_utc() -> datetime:
+    from zoneinfo import ZoneInfo
+
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start_et.astimezone(timezone.utc)
+
+
+def _orders_lock_key(scope: AccountScope) -> int:
+    import hashlib
+
+    skey = f"{scope.broker}:{scope.account_env}:{scope.broker_account}"
+    return 7344000 + int(hashlib.sha1(skey.encode()).hexdigest()[:6], 16) % 1000
+
+
+async def sync_futu_orders(
+    engine: AsyncEngine,
+    client: FutuClient,
+    scope: AccountScope,
+    *,
+    since: datetime | None = None,
+) -> dict:
+    """Pull Futu orders/fees/today-fills into Postgres and rebuild closed trades + journal.
+
+    DB-first + read-only: no-ops under XENON_READ_ONLY=1. Per-scope advisory lock
+    serializes overlapping runs (60s poll vs nightly loop vs manual refresh) so the
+    derived closed-trades rebuild + journal upserts never run on divergent snapshots.
+    `since=None` → today-only window (the poll); callers pass a wider watermark for backfill.
+    The caller owns the client's connect/disconnect lifecycle (server singleton).
+    """
+    from xenon.api.guards import is_read_only
+    from xenon.api.services.advisory_lock import pg_try_advisory_lock
+    from xenon.api.services.futu_closed_trades import closed_lots_to_rows, match_closed_lots
+    from xenon.db.queries.futu_history import insert_futu_journal_entries
+
+    zero = {
+        "open_orders": 0,
+        "history_orders": 0,
+        "fees": 0,
+        "today_fills": 0,
+        "closed_trades": 0,
+        "journal_rows": 0,
+    }
+    if is_read_only():
+        return {**zero, "skipped": "read_only"}
+
+    async with pg_try_advisory_lock(_orders_lock_key(scope), engine=engine) as got_lock:
+        if not got_lock:
+            return {**zero, "skipped": "locked"}
+
+        now = datetime.now(tz=timezone.utc)
+        today_start = _today_et_start_utc()
+        hist_since = since or today_start
+
+        # 1. Today's fills → futu_trades (keeps TODAY'S EXECUTED ORDERS live).
+        deals_raw = client.fetch_history_deals(start=today_start, end=now)
+        us_deals = [d for d in deals_raw if d.get("market") == "US"]
+        n_fills = await insert_trades(engine, scope, [_trade_to_db_row(d) for d in us_deals])
+
+        # 2. Open + historical orders → futu_orders (US-only, mirror trades policy).
+        open_raw = client.fetch_open_orders()
+        hist_raw = client.fetch_history_orders(start=hist_since, end=now)
+        all_orders = {o["futu_order_id"]: o for o in (open_raw + hist_raw) if o.get("market") == "US"}
+        order_rows = list(all_orders.values())
+        n_open = sum(1 for o in open_raw if o.get("market") == "US")
+        n_hist = sum(1 for o in hist_raw if o.get("market") == "US")
+        await insert_orders(engine, scope, [_order_to_db_row(o) for o in order_rows])
+
+        # 3. Per-order fees → futu_order_fees.
+        n_fees = 0
+        if order_rows:
+            fees_raw = client.fetch_order_fees([o["futu_order_id"] for o in order_rows])
+            n_fees = await insert_order_fees(engine, scope, [_fee_to_db_row(f) for f in fees_raw])
+
+        # 4. Rebuild closed trades from the full fill set + FUTU_AUTO_IMPORT journal.
+        trades = await list_trades(engine, scope)
+        closed_rows = closed_lots_to_rows(match_closed_lots(trades))
+        n_closed = await insert_closed_trades(engine, scope, closed_rows)
+        n_journal = await insert_futu_journal_entries(engine, scope, closed_rows)
+
+        return {
+            "open_orders": n_open,
+            "history_orders": n_hist,
+            "fees": n_fees,
+            "today_fills": n_fills,
+            "closed_trades": n_closed,
+            "journal_rows": n_journal,
+        }
+
+
+__all__ = ("backfill_history_sync", "resolve_incremental_since", "sync_futu_orders")

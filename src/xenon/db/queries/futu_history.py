@@ -30,6 +30,7 @@ from xenon.db.schema import (
     futu_orders,
     futu_statement_inbox,
     futu_trades,
+    journal_entries,
 )
 from xenon.execution.account_scope import AccountScope
 
@@ -258,6 +259,28 @@ async def list_closed_trades(
     async with engine.begin() as conn:
         rows = (await conn.execute(stmt)).mappings().all()
     return [dict(r) for r in rows]
+
+
+async def insert_futu_journal_entries(engine: AsyncEngine, scope: AccountScope, closed_rows: list[dict]) -> int:
+    """Async batch UPSERT of FUTU_AUTO_IMPORT journal rows for closed lots.
+
+    Idempotent via the `uq_journal_futu_auto_import` partial unique index
+    (on_conflict_do_nothing). Shares the values builder with the sync
+    `upsert_futu_auto_import_entry` so the metadata contract stays single-sourced.
+    """
+    # Lazy import avoids any import-order coupling with the journal query module.
+    from xenon.db.queries.journal import FUTU_AUTO_IMPORT_CONFLICT, build_futu_auto_import_values
+
+    if not closed_rows:
+        return 0
+    values = [build_futu_auto_import_values(scope, r) for r in closed_rows]
+    total = 0
+    async with engine.begin() as conn:
+        for batch in _chunks(values, _ORDERS_BATCH_ROWS):
+            stmt = pg_insert(journal_entries).values(batch).on_conflict_do_nothing(**FUTU_AUTO_IMPORT_CONFLICT)
+            result = await conn.execute(stmt)
+            total += result.rowcount or 0
+    return total
 
 
 async def insert_daily_statement(engine: AsyncEngine, scope: AccountScope, row: dict) -> int:
