@@ -24,7 +24,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from xenon.db.schema import (
     futu_cash_flow,
+    futu_closed_trades,
     futu_daily_statement,
+    futu_order_fees,
+    futu_orders,
     futu_statement_inbox,
     futu_trades,
 )
@@ -140,6 +143,118 @@ async def list_cashflows(
     if until is not None:
         where = where & (futu_cash_flow.c.occurred_at <= until)
     stmt = sa.select(futu_cash_flow).where(where).order_by(futu_cash_flow.c.occurred_at.asc())
+    async with engine.begin() as conn:
+        rows = (await conn.execute(stmt)).mappings().all()
+    return [dict(r) for r in rows]
+
+
+# --- Futu orders / fees / closed-trades (read-only order querying) ---------
+
+# futu_orders has 20 columns → 1500 rows = 30k params (safe under the 32767 ceiling).
+_ORDERS_BATCH_ROWS = 1500
+
+
+def _upsert_set(table, *, exclude: set[str]):
+    """All non-PK, non-`ingested_at` columns mapped to their EXCLUDED value."""
+    pk = {c.name for c in table.primary_key.columns}
+    return {c.name: c for c in table.columns if c.name not in pk and c.name not in exclude}
+
+
+async def insert_orders(engine: AsyncEngine, scope: AccountScope, rows: Iterable[dict]) -> int:
+    rows_list = [_scoped(r, scope) for r in rows]
+    if not rows_list:
+        return 0
+    total = 0
+    async with engine.begin() as conn:
+        for batch in _chunks(rows_list, _ORDERS_BATCH_ROWS):
+            stmt = pg_insert(futu_orders).values(batch)
+            update_cols = {
+                name: getattr(stmt.excluded, name) for name in _upsert_set(futu_orders, exclude={"ingested_at"})
+            }
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["broker", "account_env", "broker_account", "futu_order_id"],
+                set_=update_cols,
+            )
+            result = await conn.execute(stmt)
+            total += result.rowcount or 0
+    return total
+
+
+async def list_orders(
+    engine: AsyncEngine,
+    scope: AccountScope,
+    *,
+    statuses: Iterable[str] | None = None,
+) -> list[dict]:
+    where = (
+        (futu_orders.c.broker == scope.broker)
+        & (futu_orders.c.account_env == scope.account_env)
+        & (futu_orders.c.broker_account == scope.broker_account)
+    )
+    if statuses is not None:
+        where = where & (futu_orders.c.status.in_(list(statuses)))
+    stmt = sa.select(futu_orders).where(where).order_by(futu_orders.c.updated_at.desc())
+    async with engine.begin() as conn:
+        rows = (await conn.execute(stmt)).mappings().all()
+    return [dict(r) for r in rows]
+
+
+async def insert_order_fees(engine: AsyncEngine, scope: AccountScope, rows: Iterable[dict]) -> int:
+    rows_list = [_scoped(r, scope) for r in rows]
+    if not rows_list:
+        return 0
+    total = 0
+    async with engine.begin() as conn:
+        for batch in _chunks(rows_list, _INSERT_BATCH_ROWS):
+            stmt = pg_insert(futu_order_fees).values(batch)
+            update_cols = {
+                name: getattr(stmt.excluded, name) for name in _upsert_set(futu_order_fees, exclude={"ingested_at"})
+            }
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["broker", "account_env", "broker_account", "futu_order_id"],
+                set_=update_cols,
+            )
+            result = await conn.execute(stmt)
+            total += result.rowcount or 0
+    return total
+
+
+async def insert_closed_trades(engine: AsyncEngine, scope: AccountScope, rows: Iterable[dict]) -> int:
+    rows_list = [_scoped(r, scope) for r in rows]
+    if not rows_list:
+        return 0
+    total = 0
+    async with engine.begin() as conn:
+        for batch in _chunks(rows_list, _ORDERS_BATCH_ROWS):
+            stmt = pg_insert(futu_closed_trades).values(batch)
+            update_cols = {
+                name: getattr(stmt.excluded, name) for name in _upsert_set(futu_closed_trades, exclude={"ingested_at"})
+            }
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["broker", "account_env", "broker_account", "futu_close_id"],
+                set_=update_cols,
+            )
+            result = await conn.execute(stmt)
+            total += result.rowcount or 0
+    return total
+
+
+async def list_closed_trades(
+    engine: AsyncEngine,
+    scope: AccountScope,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> list[dict]:
+    where = (
+        (futu_closed_trades.c.broker == scope.broker)
+        & (futu_closed_trades.c.account_env == scope.account_env)
+        & (futu_closed_trades.c.broker_account == scope.broker_account)
+    )
+    if since is not None:
+        where = where & (futu_closed_trades.c.closed_at >= since)
+    if until is not None:
+        where = where & (futu_closed_trades.c.closed_at <= until)
+    stmt = sa.select(futu_closed_trades).where(where).order_by(futu_closed_trades.c.closed_at.desc())
     async with engine.begin() as conn:
         rows = (await conn.execute(stmt)).mappings().all()
     return [dict(r) for r in rows]
