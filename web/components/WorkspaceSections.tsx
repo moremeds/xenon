@@ -963,7 +963,11 @@ const JournalSections = React.memo(function JournalSections({
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const trades = useMemo(() => {
     if (!data?.trades) return [];
-    return [...data.trades].sort((a, b) => b.id - a.id);
+    // Most-recent first by trade date (id is no longer a recency proxy once
+    // Futu auto-imports are rebuilt/grouped); id breaks same-day ties.
+    return [...data.trades].sort(
+      (a, b) => b.date.localeCompare(a.date) || b.id - a.id,
+    );
   }, [data]);
 
   const extractSearchText = useCallback(
@@ -979,7 +983,7 @@ const JournalSections = React.memo(function JournalSections({
     sorted: sortedTrades,
     sort,
     toggle,
-  } = useSort(filtered, journalSortExtract, "id" as JournalSortKey, "desc");
+  } = useSort(filtered, journalSortExtract, "date" as JournalSortKey, "desc");
 
   const toggleExpand = useCallback((id: number) => {
     setExpandedIds((prev) => {

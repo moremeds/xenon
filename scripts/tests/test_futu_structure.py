@@ -4,10 +4,12 @@ multi-leg fusion by closing order id, structure classification, blotter shape.""
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from xenon.api.services.futu_structure import (
     build_blotter_rows,
     classify_structure,
+    group_closed_trades,
     parse_occ,
 )
 
@@ -155,6 +157,26 @@ def test_classify_stock():
 
 
 # ── executions populate date + sort ──────────────────────────────────────────
+
+
+def test_group_closed_trades_carries_journal_fields():
+    """group_closed_trades is the shared primitive for blotter + journal: it must
+    expose the underlying ticker, structure name, the close-order group key, and
+    Decimal aggregates the journal writer needs."""
+    rows = [
+        _row("AAOI270115C190000", "SELL", 10, 0, 56170, 2100, "OCLOSE"),
+        _row("AAOI270115C200000", "BUY", 10, 54070, 0, -1900, "OCLOSE"),
+    ]
+    groups = group_closed_trades(rows)
+    assert len(groups) == 1
+    g = groups[0]
+    assert g["ticker"] == "AAOI"  # shortened underlying for the journal TICKER col
+    assert "Bull Call Spread" in g["structure"]  # journal STRUCTURE col
+    assert g["futu_close_id"] == "ord:OCLOSE"  # stable journal idempotency key
+    assert g["quantity"] == 20
+    assert g["realized_pnl"] == Decimal("200")
+    assert isinstance(g["cost_basis"], Decimal)
+    assert g["closed_at"] is not None
 
 
 def test_executions_carry_close_time_and_rows_sorted_desc():

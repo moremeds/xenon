@@ -157,6 +157,97 @@ async def test_sync_since_none_keeps_today_window(clean_scope):
     assert client.fetch_history_deals.call_args.kwargs["start"] == _today_et_start_utc()
 
 
+def _leg_deal(deal_id, order_id, ticker, side, qty, price):
+    return {
+        "futu_deal_id": deal_id,
+        "futu_order_id": order_id,
+        "ticker": ticker,
+        "futu_code": f"US.{ticker}",
+        "market": "US",
+        "action": "BUY" if side in ("BUY", "BUY_BACK") else "SELL",
+        "quantity": qty,
+        "price": price,
+        "fees": 0.0,
+        "filled_at": datetime.now(timezone.utc),
+        "raw": {"trd_side": side, "deal_id": deal_id},
+    }
+
+
+@pytest.mark.asyncio
+async def test_sync_journal_groups_structure_legs_into_one_entry(clean_scope):
+    """A 2-leg option structure closed by ONE order → two per-leg closed-trade
+    rows (blotter groups on read) but a SINGLE structure-level journal entry,
+    ticker = underlying, structure = the classified name."""
+    engine = clean_scope
+    deals = [
+        _leg_deal("o1", "OPEN", "AAOI270115C190000", "BUY", 10, 5.0),
+        _leg_deal("o2", "OPEN", "AAOI270115C200000", "SELL_SHORT", 10, 4.0),
+        _leg_deal("c1", "CLOSE", "AAOI270115C190000", "SELL", 10, 6.0),
+        _leg_deal("c2", "CLOSE", "AAOI270115C200000", "BUY_BACK", 10, 3.0),
+    ]
+    client = _mock_client(deals=deals, open_orders=[])
+    res = await sync_futu_orders(engine, client, SCOPE)
+    assert res["closed_trades"] == 2  # per-leg rows persisted for the blotter
+    assert res["journal_rows"] == 1  # one structure-level journal entry
+
+    async with engine.begin() as conn:
+        jrows = (
+            (
+                await conn.execute(
+                    sa.select(journal_entries).where(
+                        (journal_entries.c.broker_account == "pytest-sync")
+                        & (journal_entries.c.decision == "FUTU_AUTO_IMPORT")
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+    assert len(jrows) == 1
+    j = jrows[0]
+    assert j["ticker"] == "AAOI"  # underlying, not the OCC ticker
+    assert "Bull Call Spread" in (j["metadata"] or {}).get("structure", "")
+
+
+@pytest.mark.asyncio
+async def test_sync_purges_legacy_per_lot_journal_entries(clean_scope):
+    """A pre-grouping per-lot FUTU_AUTO_IMPORT row (old futu_close_id format) is
+    purged on the next sync so it doesn't linger alongside the grouped entry."""
+    engine = clean_scope
+    # Seed a stale legacy per-lot journal entry not in any current grouped set.
+    async with engine.begin() as conn:
+        await conn.execute(
+            sa.insert(journal_entries).values(
+                broker="FUTU",
+                account_env="paper",
+                broker_account="pytest-sync",
+                ticker="QQQ250620C500000",
+                decision="FUTU_AUTO_IMPORT",
+                authored_by="system",
+                futu_close_id="staledeal:openlot",
+                metadata={"source": "futu_closed_trade", "structure": "Journal Entry"},
+            )
+        )
+    client = _mock_client(
+        deals=[_deal("d1", "BUY", 1, 3.48), _deal("d2", "SELL", 1, 10.40)],
+        open_orders=[],
+    )
+    await sync_futu_orders(engine, client, SCOPE)
+    async with engine.begin() as conn:
+        keys = {
+            r[0]
+            for r in (
+                await conn.execute(
+                    sa.select(journal_entries.c.futu_close_id).where(
+                        (journal_entries.c.broker_account == "pytest-sync")
+                        & (journal_entries.c.decision == "FUTU_AUTO_IMPORT")
+                    )
+                )
+            ).all()
+        }
+    assert "staledeal:openlot" not in keys  # legacy per-lot row purged
+
+
 @pytest.mark.asyncio
 async def test_sync_is_read_only_noop(clean_scope, monkeypatch):
     engine = clean_scope

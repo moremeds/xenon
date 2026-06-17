@@ -238,6 +238,10 @@ def build_futu_auto_import_values(scope: AccountScope, closed_trade: Mapping[str
     meta = {
         "source": "futu_closed_trade",
         "futu_close_id": closed_trade["futu_close_id"],
+        # Structure name (e.g. "Bull Call Spread · 07/17/26 $560/$590") so the
+        # journal STRUCTURE column matches the HISTORICAL blotter; journal_entry_to_payload
+        # lifts this top-level. Falls back to the table-level "Journal Entry" when absent.
+        "structure": closed_trade.get("structure"),
         "quantity": float(closed_trade["quantity"]),
         "entry_cost": float(cost_basis) if cost_basis is not None else None,
         "cost_basis": float(cost_basis) if cost_basis is not None else None,

@@ -235,20 +235,23 @@ def _leg_execution(leg: _Leg, index: int) -> dict[str, Any]:
     }
 
 
-def build_blotter_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Group raw futu_closed_trades mappings into structure-level blotter rows.
+def group_closed_trades(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Fuse raw futu_closed_trades mappings into structure-level groups.
 
-    Output rows match the existing blotter contract (symbol, contract_desc,
-    sec_type, is_closed, total_quantity, realized_pnl, cost_basis, proceeds,
-    executions, …) so the frontend renders Futu identically to IB. Sorted by
-    close time, most recent first.
+    The single grouping primitive shared by the HISTORICAL blotter (read path)
+    and the FUTU_AUTO_IMPORT journal (write path), so both render identically:
+    SYMBOL/ticker = underlying, structure name as the descriptor, one group per
+    closing order. Returns rich dicts (Decimal monetary, datetime times) carrying
+    everything both consumers need; `futu_close_id` is the stable group key
+    (the closing order id, or the per-lot id when none) reused for journal
+    idempotency. Sorted by close time, most recent first.
     """
     groups: dict[str, list[Mapping[str, Any]]] = {}
     for row in rows:
         groups.setdefault(_group_key(row), []).append(row)
 
     out: list[dict[str, Any]] = []
-    for grp in groups.values():
+    for key, grp in groups.items():
         legs = _aggregate_legs(grp)
         opts = [leg for leg in legs if leg.parsed is not None]
         underlying = opts[0].parsed.underlying if opts else legs[0].ticker
@@ -256,38 +259,58 @@ def build_blotter_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]
 
         name = classify_structure(legs)
         detail = _leg_detail(legs)
-        contract_desc = f"{name} · {detail}" if detail else name
+        structure = f"{name} · {detail}" if detail else name
 
-        total_qty = sum(int(leg.quantity) for leg in legs)
-        realized = sum((leg.realized_pnl for leg in legs), Decimal("0"))
-        cost_basis = sum((leg.cost_basis for leg in legs), Decimal("0"))
-        proceeds = sum((leg.proceeds for leg in legs), Decimal("0"))
-        closed_at = max(leg.closed_at for leg in legs)
-
+        opened_candidates = [leg.opened_at for leg in legs if leg.opened_at is not None]
         executions = [_leg_execution(leg, i) for i, leg in enumerate(legs)]
         executions.sort(key=lambda e: e["time"])
 
         out.append(
             {
-                "symbol": underlying,
-                "contract_desc": contract_desc,
+                "futu_close_id": key,
+                "ticker": underlying,
+                "structure": structure,
                 "sec_type": sec_type,
-                "is_closed": True,
-                "net_quantity": 0,
-                "total_quantity": total_qty,
-                "total_commission": 0.0,
-                "realized_pnl": _num(realized),
-                "cost_basis": _num(cost_basis),
-                "proceeds": _num(proceeds),
-                "total_cash_flow": _num(realized),
+                "quantity": sum(int(leg.quantity) for leg in legs),
+                "realized_pnl": sum((leg.realized_pnl for leg in legs), Decimal("0")),
+                "cost_basis": sum((leg.cost_basis for leg in legs), Decimal("0")),
+                "proceeds": sum((leg.proceeds for leg in legs), Decimal("0")),
+                "opened_at": min(opened_candidates) if opened_candidates else None,
+                "closed_at": max(leg.closed_at for leg in legs),
                 "executions": executions,
-                "perm_id": None,
-                "closed_at": closed_at.astimezone(timezone.utc).isoformat(),
             }
         )
 
-    out.sort(key=lambda r: r["closed_at"], reverse=True)
+    out.sort(key=lambda g: g["closed_at"], reverse=True)
     return out
 
 
-__all__ = ("OptionLeg", "parse_occ", "classify_structure", "build_blotter_rows")
+def build_blotter_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Group raw futu_closed_trades mappings into structure-level blotter rows.
+
+    Output rows match the existing blotter contract (symbol, contract_desc,
+    sec_type, is_closed, total_quantity, realized_pnl, cost_basis, proceeds,
+    executions, …) so the frontend renders Futu identically to IB.
+    """
+    return [
+        {
+            "symbol": g["ticker"],
+            "contract_desc": g["structure"],
+            "sec_type": g["sec_type"],
+            "is_closed": True,
+            "net_quantity": 0,
+            "total_quantity": g["quantity"],
+            "total_commission": 0.0,
+            "realized_pnl": _num(g["realized_pnl"]),
+            "cost_basis": _num(g["cost_basis"]),
+            "proceeds": _num(g["proceeds"]),
+            "total_cash_flow": _num(g["realized_pnl"]),
+            "executions": g["executions"],
+            "perm_id": None,
+            "closed_at": g["closed_at"].astimezone(timezone.utc).isoformat(),
+        }
+        for g in group_closed_trades(rows)
+    ]
+
+
+__all__ = ("OptionLeg", "parse_occ", "classify_structure", "group_closed_trades", "build_blotter_rows")

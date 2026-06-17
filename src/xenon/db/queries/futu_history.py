@@ -261,23 +261,52 @@ async def list_closed_trades(
     return [dict(r) for r in rows]
 
 
-async def insert_futu_journal_entries(engine: AsyncEngine, scope: AccountScope, closed_rows: list[dict]) -> int:
-    """Async batch UPSERT of FUTU_AUTO_IMPORT journal rows for closed lots.
+async def insert_futu_journal_entries(engine: AsyncEngine, scope: AccountScope, grouped_rows: list[dict]) -> int:
+    """Sync the scope's FUTU_AUTO_IMPORT journal rows to the grouped structure set.
 
-    Idempotent via the `uq_journal_futu_auto_import` partial unique index
-    (on_conflict_do_nothing). Shares the values builder with the sync
-    `upsert_futu_auto_import_entry` so the metadata contract stays single-sourced.
+    Takes structure-level groups (from `group_closed_trades`): one journal row per
+    closing order — ticker = underlying, structure = the classified name — so the
+    journal matches the HISTORICAL blotter. Idempotent + self-healing:
+
+    - UPSERTs each group keyed by `futu_close_id` (the close-order group key),
+      refreshing ticker/metadata so structure-name + aggregate changes propagate;
+    - DELETEs scope FUTU_AUTO_IMPORT rows NOT in the current set, which purges the
+      legacy per-lot entries written before grouping (and structures that no
+      longer exist).
+
+    Skips the purge when `grouped_rows` is empty so a transient empty pull can't
+    wipe the journal. Shares `build_futu_auto_import_values` with the sync upsert.
     """
     # Lazy import avoids any import-order coupling with the journal query module.
     from xenon.db.queries.journal import FUTU_AUTO_IMPORT_CONFLICT, build_futu_auto_import_values
 
-    if not closed_rows:
+    if not grouped_rows:
         return 0
-    values = [build_futu_auto_import_values(scope, r) for r in closed_rows]
+    values = [build_futu_auto_import_values(scope, r) for r in grouped_rows]
+    keep_keys = [v["futu_close_id"] for v in values]
     total = 0
     async with engine.begin() as conn:
+        # Purge legacy/stale FUTU_AUTO_IMPORT rows not in the current grouped set.
+        await conn.execute(
+            sa.delete(journal_entries).where(
+                journal_entries.c.broker == scope.broker,
+                journal_entries.c.account_env == scope.account_env,
+                journal_entries.c.broker_account == scope.broker_account,
+                journal_entries.c.decision == "FUTU_AUTO_IMPORT",
+                journal_entries.c.futu_close_id.isnot(None),
+                journal_entries.c.futu_close_id.notin_(keep_keys),
+            )
+        )
         for batch in _chunks(values, _ORDERS_BATCH_ROWS):
-            stmt = pg_insert(journal_entries).values(batch).on_conflict_do_nothing(**FUTU_AUTO_IMPORT_CONFLICT)
+            stmt = pg_insert(journal_entries).values(batch)
+            stmt = stmt.on_conflict_do_update(
+                **FUTU_AUTO_IMPORT_CONFLICT,
+                set_={
+                    "ticker": stmt.excluded.ticker,
+                    "metadata": stmt.excluded.metadata,
+                    "authored_at": stmt.excluded.authored_at,
+                },
+            )
             result = await conn.execute(stmt)
             total += result.rowcount or 0
     return total
