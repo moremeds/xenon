@@ -834,7 +834,7 @@ git commit -m "feat(futu): FUTU_AUTO_IMPORT journal upsert + dedup index"
 **Interfaces:**
 
 - Consumes: Tasks 2–5 (`insert_orders`, `insert_order_fees`, `insert_closed_trades`, `match_closed_lots`/`closed_lots_to_rows`, `upsert_futu_auto_import_entry`), client fetchers (Task 4), existing `fetch_history_deals` + `insert_trades`, `is_read_only()`.
-- Produces: `sync_futu_orders(engine, client, scope) -> dict` (counts) wired into the existing backfill entrypoint; `_maybe_start_futu_orders_poll()` in server.py.
+- Produces: `sync_futu_orders(engine, client, scope, *, since=None) -> dict` (counts) — `since=None` means "today only" (the 60s poll); the nightly loop/CLI pass the full incremental watermark. Wired into the existing backfill entrypoint; `_maybe_start_futu_orders_poll()` in server.py.
 
 - [ ] **Step 1: Write the failing test** (mock the client; assert orders/fees/closed-trades land + journal deduped + **today's deals refreshed into `futu_trades`** + read-only no-ops). Use the existing `test_futu_history_sync.py` harness style.
 
@@ -844,7 +844,7 @@ git commit -m "feat(futu): FUTU_AUTO_IMPORT journal upsert + dedup index"
   1. `if is_read_only(): return {…zeros…}` (guard first).
   2. **Acquire a per-scope singleflight lock** (review Pass 2, P0-2). The 60s poll, the nightly 16:30 loop, `POST /futu/sync`, and `/orders/refresh?broker=FUTU` can all call this concurrently. Base UPSERTs are safe, but step 5 rebuilds _derived_ `futu_closed_trades` from the full `list_trades` set and step 6 writes journal rows — two overlapping runs could rebuild from divergent snapshots or double-insert. Use an `asyncio.Lock` keyed by `(broker, account_env, broker_account)` (mirror `server._get_futu_lock()`), OR a Postgres advisory lock (`pg_advisory_xact_lock(hashtext(scope_key))`) for cross-process safety with the nightly CLI. Prefer the advisory lock since the CLI runs in a separate process.
   3. Refresh **today's fills**: `client.fetch_history_deals(today_et_start, now)` → `insert_trades` (so TODAY'S EXECUTED ORDERS is live, not just nightly). This is the live-fills path the EXECUTED panel reads.
-  4. `client.fetch_open_orders()` + `client.fetch_history_orders(since, now)` → `insert_orders`.
+  4. `client.fetch_open_orders()` + `client.fetch_history_orders(since, now)` → `insert_orders`. **review Pass 3 (A3-3):** `since` is a parameter — the 60s poll passes `today_et_start` (narrow window, bounds the call count under Futu's 10 req/30s), while the nightly loop / CLI pass the full incremental watermark. **review Pass 3 (A3-4):** filter to `market == "US"` before persisting (mirror the `futu_trades` policy in `fetch_history_deals`) so non-US orders don't leak into the US-only surface.
   5. `client.fetch_order_fees([o["futu_order_id"] for o in orders])` → `insert_order_fees`.
   6. **In a single transaction** (review Pass 2, P0-2): rebuild closed-trades from `list_trades(engine, scope)` via `match_closed_lots` → `closed_lots_to_rows` → `insert_closed_trades`, then `upsert_futu_auto_import_entry` for each closed-trade row. Wrapping the rebuild + journal upsert in one `engine.begin()` keeps `futu_closed_trades` and the `FUTU_AUTO_IMPORT` journal consistent even if a second run interleaves. Wire into `backfill_history_sync` after trades/cashflows persist (so `futu_trades` exists before closed-trade reconstruction).
   - Add a **concurrency test**: two `sync_futu_orders` calls on the same scope (one awaiting the lock) produce no duplicate `futu_closed_trades` / journal rows.
@@ -865,11 +865,12 @@ git commit -m "feat(futu): FUTU_AUTO_IMPORT journal upsert + dedup index"
 - Modify: `src/xenon/api/routes/performance.py` (update import/usage)
 - Test: `src/xenon/api/tests/test_broker_scope.py`
 
-- [ ] **Step 1: Failing test** — assert `get_broker_scope` resolves IB from app.state by default and FUTU when `broker="FUTU"` (mock `_get_futu_client`).
+- [ ] **Step 1: Failing test** — assert `get_broker_scope` resolves IB from app.state by default and FUTU when `broker="FUTU"` (mock `_get_futu_client`). Add a test: when `broker="FUTU"` **and OpenD raises `FutuConnectionError`**, the scope still resolves from the DB fallback (seed a `futu_orders`/`futu_trades` row, assert the returned scope matches) — no 503.
 - [ ] **Step 2: Run → fail.**
 - [ ] **Step 3:** Rename the function; add `get_performance_scope = get_broker_scope` alias temporarily so nothing breaks mid-refactor, then update the performance route to import `get_broker_scope`; remove the alias.
-- [ ] **Step 4: Run → pass** (+ `uv run pytest src/xenon/api/tests/test_performance*.py`).
-- [ ] **Step 5: Commit** — `refactor(api): generalize performance scope dep to get_broker_scope`
+- [ ] **Step 4 (review Pass 3, A3-1 — DB-first resilience):** The current FUTU branch connects to OpenD live and raises 503 when OpenD is down — which would blank the Futu ORDERS/BLOTTER/JOURNAL pages even though the data is already in Postgres. That violates the DB-first requirement on the read path. Add a fallback: when the live connect raises `FutuConnectionError`, resolve the FUTU scope from the **last-synced scope in the DB** (e.g. `SELECT account_env, broker_account FROM xenon.futu_orders WHERE broker='FUTU' ORDER BY updated_at DESC LIMIT 1`, falling back to `futu_trades`, then `account_snapshots`). Only raise 503 if no prior Futu data exists at all (genuinely never synced). Keep the live path first (it's authoritative); the DB fallback is the degrade. This also hardens the existing performance route for free.
+- [ ] **Step 5: Run → pass** (+ `uv run pytest src/xenon/api/tests/test_performance*.py`).
+- [ ] **Step 6: Commit** — `refactor(api): broker-aware scope dep with DB fallback when OpenD is down`
 
 ---
 
@@ -941,10 +942,12 @@ def _futu_contract(ticker: str) -> dict:
 
 def _futu_open_order(row) -> dict:
     contract = _futu_contract(str(row["ticker"]))
-    # review Pass 2 (P1-5): the frontend keys rows on `${orderId}-${permId}` and the
-    # pending-action map is keyed on permId; orderId:0/permId:0 for every row collides
-    # as duplicate React keys. Futu order ids are numeric strings → use as the surrogate.
-    oid = int(row["futu_order_id"]) if str(row["futu_order_id"]).isdigit() else abs(hash(row["futu_order_id"])) % (10**12)
+    # review Pass 2 (P1-5) + Pass 3 (A3-2): the frontend keys rows on `${orderId}-${permId}`
+    # and the pending-action map is keyed on permId; orderId:0/permId:0 for every row collides
+    # as duplicate React keys. Futu order ids are ~19-digit strings — using them as a JS number
+    # loses precision past 2^53 and can re-collide. So (a) hash to a bounded <2^53 surrogate here,
+    # and (b) Task 11 makes the frontend prefer the string `submissionId` for the React key.
+    oid = int(hashlib.sha1(str(row["futu_order_id"]).encode()).hexdigest()[:12], 16)  # < 2^48
     return {
         "submissionId": str(row["futu_order_id"]), "orderId": oid, "permId": oid,
         "symbol": _display_symbol(contract["symbol"], contract["secType"], contract["right"], contract["strike"]),
@@ -1049,8 +1052,10 @@ For `/api/orders` POST, forward the same `?broker=` to `/orders/refresh`. For `/
 
 - [ ] **Step 4: Hide IB-only controls on the Futu tab.** The TRADE JOURNAL "SYNC IB" button calls `/api/journal/sync` (an IB-only path); the OPEN ORDERS rows render MODIFY/CANCEL actions. When `activeAccount === "futu"`, hide the "SYNC IB" button and the per-row MODIFY/CANCEL/order-entry actions (Futu is read-only). The positions table already renders read-only on Futu — mirror that gate. Add a Vitest asserting the SYNC IB button is absent when `activeAccount="futu"`.
 
-- [ ] **Step 5: Run → pass** (`cd web && npx vitest run tests/use-orders-broker.test.tsx`).
-- [ ] **Step 6: Commit** — `feat(web): render Futu orders/blotter/journal when Futu account active`
+- [ ] **Step 5 (review Pass 3, A3-2): make the OPEN ORDERS row key safe for Futu.** Find where open-order rows are keyed in `WorkspaceSections.tsx` (currently `${orderId}-${permId}`). Futu's hashed surrogate `orderId` is collision-safe but make the key robust by preferring the stable string `submissionId` when present: `key={o.submissionId ?? \`${o.orderId}-${o.permId}\`}`. Same for any `permId`-keyed pending-action map — fall back to `submissionId`. Add a Vitest that two Futu orders render with distinct keys (no React duplicate-key warning).
+
+- [ ] **Step 6: Run → pass** (`cd web && npx vitest run tests/use-orders-broker.test.tsx`).
+- [ ] **Step 7: Commit** — `feat(web): render Futu orders/blotter/journal when Futu account active`
 
 ---
 
