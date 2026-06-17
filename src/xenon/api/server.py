@@ -1450,6 +1450,39 @@ async def _bg_sync_via_subprocess():
         logger.error("Background portfolio sync failed: %s", result.error)
 
 
+async def _futu_refresh_db_first(scope) -> None:
+    """Best-effort write path: connect OpenD + sync into Postgres for the scope.
+
+    Bounded + off the event loop: the futu SDK retries a refused OpenD forever, so
+    the connect runs in a worker thread under a hard timeout. On timeout/failure we
+    log and return — the GET read path serves the last-synced DB rows regardless
+    (DB-first). No-ops under XENON_READ_ONLY=1 (sync_futu_orders self-guards).
+    """
+    import asyncio
+
+    from xenon.api.services.futu_history_sync import sync_futu_orders
+    from xenon.db.engine import get_engine
+
+    client = _get_futu_client()
+
+    def _connect() -> bool:
+        if not client.is_connected():
+            client.connect()
+        return client.is_connected()
+
+    try:
+        connected = await asyncio.wait_for(asyncio.to_thread(_connect), timeout=15)
+    except Exception as exc:  # TimeoutError, FutuError, etc.
+        logger.warning("futu refresh: OpenD connect skipped (%s); serving DB snapshot", exc)
+        return
+    if not connected:
+        return
+    try:
+        await sync_futu_orders(get_engine(), client, scope)
+    except Exception as exc:
+        logger.warning("futu refresh: sync failed (%s); serving DB snapshot", exc)
+
+
 @app.post("/orders/refresh")
 async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
     """Sync orders into Postgres, then return the scoped payload.
@@ -1464,13 +1497,7 @@ async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
         return {"status": "ok", "orders": []}
 
     if scope.broker == "FUTU":
-        from xenon.api.services.futu_history_sync import sync_futu_orders
-        from xenon.db.engine import get_engine
-
-        client = _get_futu_client()
-        if not client.is_connected():
-            client.connect()
-        await sync_futu_orders(get_engine(), client, scope)
+        await _futu_refresh_db_first(scope)
         return orders_payload_for_scope(scope)
 
     # IB path — require verified IB mode before touching the gateway.
@@ -2743,15 +2770,10 @@ async def blotter_sync(scope=Depends(get_broker_scope)):
     2026-04-28-postgres-migration-completion-IMPL.md § W2.1.
     """
     if scope.broker == "FUTU":
-        # FUTU: rebuild closed trades from fills, then read them back (no IB Flex).
-        from xenon.api.services.futu_history_sync import sync_futu_orders
-        from xenon.db.engine import get_engine
-
+        # FUTU: best-effort rebuild closed trades from fills, then read them back
+        # (no IB Flex). Bounded connect so a down OpenD can't wedge the loop.
         if not _is_test_mode():
-            client = _get_futu_client()
-            if not client.is_connected():
-                client.connect()
-            await sync_futu_orders(get_engine(), client, scope)
+            await _futu_refresh_db_first(scope)
         engine = get_sync_engine()
         with engine.connect() as conn:
             return fetch_futu_blotter(conn, scope=scope, days=30)

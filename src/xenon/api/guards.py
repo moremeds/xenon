@@ -164,35 +164,31 @@ def get_broker_scope(request: Request, broker: str | None = None) -> AccountScop
     if b != "FUTU":
         raise HTTPException(status_code=400, detail=f"Unknown broker: {broker!r}")
 
-    # FUTU path — connect on demand and read ground truth from the SDK.
-    # Importing here avoids a circular import with server.py (which imports
-    # this module during route registration).
+    # FUTU read path — NON-BLOCKING. Never initiate a connect here: the futu SDK
+    # retries a refused OpenD indefinitely (conn=0(1), 0(2), ...) without raising,
+    # which would hang the read request and wedge the event loop. Use the live
+    # matched account only if the client is ALREADY connected; otherwise serve the
+    # last-synced scope from Postgres (DB-first). The connect happens on the write
+    # path (orders_refresh / blotter sync), bounded + off the event loop.
+    # Importing here avoids a circular import with server.py.
     from xenon.api import server as _server
-    from xenon.clients.futu_exceptions import FutuConnectionError, FutuError
     from xenon.execution.account_scope import env_from_trd_env
 
     client = _server._get_futu_client()
-    if not client.is_connected():
-        try:
-            client.connect()
-        except (FutuConnectionError, FutuError):
-            # DB-first: OpenD down → serve the last-synced scope from Postgres.
-            db_scope = _futu_scope_from_db()
-            if db_scope is not None:
-                return db_scope
-            raise HTTPException(status_code=503, detail="Futu OpenD unreachable and no synced Futu data yet")
-    trd_env = client.trd_env_of_matched_account()
-    acc_id = getattr(client, "_acc_id", None)
-    if trd_env is None or acc_id is None:
-        db_scope = _futu_scope_from_db()
-        if db_scope is not None:
-            return db_scope
-        raise HTTPException(status_code=503, detail="Futu account not matched yet")
-    try:
-        env = env_from_trd_env(trd_env)
-    except ValueError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-    return AccountScope(broker="FUTU", account_env=env, broker_account=str(acc_id))
+    if client.is_connected():
+        trd_env = client.trd_env_of_matched_account()
+        acc_id = getattr(client, "_acc_id", None)
+        if trd_env is not None and acc_id is not None:
+            try:
+                env = env_from_trd_env(trd_env)
+            except ValueError as exc:
+                raise HTTPException(status_code=502, detail=str(exc))
+            return AccountScope(broker="FUTU", account_env=env, broker_account=str(acc_id))
+    # Not connected (or not matched yet) → DB-first fallback, no blocking connect.
+    db_scope = _futu_scope_from_db()
+    if db_scope is not None:
+        return db_scope
+    raise HTTPException(status_code=503, detail="Futu not connected and no synced Futu data yet")
 
 
 # Backwards-compatible alias (the performance route imported the old name).

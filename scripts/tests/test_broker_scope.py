@@ -38,29 +38,26 @@ def test_futu_live_scope_from_connected_client(monkeypatch):
     assert scope == AccountScope(broker="FUTU", account_env="live", broker_account="281753263")
 
 
-def test_futu_falls_back_to_db_scope_when_opend_down(monkeypatch):
-    from xenon.clients.futu_exceptions import FutuConnectionError
-
+def test_futu_falls_back_to_db_scope_when_not_connected_without_blocking(monkeypatch):
+    # Read path must NOT initiate a connect (SDK retries a down OpenD forever).
     client = MagicMock()
     client.is_connected.return_value = False
-    client.connect.side_effect = FutuConnectionError("OpenD down")
     _patch_futu_client(monkeypatch, client)
     db_scope = AccountScope(broker="FUTU", account_env="live", broker_account="cached-123")
     monkeypatch.setattr(guards, "_futu_scope_from_db", lambda: db_scope)
     assert guards.get_broker_scope(_FakeRequest(), broker="FUTU") == db_scope
+    client.connect.assert_not_called()  # never block on the read path
 
 
-def test_futu_503_when_opend_down_and_no_synced_data(monkeypatch):
-    from xenon.clients.futu_exceptions import FutuConnectionError
-
+def test_futu_503_when_not_connected_and_no_synced_data(monkeypatch):
     client = MagicMock()
     client.is_connected.return_value = False
-    client.connect.side_effect = FutuConnectionError("OpenD down")
     _patch_futu_client(monkeypatch, client)
     monkeypatch.setattr(guards, "_futu_scope_from_db", lambda: None)
     with pytest.raises(HTTPException) as exc:
         guards.get_broker_scope(_FakeRequest(), broker="FUTU")
     assert exc.value.status_code == 503
+    client.connect.assert_not_called()
 
 
 def test_performance_scope_alias_points_to_broker_scope():
