@@ -49,4 +49,23 @@ describe("DepthMontage", () => {
       }),
     );
   });
+
+  it("places the NBBO tag LEFT of the price on bid, RIGHT of the price on ask", () => {
+    const optionBook: DepthBook = {
+      symbol: "QQQ",
+      kind: "option",
+      isSmartDepth: true,
+      feed: "OPRA",
+      entitled: true,
+      timestamp: "t",
+      bid: [{ price: 6.66, size: 9, exchange: "CBOE2", nbbo: true }],
+      ask: [{ price: 6.72, size: 1, exchange: "BATS", nbbo: true }],
+    };
+    const { container } = render(<DepthMontage book={optionBook} />);
+    const bidPx = container.querySelector(".book-side.bid .book-px");
+    const askPx = container.querySelector(".book-side.ask .book-px");
+    // bid: tag is the FIRST child (before the price text); ask: the LAST child.
+    expect(bidPx?.firstElementChild?.className).toContain("book-nbbo-tag");
+    expect(askPx?.lastElementChild?.className).toContain("book-nbbo-tag");
+  });
 });

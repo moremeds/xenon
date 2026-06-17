@@ -13,8 +13,9 @@ const TAPE_STORAGE_KEY = "xenon:book:tape";
 type InstrumentKind = "stock" | "option" | "future";
 
 export type OrderBookProps = {
-  /** Display symbol in the window head, e.g. "RKLB" or "ES ESM6". */
-  symbolLabel: string;
+  /** Display symbol in the window head, e.g. "RKLB" or an option spec node with
+   *  the underlying symbol linked to its stock page. */
+  symbolLabel: ReactNode;
   /** Resolved instrument kind (depth.kind wins upstream). */
   kind: InstrumentKind;
   /** Live depth-of-book for the focused subject; null until it arrives. */

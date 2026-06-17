@@ -49,6 +49,12 @@ export function TimeAndSales({
         <span className="r">Time</span>
       </div>
       <div className="book-tape-rows">
+        {rows.length === 0 && (
+          <div className="book-tape-empty">
+            No prints — IB sends no time &amp; sales for this subject (options
+            have no tick-by-tick last).
+          </div>
+        )}
         {rows.map((trade, i) => {
           // Click-to-fill: tick-test tone infers side (uptick traded into the
           // offer -> BUY, downtick -> SELL). Flat/unknown -> price-only (action

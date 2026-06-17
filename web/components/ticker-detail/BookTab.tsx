@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
+import Link from "next/link";
 import type { OpenOrder, PortfolioData, PortfolioPosition } from "@/lib/types";
 import type { PriceData, DepthBook, Trade } from "@/lib/pricesProtocol";
+import { parseOptionKey } from "@/lib/pricesProtocol";
 import type { OrderPrefill } from "@/lib/TickerDetailContext";
 import { OrderBook } from "./OrderBook";
 import { fmtPrice } from "@/lib/positionUtils";
@@ -58,6 +60,36 @@ function errorFromResponseBody(
     if (typeof detail === "string" && detail.length > 0) return detail;
   }
   return fallback;
+}
+
+/** Window-head label. An option subject shows its $strike·right·expiry rather
+ *  than just the underlying ("QQQ $692P 07/17/26"), with the underlying symbol
+ *  linked to its stock page (`/QQQ`); stocks (and any unparseable key) fall back
+ *  to the bare ticker text. The depth key is the canonical optionKey
+ *  (SYMBOL_YYYYMMDD_STRIKE_RIGHT), so it carries everything the head needs. */
+function bookHeadLabel(
+  ticker: string,
+  bookKind: "stock" | "option" | "future" | undefined,
+  bookKey: string | undefined,
+): ReactNode {
+  if (bookKind === "option" && bookKey) {
+    const oc = parseOptionKey(bookKey);
+    if (oc) {
+      const e = oc.expiry;
+      const exp = /^\d{8}$/.test(e)
+        ? `${e.slice(4, 6)}/${e.slice(6, 8)}/${e.slice(2, 4)}`
+        : e;
+      return (
+        <>
+          <Link href={`/${oc.symbol.toUpperCase()}`} className="book-sym-link">
+            {oc.symbol}
+          </Link>
+          {` $${oc.strike}${oc.right} ${exp}`}
+        </>
+      );
+    }
+  }
+  return ticker;
 }
 
 /* ─── L1 Order Book ─── */
@@ -636,7 +668,7 @@ export default function BookTab({
     return (
       <div className="book-tab book-tab-only" style={{ padding: "16px 0" }}>
         <OrderBook
-          symbolLabel={ticker}
+          symbolLabel={bookHeadLabel(ticker, bookKind, bookKey)}
           kind={bookKind ?? "stock"}
           depth={book}
           trades={subjectTrades}

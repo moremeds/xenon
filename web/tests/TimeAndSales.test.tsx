@@ -32,4 +32,10 @@ describe("TimeAndSales", () => {
       }),
     );
   });
+
+  it("shows an empty-state (not blank rows) when there are no prints", () => {
+    const { container } = render(<TimeAndSales trades={[]} visible />);
+    expect(container.querySelector(".book-tape-empty")).toBeTruthy();
+    expect(screen.getByText(/No prints/)).toBeTruthy();
+  });
 });

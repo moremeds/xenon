@@ -49,10 +49,13 @@ export function DepthMontage({
           NBBO
         </span>
       ) : null;
+    // NBBO tag sits to the LEFT of the price on the bid side and to the right on
+    // the ask side, so both tags hug the spine (the inside market) symmetrically.
     const priceCell = (
       <span className="book-px" key="p">
+        {side === "bid" && nbboTag}
         {fmtDepthPrice(level.price)}
-        {nbboTag}
+        {side === "ask" && nbboTag}
       </span>
     );
     const cells =
@@ -117,7 +120,7 @@ export function DepthMontage({
         <div className="book-side bid">
           <div className="book-colhead">
             <span>{isOption ? "Exchange" : "Market"}</span>
-            <span className="r">{isOption ? "Size" : "Shares"}</span>
+            <span>{isOption ? "Size" : "Shares"}</span>
             <span className="r">Bid</span>
           </div>
           {bids.map((level, i) => row(level, "bid", i))}

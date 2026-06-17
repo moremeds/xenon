@@ -66,4 +66,42 @@ describe("BookTab bookOnly", () => {
     );
     expect(screen.getByText("ORDER BOOK")).toBeTruthy(); // existing L1 header
   });
+
+  it("shows the option contract spec ($strike·right·expiry) in the head, not just the underlying", () => {
+    const { container } = render(
+      <BookTab
+        ticker="QQQ"
+        position={null}
+        prices={{}}
+        openOrders={[]}
+        tickerPriceData={null}
+        bookOnly
+        bookKey="QQQ_20260717_692_P"
+        bookKind="option"
+      />,
+    );
+    const sym = container.querySelector(".book-sym");
+    expect(sym?.textContent).toContain("$692P");
+    expect(sym?.textContent).toContain("07/17/26");
+  });
+
+  it("links the underlying symbol in the option head to its stock page", () => {
+    const { container } = render(
+      <BookTab
+        ticker="QQQ"
+        position={null}
+        prices={{}}
+        openOrders={[]}
+        tickerPriceData={null}
+        bookOnly
+        bookKey="QQQ_20260717_692_P"
+        bookKind="option"
+      />,
+    );
+    const link = container.querySelector(".book-sym .book-sym-link");
+    expect(link).toBeTruthy();
+    expect(link?.tagName).toBe("A");
+    expect(link?.getAttribute("href")).toBe("/QQQ");
+    expect(link?.textContent).toBe("QQQ");
+  });
 });
