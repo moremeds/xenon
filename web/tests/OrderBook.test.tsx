@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, act } from "@testing-library/react";
 import { OrderBook } from "@/components/ticker-detail/OrderBook";
 
-afterEach(cleanup);
+// Wrap cleanup in act() so React's concurrent scheduler flushes all pending
+// setImmediate callbacks before JSDOM tears down — prevents "window is not
+// defined" errors bleeding into adjacent test files' environments.
+afterEach(() => act(cleanup));
 beforeEach(() => {
   try {
     window.localStorage.clear();
