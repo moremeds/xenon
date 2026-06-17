@@ -7801,10 +7801,528 @@ tr {
   border: 1px solid var(--line-grid);
   border-radius: 4px;
   box-shadow: none;
-  height: 100%;
+  /* Size to content (head + montage/tape) and sit at the top of the region
+     rather than stretching to fill it — keeps rows at their natural compact
+     height with no empty bordered void below. The tape scrolls internally so
+     a long stock tape never grows the panel past the montage. */
+  height: auto;
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+/* ── L2 depth + tape book (ported from radon globals.css :6838-7195) ────────
+   Montage (stock/option two-sided) + Time & Sales tape. The futures ladder
+   rules (book-ladder and book-lrow classes) are DEFERRED per the Phase-3 Scope
+   Decision, so they are intentionally not ported (no LadderDOM is rendered).
+   All colors are brand tokens; the depth-fill gradient encodes resting size and
+   is functional (consistent with existing xenon chart gradients). */
+.book-window {
+  --book-hairline: color-mix(in srgb, var(--line-grid) 55%, transparent);
+  --book-depth-bid: color-mix(
+    in srgb,
+    var(--signal-core) calc(var(--fill, 0) * 1%),
+    transparent
+  );
+  --book-depth-ask: color-mix(
+    in srgb,
+    var(--fault) calc(var(--fill, 0) * 1%),
+    transparent
+  );
+  border: 1px solid var(--line-grid);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+
+.book-window-head {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line-grid);
+  background: linear-gradient(180deg, var(--bg-panel-raised), var(--bg-panel));
+  /* Stable height: the live MID/BID/ASK/SPRD values change digit width every
+     tick. Without nowrap + a pinned height the row reflowed and shoved the
+     montage down. The flex spacer collapses first; overflow clips, not grows. */
+  flex-wrap: nowrap;
+  min-height: 45px;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+.book-sym {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+.book-sym .book-kind {
+  font-size: 9px;
+  color: var(--text-muted);
+  letter-spacing: 0.16em;
+  margin-left: 8px;
+}
+/* Underlying symbol in an option book head links to the stock page. Inherits
+   the head's mono weight; only hover reveals it as interactive (no permanent
+   underline — keeps the head visually quiet). */
+.book-sym .book-sym-link {
+  color: inherit;
+  text-decoration: none;
+}
+.book-sym .book-sym-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.book-head-stat {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.book-head-stat b {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.book-head-stat.bid b {
+  color: var(--signal-core);
+}
+.book-head-stat.ask b {
+  color: var(--fault);
+}
+.book-head-spacer {
+  flex: 1;
+}
+.book-feed-pill {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 4px 9px;
+  border-radius: 4px;
+  border: 1px solid color-mix(in srgb, var(--signal-core) 35%, var(--line-grid));
+  color: var(--signal-strong);
+  background: color-mix(in srgb, var(--signal-core) 10%, transparent);
+  white-space: nowrap;
+}
+
+/* tape show/hide switch */
+.book-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  appearance: none;
+  border: 1px solid var(--line-grid);
+  background: var(--bg-panel);
+  border-radius: 4px;
+  padding: 7px 12px 7px 9px;
+  cursor: pointer;
+}
+.book-toggle-track {
+  width: 30px;
+  height: 16px;
+  border-radius: 4px;
+  background: var(--line-grid);
+  position: relative;
+  transition: background 160ms ease;
+}
+.book-toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: var(--text-muted);
+  transition:
+    transform 200ms cubic-bezier(0.22, 0.61, 0.36, 1),
+    background 160ms ease;
+}
+.book-toggle[aria-checked="true"] .book-toggle-track {
+  background: color-mix(in srgb, var(--signal-core) 40%, var(--line-grid));
+}
+.book-toggle[aria-checked="true"] .book-toggle-thumb {
+  transform: translateX(14px);
+  background: var(--signal-strong);
+}
+.book-toggle-text {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* reflow grid (montage | tape) */
+.book-body-grid {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr;
+  /* The single auto row tracks the MONTAGE column only — the meaningful content
+     that should set the panel height. The tape column takes its own content out
+     of flow (the tape is absolutely positioned), so it contributes 0 to the
+     row's intrinsic height. align-items: stretch makes the tape cell fill the
+     same height; the tape's own rows scroll internally. */
+  align-items: stretch;
+  transition: grid-template-columns 320ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+.book-body-grid.tape-hidden {
+  grid-template-columns: 1fr 0fr;
+}
+.book-montage {
+  border-right: 1px solid var(--line-grid);
+  transition: border-color 200ms ease;
+  min-width: 0;
+}
+.book-body-grid.tape-hidden .book-montage {
+  border-right-color: transparent;
+}
+.book-tape-cell {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+}
+.book-tape {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid transparent;
+  opacity: 1;
+  transition: opacity 200ms ease 80ms;
+}
+.book-tape.book-tape-hidden {
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+.book-tape > .book-colhead {
+  flex: 0 0 auto;
+}
+.book-tape-rows {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 40%, transparent)
+    transparent;
+}
+.book-tape-rows::-webkit-scrollbar {
+  width: 6px;
+}
+.book-tape-rows::-webkit-scrollbar-track {
+  background: transparent;
+}
+.book-tape-rows::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text-muted) 40%, transparent);
+  border-radius: 3px;
+}
+
+.book-colhead {
+  display: grid;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--line-grid);
+  background: var(--bg-panel-raised);
+}
+.book-colhead .r {
+  text-align: right;
+}
+.book-colhead .c {
+  text-align: center;
+}
+
+/* two-sided montage (stock / option) */
+.book-sides {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+.book-side.bid {
+  border-right: 1px solid var(--line-grid);
+}
+.book-side.bid .book-colhead,
+.book-side.bid .book-row {
+  grid-template-columns: 52px 1fr 70px;
+}
+.book-side.ask .book-colhead,
+.book-side.ask .book-row {
+  grid-template-columns: 70px 1fr 52px;
+}
+.book-row {
+  display: grid;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--book-hairline);
+  position: relative;
+}
+.book-row .book-mkt {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.book-row .book-shares {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.book-row .book-px {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.book-side.bid .book-row .book-px {
+  text-align: right;
+  color: var(--signal-core);
+}
+.book-side.ask .book-row .book-px {
+  text-align: left;
+  color: var(--fault);
+}
+.book-side.ask .book-row .book-mkt {
+  text-align: right;
+}
+.book-side.bid .book-row {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(
+        in srgb,
+        var(--signal-core) calc(var(--fill, 0) * 0.5%),
+        transparent
+      )
+      58%,
+    var(--book-depth-bid) 100%
+  );
+}
+.book-side.ask .book-row {
+  background: linear-gradient(
+    270deg,
+    transparent 0%,
+    color-mix(in srgb, var(--fault) calc(var(--fill, 0) * 0.5%), transparent)
+      58%,
+    var(--book-depth-ask) 100%
+  );
+}
+/* Click-to-fill affordance — brand tokens only. */
+.book-row-fill {
+  cursor: pointer;
+}
+.book-row-fill:hover {
+  background-color: color-mix(in srgb, var(--signal-core) 10%, transparent);
+}
+.book-row-fill:hover::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: var(--signal-core);
+}
+.book-row-fill:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--signal-core) 60%, transparent);
+  outline-offset: -1px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .book-row-fill:active {
+    transform: translateY(0.5px);
+  }
+}
+.book-row[data-lvlfirst="1"]::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  height: 100%;
+  width: 3px;
+}
+.book-side.bid .book-row[data-lvlfirst="1"]::before {
+  left: 0;
+  background: color-mix(in srgb, var(--signal-core) 65%, transparent);
+}
+.book-side.ask .book-row[data-lvlfirst="1"]::before {
+  right: 0;
+  background: color-mix(in srgb, var(--fault) 65%, transparent);
+}
+.book-row.best {
+  background-color: color-mix(in srgb, var(--bg-panel-raised) 75%, transparent);
+}
+.book-row.best .book-px {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+.book-side.bid .book-row.best::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 2px;
+  background: var(--signal-core);
+}
+.book-side.ask .book-row.best::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: var(--fault);
+}
+
+/* option per-exchange BBO montage — honest framing + NBBO cue */
+.book-montage-body {
+  display: flex;
+  flex-direction: column;
+}
+.book-montage-note {
+  margin: 0;
+  padding: 7px 12px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.45;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--line-grid);
+  background: var(--bg-panel-raised);
+}
+.book-montage-body.is-option .book-side.bid .book-row.nbbo {
+  background-color: color-mix(in srgb, var(--signal-core) 9%, transparent);
+}
+.book-montage-body.is-option .book-side.ask .book-row.nbbo {
+  background-color: color-mix(in srgb, var(--fault) 9%, transparent);
+}
+.book-nbbo-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  vertical-align: middle;
+  line-height: 1.2;
+}
+.book-side.bid .book-nbbo-tag {
+  color: var(--signal-core);
+  background: color-mix(in srgb, var(--signal-core) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--signal-core) 45%, transparent);
+}
+.book-side.ask .book-nbbo-tag {
+  color: var(--fault);
+  background: color-mix(in srgb, var(--fault) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fault) 45%, transparent);
+}
+
+/* time & sales */
+.book-tape .book-colhead,
+.book-tape .book-trow {
+  grid-template-columns: 1fr 64px 58px 80px;
+  display: grid;
+  align-items: center;
+}
+.book-trow {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--book-hairline);
+  position: relative;
+}
+.book-trow .book-t-px {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.book-trow .book-t-px.up {
+  color: var(--signal-core);
+}
+.book-trow .book-t-px.down {
+  color: var(--fault);
+}
+.book-trow .book-t-px.flat {
+  color: var(--text-primary);
+}
+.book-trow .book-t-sz {
+  text-align: right;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.book-trow .book-t-mkt {
+  text-align: right;
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+.book-trow .book-t-time {
+  text-align: right;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+}
+
+/* motion */
+@keyframes book-row-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.book-reveal {
+  animation: book-row-reveal 360ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  animation-delay: calc(var(--i, 0) * 20ms);
+}
+.book-row:hover,
+.book-trow:hover {
+  background-color: var(--bg-panel-raised);
+  box-shadow: inset 0 0 0 1px var(--book-hairline);
+}
+
+/* Bid side: size sits next to the exchange (left), mirroring the ask side's
+   exchange-on-the-outside read, and the NBBO tag sits to the LEFT of the price
+   (inside the right-aligned price column) so both sides tag the inside market
+   toward the spine. */
+.book-side.bid .book-row .book-shares {
+  text-align: left;
+}
+/* Option venue codes (NASDAQBX, SAPPHIRE, EMERALD…) are far longer than stock
+   codes (IEX, ARCA) and the price cell carries the NBBO tag, so the per-side
+   columns need more room or the size/exchange collide (the "3NASDAQBX" mush).
+   Stock keeps the tighter default. */
+.book-montage-body.is-option .book-side.bid .book-colhead,
+.book-montage-body.is-option .book-side.bid .book-row {
+  grid-template-columns: 88px 1fr 96px;
+}
+.book-montage-body.is-option .book-side.ask .book-colhead,
+.book-montage-body.is-option .book-side.ask .book-row {
+  grid-template-columns: 96px 1fr 88px;
+}
+.book-side.bid .book-nbbo-tag {
+  margin-left: 0;
+  margin-right: 6px;
+}
+/* Tape empty-state: the panel exists but IB delivers no prints for this subject
+   (e.g. options have no tick-by-tick AllLast). Show why instead of blank rows. */
+.book-tape-empty {
+  padding: 14px 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+@media (prefers-reduced-motion: reduce) {
+  .book-body-grid,
+  .book-tape,
+  .book-montage,
+  .book-toggle-thumb,
+  .book-reveal {
+    transition: none !important;
+    animation: none !important;
+  }
 }
 
 /* ── act column: ticket (top) + position-or-FLAT (bottom), both live ──

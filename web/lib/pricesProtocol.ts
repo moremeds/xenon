@@ -24,7 +24,6 @@ export type PriceData = {
   timestamp: string;
 };
 
-
 export type FundamentalsData = {
   symbol: string;
   peRatio: number | null;
@@ -92,6 +91,96 @@ export type WSBatchMessage = {
   updates: Record<string, PriceData>;
 };
 
+/* ─── Depth-of-book (L2) types ─────────────────────────── */
+
+export type DepthSide = "bid" | "ask";
+
+/** One book row. marketMaker/exchange null for futures (no venue attribution). */
+export type DepthLevel = {
+  price: number;
+  size: number;
+  marketMaker: string | null; // MPID (NASDAQ TotalView) — equities direct
+  exchange: string | null; // venue code (SMART equities, options BBO)
+  /**
+   * Options only: this venue row sets the NBBO (best bid / best ask across
+   * exchanges). The relay flags it per row; ties at the inside mark every
+   * matching venue. Absent on stock/future books, which key best on position.
+   */
+  nbbo?: boolean;
+};
+
+/**
+ * Cross-venue NBBO summary for an option montage. The relay derives this from
+ * the inside (best bid / best ask) venue rows and attaches it to option books
+ * only — it is the authoritative top-of-book for the header on the Book tab.
+ */
+export type DepthNbbo = {
+  bestBid: number | null;
+  bestAsk: number | null;
+  mid: number | null;
+  bidSize: number;
+  askSize: number;
+};
+
+export type DepthBook = {
+  symbol: string; // same keyspace as PriceData.symbol (ticker | optionKey | future)
+  kind: "stock" | "option" | "future";
+  bid: DepthLevel[]; // index 0 = inside/best
+  ask: DepthLevel[]; // index 0 = inside/best
+  isSmartDepth: boolean; // true equities/options, false futures
+  feed: string | null; // head-pill label, e.g. "SMART DEPTH · TOTALVIEW"
+  entitled: boolean; // false → render L1 fallback
+  /** Options only: cross-venue NBBO summary derived by the relay. */
+  nbbo?: DepthNbbo;
+  timestamp: string;
+};
+
+/** Time & Sales tape row. */
+export type Trade = {
+  price: number;
+  size: number;
+  exchange: string | null;
+  time: string;
+};
+
+export type WSDepthMessage = {
+  type: "depth";
+  symbol: string;
+  data: DepthBook;
+};
+
+/**
+ * ⚠️ DEPTH-KEY contract: the `updates` keys here (and `symbol` on
+ * `WSDepthUnavailableMessage` / `DepthBook.symbol`) carry the **depth key** —
+ * the composite `SYMBOL_YYYYMMDD_STRIKE_RIGHT` (`optionKey`) for options, the
+ * bare symbol for stocks/futures. This is the same key `usePrices` uses for its
+ * `depths`/`tape` state (`bookKey`). Using the bare underlying for an option
+ * would clear/mark the wrong entry. Backend (`hydrateAndBroadcastDepth`) and
+ * frontend (`applyDepthMessage`) must never drift from this.
+ */
+export type WSDepthBatchMessage = {
+  type: "depth-batch";
+  updates: Record<string, DepthBook>;
+};
+
+export type WSDepthUnavailableMessage = {
+  type: "depth-unavailable";
+  symbol: string;
+  reason: "no-entitlement" | "futures-no-depth" | "recycled";
+  code?: number;
+};
+
+/**
+ * Time & Sales batch. Rides the SAME `subscribe-depth` as the depth channel
+ * (the relay seeds the tape for the focused depth symbol — no separate client
+ * action). Trades are newest-first within each symbol's array; the hook merges
+ * and bounds to the most recent rows per symbol. Keyed by the depth key above.
+ */
+export type WSTapeBatchMessage = {
+  type: "tape-batch";
+  updates: Record<string, Trade[]>;
+};
+
 export type WSMessage =
   | WSPriceMessage
   | WSFundamentalsMessage
@@ -102,7 +191,11 @@ export type WSMessage =
   | WSErrorMessage
   | WSPingMessage
   | WSPongMessage
-  | WSStatusMessage;
+  | WSStatusMessage
+  | WSDepthMessage
+  | WSDepthBatchMessage
+  | WSDepthUnavailableMessage
+  | WSTapeBatchMessage;
 
 /* ─── Option contract types & helpers ─────────────────── */
 
@@ -118,10 +211,17 @@ export function normalizeOptionExpiry(expiry: string): string | null {
   return compact.length === 8 ? compact : null;
 }
 
-export function normalizeOptionContract(contract: OptionContract): OptionContract | null {
+export function normalizeOptionContract(
+  contract: OptionContract,
+): OptionContract | null {
   const symbol = contract.symbol.trim().toUpperCase();
   const expiry = normalizeOptionExpiry(contract.expiry);
-  if (!symbol || !expiry || !Number.isFinite(contract.strike) || contract.strike <= 0) {
+  if (
+    !symbol ||
+    !expiry ||
+    !Number.isFinite(contract.strike) ||
+    contract.strike <= 0
+  ) {
     return null;
   }
   return {
@@ -141,7 +241,27 @@ export function optionKey(c: OptionContract): string {
   return `${c.symbol.trim().toUpperCase()}_${c.expiry.trim()}_${c.strike}_${c.right}`;
 }
 
-export function uniqueOptionContracts(contracts: OptionContract[]): OptionContract[] {
+/**
+ * Inverse of {@link optionKey}: parse a composite `SYMBOL_YYYYMMDD_STRIKE_RIGHT`
+ * key back into an OptionContract. The symbol may itself contain underscores, so
+ * we split from the RIGHT: last segment = right (C/P), then strike, then expiry,
+ * and everything before that is the symbol. Returns null for non-option keys
+ * (bare stock symbols, malformed input) — the caller treats those as stocks.
+ */
+export function parseOptionKey(key: string): OptionContract | null {
+  const parts = key.trim().split("_");
+  if (parts.length < 4) return null;
+  const right = parts[parts.length - 1];
+  if (right !== "C" && right !== "P") return null;
+  const strike = Number(parts[parts.length - 2]);
+  const expiry = parts[parts.length - 3];
+  const symbol = parts.slice(0, parts.length - 3).join("_");
+  return normalizeOptionContract({ symbol, expiry, strike, right });
+}
+
+export function uniqueOptionContracts(
+  contracts: OptionContract[],
+): OptionContract[] {
   const seen = new Set<string>();
   const normalizedContracts: OptionContract[] = [];
   for (const contract of contracts) {
@@ -157,10 +277,7 @@ export function uniqueOptionContracts(contracts: OptionContract[]): OptionContra
 
 /** Stable hash for a list of option contracts (for memoization change detection) */
 export function contractsKey(contracts: OptionContract[]): string {
-  return uniqueOptionContracts(contracts)
-    .map(optionKey)
-    .sort()
-    .join(",");
+  return uniqueOptionContracts(contracts).map(optionKey).sort().join(",");
 }
 
 /**
