@@ -135,6 +135,7 @@ journal_entries = Table(
     Column("broker", Text, nullable=False, server_default=text("'IB'")),
     Column("account_env", Text, nullable=False, server_default=text("'legacy_unknown'")),
     Column("broker_account", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    Column("futu_close_id", Text),  # set only for decision='FUTU_AUTO_IMPORT'; NULL for IB rows
     CheckConstraint("broker IN ('IB','FUTU')", name="ck_journal_broker"),
     CheckConstraint(
         "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
@@ -150,6 +151,15 @@ journal_entries = Table(
         "trade_id",
         unique=True,
         postgresql_where=text("decision = 'IB_AUTO_IMPORT' AND trade_id IS NOT NULL"),
+    ),
+    Index(
+        "uq_journal_futu_auto_import",
+        "broker",
+        "account_env",
+        "broker_account",
+        "futu_close_id",
+        unique=True,
+        postgresql_where=text("decision = 'FUTU_AUTO_IMPORT' AND futu_close_id IS NOT NULL"),
     ),
 )
 
@@ -290,6 +300,116 @@ futu_cash_flow = Table(
         "account_env",
         "broker_account",
         "occurred_at",
+    ),
+)
+
+
+# Futu orders — open/working AND historical orders pulled from OpenD
+# (order_list_query + history_order_list_query). UPSERT keyed on
+# (scope, futu_order_id) so a resting order's status/fills re-stamp in place.
+# Shaped at the API into the unified IB OpenOrder contract. Read-only: xenon
+# never places Futu orders. `order_type`/`status` keep the raw Futu enum label
+# (NORMAL/MARKET/STOP/..., SUBMITTED/FILLED_ALL/...); the API maps for display.
+futu_orders = Table(
+    "futu_orders",
+    xenon_metadata,
+    Column("broker", Text, primary_key=True),
+    Column("account_env", Text, primary_key=True),
+    Column("broker_account", Text, primary_key=True),
+    Column("futu_order_id", Text, primary_key=True),
+    Column("ticker", Text, nullable=False),
+    Column("futu_code", Text, nullable=False),
+    Column("market", Text, nullable=False),
+    Column("action", Text, nullable=False),  # 'BUY' | 'SELL' (normalized)
+    Column("order_type", Text, nullable=False),  # raw Futu OrderType label
+    Column("quantity", Numeric(20, 8), nullable=False),
+    Column("limit_price", Numeric(14, 4)),
+    Column("aux_price", Numeric(14, 4)),  # stop/trigger price
+    Column("status", Text, nullable=False),  # raw Futu OrderStatus label
+    Column("tif", Text, nullable=False, server_default=text("'DAY'")),
+    Column("filled_qty", Numeric(20, 8), nullable=False, server_default=text("0")),
+    Column("avg_fill_price", Numeric(14, 4)),
+    Column("created_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("updated_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("raw", JSONB, nullable=False),
+    Column("ingested_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    CheckConstraint("broker = 'FUTU'", name="ck_futu_orders_broker"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim')",
+        name="ck_futu_orders_account_env",
+    ),
+    CheckConstraint("action IN ('BUY', 'SELL')", name="ck_futu_orders_action"),
+    Index(
+        "ix_futu_orders_scope_updated_at",
+        "broker",
+        "account_env",
+        "broker_account",
+        "updated_at",
+    ),
+    Index(
+        "ix_futu_orders_scope_status",
+        "broker",
+        "account_env",
+        "broker_account",
+        "status",
+    ),
+)
+
+
+# Per-order fee snapshot from OpenD order_fee_query (order_id, fee_amount, fee_details).
+futu_order_fees = Table(
+    "futu_order_fees",
+    xenon_metadata,
+    Column("broker", Text, primary_key=True),
+    Column("account_env", Text, primary_key=True),
+    Column("broker_account", Text, primary_key=True),
+    Column("futu_order_id", Text, primary_key=True),
+    Column("total_fee", Numeric(14, 4), nullable=False, server_default=text("0")),
+    Column("currency", Text, nullable=False, server_default=text("'USD'")),
+    Column("raw", JSONB, nullable=False),
+    Column("ingested_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    CheckConstraint("broker = 'FUTU'", name="ck_futu_order_fees_broker"),
+)
+
+
+# Futu closed trades — FIFO-reconstructed closed lots from futu_trades.
+# Feeds both the 30-day HISTORICAL TRADES table and FUTU_AUTO_IMPORT journal
+# rows. The `trades` table is IB-locked (ck_trades_broker_ib_only) and IB-shaped
+# (submission_id FK), so Futu closed trades get their own table. `futu_close_id`
+# is the stable synthetic key `close_deal_id:open_deal_id` (see
+# xenon.api.services.futu_closed_trades.match_closed_lots).
+futu_closed_trades = Table(
+    "futu_closed_trades",
+    xenon_metadata,
+    Column("broker", Text, primary_key=True),
+    Column("account_env", Text, primary_key=True),
+    Column("broker_account", Text, primary_key=True),
+    Column("futu_close_id", Text, primary_key=True),
+    Column("ticker", Text, nullable=False),
+    Column("futu_code", Text, nullable=False),
+    Column("structure", Text),
+    Column("action", Text, nullable=False),  # closing side: 'SELL' (was long) | 'BUY' (was short)
+    Column("quantity", Numeric(20, 8), nullable=False),
+    Column("entry_cost", Numeric(14, 4)),
+    Column("exit_cost", Numeric(14, 4)),
+    Column("realized_pnl", Numeric(14, 2), nullable=False),
+    Column("cost_basis", Numeric(14, 4), nullable=False),
+    Column("proceeds", Numeric(14, 4), nullable=False),
+    Column("opened_at", TIMESTAMP(timezone=True)),
+    Column("closed_at", TIMESTAMP(timezone=True), nullable=False),
+    Column("metadata", JSONB),
+    Column("ingested_at", TIMESTAMP(timezone=True), nullable=False, server_default=tz_now),
+    CheckConstraint("broker = 'FUTU'", name="ck_futu_closed_trades_broker"),
+    CheckConstraint(
+        "account_env IN ('paper', 'live', 'sim')",
+        name="ck_futu_closed_trades_account_env",
+    ),
+    Index(
+        "ix_futu_closed_scope_closed_at",
+        "broker",
+        "account_env",
+        "broker_account",
+        "closed_at",
     ),
 )
 
