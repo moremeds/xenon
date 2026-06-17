@@ -45,6 +45,10 @@ export default function TickerWorkspace({
   const positionId = searchParams.get("posId")
     ? Number(searchParams.get("posId"))
     : null;
+  // `?leg=<optionKey>` selects the option book for that contract; absent = the
+  // underlying stock book (the bare ticker URL). Kept distinct from `posId` so
+  // the book head's underlying link can drop it to reach the stock book.
+  const leg = searchParams.get("leg");
 
   // Deck change → router.replace (no history pollution). Writes `?deck=` when a
   // deck is open, deletes it otherwise. Always drops the legacy `tab` param so
@@ -73,6 +77,7 @@ export default function TickerWorkspace({
       <TickerDetailContent
         ticker={ticker}
         positionId={positionId}
+        leg={leg}
         activeTab={deck ?? ""}
         onTabChange={setDeck}
         prices={prices}
