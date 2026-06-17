@@ -666,7 +666,9 @@ export default function BookTab({
     const book = (bookKey && depths?.[bookKey]) || null;
     const subjectTrades = (bookKey && tape?.[bookKey]) || [];
     return (
-      <div className="book-tab book-tab-only" style={{ padding: "16px 0" }}>
+      // No inline top/bottom padding: the inset must match the `.book-region`
+      // side gutter (14px) so the window's top space equals its side space.
+      <div className="book-tab book-tab-only">
         <OrderBook
           symbolLabel={bookHeadLabel(ticker, bookKind, bookKey)}
           kind={bookKind ?? "stock"}

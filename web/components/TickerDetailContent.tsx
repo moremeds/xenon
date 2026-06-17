@@ -14,6 +14,7 @@ import type {
   Trade,
 } from "@/lib/pricesProtocol";
 import { resolveTickerQuote } from "@/lib/tickerQuote";
+import { resolveBookSubject, etTodayYmd } from "@/lib/book/bookSubject";
 import { useTickerDetail } from "@/lib/TickerDetailContext";
 import { isUrlDeck, legacyTabToDeck, type DeckKey } from "@/lib/deckNav";
 import AssetCockpit from "./ticker-detail/AssetCockpit";
@@ -21,6 +22,8 @@ import AssetCockpit from "./ticker-detail/AssetCockpit";
 export type TickerDetailContentProps = {
   ticker: string;
   positionId?: number | null;
+  /** `?leg=<optionKey>` — selects the option book; null/absent = stock book. */
+  leg?: string | null;
   activeTab: string;
   onTabChange: (tab: string) => void;
   prices: Record<string, PriceData>;
@@ -35,6 +38,7 @@ export type TickerDetailContentProps = {
 export default function TickerDetailContent({
   ticker,
   positionId,
+  leg,
   activeTab,
   onTabChange,
   prices,
@@ -74,21 +78,44 @@ export default function TickerDetailContent({
     [ticker, position, prices],
   );
 
-  // Phase 2 has no L2 depth feed, so the header quote IS the resolved price (the
-  // depth-NBBO correction is deferred to Phase 3). bookKey is the single-leg
-  // option key when present, else the ticker.
-  const quotePriceData = priceData;
-  const bookKey = chartPriceKey ?? ticker;
-
-  // Instrument kind for the book/header. A single-leg non-stock position is an
-  // option; everything else (stock, index, multi-leg, flat) is a stock book.
-  // xenon has no futures path (deferred), so there is no "future" branch here.
-  const bookKind: "stock" | "option" | "future" =
+  // The cockpit BOOK is URL-driven, treating the underlying and each option as
+  // distinct subjects: `?leg=<optionKey>` (or a `?posId`-selected single-leg
+  // option) shows that option's book; the bare ticker shows the underlying STOCK
+  // book — so the book head's underlying link (`/TICKER`) actually reaches the
+  // stock. An option past expiry falls back to the stock book. The ticket /
+  // position panel stay driven by `position` (unchanged).
+  const positionOptionKey =
     position &&
     position.structure_type !== "Stock" &&
     position.legs.length === 1
-      ? "option"
-      : "stock";
+      ? (chartPriceKey ?? null)
+      : null;
+  const subject = useMemo(
+    () =>
+      resolveBookSubject({
+        ticker,
+        leg: leg ?? null,
+        hasPosId: positionId != null && positionId >= 0,
+        positionOptionKey,
+        positionPriceData: priceData,
+        prices,
+        todayYmd: etTodayYmd(),
+      }),
+    [ticker, leg, positionId, positionOptionKey, priceData, prices],
+  );
+  const bookKind: "stock" | "option" | "future" = subject.bookKind;
+  const bookKey = subject.bookKey;
+
+  // Header quote follows the book subject. Exception: a multi-leg position keeps
+  // its signed spread-net header over the underlying book (legacy behavior — a
+  // spread has no single-contract book), so multi-leg viewing is unchanged.
+  const isMultiLeg = position != null && position.legs.length > 1;
+  const quotePriceData =
+    subject.bookKind === "stock" && isMultiLeg
+      ? priceData
+      : subject.quotePriceData;
+  const headerSpreadNet =
+    subject.bookKind === "stock" && isMultiLeg ? isSpreadNet : false;
 
   // Publish the focused book key upward so WorkspaceShell (the usePrices
   // callsite) can stream L2 depth + tape for exactly this subject. Cleared on
@@ -135,7 +162,7 @@ export default function TickerDetailContent({
       bookKind={bookKind}
       quotePriceData={quotePriceData}
       priceData={priceData}
-      isSpreadNet={isSpreadNet}
+      isSpreadNet={headerSpreadNet}
       tickerOrders={tickerOrders}
       depths={depths}
       tape={tape}

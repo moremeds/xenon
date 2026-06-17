@@ -102,7 +102,9 @@ export default function AssetCockpit({
           position={position}
           prices={prices}
           openOrders={tickerOrders}
-          tickerPriceData={priceData}
+          /* The book head/L1-fallback follows the book SUBJECT (stock vs option),
+             not the held position — the ticket keeps `priceData`. */
+          tickerPriceData={quotePriceData}
           bookKey={bookKey}
           bookKind={bookKind}
           depths={depths}

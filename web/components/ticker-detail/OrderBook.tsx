@@ -66,11 +66,16 @@ export function OrderBook({
   l1Fallback,
   onPriceClick,
 }: OrderBookProps) {
-  const [tapeVisible, setTapeVisible] = useState(true);
+  // Options have no time & sales (IB sends no tick-by-tick last for OPRA), so
+  // their tape starts COLLAPSED — the empty tape pane would just waste space.
+  // Stocks honor the persisted show/hide preference. (Toggling an option's tape
+  // open still works in-session; it re-collapses on the next mount.)
+  const isOption = kind === "option";
+  const [tapeVisible, setTapeVisible] = useState(!isOption);
 
   useEffect(() => {
-    setTapeVisible(readTapePreference());
-  }, []);
+    setTapeVisible(isOption ? false : readTapePreference());
+  }, [isOption]);
 
   const toggleTape = () => {
     setTapeVisible((prev) => {
@@ -107,7 +112,9 @@ export function OrderBook({
       <div className="book-window-head">
         <span className="book-sym">
           {symbolLabel}
-          <span className="book-kind">{kindLabel}</span>
+          {/* The option head already reads "$strike·right·expiry" — the kind tag
+              would be redundant clutter, so it is shown only for non-options. */}
+          {!isOption && <span className="book-kind">{kindLabel}</span>}
         </span>
         <span className="book-head-stat">
           {head.lastLabel}{" "}

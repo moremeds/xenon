@@ -7839,7 +7839,7 @@ tr {
 .book-window-head {
   display: flex;
   align-items: center;
-  gap: 18px;
+  gap: 14px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--line-grid);
   background: linear-gradient(180deg, var(--bg-panel-raised), var(--bg-panel));
@@ -7857,6 +7857,13 @@ tr {
   font-size: 16px;
   letter-spacing: 0.05em;
   white-space: nowrap;
+  /* The long option spec ("QQQ $692P 07/17/26") is the only wide variable item;
+     let it be the shrink point so a narrow panel ellipsises the trailing expiry
+     rather than clipping the tape toggle off the right edge. The leading ticker
+     (its underlying link) stays visible. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .book-sym .book-kind {
   font-size: 9px;
@@ -7908,6 +7915,7 @@ tr {
   color: var(--signal-strong);
   background: color-mix(in srgb, var(--signal-core) 10%, transparent);
   white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 /* tape show/hide switch */
@@ -7921,6 +7929,9 @@ tr {
   border-radius: 4px;
   padding: 7px 12px 7px 9px;
   cursor: pointer;
+  /* Never shrink or clip the toggle — the symbol gives up space first. */
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 .book-toggle-track {
   width: 30px;
@@ -8048,13 +8059,16 @@ tr {
 .book-side.bid {
   border-right: 1px solid var(--line-grid);
 }
+/* MARKET venue column wide enough for the longest stock-depth venue codes
+   ("OVERNIGHT", "DRCTEDGE", "NYSENAT") so they never overrun the SHARES number.
+   At 52px "OVERNIGHT" overflowed its cell and collided with the size. */
 .book-side.bid .book-colhead,
 .book-side.bid .book-row {
-  grid-template-columns: 52px 1fr 70px;
+  grid-template-columns: 86px 1fr 70px;
 }
 .book-side.ask .book-colhead,
 .book-side.ask .book-row {
-  grid-template-columns: 70px 1fr 52px;
+  grid-template-columns: 70px 1fr 86px;
 }
 .book-row {
   display: grid;
