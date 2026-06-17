@@ -1,7 +1,7 @@
 {
   "name": "xenon-web",
   "private": true,
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Xenon Terminal — market structure reconstruction instrument with real-time IB streaming and AI chat.",
   "type": "module",
   "scripts": {

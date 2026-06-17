@@ -5,6 +5,9 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-17
+
+
 ### Added
 
 - **radon→xenon AssetCockpit port — Phase 3: L2 depth + time-and-sales tape (#150).** Brings the cockpit book panel to live L2. **3a** migrates the IB realtime relay from `ib@0.2.9` to `@stoqey/ib` (plain-object contract builders, rewired events, L1-parity gate) with a frozen WS-URL/fallback-port contract pinned by `ws-url-contract.test.ts` so the handshake can't drift. **3b** adds a unit-tested L2 ladder accumulator + bounded tape ring buffer and emits **additive** WS messages (`depth-batch`, `tape-batch`, `depth-unavailable`, `depth`) with per-symbol budget/LRU — existing L1 consumers untouched. **3c** ports radon's book/montage/tape frontend: `OrderBook` + `DepthMontage` + `TimeAndSales`, `usePrices` depth/tape subscription + reducer, and click-to-fill from a book level or tape print through `OrderPrefill` in `TickerDetailContext` into the order ticket. `BookTab` renders the L2 montage when an entitled depth book is present and falls back to the existing L1 panel otherwise. The option book head shows the contract spec (`QQQ $692P 07/17/26`) with the underlying linked to its stock page; the panel sizes to content (no empty void), the bid NBBO tag/size sit left, and the tape shows an empty-state for instruments IB gives no tick-by-tick `AllLast` (options, code 10189). Scope is stock + option; the futures ladder is deferred (xenon surfaces no FUT instrument).
@@ -12,7 +15,6 @@ All notable changes to Xenon are documented here. Format loosely based on
 ### Fixed
 
 - **L2 depth froze ~5s after subscribing (#150).** IB **code 2152** on an entitled book is an _informational_ venue-permission summary, not an entitlement loss, but the relay's broad error handler misclassified it as `no-entitlement` and tore down the working depth ticket. Narrowed the classification (`isDepthPermissionError` in `ib_connection_status.js`) so only real permission errors (10089/10092, or messages matching `depth.*not (allowed|eligible)|not supported for this combination`) tear down; 2152 and other 21xx info codes are logged and ignored. Live-verified: 99 depth-batches over 16s with zero teardowns and `ib_connected` steady.
-
 ## [0.4.2] — 2026-06-16
 
 ### Added
