@@ -952,9 +952,13 @@ const journalSortExtract = (
   }
 };
 
-const JournalSections = React.memo(function JournalSections() {
+const JournalSections = React.memo(function JournalSections({
+  activeAccount = "ib",
+}: {
+  activeAccount?: "ib" | "futu";
+}) {
   const { data, loading, error, syncWithIB, syncing, lastSyncResult } =
-    useJournal();
+    useJournal(true, activeAccount === "futu" ? "FUTU" : "IB");
   const [syncError, setSyncError] = useState<string | null>(null);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
   const trades = useMemo(() => {
@@ -1028,14 +1032,16 @@ const JournalSections = React.memo(function JournalSections() {
             <InfoTooltip text={SECTION_TOOLTIPS["Trade Journal"]} />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <button
-              className="btn-sync"
-              onClick={handleSync}
-              disabled={syncing}
-              title="Sync unreconciled IB trades into journal"
-            >
-              {syncing ? "SYNCING..." : "SYNC IB"}
-            </button>
+            {activeAccount !== "futu" && (
+              <button
+                className="btn-sync"
+                onClick={handleSync}
+                disabled={syncing}
+                title="Sync unreconciled IB trades into journal"
+              >
+                {syncing ? "SYNCING..." : "SYNC IB"}
+              </button>
+            )}
             {lastSyncResult && (
               <span className="pill defined" style={{ fontSize: "9px" }}>
                 {lastSyncResult.imported > 0
@@ -1462,11 +1468,15 @@ function OrdersSections({
   orders,
   prices,
   portfolio,
+  activeAccount = "ib",
 }: {
   orders: OrdersData | null;
   prices?: Record<string, PriceData>;
   portfolio?: PortfolioData | null;
+  activeAccount?: "ib" | "futu";
 }) {
+  // Futu is read-only: no order modify/cancel surfaces (mirrors the position table gate).
+  const readonly = activeAccount === "futu";
   const {
     pendingCancels,
     pendingModifies,
@@ -1802,7 +1812,11 @@ function OrdersSections({
                         </td>
                         <td>{o.tif}</td>
                         <td className="actions-cell">
-                          {isPending ? (
+                          {readonly ? (
+                            <span className="cancel-pending-label">
+                              READ-ONLY
+                            </span>
+                          ) : isPending ? (
                             <span className="cancel-pending-label">
                               PENDING
                             </span>
@@ -1845,7 +1859,10 @@ function OrdersSections({
                   const isPending = isPendingCancel || isPendingModify;
                   return (
                     <tr
-                      key={`${o.order.orderId}-${o.order.permId}`}
+                      key={
+                        o.order.submissionId ??
+                        `${o.order.orderId}-${o.order.permId}`
+                      }
                       className={
                         isPendingCancel
                           ? "row-pending-cancel"
@@ -1910,7 +1927,11 @@ function OrdersSections({
                       </td>
                       <td>{o.order.tif}</td>
                       <td className="actions-cell">
-                        {isPending ? (
+                        {readonly ? (
+                          <span className="cancel-pending-label">
+                            READ-ONLY
+                          </span>
+                        ) : isPending ? (
                           <span className="cancel-pending-label">PENDING</span>
                         ) : (
                           <>
@@ -2183,7 +2204,7 @@ function OrdersSections({
         </div>
       )}
 
-      <HistoricalTradesSection />
+      <HistoricalTradesSection activeAccount={activeAccount} />
     </>
   );
 }
@@ -2239,8 +2260,15 @@ const blotterExtract = (
   }
 };
 
-export function HistoricalTradesSection() {
-  const { data, loading, syncing, error, syncNow } = useBlotter(true);
+export function HistoricalTradesSection({
+  activeAccount = "ib",
+}: {
+  activeAccount?: "ib" | "futu";
+}) {
+  const { data, loading, syncing, error, syncNow } = useBlotter(
+    true,
+    activeAccount === "futu" ? "FUTU" : "IB",
+  );
   const [page, setPage] = useState(0);
 
   const allTrades = useMemo(() => {
@@ -2632,10 +2660,11 @@ export default function WorkspaceSections({
           orders={orders ?? null}
           prices={prices}
           portfolio={portfolio}
+          activeAccount={activeAccount}
         />
       );
     case "journal":
-      return <JournalSections />;
+      return <JournalSections activeAccount={activeAccount} />;
     case "ticker-detail":
       return tickerParam ? (
         <TickerWorkspace ticker={tickerParam} theme={theme ?? "dark"} />

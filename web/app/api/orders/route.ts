@@ -5,35 +5,49 @@ export const runtime = "nodejs";
 
 type OrdersPayload = Record<string, unknown>;
 
-let syncInFlight: Promise<void> | null = null;
+// Per-broker singleflight so an IB refresh and a FUTU refresh don't collapse together.
+const syncInFlight: Record<string, Promise<void> | null> = {};
 
-async function fetchOrders(): Promise<OrdersPayload> {
-  return await xenonFetch<OrdersPayload>("/orders", { method: "GET", timeout: 10_000 });
+function brokerQuery(req: Request): string {
+  const broker = new URL(req.url).searchParams.get("broker");
+  return broker ? `?broker=${encodeURIComponent(broker)}` : "";
 }
 
-export async function GET(): Promise<Response> {
+async function fetchOrders(qs: string): Promise<OrdersPayload> {
+  return await xenonFetch<OrdersPayload>(`/orders${qs}`, {
+    method: "GET",
+    timeout: 10_000,
+  });
+}
+
+export async function GET(req: Request): Promise<Response> {
+  const qs = brokerQuery(req);
   try {
-    const data = await fetchOrders();
-    return NextResponse.json(data);
+    return NextResponse.json(await fetchOrders(qs));
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to read orders";
+    const message =
+      error instanceof Error ? error.message : "Failed to read orders";
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }
 
-export async function POST(): Promise<Response> {
+export async function POST(req: Request): Promise<Response> {
+  const qs = brokerQuery(req);
+  const key = qs || "ib";
   try {
-    if (!syncInFlight) {
-      syncInFlight = xenonFetch("/orders/refresh", { method: "POST", timeout: 35_000 })
+    if (!syncInFlight[key]) {
+      syncInFlight[key] = xenonFetch(`/orders/refresh${qs}`, {
+        method: "POST",
+        timeout: 35_000,
+      })
         .then(() => {})
         .finally(() => {
-          syncInFlight = null;
+          syncInFlight[key] = null;
         });
     }
-    await syncInFlight;
+    await syncInFlight[key];
 
-    const data = await fetchOrders();
-    return NextResponse.json(data);
+    return NextResponse.json(await fetchOrders(qs));
   } catch (error) {
     const message = error instanceof Error ? error.message : "Sync failed";
     return NextResponse.json({ error: message }, { status: 502 });

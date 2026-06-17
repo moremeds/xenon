@@ -3,22 +3,35 @@ import { xenonFetch } from "@/lib/xenonApi";
 
 export const runtime = "nodejs";
 
-export async function GET(): Promise<Response> {
+function brokerQuery(req: Request): string {
+  const broker = new URL(req.url).searchParams.get("broker");
+  return broker ? `?broker=${encodeURIComponent(broker)}` : "";
+}
+
+export async function GET(req: Request): Promise<Response> {
   try {
-    const data = await xenonFetch("/blotter", { method: "GET", timeout: 10_000 });
+    const data = await xenonFetch(`/blotter${brokerQuery(req)}`, {
+      method: "GET",
+      timeout: 10_000,
+    });
     return NextResponse.json(data);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to read blotter";
+    const message =
+      error instanceof Error ? error.message : "Failed to read blotter";
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }
 
-export async function POST(): Promise<Response> {
+export async function POST(req: Request): Promise<Response> {
   try {
-    const data = await xenonFetch("/blotter", { method: "POST", timeout: 130_000 });
+    const data = await xenonFetch(`/blotter${brokerQuery(req)}`, {
+      method: "POST",
+      timeout: 130_000,
+    });
     return NextResponse.json(data);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Blotter sync failed";
+    const message =
+      error instanceof Error ? error.message : "Blotter sync failed";
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }
