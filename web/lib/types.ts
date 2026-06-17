@@ -137,6 +137,9 @@ export type OpenOrder = {
   avgFillPrice: number | null;
   tif: string;
   modifySequence?: number;
+  /** Set by mergeDashboardOrders so the combined dashboard card can label
+   *  which broker each working order belongs to (FUTU rows are read-only). */
+  broker?: "IB" | "FUTU";
 };
 
 export type ExecutedOrder = {
