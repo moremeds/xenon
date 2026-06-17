@@ -123,6 +123,18 @@ function verticalLabel(
   return `${name} ${fmtStrike(lo)}/${fmtStrike(hi)} · ${expiry}`;
 }
 
+/** Label for a 1:2:1 (broken-wing allowed) butterfly: wing/body/wing strikes. */
+function butterflyLabel(
+  type: "Call" | "Put",
+  loStrike: number | null,
+  bodyStrike: number | null,
+  hiStrike: number | null,
+  expiry: string,
+): string {
+  const name = type === "Call" ? "Call Butterfly" : "Put Butterfly";
+  return `${name} ${fmtStrike(loStrike)}/${fmtStrike(bodyStrike)}/${fmtStrike(hiStrike)} · ${expiry}`;
+}
+
 function detectVirtualCombos(
   options: PortfolioPosition[],
 ): Map<number, ComboDetection> {
@@ -164,6 +176,20 @@ function detectVirtualCombos(
     const pair: VirtualPair = { pairKey, label };
     overrides.set(a.id, { category, pair });
     overrides.set(b.id, { category, pair });
+  };
+
+  const markTriple = (
+    lo: PortfolioPosition,
+    body: PortfolioPosition,
+    hi: PortfolioPosition,
+    category: CategoryKey,
+    label: string,
+  ) => {
+    const pairKey = `vp-${++pairSeq}`;
+    const pair: VirtualPair = { pairKey, label };
+    overrides.set(lo.id, { category, pair });
+    overrides.set(body.id, { category, pair });
+    overrides.set(hi.id, { category, pair });
   };
 
   /**
@@ -213,6 +239,71 @@ function detectVirtualCombos(
 
   for (const [expiry, group] of byExpiry.entries()) {
     const available = new Set(group.map((p) => p.id));
+
+    // Pass 0 — butterfly (1:2:1, broken wing allowed): two same-type wings on
+    // one side + a body on the other, where body.contracts == the sum of the
+    // two wing contracts and the body strike sits strictly between the wings.
+    // Claimed before the 2-leg passes so a real fly isn't fragmented into a
+    // vertical + an orphan leg. Covers long flies (2 long wings + short body)
+    // and short flies (2 short wings + long body).
+    for (const type of ["Call", "Put"] as const) {
+      for (const bodyDir of ["SHORT", "LONG"] as const) {
+        const wingDir = bodyDir === "SHORT" ? "LONG" : "SHORT";
+        const bodies = group.filter(
+          (p) =>
+            available.has(p.id) &&
+            p.legs[0].type === type &&
+            p.legs[0].direction === bodyDir,
+        );
+        for (const body of bodies) {
+          if (!available.has(body.id)) continue;
+          const bodyStrike = body.legs[0].strike;
+          if (bodyStrike == null) continue;
+          const bodyQty = body.legs[0].contracts;
+          const wingOf = (cmp: (s: number) => boolean) =>
+            group
+              .filter(
+                (p) =>
+                  available.has(p.id) &&
+                  p.legs[0].type === type &&
+                  p.legs[0].direction === wingDir &&
+                  p.legs[0].strike != null &&
+                  cmp(p.legs[0].strike),
+              )
+              .sort(byStrike);
+          const lows = wingOf((s) => s < bodyStrike);
+          const highs = wingOf((s) => s > bodyStrike);
+          let matched = false;
+          for (const lo of lows) {
+            if (matched) break;
+            if (!available.has(lo.id)) continue;
+            for (const hi of highs) {
+              if (!available.has(hi.id)) continue;
+              if (lo.legs[0].contracts + hi.legs[0].contracts === bodyQty) {
+                markTriple(
+                  lo,
+                  body,
+                  hi,
+                  "butterfly",
+                  butterflyLabel(
+                    type,
+                    lo.legs[0].strike,
+                    bodyStrike,
+                    hi.legs[0].strike,
+                    expiry,
+                  ),
+                );
+                available.delete(lo.id);
+                available.delete(body.id);
+                available.delete(hi.id);
+                matched = true;
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
 
     // Pass 1 — verticals (same type, opposite direction, strike-sorted).
     for (const type of ["Call", "Put"] as const) {

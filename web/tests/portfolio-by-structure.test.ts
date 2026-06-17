@@ -401,6 +401,58 @@ describe("buildTickerGroups — virtual combo detection (orphan single legs)", (
     expect(pair0?.label).toContain("$175");
   });
 
+  it("SPCX 1:2:1 put butterfly (Long 8 / Short 16 / Long 8) → butterfly, not 3 singles (user-reported)", () => {
+    const flyLeg = (
+      dir: "LONG" | "SHORT",
+      strike: number,
+      contracts: number,
+    ): PortfolioPosition => ({
+      id: nextId(),
+      ticker: "SPCX",
+      structure: `${dir === "LONG" ? "Long" : "Short"} Put $${strike}.0`,
+      structure_type: `${dir === "LONG" ? "Long" : "Short"} Put`,
+      risk_profile: dir === "LONG" ? "defined" : "undefined",
+      direction: dir === "LONG" ? "DEBIT" : "CREDIT",
+      contracts,
+      expiry: "2026-09-18",
+      entry_cost: dir === "LONG" ? 100 : -100,
+      market_value: dir === "LONG" ? 120 : -80,
+      legs: [
+        {
+          type: "Put",
+          direction: dir,
+          strike,
+          contracts,
+          avg_cost: dir === "LONG" ? 100 : -100,
+          entry_cost: dir === "LONG" ? 100 : -100,
+          market_price: null,
+          market_value: dir === "LONG" ? 120 : -80,
+        },
+      ],
+    });
+    // Wings 8+8 = body 16, body strike (200) between the wings (190/210).
+    const positions = [
+      flyLeg("LONG", 210, 8),
+      flyLeg("SHORT", 200, 16),
+      flyLeg("LONG", 190, 8),
+    ];
+    const groups = buildTickerGroups(positions, {});
+    const cats = groups[0].optionsByCategory;
+    expect(cats.get("butterfly")?.length).toBe(3);
+    expect(cats.has("single")).toBe(false);
+    // All three legs share one pair key + a Put Butterfly label.
+    const fly = cats.get("butterfly")!;
+    const keys = new Set(
+      fly.map((p) => groups[0].virtualPairs.get(p.id)?.pairKey),
+    );
+    expect(keys.size).toBe(1);
+    const label = groups[0].virtualPairs.get(fly[0].id)?.label ?? "";
+    expect(label).toMatch(/Put Butterfly/);
+    expect(label).toContain("$190");
+    expect(label).toContain("$200");
+    expect(label).toContain("$210");
+  });
+
   it("two TSLA Put spreads at same expiry → two distinct pair keys (tight-strike matching)", () => {
     // Simulates two Bull Put Spreads at the same expiry. Pair-by-strike
     // ensures we don't cross legs of different spreads.
