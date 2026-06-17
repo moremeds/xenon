@@ -5,6 +5,9 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-06-17
+
+
 ### Added
 
 - **Read-only Futu order querying — unified with IB, structure-grouped, DB-first (#153).** Brings the Futu broker tab to IB parity for the Orders, Historical Trades (blotter), and Trade Journal surfaces. Open + historical orders, per-order fees, and a FIFO-matched closed-trade book sync from the local Futu OpenD into Postgres (`futu_orders`, `futu_order_fees`, `futu_closed_trades`) and render through the existing FastAPI read routes + Next.js — DB-first, no JSON fallbacks, fully read-only (no orders/fills/quotes). Multi-leg option closes are grouped into structures by closing order id: the blotter and journal show SYMBOL = underlying and DESCRIPTION = the classified structure name (vertical, straddle, risk reversal, …) instead of duplicate full-OCC strings, sorted newest-first, with a compact non-wrapping date column. The Trade Journal auto-imports one self-healing `FUTU_AUTO_IMPORT` entry per closing structure (purge-and-upsert keyed on the close-order group, scoped per account).
@@ -12,7 +15,6 @@ All notable changes to Xenon are documented here. Format loosely based on
 ### Fixed
 
 - **Stale Futu data (~half a month behind) and silent sync aborts (#153).** The sync now pulls fresh deals/orders from OpenD on an incremental watermark (`resolve_incremental_since`) instead of leaning on the fixed daily-history window, and tolerates Futu's `'N/A'` / NaN / list-valued frame cells (`_coerce_num` / `_na_to_none`) — including `fetch_order_fees` — that previously raised `ValueError`/array-ambiguity and silently aborted the entire sync before the closed-trade rebuild ran. Closed-trade rebuild and journal sync are guarded by a per-scope Postgres advisory lock and honor `XENON_READ_ONLY=1`.
-
 ## [0.5.1] — 2026-06-17
 
 ### Added
