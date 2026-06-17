@@ -1,7 +1,13 @@
 // @vitest-environment jsdom
-import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, it, expect, afterEach } from "vitest";
+import { render, screen, cleanup } from "@testing-library/react";
 import Sidebar from "../components/Sidebar";
+
+// Unmount after each test so next/link's mount-time prefetch (IntersectionObserver
+// / idle callback) is torn down before the jsdom env is destroyed. Without this
+// the leaked callbacks fire after teardown as "window is not defined" unhandled
+// errors, which vitest 4 reports as a non-zero exit even though all tests pass.
+afterEach(cleanup);
 
 const base = { activeSection: "portfolio" as const, actionTone: "#fff" };
 
