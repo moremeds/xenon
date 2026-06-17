@@ -36,7 +36,12 @@ INTERNALS_SKEW_CACHE_DIR = DATA_DIR / "cache"
 INTERNALS_SKEW_CACHE_TTL_SECONDS = 60 * 15
 
 from xenon.api import trading_mode
-from xenon.api.auth import verify_api_key, verify_clerk_jwt
+from xenon.api.auth import (
+    classify_auth,
+    validate_auth_config,
+    verify_api_key,
+    verify_clerk_jwt,
+)
 from xenon.api.guards import (
     get_account_scope,
     get_broker_scope,
@@ -470,6 +475,8 @@ async def lifespan(app: FastAPI):
     """Start IB pool and UW client on startup, tear down on shutdown."""
     global ib_pool, uw_available
 
+    logger.info(validate_auth_config())  # logs posture; raises if internal token == query key
+
     if _is_test_mode():
         logger.info("Xenon API starting in test mode; IB Gateway and pool startup are disabled")
         uw_available = bool(os.environ.get("UW_TOKEN"))
@@ -626,49 +633,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Auth middleware — protect all routes except /health and internal ticket validation
+# Auth middleware — only /health and the internal ticket-validate probe are exempt.
+# /docs and /openapi.json are deliberately NOT exempt: they expose the full trading
+# API schema and now require auth (localhost / internal token / Clerk).
 AUTH_EXEMPT_PATHS = {
     "/health",
     "/ws-ticket/validate",
-    "/docs",
-    "/openapi.json",
-    # B3 — /dev/rehydrate/synthetic intentionally NOT listed here. The route
-    # is protected by the _dev_probes_enabled() gate (DEV_PROBES/test_mode),
-    # the localhost-bypass below, and standard Clerk auth. Exempting it would
-    # expose a public write endpoint if DEV_PROBES=1 leaked into a non-local env.
+    # /dev/rehydrate/synthetic intentionally NOT listed: gated by _dev_probes_enabled()
+    # AND now by classify_auth (fail-closed). Exempting it would risk a public write
+    # endpoint if DEV_PROBES=1 leaked into a non-local env.
 }
 
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    """Require Clerk JWT for all endpoints except exempted paths and localhost."""
+    """Authorize via classify_auth (fail-closed); defer Clerk JWT to async validation."""
     if request.url.path in AUTH_EXEMPT_PATHS:
         return await call_next(request)
 
-    if not os.environ.get("CLERK_JWKS_URL"):
+    decision = classify_auth(request)
+
+    if decision.action == "pass":
+        request.state.user = decision.identity
         return await call_next(request)
 
-    # Skip auth for server-to-server calls from localhost (Next.js → FastAPI)
-    client_host = request.client.host if request.client else None
-    if client_host in ("127.0.0.1", "::1"):
+    if decision.action == "clerk":
+        try:
+            payload = await verify_clerk_jwt(request)
+            request.state.user = payload
+        except HTTPException as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+            )
         return await call_next(request)
 
-    # API key auth — scoped to historical/contract endpoints only
-    service_identity = verify_api_key(request)
-    if service_identity:
-        request.state.user = service_identity
-        return await call_next(request)
-
-    try:
-        payload = await verify_clerk_jwt(request)
-        request.state.user = payload
-    except HTTPException as exc:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"detail": exc.detail},
-        )
-
-    return await call_next(request)
+    return JSONResponse(
+        status_code=401,
+        content={"detail": "Authentication required"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1293,9 +1296,15 @@ async def dev_rehydrate_synthetic():
 
 
 @app.post("/ws-ticket")
-async def get_ws_ticket(payload: dict = Depends(verify_clerk_jwt)):
-    """Issue a short-lived ticket for WebSocket authentication."""
-    ticket = create_ticket(payload["sub"])
+async def get_ws_ticket(request: Request):
+    """Issue a short-lived ticket for WebSocket authentication.
+
+    The middleware already authorized this request (localhost / internal token /
+    API key / Clerk) and set request.state.user. Reading it here avoids a second
+    Clerk validation that would raise when CLERK_JWKS_URL is unset (prod).
+    """
+    user = getattr(request.state, "user", None) or {}
+    ticket = create_ticket(user.get("sub", "unknown"))
     return {"ticket": ticket}
 
 
