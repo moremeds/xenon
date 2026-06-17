@@ -5,6 +5,9 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-06-17
+
+
 ### Added
 
 - **Stock/option book URL split in AssetCockpit (#151).** The cockpit book is now URL-driven: bare `/TICKER` shows the underlying stock book; `?leg=<optionKey>` shows that option's book (head, montage, tape, and depth all follow the option subject). A `?posId=`-selected single-leg option position also opens the option book automatically without changing the URL. The underlying link in the option book head navigates back to the stock view. Multi-leg positions continue to show the stock book with a spread-net header.
@@ -16,7 +19,6 @@ All notable changes to Xenon are documented here. Format loosely based on
 - **Non-canonical `?leg=` values failed to resolve prices/depths/tape (#151).** `resolveBookSubject` now canonicalises the key via `optionKey(parseOptionKey(...))` so dashed-expiry or lowercase leg parameters (e.g. `QQQ_2026-07-17_692_P`) match the canonical form used to key the price/depth/tape stores.
 - **Lowercase→uppercase ticker redirect dropped `?leg` and `?posId` (#151).** `/qqq?leg=QQQ_20260717_692_P` redirected to `/QQQ` (bare), losing the option selection. Fixed: redirect now preserves `tab`, `posId`, and `leg` via `URLSearchParams`.
 - **Option tape shown by default; "OPTION" label in book head (#151).** Option books now start with the tape collapsed (no tick-by-tick `AllLast` data from IB for options) and omit the `OPTION` kind badge from the head — the contract spec (`QQQ $692P 07/17/26`) already identifies the instrument.
-
 ## [0.5.0] — 2026-06-17
 
 ### Added
