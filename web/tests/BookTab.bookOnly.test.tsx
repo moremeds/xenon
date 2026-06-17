@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { describe, it, expect, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, act } from "@testing-library/react";
 import BookTab from "@/components/ticker-detail/BookTab";
 import type { DepthBook } from "@/lib/pricesProtocol";
 
-afterEach(cleanup);
+// Wrap cleanup in act() to flush React's scheduler queue before JSDOM tears down.
+afterEach(() => act(cleanup));
 
 const baseProps = {
   ticker: "SPX",

@@ -5,8 +5,19 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.5.0] — 2026-06-17
+### Added
 
+- **Stock/option book URL split in AssetCockpit (#151).** The cockpit book is now URL-driven: bare `/TICKER` shows the underlying stock book; `?leg=<optionKey>` shows that option's book (head, montage, tape, and depth all follow the option subject). A `?posId=`-selected single-leg option position also opens the option book automatically without changing the URL. The underlying link in the option book head navigates back to the stock view. Multi-leg positions continue to show the stock book with a spread-net header.
+
+### Fixed
+
+- **Option book fell back to stock book when quote was momentarily absent (#151).** `positionOptionKey` previously derived the option key via `resolveTickerQuote`'s `priceKey`, which is only set when a live or calculated mark exists. Cold start and illiquid contracts silently showed the stock book. Fixed by computing the key directly from the position leg via `legPriceKey` (quote-independent).
+- **Option book borrowed the underlying's L1 bid/ask when the option quote was absent (#151).** `BookTab`'s price fallback chain (`tickerPriceData ?? prices[ticker]`) leaked the stock's live bid/ask/last into the option head display. Fixed: the stock ticker fallback only applies for stock book subjects.
+- **Non-canonical `?leg=` values failed to resolve prices/depths/tape (#151).** `resolveBookSubject` now canonicalises the key via `optionKey(parseOptionKey(...))` so dashed-expiry or lowercase leg parameters (e.g. `QQQ_2026-07-17_692_P`) match the canonical form used to key the price/depth/tape stores.
+- **Lowercase→uppercase ticker redirect dropped `?leg` and `?posId` (#151).** `/qqq?leg=QQQ_20260717_692_P` redirected to `/QQQ` (bare), losing the option selection. Fixed: redirect now preserves `tab`, `posId`, and `leg` via `URLSearchParams`.
+- **Option tape shown by default; "OPTION" label in book head (#151).** Option books now start with the tape collapsed (no tick-by-tick `AllLast` data from IB for options) and omit the `OPTION` kind badge from the head — the contract spec (`QQQ $692P 07/17/26`) already identifies the instrument.
+
+## [0.5.0] — 2026-06-17
 
 ### Added
 
@@ -15,6 +26,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 ### Fixed
 
 - **L2 depth froze ~5s after subscribing (#150).** IB **code 2152** on an entitled book is an _informational_ venue-permission summary, not an entitlement loss, but the relay's broad error handler misclassified it as `no-entitlement` and tore down the working depth ticket. Narrowed the classification (`isDepthPermissionError` in `ib_connection_status.js`) so only real permission errors (10089/10092, or messages matching `depth.*not (allowed|eligible)|not supported for this combination`) tear down; 2152 and other 21xx info codes are logged and ignored. Live-verified: 99 depth-batches over 16s with zero teardowns and `ib_connected` steady.
+
 ## [0.4.2] — 2026-06-16
 
 ### Added
