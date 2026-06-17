@@ -27,9 +27,15 @@ export function mergeDashboardOrders(
   const ibFills = ib?.executed_orders ?? [];
   const futuFills = futu?.executed_orders ?? [];
 
-  // Latest of the two sync timestamps (ISO strings sort lexicographically).
+  // Latest of the two sync timestamps. Compare numerically via Date.parse
+  // rather than lexicographically — IB and Futu are independent producers, so
+  // one emitting an offset (`+00:00`) while the other emits `Z` would break a
+  // raw string sort. Unparseable stamps fall to the end and are ignored.
   const lastSync =
-    [ib?.last_sync, futu?.last_sync].filter(Boolean).sort().pop() ?? "";
+    [ib?.last_sync, futu?.last_sync]
+      .filter((s): s is string => Boolean(s))
+      .sort((a, b) => Date.parse(a) - Date.parse(b))
+      .at(-1) ?? "";
 
   return {
     last_sync: lastSync,

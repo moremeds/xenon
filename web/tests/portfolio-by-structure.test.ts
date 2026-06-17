@@ -453,6 +453,49 @@ describe("buildTickerGroups — virtual combo detection (orphan single legs)", (
     expect(label).toContain("$210");
   });
 
+  it("unequal wings (5 / 16 / 11) are NOT a butterfly — ratio spread, not 1:2:1", () => {
+    const flyLeg = (
+      dir: "LONG" | "SHORT",
+      strike: number,
+      contracts: number,
+    ): PortfolioPosition => ({
+      id: nextId(),
+      ticker: "SPCX",
+      structure: `${dir === "LONG" ? "Long" : "Short"} Put $${strike}.0`,
+      structure_type: `${dir === "LONG" ? "Long" : "Short"} Put`,
+      risk_profile: dir === "LONG" ? "defined" : "undefined",
+      direction: dir === "LONG" ? "DEBIT" : "CREDIT",
+      contracts,
+      expiry: "2026-09-18",
+      entry_cost: dir === "LONG" ? 100 : -100,
+      market_value: dir === "LONG" ? 120 : -80,
+      legs: [
+        {
+          type: "Put",
+          direction: dir,
+          strike,
+          contracts,
+          avg_cost: dir === "LONG" ? 100 : -100,
+          entry_cost: dir === "LONG" ? 100 : -100,
+          market_price: null,
+          market_value: dir === "LONG" ? 120 : -80,
+        },
+      ],
+    });
+    // Wings 5 + 11 = body 16 and strikes straddle, but wings are unequal — this
+    // is a ratio spread, not a 1:2:1 fly. Must NOT be mislabeled a butterfly.
+    const positions = [
+      flyLeg("LONG", 210, 11),
+      flyLeg("SHORT", 200, 16),
+      flyLeg("LONG", 190, 5),
+    ];
+    const groups = buildTickerGroups(positions, {});
+    const cats = groups[0].optionsByCategory;
+    expect(cats.has("butterfly")).toBe(false);
+    // The three legs fall through to single rows (no clean pair).
+    expect(cats.get("single")?.length).toBe(3);
+  });
+
   it("two TSLA Put spreads at same expiry → two distinct pair keys (tight-strike matching)", () => {
     // Simulates two Bull Put Spreads at the same expiry. Pair-by-strike
     // ensures we don't cross legs of different spreads.

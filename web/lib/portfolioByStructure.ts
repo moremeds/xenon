@@ -240,12 +240,19 @@ function detectVirtualCombos(
   for (const [expiry, group] of byExpiry.entries()) {
     const available = new Set(group.map((p) => p.id));
 
-    // Pass 0 — butterfly (1:2:1, broken wing allowed): two same-type wings on
-    // one side + a body on the other, where body.contracts == the sum of the
-    // two wing contracts and the body strike sits strictly between the wings.
-    // Claimed before the 2-leg passes so a real fly isn't fragmented into a
-    // vertical + an orphan leg. Covers long flies (2 long wings + short body)
-    // and short flies (2 short wings + long body).
+    // Pass 0 — butterfly (1:2:1): two equal-size same-type wings on one side +
+    // a 2× body on the other, where the wings are equal contracts, sum to the
+    // body, and the body strike sits strictly between the wings. Requiring
+    // equal wings keeps this to the genuine 1:2:1 ratio — broken-wing flies
+    // still qualify (equal contracts, only the strikes are asymmetric) while
+    // ratio spreads like 5/16/11 are rejected. Claimed before the 2-leg passes
+    // so a real fly isn't fragmented into a vertical + an orphan leg. Covers
+    // long flies (2 long wings + short body) and short flies (2 short wings +
+    // long body). IB position snapshots carry no combo lineage (CLAUDE.md
+    // § Portfolio Structure Classification), so this is intentionally a
+    // lineage-free heuristic: three independent legs that happen to form a
+    // 1:2:1 shape will group — consistent with how the verticals pass treats
+    // orphan opposite legs.
     for (const type of ["Call", "Put"] as const) {
       for (const bodyDir of ["SHORT", "LONG"] as const) {
         const wingDir = bodyDir === "SHORT" ? "LONG" : "SHORT";
@@ -279,7 +286,10 @@ function detectVirtualCombos(
             if (!available.has(lo.id)) continue;
             for (const hi of highs) {
               if (!available.has(hi.id)) continue;
-              if (lo.legs[0].contracts + hi.legs[0].contracts === bodyQty) {
+              if (
+                lo.legs[0].contracts === hi.legs[0].contracts &&
+                lo.legs[0].contracts + hi.legs[0].contracts === bodyQty
+              ) {
                 markTriple(
                   lo,
                   body,
