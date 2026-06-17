@@ -213,6 +213,79 @@ def upsert_auto_import_entry(
     return journal_entry_to_payload(existing) if existing is not None else None
 
 
+def upsert_futu_auto_import_entry(
+    conn: Connection,
+    *,
+    scope: AccountScope,
+    closed_trade: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Idempotently create a FUTU_AUTO_IMPORT journal entry for a closed Futu lot.
+
+    Futu has no `trades` row to resolve scope from (the trades table is IB-locked),
+    so scope + closed-trade detail come from the caller. `trade_id` stays NULL;
+    dedup is on the dedicated `futu_close_id` column via the partial unique index
+    `uq_journal_futu_auto_import`. Metadata keys mirror those `journal_entry_to_payload`
+    lifts top-level so the journal table renders QTY / ENTRY COST / REALIZED P&L / ROR.
+    """
+    cost_basis = closed_trade.get("cost_basis")
+    realized = closed_trade.get("realized_pnl")
+    ror = None
+    if cost_basis not in (None, 0) and realized is not None:
+        ror = float(realized) / float(cost_basis)
+    opened_at = closed_trade.get("opened_at")
+    closed_at = closed_trade["closed_at"]
+    meta = {
+        "source": "futu_closed_trade",
+        "futu_close_id": closed_trade["futu_close_id"],
+        "quantity": float(closed_trade["quantity"]),
+        "entry_cost": float(cost_basis) if cost_basis is not None else None,
+        "cost_basis": float(cost_basis) if cost_basis is not None else None,
+        "proceeds": float(closed_trade["proceeds"]) if closed_trade.get("proceeds") is not None else None,
+        "realized_pnl": float(realized) if realized is not None else None,
+        "return_on_risk": ror,
+        "opened_at": opened_at.astimezone(timezone.utc).isoformat() if isinstance(opened_at, datetime) else None,
+        "close_date": closed_at.astimezone(timezone.utc).isoformat()
+        if isinstance(closed_at, datetime)
+        else str(closed_at),
+        "outcome": "WIN" if (realized is not None and float(realized) >= 0) else "LOSS",
+    }
+    stmt = (
+        pg_insert(journal_entries)
+        .values(
+            trade_id=None,
+            ticker=closed_trade["ticker"],
+            decision="FUTU_AUTO_IMPORT",
+            authored_by="system",
+            metadata=meta,
+            futu_close_id=closed_trade["futu_close_id"],
+            broker=scope.broker,
+            account_env=scope.account_env,
+            broker_account=scope.broker_account,
+            authored_at=closed_at,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["broker", "account_env", "broker_account", "futu_close_id"],
+            index_where=text("decision = 'FUTU_AUTO_IMPORT' AND futu_close_id IS NOT NULL"),
+        )
+        .returning(journal_entries)
+    )
+    inserted = conn.execute(stmt).first()
+    if inserted is not None:
+        return journal_entry_to_payload(inserted)
+    existing = conn.execute(
+        select(journal_entries)
+        .where(
+            journal_entries.c.decision == "FUTU_AUTO_IMPORT",
+            journal_entries.c.broker == scope.broker,
+            journal_entries.c.account_env == scope.account_env,
+            journal_entries.c.broker_account == scope.broker_account,
+            journal_entries.c.futu_close_id == closed_trade["futu_close_id"],
+        )
+        .limit(1)
+    ).first()
+    return journal_entry_to_payload(existing) if existing is not None else None
+
+
 def pending_journal_outbox_count(conn: Connection, *, scope: AccountScope) -> int:
     result = conn.execute(
         select(func.count())
