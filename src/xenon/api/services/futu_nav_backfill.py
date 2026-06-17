@@ -39,6 +39,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from xenon.api.services.futu_closed_trades import match_closed_lots
 from xenon.db.queries.futu_history import list_cashflows, list_trades
 from xenon.db.schema import nav_history
 from xenon.execution.account_scope import AccountScope
@@ -79,73 +80,21 @@ def _raw_trd_side(trade: dict) -> str:
 
 
 def _compute_daily_realized_pnl(trades: list[dict]) -> dict[date, Decimal]:
-    """FIFO-match closing trades against open lots; bucket realized P&L by day.
+    """Bucket FIFO realized P&L by close day.
 
-    Per-symbol queues track open longs and open shorts separately:
-      BUY        → push to longs[code]
-      SELL       → pop from longs[code]; realized = (sell_p - open_p) * qty * mult
-      SELL_SHORT → push to shorts[code]
-      BUY_BACK   → pop from shorts[code]; realized = (open_p - cover_p) * qty * mult
+    Single source of FIFO truth: delegates to
+    `xenon.api.services.futu_closed_trades.match_closed_lots` (the same matcher
+    that feeds the closed-trades surface and FUTU_AUTO_IMPORT journal rows), then
+    sums each closed lot's realized P&L by its UTC close date. Keeping one matcher
+    means NAV and the closed-trades table can never drift.
 
-    Closes against an empty queue (account had a pre-inception position) are
-    skipped with a warning — no cost basis, no P&L contribution.
-
-    Operates on trades in chronological order; list_trades returns ascending.
+    The matcher preserves the prior semantics: per-symbol long/short FIFO queues,
+    100x options multiplier, and warnings on closes with no open lot / unknown
+    sides (pre-inception positions contribute no P&L).
     """
-    longs: dict[str, deque[tuple[Decimal, Decimal]]] = defaultdict(deque)
-    shorts: dict[str, deque[tuple[Decimal, Decimal]]] = defaultdict(deque)
     daily: dict[date, Decimal] = defaultdict(lambda: Decimal("0"))
-
-    for t in trades:
-        code = t["futu_code"]
-        ticker = t["ticker"]
-        mult = Decimal(_contract_multiplier(ticker))
-        qty = Decimal(t["quantity"])
-        price = Decimal(t["price"])
-        d = t["filled_at"].astimezone(timezone.utc).date()
-        side = _raw_trd_side(t)
-
-        if side == "BUY":
-            longs[code].append((qty, price))
-        elif side == "SELL_SHORT":
-            shorts[code].append((qty, price))
-        elif side == "SELL":
-            remaining = qty
-            while remaining > 0 and longs[code]:
-                lot_qty, lot_price = longs[code][0]
-                matched = min(lot_qty, remaining)
-                daily[d] += (price - lot_price) * matched * mult
-                if matched == lot_qty:
-                    longs[code].popleft()
-                else:
-                    longs[code][0] = (lot_qty - matched, lot_price)
-                remaining -= matched
-            if remaining > 0:
-                logger.warning(
-                    "SELL with no open long lot: code=%s qty_unmatched=%s — skipping P&L (pre-inception position?)",
-                    code,
-                    remaining,
-                )
-        elif side == "BUY_BACK":
-            remaining = qty
-            while remaining > 0 and shorts[code]:
-                lot_qty, lot_price = shorts[code][0]
-                matched = min(lot_qty, remaining)
-                daily[d] += (lot_price - price) * matched * mult
-                if matched == lot_qty:
-                    shorts[code].popleft()
-                else:
-                    shorts[code][0] = (lot_qty - matched, lot_price)
-                remaining -= matched
-            if remaining > 0:
-                logger.warning(
-                    "BUY_BACK with no open short lot: code=%s qty_unmatched=%s",
-                    code,
-                    remaining,
-                )
-        else:
-            logger.warning("unknown trd_side=%r — skipping", side)
-
+    for lot in match_closed_lots(trades):
+        daily[lot.closed_at.astimezone(timezone.utc).date()] += lot.realized_pnl
     return dict(daily)
 
 

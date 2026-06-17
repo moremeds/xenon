@@ -136,7 +136,9 @@ describe("IB clientId collision prevention", () => {
     const filePath = path.resolve(__dirname, "../app/api/orders/route.ts");
     const content = await readFile(filePath, "utf8");
     expect(content.includes("xenonFetch")).toBeTruthy();
-    expect(content.includes('"/orders/refresh"')).toBeTruthy();
+    // The path is built as a template literal `/orders/refresh${qs}` so the
+    // broker scope (?broker=FUTU) can be forwarded — match the path substring.
+    expect(content.includes("/orders/refresh")).toBeTruthy();
   });
 
   it("cancel route passes clientId via typed wrapper", async () => {

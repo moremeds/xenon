@@ -65,6 +65,11 @@ export function useSyncHook<T>(
   const didInitialSync = useRef(false);
   const didInitialRead = useRef(false);
   const initialLoadKeyRef = useRef<string | null>(null);
+  // Tracks the live endpoint so an in-flight response for a previous endpoint
+  // (e.g. an IB fetch still resolving after the broker switched to FUTU) can be
+  // discarded instead of clobbering the current endpoint's data.
+  const currentEndpointRef = useRef(endpoint);
+  currentEndpointRef.current = endpoint;
   const requestRef = useRef<
     (method: RetryMethod, background?: boolean) => Promise<void>
   >(async () => {});
@@ -81,8 +86,9 @@ export function useSyncHook<T>(
       if (!background && method === "POST") {
         setSyncing(true);
       }
+      const reqEndpoint = endpoint;
       try {
-        const res = await fetch(endpoint, { method });
+        const res = await fetch(reqEndpoint, { method });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           throw new Error(
@@ -90,6 +96,8 @@ export function useSyncHook<T>(
           );
         }
         const json = (await res.json()) as T;
+        // Discard a stale response if the endpoint changed mid-flight (broker switch).
+        if (reqEndpoint !== currentEndpointRef.current) return;
         const stamp = extractTimestamp
           ? extractTimestamp(json)
           : new Date().toISOString();
@@ -105,6 +113,7 @@ export function useSyncHook<T>(
           }, retryIntervalMs);
         }
       } catch (err) {
+        if (reqEndpoint !== currentEndpointRef.current) return;
         // Only show error if we don't already have valid cached data —
         // unless the caller explicitly wants the stale view marked as degraded.
         setData((prev) => {
@@ -144,18 +153,21 @@ export function useSyncHook<T>(
     if (initialLoadKeyRef.current === endpoint) return;
     initialLoadKeyRef.current = endpoint;
 
+    const reqEndpoint = endpoint;
     const init = async () => {
       try {
-        const res = await fetch(endpoint, { method: "GET" });
+        const res = await fetch(reqEndpoint, { method: "GET" });
         if (!res.ok) throw new Error("Failed to fetch cached data");
         const json = (await res.json()) as T;
+        // Discard a stale initial read if the endpoint changed mid-flight.
+        if (reqEndpoint !== currentEndpointRef.current) return;
         const stamp = extractTimestamp ? extractTimestamp(json) : null;
         setData(json);
         setLastSync(stamp);
         setError(null);
         setLoading(false);
         didInitialRead.current = true;
-        _syncCache.set(endpoint, { data: json, lastSync: stamp });
+        _syncCache.set(reqEndpoint, { data: json, lastSync: stamp });
 
         clearRetry();
         if (shouldRetry?.(json) && retryIntervalMs > 0) {
@@ -164,16 +176,19 @@ export function useSyncHook<T>(
           }, retryIntervalMs);
         }
 
-        // Auto-sync on first load when the hook is active.
-        if (active && !didInitialSync.current) {
+        // Auto-sync on first load when the hook is active. GET-only hooks
+        // (hasPost=false, e.g. journal) already have their data from this read —
+        // a redundant GET sync only risks a stale-response race, so skip it.
+        if (active && hasPost && !didInitialSync.current) {
           didInitialSync.current = true;
           void triggerSync();
         }
       } catch (err) {
+        if (reqEndpoint !== currentEndpointRef.current) return;
         setError(err instanceof Error ? err.message : "Unknown error");
         setLoading(false);
         didInitialRead.current = true;
-        if (active && !didInitialSync.current) {
+        if (active && hasPost && !didInitialSync.current) {
           didInitialSync.current = true;
           void triggerSync();
         }
@@ -185,6 +200,7 @@ export function useSyncHook<T>(
     active,
     clearRetry,
     endpoint,
+    hasPost,
     triggerSync,
     extractTimestamp,
     retryIntervalMs,

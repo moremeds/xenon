@@ -147,10 +147,17 @@ def test_performance_futu_when_opend_unreachable_returns_503(client: TestClient)
     fake_client = MagicMock()
     fake_client.is_connected.return_value = False
     fake_client.connect.side_effect = FutuConnectionError("no opend")
-    with patch("xenon.api.server._get_futu_client", return_value=fake_client):
+    with (
+        patch("xenon.api.server._get_futu_client", return_value=fake_client),
+        # No synced Futu data — isolate from whatever the dev DB happens to hold.
+        patch("xenon.api.guards._futu_scope_from_db", return_value=None),
+    ):
         resp = client.get("/performance?broker=FUTU")
     assert resp.status_code == 503
-    assert "opend unreachable" in resp.json()["detail"].lower()
+    # Read-path scope resolution is non-blocking: it never calls connect() (the
+    # Futu SDK retries a down OpenD forever). With is_connected()=False and no
+    # synced Futu data it 503s with this message — not "OpenD unreachable".
+    assert "not connected" in resp.json()["detail"].lower()
 
 
 def test_performance_futu_resolves_scope_from_matched_account(client: TestClient) -> None:

@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from xenon.api.guards import get_account_scope, is_read_only, read_only_403
+from xenon.api.guards import get_account_scope, get_broker_scope, is_read_only, read_only_403
 from xenon.db.engine import get_sync_engine
 from xenon.db.queries.journal import (
     create_journal_entry,
@@ -47,7 +47,7 @@ def _parse_trade_id(value: Any) -> int | None:
 
 @router.get("/journal")
 async def journal_list(
-    scope: AccountScope = Depends(get_account_scope),
+    scope: AccountScope = Depends(get_broker_scope),
     days: int = Query(90, ge=1, le=3650),
     limit: int = Query(500, ge=1, le=5000),
 ) -> dict[str, list[dict[str, Any]]]:

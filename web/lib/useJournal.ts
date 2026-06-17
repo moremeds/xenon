@@ -20,11 +20,23 @@ export type UseJournalReturn = {
   lastSyncResult: { imported: number; skipped: number } | null;
 };
 
-export function useJournal(active = true): UseJournalReturn {
-  const stableConfig = useMemo(() => config, []);
+export function useJournal(
+  active = true,
+  broker: "IB" | "FUTU" = "IB",
+): UseJournalReturn {
+  const stableConfig = useMemo(
+    () => ({
+      ...config,
+      endpoint: broker === "FUTU" ? "/api/journal?broker=FUTU" : "/api/journal",
+    }),
+    [broker],
+  );
   const result = useSyncHook<TradeLogData>(stableConfig, active);
   const [syncing, setSyncing] = useState(false);
-  const [lastSyncResult, setLastSyncResult] = useState<{ imported: number; skipped: number } | null>(null);
+  const [lastSyncResult, setLastSyncResult] = useState<{
+    imported: number;
+    skipped: number;
+  } | null>(null);
 
   const syncWithIB = useCallback(async () => {
     setSyncing(true);

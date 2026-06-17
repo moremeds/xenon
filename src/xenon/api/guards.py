@@ -101,14 +101,44 @@ def get_account_scope(request: Request) -> AccountScope:
     return resolve_from_app_state(request.app.state)
 
 
-def get_performance_scope(request: Request, broker: str | None = None) -> AccountScope:
-    """Broker-aware scope dep for the performance route.
+def _futu_scope_from_db() -> AccountScope | None:
+    """Last-synced FUTU scope from Postgres (DB-first fallback when OpenD is down).
 
-    `?broker=IB` (default) resolves the live IB scope from app.state.
-    `?broker=FUTU` resolves from the lazily-connected FutuClient's matched
-    account — connecting if necessary. Raises 503 when the Futu OpenD is
-    unreachable so the UI can render a connect-prompt distinctly from a
-    fatal error.
+    Reads the most recent persisted Futu rows so the read path (orders / blotter /
+    journal / performance) still serves cached data without a live OpenD connect.
+    Returns None only when no Futu data has ever been synced.
+    """
+    from sqlalchemy import desc, select
+
+    from xenon.db.engine import get_sync_engine
+    from xenon.db.schema import futu_orders, futu_trades
+
+    engine = get_sync_engine()
+    try:
+        with engine.connect() as conn:
+            for table, order_col in ((futu_orders, "updated_at"), (futu_trades, "filled_at")):
+                row = conn.execute(
+                    select(table.c.account_env, table.c.broker_account)
+                    .where(table.c.broker == "FUTU")
+                    .order_by(desc(table.c[order_col]))
+                    .limit(1)
+                ).first()
+                if row is not None:
+                    return AccountScope(broker="FUTU", account_env=row[0], broker_account=row[1])
+    except Exception:  # pragma: no cover - DB unreachable too; let caller 503
+        return None
+    return None
+
+
+def get_broker_scope(request: Request, broker: str | None = None) -> AccountScope:
+    """Broker-aware scope dep for read routes (orders, blotter, journal, performance).
+
+    `?broker=IB` (default) resolves the live IB scope from app.state (env fallback
+    when the Gateway handshake is pending). `?broker=FUTU` resolves from the
+    lazily-connected FutuClient's matched account; if OpenD is unreachable it falls
+    back to the last-synced FUTU scope in Postgres so the DB-first read path keeps
+    serving cached orders/blotter/journal. Only 503s when OpenD is down AND no Futu
+    data has ever been synced.
     """
     b = (broker or "IB").upper()
     if b == "IB":
@@ -117,8 +147,8 @@ def get_performance_scope(request: Request, broker: str | None = None) -> Accoun
         except ValueError:
             # IB Gateway API handshake failed (TCP open, auth not accepted —
             # commonly "needs 2FA on IBKR mobile" or "client IP not in trusted
-            # list"). app.state.account stays empty. The /performance read path
-            # is Postgres-only, so degrade gracefully via env vars (dev.sh
+            # list"). app.state.account stays empty. The read path is
+            # Postgres-only, so degrade gracefully via env vars (dev.sh
             # exports XENON_BROKER_ACCOUNT + XENON_TRADING_MODE before boot).
             from xenon.execution.account_scope import resolve_from_env
 
@@ -134,29 +164,32 @@ def get_performance_scope(request: Request, broker: str | None = None) -> Accoun
     if b != "FUTU":
         raise HTTPException(status_code=400, detail=f"Unknown broker: {broker!r}")
 
-    # FUTU path — connect on demand and read ground truth from the SDK.
-    # Importing here avoids a circular import with server.py (which imports
-    # this module during route registration).
+    # FUTU read path — NON-BLOCKING. Never initiate a connect here: the futu SDK
+    # retries a refused OpenD indefinitely (conn=0(1), 0(2), ...) without raising,
+    # which would hang the read request and wedge the event loop. Use the live
+    # matched account only if the client is ALREADY connected; otherwise serve the
+    # last-synced scope from Postgres (DB-first). The connect happens on the write
+    # path (orders_refresh / blotter sync), bounded + off the event loop.
+    # Importing here avoids a circular import with server.py.
     from xenon.api import server as _server
-    from xenon.clients.futu_exceptions import FutuConnectionError, FutuError
     from xenon.execution.account_scope import env_from_trd_env
 
     client = _server._get_futu_client()
-    if not client.is_connected():
-        try:
-            client.connect()
-        except FutuConnectionError as exc:
-            raise HTTPException(status_code=503, detail=f"Futu OpenD unreachable: {exc}")
-        except FutuError as exc:
-            raise HTTPException(status_code=502, detail=f"Futu error: {exc}")
-    trd_env = client.trd_env_of_matched_account()
-    if trd_env is None:
-        raise HTTPException(status_code=503, detail="Futu account not matched yet")
-    acc_id = getattr(client, "_acc_id", None)
-    if acc_id is None:
-        raise HTTPException(status_code=503, detail="Futu account id unavailable")
-    try:
-        env = env_from_trd_env(trd_env)
-    except ValueError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-    return AccountScope(broker="FUTU", account_env=env, broker_account=str(acc_id))
+    if client.is_connected():
+        trd_env = client.trd_env_of_matched_account()
+        acc_id = getattr(client, "_acc_id", None)
+        if trd_env is not None and acc_id is not None:
+            try:
+                env = env_from_trd_env(trd_env)
+            except ValueError as exc:
+                raise HTTPException(status_code=502, detail=str(exc))
+            return AccountScope(broker="FUTU", account_env=env, broker_account=str(acc_id))
+    # Not connected (or not matched yet) → DB-first fallback, no blocking connect.
+    db_scope = _futu_scope_from_db()
+    if db_scope is not None:
+        return db_scope
+    raise HTTPException(status_code=503, detail="Futu not connected and no synced Futu data yet")
+
+
+# Backwards-compatible alias (the performance route imported the old name).
+get_performance_scope = get_broker_scope

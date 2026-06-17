@@ -129,7 +129,7 @@ export default function WorkspaceShell({
     lastSync: ordersLastSync,
     syncNow: ordersSyncNow,
     updateData: updateOrdersData,
-  } = useOrders(shouldAutoSyncOrders);
+  } = useOrders(shouldAutoSyncOrders, activeAccount === "futu" ? "FUTU" : "IB");
 
   // Trigger a fresh IB sync every time the user navigates TO the orders page.
   // place/modify/cancel all sync orders.json immediately after the action, so

@@ -93,6 +93,46 @@ def _enum_to_str(value: Any) -> str:
     raise ValueError(f"Unknown TrdEnv value: {value!r}")
 
 
+def _coerce_num(value: Any) -> Optional[float]:
+    """Coerce a Futu numeric cell to float, tolerating its sentinels.
+
+    Futu frames use the string ``'N/A'`` (and occasionally empty string) for
+    unset numeric fields — a plain limit order has no trail/stop ``aux_price``,
+    an unfilled order has no ``dealt_avg_price``. ``float('N/A')`` raised, which
+    crashed the whole frame normalization and aborted the orders sync. Any
+    non-numeric / NaN / None value maps to ``None``; valid numbers pass through.
+    """
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _na_to_none(value: Any) -> Any:
+    """Scrub a single frame cell's NaN → None for JSON, tolerating array cells.
+
+    `order_fee_query` returns ``fee_details`` as a multi-element list per row;
+    ``pd.isna(list_of_2+)`` returns a bool *array* and ``if array`` raised
+    ``ValueError`` — which aborted fetch_order_fees and the whole orders sync
+    before the closed-trade rebuild. Scalar NaN → None; any non-scalar (list /
+    ndarray) passes through unchanged.
+    """
+    try:
+        res = pd.isna(value)
+    except (TypeError, ValueError):
+        return value
+    if isinstance(res, bool):
+        return None if res else value
+    return value  # array-valued cell (e.g. fee_details list) — keep as-is
+
+
 # Defaults chosen to match Futu's 10 calls / 30s rate limit with safety margin.
 DEFAULT_POSITION_TTL_SEC = 30
 DEFAULT_ACCOUNT_TTL_SEC = 10
@@ -746,7 +786,7 @@ class FutuClient:
                         "price": float(row.get("price", 0) or 0),
                         "fees": 0.0,  # Futu reports fees separately via order detail; v1 sets 0
                         "filled_at": self._parse_futu_ts(row.get("create_time")),
-                        "raw": {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()},
+                        "raw": {k: _na_to_none(v) for k, v in row.to_dict().items()},
                     }
                 )
         return out
@@ -820,8 +860,157 @@ class FutuClient:
                             "occurred_at": self._parse_futu_ts(
                                 row.get("clearing_date") or cur_day.strftime("%Y-%m-%d 00:00:00")
                             ),
-                            "raw": {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()},
+                            "raw": {k: _na_to_none(v) for k, v in row.to_dict().items()},
                         }
                     )
             cur_day = cur_day + timedelta(days=1)
+        return out
+
+    # --- Orders (read-only) ------------------------------------------------
+
+    # Live/working statuses for the OPEN ORDERS surface (raw Futu OrderStatus
+    # labels). CANCELLING_* are in-flight cancels — still "working" until done.
+    OPEN_ORDER_STATUSES: tuple[str, ...] = (
+        "SUBMITTING",
+        "SUBMITTED",
+        "WAITING_SUBMIT",
+        "FILLED_PART",
+        "CANCELLING_PART",
+        "CANCELLING_ALL",
+    )
+
+    # order_fee_query shares the 10 req / 30s trade-query budget. Batching ids
+    # keeps call count low; 3.5s between chunks matches DEAL_THROTTLE_SEC.
+    FEE_THROTTLE_SEC: float = 3.5
+    _FEE_CHUNK = 50
+
+    def _normalize_order_row(self, row: Any) -> Dict[str, Any]:
+        """Shape one order_list/history_order frame row for insert_orders.
+
+        Verified columns (futu-api 0.137.0): code, trd_side, order_type,
+        order_status, order_id, qty, price, aux_price, time_in_force,
+        dealt_qty, dealt_avg_price, create_time, updated_time.
+        """
+        code = str(row.get("code", ""))
+        market, _, ticker = code.partition(".")
+        if not ticker:
+            ticker, market = code, ""
+        raw_side = str(row.get("trd_side", "")).upper()
+        action = {"BUY": "BUY", "SELL": "SELL", "SELL_SHORT": "SELL", "BUY_BACK": "BUY"}.get(raw_side, "BUY")
+        price = _coerce_num(row.get("price"))
+        aux = _coerce_num(row.get("aux_price"))
+        dealt_avg = _coerce_num(row.get("dealt_avg_price"))
+        return {
+            "futu_order_id": str(row.get("order_id")),
+            "ticker": ticker,
+            "futu_code": code,
+            "market": market,
+            "action": action,
+            "order_type": str(row.get("order_type", "NORMAL")),
+            "quantity": _coerce_num(row.get("qty")) or 0.0,
+            "limit_price": price if price and price > 0 else None,
+            "aux_price": aux if aux else None,
+            "status": str(row.get("order_status", "")),
+            "tif": str(row.get("time_in_force", "DAY")),
+            "filled_qty": _coerce_num(row.get("dealt_qty")) or 0.0,
+            "avg_fill_price": dealt_avg if dealt_avg else None,
+            "created_at": self._parse_futu_ts(row.get("create_time")),
+            "updated_at": self._parse_futu_ts(row.get("updated_time") or row.get("create_time")),
+            "raw": {k: _na_to_none(v) for k, v in row.to_dict().items()},
+        }
+
+    def fetch_open_orders(self) -> List[Dict[str, Any]]:
+        """Pull current/today's orders from OpenD (order_list_query).
+
+        Returns rows shaped for insert_orders. Includes filled/cancelled-today
+        orders too; the API read path filters to OPEN_ORDER_STATUSES.
+        """
+        self._ensure_connected()
+        try:
+            from futu import RET_OK, TrdEnv  # type: ignore
+        except ImportError as exc:
+            raise FutuConnectionError("futu-api missing") from exc
+        env_enum = getattr(TrdEnv, self._matched_trd_env or self.trd_env, TrdEnv.REAL)
+        try:
+            ret, data = self._trd_ctx.order_list_query(acc_id=self._acc_id, trd_env=env_enum)
+        except Exception as exc:
+            raise classify_futu_exception(exc)
+        if ret != RET_OK:
+            raise classify_futu_exception(Exception(str(data)))
+        if data is None or data.empty:
+            return []
+        return [self._normalize_order_row(row) for _, row in data.iterrows()]
+
+    def fetch_history_orders(self, start: datetime, end: datetime) -> List[Dict[str, Any]]:
+        """Pull historical orders from OpenD (history_order_list_query) in [start, end]."""
+        self._ensure_connected()
+        try:
+            from futu import RET_OK, TrdEnv  # type: ignore
+        except ImportError as exc:
+            raise FutuConnectionError("futu-api missing") from exc
+        import time as _time
+
+        env_enum = getattr(TrdEnv, self._matched_trd_env or self.trd_env, TrdEnv.REAL)
+        out: List[Dict[str, Any]] = []
+        first_call = True
+        for w_start, w_end in self._iter_windows(start, end):
+            if not first_call and self.DEAL_THROTTLE_SEC > 0:
+                _time.sleep(self.DEAL_THROTTLE_SEC)
+            first_call = False
+            try:
+                ret, data = self._trd_ctx.history_order_list_query(
+                    code="",
+                    start=self._fmt_futu_ts(w_start),
+                    end=self._fmt_futu_ts(w_end),
+                    trd_env=env_enum,
+                    acc_id=self._acc_id,
+                )
+            except Exception as exc:
+                raise classify_futu_exception(exc)
+            if ret != RET_OK:
+                raise classify_futu_exception(Exception(str(data)))
+            if data is None or data.empty:
+                continue
+            out.extend(self._normalize_order_row(row) for _, row in data.iterrows())
+        return out
+
+    def fetch_order_fees(self, order_ids: List[str]) -> List[Dict[str, Any]]:
+        """Pull per-order fees (order_fee_query). Batched; throttled between chunks.
+
+        Verified columns (futu-api 0.137.0): order_id, fee_amount, fee_details.
+        """
+        if not order_ids:
+            return []
+        self._ensure_connected()
+        try:
+            from futu import RET_OK, TrdEnv  # type: ignore
+        except ImportError as exc:
+            raise FutuConnectionError("futu-api missing") from exc
+        import time as _time
+
+        env_enum = getattr(TrdEnv, self._matched_trd_env or self.trd_env, TrdEnv.REAL)
+        out: List[Dict[str, Any]] = []
+        chunks = [order_ids[i : i + self._FEE_CHUNK] for i in range(0, len(order_ids), self._FEE_CHUNK)]
+        for n, chunk in enumerate(chunks):
+            if n and self.FEE_THROTTLE_SEC > 0:
+                _time.sleep(self.FEE_THROTTLE_SEC)
+            try:
+                ret, data = self._trd_ctx.order_fee_query(order_id_list=chunk, trd_env=env_enum, acc_id=self._acc_id)
+            except Exception as exc:
+                raise classify_futu_exception(exc)
+            if ret != RET_OK:
+                raise classify_futu_exception(Exception(str(data)))
+            if data is None or data.empty:
+                continue
+            for _, row in data.iterrows():
+                out.append(
+                    {
+                        "futu_order_id": str(row.get("order_id")),
+                        # _coerce_num tolerates 'N/A'/NaN sentinels — a raw float()
+                        # here would raise and silently abort the whole sync.
+                        "total_fee": _coerce_num(row.get("fee_amount")) or 0.0,
+                        "currency": "USD",
+                        "raw": {k: _na_to_none(v) for k, v in row.to_dict().items()},
+                    }
+                )
         return out

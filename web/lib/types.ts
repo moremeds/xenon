@@ -121,6 +121,7 @@ export type OrderContract = {
 };
 
 export type OpenOrder = {
+  submissionId?: string;
   orderId: number;
   permId: number;
   symbol: string;
@@ -135,6 +136,7 @@ export type OpenOrder = {
   remaining: number;
   avgFillPrice: number | null;
   tif: string;
+  modifySequence?: number;
 };
 
 export type ExecutedOrder = {

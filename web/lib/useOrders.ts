@@ -15,7 +15,10 @@ type UseOrdersReturn = {
   updateData: (data: OrdersData) => void;
 };
 
-export function useOrders(active: boolean = true): UseOrdersReturn {
+export function useOrders(
+  active: boolean = true,
+  broker: "IB" | "FUTU" = "IB",
+): UseOrdersReturn {
   const [data, setData] = useState<OrdersData | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -23,11 +26,12 @@ export function useOrders(active: boolean = true): UseOrdersReturn {
   const [lastSync, setLastSync] = useState<string | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const didInitialSync = useRef(false);
+  const q = broker === "FUTU" ? "?broker=FUTU" : "";
 
   const triggerSync = useCallback(async () => {
     setSyncing(true);
     try {
-      const res = await fetch("/api/orders", { method: "POST" });
+      const res = await fetch(`/api/orders${q}`, { method: "POST" });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error((body as { error?: string }).error ?? "Sync failed");
@@ -41,18 +45,21 @@ export function useOrders(active: boolean = true): UseOrdersReturn {
     } finally {
       setSyncing(false);
     }
-  }, []);
+  }, [q]);
 
   const syncNow = useCallback(() => {
     void triggerSync();
   }, [triggerSync]);
 
-  // Always read cached orders on mount (needed by ticker detail modal on any page).
-  // Only auto-sync from IB when active (orders page).
+  // Always read cached orders on mount (and on broker switch). Only auto-sync
+  // when active (orders page). Re-runs when `broker` changes so switching the
+  // account tab repaints the other broker's orders.
   useEffect(() => {
+    didInitialSync.current = false;
+    setLoading(true);
     const init = async () => {
       try {
-        const res = await fetch("/api/orders");
+        const res = await fetch(`/api/orders${q}`);
         if (!res.ok) throw new Error("Failed to fetch orders");
         const json = (await res.json()) as OrdersData;
         setData(json);
@@ -60,7 +67,7 @@ export function useOrders(active: boolean = true): UseOrdersReturn {
         setError(null);
         setLoading(false);
 
-        // Sync fresh from IB on first load of orders page
+        // Sync fresh on first load of orders page for this broker.
         if (active && !didInitialSync.current) {
           didInitialSync.current = true;
           void triggerSync();
@@ -73,7 +80,7 @@ export function useOrders(active: boolean = true): UseOrdersReturn {
 
     void init();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [broker]);
 
   // When orders page becomes active, trigger IB sync if we haven't yet
   useEffect(() => {
