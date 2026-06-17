@@ -313,6 +313,55 @@ def _maybe_start_activity_poller() -> None:
     logger.info("ib activity poller started: interval=%ss", interval_s)
 
 
+def _maybe_start_flex_reconcile_loop() -> None:
+    """Start the periodic IB Flex → order_fills reconcile loop if enabled.
+
+    Backfills externally-placed (TWS / IBKR mobile) IB fills that the live
+    pool's own-client reqExecutions can't see — with no master API client ID on
+    the Gateway, reqExecutions returns only the pool's own executions — and
+    reconciles WORKING snapshot rows those fills cover. Enabled by default when
+    Flex is configured; set XENON_FLEX_RECONCILE=0 to disable. Skipped in test
+    mode, when Flex is unconfigured, or when scope is unresolved. Started only
+    on the non-read-only path (the reconcile also no-ops on XENON_READ_ONLY=1).
+    """
+    import asyncio as _asyncio
+
+    from xenon.api.services.flex_fill_reconcile import (
+        DEFAULT_FLEX_RECONCILE_INTERVAL_S,
+        flex_reconcile_loop,
+    )
+    from xenon.execution.account_scope import AccountScope
+
+    if _is_test_mode():
+        logger.info("test_mode: skipping flex reconcile loop")
+        return
+
+    flag = os.environ.get("XENON_FLEX_RECONCILE", "").strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        logger.info("flex reconcile loop disabled (XENON_FLEX_RECONCILE=%s)", flag)
+        return
+
+    if not (os.environ.get("IB_FLEX_TOKEN") and os.environ.get("IB_FLEX_QUERY_ID")):
+        logger.info("flex reconcile loop skipped: IB Flex not configured")
+        return
+
+    _env = getattr(app.state, "trading_mode", None)
+    _acct = getattr(app.state, "account", None)
+    if not _env or not _acct:
+        logger.info("flex reconcile loop skipped: scope not resolved")
+        return
+
+    scope = AccountScope(broker="IB", account_env=_env, broker_account=_acct)
+    try:
+        interval_s = float(os.environ.get("XENON_FLEX_RECONCILE_S", DEFAULT_FLEX_RECONCILE_INTERVAL_S))
+    except ValueError:
+        interval_s = DEFAULT_FLEX_RECONCILE_INTERVAL_S
+
+    task = _asyncio.create_task(flex_reconcile_loop(scope=scope, interval_s=interval_s))
+    app.state.flex_reconcile_task = task
+    logger.info("flex reconcile loop started: interval=%ss", interval_s)
+
+
 def _maybe_start_futu_history_loop() -> None:
     """Start the nightly Futu trades + cashflows + NAV walk loop.
 
@@ -562,6 +611,12 @@ async def lifespan(app: FastAPI):
         # to suppress. Cadence env: XENON_IB_ACTIVITY_POLL_S.
         _maybe_start_activity_poller()
 
+        # Periodic IB Flex → order_fills reconcile. Backfills externally-placed
+        # (TWS/mobile) fills the live own-client reqExecutions can't see, and
+        # marks the WORKING snapshot rows they cover FILLED. Flex cadence is slow
+        # (a few times/day); set XENON_FLEX_RECONCILE=0 to suppress.
+        _maybe_start_flex_reconcile_loop()
+
     # Nightly Futu trades + cashflows + NAV walk. Runs at 16:30 ET every
     # weekday. Idempotent via UPSERT on natural keys. Enabled by default;
     # set XENON_FUTU_HISTORY_LOOP=0 to suppress.
@@ -601,6 +656,13 @@ async def lifespan(app: FastAPI):
             futu_loop_task.cancel()
             try:
                 await futu_loop_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        flex_reconcile_task = getattr(app.state, "flex_reconcile_task", None)
+        if flex_reconcile_task is not None:
+            flex_reconcile_task.cancel()
+            try:
+                await flex_reconcile_task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         if ib_pool:
