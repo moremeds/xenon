@@ -48,6 +48,10 @@ class ClosedLot:
     realized_pnl: Decimal
     opened_at: datetime | None
     closed_at: datetime
+    # Order id of the closing fill. Futu places a multi-leg structure as ONE
+    # order, so all legs of a structure share this id — the grouping key that
+    # fuses leg rows into a single structure row on the HISTORICAL surface.
+    close_order_id: str = ""
 
 
 def match_closed_lots(trades: list[dict]) -> list[ClosedLot]:
@@ -75,6 +79,7 @@ def match_closed_lots(trades: list[dict]) -> list[ClosedLot]:
         price = Decimal(str(t["price"]))
         when = t["filled_at"].astimezone(timezone.utc)
         deal_id = str(t["futu_deal_id"])
+        close_order_id = str(t.get("futu_order_id") or "")
         side = _raw_trd_side(t)
 
         if side == "BUY":
@@ -107,6 +112,7 @@ def match_closed_lots(trades: list[dict]) -> list[ClosedLot]:
                         realized_pnl=proceeds - cost_basis,
                         opened_at=lot_when,
                         closed_at=when,
+                        close_order_id=close_order_id,
                     )
                 )
                 if matched == lot_qty:
@@ -145,7 +151,7 @@ def closed_lots_to_rows(lots: list[ClosedLot]) -> list[dict]:
             "proceeds": l.proceeds,
             "opened_at": l.opened_at,
             "closed_at": l.closed_at,
-            "metadata": {},
+            "metadata": {"close_order_id": l.close_order_id} if l.close_order_id else {},
         }
         for l in lots
     ]

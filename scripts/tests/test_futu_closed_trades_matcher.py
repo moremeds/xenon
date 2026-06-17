@@ -8,9 +8,10 @@ from decimal import Decimal
 from xenon.api.services.futu_closed_trades import closed_lots_to_rows, match_closed_lots
 
 
-def _t(deal_id, side, qty, price, day, code="US.QQQ", ticker="QQQ"):
+def _t(deal_id, side, qty, price, day, code="US.QQQ", ticker="QQQ", order_id=None):
     return {
         "futu_deal_id": deal_id,
+        "futu_order_id": order_id if order_id is not None else f"ord-{deal_id}",
         "futu_code": code,
         "ticker": ticker,
         "quantity": qty,
@@ -88,3 +89,33 @@ def test_closed_lots_to_rows_shape():
     assert rows[0]["futu_close_id"] == "d2:d1"
     assert rows[0]["realized_pnl"] == Decimal("50")
     assert set(rows[0]) >= {"ticker", "action", "quantity", "cost_basis", "proceeds", "opened_at", "closed_at"}
+
+
+def test_close_order_id_captured_from_closing_fill():
+    """The closing fill's order id is carried on every lot it produced — so the
+    HISTORICAL surface can fuse legs of one multi-leg close into a structure."""
+    lots = match_closed_lots(
+        [
+            _t("o1", "BUY", 1, 100, 1, order_id="OPEN-A"),
+            _t("c1", "SELL", 1, 150, 2, order_id="CLOSE-Z"),
+        ]
+    )
+    assert lots[0].close_order_id == "CLOSE-Z"  # closing order, not the open
+    assert closed_lots_to_rows(lots)[0]["metadata"]["close_order_id"] == "CLOSE-Z"
+
+
+def test_multi_leg_close_shares_one_close_order_id():
+    """Two legs closed by ONE order (Futu places structures as a single order)
+    share a close_order_id even though their deal ids differ."""
+    cc = "US.AAOI270115C200000"
+    cp = "US.AAOI270115C190000"
+    lots = match_closed_lots(
+        [
+            _t("oa", "SELL_SHORT", 10, 54.0, 1, code=cc, ticker="AAOI270115C200000", order_id="O-OPEN"),
+            _t("ob", "BUY", 10, 56.0, 1, code=cp, ticker="AAOI270115C190000", order_id="O-OPEN"),
+            _t("ca", "BUY_BACK", 10, 54.07, 2, code=cc, ticker="AAOI270115C200000", order_id="O-CLOSE"),
+            _t("cb", "SELL", 10, 56.17, 2, code=cp, ticker="AAOI270115C190000", order_id="O-CLOSE"),
+        ]
+    )
+    assert {l.close_order_id for l in lots} == {"O-CLOSE"}
+    assert {l.ticker for l in lots} == {"AAOI270115C200000", "AAOI270115C190000"}

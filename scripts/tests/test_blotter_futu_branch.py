@@ -77,6 +77,7 @@ def test_fetch_futu_blotter_shape(engine):
     # Same keys the frontend HISTORICAL TRADES table reads from the IB blotter.
     assert {
         "symbol",
+        "contract_desc",
         "sec_type",
         "is_closed",
         "total_quantity",
@@ -84,10 +85,17 @@ def test_fetch_futu_blotter_shape(engine):
         "realized_pnl",
         "cost_basis",
         "proceeds",
+        "executions",
     } <= keys
-    by_symbol = {t["symbol"]: t for t in payload["closed_trades"]}
-    assert by_symbol["QQQ"]["sec_type"] == "STK"
-    assert by_symbol["QQQ250620C500000"]["sec_type"] == "OPT"  # OCC tail → OPT
+    by_type = {t["sec_type"]: t for t in payload["closed_trades"]}
+    # Symbol is shortened to the underlying for BOTH rows; the option is
+    # disambiguated by sec_type + the structure-name description.
+    assert by_type["STK"]["symbol"] == "QQQ"
+    assert by_type["OPT"]["symbol"] == "QQQ"  # underlying, not the OCC ticker
+    assert "Call" in by_type["OPT"]["contract_desc"]  # structure name, not the raw ticker
+    assert by_type["OPT"]["contract_desc"] != "QQQ250620C500000"
+    # Executions carry the close time so the frontend DATE column + sort work.
+    assert by_type["OPT"]["executions"] and by_type["OPT"]["executions"][-1]["time"]
     assert all(t["is_closed"] for t in payload["closed_trades"])
     assert all(t["total_commission"] == 0.0 for t in payload["closed_trades"])  # Futu: no per-lot commission
 

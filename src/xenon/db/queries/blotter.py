@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Mapping
@@ -10,8 +9,6 @@ from sqlalchemy.engine import Connection
 
 from xenon.db.schema import futu_closed_trades, order_submissions, trades
 from xenon.execution.account_scope import AccountScope
-
-_OCC_TAIL = re.compile(r"\d{6}[CP]\d+$")
 
 
 def fetch_blotter_pg(
@@ -78,54 +75,35 @@ def fetch_futu_blotter(conn: Connection, *, scope: AccountScope, days: int = 30)
     """Historical Trades payload for a FUTU scope, derived from futu_closed_trades.
 
     Same response contract as fetch_blotter_pg so the frontend renders identically.
-    Futu has no per-lot commission (IB Flex is the only commission-bearing source),
-    so total_commission is 0. Every futu_closed_trades row is a closed lot.
+    Closed lots are grouped into structure-level rows (see futu_structure): FIFO
+    sub-lots of one contract collapse into one line, and legs sharing a closing
+    order id fuse into a single structure row (SYMBOL = underlying, DESCRIPTION =
+    structure name). Futu has no per-lot commission, so total_commission is 0.
     """
+    from xenon.api.services.futu_structure import build_blotter_rows
+
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     rows = conn.execute(
-        select(futu_closed_trades)
-        .where(
+        select(futu_closed_trades).where(
             futu_closed_trades.c.broker == scope.broker,
             futu_closed_trades.c.account_env == scope.account_env,
             futu_closed_trades.c.broker_account == scope.broker_account,
             futu_closed_trades.c.closed_at >= cutoff,
         )
-        .order_by(desc(futu_closed_trades.c.closed_at), desc(futu_closed_trades.c.futu_close_id))
     ).all()
 
-    closed_trades: list[dict[str, Any]] = []
+    closed_trades = build_blotter_rows(row._mapping for row in rows)
+
     realized_pnl = Decimal("0")
     as_of: datetime | None = None
-    for row in rows:
-        m = row._mapping
-        sec_type = "OPT" if _OCC_TAIL.search(str(m["ticker"])) else "STK"
-        rpnl = m.get("realized_pnl")
-        cost_basis = m.get("cost_basis")
-        proceeds = m.get("proceeds")
-        if rpnl is not None:
-            realized_pnl += Decimal(str(rpnl))
-        closed_at = m.get("closed_at")
-        if isinstance(closed_at, datetime):
-            ca = closed_at.astimezone(timezone.utc)
+    for trade in closed_trades:
+        if trade.get("realized_pnl") is not None:
+            realized_pnl += Decimal(str(trade["realized_pnl"]))
+        closed_at = trade.get("closed_at")
+        if isinstance(closed_at, str) and closed_at:
+            ca = datetime.fromisoformat(closed_at)
             if as_of is None or ca > as_of:
                 as_of = ca
-        closed_trades.append(
-            {
-                "symbol": m["ticker"],
-                "contract_desc": str(m.get("structure") or m["ticker"]),
-                "sec_type": sec_type,
-                "is_closed": True,
-                "net_quantity": 0,
-                "total_quantity": int(m["quantity"]),
-                "total_commission": 0.0,
-                "realized_pnl": _number(rpnl) if rpnl is not None else None,
-                "cost_basis": _number(cost_basis) if cost_basis is not None else None,
-                "proceeds": _number(proceeds) if proceeds is not None else None,
-                "total_cash_flow": _number(rpnl) if rpnl is not None else None,
-                "executions": [],
-                "perm_id": None,
-            }
-        )
 
     return {
         "configured": True,
