@@ -5,8 +5,17 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.6.0] — 2026-06-17
+### Added
 
+- **Recognize 1:2:1 butterfly in portfolio structure grouping (#156).** Multi-leg option positions that form a symmetric butterfly (two equal-size wings + a 2× body, body strike strictly between the wings) are now grouped as a `butterfly` virtual combo with a `Put/Call Butterfly` label instead of three unrelated `SINGLE` rows. Broken-wing flies (equal wing contracts, asymmetric strikes) qualify; unequal-wing ratio spreads are rejected. Runs as "Pass 0" before the existing vertical/straddle detection so a genuine fly isn't fragmented.
+
+### Fixed
+
+- **Dashboard "Working & Filled" card dropped IB orders while on the FUTU tab (and vice versa) (#156).** The card now merges open/executed orders from both brokers via `mergeDashboardOrders`, tagging each row with its broker (`IB · …` / `FUTU · …`). Each working-order row also formats raw status strings into readable labels (`PENDINGSUBMIT` → `Pending Submit`).
+- **Portfolio snapshot breakdown numbers were ragged (#156).** Net-liq and P&L value columns are now right-aligned with a fixed minimum width so the breakdown rows line up vertically.
+- **IB/FUTU open-order flicker on account-tab switch (#155).** A stale in-flight orders response from the previous broker could briefly overwrite the newly selected broker's orders. `useOrders` now discards responses whose requested broker no longer matches the current tab.
+
+## [0.6.0] — 2026-06-17
 
 ### Added
 
@@ -15,6 +24,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 ### Fixed
 
 - **Stale Futu data (~half a month behind) and silent sync aborts (#153).** The sync now pulls fresh deals/orders from OpenD on an incremental watermark (`resolve_incremental_since`) instead of leaning on the fixed daily-history window, and tolerates Futu's `'N/A'` / NaN / list-valued frame cells (`_coerce_num` / `_na_to_none`) — including `fetch_order_fees` — that previously raised `ValueError`/array-ambiguity and silently aborted the entire sync before the closed-trade rebuild ran. Closed-trade rebuild and journal sync are guarded by a per-scope Postgres advisory lock and honor `XENON_READ_ONLY=1`.
+
 ## [0.5.1] — 2026-06-17
 
 ### Added
