@@ -4,6 +4,11 @@ const mockXenonFetch = vi.fn();
 
 vi.mock("@/lib/xenonApi", () => ({
   xenonFetch: mockXenonFetch,
+  internalApiHeaders: (headers: Headers) => {
+    const token = process.env.XENON_INTERNAL_API_TOKEN;
+    if (token) headers.set("X-Internal-Token", token);
+    return headers;
+  },
   XenonApiError: class extends Error {
     status: number;
     detail: string;
@@ -64,7 +69,8 @@ describe("wizard api routes", () => {
       status: "ok",
     });
 
-    const { POST } = await import("../app/api/wizard/sessions/[id]/submit/route");
+    const { POST } =
+      await import("../app/api/wizard/sessions/[id]/submit/route");
     const response = await POST(
       new Request("http://localhost/api/wizard/sessions/wiz-1/submit", {
         method: "POST",
@@ -79,11 +85,14 @@ describe("wizard api routes", () => {
       session_id: "wiz-1",
       status: "ok",
     });
-    expect(mockXenonFetch).toHaveBeenCalledWith("/wizard/sessions/wiz-1/submit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target_price: "2.45", price_basis: "MID" }),
-    });
+    expect(mockXenonFetch).toHaveBeenCalledWith(
+      "/wizard/sessions/wiz-1/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target_price: "2.45", price_basis: "MID" }),
+      },
+    );
   });
 
   it("proxies wizard SSE streams as event-stream responses", async () => {
