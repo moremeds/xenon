@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@clerk/nextjs/server";
 import { WebSocket } from "ws";
 import { resolveServerIbRealtimeWsUrl } from "@/lib/server/ibRealtimeRuntime";
+import { internalApiHeaders } from "@/lib/xenonApi";
 
 /**
  * Fetch previous-day closing prices for stock symbols.
@@ -26,9 +27,12 @@ async function buildWsUrl(token: string | null): Promise<string> {
   const ibWsUrl = resolveServerIbRealtimeWsUrl();
   if (!token) return ibWsUrl;
   try {
+    const wsHeaders = new Headers({ "Content-Type": "application/json" });
+    if (token) wsHeaders.set("Authorization", `Bearer ${token}`);
+    internalApiHeaders(wsHeaders);
     const res = await fetch(`${XENON_API}/ws-ticket`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      headers: wsHeaders,
     });
     if (!res.ok) return ibWsUrl;
     const { ticket } = await res.json();
@@ -44,7 +48,10 @@ async function buildWsUrl(token: string | null): Promise<string> {
  * Sends a snapshot request for all symbols and collects `close` fields.
  * Returns a map of symbol → close for symbols that had data.
  */
-async function fetchFromIB(symbols: string[], token: string | null): Promise<Record<string, number>> {
+async function fetchFromIB(
+  symbols: string[],
+  token: string | null,
+): Promise<Record<string, number>> {
   const results: Record<string, number> = {};
   if (symbols.length === 0) return results;
 
@@ -54,7 +61,11 @@ async function fetchFromIB(symbols: string[], token: string | null): Promise<Rec
     let ws: WebSocket;
     const pending = new Set(symbols);
     const timeout = setTimeout(() => {
-      try { ws?.close(); } catch { /* ignore */ }
+      try {
+        ws?.close();
+      } catch {
+        /* ignore */
+      }
       resolve(results);
     }, 3000);
 
@@ -68,7 +79,11 @@ async function fetchFromIB(symbols: string[], token: string | null): Promise<Rec
 
     ws.on("error", () => {
       clearTimeout(timeout);
-      try { ws.close(); } catch { /* ignore */ }
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
       resolve(results);
     });
 
@@ -78,7 +93,11 @@ async function fetchFromIB(symbols: string[], token: string | null): Promise<Rec
         ws.send(JSON.stringify({ action: "snapshot", symbols }));
       } catch {
         clearTimeout(timeout);
-        try { ws.close(); } catch { /* ignore */ }
+        try {
+          ws.close();
+        } catch {
+          /* ignore */
+        }
         resolve(results);
       }
     });
@@ -96,7 +115,11 @@ async function fetchFromIB(symbols: string[], token: string | null): Promise<Rec
         // Resolve early once all snapshots received
         if (pending.size === 0) {
           clearTimeout(timeout);
-          try { ws.close(); } catch { /* ignore */ }
+          try {
+            ws.close();
+          } catch {
+            /* ignore */
+          }
           resolve(results);
         }
       } catch {
@@ -120,7 +143,10 @@ async function fetchFromUW(symbol: string): Promise<number | null> {
     const res = await fetch(
       `https://api.unusualwhales.com/api/stock/${encodeURIComponent(symbol)}/quote`,
       {
-        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+        },
         signal: AbortSignal.timeout(5000),
       },
     );

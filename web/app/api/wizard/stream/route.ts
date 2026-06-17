@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { internalApiHeaders } from "@/lib/xenonApi";
 
 export const runtime = "nodejs";
 
@@ -14,13 +15,15 @@ export async function GET(request: Request): Promise<Response> {
     }
 
     const upstream = await fetch(upstreamUrl.toString(), {
-      headers: { Accept: "text/event-stream" },
+      headers: internalApiHeaders(new Headers({ Accept: "text/event-stream" })),
       cache: "no-store",
       signal: request.signal,
     });
 
     if (!upstream.ok) {
-      const detail = await upstream.text().catch(() => `HTTP ${upstream.status}`);
+      const detail = await upstream
+        .text()
+        .catch(() => `HTTP ${upstream.status}`);
       return NextResponse.json({ error: detail }, { status: upstream.status });
     }
 
