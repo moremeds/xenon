@@ -178,6 +178,23 @@ def test_fetch_order_fees_batches_and_maps_fee_amount(monkeypatch):
     ctx.order_fee_query.assert_called_once()
 
 
+def test_fetch_order_fees_tolerates_list_valued_fee_details(monkeypatch):
+    """order_fee_query returns `fee_details` as a LIST per row. The raw-cell NaN
+    scrub used `pd.isna(v)` which returns an ARRAY for list cells → `if array`
+    raised ValueError, aborting fetch_order_fees and the whole sync before the
+    closed-trade rebuild ever ran. List cells must pass through untouched."""
+    details = [{"title": "commission", "value": 0.5}, {"title": "platform", "value": 0.25}]
+    frame = pd.DataFrame([{"order_id": "O1", "fee_amount": 0.75, "fee_details": details}])
+    ctx = MagicMock()
+    ctx.order_fee_query.return_value = (0, frame)
+    c = _client(ctx)
+    c.FEE_THROTTLE_SEC = 0
+    rows = c.fetch_order_fees(["O1"])  # must not raise on the multi-element list cell
+    assert rows[0]["futu_order_id"] == "O1"
+    assert rows[0]["total_fee"] == 0.75
+    assert rows[0]["raw"]["fee_details"] == details
+
+
 def test_fetch_order_fees_empty_input_no_call():
     ctx = MagicMock()
     assert _client(ctx).fetch_order_fees([]) == []

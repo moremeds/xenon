@@ -115,6 +115,24 @@ def _coerce_num(value: Any) -> Optional[float]:
         return None
 
 
+def _na_to_none(value: Any) -> Any:
+    """Scrub a single frame cell's NaN → None for JSON, tolerating array cells.
+
+    `order_fee_query` returns ``fee_details`` as a multi-element list per row;
+    ``pd.isna(list_of_2+)`` returns a bool *array* and ``if array`` raised
+    ``ValueError`` — which aborted fetch_order_fees and the whole orders sync
+    before the closed-trade rebuild. Scalar NaN → None; any non-scalar (list /
+    ndarray) passes through unchanged.
+    """
+    try:
+        res = pd.isna(value)
+    except (TypeError, ValueError):
+        return value
+    if isinstance(res, bool):
+        return None if res else value
+    return value  # array-valued cell (e.g. fee_details list) — keep as-is
+
+
 # Defaults chosen to match Futu's 10 calls / 30s rate limit with safety margin.
 DEFAULT_POSITION_TTL_SEC = 30
 DEFAULT_ACCOUNT_TTL_SEC = 10
@@ -768,7 +786,7 @@ class FutuClient:
                         "price": float(row.get("price", 0) or 0),
                         "fees": 0.0,  # Futu reports fees separately via order detail; v1 sets 0
                         "filled_at": self._parse_futu_ts(row.get("create_time")),
-                        "raw": {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()},
+                        "raw": {k: _na_to_none(v) for k, v in row.to_dict().items()},
                     }
                 )
         return out
@@ -842,7 +860,7 @@ class FutuClient:
                             "occurred_at": self._parse_futu_ts(
                                 row.get("clearing_date") or cur_day.strftime("%Y-%m-%d 00:00:00")
                             ),
-                            "raw": {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()},
+                            "raw": {k: _na_to_none(v) for k, v in row.to_dict().items()},
                         }
                     )
             cur_day = cur_day + timedelta(days=1)
@@ -898,7 +916,7 @@ class FutuClient:
             "avg_fill_price": dealt_avg if dealt_avg else None,
             "created_at": self._parse_futu_ts(row.get("create_time")),
             "updated_at": self._parse_futu_ts(row.get("updated_time") or row.get("create_time")),
-            "raw": {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()},
+            "raw": {k: _na_to_none(v) for k, v in row.to_dict().items()},
         }
 
     def fetch_open_orders(self) -> List[Dict[str, Any]]:
@@ -990,7 +1008,7 @@ class FutuClient:
                         "futu_order_id": str(row.get("order_id")),
                         "total_fee": float(row.get("fee_amount", 0) or 0),
                         "currency": "USD",
-                        "raw": {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()},
+                        "raw": {k: _na_to_none(v) for k, v in row.to_dict().items()},
                     }
                 )
         return out
