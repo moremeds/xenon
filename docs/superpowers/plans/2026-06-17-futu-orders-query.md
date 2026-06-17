@@ -403,12 +403,14 @@ Lift the queue logic out of `futu_nav_backfill._compute_daily_realized_pnl` (alr
 
 ```python
 from __future__ import annotations
+import logging
 import re
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 
+logger = logging.getLogger(__name__)
 _OCC_TAIL = re.compile(r"\d{6}[CP]\d+$")
 
 def _contract_multiplier(ticker: str) -> int:
@@ -432,7 +434,12 @@ class ClosedLot:
     closed_at: datetime
 
 def match_closed_lots(trades: list[dict]) -> list[ClosedLot]:
-    longs: dict[str, deque] = defaultdict(deque)   # (qty, price, opened_at, deal_id)
+    # review Pass 2 (P0-1): deterministic order so split-lot ids are stable across
+    # re-pulls. list_trades orders only by filled_at; equal-timestamp fills could
+    # otherwise reorder and remint different close ids → duplicate journal rows.
+    # Secondary key = futu_deal_id (stable, unique per fill).
+    trades = sorted(trades, key=lambda t: (t["filled_at"], str(t["futu_deal_id"])))
+    longs: dict[str, deque] = defaultdict(deque)   # (qty, price, opened_at, open_deal_id)
     shorts: dict[str, deque] = defaultdict(deque)
     out: list[ClosedLot] = []
     for t in trades:
@@ -440,38 +447,50 @@ def match_closed_lots(trades: list[dict]) -> list[ClosedLot]:
         mult = Decimal(_contract_multiplier(ticker))
         qty, price = Decimal(str(t["quantity"])), Decimal(str(t["price"]))
         when = t["filled_at"].astimezone(timezone.utc)
+        deal_id = str(t["futu_deal_id"])
         side = _raw_trd_side(t)
         if side == "BUY":
-            longs[code].append((qty, price, when))
+            longs[code].append((qty, price, when, deal_id))
         elif side == "SELL_SHORT":
-            shorts[code].append((qty, price, when))
+            shorts[code].append((qty, price, when, deal_id))
         elif side in ("SELL", "BUY_BACK"):
             book = longs[code] if side == "SELL" else shorts[code]
-            remaining, idx = qty, 0
+            remaining = qty
             while remaining > 0 and book:
-                lot_qty, lot_price, lot_when = book[0]
+                lot_qty, lot_price, lot_when, open_deal_id = book[0]
                 matched = min(lot_qty, remaining)
                 if side == "SELL":
                     cost_basis, proceeds = lot_price * matched * mult, price * matched * mult
-                    realized = proceeds - cost_basis
                     action = "SELL"
                 else:  # BUY_BACK closes a short
                     proceeds, cost_basis = lot_price * matched * mult, price * matched * mult
-                    realized = proceeds - cost_basis
                     action = "BUY"
                 out.append(ClosedLot(
-                    futu_close_id=f"{t['futu_deal_id']}:{idx}",
+                    # review Pass 2 (P0-1): key on BOTH deal ids so partial fills against
+                    # multiple open lots stay unique AND stable (not a positional index).
+                    futu_close_id=f"{deal_id}:{open_deal_id}",
                     ticker=ticker, futu_code=code, action=action, quantity=matched,
-                    cost_basis=cost_basis, proceeds=proceeds, realized_pnl=realized,
+                    cost_basis=cost_basis, proceeds=proceeds, realized_pnl=proceeds - cost_basis,
                     opened_at=lot_when, closed_at=when,
                 ))
-                idx += 1
                 if matched == lot_qty:
                     book.popleft()
                 else:
-                    book[0] = (lot_qty - matched, lot_price, lot_when)
+                    book[0] = (lot_qty - matched, lot_price, lot_when, open_deal_id)
                 remaining -= matched
+            if remaining > 0:
+                # review Pass 2 (P1-3): preserve the existing NAV observability — a close
+                # with no open lot means a pre-inception position; warn, don't silently skip.
+                logger.warning("close with no open lot: side=%s code=%s qty_unmatched=%s deal=%s",
+                               side, code, remaining, deal_id)
+        else:
+            logger.warning("unknown trd_side=%r deal=%s — skipping", side, deal_id)
     return out
+```
+
+> **Edge-case tests required (Pass 2):** (a) a `SELL` with no prior `BUY` logs a warning and emits no lot; (b) an unknown `trd_side` logs and is skipped; (c) two fills with the **same** `filled_at` produce the **same** `futu_close_id`s on a re-pull regardless of input order (feed the list shuffled, assert identical ids).
+
+```
 
 def closed_lots_to_rows(lots: list[ClosedLot]) -> list[dict]:
     return [{
@@ -577,8 +596,11 @@ Mirror `fetch_history_deals` (read at lines 675–752). Field names per the futu
 
 ```python
 # Live/working statuses for the OPEN ORDERS surface.
-OPEN_ORDER_STATUSES = ("SUBMITTING", "SUBMITTED", "WAITING_SUBMIT", "FILLED_PART")
-FEE_THROTTLE_SEC = 0.2
+OPEN_ORDER_STATUSES = ("SUBMITTING", "SUBMITTED", "WAITING_SUBMIT", "FILLED_PART", "CANCELLING_PART", "CANCELLING_ALL")
+# review Pass 2 (P1-6): Futu caps trade queries at 10 req / 30s. Batching 50 ids per
+# call keeps the call count low, but throttle 3.5s between chunks (matches DEAL_THROTTLE_SEC)
+# so a many-order account can't blow the limit. Do NOT use a sub-second throttle here.
+FEE_THROTTLE_SEC = 3.5
 
 def fetch_open_orders(self) -> list[dict]:
     self._ensure_connected()
@@ -723,14 +745,17 @@ def test_futu_auto_import_is_idempotent(pg_sync_conn):
     a = upsert_futu_auto_import_entry(pg_sync_conn, scope=SCOPE, closed_trade=CT)
     b = upsert_futu_auto_import_entry(pg_sync_conn, scope=SCOPE, closed_trade=CT)
     assert a is not None
-    rows = list_journal_entries(pg_sync_conn, SCOPE, cutoff=None, limit=100)
+    # review Pass 2 (P1-7): journal_entry_to_payload LIFTS metadata fields to top-level —
+    # it does NOT return a nested {"metadata": {...}}. Assert top-level keys.
+    assert a["decision"] == "FUTU_AUTO_IMPORT"
+    assert float(a["realized_pnl"]) == 692.0
+    # dedup: a query for FUTU rows returns exactly one
+    rows = list_journal_entries(pg_sync_conn, scope=SCOPE, cutoff=None, limit=100)
     futu = [r for r in rows if r.get("decision") == "FUTU_AUTO_IMPORT"]
     assert len(futu) == 1  # second call deduped
-    assert futu[0]["metadata"]["futu_close_id"] == "d2:0"
-    assert futu[0]["metadata"]["realized_pnl"] == 692.0
 ```
 
-> Match the `pg_sync_conn`/`list_journal_entries` signatures used in `src/xenon/api/tests/test_journal_auto_import.py`.
+> review Pass 2 (P1-7): **before writing this test**, read the real `journal_entry_to_payload` and `list_journal_entries` in `src/xenon/db/queries/journal.py` + `src/xenon/api/tests/test_journal_auto_import.py`: confirm (a) which metadata keys are lifted top-level (so `_futu_auto_import` metadata uses the SAME keys the IB path lifts — `realized_pnl`, `return_on_risk`, `entry_cost`, `structure`, `quantity` — or the journal table columns won't render for Futu rows), and (b) the exact `list_journal_entries` parameter order / keyword-only-ness. Adjust the assertions to the real payload shape.
 
 - [ ] **Step 3: Run test to verify it fails**
 
@@ -817,12 +842,12 @@ git commit -m "feat(futu): FUTU_AUTO_IMPORT journal upsert + dedup index"
 
 - [ ] **Step 3: Implement `sync_futu_orders`** — in order:
   1. `if is_read_only(): return {…zeros…}` (guard first).
-  2. Refresh **today's fills**: `client.fetch_history_deals(today_et_start, now)` → `insert_trades` (so TODAY'S EXECUTED ORDERS is live, not just nightly). This is the live-fills path the EXECUTED panel reads.
-  3. `client.fetch_open_orders()` + `client.fetch_history_orders(since, now)` → `insert_orders`.
-  4. `client.fetch_order_fees([o["futu_order_id"] for o in orders])` → `insert_order_fees`.
-  5. Rebuild closed-trades from `list_trades(engine, scope)` via `match_closed_lots` → `closed_lots_to_rows` → `insert_closed_trades`.
-  6. For each closed-trade row, `upsert_futu_auto_import_entry`.
-     Wire into `backfill_history_sync` after trades/cashflows persist (so `futu_trades` exists before closed-trade reconstruction).
+  2. **Acquire a per-scope singleflight lock** (review Pass 2, P0-2). The 60s poll, the nightly 16:30 loop, `POST /futu/sync`, and `/orders/refresh?broker=FUTU` can all call this concurrently. Base UPSERTs are safe, but step 5 rebuilds _derived_ `futu_closed_trades` from the full `list_trades` set and step 6 writes journal rows — two overlapping runs could rebuild from divergent snapshots or double-insert. Use an `asyncio.Lock` keyed by `(broker, account_env, broker_account)` (mirror `server._get_futu_lock()`), OR a Postgres advisory lock (`pg_advisory_xact_lock(hashtext(scope_key))`) for cross-process safety with the nightly CLI. Prefer the advisory lock since the CLI runs in a separate process.
+  3. Refresh **today's fills**: `client.fetch_history_deals(today_et_start, now)` → `insert_trades` (so TODAY'S EXECUTED ORDERS is live, not just nightly). This is the live-fills path the EXECUTED panel reads.
+  4. `client.fetch_open_orders()` + `client.fetch_history_orders(since, now)` → `insert_orders`.
+  5. `client.fetch_order_fees([o["futu_order_id"] for o in orders])` → `insert_order_fees`.
+  6. **In a single transaction** (review Pass 2, P0-2): rebuild closed-trades from `list_trades(engine, scope)` via `match_closed_lots` → `closed_lots_to_rows` → `insert_closed_trades`, then `upsert_futu_auto_import_entry` for each closed-trade row. Wrapping the rebuild + journal upsert in one `engine.begin()` keeps `futu_closed_trades` and the `FUTU_AUTO_IMPORT` journal consistent even if a second run interleaves. Wire into `backfill_history_sync` after trades/cashflows persist (so `futu_trades` exists before closed-trade reconstruction).
+  - Add a **concurrency test**: two `sync_futu_orders` calls on the same scope (one awaiting the lock) produce no duplicate `futu_closed_trades` / journal rows.
 
 - [ ] **Step 4: Add `_maybe_start_futu_orders_poll()` to server.py** — mirror `_maybe_start_futu_history_loop`. A 60s loop (env `XENON_FUTU_ORDERS_POLL_SEC`, default 60; disable with `XENON_FUTU_ORDERS_POLL=0`) that, **only during RTH** (reuse the market-hours helper) and **only when not read-only**, resolves the FUTU scope via the same `_scope_factory` the history loop uses and calls `sync_futu_orders`. Skipped in test mode and under `XENON_READ_ONLY=1` (mirror the existing `_maybe_start_*` guards). Make `/futu/sync` and `/orders/refresh?broker=FUTU` also call `sync_futu_orders` so the manual refresh button pulls fresh.
 
@@ -894,15 +919,36 @@ _FUTU_STATUS = {
     "SUBMITTING": "PendingSubmit", "WAITING_SUBMIT": "PendingSubmit",
     "SUBMITTED": "Submitted", "FILLED_PART": "PartiallyFilled",
     "FILLED_ALL": "Filled", "CANCELLED_ALL": "Cancelled", "CANCELLED_PART": "Cancelled",
+    "CANCELLING_PART": "Submitted", "CANCELLING_ALL": "Submitted",
 }
 _FUTU_TYPE = {"NORMAL": "LMT", "MARKET": "MKT"}  # else pass through label
 
-def _futu_open_order(row) -> dict:
+# review Pass 2 (P1-4): Futu codes can be OCC option symbols (e.g. US.QQQ250620C500000).
+# The frontend reads contract.secType/right/strike/expiry to render option rows — so we
+# must parse OCC, not hardcode STK. Reuse the OCC tail regex from futu_closed_trades.py.
+_OCC = re.compile(r"^(?P<u>[A-Z]+)(?P<y>\d{2})(?P<m>\d{2})(?P<d>\d{2})(?P<cp>[CP])(?P<strike>\d+)$")
+
+def _futu_contract(ticker: str) -> dict:
+    m = _OCC.match(ticker)
+    if not m:
+        return {"conId": None, "symbol": ticker, "secType": "STK",
+                "strike": None, "right": None, "expiry": None}
     return {
-        "submissionId": row["futu_order_id"], "orderId": 0, "permId": 0,
-        "symbol": row["ticker"],
-        "contract": {"conId": None, "symbol": row["ticker"], "secType": "STK",
-                     "strike": None, "right": None, "expiry": None},
+        "conId": None, "symbol": m["u"], "secType": "OPT",
+        "strike": int(m["strike"]) / 1000.0, "right": m["cp"],
+        "expiry": f"20{m['y']}-{m['m']}-{m['d']}",
+    }
+
+def _futu_open_order(row) -> dict:
+    contract = _futu_contract(str(row["ticker"]))
+    # review Pass 2 (P1-5): the frontend keys rows on `${orderId}-${permId}` and the
+    # pending-action map is keyed on permId; orderId:0/permId:0 for every row collides
+    # as duplicate React keys. Futu order ids are numeric strings → use as the surrogate.
+    oid = int(row["futu_order_id"]) if str(row["futu_order_id"]).isdigit() else abs(hash(row["futu_order_id"])) % (10**12)
+    return {
+        "submissionId": str(row["futu_order_id"]), "orderId": oid, "permId": oid,
+        "symbol": _display_symbol(contract["symbol"], contract["secType"], contract["right"], contract["strike"]),
+        "contract": contract,
         "action": row["action"],
         "orderType": _FUTU_TYPE.get(row["order_type"], row["order_type"]),
         "totalQuantity": int(row["quantity"]),
@@ -916,9 +962,9 @@ def _futu_open_order(row) -> dict:
     }
 ```
 
-`_futu_executed_order(row)` maps a `futu_trades` row to the `ExecutedOrder` shape (side `BOT`/`SLD`, qty, price, commission from fees, `time`). Option-symbol display via the existing `_display_symbol` when the OCC tail is present.
+`_futu_executed_order(row)` maps a `futu_trades` row to the `ExecutedOrder` shape (side `BOT`/`SLD`, qty, price, commission from `futu_order_fees`, `time`), using the same `_futu_contract` + `_display_symbol` for option display. Add a unit assertion that an OCC ticker yields `secType=="OPT"` with parsed strike/right/expiry, and that two distinct Futu orders produce distinct `orderId`s.
 
-- [ ] **Step 4:** Make `/orders/refresh` broker-aware — read `broker` query param; `FUTU` → call the Task-6 sync (orders pull into DB), `IB` → existing IB refresh. Switch the route deps from `get_account_scope` to `get_broker_scope`.
+- [ ] **Step 4:** Make `/orders/refresh` broker-aware. **Note (review Pass 2, P2-8):** `/orders/refresh` is defined in `src/xenon/api/server.py:1446` (`@app.post("/orders/refresh")`, `Depends(get_account_scope)` + `require_mode_verified`), NOT in `routes/orders.py`. The GET `/orders` is in `routes/orders.py`. Switch **both** deps from `get_account_scope` to `get_broker_scope`. In `orders_refresh`, branch: `FUTU` → call the Task-6 `sync_futu_orders`; `IB` → existing IB refresh. (Files for this task therefore include `src/xenon/api/server.py`.)
 
 - [ ] **Step 5: Run → pass.**
 
@@ -928,15 +974,17 @@ def _futu_open_order(row) -> dict:
 
 ## Task 9: `/blotter` FUTU branch (30-day historical trades)
 
-**Files:**
+**Files (review Pass 2, P2-8 — corrected):**
 
-- Modify: `src/xenon/api/routes/blotter.py`
+- Modify: `src/xenon/api/server.py` — `/blotter` GET (`server.py:2784 blotter_get`) + POST (`server.py:2712 blotter_sync`); both currently `Depends(get_account_scope)`. There is **no** `routes/blotter.py`.
+- Modify: `src/xenon/db/queries/blotter.py` — `fetch_blotter_pg` (the IB shaper); add a `fetch_futu_blotter` sibling (or a `broker` branch) reading `futu_closed_trades` and emitting the same `_trade_to_payload` shape.
+- Modify: `src/xenon/api/routes/journal.py` — switch `GET /journal` dep to `get_broker_scope`.
 - Test: `scripts/tests/test_blotter_futu_branch.py`
 
-- [ ] **Step 1: Failing test** — seed `futu_closed_trades`, call the blotter handler with FUTU scope, assert `closed_trades` rows carry `realized_pnl`, `cost_basis`, `proceeds`, `date`, `symbol`, `side`, `qty` (matching the IB blotter response keys the frontend reads).
+- [ ] **Step 1: Failing test** — seed `futu_closed_trades`, call `blotter_get` (or `fetch_futu_blotter`) with FUTU scope, assert `closed_trades` rows carry `realized_pnl`, `cost_basis`, `proceeds`, plus the keys `_trade_to_payload` emits (`date`/`symbol`/`side`/`qty` — **read `db/queries/blotter.py:_trade_to_payload` for the exact key names** and mirror them; do not invent keys).
 - [ ] **Step 2: Run → fail.**
-- [ ] **Step 3:** Add `scope.broker == "FUTU"` branch to the blotter **GET** that reads `list_closed_trades` and shapes to the existing blotter response contract (inspect `blotter.py` for the exact IB `closed_trades` row keys and mirror them). For **commission**: `futu_closed_trades` has no per-lot commission; set `commission` to `None`/`0` for Futu rows (the 30-day table's COMMISSION column tolerates this — IB Flex is the only commission-bearing source). Switch the route dep to `get_broker_scope`.
-- [ ] **Step 4:** Make the blotter **POST** (manual refresh) broker-aware: for `scope.broker == "FUTU"`, call `sync_futu_orders` (rebuilds closed-trades from fills) instead of the IB Flex sync — so the HISTORICAL TRADES "REFRESH" button works on the Futu tab. The `/journal` route only needs its dep switched to `get_broker_scope` (FUTU rows already exist from Task 6) — fold that one-line change in here with a journal-scope test.
+- [ ] **Step 3:** In `db/queries/blotter.py`, add the Futu reader shaping `futu_closed_trades` into the existing `_trade_to_payload` contract. For **commission**: `futu_closed_trades` has no per-lot commission; set `commission` to `None`/`0` for Futu rows (the 30-day table's COMMISSION column tolerates this — IB Flex is the only commission-bearing source). In `server.py`, switch `blotter_get` to `get_broker_scope` and branch `scope.broker == "FUTU"` to the Futu reader.
+- [ ] **Step 4:** Switch `blotter_sync` (POST) to `get_broker_scope` and branch: `scope.broker == "FUTU"` → call `sync_futu_orders` (rebuilds closed-trades from fills) instead of the IB Flex sync — so the HISTORICAL TRADES "REFRESH" button works on the Futu tab. Then switch `routes/journal.py` `GET /journal` dep to `get_broker_scope` (FUTU rows already exist from Task 6) and add a journal-scope test.
 - [ ] **Step 5: Run → pass.**
 - [ ] **Step 6: Commit** — `feat(api): /blotter + /journal FUTU scope`
 
