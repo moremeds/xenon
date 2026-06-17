@@ -1087,7 +1087,7 @@ const JournalSections = React.memo(function JournalSections({
         )}
         {trades.length > 0 && (
           <div className="section-body table-wrap">
-            <table>
+            <table className="journal-table">
               <thead>
                 <tr>
                   <SortTh<JournalSortKey>
@@ -1179,7 +1179,7 @@ const JournalSections = React.memo(function JournalSections({
                     <React.Fragment key={t.id}>
                       <tr>
                         <td className="cell-muted">{t.id}</td>
-                        <td>{t.date}</td>
+                        <td className="journal-date">{t.date}</td>
                         <td>
                           <span
                             style={{

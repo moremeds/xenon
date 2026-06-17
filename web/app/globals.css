@@ -895,6 +895,17 @@ tr:last-child td {
   border-bottom: none;
 }
 
+/* Compact density for the Trade Journal (overrides the roomier global td/th). */
+.journal-table th,
+.journal-table td {
+  padding: 7px 12px;
+  font-size: 11px;
+}
+.journal-table td.journal-date {
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
 .last-price-up {
   animation: last-price-flash-up 2.5s ease-out;
 }
