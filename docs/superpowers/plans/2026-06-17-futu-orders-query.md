@@ -621,7 +621,33 @@ def _normalize_order_row(self, row) -> dict:
     }
 ```
 
-`fetch_order_fees(order_ids)` calls `self._trd_ctx.order_fee_query(order_id_list=..., acc_id=..., trd_env=...)` with a `time.sleep(FEE_THROTTLE_SEC)` between calls; returns `[{"futu_order_id", "total_fee", "currency": "USD", "raw"}]`. If the SDK lacks `order_fee_query` in this version, return `[]` and log once (verify against the installed SDK during implementation — see Task 0 note below).
+`fetch_order_fees(order_ids)` — **verified**: `order_fee_query(order_id_list=[...], trd_env=..., acc_id=...)` exists and returns a frame with columns `order_id, fee_amount, fee_details`. It accepts a **batch** list, so chunk `order_ids` (e.g. 50/call) and `time.sleep(FEE_THROTTLE_SEC)` between chunks — not per-order. Map `fee_amount → total_fee`:
+
+```python
+def fetch_order_fees(self, order_ids: list[str]) -> list[dict]:
+    self._ensure_connected()
+    from futu import RET_OK, TrdEnv
+    import time as _time
+    env_enum = getattr(TrdEnv, self._matched_trd_env or self.trd_env, TrdEnv.REAL)
+    out: list[dict] = []
+    chunks = [order_ids[i:i + 50] for i in range(0, len(order_ids), 50)]
+    for n, chunk in enumerate(chunks):
+        if n and self.FEE_THROTTLE_SEC > 0:
+            _time.sleep(self.FEE_THROTTLE_SEC)
+        ret, data = self._trd_ctx.order_fee_query(order_id_list=chunk, trd_env=env_enum, acc_id=self._acc_id)
+        if ret != RET_OK:
+            raise classify_futu_exception(Exception(str(data)))
+        if data is None or data.empty:
+            continue
+        for _, row in data.iterrows():
+            out.append({
+                "futu_order_id": str(row.get("order_id")),
+                "total_fee": float(row.get("fee_amount", 0) or 0),
+                "currency": "USD",
+                "raw": {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()},
+            })
+    return out
+```
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -635,8 +661,12 @@ git add src/xenon/clients/futu_client.py scripts/tests/test_futu_orders_client.p
 git commit -m "feat(futu): client fetchers for open/history orders + fees"
 ```
 
-> **Task 0 note (do at implementation start):** verify the installed SDK frame columns and that `order_fee_query` exists:
-> `cd .venv/lib/python3.13/site-packages/futu && grep -n "def order_list_query\|def order_fee_query\|def history_order_list_query" trade/open_trade_context.py` and inspect the returned DataFrame columns. Adjust field names in `_normalize_order_row` to match the real frame. Do NOT guess column names — read them.
+> **SDK columns — VERIFIED 2026-06-17** against `.venv/.../futu/trade/open_trade_context.py`:
+>
+> - `order_list_query(order_id="", status_filter_list=[], code='', start='', end='', trd_env=, acc_id=, …)` and `history_order_list_query(status_filter_list=[], code='', start='', end='', trd_env=, acc_id=, …)` return the **identical** col_list: `code, stock_name, order_market, trd_side, order_type, order_status, order_id, qty, price, create_time, updated_time, dealt_qty, dealt_avg_price, last_err_msg, remark, time_in_force, fill_outside_rth, session, aux_price, trail_type, trail_value, trail_spread, currency, jp_acc_type`.
+> - `order_fee_query(order_id_list=[], trd_env=, acc_id=)` returns `order_id, fee_amount, fee_details`.
+> - Enums (verified): `OrderType` = NORMAL/MARKET/ABSOLUTE_LIMIT/AUCTION/AUCTION_LIMIT/SPECIAL_LIMIT/SPECIAL_LIMIT_ALL/STOP/STOP_LIMIT/MARKET_IF_TOUCHED/LIMIT_IF_TOUCHED/TRAILING_STOP/TRAILING_STOP_LIMIT/TWAP/TWAP_LIMIT/VWAP/VWAP_LIMIT; `TimeInForce` = DAY/GTC; `OrderStatus` = UNSUBMITTED/WAITING_SUBMIT/SUBMITTING/SUBMIT_FAILED/TIMEOUT/SUBMITTED/FILLED_PART/FILLED_ALL/CANCELLING_PART/CANCELLING_ALL/CANCELLED_PART/CANCELLED_ALL/FAILED/DISABLED/DELETED/FILL_CANCELLED.
+>   The `_normalize_order_row` field names above match this frame. Still confirm `pd.isna` import (`import pandas as pd` is already module-level in `futu_client.py`).
 
 ---
 
@@ -651,22 +681,25 @@ git commit -m "feat(futu): client fetchers for open/history orders + fees"
 **Interfaces:**
 
 - Consumes: `journal_entries` table; a closed-trade row dict (from Task 3).
-- Produces: `upsert_futu_auto_import_entry(conn, *, scope, closed_trade: dict) -> dict | None` — idempotent on `(scope, metadata->>'futu_close_id')`.
+- Produces: `upsert_futu_auto_import_entry(conn, *, scope, closed_trade: dict) -> dict | None` — idempotent on `(scope, futu_close_id)`.
 
-- [ ] **Step 1: Add the Futu dedup index to `schema.py` + migration**
+- [ ] **Step 1: Add a `futu_close_id` column + Futu dedup index to `schema.py` + migration**
+
+Rationale (review-cycle Pass 1): a partial-unique index over a JSONB expression (`metadata->>'futu_close_id'`) makes `ON CONFLICT` brittle — Postgres requires the conflict target to exactly match the indexed expression, and SQLAlchemy's `on_conflict_do_nothing` does not reliably accept a `text()` expression as an `index_element`. A dedicated nullable column is unambiguous and keeps `journal_entry_to_payload` unchanged.
 
 ```python
-# in journal_entries Table(...), add alongside uq_journal_auto_import:
+# in journal_entries Table(...): add a column alongside the existing scope columns…
+Column("futu_close_id", Text),  # set only for decision='FUTU_AUTO_IMPORT'; NULL for IB rows
+# …and an index alongside uq_journal_auto_import:
 Index(
     "uq_journal_futu_auto_import",
-    "broker", "account_env", "broker_account",
-    text("(metadata->>'futu_close_id')"),
+    "broker", "account_env", "broker_account", "futu_close_id",
     unique=True,
-    postgresql_where=text("decision = 'FUTU_AUTO_IMPORT'"),
+    postgresql_where=text("decision = 'FUTU_AUTO_IMPORT' AND futu_close_id IS NOT NULL"),
 ),
 ```
 
-Add the matching `op.create_index(..., postgresql_where=...)` to `2026_06_17_futu_orders.py`.
+Add the matching `op.add_column("journal_entries", sa.Column("futu_close_id", sa.Text()), schema="xenon")` and `op.create_index(..., postgresql_where=sa.text("decision = 'FUTU_AUTO_IMPORT' AND futu_close_id IS NOT NULL"))` to `2026_06_17_futu_orders.py`.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -724,13 +757,13 @@ def upsert_futu_auto_import_entry(conn, *, scope, closed_trade: dict):
         pg_insert(journal_entries)
         .values(
             trade_id=None, ticker=closed_trade["ticker"], decision="FUTU_AUTO_IMPORT",
-            authored_by="system", metadata=meta,
+            authored_by="system", metadata=meta, futu_close_id=closed_trade["futu_close_id"],
             broker=scope.broker, account_env=scope.account_env, broker_account=scope.broker_account,
             authored_at=closed_trade["closed_at"],
         )
         .on_conflict_do_nothing(
-            index_elements=["broker", "account_env", "broker_account", text("(metadata->>'futu_close_id')")],
-            index_where=text("decision = 'FUTU_AUTO_IMPORT'"),
+            index_elements=["broker", "account_env", "broker_account", "futu_close_id"],
+            index_where=text("decision = 'FUTU_AUTO_IMPORT' AND futu_close_id IS NOT NULL"),
         )
         .returning(journal_entries)
     )
@@ -743,13 +776,13 @@ def upsert_futu_auto_import_entry(conn, *, scope, closed_trade: dict):
             journal_entries.c.broker == scope.broker,
             journal_entries.c.account_env == scope.account_env,
             journal_entries.c.broker_account == scope.broker_account,
-            journal_entries.c.metadata["futu_close_id"].astext == closed_trade["futu_close_id"],
+            journal_entries.c.futu_close_id == closed_trade["futu_close_id"],
         ).limit(1)
     ).first()
     return journal_entry_to_payload(existing) if existing is not None else None
 ```
 
-> Confirm `on_conflict_do_nothing` accepts a `text()` expression index element on this SQLAlchemy version; if not, target the index by name via `index_elements` workaround or `ON CONFLICT ON CONSTRAINT uq_journal_futu_auto_import`. Verify during implementation.
+> Plain-column `ON CONFLICT` — no expression-index gamble. `meta` should also carry the keys the frontend journal row reader expects (`realized_pnl`, `return_on_risk`, `entry_cost`, `structure`, `quantity`); during implementation, read `journal_entry_to_payload` + the `JournalSections` row mapper in `web/components/WorkspaceSections.tsx` and align metadata keys so the QTY / ENTRY COST / REALIZED P&L / ROR columns render for Futu rows.
 
 - [ ] **Step 5: Run test to verify it passes**
 
@@ -770,22 +803,32 @@ git commit -m "feat(futu): FUTU_AUTO_IMPORT journal upsert + dedup index"
 **Files:**
 
 - Modify: `src/xenon/api/services/futu_history_sync.py`
-- Test: `scripts/tests/test_futu_orders_sync.py`
+- Modify: `src/xenon/api/server.py` (open-orders poll loop + `/futu/sync` & `/orders/refresh?broker=FUTU` call `sync_futu_orders`)
+- Test: `scripts/tests/test_futu_orders_sync.py`, `scripts/tests/test_futu_orders_poll_smoke.py`
 
 **Interfaces:**
 
-- Consumes: Tasks 2–5 (`insert_orders`, `insert_order_fees`, `insert_closed_trades`, `match_closed_lots`/`closed_lots_to_rows`, `upsert_futu_auto_import_entry`), client fetchers (Task 4), `is_read_only()`.
-- Produces: `sync_futu_orders(engine, client, scope) -> dict` (counts) wired into the existing backfill entrypoint.
+- Consumes: Tasks 2–5 (`insert_orders`, `insert_order_fees`, `insert_closed_trades`, `match_closed_lots`/`closed_lots_to_rows`, `upsert_futu_auto_import_entry`), client fetchers (Task 4), existing `fetch_history_deals` + `insert_trades`, `is_read_only()`.
+- Produces: `sync_futu_orders(engine, client, scope) -> dict` (counts) wired into the existing backfill entrypoint; `_maybe_start_futu_orders_poll()` in server.py.
 
-- [ ] **Step 1: Write the failing test** (mock the client; assert rows land + journal deduped + read-only no-ops). Use the existing `test_futu_history_sync.py` harness style.
+- [ ] **Step 1: Write the failing test** (mock the client; assert orders/fees/closed-trades land + journal deduped + **today's deals refreshed into `futu_trades`** + read-only no-ops). Use the existing `test_futu_history_sync.py` harness style.
 
 - [ ] **Step 2: Run → fail.** `uv run pytest scripts/tests/test_futu_orders_sync.py -v`
 
-- [ ] **Step 3: Implement `sync_futu_orders`** — pull open + history orders → `insert_orders`; fees → `insert_order_fees`; build closed-trades from `list_trades` (already-persisted fills) via `match_closed_lots` → `insert_closed_trades`; then for each closed-trade row call `upsert_futu_auto_import_entry`. Guard the whole function with `if is_read_only(): return {...zeros...}`. Wire it into `backfill_history_sync` after trades/cashflows persist (so `futu_trades` exists before closed-trade reconstruction).
+- [ ] **Step 3: Implement `sync_futu_orders`** — in order:
+  1. `if is_read_only(): return {…zeros…}` (guard first).
+  2. Refresh **today's fills**: `client.fetch_history_deals(today_et_start, now)` → `insert_trades` (so TODAY'S EXECUTED ORDERS is live, not just nightly). This is the live-fills path the EXECUTED panel reads.
+  3. `client.fetch_open_orders()` + `client.fetch_history_orders(since, now)` → `insert_orders`.
+  4. `client.fetch_order_fees([o["futu_order_id"] for o in orders])` → `insert_order_fees`.
+  5. Rebuild closed-trades from `list_trades(engine, scope)` via `match_closed_lots` → `closed_lots_to_rows` → `insert_closed_trades`.
+  6. For each closed-trade row, `upsert_futu_auto_import_entry`.
+     Wire into `backfill_history_sync` after trades/cashflows persist (so `futu_trades` exists before closed-trade reconstruction).
 
-- [ ] **Step 4: Run → pass.**
+- [ ] **Step 4: Add `_maybe_start_futu_orders_poll()` to server.py** — mirror `_maybe_start_futu_history_loop`. A 60s loop (env `XENON_FUTU_ORDERS_POLL_SEC`, default 60; disable with `XENON_FUTU_ORDERS_POLL=0`) that, **only during RTH** (reuse the market-hours helper) and **only when not read-only**, resolves the FUTU scope via the same `_scope_factory` the history loop uses and calls `sync_futu_orders`. Skipped in test mode and under `XENON_READ_ONLY=1` (mirror the existing `_maybe_start_*` guards). Make `/futu/sync` and `/orders/refresh?broker=FUTU` also call `sync_futu_orders` so the manual refresh button pulls fresh.
 
-- [ ] **Step 5: Commit** — `feat(futu): sync persists orders, fees, closed trades + journal`
+- [ ] **Step 5: Run → pass** (`scripts/tests/test_futu_orders_sync.py` + a loop smoke test mirroring `test_futu_history_loop_smoke.py`).
+
+- [ ] **Step 6: Commit** — `feat(futu): sync + 60s RTH poll persist orders, fees, closed trades, fills, journal`
 
 ---
 
@@ -892,9 +935,10 @@ def _futu_open_order(row) -> dict:
 
 - [ ] **Step 1: Failing test** — seed `futu_closed_trades`, call the blotter handler with FUTU scope, assert `closed_trades` rows carry `realized_pnl`, `cost_basis`, `proceeds`, `date`, `symbol`, `side`, `qty` (matching the IB blotter response keys the frontend reads).
 - [ ] **Step 2: Run → fail.**
-- [ ] **Step 3:** Add `scope.broker == "FUTU"` branch that reads `list_closed_trades` and shapes to the existing blotter response contract (inspect `blotter.py` for the exact IB `closed_trades` row keys and mirror them). Switch the route dep to `get_broker_scope`. The `/journal` route only needs its dep switched to `get_broker_scope` (the FUTU rows already exist from Task 6) — fold that one-line change in here with a journal-scope test.
-- [ ] **Step 4: Run → pass.**
-- [ ] **Step 5: Commit** — `feat(api): /blotter + /journal FUTU scope`
+- [ ] **Step 3:** Add `scope.broker == "FUTU"` branch to the blotter **GET** that reads `list_closed_trades` and shapes to the existing blotter response contract (inspect `blotter.py` for the exact IB `closed_trades` row keys and mirror them). For **commission**: `futu_closed_trades` has no per-lot commission; set `commission` to `None`/`0` for Futu rows (the 30-day table's COMMISSION column tolerates this — IB Flex is the only commission-bearing source). Switch the route dep to `get_broker_scope`.
+- [ ] **Step 4:** Make the blotter **POST** (manual refresh) broker-aware: for `scope.broker == "FUTU"`, call `sync_futu_orders` (rebuilds closed-trades from fills) instead of the IB Flex sync — so the HISTORICAL TRADES "REFRESH" button works on the Futu tab. The `/journal` route only needs its dep switched to `get_broker_scope` (FUTU rows already exist from Task 6) — fold that one-line change in here with a journal-scope test.
+- [ ] **Step 5: Run → pass.**
+- [ ] **Step 6: Commit** — `feat(api): /blotter + /journal FUTU scope`
 
 ---
 
@@ -955,8 +999,10 @@ For `/api/orders` POST, forward the same `?broker=` to `/orders/refresh`. For `/
   - `useBlotter` / `useJournal`: pass a broker-suffixed endpoint into `useSyncHook` (`endpoint: broker === "FUTU" ? "/api/blotter?broker=FUTU" : "/api/blotter"`). The module-level cache keys on endpoint string, so per-broker isolation is automatic.
   - Call sites: `WorkspaceShell.tsx:132` → `useOrders(shouldAutoSyncOrders, activeAccount === "futu" ? "FUTU" : "IB")`. In `WorkspaceSections.tsx`, thread the existing `activeAccount` prop into `useBlotter(true, …)` (line 2243) and `useJournal(…)` (line 957). (`activeAccount` is already passed into these components per the explore findings.)
 
-- [ ] **Step 4: Run → pass** (`cd web && npx vitest run tests/use-orders-broker.test.tsx`).
-- [ ] **Step 5: Commit** — `feat(web): render Futu orders/blotter/journal when Futu account active`
+- [ ] **Step 4: Hide IB-only controls on the Futu tab.** The TRADE JOURNAL "SYNC IB" button calls `/api/journal/sync` (an IB-only path); the OPEN ORDERS rows render MODIFY/CANCEL actions. When `activeAccount === "futu"`, hide the "SYNC IB" button and the per-row MODIFY/CANCEL/order-entry actions (Futu is read-only). The positions table already renders read-only on Futu — mirror that gate. Add a Vitest asserting the SYNC IB button is absent when `activeAccount="futu"`.
+
+- [ ] **Step 5: Run → pass** (`cd web && npx vitest run tests/use-orders-broker.test.tsx`).
+- [ ] **Step 6: Commit** — `feat(web): render Futu orders/blotter/journal when Futu account active`
 
 ---
 
