@@ -8,7 +8,10 @@ type OrdersPayload = Record<string, unknown>;
 // Per-broker singleflight so an IB refresh and a FUTU refresh don't collapse together.
 const syncInFlight: Record<string, Promise<void> | null> = {};
 
-function brokerQuery(req: Request): string {
+function brokerQuery(req?: Request): string {
+  // `req` (or req.url) is absent when the route handler is unit-tested directly;
+  // production Next.js always supplies a Request. Default to the IB scope.
+  if (!req?.url) return "";
   const broker = new URL(req.url).searchParams.get("broker");
   return broker ? `?broker=${encodeURIComponent(broker)}` : "";
 }
@@ -20,7 +23,7 @@ async function fetchOrders(qs: string): Promise<OrdersPayload> {
   });
 }
 
-export async function GET(req: Request): Promise<Response> {
+export async function GET(req?: Request): Promise<Response> {
   const qs = brokerQuery(req);
   try {
     return NextResponse.json(await fetchOrders(qs));
@@ -31,7 +34,7 @@ export async function GET(req: Request): Promise<Response> {
   }
 }
 
-export async function POST(req: Request): Promise<Response> {
+export async function POST(req?: Request): Promise<Response> {
   const qs = brokerQuery(req);
   const key = qs || "ib";
   try {

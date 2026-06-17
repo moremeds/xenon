@@ -3,12 +3,15 @@ import { xenonFetch } from "@/lib/xenonApi";
 
 export const runtime = "nodejs";
 
-function brokerQuery(req: Request): string {
+function brokerQuery(req?: Request): string {
+  // `req` (or req.url) is absent when the route handler is unit-tested directly;
+  // production Next.js always supplies a Request. Default to the IB scope.
+  if (!req?.url) return "";
   const broker = new URL(req.url).searchParams.get("broker");
   return broker ? `?broker=${encodeURIComponent(broker)}` : "";
 }
 
-export async function GET(req: Request): Promise<Response> {
+export async function GET(req?: Request): Promise<Response> {
   try {
     const data = await xenonFetch(`/blotter${brokerQuery(req)}`, {
       method: "GET",
@@ -22,7 +25,7 @@ export async function GET(req: Request): Promise<Response> {
   }
 }
 
-export async function POST(req: Request): Promise<Response> {
+export async function POST(req?: Request): Promise<Response> {
   try {
     const data = await xenonFetch(`/blotter${brokerQuery(req)}`, {
       method: "POST",
