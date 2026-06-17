@@ -1505,6 +1505,13 @@ async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
     via sync_futu_orders (DB-first; no-ops under XENON_READ_ONLY=1). The GET read
     path stays Postgres-only.
     """
+    # IB requires a verified trading mode before any work — including the
+    # test-mode short-circuit — so a mode mismatch is refused even in test mode
+    # (preserves the /orders/refresh guard contract). FUTU is read-only and
+    # carries no IB trading mode to verify, so it is exempt.
+    if scope.broker != "FUTU":
+        require_mode_verified(request)
+
     if _is_test_mode():
         return {"status": "ok", "orders": []}
 
@@ -1512,8 +1519,7 @@ async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
         await _futu_refresh_db_first(scope)
         return orders_payload_for_scope(scope)
 
-    # IB path — require verified IB mode before touching the gateway.
-    require_mode_verified(request)
+    # IB path — mode already verified above; touch the gateway.
     result = await _run_ib_script_with_recovery(
         "xenon-ib-orders", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
     )
