@@ -257,6 +257,33 @@ def _futu_executed_order(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _futu_order_as_executed(row: dict[str, Any]) -> dict[str, Any]:
+    """Derive an order-grain executed row from an intraday-filled ``futu_orders`` row.
+
+    ``futu_trades`` (deal-grain, with per-deal fees) is written only by the nightly
+    16:30 ET ``history_deal_list_query`` sync, so today's Futu fills are invisible in
+    the "Today's Executed Orders" panel until tonight. This fallback surfaces them
+    immediately from the live-synced ``futu_orders`` table. Once the deal rows land in
+    ``futu_trades`` the caller dedupes the order out (see ``_futu_orders_payload``), so
+    a filled order never double-counts. ``execId`` is prefixed ``order-`` to stay
+    distinct from deal-grain ``futu_deal_id`` execIds.
+    """
+    contract = _futu_contract(str(row["ticker"]))
+    side = str(row["action"]).upper()
+    return {
+        "execId": f"order-{row['futu_order_id']}",
+        "symbol": _display_symbol(contract["symbol"], contract["secType"], contract["right"], contract["strike"]),
+        "contract": contract,
+        "side": "BOT" if side == "BUY" else "SLD" if side == "SELL" else side,
+        "quantity": _float_or_none(row.get("filled_qty")) or 0.0,
+        "avgPrice": _float_or_none(row.get("avg_fill_price")),
+        "commission": None,  # per-deal fees arrive with the nightly futu_trades sync
+        "realizedPNL": None,
+        "time": _iso(row.get("updated_at")),
+        "exchange": "FUTU",
+    }
+
+
 def _futu_orders_payload(scope: AccountScope, *, limit: int) -> dict[str, Any]:
     engine = get_sync_engine()
     with engine.connect() as conn:
@@ -288,8 +315,34 @@ def _futu_orders_payload(scope: AccountScope, *, limit: int) -> dict[str, Any]:
                 .limit(limit)
             ).all()
         ]
+        # Intraday fallback: FILLED futu_orders touched today whose deal rows haven't
+        # synced into futu_trades yet (nightly 16:30 ET). Surfaces today's fills now
+        # instead of leaving them invisible until tonight. US-only to mirror the
+        # futu_trades market constraint; deduped against deal rows below.
+        filled_order_rows = [
+            dict(r._mapping)
+            for r in conn.execute(
+                select(futu_orders)
+                .where(
+                    futu_orders.c.broker == scope.broker,
+                    futu_orders.c.account_env == scope.account_env,
+                    futu_orders.c.broker_account == scope.broker_account,
+                    futu_orders.c.market == "US",
+                    futu_orders.c.filled_qty > 0,
+                    futu_orders.c.updated_at >= _today_et_start_utc(),
+                )
+                .order_by(desc(futu_orders.c.updated_at))
+                .limit(limit)
+            ).all()
+        ]
     open_orders = [_futu_open_order(row) for row in open_rows]
+    # Deal-grain rows take precedence; add order-grain rows only for filled orders that
+    # have no deal yet, so a fill never appears twice once the nightly deal sync runs.
+    dealt_order_ids = {str(r.get("futu_order_id")) for r in fill_rows if r.get("futu_order_id")}
     executed_orders = [_futu_executed_order(row) for row in fill_rows]
+    executed_orders += [
+        _futu_order_as_executed(row) for row in filled_order_rows if str(row["futu_order_id"]) not in dealt_order_ids
+    ]
     return {
         "last_sync": datetime.now(timezone.utc).isoformat(),
         "open_orders": open_orders,
