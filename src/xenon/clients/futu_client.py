@@ -1006,7 +1006,9 @@ class FutuClient:
                 out.append(
                     {
                         "futu_order_id": str(row.get("order_id")),
-                        "total_fee": float(row.get("fee_amount", 0) or 0),
+                        # _coerce_num tolerates 'N/A'/NaN sentinels — a raw float()
+                        # here would raise and silently abort the whole sync.
+                        "total_fee": _coerce_num(row.get("fee_amount")) or 0.0,
                         "currency": "USD",
                         "raw": {k: _na_to_none(v) for k, v in row.to_dict().items()},
                     }

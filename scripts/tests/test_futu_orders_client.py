@@ -195,6 +195,22 @@ def test_fetch_order_fees_tolerates_list_valued_fee_details(monkeypatch):
     assert rows[0]["raw"]["fee_details"] == details
 
 
+def test_fetch_order_fees_na_sentinel_fee_amount_coerces_to_zero(monkeypatch):
+    """A non-numeric `fee_amount` sentinel ('N/A') must not crash the fee fetch.
+
+    `float(row.get("fee_amount") or 0)` raised ValueError on 'N/A', aborting
+    fetch_order_fees and the whole orders sync before the closed-trade rebuild.
+    _coerce_num maps the sentinel to None → total_fee falls back to 0.0."""
+    frame = pd.DataFrame([{"order_id": "O1", "fee_amount": "N/A", "fee_details": "[]"}])
+    ctx = MagicMock()
+    ctx.order_fee_query.return_value = (0, frame)
+    c = _client(ctx)
+    c.FEE_THROTTLE_SEC = 0
+    rows = c.fetch_order_fees(["O1"])  # must not raise on the 'N/A' sentinel
+    assert rows[0]["futu_order_id"] == "O1"
+    assert rows[0]["total_fee"] == 0.0
+
+
 def test_fetch_order_fees_empty_input_no_call():
     ctx = MagicMock()
     assert _client(ctx).fetch_order_fees([]) == []

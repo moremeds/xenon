@@ -8,7 +8,13 @@ from xenon.db.engine import get_sync_engine
 from xenon.db.queries.journal import list_journal_entries, upsert_futu_auto_import_entry
 from xenon.execution.account_scope import AccountScope
 
-_SCOPE = AccountScope(broker="FUTU", account_env="live", broker_account="281753263")
+# Use a pytest-only sentinel account (never a real numeric Futu account id) so
+# the absolute-count assertions can't collide with real synced FUTU_AUTO_IMPORT
+# rows in the shared core_test DB. Under the Phase-2 autouse BEGIN/ROLLBACK
+# fixture, get_sync_engine() is bound to the test's rolled-back connection, so
+# this scope sees no residuals and nothing leaks — matches the `pytest-sync`
+# convention in scripts/tests/test_futu_orders_sync.py.
+_SCOPE = AccountScope(broker="FUTU", account_env="paper", broker_account="pytest-jauto")
 
 
 def _closed(close_id: str = "d2:d1") -> dict:
