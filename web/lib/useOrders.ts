@@ -28,7 +28,15 @@ export function useOrders(
   const didInitialSync = useRef(false);
   const q = broker === "FUTU" ? "?broker=FUTU" : "";
 
+  // Track the latest requested broker so a stale in-flight response — from the
+  // previous broker, or a slow POST sync that resolves after the user switched
+  // account tabs — can't overwrite the current broker's orders. Assigned on
+  // every render so it always reflects the broker the user is looking at now.
+  const brokerRef = useRef(broker);
+  brokerRef.current = broker;
+
   const triggerSync = useCallback(async () => {
+    const reqBroker = broker;
     setSyncing(true);
     try {
       const res = await fetch(`/api/orders${q}`, { method: "POST" });
@@ -37,15 +45,17 @@ export function useOrders(
         throw new Error((body as { error?: string }).error ?? "Sync failed");
       }
       const json = (await res.json()) as OrdersData;
+      if (brokerRef.current !== reqBroker) return; // switched tabs mid-flight
       setData(json);
       setLastSync(json.last_sync || null);
       setError(null);
     } catch (err) {
+      if (brokerRef.current !== reqBroker) return; // don't surface a stale broker's error
       setError(err instanceof Error ? err.message : "Sync failed");
     } finally {
       setSyncing(false);
     }
-  }, [q]);
+  }, [q, broker]);
 
   const syncNow = useCallback(() => {
     void triggerSync();
@@ -57,11 +67,18 @@ export function useOrders(
   useEffect(() => {
     didInitialSync.current = false;
     setLoading(true);
+    // Clear the previous broker's orders immediately so a tab switch never
+    // lingers on (or flickers back to) the other account's open orders while
+    // the new broker's cached read is in flight.
+    setData(null);
+    setError(null);
+    const reqBroker = broker;
     const init = async () => {
       try {
         const res = await fetch(`/api/orders${q}`);
         if (!res.ok) throw new Error("Failed to fetch orders");
         const json = (await res.json()) as OrdersData;
+        if (brokerRef.current !== reqBroker) return; // switched tabs mid-flight
         setData(json);
         setLastSync(json.last_sync || null);
         setError(null);
@@ -73,6 +90,7 @@ export function useOrders(
           void triggerSync();
         }
       } catch (err) {
+        if (brokerRef.current !== reqBroker) return; // stale switch — ignore
         setError(err instanceof Error ? err.message : "Unknown error");
         setLoading(false);
       }
