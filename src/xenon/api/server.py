@@ -37,7 +37,14 @@ INTERNALS_SKEW_CACHE_TTL_SECONDS = 60 * 15
 
 from xenon.api import trading_mode
 from xenon.api.auth import verify_api_key, verify_clerk_jwt
-from xenon.api.guards import get_account_scope, is_read_only, mask_account, read_only_403, require_mode_verified
+from xenon.api.guards import (
+    get_account_scope,
+    get_broker_scope,
+    is_read_only,
+    mask_account,
+    read_only_403,
+    require_mode_verified,
+)
 from xenon.api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_mode, is_docker_mode, restart_ib_gateway
 from xenon.api.ib_pool import IBPool
 from xenon.api.pool_order_manage import pool_cancel_order, pool_modify_order
@@ -53,7 +60,7 @@ from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
 from xenon.db.engine import dispose_engine, get_sync_engine, init_engine
-from xenon.db.queries.blotter import blotter_has_trades, fetch_blotter_pg, merge_pg_and_flex
+from xenon.db.queries.blotter import blotter_has_trades, fetch_blotter_pg, fetch_futu_blotter, merge_pg_and_flex
 from xenon.db.schema import account_snapshots, order_events, order_submissions
 from xenon.execution import orders_store, preflight, quote_guard, quote_tokens
 from xenon.execution.account_scope import resolve_from_app_state
@@ -1443,16 +1450,31 @@ async def _bg_sync_via_subprocess():
         logger.error("Background portfolio sync failed: %s", result.error)
 
 
-@app.post("/orders/refresh", dependencies=[Depends(require_mode_verified)])
-async def orders_refresh(scope=Depends(get_account_scope)):
-    """Sync orders from IB via subprocess.
+@app.post("/orders/refresh")
+async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
+    """Sync orders into Postgres, then return the scoped payload.
 
-    Scripts auto-allocate client IDs from subprocess range (20-49).
-    Auto-restarts IB Gateway on ECONNREFUSED and retries once.
+    IB: subprocess pull (auto-allocated clientId 20-49, gateway auto-restart on
+    ECONNREFUSED), gated on IB mode verification.
+    FUTU: read-only pull from OpenD into futu_orders/trades/closed_trades + journal
+    via sync_futu_orders (DB-first; no-ops under XENON_READ_ONLY=1). The GET read
+    path stays Postgres-only.
     """
     if _is_test_mode():
         return {"status": "ok", "orders": []}
 
+    if scope.broker == "FUTU":
+        from xenon.api.services.futu_history_sync import sync_futu_orders
+        from xenon.db.engine import get_engine
+
+        client = _get_futu_client()
+        if not client.is_connected():
+            client.connect()
+        await sync_futu_orders(get_engine(), client, scope)
+        return orders_payload_for_scope(scope)
+
+    # IB path — require verified IB mode before touching the gateway.
+    require_mode_verified(request)
     result = await _run_ib_script_with_recovery(
         "xenon-ib-orders", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
     )
@@ -2710,7 +2732,7 @@ async def futu_portfolio():
 
 
 @app.post("/blotter")
-async def blotter_sync(scope=Depends(get_account_scope)):
+async def blotter_sync(scope=Depends(get_broker_scope)):
     """Return historical trades from Postgres first, then optional IB Flex.
 
     When IB_FLEX_TOKEN / IB_FLEX_QUERY_ID are unset, return a structured
@@ -2720,6 +2742,20 @@ async def blotter_sync(scope=Depends(get_account_scope)):
     (see src/xenon/trade_blotter/flex_query.py). Plan: docs/plans/
     2026-04-28-postgres-migration-completion-IMPL.md § W2.1.
     """
+    if scope.broker == "FUTU":
+        # FUTU: rebuild closed trades from fills, then read them back (no IB Flex).
+        from xenon.api.services.futu_history_sync import sync_futu_orders
+        from xenon.db.engine import get_engine
+
+        if not _is_test_mode():
+            client = _get_futu_client()
+            if not client.is_connected():
+                client.connect()
+            await sync_futu_orders(get_engine(), client, scope)
+        engine = get_sync_engine()
+        with engine.connect() as conn:
+            return fetch_futu_blotter(conn, scope=scope, days=30)
+
     engine = get_sync_engine()
     with engine.connect() as conn:
         pg_payload = fetch_blotter_pg(conn, scope=scope, days=30)
@@ -2782,9 +2818,11 @@ async def blotter_sync(scope=Depends(get_account_scope)):
 
 
 @app.get("/blotter")
-async def blotter_get(scope=Depends(get_account_scope)):
+async def blotter_get(scope=Depends(get_broker_scope)):
     engine = get_sync_engine()
     with engine.connect() as conn:
+        if scope.broker == "FUTU":
+            return fetch_futu_blotter(conn, scope=scope, days=30)
         return fetch_blotter_pg(conn, scope=scope, days=30)
 
 
