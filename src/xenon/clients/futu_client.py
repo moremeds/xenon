@@ -93,6 +93,28 @@ def _enum_to_str(value: Any) -> str:
     raise ValueError(f"Unknown TrdEnv value: {value!r}")
 
 
+def _coerce_num(value: Any) -> Optional[float]:
+    """Coerce a Futu numeric cell to float, tolerating its sentinels.
+
+    Futu frames use the string ``'N/A'`` (and occasionally empty string) for
+    unset numeric fields — a plain limit order has no trail/stop ``aux_price``,
+    an unfilled order has no ``dealt_avg_price``. ``float('N/A')`` raised, which
+    crashed the whole frame normalization and aborted the orders sync. Any
+    non-numeric / NaN / None value maps to ``None``; valid numbers pass through.
+    """
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 # Defaults chosen to match Futu's 10 calls / 30s rate limit with safety margin.
 DEFAULT_POSITION_TTL_SEC = 30
 DEFAULT_ACCOUNT_TTL_SEC = 10
@@ -857,9 +879,9 @@ class FutuClient:
             ticker, market = code, ""
         raw_side = str(row.get("trd_side", "")).upper()
         action = {"BUY": "BUY", "SELL": "SELL", "SELL_SHORT": "SELL", "BUY_BACK": "BUY"}.get(raw_side, "BUY")
-        price = float(row.get("price", 0) or 0)
-        aux = row.get("aux_price")
-        dealt_avg = row.get("dealt_avg_price")
+        price = _coerce_num(row.get("price"))
+        aux = _coerce_num(row.get("aux_price"))
+        dealt_avg = _coerce_num(row.get("dealt_avg_price"))
         return {
             "futu_order_id": str(row.get("order_id")),
             "ticker": ticker,
@@ -867,13 +889,13 @@ class FutuClient:
             "market": market,
             "action": action,
             "order_type": str(row.get("order_type", "NORMAL")),
-            "quantity": float(row.get("qty", 0) or 0),
-            "limit_price": price if price > 0 else None,
-            "aux_price": (float(aux) if aux not in (None, 0, "") and not pd.isna(aux) else None),
+            "quantity": _coerce_num(row.get("qty")) or 0.0,
+            "limit_price": price if price and price > 0 else None,
+            "aux_price": aux if aux else None,
             "status": str(row.get("order_status", "")),
             "tif": str(row.get("time_in_force", "DAY")),
-            "filled_qty": float(row.get("dealt_qty", 0) or 0),
-            "avg_fill_price": (float(dealt_avg) if dealt_avg not in (None, 0, "") and not pd.isna(dealt_avg) else None),
+            "filled_qty": _coerce_num(row.get("dealt_qty")) or 0.0,
+            "avg_fill_price": dealt_avg if dealt_avg else None,
             "created_at": self._parse_futu_ts(row.get("create_time")),
             "updated_at": self._parse_futu_ts(row.get("updated_time") or row.get("create_time")),
             "raw": {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()},

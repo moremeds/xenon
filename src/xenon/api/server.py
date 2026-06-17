@@ -1460,8 +1460,15 @@ async def _futu_refresh_db_first(scope) -> None:
     """
     import asyncio
 
-    from xenon.api.services.futu_history_sync import sync_futu_orders
+    # Catch-up inception for a never-synced scope; thereafter the watermark
+    # (max filled_at − lookback) keeps the manual refresh's window tight.
+    from datetime import date as _date
+    from datetime import datetime, time, timezone
+
+    from xenon.api.services.futu_history_sync import resolve_incremental_since, sync_futu_orders
     from xenon.db.engine import get_engine
+
+    _FUTU_INCEPTION = _date(2024, 1, 1)
 
     client = _get_futu_client()
 
@@ -1478,7 +1485,12 @@ async def _futu_refresh_db_first(scope) -> None:
     if not connected:
         return
     try:
-        await sync_futu_orders(get_engine(), client, scope)
+        # A manual refresh catches up the gap since the last synced fill (minus a
+        # 7-day lookback for late-posted corrections), not just today — so a stack
+        # idle for days/weeks returns to current on one click.
+        since_date = await resolve_incremental_since(get_engine(), scope, inception=_FUTU_INCEPTION)
+        since_dt = datetime.combine(since_date, time.min, tzinfo=timezone.utc)
+        await sync_futu_orders(get_engine(), client, scope, since=since_dt)
     except Exception as exc:
         logger.warning("futu refresh: sync failed (%s); serving DB snapshot", exc)
 

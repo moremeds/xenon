@@ -240,8 +240,11 @@ async def sync_futu_orders(
         today_start = _today_et_start_utc()
         hist_since = since or today_start
 
-        # 1. Today's fills → futu_trades (keeps TODAY'S EXECUTED ORDERS live).
-        deals_raw = client.fetch_history_deals(start=today_start, end=now)
+        # 1. Fills → futu_trades. `since=None` (60s poller) pulls only today, keeping
+        #    TODAY'S EXECUTED ORDERS live cheaply. A manual refresh passes a back-dated
+        #    watermark so a multi-day gap (e.g. stack idle for two weeks) is caught up —
+        #    otherwise the closed-trade rebuild (step 4, reads the full DB) stays stale.
+        deals_raw = client.fetch_history_deals(start=hist_since, end=now)
         us_deals = [d for d in deals_raw if d.get("market") == "US"]
         n_fills = await insert_trades(engine, scope, [_trade_to_db_row(d) for d in us_deals])
 

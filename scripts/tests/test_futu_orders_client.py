@@ -91,6 +91,69 @@ def test_sell_short_normalizes_to_sell_and_market_order_has_no_limit():
     assert r["avg_fill_price"] == 200.5
 
 
+def test_na_sentinel_numeric_fields_coerce_to_none():
+    """Futu returns the string 'N/A' for unset numeric fields (no aux/trail on a
+    plain limit, no fill price before execution). float('N/A') used to crash the
+    whole fetch_open_orders → the sync aborted and nothing synced. All numeric
+    fields must tolerate 'N/A' and any non-numeric junk → None / 0."""
+    frame = pd.DataFrame(
+        [
+            {
+                "order_id": "O9",
+                "code": "US.QQQ",
+                "trd_side": "BUY",
+                "order_type": "NORMAL",
+                "qty": 2,
+                "price": 631.5,
+                "aux_price": "N/A",  # plain limit → no trail/stop price
+                "order_status": "SUBMITTED",
+                "time_in_force": "GTC",
+                "dealt_qty": "N/A",
+                "dealt_avg_price": "N/A",  # not filled yet
+                "create_time": "2026-06-17 09:30:00",
+                "updated_time": "2026-06-17 09:31:00",
+            }
+        ]
+    )
+    ctx = MagicMock()
+    ctx.order_list_query.return_value = (0, frame)
+    r = _client(ctx).fetch_open_orders()[0]  # must not raise
+    assert r["limit_price"] == 631.5
+    assert r["aux_price"] is None
+    assert r["filled_qty"] == 0
+    assert r["avg_fill_price"] is None
+    assert r["quantity"] == 2
+
+
+def test_na_sentinel_price_field_coerces_without_crash():
+    """`price='N/A'` (e.g. a market order with no limit) must not crash; → no limit."""
+    frame = pd.DataFrame(
+        [
+            {
+                "order_id": "O10",
+                "code": "US.AAPL",
+                "trd_side": "SELL",
+                "order_type": "MARKET",
+                "qty": 1,
+                "price": "N/A",
+                "aux_price": "N/A",
+                "order_status": "FILLED_ALL",
+                "time_in_force": "DAY",
+                "dealt_qty": 1,
+                "dealt_avg_price": 201.0,
+                "create_time": "2026-06-17 10:00:00",
+                "updated_time": "2026-06-17 10:00:05",
+            }
+        ]
+    )
+    ctx = MagicMock()
+    ctx.order_list_query.return_value = (0, frame)
+    r = _client(ctx).fetch_open_orders()[0]  # must not raise
+    assert r["limit_price"] is None
+    assert r["filled_qty"] == 1
+    assert r["avg_fill_price"] == 201.0
+
+
 def test_fetch_open_orders_empty_frame_returns_empty():
     ctx = MagicMock()
     ctx.order_list_query.return_value = (0, pd.DataFrame())

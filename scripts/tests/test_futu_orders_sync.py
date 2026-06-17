@@ -131,6 +131,33 @@ async def test_sync_persists_orders_fills_and_rebuilds_closed_trades(clean_scope
 
 
 @pytest.mark.asyncio
+async def test_sync_since_widens_deals_window_for_catch_up(clean_scope):
+    """A manual refresh passes a back-dated `since` to catch up a multi-day gap.
+
+    The fills pull (step 1) must honor `since`, not stay pinned to today — otherwise
+    days between the last sync and now never enter futu_trades and the closed-trade
+    rebuild stays stale. `since=None` (the 60s poller) keeps the cheap today window."""
+    engine = clean_scope
+    since = datetime(2026, 5, 25, 0, 0, tzinfo=timezone.utc)
+    client = _mock_client(deals=[_deal("d1", "BUY", 1, 3.48)], open_orders=[_order("O1")])
+    await sync_futu_orders(engine, client, SCOPE, since=since)
+    # Deals (step 1) and history orders (step 2) both fetched from `since`.
+    assert client.fetch_history_deals.call_args.kwargs["start"] == since
+    assert client.fetch_history_orders.call_args.kwargs["start"] == since
+
+
+@pytest.mark.asyncio
+async def test_sync_since_none_keeps_today_window(clean_scope):
+    """`since=None` (poller) pulls only today's fills — the cheap path."""
+    from xenon.api.services.futu_history_sync import _today_et_start_utc
+
+    engine = clean_scope
+    client = _mock_client(deals=[_deal("d1", "BUY", 1, 3.48)], open_orders=[_order("O1")])
+    await sync_futu_orders(engine, client, SCOPE, since=None)
+    assert client.fetch_history_deals.call_args.kwargs["start"] == _today_et_start_utc()
+
+
+@pytest.mark.asyncio
 async def test_sync_is_read_only_noop(clean_scope, monkeypatch):
     engine = clean_scope
     monkeypatch.setenv("XENON_READ_ONLY", "1")
