@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -10,9 +12,9 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import desc, select
 
-from xenon.api.guards import get_account_scope
+from xenon.api.guards import get_broker_scope
 from xenon.db.engine import get_sync_engine
-from xenon.db.schema import order_fills, order_submissions
+from xenon.db.schema import futu_order_fees, futu_orders, futu_trades, order_fills, order_submissions
 from xenon.execution.account_scope import AccountScope
 
 router = APIRouter()
@@ -171,7 +173,135 @@ def _fill_sec_type(row: dict[str, Any], metadata: dict[str, Any]) -> str:
     return str(submission_sec_type or "STK")
 
 
+# --- Futu read path: shape futu_orders/futu_trades into the IB OpenOrder/ExecutedOrder contract ---
+
+_FUTU_STATUS = {
+    "SUBMITTING": "PendingSubmit",
+    "WAITING_SUBMIT": "PendingSubmit",
+    "SUBMITTED": "Submitted",
+    "FILLED_PART": "PartiallyFilled",
+    "FILLED_ALL": "Filled",
+    "CANCELLED_ALL": "Cancelled",
+    "CANCELLED_PART": "Cancelled",
+    "CANCELLING_PART": "Submitted",
+    "CANCELLING_ALL": "Submitted",
+}
+_FUTU_TYPE = {"NORMAL": "LMT", "MARKET": "MKT"}  # else passthrough raw Futu label
+_FUTU_OPEN_STATUSES = ("SUBMITTING", "SUBMITTED", "WAITING_SUBMIT", "FILLED_PART", "CANCELLING_PART", "CANCELLING_ALL")
+# OCC option symbol: <underlier><YYMMDD><C|P><strike*1000>.
+_OCC = re.compile(r"^(?P<u>[A-Z]+)(?P<y>\d{2})(?P<m>\d{2})(?P<d>\d{2})(?P<cp>[CP])(?P<strike>\d+)$")
+
+
+def _futu_contract(ticker: str) -> dict[str, Any]:
+    m = _OCC.match(ticker)
+    if not m:
+        return {"conId": None, "symbol": ticker, "secType": "STK", "strike": None, "right": None, "expiry": None}
+    return {
+        "conId": None,
+        "symbol": m["u"],
+        "secType": "OPT",
+        "strike": int(m["strike"]) / 1000.0,
+        "right": m["cp"],
+        "expiry": f"20{m['y']}-{m['m']}-{m['d']}",
+    }
+
+
+def _futu_surrogate_id(futu_order_id: str) -> int:
+    """Stable JS-safe (< 2^48) surrogate so frontend `${orderId}-${permId}` keys don't collide.
+
+    Futu order ids are ~19-digit strings — using them as JS numbers loses precision past
+    2^53. Frontend prefers the string submissionId for the key; this is the numeric fallback.
+    """
+    return int(hashlib.sha1(str(futu_order_id).encode()).hexdigest()[:12], 16)
+
+
+def _futu_open_order(row: dict[str, Any]) -> dict[str, Any]:
+    contract = _futu_contract(str(row["ticker"]))
+    total = int(row["quantity"])
+    filled = int(row.get("filled_qty") or 0)
+    oid = _futu_surrogate_id(row["futu_order_id"])
+    return {
+        "submissionId": str(row["futu_order_id"]),
+        "orderId": oid,
+        "permId": oid,
+        "symbol": _display_symbol(contract["symbol"], contract["secType"], contract["right"], contract["strike"]),
+        "contract": contract,
+        "action": row["action"],
+        "orderType": _FUTU_TYPE.get(row["order_type"], row["order_type"]),
+        "totalQuantity": total,
+        "limitPrice": _float_or_none(row.get("limit_price")),
+        "auxPrice": _float_or_none(row.get("aux_price")),
+        "status": _FUTU_STATUS.get(row["status"], row["status"]),
+        "filled": filled,
+        "remaining": max(total - filled, 0),
+        "avgFillPrice": _float_or_none(row.get("avg_fill_price")),
+        "tif": str(row.get("tif") or "DAY"),
+        "modifySequence": 0,
+    }
+
+
+def _futu_executed_order(row: dict[str, Any]) -> dict[str, Any]:
+    contract = _futu_contract(str(row["ticker"]))
+    side = str(row["action"]).upper()
+    return {
+        "execId": str(row["futu_deal_id"]),
+        "symbol": _display_symbol(contract["symbol"], contract["secType"], contract["right"], contract["strike"]),
+        "contract": contract,
+        "side": "BOT" if side == "BUY" else "SLD" if side == "SELL" else side,
+        "quantity": float(row["quantity"]),
+        "avgPrice": _float_or_none(row.get("price")),
+        "commission": _float_or_none(row.get("fees")),
+        "realizedPNL": None,
+        "time": _iso(row.get("filled_at")),
+        "exchange": "FUTU",
+    }
+
+
+def _futu_orders_payload(scope: AccountScope, *, limit: int) -> dict[str, Any]:
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        open_rows = [
+            dict(r._mapping)
+            for r in conn.execute(
+                select(futu_orders)
+                .where(
+                    futu_orders.c.broker == scope.broker,
+                    futu_orders.c.account_env == scope.account_env,
+                    futu_orders.c.broker_account == scope.broker_account,
+                    futu_orders.c.status.in_(_FUTU_OPEN_STATUSES),
+                )
+                .order_by(desc(futu_orders.c.updated_at))
+                .limit(limit)
+            ).all()
+        ]
+        fill_rows = [
+            dict(r._mapping)
+            for r in conn.execute(
+                select(futu_trades)
+                .where(
+                    futu_trades.c.broker == scope.broker,
+                    futu_trades.c.account_env == scope.account_env,
+                    futu_trades.c.broker_account == scope.broker_account,
+                    futu_trades.c.filled_at >= _today_et_start_utc(),
+                )
+                .order_by(desc(futu_trades.c.filled_at), desc(futu_trades.c.futu_deal_id))
+                .limit(limit)
+            ).all()
+        ]
+    open_orders = [_futu_open_order(row) for row in open_rows]
+    executed_orders = [_futu_executed_order(row) for row in fill_rows]
+    return {
+        "last_sync": datetime.now(timezone.utc).isoformat(),
+        "open_orders": open_orders,
+        "executed_orders": executed_orders,
+        "open_count": len(open_orders),
+        "executed_count": len(executed_orders),
+    }
+
+
 def orders_payload_for_scope(scope: AccountScope, *, limit: int = 200) -> dict[str, Any]:
+    if scope.broker == "FUTU":
+        return _futu_orders_payload(scope, limit=limit)
     engine = get_sync_engine()
     with engine.connect() as conn:
         open_rows = [
@@ -226,8 +356,8 @@ def orders_payload_for_scope(scope: AccountScope, *, limit: int = 200) -> dict[s
 
 @router.get("/orders")
 async def orders_list(
-    scope: AccountScope = Depends(get_account_scope),
+    scope: AccountScope = Depends(get_broker_scope),
     limit: int = Query(200, ge=1, le=1000),
 ) -> dict[str, Any]:
-    """Return scoped open order submissions plus recent execution fills."""
+    """Return scoped open order submissions plus recent execution fills (IB or FUTU)."""
     return orders_payload_for_scope(scope, limit=limit)
