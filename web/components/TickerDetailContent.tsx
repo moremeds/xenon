@@ -14,7 +14,11 @@ import type {
   Trade,
 } from "@/lib/pricesProtocol";
 import { resolveTickerQuote } from "@/lib/tickerQuote";
-import { resolveBookSubject, etTodayYmd } from "@/lib/book/bookSubject";
+import {
+  resolveBookSubject,
+  etTodayYmd,
+  positionBookKey,
+} from "@/lib/book/bookSubject";
 import { useTickerDetail } from "@/lib/TickerDetailContext";
 import { isUrlDeck, legacyTabToDeck, type DeckKey } from "@/lib/deckNav";
 import AssetCockpit from "./ticker-detail/AssetCockpit";
@@ -69,11 +73,7 @@ export default function TickerDetailContent({
 
   // Single source for the cockpit header / book / ticket. Carries the spread-net
   // flag so combos render a signed net instead of a percent move.
-  const {
-    priceData,
-    priceKey: chartPriceKey,
-    isSpreadNet,
-  } = useMemo(
+  const { priceData, isSpreadNet } = useMemo(
     () => resolveTickerQuote(ticker, position, prices),
     [ticker, position, prices],
   );
@@ -84,12 +84,7 @@ export default function TickerDetailContent({
   // book — so the book head's underlying link (`/TICKER`) actually reaches the
   // stock. An option past expiry falls back to the stock book. The ticket /
   // position panel stay driven by `position` (unchanged).
-  const positionOptionKey =
-    position &&
-    position.structure_type !== "Stock" &&
-    position.legs.length === 1
-      ? (chartPriceKey ?? null)
-      : null;
+  const positionOptionKey = positionBookKey(position);
   const subject = useMemo(
     () =>
       resolveBookSubject({

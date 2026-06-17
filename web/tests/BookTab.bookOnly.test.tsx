@@ -85,6 +85,39 @@ describe("BookTab bookOnly", () => {
     expect(sym?.textContent).toContain("07/17/26");
   });
 
+  it("option book does NOT borrow the underlying L1 when the option quote is absent", () => {
+    // tickerPriceData (the book subject's quote) is null; prices has only the
+    // underlying. The option book must show "---", never the stock's bid/ask —
+    // web/CLAUDE.md forbids showing underlying price where an option is expected.
+    const { container } = render(
+      <BookTab
+        ticker="QQQ"
+        position={null}
+        prices={{
+          QQQ: {
+            symbol: "QQQ",
+            last: 733.7,
+            bid: 733.65,
+            ask: 733.75,
+          } as never,
+        }}
+        openOrders={[]}
+        tickerPriceData={null}
+        bookOnly
+        bookKey="QQQ_20260717_692_P"
+        bookKind="option"
+      />,
+    );
+    // L1 fallback renders (no entitled depth), but none of the underlying's
+    // 733.x scalars leak into the option head or the L1 panel.
+    expect(screen.getByText("ORDER BOOK")).toBeTruthy();
+    expect(container.textContent).not.toContain("733");
+    // The option spec head is still shown.
+    expect(container.querySelector(".book-sym")?.textContent).toContain(
+      "$692P",
+    );
+  });
+
   it("links the underlying symbol in the option head to its stock page", () => {
     const { container } = render(
       <BookTab

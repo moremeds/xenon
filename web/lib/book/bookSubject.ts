@@ -1,5 +1,7 @@
 import type { PriceData } from "@/lib/pricesProtocol";
-import { parseOptionKey } from "@/lib/pricesProtocol";
+import { optionKey, parseOptionKey } from "@/lib/pricesProtocol";
+import type { PortfolioPosition } from "@/lib/types";
+import { legPriceKey } from "@/lib/positionUtils";
 
 /**
  * Is an option past its expiry? Both args are `YYYYMMDD` calendar dates compared
@@ -60,7 +62,10 @@ export function resolveBookSubject(args: {
   const expired = parsed ? isOptionExpired(parsed.expiry, todayYmd) : false;
 
   if (parsed && matchesTicker && !expired) {
-    const bookKey = candidate as string;
+    // Canonicalize: `candidate` may be a non-canonical URL string (dashed
+    // expiry, lowercase) that parses to the same contract. Key everything off
+    // the canonical optionKey so prices/depths/tape/focusedBookKey all resolve.
+    const bookKey = optionKey(parsed);
     const quotePriceData =
       positionOptionKey === bookKey
         ? positionPriceData
@@ -73,6 +78,22 @@ export function resolveBookSubject(args: {
     bookKey: ticker,
     quotePriceData: prices[ticker] ?? null,
   };
+}
+
+/**
+ * The canonical option depth-key for a single-leg option POSITION, derived from
+ * the position legs alone — never from quote availability. `resolveTickerQuote`'s
+ * `priceKey` is only populated when a live or calculated quote exists, so keying
+ * the book off it would drop a held option back to the stock book whenever its
+ * quote is momentarily absent (cold start, illiquid contract, missing snapshot
+ * mark). Returns null for stock or multi-leg positions.
+ */
+export function positionBookKey(
+  position: PortfolioPosition | null,
+): string | null {
+  if (!position || position.structure_type === "Stock") return null;
+  if (position.legs.length !== 1) return null;
+  return legPriceKey(position.ticker, position.expiry, position.legs[0]);
 }
 
 /** Today's calendar date in ET as `YYYYMMDD` (option-expiry timezone). */

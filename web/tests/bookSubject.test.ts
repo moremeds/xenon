@@ -2,8 +2,10 @@ import { describe, it, expect } from "vitest";
 import {
   isOptionExpired,
   resolveBookSubject,
+  positionBookKey,
 } from "@/lib/book/bookSubject";
 import type { PriceData } from "@/lib/pricesProtocol";
+import type { PortfolioLeg, PortfolioPosition } from "@/lib/types";
 
 const px = (symbol: string, last: number): PriceData =>
   ({ symbol, last, bid: last - 0.05, ask: last + 0.05 }) as PriceData;
@@ -103,5 +105,68 @@ describe("resolveBookSubject", () => {
     });
     expect(s.bookKey).toBe(other);
     expect(s.quotePriceData?.last).toBe(3.2);
+  });
+
+  it("canonicalizes a non-canonical ?leg= (dashed expiry) so the quote resolves", () => {
+    // A dashed-expiry leg parses to the same contract but a different raw string.
+    // bookKey must be the canonical optionKey, else prices[bookKey] (keyed by the
+    // canonical form) misses and the book renders live-looking but quote-less.
+    const s = resolveBookSubject({ ...base, leg: "QQQ_2026-07-17_692_P" });
+    expect(s.bookKind).toBe("option");
+    expect(s.bookKey).toBe(OPT); // canonical, NOT "QQQ_2026-07-17_692_P"
+    expect(s.quotePriceData?.last).toBe(5.78);
+  });
+});
+
+describe("positionBookKey", () => {
+  const optLeg: PortfolioLeg = {
+    direction: "LONG",
+    contracts: 1,
+    type: "Put",
+    strike: 692,
+    entry_cost: 0,
+    avg_cost: 0,
+    market_price: null, // no live/marked quote — the regression scenario
+    market_value: null,
+  };
+  const mkPos = (over: Partial<PortfolioPosition>): PortfolioPosition =>
+    ({
+      id: 1,
+      ticker: "QQQ",
+      structure: "Long Put",
+      structure_type: "Long Put",
+      risk_profile: "",
+      expiry: "20260717",
+      contracts: 1,
+      direction: "LONG",
+      entry_cost: 0,
+      max_risk: null,
+      market_value: null,
+      legs: [optLeg],
+      kelly_optimal: null,
+      target: null,
+      stop: null,
+      entry_date: "",
+      ...over,
+    }) as PortfolioPosition;
+
+  it("derives the option key for a single-leg option EVEN with no quote (market_price null)", () => {
+    expect(positionBookKey(mkPos({}))).toBe("QQQ_20260717_692_P");
+  });
+  it("returns null for a stock position", () => {
+    expect(
+      positionBookKey(
+        mkPos({
+          structure_type: "Stock",
+          legs: [{ ...optLeg, type: "Stock", strike: null }],
+        }),
+      ),
+    ).toBeNull();
+  });
+  it("returns null for a multi-leg position", () => {
+    expect(positionBookKey(mkPos({ legs: [optLeg, optLeg] }))).toBeNull();
+  });
+  it("returns null when there is no position", () => {
+    expect(positionBookKey(null)).toBeNull();
   });
 });

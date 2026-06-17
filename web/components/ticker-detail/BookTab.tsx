@@ -636,7 +636,13 @@ export default function BookTab({
   bookKey,
   bookKind,
 }: BookTabProps) {
-  const priceData = tickerPriceData ?? prices[ticker] ?? null;
+  // The book subject's quote. For an OPTION subject never fall back to the
+  // underlying's L1 (`prices[ticker]`) — showing the stock's bid/ask under an
+  // option head is forbidden (web/CLAUDE.md); show "---" instead. The legacy
+  // stock fallback is preserved for stock books.
+  const priceData =
+    tickerPriceData ??
+    (bookKind === "option" ? null : (prices[ticker] ?? null));
   const bid = priceData?.bid ?? null;
   const ask = priceData?.ask ?? null;
   const mid = bid != null && ask != null ? (bid + ask) / 2 : null;

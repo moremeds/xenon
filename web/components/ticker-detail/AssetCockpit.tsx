@@ -28,7 +28,8 @@ export type AssetCockpitProps = {
   bookKind: "stock" | "option" | "future";
   /** Depth-NBBO-corrected quote; single source for the header scalars. */
   quotePriceData: PriceData | null;
-  /** Resolved option/underlying price data threaded to the ticket + book. */
+  /** Resolved option/underlying price data threaded to the order ticket
+   *  (the book follows `quotePriceData` — the book subject's own quote). */
   priceData: PriceData | null;
   isSpreadNet?: boolean;
   tickerOrders: OpenOrder[];
