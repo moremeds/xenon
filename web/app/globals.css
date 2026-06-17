@@ -7279,6 +7279,10 @@ tr {
   font-weight: 600;
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
+  /* Right-aligned fixed column so the value right-edges line up across the
+     IB / FUTU rows regardless of magnitude ($66,413 vs $212,364). */
+  min-width: 90px;
+  text-align: right;
 }
 
 .snapshot-breakdown__pnl {
@@ -7286,6 +7290,9 @@ tr {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
+  /* Right-aligned fixed column so +$49 / -$753 align under one another. */
+  min-width: 58px;
+  text-align: right;
 }
 
 .snapshot-breakdown__pnl--core {

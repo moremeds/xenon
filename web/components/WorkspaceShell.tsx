@@ -9,6 +9,7 @@ import { navItems } from "@/lib/data";
 import { resolveSectionFromPath } from "@/lib/chat";
 import { usePortfolio } from "@/lib/usePortfolio";
 import { useFutuPortfolio } from "@/lib/useFutuPortfolio";
+import { mergeDashboardOrders } from "@/lib/mergeDashboardOrders";
 import { useActiveAccount } from "@/lib/accountContext";
 import { useOrders } from "@/lib/useOrders";
 import { useMarketHours, MarketState } from "@/lib/useMarketHours";
@@ -130,6 +131,18 @@ export default function WorkspaceShell({
     syncNow: ordersSyncNow,
     updateData: updateOrdersData,
   } = useOrders(shouldAutoSyncOrders, activeAccount === "futu" ? "FUTU" : "IB");
+
+  // The dashboard shows a merged IB + FUTU portfolio, so its Working & Filled
+  // card must show both brokers' working orders too. `orders` above is scoped
+  // to the active tab; fetch the OTHER broker as a cache-read only (active=false
+  // → initial GET, no extra polling) and merge the two for the dashboard card.
+  const otherBroker = activeAccount === "futu" ? "IB" : "FUTU";
+  const { data: otherOrders } = useOrders(false, otherBroker);
+  const dashboardOrders = useMemo(() => {
+    const ibSrc = activeAccount === "ib" ? orders : otherOrders;
+    const futuSrc = activeAccount === "futu" ? orders : otherOrders;
+    return mergeDashboardOrders(ibSrc, futuSrc);
+  }, [orders, otherOrders, activeAccount]);
 
   // Trigger a fresh IB sync every time the user navigates TO the orders page.
   // place/modify/cancel all sync orders.json immediately after the action, so
@@ -532,7 +545,7 @@ export default function WorkspaceShell({
           {activeSection === "dashboard" ? (
             <DashboardSurface
               accounts={dashboardAccounts}
-              orders={orders}
+              orders={dashboardOrders}
               prices={prices}
             />
           ) : null}

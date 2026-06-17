@@ -44,6 +44,25 @@ function priceTag(value: number | null): string {
   return value != null ? `@ ${fmtSignedPrice(value)}` : "";
 }
 
+// Broker status strings arrive concatenated (IB "PendingSubmit", Futu
+// "PENDINGSUBMIT"/"WAITING_SUBMIT"). Render them as spaced words so the card
+// shows "PENDING SUBMIT", not "PENDINGSUBMIT". Known multi-word statuses are
+// mapped explicitly; everything else falls back to underscore→space +
+// camelCase splitting. The card's CSS uppercases the result.
+const STATUS_LABELS: Record<string, string> = {
+  PENDINGSUBMIT: "Pending Submit",
+  PRESUBMITTED: "Pre Submitted",
+  WAITINGSUBMIT: "Waiting Submit",
+  PENDINGCANCEL: "Pending Cancel",
+  PARTIALLYFILLED: "Partially Filled",
+};
+function formatStatus(status: string | null | undefined): string {
+  if (!status) return "—";
+  const key = status.replace(/[\s_]/g, "").toUpperCase();
+  if (STATUS_LABELS[key]) return STATUS_LABELS[key];
+  return status.replace(/_/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2");
+}
+
 // Contract label, shared by orders + fills. Guards nullable OPT strike/right so
 // incomplete metadata never renders "$null".
 function describeContract(c: OrderContract): string {
@@ -111,10 +130,11 @@ export function OrdersSnapshotCard({ orders }: Props) {
                 {open.map((o, i) => (
                   <li key={`o-${i}`} className="snapshot-list__row">
                     <span className="snapshot-list__row-desc">
+                      {o.broker ? `${o.broker} · ` : ""}
                       {describeOrder(o)}
                     </span>
                     <span className="snapshot-list__row-meta">
-                      {o.status ?? "—"}
+                      {formatStatus(o.status)}
                     </span>
                   </li>
                 ))}
