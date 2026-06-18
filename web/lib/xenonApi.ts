@@ -18,6 +18,20 @@ export class XenonApiError extends Error {
   }
 }
 
+/**
+ * Attach the server-to-server trust header so the api can keep order-write
+ * endpoints closed to external callers. Read at call time (not module load) so
+ * per-request/test env changes take effect. MUST be a server-only env var —
+ * never NEXT_PUBLIC_ (would leak the secret to the browser).
+ */
+export function internalApiHeaders(headers: Headers): Headers {
+  const internalToken = process.env.XENON_INTERNAL_API_TOKEN;
+  if (internalToken) {
+    headers.set("X-Internal-Token", internalToken);
+  }
+  return headers;
+}
+
 export async function xenonFetch<T = Record<string, unknown>>(
   path: string,
   opts?: RequestInit & { timeout?: number; token?: string },
@@ -27,6 +41,7 @@ export async function xenonFetch<T = Record<string, unknown>>(
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
+  internalApiHeaders(headers);
   const res = await fetch(`${XENON_API}${path}`, {
     ...fetchOpts,
     headers,

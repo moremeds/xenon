@@ -58,6 +58,22 @@ container, `127.0.0.1` is the container itself.
 during 1.7). All operational files live under it; the source repo is **not**
 cloned to the mini.
 
+### Query-API auth env (added 2026-06-17)
+
+The api is **fail-closed** (see `src/xenon/api/CLAUDE.md` § Auth). Set these in
+`/opt/xenon/.env` (single source — `compose.yml` injects the token into the web
+container via `environment:`, and `env_file: ./.env` gives it to api/realtime/migrator):
+
+| Var                        | Purpose                                                                                                                                                                       |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `XENON_INTERNAL_API_TOKEN` | Shared secret proving `web→api` is the trusted UI (full access). `compose.yml` web service must carry `environment: XENON_INTERNAL_API_TOKEN: ${XENON_INTERNAL_API_TOKEN:-}`. |
+| `XENON_QUERY_API_KEY`      | Read-only key for external scripts (send as `X-API-Key`; GET-only query paths). MUST differ from the internal token — the api refuses to boot if equal.                       |
+
+Generate two distinct values with `openssl rand -hex 32`. `XENON_AUTH_ALLOW_DEV_OPEN`
+is NEVER set in prod. After editing, `docker-compose up -d` to recreate containers
+(env_file changes need a recreate, not a restart). Confirm the api startup log shows
+`auth: ENFORCED`.
+
 ## First-time bootstrap (one-shot)
 
 Run from this dev Mac unless noted. Prereq: `gh` authenticated as the GitHub

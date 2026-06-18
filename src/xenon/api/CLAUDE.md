@@ -98,11 +98,20 @@ On-demand scripts MUST use `client_id="auto"` (range 20-49). Never hardcode — 
 
 ## Auth — Security-Relevant Behavior
 
-**Auth-exempt paths:** `/health`, `/ws-ticket/validate`, `/docs`, `/openapi.json`.
+**Auth-exempt paths:** `/health`, `/ws-ticket/validate`. (`/docs` and `/openapi.json` are NOT exempt — they expose the full trading API schema and require auth.)
 
-**Localhost bypass:** Auth middleware and `verify_clerk_jwt` dependency skip validation for requests from `127.0.0.1`/`::1` (server-to-server). The WS relay also skips ticket validation for localhost connections. Enables local dev without Clerk sign-in.
+**Fail-closed.** `auth.classify_auth(request)` (sync) is called by `server.py::auth_middleware`. A non-exempt request is DENIED (401) unless it proves identity, in order:
 
-**Graceful fallback:** When `CLERK_JWKS_URL` is not set, auth middleware passes all requests through.
+1. Source `127.0.0.1`/`::1` → pass (on-box / dev stack / web harness).
+2. Valid `X-Internal-Token` == `XENON_INTERNAL_API_TOKEN` → pass, full access. `xenonFetch` AND the two direct web→api callers (`web/app/api/wizard/stream`, `web/app/api/previous-close`) attach it via `internalApiHeaders()`.
+3. Valid `X-API-Key`: `XENON_QUERY_API_KEY` → GET-only read paths (`QUERY_API_KEY_PATHS`); `MDW_API_KEY` → `/historical/*` + `/contract/qualify` (`API_KEY_ALLOWED_PATHS`). A matched key grants-or-denies definitively; neither grants write/sync paths.
+4. `CLERK_JWKS_URL` set → defer to async Clerk JWT.
+5. `XENON_AUTH_ALLOW_DEV_OPEN=1` (strict truthy) → pass. **Dev/test only** — set by `dev.sh`, the root `conftest.py`, and the web harness. Production never sets it, so a prod env that fails to load denies rather than exposes the API.
+6. Else → 401.
+
+`validate_auth_config()` runs at lifespan startup: refuses to boot if `XENON_INTERNAL_API_TOKEN == XENON_QUERY_API_KEY` (a leaked read-only key could otherwise be replayed for write access) and logs the posture (ENFORCED / DEV-OPEN / FAIL-CLOSED).
+
+Order-write endpoints (`/orders/place|cancel|modify`, `/portfolio/sync`, `POST /blotter`, `POST /futu/sync`) are in no API-key allowlist, so an external key can never reach them — only the internal UI token, localhost, or Clerk.
 
 Component map, files, ticket flow: `docs/architecture/api-infrastructure.md`.
 

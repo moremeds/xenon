@@ -182,6 +182,11 @@ export XENON_TRADING_MODE="$MODE"
 export IB_GATEWAY_HOST="$IB_HOST"
 export IB_GATEWAY_PORT="$IB_PORT"
 
+# Auth is fail-closed. Localhost calls already pass, but export the dev-open flag
+# so any non-localhost dev tooling (curl from another device on the dev box's
+# network) also works. Production NEVER sets this.
+export XENON_AUTH_ALLOW_DEV_OPEN=1
+
 # Live mode from dev.sh is for *debugging* against live IB — the data
 # flows in but nothing persists. Real live trading goes through the
 # Docker stack on the macmini, which writes core_dev. Forcing read-only

@@ -107,6 +107,11 @@ services:
       # service over the compose network, not localhost. Var name matches
       # web/lib/xenonApi.ts and the per-route fallbacks in web/app/api/.
       XENON_API_URL: http://api:8321
+      # Server-to-server trust secret, sourced once from the root .env (compose
+      # interpolates ${VAR} from the compose-dir .env). The api service gets the
+      # same value via its env_file: ./.env. Single source of truth — never
+      # NEXT_PUBLIC_ (server-only).
+      XENON_INTERNAL_API_TOKEN: ${XENON_INTERNAL_API_TOKEN:-}
     ports:
       - "3000:3000"
     extra_hosts:

@@ -134,6 +134,7 @@ export async function ensureTestFastApi(): Promise<FastApiHarness> {
       env: {
         ...process.env,
         XENON_API_TEST_MODE: "1",
+        XENON_AUTH_ALLOW_DEV_OPEN: "1",
         PYTHONUNBUFFERED: "1",
       },
       stdio: "pipe",
