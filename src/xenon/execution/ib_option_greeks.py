@@ -33,8 +33,21 @@ GREEKS_POLL_SECS = 0.1
 
 
 def _safe(v):
-    """None for missing/NaN; passthrough otherwise (mirrors the snapshotter spike)."""
+    """None for missing/NaN; passthrough otherwise (mirrors the snapshotter spike).
+
+    Used for greeks, which legitimately go negative (theta, put delta, etc.).
+    """
     if v is None or (isinstance(v, float) and math.isnan(v)):
+        return None
+    return v
+
+
+def _price(v):
+    """Like _safe, but also maps IB's -1 'no quote' sentinel (and any negative)
+    to None. reqMktData returns bid/ask = -1 when no quote is active (common
+    outside RTH); surfacing -1 as a price would mislead a consumer."""
+    v = _safe(v)
+    if v is None or v < 0:
         return None
     return v
 
@@ -69,6 +82,11 @@ def main():
             exchange="SMART",
             currency="USD",
         )
+        # Frozen (type 2): returns live data during RTH and the last recorded
+        # session values after hours, so the endpoint yields greeks 24/7 instead
+        # of null every evening/weekend. No downside during RTH (live wins).
+        client._ib.reqMarketDataType(2)
+
         client._ib.qualifyContracts(contract)
         if not contract.conId:
             print(
@@ -113,8 +131,8 @@ def main():
             "strike": float(args.strike),
             "right": args.right.upper(),
             "asOf": datetime.now(timezone.utc).isoformat(),
-            "bid": _safe(ticker.bid),
-            "ask": _safe(ticker.ask),
+            "bid": _price(ticker.bid),
+            "ask": _price(ticker.ask),
             "greeks": greeks,
         }
         if greeks is None:

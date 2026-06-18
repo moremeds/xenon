@@ -22,8 +22,9 @@ import json
 from collections import namedtuple
 
 import pytest
-import xenon.execution.ib_option_greeks as mod
 from ib_async import Option
+
+import xenon.execution.ib_option_greeks as mod
 
 # Mirror ib_async.OptionComputation's fields we read.
 MG = namedtuple("MG", "impliedVol delta gamma vega theta undPrice")
@@ -50,6 +51,10 @@ class _FakeIB:
         self.cancelled = False
         self.mkt_contract = None
         self.mkt_snapshot = None
+        self.market_data_type = None
+
+    def reqMarketDataType(self, t):
+        self.market_data_type = t
 
     def qualifyContracts(self, *contracts):
         for c in contracts:
@@ -128,6 +133,7 @@ def test_option_contract_built_and_greeks_returned(monkeypatch, capsys):
     assert ib.mkt_contract.lastTradeDateOrContractMonth == "20260717"
     assert ib.mkt_contract.currency == "USD"
     assert ib.mkt_snapshot is True
+    assert ib.market_data_type == 2  # frozen fallback so greeks flow off-hours
     assert payload["greeks"] == {
         "impliedVol": 0.2134,
         "delta": 0.5421,
@@ -198,6 +204,17 @@ def test_nan_bid_ask_collapse_to_null(monkeypatch, capsys):
     )
     assert code == 0
     assert payload["bid"] is None and payload["ask"] is None
+
+
+def test_negative_bid_ask_sentinel_collapses_to_null(monkeypatch, capsys):
+    # IB returns bid/ask = -1 when no quote is active (e.g. outside RTH). It is a
+    # "no data" sentinel, not a price — must surface as null, not -1. Greeks,
+    # which can be legitimately negative (theta), are unaffected.
+    g = MG(impliedVol=0.19, delta=0.4, gamma=0.01, vega=0.2, theta=-0.1, undPrice=600.0)
+    payload, code, _, _ = _run(monkeypatch, capsys, _FULL, ticker=_FakeTicker(bid=-1, ask=-1, greeks=g, greeks_after=1))
+    assert code == 0
+    assert payload["bid"] is None and payload["ask"] is None
+    assert payload["greeks"]["theta"] == -0.1  # negative greek preserved
 
 
 # --------------------------------------------------------------------------- #
