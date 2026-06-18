@@ -75,6 +75,32 @@ async def seeded():
             },
         ],
     )
+    # A FILLED order that ALSO has a deal — must appear once (via the deal), not
+    # double-counted by the order-grain fallback.
+    await insert_orders(
+        eng,
+        SCOPE,
+        [
+            {
+                "futu_order_id": "100200777",
+                "ticker": "AAPL",
+                "futu_code": "US.AAPL",
+                "market": "US",
+                "action": "BUY",
+                "order_type": "NORMAL",
+                "quantity": 3,
+                "limit_price": 200.0,
+                "aux_price": None,
+                "status": "FILLED_ALL",
+                "tif": "DAY",
+                "filled_qty": 3,
+                "avg_fill_price": 199.5,
+                "created_at": now,
+                "updated_at": now,
+                "raw": {},
+            },
+        ],
+    )
     await _insert_trades(
         eng,
         SCOPE,
@@ -91,7 +117,20 @@ async def seeded():
                 "fees": 0.75,
                 "filled_at": now,
                 "raw": {"trd_side": "BUY"},
-            }
+            },
+            {
+                "futu_deal_id": "d2",
+                "futu_order_id": "100200777",
+                "ticker": "AAPL",
+                "futu_code": "US.AAPL",
+                "market": "US",
+                "action": "BUY",
+                "quantity": 3,
+                "price": 199.5,
+                "fees": 1.0,
+                "filled_at": now,
+                "raw": {"trd_side": "BUY"},
+            },
         ],
     )
     try:
@@ -140,8 +179,23 @@ def test_orders_payload_futu_shapes_like_ib(seeded):
     assert oo["status"] == "Submitted"  # SUBMITTED → Submitted
     assert oo["tif"] == "GTC"
     assert oo["submissionId"] == "100200300"
-    # Today's fill shows up as an executed order with BOT side + commission.
-    assert payload["executed_count"] == 1
-    eo = payload["executed_orders"][0]
-    assert eo["side"] == "BOT"
-    assert eo["commission"] == 0.75
+    # Today's executed orders come from two intraday-available sources:
+    #   1. futu_trades deals (deal-grain, with fees) — orders 100200300/100200777
+    #   2. FILLED futu_orders with no deal yet (order-grain fallback) — order
+    #      100200999 (FILLED_ALL today, no deal) surfaces immediately so today's
+    #      fills aren't invisible until the nightly 16:30 ET deal sync.
+    by_exec = {eo["execId"]: eo for eo in payload["executed_orders"]}
+    assert set(by_exec) == {"d1", "d2", "order-100200999"}
+    assert payload["executed_count"] == 3
+    # Deal-backed row keeps its fees.
+    assert by_exec["d1"]["side"] == "BOT"
+    assert by_exec["d1"]["commission"] == 0.75
+    # Dedup: order 100200777 is FILLED *and* has deal d2 → appears once (the deal),
+    # never as a derived "order-100200777" row.
+    assert "order-100200777" not in by_exec
+    # The derived row from the dealless FILLED_ALL order (order-grain, prefixed execId).
+    derived = by_exec["order-100200999"]
+    assert derived["side"] == "SLD"  # SELL → SLD
+    assert derived["quantity"] == 2.0  # filled_qty, not total
+    assert derived["avgPrice"] == 4.5  # avg_fill_price
+    assert derived["commission"] is None  # per-deal fees arrive with the nightly sync

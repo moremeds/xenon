@@ -5,8 +5,15 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.6.1] — 2026-06-17
+### Added
 
+- **IB Flex reconcile — externally-placed fills now reach "Today's Executed Orders".** Fills placed via TWS / IBKR mobile / other sessions were invisible to xenon because the live pool's `reqExecutions` is own-client (no master API client ID on the Gateway), so they never reached `order_fills` and the imported `snapshot-<permId>` order stayed `WORKING` after filling. A slow background loop (30 min; `XENON_FLEX_RECONCILE=0` disables) pulls account-level IB Flex executions, backfills the missing rows (idempotent on `exec_id`), and marks covered WORKING snapshots `FILLED`. Honors `XENON_READ_ONLY=1`. (Position view already showed these fills; this fixes the executed-orders / Realized P&L surface.)
+
+### Fixed
+
+- **"Today's Executed Orders" missed today's Futu fills until the nightly sync.** `futu_trades` (the panel's source) is written only by the 16:30 ET deal sync, so intraday Futu fills — which flip `futu_orders` to `FILLED_ALL` immediately — stayed invisible until tonight. The panel now also derives order-grain executed rows from today's FILLED `futu_orders`, deduped against deal rows by `futu_order_id` so a fill never double-counts once the nightly sync runs.
+
+## [0.6.1] — 2026-06-17
 
 ### Added
 
@@ -17,6 +24,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 - **Dashboard "Working & Filled" card dropped IB orders while on the FUTU tab (and vice versa) (#156).** The card now merges open/executed orders from both brokers via `mergeDashboardOrders`, tagging each row with its broker (`IB · …` / `FUTU · …`). Each working-order row also formats raw status strings into readable labels (`PENDINGSUBMIT` → `Pending Submit`).
 - **Portfolio snapshot breakdown numbers were ragged (#156).** Net-liq and P&L value columns are now right-aligned with a fixed minimum width so the breakdown rows line up vertically.
 - **IB/FUTU open-order flicker on account-tab switch (#155).** A stale in-flight orders response from the previous broker could briefly overwrite the newly selected broker's orders. `useOrders` now discards responses whose requested broker no longer matches the current tab.
+
 ## [0.6.0] — 2026-06-17
 
 ### Added
