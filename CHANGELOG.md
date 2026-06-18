@@ -5,10 +5,12 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-06-18
+
+
 ### Security
 
 - Fail-closed API authentication: localhost bypass, X-Internal-Token for web→api trust, XENON_QUERY_API_KEY for read-only external access (GET /portfolio, /orders, /blotter, /journal, /futu/portfolio, /trades/entry-dates, /performance). Closes open-internet prod hole.
-
 ## [0.6.1] — 2026-06-17
 
 ### Added
