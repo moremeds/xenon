@@ -5,6 +5,9 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.6.4] — 2026-06-18
+
+
 ### Added
 
 - `GET /market-depth` — point-in-time L2 order-book snapshot (subprocess-backed,
@@ -13,7 +16,6 @@ All notable changes to Xenon are documented here. Format loosely based on
   (`price`/`size`/`marketMaker`), and a permission-only `entitled` flag with a `note`
   distinguishing no-entitlement from an empty book. Exposed via `XENON_QUERY_API_KEY`.
   New CLI `xenon-ib-market-depth`. Consumer docs: `docs/reference/readonly-query-api.md`.
-
 ## [0.6.3] — 2026-06-18
 
 ### Security
