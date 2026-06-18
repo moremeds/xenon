@@ -5,8 +5,19 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.6.4] — 2026-06-18
+### Added
 
+- `GET /options/greeks` — broker-computed option greeks (IB `modelGreeks`:
+  `impliedVol`/`delta`/`gamma`/`vega`/`theta`/`undPrice`) for a single contract,
+  subprocess-backed (mirrors `/market-depth`). Requires the full option triplet
+  (`symbol`+`expiry`+`strike`+`right`); returns the qualified `conId` and bid/ask.
+  Uses IB frozen market-data fallback so greeks are returned 24/7 (last-session
+  values after hours); `greeks: null` + `note` when IB computes none. bid/ask of
+  IB's `-1` "no quote" sentinel surface as `null`. Exposed via `XENON_QUERY_API_KEY`
+  (GET only). New CLI `xenon-ib-option-greeks`. Consumer docs:
+  `docs/reference/readonly-query-api.md`.
+
+## [0.6.4] — 2026-06-18
 
 ### Added
 
@@ -16,6 +27,7 @@ All notable changes to Xenon are documented here. Format loosely based on
   (`price`/`size`/`marketMaker`), and a permission-only `entitled` flag with a `note`
   distinguishing no-entitlement from an empty book. Exposed via `XENON_QUERY_API_KEY`.
   New CLI `xenon-ib-market-depth`. Consumer docs: `docs/reference/readonly-query-api.md`.
+
 ## [0.6.3] — 2026-06-18
 
 ### Security

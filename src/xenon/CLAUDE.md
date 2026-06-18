@@ -142,27 +142,28 @@ Postgres is primary for portfolio, orders, NAV, trades, UW stats, and journal en
 
 ## Commands
 
-| Command                   | Action                                                             |
-| ------------------------- | ------------------------------------------------------------------ |
-| `xenon-api`               | FastAPI server (`localhost:8321`) — used by `dev.sh`               |
-| `xenon-ib-sync`           | Pull live portfolio + open orders from IB into Postgres            |
-| `xenon-ib-place-order`    | Subprocess placeholder for the place-order path                    |
-| `xenon-ib-order-manage`   | Subprocess for cancel/modify (uses original clientId)              |
-| `xenon-ib-orders`         | Inspect IB open orders                                             |
-| `xenon-ib-option-chain`   | Fetch options chain for a symbol (used by `/options/chain`)        |
-| `xenon-ib-market-depth`   | L2 order-book snapshot for a contract (used by `/market-depth`)    |
-| `xenon-ib-reconcile`      | Reconcile IB vs Postgres orders + fills                            |
-| `xenon-ib-execute`        | Direct execution helper                                            |
-| `xenon-futu-sync`         | Pull read-only positions from local Futu OpenD                     |
-| `xenon-naked-short-audit` | Post-sync cancellation of any uncovered short positions            |
-| `xenon-blotter`           | Today's fills + P&L                                                |
-| `xenon-blotter-history`   | Historical trades (Flex Query)                                     |
-| `xenon-portfolio-report`  | HTML portfolio report                                              |
-| `xenon-portfolio-attrib`  | P&L attribution (incl. Kelly calibration display fields)           |
-| `xenon-portfolio-perf`    | Performance computation (drawdown, return series, OHLC enrichment) |
-| `xenon-perf-explainer`    | Performance-page HTML explainer                                    |
-| `xenon-monitor-daemon`    | Position-rules + fill monitor + preset rebalance daemon            |
-| `xenon-position-rules`    | Position-close rule CLI                                            |
-| `xenon-preset-rebalance`  | Preset rebalance handler                                           |
-| `xenon-market-hours`      | Market-hours helper                                                |
-| `xenon-presets`           | Preset list helper                                                 |
+| Command                   | Action                                                                |
+| ------------------------- | --------------------------------------------------------------------- |
+| `xenon-api`               | FastAPI server (`localhost:8321`) — used by `dev.sh`                  |
+| `xenon-ib-sync`           | Pull live portfolio + open orders from IB into Postgres               |
+| `xenon-ib-place-order`    | Subprocess placeholder for the place-order path                       |
+| `xenon-ib-order-manage`   | Subprocess for cancel/modify (uses original clientId)                 |
+| `xenon-ib-orders`         | Inspect IB open orders                                                |
+| `xenon-ib-option-chain`   | Fetch options chain for a symbol (used by `/options/chain`)           |
+| `xenon-ib-market-depth`   | L2 order-book snapshot for a contract (used by `/market-depth`)       |
+| `xenon-ib-option-greeks`  | Broker modelGreeks snapshot for an option (used by `/options/greeks`) |
+| `xenon-ib-reconcile`      | Reconcile IB vs Postgres orders + fills                               |
+| `xenon-ib-execute`        | Direct execution helper                                               |
+| `xenon-futu-sync`         | Pull read-only positions from local Futu OpenD                        |
+| `xenon-naked-short-audit` | Post-sync cancellation of any uncovered short positions               |
+| `xenon-blotter`           | Today's fills + P&L                                                   |
+| `xenon-blotter-history`   | Historical trades (Flex Query)                                        |
+| `xenon-portfolio-report`  | HTML portfolio report                                                 |
+| `xenon-portfolio-attrib`  | P&L attribution (incl. Kelly calibration display fields)              |
+| `xenon-portfolio-perf`    | Performance computation (drawdown, return series, OHLC enrichment)    |
+| `xenon-perf-explainer`    | Performance-page HTML explainer                                       |
+| `xenon-monitor-daemon`    | Position-rules + fill monitor + preset rebalance daemon               |
+| `xenon-position-rules`    | Position-close rule CLI                                               |
+| `xenon-preset-rebalance`  | Preset rebalance handler                                              |
+| `xenon-market-hours`      | Market-hours helper                                                   |
+| `xenon-presets`           | Preset list helper                                                    |
