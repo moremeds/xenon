@@ -2963,6 +2963,13 @@ async def market_depth(
     an error. ``entitled`` reflects the permission axis only; an empty book with
     no permission failure stays ``entitled: true`` with a ``note``.
     """
+    # Normalize blank query strings to absent: an empty option field (e.g.
+    # ?right=) is "omitted", not "present-but-invalid". Keeps the all-or-none
+    # guard and the arg builder on the same presence predicate, so a blank field
+    # yields the documented 422 instead of leaking through to a subprocess 502.
+    expiry = (expiry or "").strip() or None
+    right = (right or "").strip() or None
+
     # All-or-none option tuple — never silently degrade an option request to
     # stock depth on a partial tuple.
     opt = [expiry, strike, right]

@@ -85,6 +85,19 @@ def test_partial_option_tuple_is_422(client):
     assert captured == {}  # no subprocess call
 
 
+def test_blank_option_field_is_422(client):
+    tc, captured = client
+    # An empty option field (?right=) is a partial tuple -> 422, not forwarded
+    # and turned into a subprocess 502. Regression for the blank-param mismatch
+    # where "" passed the `is not None` guard but was dropped by `if right`.
+    resp = tc.get(
+        "/market-depth",
+        params={"symbol": "QQQ", "expiry": "20260618", "strike": 500, "right": ""},
+    )
+    assert resp.status_code == 422, resp.text
+    assert captured == {}  # no subprocess call
+
+
 def test_num_rows_out_of_range_is_422(client):
     tc, _ = client
     assert tc.get("/market-depth", params={"symbol": "QQQ", "num_rows": 999}).status_code == 422
