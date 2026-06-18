@@ -5,6 +5,9 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.6.5] — 2026-06-18
+
+
 ### Added
 
 - `GET /options/greeks` — broker-computed option greeks (IB `modelGreeks`:
@@ -16,7 +19,6 @@ All notable changes to Xenon are documented here. Format loosely based on
   IB's `-1` "no quote" sentinel surface as `null`. Exposed via `XENON_QUERY_API_KEY`
   (GET only). New CLI `xenon-ib-option-greeks`. Consumer docs:
   `docs/reference/readonly-query-api.md`.
-
 ## [0.6.4] — 2026-06-18
 
 ### Added
