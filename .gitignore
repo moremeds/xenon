@@ -172,3 +172,4 @@ scripts/data/
 
 # Scratch test/run artifacts
 output/
+deploy-note*.md
