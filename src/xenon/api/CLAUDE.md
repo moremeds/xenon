@@ -104,7 +104,7 @@ On-demand scripts MUST use `client_id="auto"` (range 20-49). Never hardcode — 
 
 1. Source `127.0.0.1`/`::1` → pass (on-box / dev stack / web harness).
 2. Valid `X-Internal-Token` == `XENON_INTERNAL_API_TOKEN` → pass, full access. `xenonFetch` AND the two direct web→api callers (`web/app/api/wizard/stream`, `web/app/api/previous-close`) attach it via `internalApiHeaders()`.
-3. Valid `X-API-Key`: `XENON_QUERY_API_KEY` → GET-only read paths (`QUERY_API_KEY_PATHS`); `MDW_API_KEY` → `/historical/*` + `/contract/qualify` (`API_KEY_ALLOWED_PATHS`). A matched key grants-or-denies definitively; neither grants write/sync paths.
+3. Valid `X-API-Key`: `XENON_QUERY_API_KEY` → read-only data + market-data paths (`QUERY_API_KEY_PATHS`): GET reads (`/portfolio`, `/orders`, `/orders/quote`, `/options/chain`, `/options/expirations`, `/market-depth`, `/performance`, `/watchlist`, …) plus body-carrying **read-only** POSTs (`/historical/bars`, `/historical/head-timestamp`, `/contract/qualify`, `/ws-ticket`); `MDW_API_KEY` → `/historical/*` + `/contract/qualify` (`API_KEY_ALLOWED_PATHS`). A matched key grants-or-denies definitively; neither grants write/sync paths. Consumer reference: `docs/reference/readonly-query-api.md`.
 4. `CLERK_JWKS_URL` set → defer to async Clerk JWT.
 5. `XENON_AUTH_ALLOW_DEV_OPEN=1` (strict truthy) → pass. **Dev/test only** — set by `dev.sh`, the root `conftest.py`, and the web harness. Production never sets it, so a prod env that fails to load denies rather than exposes the API.
 6. Else → 401.

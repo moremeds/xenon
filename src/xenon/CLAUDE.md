@@ -150,6 +150,7 @@ Postgres is primary for portfolio, orders, NAV, trades, UW stats, and journal en
 | `xenon-ib-order-manage`   | Subprocess for cancel/modify (uses original clientId)              |
 | `xenon-ib-orders`         | Inspect IB open orders                                             |
 | `xenon-ib-option-chain`   | Fetch options chain for a symbol (used by `/options/chain`)        |
+| `xenon-ib-market-depth`   | L2 order-book snapshot for a contract (used by `/market-depth`)    |
 | `xenon-ib-reconcile`      | Reconcile IB vs Postgres orders + fills                            |
 | `xenon-ib-execute`        | Direct execution helper                                            |
 | `xenon-futu-sync`         | Pull read-only positions from local Futu OpenD                     |

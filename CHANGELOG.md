@@ -5,12 +5,21 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.6.3] — 2026-06-18
+### Added
 
+- `GET /market-depth` — point-in-time L2 order-book snapshot (subprocess-backed,
+  mirrors `/options/chain`). Accepts `symbol` (stock/index) or a full option triplet
+  (`expiry`+`strike`+`right`); returns the qualified `conId`, `bids`/`asks`
+  (`price`/`size`/`marketMaker`), and a permission-only `entitled` flag with a `note`
+  distinguishing no-entitlement from an empty book. Exposed via `XENON_QUERY_API_KEY`.
+  New CLI `xenon-ib-market-depth`. Consumer docs: `docs/reference/readonly-query-api.md`.
+
+## [0.6.3] — 2026-06-18
 
 ### Security
 
 - Expand query-key allowlist: `/options/chain`, `/options/expirations`, `/historical/bars`, `/historical/head-timestamp`, `/contract/qualify`, `/orders/quote`, `/attribution`, `/watchlist`, `POST /ws-ticket` now accessible via `XENON_QUERY_API_KEY` for external read-only access.
+
 ## [0.6.2] — 2026-06-18
 
 ### Security
