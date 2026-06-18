@@ -61,16 +61,33 @@ class TestQueryApiKey:
                 req = FakeRequest(path, method, {"X-API-Key": "qk"})
                 assert verify_api_key(req) is not None, f"{method} {path} should be allowed"
 
-    def test_query_paths_are_all_get_and_complete(self):
-        assert all(m == "GET" for m, _ in QUERY_API_KEY_PATHS)
+    def test_query_paths_are_complete(self):
+        # Market-data endpoints use POST because they take a request body but
+        # are still read-only (no state changes). Only state-mutating POSTs are
+        # excluded — see test_write_and_sync_paths_never_granted_by_query_key.
         expected = {
+            # Portfolio / account
             ("GET", "/portfolio"),
+            ("GET", "/futu/portfolio"),
+            ("GET", "/attribution"),
+            # Orders / fills / journal / live quote
             ("GET", "/orders"),
+            ("GET", "/orders/quote"),
             ("GET", "/blotter"),
             ("GET", "/journal"),
-            ("GET", "/futu/portfolio"),
             ("GET", "/trades/entry-dates"),
+            # Performance / NAV
             ("GET", "/performance"),
+            # Market data
+            ("GET", "/options/chain"),
+            ("GET", "/options/expirations"),
+            ("POST", "/historical/bars"),
+            ("POST", "/historical/head-timestamp"),
+            ("POST", "/contract/qualify"),
+            # Watchlist
+            ("GET", "/watchlist"),
+            # WebSocket ticket (allows external clients to open the realtime feed)
+            ("POST", "/ws-ticket"),
         }
         assert set(QUERY_API_KEY_PATHS) == expected
 
