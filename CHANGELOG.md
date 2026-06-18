@@ -7,7 +7,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ### Added
 
-- **IB Flex reconcile — externally-placed fills now reach "Today's Executed Orders".** Fills placed via TWS / IBKR mobile / other sessions were invisible to xenon because the live pool's `reqExecutions` is own-client (no master API client ID on the Gateway), so they never reached `order_fills` and the imported `snapshot-<permId>` order stayed `WORKING` after filling. A slow background loop (30 min; `XENON_FLEX_RECONCILE=0` disables) pulls account-level IB Flex executions, backfills the missing rows (idempotent on `exec_id`), and marks covered WORKING snapshots `FILLED`. Honors `XENON_READ_ONLY=1`. (Position view already showed these fills; this fixes the executed-orders / Realized P&L surface.)
+- **IB Flex reconcile — externally-placed fills now reach "Today's Executed Orders".** Fills placed via TWS / IBKR mobile / other sessions were invisible to xenon because the live pool's `reqExecutions` is own-client (no master API client ID on the Gateway), so they never reached `order_fills` and the imported `snapshot-<permId>` order stayed `WORKING` after filling. A slow background loop (30 min; `XENON_FLEX_RECONCILE=0` disables) pulls account-level IB Flex executions and backfills only orders the live mirror can't see — deduped by `perm_id` (Flex `tradeID` ≠ the API's `execId`, so an `exec_id` check alone would double-count) — then marks covered WORKING snapshots `FILLED`. Honors `XENON_READ_ONLY=1`. (Position view already showed these fills; this fixes the executed-orders / Realized P&L surface.)
 
 ### Fixed
 

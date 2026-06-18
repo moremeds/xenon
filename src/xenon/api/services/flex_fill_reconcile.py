@@ -76,9 +76,29 @@ def _default_flex_client() -> _FlexClient | None:
     query_id = os.environ.get("IB_FLEX_QUERY_ID")
     if not token or not query_id:
         return None
-    from xenon.trade_blotter.flex_query import FlexQueryClient
+    from xenon.trade_blotter.flex_query import FlexQueryFetcher
 
-    return FlexQueryClient(token, query_id)
+    return FlexQueryFetcher(token=token, query_id=query_id)
+
+
+def _perm_ids_with_fills(scope: AccountScope) -> set[str]:
+    """perm_ids that already have ``order_fills`` in this scope — i.e. the live
+    mirror (or a prior reconcile) already covers them. Used to skip Flex execs for
+    those orders so a fill the live feed already captured isn't re-inserted under a
+    different (Flex `tradeID`) exec_id."""
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(order_fills.c.perm_id)
+            .where(
+                order_fills.c.broker == scope.broker,
+                order_fills.c.account_env == scope.account_env,
+                order_fills.c.broker_account == scope.broker_account,
+                order_fills.c.perm_id.isnot(None),
+            )
+            .distinct()
+        ).all()
+    return {str(r[0]) for r in rows}
 
 
 def _reconcile_working_snapshots(scope: AccountScope) -> int:
@@ -170,17 +190,37 @@ def reconcile_flex_fills(
         logger.warning("flex_fill_reconcile: fetch_executions failed: %s", exc)
         return {"error": str(exc)}
 
-    dicts = [_flex_exec_to_record_dict(e) for e in execs]
+    # Dedup by perm_id, NOT exec_id. Flex `tradeID` != the API's `reqExecutions`
+    # `execId`, so a fill the live mirror already captured (own-client, xenon-placed)
+    # would slip past an exec_id check and double-count. The codebase correlates
+    # Flex↔PG by perm_id (db/queries/blotter._merge_section), so we do too: skip any
+    # Flex exec whose perm_id already has order_fills, and insert only genuinely
+    # external orders (no live-mirror fills — e.g. a mobile-placed order). Execs with
+    # no perm_id can't be correlated and are dropped (safe: never double-count).
+    covered = _perm_ids_with_fills(scope)
+    dicts = [
+        _flex_exec_to_record_dict(e)
+        for e in execs
+        if str(getattr(e, "perm_id", "") or "") and str(e.perm_id) not in covered
+    ]
+    skipped_covered = len(execs) - len(dicts)
     result = record_external_fills(dicts, scope=scope)
     reconciled = _reconcile_working_snapshots(scope)
     logger.info(
-        "flex_fill_reconcile: scope=%s flex_execs=%d inserted=%d reconciled=%d",
+        "flex_fill_reconcile: scope=%s flex_execs=%d candidates=%d skipped_covered=%d inserted=%d reconciled=%d",
         scope.as_dict(),
         len(execs),
+        len(dicts),
+        skipped_covered,
         result.get("inserted", 0),
         reconciled,
     )
-    return {"flex_executions": len(execs), "reconciled": reconciled, **result}
+    return {
+        "flex_executions": len(execs),
+        "skipped_covered": skipped_covered,
+        "reconciled": reconciled,
+        **result,
+    }
 
 
 async def _default_async_runner(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:

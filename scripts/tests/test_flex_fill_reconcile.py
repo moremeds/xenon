@@ -65,6 +65,29 @@ def _seed_working(perm_id: str, *, qty: int = 1) -> str:
     return sid
 
 
+def _seed_fill(perm_id: str, exec_id: str, qty: int = 1) -> None:
+    """Insert an existing order_fills row (as the live mirror would) under an
+    API-style execId, to test perm_id-level dedup against Flex's tradeID."""
+    with get_sync_engine().begin() as conn:
+        conn.execute(
+            insert(order_fills).values(
+                exec_id=exec_id,
+                submission_id=f"snapshot-{perm_id}",
+                perm_id=perm_id,
+                ticker="SPX",
+                side="BUY",
+                qty=Decimal(qty),
+                price=Decimal("14.40"),
+                commission=Decimal("1.64"),
+                filled_at=NOW,
+                metadata={"sec_type": "OPT", "legacy_source": "test"},
+                broker=SCOPE.broker,
+                account_env=SCOPE.account_env,
+                broker_account=SCOPE.broker_account,
+            )
+        )
+
+
 def _exec(perm_id: str, exec_id: str, qty: int = 1) -> Execution:
     return Execution(
         exec_id=exec_id,
@@ -120,3 +143,33 @@ def test_flex_reconcile_noop_in_read_only(monkeypatch):
     result = reconcile_flex_fills(scope=SCOPE, flex_client=stub)
     assert result.get("skipped") == "read_only"
     assert not _fill_exists("fxr-exec-ro")
+
+
+def test_flex_reconcile_skips_perm_ids_already_covered_by_live_mirror():
+    # The live mirror already recorded this fill under an API-style execId. Flex
+    # returns the SAME fill under a different tradeID — it must NOT double-insert,
+    # because Flex tradeID != API execId so an exec_id check alone wouldn't catch it.
+    perm = "FLEXTEST-400"
+    _seed_working(perm)
+    _seed_fill(perm, "live-execId-0001.01")
+    stub = _StubFlex([_exec(perm, "flex-tradeID-9999")])
+    result = reconcile_flex_fills(scope=SCOPE, flex_client=stub)
+    assert result["skipped_covered"] == 1
+    assert result["inserted"] == 0
+    assert not _fill_exists("flex-tradeID-9999")
+
+
+def test_default_flex_client_imports_and_constructs(monkeypatch):
+    # Guards the real FlexQueryFetcher import/construction in _default_flex_client —
+    # the production loop's path, which the stub-injected tests above never exercise
+    # (an earlier wrong class name `FlexQueryClient` would have ImportError'd in prod).
+    from xenon.api.services.flex_fill_reconcile import _default_flex_client
+
+    monkeypatch.delenv("XENON_READ_ONLY", raising=False)
+    monkeypatch.setenv("IB_FLEX_TOKEN", "tok")
+    monkeypatch.setenv("IB_FLEX_QUERY_ID", "qid")
+    client = _default_flex_client()
+    assert client is not None
+    assert hasattr(client, "fetch_executions")
+    monkeypatch.delenv("IB_FLEX_TOKEN")
+    assert _default_flex_client() is None  # unconfigured → None, no import error
