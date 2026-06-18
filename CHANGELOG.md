@@ -5,10 +5,12 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.6.3] — 2026-06-18
+
+
 ### Security
 
 - Expand query-key allowlist: `/options/chain`, `/options/expirations`, `/historical/bars`, `/historical/head-timestamp`, `/contract/qualify`, `/orders/quote`, `/attribution`, `/watchlist`, `POST /ws-ticket` now accessible via `XENON_QUERY_API_KEY` for external read-only access.
-
 ## [0.6.2] — 2026-06-18
 
 ### Security
