@@ -152,6 +152,7 @@ QUERY_API_KEY_PATHS = frozenset(
         # Market data (read-only IB fetches — POST only because they take a body)
         ("GET", "/options/chain"),
         ("GET", "/options/expirations"),
+        ("GET", "/options/greeks"),
         ("GET", "/market-depth"),
         ("POST", "/historical/bars"),
         ("POST", "/historical/head-timestamp"),

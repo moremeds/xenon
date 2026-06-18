@@ -81,6 +81,7 @@ class TestQueryApiKey:
             # Market data
             ("GET", "/options/chain"),
             ("GET", "/options/expirations"),
+            ("GET", "/options/greeks"),
             ("GET", "/market-depth"),
             ("POST", "/historical/bars"),
             ("POST", "/historical/head-timestamp"),
@@ -98,6 +99,14 @@ class TestQueryApiKey:
             allowed = FakeRequest("/market-depth", "GET", {"X-API-Key": "qk"})
             assert verify_api_key(allowed) is not None
             denied = FakeRequest("/market-depth", "POST", {"X-API-Key": "qk"})
+            assert verify_api_key(denied) is None
+
+    def test_options_greeks_get_granted_post_denied(self):
+        # GET /options/greeks is the read-only broker-greeks snapshot; POST is not in scope.
+        with patch.dict(os.environ, {"XENON_QUERY_API_KEY": "qk"}, clear=False):
+            allowed = FakeRequest("/options/greeks", "GET", {"X-API-Key": "qk"})
+            assert verify_api_key(allowed) is not None
+            denied = FakeRequest("/options/greeks", "POST", {"X-API-Key": "qk"})
             assert verify_api_key(denied) is None
 
     def test_write_and_sync_paths_never_granted_by_query_key(self):

@@ -2991,6 +2991,48 @@ async def market_depth(
     return result.data
 
 
+@app.get("/options/greeks")
+async def options_greeks(
+    symbol: str,
+    expiry: str,
+    strike: float,
+    right: str,
+):
+    """Broker-computed option greeks (IB modelGreeks) for one contract (subprocess).
+
+    Greeks are option-only — the full triplet (``expiry`` + ``strike`` + ``right``)
+    is required; FastAPI 422s a missing leg before any subprocess spawns. Returns
+    the qualified ``conId``, bid/ask, and greeks (impliedVol/delta/gamma/vega/
+    theta/undPrice). When IB delivers no greeks (illiquid contract, market closed)
+    ``greeks`` is null with a ``note`` — still a 200, not an error.
+    """
+    expiry = (expiry or "").strip()
+    right = (right or "").strip().upper()
+    if not expiry:
+        raise HTTPException(status_code=422, detail="expiry is required (YYYYMMDD)")
+    if right not in ("C", "P"):
+        raise HTTPException(status_code=422, detail="right must be C or P")
+
+    args = [
+        "--symbol",
+        symbol.upper(),
+        "--expiry",
+        expiry,
+        "--strike",
+        str(strike),
+        "--right",
+        right,
+        "--port",
+        str(DEFAULT_GATEWAY_PORT),
+    ]
+    result = await _run_ib_script_with_recovery("xenon-ib-option-greeks", args, timeout=20)
+    if not result.ok:
+        raise HTTPException(status_code=502, detail=result.error)
+    if result.data and result.data.get("error"):
+        raise HTTPException(status_code=502, detail=result.data["error"])
+    return result.data
+
+
 # ---------------------------------------------------------------------------
 # IB Gateway auto-recovery
 # ---------------------------------------------------------------------------
