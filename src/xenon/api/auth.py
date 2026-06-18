@@ -137,13 +137,27 @@ def _truthy_env(name: str) -> bool:
 # have POST siblings (sync/rebuild) which are deliberately excluded.
 QUERY_API_KEY_PATHS = frozenset(
     {
+        # Portfolio / account
         ("GET", "/portfolio"),
+        ("GET", "/futu/portfolio"),
+        ("GET", "/attribution"),
+        # Orders / fills / journal
         ("GET", "/orders"),
         ("GET", "/blotter"),
         ("GET", "/journal"),
-        ("GET", "/futu/portfolio"),
         ("GET", "/trades/entry-dates"),
+        # Performance / NAV
         ("GET", "/performance"),
+        # Market data (read-only IB fetches — POST only because they take a body)
+        ("GET", "/options/chain"),
+        ("GET", "/options/expirations"),
+        ("POST", "/historical/bars"),
+        ("POST", "/historical/head-timestamp"),
+        ("POST", "/contract/qualify"),
+        # Watchlist
+        ("GET", "/watchlist"),
+        # WebSocket ticket — allows external clients to open the realtime feed
+        ("POST", "/ws-ticket"),
     }
 )
 
