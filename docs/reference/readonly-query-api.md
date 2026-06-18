@@ -50,6 +50,7 @@ the portfolio/orders surfaces read from Postgres and are described in
 | GET     | `/watchlist`                 | Watchlist                                                    |
 | GET     | `/options/chain`             | Option strikes — params: `symbol`, `expiry?`                 |
 | GET     | `/options/expirations`       | Option expiries — param: `symbol`                            |
+| **GET** | **`/options/greeks`**        | **Broker-computed option greeks (see below)**                |
 | **GET** | **`/market-depth`**          | **L2 order-book snapshot (see below)**                       |
 | POST    | `/historical/bars`           | Historical OHLCV — body below                                |
 | POST    | `/historical/head-timestamp` | Earliest available bar — body below                          |
@@ -156,6 +157,87 @@ curl -H "X-API-Key: $XENON_QUERY_API_KEY" \
 Errors: `422` (partial option tuple, or `num_rows` out of 1–20); `502`
 (`{"detail":"could not qualify <symbol>"}` for an unlistable contract, or IB gateway
 unreachable). A no-entitlement / empty book is a **200**, not an error.
+
+---
+
+## `GET /options/greeks` — broker-computed option greeks
+
+Point-in-time IB `modelGreeks` (the broker's own option-model output) for a single option
+contract. **Snapshot, not a stream.** Backed by a short-lived subprocess that subscribes
+`reqMktData(snapshot=True)`, polls until IB computes greeks (delta present), reads them, and
+cancels. Greeks are **option-only** — there is no stock/index form.
+
+### Query parameters
+
+| Param    | Type                            | Notes                                              |
+| -------- | ------------------------------- | -------------------------------------------------- |
+| `symbol` | string, **required**            | Underlying ticker. Upper-cased.                    |
+| `expiry` | string `YYYYMMDD`, **required** | Option expiry.                                     |
+| `strike` | float, **required**             | Option strike.                                     |
+| `right`  | `C`/`P`, **required**           | Option right (upper-cased). Anything else → `422`. |
+
+All four are required (greeks are option-only). A missing/blank leg or a `right` outside
+`{C,P}` → `422` before any subprocess spawns.
+
+### Response
+
+| Field                        | Meaning                                                                                                                                                         |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `symbol`, `conId`, `secType` | Qualified option (`conId` is the resolved IB id; `secType` is always `OPT`).                                                                                    |
+| `expiry`, `strike`, `right`  | Echo of the requested contract.                                                                                                                                 |
+| `asOf`                       | UTC ISO timestamp of the snapshot **request** (not the data vintage — see freshness note).                                                                      |
+| `bid` / `ask`                | Option NBBO, or `null` when no quote is active (IB's `-1` "no quote" sentinel is normalized to `null`).                                                         |
+| `greeks`                     | `{impliedVol, delta, gamma, vega, theta, undPrice}`, or `null` when IB computes none. Greeks may be negative (theta, put delta). NaN fields collapse to `null`. |
+| `note`                       | Present only when `greeks` is `null`: `"no greeks returned"`.                                                                                                   |
+
+> **Freshness / 24-7 behavior:** the subprocess sets IB **frozen** market-data type (`2`), so
+> during regular trading hours you get live greeks and after hours you get the **last recorded
+> session** values — the endpoint returns greeks around the clock rather than `null` every
+> evening/weekend. `asOf` is the request time, so it does **not** distinguish live from
+> last-session greeks; treat off-hours values as last-close.
+
+> **`conId` for options:** like `/market-depth`, this returns the qualified option `conId`
+> (which `/contract/qualify` cannot resolve). Feed it to
+> `GET /orders/quote?ticker=<sym>&con_id=<conId>` for the live bid/ask/mid.
+
+### Examples (real capture, 2026-06-18, live IB)
+
+```bash
+curl -H "X-API-Key: $XENON_QUERY_API_KEY" \
+  "http://<host>:8421/options/greeks?symbol=QQQ&expiry=20260717&strike=600&right=C"
+```
+
+```json
+{
+  "symbol": "QQQ",
+  "conId": 870718877,
+  "secType": "OPT",
+  "expiry": "20260717",
+  "strike": 600.0,
+  "right": "C",
+  "asOf": "2026-06-18T09:07:46.149849+00:00",
+  "bid": null,
+  "ask": null,
+  "greeks": {
+    "impliedVol": 0.4071,
+    "delta": 0.9548,
+    "gamma": 0.00116,
+    "vega": 0.2306,
+    "theta": -0.2295,
+    "undPrice": 722.39
+  }
+}
+```
+
+(Captured pre-market: `bid`/`ask` are `null` — no active quote — while the frozen fallback
+still returns the last-session greeks. A deep-ITM 600C on QQQ@722 → delta ≈ 0.95.)
+
+When IB computes no greeks at all (illiquid contract), `greeks` is `null` with
+`"note": "no greeks returned"` — still a **200**.
+
+Errors: `422` (missing leg or `right` ∉ `{C,P}`); `502`
+(`{"detail":"could not qualify <symbol> ..."}` for an unlistable contract, or IB gateway
+unreachable).
 
 ---
 

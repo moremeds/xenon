@@ -171,7 +171,8 @@ Endpoints live in `scripts/api/routes/historical.py` and use the "data" pool rol
 
 A broader read-only surface for headless consumers, scoped by `QUERY_API_KEY_PATHS`
 (`auth.py`): the portfolio/orders/journal/performance GET reads, the market-data fetches
-(`/options/chain`, `/options/expirations`, **`GET /market-depth`** — point-in-time L2
+(`/options/chain`, `/options/expirations`, **`GET /options/greeks`** — broker `modelGreeks`
+via the `xenon-ib-option-greeks` subprocess, **`GET /market-depth`** — point-in-time L2
 snapshot via the `xenon-ib-market-depth` subprocess), the read-only `/historical/*` +
 `/contract/qualify` POSTs, and `POST /ws-ticket`. The key never reaches a write/sync path.
 Full consumer reference with verified examples: `docs/reference/readonly-query-api.md`.
