@@ -2947,6 +2947,50 @@ async def options_expirations(symbol: str):
     return {"symbol": result.data.get("symbol"), "expirations": result.data.get("expirations")}
 
 
+@app.get("/market-depth")
+async def market_depth(
+    symbol: str,
+    expiry: Optional[str] = None,
+    strike: Optional[float] = None,
+    right: Optional[str] = None,
+    num_rows: int = Query(10, ge=1, le=20),
+):
+    """Point-in-time L2 order-book snapshot (subprocess; mirrors /options/chain).
+
+    `symbol` alone fetches stock/index depth; pass the full option triplet
+    (`expiry` + `strike` + `right`) for option depth. Returns the qualified
+    `conId`. A no-entitlement contract is a 200 with ``entitled: false`` — not
+    an error. ``entitled`` reflects the permission axis only; an empty book with
+    no permission failure stays ``entitled: true`` with a ``note``.
+    """
+    # Normalize blank query strings to absent: an empty option field (e.g.
+    # ?right=) is "omitted", not "present-but-invalid". Keeps the all-or-none
+    # guard and the arg builder on the same presence predicate, so a blank field
+    # yields the documented 422 instead of leaking through to a subprocess 502.
+    expiry = (expiry or "").strip() or None
+    right = (right or "").strip() or None
+
+    # All-or-none option tuple — never silently degrade an option request to
+    # stock depth on a partial tuple.
+    opt = [expiry, strike, right]
+    if any(v is not None for v in opt) and not all(v is not None for v in opt):
+        raise HTTPException(status_code=422, detail="provide all of expiry/strike/right, or none")
+
+    args = ["--symbol", symbol.upper(), "--port", str(DEFAULT_GATEWAY_PORT), "--num-rows", str(num_rows)]
+    if expiry:
+        args += ["--expiry", expiry]
+    if strike is not None:
+        args += ["--strike", str(strike)]
+    if right:
+        args += ["--right", right.upper()]
+    result = await _run_ib_script_with_recovery("xenon-ib-market-depth", args, timeout=15)
+    if not result.ok:
+        raise HTTPException(status_code=502, detail=result.error)
+    if result.data and result.data.get("error"):
+        raise HTTPException(status_code=502, detail=result.data["error"])
+    return result.data
+
+
 # ---------------------------------------------------------------------------
 # IB Gateway auto-recovery
 # ---------------------------------------------------------------------------

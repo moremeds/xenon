@@ -81,6 +81,7 @@ class TestQueryApiKey:
             # Market data
             ("GET", "/options/chain"),
             ("GET", "/options/expirations"),
+            ("GET", "/market-depth"),
             ("POST", "/historical/bars"),
             ("POST", "/historical/head-timestamp"),
             ("POST", "/contract/qualify"),
@@ -90,6 +91,14 @@ class TestQueryApiKey:
             ("POST", "/ws-ticket"),
         }
         assert set(QUERY_API_KEY_PATHS) == expected
+
+    def test_market_depth_get_granted_post_denied(self):
+        # GET /market-depth is the read-only L2 snapshot; POST is not in scope.
+        with patch.dict(os.environ, {"XENON_QUERY_API_KEY": "qk"}, clear=False):
+            allowed = FakeRequest("/market-depth", "GET", {"X-API-Key": "qk"})
+            assert verify_api_key(allowed) is not None
+            denied = FakeRequest("/market-depth", "POST", {"X-API-Key": "qk"})
+            assert verify_api_key(denied) is None
 
     def test_write_and_sync_paths_never_granted_by_query_key(self):
         # Assert the query key is rejected for every mutating/sync path.
