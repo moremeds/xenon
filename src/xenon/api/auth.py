@@ -141,8 +141,9 @@ QUERY_API_KEY_PATHS = frozenset(
         ("GET", "/portfolio"),
         ("GET", "/futu/portfolio"),
         ("GET", "/attribution"),
-        # Orders / fills / journal
+        # Orders / fills / journal / live quote
         ("GET", "/orders"),
+        ("GET", "/orders/quote"),
         ("GET", "/blotter"),
         ("GET", "/journal"),
         ("GET", "/trades/entry-dates"),
