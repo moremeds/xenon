@@ -9,6 +9,34 @@ Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` fi
 | FastAPI, Clerk auth, IB Gateway, order lifecycle | `src/xenon/api/CLAUDE.md` |
 | Brand tokens, typography, spectrum, UI rules     | `brand/CLAUDE.md`         |
 
+## Directory layout
+
+| Path              | Purpose                                                | Gitignored?                               |
+| ----------------- | ------------------------------------------------------ | ----------------------------------------- |
+| `src/xenon/`      | Python package — API, execution, sync, models          | no                                        |
+| `web/`            | Next.js frontend                                       | no (`.next/`, `node_modules/` yes)        |
+| `site/`           | Marketing / Vercel landing site                        | no (`.next/`, `node_modules/` yes)        |
+| `lib/tools/`      | Shared TypeScript analytics tools (Kelly, GEX readers) | no                                        |
+| `scripts/`        | Infra, release, CI helpers                             | no                                        |
+| `docs/`           | Architecture, runbooks, plans, references              | no                                        |
+| `context/memory/` | Agent memory store (episodic + fact)                   | partially (see `context/.gitignore`)      |
+| `config/`         | Static config files                                    | no                                        |
+| `data/`           | Runtime data files (JSON payloads, caches)             | yes                                       |
+| `logs/`           | Runtime logs                                           | yes (`logs/*`, keep `.gitkeep`)           |
+| `tmp/`            | Scratch / temp files                                   | yes                                       |
+| `output/`         | Tool output, test run artifacts                        | yes                                       |
+| `reports/`        | HTML / JSON reports                                    | yes (`*.html`, `*.json`, `.gitkeep` kept) |
+| `test-results/`   | Playwright / Vitest test result artifacts              | yes                                       |
+
+### File placement rules
+
+- **Verification screenshots** (browser, Playwright, chrome-devtools MCP) → `output/playwright/<feature>-<date>.png`. Never drop them in the project root or `docs/plans/`. Root-level `*.png` and `docs/plans/*.png` are gitignored.
+- **Deploy notes** → gitignored; use `CHANGELOG.md` and the release cut script instead.
+- **Plan documents** → `docs/superpowers/plans/YYYY-MM-DD-<slug>.md`; completed plans move to `docs/superpowers/plans/_archive/`.
+- **Spec documents** → `docs/superpowers/specs/YYYY-MM-DD-<slug>-design.md`.
+- **Logs and temp files** → `logs/` or `tmp/` (both gitignored); never in root.
+- **One-time scripts** → `scripts/` with a clear name; delete after use.
+
 ## Brokers
 
 - **IB** (primary) — quotes, chains, execution, portfolio. Never bypassed.
