@@ -18,7 +18,7 @@ Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` fi
 | `site/`           | Marketing / Vercel landing site                        | no (`.next/`, `node_modules/` yes)        |
 | `lib/tools/`      | Shared TypeScript analytics tools (Kelly, GEX readers) | no                                        |
 | `scripts/`        | Infra, release, CI helpers                             | no                                        |
-| `docs/`           | Architecture, runbooks, plans, references              | no                                        |
+| `docs/`           | Architecture, runbooks, research, references           | no                                        |
 | `context/memory/` | Agent memory store (episodic + fact)                   | partially (see `context/.gitignore`)      |
 | `config/`         | Static config files                                    | no                                        |
 | `data/`           | Runtime data files (JSON payloads, caches)             | yes                                       |
@@ -30,7 +30,7 @@ Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` fi
 
 ### File placement rules
 
-- **Verification screenshots** (browser, Playwright, chrome-devtools MCP) → `output/playwright/<feature>-<date>.png`. Never drop them in the project root or `docs/plans/`. Root-level `*.png` and `docs/plans/*.png` are gitignored.
+- **Verification screenshots** (browser, Playwright, chrome-devtools MCP) → `output/playwright/<feature>-<date>.png`. Never drop them in the project root. Root-level `*.png` and `docs/plans/*.png` are gitignored.
 - **Deploy notes** → gitignored; use `CHANGELOG.md` and the release cut script instead.
 - **Plan documents** → `docs/superpowers/plans/YYYY-MM-DD-<slug>.md`; completed plans move to `docs/superpowers/plans/_archive/`.
 - **Spec documents** → `docs/superpowers/specs/YYYY-MM-DD-<slug>-design.md`.
@@ -97,7 +97,7 @@ Real live trading must go through the macmini Docker stack, which writes `core_d
 
 **Read first:** `docs/reference/order-path-incident-history.md` — chronological log of every non-trivial order-path bug, root cause, fix, and regression test. Append a row when you ship a similar fix.
 
-Three automated guards lock in regression patterns. Original two from PR #61; the write-side guard ships with the dev/prod DB split. Full design: `docs/plans/2026-04-28-order-path-regression-prevention.md`.
+Three automated guards lock in regression patterns. Original two from PR #61; the write-side guard ships with the dev/prod DB split. Full design: `docs/superpowers/plans/_archive/2026-04-28-order-path-regression-prevention.md`.
 
 - **Edit-time reminder** (`.claude/hooks/order-path-reminder.sh`) — PreToolUse hook prints an order-path checklist when Claude edits files under `src/xenon/execution/`, `src/xenon/api/server.py`, `web/app/api/orders/`, or `web/lib/order/`. Advisory, never blocks.
 - **CI guards** (`.github/workflows/ci.yml::order-path-guards`):
