@@ -9,6 +9,34 @@ Master policy file. Topic-specific guidance lives in subdirectory `CLAUDE.md` fi
 | FastAPI, Clerk auth, IB Gateway, order lifecycle | `src/xenon/api/CLAUDE.md` |
 | Brand tokens, typography, spectrum, UI rules     | `brand/CLAUDE.md`         |
 
+## Directory layout
+
+| Path              | Purpose                                                | Gitignored?                               |
+| ----------------- | ------------------------------------------------------ | ----------------------------------------- |
+| `src/xenon/`      | Python package — API, execution, sync, models          | no                                        |
+| `web/`            | Next.js frontend                                       | no (`.next/`, `node_modules/` yes)        |
+| `site/`           | Marketing / Vercel landing site                        | no (`.next/`, `node_modules/` yes)        |
+| `lib/tools/`      | Shared TypeScript analytics tools (Kelly, GEX readers) | no                                        |
+| `scripts/`        | Infra, release, CI helpers                             | no                                        |
+| `docs/`           | Architecture, runbooks, research, references           | no                                        |
+| `context/memory/` | Agent memory store (episodic + fact)                   | partially (see `context/.gitignore`)      |
+| `config/`         | Static config files                                    | no                                        |
+| `data/`           | Runtime data files (JSON payloads, caches)             | yes                                       |
+| `logs/`           | Runtime logs                                           | yes (`logs/*`, keep `.gitkeep`)           |
+| `tmp/`            | Scratch / temp files                                   | yes                                       |
+| `output/`         | Tool output, test run artifacts                        | yes                                       |
+| `reports/`        | HTML / JSON reports                                    | yes (`*.html`, `*.json`, `.gitkeep` kept) |
+| `test-results/`   | Playwright / Vitest test result artifacts              | yes                                       |
+
+### File placement rules
+
+- **Verification screenshots** (browser, Playwright, chrome-devtools MCP) → `output/playwright/<feature>-<date>.png`. Never drop them in the project root. Root-level `*.png` and `docs/plans/*.png` are gitignored.
+- **Deploy notes** → gitignored; use `CHANGELOG.md` and the release cut script instead.
+- **Plan documents** → `docs/superpowers/plans/YYYY-MM-DD-<slug>.md`; completed plans move to `docs/superpowers/plans/_archive/`.
+- **Spec documents** → `docs/superpowers/specs/YYYY-MM-DD-<slug>-design.md`.
+- **Logs and temp files** → `logs/` or `tmp/` (both gitignored); never in root.
+- **One-time scripts** → `scripts/` with a clear name; delete after use.
+
 ## Brokers
 
 - **IB** (primary) — quotes, chains, execution, portfolio. Never bypassed.
@@ -69,7 +97,7 @@ Real live trading must go through the macmini Docker stack, which writes `core_d
 
 **Read first:** `docs/reference/order-path-incident-history.md` — chronological log of every non-trivial order-path bug, root cause, fix, and regression test. Append a row when you ship a similar fix.
 
-Three automated guards lock in regression patterns. Original two from PR #61; the write-side guard ships with the dev/prod DB split. Full design: `docs/plans/2026-04-28-order-path-regression-prevention.md`.
+Three automated guards lock in regression patterns. Original two from PR #61; the write-side guard ships with the dev/prod DB split. Full design: `docs/superpowers/plans/_archive/2026-04-28-order-path-regression-prevention.md`.
 
 - **Edit-time reminder** (`.claude/hooks/order-path-reminder.sh`) — PreToolUse hook prints an order-path checklist when Claude edits files under `src/xenon/execution/`, `src/xenon/api/server.py`, `web/app/api/orders/`, or `web/lib/order/`. Advisory, never blocks.
 - **CI guards** (`.github/workflows/ci.yml::order-path-guards`):

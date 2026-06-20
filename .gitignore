@@ -124,8 +124,10 @@ tmp/
 data/cache/
 data/nav_history.jsonl
 
-# Verification screenshots (generated during UI work)
-/internals-panel.png
+# Verification screenshots — go in output/playwright/, not root or docs/
+/*.png
+docs/plans/*.png
+docs/superpowers/plans/*.png
 web/internals-panel.png
 web/regime-panel.png
 
