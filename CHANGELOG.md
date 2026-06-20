@@ -5,8 +5,15 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.6.5] — 2026-06-18
+## [0.6.6] — 2026-06-20
 
+### Changed
+
+- `docs/` restructured: `docs/plans/` eliminated — all completed plans consolidated into `docs/superpowers/plans/_archive/`; new `docs/research/` for long-form notes; `docs/reviews/` merged from two stale dirs; design PNGs moved to `docs/reference/`; `docs/reference/apex-futu/` removed
+- `CLAUDE.md` and `AGENTS.md` updated with directory layout table and file placement rules
+- `.gitignore` updated with glob patterns for screenshots (`/*.png`, `docs/plans/*.png`) replacing per-file entries
+
+## [0.6.5] — 2026-06-18
 
 ### Added
 
@@ -19,6 +26,7 @@ All notable changes to Xenon are documented here. Format loosely based on
   IB's `-1` "no quote" sentinel surface as `null`. Exposed via `XENON_QUERY_API_KEY`
   (GET only). New CLI `xenon-ib-option-greeks`. Consumer docs:
   `docs/reference/readonly-query-api.md`.
+
 ## [0.6.4] — 2026-06-18
 
 ### Added
