@@ -10,19 +10,19 @@ from xenon.clients.ib_client import CLIENT_IDS
 
 
 def test_option_chain_snapshotter_a_registered():
-    assert CLIENT_IDS["option_chain_snapshotter_a"] == 95
+    assert CLIENT_IDS["option_chain_snapshotter_a"] == 901
 
 
 def test_option_chain_snapshotter_b_registered():
-    assert CLIENT_IDS["option_chain_snapshotter_b"] == 96
+    assert CLIENT_IDS["option_chain_snapshotter_b"] == 902
 
 
 def test_snapshotter_ids_dont_collide_with_existing():
-    """95 and 96 must not appear anywhere else in CLIENT_IDS."""
+    """901 and 902 must not appear anywhere else in CLIENT_IDS."""
     duplicates = [
         name
         for name, cid in CLIENT_IDS.items()
-        if cid in (95, 96) and name not in ("option_chain_snapshotter_a", "option_chain_snapshotter_b")
+        if cid in (901, 902) and name not in ("option_chain_snapshotter_a", "option_chain_snapshotter_b")
     ]
     assert duplicates == [], f"clientId collision: {duplicates}"
 

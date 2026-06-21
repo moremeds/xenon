@@ -78,6 +78,9 @@ class IBContractError(IBError):
 #   50-69   Scanners (CRI/VCG ad-hoc pools)
 #   70-89   Daemons (fill monitor, exit service)
 #   90-99   Standalone CLI (manual runs)
+#   900-999 Dedicated long-running daemons outside the main stack
+#           (note: 900 reserved for radon relay — see project memory
+#           radon_xenon_shared_gateway_clientid)
 #
 POOL_ID_RANGE = (0, 9)
 RELAY_ID_RANGE = (10, 19)
@@ -106,8 +109,8 @@ CLIENT_IDS: dict = {
     "vcg_scanner": 50,  # scanner range
     "cri_scanner": 5,  # pool data role
     "ib_realtime_server": 10,  # relay range
-    "option_chain_snapshotter_a": 95,  # daemon range — pool A for option_chain archive snapshotter
-    "option_chain_snapshotter_b": 96,  # daemon range — pool B for option_chain archive snapshotter
+    "option_chain_snapshotter_a": 901,  # dedicated daemon range — pool A for option_chain archive snapshotter
+    "option_chain_snapshotter_b": 902,  # dedicated daemon range — pool B for option_chain archive snapshotter
 }
 
 DEFAULT_HOST = os.environ.get("IB_GATEWAY_HOST", "127.0.0.1")

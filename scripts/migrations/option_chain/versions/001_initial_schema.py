@@ -32,7 +32,7 @@ def upgrade() -> None:
         """
         CREATE TABLE archive.snapshot_config (
             ticker          TEXT PRIMARY KEY,
-            cadence_seconds INT NOT NULL DEFAULT 1800,
+            cadence_seconds INT NOT NULL DEFAULT 600,
             enabled         BOOLEAN NOT NULL DEFAULT TRUE,
             contract_scope  TEXT NOT NULL DEFAULT 'full',
             notes           TEXT,
@@ -166,10 +166,12 @@ def upgrade() -> None:
     op.execute("SELECT add_compression_policy('archive.underlying_ohlcv', INTERVAL '30 days')")
 
     # 6. v_staleness — operator dashboard view
-    # Pass-2 (codex) finding: NULL last_run.finished_at (no run yet) made
-    # `now() - NULL > interval` evaluate to NULL, which the original CASE
-    # treated as ELSE → 'fresh'. A never-run enabled ticker would silently
-    # report healthy. Explicit NULL → 'stale' so the operator dashboard alerts.
+    # Design notes:
+    # - LATERAL joins the most recent run regardless of status so `status`
+    #   surfaces errors/running instead of misleadingly showing an older ok run.
+    # - health='fresh' requires BOTH a recent run AND status in ('ok','partial');
+    #   an error or still-running last run is 'stale' even if recent.
+    # - NULL finished_at (no run yet, or run still in progress) → 'stale'.
     op.execute(
         """
         CREATE VIEW archive.v_staleness AS
@@ -181,14 +183,15 @@ def upgrade() -> None:
             last_run.status,
             CASE
                 WHEN last_run.finished_at IS NULL THEN 'stale'
+                WHEN last_run.status NOT IN ('ok', 'partial') THEN 'stale'
                 WHEN now() - last_run.finished_at > make_interval(secs => c.cadence_seconds * 4) THEN 'stale'
                 ELSE 'fresh'
             END AS health
         FROM archive.snapshot_config c
         LEFT JOIN LATERAL (
             SELECT * FROM archive.snapshot_run r
-            WHERE r.ticker = c.ticker AND r.status IN ('ok','partial')
-            ORDER BY r.finished_at DESC LIMIT 1
+            WHERE r.ticker = c.ticker
+            ORDER BY r.started_at DESC LIMIT 1
         ) last_run ON true
         WHERE c.enabled
         """

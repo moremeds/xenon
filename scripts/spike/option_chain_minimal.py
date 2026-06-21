@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPIKE — delete after option_chain_snapshotter service module merges (PRs 4-9).
+# Not used in production; gated on OPTION_CHAIN_DATABASE_URL being set.
 """Minimal end-to-end spike for option_chain_snapshotter.
 
 For each of SPX/NDX/RUT/VIX:
@@ -15,7 +17,7 @@ For each of SPX/NDX/RUT/VIX:
 
 Production paths (limiter, persister, pool, daily refresh) are NOT exercised.
 This is a proof-of-life demonstrating end-to-end IB → PG flow for the
-4-ticker universe. Uses clientId 95 (registered as option_chain_snapshotter_a).
+4-ticker universe. Uses clientId 901 (registered as option_chain_snapshotter_a).
 
 Read-only against live IB at 100.66.147.98:4001. No orders, no money risk.
 """
@@ -384,7 +386,7 @@ async def main():
         "--client-id",
         type=int,
         default=CLIENT_IDS["option_chain_snapshotter_a"],
-        help="IB clientId (default: 95 from registry)",
+        help="IB clientId (default: 901 from registry)",
     )
     args = parser.parse_args()
 
