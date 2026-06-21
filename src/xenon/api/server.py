@@ -338,6 +338,68 @@ def _maybe_start_futu_history_loop() -> None:
     logger.info("futu history loop started (target: 16:30 ET weekdays)")
 
 
+def _maybe_start_snapshotter() -> None:
+    """Start the option chain archive snapshotter as a background task.
+
+    Snapshots SPX/NDX/RUT/VIX option chains into archive.option_chain every
+    ~10 min during RTH.  Uses clientId 901 (dedicated daemon range).
+    Enabled by default; set XENON_OPTION_CHAIN_SNAPSHOTTER=0 to suppress.
+    Skipped in test mode, read-only mode, and when DATABASE_URL is absent.
+    """
+    import asyncio as _asyncio
+
+    if _is_test_mode():
+        logger.info("test_mode: skipping option chain snapshotter")
+        return
+
+    if is_read_only():
+        logger.info("XENON_READ_ONLY=1: skipping option chain snapshotter")
+        return
+
+    flag = os.environ.get("XENON_OPTION_CHAIN_SNAPSHOTTER", "").strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        logger.info("option chain snapshotter disabled (XENON_OPTION_CHAIN_SNAPSHOTTER=%s)", flag)
+        return
+
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        logger.info("option chain snapshotter skipped: DATABASE_URL not set")
+        return
+
+    from xenon.api.services.advisory_lock import (
+        LOCK_KEY_OPTION_CHAIN_SNAPSHOTTER,
+        pg_try_advisory_lock,
+    )
+    from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT, DEFAULT_HOST
+    from xenon.option_chain_snapshotter.daemon import run_forever as _snapshotter_run_forever
+
+    ib_host = DEFAULT_HOST
+    ib_port = int(os.environ.get("IB_GATEWAY_PORT", str(DEFAULT_GATEWAY_PORT)))
+    ib_client_id = int(os.environ.get("IB_CLIENT_ID_SNAPSHOTTER", "901"))
+
+    async def _supervised() -> None:
+        async with pg_try_advisory_lock(LOCK_KEY_OPTION_CHAIN_SNAPSHOTTER) as got_lock:
+            if not got_lock:
+                logger.info("option chain snapshotter: advisory lock held by another worker — skipping")
+                return
+            logger.info(
+                "option chain snapshotter started (IB=%s:%d clientId=%d)",
+                ib_host,
+                ib_port,
+                ib_client_id,
+            )
+            await _snapshotter_run_forever(
+                ib_host=ib_host,
+                ib_port=ib_port,
+                ib_client_id=ib_client_id,
+                database_url=db_url,
+            )
+
+    task = _asyncio.create_task(_supervised(), name="option_chain_snapshotter")
+    app.state.snapshotter_task = task
+    logger.info("option chain snapshotter task created")
+
+
 async def _run_fills_replay_on_boot() -> None:
     """Replay IB fills into xenon.order_fills once on boot. Best-effort.
 
@@ -507,6 +569,11 @@ async def lifespan(app: FastAPI):
     # set XENON_FUTU_HISTORY_LOOP=0 to suppress.
     _maybe_start_futu_history_loop()
 
+    # Option chain archive snapshotter. Snapshots SPX/NDX/RUT/VIX chains
+    # into archive.option_chain every ~10 min during RTH. Enabled by default;
+    # set XENON_OPTION_CHAIN_SNAPSHOTTER=0 to suppress.
+    _maybe_start_snapshotter()
+
     # W4.7 — PG-event-driven journal auto-import listener.
     # Replaces the legacy periodic /journal/sync flow. Failures must not
     # block boot.
@@ -541,6 +608,13 @@ async def lifespan(app: FastAPI):
             futu_loop_task.cancel()
             try:
                 await futu_loop_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        snapshotter_task = getattr(app.state, "snapshotter_task", None)
+        if snapshotter_task is not None:
+            snapshotter_task.cancel()
+            try:
+                await snapshotter_task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         if ib_pool:
