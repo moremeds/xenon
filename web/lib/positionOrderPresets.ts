@@ -12,6 +12,9 @@ export type TicketPayload =
       quantity: number;
       limitPrice: number;
       tif: "DAY" | "GTC";
+      // Foreign cash-equity venue/currency (Japan/Korea). Absent for US stocks.
+      exchange?: string;
+      currency?: string;
     }
   | {
       type: "option";
@@ -109,6 +112,8 @@ export function seedTicketFromPosition(
         : "BUY";
     const q = pickStockBidAsk(prices[position.ticker]);
     const limitPrice = q.last ?? q.mid ?? 0;
+    const isForeign =
+      !!position.currency && position.currency.toUpperCase() !== "USD";
     return {
       payload: {
         type: "stock",
@@ -117,6 +122,13 @@ export function seedTicketFromPosition(
         quantity: baseContracts,
         limitPrice,
         tif: "DAY",
+        // Foreign cash equity → route the order to its native venue/currency.
+        ...(isForeign
+          ? {
+              exchange: position.exchange ?? undefined,
+              currency: position.currency!.toUpperCase(),
+            }
+          : {}),
       },
       referenceBid: q.bid,
       referenceMid: q.mid,

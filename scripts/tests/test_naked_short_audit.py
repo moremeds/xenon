@@ -438,3 +438,26 @@ def test_leg_wizard_tag_prefix_must_match_exactly():
     violations = find_naked_short_violations(orders, positions)
 
     assert len(violations) == 1, "Only exact 'leg_wizard:' prefix skips"
+
+
+def test_naked_short_stock_flagged_for_jpy_ticker_same_as_usd():
+    """The guard is currency-agnostic: a SELL of a foreign (JPY) stock with no
+    covering shares is naked-short exactly like a USD ticker. Real ticker:
+    5016 JX Advanced Metals (TSEJ/JPY)."""
+    orders = [make_order(1, 1001, "5016", "STK", "SELL", 100)]
+    positions = []  # no long shares → uncovered short
+
+    violations = find_naked_short_violations(orders, positions)
+
+    assert len(violations) == 1
+    assert violations[0]["symbol"] == "5016"
+
+
+def test_covered_sell_not_flagged_for_jpy_ticker():
+    """A SELL covered by long shares is allowed — no currency special-casing."""
+    orders = [make_order(1, 1001, "5016", "STK", "SELL", 100)]
+    positions = [make_stock_position("5016", 100)]  # fully covered
+
+    violations = find_naked_short_violations(orders, positions)
+
+    assert violations == []
