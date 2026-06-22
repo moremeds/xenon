@@ -131,6 +131,7 @@ def fetch_ib_executions(client: IBClient, lookback_days: int = 7) -> list:
                 "commission": commission,
                 "realized_pnl": realized_pnl,
                 "commission_ready": commission_ready,
+                "currency": getattr(cr, "currency", None) if commission_ready else None,
                 "strike": c.strike if c.secType == "OPT" else None,
                 "expiry": c.lastTradeDateOrContractMonth if c.secType == "OPT" else None,
                 "right": c.right if c.secType == "OPT" else None,
@@ -241,6 +242,7 @@ def _fill_metadata(execution: dict, *, legacy_id: str) -> dict[str, Any]:
         "right": _field(execution, "right"),
         "raw_side": _field(execution, "side"),
         "realized_pnl": str(_decimal(_field(execution, "realized_pnl", "realizedPNL"))),
+        "currency": _field(execution, "currency"),
     }
 
 

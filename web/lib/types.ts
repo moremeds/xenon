@@ -162,6 +162,7 @@ export type ExecutedOrder = {
   avgPrice: number | null;
   commission: number | null;
   realizedPNL: number | null;
+  currency?: string;
   time: string;
   exchange: string;
 };

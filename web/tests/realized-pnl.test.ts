@@ -19,15 +19,24 @@ const todaysDate = new Date().toLocaleDateString("sv", {
 const makeFill = (
   realizedPNL: number | null,
   time = `${todaysDate}T10:00:00`,
+  currency?: string,
 ): ExecutedOrder => ({
   execId: "test-exec-1",
   symbol: "AAPL",
-  contract: { symbol: "AAPL", secType: "STK", conId: null, strike: null, right: null, expiry: null },
+  contract: {
+    symbol: "AAPL",
+    secType: "STK",
+    conId: null,
+    strike: null,
+    right: null,
+    expiry: null,
+  },
   side: "BOT",
   quantity: 100,
   avgPrice: 214.5,
   commission: -1.05,
   realizedPNL,
+  currency,
   time,
   exchange: "SMART",
 });
@@ -53,12 +62,37 @@ describe("computeRealizedPnlFromFills", () => {
   });
 
   test("handles negative realized P&L (losing trades)", () => {
-    const fills = [makeFill(-1250.50), makeFill(-500.25)];
+    const fills = [makeFill(-1250.5), makeFill(-500.25)];
     expect(computeRealizedPnlFromFills(fills)).toBeCloseTo(-1750.75);
   });
 
   test("handles single fill with exact P&L", () => {
-    const fills = [makeFill(3847.20)];
-    expect(computeRealizedPnlFromFills(fills)).toBeCloseTo(3847.20);
+    const fills = [makeFill(3847.2)];
+    expect(computeRealizedPnlFromFills(fills)).toBeCloseTo(3847.2);
+  });
+
+  test("converts KRW fill to USD using usdPerUnit", () => {
+    // ₩595,618 at 1 KRW = 0.000725 USD ≈ $431.82 — the -$595,618 display bug
+    const fills = [makeFill(595618, `${todaysDate}T10:00:00`, "KRW")];
+    const usdPerUnit = { USD: 1, KRW: 0.000725 };
+    expect(computeRealizedPnlFromFills(fills, usdPerUnit)).toBeCloseTo(
+      595618 * 0.000725,
+      1,
+    );
+  });
+
+  test("skips fill with non-USD currency when no FX rate available", () => {
+    const fills = [
+      makeFill(100, `${todaysDate}T10:00:00`, "USD"),
+      makeFill(595618, `${todaysDate}T10:00:00`, "KRW"),
+    ];
+    expect(computeRealizedPnlFromFills(fills, { USD: 1 })).toBeCloseTo(100);
+  });
+
+  test("USD fill unaffected by usdPerUnit", () => {
+    const fills = [makeFill(500, `${todaysDate}T10:00:00`, "USD")];
+    expect(
+      computeRealizedPnlFromFills(fills, { USD: 1, KRW: 0.0007 }),
+    ).toBeCloseTo(500);
   });
 });

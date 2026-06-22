@@ -46,10 +46,19 @@ function fillDateET(time: string): string {
  * also includes non-order events (option expiry, adjustments, etc.).  Using
  * fill-level data filtered to today is the canonical approach.
  */
-export function computeRealizedPnlFromFills(fills: ExecutedOrder[]): number {
+export function computeRealizedPnlFromFills(
+  fills: ExecutedOrder[],
+  usdPerUnit: Record<string, number> = { USD: 1 },
+): number {
   if (fills.length === 0) return 0;
   const today = todayET();
   return fills
     .filter((fill) => fillDateET(fill.time) === today)
-    .reduce((sum, fill) => sum + (fill.realizedPNL ?? 0), 0);
+    .reduce((sum, fill) => {
+      const pnl = fill.realizedPNL ?? 0;
+      const cur = (fill.currency || "USD").toUpperCase();
+      const rate = cur === "USD" ? 1 : (usdPerUnit[cur] ?? null);
+      if (rate == null) return sum; // skip fill if no FX rate — don't add native amount as USD
+      return sum + pnl * rate;
+    }, 0);
 }
