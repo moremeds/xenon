@@ -73,6 +73,10 @@ class PreflightRequest(BaseModel):
     strike: Decimal | None = None
     multiplier: int = 100
     limit_price: Decimal
+    # Multi-currency (Japan/Korea). A non-USD cash equity is out of the US-only
+    # V1 universe by definition — gated on currency, not the symbol whitelist.
+    currency: str = "USD"
+    exchange: str | None = None
 
 
 class ComboPreflightLeg(BaseModel):
@@ -355,15 +359,20 @@ def evaluate(
     """
     reservations = reservations or WorkingReservations()
 
-    # ① Universe
-    if not is_known(req.ticker):
+    # ① Universe — V1 universe is US-only. Foreign cash equities (non-USD STK)
+    # are out of that universe by definition; gate them on currency instead, so
+    # BUY-accept (②) and SELL-coverage (③) still apply. USD tickers unchanged.
+    is_foreign_equity = req.security_type == "STK" and (req.currency or "USD").upper() != "USD"
+    if not is_foreign_equity and not is_known(req.ticker):
         return Verdict(
             accept=False,
             reason_code=ReasonCode.UNIVERSE_UNKNOWN,
             reason_detail=f"{req.ticker} not in V1 universe",
         )
 
-    if req.security_type == "STK" and is_index(req.ticker):
+    # is_index() raises KeyError for non-universe tickers, so it must only run
+    # for known USD tickers — a foreign equity is never an index.
+    if req.security_type == "STK" and not is_foreign_equity and is_index(req.ticker):
         return Verdict(
             accept=False,
             reason_code=ReasonCode.INDEX_HAS_NO_STOCK,

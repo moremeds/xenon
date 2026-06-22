@@ -99,6 +99,17 @@ def get_account_summary(client: IBClient) -> dict:
     return summary
 
 
+def get_fx_rates(client: IBClient) -> dict:
+    """USD-per-unit FX rates from IB's cached accountValues ExchangeRate rows.
+
+    For a USD-base account IB reports each non-USD currency's ExchangeRate as the
+    native→USD multiplier (base = native * ExchangeRate), so the returned map is
+    directly usable as usd_per_unit. Always includes USD: 1.0."""
+    from xenon.utils.fx import usd_per_unit_from_account_values
+
+    return usd_per_unit_from_account_values(client.ib.accountValues())
+
+
 def get_pnl(client: IBClient, account: str = "") -> dict:
     """Fetch daily P&L via reqPnL. Polls up to 10s for data to arrive."""
     from ib_async import util as ib_util
@@ -411,8 +422,10 @@ def collapse_positions(positions: list) -> list:
     # Group by ticker + expiry
     groups = defaultdict(list)
     for pos in positions:
-        # Use N/A expiry for stocks to keep them separate
-        key = (pos["symbol"], pos["expiry"])
+        # Use N/A expiry for stocks to keep them separate. Include currency so a
+        # foreign listing (e.g. 5016 JPY) never merges with a same-symbol USD
+        # listing — short numeric tickers can collide across exchanges.
+        key = (pos["symbol"], pos["expiry"], (pos.get("currency") or "USD").upper())
         groups[key].append(pos)
 
     # ── Second pass: merge covered calls ──
@@ -423,7 +436,7 @@ def collapse_positions(positions: list) -> list:
     collapsed = []
     position_id = 1
 
-    for (symbol, expiry), legs in groups.items():
+    for (symbol, expiry, currency), legs in groups.items():
         structure_type, risk_profile = detect_structure_type(legs)
 
         # Bugfix 2026-04-27: 2 legs sharing (ticker, expiry) that don't form a
@@ -522,6 +535,7 @@ def collapse_positions(positions: list) -> list:
                     "market_price": leg.get("marketPrice"),
                     "market_value": leg.get("marketValue"),
                     "market_price_is_calculated": bool(leg.get("marketPriceIsCalculated")),
+                    "currency": (leg.get("currency") or "USD").upper(),
                 }
             )
 
@@ -529,6 +543,8 @@ def collapse_positions(positions: list) -> list:
             {
                 "id": position_id,
                 "ticker": symbol,
+                "currency": (currency or "USD").upper(),
+                "exchange": (legs[0].get("exchange") if legs else None),
                 "structure": structure_desc,
                 "structure_type": structure_type,
                 "risk_profile": risk_profile,
@@ -621,6 +637,8 @@ def fetch_positions(client: IBClient) -> list:
         formatted.append(
             {
                 "symbol": contract.symbol,
+                "currency": (getattr(contract, "currency", "") or "USD").upper(),
+                "exchange": (getattr(contract, "primaryExchange", "") or getattr(contract, "exchange", "") or None),
                 "secType": contract.secType,
                 "position": position_size,
                 "avgCost": avg_cost,
@@ -918,15 +936,23 @@ def build_fill_dates(client) -> dict:
 
 
 def convert_to_portfolio_format(
-    account: dict, collapsed_positions: list, pnl_data: Optional[dict] = None, fill_dates: Optional[dict] = None
+    account: dict,
+    collapsed_positions: list,
+    pnl_data: Optional[dict] = None,
+    fill_dates: Optional[dict] = None,
+    fx_rates: Optional[dict] = None,
 ) -> dict:
-    """Convert IB data to portfolio.json format using collapsed positions"""
+    """Convert IB data to portfolio.json format using collapsed positions.
 
+    IB returns each position's entry_cost / market_value in the contract's NATIVE
+    currency (JPY for TSEJ, KRW for KRX). ``fx_rates`` is a usd_per_unit map
+    (USD value of 1 unit) used to add ``*_usd`` fields and to compute deployed
+    totals in a single unit (USD). For a USD-base account NetLiquidation is
+    already IB's consolidated USD total, so bankroll stays correct as-is."""
+    from xenon.utils.fx import to_usd
+
+    fx_rates = fx_rates or {"USD": 1.0}
     bankroll = account.get("NetLiquidation", account.get("TotalCashValue", 0))
-
-    # Calculate totals from collapsed positions
-    total_deployed = sum(p["entry_cost"] for p in collapsed_positions)
-    deployed_pct = (total_deployed / bankroll * 100) if bankroll > 0 else 0
 
     # Derive entry_date from PG (order_fills + trades + previous account_snapshots).
     # Priority: per-contract fills → trade_log → per-ticker fills → IB session
@@ -1002,14 +1028,39 @@ def convert_to_portfolio_format(
             or "unknown"
         )
 
+    # USD enrichment — IB returns native values; convert per position currency.
+    for pos in collapsed_positions:
+        cur = (pos.get("currency") or "USD").upper()
+        pos["entry_cost_usd"] = to_usd(pos.get("entry_cost"), cur, fx_rates)
+        pos["market_value_usd"] = to_usd(pos.get("market_value"), cur, fx_rates)
+        for leg in pos.get("legs", []):
+            lcur = (leg.get("currency") or cur).upper()
+            leg["market_value_usd"] = to_usd(leg.get("market_value"), lcur, fx_rates)
+
+    # Deployed totals must be in a single unit (USD). NEVER fall back to the
+    # native entry_cost for a missing rate — adding a ¥-sized number into a USD
+    # total corrupts it. Skip unconverted positions and surface the count so a
+    # missing rate is visible rather than silently wrong.
+    usd_costs = [p.get("entry_cost_usd") for p in collapsed_positions if p.get("entry_cost_usd") is not None]
+    total_deployed = sum(usd_costs)
+    unconverted = sum(
+        1
+        for p in collapsed_positions
+        if (p.get("currency") or "USD").upper() != "USD" and p.get("entry_cost_usd") is None
+    )
+    deployed_pct = (total_deployed / bankroll * 100) if bankroll > 0 else 0
+
     result = {
         "bankroll": round(bankroll, 2),
         "peak_value": round(bankroll, 2),  # Would need historical tracking
+        "base_currency": "USD",
+        "fx_rates": fx_rates,
         "last_sync": datetime.now().isoformat(),
         "positions": collapsed_positions,
         "total_deployed_pct": round(deployed_pct, 2),
         "total_deployed_dollars": round(total_deployed, 2),
         "remaining_capacity_pct": round(100 - deployed_pct, 2),
+        "fx_unconverted_count": unconverted,  # >0 → a non-USD row lacked an FX rate
         "position_count": len(collapsed_positions),
         "defined_risk_count": len([p for p in collapsed_positions if p["risk_profile"] == "defined"]),
         "undefined_risk_count": len([p for p in collapsed_positions if p["risk_profile"] != "defined"]),
@@ -1122,6 +1173,8 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
                         expiry=expiry,
                         strike=Decimal(str(leg["strike"])) if leg.get("strike") else None,
                         right=right,
+                        currency=(leg.get("currency") or pos.get("currency") or "USD").upper(),
+                        exchange=pos.get("exchange"),
                         quantity=qty,
                         avg_cost=Decimal(str(leg.get("avg_cost", 0))),
                         current_price=Decimal(str(leg["market_price"])) if leg.get("market_price") else None,
@@ -1227,6 +1280,7 @@ def main():
         # ── Phase 1: Account summary (fast, no sleep needed) ──
         print("Fetching account summary...")
         account = get_account_summary(client)
+        fx_rates = get_fx_rates(client)
 
         # ── Phase 2: Request account PnL + positions concurrently ──
         # reqPnL is a subscription — request it, then do other work while it streams
@@ -1256,10 +1310,20 @@ def main():
             # Setting exchange='SMART' avoids the 1s qualifyContracts() round-trip.
             print("Requesting market data + per-position PnL...")
             client.set_market_data_type(4)
+            # USD contracts: force SMART (positions from get_positions() may carry
+            # AMEX/BATS that fail with reqMktData type 4). Non-USD contracts (TSEJ/
+            # KRX): SMART does not route foreign venues — qualify so IB supplies a
+            # routable exchange instead of force-setting SMART, which breaks the
+            # quote for a JPY/KRW contract. See order-path-incident-history.md.
+            foreign = [p for p in positions if (p.get("currency") or "USD").upper() != "USD"]
             for pos in positions:
-                # Force SMART for all — stocks from get_positions() may have
-                # exchange-specific values (AMEX, BATS) that fail with reqMktData type 4
-                pos["contract"].exchange = "SMART"
+                if (pos.get("currency") or "USD").upper() == "USD":
+                    pos["contract"].exchange = "SMART"
+            if foreign:
+                try:
+                    client.qualify_contracts(*[p["contract"] for p in foreign])
+                except Exception as exc:
+                    print(f"  Warning: could not qualify {len(foreign)} foreign contract(s): {exc}")
 
             # Request PnL Single FIRST (takes slightly longer to arrive)
             pnl_requests = []
@@ -1364,7 +1428,9 @@ def main():
         # Sync if requested
         if args.sync:
             fill_dates = build_fill_dates(client)
-            portfolio = convert_to_portfolio_format(account, collapsed, pnl_data, fill_dates=fill_dates)
+            portfolio = convert_to_portfolio_format(
+                account, collapsed, pnl_data, fill_dates=fill_dates, fx_rates=fx_rates
+            )
             save_portfolio(portfolio)
 
             # ── Naked Short Audit (post-sync) ──

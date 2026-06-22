@@ -1,11 +1,19 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import type { PortfolioData, AccountSummary, ExecutedOrder } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
-import { computeExposureDetailed, type ExposureDataWithBreakdown } from "@/lib/exposureBreakdown";
+import {
+  computeExposureDetailed,
+  type ExposureDataWithBreakdown,
+} from "@/lib/exposureBreakdown";
 import { computeDayMoveBreakdown } from "@/lib/dayMoveBreakdown";
-import ExposureBreakdownModal, { type ExposureMetric } from "./ExposureBreakdownModal";
+import { nativeToDisplayUsd } from "@/lib/positionUtils";
+import { fmtNative } from "@/lib/fx";
+import { useFx } from "@/lib/useFx";
+import ExposureBreakdownModal, {
+  type ExposureMetric,
+} from "./ExposureBreakdownModal";
 import FillsModal from "./FillsModal";
 import PnlBreakdownModal, { type PnlBreakdownRow } from "./PnlBreakdownModal";
 import AccountMetricModal from "./AccountMetricModal";
@@ -18,7 +26,9 @@ type MetricCardsProps = {
   section?: string;
 };
 
-export function getAccountDayPnlFormula(source: PortfolioData["source"] = "ib"): string {
+export function getAccountDayPnlFormula(
+  source: PortfolioData["source"] = "ib",
+): string {
   if (source === "futu") {
     return (
       "Day P&L = SUM( current_price − yesterday_close ) × position_size for positions with live price data\n" +
@@ -55,61 +65,111 @@ const fmt = (n: number) =>
     ? `$${(n / 1_000_000).toFixed(2)}M`
     : `$${n.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
 
-const fmtSigned = (n: number) =>
-  `${n >= 0 ? "+" : "-"}${fmt(Math.abs(n))}`;
+const fmtSigned = (n: number) => `${n >= 0 ? "+" : "-"}${fmt(Math.abs(n))}`;
 
 const fmtExact = (n: number) =>
   `$${Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-const fmtSignedExact = (n: number) =>
-  `${n >= 0 ? "+" : "-"}${fmtExact(n)}`;
+const fmtSignedExact = (n: number) => `${n >= 0 ? "+" : "-"}${fmtExact(n)}`;
 
-const tone = (n: number) => (n > 0 ? "positive" as const : n < 0 ? "negative" as const : "neutral" as const);
+const tone = (n: number) =>
+  n > 0
+    ? ("positive" as const)
+    : n < 0
+      ? ("negative" as const)
+      : ("neutral" as const);
 
-function resolveMarketValue(pos: PortfolioData["positions"][number]): number | null {
+function resolveMarketValue(
+  pos: PortfolioData["positions"][number],
+): number | null {
   if (pos.market_value != null) return pos.market_value;
   const known = pos.legs.filter((l) => l.market_value != null);
-  return known.length > 0 ? known.reduce((s, l) => s + l.market_value!, 0) : null;
+  return known.length > 0
+    ? known.reduce((s, l) => s + l.market_value!, 0)
+    : null;
 }
 
 /* ─── Unrealized P&L breakdown (IB total: entry cost vs market value) ─── */
 
-function computeUnrealizedBreakdown(portfolio: PortfolioData): PnlBreakdownRow[] {
+function computeUnrealizedBreakdown(
+  portfolio: PortfolioData,
+  usdPerUnit: Record<string, number> = { USD: 1 },
+): PnlBreakdownRow[] {
+  const usd2 = (v: number) =>
+    `$${Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   return portfolio.positions.flatMap((pos) => {
     const mv = resolveMarketValue(pos);
     if (mv == null) return [];
-    const pnl = mv - pos.entry_cost;
-    const pnlPct = pos.entry_cost !== 0 ? (pnl / Math.abs(pos.entry_cost)) * 100 : null;
-    return [{
-      id: pos.id,
-      ticker: pos.ticker,
-      structure: pos.structure,
-      col1: `$${Math.abs(pos.entry_cost).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-      col2: `$${Math.abs(mv).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-      pnl,
-      pnlPct,
-    }];
+    const cur = (pos.currency || "USD").toUpperCase();
+    // Foreign entry cost / MV / P&L are native — convert to USD before they
+    // reach the breakdown total; skip a position with no rate (no native leak).
+    const pnl = nativeToDisplayUsd(mv - pos.entry_cost, cur, usdPerUnit);
+    if (pnl == null) return [];
+    // % is a currency-invariant ratio — compute from the native pair.
+    const pnlPct =
+      pos.entry_cost !== 0
+        ? ((mv - pos.entry_cost) / Math.abs(pos.entry_cost)) * 100
+        : null;
+    const fmtMoney =
+      cur === "USD" ? usd2 : (v: number) => fmtNative(Math.abs(v), cur);
+    return [
+      {
+        id: pos.id,
+        ticker: pos.ticker,
+        structure: pos.structure,
+        col1: fmtMoney(pos.entry_cost),
+        col2: fmtMoney(mv),
+        pnl,
+        pnlPct,
+      },
+    ];
   });
 }
-
 
 function computeTodayUnrealizedPnl(
   portfolio: PortfolioData,
   prices: Record<string, PriceData>,
+  usdPerUnit: Record<string, number> = { USD: 1 },
 ): { pnl: number; positionsWithData: number; totalPositions: number } {
-  const { rows, total } = computeDayMoveBreakdown(portfolio, prices);
-  return { pnl: total, positionsWithData: rows.length, totalPositions: portfolio.positions.length };
+  const { rows, total } = computeDayMoveBreakdown(
+    portfolio,
+    prices,
+    usdPerUnit,
+  );
+  return {
+    pnl: total,
+    positionsWithData: rows.length,
+    totalPositions: portfolio.positions.length,
+  };
 }
 
 /* ─── Metric card helper ─────────────────────────────────── */
 
-type CardDef = { label: string; value: string; change: string; tone: "positive" | "negative" | "neutral" };
+type CardDef = {
+  label: string;
+  value: string;
+  change: string;
+  tone: "positive" | "negative" | "neutral";
+};
 
-function MetricCard({ card, onClick }: { card: CardDef; onClick?: () => void }) {
+function MetricCard({
+  card,
+  onClick,
+}: {
+  card: CardDef;
+  onClick?: () => void;
+}) {
   return (
-    <div className={`metric-card${onClick ? " metric-card-clickable" : ""}`} onClick={onClick}>
+    <div
+      className={`metric-card${onClick ? " metric-card-clickable" : ""}`}
+      onClick={onClick}
+    >
       <div className="metric-label">{card.label}</div>
-      <div className={`metric-value ${card.tone !== "neutral" ? card.tone : ""}`}>{card.value}</div>
+      <div
+        className={`metric-value ${card.tone !== "neutral" ? card.tone : ""}`}
+      >
+        {card.value}
+      </div>
       <div className={`metric-change ${card.tone}`}>{card.change}</div>
     </div>
   );
@@ -117,7 +177,15 @@ function MetricCard({ card, onClick }: { card: CardDef; onClick?: () => void }) 
 
 /* ─── Collapsible section header ─────────────────────────── */
 
-function SectionHeader({ label, collapsed, onToggle }: { label: string; collapsed: boolean; onToggle: () => void }) {
+function SectionHeader({
+  label,
+  collapsed,
+  onToggle,
+}: {
+  label: string;
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
   return (
     <div className="section-label-mono section-label-toggle" onClick={onToggle}>
       <svg
@@ -128,7 +196,13 @@ function SectionHeader({ label, collapsed, onToggle }: { label: string; collapse
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
       >
-        <path d="M3 1.5L7 5L3 8.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        <path
+          d="M3 1.5L7 5L3 8.5"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
       </svg>
       <span>{label}</span>
     </div>
@@ -140,6 +214,7 @@ function SectionHeader({ label, collapsed, onToggle }: { label: string; collapse
 function AccountRow({
   acct,
   dayPnl,
+  unrealizedPnl,
   collapsed,
   onToggle,
   onNetLiqClick,
@@ -149,6 +224,10 @@ function AccountRow({
 }: {
   acct: AccountSummary;
   dayPnl: number | null;
+  // USD-denominated unrealized P&L. Equals acct.unrealized_pnl for IB (already
+  // base-USD); for Futu it's the FX-converted per-position sum (acct value is a
+  // native-currency sum the envelope can't convert — accinfo returns "N/A").
+  unrealizedPnl: number;
   collapsed: boolean;
   onToggle: () => void;
   onNetLiqClick: () => void;
@@ -159,25 +238,51 @@ function AccountRow({
   const dailyAvailable = dayPnl != null;
   return (
     <>
-      <SectionHeader label="ACCOUNT" collapsed={collapsed} onToggle={onToggle} />
-      {!collapsed && <div className="metrics-grid">
-        <MetricCard
-          card={{ label: "Net Liquidation", value: fmtExact(acct.net_liquidation), change: "BANKROLL", tone: "neutral" }}
-          onClick={onNetLiqClick}
-        />
-        <MetricCard
-          card={{ label: "Day P&L", value: dailyAvailable ? fmtSignedExact(dayPnl!) : "---", change: dailyAvailable ? "TODAY" : "MARKET CLOSED", tone: dailyAvailable ? tone(dayPnl!) : "neutral" }}
-          onClick={onDayPnlClick}
-        />
-        <MetricCard
-          card={{ label: "Unrealized P&L", value: fmtSignedExact(acct.unrealized_pnl), change: "OPEN POSITIONS", tone: acct.unrealized_pnl !== 0 ? tone(acct.unrealized_pnl) : "neutral" }}
-          onClick={onUnrealizedClick}
-        />
-        <MetricCard
-          card={{ label: "Dividends", value: acct.dividends != null ? fmtExact(acct.dividends) : "---", change: "ACCRUED", tone: (acct.dividends ?? 0) > 0 ? "positive" : "neutral" }}
-          onClick={onDividendsClick}
-        />
-      </div>}
+      <SectionHeader
+        label="ACCOUNT"
+        collapsed={collapsed}
+        onToggle={onToggle}
+      />
+      {!collapsed && (
+        <div className="metrics-grid">
+          <MetricCard
+            card={{
+              label: "Net Liquidation",
+              value: fmtExact(acct.net_liquidation),
+              change: "BANKROLL",
+              tone: "neutral",
+            }}
+            onClick={onNetLiqClick}
+          />
+          <MetricCard
+            card={{
+              label: "Day P&L",
+              value: dailyAvailable ? fmtSignedExact(dayPnl!) : "---",
+              change: dailyAvailable ? "TODAY" : "MARKET CLOSED",
+              tone: dailyAvailable ? tone(dayPnl!) : "neutral",
+            }}
+            onClick={onDayPnlClick}
+          />
+          <MetricCard
+            card={{
+              label: "Unrealized P&L",
+              value: fmtSignedExact(unrealizedPnl),
+              change: "OPEN POSITIONS",
+              tone: unrealizedPnl !== 0 ? tone(unrealizedPnl) : "neutral",
+            }}
+            onClick={onUnrealizedClick}
+          />
+          <MetricCard
+            card={{
+              label: "Dividends",
+              value: acct.dividends != null ? fmtExact(acct.dividends) : "---",
+              change: "ACCRUED",
+              tone: (acct.dividends ?? 0) > 0 ? "positive" : "neutral",
+            }}
+            onClick={onDividendsClick}
+          />
+        </div>
+      )}
     </>
   );
 }
@@ -204,24 +309,46 @@ function RiskRow({
   return (
     <>
       <SectionHeader label="RISK" collapsed={collapsed} onToggle={onToggle} />
-      {!collapsed && <div className="metrics-grid">
-        <MetricCard
-          card={{ label: "Buying Power", value: fmtExact(acct.buying_power), change: "AVAILABLE", tone: "neutral" }}
-          onClick={onBuyingPowerClick}
-        />
-        <MetricCard
-          card={{ label: "Maintenance Margin", value: fmtExact(acct.maintenance_margin), change: "REQUIRED", tone: "neutral" }}
-          onClick={onMarginClick}
-        />
-        <MetricCard
-          card={{ label: "Excess Liquidity", value: fmtExact(acct.excess_liquidity), change: "CUSHION", tone: tone(acct.excess_liquidity) }}
-          onClick={onExcessLiqClick}
-        />
-        <MetricCard
-          card={{ label: "Settled Cash", value: fmtSignedExact(acct.settled_cash), change: "NET CASH", tone: tone(acct.settled_cash) }}
-          onClick={onSettledCashClick}
-        />
-      </div>}
+      {!collapsed && (
+        <div className="metrics-grid">
+          <MetricCard
+            card={{
+              label: "Buying Power",
+              value: fmtExact(acct.buying_power),
+              change: "AVAILABLE",
+              tone: "neutral",
+            }}
+            onClick={onBuyingPowerClick}
+          />
+          <MetricCard
+            card={{
+              label: "Maintenance Margin",
+              value: fmtExact(acct.maintenance_margin),
+              change: "REQUIRED",
+              tone: "neutral",
+            }}
+            onClick={onMarginClick}
+          />
+          <MetricCard
+            card={{
+              label: "Excess Liquidity",
+              value: fmtExact(acct.excess_liquidity),
+              change: "CUSHION",
+              tone: tone(acct.excess_liquidity),
+            }}
+            onClick={onExcessLiqClick}
+          />
+          <MetricCard
+            card={{
+              label: "Settled Cash",
+              value: fmtSignedExact(acct.settled_cash),
+              change: "NET CASH",
+              tone: tone(acct.settled_cash),
+            }}
+            onClick={onSettledCashClick}
+          />
+        </div>
+      )}
     </>
   );
 }
@@ -248,24 +375,53 @@ function MarginRow({
   return (
     <>
       <SectionHeader label="MARGIN" collapsed={collapsed} onToggle={onToggle} />
-      {!collapsed && <div className="metrics-grid">
-        <MetricCard
-          card={{ label: "Equity With Loan", value: acct.equity_with_loan != null ? fmtExact(acct.equity_with_loan) : "---", change: "EWL", tone: "neutral" }}
-          onClick={onEwlClick}
-        />
-        <MetricCard
-          card={{ label: "Previous Day EWL", value: acct.previous_day_ewl != null ? fmtExact(acct.previous_day_ewl) : "---", change: "PRIOR SESSION", tone: "neutral" }}
-          onClick={onPrevEwlClick}
-        />
-        <MetricCard
-          card={{ label: "Reg T Equity", value: acct.reg_t_equity != null ? fmtExact(acct.reg_t_equity) : "---", change: "REGULATION T", tone: "neutral" }}
-          onClick={onRegTClick}
-        />
-        <MetricCard
-          card={{ label: "SMA", value: acct.sma != null ? fmtExact(acct.sma) : "---", change: "SPECIAL MEMORANDUM", tone: "neutral" }}
-          onClick={onSmaClick}
-        />
-      </div>}
+      {!collapsed && (
+        <div className="metrics-grid">
+          <MetricCard
+            card={{
+              label: "Equity With Loan",
+              value:
+                acct.equity_with_loan != null
+                  ? fmtExact(acct.equity_with_loan)
+                  : "---",
+              change: "EWL",
+              tone: "neutral",
+            }}
+            onClick={onEwlClick}
+          />
+          <MetricCard
+            card={{
+              label: "Previous Day EWL",
+              value:
+                acct.previous_day_ewl != null
+                  ? fmtExact(acct.previous_day_ewl)
+                  : "---",
+              change: "PRIOR SESSION",
+              tone: "neutral",
+            }}
+            onClick={onPrevEwlClick}
+          />
+          <MetricCard
+            card={{
+              label: "Reg T Equity",
+              value:
+                acct.reg_t_equity != null ? fmtExact(acct.reg_t_equity) : "---",
+              change: "REGULATION T",
+              tone: "neutral",
+            }}
+            onClick={onRegTClick}
+          />
+          <MetricCard
+            card={{
+              label: "SMA",
+              value: acct.sma != null ? fmtExact(acct.sma) : "---",
+              change: "SPECIAL MEMORANDUM",
+              tone: "neutral",
+            }}
+            onClick={onSmaClick}
+          />
+        </div>
+      )}
     </>
   );
 }
@@ -291,25 +447,60 @@ function CapitalRow({
 }) {
   return (
     <>
-      <SectionHeader label="CAPITAL" collapsed={collapsed} onToggle={onToggle} />
-      {!collapsed && <div className="metrics-grid">
-        <MetricCard
-          card={{ label: "Cash", value: acct.cash != null ? fmtSignedExact(acct.cash) : "---", change: "TOTAL CASH", tone: acct.cash != null ? tone(acct.cash) : "neutral" }}
-          onClick={onCashClick}
-        />
-        <MetricCard
-          card={{ label: "Available Funds", value: acct.available_funds != null ? fmtExact(acct.available_funds) : "---", change: "EWL - INITIAL MARGIN", tone: "neutral" }}
-          onClick={onAvailFundsClick}
-        />
-        <MetricCard
-          card={{ label: "Initial Margin", value: acct.initial_margin != null ? fmtExact(acct.initial_margin) : "---", change: "REQUIRED", tone: "neutral" }}
-          onClick={onInitMarginClick}
-        />
-        <MetricCard
-          card={{ label: "Gross Position Value", value: acct.gross_position_value != null ? fmtExact(acct.gross_position_value) : "---", change: "SECURITIES", tone: "neutral" }}
-          onClick={onGrossPosClick}
-        />
-      </div>}
+      <SectionHeader
+        label="CAPITAL"
+        collapsed={collapsed}
+        onToggle={onToggle}
+      />
+      {!collapsed && (
+        <div className="metrics-grid">
+          <MetricCard
+            card={{
+              label: "Cash",
+              value: acct.cash != null ? fmtSignedExact(acct.cash) : "---",
+              change: "TOTAL CASH",
+              tone: acct.cash != null ? tone(acct.cash) : "neutral",
+            }}
+            onClick={onCashClick}
+          />
+          <MetricCard
+            card={{
+              label: "Available Funds",
+              value:
+                acct.available_funds != null
+                  ? fmtExact(acct.available_funds)
+                  : "---",
+              change: "EWL - INITIAL MARGIN",
+              tone: "neutral",
+            }}
+            onClick={onAvailFundsClick}
+          />
+          <MetricCard
+            card={{
+              label: "Initial Margin",
+              value:
+                acct.initial_margin != null
+                  ? fmtExact(acct.initial_margin)
+                  : "---",
+              change: "REQUIRED",
+              tone: "neutral",
+            }}
+            onClick={onInitMarginClick}
+          />
+          <MetricCard
+            card={{
+              label: "Gross Position Value",
+              value:
+                acct.gross_position_value != null
+                  ? fmtExact(acct.gross_position_value)
+                  : "---",
+              change: "SECURITIES",
+              tone: "neutral",
+            }}
+            onClick={onGrossPosClick}
+          />
+        </div>
+      )}
     </>
   );
 }
@@ -329,35 +520,61 @@ function ExposureRow({
 }) {
   return (
     <>
-      <SectionHeader label="EXPOSURE" collapsed={collapsed} onToggle={onToggle} />
+      <SectionHeader
+        label="EXPOSURE"
+        collapsed={collapsed}
+        onToggle={onToggle}
+      />
       {!collapsed && exposure ? (
         <div className="metrics-grid">
           <MetricCard
-            card={{ label: "Net Long", value: fmt(exposure.netLong), change: "LONG BIASED", tone: "positive" }}
+            card={{
+              label: "Net Long",
+              value: fmt(exposure.netLong),
+              change: "LONG BIASED",
+              tone: "positive",
+            }}
             onClick={() => onCardClick("netLong")}
           />
           <MetricCard
-            card={{ label: "Net Short", value: fmt(exposure.netShort), change: "SHORT BIASED", tone: "negative" }}
+            card={{
+              label: "Net Short",
+              value: fmt(exposure.netShort),
+              change: "SHORT BIASED",
+              tone: "negative",
+            }}
             onClick={() => onCardClick("netShort")}
           />
           <MetricCard
-            card={{ label: "Dollar Delta", value: fmtSigned(exposure.dollarDelta), change: "NOTIONAL EXPOSURE", tone: tone(exposure.dollarDelta) }}
+            card={{
+              label: "Dollar Delta",
+              value: fmtSigned(exposure.dollarDelta),
+              change: "NOTIONAL EXPOSURE",
+              tone: tone(exposure.dollarDelta),
+            }}
             onClick={() => onCardClick("dollarDelta")}
           />
           <MetricCard
-            card={{ label: "Net Exposure", value: `${exposure.netExposurePct >= 0 ? "+" : ""}${exposure.netExposurePct.toFixed(1)}%`, change: "OF BANKROLL", tone: tone(exposure.netExposurePct) }}
+            card={{
+              label: "Net Exposure",
+              value: `${exposure.netExposurePct >= 0 ? "+" : ""}${exposure.netExposurePct.toFixed(1)}%`,
+              change: "OF BANKROLL",
+              tone: tone(exposure.netExposurePct),
+            }}
             onClick={() => onCardClick("netExposure")}
           />
         </div>
       ) : !collapsed ? (
         <div className="metrics-grid">
-          {["Net Long", "Net Short", "Dollar Delta", "Net Exposure"].map((label) => (
-            <div key={label} className="metric-card metric-card-loading">
-              <div className="metric-label">{label}</div>
-              <div className="metric-value">---</div>
-              <div className="metric-change neutral">AWAITING PRICES</div>
-            </div>
-          ))}
+          {["Net Long", "Net Short", "Dollar Delta", "Net Exposure"].map(
+            (label) => (
+              <div key={label} className="metric-card metric-card-loading">
+                <div className="metric-label">{label}</div>
+                <div className="metric-value">---</div>
+                <div className="metric-change neutral">AWAITING PRICES</div>
+              </div>
+            ),
+          )}
         </div>
       ) : null}
     </>
@@ -383,7 +600,11 @@ function TodayPnlRow({
   onRealizedClick,
   onTotalClick,
 }: {
-  todayUnrealized: { pnl: number; positionsWithData: number; totalPositions: number } | null;
+  todayUnrealized: {
+    pnl: number;
+    positionsWithData: number;
+    totalPositions: number;
+  } | null;
   hasDaily: boolean;
   unrealized: number;
   realized: number;
@@ -397,7 +618,11 @@ function TodayPnlRow({
 }) {
   return (
     <>
-      <SectionHeader label="TODAY'S P&L" collapsed={collapsed} onToggle={onToggle} />
+      <SectionHeader
+        label="TODAY'S P&L"
+        collapsed={collapsed}
+        onToggle={onToggle}
+      />
       {!collapsed && hasDaily ? (
         <div className="metrics-grid-3">
           {/* Renamed: "Unrealized" → "Day Move" — intraday change from yesterday's close */}
@@ -411,11 +636,21 @@ function TodayPnlRow({
             onClick={onDayMoveClick}
           />
           <MetricCard
-            card={{ label: "Realized", value: fmtSigned(realized), change: "TODAY'S FILLS", tone: tone(realized) }}
+            card={{
+              label: "Realized",
+              value: fmtSigned(realized),
+              change: "TODAY'S FILLS",
+              tone: tone(realized),
+            }}
             onClick={onRealizedClick}
           />
           <MetricCard
-            card={{ label: "Total", value: fmtSigned(total), change: "COMBINED", tone: tone(total) }}
+            card={{
+              label: "Total",
+              value: fmtSigned(total),
+              change: "COMBINED",
+              tone: tone(total),
+            }}
             onClick={onTotalClick}
           />
         </div>
@@ -426,9 +661,14 @@ function TodayPnlRow({
             <div className="metric-value">---</div>
             <div className="metric-change neutral">MARKET CLOSED</div>
           </div>
-          <div className="metric-card metric-card-clickable" onClick={onRealizedClick}>
+          <div
+            className="metric-card metric-card-clickable"
+            onClick={onRealizedClick}
+          >
             <div className="metric-label">Realized</div>
-            <div className={`metric-value ${tone(realizedPnl ?? 0) !== "neutral" ? tone(realizedPnl ?? 0) : ""}`}>
+            <div
+              className={`metric-value ${tone(realizedPnl ?? 0) !== "neutral" ? tone(realizedPnl ?? 0) : ""}`}
+            >
               {fmtSigned(realizedPnl ?? 0)}
             </div>
             <div className="metric-change neutral">TODAY&apos;S FILLS</div>
@@ -446,19 +686,49 @@ function TodayPnlRow({
 
 /* ─── Legacy NET LEVERAGE row (no account_summary) ───────── */
 
-function LegacyLeverageRow({ portfolio, pnl, pnlPct }: { portfolio: PortfolioData; pnl: number; pnlPct: number }) {
+function LegacyLeverageRow({
+  portfolio,
+  pnl,
+  pnlPct,
+}: {
+  portfolio: PortfolioData;
+  pnl: number;
+  pnlPct: number;
+}) {
   const cards: CardDef[] = [
-    { label: "Net Liquidation", value: fmt(portfolio.bankroll), change: "BANKROLL", tone: "neutral" },
-    { label: "Positions", value: String(portfolio.position_count), change: `${portfolio.defined_risk_count} DEFINED / ${portfolio.undefined_risk_count} UNDEFINED`, tone: "neutral" },
-    { label: "Deployed", value: fmt(portfolio.total_deployed_dollars), change: `${portfolio.total_deployed_pct.toFixed(1)}% OF BANKROLL`, tone: portfolio.total_deployed_pct > 100 ? "negative" : "neutral" },
-    { label: "Open P&L", value: fmtSigned(pnl), change: `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%`, tone: tone(pnl) },
+    {
+      label: "Net Liquidation",
+      value: fmt(portfolio.bankroll),
+      change: "BANKROLL",
+      tone: "neutral",
+    },
+    {
+      label: "Positions",
+      value: String(portfolio.position_count),
+      change: `${portfolio.defined_risk_count} DEFINED / ${portfolio.undefined_risk_count} UNDEFINED`,
+      tone: "neutral",
+    },
+    {
+      label: "Deployed",
+      value: fmt(portfolio.total_deployed_dollars),
+      change: `${portfolio.total_deployed_pct.toFixed(1)}% OF BANKROLL`,
+      tone: portfolio.total_deployed_pct > 100 ? "negative" : "neutral",
+    },
+    {
+      label: "Open P&L",
+      value: fmtSigned(pnl),
+      change: `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%`,
+      tone: tone(pnl),
+    },
   ];
 
   return (
     <>
       <div className="section-label-mono">NET LEVERAGE</div>
       <div className="metrics-grid">
-        {cards.map((c) => <MetricCard key={c.label} card={c} />)}
+        {cards.map((c) => (
+          <MetricCard key={c.label} card={c} />
+        ))}
       </div>
     </>
   );
@@ -466,7 +736,13 @@ function LegacyLeverageRow({ portfolio, pnl, pnlPct }: { portfolio: PortfolioDat
 
 /* ─── Main component ─────────────────────────────────────── */
 
-export default function MetricCards({ portfolio, prices, realizedPnl, executedOrders = [], section }: MetricCardsProps) {
+export default function MetricCards({
+  portfolio,
+  prices,
+  realizedPnl,
+  executedOrders = [],
+  section,
+}: MetricCardsProps) {
   // Section collapse state: Account + Today's P&L expanded by default, rest collapsed
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({
     account: false,
@@ -503,10 +779,30 @@ export default function MetricCards({ portfolio, prices, realizedPnl, executedOr
   const [initMarginModalOpen, setInitMarginModalOpen] = useState(false);
   const [grossPosModalOpen, setGrossPosModalOpen] = useState(false);
 
+  // Live USD-per-unit rates for every non-USD currency held, merged over the
+  // sync-time fx_rates fallback. Hooks must run before any early return.
+  const currencies = useMemo(
+    () =>
+      [
+        ...new Set(
+          (portfolio?.positions ?? []).map((p) =>
+            (p.currency || "USD").toUpperCase(),
+          ),
+        ),
+      ].filter((c) => c !== "USD"),
+    [portfolio],
+  );
+  const usdPerUnit = useFx(prices ?? {}, portfolio?.fx_rates ?? {}, currencies);
+
   const isPortfolio = section === "portfolio";
   if (!portfolio) {
     if (!isPortfolio) return null;
-    const placeholders = ["Net Liquidation", "Day P&L", "Unrealized P&L", "Dividends"];
+    const placeholders = [
+      "Net Liquidation",
+      "Day P&L",
+      "Unrealized P&L",
+      "Dividends",
+    ];
     return (
       <>
         <div className="section-label-mono">ACCOUNT</div>
@@ -527,21 +823,29 @@ export default function MetricCards({ portfolio, prices, realizedPnl, executedOr
     let total = 0;
     for (const pos of portfolio.positions) {
       const mv = resolveMarketValue(pos);
-      if (mv != null) total += mv - pos.entry_cost;
+      if (mv == null) continue;
+      // Convert native open P&L to USD before summing (skip if no rate).
+      const cur = (pos.currency || "USD").toUpperCase();
+      const usd = nativeToDisplayUsd(mv - pos.entry_cost, cur, usdPerUnit);
+      if (usd != null) total += usd;
     }
     return total;
   })();
-  const pnlPct = portfolio.total_deployed_dollars > 0
-    ? (pnl / portfolio.total_deployed_dollars) * 100
-    : 0;
+  const pnlPct =
+    portfolio.total_deployed_dollars > 0
+      ? (pnl / portfolio.total_deployed_dollars) * 100
+      : 0;
 
   const hasPrices = prices && Object.keys(prices).length > 0;
-  const exposure = hasPrices ? computeExposureDetailed(portfolio, prices) : null;
+  const exposure = hasPrices
+    ? computeExposureDetailed(portfolio, prices, usdPerUnit)
+    : null;
 
   const todayUnrealized = hasPrices
-    ? computeTodayUnrealizedPnl(portfolio, prices)
+    ? computeTodayUnrealizedPnl(portfolio, prices, usdPerUnit)
     : null;
-  const hasDaily = todayUnrealized != null && todayUnrealized.positionsWithData > 0;
+  const hasDaily =
+    todayUnrealized != null && todayUnrealized.positionsWithData > 0;
   const unrealized = todayUnrealized?.pnl ?? 0;
   const realized = realizedPnl ?? 0;
   const total = unrealized + realized;
@@ -550,24 +854,50 @@ export default function MetricCards({ portfolio, prices, realizedPnl, executedOr
   const accountDayPnl = acct
     ? resolveAccountDayPnlValue(portfolio, prices)
     : null;
+  // account_summary.unrealized_pnl is base-USD for IB, but for Futu it's a
+  // native-currency SUM (the envelope can't FX-convert it — accinfo returns
+  // "N/A" for the USD figure). For Futu, derive the USD unrealized from the
+  // FX-converted per-position sum so a ¥/₩ row can't leak its native magnitude.
+  const accountUnrealizedUsd =
+    acct && portfolio.source === "futu"
+      ? portfolio.positions.reduce((sum, pos) => {
+          const mv = resolveMarketValue(pos);
+          if (mv == null) return sum;
+          const cur = (pos.currency || "USD").toUpperCase();
+          const usd = nativeToDisplayUsd(mv - pos.entry_cost, cur, usdPerUnit);
+          return usd == null ? sum : sum + usd;
+        }, 0)
+      : (acct?.unrealized_pnl ?? 0);
 
   // Breakdown rows (computed lazily — only used when modals open)
   const unrealizedBreakdownRows = unrealizedModalOpen
-    ? computeUnrealizedBreakdown(portfolio)
+    ? computeUnrealizedBreakdown(portfolio, usdPerUnit)
     : [];
-  const dayMoveBreakdown = dayMoveModalOpen && hasPrices
-    ? computeDayMoveBreakdown(portfolio, prices!)
-    : { rows: [], total: 0 };
+  const dayMoveBreakdown =
+    dayMoveModalOpen && hasPrices
+      ? computeDayMoveBreakdown(portfolio, prices!, usdPerUnit)
+      : { rows: [], total: 0 };
 
   if (!isPortfolio) return null;
 
   return (
     <>
+      {/* Missing-FX warning: a non-USD position with no FX rate is excluded
+          from USD totals (only counted, never summed as native). Surface it
+          rather than silently under-report deployed capital. */}
+      {(portfolio.fx_unconverted_count ?? 0) > 0 && (
+        <div className="fx-warning" role="status">
+          ⚠ {portfolio.fx_unconverted_count} position
+          {portfolio.fx_unconverted_count === 1 ? "" : "s"} missing an FX rate —
+          excluded from USD totals.
+        </div>
+      )}
       {/* Row 1: ACCOUNT (IB authoritative) or legacy NET LEVERAGE */}
       {acct ? (
         <AccountRow
           acct={acct}
           dayPnl={accountDayPnl}
+          unrealizedPnl={accountUnrealizedUsd}
           collapsed={collapsed.account}
           onToggle={() => toggle("account")}
           onNetLiqClick={() => setNetLiqModalOpen(true)}
@@ -619,7 +949,12 @@ export default function MetricCards({ portfolio, prices, realizedPnl, executedOr
       )}
 
       {/* Row 5: EXPOSURE (real-time, all 4 clickable) */}
-      <ExposureRow exposure={exposure} collapsed={collapsed.exposure} onToggle={() => toggle("exposure")} onCardClick={setActiveMetric} />
+      <ExposureRow
+        exposure={exposure}
+        collapsed={collapsed.exposure}
+        onToggle={() => toggle("exposure")}
+        onCardClick={setActiveMetric}
+      />
 
       {/* Row 6: TODAY'S P&L — renamed "Unrealized" → "Day Move" */}
       <TodayPnlRow
@@ -796,7 +1131,11 @@ export default function MetricCards({ portfolio, prices, realizedPnl, executedOr
         <AccountMetricModal
           open={ewlModalOpen}
           title="Equity With Loan Value"
-          value={acct.equity_with_loan != null ? fmtExact(acct.equity_with_loan) : "---"}
+          value={
+            acct.equity_with_loan != null
+              ? fmtExact(acct.equity_with_loan)
+              : "---"
+          }
           formula={
             "EWL = Cash + Stock Value + Bond Value + Fund Value + European & Asian Options Value\n" +
             "Source: Interactive Brokers accountValues (EquityWithLoanValue)\n" +
@@ -811,7 +1150,11 @@ export default function MetricCards({ portfolio, prices, realizedPnl, executedOr
         <AccountMetricModal
           open={prevEwlModalOpen}
           title="Previous Day Equity With Loan"
-          value={acct.previous_day_ewl != null ? fmtExact(acct.previous_day_ewl) : "---"}
+          value={
+            acct.previous_day_ewl != null
+              ? fmtExact(acct.previous_day_ewl)
+              : "---"
+          }
           formula={
             "Previous Day EWL = Equity With Loan at prior session close\n" +
             "Source: Interactive Brokers accountValues (PreviousDayEquityWithLoanValue)\n" +
@@ -826,7 +1169,9 @@ export default function MetricCards({ portfolio, prices, realizedPnl, executedOr
         <AccountMetricModal
           open={regTModalOpen}
           title="Regulation T Equity"
-          value={acct.reg_t_equity != null ? fmtExact(acct.reg_t_equity) : "---"}
+          value={
+            acct.reg_t_equity != null ? fmtExact(acct.reg_t_equity) : "---"
+          }
           formula={
             "Reg T Equity = Cash + Stock Value + Bond Value + Fund Value\n" +
             "Source: Interactive Brokers accountValues (RegTEquity)\n" +
@@ -872,7 +1217,11 @@ export default function MetricCards({ portfolio, prices, realizedPnl, executedOr
         <AccountMetricModal
           open={availFundsModalOpen}
           title="Available Funds"
-          value={acct.available_funds != null ? fmtExact(acct.available_funds) : "---"}
+          value={
+            acct.available_funds != null
+              ? fmtExact(acct.available_funds)
+              : "---"
+          }
           formula={
             "Available Funds = Equity With Loan - Initial Margin Requirement\n" +
             "Source: Interactive Brokers accountValues (AvailableFunds)\n" +
@@ -887,7 +1236,9 @@ export default function MetricCards({ portfolio, prices, realizedPnl, executedOr
         <AccountMetricModal
           open={initMarginModalOpen}
           title="Initial Margin"
-          value={acct.initial_margin != null ? fmtExact(acct.initial_margin) : "---"}
+          value={
+            acct.initial_margin != null ? fmtExact(acct.initial_margin) : "---"
+          }
           formula={
             "Initial Margin = Margin required to open current positions\n" +
             "Source: Interactive Brokers accountValues (InitMarginReq)\n" +
@@ -902,7 +1253,11 @@ export default function MetricCards({ portfolio, prices, realizedPnl, executedOr
         <AccountMetricModal
           open={grossPosModalOpen}
           title="Securities Gross Position Value"
-          value={acct.gross_position_value != null ? fmtExact(acct.gross_position_value) : "---"}
+          value={
+            acct.gross_position_value != null
+              ? fmtExact(acct.gross_position_value)
+              : "---"
+          }
           formula={
             "Gross Position Value = |Long Stock Value| + |Short Stock Value| + |Options Value|\n" +
             "Source: Interactive Brokers accountValues (GrossPositionValue)\n" +

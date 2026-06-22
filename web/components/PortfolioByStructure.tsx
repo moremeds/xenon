@@ -23,12 +23,16 @@ import type { PortfolioPosition } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 import { buildTickerGroups } from "@/lib/portfolioByStructure";
 import { CATEGORY_LABELS, type CategoryKey } from "@/lib/structureCatalog";
-import { fmtUsd } from "@/lib/positionUtils";
+import { fmtUsd, nativeToDisplayUsd } from "@/lib/positionUtils";
+import { fmtNative } from "@/lib/fx";
+import { useFx } from "@/lib/useFx";
 import PositionTable from "./PositionTable";
+import FxBadge from "./FxBadge";
 
 type Props = {
   positions: PortfolioPosition[];
   prices?: Record<string, PriceData>;
+  fxRates?: Record<string, number>;
   activeAccount: "ib" | "futu";
   lastSync: string;
 };
@@ -56,15 +60,32 @@ function fmtPrice(n: number | null): string {
 export default function PortfolioByStructure({
   positions,
   prices,
+  fxRates,
   activeAccount,
   lastSync,
 }: Props) {
+  // Live usd_per_unit for converting per-structure aggregate MV/P&L to USD and
+  // for the cross-ticker USD sort inside buildTickerGroups.
+  const currencies = useMemo(
+    () => [
+      ...new Set(positions.map((p) => (p.currency || "USD").toUpperCase())),
+    ],
+    [positions],
+  );
+  const usdPerUnit = useFx(prices ?? {}, fxRates ?? { USD: 1 }, currencies);
+  // Per-currency liveness: a filled FX dot only when THAT pair has a fresh
+  // USD.<cur> tick. Mirrors PositionTable so the inline header badge matches.
+  const liveCurrencies = currencies.filter(
+    (c) => c !== "USD" && (prices?.[`USD.${c}`]?.last ?? null) != null,
+  );
+
   const groups = useMemo(
     () =>
       buildTickerGroups(positions, prices, {
         fuseVirtualPairs: activeAccount === "futu",
+        usdPerUnit,
       }),
-    [positions, prices, activeAccount],
+    [positions, prices, activeAccount, usdPerUnit],
   );
 
   // Ephemeral collapse state, namespaced by activeAccount:ticker:category
@@ -100,6 +121,30 @@ export default function PortfolioByStructure({
           group;
         const hasDelta = agg.netDelta != null;
 
+        // Multi-currency: a foreign ticker card (e.g. 5016/JPY, 000660/KRW) is
+        // a single native-currency stock. Convert aggregate money to USD; the
+        // per-share `last` stays native. USD groups pass through unchanged.
+        // Use group.currency (not stock?.currency) so a non-stock/Unknown
+        // foreign row — e.g. a Futu JP.* position with no parsed stock leg —
+        // still reports its real currency instead of defaulting to USD.
+        const groupCurrency = group.currency;
+        const isForeign = groupCurrency !== "USD";
+        // Single relevant FX pair for this card (USD/JPY, USD/KRW, …). USD
+        // cards show nothing. Only the card's own currency — never the other
+        // currencies that happen to sit in the shared usd_per_unit map.
+        const fxRate = usdPerUnit[groupCurrency];
+        const aggMvUsd = nativeToDisplayUsd(agg.mv, groupCurrency, usdPerUnit);
+        const aggDayPnlUsd = nativeToDisplayUsd(
+          agg.dayPnl,
+          groupCurrency,
+          usdPerUnit,
+        );
+        const aggTotalPnlUsd = nativeToDisplayUsd(
+          agg.totalPnl,
+          groupCurrency,
+          usdPerUnit,
+        );
+
         // Track whether the card has already rendered its column header row.
         // Only the first sub-table in a card shows <thead>; subsequent sub-
         // tables use hideHeader so the card has a single header line.
@@ -116,9 +161,20 @@ export default function PortfolioByStructure({
               <div className="section-title">
                 <span style={{ fontWeight: 600 }}>{ticker}</span>
                 <span className="cell-muted">
-                  {fmtPrice(last)}{" "}
+                  {isForeign
+                    ? last != null
+                      ? fmtNative(last, groupCurrency)
+                      : "—"
+                    : fmtPrice(last)}{" "}
                   {dayChgPct != null ? `(${fmtPct(dayChgPct)})` : ""}
                 </span>
+                {isForeign && fxRate != null && fxRate > 0 && (
+                  <FxBadge
+                    rates={{ [groupCurrency]: fxRate }}
+                    liveCurrencies={liveCurrencies}
+                    inline
+                  />
+                )}
               </div>
               <div
                 style={{
@@ -129,29 +185,29 @@ export default function PortfolioByStructure({
                 }}
               >
                 <span className="cell-muted">
-                  MV {agg.mv != null ? fmtUsd(agg.mv) : "—"}
+                  MV {aggMvUsd != null ? fmtUsd(aggMvUsd) : "—"}
                 </span>
                 <span
                   className={
-                    agg.dayPnl != null
-                      ? agg.dayPnl >= 0
+                    aggDayPnlUsd != null
+                      ? aggDayPnlUsd >= 0
                         ? "positive"
                         : "negative"
                       : "cell-muted"
                   }
                 >
-                  Day {fmtSigned(agg.dayPnl)}
+                  Day {fmtSigned(aggDayPnlUsd)}
                 </span>
                 <span
                   className={
-                    agg.totalPnl != null
-                      ? agg.totalPnl >= 0
+                    aggTotalPnlUsd != null
+                      ? aggTotalPnlUsd >= 0
                         ? "positive"
                         : "negative"
                       : "cell-muted"
                   }
                 >
-                  P&amp;L {fmtSigned(agg.totalPnl)}
+                  P&amp;L {fmtSigned(aggTotalPnlUsd)}
                   {agg.totalPnlPct != null
                     ? ` (${fmtPct(agg.totalPnlPct)})`
                     : ""}
@@ -171,8 +227,10 @@ export default function PortfolioByStructure({
                   showExpiry={true}
                   showUnderlying={true}
                   prices={prices}
+                  fxRates={fxRates}
                   readonly={readonly}
                   hideHeader={takeHeaderSlot()}
+                  hideFxBadge
                 />
               )}
               {Array.from(optionsByCategory.entries()).map(
@@ -278,8 +336,10 @@ export default function PortfolioByStructure({
                                   positions={sg.positions}
                                   showUnderlying={true}
                                   prices={prices}
+                                  fxRates={fxRates}
                                   readonly={readonly}
                                   hideHeader={takeHeaderSlot()}
+                                  hideFxBadge
                                 />
                               </div>
                             );

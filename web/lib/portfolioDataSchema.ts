@@ -15,6 +15,10 @@ const PortfolioLegSchema = Type.Object({
   market_price: Type.Union([Type.Number(), Type.Null()]),
   market_value: Type.Union([Type.Number(), Type.Null()]),
   market_price_is_calculated: Type.Optional(Type.Boolean()),
+  // Multi-currency (Japan/Korea support). Optional so existing USD payloads
+  // validate unchanged. usd_per_unit conversion happens at the display edge.
+  currency: Type.Optional(Type.String()),
+  market_value_usd: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
 });
 
 const PortfolioPositionSchema = Type.Object({
@@ -30,6 +34,11 @@ const PortfolioPositionSchema = Type.Object({
   max_risk: Type.Union([Type.Number(), Type.Null()]),
   market_value: Type.Union([Type.Number(), Type.Null()]),
   legs: Type.Array(PortfolioLegSchema),
+  // Multi-currency (Japan/Korea). Optional — USD payloads omit these.
+  currency: Type.Optional(Type.String()),
+  exchange: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  entry_cost_usd: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+  market_value_usd: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
   market_price_is_calculated: Type.Optional(Type.Boolean()),
   ib_daily_pnl: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
   kelly_optimal: Type.Union([Type.Number(), Type.Null()]),
@@ -63,6 +72,10 @@ export const PortfolioDataSchema = Type.Object({
   bankroll: Type.Number(),
   peak_value: Type.Number(),
   last_sync: Type.String(),
+  // Multi-currency display metadata. base_currency is always "USD" for v1.
+  base_currency: Type.Optional(Type.String()),
+  fx_rates: Type.Optional(Type.Record(Type.String(), Type.Number())),
+  fx_unconverted_count: Type.Optional(Type.Number()),
   positions: Type.Array(PortfolioPositionSchema),
   total_deployed_pct: Type.Number(),
   total_deployed_dollars: Type.Number(),

@@ -25,6 +25,7 @@ export type FutuNormalizedStock = {
   symbol: string;
   exchange: string;
   currency: string;
+  market?: string; // Futu market prefix ("US", "JP", ...) — foreign stocks set it
   live_data: boolean;
 };
 
@@ -117,8 +118,13 @@ export type FutuNeverSynced = {
 
 export type FutuPortfolioResponse = FutuPortfolioEnvelope | FutuNeverSynced;
 
-export function isFutuNeverSynced(x: FutuPortfolioResponse): x is FutuNeverSynced {
-  return (x as FutuNeverSynced).ok === false && (x as FutuNeverSynced).code === "never_synced";
+export function isFutuNeverSynced(
+  x: FutuPortfolioResponse,
+): x is FutuNeverSynced {
+  return (
+    (x as FutuNeverSynced).ok === false &&
+    (x as FutuNeverSynced).code === "never_synced"
+  );
 }
 
 // ── Adapter ────────────────────────────────────────────────────────────────
@@ -132,16 +138,27 @@ export function futuToPortfolioData(env: FutuPortfolioEnvelope): PortfolioData {
     futuPositionToPortfolioPosition(p, idx),
   );
 
-  const totalDeployedDollars = positions.reduce(
-    (sum, p) => sum + Math.abs(p.market_value ?? 0),
-    0,
-  );
+  // OPEN RISK / deployed capital must be USD. Per-position market_value is in
+  // each security's NATIVE currency, so summing rows mixes units (one ¥2.45M
+  // JPY row inflated this to a bogus $2.9M open-risk headline). The envelope's
+  // gross_position_value is sourced from Futu's accinfo_query(currency=USD) and
+  // is already USD-denominated — use it. Fall back to the native sum only when
+  // the backend omits it (pre-USD-fix snapshots).
+  const grossUsd = env.account_summary.gross_position_value;
+  const totalDeployedDollars =
+    grossUsd != null && Number.isFinite(grossUsd)
+      ? Math.abs(grossUsd)
+      : positions.reduce((sum, p) => sum + Math.abs(p.market_value ?? 0), 0);
   const bankroll = env.account_summary.net_liquidation ?? 0;
   const totalDeployedPct =
     bankroll > 0 ? (totalDeployedDollars / bankroll) * 100 : 0;
 
-  const definedCount = positions.filter((p) => p.risk_profile === "defined").length;
-  const undefinedCount = positions.filter((p) => p.risk_profile === "undefined").length;
+  const definedCount = positions.filter(
+    (p) => p.risk_profile === "defined",
+  ).length;
+  const undefinedCount = positions.filter(
+    (p) => p.risk_profile === "undefined",
+  ).length;
 
   return {
     source: "futu",
@@ -189,8 +206,15 @@ function futuPositionToPortfolioPosition(
   p: FutuRawPosition,
   idx: number,
 ): PortfolioPosition {
-  const { structure, structureType, riskProfile, type, strike, expiry, ticker } =
-    classifyFutuPosition(p);
+  const {
+    structure,
+    structureType,
+    riskProfile,
+    type,
+    strike,
+    expiry,
+    ticker,
+  } = classifyFutuPosition(p);
 
   const direction: "LONG" | "SHORT" = p.quantity >= 0 ? "LONG" : "SHORT";
   const contracts = Math.abs(p.quantity);
@@ -200,11 +224,18 @@ function futuPositionToPortfolioPosition(
   // (-entry cost). Futu already signs market_value this way.
   const entryCost = p.avg_cost * p.quantity * multiplier;
 
+  // Native trading currency (JPY/HKD/USD). MUST be propagated: the FX-aware
+  // display path (PositionTable, PortfolioByStructure) and the forex
+  // subscription (deriveFxSubscriptions) both key off pos.currency. Dropping it
+  // made every Futu row default to USD, so a ¥/₩ market_value rendered as $.
+  const currency = (p.currency || "USD").toUpperCase();
+
   const leg: PortfolioLeg = {
     direction,
     contracts,
     type,
     strike,
+    currency,
     entry_cost: entryCost,
     avg_cost: p.avg_cost,
     market_price: p.market_price || null,
@@ -218,6 +249,7 @@ function futuPositionToPortfolioPosition(
     structure,
     structure_type: structureType,
     risk_profile: riskProfile,
+    currency,
     expiry,
     contracts,
     direction,

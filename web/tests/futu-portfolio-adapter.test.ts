@@ -8,7 +8,13 @@ import {
   type FutuRawPosition,
 } from "@/lib/futuPortfolioAdapter";
 
-const REAL_JSON_PATH = join(__dirname, "..", "..", "data", "futu_portfolio.json");
+const REAL_JSON_PATH = join(
+  __dirname,
+  "..",
+  "..",
+  "data",
+  "futu_portfolio.json",
+);
 
 function loadReal(): FutuPortfolioEnvelope {
   if (!existsSync(REAL_JSON_PATH)) {
@@ -151,7 +157,9 @@ describe("futuToPortfolioData — position classification", () => {
   });
 
   it("classifies long stock as equity with structure_type=Stock", () => {
-    const stock = data.positions.find((p) => p.ticker === "TSLA" && p.structure === "Stock");
+    const stock = data.positions.find(
+      (p) => p.ticker === "TSLA" && p.structure === "Stock",
+    );
     expect(stock).toBeTruthy();
     expect(stock!.risk_profile).toBe("equity");
     expect(stock!.direction).toBe("LONG");
@@ -190,6 +198,124 @@ describe("futuToPortfolioData — position classification", () => {
       expect(unknown.structure_type).toBe("Unknown");
       expect(unknown.risk_profile).toBe("complex");
     }
+  });
+
+  it("classifies a Japan cash equity (kind=STK) as Stock, not Unknown", () => {
+    // Regression for JP.6981: symbol_norm now classifies Japan codes as STK
+    // (was UNKNOWN → rendered under the 'OTHER' bucket). The adapter must
+    // surface it as an ordinary equity row, ticker = bare 6981, JPY currency.
+    const env: FutuPortfolioEnvelope = {
+      ok: true,
+      fetched_at: "2026-06-22T14:00:00.000Z",
+      data_as_of: "2026-06-22T14:00:00.000Z",
+      account_id: "acct",
+      source: "futu",
+      is_stale: false,
+      warnings: [],
+      count: 1,
+      positions: [
+        {
+          futu_code: "JP.6981",
+          normalized: {
+            kind: "STK",
+            symbol: "6981",
+            exchange: "TSEJ",
+            currency: "JPY",
+            market: "JP",
+            live_data: false,
+          },
+          quantity: 200,
+          avg_cost: 11_860,
+          market_price: 12_250,
+          market_value: 2_450_000,
+          unrealized_pnl: 78_000,
+          unrealized_pnl_pct: 3.3,
+          currency: "JPY",
+          position_side: "LONG",
+        },
+      ],
+      account_summary: {
+        net_liquidation: 100_000,
+        equity_with_loan: 100_000,
+        cash: 0,
+        settled_cash: 0,
+        buying_power: 0,
+        available_funds: 0,
+        initial_margin: 0,
+        maintenance_margin: 0,
+        excess_liquidity: 0,
+        gross_position_value: 15_148,
+        unrealized_pnl: 0,
+        daily_pnl: 0,
+        realized_pnl: 0,
+        dividends: null,
+        previous_day_ewl: null,
+        reg_t_equity: null,
+        sma: null,
+      },
+    };
+    const jp = futuToPortfolioData(env).positions[0];
+    expect(jp.ticker).toBe("6981");
+    expect(jp.structure).toBe("Stock");
+    expect(jp.structure_type).toBe("Stock");
+    expect(jp.risk_profile).toBe("equity");
+    expect(jp.currency).toBe("JPY");
+    expect(jp.legs[0].type).toBe("Stock");
+  });
+
+  it("propagates native currency onto the position AND leg (drives FX display + subscription)", () => {
+    const env: FutuPortfolioEnvelope = {
+      ok: true,
+      fetched_at: "2026-06-22T14:00:00.000Z",
+      data_as_of: "2026-06-22T14:00:00.000Z",
+      account_id: "acct",
+      source: "futu",
+      is_stale: false,
+      warnings: [],
+      count: 1,
+      positions: [
+        {
+          futu_code: "JP.5016",
+          normalized: {
+            kind: "STK",
+            symbol: "5016",
+            exchange: "TSEJ",
+            currency: "JPY",
+            live_data: true,
+          },
+          quantity: 100,
+          avg_cost: 24_500,
+          market_price: 24_500,
+          market_value: 2_450_000,
+          unrealized_pnl: 0,
+          unrealized_pnl_pct: 0,
+          currency: "JPY",
+          position_side: "LONG",
+        },
+      ],
+      account_summary: {
+        net_liquidation: 100_000,
+        equity_with_loan: 100_000,
+        cash: 0,
+        settled_cash: 0,
+        buying_power: 0,
+        available_funds: 0,
+        initial_margin: 0,
+        maintenance_margin: 0,
+        excess_liquidity: 0,
+        gross_position_value: 15_152,
+        unrealized_pnl: 0,
+        daily_pnl: 0,
+        realized_pnl: 0,
+        dividends: null,
+        previous_day_ewl: null,
+        reg_t_equity: null,
+        sma: null,
+      },
+    };
+    const data = futuToPortfolioData(env);
+    expect(data.positions[0].currency).toBe("JPY");
+    expect(data.positions[0].legs[0].currency).toBe("JPY");
   });
 
   it("formats option expiry as YYYY-MM-DD", () => {
@@ -270,14 +396,112 @@ describe("futuToPortfolioData — aggregates", () => {
     expect(data.bankroll).toBe(env.account_summary.net_liquidation);
   });
 
-  it("exposes total_deployed_dollars from sum of |market_value|", () => {
+  it("exposes total_deployed_dollars (OPEN RISK) from the USD gross_position_value", () => {
     const env = loadReal();
     const data = futuToPortfolioData(env);
-    const expected = env.positions.reduce(
+    // gross_position_value comes from Futu's accinfo_query(currency=USD) — it is
+    // already USD-denominated, unlike per-position market_value which is native.
+    expect(data.total_deployed_dollars).toBeCloseTo(
+      Math.abs(env.account_summary.gross_position_value ?? 0),
+      2,
+    );
+  });
+
+  it("does NOT inflate OPEN RISK by summing native ¥/₩ market_value (regression)", () => {
+    // Real-derived: one USD short option (-$28,250 MV) + one JPY stock whose MV
+    // is ¥2,450,000. The account aggregates (USD) give a $469,004 gross. The
+    // bug summed |market_value| → $2,478,250, leaking the ¥ magnitude.
+    const env: FutuPortfolioEnvelope = {
+      ok: true,
+      fetched_at: "2026-06-22T14:00:00.000Z",
+      data_as_of: "2026-06-22T14:00:00.000Z",
+      account_id: "acct",
+      source: "futu",
+      is_stale: false,
+      warnings: [],
+      count: 2,
+      positions: [
+        {
+          futu_code: "US.TSLA260821P400000",
+          normalized: {
+            kind: "OPT",
+            symbol: "TSLA",
+            expiry: "20260821",
+            strike: 400,
+            right: "P",
+            exchange: "SMART",
+            currency: "USD",
+            trading_class: null,
+            live_data: false,
+          },
+          quantity: -1,
+          avg_cost: 250,
+          market_price: 282.5,
+          market_value: -28_250,
+          unrealized_pnl: 0,
+          unrealized_pnl_pct: 0,
+          currency: "USD",
+          position_side: "SHORT",
+        },
+        {
+          futu_code: "JP.5016",
+          normalized: {
+            kind: "STK",
+            symbol: "5016",
+            exchange: "TSEJ",
+            currency: "JPY",
+            live_data: true,
+          },
+          quantity: 100,
+          avg_cost: 24_500,
+          market_price: 24_500,
+          market_value: 2_450_000, // ¥ — must not leak into the USD total
+          unrealized_pnl: 0,
+          unrealized_pnl_pct: 0,
+          currency: "JPY",
+          position_side: "LONG",
+        },
+      ],
+      account_summary: {
+        net_liquidation: 207_348.11,
+        equity_with_loan: 207_348.11,
+        cash: -27_859.82,
+        settled_cash: -27_859.82,
+        buying_power: 50_000,
+        available_funds: 50_000,
+        initial_margin: 100_000,
+        maintenance_margin: 139_881.42,
+        excess_liquidity: 67_466.69,
+        gross_position_value: 469_004.47, // long_mv 352,106.20 + |short_mv| 116,898.27 (USD)
+        unrealized_pnl: 0,
+        daily_pnl: 0,
+        realized_pnl: 0,
+        dividends: null,
+        previous_day_ewl: null,
+        reg_t_equity: null,
+        sma: null,
+      },
+    };
+
+    const data = futuToPortfolioData(env);
+    expect(data.total_deployed_dollars).toBeCloseTo(469_004.47, 2);
+    expect(data.total_deployed_dollars).toBeLessThan(1_000_000);
+    // Explicitly assert the old buggy native sum is gone.
+    expect(data.total_deployed_dollars).not.toBeCloseTo(2_478_250, 2);
+  });
+
+  it("falls back to native |market_value| sum when gross_position_value is absent", () => {
+    const env = loadReal();
+    const envNoGross: FutuPortfolioEnvelope = {
+      ...env,
+      account_summary: { ...env.account_summary, gross_position_value: null },
+    };
+    const data = futuToPortfolioData(envNoGross);
+    const nativeSum = env.positions.reduce(
       (sum: number, p: FutuRawPosition) => sum + Math.abs(p.market_value ?? 0),
       0,
     );
-    expect(data.total_deployed_dollars).toBeCloseTo(expected, 2);
+    expect(data.total_deployed_dollars).toBeCloseTo(nativeSum, 2);
   });
 
   it("last_sync is the envelope fetched_at (UTC ISO Z)", () => {

@@ -42,6 +42,8 @@ positions = Table(
     Column("expiry", Date),
     Column("strike", Numeric(12, 2)),
     Column("right", Text),
+    Column("currency", Text, nullable=False, server_default=text("'USD'")),
+    Column("exchange", Text),
     Column("quantity", Integer, nullable=False),
     Column("avg_cost", Numeric(12, 4), nullable=False),
     Column("current_price", Numeric(12, 4)),

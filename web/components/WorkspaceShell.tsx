@@ -16,6 +16,7 @@ import { useMarketHours, MarketState } from "@/lib/useMarketHours";
 import { useToast } from "@/lib/useToast";
 import { useOrderActions } from "@/lib/OrderActionsContext";
 import { usePrices } from "@/lib/usePrices";
+import { deriveFxSubscriptions } from "@/lib/fx";
 import { computeRealizedPnlFromFills } from "@/lib/realized-pnl";
 import { usePreviousClose } from "@/lib/usePreviousClose";
 import { useSubscriberHealth } from "@/lib/useSubscriberHealth";
@@ -97,10 +98,15 @@ export default function WorkspaceShell({
   const portfolioSyncNow =
     activeAccount === "ib" ? ibData.syncNow : futuData.syncNow;
 
-  const portfolioSymbols = useMemo(
-    () => (portfolio?.positions ?? []).map((p) => p.ticker),
+  // Split positions into USD symbols (SMART/USD path), forex pairs (for live
+  // USD conversion), and foreign stocks (native-venue quote). A foreign ticker
+  // must NOT go through the bare-symbol SMART/USD `symbols` list or its quote
+  // fails — it streams via `stocksMeta` instead.
+  const fxSubscriptions = useMemo(
+    () => deriveFxSubscriptions(portfolio?.positions ?? []),
     [portfolio?.positions],
   );
+  const portfolioSymbols = fxSubscriptions.usdSymbols;
 
   const portfolioContracts = useMemo<OptionContract[]>(() => {
     const contracts: OptionContract[] = [];
@@ -249,6 +255,10 @@ export default function WorkspaceShell({
     symbols: allSymbols,
     contracts: allContracts,
     indexes: [],
+    // Foreign positions (Japan/Korea): forex pairs drive live USD conversion;
+    // foreign stocks stream from their native venue (TSEJ/KRX), not SMART/USD.
+    forexes: fxSubscriptions.forexes,
+    stocksMeta: fxSubscriptions.stocksMeta,
     // The focused book subject (bare symbol for stocks, optionKey for options),
     // published by TickerDetailContent. Only this single subject streams L2
     // depth + tape (scarce IB resource). Null releases any active depth ticket.

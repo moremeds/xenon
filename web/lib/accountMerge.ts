@@ -11,8 +11,12 @@ import { resolveAccountDayPnlValue } from "@/components/MetricCards";
  * daily_pnl, FUTU's intraday-from-live-prices. Sign is preserved throughout
  * (web/CLAUDE.md credit/debit convention) — no Math.abs.
  *
- * NOTE: assumes both accounts report in USD (the existing UI formats FUTU with
- * "$"). If a non-USD FUTU account is ever surfaced, this sum must convert first.
+ * Both accounts report these fields in USD: IB's account_summary is base-USD
+ * and its total_deployed_dollars sums per-position entry_cost_usd (FX-converted
+ * in ib_sync); FUTU's net_liquidation/cash come from accinfo_query(currency=USD)
+ * and its total_deployed_dollars reads the USD gross_position_value (see
+ * futuPortfolioAdapter). So this plain sum stays in USD even with foreign
+ * (JPY/HKD) holdings — do NOT reintroduce a native-magnitude sum on either side.
  */
 export type AccountMetrics = {
   netLiq: number | null;

@@ -5,7 +5,12 @@
 
 import type { PortfolioData } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
-import { legPriceKey, resolveRealtimePrice } from "@/lib/positionUtils";
+import {
+  legPriceKey,
+  nativeToDisplayUsd,
+  resolveRealtimePrice,
+} from "@/lib/positionUtils";
+import { fmtNative } from "@/lib/fx";
 import type { PnlBreakdownRow } from "@/components/PnlBreakdownModal";
 
 /**
@@ -28,11 +33,22 @@ function isMid(p: PriceData): boolean {
 export function computeDayMoveBreakdown(
   portfolio: PortfolioData,
   prices: Record<string, PriceData>,
+  usdPerUnit: Record<string, number> = { USD: 1 },
 ): { rows: PnlBreakdownRow[]; total: number } {
   let total = 0;
   const rows: PnlBreakdownRow[] = [];
 
   for (const pos of portfolio.positions) {
+    // Foreign positions report ib_daily_pnl + native-venue quotes in JPY/KRW.
+    // Convert every contribution to USD before summing; price columns render
+    // in the native currency symbol. A position with no rate is excluded
+    // (matches the backend fx_unconverted_count semantics) rather than leaking
+    // a native magnitude into the USD total.
+    const cur = (pos.currency || "USD").toUpperCase();
+    const fmtCur =
+      cur === "USD"
+        ? (v: number) => `$${v.toFixed(2)}`
+        : (v: number) => fmtNative(v, cur);
     if (pos.structure_type === "Stock") {
       const p = prices[pos.ticker];
       const current = p ? resolveLastOrMid(p) : null;
@@ -40,19 +56,23 @@ export function computeDayMoveBreakdown(
 
       const wsPnl = (current - p.close) * pos.contracts;
       const effectivePnl = pos.ib_daily_pnl != null ? pos.ib_daily_pnl : wsPnl;
-      total += effectivePnl;
+      const pnlUsd = nativeToDisplayUsd(effectivePnl, cur, usdPerUnit);
+      if (pnlUsd == null) continue;
+      total += pnlUsd;
       const closeValue = p.close * pos.contracts;
-      const pnlPct = closeValue !== 0 ? (effectivePnl / Math.abs(closeValue)) * 100 : null;
+      // % is a currency-invariant ratio — compute from the native pair.
+      const pnlPct =
+        closeValue !== 0 ? (effectivePnl / Math.abs(closeValue)) * 100 : null;
       const currentLabel = isMid(p)
-        ? `$${current.toFixed(2)} (MID)`
-        : `$${current.toFixed(2)}`;
+        ? `${fmtCur(current)} (MID)`
+        : fmtCur(current);
       rows.push({
         id: pos.id,
         ticker: pos.ticker,
         structure: pos.structure,
-        col1: `$${p.close.toFixed(2)}`,
+        col1: fmtCur(p.close),
         col2: currentLabel,
-        pnl: effectivePnl,
+        pnl: pnlUsd,
         pnlPct,
       });
       continue;
@@ -83,14 +103,16 @@ export function computeDayMoveBreakdown(
 
     if (allLegsValid) {
       const effectivePnl = pos.ib_daily_pnl != null ? pos.ib_daily_pnl : legPnl;
-      total += effectivePnl;
+      const pnlUsd = nativeToDisplayUsd(effectivePnl, cur, usdPerUnit);
+      if (pnlUsd == null) continue;
+      total += pnlUsd;
       rows.push({
         id: pos.id,
         ticker: pos.ticker,
         structure: pos.structure,
         col1: closeStr || "---",
         col2: lastStr || "---",
-        pnl: effectivePnl,
+        pnl: pnlUsd,
         pnlPct: null,
       });
     }

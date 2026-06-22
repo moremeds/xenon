@@ -311,6 +311,36 @@ export type IndexContract = {
   exchange: string; // e.g. "CBOE"
 };
 
+/* ─── Forex + foreign-stock contract types ────────────── */
+
+/** A forex pair for live FX conversion. base=USD, quote=JPY → "USD.JPY". */
+export type ForexContract = {
+  base: string;
+  quote: string;
+};
+
+/** A foreign cash-equity with its native venue + currency (TSEJ/JPY, KRX/KRW). */
+export type StockMeta = {
+  symbol: string;
+  exchange: string;
+  currency: string;
+};
+
+/** Relay key for a forex pair: "<BASE>.<QUOTE>" (uppercased), e.g. "USD.JPY". */
+export function forexKey(c: ForexContract): string {
+  return `${c.base.trim().toUpperCase()}.${c.quote.trim().toUpperCase()}`;
+}
+
+/** Stable, order-independent hash of a forex list (memo change detection). */
+export function forexesKey(list: ForexContract[]): string {
+  return [...list.map(forexKey)].sort().join(",");
+}
+
+/** Stable hash of a foreign-stock list, keyed by bare uppercased symbol. */
+export function stocksMetaKey(list: StockMeta[]): string {
+  return [...list.map((s) => s.symbol.trim().toUpperCase())].sort().join(",");
+}
+
 /* ─── Symbol helpers ──────────────────────────────────── */
 
 export function normalizeSymbolList(symbols: string[]): string[] {

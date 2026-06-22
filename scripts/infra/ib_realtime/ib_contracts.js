@@ -34,6 +34,14 @@ export function indexContract(symbol, exchange, currency = "USD") {
   return { symbol, secType: SecType.IND, exchange, currency };
 }
 
+// Forex (CASH) for live FX conversion. IB CASH contracts use symbol=base,
+// currency=quote, exchange=IDEALPRO. Verified live (2026-06-22): USD.JPY and
+// USD.KRW quote on IDEALPRO. Keyed downstream as "<base>.<quote>" (e.g.
+// "USD.JPY") — the "." (not "_") keeps it out of the option-stale tick branch.
+export function forexContract(base, quote, exchange = "IDEALPRO") {
+  return { symbol: base, secType: SecType.CASH, currency: quote, exchange };
+}
+
 // Forward-compatible: futures depth is deferred (see plan Scope Decision), but
 // the builder is kept so the deferred ladder path can wire up without a new file.
 export function futureContract(symbol, expiry, exchange, currency = "USD") {

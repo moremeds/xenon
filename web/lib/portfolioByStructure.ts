@@ -25,6 +25,7 @@ import {
   getDisplayMarketValue,
   getDisplayTotalPnl,
   getTodayPnlDollars,
+  nativeToDisplayUsd,
   resolveEntryCost,
 } from "@/lib/positionUtils";
 import { positionDeltaForHeader } from "@/lib/exposureBreakdown";
@@ -45,6 +46,13 @@ export type VirtualPair = {
 export type TickerGroup = {
   ticker: string;
   stock: PortfolioPosition | null;
+  /**
+   * Native currency of the group (JPY/HKD/USD). Taken from the stock leg, else
+   * the first position in the group — so a non-stock/Unknown foreign position
+   * (e.g. a Futu JP.* row with no parsed stock leg) still reports its real
+   * currency instead of silently defaulting to USD and leaking a ¥/₩ magnitude.
+   */
+  currency: string;
   optionsByCategory: Map<CategoryKey, PortfolioPosition[]>;
   /**
    * For positions that were reclassified by virtual-combo detection, maps
@@ -539,7 +547,7 @@ export function fuseVirtualPair(
 export function buildTickerGroups(
   positions: PortfolioPosition[],
   prices?: Record<string, PriceData>,
-  opts?: { fuseVirtualPairs?: boolean },
+  opts?: { fuseVirtualPairs?: boolean; usdPerUnit?: Record<string, number> },
 ): TickerGroup[] {
   // Phase 1: bucket by ticker
   const buckets = new Map<string, Bucket>();
@@ -706,6 +714,11 @@ export function buildTickerGroups(
     groups.push({
       ticker: b.ticker,
       stock: b.stock,
+      currency: (
+        b.stock?.currency ||
+        b.options[0]?.currency ||
+        "USD"
+      ).toUpperCase(),
       optionsByCategory: orderedByCategory,
       virtualPairs,
       agg: { mv, entryCost, dayPnl, totalPnl, totalPnlPct, netDelta },
@@ -714,12 +727,17 @@ export function buildTickerGroups(
     });
   }
 
-  // Phase 3: sort by |mv| desc, stable on ties
-  groups.sort((a, b) => {
-    const am = Math.abs(a.agg.mv ?? 0);
-    const bm = Math.abs(b.agg.mv ?? 0);
-    return bm - am;
-  });
+  // Phase 3: sort by |market value| desc, stable on ties. Each card is a single
+  // currency (a ticker); convert its native MV to USD so a ¥/₩ card sorts on its
+  // real USD size, not its raw native magnitude. No rate → native fallback.
+  const usdPerUnit = opts?.usdPerUnit ?? { USD: 1 };
+  const mvUsd = (g: TickerGroup): number => {
+    const cur = g.currency;
+    return Math.abs(
+      nativeToDisplayUsd(g.agg.mv, cur, usdPerUnit) ?? g.agg.mv ?? 0,
+    );
+  };
+  groups.sort((a, b) => mvUsd(b) - mvUsd(a));
 
   return groups;
 }

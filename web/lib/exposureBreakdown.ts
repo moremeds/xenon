@@ -1,6 +1,6 @@
 import type { PortfolioData, PortfolioPosition } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
-import { legPriceKey } from "@/lib/positionUtils";
+import { legPriceKey, nativeToDisplayUsd } from "@/lib/positionUtils";
 
 /* ─── Types ───────────────────────────────────────────── */
 
@@ -38,11 +38,15 @@ export type ExposureDataWithBreakdown = ExposureData & {
 
 /* ─── Delta approximation (mirrored from MetricCards) ── */
 
-function approxDelta(spot: number, strike: number, dte: number, type: "Call" | "Put"): number {
+function approxDelta(
+  spot: number,
+  strike: number,
+  dte: number,
+  type: "Call" | "Put",
+): number {
   if (spot <= 0 || strike <= 0 || dte <= 0) return type === "Call" ? 0.5 : -0.5;
-  const moneyness = type === "Call"
-    ? (spot - strike) / strike
-    : (strike - spot) / strike;
+  const moneyness =
+    type === "Call" ? (spot - strike) / strike : (strike - spot) / strike;
   const timeFactor = Math.max(0.1, Math.sqrt(dte / 365));
   const adjusted = moneyness / (0.2 * timeFactor);
   const callDelta = 0.5 + 0.5 * Math.tanh(adjusted * 2);
@@ -61,7 +65,12 @@ function daysToExpiry(expiry: string): number {
 export function positionDeltaDetailed(
   pos: PortfolioPosition,
   prices: Record<string, PriceData>,
-): { delta: number; deltaSource: "ib" | "approx"; legs: ExposureBreakdownLeg[]; missingLegs: number } {
+): {
+  delta: number;
+  deltaSource: "ib" | "approx";
+  legs: ExposureBreakdownLeg[];
+  missingLegs: number;
+} {
   let totalDelta = 0;
   let usedIb = false;
   let usedApprox = false;
@@ -120,7 +129,12 @@ export function positionDeltaDetailed(
     }
 
     const dte = daysToExpiry(pos.expiry);
-    const absRawDelta = approxDelta(spot, leg.strike, dte, leg.type as "Call" | "Put");
+    const absRawDelta = approxDelta(
+      spot,
+      leg.strike,
+      dte,
+      leg.type as "Call" | "Put",
+    );
     const legDelta = sign * absRawDelta * leg.contracts * 100;
     totalDelta += legDelta;
     usedApprox = true;
@@ -164,6 +178,7 @@ export function positionDeltaForHeader(
 export function computeExposureDetailed(
   portfolio: PortfolioData,
   prices: Record<string, PriceData>,
+  usdPerUnit: Record<string, number> = { USD: 1 },
 ): ExposureDataWithBreakdown {
   let netLong = 0;
   let netShort = 0;
@@ -173,25 +188,36 @@ export function computeExposureDetailed(
   for (const pos of portfolio.positions) {
     const { delta, deltaSource, legs } = positionDeltaDetailed(pos, prices);
     const spot = prices[pos.ticker]?.last ?? null;
+    // Foreign positions quote spot + market value in their native currency
+    // (JPY/KRW). Convert the dollar-delta and market value to USD before they
+    // enter the cross-currency net-long / net-short / dollar-delta sums; a
+    // position with no rate contributes 0 rather than leaking a native size.
+    const cur = (pos.currency || "USD").toUpperCase();
 
-    // Dollar delta
-    const posDollarDelta = spot && spot > 0 ? delta * spot : 0;
+    // Dollar delta (native) → USD
+    const posDollarDeltaNative = spot && spot > 0 ? delta * spot : 0;
+    const posDollarDelta =
+      nativeToDisplayUsd(posDollarDeltaNative, cur, usdPerUnit) ?? 0;
     dollarDelta += posDollarDelta;
 
-    // Market value for net long/short classification
-    let mv = 0;
+    // Market value (native) for net long/short classification
+    let mvNative = 0;
     if (pos.structure_type === "Stock") {
       const p = prices[pos.ticker];
-      if (p?.last && p.last > 0) mv = Math.abs(p.last * pos.contracts);
-      else if (pos.market_value != null) mv = Math.abs(pos.market_value);
+      if (p?.last && p.last > 0) mvNative = Math.abs(p.last * pos.contracts);
+      else if (pos.market_value != null) mvNative = Math.abs(pos.market_value);
     } else {
       if (pos.market_value != null) {
-        mv = Math.abs(pos.market_value);
+        mvNative = Math.abs(pos.market_value);
       } else {
-        const legMv = pos.legs.reduce((s, l) => s + Math.abs(l.market_value ?? 0), 0);
-        if (legMv > 0) mv = legMv;
+        const legMv = pos.legs.reduce(
+          (s, l) => s + Math.abs(l.market_value ?? 0),
+          0,
+        );
+        if (legMv > 0) mvNative = legMv;
       }
     }
+    const mv = nativeToDisplayUsd(mvNative, cur, usdPerUnit) ?? 0;
 
     if (delta > 0) netLong += mv;
     else if (delta < 0) netShort += mv;
@@ -209,9 +235,10 @@ export function computeExposureDetailed(
     });
   }
 
-  const netExposurePct = portfolio.bankroll > 0
-    ? ((netLong - netShort) / portfolio.bankroll) * 100
-    : 0;
+  const netExposurePct =
+    portfolio.bankroll > 0
+      ? ((netLong - netShort) / portfolio.bankroll) * 100
+      : 0;
 
   return { netLong, netShort, dollarDelta, netExposurePct, rows };
 }

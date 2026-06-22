@@ -24,11 +24,13 @@ export const PlaceOrderComboLegSchema = Type.Object({
 
 /** Top-level place-order body (structural validation only — business rules stay in the route). */
 export const PlaceOrderBodySchema = Type.Object({
-  type: Type.Optional(Type.Union([
-    Type.Literal("stock"),
-    Type.Literal("option"),
-    Type.Literal("combo"),
-  ])),
+  type: Type.Optional(
+    Type.Union([
+      Type.Literal("stock"),
+      Type.Literal("option"),
+      Type.Literal("combo"),
+    ]),
+  ),
   symbol: Type.String({ minLength: 1 }),
   action: Type.Union([Type.Literal("BUY"), Type.Literal("SELL")]),
   quantity: Type.Number(),
@@ -42,6 +44,10 @@ export const PlaceOrderBodySchema = Type.Object({
   quote_token: Type.Optional(Type.String()),
   con_id: Type.Optional(Type.Number()),
   acknowledge_limit_override: Type.Optional(Type.Boolean()),
+  // Multi-currency (Japan/Korea): a foreign cash-equity order carries its native
+  // venue + currency so the place/quote path routes to TSEJ/KRX, not SMART/USD.
+  exchange: Type.Optional(Type.String()),
+  currency: Type.Optional(Type.String()),
 });
 
 export type PlaceOrderBodyValidated = Static<typeof PlaceOrderBodySchema>;

@@ -9,6 +9,8 @@ import {
   type Trade,
   type OptionContract,
   type IndexContract,
+  type ForexContract,
+  type StockMeta,
   type WSDepthMessage,
   type WSDepthBatchMessage,
   type WSTapeBatchMessage,
@@ -19,6 +21,9 @@ import {
   contractsKey,
   optionKey,
   parseOptionKey,
+  forexKey,
+  forexesKey,
+  stocksMetaKey,
 } from "./pricesProtocol";
 import {
   createReconnectStrategy,
@@ -40,6 +45,12 @@ export type UsePricesOptions = {
   contracts?: OptionContract[];
   /** Index contracts to subscribe to (e.g. VIX, VVIX) */
   indexes?: IndexContract[];
+  /** Forex pairs for live FX conversion (e.g. {base:"USD",quote:"JPY"}). Keyed
+   * "USD.JPY" in the `prices` map. */
+  forexes?: ForexContract[];
+  /** Foreign cash-equities with native venue + currency (TSEJ/JPY, KRX/KRW).
+   * Keyed by bare symbol in `prices`, like SMART/USD symbols. */
+  stocksMeta?: StockMeta[];
   /** Enable real-time streaming (default: true) */
   enabled?: boolean;
   /**
@@ -187,6 +198,112 @@ export function applyDepthMessage(
   }
 }
 
+export type DesiredSubscriptions = {
+  symbols: string[];
+  contracts: OptionContract[];
+  indexes: IndexContract[];
+  forexes: ForexContract[];
+  stocksMeta: StockMeta[];
+};
+
+export type SubscriptionDiff = {
+  currentHash: string;
+  changed: boolean;
+  addedSymbols: string[];
+  addedContracts: OptionContract[];
+  addedIndexes: IndexContract[];
+  addedForexes: ForexContract[];
+  addedStocks: StockMeta[];
+  removedSymbols: string[];
+  removedContractKeys: string[];
+  removedIndexSymbols: string[];
+  removedForexKeys: string[];
+  removedStockSymbols: string[];
+};
+
+/**
+ * Encode desired subscriptions as FIVE "|"-delimited segments:
+ *   symbols | option contracts | indexes | forex keys | foreign-stock symbols.
+ * `computeSubscriptionDiff` splits this back apart, so the two MUST stay in
+ * lockstep on segment count — a mismatch silently corrupts the diff.
+ */
+export function subscriptionHash(d: DesiredSubscriptions): string {
+  return (
+    symbolKey(d.symbols) +
+    "|" +
+    contractsKey(d.contracts) +
+    "|" +
+    d.indexes
+      .map((i) => `${i.symbol}@${i.exchange}`)
+      .sort()
+      .join(",") +
+    "|" +
+    forexesKey(d.forexes) +
+    "|" +
+    stocksMetaKey(d.stocksMeta)
+  );
+}
+
+/**
+ * Pure diff of desired subscriptions vs the last-sent hash. Extracted from the
+ * socket sync so the segment-count trap is unit-testable without a live socket
+ * (mirrors `applyDepthMessage`). Forex diffs on `forexKey` ("USD.JPY"); foreign
+ * stocks diff on bare symbol — both removable via the plain `symbols` unsub list.
+ */
+export function computeSubscriptionDiff(
+  lastHash: string,
+  desired: DesiredSubscriptions,
+): SubscriptionDiff {
+  const currentHash = subscriptionHash(desired);
+  const [
+    lastSyms = "",
+    lastCts = "",
+    lastIdxs = "",
+    lastFx = "",
+    lastStk = "",
+  ] = lastHash.split("|");
+  const prevSymbolSet = new Set(lastSyms.split(",").filter(Boolean));
+  const prevContractSet = new Set(lastCts.split(",").filter(Boolean));
+  const prevIndexSet = new Set(lastIdxs.split(",").filter(Boolean));
+  const prevForexSet = new Set(lastFx.split(",").filter(Boolean));
+  const prevStockSet = new Set(lastStk.split(",").filter(Boolean));
+
+  const currSymbolSet = new Set(desired.symbols);
+  const currContractSet = new Set(desired.contracts.map(optionKey));
+  const currIndexSet = new Set(
+    desired.indexes.map((idx) => `${idx.symbol}@${idx.exchange}`),
+  );
+  const currForexSet = new Set(desired.forexes.map(forexKey));
+  const currStockSet = new Set(desired.stocksMeta.map((s) => s.symbol));
+
+  const removedIndexKeys = [...prevIndexSet].filter(
+    (k) => !currIndexSet.has(k),
+  );
+
+  return {
+    currentHash,
+    changed: currentHash !== lastHash,
+    addedSymbols: desired.symbols.filter((s) => !prevSymbolSet.has(s)),
+    addedContracts: desired.contracts.filter(
+      (c) => !prevContractSet.has(optionKey(c)),
+    ),
+    addedIndexes: desired.indexes.filter(
+      (idx) => !prevIndexSet.has(`${idx.symbol}@${idx.exchange}`),
+    ),
+    addedForexes: desired.forexes.filter((f) => !prevForexSet.has(forexKey(f))),
+    addedStocks: desired.stocksMeta.filter((s) => !prevStockSet.has(s.symbol)),
+    removedSymbols: [...prevSymbolSet].filter((s) => !currSymbolSet.has(s)),
+    removedContractKeys: [...prevContractSet].filter(
+      (k) => !currContractSet.has(k),
+    ),
+    removedIndexSymbols: [
+      ...new Set(removedIndexKeys.map((k) => k.split("@")[0])),
+    ],
+    removedForexKeys: [...prevForexSet].filter((k) => !currForexSet.has(k)),
+    removedStockSymbols: [...prevStockSet].filter((k) => !currStockSet.has(k)),
+  };
+}
+
 /**
  * React hook for real-time price streaming from IB via WebSocket.
  *
@@ -199,6 +316,8 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
     symbols,
     contracts = [],
     indexes = [],
+    forexes = [],
+    stocksMeta = [],
     enabled = true,
     depthSymbol = null,
     depthExpiry = null,
@@ -241,7 +360,9 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
     symbols: string[];
     contracts: OptionContract[];
     indexes: IndexContract[];
-  }>({ symbols: [], contracts: [], indexes: [] });
+    forexes: ForexContract[];
+    stocksMeta: StockMeta[];
+  }>({ symbols: [], contracts: [], indexes: [], forexes: [], stocksMeta: [] });
   const lastSentHashRef = useRef("");
 
   // Focused-depth tracking — kept SEPARATE from the price subscription diff so
@@ -271,6 +392,8 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
         .join(","),
     [indexes],
   );
+  const forexHash = forexesKey(forexes);
+  const stockMetaHash = stocksMetaKey(stocksMeta);
   // Hash keys avoid recomputation when parents pass new array identities with the same subscription set.
   const normalizedSymbols = useMemo(
     () => normalizeSymbolList(symbols),
@@ -284,11 +407,30 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
     () => indexes,
     [indexHash], // eslint-disable-line react-hooks/exhaustive-deps -- indexHash content-keys `indexes`
   );
+  const normalizedForexes = useMemo(
+    () =>
+      forexes.map((f) => ({
+        base: f.base.trim().toUpperCase(),
+        quote: f.quote.trim().toUpperCase(),
+      })),
+    [forexHash], // eslint-disable-line react-hooks/exhaustive-deps -- forexHash content-keys `forexes`
+  );
+  const normalizedStocksMeta = useMemo(
+    () =>
+      stocksMeta.map((s) => ({
+        symbol: s.symbol.trim().toUpperCase(),
+        exchange: s.exchange.trim().toUpperCase(),
+        currency: s.currency.trim().toUpperCase(),
+      })),
+    [stockMetaHash], // eslint-disable-line react-hooks/exhaustive-deps -- stockMetaHash content-keys `stocksMeta`
+  );
 
   const hasSubscriptions =
     normalizedSymbols.length > 0 ||
     normalizedContracts.length > 0 ||
-    normalizedIndexes.length > 0;
+    normalizedIndexes.length > 0 ||
+    normalizedForexes.length > 0 ||
+    normalizedStocksMeta.length > 0;
 
   const normalizedDepthSymbol =
     depthSymbol && depthSymbol.trim().length > 0 ? depthSymbol.trim() : null;
@@ -300,6 +442,8 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
     symbols: normalizedSymbols,
     contracts: normalizedContracts,
     indexes: normalizedIndexes,
+    forexes: normalizedForexes,
+    stocksMeta: normalizedStocksMeta,
   };
   desiredDepthRef.current = normalizedDepthSymbol;
   desiredDepthExpiryRef.current = normalizedDepthExpiry;
@@ -325,131 +469,81 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
     }
   }, []);
 
-  const buildHash = useCallback(
-    (syms: string[], cts: OptionContract[], idxs: IndexContract[]) =>
-      symbolKey(syms) +
-      "|" +
-      contractsKey(cts) +
-      "|" +
-      idxs
-        .map((i) => `${i.symbol}@${i.exchange}`)
-        .sort()
-        .join(","),
-    [],
-  );
+  /** Send diff-based subscribe/unsubscribe over an open socket. Diff logic is
+   *  the pure `computeSubscriptionDiff`; this only does the socket I/O + price
+   *  eviction. */
+  const syncSubscriptions = useCallback((ws: WebSocket) => {
+    if (ws.readyState !== WebSocket.OPEN) return;
 
-  /** Send diff-based subscribe/unsubscribe over an open socket. */
-  const syncSubscriptions = useCallback(
-    (ws: WebSocket) => {
-      if (ws.readyState !== WebSocket.OPEN) return;
+    const diff = computeSubscriptionDiff(
+      lastSentHashRef.current,
+      desiredRef.current,
+    );
+    if (!diff.changed) return;
 
-      const desired = desiredRef.current;
-      const currentHash = buildHash(
-        desired.symbols,
-        desired.contracts,
-        desired.indexes,
+    wsLog("sync-diff", {
+      addedSymbols: diff.addedSymbols,
+      addedContracts: diff.addedContracts.map(optionKey),
+      removedSymbols: diff.removedSymbols,
+      removedContractKeys: diff.removedContractKeys,
+      addedIndexes: diff.addedIndexes,
+      removedIndexSymbols: diff.removedIndexSymbols,
+      addedForexes: diff.addedForexes.map(forexKey),
+      removedForexKeys: diff.removedForexKeys,
+      addedStocks: diff.addedStocks.map((s) => s.symbol),
+      removedStockSymbols: diff.removedStockSymbols,
+    });
+
+    // Subscribe new (including any newly-added indexes/forex/foreign stocks)
+    if (
+      diff.addedSymbols.length > 0 ||
+      diff.addedContracts.length > 0 ||
+      diff.addedIndexes.length > 0 ||
+      diff.addedForexes.length > 0 ||
+      diff.addedStocks.length > 0
+    ) {
+      ws.send(
+        JSON.stringify({
+          action: "subscribe",
+          symbols: diff.addedSymbols,
+          ...(diff.addedContracts.length > 0
+            ? { contracts: diff.addedContracts }
+            : {}),
+          ...(diff.addedIndexes.length > 0
+            ? { indexes: diff.addedIndexes }
+            : {}),
+          ...(diff.addedForexes.length > 0
+            ? { forexes: diff.addedForexes }
+            : {}),
+          ...(diff.addedStocks.length > 0 ? { stocks: diff.addedStocks } : {}),
+        }),
       );
+    }
 
-      if (currentHash === lastSentHashRef.current) return; // No change
-
-      // Parse last-sent state to compute diff
-      const [lastSyms = "", lastCts = "", lastIdxs = ""] =
-        lastSentHashRef.current.split("|");
-      const prevSymbolSet = new Set(lastSyms.split(",").filter(Boolean));
-      const prevContractSet = new Set(lastCts.split(",").filter(Boolean));
-      const prevIndexSet = new Set(lastIdxs.split(",").filter(Boolean));
-
-      const currSymbolSet = new Set(desired.symbols);
-      const currContractKeys = desired.contracts.map(optionKey);
-      const currContractSet = new Set(currContractKeys);
-      const currIndexPairs = desired.indexes
-        .map((idx) => `${idx.symbol}@${idx.exchange}`)
-        .sort();
-      const currIndexSet = new Set(currIndexPairs);
-
-      // Compute adds
-      const addedSymbols = desired.symbols.filter((s) => !prevSymbolSet.has(s));
-      const addedContracts = desired.contracts.filter(
-        (c) => !prevContractSet.has(optionKey(c)),
-      );
-
-      // Compute removes
-      const removedSymbols = [...prevSymbolSet].filter(
-        (s) => !currSymbolSet.has(s),
-      );
-      const removedContractKeys = [...prevContractSet].filter(
-        (k) => !currContractSet.has(k),
-      );
-      const removedIndexKeys = [...prevIndexSet].filter(
-        (k) => !currIndexSet.has(k),
-      );
-      const removedIndexSymbols = [
-        ...new Set(removedIndexKeys.map((indexKey) => indexKey.split("@")[0])),
-      ];
-
-      const addedIndexes = desired.indexes.filter(
-        (idx) => !prevIndexSet.has(`${idx.symbol}@${idx.exchange}`),
-      );
-
-      wsLog("sync-diff", {
-        addedSymbols,
-        addedContracts: addedContracts.map(optionKey),
-        removedSymbols,
-        removedContractKeys,
-        addedIndexes,
-        removedIndexSymbols,
+    // Unsubscribe old. Forex keys + foreign-stock symbols ride the same
+    // `symbols` array — the relay's unsubscribe loop keys by string, so
+    // "USD.JPY" / "5016" evict like any symbol.
+    const removedAll = [
+      ...diff.removedSymbols,
+      ...diff.removedContractKeys,
+      ...diff.removedIndexSymbols,
+      ...diff.removedForexKeys,
+      ...diff.removedStockSymbols,
+    ];
+    if (removedAll.length > 0) {
+      ws.send(JSON.stringify({ action: "unsubscribe", symbols: removedAll }));
+      // Evict stale price entries
+      setPrices((prev) => {
+        const next = { ...prev };
+        for (const k of removedAll) {
+          delete next[k];
+        }
+        return next;
       });
+    }
 
-      // Subscribe new (including any newly-added indexes)
-      if (
-        addedSymbols.length > 0 ||
-        addedContracts.length > 0 ||
-        addedIndexes.length > 0
-      ) {
-        ws.send(
-          JSON.stringify({
-            action: "subscribe",
-            symbols: addedSymbols,
-            ...(addedContracts.length > 0 ? { contracts: addedContracts } : {}),
-            ...(addedIndexes.length > 0 ? { indexes: addedIndexes } : {}),
-          }),
-        );
-      }
-
-      // Unsubscribe old
-      if (
-        removedSymbols.length > 0 ||
-        removedContractKeys.length > 0 ||
-        removedIndexSymbols.length > 0
-      ) {
-        ws.send(
-          JSON.stringify({
-            action: "unsubscribe",
-            symbols: [
-              ...removedSymbols,
-              ...removedContractKeys,
-              ...removedIndexSymbols,
-            ],
-          }),
-        );
-        // Evict stale price entries
-        setPrices((prev) => {
-          const next = { ...prev };
-          for (const k of [
-            ...removedSymbols,
-            ...removedContractKeys,
-            ...removedIndexSymbols,
-          ]) {
-            delete next[k];
-          }
-          return next;
-        });
-      }
-
-      lastSentHashRef.current = currentHash;
-    },
-    [buildHash],
-  );
+    lastSentHashRef.current = diff.currentHash;
+  }, []);
 
   /**
    * Send subscribe-depth / unsubscribe-depth for the single focused symbol.
@@ -563,8 +657,21 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
   // ---------------------------------------------------------------------------
   const connect = useCallback(() => {
     if (!enabled) return;
-    const { symbols: syms, contracts: cts, indexes: idxs } = desiredRef.current;
-    if (syms.length === 0 && cts.length === 0 && idxs.length === 0) return;
+    const {
+      symbols: syms,
+      contracts: cts,
+      indexes: idxs,
+      forexes: fx,
+      stocksMeta: stk,
+    } = desiredRef.current;
+    if (
+      syms.length === 0 &&
+      cts.length === 0 &&
+      idxs.length === 0 &&
+      fx.length === 0 &&
+      stk.length === 0
+    )
+      return;
 
     // Idempotent: no-op if already connecting or open
     if (
@@ -743,8 +850,21 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
   // Wire scheduleReconnect via ref to avoid circular dep
   const scheduleReconnect = useCallback(() => {
     if (!mountedRef.current || !enabled) return;
-    const { symbols: syms, contracts: cts, indexes: idxs } = desiredRef.current;
-    if (syms.length === 0 && cts.length === 0 && idxs.length === 0) return;
+    const {
+      symbols: syms,
+      contracts: cts,
+      indexes: idxs,
+      forexes: fx,
+      stocksMeta: stk,
+    } = desiredRef.current;
+    if (
+      syms.length === 0 &&
+      cts.length === 0 &&
+      idxs.length === 0 &&
+      fx.length === 0 &&
+      stk.length === 0
+    )
+      return;
 
     const strategy = reconnectStrategyRef.current;
     if (!strategy.canRetry()) {

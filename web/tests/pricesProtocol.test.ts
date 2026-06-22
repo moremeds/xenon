@@ -8,6 +8,9 @@ import {
   portfolioLegToContract,
   normalizeSymbolList,
   symbolKey,
+  forexKey,
+  forexesKey,
+  stocksMetaKey,
 } from "../lib/pricesProtocol";
 import type { OptionContract } from "../lib/pricesProtocol";
 
@@ -94,8 +97,18 @@ describe("contractsKey", () => {
   });
 
   it("produces stable output regardless of input order", () => {
-    const a: OptionContract = { symbol: "AAPL", expiry: "20260320", strike: 200, right: "C" };
-    const b: OptionContract = { symbol: "GOOG", expiry: "20260320", strike: 175, right: "P" };
+    const a: OptionContract = {
+      symbol: "AAPL",
+      expiry: "20260320",
+      strike: 200,
+      right: "C",
+    };
+    const b: OptionContract = {
+      symbol: "GOOG",
+      expiry: "20260320",
+      strike: 175,
+      right: "P",
+    };
     expect(contractsKey([a, b])).toBe(contractsKey([b, a]));
   });
 
@@ -122,12 +135,14 @@ describe("option contract normalization helpers", () => {
   });
 
   it("normalizes the full option contract shape", () => {
-    expect(normalizeOptionContract({
-      symbol: "crm",
-      expiry: "2026-03-20",
-      strike: 197.5,
-      right: "C",
-    })).toEqual({
+    expect(
+      normalizeOptionContract({
+        symbol: "crm",
+        expiry: "2026-03-20",
+        strike: 197.5,
+        right: "C",
+      }),
+    ).toEqual({
       symbol: "CRM",
       expiry: "20260320",
       strike: 197.5,
@@ -296,7 +311,10 @@ describe("portfolioLegToContract", () => {
 
 describe("normalizeSymbolList", () => {
   it("trims whitespace from symbols", () => {
-    expect(normalizeSymbolList(["  AAPL  ", " GOOG "])).toEqual(["AAPL", "GOOG"]);
+    expect(normalizeSymbolList(["  AAPL  ", " GOOG "])).toEqual([
+      "AAPL",
+      "GOOG",
+    ]);
   });
 
   it("uppercases symbols", () => {
@@ -304,7 +322,10 @@ describe("normalizeSymbolList", () => {
   });
 
   it("filters out empty strings", () => {
-    expect(normalizeSymbolList(["AAPL", "", "  ", "GOOG"])).toEqual(["AAPL", "GOOG"]);
+    expect(normalizeSymbolList(["AAPL", "", "  ", "GOOG"])).toEqual([
+      "AAPL",
+      "GOOG",
+    ]);
   });
 
   it("returns empty array for all-empty input", () => {
@@ -344,12 +365,54 @@ describe("symbolKey", () => {
   });
 
   it("produces stable output regardless of input order", () => {
-    expect(symbolKey(["MSFT", "AAPL", "GOOG"])).toBe(symbolKey(["GOOG", "MSFT", "AAPL"]));
+    expect(symbolKey(["MSFT", "AAPL", "GOOG"])).toBe(
+      symbolKey(["GOOG", "MSFT", "AAPL"]),
+    );
   });
 
   it("deduplicates when symbols are the same after normalization", () => {
     // symbolKey doesn't deduplicate, so both appear — this tests actual behavior
     const result = symbolKey(["aapl", "AAPL"]);
     expect(result).toBe("AAPL,AAPL");
+  });
+});
+
+// =============================================================================
+// forexKey / forexesKey / stocksMetaKey
+// =============================================================================
+
+describe("forexKey", () => {
+  it("builds BASE.QUOTE uppercased", () => {
+    expect(forexKey({ base: "usd", quote: "jpy" })).toBe("USD.JPY");
+  });
+
+  it("trims whitespace", () => {
+    expect(forexKey({ base: " usd ", quote: " krw " })).toBe("USD.KRW");
+  });
+});
+
+describe("forexesKey", () => {
+  it("is order-independent and sorted", () => {
+    expect(
+      forexesKey([
+        { base: "USD", quote: "KRW" },
+        { base: "USD", quote: "JPY" },
+      ]),
+    ).toBe("USD.JPY,USD.KRW");
+  });
+
+  it("returns empty string for empty list", () => {
+    expect(forexesKey([])).toBe("");
+  });
+});
+
+describe("stocksMetaKey", () => {
+  it("keys on bare uppercased symbol, sorted", () => {
+    expect(
+      stocksMetaKey([
+        { symbol: "000660", exchange: "KRX", currency: "KRW" },
+        { symbol: "5016", exchange: "TSEJ", currency: "JPY" },
+      ]),
+    ).toBe("000660,5016");
   });
 });

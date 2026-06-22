@@ -39,6 +39,10 @@ type PlaceBody = {
   quote_token?: string;
   con_id?: number;
   acknowledge_limit_override?: boolean;
+  // Foreign cash-equity venue/currency (Japan/Korea). Forwarded verbatim by
+  // buildFastApiPlaceOrderPayload to FastAPI → ib_place_order.
+  exchange?: string;
+  currency?: string;
 };
 
 export async function POST(request: Request): Promise<Response> {

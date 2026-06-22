@@ -1,12 +1,34 @@
 import type { PortfolioPosition } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 import { optionKey } from "@/lib/pricesProtocol";
+import { toUsd } from "@/lib/fx";
 
 /* ─── Formatters ──────────────────────────────────────────── */
 
-export const fmtUsd = (n: number) => `$${n.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
-export const fmtPrice = (n: number) => `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-export const fmtPriceOrCalculated = (n: number, isCalculated: boolean) => isCalculated ? `C${fmtPrice(n)}` : fmtPrice(n);
+export const fmtUsd = (n: number) =>
+  `$${n.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+export const fmtPrice = (n: number) =>
+  `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+export const fmtPriceOrCalculated = (n: number, isCalculated: boolean) =>
+  isCalculated ? `C${fmtPrice(n)}` : fmtPrice(n);
+
+/**
+ * Convert a native money value to USD for display. The ONE conversion path
+ * shared by PositionTable, PortfolioByStructure, and the ticker-detail panels
+ * (DRY). USD (or blank currency) passes through unchanged; a non-USD value uses
+ * the live usd_per_unit rate, falling back to the sync-time `*_usd` field, then
+ * null when no rate is available (caller renders "—" / a missing-FX warning).
+ */
+export function nativeToDisplayUsd(
+  native: number | null,
+  currency: string | undefined | null,
+  usdPerUnit: Record<string, number>,
+  fallbackUsd?: number | null,
+): number | null {
+  const cur = (currency || "USD").toUpperCase();
+  if (cur === "USD") return native;
+  return toUsd(native, cur, usdPerUnit) ?? fallbackUsd ?? null;
+}
 
 type ResolvedRealtimePrice = {
   price: number | null;
@@ -45,7 +67,7 @@ export function resolveRealtimePrice(
       // ask=3.35, last=2.85 has a 19% spread; last sits near the bottom.
       const spreadPct = (hi - lo) / mid;
       const lastDivergence = Math.abs(last - mid) / mid;
-      if (spreadPct > 0.10 && lastDivergence > 0.05) {
+      if (spreadPct > 0.1 && lastDivergence > 0.05) {
         return { price: mid, isCalculated: true };
       }
     }
@@ -176,7 +198,8 @@ export function getDisplayTotalPnl(
 }
 
 export function getLastPriceIsCalculated(pos: PortfolioPosition): boolean {
-  if (pos.market_price_is_calculated != null) return pos.market_price_is_calculated;
+  if (pos.market_price_is_calculated != null)
+    return pos.market_price_is_calculated;
   if (pos.legs.length === 1) {
     return Boolean(pos.legs[0]?.market_price_is_calculated);
   }
@@ -201,7 +224,12 @@ export function legPriceKey(
   if (!right) return null;
   const expiryClean = expiry.replace(/-/g, "");
   if (expiryClean.length !== 8) return null;
-  return optionKey({ symbol: ticker.toUpperCase(), expiry: expiryClean, strike: leg.strike, right });
+  return optionKey({
+    symbol: ticker.toUpperCase(),
+    expiry: expiryClean,
+    strike: leg.strike,
+    right,
+  });
 }
 
 /* ─── Spread net price resolution ─────────────────────────── */
@@ -232,7 +260,7 @@ export function resolveSpreadPriceData(
 
   const lo = Math.round(Math.min(netBid, netAsk) * 100) / 100;
   const hi = Math.round(Math.max(netBid, netAsk) * 100) / 100;
-  const mid = Number((((lo + hi) / 2)).toFixed(2));
+  const mid = Number(((lo + hi) / 2).toFixed(2));
 
   return {
     symbol: ticker,
@@ -266,7 +294,9 @@ export function resolveSpreadPriceData(
 function todayInET(): string {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
-    year: "numeric", month: "2-digit", day: "2-digit",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
   }).formatToParts(new Date());
   const get = (type: string) => parts.find((p) => p.type === type)!.value;
   return `${get("year")}-${get("month")}-${get("day")}`;
@@ -284,7 +314,9 @@ function parseDateOnly(rawDate: string | undefined): string | null {
   if (Number.isNaN(parsed.getTime())) return null;
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
-    year: "numeric", month: "2-digit", day: "2-digit",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
   }).formatToParts(parsed);
   const get = (type: string) => parts.find((p) => p.type === type)!.value;
   return `${get("year")}-${get("month")}-${get("day")}`;
@@ -298,13 +330,20 @@ function isSameDay(pos: PortfolioPosition): boolean {
 }
 
 /** Compute real-time market value from WS prices for option positions. */
-function computeRtMv(pos: PortfolioPosition, prices?: Record<string, PriceData>): number | null {
+function computeRtMv(
+  pos: PortfolioPosition,
+  prices?: Record<string, PriceData>,
+): number | null {
   if (pos.structure_type === "Stock" || !prices) return null;
   let rtMv = 0;
   for (const leg of pos.legs) {
     const key = legPriceKey(pos.ticker, pos.expiry, leg);
     const lp = key ? prices[key] : null;
-    const current = resolveRealtimePrice(lp, leg.market_price, Boolean(leg.market_price_is_calculated)).price;
+    const current = resolveRealtimePrice(
+      lp,
+      leg.market_price,
+      Boolean(leg.market_price_is_calculated),
+    ).price;
     if (current == null) return null;
     const sign = leg.direction === "LONG" ? 1 : -1;
     rtMv += sign * current * leg.contracts * legMultiplier(leg);
@@ -314,7 +353,10 @@ function computeRtMv(pos: PortfolioPosition, prices?: Record<string, PriceData>)
 
 /* ─── Option daily change ─────────────────────────────────── */
 
-export function getOptionDailyChg(pos: PortfolioPosition, prices?: Record<string, PriceData>): number | null {
+export function getOptionDailyChg(
+  pos: PortfolioPosition,
+  prices?: Record<string, PriceData>,
+): number | null {
   if (pos.structure_type === "Stock" || !prices) return null;
 
   // Same-day position: the position didn't exist yesterday, so yesterday's
@@ -337,7 +379,11 @@ export function getOptionDailyChg(pos: PortfolioPosition, prices?: Record<string
   for (const leg of pos.legs) {
     const key = legPriceKey(pos.ticker, pos.expiry, leg);
     const lp = key ? prices[key] : null;
-    const current = resolveRealtimePrice(lp, leg.market_price, Boolean(leg.market_price_is_calculated)).price;
+    const current = resolveRealtimePrice(
+      lp,
+      leg.market_price,
+      Boolean(leg.market_price_is_calculated),
+    ).price;
     if (current == null) return null;
     const sign = leg.direction === "LONG" ? 1 : -1;
     if (lp?.close != null && lp.close > 0) {
@@ -356,10 +402,14 @@ export function getOptionDailyChg(pos: PortfolioPosition, prices?: Record<string
 
 /* ─── Today's P&L (dollars) ──────────────────────────────── */
 
-export function getTodayPnlDollars(pos: PortfolioPosition, prices?: Record<string, PriceData>): number | null {
+export function getTodayPnlDollars(
+  pos: PortfolioPosition,
+  prices?: Record<string, PriceData>,
+): number | null {
   if (pos.structure_type === "Stock") {
     const p = prices?.[pos.ticker];
-    if (!p || p.last == null || p.last <= 0 || p.close == null || p.close <= 0) return null;
+    if (!p || p.last == null || p.last <= 0 || p.close == null || p.close <= 0)
+      return null;
     return (p.last - p.close) * pos.contracts;
   }
 
@@ -380,7 +430,12 @@ export function getTodayPnlDollars(pos: PortfolioPosition, prices?: Record<strin
   for (const leg of pos.legs) {
     const key = legPriceKey(pos.ticker, pos.expiry, leg);
     const lp = key && prices ? prices[key] : null;
-    const last = (lp?.last != null && lp.last > 0) ? lp.last : (leg.market_price != null && leg.market_price > 0 ? leg.market_price : null);
+    const last =
+      lp?.last != null && lp.last > 0
+        ? lp.last
+        : leg.market_price != null && leg.market_price > 0
+          ? leg.market_price
+          : null;
     if (last == null) return null;
     const close = lp?.close;
     if (close != null && close > 0) {

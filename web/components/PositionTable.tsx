@@ -23,7 +23,11 @@ import {
   getOptionDailyChg,
   getTodayPnlDollars,
   resolveRealtimePrice,
+  nativeToDisplayUsd,
 } from "@/lib/positionUtils";
+import { fmtNative } from "@/lib/fx";
+import { useFx } from "@/lib/useFx";
+import FxBadge from "./FxBadge";
 
 /* ─── Sortable header cell ─────────────────────────────── */
 
@@ -171,7 +175,10 @@ export type PositionSortKey =
   | "pnl"
   | "expiry";
 
-function makePositionExtract(prices?: Record<string, PriceData>) {
+function makePositionExtract(
+  prices?: Record<string, PriceData>,
+  usdPerUnit: Record<string, number> = { USD: 1 },
+) {
   return (
     pos: PortfolioPosition,
     key: PositionSortKey,
@@ -185,6 +192,20 @@ function makePositionExtract(prices?: Record<string, PriceData>) {
       isStock && rtStockLast != null
         ? rtStockLast * pos.contracts
         : (optRtMv ?? resolveMarketValue(pos));
+    // Money sort keys must be in ONE unit (USD) or a ¥/₩ row floats to the top
+    // by raw magnitude. Convert native → USD for non-USD rows (USD passthrough).
+    const mvUsd = nativeToDisplayUsd(
+      mv,
+      pos.currency,
+      usdPerUnit,
+      pos.market_value_usd,
+    );
+    const entryUsd = nativeToDisplayUsd(
+      resolveEntryCost(pos),
+      pos.currency,
+      usdPerUnit,
+      pos.entry_cost_usd,
+    );
     switch (key) {
       case "ticker":
         return pos.ticker;
@@ -211,11 +232,11 @@ function makePositionExtract(prices?: Record<string, PriceData>) {
       case "today_pnl":
         return getTodayPnlDollars(pos, prices);
       case "entry_cost":
-        return resolveEntryCost(pos);
+        return entryUsd;
       case "market_value":
-        return mv;
+        return mvUsd;
       case "pnl":
-        return mv != null ? mv - resolveEntryCost(pos) : null;
+        return mvUsd != null && entryUsd != null ? mvUsd - entryUsd : null;
       case "expiry":
         return pos.expiry === "N/A" ? null : pos.expiry;
       default:
@@ -321,6 +342,7 @@ function PositionRow({
   showUnderlying = false,
   realtimePrice,
   prices,
+  usdPerUnit = { USD: 1 },
   onLegClick,
   onOrderClick,
   readonly = false,
@@ -330,6 +352,7 @@ function PositionRow({
   showUnderlying?: boolean;
   realtimePrice?: PriceData | null;
   prices?: Record<string, PriceData>;
+  usdPerUnit?: Record<string, number>;
   onLegClick?: (leg: PortfolioLeg, pos: PortfolioPosition) => void;
   onOrderClick?: (pos: PortfolioPosition) => void;
   readonly?: boolean;
@@ -429,6 +452,28 @@ function PositionRow({
       ? (realtimePrice.last - realtimePrice.close) * pos.contracts
       : null
     : getTodayPnlDollars(pos, prices);
+
+  // ── Multi-currency display (Japan/Korea) ──
+  // IB returns mv/entryCost/pnl/todayPnl in the contract's NATIVE currency.
+  // For a non-USD row, convert money columns to a USD headline (with a native
+  // sub-line on MV); per-share price columns (avg entry, last) stay native.
+  // USD rows: cur === "USD" so every *Usd value === its native input.
+  const cur = (pos.currency || "USD").toUpperCase();
+  const isForeign = cur !== "USD";
+  const mvUsd = nativeToDisplayUsd(mv, cur, usdPerUnit, pos.market_value_usd);
+  const entryCostUsd = nativeToDisplayUsd(
+    entryCost,
+    cur,
+    usdPerUnit,
+    pos.entry_cost_usd,
+  );
+  const pnlUsd =
+    mvUsd != null && entryCostUsd != null ? mvUsd - entryCostUsd : null;
+  const pnlPctUsd =
+    pnlUsd != null && entryCostUsd != null && entryCostUsd !== 0
+      ? (pnlUsd / Math.abs(entryCostUsd)) * 100
+      : null;
+  const todayPnlUsd = nativeToDisplayUsd(todayPnl, cur, usdPerUnit);
 
   // Structure already includes strike from ib_sync format_structure_description()
   const structureDisplay = pos.structure;
@@ -531,12 +576,16 @@ function PositionRow({
             )}
           </td>
         )}
-        <td className="right">{fmtPrice(avgEntry)}</td>
+        <td className="right">
+          {isForeign ? fmtNative(avgEntry, cur) : fmtPrice(avgEntry)}
+        </td>
         <td
           className={`right last-price-cell ${flashDirection ? `last-price-${flashDirection}` : ""}`}
         >
           {lastPrice != null
-            ? fmtPriceOrCalculated(lastPrice, lastPriceIsCalculated)
+            ? isForeign
+              ? fmtNative(lastPrice, cur)
+              : fmtPriceOrCalculated(lastPrice, lastPriceIsCalculated)
             : "—"}
           {priceDirection === "up" && (
             <ArrowUp
@@ -561,19 +610,26 @@ function PositionRow({
             : "—"}
         </td>
         <td
-          className={`right ${todayPnl != null ? (todayPnl >= 0 ? "positive" : "negative") : ""}`}
+          className={`right ${todayPnlUsd != null ? (todayPnlUsd >= 0 ? "positive" : "negative") : ""}`}
         >
-          {todayPnl != null
-            ? `${todayPnl >= 0 ? "+" : "-"}${fmtUsd(Math.abs(todayPnl))}`
+          {todayPnlUsd != null
+            ? `${todayPnlUsd >= 0 ? "+" : "-"}${fmtUsd(Math.abs(todayPnlUsd))}`
             : "—"}
         </td>
-        <td className="right">{fmtUsd(entryCost)}</td>
-        <td className="right">{mv != null ? fmtUsd(mv) : "—"}</td>
+        <td className="right">
+          {entryCostUsd != null ? fmtUsd(entryCostUsd) : "—"}
+        </td>
+        <td className="right">
+          {mvUsd != null ? fmtUsd(mvUsd) : "—"}
+          {isForeign && mv != null && (
+            <div className="fx-native-subline">{fmtNative(mv, cur)}</div>
+          )}
+        </td>
         <td
-          className={`right ${pnl != null ? (pnl >= 0 ? "positive" : "negative") : ""}`}
+          className={`right ${pnlUsd != null ? (pnlUsd >= 0 ? "positive" : "negative") : ""}`}
         >
-          {pnl != null
-            ? `${pnl >= 0 ? "+" : "-"}${fmtUsd(Math.abs(pnl))} (${pnlPct!.toFixed(1)}%)`
+          {pnlUsd != null
+            ? `${pnlUsd >= 0 ? "+" : "-"}${fmtUsd(Math.abs(pnlUsd))}${pnlPctUsd != null ? ` (${pnlPctUsd.toFixed(1)}%)` : ""}`
             : "—"}
         </td>
         {showExpiry && <td>{pos.expiry !== "N/A" ? pos.expiry : "—"}</td>}
@@ -606,14 +662,21 @@ export default function PositionTable({
   showExpiry = true,
   showUnderlying = false,
   prices,
+  fxRates,
   readonly = false,
   hideHeader = false,
+  hideFxBadge = false,
   onOrderPlaced,
 }: {
   positions: PortfolioPosition[];
   showExpiry?: boolean;
   showUnderlying?: boolean;
   prices?: Record<string, PriceData>;
+  /**
+   * usd_per_unit FX rates (USD value of 1 unit) from the portfolio payload.
+   * Merged with live USD.<cur> ticks via useFx for native→USD display.
+   */
+  fxRates?: Record<string, number>;
   /**
    * When true, blocks all navigation and order-entry affordances.
    * Load-bearing safety control (tribunal T7): Futu positions render with
@@ -626,9 +689,33 @@ export default function PositionTable({
    * though it renders several sub-tables (stock + per-category-pair).
    */
   hideHeader?: boolean;
+  /**
+   * Suppress the standalone FX-badge row above the table. PortfolioByStructure
+   * sets this because each ticker card is single-currency and now renders its
+   * one relevant FX pair inline in the card header instead. The flat "By Risk"
+   * view leaves it off so its mixed-currency tables keep the badge group.
+   */
+  hideFxBadge?: boolean;
   onOrderPlaced?: (orderId: string) => void;
 }) {
-  const positionExtract = useMemo(() => makePositionExtract(prices), [prices]);
+  // Distinct currencies in this table → live usd_per_unit (forex ticks over the
+  // payload fallback). USD-only portfolios resolve to { USD: 1 } and every
+  // conversion is an identity (no behavior change for the common case).
+  const currencies = useMemo(
+    () => [
+      ...new Set(positions.map((p) => (p.currency || "USD").toUpperCase())),
+    ],
+    [positions],
+  );
+  const usdPerUnit = useFx(prices ?? {}, fxRates ?? { USD: 1 }, currencies);
+  // Per-currency liveness: a filled FX dot only when THAT pair has a fresh tick.
+  const liveCurrencies = currencies.filter(
+    (c) => c !== "USD" && (prices?.[`USD.${c}`]?.last ?? null) != null,
+  );
+  const positionExtract = useMemo(
+    () => makePositionExtract(prices, usdPerUnit),
+    [prices, usdPerUnit],
+  );
   const { sorted, sort, toggle } = useSort(positions, positionExtract);
 
   // Instrument detail modal state
@@ -655,6 +742,9 @@ export default function PositionTable({
 
   return (
     <>
+      {!hideHeader && !hideFxBadge && (
+        <FxBadge rates={usdPerUnit} liveCurrencies={liveCurrencies} />
+      )}
       <table style={{ tableLayout: "fixed", width: "100%" }}>
         <colgroup>
           <col style={{ width: "7%" }} />
@@ -790,6 +880,7 @@ export default function PositionTable({
               showUnderlying={showUnderlying}
               realtimePrice={prices?.[pos.ticker]}
               prices={prices}
+              usdPerUnit={usdPerUnit}
               onLegClick={handleLegClick}
               onOrderClick={
                 readonly ? undefined : (p) => setActiveOrderPosition(p)

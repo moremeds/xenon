@@ -27,7 +27,9 @@ import {
   stockContract,
   optionContract,
   indexContract,
+  forexContract,
 } from "./ib_contracts.js";
+import { normalizeForex, normalizeStocksMeta } from "./normalize.js";
 import {
   applyDepthDelta,
   serializeLadder,
@@ -228,11 +230,13 @@ function parseActionMessage(raw) {
   const indexes = Array.isArray(payload.indexes)
     ? normalizeIndexes(payload.indexes)
     : [];
+  const forexes = normalizeForex(payload.forexes);
+  const stocksMeta = normalizeStocksMeta(payload.stocks);
   const depth =
     action === "subscribe-depth" || action === "unsubscribe-depth"
       ? normalizeDepthTarget(payload)
       : null;
-  return { action, symbols, contracts, indexes, depth };
+  return { action, symbols, contracts, indexes, forexes, stocksMeta, depth };
 }
 
 const cli = parseArgs(process.argv.slice(2));
@@ -1525,8 +1529,10 @@ async function handleClientMessage(client, data) {
   const symbols = message.symbols;
   const contracts = message.contracts;
   const indexes = message.indexes;
+  const forexes = message.forexes ?? [];
+  const stocksMeta = message.stocksMeta ?? [];
   verbose(
-    `action=${message.action} symbols=[${symbols.join(",")}] contracts=${contracts.length} indexes=${indexes.length}`,
+    `action=${message.action} symbols=[${symbols.join(",")}] contracts=${contracts.length} indexes=${indexes.length} forexes=${forexes.length} stocksMeta=${stocksMeta.length}`,
   );
   switch (message.action) {
     case "subscribe": {
@@ -1601,6 +1607,47 @@ async function handleClientMessage(client, data) {
           subscribed.push(key);
         }
       }
+      // Forex pairs (live FX conversion, e.g. USD.JPY, USD.KRW on IDEALPRO).
+      // Keyed "<base>.<quote>"; emits type:"price" like any symbol.
+      for (const fx of forexes) {
+        const key = fx.key;
+        subscribeClientToSymbol(client, key);
+        const ibContract = forexContract(fx.base, fx.quote);
+        ensureSymbolState(key, ibContract);
+        if (ibConnected) {
+          startLiveSubscription(key, ibContract);
+          const state = symbolStates.get(key);
+          if (state) {
+            sendMessage(client, {
+              type: "price",
+              symbol: key,
+              data: state.data,
+            });
+          }
+          subscribed.push(key);
+        }
+      }
+      // Foreign stocks with explicit native exchange/currency (TSEJ/JPY,
+      // KRX/KRW). Keyed by bare symbol like SMART/USD stocks, but the contract
+      // carries the native venue so IB routes the quote correctly.
+      for (const s of stocksMeta) {
+        const key = s.symbol;
+        subscribeClientToSymbol(client, key);
+        const ibContract = stockContract(s.symbol, s.exchange, s.currency);
+        ensureSymbolState(key, ibContract);
+        if (ibConnected) {
+          startLiveSubscription(key, ibContract);
+          const state = symbolStates.get(key);
+          if (state) {
+            sendMessage(client, {
+              type: "price",
+              symbol: key,
+              data: state.data,
+            });
+          }
+          subscribed.push(key);
+        }
+      }
       sendSubscribedConfirmation(client, subscribed);
       return;
     }
@@ -1616,6 +1663,22 @@ async function handleClientMessage(client, data) {
           if (!unsubscribed.includes(idx.symbol)) {
             unsubscribed.push(idx.symbol);
           }
+        }
+      }
+      for (const fx of forexes) {
+        if (
+          unsubscribeClientFromSymbol(client, fx.key) &&
+          !unsubscribed.includes(fx.key)
+        ) {
+          unsubscribed.push(fx.key);
+        }
+      }
+      for (const s of stocksMeta) {
+        if (
+          unsubscribeClientFromSymbol(client, s.symbol) &&
+          !unsubscribed.includes(s.symbol)
+        ) {
+          unsubscribed.push(s.symbol);
         }
       }
       sendUnsubscribedConfirmation(client, unsubscribed);

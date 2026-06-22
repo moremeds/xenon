@@ -26,6 +26,16 @@ CLIENT_ID = CLIENT_IDS.get("ib_place_order", 26)
 PORT = DEFAULT_GATEWAY_PORT
 
 
+def _build_stock_contract(params: dict) -> "Stock":
+    """Build a Stock contract honoring body exchange/currency. Defaults to
+    SMART/USD (US stocks); a foreign cash equity (e.g. 5016 TSEJ JPY,
+    000660 KRX KRW) routes to its native venue + currency."""
+    symbol = str(params["symbol"]).upper()
+    exchange = str(params.get("exchange") or "SMART").upper()
+    currency = str(params.get("currency") or "USD").upper()
+    return Stock(symbol, exchange, currency)
+
+
 def place_order(params: dict) -> dict:
     """Place a limit order and return result as dict."""
     order_type = params.get("type", "stock")
@@ -98,7 +108,7 @@ def place_order(params: dict) -> dict:
             contract = qualified[0]
 
         else:
-            contract = Stock(symbol, "SMART", "USD")
+            contract = _build_stock_contract(params)
             qualified = client.qualify_contracts(contract)
             if not qualified:
                 return {"status": "error", "message": f"Could not qualify contract: {symbol}"}
