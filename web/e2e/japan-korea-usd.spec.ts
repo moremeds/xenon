@@ -110,13 +110,15 @@ const PORTFOLIO_MOCK = {
 
 const ORDERS_EMPTY = { orders: [], as_of: new Date().toISOString() };
 
-// Live ticks the mock WS pushes on open — drives the live USD headline + the
-// per-pair "live" FX dot. Real levels (2026-06-22).
-const PRICE_TICKS: Record<string, number> = {
-  "USD.JPY": 161.7,
-  "USD.KRW": 1537,
-  "5016": 5267,
-  "000660": 2_885_000,
+// Live ticks the mock WS pushes on open — drives the live USD headline, the
+// per-pair "live" FX dot, and the TODAY'S P&L Day Move (last vs prior close).
+// Real levels (2026-06-22): 5016 prior-close ¥4,747 → +¥52,000 day move;
+// 000660 prior-close ₩2,764,000 → +₩121,000. Converted: +$322 + $79 ≈ +$400.
+const PRICE_TICKS: Record<string, { last: number; close: number }> = {
+  "USD.JPY": { last: 161.7, close: 161.7 },
+  "USD.KRW": { last: 1537, close: 1537 },
+  "5016": { last: 5267, close: 4747 },
+  "000660": { last: 2_885_000, close: 2_764_000 },
 };
 
 async function installMockWebSocket(page: import("@playwright/test").Page) {
@@ -146,9 +148,10 @@ async function installMockWebSocket(page: import("@playwright/test").Page) {
               subscriptions: [],
             }),
           });
-          for (const [symbol, last] of Object.entries(
-            ticks as Record<string, number>,
+          for (const [symbol, tick] of Object.entries(
+            ticks as Record<string, { last: number; close: number }>,
           )) {
+            const { last, close } = tick;
             this.onmessage?.({
               data: JSON.stringify({
                 type: "price",
@@ -165,7 +168,7 @@ async function installMockWebSocket(page: import("@playwright/test").Page) {
                   high: last,
                   low: last,
                   open: last,
-                  close: last,
+                  close,
                   timestamp: new Date().toISOString(),
                 },
               }),
@@ -265,6 +268,12 @@ test("foreign positions render native price + live USD headline + FX badge", asy
   // FX badge shows both pairs.
   await expect(page.getByText(/USD\/JPY/).first()).toBeVisible();
   await expect(page.getByText(/USD\/KRW/).first()).toBeVisible();
+
+  // TODAY'S P&L Day Move headline is the USD sum (+¥52,000→$322 plus
+  // +₩121,000→$79 ≈ +$400), NEVER the native magnitude (+$173,000 / +$52,000 /
+  // +$121,000) — the −$552,137 native-leak this sweep fixes.
+  await expect(page.getByText("+$400").first()).toBeVisible();
+  await expect(page.getByText(/\$(52,000|121,000|173,000)/)).toHaveCount(0);
 
   await page.screenshot({
     path: "../output/playwright/japan-korea-usd-2026-06-22.png",
