@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Support Japan (TSEJ/JPY) and Korea (KSE/KRW) cash-equity positions and orders in xenon the same way as US stocks, with every value converted to a live-USD headline (native price shown alongside).
+**Goal:** Support Japan (TSEJ/JPY) and Korea (KRX/KRW) cash-equity positions and orders in xenon the same way as US stocks, with every value converted to a live-USD headline (native price shown alongside).
 
-**Architecture:** IB already returns foreign positions in their native currency (JPY/KRW) plus a per-currency `ExchangeRate`; today the code discards both and treats every number as USD. We (1) capture `currency`+`exchange` from the IB position contract, (2) normalize all FX to one `usd_per_unit` convention in a small `fx` module, (3) convert per-position values + portfolio totals to USD in the backend at sync time using IB's `ExchangeRate`, (4) stream live `USD.JPY`/`USD.KRW` forex ticks (and live foreign-stock quotes) through the existing realtime relay so the frontend refines the USD headline live, and (5) make the order path exchange/currency-aware so TSEJ/KSE limit orders can be placed. Conversion is isolated to two thin layers (backend totals + frontend display edge); the native-unit P&L math in `positionUtils.ts` is left untouched.
+**Architecture:** IB already returns foreign positions in their native currency (JPY/KRW) plus a per-currency `ExchangeRate`; today the code discards both and treats every number as USD. We (1) capture `currency`+`exchange` from the IB position contract, (2) normalize all FX to one `usd_per_unit` convention in a small `fx` module, (3) convert per-position values + portfolio totals to USD in the backend at sync time using IB's `ExchangeRate`, (4) stream live `USD.JPY`/`USD.KRW` forex ticks (and live foreign-stock quotes) through the existing realtime relay so the frontend refines the USD headline live, and (5) make the order path exchange/currency-aware so TSEJ/KRX limit orders can be placed. Conversion is isolated to two thin layers (backend totals + frontend display edge); the native-unit P&L math in `positionUtils.ts` is left untouched.
 
 **Tech Stack:** Python 3.13 (`uv`, `ib_async` v2.1.0, SQLAlchemy Core, Alembic), Next.js/React (TypeScript, TypeBox schemas, Vitest), Node relay (`@stoqey/ib`), Postgres, Playwright + chrome-cdp for E2E.
 
@@ -24,7 +24,7 @@
   - `PortfolioItem` = `NamedTuple(contract, position, marketPrice, marketValue, averageCost, unrealizedPNL, realizedPNL, account)` — `marketValue`/`unrealizedPNL` are **native currency, NOT base**.
   - `AccountValue` = `NamedTuple(account, tag, value:str, currency, modelCode)` — `value` is a **string** (cast it). Tag `ExchangeRate` = rate of `currency` to base (base = native × ExchangeRate).
   - `Forex('USDJPY')` (6-char pair, no dot) → `symbol="USD"`, `currency="JPY"`, `exchange="IDEALPRO"`, `secType="CASH"`.
-  - IB exchange codes: Japan = `TSEJ`/`JPY`, Korea = `KSE`/`KRW`. `Position.contract.primaryExchange` may be empty pre-qualification — qualify foreign contracts.
+  - IB exchange codes: Japan = `TSEJ`/`JPY`, Korea = `KRX`/`KRW`. `Position.contract.primaryExchange` may be empty pre-qualification — qualify foreign contracts.
   - `USD.JPY` (conId 15016059) and `USD.KRW` (conId 36363302) both return live IDEALPRO bid/ask from this account.
 
 ---
@@ -145,7 +145,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'xenon.utils.fx'`
 """Native-currency → USD conversion for multi-currency IB portfolios.
 
 IB returns position market values, avg cost, and unrealized P&L in the
-contract's NATIVE currency (JPY for TSEJ, KRW for KSE) — verified against
+contract's NATIVE currency (JPY for TSEJ, KRW for KRX) — verified against
 ib_async v2.1.0 PortfolioItem semantics and IB's updatePortfolio callback.
 This module normalizes rates into ONE convention: ``usd_per_unit[currency]``
 is the USD value of 1 unit of that currency, so ``usd = native * rate``.
@@ -294,9 +294,9 @@ def test_fetch_positions_defaults_currency_usd_when_missing():
 
 
 def test_fetch_positions_prefers_primary_exchange_falls_back_to_exchange():
-    client = _Client([_pos("000660", "KRW", "", "KSE")])
+    client = _Client([_pos("000660", "KRW", "", "KRX")])
     out = fetch_positions(client)
-    assert out[0]["exchange"] == "KSE"  # primaryExchange empty → exchange
+    assert out[0]["exchange"] == "KRX"  # primaryExchange empty → exchange
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -433,7 +433,7 @@ git commit -m "feat(ib-sync): propagate currency/exchange through collapse_posit
 **Interfaces:**
 
 - Consumes: `pos["currency"]` (Task 1.2), `pos["contract"]`.
-- Behavior: USD contracts keep `exchange="SMART"` (existing AMEX/BATS workaround). Non-USD contracts are qualified (cheap — only the few foreign ones) so IB fills in a routable exchange, instead of being force-set to SMART which fails for TSEJ/KSE.
+- Behavior: USD contracts keep `exchange="SMART"` (existing AMEX/BATS workaround). Non-USD contracts are qualified (cheap — only the few foreign ones) so IB fills in a routable exchange, instead of being force-set to SMART which fails for TSEJ/KRX.
 
 - [ ] **Step 1: Implement (no isolated unit test — see note; verified live in Phase 5)**
 
@@ -443,7 +443,7 @@ Replace the loop at :1259-1262:
             client.set_market_data_type(4)
             # USD contracts: force SMART (positions from get_positions() may carry
             # AMEX/BATS that fail with reqMktData type 4). Non-USD contracts (TSEJ/
-            # KSE): SMART does not route foreign venues — qualify so IB supplies a
+            # KRX): SMART does not route foreign venues — qualify so IB supplies a
             # routable exchange. Verified: forcing SMART on a JPY contract breaks
             # the quote. See order-path-incident-history.md.
             foreign = [p for p in positions if (p.get("currency") or "USD").upper() != "USD"]
@@ -467,7 +467,7 @@ Expected: 5016 and 000660 appear in the POSITIONS list with a non-`None` market 
 
 ```bash
 git add src/xenon/execution/ib_sync.py
-git commit -m "fix(ib-sync): qualify foreign contracts instead of forcing SMART (TSEJ/KSE quotes)"
+git commit -m "fix(ib-sync): qualify foreign contracts instead of forcing SMART (TSEJ/KRX quotes)"
 ```
 
 ### Task 1.5: Harvest `ExchangeRate` + compute USD totals + per-position `*_usd` + stamp payload
@@ -920,7 +920,7 @@ for (const fx of forexes) {
     subscribed.push(key);
   }
 }
-// Foreign stocks with explicit exchange/currency (TSEJ/JPY, KSE/KRW).
+// Foreign stocks with explicit exchange/currency (TSEJ/JPY, KRX/KRW).
 // Keyed by bare symbol like SMART/USD stocks, but built with native venue.
 for (const s of stocksMeta) {
   const key = s.symbol;
@@ -1500,7 +1500,7 @@ it("splits USD vs foreign positions into the right subscription buckets", () => 
   const out = deriveFxSubscriptions([
     { ticker: "AAPL", currency: "USD", exchange: "SMART" },
     { ticker: "5016", currency: "JPY", exchange: "TSEJ" },
-    { ticker: "000660", currency: "KRW", exchange: "KSE" },
+    { ticker: "000660", currency: "KRW", exchange: "KRX" },
   ]);
   expect(out.usdSymbols).toEqual(["AAPL"]);
   expect(out.forexes).toEqual([
@@ -1509,7 +1509,7 @@ it("splits USD vs foreign positions into the right subscription buckets", () => 
   ]);
   expect(out.stocksMeta).toEqual([
     { symbol: "5016", exchange: "TSEJ", currency: "JPY" },
-    { symbol: "000660", exchange: "KSE", currency: "KRW" },
+    { symbol: "000660", exchange: "KRX", currency: "KRW" },
   ]);
 });
 ```
@@ -1608,7 +1608,7 @@ git commit -m "feat(ui): convert all foreign-position surfaces to USD + missing-
 
 ## PHASE 4 — Order placement: exchange/currency-aware stock orders
 
-Enables placing TSEJ/KSE limit orders the same way as US stocks.
+Enables placing TSEJ/KRX limit orders the same way as US stocks.
 
 ### Task 4.0: Preflight — allow foreign cash equities through the universe gate (BLOCKER)
 
@@ -1644,7 +1644,7 @@ def test_foreign_stock_buy_bypasses_universe():
 
 
 def test_foreign_stock_sell_without_shares_still_blocked():
-    req = PreflightRequest(ticker="000660", security_type="STK", action="SELL", quantity=10, currency="KRW", exchange="KSE")
+    req = PreflightRequest(ticker="000660", security_type="STK", action="SELL", quantity=10, currency="KRW", exchange="KRX")
     v = evaluate(req, _view())
     assert v.accept is False
     assert v.reason_code.value == "INSUFFICIENT_SHARES" or v.reason_code == __import__("xenon.execution.preflight", fromlist=["ReasonCode"]).ReasonCode.INSUFFICIENT_SHARES
@@ -2008,7 +2008,7 @@ PY
 Expect each foreign row to carry `currency`, `exchange`, `market_value_usd`, `entry_cost_usd`; `fx_rates` to contain `JPY`/`KRW`; rates in the sane band (USD/JPY ~150–165 ⇒ usd_per_unit ~0.006, USD/KRW ~1300–1600 ⇒ ~0.00065). If a rate is inverted, fix Task 1.5 (ExchangeRate direction) before proceeding.
 
 - [ ] **Step 3 (supervised PG/API/UI proof):** With operator sign-off, run ONE non-read-only sync against live IB (`XENON_TRADING_MODE=live uv run xenon-ib-sync --sync --port 4001`, `XENON_READ_ONLY` unset) so a fresh snapshot with the new fields lands in `core_test`. (Writes a portfolio snapshot only — no orders.) Then `curl http://localhost:8421/portfolio | jq '.positions[] | select(.ticker=="5016" or .ticker=="000660") | {ticker,currency,exchange,market_value,market_value_usd}'` and `... | jq .fx_rates` — fields populated.
-- [ ] **Step 4 (Playwright/chrome-cdp):** Open `http://localhost:3200`, portfolio view. Verify 5016 (TSEJ/JPY) and 000660 (KSE/KRW) rows show a native price (¥/₩) sub-line AND a `$`-USD headline; FX badge shows `USD/JPY` + `USD/KRW` with live dots. Screenshot → `output/playwright/japan-korea-usd-<date>.png`.
+- [ ] **Step 4 (Playwright/chrome-cdp):** Open `http://localhost:3200`, portfolio view. Verify 5016 (TSEJ/JPY) and 000660 (KRX/KRW) rows show a native price (¥/₩) sub-line AND a `$`-USD headline; FX badge shows `USD/JPY` + `USD/KRW` with live dots. Screenshot → `output/playwright/japan-korea-usd-<date>.png`.
 
 ### Task 5.3: GATED — foreign-stock order placement with an unfillable limit
 
@@ -2020,12 +2020,12 @@ Safe test design (once an environment is chosen):
 
 > **Adversarial caution — the non-read-only window leaks live state into `core_test`:** lifting `XENON_READ_ONLY` against live IB means the FastAPI activity poller (`_maybe_start_activity_poller`) and boot reconcilers will mirror ANY live fills/orders into `core_test`, not just this test's order. Keep the window minimal: set `XENON_IB_ACTIVITY_POLLER=0` for the test session, place → assert → cancel quickly, then restore `XENON_READ_ONLY=1`. The order itself is unfillable, but other concurrent live activity is the leak vector.
 
-> **Board-lot + tick warning (review fix — Codex ISSUE-6, conf 84):** TSEJ and KSE enforce board-lot sizes (TSE trading unit is commonly 100 shares) and price ticks that differ from the US 0.01 stub. A 1-share or off-tick order may be IB-REJECTED — and the executor must NOT mistake an expected lot/tick rejection for a working implementation, nor for a bug. Before the test, read the contract's board lot + min tick (IB `reqContractDetails` → `marketRuleIds`/`minSize`, or just match the existing held lot size of 5016/000660) and size the order to a VALID lot at a valid (absurdly low) tick.
+> **Board-lot + tick warning (review fix — Codex ISSUE-6, conf 84):** TSEJ and KRX enforce board-lot sizes (TSE trading unit is commonly 100 shares) and price ticks that differ from the US 0.01 stub. A 1-share or off-tick order may be IB-REJECTED — and the executor must NOT mistake an expected lot/tick rejection for a working implementation, nor for a bug. Before the test, read the contract's board lot + min tick (IB `reqContractDetails` → `marketRuleIds`/`minSize`, or just match the existing held lot size of 5016/000660) and size the order to a VALID lot at a valid (absurdly low) tick.
 
 - [ ] **Step 1:** Place a **BUY** limit on 5016 (TSEJ/JPY) using a VALID board lot (e.g. 100 shares — confirm via contract details) at a price far BELOW market (e.g. ¥1 when market is ~¥1000+) → cannot fill. Body: `type:"stock", symbol:"5016", action:"BUY", quantity:<board_lot>, limitPrice:<valid low tick>, tif:"DAY", exchange:"TSEJ", currency:"JPY"`. A code-110 (tick) or lot-size rejection here means the order body needs a valid tick/lot — it is NOT a feature failure; fix the test inputs and retry.
 - [ ] **Step 2:** Assert the API returns `status:"ok"` with `initialStatus` in {`Submitted`,`PreSubmitted`,`Working`} and NOT `Filled`.
 - [ ] **Step 3:** Immediately CANCEL the order via the cancel path; assert it cancels. **Verify the cancel rebuilds/uses the foreign contract correctly** (see Task 4.5 / Codex ISSUE-10) — a cancel that silently fails or targets a SMART/USD contract is a real bug, not a pass.
-- [ ] **Step 4:** Repeat for 000660 (KSE/KRW) — BUY a valid board lot at an absurdly low won price (e.g. ₩1, on a valid tick).
+- [ ] **Step 4:** Repeat for 000660 (KRX/KRW) — BUY a valid board lot at an absurdly low won price (e.g. ₩1, on a valid tick).
 - [ ] **Step 5:** Confirm via IB/`/orders` that no fill occurred and the working order is gone, AND the `/orders` row renders the correct venue/currency (not SMART/USD). Screenshot the order lifecycle.
 
 ---
@@ -2035,7 +2035,7 @@ Safe test design (once an environment is chosen):
 The dev `live` stack forces `XENON_READ_ONLY=1` (orders 403). The paper stack (`dev.sh paper`, port 4002) does NOT hold 5016/000660 and may lack TSE/KRX market-data + trading permissions. So testing real foreign-order placement requires one of:
 
 1. **Paper account** — verify TSE/KRX trading permission exists on paper first; place the unfillable order there. Safest (no live money), but may be blocked by missing paper entitlements.
-2. **Live account, read-only lifted for the test** — run the live IB gateway with `XENON_READ_ONLY` unset for a single supervised, unfillable order, then restore read-only. Exercises the real path but transmits a genuine (unfillable) order to TSEJ/KSE.
+2. **Live account, read-only lifted for the test** — run the live IB gateway with `XENON_READ_ONLY` unset for a single supervised, unfillable order, then restore read-only. Exercises the real path but transmits a genuine (unfillable) order to TSEJ/KRX.
 
 This is the one step that cannot be auto-decided; it needs operator sign-off on which account + acceptance that a real unfillable order is transmitted.
 

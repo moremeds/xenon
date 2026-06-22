@@ -411,8 +411,10 @@ def collapse_positions(positions: list) -> list:
     # Group by ticker + expiry
     groups = defaultdict(list)
     for pos in positions:
-        # Use N/A expiry for stocks to keep them separate
-        key = (pos["symbol"], pos["expiry"])
+        # Use N/A expiry for stocks to keep them separate. Include currency so a
+        # foreign listing (e.g. 5016 JPY) never merges with a same-symbol USD
+        # listing — short numeric tickers can collide across exchanges.
+        key = (pos["symbol"], pos["expiry"], (pos.get("currency") or "USD").upper())
         groups[key].append(pos)
 
     # ── Second pass: merge covered calls ──
@@ -423,7 +425,7 @@ def collapse_positions(positions: list) -> list:
     collapsed = []
     position_id = 1
 
-    for (symbol, expiry), legs in groups.items():
+    for (symbol, expiry, currency), legs in groups.items():
         structure_type, risk_profile = detect_structure_type(legs)
 
         # Bugfix 2026-04-27: 2 legs sharing (ticker, expiry) that don't form a
@@ -522,6 +524,7 @@ def collapse_positions(positions: list) -> list:
                     "market_price": leg.get("marketPrice"),
                     "market_value": leg.get("marketValue"),
                     "market_price_is_calculated": bool(leg.get("marketPriceIsCalculated")),
+                    "currency": (leg.get("currency") or "USD").upper(),
                 }
             )
 
@@ -529,6 +532,8 @@ def collapse_positions(positions: list) -> list:
             {
                 "id": position_id,
                 "ticker": symbol,
+                "currency": (currency or "USD").upper(),
+                "exchange": (legs[0].get("exchange") if legs else None),
                 "structure": structure_desc,
                 "structure_type": structure_type,
                 "risk_profile": risk_profile,
@@ -621,6 +626,8 @@ def fetch_positions(client: IBClient) -> list:
         formatted.append(
             {
                 "symbol": contract.symbol,
+                "currency": (getattr(contract, "currency", "") or "USD").upper(),
+                "exchange": (getattr(contract, "primaryExchange", "") or getattr(contract, "exchange", "") or None),
                 "secType": contract.secType,
                 "position": position_size,
                 "avgCost": avg_cost,
