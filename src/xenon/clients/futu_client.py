@@ -524,14 +524,28 @@ class FutuClient:
 
         total_unrealized = sum((p.get("unrealized_pnl") or 0.0) for p in positions)
 
-        long_mv = 0.0
-        short_mv = 0.0
-        for p in positions:
-            mv = p.get("market_value") or 0.0
-            if mv >= 0:
-                long_mv += mv
-            else:
-                short_mv += mv  # negative
+        # gross_position_value drives the UI's OPEN RISK / deployed-capital
+        # headline, which MUST be USD. Per-position market_value is in each
+        # security's NATIVE currency, so summing across rows mixes units (a
+        # single JPY row adds ¥-millions into a USD total — the cause of the
+        # bogus $2.9M open-risk figure). The account query runs with
+        # currency=USD, so its long_mv/short_mv are already USD-denominated;
+        # prefer them. Fall back to the native sum only when Futu omits the
+        # account aggregates (older OpenD / SIMULATE accounts).
+        acct_long_mv = account.get("long_mv")
+        acct_short_mv = account.get("short_mv")
+        if acct_long_mv is not None or acct_short_mv is not None:
+            long_mv = acct_long_mv or 0.0
+            short_mv = acct_short_mv or 0.0
+        else:
+            long_mv = 0.0
+            short_mv = 0.0
+            for p in positions:
+                mv = p.get("market_value") or 0.0
+                if mv >= 0:
+                    long_mv += mv
+                else:
+                    short_mv += mv  # negative
 
         gross_position_value = long_mv + abs(short_mv)
 

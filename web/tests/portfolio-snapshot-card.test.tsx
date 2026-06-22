@@ -9,6 +9,10 @@ import {
   PortfolioSnapshotCard,
   type DashboardAccount,
 } from "@/components/dashboard/PortfolioSnapshotCard";
+import {
+  futuToPortfolioData,
+  type FutuPortfolioEnvelope,
+} from "@/lib/futuPortfolioAdapter";
 import type { PortfolioData } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 
@@ -225,6 +229,106 @@ describe("PortfolioSnapshotCard (merged IB + FUTU)", () => {
     expect(body.textContent).toContain("$1,003,726");
     expect(body.textContent).toContain("FUTU");
     expect(body.textContent).toContain("$233,563");
+  });
+
+  it("OPEN RISK renders the USD deployed total, not the native ¥-inflated sum (regression)", () => {
+    // Build the FUTU portfolio through the REAL adapter from an envelope that
+    // reproduces the bug: one USD short option + one JPY stock whose ¥2.45M MV
+    // would leak into the deployed total. gross_position_value is the USD
+    // figure from accinfo_query(currency=USD).
+    const env: FutuPortfolioEnvelope = {
+      ok: true,
+      fetched_at: "2026-06-22T14:00:00.000Z",
+      data_as_of: "2026-06-22T14:00:00.000Z",
+      account_id: "acct",
+      source: "futu",
+      is_stale: false,
+      warnings: [],
+      count: 2,
+      positions: [
+        {
+          futu_code: "US.TSLA260821P400000",
+          normalized: {
+            kind: "OPT",
+            symbol: "TSLA",
+            expiry: "20260821",
+            strike: 400,
+            right: "P",
+            exchange: "SMART",
+            currency: "USD",
+            trading_class: null,
+            live_data: false,
+          },
+          quantity: -1,
+          avg_cost: 250,
+          market_price: 282.5,
+          market_value: -28_250,
+          unrealized_pnl: 0,
+          unrealized_pnl_pct: 0,
+          currency: "USD",
+          position_side: "SHORT",
+        },
+        {
+          futu_code: "JP.5016",
+          normalized: {
+            kind: "STK",
+            symbol: "5016",
+            exchange: "TSEJ",
+            currency: "JPY",
+            live_data: true,
+          },
+          quantity: 100,
+          avg_cost: 24_500,
+          market_price: 24_500,
+          market_value: 2_450_000, // ¥
+          unrealized_pnl: 0,
+          unrealized_pnl_pct: 0,
+          currency: "JPY",
+          position_side: "LONG",
+        },
+      ],
+      account_summary: {
+        net_liquidation: 207_348.11,
+        equity_with_loan: 207_348.11,
+        cash: -27_859.82,
+        settled_cash: -27_859.82,
+        buying_power: 50_000,
+        available_funds: 50_000,
+        initial_margin: 100_000,
+        maintenance_margin: 139_881.42,
+        excess_liquidity: 67_466.69,
+        gross_position_value: 469_004.47, // USD
+        unrealized_pnl: 0,
+        daily_pnl: 0,
+        realized_pnl: 0,
+        dividends: null,
+        previous_day_ewl: null,
+        reg_t_equity: null,
+        sma: null,
+      },
+    };
+    const accts: DashboardAccount[] = [
+      {
+        source: "ib",
+        label: "IB",
+        accountId: "IB",
+        status: "live",
+        portfolio: ibPortfolio(), // total_deployed_dollars = 13,267
+      },
+      {
+        source: "futu",
+        label: "FUTU",
+        accountId: "F",
+        status: "stale",
+        portfolio: futuToPortfolioData(env),
+      },
+    ];
+    const { container } = render(<PortfolioSnapshotCard accounts={accts} />);
+    const openRisk = mergedCell(container, "Open Risk")?.textContent ?? "";
+    // 13,267 (IB) + 469,004.47 (FUTU USD) = 482,271 — NOT 2,491,517 ($2.49M).
+    expect(openRisk).toContain("$482,271");
+    expect(openRisk).not.toMatch(/M/); // no millions abbreviation = no ¥-leak
+    expect(openRisk).not.toContain("2,4"); // neither 2,478,250 nor 2,491,517
   });
 
   it("renders --- for merged cells when all accounts are empty", () => {
