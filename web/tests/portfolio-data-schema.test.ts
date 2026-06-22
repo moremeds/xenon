@@ -65,4 +65,64 @@ describe("PortfolioDataSchema", () => {
 
     expect(Value.Check(PortfolioDataSchema, sample)).toBe(true);
   });
+
+  test("accepts a JPY position with USD fields + fx_rates", () => {
+    // Real IB snapshot 2026-06-22: 5016 JX Advanced Metals, 100 sh.
+    //   entry 100 @ prior-close ¥4,747 = ¥474,700 → $2,936.49
+    //   mkt   100 @ last ¥5,267       = ¥526,700 → $3,258.17
+    //   USD.JPY 161.6575 → usd_per_unit[JPY] = 0.006186
+    const payload = {
+      bankroll: 100_000,
+      peak_value: 100_000,
+      last_sync: "2026-06-22T00:00:00Z",
+      base_currency: "USD",
+      fx_rates: { USD: 1, JPY: 0.006186 },
+      fx_unconverted_count: 0,
+      positions: [
+        {
+          id: 1,
+          ticker: "5016",
+          currency: "JPY",
+          exchange: "TSEJ",
+          structure: "Stock (100 shares)",
+          structure_type: "Stock",
+          risk_profile: "equity",
+          expiry: "N/A",
+          contracts: 100,
+          direction: "LONG",
+          entry_cost: 474_700,
+          entry_cost_usd: 2_936.49,
+          max_risk: null,
+          market_value: 526_700,
+          market_value_usd: 3_258.17,
+          legs: [
+            {
+              direction: "LONG",
+              contracts: 100,
+              type: "Stock",
+              currency: "JPY",
+              strike: null,
+              entry_cost: 474_700,
+              avg_cost: 4_747,
+              market_price: 5_267,
+              market_value: 526_700,
+              market_value_usd: 3_258.17,
+            },
+          ],
+          kelly_optimal: null,
+          target: null,
+          stop: null,
+          entry_date: "unknown",
+        },
+      ],
+      total_deployed_pct: 2.94,
+      total_deployed_dollars: 2_936.49,
+      remaining_capacity_pct: 97.06,
+      position_count: 1,
+      defined_risk_count: 0,
+      undefined_risk_count: 1,
+      avg_kelly_optimal: null,
+    };
+    expect(Value.Check(PortfolioDataSchema, payload)).toBe(true);
+  });
 });

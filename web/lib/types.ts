@@ -73,6 +73,10 @@ export type PortfolioLeg = {
   market_price: number | null;
   market_value: number | null;
   market_price_is_calculated?: boolean;
+  /** Native currency of the leg (JPY/KRW/USD). Optional — USD payloads omit. */
+  currency?: string;
+  /** Leg market value converted to USD at sync time (null if no FX rate). */
+  market_value_usd?: number | null;
 };
 
 export type PortfolioPosition = {
@@ -89,6 +93,13 @@ export type PortfolioPosition = {
   market_value: number | null;
   legs: PortfolioLeg[];
   market_price_is_calculated?: boolean;
+  /** Native currency of the position (JPY/KRW/USD). Optional — USD payloads omit. */
+  currency?: string;
+  /** Native listing exchange (TSEJ/KRX/SMART/...). */
+  exchange?: string | null;
+  /** Entry cost / market value converted to USD at sync time (null if no FX rate). */
+  entry_cost_usd?: number | null;
+  market_value_usd?: number | null;
   /** IB's per-position daily P&L from reqPnLSingle.
    *  Correctly handles intraday additions (only overnight contracts use
    *  yesterday's close; today's adds use fill price as reference).
@@ -197,6 +208,12 @@ export type PortfolioData = {
   bankroll: number;
   peak_value: number;
   last_sync: string;
+  /** Base currency for all *_usd fields + headline totals. "USD" for v1. */
+  base_currency?: string;
+  /** usd_per_unit map (USD value of 1 unit) for native→USD display conversion. */
+  fx_rates?: Record<string, number>;
+  /** Count of non-USD positions excluded from USD totals for lack of an FX rate. */
+  fx_unconverted_count?: number;
   positions: PortfolioPosition[];
   total_deployed_pct: number;
   total_deployed_dollars: number;
