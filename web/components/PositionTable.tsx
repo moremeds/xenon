@@ -559,7 +559,11 @@ function PositionRow({
           <td
             className={`right last-price-cell ${underlyingFlash ? `last-price-${underlyingFlash}` : ""}`}
           >
-            {underlyingPrice != null ? fmtPrice(underlyingPrice) : "—"}
+            {underlyingPrice != null
+              ? isForeign
+                ? fmtNative(underlyingPrice, cur)
+                : fmtPrice(underlyingPrice)
+              : "—"}
             {underlyingDirection === "up" && (
               <ArrowUp
                 size={11}
@@ -748,17 +752,22 @@ export default function PositionTable({
       <table style={{ tableLayout: "fixed", width: "100%" }}>
         <colgroup>
           <col style={{ width: "7%" }} />
-          <col style={{ width: "14%" }} />
-          <col style={{ width: "4%" }} />
+          {/* Structure trimmed 14→8 to fund the wider native-price columns; it
+              already wraps long structure names. */}
+          <col style={{ width: "8%" }} />
+          <col style={{ width: "3%" }} />
           <col style={{ width: "7%" }} />
-          {showUnderlying && <col style={{ width: "7%" }} />}
-          <col style={{ width: "7%" }} />
-          <col style={{ width: "7%" }} />
+          {/* Underlying / Avg Entry / Last Price 7→11: 7-digit native JPY/KRW
+              prices (₩2,919,000) overflowed and collided at narrower widths.
+              USD rows hold short values here, so the extra width is slack. */}
+          {showUnderlying && <col style={{ width: "11%" }} />}
+          <col style={{ width: "11%" }} />
+          <col style={{ width: "11%" }} />
+          <col style={{ width: "5%" }} />
           <col style={{ width: "6%" }} />
           <col style={{ width: "7%" }} />
           <col style={{ width: "8%" }} />
-          <col style={{ width: "8%" }} />
-          <col style={{ width: "11%" }} />
+          <col style={{ width: "9%" }} />
           {showExpiry && <col style={{ width: "7%" }} />}
         </colgroup>
         {!hideHeader && (

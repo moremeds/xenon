@@ -1419,6 +1419,26 @@ async def portfolio_get(scope=Depends(get_account_scope)):
     return payload
 
 
+def _snapshot_age_seconds(payload: dict) -> Optional[float]:
+    """Age in seconds of a portfolio payload's `last_sync` stamp, or None when
+    absent/unparseable. `last_sync` is naive-local ISO from ib_sync (same host
+    as the API), so compare against naive `datetime.now()`."""
+    raw = payload.get("last_sync") if isinstance(payload, dict) else None
+    if not raw:
+        return None
+    try:
+        return (datetime.now() - datetime.fromisoformat(raw)).total_seconds()
+    except (ValueError, TypeError):
+        return None
+
+
+# A healthy /portfolio/sync rebuilds last_sync every run; a snapshot older than
+# this after a "successful" sync means the subprocess exited 0 but the PG write
+# never landed (e.g. a schema drift silently swallowed by save_portfolio). Loud,
+# not fatal — surfaced in the API log where it's actually visible.
+_STALE_SNAPSHOT_AFTER_SYNC_S = 300.0
+
+
 @app.post("/portfolio/sync")
 async def portfolio_sync(scope=Depends(get_account_scope)):
     """Sync portfolio from IB via subprocess, then return the fresh payload.
@@ -1437,6 +1457,19 @@ async def portfolio_sync(scope=Depends(get_account_scope)):
         raise HTTPException(
             status_code=502,
             detail="ib_sync ran but no snapshot landed in Postgres — check ib_sync logs.",
+        )
+    # Subprocess exited 0 but the snapshot is stale → the PG write was swallowed
+    # (save_portfolio catches write errors). Don't fail the read, but make it loud.
+    age = _snapshot_age_seconds(payload)
+    if age is not None and age > _STALE_SNAPSHOT_AFTER_SYNC_S and not _is_test_mode():
+        logger.error(
+            "portfolio sync returned a stale snapshot (last_sync age %.0fs > %.0fs) for "
+            "%s/%s/%s — ib_sync exited 0 but the Postgres write likely failed; check ib_sync logs.",
+            age,
+            _STALE_SNAPSHOT_AFTER_SYNC_S,
+            scope.broker,
+            scope.account_env,
+            scope.broker_account,
         )
     return payload
 
