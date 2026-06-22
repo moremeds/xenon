@@ -200,6 +200,69 @@ describe("futuToPortfolioData — position classification", () => {
     }
   });
 
+  it("classifies a Japan cash equity (kind=STK) as Stock, not Unknown", () => {
+    // Regression for JP.6981: symbol_norm now classifies Japan codes as STK
+    // (was UNKNOWN → rendered under the 'OTHER' bucket). The adapter must
+    // surface it as an ordinary equity row, ticker = bare 6981, JPY currency.
+    const env: FutuPortfolioEnvelope = {
+      ok: true,
+      fetched_at: "2026-06-22T14:00:00.000Z",
+      data_as_of: "2026-06-22T14:00:00.000Z",
+      account_id: "acct",
+      source: "futu",
+      is_stale: false,
+      warnings: [],
+      count: 1,
+      positions: [
+        {
+          futu_code: "JP.6981",
+          normalized: {
+            kind: "STK",
+            symbol: "6981",
+            exchange: "TSEJ",
+            currency: "JPY",
+            market: "JP",
+            live_data: false,
+          },
+          quantity: 200,
+          avg_cost: 11_860,
+          market_price: 12_250,
+          market_value: 2_450_000,
+          unrealized_pnl: 78_000,
+          unrealized_pnl_pct: 3.3,
+          currency: "JPY",
+          position_side: "LONG",
+        },
+      ],
+      account_summary: {
+        net_liquidation: 100_000,
+        equity_with_loan: 100_000,
+        cash: 0,
+        settled_cash: 0,
+        buying_power: 0,
+        available_funds: 0,
+        initial_margin: 0,
+        maintenance_margin: 0,
+        excess_liquidity: 0,
+        gross_position_value: 15_148,
+        unrealized_pnl: 0,
+        daily_pnl: 0,
+        realized_pnl: 0,
+        dividends: null,
+        previous_day_ewl: null,
+        reg_t_equity: null,
+        sma: null,
+      },
+    };
+    const jp = futuToPortfolioData(env).positions[0];
+    expect(jp.ticker).toBe("6981");
+    expect(jp.structure).toBe("Stock");
+    expect(jp.structure_type).toBe("Stock");
+    expect(jp.risk_profile).toBe("equity");
+    expect(jp.currency).toBe("JPY");
+    expect(jp.legs[0].type).toBe("Stock");
+  });
+
   it("propagates native currency onto the position AND leg (drives FX display + subscription)", () => {
     const env: FutuPortfolioEnvelope = {
       ok: true,

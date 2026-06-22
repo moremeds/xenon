@@ -10,7 +10,6 @@ import pytest
 
 from xenon.utils.symbol_norm import futu_to_ib, ib_to_futu
 
-
 # ────────────────────────────────────────────────────────────────────
 # Stocks
 # ────────────────────────────────────────────────────────────────────
@@ -74,6 +73,40 @@ def test_option_pattern_not_confused_with_stock():
     # Must not match the option regex — no date digits
     r = futu_to_ib("US.META")
     assert r["kind"] == "STK"
+
+
+# ────────────────────────────────────────────────────────────────────
+# Foreign cash equities (Japan) — classified as STK, not UNKNOWN
+# ────────────────────────────────────────────────────────────────────
+
+
+def test_japan_stock_is_classified_as_stock():
+    # JP.6981 = Murata Manufacturing (Tokyo Stock Exchange), priced in JPY.
+    # Verified present in the live Futu snapshot 2026-06-22. Must NOT fall
+    # through to UNKNOWN — it's an ordinary long cash equity.
+    r = futu_to_ib("JP.6981")
+    assert r["kind"] == "STK"
+    assert r["symbol"] == "6981"  # bare ticker, market prefix stripped (US.AAPL → AAPL)
+    assert r["exchange"] == "TSEJ"  # IB's Tokyo venue code
+    assert r["currency"] == "JPY"
+    assert r["market"] == "JP"  # preserved so ib_to_futu reconstructs JP.6981
+    # No live IB quote routing is wired for foreign Futu rows (the foreign
+    # quote path needs an exchange-qualified subscription, not SMART/USD).
+    assert r["live_data"] is False
+
+
+def test_japan_numeric_ticker_stays_string():
+    # Leading-zero / digit-only tickers must never be coerced to a number.
+    r = futu_to_ib("JP.7203")  # Toyota
+    assert r["kind"] == "STK"
+    assert r["symbol"] == "7203"
+    assert isinstance(r["symbol"], str)
+
+
+def test_us_stock_carries_us_market_tag():
+    # The market tag is now present on every STK result for round-trip use.
+    r = futu_to_ib("US.AAPL")
+    assert r["market"] == "US"
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -143,6 +176,7 @@ def test_never_returns_none_never_raises():
         "US.SPY260320P00450000",
         "US.TSLA260619P00250500",
         "US.NVDA260116C01000000",  # $1000 strike
+        "JP.6981",  # foreign cash equity must round-trip back to JP.6981
     ],
 )
 def test_semantic_round_trip(futu_code):

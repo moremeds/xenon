@@ -25,6 +25,7 @@ export type FutuNormalizedStock = {
   symbol: string;
   exchange: string;
   currency: string;
+  market?: string; // Futu market prefix ("US", "JP", ...) — foreign stocks set it
   live_data: boolean;
 };
 

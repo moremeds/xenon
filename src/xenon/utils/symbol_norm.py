@@ -48,7 +48,6 @@ from __future__ import annotations
 import re
 from typing import Optional, TypedDict, Union
 
-
 # ---------------------------------------------------------------------
 # Result types
 # ---------------------------------------------------------------------
@@ -59,6 +58,7 @@ class StockResult(TypedDict):
     symbol: str
     exchange: str
     currency: str
+    market: str  # Futu market prefix ("US", "JP", ...) — for ib_to_futu round-trip
     live_data: bool
 
 
@@ -93,6 +93,18 @@ NormalizedSymbol = Union[StockResult, OptionResult, UnknownResult]
 # (Futu uses 6 in some samples, 8 in others), so allow 4-9.
 _OPTION_RE = re.compile(r"^([A-Z][A-Z0-9]*)(\d{6})([CP])(\d{4,9})$")
 
+# Futu market prefix → (IB exchange, native currency) for foreign cash
+# equities we classify as tradable stocks. Markets absent from this map
+# fall through to UNKNOWN (HK/SH/SZ remain out of scope per the v1 decision;
+# their tests pin that behavior). Verified against the installed `futu`
+# SDK `Market` enum (HK, US, SH, SZ, SG, JP, AU, MY, CA) and the live Futu
+# snapshot 2026-06-22 (`JP.6981` Murata, JPY). Korea has NO Futu market —
+# Futu OpenD cannot hold KR positions — so it never appears here; Korea
+# support is IB-side only (KRX/KRW).
+_FOREIGN_STOCK_VENUE: dict[str, tuple[str, str]] = {
+    "JP": ("TSEJ", "JPY"),
+}
+
 
 def futu_to_ib(futu_symbol: str) -> NormalizedSymbol:
     """Parse a Futu code into an IB-facing normalized dict.
@@ -112,18 +124,23 @@ def futu_to_ib(futu_symbol: str) -> NormalizedSymbol:
     market, rest = raw.split(".", 1)
     market = market.upper()
 
-    if market != "US":
-        return _unknown(raw, f"market '{market}' not supported in v1 (US only)")
-
     if not rest:
         return _unknown(raw, "empty ticker after market prefix")
 
-    # Option vs stock: try the OCC-packed pattern first.
-    opt_match = _OPTION_RE.match(rest)
-    if opt_match:
-        return _parse_option(raw, opt_match)
+    if market == "US":
+        # Option vs stock: try the OCC-packed pattern first. Foreign markets
+        # (Japan) only carry cash equities in scope here, so options are a
+        # US-only branch.
+        opt_match = _OPTION_RE.match(rest)
+        if opt_match:
+            return _parse_option(raw, opt_match)
+        return _parse_stock(raw, rest)
 
-    return _parse_stock(raw, rest)
+    venue = _FOREIGN_STOCK_VENUE.get(market)
+    if venue is not None:
+        return _parse_foreign_stock(rest, market, venue)
+
+    return _unknown(raw, f"market '{market}' not supported in v1")
 
 
 def _parse_stock(raw: str, rest: str) -> StockResult:
@@ -139,7 +156,29 @@ def _parse_stock(raw: str, rest: str) -> StockResult:
         "symbol": ib_symbol,
         "exchange": "SMART",
         "currency": "USD",
+        "market": "US",
         "live_data": True,
+    }
+
+
+def _parse_foreign_stock(rest: str, market: str, venue: tuple[str, str]) -> StockResult:
+    """Foreign cash equity (e.g. `JP.6981` → Murata on TSEJ, JPY).
+
+    Futu foreign tickers are numeric (`6981`, `7203`); keep the bare ticker
+    exactly as Futu provides it as a string — no dot→space (that's the US
+    `BRK.B` convention) and no numeric coercion (leading-zero tickers must
+    survive). `live_data` is False because routing a live IB quote needs an
+    exchange-qualified subscription (TSEJ/JPY), which is not wired for the
+    read-only Futu path; the snapshot's `market_price` carries the row.
+    """
+    exchange, currency = venue
+    return {
+        "kind": "STK",
+        "symbol": rest,
+        "exchange": exchange,
+        "currency": currency,
+        "market": market,
+        "live_data": False,
     }
 
 
@@ -193,8 +232,12 @@ def ib_to_futu(info: NormalizedSymbol) -> str:
     """
     kind = info.get("kind")
     if kind == "STK":
-        sym = info["symbol"].replace(" ", ".")
-        return f"US.{sym}"
+        market = info.get("market", "US")
+        if market == "US":
+            sym = info["symbol"].replace(" ", ".")
+            return f"US.{sym}"
+        # Foreign stocks carry bare numeric tickers with no dot→space lossiness.
+        return f"{market}.{info['symbol']}"
     if kind == "OPT":
         underlying = info["symbol"]
         expiry = info["expiry"]  # YYYYMMDD
