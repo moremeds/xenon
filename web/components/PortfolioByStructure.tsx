@@ -23,12 +23,15 @@ import type { PortfolioPosition } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 import { buildTickerGroups } from "@/lib/portfolioByStructure";
 import { CATEGORY_LABELS, type CategoryKey } from "@/lib/structureCatalog";
-import { fmtUsd } from "@/lib/positionUtils";
+import { fmtUsd, nativeToDisplayUsd } from "@/lib/positionUtils";
+import { fmtNative } from "@/lib/fx";
+import { useFx } from "@/lib/useFx";
 import PositionTable from "./PositionTable";
 
 type Props = {
   positions: PortfolioPosition[];
   prices?: Record<string, PriceData>;
+  fxRates?: Record<string, number>;
   activeAccount: "ib" | "futu";
   lastSync: string;
 };
@@ -56,6 +59,7 @@ function fmtPrice(n: number | null): string {
 export default function PortfolioByStructure({
   positions,
   prices,
+  fxRates,
   activeAccount,
   lastSync,
 }: Props) {
@@ -66,6 +70,15 @@ export default function PortfolioByStructure({
       }),
     [positions, prices, activeAccount],
   );
+
+  // Live usd_per_unit for converting per-structure aggregate MV/P&L to USD.
+  const currencies = useMemo(
+    () => [
+      ...new Set(positions.map((p) => (p.currency || "USD").toUpperCase())),
+    ],
+    [positions],
+  );
+  const usdPerUnit = useFx(prices ?? {}, fxRates ?? { USD: 1 }, currencies);
 
   // Ephemeral collapse state, namespaced by activeAccount:ticker:category
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
@@ -100,6 +113,23 @@ export default function PortfolioByStructure({
           group;
         const hasDelta = agg.netDelta != null;
 
+        // Multi-currency: a foreign ticker card (e.g. 5016/JPY, 000660/KRW) is
+        // a single native-currency stock. Convert aggregate money to USD; the
+        // per-share `last` stays native. USD groups pass through unchanged.
+        const groupCurrency = (stock?.currency || "USD").toUpperCase();
+        const isForeign = groupCurrency !== "USD";
+        const aggMvUsd = nativeToDisplayUsd(agg.mv, groupCurrency, usdPerUnit);
+        const aggDayPnlUsd = nativeToDisplayUsd(
+          agg.dayPnl,
+          groupCurrency,
+          usdPerUnit,
+        );
+        const aggTotalPnlUsd = nativeToDisplayUsd(
+          agg.totalPnl,
+          groupCurrency,
+          usdPerUnit,
+        );
+
         // Track whether the card has already rendered its column header row.
         // Only the first sub-table in a card shows <thead>; subsequent sub-
         // tables use hideHeader so the card has a single header line.
@@ -116,7 +146,11 @@ export default function PortfolioByStructure({
               <div className="section-title">
                 <span style={{ fontWeight: 600 }}>{ticker}</span>
                 <span className="cell-muted">
-                  {fmtPrice(last)}{" "}
+                  {isForeign
+                    ? last != null
+                      ? fmtNative(last, groupCurrency)
+                      : "—"
+                    : fmtPrice(last)}{" "}
                   {dayChgPct != null ? `(${fmtPct(dayChgPct)})` : ""}
                 </span>
               </div>
@@ -129,29 +163,29 @@ export default function PortfolioByStructure({
                 }}
               >
                 <span className="cell-muted">
-                  MV {agg.mv != null ? fmtUsd(agg.mv) : "—"}
+                  MV {aggMvUsd != null ? fmtUsd(aggMvUsd) : "—"}
                 </span>
                 <span
                   className={
-                    agg.dayPnl != null
-                      ? agg.dayPnl >= 0
+                    aggDayPnlUsd != null
+                      ? aggDayPnlUsd >= 0
                         ? "positive"
                         : "negative"
                       : "cell-muted"
                   }
                 >
-                  Day {fmtSigned(agg.dayPnl)}
+                  Day {fmtSigned(aggDayPnlUsd)}
                 </span>
                 <span
                   className={
-                    agg.totalPnl != null
-                      ? agg.totalPnl >= 0
+                    aggTotalPnlUsd != null
+                      ? aggTotalPnlUsd >= 0
                         ? "positive"
                         : "negative"
                       : "cell-muted"
                   }
                 >
-                  P&amp;L {fmtSigned(agg.totalPnl)}
+                  P&amp;L {fmtSigned(aggTotalPnlUsd)}
                   {agg.totalPnlPct != null
                     ? ` (${fmtPct(agg.totalPnlPct)})`
                     : ""}
@@ -171,6 +205,7 @@ export default function PortfolioByStructure({
                   showExpiry={true}
                   showUnderlying={true}
                   prices={prices}
+                  fxRates={fxRates}
                   readonly={readonly}
                   hideHeader={takeHeaderSlot()}
                 />
@@ -278,6 +313,7 @@ export default function PortfolioByStructure({
                                   positions={sg.positions}
                                   showUnderlying={true}
                                   prices={prices}
+                                  fxRates={fxRates}
                                   readonly={readonly}
                                   hideHeader={takeHeaderSlot()}
                                 />

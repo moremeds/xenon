@@ -1,3 +1,5 @@
+import type { ForexContract, StockMeta } from "@/lib/pricesProtocol";
+
 /** Native-currency → USD conversion (mirror of src/xenon/utils/fx.py).
  *  usdPerUnit[cur] = USD value of 1 unit of `cur`, so usd = native * rate. */
 export function toUsd(
@@ -41,4 +43,36 @@ export function fmtNative(amount: number | null, currency: string): string {
   } catch {
     return `${amount.toLocaleString("en-US")} ${cur}`;
   }
+}
+
+/** Split portfolio positions into the three WS subscription buckets:
+ *   - usdSymbols: USD tickers (keep the existing SMART/USD `symbols` path),
+ *   - forexes: one USD/<cur> pair per distinct non-USD currency (for conversion),
+ *   - stocksMeta: {symbol,exchange,currency} per non-USD position (native-venue
+ *     quote — a SMART/USD subscription would fail for TSEJ/KRX).
+ *  A non-USD position WITHOUT an exchange still triggers a forex pair (so it
+ *  converts via the payload fallback) but gets no live foreign quote. */
+export function deriveFxSubscriptions(
+  positions: { ticker: string; currency?: string; exchange?: string | null }[],
+): { usdSymbols: string[]; forexes: ForexContract[]; stocksMeta: StockMeta[] } {
+  const usdSymbols: string[] = [];
+  const stocksMeta: StockMeta[] = [];
+  const quotes = new Set<string>();
+  for (const p of positions) {
+    const cur = (p.currency || "USD").toUpperCase();
+    if (cur === "USD") {
+      usdSymbols.push(p.ticker);
+    } else if (p.exchange) {
+      stocksMeta.push({
+        symbol: p.ticker,
+        exchange: p.exchange,
+        currency: cur,
+      });
+      quotes.add(cur);
+    } else {
+      quotes.add(cur);
+    }
+  }
+  const forexes = [...quotes].map((quote) => ({ base: "USD", quote }));
+  return { usdSymbols, forexes, stocksMeta };
 }

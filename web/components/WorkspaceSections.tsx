@@ -789,6 +789,7 @@ function PortfolioSections({
         <PortfolioByStructure
           positions={structureFilter.filtered}
           prices={prices}
+          fxRates={portfolio.fx_rates}
           activeAccount={activeAccount}
           lastSync={portfolio.last_sync}
         />
@@ -825,6 +826,7 @@ function PortfolioSections({
               positions={definedFilter.filtered}
               showUnderlying={true}
               prices={prices}
+              fxRates={portfolio.fx_rates}
               readonly={activeAccount === "futu"}
             />
           </div>
@@ -859,6 +861,7 @@ function PortfolioSections({
               positions={undefinedFilter.filtered}
               showUnderlying={true}
               prices={prices}
+              fxRates={portfolio.fx_rates}
               readonly={activeAccount === "futu"}
             />
           </div>
@@ -891,6 +894,7 @@ function PortfolioSections({
               positions={equityFilter.filtered}
               showExpiry={false}
               prices={prices}
+              fxRates={portfolio.fx_rates}
               readonly={activeAccount === "futu"}
             />
           </div>

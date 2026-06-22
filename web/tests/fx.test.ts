@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { toUsd, usdPerUnitFromForexTick, fmtNative } from "@/lib/fx";
+import {
+  toUsd,
+  usdPerUnitFromForexTick,
+  fmtNative,
+  deriveFxSubscriptions,
+} from "@/lib/fx";
 
 // Real IB snapshot, 2026-06-22:
 //   5016 JX Advanced Metals: 100 sh @ ¥5,267 = ¥526,700 market value
@@ -50,5 +55,39 @@ describe("fmtNative", () => {
   });
   it("returns a placeholder for null", () => {
     expect(fmtNative(null, "JPY")).toBe("---");
+  });
+});
+
+describe("deriveFxSubscriptions", () => {
+  it("splits USD vs foreign positions into the right subscription buckets", () => {
+    const out = deriveFxSubscriptions([
+      { ticker: "AAPL", currency: "USD", exchange: "SMART" },
+      { ticker: "5016", currency: "JPY", exchange: "TSEJ" },
+      { ticker: "000660", currency: "KRW", exchange: "KRX" },
+    ]);
+    expect(out.usdSymbols).toEqual(["AAPL"]);
+    expect(out.forexes).toEqual([
+      { base: "USD", quote: "JPY" },
+      { base: "USD", quote: "KRW" },
+    ]);
+    expect(out.stocksMeta).toEqual([
+      { symbol: "5016", exchange: "TSEJ", currency: "JPY" },
+      { symbol: "000660", exchange: "KRX", currency: "KRW" },
+    ]);
+  });
+
+  it("a non-USD position without an exchange still triggers a forex pair, no foreign quote", () => {
+    const out = deriveFxSubscriptions([
+      { ticker: "5016", currency: "JPY", exchange: null },
+    ]);
+    expect(out.usdSymbols).toEqual([]);
+    expect(out.stocksMeta).toEqual([]);
+    expect(out.forexes).toEqual([{ base: "USD", quote: "JPY" }]);
+  });
+
+  it("defaults missing currency to USD", () => {
+    const out = deriveFxSubscriptions([{ ticker: "SPY" }]);
+    expect(out.usdSymbols).toEqual(["SPY"]);
+    expect(out.forexes).toEqual([]);
   });
 });
