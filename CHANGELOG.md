@@ -5,12 +5,17 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.7.1] — 2026-06-22
+### Fixed
 
+- IB foreign-stock (JPY/KRW) rows: native per-share price columns (Underlying, Avg Entry, Last Price) widened to 11% so 7-digit values (₩2,919,000) no longer overflow and collide; the Underlying cell now formats native currency (₩/¥) via `fmtNative` instead of a bogus `$` prefix
+- `/portfolio/sync` logs a loud error when it returns a stale snapshot — catches the silent class of failure where `xenon-ib-sync` exits 0 but the Postgres write was swallowed (e.g. schema drift from an un-applied migration). Non-fatal: the read still returns, but the staleness is now visible in the API log
+
+## [0.7.1] — 2026-06-22
 
 ### Fixed
 
 - Realized P&L for non-USD fills (KRW, JPY) now FX-converted to USD before display; previously ₩595,618 rendered as -$595,618 (native magnitude treated as USD). `CommissionReport.currency` threaded from IB fill pipeline through fill metadata, API response, and `computeRealizedPnlFromFills`; fills with unknown non-USD currency are skipped rather than added at native magnitude
+
 ## [0.7.0] — 2026-06-22
 
 ### Added
