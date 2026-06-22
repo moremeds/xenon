@@ -5,6 +5,9 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-06-22
+
+
 ### Added
 
 - Japan (TSEJ/JPY) and Korea (KSE/KRW) cash equity support end-to-end: IB quotes, order entry, portfolio display, and Futu read-only sync
@@ -21,7 +24,6 @@ All notable changes to Xenon are documented here. Format loosely based on
 - Futu Japan equities now correctly classified as `Stock` (not `Unknown`); no spurious "OTHER" collapsible group in the card
 - IB `BASE` pseudo-currency filtered from FX harvest so it never appears as a `USD/BASE` badge
 - Futu `gross_position_value` and per-position values USD-converted via FX rates
-
 ## [0.6.6] — 2026-06-21
 
 ### Changed
