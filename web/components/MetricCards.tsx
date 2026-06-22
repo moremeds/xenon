@@ -8,6 +8,7 @@ import {
   type ExposureDataWithBreakdown,
 } from "@/lib/exposureBreakdown";
 import { computeDayMoveBreakdown } from "@/lib/dayMoveBreakdown";
+import { computeRealizedPnlFromFills } from "@/lib/realized-pnl";
 import { nativeToDisplayUsd } from "@/lib/positionUtils";
 import { fmtNative } from "@/lib/fx";
 import { useFx } from "@/lib/useFx";
@@ -847,7 +848,7 @@ export default function MetricCards({
   const hasDaily =
     todayUnrealized != null && todayUnrealized.positionsWithData > 0;
   const unrealized = todayUnrealized?.pnl ?? 0;
-  const realized = realizedPnl ?? 0;
+  const realized = computeRealizedPnlFromFills(executedOrders, usdPerUnit);
   const total = unrealized + realized;
 
   const acct = portfolio.account_summary;
@@ -963,7 +964,7 @@ export default function MetricCards({
         unrealized={unrealized}
         realized={realized}
         total={total}
-        realizedPnl={realizedPnl}
+        realizedPnl={realized}
         collapsed={collapsed.todayPnl}
         onToggle={() => toggle("todayPnl")}
         onDayMoveClick={() => setDayMoveModalOpen(true)}

@@ -5,8 +5,11 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.7.0] — 2026-06-22
+### Fixed
 
+- Realized P&L for non-USD fills (KRW, JPY) now FX-converted to USD before display; previously ₩595,618 rendered as -$595,618 (native magnitude treated as USD). `CommissionReport.currency` threaded from IB fill pipeline through fill metadata, API response, and `computeRealizedPnlFromFills`; fills with unknown non-USD currency are skipped rather than added at native magnitude
+
+## [0.7.0] — 2026-06-22
 
 ### Added
 
@@ -24,6 +27,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 - Futu Japan equities now correctly classified as `Stock` (not `Unknown`); no spurious "OTHER" collapsible group in the card
 - IB `BASE` pseudo-currency filtered from FX harvest so it never appears as a `USD/BASE` badge
 - Futu `gross_position_value` and per-position values USD-converted via FX rates
+
 ## [0.6.6] — 2026-06-21
 
 ### Changed

@@ -155,6 +155,7 @@ def _executed_order(row: dict[str, Any]) -> dict[str, Any]:
         "avgPrice": _float_or_none(row.get("price")),
         "commission": _float_or_none(row.get("commission")),
         "realizedPNL": _float_or_none(metadata.get("realized_pnl")),
+        "currency": str(metadata.get("currency") or "USD"),
         "time": _iso(row.get("filled_at")),
         "exchange": str(metadata.get("exchange") or ""),
     }
