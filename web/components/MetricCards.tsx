@@ -214,6 +214,7 @@ function SectionHeader({
 function AccountRow({
   acct,
   dayPnl,
+  unrealizedPnl,
   collapsed,
   onToggle,
   onNetLiqClick,
@@ -223,6 +224,10 @@ function AccountRow({
 }: {
   acct: AccountSummary;
   dayPnl: number | null;
+  // USD-denominated unrealized P&L. Equals acct.unrealized_pnl for IB (already
+  // base-USD); for Futu it's the FX-converted per-position sum (acct value is a
+  // native-currency sum the envelope can't convert — accinfo returns "N/A").
+  unrealizedPnl: number;
   collapsed: boolean;
   onToggle: () => void;
   onNetLiqClick: () => void;
@@ -261,12 +266,9 @@ function AccountRow({
           <MetricCard
             card={{
               label: "Unrealized P&L",
-              value: fmtSignedExact(acct.unrealized_pnl),
+              value: fmtSignedExact(unrealizedPnl),
               change: "OPEN POSITIONS",
-              tone:
-                acct.unrealized_pnl !== 0
-                  ? tone(acct.unrealized_pnl)
-                  : "neutral",
+              tone: unrealizedPnl !== 0 ? tone(unrealizedPnl) : "neutral",
             }}
             onClick={onUnrealizedClick}
           />
@@ -852,6 +854,20 @@ export default function MetricCards({
   const accountDayPnl = acct
     ? resolveAccountDayPnlValue(portfolio, prices)
     : null;
+  // account_summary.unrealized_pnl is base-USD for IB, but for Futu it's a
+  // native-currency SUM (the envelope can't FX-convert it — accinfo returns
+  // "N/A" for the USD figure). For Futu, derive the USD unrealized from the
+  // FX-converted per-position sum so a ¥/₩ row can't leak its native magnitude.
+  const accountUnrealizedUsd =
+    acct && portfolio.source === "futu"
+      ? portfolio.positions.reduce((sum, pos) => {
+          const mv = resolveMarketValue(pos);
+          if (mv == null) return sum;
+          const cur = (pos.currency || "USD").toUpperCase();
+          const usd = nativeToDisplayUsd(mv - pos.entry_cost, cur, usdPerUnit);
+          return usd == null ? sum : sum + usd;
+        }, 0)
+      : (acct?.unrealized_pnl ?? 0);
 
   // Breakdown rows (computed lazily — only used when modals open)
   const unrealizedBreakdownRows = unrealizedModalOpen
@@ -881,6 +897,7 @@ export default function MetricCards({
         <AccountRow
           acct={acct}
           dayPnl={accountDayPnl}
+          unrealizedPnl={accountUnrealizedUsd}
           collapsed={collapsed.account}
           onToggle={() => toggle("account")}
           onNetLiqClick={() => setNetLiqModalOpen(true)}

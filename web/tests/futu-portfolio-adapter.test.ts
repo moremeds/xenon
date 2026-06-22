@@ -200,6 +200,61 @@ describe("futuToPortfolioData — position classification", () => {
     }
   });
 
+  it("propagates native currency onto the position AND leg (drives FX display + subscription)", () => {
+    const env: FutuPortfolioEnvelope = {
+      ok: true,
+      fetched_at: "2026-06-22T14:00:00.000Z",
+      data_as_of: "2026-06-22T14:00:00.000Z",
+      account_id: "acct",
+      source: "futu",
+      is_stale: false,
+      warnings: [],
+      count: 1,
+      positions: [
+        {
+          futu_code: "JP.5016",
+          normalized: {
+            kind: "STK",
+            symbol: "5016",
+            exchange: "TSEJ",
+            currency: "JPY",
+            live_data: true,
+          },
+          quantity: 100,
+          avg_cost: 24_500,
+          market_price: 24_500,
+          market_value: 2_450_000,
+          unrealized_pnl: 0,
+          unrealized_pnl_pct: 0,
+          currency: "JPY",
+          position_side: "LONG",
+        },
+      ],
+      account_summary: {
+        net_liquidation: 100_000,
+        equity_with_loan: 100_000,
+        cash: 0,
+        settled_cash: 0,
+        buying_power: 0,
+        available_funds: 0,
+        initial_margin: 0,
+        maintenance_margin: 0,
+        excess_liquidity: 0,
+        gross_position_value: 15_152,
+        unrealized_pnl: 0,
+        daily_pnl: 0,
+        realized_pnl: 0,
+        dividends: null,
+        previous_day_ewl: null,
+        reg_t_equity: null,
+        sma: null,
+      },
+    };
+    const data = futuToPortfolioData(env);
+    expect(data.positions[0].currency).toBe("JPY");
+    expect(data.positions[0].legs[0].currency).toBe("JPY");
+  });
+
   it("formats option expiry as YYYY-MM-DD", () => {
     const opt = data.positions.find((p) => p.expiry.length > 0);
     if (opt) {

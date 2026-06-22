@@ -118,7 +118,10 @@ export default function PortfolioByStructure({
         // Multi-currency: a foreign ticker card (e.g. 5016/JPY, 000660/KRW) is
         // a single native-currency stock. Convert aggregate money to USD; the
         // per-share `last` stays native. USD groups pass through unchanged.
-        const groupCurrency = (stock?.currency || "USD").toUpperCase();
+        // Use group.currency (not stock?.currency) so a non-stock/Unknown
+        // foreign row — e.g. a Futu JP.* position with no parsed stock leg —
+        // still reports its real currency instead of defaulting to USD.
+        const groupCurrency = group.currency;
         const isForeign = groupCurrency !== "USD";
         const aggMvUsd = nativeToDisplayUsd(agg.mv, groupCurrency, usdPerUnit);
         const aggDayPnlUsd = nativeToDisplayUsd(

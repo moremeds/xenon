@@ -79,4 +79,41 @@ describe("buildTickerGroups — cross-ticker sort in USD", () => {
     });
     expect(groups.map((g) => g.ticker)).toEqual(["5016", "MSFT"]);
   });
+
+  it("reports group.currency for a non-stock/Unknown foreign position (no USD default)", () => {
+    // A Futu JP.* row classifies as Unknown — it has NO stock leg, so deriving
+    // the card currency from stock?.currency would default it to USD and leak
+    // the ¥ magnitude. group.currency must come from the position itself.
+    const unknown: PortfolioPosition = {
+      id: 9001,
+      ticker: "JP.6981",
+      currency: "JPY",
+      structure: "Unknown",
+      structure_type: "Unknown",
+      risk_profile: "complex",
+      direction: "LONG",
+      contracts: 200,
+      expiry: "",
+      entry_cost: 2_372_000,
+      market_value: 2_450_000,
+      legs: [
+        {
+          type: "Stock",
+          direction: "LONG",
+          strike: null,
+          contracts: 200,
+          currency: "JPY",
+          avg_cost: 11_860,
+          entry_cost: 2_372_000,
+          market_price: 12_250,
+          market_value: 2_450_000,
+        },
+      ],
+    } as PortfolioPosition;
+    const groups = buildTickerGroups([unknown], { "JP.6981": mkPrice() });
+    const g = groups.find((x) => x.ticker === "JP.6981");
+    expect(g).toBeDefined();
+    expect(g!.stock).toBeNull(); // not classified as a stock leg
+    expect(g!.currency).toBe("JPY"); // currency still recovered from the position
+  });
 });

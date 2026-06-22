@@ -223,11 +223,18 @@ function futuPositionToPortfolioPosition(
   // (-entry cost). Futu already signs market_value this way.
   const entryCost = p.avg_cost * p.quantity * multiplier;
 
+  // Native trading currency (JPY/HKD/USD). MUST be propagated: the FX-aware
+  // display path (PositionTable, PortfolioByStructure) and the forex
+  // subscription (deriveFxSubscriptions) both key off pos.currency. Dropping it
+  // made every Futu row default to USD, so a ¥/₩ market_value rendered as $.
+  const currency = (p.currency || "USD").toUpperCase();
+
   const leg: PortfolioLeg = {
     direction,
     contracts,
     type,
     strike,
+    currency,
     entry_cost: entryCost,
     avg_cost: p.avg_cost,
     market_price: p.market_price || null,
@@ -241,6 +248,7 @@ function futuPositionToPortfolioPosition(
     structure,
     structure_type: structureType,
     risk_profile: riskProfile,
+    currency,
     expiry,
     contracts,
     direction,
