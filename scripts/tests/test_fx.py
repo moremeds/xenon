@@ -64,6 +64,20 @@ def test_usd_per_unit_from_account_values_reads_exchange_rate_tag():
     assert out["KRW"] == 0.00065
 
 
+def test_usd_per_unit_skips_base_pseudo_currency():
+    # IB emits an ExchangeRate row with currency "BASE" (value 1.0) marking the
+    # account base currency. It must NOT become a rate (else the UI renders a
+    # bogus "USD/BASE" FX badge). Real account-values shape (2026-06-22).
+    avs = [
+        SimpleNamespace(tag="ExchangeRate", value="0.006186", currency="JPY"),
+        SimpleNamespace(tag="ExchangeRate", value="1", currency="BASE"),
+    ]
+    out = usd_per_unit_from_account_values(avs)
+    assert "BASE" not in out
+    assert out["JPY"] == 0.006186
+    assert out["USD"] == 1.0
+
+
 def test_usd_per_unit_skips_unparseable_values():
     avs = [SimpleNamespace(tag="ExchangeRate", value="N/A", currency="JPY")]
     out = usd_per_unit_from_account_values(avs)

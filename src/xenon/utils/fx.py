@@ -59,6 +59,11 @@ def usd_per_unit_from_account_values(account_values: list, base_currency: str = 
         cur = (getattr(av, "currency", "") or "").upper()
         if not cur:
             continue
+        # IB emits an ExchangeRate row with currency "BASE" (value 1.0) marking
+        # the account base currency — it's not a real currency and would render
+        # as a bogus "USD/BASE" FX badge. Skip it; base is already USD: 1.0.
+        if cur == "BASE":
+            continue
         try:
             rate = float(getattr(av, "value", None))
         except (TypeError, ValueError):
