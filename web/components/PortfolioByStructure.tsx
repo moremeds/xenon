@@ -63,15 +63,8 @@ export default function PortfolioByStructure({
   activeAccount,
   lastSync,
 }: Props) {
-  const groups = useMemo(
-    () =>
-      buildTickerGroups(positions, prices, {
-        fuseVirtualPairs: activeAccount === "futu",
-      }),
-    [positions, prices, activeAccount],
-  );
-
-  // Live usd_per_unit for converting per-structure aggregate MV/P&L to USD.
+  // Live usd_per_unit for converting per-structure aggregate MV/P&L to USD and
+  // for the cross-ticker USD sort inside buildTickerGroups.
   const currencies = useMemo(
     () => [
       ...new Set(positions.map((p) => (p.currency || "USD").toUpperCase())),
@@ -79,6 +72,15 @@ export default function PortfolioByStructure({
     [positions],
   );
   const usdPerUnit = useFx(prices ?? {}, fxRates ?? { USD: 1 }, currencies);
+
+  const groups = useMemo(
+    () =>
+      buildTickerGroups(positions, prices, {
+        fuseVirtualPairs: activeAccount === "futu",
+        usdPerUnit,
+      }),
+    [positions, prices, activeAccount, usdPerUnit],
+  );
 
   // Ephemeral collapse state, namespaced by activeAccount:ticker:category
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});

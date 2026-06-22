@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import type { PortfolioData, AccountSummary, ExecutedOrder } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 import {
@@ -8,6 +8,9 @@ import {
   type ExposureDataWithBreakdown,
 } from "@/lib/exposureBreakdown";
 import { computeDayMoveBreakdown } from "@/lib/dayMoveBreakdown";
+import { nativeToDisplayUsd } from "@/lib/positionUtils";
+import { fmtNative } from "@/lib/fx";
+import { useFx } from "@/lib/useFx";
 import ExposureBreakdownModal, {
   type ExposureMetric,
 } from "./ExposureBreakdownModal";
@@ -90,20 +93,32 @@ function resolveMarketValue(
 
 function computeUnrealizedBreakdown(
   portfolio: PortfolioData,
+  usdPerUnit: Record<string, number> = { USD: 1 },
 ): PnlBreakdownRow[] {
+  const usd2 = (v: number) =>
+    `$${Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   return portfolio.positions.flatMap((pos) => {
     const mv = resolveMarketValue(pos);
     if (mv == null) return [];
-    const pnl = mv - pos.entry_cost;
+    const cur = (pos.currency || "USD").toUpperCase();
+    // Foreign entry cost / MV / P&L are native — convert to USD before they
+    // reach the breakdown total; skip a position with no rate (no native leak).
+    const pnl = nativeToDisplayUsd(mv - pos.entry_cost, cur, usdPerUnit);
+    if (pnl == null) return [];
+    // % is a currency-invariant ratio — compute from the native pair.
     const pnlPct =
-      pos.entry_cost !== 0 ? (pnl / Math.abs(pos.entry_cost)) * 100 : null;
+      pos.entry_cost !== 0
+        ? ((mv - pos.entry_cost) / Math.abs(pos.entry_cost)) * 100
+        : null;
+    const fmtMoney =
+      cur === "USD" ? usd2 : (v: number) => fmtNative(Math.abs(v), cur);
     return [
       {
         id: pos.id,
         ticker: pos.ticker,
         structure: pos.structure,
-        col1: `$${Math.abs(pos.entry_cost).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-        col2: `$${Math.abs(mv).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+        col1: fmtMoney(pos.entry_cost),
+        col2: fmtMoney(mv),
         pnl,
         pnlPct,
       },
@@ -114,8 +129,13 @@ function computeUnrealizedBreakdown(
 function computeTodayUnrealizedPnl(
   portfolio: PortfolioData,
   prices: Record<string, PriceData>,
+  usdPerUnit: Record<string, number> = { USD: 1 },
 ): { pnl: number; positionsWithData: number; totalPositions: number } {
-  const { rows, total } = computeDayMoveBreakdown(portfolio, prices);
+  const { rows, total } = computeDayMoveBreakdown(
+    portfolio,
+    prices,
+    usdPerUnit,
+  );
   return {
     pnl: total,
     positionsWithData: rows.length,
@@ -757,6 +777,21 @@ export default function MetricCards({
   const [initMarginModalOpen, setInitMarginModalOpen] = useState(false);
   const [grossPosModalOpen, setGrossPosModalOpen] = useState(false);
 
+  // Live USD-per-unit rates for every non-USD currency held, merged over the
+  // sync-time fx_rates fallback. Hooks must run before any early return.
+  const currencies = useMemo(
+    () =>
+      [
+        ...new Set(
+          (portfolio?.positions ?? []).map((p) =>
+            (p.currency || "USD").toUpperCase(),
+          ),
+        ),
+      ].filter((c) => c !== "USD"),
+    [portfolio],
+  );
+  const usdPerUnit = useFx(prices ?? {}, portfolio?.fx_rates ?? {}, currencies);
+
   const isPortfolio = section === "portfolio";
   if (!portfolio) {
     if (!isPortfolio) return null;
@@ -786,7 +821,11 @@ export default function MetricCards({
     let total = 0;
     for (const pos of portfolio.positions) {
       const mv = resolveMarketValue(pos);
-      if (mv != null) total += mv - pos.entry_cost;
+      if (mv == null) continue;
+      // Convert native open P&L to USD before summing (skip if no rate).
+      const cur = (pos.currency || "USD").toUpperCase();
+      const usd = nativeToDisplayUsd(mv - pos.entry_cost, cur, usdPerUnit);
+      if (usd != null) total += usd;
     }
     return total;
   })();
@@ -797,11 +836,11 @@ export default function MetricCards({
 
   const hasPrices = prices && Object.keys(prices).length > 0;
   const exposure = hasPrices
-    ? computeExposureDetailed(portfolio, prices)
+    ? computeExposureDetailed(portfolio, prices, usdPerUnit)
     : null;
 
   const todayUnrealized = hasPrices
-    ? computeTodayUnrealizedPnl(portfolio, prices)
+    ? computeTodayUnrealizedPnl(portfolio, prices, usdPerUnit)
     : null;
   const hasDaily =
     todayUnrealized != null && todayUnrealized.positionsWithData > 0;
@@ -816,11 +855,11 @@ export default function MetricCards({
 
   // Breakdown rows (computed lazily — only used when modals open)
   const unrealizedBreakdownRows = unrealizedModalOpen
-    ? computeUnrealizedBreakdown(portfolio)
+    ? computeUnrealizedBreakdown(portfolio, usdPerUnit)
     : [];
   const dayMoveBreakdown =
     dayMoveModalOpen && hasPrices
-      ? computeDayMoveBreakdown(portfolio, prices!)
+      ? computeDayMoveBreakdown(portfolio, prices!, usdPerUnit)
       : { rows: [], total: 0 };
 
   if (!isPortfolio) return null;

@@ -6,6 +6,7 @@ import type { PortfolioPosition } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 import {
   fmtPrice,
+  nativeToDisplayUsd,
   resolveEntryCost,
   resolveMarketValue,
   getAvgEntry,
@@ -14,6 +15,7 @@ import {
   resolveRealtimePrice,
   resolveSpreadPriceData,
 } from "@/lib/positionUtils";
+import { fmtNative, usdPerUnitFromForexTick } from "@/lib/fx";
 import { fmtSignedPrice, fmtUsd, toneClass } from "@/lib/format";
 
 type PositionTabProps = {
@@ -21,7 +23,13 @@ type PositionTabProps = {
   prices: Record<string, PriceData>;
 };
 
-function LegsDisclosure({ position, prices }: { position: PortfolioPosition; prices: Record<string, PriceData> }) {
+function LegsDisclosure({
+  position,
+  prices,
+}: {
+  position: PortfolioPosition;
+  prices: Record<string, PriceData>;
+}) {
   const [expanded, setExpanded] = useState(false);
 
   return (
@@ -56,18 +64,33 @@ function LegsDisclosure({ position, prices }: { position: PortfolioPosition; pri
                 Boolean(leg.market_price_is_calculated),
               ).price;
               const legSign = leg.direction === "LONG" ? 1 : -1;
-              const signedEntry = legSign * (Math.abs(leg.avg_cost) / (leg.type === "Stock" ? 1 : 100));
-              const signedMarket = legMktResolved != null ? legSign * legMktResolved : null;
+              const signedEntry =
+                legSign *
+                (Math.abs(leg.avg_cost) / (leg.type === "Stock" ? 1 : 100));
+              const signedMarket =
+                legMktResolved != null ? legSign * legMktResolved : null;
               return (
                 <tr key={i}>
-                  <td className={leg.direction === "LONG" ? "positive" : "negative"}>{leg.direction}</td>
+                  <td
+                    className={
+                      leg.direction === "LONG" ? "positive" : "negative"
+                    }
+                  >
+                    {leg.direction}
+                  </td>
                   <td>{leg.type}</td>
-                  <td className="right">{leg.strike != null ? `$${leg.strike}` : "---"}</td>
+                  <td className="right">
+                    {leg.strike != null ? `$${leg.strike}` : "---"}
+                  </td>
                   <td className="right">{leg.contracts}</td>
-                  <td className={`right ${toneClass(signedEntry) !== "neutral" ? toneClass(signedEntry) : ""}`}>
+                  <td
+                    className={`right ${toneClass(signedEntry) !== "neutral" ? toneClass(signedEntry) : ""}`}
+                  >
                     {fmtSignedPrice(signedEntry)}
                   </td>
-                  <td className={`right ${signedMarket != null && toneClass(signedMarket) !== "neutral" ? toneClass(signedMarket) : ""}`}>
+                  <td
+                    className={`right ${signedMarket != null && toneClass(signedMarket) !== "neutral" ? toneClass(signedMarket) : ""}`}
+                  >
                     {fmtSignedPrice(signedMarket)}
                   </td>
                 </tr>
@@ -83,7 +106,10 @@ function LegsDisclosure({ position, prices }: { position: PortfolioPosition; pri
 export default function PositionTab({ position, prices }: PositionTabProps) {
   const isStock = position.structure_type === "Stock";
   const spreadPriceData = useMemo(
-    () => (!isStock && position.legs.length > 1 ? resolveSpreadPriceData(position.ticker, position, prices) : null),
+    () =>
+      !isStock && position.legs.length > 1
+        ? resolveSpreadPriceData(position.ticker, position, prices)
+        : null,
     [isStock, position, prices],
   );
 
@@ -91,7 +117,9 @@ export default function PositionTab({ position, prices }: PositionTabProps) {
     if (isStock) {
       const rt = prices[position.ticker];
       const last = rt?.last != null && rt.last > 0 ? rt.last : null;
-      return last != null ? { mv: last * position.contracts, lastPrice: last } : null;
+      return last != null
+        ? { mv: last * position.contracts, lastPrice: last }
+        : null;
     }
     if (spreadPriceData?.last != null) {
       const mult = getMultiplier(position);
@@ -116,10 +144,50 @@ export default function PositionTab({ position, prices }: PositionTabProps) {
   const entryCost = resolveEntryCost(position);
   const avgEntry = getAvgEntry(position);
   const mv = rtData?.mv ?? resolveMarketValue(position);
-  const lastPrice = rtData?.lastPrice ?? (mv != null ? mv / (position.contracts * getMultiplier(position)) : null);
-  const pnl = mv != null ? mv - entryCost : null;
-  const pnlPct = pnl != null && entryCost !== 0 ? (pnl / Math.abs(entryCost)) * 100 : null;
-  const lastPriceLabel = !isStock && position.legs.length > 1 ? "Mark Price" : "Last Price";
+  const lastPrice =
+    rtData?.lastPrice ??
+    (mv != null ? mv / (position.contracts * getMultiplier(position)) : null);
+  const lastPriceLabel =
+    !isStock && position.legs.length > 1 ? "Mark Price" : "Last Price";
+
+  // FX: foreign positions carry native (JPY/KRW) entry/market values + prices.
+  // Convert money headlines to USD via the live USD.<cur> tick, falling back to
+  // the backend-supplied *_usd siblings; prices stay in the native symbol.
+  const cur = (position.currency || "USD").toUpperCase();
+  const isForeign = cur !== "USD";
+  const usdPerUnit: Record<string, number> = { USD: 1 };
+  const liveRate = usdPerUnitFromForexTick(
+    `USD.${cur}`,
+    prices[`USD.${cur}`]?.last ?? null,
+  );
+  if (liveRate) usdPerUnit[liveRate.currency] = liveRate.rate;
+
+  const entryCostUsd = nativeToDisplayUsd(
+    entryCost,
+    cur,
+    usdPerUnit,
+    position.entry_cost_usd,
+  );
+  const mvUsd =
+    mv != null
+      ? nativeToDisplayUsd(mv, cur, usdPerUnit, position.market_value_usd)
+      : null;
+  const pnl =
+    mvUsd != null && entryCostUsd != null ? mvUsd - entryCostUsd : null;
+  const pnlPct =
+    pnl != null && entryCostUsd != null && entryCostUsd !== 0
+      ? (pnl / Math.abs(entryCostUsd)) * 100
+      : null;
+
+  const fmtEntryPrice = isForeign
+    ? fmtNative(avgEntry, cur)
+    : fmtSignedPrice(avgEntry);
+  const fmtLastPrice =
+    lastPrice == null
+      ? "---"
+      : isForeign
+        ? fmtNative(lastPrice, cur)
+        : fmtSignedPrice(lastPrice);
 
   return (
     <div className="position-tab">
@@ -138,30 +206,56 @@ export default function PositionTab({ position, prices }: PositionTabProps) {
         </div>
         <div className="pos-stat">
           <span className="pos-stat-label">Entry Date</span>
-          <span className="pos-stat-value">{position.entry_date && position.entry_date !== "unknown" ? position.entry_date : "---"}</span>
+          <span className="pos-stat-value">
+            {position.entry_date && position.entry_date !== "unknown"
+              ? position.entry_date
+              : "---"}
+          </span>
         </div>
         <div className="pos-stat">
           <span className="pos-stat-label">Avg Entry</span>
-          <span className={`pos-stat-value ${toneClass(avgEntry) !== "neutral" ? toneClass(avgEntry) : ""}`}>{fmtSignedPrice(avgEntry)}</span>
+          <span
+            className={`pos-stat-value ${toneClass(avgEntry) !== "neutral" ? toneClass(avgEntry) : ""}`}
+          >
+            {fmtEntryPrice}
+          </span>
         </div>
         <div className="pos-stat">
           <span className="pos-stat-label">{lastPriceLabel}</span>
-          <span className={`pos-stat-value ${lastPrice != null && toneClass(lastPrice) !== "neutral" ? toneClass(lastPrice) : ""}`}>
-            {fmtSignedPrice(lastPrice)}
+          <span
+            className={`pos-stat-value ${lastPrice != null && toneClass(lastPrice) !== "neutral" ? toneClass(lastPrice) : ""}`}
+          >
+            {fmtLastPrice}
           </span>
         </div>
         <div className="pos-stat">
           <span className="pos-stat-label">Entry Cost</span>
-          <span className="pos-stat-value">{fmtUsd(entryCost)}</span>
+          <span className="pos-stat-value">
+            {entryCostUsd != null ? fmtUsd(entryCostUsd) : "---"}
+            {isForeign && (
+              <span className="fx-native-subline">
+                {fmtNative(entryCost, cur)}
+              </span>
+            )}
+          </span>
         </div>
         <div className="pos-stat">
           <span className="pos-stat-label">Market Value</span>
-          <span className="pos-stat-value">{mv != null ? fmtUsd(mv) : "---"}</span>
+          <span className="pos-stat-value">
+            {mvUsd != null ? fmtUsd(mvUsd) : "---"}
+            {isForeign && mv != null && (
+              <span className="fx-native-subline">{fmtNative(mv, cur)}</span>
+            )}
+          </span>
         </div>
         <div className="pos-stat">
           <span className="pos-stat-label">Unrealized P&L</span>
-          <span className={`pos-stat-value ${pnl != null ? (pnl >= 0 ? "positive" : "negative") : ""}`}>
-            {pnl != null ? `${pnl >= 0 ? "+" : "-"}${fmtUsd(Math.abs(pnl))} (${pnlPct!.toFixed(1)}%)` : "---"}
+          <span
+            className={`pos-stat-value ${pnl != null ? (pnl >= 0 ? "positive" : "negative") : ""}`}
+          >
+            {pnl != null
+              ? `${pnl >= 0 ? "+" : "-"}${fmtUsd(Math.abs(pnl))} (${pnlPct!.toFixed(1)}%)`
+              : "---"}
           </span>
         </div>
         {position.expiry !== "N/A" && (
