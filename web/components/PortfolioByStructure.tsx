@@ -27,6 +27,7 @@ import { fmtUsd, nativeToDisplayUsd } from "@/lib/positionUtils";
 import { fmtNative } from "@/lib/fx";
 import { useFx } from "@/lib/useFx";
 import PositionTable from "./PositionTable";
+import FxBadge from "./FxBadge";
 
 type Props = {
   positions: PortfolioPosition[];
@@ -72,6 +73,11 @@ export default function PortfolioByStructure({
     [positions],
   );
   const usdPerUnit = useFx(prices ?? {}, fxRates ?? { USD: 1 }, currencies);
+  // Per-currency liveness: a filled FX dot only when THAT pair has a fresh
+  // USD.<cur> tick. Mirrors PositionTable so the inline header badge matches.
+  const liveCurrencies = currencies.filter(
+    (c) => c !== "USD" && (prices?.[`USD.${c}`]?.last ?? null) != null,
+  );
 
   const groups = useMemo(
     () =>
@@ -123,6 +129,10 @@ export default function PortfolioByStructure({
         // still reports its real currency instead of defaulting to USD.
         const groupCurrency = group.currency;
         const isForeign = groupCurrency !== "USD";
+        // Single relevant FX pair for this card (USD/JPY, USD/KRW, …). USD
+        // cards show nothing. Only the card's own currency — never the other
+        // currencies that happen to sit in the shared usd_per_unit map.
+        const fxRate = usdPerUnit[groupCurrency];
         const aggMvUsd = nativeToDisplayUsd(agg.mv, groupCurrency, usdPerUnit);
         const aggDayPnlUsd = nativeToDisplayUsd(
           agg.dayPnl,
@@ -158,6 +168,13 @@ export default function PortfolioByStructure({
                     : fmtPrice(last)}{" "}
                   {dayChgPct != null ? `(${fmtPct(dayChgPct)})` : ""}
                 </span>
+                {isForeign && fxRate != null && fxRate > 0 && (
+                  <FxBadge
+                    rates={{ [groupCurrency]: fxRate }}
+                    liveCurrencies={liveCurrencies}
+                    inline
+                  />
+                )}
               </div>
               <div
                 style={{
@@ -213,6 +230,7 @@ export default function PortfolioByStructure({
                   fxRates={fxRates}
                   readonly={readonly}
                   hideHeader={takeHeaderSlot()}
+                  hideFxBadge
                 />
               )}
               {Array.from(optionsByCategory.entries()).map(
@@ -321,6 +339,7 @@ export default function PortfolioByStructure({
                                   fxRates={fxRates}
                                   readonly={readonly}
                                   hideHeader={takeHeaderSlot()}
+                                  hideFxBadge
                                 />
                               </div>
                             );

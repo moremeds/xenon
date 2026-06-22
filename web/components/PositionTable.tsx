@@ -665,6 +665,7 @@ export default function PositionTable({
   fxRates,
   readonly = false,
   hideHeader = false,
+  hideFxBadge = false,
   onOrderPlaced,
 }: {
   positions: PortfolioPosition[];
@@ -688,6 +689,13 @@ export default function PositionTable({
    * though it renders several sub-tables (stock + per-category-pair).
    */
   hideHeader?: boolean;
+  /**
+   * Suppress the standalone FX-badge row above the table. PortfolioByStructure
+   * sets this because each ticker card is single-currency and now renders its
+   * one relevant FX pair inline in the card header instead. The flat "By Risk"
+   * view leaves it off so its mixed-currency tables keep the badge group.
+   */
+  hideFxBadge?: boolean;
   onOrderPlaced?: (orderId: string) => void;
 }) {
   // Distinct currencies in this table → live usd_per_unit (forex ticks over the
@@ -734,7 +742,7 @@ export default function PositionTable({
 
   return (
     <>
-      {!hideHeader && (
+      {!hideHeader && !hideFxBadge && (
         <FxBadge rates={usdPerUnit} liveCurrencies={liveCurrencies} />
       )}
       <table style={{ tableLayout: "fixed", width: "100%" }}>

@@ -6,9 +6,13 @@
 export default function FxBadge({
   rates,
   liveCurrencies = [],
+  inline = false,
 }: {
   rates: Record<string, number>;
   liveCurrencies?: string[];
+  /** Inline header placement (e.g. after a ticker name) — drops the
+   *  standalone-row bottom margin so the capsule sits vertically centered. */
+  inline?: boolean;
 }) {
   const liveSet = new Set(liveCurrencies.map((c) => c.toUpperCase()));
   const pairs = Object.entries(rates)
@@ -20,7 +24,11 @@ export default function FxBadge({
     }));
   if (pairs.length === 0) return null;
   return (
-    <span className="fx-badge-group">
+    <span
+      className={
+        inline ? "fx-badge-group fx-badge-group-inline" : "fx-badge-group"
+      }
+    >
       {pairs.map(({ cur, perUsd, live }) => (
         <span
           key={cur}

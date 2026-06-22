@@ -8655,6 +8655,10 @@ tr {
   gap: 6px;
   margin-bottom: 8px;
 }
+/* Inline header placement (after a ticker name): no standalone-row margin. */
+.fx-badge-group-inline {
+  margin-bottom: 0;
+}
 .fx-badge {
   display: inline-flex;
   align-items: center;

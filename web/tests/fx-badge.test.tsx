@@ -35,4 +35,24 @@ describe("FxBadge", () => {
     );
     expect(container.textContent).toBe("");
   });
+
+  it("uses the standalone group class by default (keeps its bottom margin)", () => {
+    const { container } = render(
+      <FxBadge rates={{ USD: 1, JPY: 0.006186 }} liveCurrencies={["JPY"]} />,
+    );
+    const group = container.querySelector(".fx-badge-group");
+    expect(group).not.toBeNull();
+    expect(group!.classList.contains("fx-badge-group-inline")).toBe(false);
+  });
+
+  it("adds the inline modifier class when inline (for header placement)", () => {
+    const { container } = render(
+      <FxBadge
+        rates={{ USD: 1, JPY: 0.006186 }}
+        liveCurrencies={["JPY"]}
+        inline
+      />,
+    );
+    expect(container.querySelector(".fx-badge-group-inline")).not.toBeNull();
+  });
 });
