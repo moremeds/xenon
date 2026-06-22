@@ -1628,6 +1628,8 @@ def _body_to_preflight_request(body: dict) -> PreflightRequest:
         strike=Decimal(str(body["strike"])) if body.get("strike") is not None else None,
         multiplier=multiplier,
         limit_price=Decimal(str(limit)) if limit is not None else Decimal("0"),
+        currency=str(body.get("currency") or "USD").upper(),
+        exchange=body.get("exchange"),
     )
 
 
@@ -1862,7 +1864,14 @@ def _contract_from_order_body(body: dict) -> Contract:
             exchange="SMART",
             currency="USD",
         )
-    return Stock(symbol, "SMART", "USD")
+    # Stock quote/qualify path: honor body exchange/currency so a foreign cash
+    # equity (5016 TSEJ JPY, 000660 KRX KRW) quotes from its native venue.
+    # Option branch stays SMART/USD (US/index options only — no foreign options).
+    return Stock(
+        symbol,
+        str(body.get("exchange") or "SMART").upper(),
+        str(body.get("currency") or "USD").upper(),
+    )
 
 
 def _fetch_order_quote_snapshot_with_client(client: Any, body: dict) -> tuple[int, dict]:
