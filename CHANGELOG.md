@@ -5,14 +5,31 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.6.6] — 2026-06-21
+### Added
 
+- Japan (TSEJ/JPY) and Korea (KSE/KRW) cash equity support end-to-end: IB quotes, order entry, portfolio display, and Futu read-only sync
+- Live IDEALPRO FX ticks (USD/JPY, USD/KRW) subscribed by the relay; snapshot fallback via IB account ExchangeRate
+- All position aggregates (MV, P&L, deployed capital, open risk, DAY MOVE, UNREALIZED) converted to USD using live FX rates
+- `FxBadge` component — one relevant FX capsule per card (USD/JPY for JP, USD/KRW for KR, none for USD); filled dot = live IDEALPRO tick, hollow = snapshot rate
+- Inline FX badge in each ticker card header (after ticker name); suppressed from per-table row to eliminate leak of unrelated currencies
+- `currency` and `exchange` columns on `xenon.positions` (Alembic migration `2026_06_22_positions_currency`; existing rows backfill to `USD`)
+- `nativeToDisplayUsd()` helper in `web/lib/fx.ts`; `useFx` hook returns `usd_per_unit` map
+- Foreign venue/currency forwarded through order preflight, place, and quote flows
+
+### Fixed
+
+- Futu Japan equities now correctly classified as `Stock` (not `Unknown`); no spurious "OTHER" collapsible group in the card
+- IB `BASE` pseudo-currency filtered from FX harvest so it never appears as a `USD/BASE` badge
+- Futu `gross_position_value` and per-position values USD-converted via FX rates
+
+## [0.6.6] — 2026-06-21
 
 ### Changed
 
 - `docs/` restructured: `docs/plans/` eliminated — all completed plans consolidated into `docs/superpowers/plans/_archive/`; new `docs/research/` for long-form notes; `docs/reviews/` merged from two stale dirs; design PNGs moved to `docs/reference/`; `docs/reference/apex-futu/` removed
 - `CLAUDE.md` and `AGENTS.md` updated with directory layout table and file placement rules
 - `.gitignore` updated with glob patterns for screenshots (`/*.png`, `docs/plans/*.png`) replacing per-file entries
+
 ## [0.6.5] — 2026-06-18
 
 ### Added
