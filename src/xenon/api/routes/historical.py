@@ -26,6 +26,7 @@ router = APIRouter()
 # Request / response models
 # ---------------------------------------------------------------------------
 
+
 class ContractSpec(BaseModel):
     sec_type: str = "STK"
     symbol: str
@@ -66,6 +67,7 @@ class BarResponse(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _get_pool(request: Request):
     """Retrieve ib_pool from app state (set during lifespan)."""
     pool = getattr(request.app.state, "ib_pool", None)
@@ -76,7 +78,7 @@ def _get_pool(request: Request):
 
 def make_ib_contract(spec: ContractSpec):
     """Reconstruct an ib_async contract from a JSON spec."""
-    from ib_async import Stock, Future, Index
+    from ib_async import Future, Index, Stock
 
     if spec.sec_type == "STK":
         return Stock(spec.symbol, spec.exchange, spec.currency)
@@ -105,9 +107,11 @@ def _contract_to_dict(contract) -> dict:
 
 
 def _bar_date_to_iso(bar_date) -> str:
-    """Convert IB bar date to ISO format (YYYY-MM-DD)."""
-    if isinstance(bar_date, (date, datetime)):
-        return bar_date.isoformat()[:10]
+    """Convert IB bar date to ISO 8601. Datetimes keep the full timestamp."""
+    if isinstance(bar_date, datetime):
+        return bar_date.isoformat()  # full ISO timestamp for intraday bars
+    if isinstance(bar_date, date):
+        return bar_date.isoformat()  # YYYY-MM-DD for daily bars
     s = str(bar_date)
     if len(s) == 8 and s.isdigit():
         return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
@@ -132,6 +136,7 @@ def _head_timestamp_to_iso(ts) -> str:
 # Endpoints
 # ---------------------------------------------------------------------------
 
+
 @router.post("/contract/qualify")
 async def qualify_contracts(req: QualifyRequest, request: Request):
     """Qualify one or more contracts against IB."""
@@ -140,9 +145,7 @@ async def qualify_contracts(req: QualifyRequest, request: Request):
 
     try:
         async with pool.acquire("data") as client:
-            qualified = await pool.run_sync(
-                "data", client.qualify_contracts, *contracts
-            )
+            qualified = await pool.run_sync("data", client.qualify_contracts, *contracts)
     except ConnectionError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
