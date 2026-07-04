@@ -18,12 +18,17 @@ All notable changes to Xenon are documented here. Format loosely based on
   the stale value with no way to notice. Now, when a stock/index line goes stale
   (or has no `last`), the relay lazily fetches the authoritative most-recent daily
   bar close from the historical plane and overrides the frozen streaming value
-  (`applyAuthoritativeClose`). Demand-driven (only stale symbols), throttled
-  (`IB_REALTIME_HIST_SPACING_MS`, default 3s) to respect IB historical pacing,
-  cached per ET day, and swept every `IB_REALTIME_HIST_SWEEP_MS` (default 30s) so
-  a silently-frozen line self-corrects even without a re-tick. During RTH nothing
-  is stale, so no historical requests are issued and the live streaming `last` is
-  never overridden.
+  (`applyAuthoritativeClose`). Only the most-recent **completed** session is used
+  (`selectCompletedBarClose` rejects an in-progress current-day bar, so an
+  intraday partial is never served as a close). Demand-driven (only stale
+  symbols), throttled at `IB_REALTIME_HIST_SPACING_MS` (default 12s — after the
+  16:00 close the whole universe goes stale at once, and IB caps historical at 60
+  requests / 10 min), cached per ET day, and swept every `IB_REALTIME_HIST_SWEEP_MS`
+  (default 30s) so a silently-frozen line self-corrects even without a re-tick.
+  Failed/hung fetches back off (`IB_REALTIME_HIST_COOLDOWN_MS`, default 5m) and a
+  per-request timeout plus a reconnect reset prevent a stuck request from
+  permanently blocking a symbol. During RTH nothing is stale, so no historical
+  requests are issued and the live streaming `last` is never overridden.
 
 ## [0.8.0] — 2026-07-04
 

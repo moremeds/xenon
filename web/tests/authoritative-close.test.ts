@@ -15,7 +15,8 @@ const handlerPath = new URL(
   "../../scripts/infra/ib_realtime/ib_tick_handler.js",
   import.meta.url,
 ).pathname;
-const { createPriceData, applyAuthoritativeClose } = await import(handlerPath);
+const { createPriceData, applyAuthoritativeClose, selectCompletedBarClose } =
+  await import(handlerPath);
 
 const TSLA_JUL1_CLOSE = 425.3; // frozen streaming close
 const TSLA_JUL1_LAST = 423.6; // frozen streaming last
@@ -92,5 +93,49 @@ describe("applyAuthoritativeClose", () => {
     expect(applyAuthoritativeClose(d, -1, true)).toBe(false);
     expect(applyAuthoritativeClose(d, null, true)).toBe(false);
     expect(d.last).toBe(TSLA_JUL1_LAST); // untouched
+  });
+});
+
+describe("selectCompletedBarClose", () => {
+  // Real TSLA daily closes pulled from the IB Gateway historical plane 2026-07-04.
+  const JUL1 = { date: "20260701", close: 425.3 };
+  const JUL2 = { date: "20260702", close: 393.45 };
+
+  it("returns the latest completed session close (market closed)", () => {
+    // Sat 2026-07-04: no bar dated today; latest completed = Jul-2.
+    const got = selectCompletedBarClose([JUL1, JUL2], "20260704", false);
+    expect(got).toEqual({ close: 393.45, date: "20260702" });
+  });
+
+  it("rejects today's partial bar while the session is open (RTH)", () => {
+    // Intraday: [Jul-1 complete, today partial]. Must pick Jul-1, not the partial.
+    const bars = [JUL1, { date: "20260702", close: 410.12 }];
+    const got = selectCompletedBarClose(bars, "20260702", true);
+    expect(got).toEqual({ close: 425.3, date: "20260701" });
+  });
+
+  it("accepts today's bar once the session has closed", () => {
+    const bars = [JUL1, JUL2];
+    const got = selectCompletedBarClose(bars, "20260702", false);
+    expect(got).toEqual({ close: 393.45, date: "20260702" });
+  });
+
+  it("skips non-positive bars and returns null when none qualify", () => {
+    expect(
+      selectCompletedBarClose(
+        [{ date: "20260702", close: -1 }],
+        "20260703",
+        false,
+      ),
+    ).toBe(null);
+    expect(selectCompletedBarClose([], "20260703", false)).toBe(null);
+    // Only a partial today bar available → null (no completed session yet).
+    expect(
+      selectCompletedBarClose(
+        [{ date: "20260702", close: 410 }],
+        "20260702",
+        true,
+      ),
+    ).toBe(null);
   });
 });

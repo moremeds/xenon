@@ -104,6 +104,24 @@ export function applyAuthoritativeClose(data, dailyClose, stale) {
   return changed;
 }
 
+// Pick the close of the most-recent COMPLETED daily session from historical
+// bars. An in-progress current-day bar (returned by "2 D"/"1 day" during RTH)
+// is rejected, so a partial intraday value is never cached and served as a
+// session close. `bars` = [{ date: "YYYYMMDD", close }] oldest→newest (IB order);
+// `todayYmd` = "YYYYMMDD" in ET; `sessionOpen` = is today's RTH session in
+// progress right now. Returns { close, date } of the latest completed session,
+// or null when none qualifies.
+export function selectCompletedBarClose(bars, todayYmd, sessionOpen) {
+  let best = null;
+  for (const b of bars) {
+    if (typeof b.close !== "number" || !(b.close > 0)) continue;
+    const isTodayPartial = b.date === todayYmd && sessionOpen;
+    if (isTodayPartial) continue; // today's bar is still forming — not a close
+    best = { close: b.close, date: b.date }; // newer completed bar wins
+  }
+  return best;
+}
+
 // Fields whose change means the symbol produced a real, fresh update. Closed-
 // market -1 quotes normalize to null → no change → timestamp is NOT bumped, so
 // a stale `last` carries an honest (old) timestamp instead of a lying fresh one.
