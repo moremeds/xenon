@@ -48,13 +48,18 @@ INCLUDE_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".sh", ".toml", ".yaml"
 ALLOWLIST_PATHS: set[Path] = {
     REPO_ROOT / "scripts/checks/no_yahoo_finance.py",  # this file references the terms itself
     REPO_ROOT / ".github/workflows/ci.yml",  # CI step name documents the guard
-    # Pre-existing violations pinned at guard introduction (2026-07-04); tracked
-    # in docs/todo-backlog.md. Intended to shrink to zero — do NOT add entries.
-    REPO_ROOT / "web/app/api/ticker/news/route.ts",
-    REPO_ROOT / "web/app/api/ticker/info/route.ts",
-    REPO_ROOT / "web/app/api/previous-close/route.ts",
-    REPO_ROOT / "src/xenon/reports/portfolio_performance.py",
-    REPO_ROOT / "scripts/research/spx_short_put_backtest.py",
+}
+
+# Pre-existing violations pinned at guard introduction (2026-07-04); tracked in
+# docs/todo-backlog.md. Ratchet: a file may have AT MOST its baseline count of
+# matches — adding a new Yahoo reference to an already-violating file fails CI.
+# When you remove a call site, lower (or delete) its baseline in the same PR.
+BASELINE_COUNTS: dict[Path, int] = {
+    REPO_ROOT / "web/app/api/ticker/news/route.ts": 2,
+    REPO_ROOT / "web/app/api/ticker/info/route.ts": 1,
+    REPO_ROOT / "web/app/api/previous-close/route.ts": 1,
+    REPO_ROOT / "src/xenon/reports/portfolio_performance.py": 1,
+    REPO_ROOT / "scripts/research/spx_short_put_backtest.py": 3,
 }
 
 
@@ -65,6 +70,7 @@ def is_excluded(path: Path) -> bool:
 
 def main() -> int:
     violations: list[tuple[Path, int, str]] = []
+    baseline_hits: dict[Path, list[tuple[int, str]]] = {p: [] for p in BASELINE_COUNTS}
 
     for path in REPO_ROOT.rglob("*"):
         if not path.is_file():
@@ -83,20 +89,43 @@ def main() -> int:
 
         for lineno, line in enumerate(text.splitlines(), 1):
             if FORBIDDEN.search(line):
-                rel = path.relative_to(REPO_ROOT)
-                violations.append((rel, lineno, line.rstrip()))
+                if path in BASELINE_COUNTS:
+                    baseline_hits[path].append((lineno, line.rstrip()))
+                else:
+                    violations.append((path.relative_to(REPO_ROOT), lineno, line.rstrip()))
 
-    if not violations:
-        print("OK: no Yahoo Finance references in active code.")
+    ratchet_failures: list[str] = []
+    for path, hits in baseline_hits.items():
+        rel = path.relative_to(REPO_ROOT)
+        allowed = BASELINE_COUNTS[path]
+        if len(hits) > allowed:
+            ratchet_failures.append(
+                f"  {rel}: {len(hits)} Yahoo reference(s), baseline allows {allowed} — "
+                f"new Yahoo usage added to an already-violating file"
+            )
+            for lineno, line in hits:
+                ratchet_failures.append(f"    {rel}:{lineno}: {line.strip()[:120]}")
+        elif len(hits) < allowed:
+            print(
+                f"NOTE: {rel} is below its baseline ({len(hits)} < {allowed}) — "
+                f"lower BASELINE_COUNTS to lock in the cleanup."
+            )
+
+    if not violations and not ratchet_failures:
+        print("OK: no new Yahoo Finance references in active code.")
         return 0
 
     print("FAIL: Yahoo Finance references found in active code.")
     print("      Root CLAUDE.md: 'Never use Yahoo Finance.' Use IB / Futu / UW instead.")
     print()
-    print(f"{len(violations)} violation(s):")
-    for rel, lineno, line in violations:
-        snippet = line.strip()[:120]
-        print(f"  {rel}:{lineno}: {snippet}")
+    if violations:
+        print(f"{len(violations)} violation(s) in non-baseline files:")
+        for rel, lineno, line in violations:
+            print(f"  {rel}:{lineno}: {line.strip()[:120]}")
+    if ratchet_failures:
+        print("Ratchet failures (baseline exceeded):")
+        for msg in ratchet_failures:
+            print(msg)
     return 1
 
 
