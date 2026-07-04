@@ -48,6 +48,7 @@ import {
   updatePriceFromTickPrice,
   updatePriceFromTickSize,
 } from "./ib_tick_handler.js";
+import { pickEvictable, pickAdmittable } from "./line_budget.js";
 import { LRUCache } from "../../lib/lru-cache.js";
 import { RateLimiter } from "../../lib/rate-limiter.js";
 import { createSubscriberRegistry } from "./subscriber_registry.js";
@@ -826,6 +827,7 @@ function ensureSymbolState(key, ibContract) {
     contract: ibContract,
     data: createPriceData(key),
     lastRealTickAt: null, // ms of last freshness-field change; null until first real tick
+    lastAccessAt: null, // ms of last subscribe or real tick; LRU heat for line budget
   };
   symbolStates.set(key, state);
   return state;
@@ -837,6 +839,7 @@ function startLiveSubscription(key, ibContract) {
   const existing = ensureSymbolState(key, ibContract);
   const nextTickerId = (nextRequestId += 1);
   const state = existing;
+  state.lastAccessAt = Date.now(); // subscribe counts as access (LRU heat)
 
   if (state.tickerId != null) {
     try {
@@ -845,7 +848,11 @@ function startLiveSubscription(key, ibContract) {
       // Ignore.
     }
     requestIdToSymbol.delete(state.tickerId);
+    state.tickerId = null; // free the slot before the budget check re-counts
   }
+
+  // Enforce the IB line budget: evict the idlest live line(s) to make room.
+  makeRoomForLine(key);
 
   try {
     ib.reqMktData(nextTickerId, ibContract, "233,165", false, false);
@@ -913,6 +920,7 @@ function unsubscribeClientFromSymbol(client, symbol) {
     if (subscribers.size === 0) {
       symbolSubscribers.delete(symbol);
       stopLiveSubscription(symbol);
+      admitPendingLine(); // a slot freed → re-admit the hottest evicted symbol
       unsubscribed = true;
     } else {
       unsubscribed = true;
@@ -1374,6 +1382,79 @@ function withStale(state) {
   return { ...state.data, stale: computeStale(state) };
 }
 
+/* ─── L1 market-data line budget (LRU) ──────────────────────────────────────
+ * IB caps simultaneous market-data lines at ~100 per ACCOUNT (shared across all
+ * API clients). The subscribed universe (portfolio + open option chains, ~62
+ * lines per chain) routinely exceeds that → error 101 + silent starvation. Hold
+ * only the hottest MAX_CONCURRENT_LINES live; evict the idlest (oldest
+ * lastAccessAt = subscribe or last real tick) to admit a new symbol, and
+ * re-admit the hottest evicted-but-wanted symbol when a slot frees. Evicted
+ * symbols read stale:true (computeStale, tickerId==null) instead of serving a
+ * silent cache. Leave headroom under the real cap for depth/tape/snapshot lines.
+ * ponytail: O(n) scan per subscribe (n = subscribed symbols, ~hundreds) — fine;
+ * switch to a heap only if the universe grows past low-thousands.
+ */
+// Default 85, not the full ~100: leave headroom for L2 depth/tape tickets (up to
+// MAX_CONCURRENT_DEPTH×2) and transient snapshot lines, which also draw the cap.
+const MAX_CONCURRENT_LINES = Number(process.env.IB_REALTIME_MAX_LINES) || 85;
+
+function activeLineCount() {
+  let n = 0;
+  for (const state of symbolStates.values()) {
+    if (state.tickerId != null) n += 1;
+  }
+  return n;
+}
+
+function lineEntries() {
+  const out = [];
+  for (const [key, state] of symbolStates) {
+    out.push({
+      key,
+      tickerId: state.tickerId,
+      lastAccessAt: state.lastAccessAt,
+    });
+  }
+  return out;
+}
+
+function evictLine(key) {
+  const state = symbolStates.get(key);
+  if (!state || state.tickerId == null) return;
+  try {
+    ib.cancelMktData(state.tickerId);
+  } catch {
+    // Ignore.
+  }
+  requestIdToSymbol.delete(state.tickerId);
+  state.tickerId = null;
+  hydrateAndBroadcast(key); // push stale:true to subscribers
+}
+
+// Free slots (evicting the idlest live lines) until under budget, protecting the
+// incoming symbol. Returns true if there is room to admit `incomingKey`.
+function makeRoomForLine(incomingKey) {
+  while (activeLineCount() >= MAX_CONCURRENT_LINES) {
+    const victim = pickEvictable(lineEntries(), incomingKey);
+    if (victim == null) return false; // nothing evictable (all == incoming)
+    evictLine(victim);
+  }
+  return true;
+}
+
+// A line just freed — re-admit the hottest evicted-but-still-wanted symbol.
+function admitPendingLine() {
+  if (!ibConnected) return;
+  if (activeLineCount() >= MAX_CONCURRENT_LINES) return;
+  const key = pickAdmittable(lineEntries());
+  if (key == null) return;
+  const state = symbolStates.get(key);
+  if (!state || !state.contract || state.tickerId != null) return;
+  const subs = symbolSubscribers.get(key);
+  if (!subs || subs.size === 0) return; // no longer wanted
+  startLiveSubscription(key, state.contract);
+}
+
 function hydrateAndBroadcast(symbol) {
   const state = symbolStates.get(symbol);
   if (!state) return;
@@ -1400,7 +1481,11 @@ function onTickPrice(tickerId, tickType, price) {
 
   if (liveState) {
     const changed = updatePriceFromTickPrice(liveState.data, tickType, price);
-    if (changed) liveState.lastRealTickAt = Date.now();
+    if (changed) {
+      const now = Date.now();
+      liveState.lastRealTickAt = now;
+      liveState.lastAccessAt = now; // ticking = hot; protects liquid lines from eviction
+    }
     // Cache option close prices to disk for after-hours availability
     updateOptionCloseCache(symbol, liveState.data.close);
     verbose(`tick ${symbol} type=${tickType} price=${price}`);
@@ -1419,7 +1504,11 @@ function onTickSize(tickerId, sizeType, size) {
 
   if (liveState) {
     const changed = updatePriceFromTickSize(liveState.data, sizeType, size);
-    if (changed) liveState.lastRealTickAt = Date.now();
+    if (changed) {
+      const now = Date.now();
+      liveState.lastRealTickAt = now;
+      liveState.lastAccessAt = now;
+    }
     hydrateAndBroadcast(symbol);
   }
   if (snapshotState) {
