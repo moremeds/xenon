@@ -18,9 +18,19 @@ All notable changes to Xenon are documented here. Format loosely based on
 - Each `price`/`batch` frame carries an additive per-symbol `stale` boolean
   (`true` when the symbol has no active IB line or no real tick within
   `IB_REALTIME_STALE_TICK_MS`, default 60s) so consumers can distinguish a live
-  tick from a held cache. Note: the underlying line-budget **oversubscription**
-  (relay attempts ~430 subscriptions against a ~100 cap) is now _visible_ but not
-  yet _fixed_ — capacity management is a separate follow-up.
+  tick from a held cache.
+
+### Added
+
+- IB realtime relay now enforces an **LRU market-data line budget**
+  (`IB_REALTIME_MAX_LINES`, default 85) instead of blindly subscribing past IB's
+  ~100-line per-account cap. The root cause of the stale-`last` oversubscription:
+  one open option chain requests ~62 lines (C+P × ~31 visible strikes), which on
+  top of the portfolio blows the cap. The relay now holds only the hottest lines
+  live — evicting the idlest (oldest subscribe/last-tick) to admit a new symbol,
+  and re-subscribing the hottest evicted-but-wanted symbol when a line frees.
+  Illiquid far-OTM strikes age out first; liquid portfolio/ATM lines stay hot.
+  Evicted symbols read `stale: true` rather than serving a silent cache.
 
 ## [0.7.2] — 2026-06-23
 
