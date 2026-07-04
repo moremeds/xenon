@@ -108,21 +108,59 @@ Three automated guards lock in regression patterns. Original two from PR #61; th
 
 To audit the current allowlists: `python3 scripts/checks/no_json_fallback_on_order_path.py --show-allowlist` (and the corresponding flags on the write-side and caller guards).
 
+## Combo / BAG Order Guardrails
+
+1. **Never map combo `Order.action` from debit vs credit.** Combo leg actions define the intended structure; a `SELL` BAG envelope reverses the legs.
+2. For entry / open chain combos, keep the envelope on `BUY` and preserve per-leg actions.
+3. **Reset stale manual net price** when combo structure changes (single → combo transitions invalidate the previous manual limit price).
+4. **Required regressions for combo-entry bugs:** unit test for action / ratio / net-price semantics AND a browser test for displayed combo net price and submitted payload.
+5. **Trace the full path before fixing:** chain builder → `/api/orders/place` → FastAPI bridge → `src/xenon/execution/ib_place_order.py`. Identify whether the bug is UI state, payload semantics, or IB combo behavior before patching.
+
+## Cancel / Modify Semantics
+
+Read `src/xenon/api/CLAUDE.md` before touching cancel / modify code. Critical rules:
+
+1. Cancel and modify use subprocesses with the original client ID.
+2. Do not trust the original `Trade` object as the only confirmation source.
+3. Order disappearance from refreshed open orders counts as cancel success.
+4. Preserve upstream status codes and human-readable error detail end-to-end.
+5. Route + browser regressions are required, not just Python tests.
+
+## Client IDs
+
+On-demand IB scripts must use `client_id="auto"` so they stay in the subprocess range rather than colliding with the persistent pool.
+
+## Frontend Calculation Invariants
+
+Preserve these in all UI pricing / P&L work (full table + tests in `web/CLAUDE.md`):
+
+- Credit / debit sign convention: credits stay negative, debits stay positive. Never `Math.abs()` away sign.
+- Spread mid is the sum of per-leg mids.
+- Combo natural bid / ask uses cross-fields, not `sign * bid` / `sign * ask`.
+- BAG `ComboLeg.action` encodes structure, not trade direction. Always `LONG → BUY`, `SHORT → SELL` regardless of order direction.
+- Daily Change % uses `Daily P&L / |Yesterday's Close Value|`, never entry cost.
+- Never show underlying price where the user expects option or spread price — show `---` if unavailable.
+
+## Frontend / FastAPI Boundary
+
+- Next.js routes call FastAPI via `xenonFetch()` in `web/lib/xenonApi.ts`. Never `spawn()` from Next.js routes as a fallback path.
+- WebSocket auth uses 30s single-use tickets.
+
 ## ⛔ Mandatory Rules
 
 1. **Be concise.** No preamble, no filler.
 2. **E2E browser verification for ALL UI work.** Primary: `chrome-cdp`. Fallback: Playwright (`web/playwright.config.ts`). No UI change done until visually confirmed. Don't assume code changes produce the expected visual result — verify rendered output in the browser before committing.
 3. **Red/green TDD for ALL code.** Failing test → fix → green → refactor. Unit: Vitest, E2E: chrome-cdp/Playwright.
-4. **95% test coverage target.** Every change includes corresponding tests.
+4. **95% coverage target on the touched surface** when practical. Every change includes corresponding tests.
 5. **API keys** in `.env` files (see Credentials below). Fallback: `~/.zshrc`.
 6. **Options structure reference:** `docs/trading/options-structures.json` + `docs/trading/options-structures.md` — 58 structures, guard decisions, P&L attribution labels. Use for order entry, structure classification, and naked short guard logic.
 7. **Todo capture.** When the user says "todo" (e.g. "todo: explore X", "add this as a todo"), append the idea to the **Inbox** section at the bottom of `docs/todo-backlog.md` with today's date. Do not start work on it. Do not silently drop it. The backlog is a queue for future planning sessions, not active work. **Add your own commentary** under each entry — hypotheses, suspected file sites, dependencies on other backlog items, design questions, references to commits/CLAUDE.md guidance — anything that would save future-you from rebuilding the context from scratch. Use a `**Notes:**` sub-bullet to keep your commentary visually separate from the user's original framing.
 
 ## Identity
 
-**Xenon** — broker terminal for options portfolio management. Live IB + read-only Futu integration. Places orders, tracks fills, enforces position-close rules, surfaces P&L and Greeks attribution. **No signal generation, no scanner output — bring your own thesis.**
+**Xenon** — broker terminal for options portfolio management. Live IB + read-only Futu integration. Places orders, tracks fills, enforces position-close rules, surfaces P&L and Greeks attribution. **No signal generation, no scanner output — bring your own thesis.** The signal layer (scanners, fetchers, analysis, share-card generators) was removed in the pure-portfolio pivot (commit `cc568c36`); do not reintroduce scanner / evaluation / discovery surfaces.
 
-Brand spec: `brand/CLAUDE.md` + `docs/reference/brand-identity.md`.
+Brand spec: `brand/CLAUDE.md` + `docs/reference/brand-identity.md`. Non-negotiables for any UI/asset work: `signal.core` teal is the flagship accent; all colors via design tokens — no raw hex; Inter for UI, IBM Plex Mono for numeric/telemetry, Sohne for display only; panels max out at 4px radius (badges may use capsule); no glassmorphism, decorative gradients, or soft shadows; empty states describe measurement conditions; voice is precise, calm, scientific.
 
 ## ⛔ Naked-Short Guard — Mandatory, No Exceptions
 
@@ -148,6 +186,8 @@ TZ=America/New_York date +"%A %H:%M"   # 9:30–16:00 ET, Mon–Fri
 Quotes, fills, and position updates flow whenever IB Gateway is connected. Outside RTH the portfolio still renders from the last `account_snapshots.payload`; flag stale data in the UI rather than swap to a different source.
 
 ## Startup Checklist
+
+`scripts/infra/dev.sh paper|live` derives the IB Gateway port (4001 live / 4002 paper), exports `XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT`, runs Alembic migrations, and starts FastAPI + Next dev. It does **not** edit `.env` and does **not** start IB Gateway (manual). `--no-auth` bypasses Clerk for the session.
 
 - [ ] `scripts/infra/dev.sh paper` (paper IB on local `127.0.0.1:4002`, writes `core_test`) — OR `scripts/infra/dev.sh live` (live IB on macmini `100.66.147.98:4001`, **read-only — `XENON_READ_ONLY=1`**)
 - [ ] Dev stack binds **3200** (Next), **8421** (FastAPI), **8866** (realtime WS). Production launchd keeps 3000/8321/8765; the dev ports are offset so the xenon dev stack coexists with the local radon stack.
@@ -196,7 +236,7 @@ Per-session bootstrap (cheap, idempotent):
 | Action                | Command                                               |
 | --------------------- | ----------------------------------------------------- |
 | Install / sync deps   | `uv sync --extra test`                                |
-| Run a CLI entry point | `uv run xenon-trend-scan ...`                         |
+| Run a CLI entry point | `uv run xenon-portfolio-report ...`                   |
 | Run a one-off script  | `uv run python scripts/foo.py`                        |
 | Run pytest            | `uv run pytest ...`                                   |
 | Add a dep             | `uv add <pkg>` (updates `pyproject.toml` + `uv.lock`) |
@@ -250,3 +290,7 @@ git push origin master --follow-tags   # operator pushes manually → release.ym
 ```
 
 `VERSION` (root) is the source of truth; `scripts/release/version_sync_check.py` enforces parity with `package.json` in CI.
+
+## Strategy Registry Sync
+
+If `docs/trading/strategies.md` changes, update `data/strategies.json` in the same change and validate with `uv run python -m json.tool data/strategies.json`. The registry is documentation only — the signal layer that consumed it was removed in the pure-portfolio pivot — but the docs still reference it, so keep them in sync.
