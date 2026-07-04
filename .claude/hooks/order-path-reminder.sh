@@ -7,7 +7,7 @@
 #
 # Exits 0 always — this is advisory, not blocking. Layer 2 (pre-commit) is
 # the deterministic gate. See:
-#   docs/plans/2026-04-28-order-path-regression-prevention.md
+#   docs/superpowers/plans/_archive/2026-04-28-order-path-regression-prevention.md
 
 set -euo pipefail
 
@@ -54,8 +54,8 @@ shipped silent regressions here. Keep these invariants:
    AccountScope; legacy JSON is backfill input only.
 2. Every order entrypoint must route through _run_preflight() in
    src/xenon/api/server.py. Do not call ib_place_order directly from
-   anywhere except server.py / ib_order_manage.py — in-process bypass
-   has caused regressions twice.
+   anywhere except server.py, the module itself, and tests (the CI
+   caller allowlist) — in-process bypass has caused regressions twice.
 3. client_attempt_id is required, not optional, on every order body.
    Missing it must return INVALID_ORDER_BODY (400) — never accept and
    forward.
@@ -66,8 +66,8 @@ shipped silent regressions here. Keep these invariants:
    route does not enforce it. Do not add a frontend-only guard that
    in-process callers can bypass.
 
-Reference: docs/plans/2026-04-28-order-path-regression-prevention.md
-Reference: docs/plans/2026-04-27-order-placement-reliability.md (PR #61)
+Reference: docs/superpowers/plans/_archive/2026-04-28-order-path-regression-prevention.md
+Reference: docs/reference/order-path-incident-history.md
 EOF
 
 exit 0

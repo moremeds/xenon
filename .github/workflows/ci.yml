@@ -183,7 +183,7 @@ jobs:
       - run: python3.13 scripts/release/version_sync_check.py
 
   order-path-guards:
-    # Layer 2 of docs/plans/2026-04-28-order-path-regression-prevention.md.
+    # Layer 2 of docs/superpowers/plans/_archive/2026-04-28-order-path-regression-prevention.md.
     # Pure-stdlib Python — no uv sync, no Postgres. Runs in seconds.
     runs-on: ubuntu-latest
     steps:
@@ -201,3 +201,5 @@ jobs:
         run: python3.13 scripts/checks/no_ib_insync.py
       - name: nav_history single-writer guard (Pass-2 T4)
         run: python3.13 scripts/checks/no_pg_insert_nav_history.py
+      - name: No Yahoo Finance in active code (CLAUDE.md standing rule)
+        run: python3.13 scripts/checks/no_yahoo_finance.py

@@ -97,6 +97,20 @@ when scoping starts.
 
 <!-- 2026-MM-DD — short title — one-line description -->
 
+- 2026-07-04 — **Purge Yahoo Finance from the 5 allowlisted files in `no_yahoo_finance.py`** —
+  the new CI guard (added with the config-audit PR) found 6 pre-existing
+  `finance.yahoo.com`/`yfinance` usages violating the standing "Never use Yahoo
+  Finance" rule: `web/app/api/ticker/news/route.ts`, `web/app/api/ticker/info/route.ts`,
+  `web/app/api/previous-close/route.ts`, `src/xenon/reports/portfolio_performance.py:854`,
+  `scripts/research/spx_short_put_backtest.py`. They are pinned in the guard's
+  `ALLOWLIST_PATHS`, intended to shrink to zero.
+  **Notes:** likely replacements — UW historic OHLC (`$UW_TOKEN`, already used by
+  portfolio-perf/report) for the chart/close endpoints; IB for real-time previous
+  close; the news route may need EXA (`EXA_API_KEY` already in web/.env) or UW news.
+  `portfolio_performance.py` claiming UW but hitting Yahoo at line 854 deserves a
+  look first — it may be a fallback path that silently took over. Remove each file
+  from `ALLOWLIST_PATHS` in the same PR that fixes it so the guard locks it in.
+
 - 2026-04-27 — **Add a priority level to backlog items** — tag each numbered
   section (and inbox entry on promotion) with a priority so planning sessions
   can sort by impact, not by capture order. Open question: P0/P1/P2 vs.

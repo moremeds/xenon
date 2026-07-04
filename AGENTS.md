@@ -1,1 +1,1 @@
-.pi/AGENTS.md
+CLAUDE.md
