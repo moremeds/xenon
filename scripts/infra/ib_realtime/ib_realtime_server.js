@@ -825,6 +825,7 @@ function ensureSymbolState(key, ibContract) {
     tickerId: null,
     contract: ibContract,
     data: createPriceData(key),
+    lastRealTickAt: null, // ms of last freshness-field change; null until first real tick
   };
   symbolStates.set(key, state);
   return state;
@@ -1358,6 +1359,21 @@ async function handleSnapshotRequest(client, symbols) {
   }
 }
 
+// A symbol is stale when it has no active IB line (starved by the ~100-line
+// budget → error 102, or a no-security-def / not-subscribed drop) or hasn't
+// produced a real value change within STALE_TICK_MS. Lets consumers distinguish
+// a live tick from a held cache instead of trusting the (now honest) timestamp.
+const STALE_TICK_MS = Number(process.env.IB_REALTIME_STALE_TICK_MS) || 60_000;
+function computeStale(state) {
+  if (!state) return true;
+  if (state.tickerId == null) return true; // no active IB market-data line
+  const at = state.lastRealTickAt;
+  return at == null || Date.now() - at > STALE_TICK_MS;
+}
+function withStale(state) {
+  return { ...state.data, stale: computeStale(state) };
+}
+
 function hydrateAndBroadcast(symbol) {
   const state = symbolStates.get(symbol);
   if (!state) return;
@@ -1370,7 +1386,7 @@ function hydrateAndBroadcast(symbol) {
   // updates as a single {"type": "batch", "updates": {...}} message.
   const subscribers = symbolSubscribers.get(symbol);
   if (!subscribers || subscribers.size === 0) return;
-  const dataSnapshot = { ...state.data };
+  const dataSnapshot = withStale(state);
   for (const client of subscribers) {
     bufferPriceForClient(client, symbol, dataSnapshot);
   }
@@ -1383,7 +1399,8 @@ function onTickPrice(tickerId, tickType, price) {
   const snapshotState = snapshotRequests.get(tickerId);
 
   if (liveState) {
-    updatePriceFromTickPrice(liveState.data, tickType, price);
+    const changed = updatePriceFromTickPrice(liveState.data, tickType, price);
+    if (changed) liveState.lastRealTickAt = Date.now();
     // Cache option close prices to disk for after-hours availability
     updateOptionCloseCache(symbol, liveState.data.close);
     verbose(`tick ${symbol} type=${tickType} price=${price}`);
@@ -1401,7 +1418,9 @@ function onTickSize(tickerId, sizeType, size) {
   const snapshotState = snapshotRequests.get(tickerId);
 
   if (liveState) {
-    updatePriceFromTickSize(liveState.data, sizeType, size);
+    const changed = updatePriceFromTickSize(liveState.data, sizeType, size);
+    if (changed) liveState.lastRealTickAt = Date.now();
+    hydrateAndBroadcast(symbol);
   }
   if (snapshotState) {
     updatePriceFromTickSize(snapshotState.data, sizeType, size);
@@ -1513,7 +1532,7 @@ function restoreSubscriptions() {
       sendToSymbolSubscribers(key, {
         type: "price",
         symbol: key,
-        data: state.data,
+        data: withStale(state),
       });
     }
   }
@@ -1549,7 +1568,7 @@ async function handleClientMessage(client, data) {
             sendMessage(client, {
               type: "price",
               symbol,
-              data: state.data,
+              data: withStale(state),
             });
           }
           // Send cached fundamentals if available
@@ -1582,7 +1601,7 @@ async function handleClientMessage(client, data) {
             sendMessage(client, {
               type: "price",
               symbol: key,
-              data: state.data,
+              data: withStale(state),
             });
           }
           subscribed.push(key);
@@ -1601,7 +1620,7 @@ async function handleClientMessage(client, data) {
             sendMessage(client, {
               type: "price",
               symbol: key,
-              data: state.data,
+              data: withStale(state),
             });
           }
           subscribed.push(key);
@@ -1621,7 +1640,7 @@ async function handleClientMessage(client, data) {
             sendMessage(client, {
               type: "price",
               symbol: key,
-              data: state.data,
+              data: withStale(state),
             });
           }
           subscribed.push(key);
@@ -1642,7 +1661,7 @@ async function handleClientMessage(client, data) {
             sendMessage(client, {
               type: "price",
               symbol: key,
-              data: state.data,
+              data: withStale(state),
             });
           }
           subscribed.push(key);
@@ -1917,6 +1936,24 @@ function wireIBEvents() {
         if (state && state.tickerId === tickerId) {
           requestIdToSymbol.delete(tickerId);
           state.tickerId = null;
+        }
+      }
+    } else if (code === 101 || /Max number of tickers/i.test(msg)) {
+      // IB market-data line budget (~100/account, SHARED across API clients) is
+      // exhausted — this subscription got no line and will NEVER stream. Clear
+      // the dead tickerId so computeStale() reports the symbol as stale instead
+      // of the relay silently serving a held cache with a fresh timestamp.
+      // Root cause of the July-2 stale-`last` report. Real fix is capacity
+      // management (cap concurrent lines); this at least stops the silent lie.
+      console.warn(
+        `\x1b[33mIB warning: market-data line cap reached for ${symbol ?? `tickerId:${tickerId}`} — symbol will read stale\x1b[0m`,
+      );
+      if (symbol) {
+        const state = symbolStates.get(symbol);
+        if (state && state.tickerId === tickerId) {
+          requestIdToSymbol.delete(tickerId);
+          state.tickerId = null;
+          hydrateAndBroadcast(symbol); // push stale:true to subscribers now
         }
       }
     } else if (/Fundamentals data is not allowed/i.test(msg)) {

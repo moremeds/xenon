@@ -5,13 +5,30 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.7.2] — 2026-06-23
+### Fixed
 
+- IB realtime relay no longer serves a stale `last` with a fresh timestamp. Two
+  causes addressed: (1) `updatePriceFromTickPrice`/`updatePriceFromTickSize` now
+  bump `data.timestamp` **only** when a freshness field actually changes — a
+  closed-market `-1` quote (normalized to null) no longer advances the timestamp,
+  so a held cache reads with an honest (old) time; (2) error 101 "Max number of
+  tickers has been reached" (IB's ~100-line per-account market-data budget,
+  observed firing 88× in 15 min on prod) is now handled — the dead `tickerId` is
+  cleared instead of the symbol silently pretending to be subscribed.
+- Each `price`/`batch` frame carries an additive per-symbol `stale` boolean
+  (`true` when the symbol has no active IB line or no real tick within
+  `IB_REALTIME_STALE_TICK_MS`, default 60s) so consumers can distinguish a live
+  tick from a held cache. Note: the underlying line-budget **oversubscription**
+  (relay attempts ~430 subscriptions against a ~100 cap) is now _visible_ but not
+  yet _fixed_ — capacity management is a separate follow-up.
+
+## [0.7.2] — 2026-06-23
 
 ### Fixed
 
 - IB foreign-stock (JPY/KRW) rows: native per-share price columns (Underlying, Avg Entry, Last Price) widened to 11% so 7-digit values (₩2,919,000) no longer overflow and collide; the Underlying cell now formats native currency (₩/¥) via `fmtNative` instead of a bogus `$` prefix
 - `/portfolio/sync` logs a loud error when it returns a stale snapshot — catches the silent class of failure where `xenon-ib-sync` exits 0 but the Postgres write was swallowed (e.g. schema drift from an un-applied migration). Non-fatal: the read still returns, but the staleness is now visible in the API log
+
 ## [0.7.1] — 2026-06-22
 
 ### Fixed

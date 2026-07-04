@@ -73,7 +73,36 @@ export function updateDerivedLast(data) {
   }
 }
 
+// Fields whose change means the symbol produced a real, fresh update. Closed-
+// market -1 quotes normalize to null → no change → timestamp is NOT bumped, so
+// a stale `last` carries an honest (old) timestamp instead of a lying fresh one.
+const FRESHNESS_FIELDS = [
+  "last",
+  "bid",
+  "ask",
+  "close",
+  "volume",
+  "high",
+  "low",
+  "open",
+];
+
+function snapshotFreshness(data) {
+  const snap = {};
+  for (const f of FRESHNESS_FIELDS) snap[f] = data[f];
+  return snap;
+}
+
+function freshnessChanged(prev, data) {
+  for (const f of FRESHNESS_FIELDS) {
+    if (prev[f] !== data[f]) return true;
+  }
+  return false;
+}
+
+// Returns true iff this tick changed a freshness field (and bumped timestamp).
 export function updatePriceFromTickPrice(data, tickType, value) {
+  const prev = snapshotFreshness(data);
   switch (tickType) {
     // ── Live tick types ───────────────────────────────────────────────────
     case TICK_TYPE.BID:
@@ -176,7 +205,11 @@ export function updatePriceFromTickPrice(data, tickType, value) {
     }
   }
 
-  data.timestamp = new Date().toISOString();
+  const changed = freshnessChanged(prev, data);
+  if (changed) {
+    data.timestamp = new Date().toISOString();
+  }
+  return changed;
 }
 
 /* ─── Fundamentals (tickString type 47) ─────────────────────── */
@@ -255,7 +288,9 @@ export function parseFundamentalRatios(data, fundString) {
   return updated;
 }
 
+// Returns true iff this size tick changed a freshness field (and bumped timestamp).
 export function updatePriceFromTickSize(data, sizeType, value) {
+  const prev = snapshotFreshness(data);
   switch (sizeType) {
     case TICK_TYPE.BID_SIZE:
       data.bidSize = normalizeNumber(value);
@@ -281,5 +316,9 @@ export function updatePriceFromTickSize(data, sizeType, value) {
       break;
   }
 
-  data.timestamp = new Date().toISOString();
+  const changed = freshnessChanged(prev, data);
+  if (changed) {
+    data.timestamp = new Date().toISOString();
+  }
+  return changed;
 }
