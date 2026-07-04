@@ -5,6 +5,9 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-07-04
+
+
 ### Fixed
 
 - IB realtime relay now serves the **correct last price when a streaming line is
@@ -29,7 +32,6 @@ All notable changes to Xenon are documented here. Format loosely based on
   per-request timeout plus a reconnect reset prevent a stuck request from
   permanently blocking a symbol. During RTH nothing is stale, so no historical
   requests are issued and the live streaming `last` is never overridden.
-
 ## [0.8.0] — 2026-07-04
 
 ### Fixed
