@@ -73,6 +73,55 @@ export function updateDerivedLast(data) {
   }
 }
 
+// IB serves market data on two independent planes: the streaming `reqMktData`
+// subscription and the `reqHistoricalData` bars. A streaming line can FREEZE
+// per-contract — if it was starved (error 101 "max tickers") across a session
+// boundary it never advances, and keeps emitting the last session's CLOSE/LAST
+// it managed to receive (e.g. TSLA stuck at Jul-1 425.30/423.60 while the real
+// Jul-2 close is 393.45). The historical plane is pulled fresh each call, so
+// the most recent daily bar's close is authoritative.
+//
+// When there is no live trade (line stale, or `last` absent), the last known
+// price IS that daily close — so override the frozen streaming value with it.
+// A genuine live `last` (not calculated, not stale) is left untouched; only its
+// `close` is corrected. Options are skipped — they use optionCloseCache.
+// Mutates `data` in place; returns true iff it changed `last` or `close`.
+export function applyAuthoritativeClose(data, dailyClose, stale) {
+  if (typeof dailyClose !== "number" || !(dailyClose > 0)) return false;
+  if (data.symbol.includes("_")) return false; // options: separate close cache
+  let changed = false;
+  if (data.close !== dailyClose) {
+    data.close = dailyClose;
+    changed = true;
+  }
+  // No live trade to trust: last is missing, was derived, or the line is stale.
+  const noLiveTrade = data.last == null || data.lastIsCalculated || stale;
+  if (noLiveTrade && data.last !== dailyClose) {
+    data.last = dailyClose;
+    data.lastIsCalculated = true; // a session close, not a live trade print
+    changed = true;
+  }
+  return changed;
+}
+
+// Pick the close of the most-recent COMPLETED daily session from historical
+// bars. An in-progress current-day bar (returned by "2 D"/"1 day" during RTH)
+// is rejected, so a partial intraday value is never cached and served as a
+// session close. `bars` = [{ date: "YYYYMMDD", close }] oldest→newest (IB order);
+// `todayYmd` = "YYYYMMDD" in ET; `sessionOpen` = is today's RTH session in
+// progress right now. Returns { close, date } of the latest completed session,
+// or null when none qualifies.
+export function selectCompletedBarClose(bars, todayYmd, sessionOpen) {
+  let best = null;
+  for (const b of bars) {
+    if (typeof b.close !== "number" || !(b.close > 0)) continue;
+    const isTodayPartial = b.date === todayYmd && sessionOpen;
+    if (isTodayPartial) continue; // today's bar is still forming — not a close
+    best = { close: b.close, date: b.date }; // newer completed bar wins
+  }
+  return best;
+}
+
 // Fields whose change means the symbol produced a real, fresh update. Closed-
 // market -1 quotes normalize to null → no change → timestamp is NOT bumped, so
 // a stale `last` carries an honest (old) timestamp instead of a lying fresh one.

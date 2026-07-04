@@ -47,6 +47,8 @@ import {
   parseFundamentalRatios,
   updatePriceFromTickPrice,
   updatePriceFromTickSize,
+  applyAuthoritativeClose,
+  selectCompletedBarClose,
 } from "./ib_tick_handler.js";
 import { pickEvictable, pickAdmittable } from "./line_budget.js";
 import { LRUCache } from "../../lib/lru-cache.js";
@@ -901,6 +903,24 @@ function cleanupSymbolStateForReconnect() {
       state.tickerId = null;
     }
   }
+  // In-flight daily-close historical requests are keyed to the OLD client; after
+  // a client rotation IB never sends their bars/finished marker, so a `pending`
+  // entry would block that symbol's backfill forever and leak the reqId maps.
+  // Reset the whole subsystem — the sweep re-enqueues on demand after reconnect.
+  resetDailyCloseState();
+}
+
+function resetDailyCloseState() {
+  for (const timer of dailyCloseReqTimers.values()) clearTimeout(timer);
+  dailyCloseReqTimers.clear();
+  dailyCloseReqIds.clear();
+  dailyClosePending.clear();
+  dailyCloseBars.clear();
+  dailyCloseCooldown.clear();
+  dailyCloseQueue.length = 0;
+  dailyCloseDraining = false;
+  // dailyCloseStore (the cached closes) is intentionally kept — a fetched close
+  // is still valid across a reconnect; only the in-flight bookkeeping is reset.
 }
 
 function subscribeClientToSymbol(client, symbol) {
@@ -1489,6 +1509,19 @@ function hydrateAndBroadcast(symbol) {
   // Backfill close from cache for options that IB hasn't sent close for
   applyCachedClose(state.data);
 
+  // Stocks/indexes: correct a frozen streaming line with the authoritative
+  // daily close from IB's historical plane. Fetch lazily the first time a line
+  // is stale; once cached, override on every broadcast.
+  const stale = computeStale(state);
+  const daily = dailyCloseStore.get(symbol);
+  if (daily && daily.ymd === etYmd()) {
+    // Only override with a close fetched today, so a live RTH streaming close is
+    // never regressed by a day-old historical value.
+    applyAuthoritativeClose(state.data, daily.close, stale);
+  } else if (stale) {
+    enqueueDailyClose(symbol, state.contract);
+  }
+
   // Buffer the tick for batched delivery instead of sending immediately.
   // Each subscribed client gets the latest PriceData snapshot for this symbol
   // in their per-client buffer. The batch flush timer sends all buffered
@@ -1634,6 +1667,167 @@ function onFundamentalData(reqId, xmlData) {
     verbose(
       `fundamentals ${symbol}: no usable data in XML (${xmlData.length} chars)`,
     );
+  }
+}
+
+/* ─── Authoritative daily close via reqHistoricalData ─────────────────────
+ * The streaming reqMktData plane can freeze a contract's line across a session
+ * boundary (error-101 starvation → the line never advances, keeps emitting the
+ * last CLOSE/LAST it received). IB's historical plane is pulled fresh each call,
+ * so the most recent daily bar's close is authoritative. We lazily fetch it for
+ * a non-option symbol when its streaming line goes stale, cache it per ET day,
+ * and let applyAuthoritativeClose() override the frozen streaming value.
+ *
+ * Demand-driven (only stale symbols enqueue) + throttled so we never trip IB
+ * historical pacing (~60 requests / 10 min). During RTH nothing is stale, so no
+ * historical requests are issued at all. See applyAuthoritativeClose in
+ * ib_tick_handler.js for the override policy.
+ */
+const dailyCloseStore = new Map(); // symbol → { close, sessionDate, ymd }
+const dailyCloseReqIds = new Map(); // reqId → symbol
+const dailyClosePending = new Set(); // symbols in-flight
+const dailyCloseQueue = []; // [{ symbol, contract }] waiting to fetch
+const dailyCloseBars = new Map(); // reqId → [{ date, close }] bar accumulator
+const dailyCloseCooldown = new Map(); // symbol → ms; skip enqueue until then
+const dailyCloseReqTimers = new Map(); // reqId → timeout handle (hung-req guard)
+let dailyCloseDraining = false;
+// IB historical pacing: no more than 60 requests in any 10-minute window → the
+// sustained rate must not exceed 1 per 10s. After the 16:00 close EVERY
+// subscribed stock goes stale within 60s, so the sweep can enqueue the whole
+// universe (~100+) at once; a spacing below 10s would trip pacing violations
+// (code 162) every evening. 12s leaves margin (≤50 requests/10min).
+const DAILY_CLOSE_SPACING_MS =
+  Number(process.env.IB_REALTIME_HIST_SPACING_MS) || 12_000;
+const DAILY_CLOSE_SWEEP_MS =
+  Number(process.env.IB_REALTIME_HIST_SWEEP_MS) || 30_000;
+// After a failed/hung fetch, wait this long before the sweep retries the symbol
+// (prevents a no-data / paced symbol from re-requesting every sweep forever).
+const DAILY_CLOSE_COOLDOWN_MS =
+  Number(process.env.IB_REALTIME_HIST_COOLDOWN_MS) || 300_000;
+// If IB never sends bars nor a "finished" marker nor an error (silent drop), the
+// request would hang `pending` forever. Give up after this long and allow retry.
+const DAILY_CLOSE_REQ_TIMEOUT_MS =
+  Number(process.env.IB_REALTIME_HIST_REQ_TIMEOUT_MS) || 20_000;
+let dailyCloseSweepTimer = null;
+
+// Clear all in-flight bookkeeping for one daily-close request and start its
+// cooldown. Safe to call from the finalize, error, timeout, and reset paths.
+function clearDailyCloseReq(reqId, symbol, cooldown) {
+  dailyCloseReqIds.delete(reqId);
+  dailyCloseBars.delete(reqId);
+  const timer = dailyCloseReqTimers.get(reqId);
+  if (timer) {
+    clearTimeout(timer);
+    dailyCloseReqTimers.delete(reqId);
+  }
+  if (symbol != null) {
+    dailyClosePending.delete(symbol);
+    if (cooldown)
+      dailyCloseCooldown.set(symbol, Date.now() + DAILY_CLOSE_COOLDOWN_MS);
+  }
+}
+
+// "YYYY-MM-DD" in US Eastern — the session calendar day (en-CA → ISO order).
+// Formatter is built once; etYmd() runs on every broadcast, so per-call
+// construction would allocate a DateTimeFormat per tick.
+const ET_YMD_FMT = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/New_York",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+function etYmd() {
+  return ET_YMD_FMT.format(new Date());
+}
+
+function enqueueDailyClose(symbol, contract) {
+  if (!contract || symbol.includes("_")) return; // stocks/indexes only
+  if (dailyClosePending.has(symbol)) return;
+  const cached = dailyCloseStore.get(symbol);
+  if (cached && cached.ymd === etYmd()) return; // already have today's fetch
+  const cooldownUntil = dailyCloseCooldown.get(symbol);
+  if (cooldownUntil && Date.now() < cooldownUntil) return; // backing off a failure
+  if (dailyCloseQueue.some((q) => q.symbol === symbol)) return;
+  dailyCloseQueue.push({ symbol, contract });
+  drainDailyCloseQueue();
+}
+
+function drainDailyCloseQueue() {
+  if (dailyCloseDraining) return;
+  const next = dailyCloseQueue.shift();
+  if (!next) return;
+  if (!ibConnected) {
+    dailyCloseQueue.length = 0; // demand re-enqueues after reconnect
+    return;
+  }
+  dailyCloseDraining = true;
+  const reqId = (nextRequestId += 1);
+  dailyCloseReqIds.set(reqId, next.symbol);
+  dailyClosePending.add(next.symbol);
+  dailyCloseBars.set(reqId, []);
+  try {
+    // "2 D" of daily TRADES bars → the two most recent sessions; the completed
+    // one is picked at finalize. useRTH=1, formatDate=1 (bar dates as YYYYMMDD).
+    ib.reqHistoricalData(
+      reqId,
+      next.contract,
+      "",
+      "2 D",
+      "1 day",
+      "TRADES",
+      1,
+      1,
+      false,
+    );
+    verbose(`reqHistoricalData(dailyClose) ${next.symbol} reqId=${reqId}`);
+    // Hung-request guard: IB may silently drop a response (no bars, no marker, no
+    // error). Give up after a timeout so `pending` can't leak forever.
+    dailyCloseReqTimers.set(
+      reqId,
+      setTimeout(() => {
+        if (dailyCloseReqIds.has(reqId)) {
+          verbose(`dailyClose timeout ${next.symbol} reqId=${reqId}`);
+          clearDailyCloseReq(reqId, next.symbol, true);
+        }
+      }, DAILY_CLOSE_REQ_TIMEOUT_MS),
+    );
+  } catch (error) {
+    verbose(`reqHistoricalData failed for ${next.symbol}: ${error}`);
+    clearDailyCloseReq(reqId, next.symbol, true);
+  }
+  // Space out requests regardless of success to respect IB pacing.
+  setTimeout(() => {
+    dailyCloseDraining = false;
+    drainDailyCloseQueue();
+  }, DAILY_CLOSE_SPACING_MS);
+}
+
+function onHistoricalDailyClose(reqId, time, close) {
+  const symbol = dailyCloseReqIds.get(reqId);
+  if (!symbol) return;
+  const bars = dailyCloseBars.get(reqId);
+  if (!String(time).startsWith("finished")) {
+    // Accumulate dated bars (oldest→newest); completion is decided at finalize.
+    if (bars) bars.push({ date: String(time).trim(), close });
+    return;
+  }
+  // "finished-…" marker row: finalize. Pick the most recent COMPLETED session —
+  // during RTH a partial current-day bar is rejected so an intraday value is
+  // never served as a close.
+  const chosen = selectCompletedBarClose(
+    bars || [],
+    etYmd().replaceAll("-", ""),
+    isUSMarketHours(),
+  );
+  clearDailyCloseReq(reqId, symbol, !chosen); // cooldown only if we got nothing
+  if (chosen) {
+    dailyCloseStore.set(symbol, {
+      close: chosen.close,
+      sessionDate: chosen.date,
+      ymd: etYmd(),
+    });
+    verbose(`dailyClose ${symbol} = ${chosen.close} (session ${chosen.date})`);
+    hydrateAndBroadcast(symbol); // re-emit with the corrected close/last
   }
 }
 
@@ -2011,6 +2205,18 @@ function wireIBEvents() {
 
   ib.on(EventName.error, (error, code, reqId) => {
     const msg = String(error?.message ?? error);
+    // Daily-close historical requests: any error/info on their reqId is terminal
+    // (IB sends NO "finished" marker on failure — @stoqey has no historicalDataEnd
+    // event, so onHistoricalDailyClose would never finalize). Clear the in-flight
+    // state here — before the isInfoCode short-circuit, since a pacing code may be
+    // classed as info — so the sweep can retry instead of a stuck `pending`
+    // permanently blocking this symbol's backfill (and leaking the reqId maps).
+    if (reqId != null && dailyCloseReqIds.has(reqId)) {
+      const sym = dailyCloseReqIds.get(reqId);
+      verbose(`dailyClose historical error ${sym} code=${code}: ${msg}`);
+      clearDailyCloseReq(reqId, sym, true); // cooldown before the sweep retries
+      return;
+    }
     // @stoqey/ib error signature is (error, code, reqId) — there is no `data`
     // object (unlike the dead ib@0.2.9 lib). Informational codes also surface
     // here; short-circuit them so they never flip ib_connected.
@@ -2152,6 +2358,10 @@ function wireIBEvents() {
 
   ib.on(EventName.fundamentalData, (reqId, data) => {
     onFundamentalData(reqId, data);
+  });
+
+  ib.on(EventName.historicalData, (reqId, time, _open, _high, _low, close) => {
+    onHistoricalDailyClose(reqId, time, close);
   });
 
   // ── L2 depth + time-and-sales (Phase 3b) ──────────────────────────────
@@ -2371,6 +2581,22 @@ staleCheckTimer = setInterval(() => {
   }
 }, STALE_CHECK_INTERVAL_MS);
 
+// Authoritative daily-close sweep: enqueue a fetch for any subscribed stock/
+// index whose streaming line is stale and lacks a today-cached close. enqueue
+// dedupes + throttles + caches by ET day, so repeated sweeps are cheap. This
+// guarantees a frozen line self-corrects even if it never re-ticks.
+dailyCloseSweepTimer = setInterval(() => {
+  if (!ibConnected || shuttingDown) return;
+  for (const symbol of symbolSubscribers.keys()) {
+    if (symbol.includes("_")) continue;
+    const state = symbolStates.get(symbol);
+    if (!state || !computeStale(state)) continue;
+    const cached = dailyCloseStore.get(symbol);
+    if (cached && cached.ymd === etYmd()) continue;
+    enqueueDailyClose(symbol, state.contract);
+  }
+}, DAILY_CLOSE_SWEEP_MS);
+
 process.on("SIGINT", () => {
   if (shuttingDown) process.exit(0);
   shuttingDown = true;
@@ -2389,6 +2615,10 @@ process.on("SIGINT", () => {
   if (staleCheckTimer) {
     clearInterval(staleCheckTimer);
     staleCheckTimer = null;
+  }
+  if (dailyCloseSweepTimer) {
+    clearInterval(dailyCloseSweepTimer);
+    dailyCloseSweepTimer = null;
   }
   snapshotLimiter.clear();
   for (const client of clients) {
