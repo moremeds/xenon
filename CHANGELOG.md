@@ -5,6 +5,9 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-07-04
+
+
 ### Fixed
 
 - IB realtime relay no longer serves a stale `last` with a fresh timestamp. Two
@@ -31,7 +34,6 @@ All notable changes to Xenon are documented here. Format loosely based on
   and re-subscribing the hottest evicted-but-wanted symbol when a line frees.
   Illiquid far-OTM strikes age out first; liquid portfolio/ATM lines stay hot.
   Evicted symbols read `stale: true` rather than serving a silent cache.
-
 ## [0.7.2] — 2026-06-23
 
 ### Fixed
