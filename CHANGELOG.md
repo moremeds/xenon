@@ -5,8 +5,27 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
-## [0.8.0] — 2026-07-04
+### Fixed
 
+- IB realtime relay now serves the **correct last price when a streaming line is
+  frozen**. IB has two independent data planes: streaming (`reqMktData`) and
+  historical (`reqHistoricalData`). A streaming line can freeze per-contract —
+  when it was starved across a session boundary (error-101, see 0.8.0) it never
+  advances and keeps emitting the last session's `CLOSE`/`LAST` it managed to
+  receive (observed on prod 2026-07-04: TSLA stuck at Jul-1 `423.60/425.30` while
+  the real Jul-2 close is `393.45` — the same gateway's historical plane knew the
+  correct value). The relay only ever read the streaming plane, so it forwarded
+  the stale value with no way to notice. Now, when a stock/index line goes stale
+  (or has no `last`), the relay lazily fetches the authoritative most-recent daily
+  bar close from the historical plane and overrides the frozen streaming value
+  (`applyAuthoritativeClose`). Demand-driven (only stale symbols), throttled
+  (`IB_REALTIME_HIST_SPACING_MS`, default 3s) to respect IB historical pacing,
+  cached per ET day, and swept every `IB_REALTIME_HIST_SWEEP_MS` (default 30s) so
+  a silently-frozen line self-corrects even without a re-tick. During RTH nothing
+  is stale, so no historical requests are issued and the live streaming `last` is
+  never overridden.
+
+## [0.8.0] — 2026-07-04
 
 ### Fixed
 
@@ -34,6 +53,7 @@ All notable changes to Xenon are documented here. Format loosely based on
   and re-subscribing the hottest evicted-but-wanted symbol when a line frees.
   Illiquid far-OTM strikes age out first; liquid portfolio/ATM lines stay hot.
   Evicted symbols read `stale: true` rather than serving a silent cache.
+
 ## [0.7.2] — 2026-06-23
 
 ### Fixed

@@ -47,6 +47,7 @@ import {
   parseFundamentalRatios,
   updatePriceFromTickPrice,
   updatePriceFromTickSize,
+  applyAuthoritativeClose,
 } from "./ib_tick_handler.js";
 import { pickEvictable, pickAdmittable } from "./line_budget.js";
 import { LRUCache } from "../../lib/lru-cache.js";
@@ -1489,6 +1490,19 @@ function hydrateAndBroadcast(symbol) {
   // Backfill close from cache for options that IB hasn't sent close for
   applyCachedClose(state.data);
 
+  // Stocks/indexes: correct a frozen streaming line with the authoritative
+  // daily close from IB's historical plane. Fetch lazily the first time a line
+  // is stale; once cached, override on every broadcast.
+  const stale = computeStale(state);
+  const daily = dailyCloseStore.get(symbol);
+  if (daily && daily.ymd === etYmd()) {
+    // Only override with a close fetched today, so a live RTH streaming close is
+    // never regressed by a day-old historical value.
+    applyAuthoritativeClose(state.data, daily.close, stale);
+  } else if (stale) {
+    enqueueDailyClose(symbol, state.contract);
+  }
+
   // Buffer the tick for batched delivery instead of sending immediately.
   // Each subscribed client gets the latest PriceData snapshot for this symbol
   // in their per-client buffer. The batch flush timer sends all buffered
@@ -1634,6 +1648,113 @@ function onFundamentalData(reqId, xmlData) {
     verbose(
       `fundamentals ${symbol}: no usable data in XML (${xmlData.length} chars)`,
     );
+  }
+}
+
+/* ─── Authoritative daily close via reqHistoricalData ─────────────────────
+ * The streaming reqMktData plane can freeze a contract's line across a session
+ * boundary (error-101 starvation → the line never advances, keeps emitting the
+ * last CLOSE/LAST it received). IB's historical plane is pulled fresh each call,
+ * so the most recent daily bar's close is authoritative. We lazily fetch it for
+ * a non-option symbol when its streaming line goes stale, cache it per ET day,
+ * and let applyAuthoritativeClose() override the frozen streaming value.
+ *
+ * Demand-driven (only stale symbols enqueue) + throttled so we never trip IB
+ * historical pacing (~60 requests / 10 min). During RTH nothing is stale, so no
+ * historical requests are issued at all. See applyAuthoritativeClose in
+ * ib_tick_handler.js for the override policy.
+ */
+const dailyCloseStore = new Map(); // symbol → { close, ymd }
+const dailyCloseReqIds = new Map(); // reqId → symbol
+const dailyClosePending = new Set(); // symbols in-flight
+const dailyCloseQueue = []; // [{ symbol, contract }] waiting to fetch
+const dailyCloseBars = new Map(); // reqId → latest bar close accumulator
+let dailyCloseDraining = false;
+const DAILY_CLOSE_SPACING_MS =
+  Number(process.env.IB_REALTIME_HIST_SPACING_MS) || 3000;
+const DAILY_CLOSE_SWEEP_MS =
+  Number(process.env.IB_REALTIME_HIST_SWEEP_MS) || 30_000;
+let dailyCloseSweepTimer = null;
+
+function etYmd() {
+  // "YYYY-MM-DD" in US Eastern — the session calendar day (en-CA → ISO order).
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+function enqueueDailyClose(symbol, contract) {
+  if (!contract || symbol.includes("_")) return; // stocks/indexes only
+  if (dailyClosePending.has(symbol)) return;
+  const cached = dailyCloseStore.get(symbol);
+  if (cached && cached.ymd === etYmd()) return; // already have today's fetch
+  if (dailyCloseQueue.some((q) => q.symbol === symbol)) return;
+  dailyCloseQueue.push({ symbol, contract });
+  drainDailyCloseQueue();
+}
+
+function drainDailyCloseQueue() {
+  if (dailyCloseDraining) return;
+  const next = dailyCloseQueue.shift();
+  if (!next) return;
+  if (!ibConnected) {
+    dailyCloseQueue.length = 0; // demand re-enqueues after reconnect
+    return;
+  }
+  dailyCloseDraining = true;
+  const reqId = (nextRequestId += 1);
+  dailyCloseReqIds.set(reqId, next.symbol);
+  dailyClosePending.add(next.symbol);
+  dailyCloseBars.set(reqId, null);
+  try {
+    // "2 D" of daily TRADES bars; last non-marker bar = most recent completed
+    // session close. useRTH=1, formatDate=1.
+    ib.reqHistoricalData(
+      reqId,
+      next.contract,
+      "",
+      "2 D",
+      "1 day",
+      "TRADES",
+      1,
+      1,
+      false,
+    );
+    verbose(`reqHistoricalData(dailyClose) ${next.symbol} reqId=${reqId}`);
+  } catch (error) {
+    verbose(`reqHistoricalData failed for ${next.symbol}: ${error}`);
+    dailyCloseReqIds.delete(reqId);
+    dailyClosePending.delete(next.symbol);
+    dailyCloseBars.delete(reqId);
+  }
+  // Space out requests regardless of success to respect IB pacing.
+  setTimeout(() => {
+    dailyCloseDraining = false;
+    drainDailyCloseQueue();
+  }, DAILY_CLOSE_SPACING_MS);
+}
+
+function onHistoricalDailyClose(reqId, time, close) {
+  const symbol = dailyCloseReqIds.get(reqId);
+  if (!symbol) return;
+  if (!String(time).startsWith("finished")) {
+    // Bars arrive oldest→newest; keep the latest positive close.
+    if (typeof close === "number" && close > 0)
+      dailyCloseBars.set(reqId, close);
+    return;
+  }
+  // "finished-…" marker row: finalize this request.
+  const finalClose = dailyCloseBars.get(reqId);
+  dailyCloseReqIds.delete(reqId);
+  dailyClosePending.delete(symbol);
+  dailyCloseBars.delete(reqId);
+  if (typeof finalClose === "number" && finalClose > 0) {
+    dailyCloseStore.set(symbol, { close: finalClose, ymd: etYmd() });
+    verbose(`dailyClose ${symbol} = ${finalClose}`);
+    hydrateAndBroadcast(symbol); // re-emit with the corrected close/last
   }
 }
 
@@ -2154,6 +2275,10 @@ function wireIBEvents() {
     onFundamentalData(reqId, data);
   });
 
+  ib.on(EventName.historicalData, (reqId, time, _open, _high, _low, close) => {
+    onHistoricalDailyClose(reqId, time, close);
+  });
+
   // ── L2 depth + time-and-sales (Phase 3b) ──────────────────────────────
   // updateMktDepth = single-venue (no MPID); updateMktDepthL2 = SMART (carries
   // marketMaker/MPID). Both funnel into onDepthDelta. tickByTickAllLast feeds
@@ -2371,6 +2496,22 @@ staleCheckTimer = setInterval(() => {
   }
 }, STALE_CHECK_INTERVAL_MS);
 
+// Authoritative daily-close sweep: enqueue a fetch for any subscribed stock/
+// index whose streaming line is stale and lacks a today-cached close. enqueue
+// dedupes + throttles + caches by ET day, so repeated sweeps are cheap. This
+// guarantees a frozen line self-corrects even if it never re-ticks.
+dailyCloseSweepTimer = setInterval(() => {
+  if (!ibConnected || shuttingDown) return;
+  for (const symbol of symbolSubscribers.keys()) {
+    if (symbol.includes("_")) continue;
+    const state = symbolStates.get(symbol);
+    if (!state || !computeStale(state)) continue;
+    const cached = dailyCloseStore.get(symbol);
+    if (cached && cached.ymd === etYmd()) continue;
+    enqueueDailyClose(symbol, state.contract);
+  }
+}, DAILY_CLOSE_SWEEP_MS);
+
 process.on("SIGINT", () => {
   if (shuttingDown) process.exit(0);
   shuttingDown = true;
@@ -2389,6 +2530,10 @@ process.on("SIGINT", () => {
   if (staleCheckTimer) {
     clearInterval(staleCheckTimer);
     staleCheckTimer = null;
+  }
+  if (dailyCloseSweepTimer) {
+    clearInterval(dailyCloseSweepTimer);
+    dailyCloseSweepTimer = null;
   }
   snapshotLimiter.clear();
   for (const client of clients) {
