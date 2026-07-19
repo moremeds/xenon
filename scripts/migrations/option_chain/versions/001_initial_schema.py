@@ -44,8 +44,6 @@ def upgrade() -> None:
         """
         INSERT INTO archive.snapshot_config (ticker, cadence_seconds, enabled, contract_scope) VALUES
             ('SPX', 600, TRUE, 'full'),
-            ('NDX', 600, TRUE, 'full'),
-            ('RUT', 600, TRUE, 'full'),
             ('VIX', 600, TRUE, 'full')
         """
     )
