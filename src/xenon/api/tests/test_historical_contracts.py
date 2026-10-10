@@ -20,9 +20,10 @@ def test_cash_builds_idealpro_forex(pair):
     assert (c.secType, c.symbol, c.currency, c.exchange) == ("CASH", pair[:3], pair[3:], "IDEALPRO")
 
 
-def test_cash_keeps_explicit_exchange():
-    c = make_ib_contract(ContractSpec(sec_type="CASH", symbol="EUR", currency="USD", exchange="IDEALPRO"))
-    assert c.exchange == "IDEALPRO"
+@pytest.mark.parametrize(("given", "expected"), [("SMART", "IDEALPRO"), ("FXCONV", "FXCONV")])
+def test_cash_exchange_smart_means_idealpro_else_passthrough(given, expected):
+    c = make_ib_contract(ContractSpec(sec_type="CASH", symbol="EUR", currency="USD", exchange=given))
+    assert c.exchange == expected
 
 
 def test_cmdty_builds_commodity():
