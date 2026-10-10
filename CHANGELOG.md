@@ -11,6 +11,13 @@ All notable changes to Xenon are documented here. Format loosely based on
   `CASH` (FX on IDEALPRO, e.g. EUR/USD) and `CMDTY` (e.g. XAUUSD) contracts, so
   query-key clients can pull IB `MIDPOINT` FX bars.
 
+### Changed
+
+- `POST /historical/bars` and `/contract/qualify` return **404** naming the contract when IB
+  cannot qualify it (unknown or ambiguous). Before, bars returned `200 {"bars": []}` —
+  indistinguishable from "no data" — and qualify crashed with a 500. Callers that relied on
+  an empty list for an unsupported route (e.g. `IND RUT@CBOE`) now get a 404.
+
 ## [0.8.1] — 2026-07-04
 
 

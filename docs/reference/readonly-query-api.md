@@ -270,7 +270,11 @@ enumerator only, no quotes/greeks.
 FX example — `{"sec_type": "CASH", "symbol": "EUR", "currency": "USD", "exchange": "IDEALPRO"}`
 (`exchange` defaults to `IDEALPRO` for `CASH`), with `"what_to_show": "MIDPOINT", "use_rth": false`.
 A CASH `1 day` bar runs 17:15 → 17:00 America/New_York and is dated by the NY date of its 17:00 close.
-`MIDPOINT` bars carry `volume: -1`. Gold spot: `{"sec_type": "CMDTY", "symbol": "XAUUSD"}`.
+`MIDPOINT` bars carry `volume: -1`. Gold spot: `{"sec_type": "CMDTY", "symbol": "XAUUSD"}`. Silver: `XAGUSD`.
+IB energy/ags/base metals are futures (`FUT` + `last_trade_date`), not `CMDTY`.
+A contract IB cannot qualify (unknown or ambiguous) → **404** with the contract in `detail`, on
+both `/historical/bars` and `/contract/qualify`. `200` with `"bars": []` now means only "the
+contract exists, IB returned no data for that window" (e.g. `XPTUSD` MIDPOINT).
 
 `POST /historical/head-timestamp` — `{"contract": {...}, "what_to_show": "TRADES", "use_rth": true}`.
 

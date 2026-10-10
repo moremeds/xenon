@@ -98,6 +98,19 @@ def make_ib_contract(spec: ContractSpec):
         raise HTTPException(status_code=422, detail=f"Unsupported sec_type: {spec.sec_type}")
 
 
+def _require_qualified(specs: List[ContractSpec], contracts: list) -> None:
+    """404 when IB could not qualify a contract (unknown or ambiguous).
+
+    ib_async leaves conId=0 on such a contract instead of raising, which used to
+    surface as an empty-but-200 bars response that looked like "no data".
+    """
+    missing = [
+        f"{s.sec_type} {s.symbol} {s.currency}@{c.exchange}" for s, c in zip(specs, contracts) if not c.conId
+    ]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"IB could not qualify contract(s): {', '.join(missing)}")
+
+
 def _contract_to_dict(contract) -> dict:
     """Serialize a qualified ib_async contract to JSON-safe dict."""
     return {
@@ -151,11 +164,12 @@ async def qualify_contracts(req: QualifyRequest, request: Request):
 
     try:
         async with pool.acquire("data") as client:
-            qualified = await pool.run_sync("data", client.qualify_contracts, *contracts)
+            await pool.run_sync("data", client.qualify_contracts, *contracts)
     except ConnectionError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    return {"contracts": [_contract_to_dict(c) for c in qualified]}
+    _require_qualified(req.contracts, contracts)
+    return {"contracts": [_contract_to_dict(c) for c in contracts]}
 
 
 @router.post("/historical/head-timestamp")
@@ -192,6 +206,7 @@ async def historical_bars(req: HistoricalBarsRequest, request: Request):
     try:
         async with pool.acquire("data") as client:
             await pool.run_sync("data", client.qualify_contracts, contract)
+            _require_qualified([req.contract], [contract])
             bars = await pool.run_sync(
                 "data",
                 client.get_historical_data,

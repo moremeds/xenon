@@ -5,13 +5,44 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from xenon.api.routes.historical import (
     ContractSpec,
     HistoricalBarsRequest,
+    QualifyRequest,
     historical_bars,
     make_ib_contract,
+    qualify_contracts,
 )
+
+
+class FakePool:
+    """Mimics ib_async: a known contract gets its conId filled in place; an
+    unknown or ambiguous one comes back as None and keeps conId=0."""
+
+    def __init__(self, known=True):
+        self.known = known
+        self.calls = []
+
+    @asynccontextmanager
+    async def acquire(self, role):
+        yield SimpleNamespace(qualify_contracts="qualify", get_historical_data="hist")
+
+    async def run_sync(self, role, fn, *args, **kwargs):
+        self.calls.append((fn, args, kwargs))
+        if fn == "qualify":
+            if not self.known:
+                return [None for _ in args]
+            for c in args:
+                c.conId = 12087792
+            return list(args)
+        # IB returns volume=-1 for MIDPOINT bars.
+        return [SimpleNamespace(date="20261009", open=1.1, high=1.2, low=1.0, close=1.15, volume=-1)]
+
+
+def _request(pool):
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ib_pool=pool)))
 
 
 @pytest.mark.parametrize("pair", ["EURUSD", "USDJPY", "GBPUSD", "USDCAD", "USDSEK", "USDCHF"])
@@ -32,20 +63,7 @@ def test_cmdty_builds_commodity():
 
 
 def test_fx_midpoint_request_passes_through_unchanged():
-    calls = []
-
-    class FakePool:
-        @asynccontextmanager
-        async def acquire(self, role):
-            yield SimpleNamespace(qualify_contracts="qualify", get_historical_data="hist")
-
-        async def run_sync(self, role, fn, *args, **kwargs):
-            calls.append((fn, args, kwargs))
-            if fn == "qualify":
-                return list(args)
-            # IB returns volume=-1 for MIDPOINT bars.
-            return [SimpleNamespace(date="20261009", open=1.1, high=1.2, low=1.0, close=1.15, volume=-1)]
-
+    pool = FakePool()
     req = HistoricalBarsRequest(
         contract=ContractSpec(sec_type="CASH", symbol="EUR", currency="USD", exchange="IDEALPRO"),
         duration="2 Y",
@@ -53,11 +71,10 @@ def test_fx_midpoint_request_passes_through_unchanged():
         what_to_show="MIDPOINT",
         use_rth=False,
     )
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ib_pool=FakePool())))
 
-    out = asyncio.run(historical_bars(req, request))
+    out = asyncio.run(historical_bars(req, _request(pool)))
 
-    fn, args, kwargs = calls[-1]
+    fn, args, kwargs = pool.calls[-1]
     assert fn == "hist"
     assert args[0].secType == "CASH"
     assert kwargs == {
@@ -68,3 +85,33 @@ def test_fx_midpoint_request_passes_through_unchanged():
         "use_rth": False,
     }
     assert out["bars"] == [{"date": "2026-10-09", "open": 1.1, "high": 1.2, "low": 1.0, "close": 1.15, "volume": -1}]
+
+
+def test_bars_unknown_contract_is_404_not_empty_200():
+    pool = FakePool(known=False)
+    req = HistoricalBarsRequest(contract=ContractSpec(sec_type="CMDTY", symbol="WTI"))
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(historical_bars(req, _request(pool)))
+
+    assert exc.value.status_code == 404
+    assert "CMDTY WTI" in exc.value.detail
+    assert [fn for fn, _, _ in pool.calls] == ["qualify"]  # never asks IB for bars
+
+
+def test_qualify_unknown_contract_is_404_naming_it():
+    req = QualifyRequest(contracts=[ContractSpec(sec_type="CMDTY", symbol="WTI")])
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(qualify_contracts(req, _request(FakePool(known=False))))
+
+    assert exc.value.status_code == 404
+    assert "CMDTY WTI" in exc.value.detail
+
+
+def test_qualify_known_contract_returns_con_id():
+    req = QualifyRequest(contracts=[ContractSpec(sec_type="CASH", symbol="EUR", currency="USD")])
+
+    out = asyncio.run(qualify_contracts(req, _request(FakePool())))
+
+    assert out["contracts"][0]["conId"] == 12087792
