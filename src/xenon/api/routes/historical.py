@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import date, datetime
 from typing import List, Optional
 
@@ -20,6 +21,10 @@ from pydantic import BaseModel
 logger = logging.getLogger("xenon.historical")
 
 router = APIRouter()
+
+# ib_async's reqHistoricalData default timeout. On expiry it cancels the IB request
+# and returns [] instead of raising, so an over-long duration looks like "no data".
+_IB_HIST_TIMEOUT_S = 60
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +212,7 @@ async def historical_bars(req: HistoricalBarsRequest, request: Request):
         async with pool.acquire("data") as client:
             await pool.run_sync("data", client.qualify_contracts, contract)
             _require_qualified([req.contract], [contract])
+            started = time.monotonic()
             bars = await pool.run_sync(
                 "data",
                 client.get_historical_data,
@@ -219,6 +225,16 @@ async def historical_bars(req: HistoricalBarsRequest, request: Request):
             )
     except ConnectionError as e:
         raise HTTPException(status_code=503, detail=str(e))
+
+    # ponytail: elapsed includes any wait for the "data" worker, so a genuinely empty
+    # reply queued behind a slow request can read as a timeout. That errs to 504
+    # (retry with a shorter window), never to a silent empty 200.
+    if not bars and time.monotonic() - started >= _IB_HIST_TIMEOUT_S:
+        raise HTTPException(
+            status_code=504,
+            detail=f"IB historical request timed out after {_IB_HIST_TIMEOUT_S}s "
+            f"(duration {req.duration!r}); split it into shorter windows with end_date_time",
+        )
 
     return {
         "bars": [

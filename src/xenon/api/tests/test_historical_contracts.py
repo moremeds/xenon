@@ -115,3 +115,24 @@ def test_qualify_known_contract_returns_con_id():
     out = asyncio.run(qualify_contracts(req, _request(FakePool())))
 
     assert out["contracts"][0]["conId"] == 12087792
+
+
+def test_bars_ib_timeout_is_504_not_empty_200(monkeypatch):
+    """ib_async cancels a request that runs past its timeout and returns []."""
+    import xenon.api.routes.historical as hist
+
+    ticks = iter([0.0, hist._IB_HIST_TIMEOUT_S])
+    monkeypatch.setattr(hist, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
+
+    class TimingOutPool(FakePool):
+        async def run_sync(self, role, fn, *args, **kwargs):
+            out = await super().run_sync(role, fn, *args, **kwargs)
+            return [] if fn == "hist" else out
+
+    req = HistoricalBarsRequest(contract=ContractSpec(sec_type="CASH", symbol="USD", currency="CAD"), duration="17 Y")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(historical_bars(req, _request(TimingOutPool())))
+
+    assert exc.value.status_code == 504
+    assert "17 Y" in exc.value.detail

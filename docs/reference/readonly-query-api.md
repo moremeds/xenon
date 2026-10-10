@@ -275,6 +275,10 @@ IB energy/ags/base metals are futures (`FUT` + `last_trade_date`), not `CMDTY`.
 A contract IB cannot qualify (unknown or ambiguous) → **404** with the contract in `detail`, on
 both `/historical/bars` and `/contract/qualify`. `200` with `"bars": []` now means only "the
 contract exists, IB returned no data for that window" (e.g. `XPTUSD` MIDPOINT).
+A request that runs past IB's 60 s historical timeout → **504** (not an empty 200). Long
+histories: chunk with `end_date_time` (`"YYYYMMDD-HH:MM:SS"`, UTC) and **overlap** the windows —
+IB's `N Y` is not an exact calendar span (a `5 Y` window ending `20250101-00:00:00` omits
+2020-01-02) — then de-duplicate by `date`.
 
 `POST /historical/head-timestamp` — `{"contract": {...}, "what_to_show": "TRADES", "use_rth": true}`.
 
