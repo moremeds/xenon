@@ -266,7 +266,13 @@ enumerator only, no quotes/greeks.
 }
 ```
 
+`contract.sec_type` accepts `STK`, `FUT` (needs `last_trade_date`), `IND`, `CASH`, `CMDTY`.
+FX example — `{"sec_type": "CASH", "symbol": "EUR", "currency": "USD", "exchange": "IDEALPRO"}`
+(`exchange` defaults to `IDEALPRO` for `CASH`), with `"what_to_show": "MIDPOINT", "use_rth": false`.
+A CASH `1 day` bar runs 17:15 → 17:00 America/New_York and is dated by the NY date of its 17:00 close.
+`MIDPOINT` bars carry `volume: -1`. Gold spot: `{"sec_type": "CMDTY", "symbol": "XAUUSD"}`.
+
 `POST /historical/head-timestamp` — `{"contract": {...}, "what_to_show": "TRADES", "use_rth": true}`.
 
 `POST /contract/qualify` — `{"contracts": [{"sec_type": "STK", "symbol": "AAPL"}]}` → each with
-its resolved `conId`. **STK/FUT/IND only** — for options, use `/market-depth`'s `conId`.
+its resolved `conId`. **STK/FUT/IND/CASH/CMDTY only** — for options, use `/market-depth`'s `conId`.

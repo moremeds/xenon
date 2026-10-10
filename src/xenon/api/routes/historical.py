@@ -78,7 +78,7 @@ def _get_pool(request: Request):
 
 def make_ib_contract(spec: ContractSpec):
     """Reconstruct an ib_async contract from a JSON spec."""
-    from ib_async import Future, Index, Stock
+    from ib_async import Commodity, Forex, Future, Index, Stock
 
     if spec.sec_type == "STK":
         return Stock(spec.symbol, spec.exchange, spec.currency)
@@ -88,6 +88,12 @@ def make_ib_contract(spec: ContractSpec):
         return Future(spec.symbol, spec.last_trade_date, spec.exchange, spec.currency)
     elif spec.sec_type == "IND":
         return Index(spec.symbol, spec.exchange, spec.currency)
+    elif spec.sec_type == "CASH":
+        # FX trades on IDEALPRO, never SMART; treat the SMART model default as "unset".
+        exchange = "IDEALPRO" if spec.exchange == "SMART" else spec.exchange
+        return Forex(symbol=spec.symbol, currency=spec.currency, exchange=exchange)
+    elif spec.sec_type == "CMDTY":
+        return Commodity(spec.symbol, spec.exchange, spec.currency)
     else:
         raise HTTPException(status_code=422, detail=f"Unsupported sec_type: {spec.sec_type}")
 

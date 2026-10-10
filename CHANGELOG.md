@@ -5,6 +5,12 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+### Added
+
+- `POST /historical/bars`, `/historical/head-timestamp` and `/contract/qualify` accept
+  `CASH` (FX on IDEALPRO, e.g. EUR/USD) and `CMDTY` (e.g. XAUUSD) contracts, so
+  query-key clients can pull IB `MIDPOINT` FX bars.
+
 ## [0.8.1] — 2026-07-04
 
 
