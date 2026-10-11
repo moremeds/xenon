@@ -117,7 +117,9 @@ def _require_qualified(specs: List[ContractSpec], contracts: list) -> None:
     ib_async leaves conId=0 on such a contract instead of raising, which used to
     surface as an empty-but-200 bars response that looked like "no data".
     """
-    missing = [f"{s.sec_type} {s.symbol} {s.currency}@{c.exchange}" for s, c in zip(specs, contracts) if not c.conId]
+    missing = [
+        f"{s.sec_type} {s.symbol} {s.currency}@{c.exchange}" for s, c in zip(specs, contracts) if not c.conId
+    ]
     if missing:
         raise HTTPException(status_code=404, detail=f"IB could not qualify contract(s): {', '.join(missing)}")
 

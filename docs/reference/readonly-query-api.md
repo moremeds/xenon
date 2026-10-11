@@ -278,18 +278,24 @@ IB energy/ags/base metals are futures (`FUT` + `last_trade_date`), not `CMDTY`.
 listed on COMEX and QBALGO). One leg: `{"sec_type": "FUT", "symbol": "GC", "exchange": "COMEX",
 "last_trade_date": "202612"}`. Expired legs resolve only for about one year after expiry (observed
 2026-10-11: GCZ5 and GCQ6 resolve; GCZ4 and ESH5 → 404). An expired leg with `end_date_time: ""`
-returns bars through its last trade date, and can end with one flat `volume: 0` bar dated the
-next day (GCZ5, last trade 2025-12-29: a 2025-12-30 bar at 4325.1, volume 0). Drop it if you need
-only traded sessions. Continuous: `{"sec_type": "CONTFUT", "symbol": "GC",
+returns bars through its last trade date. **Flat `volume: 0` bars:** a leg gets a bar with
+O = H = L = C and `volume: 0` for sessions it did not trade: most of a back month's early life
+(GCZ6: 1065 of 1465 bars, the last on 2025-08-13), exchange holidays, and the day after an expired
+leg's last trade date (GCZ5: 2025-12-30). Their price is not a carry-forward of the prior close.
+Filter on `volume > 0` when you need traded sessions. Continuous: `{"sec_type": "CONTFUT", "symbol": "GC",
 "exchange": "COMEX"}`; `/contract/qualify` returns the current front leg's `conId`/`localSymbol`.
 `CONTFUT` limits:
 - `end_date_time` must be `""` → **422** otherwise (IB error 10339). It cannot be chunked, so the
   overlapping-window guidance below does not apply: ask for a long `duration` once. GC's history
   starts 2019-12-30 (`"10 Y"` → 1718 daily bars, ~3 s).
-- The series is **back-adjusted**. After the latest roll its closes equal the front leg's; before
-  it they equal no single leg (2025-11-03: CONTFUT 4198.925, GCZ5 4014.0, GCZ6 4194.9). Do not use
-  it for price levels. Returns are safe only inside one roll segment. Earlier values probably
-  change at each roll (not yet observed), so do not cache it as fixed history.
+- The series is **ratio back-adjusted**. After the latest roll its closes equal the front leg's.
+  Within each earlier roll segment, CONTFUT = front leg × a constant (CONTFUT/GCZ5 over
+  2025-09-01 → 11-20: 1.046070, sd 7.5e-8), so daily % returns equal the front leg's. Levels and
+  $ changes do not: do not use it for price levels. Earlier values probably change at each roll
+  (not yet observed), so do not cache it as fixed history.
+- The front leg follows IB's own roll calendar, thin months included: GC rolled into October
+  (GCV6) for 2026-08-03 → 09-28, then GCZ6. CONTFUT `volume` is that leg's volume, not the most
+  liquid contract's (2.7k–22.7k a day in the GCV6 segment; GCZ6 traded 205k on 09-28).
 - Long gold history: use `CMDTY XAUUSD` (2010 →); IB futures do not reach that far. A single leg
   goes back to its listing with chunked `end_date_time` windows (GCZ6: 2020-12-31 →).
 

@@ -7,7 +7,7 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ### Added
 
-- `POST /historical/bars` and `/contract/qualify` accept `CONTFUT` (IB continuous futures, back-adjusted) and resolve `FUT` legs that expired within about the last year (`includeExpired`).
+- `POST /historical/bars` and `/contract/qualify` accept `CONTFUT` (IB continuous futures, ratio back-adjusted on IB's own roll calendar) and resolve `FUT` legs that expired within about the last year (`includeExpired`).
 
 ### Changed
 
