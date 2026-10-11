@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import date, datetime
 from typing import List, Optional
 
@@ -20,6 +21,10 @@ from pydantic import BaseModel
 logger = logging.getLogger("xenon.historical")
 
 router = APIRouter()
+
+# ib_async's reqHistoricalData default timeout. On expiry it cancels the IB request
+# and returns [] instead of raising, so an over-long duration looks like "no data".
+_IB_HIST_TIMEOUT_S = 60
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +83,7 @@ def _get_pool(request: Request):
 
 def make_ib_contract(spec: ContractSpec):
     """Reconstruct an ib_async contract from a JSON spec."""
-    from ib_async import Future, Index, Stock
+    from ib_async import Commodity, Forex, Future, Index, Stock
 
     if spec.sec_type == "STK":
         return Stock(spec.symbol, spec.exchange, spec.currency)
@@ -88,8 +93,27 @@ def make_ib_contract(spec: ContractSpec):
         return Future(spec.symbol, spec.last_trade_date, spec.exchange, spec.currency)
     elif spec.sec_type == "IND":
         return Index(spec.symbol, spec.exchange, spec.currency)
+    elif spec.sec_type == "CASH":
+        # FX trades on IDEALPRO, never SMART; treat the SMART model default as "unset".
+        exchange = "IDEALPRO" if spec.exchange == "SMART" else spec.exchange
+        return Forex(symbol=spec.symbol, currency=spec.currency, exchange=exchange)
+    elif spec.sec_type == "CMDTY":
+        return Commodity(spec.symbol, spec.exchange, spec.currency)
     else:
         raise HTTPException(status_code=422, detail=f"Unsupported sec_type: {spec.sec_type}")
+
+
+def _require_qualified(specs: List[ContractSpec], contracts: list) -> None:
+    """404 when IB could not qualify a contract (unknown or ambiguous).
+
+    ib_async leaves conId=0 on such a contract instead of raising, which used to
+    surface as an empty-but-200 bars response that looked like "no data".
+    """
+    missing = [
+        f"{s.sec_type} {s.symbol} {s.currency}@{c.exchange}" for s, c in zip(specs, contracts) if not c.conId
+    ]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"IB could not qualify contract(s): {', '.join(missing)}")
 
 
 def _contract_to_dict(contract) -> dict:
@@ -145,11 +169,12 @@ async def qualify_contracts(req: QualifyRequest, request: Request):
 
     try:
         async with pool.acquire("data") as client:
-            qualified = await pool.run_sync("data", client.qualify_contracts, *contracts)
+            await pool.run_sync("data", client.qualify_contracts, *contracts)
     except ConnectionError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
-    return {"contracts": [_contract_to_dict(c) for c in qualified]}
+    _require_qualified(req.contracts, contracts)
+    return {"contracts": [_contract_to_dict(c) for c in contracts]}
 
 
 @router.post("/historical/head-timestamp")
@@ -186,6 +211,8 @@ async def historical_bars(req: HistoricalBarsRequest, request: Request):
     try:
         async with pool.acquire("data") as client:
             await pool.run_sync("data", client.qualify_contracts, contract)
+            _require_qualified([req.contract], [contract])
+            started = time.monotonic()
             bars = await pool.run_sync(
                 "data",
                 client.get_historical_data,
@@ -198,6 +225,16 @@ async def historical_bars(req: HistoricalBarsRequest, request: Request):
             )
     except ConnectionError as e:
         raise HTTPException(status_code=503, detail=str(e))
+
+    # ponytail: elapsed includes any wait for the "data" worker, so a genuinely empty
+    # reply queued behind a slow request can read as a timeout. That errs to 504
+    # (retry with a shorter window), never to a silent empty 200.
+    if not bars and time.monotonic() - started >= _IB_HIST_TIMEOUT_S:
+        raise HTTPException(
+            status_code=504,
+            detail=f"IB historical request timed out after {_IB_HIST_TIMEOUT_S}s "
+            f"(duration {req.duration!r}); split it into shorter windows with end_date_time",
+        )
 
     return {
         "bars": [

@@ -266,7 +266,21 @@ enumerator only, no quotes/greeks.
 }
 ```
 
+`contract.sec_type` accepts `STK`, `FUT` (needs `last_trade_date`), `IND`, `CASH`, `CMDTY`.
+FX example — `{"sec_type": "CASH", "symbol": "EUR", "currency": "USD", "exchange": "IDEALPRO"}`
+(`exchange` defaults to `IDEALPRO` for `CASH`), with `"what_to_show": "MIDPOINT", "use_rth": false`.
+A CASH `1 day` bar runs 17:15 → 17:00 America/New_York and is dated by the NY date of its 17:00 close.
+`MIDPOINT` bars carry `volume: -1`. Gold spot: `{"sec_type": "CMDTY", "symbol": "XAUUSD"}`. Silver: `XAGUSD`.
+IB energy/ags/base metals are futures (`FUT` + `last_trade_date`), not `CMDTY`.
+A contract IB cannot qualify (unknown or ambiguous) → **404** with the contract in `detail`, on
+both `/historical/bars` and `/contract/qualify`. `200` with `"bars": []` now means only "the
+contract exists, IB returned no data for that window" (e.g. `XPTUSD` MIDPOINT).
+A request that runs past IB's 60 s historical timeout → **504** (not an empty 200). Long
+histories: chunk with `end_date_time` (`"YYYYMMDD-HH:MM:SS"`, UTC) and **overlap** the windows —
+IB's `N Y` is not an exact calendar span (a `5 Y` window ending `20250101-00:00:00` omits
+2020-01-02) — then de-duplicate by `date`.
+
 `POST /historical/head-timestamp` — `{"contract": {...}, "what_to_show": "TRADES", "use_rth": true}`.
 
 `POST /contract/qualify` — `{"contracts": [{"sec_type": "STK", "symbol": "AAPL"}]}` → each with
-its resolved `conId`. **STK/FUT/IND only** — for options, use `/market-depth`'s `conId`.
+its resolved `conId`. **STK/FUT/IND/CASH/CMDTY only** — for options, use `/market-depth`'s `conId`.
