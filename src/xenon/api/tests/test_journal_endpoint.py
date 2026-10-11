@@ -41,7 +41,8 @@ def test_journal_list_returns_scoped_trade_log_shape():
     entry_id = _insert_journal_entry(ticker="AAPL")
     _insert_journal_entry(ticker="MSFT", broker_account="DU9999999")
 
-    response = TestClient(app).get("/journal")
+    # The row is dated 2026-04-28; the route's default 90-day window dropped it on 2026-07-27.
+    response = TestClient(app).get("/journal", params={"days": 3650})
     body = response.json()
 
     assert response.status_code == 200
