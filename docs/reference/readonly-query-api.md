@@ -296,6 +296,8 @@ Filter on `volume > 0` when you need traded sessions. Continuous: `{"sec_type": 
 - The front leg follows IB's own roll calendar, thin months included: GC rolled into October
   (GCV6) for 2026-08-03 → 09-28, then GCZ6. CONTFUT `volume` is that leg's volume, not the most
   liquid contract's (2.7k–22.7k a day in the GCV6 segment; GCZ6 traded 205k on 09-28).
+  The bar on the last pre-roll day already prints the new leg's close but carries the old leg's
+  volume (2026-09-29: close = GCZ6's 4179.7, volume 2078 from GCV6).
 - Long gold history: use `CMDTY XAUUSD` (2010 →); IB futures do not reach that far. A single leg
   goes back to its listing with chunked `end_date_time` windows (GCZ6: 2020-12-31 →).
 
