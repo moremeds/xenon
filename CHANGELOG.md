@@ -5,6 +5,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.8.3] — 2026-10-11
+
 ### Added
 
 - `POST /historical/bars` and `/contract/qualify` accept `CONTFUT` (IB continuous futures, ratio back-adjusted on IB's own roll calendar) and resolve `FUT` legs that expired within about the last year (`includeExpired`).
