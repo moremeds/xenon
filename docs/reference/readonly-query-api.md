@@ -54,7 +54,7 @@ the portfolio/orders surfaces read from Postgres and are described in
 | **GET** | **`/market-depth`**          | **L2 order-book snapshot (see below)**                       |
 | POST    | `/historical/bars`           | Historical OHLCV — body below                                |
 | POST    | `/historical/head-timestamp` | Earliest available bar — body below                          |
-| POST    | `/contract/qualify`          | Qualify STK/FUT/IND specs → `conId` (no options)             |
+| POST    | `/contract/qualify`          | Qualify STK/FUT/CONTFUT/IND/CASH/CMDTY specs → `conId`       |
 | POST    | `/ws-ticket`                 | Mint a 30s ticket to open the realtime WS feed               |
 
 ---
@@ -91,7 +91,7 @@ option depth. A **partial** option tuple → `422` (never silently degrades to s
 | `note`                       | Present only when the book is empty: `"no L2 entitlement"` (not entitled), `"depth line budget exhausted (309)"` (transient — IB's ~3 depth lines busy), or `"no depth returned"` (market closed / no levels). |
 
 > **`conId` bonus:** `/market-depth` returns the qualified `conId` — including for **options**,
-> which `/contract/qualify` cannot resolve (it supports STK/FUT/IND only). Feed that `conId`
+> which `/contract/qualify` cannot resolve (it supports STK/FUT/CONTFUT/IND/CASH/CMDTY only). Feed that `conId`
 > to `GET /orders/quote?ticker=<sym>&con_id=<conId>` for the option's bid/ask.
 
 > **`entitled` vs data:** check `entitled` for _permission_ and `len(bids)/len(asks)` for
@@ -266,12 +266,41 @@ enumerator only, no quotes/greeks.
 }
 ```
 
-`contract.sec_type` accepts `STK`, `FUT` (needs `last_trade_date`), `IND`, `CASH`, `CMDTY`.
+`contract.sec_type` accepts `STK`, `FUT` (needs `last_trade_date`), `CONTFUT`, `IND`, `CASH`, `CMDTY`.
 FX example — `{"sec_type": "CASH", "symbol": "EUR", "currency": "USD", "exchange": "IDEALPRO"}`
 (`exchange` defaults to `IDEALPRO` for `CASH`), with `"what_to_show": "MIDPOINT", "use_rth": false`.
 A CASH `1 day` bar runs 17:15 → 17:00 America/New_York and is dated by the NY date of its 17:00 close.
 `MIDPOINT` bars carry `volume: -1`. Gold spot: `{"sec_type": "CMDTY", "symbol": "XAUUSD"}`. Silver: `XAGUSD`.
 IB energy/ags/base metals are futures (`FUT` + `last_trade_date`), not `CMDTY`.
+
+**Futures.** `FUT` and `CONTFUT` need a real `exchange` (`COMEX`, `CME`, `NYMEX`, `CBOT`, ...).
+`SMART` or `""` → **422**: a SMART futures lookup got no IB answer in 20 s (live probe, `CONTFUT ES`), and `""` is ambiguous (GC is
+listed on COMEX and QBALGO). One leg: `{"sec_type": "FUT", "symbol": "GC", "exchange": "COMEX",
+"last_trade_date": "202612"}`. Expired legs resolve only for about one year after expiry (observed
+2026-10-11: GCZ5 and GCQ6 resolve; GCZ4 and ESH5 → 404). An expired leg with `end_date_time: ""`
+returns bars through its last trade date. **Flat `volume: 0` bars:** a leg gets a bar with
+O = H = L = C and `volume: 0` for sessions it did not trade: most of a back month's early life
+(GCZ6: 1065 of 1465 bars, the last on 2025-08-13), exchange holidays, and the day after an expired
+leg's last trade date (GCZ5: 2025-12-30). Their price is not a carry-forward of the prior close.
+Filter on `volume > 0` when you need traded sessions. Continuous: `{"sec_type": "CONTFUT", "symbol": "GC",
+"exchange": "COMEX"}`; `/contract/qualify` returns the current front leg's `conId`/`localSymbol`.
+`CONTFUT` limits:
+- `end_date_time` must be `""` → **422** otherwise (IB error 10339). It cannot be chunked, so the
+  overlapping-window guidance below does not apply: ask for a long `duration` once. GC's history
+  starts 2019-12-30 (`"10 Y"` → 1718 daily bars, ~3 s).
+- The series is **ratio back-adjusted**. After the latest roll its closes equal the front leg's.
+  Within each earlier roll segment, CONTFUT = front leg × a constant (CONTFUT/GCZ5 over
+  2025-09-01 → 11-20: 1.046070, sd 7.5e-8), so daily % returns equal the front leg's. Levels and
+  $ changes do not: do not use it for price levels. Earlier values probably change at each roll
+  (not yet observed), so do not cache it as fixed history.
+- The front leg follows IB's own roll calendar, thin months included: GC rolled into October
+  (GCV6) for 2026-08-03 → 09-28, then GCZ6. CONTFUT `volume` is that leg's volume, not the most
+  liquid contract's (2.7k–22.7k a day in the GCV6 segment; GCZ6 traded 205k on 09-28).
+  The bar on the last pre-roll day already prints the new leg's close but carries the old leg's
+  volume (2026-09-29: close = GCZ6's 4179.7, volume 2078 from GCV6).
+- Long gold history: use `CMDTY XAUUSD` (2010 →); IB futures do not reach that far. A single leg
+  goes back to its listing with chunked `end_date_time` windows (GCZ6: 2020-12-31 →).
+
 A contract IB cannot qualify (unknown or ambiguous) → **404** with the contract in `detail`, on
 both `/historical/bars` and `/contract/qualify`. `200` with `"bars": []` now means only "the
 contract exists, IB returned no data for that window" (e.g. `XPTUSD` MIDPOINT).

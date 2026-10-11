@@ -136,3 +136,57 @@ def test_bars_ib_timeout_is_504_not_empty_200(monkeypatch):
 
     assert exc.value.status_code == 504
     assert "17 Y" in exc.value.detail
+
+
+def test_fut_includes_expired_so_recent_legs_resolve():
+    c = make_ib_contract(ContractSpec(sec_type="FUT", symbol="GC", exchange="COMEX", last_trade_date="202512"))
+    assert (c.secType, c.symbol, c.exchange, c.lastTradeDateOrContractMonth) == ("FUT", "GC", "COMEX", "202512")
+    assert c.includeExpired is True
+
+
+def test_contfut_builds_continuous_future():
+    c = make_ib_contract(ContractSpec(sec_type="CONTFUT", symbol="GC", exchange="COMEX"))
+    assert (c.secType, c.symbol, c.exchange, c.currency) == ("CONTFUT", "GC", "COMEX", "USD")
+
+
+@pytest.mark.parametrize("sec_type", ["FUT", "CONTFUT"])
+@pytest.mark.parametrize("exchange", ["SMART", ""])
+def test_futures_without_exchange_is_422_before_ib(sec_type, exchange):
+    """IB never answers a SMART futures lookup, and "" is ambiguous (GC: COMEX + QBALGO)."""
+    pool = FakePool()
+    spec = ContractSpec(sec_type=sec_type, symbol="GC", exchange=exchange, last_trade_date="202612")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(historical_bars(HistoricalBarsRequest(contract=spec), _request(pool)))
+
+    assert exc.value.status_code == 422
+    assert "COMEX" in exc.value.detail
+    assert pool.calls == []
+
+
+def test_contfut_with_end_date_is_422_before_ib():
+    """IB rejects it with error 10339 and ib_async returns [] at once: an empty 200."""
+    pool = FakePool()
+    req = HistoricalBarsRequest(
+        contract=ContractSpec(sec_type="CONTFUT", symbol="GC", exchange="COMEX"), end_date_time="20200101-00:00:00"
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(historical_bars(req, _request(pool)))
+
+    assert exc.value.status_code == 422
+    assert "end_date_time" in exc.value.detail
+    assert pool.calls == []
+
+
+def test_contfut_bars_pass_through():
+    pool = FakePool()
+    req = HistoricalBarsRequest(
+        contract=ContractSpec(sec_type="CONTFUT", symbol="GC", exchange="COMEX"), duration="10 Y"
+    )
+
+    out = asyncio.run(historical_bars(req, _request(pool)))
+
+    assert [fn for fn, _, _ in pool.calls] == ["qualify", "hist"]
+    assert pool.calls[-1][1][0].secType == "CONTFUT"
+    assert len(out["bars"]) == 1
