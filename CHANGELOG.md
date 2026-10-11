@@ -5,6 +5,14 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+### Added
+
+- `POST /historical/bars` and `/contract/qualify` accept `CONTFUT` (IB continuous futures, back-adjusted) and resolve `FUT` legs that expired within about the last year (`includeExpired`).
+
+### Changed
+
+- `FUT`/`CONTFUT` with `exchange` `SMART` or empty → 422 (a live SMART `CONTFUT` lookup got no IB answer in 20 s, and the route has no qualify timeout, so it would hold the `data` worker). `CONTFUT` with `end_date_time` → 422 instead of an empty 200.
+
 ## [0.8.2] — 2026-10-11
 
 ### Added

@@ -83,14 +83,22 @@ def _get_pool(request: Request):
 
 def make_ib_contract(spec: ContractSpec):
     """Reconstruct an ib_async contract from a JSON spec."""
-    from ib_async import Commodity, Forex, Future, Index, Stock
+    from ib_async import Commodity, ContFuture, Forex, Future, Index, Stock
 
+    if spec.sec_type in ("FUT", "CONTFUT") and spec.exchange in ("SMART", ""):
+        # A live SMART CONTFUT lookup got no IB answer in 20 s (qualify has no timeout here,
+        # so it would hold the "data" worker), and "" is ambiguous (GC lists on COMEX and
+        # QBALGO). The venue differs per root, so there is no default to map SMART to.
+        raise HTTPException(status_code=422, detail="exchange required for futures, e.g. COMEX, CME, NYMEX, CBOT")
     if spec.sec_type == "STK":
         return Stock(spec.symbol, spec.exchange, spec.currency)
     elif spec.sec_type == "FUT":
         if not spec.last_trade_date:
             raise HTTPException(status_code=422, detail="last_trade_date required for futures")
-        return Future(spec.symbol, spec.last_trade_date, spec.exchange, spec.currency)
+        # includeExpired lets legs that expired within IB's ~1 year window resolve.
+        return Future(spec.symbol, spec.last_trade_date, spec.exchange, currency=spec.currency, includeExpired=True)
+    elif spec.sec_type == "CONTFUT":
+        return ContFuture(spec.symbol, spec.exchange, currency=spec.currency)
     elif spec.sec_type == "IND":
         return Index(spec.symbol, spec.exchange, spec.currency)
     elif spec.sec_type == "CASH":
@@ -109,9 +117,7 @@ def _require_qualified(specs: List[ContractSpec], contracts: list) -> None:
     ib_async leaves conId=0 on such a contract instead of raising, which used to
     surface as an empty-but-200 bars response that looked like "no data".
     """
-    missing = [
-        f"{s.sec_type} {s.symbol} {s.currency}@{c.exchange}" for s, c in zip(specs, contracts) if not c.conId
-    ]
+    missing = [f"{s.sec_type} {s.symbol} {s.currency}@{c.exchange}" for s, c in zip(specs, contracts) if not c.conId]
     if missing:
         raise HTTPException(status_code=404, detail=f"IB could not qualify contract(s): {', '.join(missing)}")
 
@@ -207,6 +213,11 @@ async def historical_bars(req: HistoricalBarsRequest, request: Request):
     """Fetch historical OHLCV bars for a contract."""
     pool = _get_pool(request)
     contract = make_ib_contract(req.contract)
+    if req.contract.sec_type == "CONTFUT" and req.end_date_time:
+        # IB error 10339; ib_async would return [] at once, an empty 200.
+        raise HTTPException(
+            status_code=422, detail="CONTFUT does not accept end_date_time; IB serves it only up to now"
+        )
 
     try:
         async with pool.acquire("data") as client:
