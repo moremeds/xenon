@@ -5,6 +5,8 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-10-11
+
 ### Added
 
 - `POST /historical/bars` and `/contract/qualify` accept
@@ -20,7 +22,6 @@ All notable changes to Xenon are documented here. Format loosely based on
 - `POST /historical/bars` returns **504** when the IB request hits ib_async's 60 s timeout.
   ib_async cancels the request and returns `[]`, which used to surface as `200 {"bars": []}`
   (seen live: `USDCAD` `17 Y` daily MIDPOINT). Split long windows with `end_date_time`.
-
 ## [0.8.1] — 2026-07-04
 
 
