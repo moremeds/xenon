@@ -37,6 +37,7 @@ normalization layered on.
 from __future__ import annotations
 
 import logging
+import socket
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -74,6 +75,22 @@ except ImportError:  # pragma: no cover — only hit when futu-api not installed
     TrdMarket = None  # type: ignore[assignment]
 
 logger = logging.getLogger("xenon.futu")
+
+
+def _probe_opend(host: str, port: int, timeout: float = 3.0) -> None:
+    """Fail fast when OpenD is not accepting TCP connections.
+
+    ponytail: a bare TCP connect, not a Futu handshake. OpenSecTradeContext
+    retries a refused connection forever (blocking its caller), so an
+    unreachable OpenD must be caught before the SDK is touched. A port that
+    accepts TCP but never answers the handshake is not covered here; async
+    callers still wrap connect() in a thread with a timeout.
+    """
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            pass
+    except OSError as exc:
+        raise FutuConnectionError(f"OpenD unreachable at {host}:{port}: {exc}") from exc
 
 
 def _enum_to_str(value: Any) -> str:
@@ -192,6 +209,7 @@ class FutuClient:
         """
         if OpenSecTradeContext is None:
             raise FutuConnectionError("futu-api is not installed. `pip install futu-api`")
+        _probe_opend(self.host, self.port)
 
         trd_market = getattr(TrdMarket, self.filter_trading_market, TrdMarket.US)
         sec_firm = getattr(SecurityFirm, self.security_firm, SecurityFirm.FUTUSECURITIES)
