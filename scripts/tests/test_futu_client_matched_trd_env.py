@@ -25,7 +25,10 @@ def mock_ctx():
     """Yield a mock OpenSecTradeContext whose get_acc_list() the test sets."""
     from futu import RET_OK
 
-    with patch("xenon.clients.futu_client.OpenSecTradeContext") as ctx_cls:
+    with (
+        patch("xenon.clients.futu_client._probe_opend"),
+        patch("xenon.clients.futu_client.OpenSecTradeContext") as ctx_cls,
+    ):
         ctx = MagicMock()
         ctx_cls.return_value = ctx
         ctx.get_acc_list.return_value = (RET_OK, pd.DataFrame())

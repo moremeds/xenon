@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 
 ET = ZoneInfo("America/New_York")
 
+# scope_factory() opens the Futu SDK context, which retries a refused OpenD
+# forever. Run it off the event loop with a bound so a dead OpenD costs one
+# failed tick, not a frozen API (2026-10 nightly wedge).
+SCOPE_TIMEOUT_S = 30.0
+
 
 def next_run_at_et(now_et: datetime, *, hour: int = 16, minute: int = 30) -> datetime:
     """Return the next strict-future ET weekday occurrence of HH:MM.
@@ -89,7 +94,9 @@ async def futu_history_loop(
         scope = None
         try:
             engine = engine_factory()
-            scope = scope_factory()
+            scope = await asyncio.wait_for(
+                asyncio.to_thread(scope_factory), timeout=SCOPE_TIMEOUT_S
+            )
             result = await runner(engine, scope, since=None)
             logger.info(
                 "futu history sync ok: trades=%s cashflows=%s nav_rows=%s",
