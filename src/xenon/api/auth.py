@@ -132,9 +132,11 @@ def _truthy_env(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-# Read-only query key — (METHOD, PATH) tuples. GET-only by construction so an
-# external key can never trigger a write/sync. /blotter and /performance also
-# have POST siblings (sync/rebuild) which are deliberately excluded.
+# Read-only query key — (METHOD, PATH) tuples. Read-only data endpoints only;
+# write, sync, and order paths are excluded regardless of method. Some
+# endpoints use POST purely because they take a request body (no state change);
+# those are explicitly listed. /blotter and /performance also have POST
+# siblings (sync/rebuild) that are intentionally excluded.
 QUERY_API_KEY_PATHS = frozenset(
     {
         # Portfolio / account
