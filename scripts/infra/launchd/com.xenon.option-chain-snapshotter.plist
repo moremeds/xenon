@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.xenon.option-chain-snapshotter</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/uv</string>
+    <string>run</string>
+    <string>--project</string>
+    <string>/Users/moremeds/projects/xenon</string>
+    <string>xenon-option-chain-snapshot</string>
+    <!-- clientId 96 = option_chain_snapshotter_b (95 is the primary slot
+         held by ad-hoc spike runs; using 96 avoids "clientId in use" races
+         with the operator's interactive testing). -->
+    <string>--client-id</string>
+    <string>96</string>
+  </array>
+
+  <!-- 600s = 10 min cadence. NYSE RTH gate inside the entry point short-circuits
+       off-hours fires, so this can run 24/7 without polluting archive.snapshot_run. -->
+  <key>StartInterval</key>
+  <integer>600</integer>
+
+  <!-- Off at load — first fire happens at next interval boundary, not immediately. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/moremeds/projects/xenon</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>OPTION_CHAIN_DATABASE_URL</key>
+    <string>postgresql+psycopg://option_chain_writer:option_chain_dev@127.0.0.1:5432/option_chain</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/opt/xenon/logs/option-chain-snapshotter.launchd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/opt/xenon/logs/option-chain-snapshotter.launchd.err.log</string>
+</dict>
+</plist>
