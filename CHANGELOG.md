@@ -5,6 +5,10 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+### Fixed
+
+- xenon-api no longer stops answering every weekday from about 16:20 to 20:25 ET. The nightly Futu history sync called `FutuClient.connect()` on the event loop, and the futu SDK retries a refused OpenD forever, so every route (including `/options/greeks`) hung until the Colima watchdog restarted the VM. `connect()` now TCP-probes OpenD (3 s) and fails fast, and the loop runs its connect in a thread with a 30 s bound. While OpenD stays unreachable from the container, the nightly sync records an error instead of hanging.
+
 ## [0.8.3] — 2026-10-11
 
 ### Added
