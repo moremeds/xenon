@@ -31,11 +31,48 @@ import socket
 
 import pytest
 
+# Imported for fixture registration: `_pg_schema_guard` depends on it so the
+# schema check runs after the per-worker DB rewrite under pytest-xdist.
+from xenon._test_db import _ensure_worker_db  # noqa: F401
+
 os.environ.setdefault("XENON_AUTH_ALLOW_DEV_OPEN", "1")
 
 # Ports the IB Gateway API listens on (live 4001 / paper 4002). A test that
 # dials either without opting in via marker is a bug — make it fail loudly.
 _BROKER_PORTS = frozenset({4001, 4002})
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _pg_schema_guard(_ensure_worker_db):
+    """Fail loudly when the PG test DB is reachable but schema-incomplete.
+
+    `truncate_all_xenon_tables` treats any SQLAlchemyError (including
+    UndefinedTable) as "offline" and flips `mark_offline`, which silently
+    skips every PG-dependent test for the rest of the session. A reachable
+    but incomplete schema is not the offline case — error once per worker
+    with the missing table names instead. Offline (unreachable) stays a
+    no-op so offline dev runs are unaffected. Depends on `_ensure_worker_db`
+    so the check targets the per-worker DB under xdist.
+    """
+    from sqlalchemy import text
+
+    from xenon._test_db import XENON_TABLES, get_session_engine, is_pg_reachable
+
+    if not is_pg_reachable():
+        return
+    with get_session_engine().connect() as conn:
+        missing = [
+            table
+            for table in XENON_TABLES
+            if conn.execute(text("SELECT to_regclass(:n)"), {"n": table}).scalar() is None
+        ]
+    if missing:
+        raise RuntimeError(
+            "PG test DB schema incomplete — missing tables: "
+            + ", ".join(missing)
+            + ". Run `alembic upgrade head` against the test DB; a reachable "
+            "but incomplete schema must not be downgraded to offline skips."
+        )
 
 
 class BrokerConnectDenied(ConnectionRefusedError):

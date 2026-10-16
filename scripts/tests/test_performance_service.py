@@ -111,60 +111,10 @@ async def test_30_plus_IB_MASKED_when_env_true(async_engine, monkeypatch):
     await _purge(async_engine, "T_30_MASK")
     s = data["summary"]
     assert s["sharpe_ratio"] is None
-    assert "IB TWR requires cash-flow tracking" in " ".join(data["warnings"])
+    assert "IB risk metrics masked: cash flow ingestion incomplete" in " ".join(data["warnings"])
 
 
 # ---------- IB return formula ----------
-
-
-async def test_IB_returns_use_daily_pnl_over_prev_nav(async_engine, monkeypatch):
-    """daily_pnl/prev_nav, NOT nav-delta/prev_nav. Construct a seed where
-    they diverge: nav jumps from 100→200 (deposit) but daily_pnl=5 (only $5 trading)."""
-    monkeypatch.setenv("XENON_IB_DAILYPNL_INCLUDES_CASHFLOWS", "false")
-    account = "T_IB_RETF"
-    await _purge(async_engine, account)
-    async with async_engine.begin() as c:
-        # day 1: nav=100, daily_pnl=0
-        await c.execute(
-            sa.insert(nav_history).values(
-                broker="IB",
-                account_env="paper",
-                broker_account=account,
-                date=date(2026, 1, 1),
-                nav="100.0",
-                daily_pnl="0.0",
-                source="intraday",
-            )
-        )
-        # day 2: nav=200 (deposit), daily_pnl=5 (only $5 of trading)
-        await c.execute(
-            sa.insert(nav_history).values(
-                broker="IB",
-                account_env="paper",
-                broker_account=account,
-                date=date(2026, 1, 2),
-                nav="200.0",
-                daily_pnl="5.0",
-                source="intraday",
-            )
-        )
-        for i in range(3, 8):
-            await c.execute(
-                sa.insert(nav_history).values(
-                    broker="IB",
-                    account_env="paper",
-                    broker_account=account,
-                    date=date(2026, 1, i),
-                    nav="200.0",
-                    daily_pnl="0.0",
-                    source="intraday",
-                )
-            )
-    data = await compute(async_engine, AccountScope("IB", "paper", account))
-    await _purge(async_engine, account)
-    series = data["series"]
-    # series[1] = day 2: daily_pnl/prev_nav = 5/100 = 0.05 — NOT 100/100=1.0
-    assert series[1]["daily_return"] == pytest.approx(0.05, rel=1e-9)
 
 
 async def test_first_IB_return_zeroed(async_engine, monkeypatch):

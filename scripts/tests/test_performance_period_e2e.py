@@ -2,19 +2,29 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
 
 from xenon.api.services.perf_cache import cached_compute, clear_cache
 from xenon.api.services.performance import compute
+from xenon.utils.market_calendar import current_session_date_et
 from xenon.execution.account_scope import AccountScope
 from xenon.utils.portfolio_loader import upsert_nav_sync
 
 # committed_db: seeds nav via the sync engine while compute() reads via the
 # async engine — the writes must really commit to be visible cross-connection.
 pytestmark = [pytest.mark.asyncio, pytest.mark.committed_db]
+
+
+@pytest.fixture(autouse=True)
+def _below_min_days_gate(monkeypatch):
+    # These tests pin period-window semantics with a handful of nav points;
+    # relax the min-history gate (XENON_PERF_MIN_DAYS_CURVE, default 5) which
+    # was added after this module was written and is not under test here.
+    monkeypatch.setenv("XENON_PERF_MIN_DAYS_CURVE", "1")
+
 
 _SCOPE = AccountScope(broker="IB", account_env="live", broker_account="IB_PE2E1")
 
@@ -82,12 +92,15 @@ async def test_invalid_period_raises(async_engine):
 async def test_cache_key_includes_period(async_engine):
     """Two period values must NOT share a cache entry."""
     clear_cache()
+    today = current_session_date_et()
     _seed_nav(
         _SCOPE,
         [
-            (date(2026, 1, 2), 100.0),
-            (date(2026, 5, 30), 105.0),
-            (date(2026, 6, 1), 110.0),
+            # Old row pushes inception back so YTD and 1M resolve to different
+            # period_start values regardless of when the suite runs.
+            (date(today.year - 1, 1, 5), 100.0),
+            (today - timedelta(days=10), 105.0),
+            (today - timedelta(days=1), 110.0),
         ],
     )
     ytd = await cached_compute(async_engine, _SCOPE, period="YTD")
