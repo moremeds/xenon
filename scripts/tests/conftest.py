@@ -24,12 +24,15 @@ import sys
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 from xenon._test_db import (
     _BoundEngine,
     _ensure_worker_db,  # noqa: F401 — autouse session fixture (Phase 3 xdist DB clone)
     app_engine_bound_to_test,  # noqa: F401 — re-exported for pytest fixture discovery
+    async_test_db_url,
     get_session_engine,
     is_pg_reachable,
     pg_session,  # noqa: F401 — re-exported for pytest fixture discovery
@@ -147,6 +150,12 @@ def sync_engine(pg_test_engine) -> Engine:
 
 import pytest_asyncio
 
+# Session-level asyncpg reachability cache: the probe runs at most once per
+# pytest session (per xdist worker). `is_pg_reachable` already caches the
+# sync probe; this caches the async one so a dead PG costs one timeout total,
+# not one per test.
+_ASYNC_PG_REACHABLE: bool | None = None
+
 
 @pytest_asyncio.fixture
 async def async_engine():
@@ -158,14 +167,23 @@ async def async_engine():
     """
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    url = _sync_test_db_url().replace("postgresql+psycopg://", "postgresql+asyncpg://")
+    global _ASYNC_PG_REACHABLE
+    if _ASYNC_PG_REACHABLE is False or not is_pg_reachable():
+        pytest.skip(f"PG test DB unreachable at {sync_test_db_url()}")
+
+    url = async_test_db_url()
     eng = create_async_engine(url, pool_pre_ping=True)
     try:
         async with eng.connect() as conn:
             await conn.execute(text("SELECT 1"))
-    except Exception:
+    except (SQLAlchemyError, OSError) as exc:
+        # Connection-level failures only — anything else is a real bug and
+        # must surface as an error, not a silent skip.
         await eng.dispose()
-        pytest.skip(f"PG test DB unreachable at {url}")
+        _ASYNC_PG_REACHABLE = False
+        pytest.skip(f"PG test DB unreachable at {url}: {exc}")
+    else:
+        _ASYNC_PG_REACHABLE = True
     try:
         yield eng
     finally:

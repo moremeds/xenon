@@ -8,7 +8,9 @@ unset — so the autouse env fixture must export it for every test.
 
 from __future__ import annotations
 
+import errno
 import os
+import socket
 
 import pytest
 from sqlalchemy.engine import Engine
@@ -85,3 +87,54 @@ def test_truncate_postgres_tables_treats_missing_schema_as_offline(monkeypatch):
     db_fixture.truncate_all_xenon_tables()
 
     assert db_fixture._PG_REACHABLE is False
+
+
+# ---------------------------------------------------------------------------
+# Broker-connection deny (root conftest `_deny_broker_connections`)
+# ---------------------------------------------------------------------------
+
+
+def test_broker_deny_sets_dead_gateway_env():
+    """Subprocess CLIs must inherit a dead IB endpoint, not a real gateway."""
+    assert os.environ["IB_GATEWAY_HOST"] == "127.0.0.255"
+    assert os.environ["IB_GATEWAY_PORT"] == "1"
+
+
+def test_broker_port_4001_connect_fails_loudly():
+    """An unmarked test dialing the live gateway must raise, not connect."""
+    sock = socket.socket()
+    try:
+        with pytest.raises(RuntimeError, match="broker connection"):
+            sock.connect(("127.0.0.1", 4001))
+    finally:
+        sock.close()
+
+
+def test_broker_port_4001_denied_on_any_host():
+    """The guard matches on the port — non-localhost 4001 is denied too."""
+    sock = socket.socket()
+    try:
+        with pytest.raises(RuntimeError, match="broker connection"):
+            sock.connect(("192.0.2.1", 4001))
+    finally:
+        sock.close()
+
+
+def test_broker_port_4002_connect_ex_denied():
+    """connect_ex probes (e.g. health checks) get ECONNREFUSED, not a dial."""
+    sock = socket.socket()
+    try:
+        assert sock.connect_ex(("127.0.0.1", 4002)) == errno.ECONNREFUSED
+    finally:
+        sock.close()
+
+
+def test_non_broker_port_unaffected():
+    """The guard delegates every non-broker connect to the real socket."""
+    sock = socket.socket()
+    try:
+        # Port 1 (nothing listens) proves delegation: a real connect attempt
+        # yields ECONNREFUSED, not BrokerConnectDenied.
+        assert sock.connect_ex(("127.0.0.1", 1)) == errno.ECONNREFUSED
+    finally:
+        sock.close()
