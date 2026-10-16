@@ -9,7 +9,6 @@ import { useOrderActions } from "@/lib/OrderActionsContext";
 import { useTickerDetailOptional } from "@/lib/TickerDetailContext";
 import {
   fmtPrice,
-  legPriceKey,
   positionToOrderLegs,
   resolveEntryCost,
 } from "@/lib/positionUtils";
@@ -828,7 +827,21 @@ function ComboOrderForm({
 }) {
   const defaultAction: OrderAction = "SELL";
   const [action, setAction] = useState<OrderAction>(defaultAction);
-  const [quantity, setQuantity] = useState(() => String(position.contracts));
+  // ONE normalized representation of the held combo: gcd-reduced per-unit
+  // leg ratios + structure-unit quantity. The quote strip, the naked-short
+  // guard, direct submission, and the wizard plan all consume this same
+  // list so the submitted order matches the displayed quote.
+  const normalizedCombo = useMemo(() => {
+    const orderLegs = positionToOrderLegs(position);
+    return orderLegs ? normalizeComboOrder(orderLegs) : null;
+  }, [position]);
+  const normalizedLegs = useMemo(
+    () => normalizedCombo?.legs ?? [],
+    [normalizedCombo],
+  );
+  const [quantity, setQuantity] = useState(() =>
+    String(normalizedCombo?.quantity ?? position.contracts),
+  );
   const [limitPrice, setLimitPrice] = useState("");
   const [tif, setTif] = useState<"DAY" | "GTC">("GTC");
   const [confirmStep, setConfirmStep] = useState(false);
@@ -866,15 +879,14 @@ function ComboOrderForm({
   // IB reverses leg actions on SELL, so the market quote must NOT flip
   // with the selected action.
   const netPrices = useMemo(() => {
-    const orderLegs = positionToOrderLegs(position);
-    if (!orderLegs) return { bid: null, ask: null, mid: null };
-    const quotingLegs = normalizeComboOrder(orderLegs).legs;
-    return computeNetOptionQuote(quotingLegs, prices, ticker);
-  }, [position, prices, ticker]);
+    if (!normalizedCombo) return { bid: null, ask: null, mid: null };
+    return computeNetOptionQuote(normalizedCombo.legs, prices, ticker);
+  }, [normalizedCombo, prices, ticker]);
 
   const parsedQty = parseInt(quantity, 10);
   const parsedPrice = parseFloat(limitPrice);
   const isValid =
+    normalizedLegs.length > 0 &&
     !isNaN(parsedQty) &&
     parsedQty > 0 &&
     Number.isFinite(parsedPrice) &&
@@ -884,12 +896,12 @@ function ComboOrderForm({
   const nakedShortWarning = useMemo(() => {
     if (action !== "SELL") return null;
     const qty = !isNaN(parsedQty) && parsedQty > 0 ? parsedQty : 1;
-    const legs = legsWithActions.map((leg) => ({
+    const legs = normalizedLegs.map((leg) => ({
       expiry: leg.expiry,
-      strike: leg.strike!,
+      strike: leg.strike,
       right: leg.right,
-      action: leg.legAction,
-      ratio: 1,
+      action: leg.action,
+      ratio: leg.quantity,
     }));
     const payload: OrderPayload = {
       type: "combo",
@@ -902,7 +914,7 @@ function ComboOrderForm({
     const guardPortfolio = toNakedShortPortfolio(portfolio);
     const result = checkNakedShortRisk(payload, guardPortfolio);
     return result.allowed ? null : (result.reason ?? null);
-  }, [action, parsedQty, ticker, legsWithActions, portfolio]);
+  }, [action, parsedQty, ticker, normalizedLegs, portfolio]);
 
   const handlePlace = useCallback(async () => {
     if (!confirmStep) {
@@ -915,12 +927,12 @@ function ComboOrderForm({
     setSuccess(null);
 
     try {
-      const legs = legsWithActions.map((leg) => ({
+      const legs = normalizedLegs.map((leg) => ({
         expiry: leg.expiry,
-        strike: leg.strike!,
+        strike: leg.strike,
         right: leg.right,
-        action: leg.legAction,
-        ratio: 1,
+        action: leg.action,
+        ratio: leg.quantity,
       }));
 
       // Final naked short guard check before submission
@@ -1000,7 +1012,7 @@ function ComboOrderForm({
     parsedQty,
     parsedPrice,
     tif,
-    legsWithActions,
+    normalizedLegs,
     position.structure,
     portfolio,
     onOrderPlaced,
@@ -1094,17 +1106,17 @@ function ComboOrderForm({
     setLoading(true);
     setError(null);
     try {
-      const planLegs = legsWithActions.map((leg) => ({
+      const planLegs = normalizedLegs.map((leg) => ({
         contract_id: `${ticker}_${leg.expiry}_${leg.strike}_${leg.right}`,
-        action: leg.legAction,
+        action: leg.action,
         right: leg.right,
         strike: String(leg.strike),
         expiry: leg.expiry,
-        quantity: 1,
+        quantity: leg.quantity,
       }));
       const quotes: Record<string, { bid: string; ask: string }> = {};
-      for (const leg of legsWithActions) {
-        const key = legPriceKey(ticker, position.expiry, leg);
+      for (const leg of normalizedLegs) {
+        const key = `${ticker}_${leg.expiry}_${leg.strike}_${leg.right}`;
         const pd = key ? prices[key] : null;
         if (pd?.bid == null || pd.ask == null) {
           throw new Error("Every wizard leg needs a bid/ask quote");
@@ -1122,13 +1134,13 @@ function ComboOrderForm({
         quantity: parsedQty,
         limitPrice: wizardLimitPrice,
         tif,
-        legs: legsWithActions.map((leg) => ({
+        legs: normalizedLegs.map((leg) => ({
           symbol: ticker,
           expiry: leg.expiry,
-          strike: leg.strike!,
+          strike: leg.strike,
           right: leg.right,
-          action: leg.legAction,
-          ratio: 1,
+          action: leg.action,
+          ratio: leg.quantity,
         })),
       };
 
@@ -1156,11 +1168,10 @@ function ComboOrderForm({
     }
   }, [
     action,
-    legsWithActions,
+    normalizedLegs,
     netPrices.mid,
     parsedPrice,
     parsedQty,
-    position.expiry,
     prices,
     ticker,
     tif,

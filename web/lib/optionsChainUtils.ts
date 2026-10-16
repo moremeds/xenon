@@ -5,6 +5,8 @@ import { optionKey } from "@/lib/pricesProtocol";
 
 export type OrderLeg = {
   id: string;
+  /** Underlying symbol. When omitted, recovered from the `SYMBOL_…` id prefix. */
+  symbol?: string;
   action: "BUY" | "SELL";
   right: "C" | "P";
   strike: number;
@@ -133,7 +135,7 @@ export function computeNetPrice(legs: OrderLeg[], prices: Record<string, PriceDa
   let net = 0;
   for (const leg of legs) {
     const key = optionKey({
-      symbol: leg.id.split("_")[0],
+      symbol: leg.symbol ?? leg.id.split("_")[0],
       expiry: leg.expiry,
       strike: leg.strike,
       right: leg.right,
@@ -171,6 +173,11 @@ export type NetOptionQuote = {
  *   - bid = proceeds to SELL the structure
  *         = sum of (bid * qty) for BUY legs - sum of (ask * qty) for SELL legs
  *
+ * Each leg is priced under its own symbol: `leg.symbol` when set, else
+ * recovered from the `SYMBOL_…` `leg.id` prefix (same convention as
+ * `computeNetPrice`); `ticker` is only a fallback when a leg carries no
+ * symbol at all. This keeps mixed-underlying BAG orders correct.
+ *
  * Values are SIGNED: debit structures quote positive, credit structures
  * quote negative (IB BAG limit convention: negative limit = net credit).
  * ask >= bid holds whenever every leg's ask >= its bid, so no absolute-value
@@ -191,7 +198,7 @@ export function computeNetOptionQuote(
 
   for (const leg of legs) {
     const key = optionKey({
-      symbol: ticker,
+      symbol: leg.symbol ?? (leg.id.split("_")[0] || ticker),
       expiry: leg.expiry,
       strike: leg.strike,
       right: leg.right,

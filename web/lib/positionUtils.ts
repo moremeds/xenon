@@ -257,6 +257,7 @@ export function positionToOrderLegs(
     if (!right || expiry.length !== 8) return null;
     const legQuote: OrderLeg = {
       id: `${position.ticker}_${expiry}_${leg.strike}_${right}_${index}`,
+      symbol: position.ticker,
       action: leg.direction === "LONG" ? "BUY" : "SELL",
       right,
       strike: leg.strike,

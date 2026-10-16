@@ -287,20 +287,21 @@ function OrderBuilder({
   const lastStructureKeyRef = useRef("");
   const structure = detectStructure(legs);
   const netPrice = computeNetPrice(pricingLegs, prices);
-  const isDebit = netPrice != null ? netPrice > 0 : null;
   const totalQty =
     normalizedOrder?.quantity ?? (legs.length > 0 ? legs[0].quantity : 1);
 
   const parsedPrice = parseFloat(limitPrice);
   // prettier-ignore
   const isValidPrice = !isNaN(parsedPrice) && (isCombo ? parsedPrice !== 0 : parsedPrice > 0);
-  const signedLimitPrice = Number.isFinite(parsedPrice)
-    ? isDebit === null
-      ? parsedPrice
-      : isDebit
-        ? Math.abs(parsedPrice)
-        : -Math.abs(parsedPrice)
-    : NaN;
+  // Debit/credit follows the SIGNED limit the user selected (BID/MID/ASK or
+  // typed) — never the quote mid. A zero-crossing market can show a
+  // positive ask and a negative mid simultaneously; the payload must keep
+  // the price's own sign end-to-end.
+  const isDebit = Number.isFinite(parsedPrice)
+    ? parsedPrice > 0
+    : netPrice != null
+      ? netPrice > 0
+      : null;
 
   // For BID/MID/ASK quote, always use ratio-normalized legs (quantity=1 for single leg)
   // so the quote shows per-unit price, not aggregate (e.g. $1.46 not $73.00 for 50 contracts)
@@ -391,7 +392,7 @@ function OrderBuilder({
             symbol: ticker,
             action: getComboEntryAction(comboOrder.legs),
             quantity: totalQty,
-            limitPrice: signedLimitPrice,
+            limitPrice: parsedPrice,
             tif,
             legs: comboOrder.legs.map((l) => ({
               symbol: ticker,
@@ -449,7 +450,6 @@ function OrderBuilder({
     totalQty,
     tif,
     structure,
-    signedLimitPrice,
     attemptId,
   ]);
 
@@ -458,8 +458,8 @@ function OrderBuilder({
       setError("Build a priced combo before opening the wizard");
       return;
     }
-    const wizardLimitPrice = Number.isFinite(signedLimitPrice)
-      ? signedLimitPrice
+    const wizardLimitPrice = Number.isFinite(parsedPrice)
+      ? parsedPrice
       : netPrices.mid;
     setLoading(true);
     setError(null);
@@ -537,15 +537,15 @@ function OrderBuilder({
     prices,
     ticker,
     totalQty,
-    signedLimitPrice,
+    parsedPrice,
     tif,
     wizardLauncher,
   ]);
 
   const handleWizardSubmit = useCallback(async () => {
     if (!wizardLauncher.sessionId) return;
-    const submitTargetPrice = Number.isFinite(signedLimitPrice)
-      ? signedLimitPrice
+    const submitTargetPrice = Number.isFinite(parsedPrice)
+      ? parsedPrice
       : netPrices.mid;
     if (submitTargetPrice == null) return;
     const res = await fetch(
@@ -566,7 +566,7 @@ function OrderBuilder({
     }
     wizardSession.refresh();
   }, [
-    signedLimitPrice,
+    parsedPrice,
     netPrices.mid,
     wizardLauncher.sessionId,
     wizardSession,
@@ -981,7 +981,7 @@ function OrderBuilder({
                 marginTop: "4px",
               }}
             >
-              {fmtPrice(signedLimitPrice * totalQty * 100)} notional
+              {fmtPrice(parsedPrice * totalQty * 100)} notional
             </span>
           )}
         </div>

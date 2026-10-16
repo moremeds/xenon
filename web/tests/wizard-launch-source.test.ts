@@ -17,7 +17,7 @@ describe("wizard launch wiring", () => {
     expect(src).toContain('fetch("/api/wizard/plan"');
     expect(src).toContain("wizardLauncher.launch(json.session_id");
     expect(src).toContain(
-      "const submitTargetPrice = Number.isFinite(signedLimitPrice)",
+      "const submitTargetPrice = Number.isFinite(parsedPrice)",
     );
     expect(src).toContain("wizardSession.refresh();");
     expect(src).toContain("const wizardCanSubmit");

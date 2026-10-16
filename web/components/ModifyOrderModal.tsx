@@ -166,6 +166,7 @@ function resolveOrderPriceData(
         if (!right) return null;
         return {
           id: `${cl.symbol.toUpperCase()}_${expiryClean}_${cl.strike}_${right}_${index}`,
+          symbol: cl.symbol.toUpperCase(),
           action: normalizeLegAction(cl.action),
           right,
           strike: cl.strike,

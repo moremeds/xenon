@@ -96,6 +96,7 @@ export function useOrderPrices({
     if (type === "combo" && legs && legs.length > 0) {
       const orderLegs: ChainOrderLeg[] = legs.map((leg) => ({
         id: leg.id,
+        symbol: ticker,
         action: leg.direction === "LONG" ? "BUY" : "SELL",
         right: leg.type === "Call" ? "C" : "P",
         strike: leg.strike,
