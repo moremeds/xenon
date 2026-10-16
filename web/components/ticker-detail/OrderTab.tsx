@@ -7,7 +7,16 @@ import type { PriceData } from "@/lib/pricesProtocol";
 import { optionKey } from "@/lib/pricesProtocol";
 import { useOrderActions } from "@/lib/OrderActionsContext";
 import { useTickerDetailOptional } from "@/lib/TickerDetailContext";
-import { fmtPrice, legPriceKey, resolveEntryCost } from "@/lib/positionUtils";
+import {
+  fmtPrice,
+  legPriceKey,
+  positionToOrderLegs,
+  resolveEntryCost,
+} from "@/lib/positionUtils";
+import {
+  computeNetOptionQuote,
+  normalizeComboOrder,
+} from "@/lib/optionsChainUtils";
 import ModifyOrderModal from "@/components/ModifyOrderModal";
 import OrderErrorBanner from "@/components/OrderErrorBanner";
 import { RegimeBlockModal } from "@/components/RegimeBlockModal";
@@ -850,53 +859,18 @@ function ComboOrderForm({
     });
   }, [position]);
 
-  // Compute net BID / ASK / MID for the combo using natural market prices.
-  // IB reverses leg actions when Order.action = SELL, so the EFFECTIVE
-  // execution direction depends on the combo action:
-  //   BUY combo: LONG leg → BUY (pay ask), SHORT leg → SELL (receive bid)
-  //   SELL combo: LONG leg → SELL (receive bid), SHORT leg → BUY (pay ask)
-  //
-  // Natural market calculation:
-  //   netBid = what we receive if we SELL at market (best case)
-  //   netAsk = what we pay if we BUY at market (worst case)
+  // Net BID / ASK / MID for the combo via the single natural-quote
+  // implementation. The strip shows the signed quote of the structure
+  // itself (debit positive / credit negative) — independent of the
+  // envelope action. Order.action (BUY/SELL) controls open vs close and
+  // IB reverses leg actions on SELL, so the market quote must NOT flip
+  // with the selected action.
   const netPrices = useMemo(() => {
-    let netBid = 0;
-    let netAsk = 0;
-    let allAvailable = true;
-
-    for (const leg of position.legs) {
-      const key = legPriceKey(ticker, position.expiry, leg);
-      if (!key) {
-        allAvailable = false;
-        break;
-      }
-      const lp = prices[key];
-      if (!lp || lp.bid == null || lp.ask == null) {
-        allAvailable = false;
-        break;
-      }
-
-      // Effective execution after IB's reversal:
-      const effectivelySelling =
-        (action === "SELL") === (leg.direction === "LONG");
-
-      if (effectivelySelling) {
-        // We're selling this leg → receive BID
-        netBid += lp.bid;
-        netAsk += lp.ask;
-      } else {
-        // We're buying this leg → pay ASK
-        netBid -= lp.ask;
-        netAsk -= lp.bid;
-      }
-    }
-
-    if (!allAvailable) return { bid: null, ask: null, mid: null };
-    const bid = Math.min(netBid, netAsk);
-    const ask = Math.max(netBid, netAsk);
-    const mid = (bid + ask) / 2;
-    return { bid, ask, mid };
-  }, [position, prices, ticker, action]);
+    const orderLegs = positionToOrderLegs(position);
+    if (!orderLegs) return { bid: null, ask: null, mid: null };
+    const quotingLegs = normalizeComboOrder(orderLegs).legs;
+    return computeNetOptionQuote(quotingLegs, prices, ticker);
+  }, [position, prices, ticker]);
 
   const parsedQty = parseInt(quantity, 10);
   const parsedPrice = parseFloat(limitPrice);

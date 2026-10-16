@@ -22,14 +22,14 @@ describe("OptionsChainTab combo credit signing", () => {
     expect(src).toContain("limitPrice: signedLimitPrice");
   });
 
-  it("signs net quick-order values when rendering combo quote buttons", () => {
+  it("renders signed net quick-order values on combo quote buttons", () => {
     const src = fs.readFileSync(SOURCE_PATH, "utf-8");
-    expect(src).toContain("signedNetPrices.bid");
-    expect(src).toContain("signedNetPrices.mid");
-    expect(src).toContain("signedNetPrices.ask");
-    expect(src).toContain("signedNetPrices.bid.toFixed(2)");
-    expect(src).toContain("signedNetPrices.mid.toFixed(2)");
-    expect(src).toContain("signedNetPrices.ask.toFixed(2)");
+    expect(src).toContain("netPrices.bid");
+    expect(src).toContain("netPrices.mid");
+    expect(src).toContain("netPrices.ask");
+    expect(src).toContain("netPrices.bid.toFixed(2)");
+    expect(src).toContain("netPrices.mid.toFixed(2)");
+    expect(src).toContain("netPrices.ask.toFixed(2)");
   });
 
   it("uses credit/debit className for combo submit button", () => {
@@ -40,6 +40,7 @@ describe("OptionsChainTab combo credit signing", () => {
   it("displays signed notional for combo orders", () => {
     const src = fs.readFileSync(SOURCE_PATH, "utf-8");
     expect(src).toContain("signedLimitPrice * totalQty * 100");
-    expect(src).toContain("const signedNetPrice = useCallback");
+    // The natural quote itself is signed — no secondary sign layer.
+    expect(src).toContain("computeNetOptionQuote(quotingLegs, prices, ticker)");
   });
 });

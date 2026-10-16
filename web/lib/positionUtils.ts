@@ -1,6 +1,11 @@
 import type { PortfolioPosition } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 import { optionKey } from "@/lib/pricesProtocol";
+import {
+  computeNetOptionQuote,
+  normalizeComboOrder,
+  type OrderLeg,
+} from "@/lib/optionsChainUtils";
 import { toUsd } from "@/lib/fx";
 
 /* ─── Formatters ──────────────────────────────────────────── */
@@ -235,7 +240,38 @@ export function legPriceKey(
 /* ─── Spread net price resolution ─────────────────────────── */
 
 /**
- * Compute synthetic PriceData for a multi-leg spread from per-leg WS prices.
+ * Map portfolio legs to order-builder legs for natural-quote computation.
+ * LONG → BUY, SHORT → SELL (structure actions, not trade direction);
+ * quantity carries leg contracts so callers can ratio-normalize.
+ * Returns null when any leg can't be priced as an option — same null
+ * conditions as `legPriceKey` (Stock leg, missing/zero strike, bad expiry).
+ */
+export function positionToOrderLegs(
+  position: PortfolioPosition,
+): OrderLeg[] | null {
+  const expiry = position.expiry.replace(/-/g, "");
+  const legs = position.legs.map((leg, index) => {
+    if (leg.type === "Stock") return null;
+    if (leg.strike == null || leg.strike === 0) return null;
+    const right = leg.type === "Call" ? "C" : leg.type === "Put" ? "P" : null;
+    if (!right || expiry.length !== 8) return null;
+    const legQuote: OrderLeg = {
+      id: `${position.ticker}_${expiry}_${leg.strike}_${right}_${index}`,
+      action: leg.direction === "LONG" ? "BUY" : "SELL",
+      right,
+      strike: leg.strike,
+      expiry,
+      quantity: Math.max(1, Math.trunc(leg.contracts)),
+      limitPrice: null,
+    };
+    return legQuote;
+  });
+  return legs.every((l): l is OrderLeg => l != null) ? legs : null;
+}
+
+/**
+ * Compute synthetic PriceData for a multi-leg spread from per-leg WS prices
+ * via `computeNetOptionQuote` — the single natural-quote implementation.
  * Returns null for single-leg, stock positions, or when leg prices are unavailable.
  */
 export function resolveSpreadPriceData(
@@ -246,28 +282,23 @@ export function resolveSpreadPriceData(
   if (position.structure_type === "Stock") return null;
   if (position.legs.length < 2) return null;
 
-  let netBid = 0;
-  let netAsk = 0;
-  for (const leg of position.legs) {
-    const key = legPriceKey(ticker, position.expiry, leg);
-    if (!key) return null;
-    const lp = prices[key];
-    if (!lp || lp.bid == null || lp.ask == null) return null;
-    const sign = leg.direction === "LONG" ? 1 : -1;
-    netBid += sign * lp.bid;
-    netAsk += sign * lp.ask;
-  }
+  const orderLegs = positionToOrderLegs(position);
+  if (!orderLegs) return null;
+  // Ratio-normalize so the quote is per unit of the structure, not per
+  // total contracts held.
+  const quotingLegs = normalizeComboOrder(orderLegs).legs;
+  const quote = computeNetOptionQuote(quotingLegs, prices, ticker);
+  if (quote.bid == null || quote.ask == null || quote.mid == null) return null;
 
-  const lo = Math.round(Math.min(netBid, netAsk) * 100) / 100;
-  const hi = Math.round(Math.max(netBid, netAsk) * 100) / 100;
-  const mid = Number(((lo + hi) / 2).toFixed(2));
+  const bid = Math.round(quote.bid * 100) / 100;
+  const ask = Math.round(quote.ask * 100) / 100;
 
   return {
     symbol: ticker,
-    last: mid,
+    last: quote.mid,
     lastIsCalculated: true,
-    bid: lo,
-    ask: hi,
+    bid,
+    ask,
     bidSize: null,
     askSize: null,
     volume: null,

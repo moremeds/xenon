@@ -8,7 +8,12 @@ import type { ModifyComboLeg, ModifyOrderRequest } from "@/lib/orderModify";
 import Modal from "./Modal";
 import { getQuoteMetrics } from "@/lib/quoteTelemetry";
 import { applyRestingLimitToQuote } from "@/lib/modifyOrderQuote";
-import { fmtPrice, legPriceKey } from "@/lib/positionUtils";
+import { fmtPrice, positionToOrderLegs } from "@/lib/positionUtils";
+import {
+  computeNetOptionQuote,
+  normalizeComboOrder,
+  type OrderLeg,
+} from "@/lib/optionsChainUtils";
 import { ModifyOrderQuoteTelemetry } from "./QuoteTelemetry";
 import {
   OrderPriceStrip,
@@ -134,29 +139,22 @@ function resolveOrderPriceData(
     }
   }
 
-  // BAG: compute net bid/ask/mid from combo legs (order data or portfolio fallback)
-  // Natural market calculation:
-  //   netBid = proceeds if we SELL at market (receive bid on BUY legs, pay ask on SELL legs)
-  //   netAsk = cost if we BUY at market (pay ask on BUY legs, receive bid on SELL legs)
+  // BAG: net bid/ask/mid from combo legs via the single natural-quote
+  // implementation (computeNetOptionQuote) — signed, cross-field.
+  // Primary source is the order's own combo legs (resolved during sync);
+  // fall back to the portfolio position legs when the order lacks them.
   if (c.secType === "BAG") {
-    let netBid = 0;
-    let netAsk = 0;
-    let netLast = 0;
-    let resolved = false;
+    let orderLegs: OrderLeg[] | null = null;
+    let quoteTicker = c.symbol.toUpperCase();
 
     // Primary: use combo legs from the order itself (resolved during sync)
     if (c.comboLegs?.length) {
-      let allAvailable = true;
-      for (const cl of c.comboLegs) {
+      const mapped = c.comboLegs.map((cl, index): OrderLeg | null => {
         if (!cl.symbol || cl.strike == null || !cl.right || !cl.expiry) {
-          allAvailable = false;
-          break;
+          return null;
         }
         const expiryClean = cl.expiry.replace(/-/g, "");
-        if (expiryClean.length !== 8) {
-          allAvailable = false;
-          break;
-        }
+        if (expiryClean.length !== 8) return null;
         const right =
           cl.right === "C" || cl.right === "P"
             ? cl.right
@@ -165,85 +163,52 @@ function resolveOrderPriceData(
               : cl.right === "PUT"
                 ? "P"
                 : null;
-        if (!right) {
-          allAvailable = false;
-          break;
-        }
-        const key = optionKey({
-          symbol: cl.symbol.toUpperCase(),
-          expiry: expiryClean,
-          strike: cl.strike,
+        if (!right) return null;
+        return {
+          id: `${cl.symbol.toUpperCase()}_${expiryClean}_${cl.strike}_${right}_${index}`,
+          action: normalizeLegAction(cl.action),
           right,
-        });
-        const lp = prices[key];
-        if (!lp || lp.bid == null || lp.ask == null) {
-          allAvailable = false;
-          break;
-        }
-
-        // Natural market: BUY leg = pay ask / receive bid, SELL leg = receive bid / pay ask
-        if (cl.action === "BUY") {
-          netAsk += lp.ask; // To BUY combo: pay ask on BUY legs
-          netBid += lp.bid; // To SELL combo: receive bid on BUY legs
-        } else {
-          netAsk -= lp.bid; // To BUY combo: receive bid on SELL legs
-          netBid -= lp.ask; // To SELL combo: pay ask on SELL legs
-        }
-        const sign = cl.action === "BUY" ? 1 : -1;
-        netLast += sign * (lp.last ?? (lp.bid + lp.ask) / 2);
+          strike: cl.strike,
+          expiry: expiryClean,
+          quantity: Math.max(1, Math.trunc(cl.ratio ?? 1)),
+          limitPrice: null,
+        };
+      });
+      if (mapped.every((l): l is OrderLeg => l != null)) {
+        orderLegs = mapped;
+        quoteTicker = comboUnderlyingSymbol(order);
       }
-      resolved = allAvailable;
     }
 
     // Fallback: use portfolio position legs
-    if (!resolved && portfolio) {
+    if (!orderLegs && portfolio) {
       const pos = portfolio.positions.find(
         (p) => p.ticker === c.symbol && p.legs.length > 1,
       );
       if (pos) {
-        netBid = 0;
-        netAsk = 0;
-        netLast = 0;
-        let allAvailable = true;
-        for (const leg of pos.legs) {
-          const key = legPriceKey(pos.ticker, pos.expiry, leg);
-          if (!key) {
-            allAvailable = false;
-            break;
-          }
-          const lp = prices[key];
-          if (!lp || lp.bid == null || lp.ask == null) {
-            allAvailable = false;
-            break;
-          }
-
-          // Natural market: LONG leg = pay ask / receive bid, SHORT leg = receive bid / pay ask
-          if (leg.direction === "LONG") {
-            netAsk += lp.ask; // To BUY combo: pay ask on LONG legs
-            netBid += lp.bid; // To SELL combo: receive bid on LONG legs
-          } else {
-            netAsk -= lp.bid; // To BUY combo: receive bid on SHORT legs
-            netBid -= lp.ask; // To SELL combo: pay ask on SHORT legs
-          }
-          const sign = leg.direction === "LONG" ? 1 : -1;
-          netLast += sign * (lp.last ?? (lp.bid + lp.ask) / 2);
-        }
-        resolved = allAvailable;
+        orderLegs = positionToOrderLegs(pos);
+        quoteTicker = pos.ticker.toUpperCase();
       }
     }
 
-    if (!resolved) return null;
+    if (!orderLegs) return null;
 
-    // Ensure bid < ask (natural market ordering)
-    const lo = Math.min(Math.abs(netBid), Math.abs(netAsk));
-    const hi = Math.max(Math.abs(netBid), Math.abs(netAsk));
+    // Ratio-normalize so the quote is per unit of the structure.
+    const quote = computeNetOptionQuote(
+      normalizeComboOrder(orderLegs).legs,
+      prices,
+      quoteTicker,
+    );
+    if (quote.bid == null || quote.ask == null || quote.mid == null) {
+      return null;
+    }
 
     return {
       symbol: c.symbol,
-      last: Math.round(netLast * 100) / 100,
+      last: Math.round(quote.mid * 100) / 100,
       lastIsCalculated: true,
-      bid: Math.round(lo * 100) / 100,
-      ask: Math.round(hi * 100) / 100,
+      bid: Math.round(quote.bid * 100) / 100,
+      ask: Math.round(quote.ask * 100) / 100,
       bidSize: null,
       askSize: null,
       volume: null,

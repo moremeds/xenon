@@ -7,7 +7,9 @@ type ModifyQuoteOverlayInput = {
 };
 
 function normalizeLimitPrice(limitPrice: number | null | undefined): number | null {
-  if (typeof limitPrice !== "number" || !Number.isFinite(limitPrice) || limitPrice <= 0) {
+  // BAG limits are signed: a resting credit-combo order carries a NEGATIVE
+  // limit (net credit). Zero means "no usable resting limit".
+  if (typeof limitPrice !== "number" || !Number.isFinite(limitPrice) || limitPrice === 0) {
     return null;
   }
   return limitPrice;

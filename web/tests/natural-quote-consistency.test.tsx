@@ -1,0 +1,356 @@
+/**
+ * @vitest-environment jsdom
+ *
+ * PR-19 — one natural-quote implementation.
+ *
+ * Every surface that shows a combo's natural market must report identical
+ * numbers: the position spread price bar (resolveSpreadPriceData / PositionTab),
+ * the combo order form in OrderTab, the BAG order quote in ModifyOrderModal, and
+ * the options-chain order builder (which already calls computeNetOptionQuote).
+ *
+ * Canonical contract of computeNetOptionQuote (signed instrument quote):
+ *   bid = proceeds to SELL the structure at market
+ *       = Σ(bid·qty over BUY legs) − Σ(ask·qty over SELL legs)
+ *   ask = cost to BUY the structure at market
+ *       = Σ(ask·qty over BUY legs) − Σ(bid·qty over SELL legs)
+ *   mid = (bid + ask) / 2
+ * Values are signed: a structure worth a net credit quotes negative, matching
+ * the IB BAG limit-price convention (negative limit = net credit).
+ *
+ * All bid/ask numbers below are hypothetical fixtures authored for this test;
+ * they are not observed market data.
+ */
+
+import React from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render } from "@testing-library/react";
+import {
+  computeNetOptionQuote,
+  normalizeComboOrder,
+  type OrderLeg,
+} from "../lib/optionsChainUtils";
+import { resolveSpreadPriceData } from "../lib/positionUtils";
+import OrderTab from "../components/ticker-detail/OrderTab";
+import ModifyOrderModal from "../components/ModifyOrderModal";
+import type { OpenOrder, PortfolioData, PortfolioPosition } from "../lib/types";
+import type { PriceData } from "../lib/pricesProtocol";
+
+vi.mock("@/lib/OrderActionsContext", () => ({
+  useOrderActions: () => ({
+    pendingCancels: new Map(),
+    pendingModifies: new Map(),
+    cancelledOrders: [],
+    requestCancel: vi.fn(),
+    requestModify: vi.fn(),
+    drainNotifications: vi.fn(() => []),
+    setOrdersUpdater: vi.fn(),
+  }),
+}));
+
+vi.mock("@/components/Modal", () => ({
+  default: ({ children }: { children: React.ReactNode }) => (
+    <div data-testid="modal">{children}</div>
+  ),
+}));
+
+/* ─── Hypothetical fixtures ─── */
+
+const TICKER = "TEST";
+const EXPIRY = "20260619";
+
+function makePriceData(bid: number, ask: number): PriceData {
+  return {
+    symbol: "TEST",
+    bid,
+    ask,
+    last: (bid + ask) / 2,
+    bidSize: null,
+    askSize: null,
+    volume: null,
+    high: null,
+    low: null,
+    open: null,
+    close: null,
+    week52High: null,
+    week52Low: null,
+    avgVolume: null,
+    delta: null,
+    gamma: null,
+    theta: null,
+    vega: null,
+    impliedVol: null,
+    undPrice: null,
+    timestamp: new Date().toISOString(),
+  } as PriceData;
+}
+
+// Hypothetical leg quotes — NOT observed market data.
+const PRICES: Record<string, PriceData> = {
+  TEST_20260619_200_C: makePriceData(4.5, 4.7),
+  TEST_20260619_210_C: makePriceData(2.0, 2.2),
+  TEST_20260619_200_P: makePriceData(4.5, 4.7),
+  TEST_20260619_190_P: makePriceData(2.0, 2.2),
+};
+
+function makePosition(legs: PortfolioPosition["legs"]): PortfolioPosition {
+  return {
+    id: 1,
+    ticker: TICKER,
+    direction: "COMBO",
+    structure: "TEST SPREAD",
+    structure_type: "Vertical",
+    expiry: "2026-06-19",
+    contracts: 10,
+    entry_cost: 0,
+    market_value: 0,
+    legs,
+  } as PortfolioPosition;
+}
+
+function makePortfolio(position: PortfolioPosition): PortfolioData {
+  return {
+    bankroll: 100_000,
+    peak_value: 100_000,
+    last_sync: new Date().toISOString(),
+    total_deployed_pct: 1,
+    total_deployed_dollars: 1_000,
+    remaining_capacity_pct: 99,
+    position_count: 1,
+    defined_risk_count: 1,
+    undefined_risk_count: 0,
+    avg_kelly_optimal: null,
+    positions: [position],
+    exposure: {},
+    violations: [],
+    account_summary: {
+      net_liquidation: 100_000,
+      daily_pnl: 0,
+      unrealized_pnl: 0,
+      realized_pnl: 0,
+      settled_cash: 100_000,
+      maintenance_margin: 0,
+      excess_liquidity: 100_000,
+      buying_power: 200_000,
+      dividends: 0,
+    },
+  } as PortfolioData;
+}
+
+function makeBagOrder(
+  legs: { action: "BUY" | "SELL"; strike: number; right: "C" | "P" }[],
+): OpenOrder {
+  return {
+    orderId: 1,
+    permId: 1001,
+    symbol: TICKER,
+    action: "SELL",
+    orderType: "LMT",
+    tif: "DAY",
+    totalQuantity: 1,
+    limitPrice: null,
+    auxPrice: null,
+    contract: {
+      symbol: TICKER,
+      secType: "BAG",
+      strike: null,
+      right: null,
+      expiry: null,
+      comboLegs: legs.map((l) => ({
+        action: l.action,
+        symbol: TICKER,
+        expiry: EXPIRY,
+        strike: l.strike,
+        right: l.right,
+        ratio: 1,
+      })),
+    },
+  } as unknown as OpenOrder;
+}
+
+/* ─── Shared expected values ─── */
+
+// Bull call spread (debit): BUY 200C / SELL 210C.
+//   bid = 4.50 − 2.20 = 2.30   ask = 4.70 − 2.00 = 2.70   mid = 2.50
+const DEBIT_ORDER_LEGS: OrderLeg[] = [
+  { id: "TEST_200_C", action: "BUY", right: "C", strike: 200, expiry: EXPIRY, quantity: 1, limitPrice: null },
+  { id: "TEST_210_C", action: "SELL", right: "C", strike: 210, expiry: EXPIRY, quantity: 1, limitPrice: null },
+];
+const DEBIT_POSITION = makePosition([
+  { type: "Call", strike: 200, direction: "LONG", contracts: 10, entry_cost: 4500, avg_cost: 450, market_price: 4.6, market_value: 4600, market_price_is_calculated: false },
+  { type: "Call", strike: 210, direction: "SHORT", contracts: 10, entry_cost: -2100, avg_cost: 210, market_price: 2.1, market_value: -2100, market_price_is_calculated: false },
+]);
+const DEBIT_QUOTE = { bid: 2.3, ask: 2.7, mid: 2.5 };
+
+// Credit put spread: SELL 200P / BUY 190P (the short-risk structure).
+//   bid = 2.00 − 4.70 = −2.70  ask = 2.20 − 4.50 = −2.30  mid = −2.50
+const CREDIT_ORDER_LEGS: OrderLeg[] = [
+  { id: "TEST_200_P", action: "SELL", right: "P", strike: 200, expiry: EXPIRY, quantity: 1, limitPrice: null },
+  { id: "TEST_190_P", action: "BUY", right: "P", strike: 190, expiry: EXPIRY, quantity: 1, limitPrice: null },
+];
+const CREDIT_POSITION = makePosition([
+  { type: "Put", strike: 200, direction: "SHORT", contracts: 10, entry_cost: -4600, avg_cost: 460, market_price: 4.6, market_value: -4600, market_price_is_calculated: false },
+  { type: "Put", strike: 190, direction: "LONG", contracts: 10, entry_cost: 2100, avg_cost: 210, market_price: 2.1, market_value: 2100, market_price_is_calculated: false },
+]);
+const CREDIT_QUOTE = { bid: -2.7, ask: -2.3, mid: -2.5 };
+
+afterEach(() => cleanup());
+
+function assertQuote(
+  quote: { bid: number | null; ask: number | null; mid: number | null },
+  expected: { bid: number; ask: number; mid: number },
+) {
+  expect(quote.bid).toBeCloseTo(expected.bid, 4);
+  expect(quote.ask).toBeCloseTo(expected.ask, 4);
+  expect(quote.mid).toBeCloseTo(expected.mid, 4);
+}
+
+function assertSpreadPriceData(
+  position: PortfolioPosition,
+  expected: { bid: number; ask: number; mid: number },
+) {
+  const pd = resolveSpreadPriceData(TICKER, position, PRICES);
+  expect(pd).not.toBeNull();
+  expect(pd!.bid).toBeCloseTo(expected.bid, 4);
+  expect(pd!.ask).toBeCloseTo(expected.ask, 4);
+  // The synthetic mark is the natural-quote mid.
+  expect(pd!.last).toBeCloseTo(expected.mid, 4);
+}
+
+function assertStripValues(
+  strip: Element | null,
+  expected: { bid: number; ask: number; mid: number },
+) {
+  const fmt = (n: number) =>
+    n < 0 ? `-$${Math.abs(n).toFixed(2)}` : `$${n.toFixed(2)}`;
+  const items = strip?.querySelectorAll(".spread-price-item") ?? [];
+  const text = (label: string) =>
+    Array.from(items)
+      .find((el) => el.querySelector(".spread-price-label")?.textContent === label)
+      ?.querySelector(".spread-price-value")?.textContent ?? null;
+  expect(text("BID")).toBe(fmt(expected.bid));
+  expect(text("MID")).toBe(fmt(expected.mid));
+  expect(text("ASK")).toBe(fmt(expected.ask));
+}
+
+function assertOrderTabStrip(
+  position: PortfolioPosition,
+  expected: { bid: number; ask: number; mid: number },
+) {
+  const { container, getByRole } = render(
+    React.createElement(OrderTab, {
+      ticker: TICKER,
+      position,
+      portfolio: makePortfolio(position),
+      prices: PRICES,
+      openOrders: [],
+    }),
+  );
+
+  const strip = container.querySelector(".spread-price-strip");
+  assertStripValues(strip, expected);
+
+  // The quote describes the instrument, not the envelope direction: toggling
+  // BUY/SELL must not change the displayed natural market.
+  fireEvent.click(getByRole("button", { name: "BUY" }));
+  assertStripValues(
+    container.querySelector(".spread-price-strip"),
+    expected,
+  );
+}
+
+function assertModifyModalStrip(
+  order: OpenOrder,
+  expected: { bid: number; ask: number; mid: number },
+) {
+  const { container } = render(
+    React.createElement(ModifyOrderModal, {
+      order,
+      loading: false,
+      prices: PRICES,
+      portfolio: undefined,
+      onConfirm: () => {},
+      onClose: () => {},
+    }),
+  );
+
+  const strip = container.querySelector(".order-price-strip-compact");
+  const fmt = (n: number) => `$${n.toFixed(2)}`;
+  const items = strip?.querySelectorAll(".order-price-item") ?? [];
+  const text = (label: string) =>
+    Array.from(items)
+      .find((el) => el.querySelector(".order-price-label")?.textContent === label)
+      ?.querySelector(".order-price-value")?.textContent ?? null;
+  expect(text("BID")).toBe(fmt(expected.bid));
+  expect(text("MID")).toBe(fmt(expected.mid));
+  expect(text("ASK")).toBe(fmt(expected.ask));
+}
+
+/* ─── Tests ─── */
+
+describe("natural quote — one implementation", () => {
+  it("canonical: debit bull call spread", () => {
+    assertQuote(
+      computeNetOptionQuote(DEBIT_ORDER_LEGS, PRICES, TICKER),
+      DEBIT_QUOTE,
+    );
+  });
+
+  it("canonical: credit put spread", () => {
+    assertQuote(
+      computeNetOptionQuote(CREDIT_ORDER_LEGS, PRICES, TICKER),
+      CREDIT_QUOTE,
+    );
+  });
+
+  it("chain order-builder path (ratio-normalized legs) agrees", () => {
+    // OptionsChainTab calls computeNetOptionQuote(normalizeComboOrder(legs).legs).
+    for (const [legs, expected] of [
+      [DEBIT_ORDER_LEGS, DEBIT_QUOTE],
+      [CREDIT_ORDER_LEGS, CREDIT_QUOTE],
+    ] as const) {
+      const doubled = legs.map((l) => ({ ...l, quantity: 2 }));
+      assertQuote(
+        computeNetOptionQuote(normalizeComboOrder(doubled).legs, PRICES, TICKER),
+        expected,
+      );
+    }
+  });
+
+  it("position spread price bar agrees (debit)", () => {
+    assertSpreadPriceData(DEBIT_POSITION, DEBIT_QUOTE);
+  });
+
+  it("position spread price bar agrees and stays signed (credit)", () => {
+    // A held credit structure must keep a negative mark — PositionTab MV is
+    // last × contracts × 100 and a negative mark means net liability.
+    assertSpreadPriceData(CREDIT_POSITION, CREDIT_QUOTE);
+  });
+
+  it("OrderTab combo form agrees, independent of envelope action (debit)", () => {
+    assertOrderTabStrip(DEBIT_POSITION, DEBIT_QUOTE);
+  });
+
+  it("OrderTab combo form agrees, independent of envelope action (credit)", () => {
+    assertOrderTabStrip(CREDIT_POSITION, CREDIT_QUOTE);
+  });
+
+  it("ModifyOrderModal BAG quote agrees (debit)", () => {
+    assertModifyModalStrip(
+      makeBagOrder([
+        { action: "BUY", strike: 200, right: "C" },
+        { action: "SELL", strike: 210, right: "C" },
+      ]),
+      DEBIT_QUOTE,
+    );
+  });
+
+  it("ModifyOrderModal BAG quote agrees (credit)", () => {
+    assertModifyModalStrip(
+      makeBagOrder([
+        { action: "SELL", strike: 200, right: "P" },
+        { action: "BUY", strike: 190, right: "P" },
+      ]),
+      CREDIT_QUOTE,
+    );
+  });
+});
