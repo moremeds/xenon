@@ -11,6 +11,8 @@ from __future__ import annotations
 import errno
 import os
 import socket
+import subprocess
+import sys
 
 import pytest
 from sqlalchemy.engine import Engine
@@ -138,3 +140,62 @@ def test_non_broker_port_unaffected():
         assert sock.connect_ex(("127.0.0.1", 1)) == errno.ECONNREFUSED
     finally:
         sock.close()
+
+
+# ---------------------------------------------------------------------------
+# Child-process broker guard — scripts/tests/broker_guard/sitecustomize.py is
+# on PYTHONPATH (set by the root conftest), so every spawned Python child
+# auto-imports the identical socket guard at interpreter startup.
+# ---------------------------------------------------------------------------
+
+_CHILD_DIAL = (
+    "import socket, sys\n"
+    "s = socket.socket()\n"
+    "try:\n"
+    "    s.connect((sys.argv[1], int(sys.argv[2])))\n"
+    "    print('CONNECTED')\n"
+    "except OSError as e:\n"
+    "    print(f'REFUSED {type(e).__name__}: {e}')\n"
+)
+
+
+def _dial_child(host: str, port: int) -> str:
+    """Spawn a real Python child that dials host:port; return its output."""
+    result = subprocess.run(
+        [sys.executable, "-c", _CHILD_DIAL, host, str(port)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    return result.stdout + result.stderr
+
+
+def test_child_process_4001_dial_denied_any_host():
+    """A subprocess dialing live-4001 on a non-localhost IP is refused."""
+    out = _dial_child("127.0.0.2", 4001)
+    assert "broker connection" in out, f"child was not guarded: {out!r}"
+    assert "CONNECTED" not in out
+
+
+def test_child_process_tws_7497_dial_denied():
+    """The child guard covers TWS paper port 7497, not just the gateway."""
+    out = _dial_child("127.0.0.1", 7497)
+    assert "broker connection" in out, f"child was not guarded: {out!r}"
+    assert "CONNECTED" not in out
+
+
+@pytest.mark.paper_ib
+def test_child_process_paper_ib_live_4001_still_denied():
+    """paper_ib allowlists ONLY 127.0.0.1:4002 — a live-port dial stays refused."""
+    assert os.environ["XENON_TEST_BROKER_ALLOW"] == "127.0.0.1:4002"
+    out = _dial_child("127.0.0.1", 4001)
+    assert "broker connection" in out, f"child was not guarded: {out!r}"
+    assert "CONNECTED" not in out
+
+
+@pytest.mark.paper_ib
+def test_child_process_paper_ib_4002_passes_guard():
+    """The exact allowlisted endpoint delegates to the real socket — outcome is
+    a real connect or OS-level ECONNREFUSED, never the guard message."""
+    out = _dial_child("127.0.0.1", 4002)
+    assert "broker connection" not in out
