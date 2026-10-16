@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { auth } from "@clerk/nextjs/server";
 import { WebSocket } from "ws";
 import { resolveServerIbRealtimeWsUrl } from "@/lib/server/ibRealtimeRuntime";
 import { internalApiHeaders } from "@/lib/xenonApi";
@@ -23,12 +22,10 @@ function cacheKey(symbol: string): string {
 
 const XENON_API = process.env.XENON_API_URL || "http://localhost:8321";
 
-async function buildWsUrl(token: string | null): Promise<string> {
+async function buildWsUrl(): Promise<string> {
   const ibWsUrl = resolveServerIbRealtimeWsUrl();
-  if (!token) return ibWsUrl;
   try {
     const wsHeaders = new Headers({ "Content-Type": "application/json" });
-    if (token) wsHeaders.set("Authorization", `Bearer ${token}`);
     internalApiHeaders(wsHeaders);
     const res = await fetch(`${XENON_API}/ws-ticket`, {
       method: "POST",
@@ -50,12 +47,11 @@ async function buildWsUrl(token: string | null): Promise<string> {
  */
 async function fetchFromIB(
   symbols: string[],
-  token: string | null,
 ): Promise<Record<string, number>> {
   const results: Record<string, number> = {};
   if (symbols.length === 0) return results;
 
-  const wsUrl = await buildWsUrl(token);
+  const wsUrl = await buildWsUrl();
 
   return new Promise<Record<string, number>>((resolve) => {
     let ws: WebSocket;
@@ -216,9 +212,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ closes: {} });
     }
 
-    const { getToken } = await auth();
-    const token = await getToken();
-
     const batch = symbols.slice(0, 30).map((s: string) => s.toUpperCase());
 
     // Check cache first, collect uncached symbols
@@ -238,7 +231,7 @@ export async function POST(req: Request) {
     }
 
     // 1st priority: IB (batch snapshot via WebSocket)
-    const ibResults = await fetchFromIB(uncached, token);
+    const ibResults = await fetchFromIB(uncached);
     const stillMissing: string[] = [];
     for (const sym of uncached) {
       if (ibResults[sym] != null) {

@@ -65,7 +65,10 @@ export function usePortfolio(
     syncingRef.current = true;
     setSyncing(true);
     try {
-      const res = await fetch("/api/portfolio", { method: "POST" });
+      const res = await fetch("/api/portfolio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error((body as { error?: string }).error ?? "Sync failed");

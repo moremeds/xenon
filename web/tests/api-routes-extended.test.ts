@@ -68,10 +68,8 @@ vi.mock("@tools/schemas/ib-orders", () => ({
   OrdersData: {},
 }));
 
-// Mock Clerk auth — previous-close route calls auth() for WS ticket
-vi.mock("@clerk/nextjs/server", () => ({
-  auth: vi.fn(async () => ({ getToken: async () => "test-token" })),
-}));
+// previous-close mints WS tickets server-side via the internal token; the
+// global fetch mock below covers the /ws-ticket call.
 
 // Mock @/lib/syncMutex (some routes may import it)
 vi.mock("@/lib/syncMutex", () => ({

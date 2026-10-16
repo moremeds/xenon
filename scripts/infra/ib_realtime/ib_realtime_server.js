@@ -54,6 +54,7 @@ import { pickEvictable, pickAdmittable } from "./line_budget.js";
 import { LRUCache } from "../../lib/lru-cache.js";
 import { RateLimiter } from "../../lib/rate-limiter.js";
 import { createSubscriberRegistry } from "./subscriber_registry.js";
+import { authorizeUpgrade } from "./ws_upgrade_auth.js";
 
 const DEFAULT_WS_PORT = 8765;
 const DEFAULT_IB_HOST = process.env.IB_GATEWAY_HOST || "127.0.0.1";
@@ -440,55 +441,25 @@ const httpServer = http.createServer((req, res) => {
 const wss = new WebSocketServer({ noServer: true });
 
 httpServer.on("upgrade", async (req, socket, head) => {
-  // Skip ticket validation if Clerk is not configured (local dev)
-  // or if the connection is from localhost (server-to-server / local browser)
-  const remoteAddr = socket.remoteAddress || "";
-  const isLocalhost =
-    !process.env.CLERK_JWKS_URL ||
-    remoteAddr === "127.0.0.1" ||
-    remoteAddr === "::1" ||
-    remoteAddr === "::ffff:127.0.0.1";
-  if (isLocalhost) {
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      wss.emit("connection", ws, req);
-    });
-    return;
-  }
-
-  const url = new URL(req.url || "/", `http://${req.headers.host}`);
-  const ticket = url.searchParams.get("ticket");
-
-  if (!ticket) {
-    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+  // Every upgrade requires a valid single-use ticket validated by FastAPI.
+  // No peer-address bypass — reachability is not authentication.
+  const decision = await authorizeUpgrade(req);
+  if (!decision.ok) {
+    verbose(`WS upgrade rejected: ${decision.status} ${decision.reason}`);
+    const statusLine =
+      decision.status === 403
+        ? "HTTP/1.1 403 Forbidden\r\n\r\n"
+        : decision.status === 503
+          ? "HTTP/1.1 503 Service Unavailable\r\n\r\n"
+          : "HTTP/1.1 401 Unauthorized\r\n\r\n";
+    socket.write(statusLine);
     socket.destroy();
     return;
   }
 
-  try {
-    const res = await fetch(TICKET_VALIDATE_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ticket }),
-    });
-
-    if (!res.ok) {
-      verbose("WS ticket validation failed: " + res.status);
-      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-      socket.destroy();
-      return;
-    }
-
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      wss.emit("connection", ws, req);
-    });
-  } catch (err) {
-    verbose(
-      "WS ticket validation error: " +
-        (err instanceof Error ? err.message : err),
-    );
-    socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
-    socket.destroy();
-  }
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.emit("connection", ws, req);
+  });
 });
 
 const clients = new Set();

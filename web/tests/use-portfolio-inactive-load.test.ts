@@ -87,6 +87,9 @@ describe("usePortfolio inactive initial load", () => {
     rerender({ active: true });
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/portfolio", { method: "POST" });
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/portfolio", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
   });
 });

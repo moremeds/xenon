@@ -23,7 +23,7 @@ export default defineConfig({
   // Start Next.js dev server before tests. Default to paper mode so E2E
   // tests never accidentally talk to a live IB account.
   webServer: {
-    command: `XENON_DISABLE_AUTH=1 XENON_TRADING_MODE=paper ASSISTANT_MOCK=1 npx next dev --turbopack -p ${PORT}`,
+    command: `XENON_TRADING_MODE=paper ASSISTANT_MOCK=1 npx next dev --turbopack -p ${PORT}`,
     url: `http://localhost:${PORT}`,
     reuseExistingServer: true,
     timeout: 60_000,

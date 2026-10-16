@@ -1,52 +1,138 @@
 import { describe, it, expect } from "vitest";
 import { NextRequest } from "next/server";
-import { createRouteMatcher } from "@clerk/nextjs/server";
-import { PUBLIC_ROUTES } from "../middleware";
+import middleware, {
+  DEFAULT_ALLOWED_HOSTS,
+  MULTIPART_API_PATHS,
+  allowedHosts,
+} from "../middleware";
 
-// Asserts the default-private + explicit-public-allowlist policy. A new route
-// added without touching middleware.ts must inherit auth — failing closed is
-// the whole point of this design (project's universal-auth-gating policy).
+// The middleware is a browser-origin/CSRF guard on mutating /api/** requests.
+// It must reject before any upstream (FastAPI) call is possible — the default
+// export returns a 403 NextResponse directly rather than NextResponse.next().
 
-const isPublic = createRouteMatcher(PUBLIC_ROUTES);
-
-const matches = (path: string): boolean =>
-  isPublic(new NextRequest(new URL(`http://localhost${path}`)));
-
-describe("middleware route gating", () => {
-  it.each([
-    "/portfolio",
-    "/portfolio/123",
-    "/orders",
-    "/orders/quote",
-    "/journal",
-    "/dashboard",
-    "/performance",
-    "/", // workspace shell
-    "/AAPL", // dynamic [ticker] route
-    // Removed in the pure-portfolio pivot — must inherit auth + return 404
-    "/scanner",
-    "/discover",
-    "/regime",
-    "/flow-analysis",
-    "/uw-analyze",
-    "/cta",
-    "/kit",
-    "/internals",
-  ])("private: %s requires auth", (path) => {
-    expect(matches(path)).toBe(false);
+const req = (
+  path: string,
+  opts: { method?: string; headers?: Record<string, string> } = {},
+): NextRequest =>
+  new NextRequest(new URL(`http://localhost:3000${path}`), {
+    method: opts.method ?? "POST",
+    headers: opts.headers,
   });
 
-  it.each(["/sign-in", "/sign-in/factor-one", "/sign-up", "/api/portfolio"])(
-    "public: %s allowed without auth",
-    (path) => {
-      expect(matches(path)).toBe(true);
-    },
-  );
+const GOOD: Record<string, string> = {
+  host: "localhost:3000",
+  origin: "http://localhost:3000",
+  "content-type": "application/json",
+};
 
-  it("PUBLIC_ROUTES never matches an unlisted top-level segment", () => {
-    // Sanity: a freshly-introduced route like /admin must default to private
-    // until someone explicitly adds it to PUBLIC_ROUTES.
-    expect(matches("/admin")).toBe(false);
-    expect(matches("/billing")).toBe(false);
+const run = (request: NextRequest) => middleware(request);
+
+const statusOf = (request: NextRequest): number => {
+  const res = run(request);
+  // NextResponse.next() has no meaningful status for the guard check; a
+  // rejection is a real 403 response. Inspect x-middleware-next to tell apart.
+  const isNext = res.headers.get("x-middleware-next") === "1";
+  return isNext ? 200 : res.status;
+};
+
+describe("middleware browser-origin guard", () => {
+  it("defaults allowed hosts to the localhost variants", () => {
+    expect(DEFAULT_ALLOWED_HOSTS).toBe(
+      "localhost:3000,127.0.0.1:3000,localhost:3200,127.0.0.1:3200",
+    );
+    expect(allowedHosts(undefined).has("127.0.0.1:3200")).toBe(true);
+  });
+
+  it("lets GET and HEAD requests through unguarded", () => {
+    expect(statusOf(req("/api/portfolio", { method: "GET" }))).toBe(200);
+    expect(statusOf(req("/api/portfolio", { method: "HEAD" }))).toBe(200);
+  });
+
+  it("lets non-/api mutating requests through unguarded", () => {
+    expect(statusOf(req("/portfolio", { method: "POST" }))).toBe(200);
+  });
+
+  it("passes a legitimate same-origin JSON POST", () => {
+    const res = run(req("/api/orders", { headers: GOOD }));
+    expect(res.headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it("403s a cross-origin text/plain POST (CSRF simple request)", async () => {
+    const res = run(
+      req("/api/orders", {
+        headers: {
+          host: "localhost:3000",
+          origin: "https://evil.example",
+          "content-type": "text/plain",
+        },
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect((await res.json()).reason).toBe("origin_mismatch");
+  });
+
+  it("403s a foreign Host (DNS rebinding)", async () => {
+    const res = run(
+      req("/api/orders", {
+        headers: { ...GOOD, host: "victim.attacker.example" },
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect((await res.json()).reason).toBe("host_not_allowed");
+  });
+
+  it("403s missing Origin without Sec-Fetch-Site: same-origin", async () => {
+    const res = run(
+      req("/api/orders", {
+        headers: {
+          host: "localhost:3000",
+          "content-type": "application/json",
+        },
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect((await res.json()).reason).toBe("missing_origin");
+  });
+
+  it("passes missing Origin when Sec-Fetch-Site is same-origin", () => {
+    const res = run(
+      req("/api/orders", {
+        headers: {
+          host: "localhost:3000",
+          "sec-fetch-site": "same-origin",
+          "content-type": "application/json",
+        },
+      }),
+    );
+    expect(res.headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it("403s same-origin host but non-JSON content type", async () => {
+    const res = run(
+      req("/api/orders", {
+        headers: { ...GOOD, "content-type": "text/plain" },
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect((await res.json()).reason).toBe("content_type");
+  });
+
+  it("403s multipart on routes not in MULTIPART_API_PATHS", async () => {
+    expect(MULTIPART_API_PATHS.size).toBe(0);
+    const res = run(
+      req("/api/orders", {
+        headers: { ...GOOD, "content-type": "multipart/form-data; boundary=x" },
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect((await res.json()).reason).toBe("content_type");
+  });
+
+  it("returns a direct 403 response (zero upstream fetch possible)", () => {
+    // A rejected request never yields NextResponse.next() — the middleware
+    // short-circuits, so no route handler or FastAPI call can run.
+    const res = run(req("/api/orders", { headers: { host: "evil.example" } }));
+    expect(res.status).toBe(403);
+    expect(res.headers.get("x-middleware-next")).toBeNull();
   });
 });

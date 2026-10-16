@@ -27,7 +27,7 @@ Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xeno
 - `pool_order_manage.py` — pool-based helpers (but see cancel/modify rule below — real cancel/modify uses subprocess)
 - `ws_ticket.py` — 30s single-use WebSocket auth tickets
 - `ib_gateway.py` — docker/cloud/launchd gateway lifecycle
-- `auth.py` — Clerk JWT + API key dependencies (localhost bypass inside)
+- `auth.py` — credential-only auth: internal token + path-scoped API keys (no localhost pass)
 
 **New endpoint?** Add a router module under `routes/`, register it in `server.py`. Business logic goes in `services/`, not inline in the route.
 
@@ -100,18 +100,18 @@ On-demand scripts MUST use `client_id="auto"` (range 20-49). Never hardcode — 
 
 **Auth-exempt paths:** `/health`, `/ws-ticket/validate`. (`/docs` and `/openapi.json` are NOT exempt — they expose the full trading API schema and require auth.)
 
-**Fail-closed.** `auth.classify_auth(request)` (sync) is called by `server.py::auth_middleware`. A non-exempt request is DENIED (401) unless it proves identity, in order:
+**Fail-closed, credential-only.** `auth.classify_auth(request)` (sync) is called by `server.py::auth_middleware`. A non-exempt request is DENIED (401) unless it proves identity, in order:
 
-1. Source `127.0.0.1`/`::1` → pass (on-box / dev stack / web harness).
-2. Valid `X-Internal-Token` == `XENON_INTERNAL_API_TOKEN` → pass, full access. `xenonFetch` AND the two direct web→api callers (`web/app/api/wizard/stream`, `web/app/api/previous-close`) attach it via `internalApiHeaders()`.
-3. Valid `X-API-Key`: `XENON_QUERY_API_KEY` → read-only data + market-data paths (`QUERY_API_KEY_PATHS`): GET reads (`/portfolio`, `/orders`, `/orders/quote`, `/options/chain`, `/options/expirations`, `/options/greeks`, `/market-depth`, `/performance`, `/watchlist`, …) plus body-carrying **read-only** POSTs (`/historical/bars`, `/historical/head-timestamp`, `/contract/qualify`, `/ws-ticket`); `MDW_API_KEY` → `/historical/*` + `/contract/qualify` (`API_KEY_ALLOWED_PATHS`). A matched key grants-or-denies definitively; neither grants write/sync paths. Consumer reference: `docs/reference/readonly-query-api.md`.
-4. `CLERK_JWKS_URL` set → defer to async Clerk JWT.
-5. `XENON_AUTH_ALLOW_DEV_OPEN=1` (strict truthy) → pass. **Dev/test only** — set by `dev.sh`, the root `conftest.py`, and the web harness. Production never sets it, so a prod env that fails to load denies rather than exposes the API.
-6. Else → 401.
+1. Valid `X-Internal-Token` == `XENON_INTERNAL_API_TOKEN` → pass, full access. `xenonFetch` AND the direct web→api callers attach it via `internalApiHeaders()`. Checked before API keys.
+2. Valid `X-API-Key`: `XENON_QUERY_API_KEY` → read-only data + market-data paths (`QUERY_API_KEY_PATHS`): GET reads (`/portfolio`, `/orders`, `/orders/quote`, `/options/chain`, `/options/expirations`, `/options/greeks`, `/market-depth`, `/performance`, `/watchlist`, …) plus body-carrying **read-only** POSTs (`/historical/bars`, `/historical/head-timestamp`, `/contract/qualify`, `/ws-ticket`); `MDW_API_KEY` → `/historical/*` + `/contract/qualify` (`API_KEY_ALLOWED_PATHS`). A matched key grants-or-denies definitively; neither grants write/sync paths. Consumer reference: `docs/reference/readonly-query-api.md`.
+3. `XENON_AUTH_ALLOW_DEV_OPEN=1` (strict truthy) → pass. **Dev/test only** — set it yourself for debugging; `dev.sh` does not export it. Production never sets it, so a prod env that fails to load denies rather than exposes the API.
+4. Else → 401.
+
+There is **no peer-address authentication**: requests from `127.0.0.1`/`::1` get no pass — Tailnet peers, Docker bridges, and proxies can all reach loopback. `/health` and `/ws-ticket/validate` are exempt; `/ws-ticket` requires a credential (internal token or scoped key) and mints 30s single-use tickets.
 
 `validate_auth_config()` runs at lifespan startup: refuses to boot if `XENON_INTERNAL_API_TOKEN == XENON_QUERY_API_KEY` (a leaked read-only key could otherwise be replayed for write access) and logs the posture (ENFORCED / DEV-OPEN / FAIL-CLOSED).
 
-Order-write endpoints (`/orders/place|cancel|modify`, `/portfolio/sync`, `POST /blotter`, `POST /futu/sync`) are in no API-key allowlist, so an external key can never reach them — only the internal UI token, localhost, or Clerk.
+Order-write endpoints (`/orders/place|cancel|modify`, `/portfolio/sync`, `POST /blotter`, `POST /futu/sync`) are in no API-key allowlist, so an external key can never reach them — only the internal token.
 
 Component map, files, ticket flow: `docs/architecture/api-infrastructure.md`.
 

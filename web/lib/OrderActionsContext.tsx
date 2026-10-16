@@ -129,7 +129,10 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
         pollCountsRef.current.set(permId, count);
 
         try {
-          const res = await fetch("/api/orders", { method: "POST" });
+          const res = await fetch("/api/orders", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+          });
           if (!res.ok) {
             scheduleNext();
             return;
@@ -250,7 +253,10 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
         pollCountsRef.current.set(permId, count);
 
         try {
-          const res = await fetch("/api/orders", { method: "POST" });
+          const res = await fetch("/api/orders", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+          });
           if (!res.ok) {
             scheduleNext();
             return;

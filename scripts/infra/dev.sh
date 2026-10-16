@@ -7,7 +7,6 @@
 #   ./scripts/infra/dev.sh                       # mode from .env (default: paper)
 #   ./scripts/infra/dev.sh paper                 # override per-invocation
 #   ./scripts/infra/dev.sh live
-#   ./scripts/infra/dev.sh paper --no-auth       # also bypass Clerk for the session
 #
 # Does NOT edit .env. Does NOT start IB Gateway — that is manual for v1.
 
@@ -24,15 +23,13 @@ log_info() { printf '\033[32m[dev.sh]\033[0m %s\n' "$*"; }
 log_warn() { printf '\033[33m[dev.sh]\033[0m %s\n' "$*" >&2; }
 log_err()  { printf '\033[31m[dev.sh]\033[0m %s\n' "$*" >&2; }
 
-# 1. Parse args (mode in any position; --no-auth optional)
+# 1. Parse args (mode in any position)
 MODE=""
-NO_AUTH=0
 for arg in "$@"; do
   case "$arg" in
-    --no-auth) NO_AUTH=1 ;;
     paper|live|PAPER|LIVE) MODE="$arg" ;;
     *)
-      log_err "Unknown argument '$arg' — expected paper|live|--no-auth"
+      log_err "Unknown argument '$arg' — expected paper|live"
       exit 2
       ;;
   esac
@@ -182,10 +179,19 @@ export XENON_TRADING_MODE="$MODE"
 export IB_GATEWAY_HOST="$IB_HOST"
 export IB_GATEWAY_PORT="$IB_PORT"
 
-# Auth is fail-closed. Localhost calls already pass, but export the dev-open flag
-# so any non-localhost dev tooling (curl from another device on the dev box's
-# network) also works. Production NEVER sets this.
-export XENON_AUTH_ALLOW_DEV_OPEN=1
+# Auth is credential-only and fail-closed — there is no localhost pass. Both
+# Next (server-side xenonFetch) and FastAPI need the same internal token so
+# Next→FastAPI calls authenticate. Source it from .env unless already set.
+if [[ -z "${XENON_INTERNAL_API_TOKEN:-}" && -f "$ENV_FILE" ]]; then
+  XENON_INTERNAL_API_TOKEN="$(grep -E '^XENON_INTERNAL_API_TOKEN=' "$ENV_FILE" | tail -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs || true)"
+fi
+if [[ -z "${XENON_INTERNAL_API_TOKEN:-}" ]]; then
+  log_err "XENON_INTERNAL_API_TOKEN must be set (env or .env) — Next→FastAPI auth fails closed without it."
+  exit 2
+fi
+export XENON_INTERNAL_API_TOKEN
+# To open the API for a debugging session (e.g. curl from another device),
+# export XENON_AUTH_ALLOW_DEV_OPEN=1 yourself — it is never set by default.
 
 # Live mode from dev.sh is for *debugging* against live IB — the data
 # flows in but nothing persists. Real live trading goes through the
@@ -203,6 +209,10 @@ fi
 # mismatch causes intermittent 502s after the 5s connect timeout. Forcing the
 # IPv4 literal sidesteps the whole DNS-order issue.
 export XENON_API_URL="${XENON_API_URL:-http://127.0.0.1:${API_PORT}}"
+
+# The realtime relay validates WS tickets against this FastAPI instance — point
+# it at the dev port (its built-in default targets the prod API on 8321).
+export TICKET_VALIDATE_URL="${TICKET_VALIDATE_URL:-${XENON_API_URL}/ws-ticket/validate}"
 
 # Per-mode broker account placeholder. AccountScope.resolve_from_env() raises
 # if XENON_BROKER_ACCOUNT is unset, and many sync subprocesses (ib_sync,
@@ -233,12 +243,6 @@ fi
 export XENON_BROKER_ACCOUNT="$BROKER_ACCOUNT"
 log_info "Broker account: $XENON_BROKER_ACCOUNT (overridden by ib_sync after IB connect)"
 
-# Optionally bypass Clerk for the dev session. The flag is honored by
-# web/middleware.ts (XENON_DISABLE_AUTH=1).
-if [[ "$NO_AUTH" == "1" ]]; then
-  export XENON_DISABLE_AUTH=1
-  log_warn "Clerk auth bypassed for this session (XENON_DISABLE_AUTH=1)."
-fi
 
 # 5. Delegate to web/package.json's `dev` script, which already orchestrates
 # `next dev`, the IB realtime relay, AND uvicorn via concurrently. Running a

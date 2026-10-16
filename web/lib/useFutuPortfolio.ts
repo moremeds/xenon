@@ -90,6 +90,7 @@ export function useFutuPortfolio(enabled: boolean) {
     try {
       const res = await fetch("/api/futu/portfolio", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
         cache: "no-store",
       });
       if (!res.ok) {

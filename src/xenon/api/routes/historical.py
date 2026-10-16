@@ -3,7 +3,7 @@
 Exposes IB historical data operations via REST API so headless clients
 (e.g., market-data-warehouse) can fetch bars without a direct IB connection.
 
-Auth: X-API-Key header (scoped in auth middleware) or Clerk JWT.
+Auth: X-API-Key header (scoped in auth middleware) or X-Internal-Token.
 All endpoints use the "data" pool role for IB access.
 """
 

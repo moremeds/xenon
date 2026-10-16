@@ -504,7 +504,7 @@ def test_cancel_failure_does_not_mark_submission_cancelled(client, tmp_db, monke
 
 
 def test_dev_probe_not_in_auth_exempt_paths():
-    """B3 — defense in depth: Clerk middleware must still cover the probe."""
+    """B3 — defense in depth: the auth middleware must still cover the probe."""
     assert "/dev/rehydrate/synthetic" not in server_mod.AUTH_EXEMPT_PATHS
 
 

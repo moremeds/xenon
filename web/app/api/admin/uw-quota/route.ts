@@ -1,4 +1,3 @@
-import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
 import type { UwQuota } from "@/lib/operatorTypes";
@@ -36,21 +35,9 @@ export function parseUwQuotaHeaders(h: Headers, fetchedAt: string): UwQuota {
 let _cache: { data: UwQuota; ts: number } | null = null;
 
 export async function GET(): Promise<Response> {
-  // This route spends the server's UW_TOKEN daily quota on every cache miss, so
-  // it must not be callable anonymously. `/api/*` is public at the Next
-  // middleware (server-side page fetches carry no Clerk cookie), so the gate
-  // lives here. The browser fetch from UwQuotaTile carries the session cookie.
-  // Dev/E2E bypass mirrors the middleware flag.
-  const authBypass =
-    process.env.XENON_DISABLE_AUTH === "1" ||
-    process.env.PLAYWRIGHT_DISABLE_AUTH === "1";
-  if (!authBypass) {
-    const { userId } = await auth();
-    if (!userId) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-  }
-
+  // This route spends the server's UW_TOKEN daily quota on every cache miss.
+  // The deployment is tailnet-only and mutating /api requests are guarded by
+  // the origin middleware; read-only GETs rely on the network boundary.
   const token = process.env.UW_TOKEN;
   if (!token) {
     return NextResponse.json({
