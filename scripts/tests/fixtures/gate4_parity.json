@@ -1,2219 +1,486 @@
 {
- "_doc": [
-  "Frozen Gate-4 acceptance fixture (lead-authored 2026-10-16, spec \u00a72.3 v3.2; reviewed by Fable). Quantities/strikes are hypothetical order shapes, not market data.",
-  "holdings: confirmed positions of scope account U1 at as_of; qty signed; STK in shares; OPT in contracts.",
-  "orders: existing orders, any state. Candidate id is always 'cand' (distinct). envelope = order action; effective leg action = leg.action if envelope BUY else flipped; leg qty = ratio*qty. Non-BAG orders have one leg with action BUY and envelope = order action.",
-  "filled_after_snapshot = units filled after as_of (not in holdings). remaining = unfilled outstanding units (authoritative; do not derive from state or qty). qty - filled_after_snapshot - remaining = units filled before as_of (already in holdings; never counted again).",
-  "Order demand = filled_after_snapshot + remaining (per effective leg). Candidate demand = qty. {modify: id, new_qty}: new_qty is the new TOTAL qty; that order's outstanding becomes max(old_total,new_qty) - filled_total.",
-  "guaranteed: true = stored guarantee mode (explicit NonGuaranteed=0). Inside a guaranteed BAG, per ratio unit, leg deltas are summed per key and only the net short-call / short-stock delta is demand; a net long delta never supplies cover to other orders. Absent/false => every leg independent and BUY legs never offset.",
-  "Key = (sym, tc, exp, mult). Long call covers a short call of the same key. Shares cover only standard deliverable calls (mult 100, tc == sym). Unknown metadata => reject.",
-  "Assignment order: long calls first (they can only cover their own key), then shares (standard deliverables only). This order is optimal and deterministic.",
-  "view.complete defaults true; view.stale defaults false. Either false/true respectively => reject. Missing account on any order => reject. Candidate account must be U1.",
-  "expect: accept iff no short stock and uncovered short calls do not increase for any key; any fail-closed condition => reject."
- ],
- "scope_account": "U1",
- "cases": [
-  {
-   "id": "covered_call_100_shares",
-   "holdings": [
+  "version": 1,
+  "cases": [
     {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 200,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "accept",
-   "why": "100 shares cover 1 standard call"
-  },
-  {
-   "id": "covered_call_99_shares",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 99
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 200,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "99 < 100 shares"
-  },
-  {
-   "id": "naked_call_empty",
-   "holdings": [],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 200,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "no cover"
-  },
-  {
-   "id": "csp_allowed",
-   "holdings": [],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "P",
-      "strike": 150,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "accept",
-   "why": "cash-secured put allowed"
-  },
-  {
-   "id": "resting_buy_shares_not_cover",
-   "holdings": [],
-   "orders": [
-    {
-     "id": "o1",
-     "account": "U1",
-     "state": "WORKING",
-     "envelope": "BUY",
-     "qty": 100,
-     "filled_after_snapshot": 0,
-     "remaining": 100,
-     "legs": [
-      {
-       "action": "BUY",
-       "sym": "AAPL",
-       "sec": "STK",
-       "ratio": 1
-      }
-     ]
-    }
-   ],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 200,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "working orders never supply cover (adv-1)"
-  },
-  {
-   "id": "pending_btc_does_not_free_cover",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
+      "name": "universe_unknown_ticker_blocks",
+      "request": {
+        "type": "stock",
+        "symbol": "AAPL",
+        "action": "BUY",
+        "quantity": 1,
+        "right": null,
+        "expiry": null,
+        "strike": null,
+        "multiplier": 100,
+        "limitPrice": 180.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": false, "reason_code": "UNIVERSE_UNKNOWN" }
     },
     {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 200,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": -1
-    }
-   ],
-   "orders": [
-    {
-     "id": "o1",
-     "account": "U1",
-     "state": "WORKING",
-     "envelope": "BUY",
-     "qty": 1,
-     "filled_after_snapshot": 0,
-     "remaining": 1,
-     "legs": [
-      {
-       "action": "BUY",
-       "sym": "AAPL",
-       "sec": "OPT",
-       "ratio": 1,
-       "right": "C",
-       "strike": 200,
-       "exp": "20261218",
-       "mult": 100,
-       "tc": "AAPL"
-      }
-     ]
-    }
-   ],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "pending buy-to-close never frees cover (adv-1)"
-  },
-  {
-   "id": "fill_after_snapshot_consumes",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
-    }
-   ],
-   "orders": [
-    {
-     "id": "o1",
-     "account": "U1",
-     "state": "FILLED",
-     "envelope": "SELL",
-     "qty": 1,
-     "filled_after_snapshot": 1,
-     "remaining": 0,
-     "legs": [
-      {
-       "action": "BUY",
-       "sym": "AAPL",
-       "sec": "OPT",
-       "ratio": 1,
-       "right": "C",
-       "strike": 200,
-       "exp": "20261218",
-       "mult": 100,
-       "tc": "AAPL"
-      }
-     ]
-    }
-   ],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "filled after snapshot still consumes (adv-2)"
-  },
-  {
-   "id": "partial_fill_working_consumes_both",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 200
-    }
-   ],
-   "orders": [
-    {
-     "id": "o1",
-     "account": "U1",
-     "state": "WORKING",
-     "envelope": "SELL",
-     "qty": 2,
-     "filled_after_snapshot": 1,
-     "remaining": 1,
-     "legs": [
-      {
-       "action": "BUY",
-       "sym": "AAPL",
-       "sec": "OPT",
-       "ratio": 1,
-       "right": "C",
-       "strike": 200,
-       "exp": "20261218",
-       "mult": 100,
-       "tc": "AAPL"
-      }
-     ]
-    }
-   ],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "1 filled + 1 remaining + candidate = 3 > 2 (adv-2)"
-  },
-  {
-   "id": "partial_fill_then_cancel_keeps_filled",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
-    }
-   ],
-   "orders": [
-    {
-     "id": "o1",
-     "account": "U1",
-     "state": "CANCELLED",
-     "envelope": "SELL",
-     "qty": 2,
-     "filled_after_snapshot": 1,
-     "remaining": 0,
-     "legs": [
-      {
-       "action": "BUY",
-       "sym": "AAPL",
-       "sec": "OPT",
-       "ratio": 1,
-       "right": "C",
-       "strike": 200,
-       "exp": "20261218",
-       "mult": 100,
-       "tc": "AAPL"
-      }
-     ]
-    }
-   ],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "cancelled order's post-snapshot fill still consumes (adv-6)"
-  },
-  {
-   "id": "partial_fill_then_cancel_frees_remainder",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 200
-    }
-   ],
-   "orders": [
-    {
-     "id": "o1",
-     "account": "U1",
-     "state": "CANCELLED",
-     "envelope": "SELL",
-     "qty": 2,
-     "filled_after_snapshot": 1,
-     "remaining": 0,
-     "legs": [
-      {
-       "action": "BUY",
-       "sym": "AAPL",
-       "sec": "OPT",
-       "ratio": 1,
-       "right": "C",
-       "strike": 200,
-       "exp": "20261218",
-       "mult": 100,
-       "tc": "AAPL"
-      }
-     ]
-    }
-   ],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "accept",
-   "why": "only unfilled remainder released"
-  },
-  {
-   "id": "unknown_order_reserves",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
-    }
-   ],
-   "orders": [
-    {
-     "id": "o1",
-     "account": "U1",
-     "state": "UNKNOWN",
-     "envelope": "SELL",
-     "qty": 1,
-     "filled_after_snapshot": 0,
-     "remaining": 1,
-     "legs": [
-      {
-       "action": "BUY",
-       "sym": "AAPL",
-       "sec": "OPT",
-       "ratio": 1,
-       "right": "C",
-       "strike": 200,
-       "exp": "20261218",
-       "mult": 100,
-       "tc": "AAPL"
-      }
-     ]
-    }
-   ],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "UNKNOWN counts as live"
-  },
-  {
-   "id": "pending_order_reserves",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
-    }
-   ],
-   "orders": [
-    {
-     "id": "o1",
-     "account": "U1",
-     "state": "PENDING",
-     "envelope": "SELL",
-     "qty": 1,
-     "filled_after_snapshot": 0,
-     "remaining": 1,
-     "legs": [
-      {
-       "action": "BUY",
-       "sym": "AAPL",
-       "sec": "OPT",
-       "ratio": 1,
-       "right": "C",
-       "strike": 200,
-       "exp": "20261218",
-       "mult": 100,
-       "tc": "AAPL"
-      }
-     ]
-    }
-   ],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "PENDING counts as live"
-  },
-  {
-   "id": "encumbered_shares_reuse",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
+      "name": "spx_stk_buy_blocks",
+      "request": {
+        "type": "stock",
+        "symbol": "SPX",
+        "action": "BUY",
+        "quantity": 1,
+        "right": null,
+        "expiry": null,
+        "strike": null,
+        "multiplier": 100,
+        "limitPrice": 5000.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": false, "reason_code": "INDEX_HAS_NO_STOCK" }
     },
     {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 200,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": -1
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "shares already cover a short call"
-  },
-  {
-   "id": "sell_envelope_flips_buy_legs",
-   "holdings": [],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 200,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     },
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "P",
-      "strike": 150,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ],
-    "guaranteed": true
-   },
-   "expect": "reject",
-   "why": "SELL envelope of (BUY C, BUY P) = short call + short put"
-  },
-  {
-   "id": "vertical_close_guaranteed_bag",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 200,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": 1
+      "name": "spx_stk_sell_blocks",
+      "request": {
+        "type": "stock",
+        "symbol": "SPX",
+        "action": "SELL",
+        "quantity": 1,
+        "right": null,
+        "expiry": null,
+        "strike": null,
+        "multiplier": 100,
+        "limitPrice": 5000.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": false, "reason_code": "INDEX_HAS_NO_STOCK" }
     },
     {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 210,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": -1
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 200,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     },
-     {
-      "action": "SELL",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ],
-    "guaranteed": true
-   },
-   "expect": "accept",
-   "why": "guaranteed option BAG nets per ratio unit (new-1)"
-  },
-  {
-   "id": "vertical_close_nonguaranteed_bag",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 200,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": 1
+      "name": "spy_buy_always_ok",
+      "request": {
+        "type": "stock",
+        "symbol": "SPY",
+        "action": "BUY",
+        "quantity": 100,
+        "right": null,
+        "expiry": null,
+        "strike": null,
+        "multiplier": 100,
+        "limitPrice": 500.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": true, "reason_code": null }
     },
     {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 210,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": -1
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 200,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     },
-     {
-      "action": "SELL",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ],
-    "guaranteed": false
-   },
-   "expect": "reject",
-   "why": "non-guaranteed legs independent"
-  },
-  {
-   "id": "vertical_close_sell_long_first",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 200,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": 1
+      "name": "spy_sell_stock_no_shares_blocks",
+      "request": {
+        "type": "stock",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 100,
+        "right": null,
+        "expiry": null,
+        "strike": null,
+        "multiplier": 100,
+        "limitPrice": 500.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": false, "reason_code": "INSUFFICIENT_SHARES" }
     },
     {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 210,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": -1
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 200,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "selling the covering long leaves the short naked"
-  },
-  {
-   "id": "vertical_close_buy_short_first",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 200,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": 1
+      "name": "spy_sell_stock_exceeds_held_blocks",
+      "request": {
+        "type": "stock",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 200,
+        "right": null,
+        "expiry": null,
+        "strike": null,
+        "multiplier": 100,
+        "limitPrice": 500.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPY",
+            "structure_type": "Stock",
+            "direction": "LONG",
+            "contracts": 100,
+            "expiry": null,
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Stock",
+                "contracts": 100,
+                "strike": 0.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": false, "reason_code": "INSUFFICIENT_SHARES" }
     },
     {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 210,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": -1
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "BUY",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "accept",
-   "why": "buying back the short is risk-reducing"
-  },
-  {
-   "id": "second_short_one_long",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 200,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": 1
+      "name": "spy_sell_stock_within_held_ok",
+      "request": {
+        "type": "stock",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 100,
+        "right": null,
+        "expiry": null,
+        "strike": null,
+        "multiplier": 100,
+        "limitPrice": 500.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPY",
+            "structure_type": "Stock",
+            "direction": "LONG",
+            "contracts": 100,
+            "expiry": null,
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Stock",
+                "contracts": 100,
+                "strike": 0.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": true, "reason_code": null }
     },
     {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 210,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": -1
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 220,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "one long covers one short only"
-  },
-  {
-   "id": "different_expiry_long_not_cover",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 200,
-     "exp": "20270115",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": 1
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "cover must be same expiry"
-  },
-  {
-   "id": "ratio_1x2_bag",
-   "holdings": [],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "BUY",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 200,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     },
-     {
-      "action": "SELL",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 2,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ],
-    "guaranteed": true
-   },
-   "expect": "reject",
-   "why": "1 long covers 1 of 2 shorts"
-  },
-  {
-   "id": "ratio_1x2_bag_qty2",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 210,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": 1
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "BUY",
-    "qty": 2,
-    "filled_after_snapshot": 0,
-    "remaining": 2,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 200,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     },
-     {
-      "action": "SELL",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 2,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ],
-    "guaranteed": true
-   },
-   "expect": "reject",
-   "why": "qty 2 => 4 short vs 2 long + 1 held"
-  },
-  {
-   "id": "short_risk_reversal_buy_envelope",
-   "holdings": [],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "BUY",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "SELL",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     },
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "P",
-      "strike": 150,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ],
-    "guaranteed": true
-   },
-   "expect": "reject",
-   "why": "short call leg uncovered"
-  },
-  {
-   "id": "sell_shares_covering_call",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
+      "name": "spy_sell_put_cash_secured_ok",
+      "request": {
+        "type": "option",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "P",
+        "expiry": "20260620",
+        "strike": 480.0,
+        "multiplier": 100,
+        "limitPrice": 5.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": true, "reason_code": null }
     },
     {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 200,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": -1
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 100,
-    "filled_after_snapshot": 0,
-    "remaining": 100,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "STK",
-      "ratio": 1
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "removes cover"
-  },
-  {
-   "id": "sell_shares_to_zero",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 100,
-    "filled_after_snapshot": 0,
-    "remaining": 100,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "STK",
-      "ratio": 1
-     }
-    ]
-   },
-   "expect": "accept",
-   "why": "down to exactly zero, unencumbered"
-  },
-  {
-   "id": "short_stock_from_zero",
-   "holdings": [],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 100,
-    "filled_after_snapshot": 0,
-    "remaining": 100,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "STK",
-      "ratio": 1
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "no short stock"
-  },
-  {
-   "id": "short_stock_below_zero",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 50
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 100,
-    "filled_after_snapshot": 0,
-    "remaining": 100,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "STK",
-      "ratio": 1
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "no short stock"
-  },
-  {
-   "id": "index_long_call_cover",
-   "holdings": [
-    {
-     "sym": "SPX",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 5800,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "SPX",
-     "qty": 1
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "SPX",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 5900,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "SPX"
-     }
-    ]
-   },
-   "expect": "accept",
-   "why": "same symbol/class/expiry/multiplier long call"
-  },
-  {
-   "id": "index_trading_class_mismatch",
-   "holdings": [
-    {
-     "sym": "SPX",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 5800,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "SPX",
-     "qty": 1
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "SPX",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 5900,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "SPXW"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "SPX vs SPXW not interchangeable"
-  },
-  {
-   "id": "adjusted_contract_no_stock_cover",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 200,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL1"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "non-standard deliverable: stock never covers"
-  },
-  {
-   "id": "multiplier_mismatch",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 200,
-     "exp": "20261218",
-     "mult": 10,
-     "tc": "AAPL",
-     "qty": 1
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "mini long does not cover standard short"
-  },
-  {
-   "id": "unknown_multiplier_fails_closed",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 200,
-      "exp": "20261218",
-      "mult": null,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "unknown metadata fails closed"
-  },
-  {
-   "id": "modify_up_rejected",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
-    }
-   ],
-   "orders": [
-    {
-     "id": "o1",
-     "account": "U1",
-     "state": "WORKING",
-     "envelope": "SELL",
-     "qty": 1,
-     "filled_after_snapshot": 0,
-     "remaining": 1,
-     "legs": [
-      {
-       "action": "BUY",
-       "sym": "AAPL",
-       "sec": "OPT",
-       "ratio": 1,
-       "right": "C",
-       "strike": 200,
-       "exp": "20261218",
-       "mult": 100,
-       "tc": "AAPL"
-      }
-     ]
-    }
-   ],
-   "candidate": {
-    "modify": "o1",
-    "new_qty": 2
-   },
-   "expect": "reject",
-   "why": "modify reserves max(old,new)=2 calls vs 100 shares"
-  },
-  {
-   "id": "modify_down_ok",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 200
-    }
-   ],
-   "orders": [
-    {
-     "id": "o1",
-     "account": "U1",
-     "state": "WORKING",
-     "envelope": "SELL",
-     "qty": 2,
-     "filled_after_snapshot": 0,
-     "remaining": 2,
-     "legs": [
-      {
-       "action": "BUY",
-       "sym": "AAPL",
-       "sec": "OPT",
-       "ratio": 1,
-       "right": "C",
-       "strike": 200,
-       "exp": "20261218",
-       "mult": 100,
-       "tc": "AAPL"
-      }
-     ]
-    }
-   ],
-   "candidate": {
-    "modify": "o1",
-    "new_qty": 1
-   },
-   "expect": "accept",
-   "why": "reducing qty never increases demand"
-  },
-  {
-   "id": "modify_down_uncertain_keeps_max",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 200
-    }
-   ],
-   "orders": [
-    {
-     "id": "o1",
-     "account": "U1",
-     "state": "WORKING",
-     "envelope": "SELL",
-     "qty": 2,
-     "filled_after_snapshot": 0,
-     "remaining": 2,
-     "legs": [
-      {
-       "action": "BUY",
-       "sym": "AAPL",
-       "sec": "OPT",
-       "ratio": 1,
-       "right": "C",
-       "strike": 200,
-       "exp": "20261218",
-       "mult": 100,
-       "tc": "AAPL"
-      }
-     ],
-     "pending_amend_qty": 1
-    }
-   ],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "uncertain amend keeps max(2,1)"
-  },
-  {
-   "id": "unresolved_bag_without_legs",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
-    }
-   ],
-   "orders": [
-    {
-     "id": "o1",
-     "account": "U1",
-     "state": "PENDING",
-     "envelope": "BUY",
-     "qty": 1,
-     "filled_after_snapshot": 0,
-     "remaining": 1,
-     "legs": null,
-     "sym": "AAPL"
-    }
-   ],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 200,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "incomplete: BAG row without stored legs"
-  },
-  {
-   "id": "incomplete_sync_pass",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 200,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "view incomplete",
-   "view": {
-    "complete": false
-   }
-  },
-  {
-   "id": "missing_account_order",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
-    }
-   ],
-   "orders": [
-    {
-     "id": "o1",
-     "account": null,
-     "state": "WORKING",
-     "envelope": "SELL",
-     "qty": 1,
-     "filled_after_snapshot": 0,
-     "remaining": 1,
-     "legs": [
-      {
-       "action": "BUY",
-       "sym": "AAPL",
-       "sec": "OPT",
-       "ratio": 1,
-       "right": "C",
-       "strike": 200,
-       "exp": "20261218",
-       "mult": 100,
-       "tc": "AAPL"
-      }
-     ]
-    }
-   ],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "missing account => incomplete view (adv-14)"
-  },
-  {
-   "id": "other_account_order_ignored",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
-    }
-   ],
-   "orders": [
-    {
-     "id": "o1",
-     "account": "U2",
-     "state": "WORKING",
-     "envelope": "SELL",
-     "qty": 1,
-     "filled_after_snapshot": 0,
-     "remaining": 1,
-     "legs": [
-      {
-       "action": "BUY",
-       "sym": "AAPL",
-       "sec": "OPT",
-       "ratio": 1,
-       "right": "C",
-       "strike": 200,
-       "exp": "20261218",
-       "mult": 100,
-       "tc": "AAPL"
-      }
-     ]
-    }
-   ],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "ratio": 1,
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL"
-     }
-    ]
-   },
-   "expect": "accept",
-   "why": "orders of another account do not consume this account's cover"
-  },
-  {
-   "id": "sell_uncommitted_long_call",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 200,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": 1
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "right": "C",
-      "strike": 200,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL",
-      "ratio": 1
-     }
-    ]
-   },
-   "expect": "accept",
-   "why": "closing a long that covers nothing"
-  },
-  {
-   "id": "greedy_assignment_across_expiries",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
+      "name": "spx_sell_call_no_cover_blocks",
+      "request": {
+        "type": "option",
+        "symbol": "SPX",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 5100.0,
+        "multiplier": 100,
+        "limitPrice": 10.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": false, "reason_code": "INDEX_CALL_UNCOVERED" }
     },
     {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 200,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": 1
+      "name": "spx_sell_call_with_long_call_same_expiry_diff_strike_ok",
+      "request": {
+        "type": "option",
+        "symbol": "SPX",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 5100.0,
+        "multiplier": 100,
+        "limitPrice": 10.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPX",
+            "structure_type": "Long Call",
+            "direction": "LONG",
+            "contracts": 1,
+            "expiry": "20260620",
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Call",
+                "contracts": 1,
+                "strike": 5000.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": true, "reason_code": null }
     },
     {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 210,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": -1
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "right": "C",
-      "strike": 220,
-      "exp": "20270115",
-      "mult": 100,
-      "tc": "AAPL",
-      "ratio": 1
-     }
-    ]
-   },
-   "expect": "accept",
-   "why": "long C200 must cover the same-expiry C210 so shares can cover the new 20270115 short; a shares-first greedy wrongly rejects"
-  },
-  {
-   "id": "working_sell_of_covering_long",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 200,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": 1
+      "name": "spx_sell_call_long_call_different_expiry_blocks",
+      "request": {
+        "type": "option",
+        "symbol": "SPX",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 5100.0,
+        "multiplier": 100,
+        "limitPrice": 10.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPX",
+            "structure_type": "Long Call",
+            "direction": "LONG",
+            "contracts": 1,
+            "expiry": "20260718",
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Call",
+                "contracts": 1,
+                "strike": 5000.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": false, "reason_code": "INDEX_CALL_UNCOVERED" }
     },
     {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 210,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": -1
+      "name": "spy_sell_call_no_cover_blocks",
+      "request": {
+        "type": "option",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 500.0,
+        "multiplier": 100,
+        "limitPrice": 5.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": false, "reason_code": "ETF_CALL_UNCOVERED" }
     },
     {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
-    }
-   ],
-   "orders": [
-    {
-     "id": "o1",
-     "account": "U1",
-     "state": "WORKING",
-     "envelope": "SELL",
-     "qty": 1,
-     "filled_after_snapshot": 0,
-     "remaining": 1,
-     "legs": [
-      {
-       "action": "BUY",
-       "sym": "AAPL",
-       "sec": "OPT",
-       "right": "C",
-       "strike": 200,
-       "exp": "20261218",
-       "mult": 100,
-       "tc": "AAPL",
-       "ratio": 1
-      }
-     ]
-    }
-   ],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "right": "C",
-      "strike": 230,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL",
-      "ratio": 1
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "outstanding sale of the covering long already consumes; shares now cover C210 only"
-  },
-  {
-   "id": "pre_snapshot_fill_not_double_counted",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 300
+      "name": "spy_sell_call_with_100_shares_ok",
+      "request": {
+        "type": "option",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 500.0,
+        "multiplier": 100,
+        "limitPrice": 5.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPY",
+            "structure_type": "Stock",
+            "direction": "LONG",
+            "contracts": 100,
+            "expiry": null,
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Stock",
+                "contracts": 100,
+                "strike": 0.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": true, "reason_code": null }
     },
     {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 200,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": -1
-    }
-   ],
-   "orders": [
-    {
-     "id": "o1",
-     "account": "U1",
-     "state": "WORKING",
-     "envelope": "SELL",
-     "qty": 2,
-     "filled_after_snapshot": 0,
-     "remaining": 1,
-     "legs": [
-      {
-       "action": "BUY",
-       "sym": "AAPL",
-       "sec": "OPT",
-       "right": "C",
-       "strike": 200,
-       "exp": "20261218",
-       "mult": 100,
-       "tc": "AAPL",
-       "ratio": 1
-      }
-     ]
-    }
-   ],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL",
-      "ratio": 1
-     }
-    ]
-   },
-   "expect": "accept",
-   "why": "qty 2: 1 filled before as_of (already the held short), 1 remaining; demand 1 held + 1 remaining + 1 cand = 3 <= 3 -> accept (not 4)"
-  },
-  {
-   "id": "pre_snapshot_fill_tight",
-   "holdings": [
-    {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 200
+      "name": "spy_sell_call_100_shares_but_existing_short_exhausts_cover_blocks",
+      "request": {
+        "type": "option",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 500.0,
+        "multiplier": 100,
+        "limitPrice": 5.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPY",
+            "structure_type": "Stock",
+            "direction": "LONG",
+            "contracts": 100,
+            "expiry": null,
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Stock",
+                "contracts": 100,
+                "strike": 0.0
+              }
+            ]
+          },
+          {
+            "ticker": "SPY",
+            "structure_type": "Short Call",
+            "direction": "SHORT",
+            "contracts": 1,
+            "expiry": "20260515",
+            "legs": [
+              {
+                "direction": "SHORT",
+                "type": "Call",
+                "contracts": 1,
+                "strike": 510.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": false, "reason_code": "ETF_CALL_UNCOVERED" }
     },
     {
-     "sym": "AAPL",
-     "sec": "OPT",
-     "right": "C",
-     "strike": 200,
-     "exp": "20261218",
-     "mult": 100,
-     "tc": "AAPL",
-     "qty": -1
-    }
-   ],
-   "orders": [
+      "name": "spy_sell_call_with_long_call_vertical_ok",
+      "request": {
+        "type": "option",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 510.0,
+        "multiplier": 100,
+        "limitPrice": 2.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPY",
+            "structure_type": "Long Call",
+            "direction": "LONG",
+            "contracts": 1,
+            "expiry": "20260620",
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Call",
+                "contracts": 1,
+                "strike": 500.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": true, "reason_code": null }
+    },
     {
-     "id": "o1",
-     "account": "U1",
-     "state": "WORKING",
-     "envelope": "SELL",
-     "qty": 2,
-     "filled_after_snapshot": 0,
-     "remaining": 1,
-     "legs": [
-      {
-       "action": "BUY",
-       "sym": "AAPL",
-       "sec": "OPT",
-       "right": "C",
-       "strike": 200,
-       "exp": "20261218",
-       "mult": 100,
-       "tc": "AAPL",
-       "ratio": 1
-      }
-     ]
-    }
-   ],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL",
-      "ratio": 1
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "same with 200 shares: 3 > 2"
-  },
-  {
-   "id": "guaranteed_diagonal_no_cross_expiry_netting",
-   "holdings": [],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "BUY",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "right": "C",
-      "strike": 200,
-      "exp": "20270115",
-      "mult": 100,
-      "tc": "AAPL",
-      "ratio": 1
-     },
-     {
-      "action": "SELL",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "right": "C",
-      "strike": 210,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL",
-      "ratio": 1
-     }
-    ],
-    "guaranteed": true
-   },
-   "expect": "reject",
-   "why": "netting only within the same (sym,tc,exp,mult) key"
-  },
-  {
-   "id": "candidate_other_account",
-   "holdings": [
+      "name": "qqq_sell_put_cash_secured_ok",
+      "request": {
+        "type": "option",
+        "symbol": "QQQ",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "P",
+        "expiry": "20260620",
+        "strike": 400.0,
+        "multiplier": 100,
+        "limitPrice": 3.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": true, "reason_code": null }
+    },
     {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
-    }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U2",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "right": "C",
-      "strike": 200,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL",
-      "ratio": 1
-     }
-    ]
-   },
-   "expect": "reject",
-   "why": "candidate account must equal scope"
-  },
-  {
-   "id": "stale_view",
-   "holdings": [
+      "name": "spy_buy_call_always_ok",
+      "request": {
+        "type": "option",
+        "symbol": "SPY",
+        "action": "BUY",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 500.0,
+        "multiplier": 100,
+        "limitPrice": 5.0
+      },
+      "portfolio": { "positions": [] },
+      "expected": { "accept": true, "reason_code": null }
+    },
     {
-     "sym": "AAPL",
-     "sec": "STK",
-     "qty": 100
+      "name": "spy_sell_to_close_exact_match_ok",
+      "request": {
+        "type": "option",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 1,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 500.0,
+        "multiplier": 100,
+        "limitPrice": 5.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPY",
+            "structure_type": "Long Call",
+            "direction": "LONG",
+            "contracts": 1,
+            "expiry": "20260620",
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Call",
+                "contracts": 1,
+                "strike": 500.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": true, "reason_code": null }
+    },
+    {
+      "name": "spy_sell_two_calls_one_long_cover_no_shares_blocks_tail",
+      "request": {
+        "type": "option",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 2,
+        "right": "C",
+        "expiry": "20260620",
+        "strike": 510.0,
+        "multiplier": 100,
+        "limitPrice": 2.0
+      },
+      "portfolio": {
+        "positions": [
+          {
+            "ticker": "SPY",
+            "structure_type": "Long Call",
+            "direction": "LONG",
+            "contracts": 1,
+            "expiry": "20260620",
+            "legs": [
+              {
+                "direction": "LONG",
+                "type": "Call",
+                "contracts": 1,
+                "strike": 500.0
+              }
+            ]
+          }
+        ]
+      },
+      "expected": { "accept": false, "reason_code": "ETF_CALL_UNCOVERED" }
     }
-   ],
-   "orders": [],
-   "candidate": {
-    "id": "cand",
-    "account": "U1",
-    "state": "WORKING",
-    "envelope": "SELL",
-    "qty": 1,
-    "filled_after_snapshot": 0,
-    "remaining": 1,
-    "legs": [
-     {
-      "action": "BUY",
-      "sym": "AAPL",
-      "sec": "OPT",
-      "right": "C",
-      "strike": 200,
-      "exp": "20261218",
-      "mult": 100,
-      "tc": "AAPL",
-      "ratio": 1
-     }
-    ]
-   },
-   "view": {
-    "stale": true
-   },
-   "expect": "reject",
-   "why": "last complete pass older than the age limit"
-  }
- ]
+  ]
 }

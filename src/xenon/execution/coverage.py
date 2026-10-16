@@ -1,7 +1,7 @@
 """Gate 4 coverage evaluation — pure, no I/O, no DB, no IB imports.
 
 Spec: tmp/repo-review/spec.md §2.3 (v3.2). Field semantics are pinned by the
-frozen fixture `scripts/tests/fixtures/gate4_parity.json` `_doc` header.
+frozen fixture `scripts/tests/fixtures/gate4_coverage_cases.json` `_doc` header.
 
 Policy (root CLAUDE.md): no short call without cover, no short stock,
 cash-secured puts allowed.

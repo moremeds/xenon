@@ -1,7 +1,7 @@
 """Gate-4 coverage module tests.
 
 Part 1: parametrized over every case in the frozen fixture
-`fixtures/gate4_parity.json` (lead-authored, spec §2.3 v3.2). Do not edit
+`fixtures/gate4_coverage_cases.json` (lead-authored, spec §2.3 v3.2). Do not edit
 the fixture; a disagreement means a deviation report, not a patch.
 
 Part 2: focused unit tests for the helpers the module exposes.
@@ -40,7 +40,7 @@ from xenon.execution.orders_store import (
     reserve_attempt,
 )
 
-FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "gate4_parity.json").read_text())
+FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "gate4_coverage_cases.json").read_text())
 SCOPE = FIXTURE["scope_account"]
 
 
