@@ -306,13 +306,24 @@ def find_frozen_trade(
     return None
 
 
+def _latch_perm_id(frozen: dict, trade) -> None:
+    """Pin the first observed nonzero permId onto the frozen identity.
+
+    While an order carries permId 0, (clientId, orderId) is the only
+    matchable identity. Once a snapshot shows a nonzero permId on that
+    frozen order the identity is complete — every later lookup must match
+    it, so a different nonzero permId occupying the same slot is "not
+    found", never a replacement we act on or an ack we didn't cause.
+    """
+    if trade is not None and frozen["perm_id"] <= 0 and (trade.order.permId or 0) > 0:
+        frozen["perm_id"] = trade.order.permId
+
+
 def _await_order_state(
     client: IBClient,
-    order_id: int,
-    perm_id: int,
+    frozen: dict,
     *,
     account: Optional[str] = None,
-    client_id: int,
     initial_trade=None,
 ) -> Iterator[tuple]:
     """Poll refreshed open-order state — 10 ticks × 0.5s (unchanged).
@@ -324,13 +335,17 @@ def _await_order_state(
     ``None`` when the FROZEN order vanished from open orders (the
     disappearance-as-ack rule). The frozen (clientId, orderId, permId)
     tuple is matched on every poll so a different order sharing the same
-    orderId can never be picked up mid-operation.
+    orderId can never be picked up mid-operation. A nonzero permId
+    observed mid-poll is latched into ``frozen`` (see ``_latch_perm_id``).
     """
     latest = initial_trade
     for _ in range(10):
         client.sleep(0.5)
-        refreshed = find_frozen_trade(client, order_id, perm_id, client_id, account=account)
+        refreshed = find_frozen_trade(
+            client, frozen["order_id"], frozen["perm_id"], frozen["client_id"], account=account
+        )
         if refreshed is not None:
+            _latch_perm_id(frozen, refreshed)
             latest = refreshed
         yield latest, refreshed
 
@@ -375,19 +390,24 @@ def cancel_order(
 
     # Freeze the observed identity — every later lookup must find THIS
     # order, not another sharing the same orderId. A different permId or
-    # clientId in a later snapshot is "not found", never a match.
-    order_id, perm_id, client_id = (
-        trade.order.orderId,
-        trade.order.permId or 0,
-        trade.order.clientId,
-    )
+    # clientId in a later snapshot is "not found", never a match. permId 0
+    # keeps the (clientId, orderId) fallback only until a snapshot shows a
+    # nonzero permId, which _latch_perm_id pins into `frozen` — a later
+    # different nonzero permId is a different order.
+    frozen = {
+        "order_id": trade.order.orderId,
+        "perm_id": trade.order.permId or 0,
+        "client_id": trade.order.clientId,
+    }
 
     # Reconnect as the original placer if needed (fixes Error 10147).
     # _reconnect_as_owner handles 326-retry + emits classified output on failure.
-    original_client_id = client_id
+    original_client_id = frozen["client_id"]
     if client.ib.client.clientId != original_client_id:
         _reconnect_as_owner(client, host, port, original_client_id)
-        trade = find_frozen_trade(client, order_id, perm_id, client_id, account=account)
+        trade = find_frozen_trade(
+            client, frozen["order_id"], frozen["perm_id"], frozen["client_id"], account=account
+        )
         if trade is None:
             output(
                 "error",
@@ -396,6 +416,7 @@ def cancel_order(
                 upstream={"code": 10147, "message": "Order not found (local lookup)"},
                 **_identity_notes(trade, account),
             )
+        _latch_perm_id(frozen, trade)
 
     # Capture IB error events during the cancel attempt
     error_msgs = []
@@ -415,7 +436,7 @@ def cancel_order(
 
     # Wait for refreshed open-order state to acknowledge the cancel.
     for latest_trade, refreshed_trade in _await_order_state(
-        client, order_id, perm_id, account=account, client_id=client_id, initial_trade=trade
+        client, frozen, account=account, initial_trade=trade
     ):
         if refreshed_trade is None:
             finish(
@@ -532,19 +553,24 @@ def modify_order(
 
     # Freeze the observed identity — every later lookup must find THIS
     # order, not another sharing the same orderId. A different permId or
-    # clientId in a later snapshot is "not found", never a match.
-    order_id, perm_id, client_id = (
-        trade.order.orderId,
-        trade.order.permId or 0,
-        trade.order.clientId,
-    )
+    # clientId in a later snapshot is "not found", never a match. permId 0
+    # keeps the (clientId, orderId) fallback only until a snapshot shows a
+    # nonzero permId, which _latch_perm_id pins into `frozen` — a later
+    # different nonzero permId is a different order.
+    frozen = {
+        "order_id": trade.order.orderId,
+        "perm_id": trade.order.permId or 0,
+        "client_id": trade.order.clientId,
+    }
 
     # Reconnect as the original placer if needed (fixes Error 103).
     # _reconnect_as_owner handles 326-retry + emits classified output on failure.
-    original_client_id = client_id
+    original_client_id = frozen["client_id"]
     if client.ib.client.clientId != original_client_id:
         _reconnect_as_owner(client, host, port, original_client_id)
-        trade = find_frozen_trade(client, order_id, perm_id, client_id, account=account)
+        trade = find_frozen_trade(
+            client, frozen["order_id"], frozen["perm_id"], frozen["client_id"], account=account
+        )
         if trade is None:
             output(
                 "error",
@@ -553,6 +579,7 @@ def modify_order(
                 upstream={"code": 10147, "message": "Order not found (local lookup)"},
                 **_identity_notes(trade, account),
             )
+        _latch_perm_id(frozen, trade)
 
     # Capture IB error events during the modify attempt
     error_msgs = []
@@ -595,7 +622,7 @@ def modify_order(
     confirmed_trade = None
     latest_trade = trade
     for latest_trade, refreshed_trade in _await_order_state(
-        client, order_id, perm_id, account=account, client_id=client_id, initial_trade=trade
+        client, frozen, account=account, initial_trade=trade
     ):
         if modify_is_confirmed(refreshed_trade, new_price, new_quantity, outside_rth):
             confirmed_trade = refreshed_trade

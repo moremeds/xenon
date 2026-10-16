@@ -484,6 +484,109 @@ class TestFrozenIdentity:
         assert placed.lmtPrice == 22.50
 
 
+# ─── permId latch — 0 is a fallback, not a wildcard ──────────────────────
+
+
+class TestPermIdLatch:
+    def test_cancel_replacement_after_latch_never_matches(self, capsys):
+        """0→111→222: the order gets permId 111 on the first poll — latched.
+        A replacement carrying (same clientId+orderId, permId 222) is NOT
+        our order: the poll returns 'not found' → disappearance-ack comes
+        from OUR 111 being gone, and the stranger is never treated as the
+        target."""
+        ours = make_trade(order_id=10, perm_id=0, client_id=9)
+        assigned = make_trade(order_id=10, perm_id=111, client_id=9)
+        replacement = make_trade(order_id=10, perm_id=222, client_id=9)
+        client = make_client()
+        client.ib.client.clientId = 9  # already the owner — no reconnect
+        client.ib.errorEvent = ErrorEvent()
+        client.get_open_orders.side_effect = (
+            [[ours]] + [[assigned]] + [[replacement]] * 12
+        )
+        client.cancel_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            cancel_order(client, 10, 0, "127.0.0.1", 4002)
+        assert exc.value.code == 0
+        data = _emitted(capsys)
+        assert data["status"] == "ok"
+        assert data["finalStatus"] == "Cancelled"
+        client.cancel_order.assert_called_once_with(ours.order)
+
+    def test_cancel_latches_permid_on_reconnect_lookup(self, capsys):
+        """Same latch through the reconnect path: post-reconnect snapshot
+        assigns permId 111 → pinned; a later 222 replacement is 'not found'
+        → disappearance-ack for ours, cancel sent to the 111 order."""
+        ours = make_trade(order_id=10, perm_id=0, client_id=9)
+        assigned = make_trade(order_id=10, perm_id=111, client_id=9)
+        replacement = make_trade(order_id=10, perm_id=222, client_id=9)
+        client = make_client()
+        client.ib.client.clientId = 0  # must reconnect as owner 9
+        client.ib.errorEvent = ErrorEvent()
+        client.get_open_orders.side_effect = (
+            [[ours]] + [[assigned]] + [[replacement]] * 12
+        )
+        client.cancel_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            cancel_order(client, 10, 0, "127.0.0.1", 4002)
+        assert exc.value.code == 0
+        assert _emitted(capsys)["status"] == "ok"
+        client.cancel_order.assert_called_once_with(assigned.order)
+
+    def test_cancel_zero_to_permid_still_succeeds(self, capsys):
+        """0→111: the latched order itself reports Cancelled → ok."""
+        ours = make_trade(order_id=10, perm_id=0, client_id=0)
+        assigned = make_trade(order_id=10, perm_id=111, client_id=0, status="Cancelled")
+        client = make_client()
+        client.ib.client.clientId = 0
+        client.ib.errorEvent = ErrorEvent()
+        client.get_open_orders.side_effect = [[ours], [assigned]]
+        client.cancel_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            cancel_order(client, 10, 0, "127.0.0.1", 4002)
+        assert exc.value.code == 0
+        data = _emitted(capsys)
+        assert data["status"] == "ok"
+        assert data["finalStatus"] == "Cancelled"
+
+    def test_modify_replacement_at_requested_price_cannot_confirm(self, capsys):
+        """0→111→222 for modify: after latching 111, a replacement at
+        permId 222 carrying the REQUESTED price must never confirm — the
+        operation times out unconfirmed rather than claiming success."""
+        ours = make_trade(order_id=10, perm_id=0, client_id=0)
+        assigned = make_trade(order_id=10, perm_id=111, client_id=0)  # old price
+        replacement = make_trade(order_id=10, perm_id=222, client_id=0, lmt_price=23.00)
+        client = make_client()
+        client.ib.client.clientId = 0
+        client.ib.errorEvent = ErrorEvent()
+        client.get_open_orders.side_effect = (
+            [[ours]] + [[assigned]] + [[replacement]] * 12
+        )
+        client.place_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            modify_order(client, 10, 0, 23.00, "127.0.0.1", 4002)
+        assert exc.value.code == 1
+        data = _emitted(capsys)
+        assert data["status"] == "error"
+        assert "not confirmed" in data["message"].lower()
+        placed = client.place_order.call_args[0][1]
+        assert placed.lmtPrice == 23.00
+
+    def test_modify_zero_to_permid_still_confirms(self, capsys):
+        """0→111: the same order reflecting the new price under its latched
+        permId confirms the modify → ok."""
+        ours = make_trade(order_id=10, perm_id=0, client_id=0)
+        assigned = make_trade(order_id=10, perm_id=111, client_id=0, lmt_price=23.00)
+        client = make_client()
+        client.ib.client.clientId = 0
+        client.ib.errorEvent = ErrorEvent()
+        client.get_open_orders.side_effect = [[ours], [assigned]]
+        client.place_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            modify_order(client, 10, 0, 23.00, "127.0.0.1", 4002)
+        assert exc.value.code == 0
+        assert _emitted(capsys)["status"] == "ok"
+
+
 # ─── IBConnectionError → JSON contract ───────────────────────────────────
 
 
