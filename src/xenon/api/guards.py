@@ -134,6 +134,27 @@ def ensure_order_allowed(kind: str, state) -> JSONResponse | None:
     return None
 
 
+class ReadOnlyDenied(Exception):
+    """Signal: request refused because XENON_READ_ONLY=1.
+
+    Raised by `require_writable` route dependencies; the app-level
+    exception handler in server.py converts it to the `read_only_403`
+    JSONResponse so the refusal keeps the top-level `reason_code` shape."""
+
+
+def require_writable() -> None:
+    """Route dependency: refuse writes under XENON_READ_ONLY=1 early.
+
+    Declared via `dependencies=[Depends(require_writable)]` — FastAPI
+    solves route-level dependencies before sibling param dependencies
+    (scope resolution) and request-body validation, so a `dev.sh live`
+    session gets 403 READ_ONLY_MODE ahead of any 4xx/5xx those would
+    produce.
+    """
+    if is_read_only():
+        raise ReadOnlyDenied()
+
+
 def get_account_scope(request: Request) -> AccountScope:
     """FastAPI dependency: resolve the current broker account scope from app.state.
 

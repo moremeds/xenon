@@ -5,11 +5,11 @@ import json
 from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from xenon.api.guards import ensure_order_allowed
+from xenon.api.guards import ensure_order_allowed, require_writable
 from xenon.execution.combo_wizard import session as combo_session
 
 router = APIRouter()
@@ -38,7 +38,7 @@ class ProtectRequest(BaseModel):
     polarity: str = "DEBIT"
 
 
-@router.post("/wizard/plan")
+@router.post("/wizard/plan", dependencies=[Depends(require_writable)])
 async def wizard_plan(request: Request, body: PlanRequest) -> dict[str, Any]:
     denial = ensure_order_allowed("wizard plan", request.app.state)
     if denial is not None:
@@ -60,7 +60,7 @@ async def wizard_sessions() -> dict[str, Any]:
     return {"sessions": combo_session.list_sessions()}
 
 
-@router.post("/wizard/sessions")
+@router.post("/wizard/sessions", dependencies=[Depends(require_writable)])
 async def wizard_create_session(request: Request, body: PlanRequest) -> dict[str, Any]:
     denial = ensure_order_allowed("wizard session create", request.app.state)
     if denial is not None:
@@ -90,7 +90,7 @@ async def wizard_stream(session_id: str = Query(...)) -> Response:
     )
 
 
-@router.post("/wizard/sessions/{session_id}/submit")
+@router.post("/wizard/sessions/{session_id}/submit", dependencies=[Depends(require_writable)])
 async def wizard_submit(session_id: str, request: Request, body: SubmitRequest) -> dict[str, Any]:
     denial = ensure_order_allowed("wizard submit", request.app.state)
     if denial is not None:
@@ -102,7 +102,7 @@ async def wizard_submit(session_id: str, request: Request, body: SubmitRequest) 
         raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
-@router.post("/wizard/sessions/{session_id}/reprice")
+@router.post("/wizard/sessions/{session_id}/reprice", dependencies=[Depends(require_writable)])
 async def wizard_reprice(session_id: str, request: Request, body: RepriceRequest) -> dict[str, Any]:
     denial = ensure_order_allowed("wizard reprice", request.app.state)
     if denial is not None:
@@ -113,7 +113,7 @@ async def wizard_reprice(session_id: str, request: Request, body: RepriceRequest
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/wizard/sessions/{session_id}/abort")
+@router.post("/wizard/sessions/{session_id}/abort", dependencies=[Depends(require_writable)])
 async def wizard_abort(session_id: str, request: Request) -> dict[str, Any]:
     denial = ensure_order_allowed("wizard abort", request.app.state)
     if denial is not None:
@@ -125,7 +125,7 @@ async def wizard_abort(session_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
-@router.post("/wizard/sessions/{session_id}/protect")
+@router.post("/wizard/sessions/{session_id}/protect", dependencies=[Depends(require_writable)])
 async def wizard_protect(session_id: str, request: Request, body: ProtectRequest) -> dict[str, Any]:
     denial = ensure_order_allowed("wizard protect", request.app.state)
     if denial is not None:

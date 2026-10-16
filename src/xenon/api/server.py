@@ -43,6 +43,7 @@ from xenon.api.auth import (
     verify_clerk_jwt,
 )
 from xenon.api.guards import (
+    ReadOnlyDenied,
     ensure_order_allowed,
     get_account_scope,
     get_broker_scope,
@@ -619,6 +620,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Xenon API", version="1.0.0", lifespan=lifespan)
+
+
+@app.exception_handler(ReadOnlyDenied)
+async def _read_only_denied_handler(request: Request, exc: ReadOnlyDenied):
+    return read_only_403()
+
+
 app.include_router(historical_router)
 app.include_router(journal_router)
 app.include_router(orders_router)

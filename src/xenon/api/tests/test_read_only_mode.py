@@ -106,6 +106,34 @@ def test_write_routes_return_403_in_read_only_even_when_mode_unverified(read_onl
     assert r.json().get("reason_code") == "READ_ONLY_MODE", r.json()
 
 
+def test_journal_post_read_only_precedes_scope_resolution(read_only_client, monkeypatch):
+    """403 before scope resolution — an unresolvable account scope must not
+    surface a 5xx ahead of the read-only refusal."""
+    import xenon.api.server as server
+
+    monkeypatch.setattr(server.app.state, "account", "", raising=False)
+    monkeypatch.setattr(server.app.state, "trading_mode", "", raising=False)
+    r = read_only_client.post("/journal", json={"ticker": "SPY", "note": "x"})
+    assert r.status_code == 403, r.text
+    assert r.json().get("reason_code") == "READ_ONLY_MODE", r.json()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/wizard/plan",
+        "/wizard/sessions",
+        "/wizard/sessions/wiz-ro/protect",
+    ],
+)
+def test_wizard_post_read_only_precedes_body_validation(read_only_client, path):
+    """403 before request-body validation — a malformed body must get the
+    read-only refusal, not a 422."""
+    r = read_only_client.post(path, json={"bogus": True})
+    assert r.status_code == 403, r.text
+    assert r.json().get("reason_code") == "READ_ONLY_MODE", r.json()
+
+
 def test_journal_post_returns_403_in_read_only(read_only_client):
     """POST /journal also blocks — journal writes are user-authored state."""
     r = read_only_client.post(
@@ -364,3 +392,47 @@ def test_ensure_writable_is_noop_when_flag_unset(monkeypatch):
     from xenon.execution import orders_store
 
     assert orders_store.ensure_writable() is None
+
+
+# ---------------------------------------------------------------------------
+# combo_wizard.session in-process mutators — scripts/services calling the
+# module directly must get the same READ_ONLY_MODE refusal before any
+# session read/claim/write, not just callers that pass through the HTTP
+# routes.
+# ---------------------------------------------------------------------------
+
+
+def test_combo_session_mutators_refuse_before_state_work(monkeypatch):
+    """Direct calls under XENON_READ_ONLY get the 403 refusal object without
+    reaching any engine/session helper — every touchpoint is stubbed to fail."""
+    monkeypatch.setenv("XENON_READ_ONLY", "1")
+    from xenon.execution.combo_wizard import session as combo_session
+
+    def _boom(name):
+        def _f(*args, **kwargs):
+            raise AssertionError(f"combo_session.{name} reached under read-only")
+
+        return _f
+
+    monkeypatch.setattr(combo_session, "get_sync_engine", _boom("get_sync_engine"))
+    monkeypatch.setattr(combo_session.combo_planner, "build_plan", _boom("build_plan"))
+    for name in (
+        "_claim_session_for_submit",
+        "_load_session",
+        "_load_current_attempt",
+    ):
+        monkeypatch.setattr(combo_session, name, _boom(name))
+
+    def _assert_read_only(resp):
+        assert getattr(resp, "status_code", None) == 403, resp
+        assert json.loads(resp.body)["reason_code"] == "READ_ONLY_MODE"
+
+    _assert_read_only(
+        combo_session.create_session(ticker="SPY", intent="OPEN", structure_name="s", payload={})
+    )
+    _assert_read_only(
+        combo_session.plan_session(ticker="SPY", intent="OPEN", legs=[], quotes={}, order_payload={})
+    )
+    _assert_read_only(asyncio.run(combo_session.submit_combo("wiz-x", {})))
+    _assert_read_only(asyncio.run(combo_session.reprice_combo("wiz-x", {"target_price": "1.00"})))
+    _assert_read_only(asyncio.run(combo_session.abort_session("wiz-x")))
