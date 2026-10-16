@@ -12,7 +12,9 @@ from xenon.api.services.performance import compute
 from xenon.execution.account_scope import AccountScope
 from xenon.utils.portfolio_loader import upsert_nav_sync
 
-pytestmark = pytest.mark.asyncio
+# committed_db: seeds nav via the sync engine while compute() reads via the
+# async engine — the writes must really commit to be visible cross-connection.
+pytestmark = [pytest.mark.asyncio, pytest.mark.committed_db]
 
 _SCOPE = AccountScope(broker="IB", account_env="live", broker_account="IB_PE2E1")
 
