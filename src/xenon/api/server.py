@@ -2357,6 +2357,27 @@ def _classify_to_http(data: dict) -> tuple[int, str]:
     return 502, ReasonCode.IB_REJECT.value
 
 
+def order_error(status: int, reason_code: str, detail: dict, **extra) -> JSONResponse:
+    """Single error contract for the cancel/modify routes.
+
+    Emits ``reason_code`` at the TOP level of the body — that is what the
+    web toast helpers read via ``readReasonCode`` (``HTTPException(
+    detail=dict)`` only ever produced ``body.detail.reason_code``). The
+    structured payload stays under ``detail`` for the readers that consume
+    it (``detail.applied`` on MODIFY_STALE, ``upstream``, ``applied_
+    sequence``, ``http_status``); ``detail.reason_code`` is kept too so
+    nested readers keep working. ``**extra`` lands at the top level.
+    """
+    return JSONResponse(
+        status_code=status,
+        content={
+            "reason_code": reason_code,
+            "detail": {**detail, "reason_code": reason_code},
+            **extra,
+        },
+    )
+
+
 def _record_manage_event(
     ib_order_id: str,
     kind: str,
@@ -2422,11 +2443,33 @@ async def _orders_cancel_from_body(body: dict):
     order_id = body.get("orderId", 0)
     perm_id = body.get("permId", 0)
 
+    if not order_id and not perm_id:
+        return order_error(
+            400,
+            ReasonCode.ORDER_IDENTIFIER_REQUIRED.value,
+            {
+                "message": "Cancel request must include orderId or permId.",
+                "http_status": 400,
+            },
+        )
+
+    scope = _resolve_scope_kwargs()
+
     args = ["cancel"]
     if order_id:
         args.extend(["--order-id", str(order_id)])
     if perm_id:
         args.extend(["--perm-id", str(perm_id)])
+
+    # PR-05 identity tuple: the subprocess asserts the scope account plus the
+    # recorded placing clientId (when a submission row carries one), so a
+    # cancel can never land on a different account's/client's order.
+    args.extend(["--account", scope["broker_account"]])
+    row = orders_store.load_submission_for_modify(
+        order_id=str(order_id or ""), perm_id=str(perm_id or ""), **scope
+    )
+    if row and row.get("placing_client_id") is not None:
+        args.extend(["--client-id", str(row["placing_client_id"])])
 
     result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=15)
     if not result.ok:
@@ -2435,8 +2478,8 @@ async def _orders_cancel_from_body(body: dict):
             "message": result.error or "Subprocess failed",
             "http_status": 503,
         }
-        _record_manage_event(str(order_id or ""), "CANCEL", detail, perm_id=str(perm_id or ""))
-        raise HTTPException(status_code=503, detail=detail)
+        _record_manage_event(str(order_id or ""), "CANCEL", detail, perm_id=str(perm_id or ""), scope=scope)
+        return order_error(503, ReasonCode.IB_CONNECTION.value, detail)
 
     data = result.data or {}
     if data.get("status") == "error":
@@ -2448,8 +2491,8 @@ async def _orders_cancel_from_body(body: dict):
             "upstream": data.get("upstream"),
             "http_status": http_status,
         }
-        _record_manage_event(str(order_id or ""), "CANCEL", detail, perm_id=str(perm_id or ""))
-        raise HTTPException(status_code=http_status, detail=detail)
+        _record_manage_event(str(order_id or ""), "CANCEL", detail, perm_id=str(perm_id or ""), scope=scope)
+        return order_error(http_status, reason_code, detail)
 
     _record_manage_event(
         str(order_id or ""),
@@ -2528,10 +2571,10 @@ async def _orders_modify_from_body(body: dict):
     modify_sequence = body.get("modifySequence")
 
     if modify_sequence is None:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "reason_code": ReasonCode.MODIFY_SEQUENCE_REQUIRED.value,
+        return order_error(
+            400,
+            ReasonCode.MODIFY_SEQUENCE_REQUIRED.value,
+            {
                 "message": "modifySequence is required",
                 "http_status": 400,
             },
@@ -2539,10 +2582,10 @@ async def _orders_modify_from_body(body: dict):
     try:
         modify_sequence = int(modify_sequence)
     except (TypeError, ValueError):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "reason_code": ReasonCode.MODIFY_SEQUENCE_REQUIRED.value,
+        return order_error(
+            400,
+            ReasonCode.MODIFY_SEQUENCE_REQUIRED.value,
+            {
                 "message": "modifySequence must be an integer",
                 "http_status": 400,
             },
@@ -2552,10 +2595,10 @@ async def _orders_modify_from_body(body: dict):
     # supplied (UI-initiated modifies often have orderId=0), route through the
     # perm_id variant so we can still find the submissions row.
     if not order_id and not perm_id:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "reason_code": ReasonCode.ORDER_IDENTIFIER_REQUIRED.value,
+        return order_error(
+            400,
+            ReasonCode.ORDER_IDENTIFIER_REQUIRED.value,
+            {
                 "message": "Modify request must include orderId or permId.",
                 "http_status": 400,
             },
@@ -2569,18 +2612,18 @@ async def _orders_modify_from_body(body: dict):
     if not seq_outcome["applied"]:
         current = seq_outcome["current_sequence"]
         if current == -1:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "reason_code": ReasonCode.ORDER_NOT_FOUND.value,
+            return order_error(
+                404,
+                ReasonCode.ORDER_NOT_FOUND.value,
+                {
                     "message": f"Order {order_id} not found",
                     "http_status": 404,
                 },
             )
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "reason_code": ReasonCode.MODIFY_STALE.value,
+        return order_error(
+            409,
+            ReasonCode.MODIFY_STALE.value,
+            {
                 "message": f"modifySequence {modify_sequence} is stale; current is {current}",
                 "applied": current,
                 "http_status": 409,
@@ -2601,6 +2644,16 @@ async def _orders_modify_from_body(body: dict):
     elif outside_rth is False:
         args.append("--no-outside-rth")
 
+    # PR-05 identity tuple: the subprocess asserts the scope account plus the
+    # recorded placing clientId (when a submission row carries one), so a
+    # modify can never land on a different account's/client's order.
+    args.extend(["--account", _scope["broker_account"]])
+    _row = orders_store.load_submission_for_modify(
+        order_id=str(order_id or ""), perm_id=str(perm_id or ""), **_scope
+    )
+    if _row and _row.get("placing_client_id") is not None:
+        args.extend(["--client-id", str(_row["placing_client_id"])])
+
     result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=15)
     if not result.ok:
         # DB sequence is already advanced; don't roll back — prevents
@@ -2618,7 +2671,7 @@ async def _orders_modify_from_body(body: dict):
             "http_status": 503,
         }
         _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""), scope=_scope)
-        raise HTTPException(status_code=503, detail=detail)
+        return order_error(503, ReasonCode.IB_CONNECTION.value, detail)
 
     data = result.data or {}
     if data.get("status") == "error":
@@ -2632,7 +2685,7 @@ async def _orders_modify_from_body(body: dict):
             "http_status": http_status,
         }
         _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""), scope=_scope)
-        raise HTTPException(status_code=http_status, detail=detail)
+        return order_error(http_status, reason_code, detail)
 
     _record_manage_event(
         str(order_id or ""),

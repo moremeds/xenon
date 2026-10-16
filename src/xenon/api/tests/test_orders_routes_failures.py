@@ -503,6 +503,179 @@ def test_cancel_failure_does_not_mark_submission_cancelled(client, tmp_db, monke
     assert state == "WORKING"
 
 
+# ─── PR-05 — top-level reason_code contract + identity args ──────────────
+#
+# The toast helpers read ``body.reason_code`` at the TOP level, never
+# ``body.detail.reason_code`` — so every cancel/modify error path must emit
+# it there (same shape as ``guards.read_only_403``). Structured fields the
+# UI already consumes stay inside ``detail`` (``applied`` on MODIFY_STALE,
+# ``applied_sequence``, ``upstream``).
+
+
+def test_cancel_error_body_has_top_level_reason_code(client, tmp_db, monkeypatch):
+    _patch_runner(
+        monkeypatch,
+        {"status": "error", "message": "IB gateway unreachable", "classification": "connection"},
+    )
+    resp = client.post("/orders/cancel", json={"orderId": 42, "permId": 0})
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["reason_code"] == "IB_CONNECTION"
+    # Structured fields keep their shape under detail for existing readers.
+    assert body["detail"]["classification"] == "connection"
+    assert body["detail"]["http_status"] == 503
+
+
+def test_cancel_ib_reject_has_top_level_reason_code(client, tmp_db, monkeypatch):
+    _patch_runner(
+        monkeypatch,
+        {
+            "status": "error",
+            "message": "Order not found",
+            "classification": "ib_reject",
+            "upstream": {"code": 10147, "message": "Order not found"},
+        },
+    )
+    resp = client.post("/orders/cancel", json={"orderId": 42, "permId": 0})
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["reason_code"] == "IB_REJECT"
+    assert body["detail"]["upstream"] == {"code": 10147, "message": "Order not found"}
+
+
+def test_cancel_without_identifiers_400s_without_subprocess(client, tmp_db, monkeypatch):
+    """orderId=0 + permId=0 → 400 ORDER_IDENTIFIER_REQUIRED at the route,
+    never reaching the subprocess."""
+
+    async def fake_runner(entry, args, timeout=30):
+        raise AssertionError("subprocess must not run without identifier")
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post("/orders/cancel", json={"orderId": 0, "permId": 0})
+    assert resp.status_code == 400
+    assert resp.json()["reason_code"] == "ORDER_IDENTIFIER_REQUIRED"
+
+
+def test_modify_stale_has_top_level_reason_code_and_detail_applied(client, tmp_db, monkeypatch):
+    """MODIFY_STALE keeps ``detail.applied`` (the UI counter-sync contract)
+    while exposing ``reason_code`` at the top level."""
+    _seed_submission(tmp_db, ib_order_id="42")
+
+    async def fake_runner(entry, args, timeout=30):
+        raise AssertionError("subprocess must not run on stale modifySequence")
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post(
+        "/orders/modify",
+        json={"orderId": 42, "permId": 0, "newPrice": 1.50, "modifySequence": 3},
+    )
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["reason_code"] == "MODIFY_STALE"
+    assert body["detail"]["applied"] == 5
+
+
+def test_modify_503_has_top_level_reason_code_and_detail_applied_sequence(client, tmp_db, monkeypatch):
+    _seed_submission(tmp_db, ib_order_id="42")
+    _patch_runner(monkeypatch, None, ok=False, error="IB gateway unreachable")
+
+    resp = client.post(
+        "/orders/modify",
+        json={"orderId": 42, "permId": 0, "newPrice": 1.50, "modifySequence": 9},
+    )
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["reason_code"] == "IB_CONNECTION"
+    assert body["detail"]["applied_sequence"] == 9
+
+
+def _seed_permid_submission_with_client_id(perm_id: str = "42", placing_client_id: int = 26) -> str:
+    sid = "sub-pcid-1"
+    engine = _pg_engine()
+    try:
+        with engine.begin() as con:
+            con.execute(
+                text(
+                    """
+            INSERT INTO xenon.order_submissions (
+                submission_id, user_id, client_attempt_id, ticker, security_type,
+                action, quantity, multiplier, limit_price, state, ib_order_id,
+                perm_id, modify_sequence, submitted_at, updated_at,
+                broker, account_env, broker_account, placing_client_id
+            ) VALUES (:submission_id, 'local', 'cid-pcid', 'AAPL', 'STK', 'BUY', 1, 100, '1.23',
+                      'WORKING', '99', :perm_id, 0, NOW(), NOW(),
+                      'IB', 'paper', 'DU0000000', :placing_client_id)
+            """
+                ),
+                {"submission_id": sid, "perm_id": perm_id, "placing_client_id": placing_client_id},
+            )
+    finally:
+        engine.dispose()
+    return sid
+
+
+def test_cancel_forwards_identity_args_to_subprocess(client, tmp_db, monkeypatch):
+    """The subprocess gets the asserted identity tuple: --account from the
+    resolved scope, --client-id from the row's placing_client_id."""
+    _seed_permid_submission_with_client_id(perm_id="42", placing_client_id=26)
+    captured = {}
+
+    async def fake_runner(entry, args, timeout=30):
+        captured["args"] = args
+        return ScriptResult(ok=True, data={"status": "ok", "message": "Cancelled"})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post("/orders/cancel", json={"orderId": 0, "permId": 42})
+    assert resp.status_code == 200
+
+    args = captured["args"]
+    assert "--account" in args
+    assert args[args.index("--account") + 1] == "DU0000000"
+    assert "--client-id" in args
+    assert args[args.index("--client-id") + 1] == "26"
+
+
+def test_modify_forwards_identity_args_to_subprocess(client, tmp_db, monkeypatch):
+    _seed_permid_submission_with_client_id(perm_id="42", placing_client_id=26)
+    captured = {}
+
+    async def fake_runner(entry, args, timeout=30):
+        captured["args"] = args
+        return ScriptResult(ok=True, data={"status": "ok", "message": "Modified"})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post(
+        "/orders/modify",
+        json={"orderId": 0, "permId": 42, "newPrice": 1.50, "modifySequence": 1},
+    )
+    assert resp.status_code == 200
+
+    args = captured["args"]
+    assert args[args.index("--account") + 1] == "DU0000000"
+    assert args[args.index("--client-id") + 1] == "26"
+
+
+def test_cancel_omits_client_id_when_no_submission_row(client, tmp_db, monkeypatch):
+    """Snapshot-imported / pre-F4 orders have no placing_client_id — the flag
+    is omitted (permId-strict matching still applies)."""
+    captured = {}
+
+    async def fake_runner(entry, args, timeout=30):
+        captured["args"] = args
+        return ScriptResult(ok=True, data={"status": "ok", "message": "Cancelled"})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post("/orders/cancel", json={"orderId": 0, "permId": 77})
+    assert resp.status_code == 200
+    assert "--client-id" not in captured["args"]
+    assert "--account" in captured["args"]
+
+
 def test_dev_probe_not_in_auth_exempt_paths():
     """B3 — defense in depth: Clerk middleware must still cover the probe."""
     assert "/dev/rehydrate/synthetic" not in server_mod.AUTH_EXEMPT_PATHS

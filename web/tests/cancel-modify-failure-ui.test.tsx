@@ -175,6 +175,47 @@ describe("C1 — cancel/modify failure rendering (Vitest downgrade)", () => {
     expect(secondCallBody.modifySequence).toBe(4);
   });
 
+  test("test_cancel_top_level_reason_code_renders_toast_copy", async () => {
+    // PR-05 shape: FastAPI now emits reason_code at the TOP level (the toast
+    // helper reads body.reason_code first); detail keeps the structured
+    // payload for nested readers.
+    const fetchFn = mockFetchSequence([
+      {
+        status: 503,
+        body: {
+          reason_code: "IB_CONNECTION",
+          detail: {
+            reason_code: "IB_CONNECTION",
+            classification: "connection",
+            message: "IB gateway unreachable",
+            http_status: 503,
+          },
+        },
+      },
+    ]);
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      fetchFn as unknown as typeof fetch,
+    );
+
+    const { result } = renderHook(() => useOrderActions(), { wrapper });
+
+    let r: Awaited<ReturnType<typeof result.current.requestCancel>>;
+    await act(async () => {
+      r = await result.current.requestCancel(makeOrder());
+    });
+
+    expect(r!.ok).toBe(false);
+    if (!r!.ok) {
+      expect(r!.status).toBe(503);
+      expect(r!.reasonCode).toBe("IB_CONNECTION");
+      expect(r!.message).toBe(ORDER_REASON_CODES.IB_CONNECTION.copy);
+    }
+
+    const notifs = result.current.drainNotifications();
+    expect(notifs).toHaveLength(1);
+    expect(notifs[0].message).toBe(ORDER_REASON_CODES.IB_CONNECTION.copy);
+  });
+
   test("test_cancel_unknown_order_upstream_10147_renders_ib_reject_copy", async () => {
     const fetchFn = mockFetchSequence([
       {

@@ -108,6 +108,100 @@ describe("/api/orders/* — upstream status + detail passthrough", () => {
     expect(await res.json()).toEqual(upstreamBody);
   });
 
+  test("preserves top-level reason_code on cancel (PR-05 contract)", async () => {
+    // New FastAPI shape: reason_code at the TOP level for the toast helpers,
+    // structured payload still under detail for existing readers.
+    const upstreamBody = {
+      reason_code: "IB_CONNECTION",
+      detail: {
+        reason_code: "IB_CONNECTION",
+        classification: "connection",
+        message: "IB gateway unreachable",
+        http_status: 503,
+      },
+    };
+    mockFetch.mockRejectedValueOnce(
+      new XenonApiError(503, "IB_CONNECTION", upstreamBody),
+    );
+    const res = await cancelPost(cancelReq());
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body).toEqual(upstreamBody);
+    expect(body.reason_code).toBe("IB_CONNECTION");
+  });
+
+  test("preserves top-level reason_code + detail.applied on modify (PR-05)", async () => {
+    const upstreamBody = {
+      reason_code: "MODIFY_STALE",
+      detail: {
+        reason_code: "MODIFY_STALE",
+        message: "modifySequence 3 is stale; current is 5",
+        applied: 5,
+        http_status: 409,
+      },
+    };
+    mockFetch.mockRejectedValueOnce(
+      new XenonApiError(409, "MODIFY_STALE", upstreamBody),
+    );
+    const res = await modifyPost(modifyReq());
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body).toEqual(upstreamBody);
+    expect(body.reason_code).toBe("MODIFY_STALE");
+    expect(body.detail.applied).toBe(5);
+  });
+
+  test("preserves 409 OWNERSHIP identity rejection on cancel (PR-05)", async () => {
+    const upstreamBody = {
+      reason_code: "OWNERSHIP",
+      detail: {
+        reason_code: "OWNERSHIP",
+        classification: "ownership",
+        message:
+          "Order identity mismatch — refusing to act: 2 open orders share orderId=10",
+        http_status: 409,
+      },
+    };
+    mockFetch.mockRejectedValueOnce(
+      new XenonApiError(409, "OWNERSHIP", upstreamBody),
+    );
+    const res = await cancelPost(cancelReq());
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body).toEqual(upstreamBody);
+    expect(body.reason_code).toBe("OWNERSHIP");
+  });
+
+  test("local cancel validation carries ORDER_IDENTIFIER_REQUIRED", async () => {
+    const req = new Request("http://localhost/api/orders/cancel", {
+      method: "POST",
+      body: JSON.stringify({ orderId: 0, permId: 0 }),
+    });
+    const res = await cancelPost(req);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.reason_code).toBe("ORDER_IDENTIFIER_REQUIRED");
+  });
+
+  test("local modify validation carries reason_code", async () => {
+    const req = new Request("http://localhost/api/orders/modify", {
+      method: "POST",
+      body: JSON.stringify({ orderId: 0, permId: 0, newPrice: 5.5 }),
+    });
+    const res = await modifyPost(req);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.reason_code).toBe("ORDER_IDENTIFIER_REQUIRED");
+
+    const badPrice = new Request("http://localhost/api/orders/modify", {
+      method: "POST",
+      body: JSON.stringify({ orderId: 1, newPrice: -1 }),
+    });
+    const res2 = await modifyPost(badPrice);
+    expect(res2.status).toBe(400);
+    expect((await res2.json()).reason_code).toBe("INVALID_ORDER_BODY");
+  });
+
   test("unknown error falls through to 500 with request_id", async () => {
     mockFetch.mockRejectedValueOnce(new Error("boom — not a XenonApiError"));
     const res = await cancelPost(cancelReq());

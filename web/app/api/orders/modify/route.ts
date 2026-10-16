@@ -97,7 +97,10 @@ export async function POST(request: Request): Promise<Response> {
 
     if (orderId === 0 && permId === 0) {
       return NextResponse.json(
-        { error: "Must provide orderId or permId" },
+        {
+          error: "Must provide orderId or permId",
+          reason_code: "ORDER_IDENTIFIER_REQUIRED",
+        },
         { status: 400 },
       );
     }
@@ -119,7 +122,10 @@ export async function POST(request: Request): Promise<Response> {
         replaceOrder.legs.length < 2
       ) {
         return NextResponse.json(
-          { error: "Invalid combo replacement payload" },
+          {
+            error: "Invalid combo replacement payload",
+            reason_code: "INVALID_ORDER_BODY",
+          },
           { status: 400 },
         );
       }
@@ -134,6 +140,7 @@ export async function POST(request: Request): Promise<Response> {
           {
             error:
               "Must provide at least one order to cancel before combo replacement",
+            reason_code: "ORDER_IDENTIFIER_REQUIRED",
           },
           { status: 400 },
         );
@@ -208,6 +215,7 @@ export async function POST(request: Request): Promise<Response> {
         {
           error:
             "Must provide at least one modify field: newPrice, newQuantity, or outsideRth",
+          reason_code: "INVALID_ORDER_BODY",
         },
         { status: 400 },
       );
@@ -215,14 +223,17 @@ export async function POST(request: Request): Promise<Response> {
 
     if (newPrice != null && newPrice <= 0) {
       return NextResponse.json(
-        { error: "Must provide newPrice > 0" },
+        { error: "Must provide newPrice > 0", reason_code: "INVALID_ORDER_BODY" },
         { status: 400 },
       );
     }
 
     if (newQuantity != null && newQuantity <= 0) {
       return NextResponse.json(
-        { error: "Must provide newQuantity > 0" },
+        {
+          error: "Must provide newQuantity > 0",
+          reason_code: "INVALID_ORDER_BODY",
+        },
         { status: 400 },
       );
     }
