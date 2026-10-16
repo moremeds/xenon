@@ -23,13 +23,21 @@
 
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  renderHook,
+  waitFor,
+} from "@testing-library/react";
 import {
   computeNetOptionQuote,
   normalizeComboOrder,
   type OrderLeg,
 } from "../lib/optionsChainUtils";
 import { resolveSpreadPriceData } from "../lib/positionUtils";
+import { useOrderPrices } from "../lib/order/hooks/useOrderPrices";
+import type { OrderLeg as UnifiedOrderLeg } from "../lib/order/types";
 import OrderTab from "../components/ticker-detail/OrderTab";
 import ModifyOrderModal from "../components/ModifyOrderModal";
 import type { OpenOrder, PortfolioData, PortfolioPosition } from "../lib/types";
@@ -138,6 +146,7 @@ function makePortfolio(position: PortfolioPosition): PortfolioData {
 
 function makeBagOrder(
   legs: { action: "BUY" | "SELL"; strike: number; right: "C" | "P" }[],
+  limitPrice: number | null = null,
 ): OpenOrder {
   return {
     orderId: 1,
@@ -147,7 +156,7 @@ function makeBagOrder(
     orderType: "LMT",
     tif: "DAY",
     totalQuantity: 1,
-    limitPrice: null,
+    limitPrice,
     auxPrice: null,
     contract: {
       symbol: TICKER,
@@ -352,5 +361,182 @@ describe("natural quote — one implementation", () => {
       ]),
       CREDIT_QUOTE,
     );
+  });
+});
+
+/* ─── useOrderPrices (unified order system hook) ─── */
+
+function toUnifiedLegs(legs: OrderLeg[]): UnifiedOrderLeg[] {
+  return legs.map((l, i) => ({
+    id: `u${i}`,
+    action: l.action,
+    direction: l.action === "BUY" ? "LONG" : "SHORT",
+    strike: l.strike,
+    type: l.right === "C" ? "Call" : "Put",
+    expiry: "2026-06-19",
+    quantity: 1,
+  }));
+}
+
+describe("useOrderPrices — same natural quote", () => {
+  it("combo debit quote is signed and identical for BUY/SELL envelopes", () => {
+    for (const action of ["BUY", "SELL"] as const) {
+      const { result } = renderHook(() =>
+        useOrderPrices({
+          ticker: TICKER,
+          type: "combo",
+          action,
+          legs: toUnifiedLegs(DEBIT_ORDER_LEGS),
+          prices: PRICES,
+        }),
+      );
+      expect(result.current.available).toBe(true);
+      assertQuote(result.current, DEBIT_QUOTE);
+    }
+  });
+
+  it("combo credit quote stays negative for BUY/SELL envelopes", () => {
+    for (const action of ["BUY", "SELL"] as const) {
+      const { result } = renderHook(() =>
+        useOrderPrices({
+          ticker: TICKER,
+          type: "combo",
+          action,
+          legs: toUnifiedLegs(CREDIT_ORDER_LEGS),
+          prices: PRICES,
+        }),
+      );
+      expect(result.current.available).toBe(true);
+      assertQuote(result.current, CREDIT_QUOTE);
+    }
+  });
+
+  it("unavailable when a leg quote is missing", () => {
+    const { result } = renderHook(() =>
+      useOrderPrices({
+        ticker: TICKER,
+        type: "combo",
+        action: "BUY",
+        legs: toUnifiedLegs(DEBIT_ORDER_LEGS),
+        prices: {},
+      }),
+    );
+    expect(result.current.available).toBe(false);
+    expect(result.current.bid).toBeNull();
+  });
+});
+
+/* ─── ModifyOrderModal signed limit price ─── */
+
+function makeSingleLegOrder(): OpenOrder {
+  return {
+    orderId: 2,
+    permId: 2002,
+    symbol: TICKER,
+    action: "BUY",
+    orderType: "LMT",
+    tif: "DAY",
+    totalQuantity: 1,
+    limitPrice: 5.0,
+    auxPrice: null,
+    contract: {
+      symbol: TICKER,
+      secType: "OPT",
+      strike: 200,
+      right: "C",
+      expiry: EXPIRY,
+      comboLegs: [],
+    },
+  } as unknown as OpenOrder;
+}
+
+describe("ModifyOrderModal — signed limit price", () => {
+  it("credit vertical: negative limit passes validation and submits signed newPrice", async () => {
+    const onConfirm = vi.fn();
+    const { getByLabelText, getByRole } = render(
+      <ModifyOrderModal
+        order={makeBagOrder(
+          [
+            { action: "SELL", strike: 200, right: "P" },
+            { action: "BUY", strike: 190, right: "P" },
+          ],
+          -2.45,
+        )}
+        loading={false}
+        prices={PRICES}
+        onConfirm={onConfirm}
+        onClose={() => {}}
+      />,
+    );
+
+    const priceInput = getByLabelText(
+      /New Net Price|New Limit Price/i,
+    ) as HTMLInputElement;
+    fireEvent.change(priceInput, { target: { value: "-2.50" } });
+
+    const submit = getByRole("button", {
+      name: /Modify Order/i,
+    }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(false);
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(onConfirm).toHaveBeenCalled());
+    const req = onConfirm.mock.calls[0][0];
+    expect(req.replaceOrder).toBeUndefined();
+    expect(req.newPrice).toBeCloseTo(-2.5, 4);
+  });
+
+  it("BAG order: zero limit is rejected", () => {
+    const onConfirm = vi.fn();
+    const { getByLabelText, getByRole } = render(
+      <ModifyOrderModal
+        order={makeBagOrder(
+          [
+            { action: "SELL", strike: 200, right: "P" },
+            { action: "BUY", strike: 190, right: "P" },
+          ],
+          -2.45,
+        )}
+        loading={false}
+        prices={PRICES}
+        onConfirm={onConfirm}
+        onClose={() => {}}
+      />,
+    );
+
+    fireEvent.change(
+      getByLabelText(/New Net Price|New Limit Price/i) as HTMLInputElement,
+      { target: { value: "0" } },
+    );
+    const submit = getByRole("button", {
+      name: /Modify Order/i,
+    }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    fireEvent.click(submit);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("single-leg order: negative limit is still rejected", () => {
+    const onConfirm = vi.fn();
+    const { getByLabelText, getByRole } = render(
+      <ModifyOrderModal
+        order={makeSingleLegOrder()}
+        loading={false}
+        prices={PRICES}
+        onConfirm={onConfirm}
+        onClose={() => {}}
+      />,
+    );
+
+    fireEvent.change(
+      getByLabelText(/New Net Price|New Limit Price/i) as HTMLInputElement,
+      { target: { value: "-2.50" } },
+    );
+    const submit = getByRole("button", {
+      name: /Modify Order/i,
+    }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    fireEvent.click(submit);
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 });

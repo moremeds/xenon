@@ -280,11 +280,16 @@ export default function ModifyOrderModal({
   const currentQuantity = order.totalQuantity;
   const parsedNew = parseFloat(newPrice);
   const parsedQuantity = Number.parseInt(newQuantity, 10);
-  const isValidPrice = !Number.isNaN(parsedNew) && parsedNew > 0;
+  const isBagOrder = order.contract.secType === "BAG";
+  // BAG net limits are signed — a credit combo carries a NEGATIVE limit
+  // (IB convention: negative limit = net credit). Combos reject only
+  // NaN/non-finite/zero; single-leg and stock limits stay strictly > 0.
+  const isValidPrice =
+    Number.isFinite(parsedNew) &&
+    (isBagOrder ? parsedNew !== 0 : parsedNew > 0);
   const isValidQuantity =
     Number.isInteger(parsedQuantity) && parsedQuantity > 0;
-  const isComboOrder =
-    order.contract.secType === "BAG" && editableLegs.length >= 2;
+  const isComboOrder = isBagOrder && editableLegs.length >= 2;
   const normalizedLegs = normalizeComboLegs(editableLegs);
   const originalLegsSnapshot = JSON.stringify(buildEditableComboLegs(order));
   const currentLegsSnapshot = JSON.stringify(editableLegs);
@@ -440,7 +445,7 @@ export default function ModifyOrderModal({
                       className="modify-price-input"
                       type="number"
                       step="0.01"
-                      min="0.01"
+                      min={isBagOrder ? undefined : "0.01"}
                       value={newPrice}
                       onChange={(e) => setNewPrice(e.target.value)}
                       autoFocus

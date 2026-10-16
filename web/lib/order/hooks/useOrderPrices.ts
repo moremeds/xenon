@@ -10,6 +10,11 @@
 import { useMemo } from "react";
 import type { PriceData } from "@/lib/pricesProtocol";
 import { optionKey } from "@/lib/pricesProtocol";
+import {
+  computeNetOptionQuote,
+  normalizeComboOrder,
+  type OrderLeg as ChainOrderLeg,
+} from "@/lib/optionsChainUtils";
 import type { OrderAction, OrderLeg, OrderPrices } from "../types";
 
 interface UseOrderPricesOptions {
@@ -29,14 +34,13 @@ interface UseOrderPricesOptions {
 /**
  * Compute order prices for any order type.
  *
- * For combos, uses natural market calculation:
- *   - BUY combo: pay ASK on BUY legs, receive BID on SELL legs
- *   - SELL combo: receive BID on BUY legs, pay ASK on SELL legs
+ * For combos, delegates to computeNetOptionQuote — the single signed
+ * natural-quote implementation (cross-fields; debit positive, credit
+ * negative; independent of the order's BUY/SELL envelope action).
  */
 export function useOrderPrices({
   ticker,
   type,
-  action,
   legs,
   prices,
   option,
@@ -84,69 +88,42 @@ export function useOrderPrices({
       };
     }
 
-    // Combo/spread
+    // Combo/spread — signed natural quote via the single implementation
+    // (computeNetOptionQuote). The quote describes the structure itself
+    // (debit positive / credit negative) and does NOT flip with the
+    // envelope action: IB reverses leg actions on a SELL BAG, so the
+    // market bid/ask/mid is action-independent.
     if (type === "combo" && legs && legs.length > 0) {
-      let netBid = 0;
-      let netAsk = 0;
-      let allAvailable = true;
-
-      for (const leg of legs) {
-        const key = optionKey({
-          symbol: ticker,
-          expiry: leg.expiry.replace(/-/g, ""),
-          strike: leg.strike,
-          right: leg.type === "Call" ? "C" : "P",
-        });
-        const pd = prices[key];
-        if (!pd || pd.bid == null || pd.ask == null) {
-          allAvailable = false;
-          break;
-        }
-
-        // Natural market calculation:
-        // For BUY combo: BUY legs pay ask, SELL legs receive bid
-        // For SELL combo: BUY legs receive bid, SELL legs pay ask
-        // But since we're computing the combo's BID/ASK (not the execution direction),
-        // we compute based on leg direction:
-        //   LONG legs contribute positively
-        //   SHORT legs contribute negatively
-        // Then we apply action reversal to get effective direction
-
-        const effectivelySelling = (action === "SELL") === (leg.direction === "LONG");
-
-        if (effectivelySelling) {
-          // Selling this leg: receive BID
-          netBid += pd.bid;
-          netAsk += pd.ask;
-        } else {
-          // Buying this leg: pay ASK
-          netBid -= pd.ask;
-          netAsk -= pd.bid;
-        }
-      }
-
-      if (!allAvailable) {
+      const orderLegs: ChainOrderLeg[] = legs.map((leg) => ({
+        id: leg.id,
+        action: leg.direction === "LONG" ? "BUY" : "SELL",
+        right: leg.type === "Call" ? "C" : "P",
+        strike: leg.strike,
+        expiry: leg.expiry.replace(/-/g, ""),
+        quantity: Math.max(1, Math.trunc(leg.quantity ?? 1)),
+        limitPrice: null,
+      }));
+      const quote = computeNetOptionQuote(
+        normalizeComboOrder(orderLegs).legs,
+        prices,
+        ticker,
+      );
+      if (quote.bid == null || quote.ask == null || quote.mid == null) {
         return { bid: null, mid: null, ask: null, spread: null, spreadPct: null, available: false };
       }
 
-      const absBid = Math.abs(netBid);
-      const absAsk = Math.abs(netAsk);
-      const bid = Math.min(absBid, absAsk);
-      const ask = Math.max(absBid, absAsk);
-      const mid = (bid + ask) / 2;
-      const spread = ask - bid;
-
+      const spread = quote.ask - quote.bid;
       return {
-        bid,
-        mid,
-        ask,
+        bid: quote.bid,
+        mid: quote.mid,
+        ask: quote.ask,
         spread,
-        spreadPct: mid > 0 ? (spread / mid) * 100 : null,
+        spreadPct: quote.mid > 0 ? (spread / quote.mid) * 100 : null,
         available: true,
       };
     }
 
     // Default: no prices available
     return { bid: null, mid: null, ask: null, spread: null, spreadPct: null, available: false };
-  }, [ticker, type, action, legs, prices, option]);
+  }, [ticker, type, legs, prices, option]);
 }
