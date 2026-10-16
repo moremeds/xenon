@@ -11,8 +11,9 @@ export function PreviewSection() {
           Three surfaces. One coherent operating picture.
         </h2>
         <p className="mt-5 text-base leading-7 text-secondary">
-          Flow, performance, and structure read like related instruments inside the
-          same terminal — a unified system, not a collection of disconnected dashboards.
+          Portfolio, orders, and attribution read like related instruments inside
+          the same terminal — one operating picture, not a set of disconnected
+          dashboards.
         </p>
       </div>
       <div className="mt-8 grid gap-4 xl:grid-cols-3">

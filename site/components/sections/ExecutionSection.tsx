@@ -7,12 +7,11 @@ export function ExecutionSection() {
       <div className="max-w-3xl">
         <TelemetryLabel tone="core">Execution Rail</TelemetryLabel>
         <h2 className="mt-4 font-display text-4xl font-semibold text-primary md:text-5xl">
-          Signal is only the start. Execution has to survive contact with risk.
+          From snapshot to staged order to attributed fill. One path.
         </h2>
         <p className="mt-5 text-base leading-7 text-secondary">
-          Xenon connects candidate selection to structure design, bankroll sizing,
-          execution, and post-trade measurement. The message is simple: no hidden
-          break between conviction and capital deployment.
+          Xenon syncs account state, stages orders against live quotes, enforces
+          coverage, routes to IB, and reconciles every fill back to the book.
         </p>
       </div>
       <div className="mt-8">

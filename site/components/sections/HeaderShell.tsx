@@ -35,10 +35,10 @@ export function HeaderShell() {
             <CommandChip command="Inspect Source" />
           </a>
           <a
-            href="#strategies"
+            href="#structures"
             className="inline-flex items-center border border-accent bg-accent px-4 py-2 font-mono text-[11px] uppercase tracking-[0.18em] text-canvas transition-colors hover:bg-signal-strong"
           >
-            Inspect Strategies
+            Inspect Catalog
           </a>
         </div>
       </div>

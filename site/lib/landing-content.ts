@@ -5,15 +5,15 @@ export type ProofItem = {
   tone?: "core" | "strong" | "neutral";
 };
 
-export type StrategyItem = {
+export type StructureItem = {
   name: string;
   description: string;
-  edge: string;
-  instruments: string;
-  holdPeriod: string;
-  winRate: string;
-  riskType: "Defined Risk" | "Undefined Risk" | "Overlay";
-  command: string;
+  legs: string;
+  category: string;
+  guard: string;
+  bias: string;
+  decision: "Allowed" | "Blocked" | "Guard Gap";
+  slug: string;
   tone?: "core" | "strong" | "warn" | "violet";
 };
 
@@ -36,7 +36,7 @@ export type AuditItem = {
 };
 
 export const headerLinks = [
-  { href: "#strategies", label: "Strategies" },
+  { href: "#structures", label: "Structures" },
   { href: "#execution", label: "Execution" },
   { href: "#surfaces", label: "Surfaces" },
   { href: "#methodology", label: "Methodology" },
@@ -44,51 +44,38 @@ export const headerLinks = [
 
 export const proofItems: ProofItem[] = [
   {
-    label: "Active Strategies",
-    value: "6",
-    detail: "Defined, undefined, and overlay structures surfaced in one terminal.",
+    label: "Brokers",
+    value: "IB + Futu",
+    detail: "Live Interactive Brokers execution; read-only Futu position snapshot.",
     tone: "core",
   },
   {
-    label: "Option Structures",
+    label: "Structure Catalog",
     value: "58",
-    detail: "Catalogued structures with guard decisions, risk profiles, and P&L attribution labels.",
+    detail: "Catalogued option structures with guard decisions and P&L attribution labels.",
     tone: "strong",
   },
   {
-    label: "Execution Path",
-    value: "5-Step",
-    detail: "Evaluate, structure, Kelly, execute, and track with the same operator context.",
+    label: "Guard Layers",
+    value: "3",
+    detail: "UI pre-flight, API gate, and post-sync audit enforce one naked-short rule.",
     tone: "strong",
   },
   {
-    label: "Explainability",
-    value: "Full",
-    detail: "Metrics, methodology, and signal states stay inspectable instead of hidden.",
+    label: "Store",
+    value: "Postgres",
+    detail: "Positions, orders, fills, and journal read from the database, not files.",
     tone: "neutral",
   },
   {
-    label: "Control Surface",
-    value: "Open",
-    detail: "Source-visible workflows for traders who do not outsource conviction.",
+    label: "Signal Feed",
+    value: "None",
+    detail: "No scanners and no discovery layer. Bring your own thesis.",
     tone: "core",
   },
 ];
 
-export const heroCommandItems = [
-  { label: "Dark Pool Flow", state: "Defined", command: "evaluate AAPL" },
-  { label: "LEAP IV Mispricing", state: "Defined", command: "leap-scan NVDA" },
-  { label: "Crash Risk Index", state: "Overlay", command: "cri-scan" },
-];
-
-export const heroMetrics = [
-  { label: "COR1M", value: "28.97", detail: "Implied correlation" },
-  { label: "VIX", value: "22.77", detail: "Volatility state" },
-  { label: "Kelly Cap", value: "7.5%", detail: "Sizing discipline" },
-  { label: "Signal Stack", value: "6", detail: "Deployable modules" },
-];
-
-export type ModuleTab = "flow" | "performance" | "structure" | "execution";
+export type ModuleTab = "portfolio" | "orders" | "attribution" | "guard";
 
 export type ModuleContent = {
   metrics: Array<{ label: string; value: string; detail: string }>;
@@ -98,240 +85,245 @@ export type ModuleContent = {
 };
 
 export const moduleContents: Record<ModuleTab, ModuleContent> = {
-  flow: {
+  portfolio: {
     metrics: [
-      { label: "COR1M", value: "28.97", detail: "Implied correlation" },
-      { label: "VIX", value: "22.77", detail: "Volatility state" },
-      { label: "Kelly Cap", value: "7.5%", detail: "Sizing discipline" },
-      { label: "Signal Stack", value: "6", detail: "Deployable modules" },
+      { label: "Primary Broker", value: "IB", detail: "Live quotes + positions" },
+      { label: "Second Tab", value: "Futu", detail: "Read-only snapshot" },
+      { label: "State Store", value: "Postgres", detail: "Account snapshots" },
+      { label: "Scope", value: "Account", detail: "Broker + env keyed" },
     ],
     commands: [
-      { label: "Dark Pool Flow", state: "Defined", command: "evaluate AAPL" },
-      { label: "LEAP IV Mispricing", state: "Defined", command: "leap-scan NVDA" },
-      { label: "Crash Risk Index", state: "Overlay", command: "cri-scan" },
+      { label: "Position Sync", state: "IB Source", command: "xenon-ib-sync" },
+      { label: "Futu Snapshot", state: "Observe Only", command: "xenon-futu-sync" },
+      { label: "NAV Refresh", state: "Flex Query", command: "xenon-nav-flex-refresh" },
     ],
-    commandLabel: "Command Surface",
-    commandPill: "Operator Visible",
+    commandLabel: "Sync Surface",
+    commandPill: "Account Scoped",
   },
-  performance: {
+  orders: {
     metrics: [
-      { label: "Sharpe", value: "1.84", detail: "Risk-adjusted return" },
-      { label: "Sortino", value: "2.61", detail: "Downside deviation" },
-      { label: "Max DD", value: "-8.2%", detail: "Peak drawdown" },
-      { label: "Win Rate", value: "62%", detail: "Closed positions" },
-    ],
-    commands: [
-      { label: "YTD Equity Curve", state: "Tracked", command: "portfolio" },
-      { label: "Trade Journal", state: "Append-only", command: "journal" },
-      { label: "Fill Blotter", state: "Live", command: "blotter" },
-    ],
-    commandLabel: "Performance Surface",
-    commandPill: "Net Liq Anchored",
-  },
-  structure: {
-    metrics: [
-      { label: "CRI", value: "34.2", detail: "Crash risk index" },
-      { label: "VVIX", value: "96.4", detail: "Vol-of-vol state" },
-      { label: "RVOL", value: "18.7%", detail: "Realized volatility" },
-      { label: "Regime", value: "Calm", detail: "Current classification" },
-    ],
-    commands: [
-      { label: "Regime Monitor", state: "Continuous", command: "cri-scan" },
-      { label: "Vol-Credit Gap", state: "Overlay", command: "vcg" },
-      { label: "GARCH Spreads", state: "Cross-asset", command: "garch-convergence" },
-    ],
-    commandLabel: "Structure Surface",
-    commandPill: "Regime Aware",
-  },
-  execution: {
-    metrics: [
-      { label: "Gates", value: "4", detail: "Sequential filters" },
-      { label: "Fill Path", value: "IB", detail: "Direct routing" },
-      { label: "Audit", value: "Full", detail: "Post-trade log" },
+      { label: "Routing", value: "IB", detail: "Direct order path" },
+      { label: "Combos", value: "BAG", detail: "Atomic multi-leg" },
+      { label: "Lifecycle", value: "Tracked", detail: "Submission to fill" },
       { label: "Guard", value: "Active", detail: "Naked short block" },
     ],
     commands: [
-      { label: "Order Placement", state: "Operator-led", command: "execute" },
-      { label: "Position Sync", state: "IB Source", command: "sync" },
-      { label: "Exit Service", state: "Pending", command: "exit-orders" },
+      { label: "Place Order", state: "Guarded", command: "xenon-ib-place-order" },
+      { label: "Cancel / Modify", state: "Owner Client", command: "xenon-ib-order-manage" },
+      { label: "Open Orders", state: "Snapshot", command: "xenon-ib-orders" },
     ],
-    commandLabel: "Execution Surface",
-    commandPill: "Gate Protected",
+    commandLabel: "Order Surface",
+    commandPill: "Guard Enforced",
+  },
+  attribution: {
+    metrics: [
+      { label: "Attribution", value: "Greeks", detail: "Per-position split" },
+      { label: "Journal", value: "Append", detail: "Postgres rows" },
+      { label: "Blotter", value: "Flex", detail: "Fill audit overlay" },
+      { label: "Reports", value: "CLI", detail: "Regenerable output" },
+    ],
+    commands: [
+      { label: "Performance", state: "Report", command: "xenon-portfolio-perf" },
+      { label: "Attribution", state: "Greeks", command: "xenon-portfolio-attrib" },
+      { label: "Fill Audit", state: "Flex Query", command: "xenon-blotter-history" },
+    ],
+    commandLabel: "Attribution Surface",
+    commandPill: "Postgres Backed",
+  },
+  guard: {
+    metrics: [
+      { label: "Layers", value: "3", detail: "UI, API, audit" },
+      { label: "Naked Calls", value: "Blocked", detail: "No exceptions" },
+      { label: "Short Puts", value: "Secured", detail: "Cash-backed only" },
+      { label: "Cover Ratio", value: "1:100", detail: "Contract to shares" },
+    ],
+    commands: [
+      { label: "Pre-Trade Guard", state: "UI + API", command: "nakedShortGuard" },
+      { label: "Post-Sync Audit", state: "Enforced", command: "xenon-naked-short-audit" },
+      { label: "Structure Rules", state: "58 Entries", command: "options-structures" },
+    ],
+    commandLabel: "Guard Surface",
+    commandPill: "Fail Closed",
   },
 };
 
-export const strategies: StrategyItem[] = [
+export const structures: StructureItem[] = [
   {
-    name: "Dark Pool Flow",
+    name: "Covered Call",
     description:
-      "Institutional flow detection for passive accumulation or distribution that has not yet expressed through the lit market.",
-    edge: "Passive buying and selling in dark pools often precedes the visible price move by days to weeks.",
-    instruments:
-      "ATM and OTM calls or puts with 2 to 6 week expiry, often expressed through verticals.",
-    holdPeriod: "2 to 6 weeks",
-    winRate: "20 to 40%",
-    riskType: "Defined Risk",
-    command: "scan -> evaluate [TICKER]",
+      "Short call premium against a long stock position. The terminal verifies 100 held shares per contract before the order can be staged.",
+    legs: "Long shares + short OTM call",
+    category: "Covered",
+    guard: "Allow — shares cover calls",
+    bias: "Neutral",
+    decision: "Allowed",
+    slug: "covered-call",
     tone: "core",
   },
   {
-    name: "LEAP IV Mispricing",
+    name: "Short Put (Cash-Secured)",
     description:
-      "Long-dated volatility dislocations where realized volatility exceeds LEAP IV and the market has not repriced the option yet.",
-    edge: "HV20 and HV60 exceed LEAP IV by at least 15 points while IV rank stays compressed.",
-    instruments: "6 to 18 month LEAP calls, usually 30 to 50 delta.",
-    holdPeriod: "Weeks to 9 months",
-    winRate: "40 to 55%",
-    riskType: "Defined Risk",
-    command: "leap-scan [TICKERS]",
+      "Single-leg short put backed by reserved cash. Allowed by policy and sized against the full strike obligation.",
+    legs: "Short put (ATM or OTM)",
+    category: "Single leg",
+    guard: "Allow — cash-secured",
+    bias: "Bullish",
+    decision: "Allowed",
+    slug: "short-put-cash-secured",
     tone: "strong",
   },
   {
-    name: "GARCH Convergence Spreads",
+    name: "Bull Call Spread",
     description:
-      "Cross-asset vega arbitrage when correlated assets reprice implied volatility at different speeds after a catalyst.",
-    edge: "Volatility lag between related assets creates measurable divergence from the 60-day mean.",
-    instruments: "30 to 40 delta calls on the lagger, usually 3 to 6 month expiry.",
-    holdPeriod: "2 to 8 weeks",
-    winRate: "50 to 65%",
-    riskType: "Defined Risk",
-    command: "garch-convergence [TICKERS]",
+      "Long call paired with a higher-strike short call at the same expiry. The long leg covers the short; risk is the debit paid.",
+    legs: "Long call + short call, higher strike",
+    category: "Vertical",
+    guard: "Allow — defined risk",
+    bias: "Bullish",
+    decision: "Allowed",
+    slug: "bull-call-spread",
     tone: "core",
   },
   {
-    name: "Risk Reversal",
+    name: "Long Iron Condor",
     description:
-      "Skew exploitation that sells the rich side of the surface to fund directional convexity on the cheap side.",
-    edge: "OTM puts often trade at materially higher implied volatility than equivalent-delta OTM calls.",
-    instruments: "Sell OTM put plus buy OTM call, generally 2 to 8 week expiry.",
-    holdPeriod: "2 to 8 weeks",
-    winRate: "30 to 50%",
-    riskType: "Undefined Risk",
-    command: "risk-reversal [TICKER]",
+      "Two out-of-the-money credit verticals sharing one expiry. All four legs stay atomic inside a single BAG order.",
+    legs: "Put credit spread + call credit spread",
+    category: "Multi-leg",
+    guard: "Allow — defined risk",
+    bias: "Range",
+    decision: "Allowed",
+    slug: "long-iron-condor",
+    tone: "strong",
+  },
+  {
+    name: "Short Call (Naked)",
+    description:
+      "An uncovered short call carries unlimited upside loss. Xenon rejects it at order entry and again in the post-sync audit.",
+    legs: "Short call, no cover",
+    category: "Single leg",
+    guard: "Block — uncovered short",
+    bias: "Bearish",
+    decision: "Blocked",
+    slug: "short-call-naked",
     tone: "warn",
   },
   {
-    name: "Volatility-Credit Gap",
+    name: "Seagull Spread",
     description:
-      "Portfolio hedge overlay when volatility reprices faster than cash credit and the gap becomes statistically dislocated.",
-    edge: "VVIX > 110 with stable credit plus a >2 sigma residual exposes artificial calm in HYG and JNK.",
-    instruments: "Short-dated HYG puts or bear put spreads.",
-    holdPeriod: "1 to 5 days",
-    winRate: "Overlay",
-    riskType: "Overlay",
-    command: "vcg",
-    tone: "violet",
-  },
-  {
-    name: "Crash Risk Index",
-    description:
-      "CTA deleveraging detector built from volatility, implied correlation, and momentum stress signals.",
-    edge: "VIX, VVIX, COR1M, and momentum convergence often precede forced systematic selling over 3 to 5 days.",
-    instruments: "SPY puts, bear put spreads, and tail hedges.",
-    holdPeriod: "3 to 5 days",
-    winRate: "Overlay",
-    riskType: "Overlay",
-    command: "cri-scan",
+      "A documented guard gap: the short put is not covered by the long call hedge. The catalog flags the gap instead of pretending coverage.",
+    legs: "Long call + short call + short put",
+    category: "Multi-leg",
+    guard: "Gap — flagged in catalog",
+    bias: "Defined-gap",
+    decision: "Guard Gap",
+    slug: "seagull-spread",
     tone: "violet",
   },
 ];
 
 export const executionItems: ExecutionItem[] = [
   {
-    step: "Evaluate",
+    step: "Sync",
     summary:
-      "Every candidate is forced through a structured gate sequence instead of discretionary skipping.",
-    metadata: "Ticker, seasonality, analysts, news & catalysts, dark pool, options, OI",
+      "IB positions and account state land in Postgres; Futu snapshots stay read-only on their own account tab.",
+    metadata: "ib_sync, account scope, futu observe-only",
   },
   {
-    step: "Structure",
+    step: "Stage",
     summary:
-      "Directional view is converted into a defined or explicitly managed options structure with convexity in mind. 58 catalogued structures enforce consistent classification, risk labeling, and P&L attribution.",
-    metadata: "Expiry, delta, spread width, max loss, target R:R",
+      "Orders are built against live IB quotes — single legs or multi-leg BAG combos with explicit leg actions and ratios.",
+    metadata: "Chains, quotes, combo legs, limit price",
   },
   {
-    step: "Kelly",
+    step: "Guard",
     summary:
-      "Position size is bounded by bankroll logic so conviction does not outrun survivability.",
-    metadata: "Kelly sizing, caps, deployed capital, portfolio fit",
+      "Coverage is verified before routing: no uncovered short calls, no stock shorts, cash-secured puts only.",
+    metadata: "1 contract = 100 shares, fail closed",
   },
   {
     step: "Execute",
     summary:
-      "Execution remains visible and operator-led. Naked short protection blocks uncovered calls and stock shorts before the order reaches the exchange.",
-    metadata: "IB quotes, live pricing, fill path, naked short guard, trade log",
+      "Placement, cancel, and modify run through IB on the owning client id; fills mirror back to Postgres.",
+    metadata: "IB routing, fills, lifecycle states",
   },
   {
-    step: "Track",
+    step: "Attribute",
     summary:
-      "Performance, regime, and exposure stay linked after entry so the thesis can be audited under stress.",
-    metadata: "Portfolio state, YTD metrics, flow drift, regime overlay",
+      "Positions keep structure classification; P&L and Greeks decompose per position so the book explains itself.",
+    metadata: "Greeks attribution, journal, Flex audit",
   },
 ];
 
 export const surfaceItems: SurfaceItem[] = [
   {
-    name: "Xenon Flow",
-    headline: "Detect non-random positioning before the lit move becomes obvious.",
+    name: "Xenon Portfolio",
+    headline: "Positions, exposure, and account state read as one book.",
     metrics: [
-      { label: "Signal Classes", value: "3" },
-      { label: "Workflow", value: "Scan -> Evaluate" },
+      { label: "Sources", value: "IB + Futu" },
+      { label: "Store", value: "Postgres" },
     ],
     details: [
-      "Dark pool flow scored against sustained direction and buy ratio.",
-      "Options flow, OI changes, and news catalysts brought into the same decision surface.",
-      "Material events like buybacks and M&A surface alongside flow to explain institutional patterns.",
-      "Candidates ranked for action instead of dumped into a watchlist graveyard.",
+      "Live IB positions with quotes, chains, and Greeks on the account scope.",
+      "Futu OpenD positions render on a separate read-only tab — no orders, no fills.",
+      "Every row carries broker, environment, and account; paper and live never blend.",
+      "Recognized multi-leg structures stay classified instead of flattening into legs.",
     ],
   },
   {
-    name: "Xenon Performance",
-    headline: "Reconstruct the YTD equity curve and tie it back to current net liquidation.",
+    name: "Xenon Orders",
+    headline: "Placement, cancel, and modify run one guarded path to the broker.",
     metrics: [
-      { label: "Metrics", value: "Institutional" },
-      { label: "Anchor", value: "Net Liq" },
+      { label: "Routing", value: "IB" },
+      { label: "Guard", value: "3 Layers" },
     ],
     details: [
-      "Sharpe, Sortino, beta, drawdown, VaR, and benchmark-relative context.",
-      "Every core card exposes calculation logic in place.",
-      "Warnings surface when reconstruction assumptions or data gaps matter.",
+      "Single-leg and multi-leg BAG orders with explicit leg actions and ratios.",
+      "Cancel and modify reconnect on the placing client id.",
+      "The naked-short rule applies at the UI, the API gate, and the post-sync audit.",
+      "Order state is tracked through a defined lifecycle, including unknown outcomes.",
     ],
   },
   {
-    name: "Xenon Structure",
-    headline: "Track regime pressure, implied correlation, and portfolio-level stress context.",
+    name: "Xenon Attribution",
+    headline: "Every fill reconciles back to P&L, Greeks, and a journal entry.",
     metrics: [
-      { label: "COR1M", value: "Integrated" },
-      { label: "CTA Model", value: "Visible" },
+      { label: "Attribution", value: "Greeks" },
+      { label: "Journal", value: "Append-only" },
     ],
     details: [
-      "CRI overlays VIX, VVIX, COR1M, and momentum into a single stress lens.",
-      "Crash conditions are explicit rather than implied through vague sentiment.",
-      "Signal quality improves when regime context stays attached to execution.",
+      "Daily P&L and Greeks decompose per position and per structure.",
+      "Orders, fills, and journal entries persist in Postgres — the UI only reads.",
+      "IB Flex queries audit historical fills against the blotter.",
     ],
   },
 ];
 
 export const auditItems: AuditItem[] = [
   {
-    title: "Methodology Exposed",
-    detail: "Signal logic, performance formulas, and regime thresholds stay inspectable.",
+    title: "Naked-Short Guard",
+    detail:
+      "Coverage is checked before the broker sees the order and audited after every sync. Uncovered short calls are rejected, not flagged.",
   },
   {
-    title: "Source Transparency",
-    detail: "Data provenance remains visible so confidence and recency can be judged directly.",
-  },
-  {
-    title: "Operator Control",
-    detail: "The terminal helps the trader reason and execute. It does not ask for blind trust.",
-  },
-  {
-    title: "Open Architecture",
-    detail: "Workflows are auditable, extensible, and built for users who care how the system thinks.",
+    title: "Account Scoping",
+    detail:
+      "Every position, order, and fill carries broker, environment, and account. Paper and live data never blend.",
   },
   {
     title: "Structure Catalog",
-    detail: "58 options structures catalogued with guard decisions, risk profiles, bias labels, and P&L attribution formulas. Reference used by order entry, audit scripts, and agent evaluation.",
+    detail:
+      "58 catalogued option structures with guard decisions, risk profiles, and P&L attribution labels — including three documented guard gaps.",
+  },
+  {
+    title: "Postgres Truth",
+    detail:
+      "Portfolio, orders, fills, and journal read from the database. No silent file fallbacks on runtime paths.",
+  },
+  {
+    title: "Open Architecture",
+    detail:
+      "Source-visible and operator-controlled. The terminal explains its state; it does not ask for blind trust.",
   },
 ];
 
@@ -339,7 +331,7 @@ export const footerColumns = [
   {
     title: "Terminal",
     links: [
-      { href: "#strategies", label: "Strategies" },
+      { href: "#structures", label: "Structures" },
       { href: "#execution", label: "Execution" },
       { href: "#surfaces", label: "Surfaces" },
     ],
@@ -349,7 +341,10 @@ export const footerColumns = [
     links: [
       { href: "#methodology", label: "Methodology" },
       { href: "https://github.com/joemccann/xenon", label: "Source" },
-      { href: "https://github.com/joemccann/xenon/blob/main/docs/trading/strategies.md", label: "Registry" },
+      {
+        href: "https://github.com/joemccann/xenon/blob/main/docs/trading/options-structures.md",
+        label: "Catalog",
+      },
     ],
   },
 ];

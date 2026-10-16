@@ -11,14 +11,14 @@ import { TerminalNavItem } from "@/components/molecules/TerminalNavItem";
 import { moduleContents, type ModuleTab } from "@/lib/landing-content";
 
 const tabs: Array<{ id: ModuleTab; label: string }> = [
-  { id: "flow", label: "Flow" },
-  { id: "performance", label: "Performance" },
-  { id: "structure", label: "Structure" },
-  { id: "execution", label: "Execution" },
+  { id: "portfolio", label: "Portfolio" },
+  { id: "orders", label: "Orders" },
+  { id: "attribution", label: "Attribution" },
+  { id: "guard", label: "Guard" },
 ];
 
 export function HeroTerminalPanel() {
-  const [activeTab, setActiveTab] = useState<ModuleTab>("flow");
+  const [activeTab, setActiveTab] = useState<ModuleTab>("portfolio");
   const [animKey, setAnimKey] = useState(0);
 
   const handleTabChange = useCallback((tab: ModuleTab) => {
@@ -36,12 +36,12 @@ export function HeroTerminalPanel() {
           <div>
             <TelemetryLabel tone="core">Xenon Terminal</TelemetryLabel>
             <h2 className="mt-3 font-sans text-2xl font-semibold text-primary">
-              Strategy state and execution path in one shell.
+              Account state and order path in one shell.
             </h2>
           </div>
           <div className="flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.16em] text-secondary">
             <StatusDot tone="strong" />
-            Signal Chain Nominal
+            Session Nominal
           </div>
         </div>
       </div>
@@ -101,9 +101,9 @@ export function HeroTerminalPanel() {
         <SourceRail
           items={[
             { label: "IB Gateway", value: "Connected", tone: "strong" },
-            { label: "Methodology", value: "Exposed", tone: "core" },
+            { label: "Store", value: "Postgres", tone: "core" },
             { label: "Execution", value: "Operator Led", tone: "core" },
-            { label: "Recency", value: "Session Scoped", tone: "warn" },
+            { label: "Futu", value: "Read-Only", tone: "warn" },
           ]}
         />
       </div>

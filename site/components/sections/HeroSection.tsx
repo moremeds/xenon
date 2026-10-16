@@ -9,21 +9,22 @@ export function HeroSection() {
     <section id="top" className="relative py-14 md:py-20">
       <div className="grid gap-10 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] xl:items-start">
         <div>
-          <TelemetryLabel tone="core">Institutional Terminal</TelemetryLabel>
+          <TelemetryLabel tone="core">Broker Terminal</TelemetryLabel>
           <h1 className="mt-5 max-w-[12ch] font-display text-5xl font-semibold leading-[1.02] text-primary md:text-7xl">
-            Strategies, execution, and state reconstruction in one instrument.
+            A broker terminal for options portfolio management.
           </h1>
           <p className="mt-6 max-w-2xl text-base leading-8 text-secondary md:text-lg">
-            Xenon is built for traders and investors who want deployable strategy
-            logic, explicit execution discipline, and explainable metrics without
-            outsourcing conviction to a black box.
+            Xenon connects to Interactive Brokers for quotes, orders, and fills,
+            with a read-only Futu position view. It enforces position-close
+            rules, classifies structures, and attributes P&L and Greeks. No
+            scanners, no signal feed — bring your own thesis.
           </p>
           <div className="mt-8 flex flex-wrap gap-3">
             <a
-              href="#strategies"
+              href="#structures"
               className="inline-flex items-center border border-accent bg-accent px-5 py-3 font-mono text-[11px] uppercase tracking-[0.18em] text-canvas transition-colors hover:bg-signal-strong"
             >
-              Inspect Strategy Matrix
+              Inspect Structure Catalog
             </a>
             <a
               href="#execution"

@@ -1,12 +1,12 @@
 import { expect, test } from "../../web/node_modules/@playwright/test";
 
 test.describe("site surface preview metrics", () => {
-  test("keeps the Xenon Performance metric value inside its own tile", async ({ page }) => {
+  test("keeps the Xenon Portfolio metric value inside its own tile", async ({ page }) => {
     await page.setViewportSize({ width: 2048, height: 900 });
     await page.goto("/");
 
     const performanceCard = page.locator("article").filter({
-      has: page.getByText("Xenon Performance"),
+      has: page.getByText("Xenon Portfolio"),
     }).first();
     await expect(performanceCard).toBeVisible();
 

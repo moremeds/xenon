@@ -2,22 +2,22 @@ import type { Metadata, Viewport } from "next";
 
 export const DEFAULT_SITE_URL = "";
 export const SITE_NAME = "Xenon Terminal";
-export const SITE_TITLE = "Xenon Terminal | Strategies, Execution, and Market Structure";
+export const SITE_TITLE = "Xenon Terminal | Options Portfolio Management";
 export const SITE_DESCRIPTION =
-  "Xenon Terminal is an institutional-grade instrument for strategy discovery, execution discipline, and market-structure reconstruction.";
+  "Xenon Terminal is a broker terminal for options portfolio management: live IB execution, read-only Futu positions, position-close enforcement, and P&L and Greeks attribution. No signal feed — bring your own thesis.";
 export const SITE_KEYWORDS = [
   "Xenon Terminal",
-  "market structure",
+  "options portfolio",
   "options trading",
-  "dark pool flow",
-  "crash risk index",
-  "volatility trading",
-  "portfolio analytics",
+  "Interactive Brokers",
+  "order execution",
+  "portfolio attribution",
+  "options Greeks",
   "trading terminal",
 ];
 export const SOCIAL_IMAGE_PATH = "/og-image.png";
 export const SOCIAL_IMAGE_ALT =
-  "Xenon Terminal marketing card showing strategy discovery, execution discipline, and market-structure reconstruction.";
+  "Xenon Terminal marketing card showing order execution, portfolio state, and P&L attribution.";
 export const APPLE_ICON_PATH = "/apple-touch-icon.png";
 export const GITHUB_URL = "https://github.com/joemccann/xenon";
 
@@ -29,7 +29,7 @@ export const siteUrl = normalizeSiteUrl(
   process.env.NEXT_PUBLIC_SITE_URL?.trim() || DEFAULT_SITE_URL,
 );
 
-export const metadataBase = new URL(siteUrl);
+export const metadataBase = siteUrl ? new URL(siteUrl) : undefined;
 
 export const siteMetadata: Metadata = {
   metadataBase,

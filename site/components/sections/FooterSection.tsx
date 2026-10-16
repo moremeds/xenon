@@ -15,8 +15,8 @@ export function FooterSection() {
             </span>
           </div>
           <p className="mt-4 max-w-xs text-sm leading-6 text-secondary">
-            Strategies, execution discipline, and state reconstruction for traders who
-            want the machine to stay inspectable.
+            Order execution, close-rule enforcement, and P&L attribution for
+            operators who want the system to stay inspectable.
           </p>
         </div>
         {footerColumns.map((column) => (

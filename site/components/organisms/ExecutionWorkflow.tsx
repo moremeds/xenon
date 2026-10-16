@@ -14,25 +14,25 @@ export function ExecutionWorkflow() {
       <aside className="border border-grid bg-panel px-5 py-5">
         <TelemetryLabel tone="core">Execution Guarantees</TelemetryLabel>
         <h3 className="mt-3 font-sans text-2xl font-semibold text-primary">
-          No hidden handoff between signal and risk.
+          No hidden handoff between order and book.
         </h3>
         <p className="mt-4 text-sm leading-6 text-secondary">
-          Xenon carries every position from candidate selection through structure
-          design, bankroll sizing, execution, and post-trade auditability. Nothing
-          falls through the gap between conviction and capital deployment.
+          Every position keeps its structure classification, every order carries
+          its account scope, and every fill lands in Postgres. State stays
+          inspectable end to end.
         </p>
         <div className="mt-6 flex flex-wrap gap-3">
-          <SignalPill tone="core">Source Linked</SignalPill>
-          <SignalPill tone="strong">Kelly Bounded</SignalPill>
-          <SignalPill tone="neutral">Portfolio Aware</SignalPill>
+          <SignalPill tone="core">Guard Enforced</SignalPill>
+          <SignalPill tone="strong">Account Scoped</SignalPill>
+          <SignalPill tone="neutral">Postgres Backed</SignalPill>
         </div>
         <div className="mt-6 border-t border-grid pt-5">
           <TelemetryLabel>Operator Notes</TelemetryLabel>
           <ul className="mt-4 space-y-3 text-sm leading-6 text-secondary">
-            <li>Every step exposes methodology, not just an output state.</li>
-            <li>Motion only explains progression and scan status.</li>
-            <li>Defined-risk structures remain first-class citizens.</li>
-            <li>Every short option must be fully covered. Naked calls, naked stock shorts, and partial coverage are blocked before the order reaches the exchange.</li>
+            <li>Every order carries broker, environment, and account scope.</li>
+            <li>Coverage is checked before the broker sees the order.</li>
+            <li>Short calls require long shares or same-expiry long calls; cash-secured puts are allowed.</li>
+            <li>Uncovered exposure is blocked at the UI, the API, and the post-sync audit.</li>
           </ul>
         </div>
       </aside>
