@@ -5,11 +5,11 @@ import json
 from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from xenon.api.guards import require_mode_verified
+from xenon.api.guards import ensure_order_allowed
 from xenon.execution.combo_wizard import session as combo_session
 
 router = APIRouter()
@@ -39,7 +39,10 @@ class ProtectRequest(BaseModel):
 
 
 @router.post("/wizard/plan")
-async def wizard_plan(body: PlanRequest) -> dict[str, Any]:
+async def wizard_plan(request: Request, body: PlanRequest) -> dict[str, Any]:
+    denial = ensure_order_allowed("wizard plan", request.app.state)
+    if denial is not None:
+        return denial
     try:
         return combo_session.plan_session(
             ticker=body.ticker,
@@ -58,8 +61,11 @@ async def wizard_sessions() -> dict[str, Any]:
 
 
 @router.post("/wizard/sessions")
-async def wizard_create_session(body: PlanRequest) -> dict[str, Any]:
-    return await wizard_plan(body)
+async def wizard_create_session(request: Request, body: PlanRequest) -> dict[str, Any]:
+    denial = ensure_order_allowed("wizard session create", request.app.state)
+    if denial is not None:
+        return denial
+    return await wizard_plan(request, body)
 
 
 @router.get("/wizard/sessions/{session_id}")
@@ -84,11 +90,11 @@ async def wizard_stream(session_id: str = Query(...)) -> Response:
     )
 
 
-@router.post(
-    "/wizard/sessions/{session_id}/submit",
-    dependencies=[Depends(require_mode_verified)],
-)
-async def wizard_submit(session_id: str, body: SubmitRequest) -> dict[str, Any]:
+@router.post("/wizard/sessions/{session_id}/submit")
+async def wizard_submit(session_id: str, request: Request, body: SubmitRequest) -> dict[str, Any]:
+    denial = ensure_order_allowed("wizard submit", request.app.state)
+    if denial is not None:
+        return denial
     try:
         return await combo_session.submit_combo(session_id, body.model_dump(mode="json", exclude_none=True))
     except ValueError as exc:
@@ -96,22 +102,22 @@ async def wizard_submit(session_id: str, body: SubmitRequest) -> dict[str, Any]:
         raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
-@router.post(
-    "/wizard/sessions/{session_id}/reprice",
-    dependencies=[Depends(require_mode_verified)],
-)
-async def wizard_reprice(session_id: str, body: RepriceRequest) -> dict[str, Any]:
+@router.post("/wizard/sessions/{session_id}/reprice")
+async def wizard_reprice(session_id: str, request: Request, body: RepriceRequest) -> dict[str, Any]:
+    denial = ensure_order_allowed("wizard reprice", request.app.state)
+    if denial is not None:
+        return denial
     try:
         return await combo_session.reprice_combo(session_id, body.model_dump(mode="json"))
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post(
-    "/wizard/sessions/{session_id}/abort",
-    dependencies=[Depends(require_mode_verified)],
-)
-async def wizard_abort(session_id: str) -> dict[str, Any]:
+@router.post("/wizard/sessions/{session_id}/abort")
+async def wizard_abort(session_id: str, request: Request) -> dict[str, Any]:
+    denial = ensure_order_allowed("wizard abort", request.app.state)
+    if denial is not None:
+        return denial
     try:
         return await combo_session.abort_session(session_id)
     except ValueError as exc:
@@ -119,11 +125,11 @@ async def wizard_abort(session_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
-@router.post(
-    "/wizard/sessions/{session_id}/protect",
-    dependencies=[Depends(require_mode_verified)],
-)
-async def wizard_protect(session_id: str, body: ProtectRequest) -> dict[str, Any]:
+@router.post("/wizard/sessions/{session_id}/protect")
+async def wizard_protect(session_id: str, request: Request, body: ProtectRequest) -> dict[str, Any]:
+    denial = ensure_order_allowed("wizard protect", request.app.state)
+    if denial is not None:
+        return denial
     try:
         session = combo_session.get_session(session_id)
     except ValueError as exc:

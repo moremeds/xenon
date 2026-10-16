@@ -43,6 +43,7 @@ from xenon.api.auth import (
     verify_clerk_jwt,
 )
 from xenon.api.guards import (
+    ensure_order_allowed,
     get_account_scope,
     get_broker_scope,
     is_read_only,
@@ -1547,6 +1548,12 @@ async def orders_refresh(request: Request, scope=Depends(get_broker_scope)):
     via sync_futu_orders (DB-first; no-ops under XENON_READ_ONLY=1). The GET read
     path stays Postgres-only.
     """
+    # Read-only sessions get the PG view directly — no --sync subprocess, no
+    # OpenD connect, no writes. Placed before the mode check and the test-mode
+    # short-circuit so the single contract holds under every flag combination.
+    if is_read_only():
+        return orders_payload_for_scope(scope)
+
     # IB requires a verified trading mode before any work — including the
     # test-mode short-circuit — so a mode mismatch is refused even in test mode
     # (preserves the /orders/refresh guard contract). FUTU is read-only and
@@ -2137,27 +2144,9 @@ def _resolve_scope_kwargs() -> dict[str, str]:
 
 
 async def _orders_place_from_body(body: dict):
-    broker = str(getattr(app.state, "broker", "IB") or "IB").upper()
-    if broker != "IB":
-        return JSONResponse(
-            status_code=403,
-            content={
-                "detail": f"{broker} is read-only for order placement",
-                "reason_code": ReasonCode.READ_ONLY_BROKER.value,
-                "reason_detail": f"{broker} is read-only for order placement",
-            },
-        )
-
-    scope = _resolve_scope_kwargs()
-    if scope["broker"] != "IB":
-        return JSONResponse(
-            status_code=403,
-            content={
-                "detail": f"{scope['broker']} is read-only for order placement",
-                "reason_code": ReasonCode.READ_ONLY_BROKER.value,
-                "reason_detail": f"{scope['broker']} is read-only for order placement",
-            },
-        )
+    denial = ensure_order_allowed("order placement", app.state)
+    if denial is not None:
+        return denial
 
     # RegimeGate (VCG-CRI signal layer) was removed in the pure-portfolio
     # pivot (#104). Order entry no longer gates on regime tiers; cover_ratio
@@ -2412,6 +2401,10 @@ async def orders_cancel(request: Request):
 
 
 async def _orders_cancel_from_body(body: dict):
+    denial = ensure_order_allowed("order cancellation", app.state)
+    if denial is not None:
+        return denial
+
     if _is_test_mode():
         return {
             "status": "ok",
@@ -2513,6 +2506,10 @@ async def orders_modify(request: Request):
 
 
 async def _orders_modify_from_body(body: dict):
+    denial = ensure_order_allowed("order modification", app.state)
+    if denial is not None:
+        return denial
+
     if _is_test_mode():
         return {
             "status": "ok",

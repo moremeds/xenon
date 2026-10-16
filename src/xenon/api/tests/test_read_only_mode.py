@@ -12,7 +12,12 @@ CLAUDE.md memory feedback_httpexception_dict_detail_breaks_toast).
 
 from __future__ import annotations
 
+import asyncio
 import importlib
+import inspect
+import json
+from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
@@ -109,3 +114,229 @@ def test_orders_place_succeeds_when_flag_unset(writable_client):
         assert body.get("reason_code") != "READ_ONLY_MODE", (
             "Flag-unset client got 403 READ_ONLY_MODE — guard fired on the wrong side. Check monkeypatch ordering."
         )
+
+
+# ---------------------------------------------------------------------------
+# Wizard order-mutating POSTs — they bypass the /orders/* route guards by
+# calling server._orders_*_from_body and combo_session writers in-process,
+# so each route must apply the shared order guard itself.
+# ---------------------------------------------------------------------------
+
+_WIZARD_PLAN_BODY = {
+    "ticker": "SPY",
+    "intent": "OPEN",
+    "legs": [
+        {
+            "contract_id": "SPY_20260417_200_C",
+            "action": "BUY",
+            "right": "C",
+            "strike": "200",
+            "expiry": "20260417",
+            "quantity": 1,
+        },
+    ],
+    "quotes": {"SPY_20260417_200_C": {"bid": "4.50", "ask": "4.70"}},
+    "order_payload": {
+        "symbol": "SPY",
+        "type": "combo",
+        "action": "BUY",
+        "quantity": 1,
+        "limitPrice": "4.60",
+        "legs": [{"conId": 1001, "action": "BUY", "ratio": 1, "exchange": "SMART"}],
+    },
+}
+
+
+def _wizard_sessions_count() -> int | None:
+    """Row count via the bound test engine; None when PG is unreachable."""
+    try:
+        from xenon._test_db import is_pg_reachable
+
+        if not is_pg_reachable():
+            return None
+        from sqlalchemy import text
+
+        from xenon.db.engine import get_sync_engine
+
+        with get_sync_engine().connect() as conn:
+            return int(conn.execute(text("SELECT COUNT(*) FROM xenon.wizard_sessions")).scalar())
+    except Exception:
+        return None
+
+
+@pytest.mark.parametrize(
+    "path,body",
+    [
+        ("/wizard/plan", _WIZARD_PLAN_BODY),
+        ("/wizard/sessions", _WIZARD_PLAN_BODY),
+        ("/wizard/sessions/wiz-ro/submit", {}),
+        ("/wizard/sessions/wiz-ro/reprice", {"target_price": "1.00"}),
+        ("/wizard/sessions/wiz-ro/abort", {}),
+        (
+            "/wizard/sessions/wiz-ro/protect",
+            {"tp_target_price": "1.00", "alert_net_mid_threshold": "0.50", "polarity": "DEBIT"},
+        ),
+    ],
+)
+def test_wizard_post_routes_return_403_in_read_only(read_only_client, monkeypatch, path, body):
+    """Every wizard POST returns 403 READ_ONLY_MODE and writes nothing.
+
+    The combo_session entry points are replaced with raising spies so any
+    guard bypass surfaces as a 500 instead of silently persisting a
+    wizard_sessions / wizard_combo_attempts row.
+    """
+    from xenon.execution.combo_wizard import session as combo_session
+
+    called: list[str] = []
+    for name in ("plan_session", "submit_combo", "reprice_combo", "abort_session", "get_session"):
+        original = getattr(combo_session, name)
+        if inspect.iscoroutinefunction(original):
+
+            async def _spy(*args, _name=name, **kwargs):
+                called.append(_name)
+                raise AssertionError(f"combo_session.{_name} reached under read-only")
+
+        else:
+
+            def _spy(*args, _name=name, **kwargs):
+                called.append(_name)
+                raise AssertionError(f"combo_session.{_name} reached under read-only")
+
+        monkeypatch.setattr(combo_session, name, _spy)
+
+    rows_before = _wizard_sessions_count()
+    r = read_only_client.post(path, json=body)
+    assert r.status_code == 403, r.text
+    resp = r.json()
+    assert resp.get("reason_code") == "READ_ONLY_MODE", resp
+    assert isinstance(resp.get("detail"), str)
+    assert called == [], f"guard bypassed: {called}"
+    rows_after = _wizard_sessions_count()
+    if rows_before is not None and rows_after is not None:
+        assert rows_after == rows_before, "wizard POST persisted rows under read-only"
+
+
+def test_in_process_order_helpers_blocked_in_read_only(read_only_client):
+    """_orders_{place,cancel,modify}_from_body self-guard.
+
+    The wizard submit path reaches these without going through the
+    /orders/* routes, so the read-only denial must live inside them.
+    """
+    import xenon.api.server as server
+
+    for helper in (
+        server._orders_place_from_body,
+        server._orders_cancel_from_body,
+        server._orders_modify_from_body,
+    ):
+        result = asyncio.run(helper({}))
+        assert result.status_code == 403, f"{helper.__name__} did not deny in read-only"
+        payload = json.loads(result.body)
+        assert payload["reason_code"] == "READ_ONLY_MODE", payload
+
+
+def test_orders_refresh_serves_pg_view_without_sync_in_read_only(read_only_client, monkeypatch):
+    """Under read-only, /orders/refresh returns the PG view and never runs --sync.
+
+    The sentinel payload proves the route consulted the PG view function
+    rather than the test-mode short-circuit or the subprocess sync.
+    """
+    import xenon.api.server as server
+
+    spawned: list[tuple] = []
+
+    async def _no_spawn(*args, **kwargs):
+        spawned.append(args)
+        raise AssertionError("read-only refresh spawned an IB sync subprocess")
+
+    monkeypatch.setattr(server, "_run_ib_script_with_recovery", _no_spawn)
+    pg_view = {"open_orders": [], "executed_orders": [], "open_count": 0, "executed_count": 0}
+    monkeypatch.setattr(server, "orders_payload_for_scope", lambda scope: pg_view)
+
+    r = read_only_client.post("/orders/refresh")
+    assert r.status_code == 200, r.text
+    assert r.json() == pg_view
+    assert spawned == []
+
+
+# ---------------------------------------------------------------------------
+# orders_store choke point — every writer raises under XENON_READ_ONLY=1 so
+# subprocess / in-process callers cannot persist order state in a live
+# debugging session.
+# ---------------------------------------------------------------------------
+
+_ORDERS_STORE_WRITERS = [
+    (
+        "reserve_attempt",
+        {
+            "user_id": "u",
+            "client_attempt_id": "c-1",
+            "request": None,
+        },
+    ),
+    ("apply_modify", {"order_id": "1", "sequence": 1}),
+    (
+        "register_from_snapshot",
+        {
+            "perm_id": "1",
+            "ib_order_id": "1",
+            "ticker": "SPY",
+            "security_type": "STK",
+            "action": "BUY",
+            "quantity": 1,
+            "limit_price": 1.0,
+        },
+    ),
+    ("apply_modify_by_perm_id", {"perm_id": "1", "sequence": 1}),
+    (
+        "mark_submitted",
+        {"submission_id": "s", "ib_order_id": "1", "perm_id": "1", "placing_client_id": 26},
+    ),
+    (
+        "mark_terminal",
+        {
+            "submission_id": "s",
+            "state": "CANCELLED",
+            "reason_code": "USER_CANCEL",
+            "filled_qty": 0,
+            "avg_fill_price": None,
+        },
+    ),
+    (
+        "record_fill",
+        {
+            "exec_id": "e-1",
+            "submission_id": None,
+            "perm_id": None,
+            "con_id": None,
+            "ticker": "SPY",
+            "side": "BUY",
+            "qty": Decimal("1"),
+            "price": Decimal("1.00"),
+            "filled_at": datetime.now(timezone.utc),
+            "broker": "IB",
+            "account_env": "paper",
+            "broker_account": "DU1",
+        },
+    ),
+    ("update_fill_commission", {"exec_id": "e-1", "commission": Decimal("1.00"), "realized_pnl": None}),
+    ("record_event", {"submission_id": "s", "kind": "K", "detail": {}}),
+]
+
+
+@pytest.mark.parametrize("writer,kwargs", _ORDERS_STORE_WRITERS)
+def test_orders_store_writers_raise_under_read_only(monkeypatch, writer, kwargs):
+    """Each orders_store write function raises before touching the engine."""
+    monkeypatch.setenv("XENON_READ_ONLY", "1")
+    from xenon.execution import orders_store
+
+    with pytest.raises(orders_store.ReadOnlyWriteError, match="XENON_READ_ONLY"):
+        getattr(orders_store, writer)(**kwargs)
+
+
+def test_ensure_writable_is_noop_when_flag_unset(monkeypatch):
+    """Sanity: the choke point only fires when the flag is set."""
+    monkeypatch.delenv("XENON_READ_ONLY", raising=False)
+    from xenon.execution import orders_store
+
+    assert orders_store.ensure_writable() is None
