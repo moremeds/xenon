@@ -603,18 +603,23 @@ order_submissions = Table(
     Column("broker", Text, nullable=False, server_default=text("'IB'")),
     Column("account_env", Text, nullable=False, server_default=text("'legacy_unknown'")),
     Column("broker_account", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    # Durable reservation payload: effective legs (actions, ratios, conIds,
+    # multiplier, guarantee mode, original/replacement qty) for Gate-4
+    # coverage. NULL for pre-PR-03a rows and snapshot-imported orders.
+    Column("legs", JSONB),
     CheckConstraint("broker = 'IB'", name="ck_order_sub_broker_ib_only"),
     CheckConstraint(
         "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
         name="ck_order_sub_account_env",
     ),
+    # Idempotency is account-scoped, never identity-scoped (spec §2.3/§2.5):
+    # the same (scope, client_attempt_id) dedupes across caller identities.
     UniqueConstraint(
         "broker",
         "account_env",
         "broker_account",
-        "user_id",
         "client_attempt_id",
-        name="uq_order_sub_user_attempt",
+        name="uq_order_sub_scope_attempt",
     ),
     # FK target for regime_overrides composite scope FK (ISSUE-5).
     # Logically redundant under the submission_id PK, but Postgres requires
