@@ -297,6 +297,36 @@ class TestMiddlewareIntegration:
             assert r.status_code == 200
             assert "ticket" in r.json()
 
+    def test_ws_ticket_validate_denied_without_credential(self):
+        # /ws-ticket/validate is no longer auth-exempt — an unauthenticated
+        # caller must not be able to burn or probe tickets.
+        with patch.dict(os.environ, self.GATED, clear=False):
+            r = self._client().post("/ws-ticket/validate", json={"ticket": "x"})
+            assert r.status_code == 401
+
+    def test_ws_ticket_validate_denied_with_query_key(self):
+        # The scoped query key has no (POST, /ws-ticket/validate) entry.
+        with patch.dict(os.environ, self.GATED, clear=False):
+            r = self._client().post(
+                "/ws-ticket/validate",
+                headers={"X-API-Key": "qk"},
+                json={"ticket": "x"},
+            )
+            assert r.status_code == 401
+
+    def test_ws_ticket_validate_round_trip_with_internal_token(self):
+        # The relay path: mint with the token, validate with the token.
+        with patch.dict(os.environ, {**self.GATED, "XENON_INTERNAL_API_TOKEN": "itok"}, clear=False):
+            client = self._client()
+            ticket = client.post("/ws-ticket", headers={"X-Internal-Token": "itok"}).json()["ticket"]
+            r = client.post(
+                "/ws-ticket/validate",
+                headers={"X-Internal-Token": "itok"},
+                json={"ticket": ticket},
+            )
+            assert r.status_code == 200
+            assert "user_id" in r.json()
+
     def test_ws_ticket_denied_without_creds(self):
         with patch.dict(os.environ, self.GATED, clear=False):
             assert self._client().post("/ws-ticket").status_code == 401

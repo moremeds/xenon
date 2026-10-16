@@ -7,7 +7,9 @@ makes every remote peer look local, so client IP is never an identity):
 2. X-API-Key — machine-to-machine, path-scoped to read-only data endpoints:
    MDW_API_KEY → API_KEY_ALLOWED_PATHS; XENON_QUERY_API_KEY → QUERY_API_KEY_PATHS.
 
-/health and /ws-ticket/validate are exempt upstream (server.py AUTH_EXEMPT_PATHS).
+/health is exempt upstream (server.py AUTH_EXEMPT_PATHS). The relay's
+/ws-ticket/validate calls authenticate with X-Internal-Token like everything
+else.
 XENON_AUTH_ALLOW_DEV_OPEN=1 is a dev/test-only escape hatch production never sets.
 """
 

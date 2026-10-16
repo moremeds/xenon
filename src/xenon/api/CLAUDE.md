@@ -98,7 +98,7 @@ On-demand scripts MUST use `client_id="auto"` (range 20-49). Never hardcode — 
 
 ## Auth — Security-Relevant Behavior
 
-**Auth-exempt paths:** `/health`, `/ws-ticket/validate`. (`/docs` and `/openapi.json` are NOT exempt — they expose the full trading API schema and require auth.)
+**Auth-exempt paths:** `/health` only. (`/docs`, `/openapi.json`, and `/ws-ticket/validate` are NOT exempt — `/docs`/`/openapi.json` expose the full trading API schema, and the Node relay authenticates `/ws-ticket/validate` with `X-Internal-Token`.)
 
 **Fail-closed, credential-only.** `auth.classify_auth(request)` (sync) is called by `server.py::auth_middleware`. A non-exempt request is DENIED (401) unless it proves identity, in order:
 
@@ -107,7 +107,7 @@ On-demand scripts MUST use `client_id="auto"` (range 20-49). Never hardcode — 
 3. `XENON_AUTH_ALLOW_DEV_OPEN=1` (strict truthy) → pass. **Dev/test only** — set it yourself for debugging; `dev.sh` does not export it. Production never sets it, so a prod env that fails to load denies rather than exposes the API.
 4. Else → 401.
 
-There is **no peer-address authentication**: requests from `127.0.0.1`/`::1` get no pass — Tailnet peers, Docker bridges, and proxies can all reach loopback. `/health` and `/ws-ticket/validate` are exempt; `/ws-ticket` requires a credential (internal token or scoped key) and mints 30s single-use tickets.
+There is **no peer-address authentication**: requests from `127.0.0.1`/`::1` get no pass — Tailnet peers, Docker bridges, and proxies can all reach loopback. `/health` is exempt; `/ws-ticket` requires a credential (internal token or scoped key) and mints 30s single-use tickets; `/ws-ticket/validate` requires the internal token (the Node relay sends it).
 
 `validate_auth_config()` runs at lifespan startup: refuses to boot if `XENON_INTERNAL_API_TOKEN == XENON_QUERY_API_KEY` (a leaked read-only key could otherwise be replayed for write access) and logs the posture (ENFORCED / DEV-OPEN / FAIL-CLOSED).
 

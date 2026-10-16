@@ -88,7 +88,15 @@ export function useSyncHook<T>(
       }
       const reqEndpoint = endpoint;
       try {
-        const res = await fetch(reqEndpoint, { method });
+        // POST carries Content-Type: application/json even with an empty body —
+        // the /api middleware requires it on every mutating request.
+        const res = await fetch(reqEndpoint, {
+          method,
+          headers:
+            method === "POST"
+              ? { "Content-Type": "application/json" }
+              : undefined,
+        });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           throw new Error(

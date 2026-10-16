@@ -51,7 +51,7 @@ services:
     # in-process load_dotenv at server.py:81-82 silently no-ops in the
     # container because the api Dockerfile doesn't ship web/.env, so
     # Compose injection is the only viable channel. Forwarding the whole
-    # file also exposes EXA/CEREBRAS/CLERK_SECRET to the api container
+    # file also exposes EXA/CEREBRAS keys to the api container
     # (currently unused there) — accepted as a least-privilege tradeoff
     # vs. brittle per-key shell interpolation. See
     # docs/plans/2026-05-04-docker-uw-token-plumbing.md.
@@ -65,12 +65,17 @@ services:
       # `host.docker.internal` is the only hostname that actually reaches
       # it — a 127.0.0.1 default would dial the container's own loopback.
       FUTU_OPEND_HOST: host.docker.internal
+      # /status on the realtime relay is token-only — reach it over the
+      # compose network, not loopback. Token comes from ./.env via env_file.
+      IB_REALTIME_STATUS_URL: http://realtime:8765/status
     # IB_GATEWAY_HOST comes from .env. Use host.docker.internal only when the
     # Gateway runs on the Docker host, or when an SSH tunnel on the Docker host
     # forwards to a localhost-only Gateway on another machine. If the Gateway
     # runs directly on another LAN/Tailscale host, set that reachable address.
+    # Bind the published port to host loopback only — tailnet exposure goes
+    # through `tailscale serve`, never a wildcard bind.
     ports:
-      - "8321:8321"
+      - "127.0.0.1:8321:8321"
     volumes:
       - ./.env:/app/.env:ro
       - ./data:/app/data
@@ -89,11 +94,6 @@ services:
       context: .
       dockerfile: docker/web.Dockerfile
       args:
-        # NEXT_PUBLIC_* vars must be inlined at build time. Source from the
-        # build-host shell — compose interpolates ${VAR} from the host env or
-        # from the repo-root .env. Empty defaults keep `compose build` working
-        # in CI / clean checkouts without Clerk keys.
-        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
         # Optional: pin the WS URL into the bundle. When unset, the client
         # falls back via /api/ib/ws-config or window.location.hostname:8765
         # — workable for `localhost` access; set explicitly for any other
@@ -112,8 +112,14 @@ services:
       # same value via its env_file: ./.env. Single source of truth — never
       # NEXT_PUBLIC_ (server-only).
       XENON_INTERNAL_API_TOKEN: ${XENON_INTERNAL_API_TOKEN:-}
+      # Browser-origin guard (middleware.ts): Host allowlist for ALL /api
+      # requests. Default is localhost-only — set to the tailnet host values
+      # (e.g. xenon.tailnet-xxx.ts.net, with :port when non-standard) so the
+      # deploy is reachable through `tailscale serve`.
+      XENON_ALLOWED_HOSTS: ${XENON_ALLOWED_HOSTS:-}
+    # Bind the published port to host loopback only (see api comment).
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -121,13 +127,11 @@ services:
         condition: service_healthy
     healthcheck:
       # node:22-alpine ships busybox wget; --spider issues a HEAD-equivalent.
-      # Probe /sign-in: it's Clerk-public and returns 200 regardless of auth
-      # state, while `/` may return Clerk's dev-browser-handshake rewrite
-      # (404 from the server) when the build uses dev keys. /sign-in is
-      # stable across dev and prod Clerk environments.
       # Next standalone binds IPv4 0.0.0.0:3000 only; alpine `localhost`
       # resolves to ::1 first, which fails. Use 127.0.0.1 explicitly.
-      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/sign-in"]
+      # Probe `/` — it is a plain page (middleware only guards /api/**) and
+      # returns 200 regardless of auth state.
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -143,8 +147,22 @@ services:
       - ./.env
     # IB_GATEWAY_HOST comes from .env (see api comment). The relay also
     # consults XENON_TRADING_MODE to derive the gateway port.
+    # XENON_INTERNAL_API_TOKEN (relay → /ws-ticket/validate), XENON_QUERY_API_KEY
+    # (service WS consumers) and IB_REALTIME_STATUS_TOKEN all arrive via env_file.
+    environment:
+      # Inside the container the relay must listen on all interfaces so the
+      # host-published 127.0.0.1:8765 mapping reaches it. On bare metal the
+      # relay default is loopback-only.
+      WS_HOST: 0.0.0.0
+      # Ticket validation targets the api service over the compose network —
+      # the module default (127.0.0.1:8321) would dial the relay's own loopback.
+      TICKET_VALIDATE_URL: http://api:8321/ws-ticket/validate
+      # Origin allowlist for browser WS upgrades; default is localhost-only.
+      # Set to the tailnet origins for prod (e.g. https://xenon.tailnet-xxx.ts.net).
+      XENON_WS_ALLOWED_ORIGINS: ${XENON_WS_ALLOWED_ORIGINS:-}
+    # Bind the published port to host loopback only (see api comment).
     ports:
-      - "8765:8765"
+      - "127.0.0.1:8765:8765"
     volumes:
       - ./.env:/app/.env:ro
     extra_hosts:

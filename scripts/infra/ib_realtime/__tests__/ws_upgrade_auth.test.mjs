@@ -153,6 +153,38 @@ test("XENON_QUERY_API_KEY unset -> key path disabled", async () => {
   assert.equal(d.reason, "api_key_disabled");
 });
 
+// ── Ticket validation authenticates itself to FastAPI ───────────────────
+
+test("validate call carries X-Internal-Token when configured", async () => {
+  let seenHeaders;
+  const d = await authorizeUpgrade(makeReq({ url: "/?ticket=t1" }), {
+    fetchImpl: async (_url, init) => {
+      seenHeaders = init.headers;
+      return { ok: true };
+    },
+    origins: ORIGINS,
+    internalToken: "internal-tok-1",
+  });
+  assert.equal(d.ok, true);
+  assert.equal(seenHeaders["X-Internal-Token"], "internal-tok-1");
+});
+
+test("validate call omits X-Internal-Token when unset (server 401s)", async () => {
+  let seenHeaders;
+  const d = await authorizeUpgrade(makeReq({ url: "/?ticket=t1" }), {
+    fetchImpl: async (_url, init) => {
+      seenHeaders = init.headers;
+      return { ok: false, status: 401 }; // FastAPI rejects the credentialless call
+    },
+    origins: ORIGINS,
+    internalToken: "",
+  });
+  assert.equal(seenHeaders["X-Internal-Token"], undefined);
+  assert.equal(d.ok, false);
+  assert.equal(d.status, 401);
+  assert.equal(d.reason, "ticket_rejected");
+});
+
 test("isOriginAllowed honors the env-configured allowlist", () => {
   const origins = allowedOrigins("https://xenon.tailnet.ts.net");
   assert.equal(isOriginAllowed("https://xenon.tailnet.ts.net", origins), true);

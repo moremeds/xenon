@@ -214,6 +214,14 @@ export XENON_API_URL="${XENON_API_URL:-http://127.0.0.1:${API_PORT}}"
 # it at the dev port (its built-in default targets the prod API on 8321).
 export TICKET_VALIDATE_URL="${TICKET_VALIDATE_URL:-${XENON_API_URL}/ws-ticket/validate}"
 
+# The relay's GET /status is token-only (no loopback trust). Export an ephemeral
+# per-session token unless the operator pinned one — the relay and FastAPI's
+# health probe both inherit it, so dev /health keeps reporting subscribers.
+if [[ -z "${IB_REALTIME_STATUS_TOKEN:-}" && -f "$ENV_FILE" ]]; then
+  IB_REALTIME_STATUS_TOKEN="$(grep -E '^IB_REALTIME_STATUS_TOKEN=' "$ENV_FILE" | tail -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | xargs || true)"
+fi
+export IB_REALTIME_STATUS_TOKEN="${IB_REALTIME_STATUS_TOKEN:-$(openssl rand -hex 16)}"
+
 # Per-mode broker account placeholder. AccountScope.resolve_from_env() raises
 # if XENON_BROKER_ACCOUNT is unset, and many sync subprocesses (ib_sync,
 # ib_reconcile, naked_short_audit) call it at startup before IB Gateway is

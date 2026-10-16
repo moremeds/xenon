@@ -1,26 +1,29 @@
 import { NextRequest, NextResponse } from "next/server";
 
 /**
- * Browser-origin guard for mutating /api/** requests (CSRF / DNS-rebinding).
+ * Browser-origin guard for /api/** requests (CSRF / DNS-rebinding).
  *
  * Prod is tailnet-only: reachability is the trust boundary, so /api/** has no
  * user-auth layer. But a *browser* on an allowed client can still be tricked
  * into firing requests at this app — a malicious page can POST a "simple"
  * request (text/plain / urlencoded / multipart) cross-origin without a CORS
- * preflight, and DNS rebinding can point a foreign Host at this server. This
- * guard rejects, before any route/FastAPI call, every non-GET/HEAD /api/**
- * request unless ALL of the following hold:
+ * preflight, and DNS rebinding can point a foreign Host at this server (the
+ * rebound page then reads /api GETs under its own origin — so the Host check
+ * applies to EVERY method, including GET/HEAD).
  *
- *   1. Host ∈ XENON_ALLOWED_HOSTS (comma list; default localhost:3000,
- *      127.0.0.1:3000, localhost:3200, 127.0.0.1:3200);
- *   2. Origin's host matches the request Host exactly; when Origin is absent
+ * All /api/** requests: Host ∈ XENON_ALLOWED_HOSTS (comma list; default
+ * localhost:3000, 127.0.0.1:3000, localhost:3200, 127.0.0.1:3200).
+ *
+ * Non-GET/HEAD additionally requires ALL of:
+ *   1. Origin's host matches the request Host exactly; when Origin is absent
  *      (curl, some navigations) Sec-Fetch-Site: same-origin is required;
- *   3. Content-Type is application/json — a value no cross-origin form or
+ *   2. Content-Type is application/json — a value no cross-origin form or
  *      simple request can send. multipart/form-data is allowed only for the
  *      routes listed in MULTIPART_API_PATHS (currently none).
  *
- * Server-to-server callers must hit FastAPI directly with a credential — they
- * never go through Next, so this browser-shaped contract is safe to enforce.
+ * Rejections happen before any route/FastAPI call. Server-to-server callers
+ * must hit FastAPI directly with a credential — they never go through Next,
+ * so this browser-shaped contract is safe to enforce.
  */
 export const DEFAULT_ALLOWED_HOSTS =
   "localhost:3000,127.0.0.1:3000,localhost:3200,127.0.0.1:3200";
@@ -51,13 +54,19 @@ export default function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const method = request.method.toUpperCase();
 
-  if (method === "GET" || method === "HEAD" || !pathname.startsWith("/api/")) {
+  if (!pathname.startsWith("/api/")) {
     return NextResponse.next();
   }
 
+  // Host allowlist applies to EVERY method — DNS rebinding can otherwise read
+  // /api GETs through a rebound same-origin page.
   const host = (request.headers.get("host") ?? "").toLowerCase();
   if (!allowedHosts().has(host)) {
     return forbidden("host_not_allowed");
+  }
+
+  if (method === "GET" || method === "HEAD") {
+    return NextResponse.next();
   }
 
   const origin = request.headers.get("origin");

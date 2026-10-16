@@ -20,6 +20,7 @@ import path from "node:path";
 import http from "node:http";
 import net from "node:net";
 import { execSync } from "node:child_process";
+import { timingSafeEqual } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { WebSocketServer } from "ws";
 import { IBApi, EventName, TickByTickDataType } from "@stoqey/ib";
@@ -244,8 +245,15 @@ function parseActionMessage(raw) {
 }
 
 const cli = parseArgs(process.argv.slice(2));
-const WS_HOST = "0.0.0.0";
+// Bind host: default loopback only — on bare metal the WS port must not be
+// reachable from the LAN/Tailnet. The Docker compose service sets WS_HOST=
+// 0.0.0.0 so the host-published 127.0.0.1:8765 mapping can reach it.
+const WS_HOST = process.env.WS_HOST || "127.0.0.1";
 const LOOPBACK_HOST = "127.0.0.1";
+// Conflict detection always probes the wildcard address too: on macOS
+// SO_REUSEADDR lets a 127.0.0.1 bind succeed while 0.0.0.0:<port> is held, so
+// probing only WS_HOST would miss a foreign occupier.
+const WILDCARD_HOST = "0.0.0.0";
 const wsUrl = () => `ws://${WS_HOST}:${cli.port}`;
 const RUNTIME_FILE_PATH =
   process.env.IB_REALTIME_RUNTIME_FILE ||
@@ -317,7 +325,7 @@ async function isExistingXenonRelay(port) {
 async function findAvailablePort(startPort, endPort = startPort + 50) {
   for (let port = startPort; port <= endPort; port += 1) {
     const loopbackAvailable = await isPortAvailable(LOOPBACK_HOST, port);
-    const wildcardAvailable = await isPortAvailable(WS_HOST, port);
+    const wildcardAvailable = await isPortAvailable(WILDCARD_HOST, port);
     if (loopbackAvailable && wildcardAvailable) return port;
   }
   throw new Error(
@@ -327,7 +335,7 @@ async function findAvailablePort(startPort, endPort = startPort + 50) {
 
 async function findExistingXenonRelay(startPort, endPort = startPort + 50) {
   for (let port = startPort; port <= endPort; port += 1) {
-    if (await isPortAvailable(WS_HOST, port)) continue;
+    if (await isPortAvailable(WILDCARD_HOST, port)) continue;
     if (await isExistingXenonRelay(port)) return port;
   }
   return null;
@@ -370,7 +378,7 @@ function removeRuntimeConfigIfOwned() {
 }
 
 const loopbackAvailable = await isPortAvailable(LOOPBACK_HOST, cli.port);
-const wildcardAvailable = await isPortAvailable(WS_HOST, cli.port);
+const wildcardAvailable = await isPortAvailable(WILDCARD_HOST, cli.port);
 
 if (!loopbackAvailable || !wildcardAvailable) {
   console.log(`WebSocket port already in use at ${wsUrl()}`);
@@ -400,23 +408,26 @@ if (!loopbackAvailable || !wildcardAvailable) {
   cli.port = fallbackPort;
 }
 
-// Create HTTP server for WebSocket upgrade with ticket validation
-const TICKET_VALIDATE_URL =
-  process.env.TICKET_VALIDATE_URL || "http://127.0.0.1:8321/ws-ticket/validate";
-
+// Create HTTP server for WebSocket upgrade with ticket validation.
+// TICKET_VALIDATE_URL / XENON_INTERNAL_API_TOKEN / XENON_QUERY_API_KEY are
+// consumed inside ws_upgrade_auth.js.
 const httpServer = http.createServer((req, res) => {
   if (
     req.method === "GET" &&
     (req.url === "/status" || req.url.startsWith("/status?"))
   ) {
-    const remote = req.socket.remoteAddress || "";
-    const isLoopback =
-      remote === "127.0.0.1" ||
-      remote === "::1" ||
-      remote === "::ffff:127.0.0.1";
+    // Token-only — no loopback peer trust (reachability of 127.0.0.1 is not
+    // authentication). Unset token or mismatch -> 403 for everyone.
+    const presented = req.headers["x-status-token"];
+    const presentedBuf = Buffer.from(
+      typeof presented === "string" ? presented : "",
+    );
+    const expectedBuf = Buffer.from(STATUS_TOKEN);
     const tokenOk =
-      STATUS_TOKEN !== "" && req.headers["x-status-token"] === STATUS_TOKEN;
-    if (!isLoopback && !tokenOk) {
+      STATUS_TOKEN !== "" &&
+      presentedBuf.length === expectedBuf.length &&
+      timingSafeEqual(presentedBuf, expectedBuf);
+    if (!tokenOk) {
       res.writeHead(403, { "Content-Type": "text/plain" });
       res.end("Forbidden");
       return;
@@ -579,10 +590,10 @@ const subscriberRegistry = createSubscriberRegistry({
   ttlMs: SUBSCRIBER_TTL_MS,
 });
 const clientId = new Map(); // ws -> id (only for identified subscribers)
-// Optional shared secret: when set, GET /status also accepts requests carrying
-// a matching `X-Status-Token` header (in addition to loopback). Lets the api
-// container read /status across the Docker network in prod without exposing
-// subscriber ids on the host-published :8765 port. Empty in single-host dev.
+// Required shared secret for GET /status — the api service sends it as
+// `X-Status-Token` (constant-time compare, no loopback exception). When empty
+// /status answers 403 to everyone; dev.sh exports an ephemeral token per
+// session so the health probe keeps working in dev.
 const STATUS_TOKEN = process.env.IB_REALTIME_STATUS_TOKEN || "";
 
 /* ─── Snapshot Rate Limiter ──────────────────────────────────────────────

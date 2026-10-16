@@ -62,7 +62,8 @@ function serviceKeyMatches(presented, expected) {
  *
  * @param {import("http").IncomingMessage} req
  * @param {{ fetchImpl?: typeof fetch, validateUrl?: string,
- *           origins?: Set<string>, queryApiKey?: string }} [deps]
+ *           origins?: Set<string>, queryApiKey?: string,
+ *           internalToken?: string }} [deps]
  * @returns {Promise<{ok:true} | {ok:false, status:number, reason:string}>}
  */
 export async function authorizeUpgrade(req, deps = {}) {
@@ -70,6 +71,8 @@ export async function authorizeUpgrade(req, deps = {}) {
   const validateUrl = deps.validateUrl ?? ticketValidateUrl();
   const origins = deps.origins ?? allowedOrigins();
   const queryApiKey = deps.queryApiKey ?? process.env.XENON_QUERY_API_KEY;
+  const internalToken =
+    deps.internalToken ?? process.env.XENON_INTERNAL_API_TOKEN;
 
   if (!isOriginAllowed(req.headers.origin, origins)) {
     return { ok: false, status: 403, reason: "origin_not_allowed" };
@@ -105,9 +108,13 @@ export async function authorizeUpgrade(req, deps = {}) {
 
   let res;
   try {
+    // /ws-ticket/validate is not auth-exempt — the relay authenticates as the
+    // internal service. Missing token -> FastAPI 401 -> ticket_rejected below.
+    const headers = { "Content-Type": "application/json" };
+    if (internalToken) headers["X-Internal-Token"] = internalToken;
     res = await fetchImpl(validateUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ ticket }),
     });
   } catch (err) {

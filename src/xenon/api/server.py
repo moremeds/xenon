@@ -632,12 +632,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Auth middleware — only /health and the internal ticket-validate probe are exempt.
-# /docs and /openapi.json are deliberately NOT exempt: they expose the full trading
-# API schema and now require a credential (internal token / scoped API key).
+# Auth middleware — only /health is exempt. /docs and /openapi.json are
+# deliberately NOT exempt: they expose the full trading API schema.
+# /ws-ticket/validate is NOT exempt either: the Node relay authenticates with
+# X-Internal-Token, so an external caller cannot burn or probe tickets.
 AUTH_EXEMPT_PATHS = {
     "/health",
-    "/ws-ticket/validate",
     # /dev/rehydrate/synthetic intentionally NOT listed: gated by _dev_probes_enabled()
     # AND now by classify_auth (fail-closed). Exempting it would risk a public write
     # endpoint if DEV_PROBES=1 leaked into a non-local env.

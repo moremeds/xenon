@@ -43,13 +43,41 @@ describe("middleware browser-origin guard", () => {
     expect(allowedHosts(undefined).has("127.0.0.1:3200")).toBe(true);
   });
 
-  it("lets GET and HEAD requests through unguarded", () => {
-    expect(statusOf(req("/api/portfolio", { method: "GET" }))).toBe(200);
-    expect(statusOf(req("/api/portfolio", { method: "HEAD" }))).toBe(200);
+  it("lets GET and HEAD with an allowed Host through without Origin/JSON", () => {
+    const host = { host: "localhost:3000" };
+    expect(
+      statusOf(req("/api/portfolio", { method: "GET", headers: host })),
+    ).toBe(200);
+    expect(
+      statusOf(req("/api/portfolio", { method: "HEAD", headers: host })),
+    ).toBe(200);
   });
 
-  it("lets non-/api mutating requests through unguarded", () => {
+  it("403s foreign-Host GET and HEAD (DNS rebinding read)", async () => {
+    for (const method of ["GET", "HEAD"] as const) {
+      const res = run(
+        req("/api/portfolio", {
+          method,
+          headers: { host: "victim.attacker.example" },
+        }),
+      );
+      expect(res.status).toBe(403);
+      if (method === "GET") {
+        expect((await res.json()).reason).toBe("host_not_allowed");
+      }
+    }
+  });
+
+  it("lets non-/api requests through unguarded (any Host)", () => {
     expect(statusOf(req("/portfolio", { method: "POST" }))).toBe(200);
+    expect(
+      statusOf(
+        req("/portfolio", {
+          method: "GET",
+          headers: { host: "victim.attacker.example" },
+        }),
+      ),
+    ).toBe(200);
   });
 
   it("passes a legitimate same-origin JSON POST", () => {

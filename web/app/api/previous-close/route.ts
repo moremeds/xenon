@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { WebSocket } from "ws";
 import { resolveServerIbRealtimeWsUrl } from "@/lib/server/ibRealtimeRuntime";
-import { internalApiHeaders } from "@/lib/xenonApi";
+import { xenonFetch } from "@/lib/xenonApi";
 
 /**
  * Fetch previous-day closing prices for stock symbols.
@@ -20,21 +20,18 @@ function cacheKey(symbol: string): string {
 
 /* ── IB source (via WebSocket snapshot) ─────────────────── */
 
-const XENON_API = process.env.XENON_API_URL || "http://localhost:8321";
-
 async function buildWsUrl(): Promise<string> {
   const ibWsUrl = resolveServerIbRealtimeWsUrl();
   try {
-    const wsHeaders = new Headers({ "Content-Type": "application/json" });
-    internalApiHeaders(wsHeaders);
-    const res = await fetch(`${XENON_API}/ws-ticket`, {
+    // xenonFetch attaches X-Internal-Token — the relay now rejects ticketless
+    // upgrades, so a failed mint falls back to UW/Yahoo rather than a bare WS.
+    const res = await xenonFetch<{ ticket?: string }>("/ws-ticket", {
       method: "POST",
-      headers: wsHeaders,
+      timeout: 5_000,
     });
-    if (!res.ok) return ibWsUrl;
-    const { ticket } = await res.json();
+    if (!res.ticket) return ibWsUrl;
     const sep = ibWsUrl.includes("?") ? "&" : "?";
-    return `${ibWsUrl}${sep}ticket=${ticket}`;
+    return `${ibWsUrl}${sep}ticket=${res.ticket}`;
   } catch {
     return ibWsUrl;
   }
