@@ -3225,12 +3225,24 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
             gw_result = await restart_ib_gateway()
 
             if gw_result.get("restarted") and gw_result.get("port_listening"):
-                logger.info("IB Gateway restarted, retrying %s", entry)
                 _ib_last_failure[kind] = 0.0  # Clear cooldown after successful restart
                 if ib_pool:
                     await ib_pool.disconnect_all()
                     await ib_pool.connect_all()
-                result = await run_entry_point(entry, args, timeout=timeout)
+                if kind == "order":
+                    # OP-1: the first attempt may have reached IB before the
+                    # connection dropped — resending could duplicate the order.
+                    logger.warning(
+                        "IB Gateway restarted; NOT resending order entry %s (possible duplicate)",
+                        entry,
+                    )
+                    result = ScriptResult(
+                        ok=False,
+                        error="IB Gateway restarted; order request NOT resent — check open orders before retrying",
+                    )
+                else:
+                    logger.info("IB Gateway restarted, retrying %s", entry)
+                    result = await run_entry_point(entry, args, timeout=timeout)
             else:
                 logger.error("IB Gateway restart failed: %s", gw_result)
                 result = ScriptResult(

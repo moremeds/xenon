@@ -3,6 +3,9 @@
 A connection failure on a data/quote entry (chain, depth, greeks, sync) must
 never put order-mutating entries (place/cancel/modify) into cooldown, and an
 order-entry failure must never block data reads.
+
+OP-1 — after a successful Gateway restart, order entries are never resent
+(the first attempt may have reached IB); data entries keep their retry.
 """
 
 from __future__ import annotations
@@ -18,8 +21,17 @@ from xenon.api.subprocess import ScriptResult  # noqa: E402
 class _ConnectedPool:
     """Pool stand-in that reports every role connected (skips Layer-2 probe)."""
 
+    def __init__(self) -> None:
+        self.reconnects = 0
+
     def is_connected(self, _role: str) -> bool:
         return True
+
+    async def disconnect_all(self) -> None:
+        self.reconnects += 1
+
+    async def connect_all(self) -> None:
+        pass
 
 
 class _RunnerProbe:
@@ -119,3 +131,75 @@ async def test_order_lane_cools_down_independently(monkeypatch):
     r_data = await server_mod._run_ib_script_with_recovery("xenon-ib-market-depth", [], timeout=5)
     assert r_data.ok
     assert probe.calls == ["xenon-ib-order-manage", "xenon-ib-market-depth"]
+
+
+def _patch_dead_gateway_restart(monkeypatch):
+    """Route the recovery path into a successful local gateway restart."""
+
+    async def _gateway_dead():
+        return {"port_listening": False, "upstream_dead": False}
+
+    monkeypatch.setattr(server_mod, "check_ib_gateway", _gateway_dead)
+    monkeypatch.setattr(server_mod, "is_cloud_mode", lambda: False)
+    monkeypatch.setattr(server_mod, "is_docker_mode", lambda: False)
+
+    restarts = {"n": 0}
+
+    async def _restart():
+        restarts["n"] += 1
+        return {"restarted": True, "port_listening": True}
+
+    monkeypatch.setattr(server_mod, "restart_ib_gateway", _restart)
+    return restarts
+
+
+@pytest.mark.parametrize("entry", ["xenon-ib-place-order", "xenon-ib-order-manage"])
+async def test_order_entry_never_retried_after_gateway_restart(monkeypatch, entry):
+    """OP-1: a failed order entry may have reached IB — never resend it."""
+    pool = _ConnectedPool()
+    monkeypatch.setattr(server_mod, "ib_pool", pool)
+    restarts = _patch_dead_gateway_restart(monkeypatch)
+
+    calls: list[str] = []
+
+    async def _run(entry, args, timeout=30):
+        calls.append(entry)
+        return ScriptResult(ok=False, error="Connect call failed: Connection refused")
+
+    monkeypatch.setattr(server_mod, "run_entry_point", _run)
+
+    result = await server_mod._run_ib_script_with_recovery(entry, ["--json", "{}"], timeout=5)
+
+    # run_entry_point called exactly once; pool still reconnected after restart.
+    assert calls == [entry]
+    assert restarts["n"] == 1
+    assert pool.reconnects == 1
+    assert not result.ok
+    assert result.error == (
+        "IB Gateway restarted; order request NOT resent — check open orders before retrying"
+    )
+
+
+async def test_data_entry_retries_after_gateway_restart(monkeypatch):
+    """Data entries keep the existing retry-once-after-restart behavior."""
+    pool = _ConnectedPool()
+    monkeypatch.setattr(server_mod, "ib_pool", pool)
+    restarts = _patch_dead_gateway_restart(monkeypatch)
+
+    calls: list[str] = []
+
+    async def _run(entry, args, timeout=30):
+        calls.append(entry)
+        if len(calls) == 1:
+            return ScriptResult(ok=False, error="Connect call failed")
+        return ScriptResult(ok=True, data={"positions": []})
+
+    monkeypatch.setattr(server_mod, "run_entry_point", _run)
+
+    result = await server_mod._run_ib_script_with_recovery("xenon-ib-sync", ["--sync"], timeout=5)
+
+    assert calls == ["xenon-ib-sync", "xenon-ib-sync"]
+    assert restarts["n"] == 1
+    assert pool.reconnects == 1
+    assert result.ok
+    assert result.data == {"positions": []}
