@@ -56,6 +56,7 @@ def _leg(d: dict) -> Leg:
         tc=d.get("tc"),
         strike=d.get("strike"),
         con_id=d.get("con_id"),
+        und_sec=d.get("und_sec"),
     )
 
 
@@ -104,6 +105,7 @@ def _run(case: dict) -> Decision:
         _candidate(case["candidate"]),
         _view(case),
         SCOPE,
+        netting_enabled=case.get("netting_enabled", False),
     )
 
 
@@ -126,8 +128,11 @@ _EXP = "20261218"
 _KEY = ("AAPL", "AAPL", _EXP, 100)
 
 
-def _opt_leg(action="BUY", right="C", sym="AAPL", exp=_EXP, mult=100, tc="AAPL", ratio=1, strike=200):
-    return Leg(action=action, sym=sym, sec="OPT", ratio=ratio, right=right, exp=exp, mult=mult, tc=tc, strike=strike)
+def _opt_leg(
+    action="BUY", right="C", sym="AAPL", exp=_EXP, mult=100, tc="AAPL",
+    ratio=1, strike=200, und_sec="STK",
+):
+    return Leg(action=action, sym=sym, sec="OPT", ratio=ratio, right=right, exp=exp, mult=mult, tc=tc, strike=strike, und_sec=und_sec)
 
 
 def _call_holding(qty, sym="AAPL", exp=_EXP, mult=100, tc="AAPL", strike=200):
@@ -147,14 +152,17 @@ def _sell_call_order(id="o1", account=SCOPE, qty=1, remaining=1, filled_after=0,
     )
 
 
-def _sell_call_cand(strike=210, sym="AAPL", exp=_EXP, mult=100, tc="AAPL", qty=1, account=SCOPE):
+def _sell_call_cand(
+    strike=210, sym="AAPL", exp=_EXP, mult=100, tc="AAPL", qty=1,
+    account=SCOPE, und_sec="STK",
+):
     return Order(
         id="cand",
         account=account,
         envelope="SELL",
         qty=qty,
         remaining=qty,
-        legs=(_opt_leg("BUY", strike=strike, sym=sym, exp=exp, mult=mult, tc=tc),),
+        legs=(_opt_leg("BUY", strike=strike, sym=sym, exp=exp, mult=mult, tc=tc, und_sec=und_sec),),
     )
 
 
@@ -218,7 +226,8 @@ def test_modify_unknown_target_fails_closed():
 
 
 def test_guaranteed_nets_per_key_only():
-    # guaranteed BAG, SELL env: legs flip -> SELL C200 / BUY C210, net zero.
+    # guaranteed BAG, SELL env: legs flip -> SELL C200 / BUY C210, net zero —
+    # but only when the netting rollout flag is on.
     cand = Order(
         id="c",
         account=SCOPE,
@@ -228,12 +237,29 @@ def test_guaranteed_nets_per_key_only():
         guaranteed=True,
         legs=(_opt_leg("BUY", strike=200), _opt_leg("SELL", strike=210)),
     )
-    d = evaluate([], [], cand, View(), SCOPE)
+    d = evaluate([], [], cand, View(), SCOPE, netting_enabled=True)
     assert d.accept
+    # Flag off: legs are independent even though the bag is guaranteed.
+    d_off = evaluate([], [], cand, View(), SCOPE)
+    assert not d_off.accept
     # Same bag without the guarantee -> one independent SELL call leg.
     cand2 = Order(**{**cand.__dict__, "guaranteed": False})
-    d2 = evaluate([], [], cand2, View(), SCOPE)
+    d2 = evaluate([], [], cand2, View(), SCOPE, netting_enabled=True)
     assert not d2.accept
+    # Guaranteed but not every leg is OPT -> independent legs, no netting.
+    cand3 = Order(
+        id="c",
+        account=SCOPE,
+        envelope="SELL",
+        qty=1,
+        remaining=1,
+        guaranteed=True,
+        legs=(
+            _opt_leg("BUY", strike=200),
+            Leg(action="SELL", sym="AAPL", sec="STK", ratio=1),
+        ),
+    )
+    assert not evaluate([], [], cand3, View(), SCOPE, netting_enabled=True).accept
 
 
 def test_guaranteed_net_long_never_supplies_cover():
@@ -251,7 +277,7 @@ def test_guaranteed_net_long_never_supplies_cover():
     )
     # Bag nets +1 long call at the key: the candidate adds no demand, but the
     # net long is discarded rather than lent to o1's existing uncovered short.
-    d = evaluate(holdings, orders, cand, View(), SCOPE)
+    d = evaluate(holdings, orders, cand, View(), SCOPE, netting_enabled=True)
     assert d.accept
     assert d.uncovered[_KEY] == 1
     # A net-short bag still rejects: net -1 call delta at the key.
@@ -264,17 +290,62 @@ def test_guaranteed_net_long_never_supplies_cover():
         guaranteed=True,
         legs=(_opt_leg("BUY", strike=200), _opt_leg("SELL", strike=210, ratio=2)),
     )
-    assert not evaluate(holdings, orders, cand_short, View(), SCOPE).accept
+    assert not evaluate(holdings, orders, cand_short, View(), SCOPE, netting_enabled=True).accept
 
 
 def test_stock_cover_requires_standard_deliverable():
     holdings = [Holding(sym="AAPL", sec="STK", qty=100)]
-    # standard: mult 100, tc == sym -> shares cover
+    # standard: und_sec STK, mult 100, tc == sym -> shares cover
     assert evaluate(holdings, [], _sell_call_cand(), View(), SCOPE).accept
     # mini: mult 10 -> no share cover
     assert not evaluate(holdings, [], _sell_call_cand(mult=10), View(), SCOPE).accept
     # adjusted: tc != sym -> no share cover
     assert not evaluate(holdings, [], _sell_call_cand(tc="AAPL1"), View(), SCOPE).accept
+    # index underlying (e.g. SPX): shares never cover
+    assert not evaluate(
+        [Holding(sym="SPX", sec="STK", qty=100)], [],
+        _sell_call_cand(sym="SPX", tc="SPX", und_sec="IND"), View(), SCOPE,
+    ).accept
+    # missing und_sec -> shares never cover that call
+    assert not evaluate(holdings, [], _sell_call_cand(und_sec=None), View(), SCOPE).accept
+    # ...but long-call cover for the same key is unaffected by und_sec.
+    long_call = _call_holding(1)
+    assert evaluate(
+        [long_call], [],
+        _sell_call_cand(strike=200, und_sec=None), View(), SCOPE,
+    ).accept
+
+
+def test_order_quantity_validation_rejects():
+    def cand(**kw):
+        base = dict(
+            id="c", account=SCOPE, envelope="SELL", qty=1, remaining=1,
+            legs=(_opt_leg("BUY"),),
+        )
+        base.update(kw)
+        return Order(**base)
+
+    good = [Holding(sym="AAPL", sec="STK", qty=200)]
+    assert evaluate(good, [], cand(), View(), SCOPE).accept
+    for kw in (
+        {"qty": 0}, {"qty": True}, {"qty": 1.5},
+        {"remaining": -1}, {"remaining": True}, {"remaining": 0.5},
+        {"filled_after_snapshot": -1}, {"filled_after_snapshot": True},
+        {"filled_after_snapshot": 1, "remaining": 1},  # sum > qty
+        {"envelope": "HOLD"}, {"envelope": ""},
+        {"pending_amend_qty": 0}, {"pending_amend_qty": True},
+    ):
+        d = evaluate(good, [], cand(**kw), View(), SCOPE)
+        assert not d.accept, f"{kw} should reject"
+        assert d.reasons, f"{kw} rejected without a reason"
+    # An invalid existing order also rejects (strict gate path).
+    bad_order = cand(id="o1", qty=-3)
+    assert not evaluate(good, [bad_order], _sell_call_cand(), View(), SCOPE).accept
+    # Modify candidates validate new_qty (int >= 1).
+    order = _sell_call_order(qty=2, remaining=2)
+    for new_qty in (0, -1, True, 2.5):
+        assert not evaluate(good, [order], Modify("o1", new_qty), View(), SCOPE).accept
+    assert evaluate(good, [order], Modify("o1", 2), View(), SCOPE).accept
 
 
 def test_long_call_first_then_shares_assignment():
@@ -367,16 +438,23 @@ def test_view_defaults_and_flags():
 _SCOPE = dict(broker="IB", account_env="paper", broker_account="DU_TEST")
 
 
-@pytest.fixture(scope="module", autouse=True)
+@pytest.fixture(scope="module")
 def _throwaway_pg_db():
-    """Point this module's DB tests at a throwaway DB on LOCAL Postgres.
+    """Point the requesting DB test at a throwaway DB on LOCAL Postgres.
 
     Lead directive: the shared macmini core_test (DATABASE_URL_TEST) must
     stay at master's schema — migrations and write tests run only against
     `xe_a2_mig_<rand>` on the host from DATABASE_URL_PAPER (127.0.0.1),
     created here, migrated to head, and dropped at teardown. Module-scoped
-    so the env repoint never leaks into other test files. Skips when no
-    local admin connection or CREATEDB is available.
+    and opt-in: pure coverage cases never touch PG and run unconditionally
+    (e.g. CI without DATABASE_URL_PAPER). Skips only the requesting test
+    when no local admin connection or CREATEDB is available.
+
+    The test-side URLs carry the configured DATABASE_URL_PAPER credentials
+    (user + password) — nothing is discarded. Only CREATE/DROP DATABASE
+    goes through the local OS superuser, because the configured role has
+    no CREATEDB on the local instance; the throwaway is created with the
+    configured role as OWNER so migrations/DML run as it.
     """
     base_env = os.environ.get("DATABASE_URL_PAPER") or os.environ.get(
         "DATABASE_URL_TEST_PAPER"
@@ -397,15 +475,19 @@ def _throwaway_pg_db():
         )
     except Exception:
         pytest.skip("no usable local Postgres admin URL")
+    app_user = base.username or getpass.getuser()
     dbname = f"xe_a2_mig_{uuid.uuid4().hex[:10]}"
     try:
         with admin_engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-            conn.execute(text(f'CREATE DATABASE "{dbname}"'))
-        # Alembic writes xenon.alembic_version before the initial revision's
-        # _ensure_schemas() can run — the schemas must pre-exist.
+            conn.execute(text(f'CREATE DATABASE "{dbname}" OWNER "{app_user}"'))
+        # Configured credentials, not the admin role — the app role owns the
+        # throwaway so CREATE SCHEMA and the alembic_version table work.
+        test_async = base.set(drivername="postgresql+asyncpg", database=dbname)
         boot = create_engine(
-            admin.set(database=dbname), isolation_level="AUTOCOMMIT"
+            test_async.set(drivername="postgresql+psycopg"),
+            isolation_level="AUTOCOMMIT",
+            connect_args={"connect_timeout": 3},
         )
         with boot.connect() as conn:
             conn.execute(text("CREATE SCHEMA IF NOT EXISTS xenon"))
@@ -414,14 +496,6 @@ def _throwaway_pg_db():
     except Exception:
         admin_engine.dispose()
         pytest.skip("local Postgres admin connect/CREATE DATABASE failed")
-
-    test_async = URL.create(
-        "postgresql+asyncpg",
-        username=getpass.getuser(),
-        host=base.host,
-        port=base.port or 5432,
-        database=dbname,
-    )
 
     old_db, old_test = os.environ.get("DATABASE_URL"), os.environ.get("DATABASE_URL_TEST")
     os.environ["DATABASE_URL"] = str(test_async)
@@ -503,20 +577,20 @@ def _fetch_submission(submission_id):
         ).first()
 
 
-def test_reserve_attempt_stores_legs():
+def test_reserve_attempt_stores_legs(_throwaway_pg_db):
     out = reserve_attempt("u1", "att-legs-1", _req(), legs=_LEGS, **_SCOPE)
     assert out.status == "winner"
     row = _fetch_submission(out.submission_id)
     assert row.legs == _LEGS
 
 
-def test_reserve_attempt_without_legs_still_works():
+def test_reserve_attempt_without_legs_still_works(_throwaway_pg_db):
     out = reserve_attempt("u1", "att-nolegs-1", _req(), **_SCOPE)
     assert out.status == "winner"
     assert _fetch_submission(out.submission_id).legs is None
 
 
-def test_reserve_attempt_same_body_is_duplicate_across_identities():
+def test_reserve_attempt_same_body_is_duplicate_across_identities(_throwaway_pg_db):
     first = reserve_attempt("u1", "att-dup-1", _req(), legs=_LEGS, **_SCOPE)
     # Different caller identity, same attempt id + same body -> duplicate,
     # not a second row (idempotency is account-scoped, not identity-scoped).
@@ -526,7 +600,7 @@ def test_reserve_attempt_same_body_is_duplicate_across_identities():
     assert second.submission_id == first.submission_id
 
 
-def test_reserve_attempt_body_mismatch_same_key():
+def test_reserve_attempt_body_mismatch_same_key(_throwaway_pg_db):
     reserve_attempt("u1", "att-mm-1", _req(), legs=_LEGS, **_SCOPE)
     # Same key, different request body -> distinct outcome for 409 mapping.
     changed = reserve_attempt("u2", "att-mm-1", _req(quantity=2), legs=_LEGS, **_SCOPE)
@@ -541,7 +615,7 @@ def test_reserve_attempt_body_mismatch_same_key():
     assert same.status == "duplicate"
 
 
-def test_reserve_attempt_scope_isolation():
+def test_reserve_attempt_scope_isolation(_throwaway_pg_db):
     # Same attempt id under a different account scope is an independent key.
     first = reserve_attempt("u1", "att-scope-1", _req(), **_SCOPE)
     second = reserve_attempt("u1", "att-scope-1", _req(), **{**_SCOPE, "broker_account": "DU_OTHER"})
@@ -550,39 +624,89 @@ def test_reserve_attempt_scope_isolation():
     assert second.submission_id != first.submission_id
 
 
-def test_old_writer_insert_shape_still_succeeds():
-    # The pre-migration writer (no `legs` column in its insert) must keep
-    # working on the migrated schema (release checklist: old-writer test).
+def test_previous_release_writer_sql_still_succeeds(_throwaway_pg_db):
+    """The previous release's actual reserve_attempt statement — old insert
+    shape (no `legs`) with ON CONFLICT ON CONSTRAINT uq_order_sub_user_attempt
+    DO NOTHING — keeps working on the expanded schema (both constraints live).
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
     from xenon.db.engine import get_sync_engine
 
-    now = datetime.now(timezone.utc)
-    sid = "old-writer-1"
-    with get_sync_engine().begin() as conn:
-        conn.execute(
-            insert(order_submissions).values(
-                submission_id=sid,
-                user_id="u1",
-                client_attempt_id="att-old-1",
-                ticker="SPY",
-                security_type="STK",
-                action="SELL",
-                quantity=100,
-                expiry=None,
-                strike=None,
-                right=None,
-                multiplier=100,
-                con_id=756733,
-                limit_price=Decimal("500.15"),
-                state="PENDING",
-                submitted_at=now,
-                updated_at=now,
-                broker="IB",
-                account_env="paper",
-                broker_account="DU_TEST",
-            )
+    def old_reserve(conn, submission_id, user_id="u1", attempt="att-old-1"):
+        stmt = pg_insert(order_submissions).values(
+            submission_id=submission_id,
+            user_id=user_id,
+            client_attempt_id=attempt,
+            ticker="SPY",
+            security_type="STK",
+            action="SELL",
+            quantity=100,
+            expiry=None,
+            strike=None,
+            right=None,
+            multiplier=100,
+            con_id=756733,
+            limit_price=Decimal("500.15"),
+            state="PENDING",
+            submitted_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            broker="IB",
+            account_env="paper",
+            broker_account="DU_TEST",
         )
-    row = _fetch_submission(sid)
+        stmt = stmt.on_conflict_do_nothing(constraint="uq_order_sub_user_attempt")
+        stmt = stmt.returning(order_submissions.c.submission_id)
+        return conn.execute(stmt).first()
+
+    with get_sync_engine().begin() as conn:
+        # Fresh attempt inserts (legs stays NULL).
+        assert old_reserve(conn, "old-w-1")[0] == "old-w-1"
+        # Same (scope, user, attempt): old key's ON CONFLICT swallows it —
+        # the existing row wins, no second submission.
+        assert old_reserve(conn, "old-w-2") is None
+    row = _fetch_submission("old-w-1")
     assert row is not None and row.legs is None
+    assert _fetch_submission("old-w-2") is None
+
+
+def test_previous_release_writer_cross_identity_insert_blocked(_throwaway_pg_db):
+    """Expand-state compatibility: the old writer's key includes user_id, so
+    a same-(scope, attempt) retry under a DIFFERENT identity misses the old
+    constraint and collides with the new scope key instead — an error, not a
+    silent duplicate insert (the new key still protects cross-identity
+    replay while the old writer is deployed).
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.exc import IntegrityError
+
+    from xenon.db.engine import get_sync_engine
+
+    def old_reserve(conn, submission_id, user_id):
+        stmt = pg_insert(order_submissions).values(
+            submission_id=submission_id,
+            user_id=user_id,
+            client_attempt_id="att-xid-1",
+            ticker="SPY",
+            security_type="STK",
+            action="SELL",
+            quantity=100,
+            state="PENDING",
+            submitted_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            broker="IB",
+            account_env="paper",
+            broker_account="DU_TEST",
+        )
+        stmt = stmt.on_conflict_do_nothing(constraint="uq_order_sub_user_attempt")
+        stmt = stmt.returning(order_submissions.c.submission_id)
+        return conn.execute(stmt).first()
+
+    with get_sync_engine().begin() as conn:
+        assert old_reserve(conn, "xid-w-1", "u1") is not None
+        with pytest.raises(IntegrityError):
+            with conn.begin_nested():
+                old_reserve(conn, "xid-w-2", "u2")
 
 
 # ---------------------------------------------------------------------------
@@ -666,11 +790,14 @@ def _delete_collision(engine):
         )
 
 
-def test_migration_upgrade_downgrade_upgrade(pg_test_engine, monkeypatch):
+def test_migration_upgrade_downgrade_upgrade(_throwaway_pg_db, pg_test_engine, monkeypatch):
     """Collision check raises loudly, then upgrade/downgrade/upgrade round-trips.
 
-    Runs against the throwaway local DB (already at head via the session
-    fixture); rows are inserted/removed explicitly.
+    EXPAND-only migration: upgrade keeps uq_order_sub_user_attempt and adds
+    uq_order_sub_scope_attempt + legs alongside; downgrade removes only what
+    the upgrade added (the old constraint is untouched throughout). Runs
+    against the throwaway local DB (already at head via the fixture); rows
+    are inserted/removed explicitly.
     """
     pytest.importorskip("alembic")
     from alembic import command
@@ -681,12 +808,16 @@ def test_migration_upgrade_downgrade_upgrade(pg_test_engine, monkeypatch):
     cfg = _alembic_cfg()
     engine = pg_test_engine
     try:
-        # Fixture upgraded to head: my revision is applied.
+        # Fixture upgraded to head: expand state — BOTH unique constraints
+        # exist alongside, and legs was added.
         assert "legs" in _sub_cols(engine)
-        assert "uq_order_sub_scope_attempt" in _sub_unique(engine)
-        assert "uq_order_sub_user_attempt" not in _sub_unique(engine)
+        assert _sub_unique(engine) >= {
+            "uq_order_sub_user_attempt",
+            "uq_order_sub_scope_attempt",
+        }
 
         command.downgrade(cfg, _MIGRATION_PARENT)
+        # Downgrade drops only what the upgrade added; the old key remains.
         assert "legs" not in _sub_cols(engine)
         assert "uq_order_sub_user_attempt" in _sub_unique(engine)
         assert "uq_order_sub_scope_attempt" not in _sub_unique(engine)
@@ -700,7 +831,10 @@ def test_migration_upgrade_downgrade_upgrade(pg_test_engine, monkeypatch):
 
         command.upgrade(cfg, _MIGRATION_REV)
         assert "legs" in _sub_cols(engine)
-        assert "uq_order_sub_scope_attempt" in _sub_unique(engine)
+        assert _sub_unique(engine) >= {
+            "uq_order_sub_user_attempt",
+            "uq_order_sub_scope_attempt",
+        }
     finally:
         _delete_collision(engine)
         try:

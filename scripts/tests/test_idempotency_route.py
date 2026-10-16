@@ -92,6 +92,33 @@ def test_terminal_replay_returns_409(client):
     assert r2.json()["reason_code"] == "ATTEMPT_ID_TERMINAL"
 
 
+def test_body_mismatch_returns_409_no_broker_call(client, monkeypatch):
+    """Same client_attempt_id with a changed body → 409 ATTEMPT_BODY_MISMATCH,
+    and the broker/runner stub must not be invoked a second time."""
+    from xenon.api import server
+
+    calls = {"n": 0}
+    orig = server._next_test_order_ids
+
+    def spy():
+        calls["n"] += 1
+        return orig()
+
+    monkeypatch.setattr(server, "_next_test_order_ids", spy)
+
+    cid = "mismatch-1"
+    r1 = client.post("/orders/place", json=_body(cid))
+    assert r1.status_code == 200
+    assert calls["n"] == 1
+
+    body2 = _body(cid)
+    body2["quantity"] = 5
+    r2 = client.post("/orders/place", json=body2)
+    assert r2.status_code == 409
+    assert r2.json()["reason_code"] == "ATTEMPT_BODY_MISMATCH"
+    assert calls["n"] == 1  # zero additional broker/runner calls
+
+
 def test_concurrent_same_cid_only_one_subprocess(client, monkeypatch):
     from xenon.api import server
 

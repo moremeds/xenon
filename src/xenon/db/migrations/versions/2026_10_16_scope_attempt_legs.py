@@ -4,15 +4,20 @@ Revision ID: 2026_10_16_scope_attempt_legs
 Revises: 2026_06_22_positions_currency
 Create Date: 2026-10-16
 
-Spec §2.3/§2.5: idempotency becomes account-scoped — the unique key drops
-`user_id` and becomes (broker, account_env, broker_account,
-client_attempt_id). `legs jsonb NULL` stores the effective-leg reservation
-payload (actions, ratios, conIds, multiplier, guarantee mode, original and
-replacement qty) so demand survives restarts.
+Spec §2.3/§2.5: idempotency becomes account-scoped — EXPAND adds a unique
+key on (broker, account_env, broker_account, client_attempt_id) ALONGSIDE
+the existing (broker, account_env, broker_account, user_id,
+client_attempt_id) key so the previous release's writer keeps working
+through rollout; a later contract PR drops the old key. `legs jsonb NULL`
+stores the effective-leg reservation payload (actions, ratios, conIds,
+multiplier, guarantee mode, original and replacement qty) so demand
+survives restarts.
 
 The upgrade FIRST inventories rows that would collide under the new key and
 raises with the group count — order evidence is never deleted or merged;
-collisions need manual reconciliation before re-running.
+collisions need manual reconciliation before re-running. Downgrade removes
+only what this upgrade added (the new constraint and `legs`); the legacy
+constraint is untouched throughout.
 """
 
 from typing import Sequence, Union
@@ -56,7 +61,6 @@ def upgrade() -> None:
         sa.Column("legs", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         schema="xenon",
     )
-    op.drop_constraint("uq_order_sub_user_attempt", "order_submissions", schema="xenon")
     op.create_unique_constraint(
         "uq_order_sub_scope_attempt",
         "order_submissions",
@@ -67,10 +71,4 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_constraint("uq_order_sub_scope_attempt", "order_submissions", schema="xenon")
-    op.create_unique_constraint(
-        "uq_order_sub_user_attempt",
-        "order_submissions",
-        ["broker", "account_env", "broker_account", "user_id", "client_attempt_id"],
-        schema="xenon",
-    )
     op.drop_column("order_submissions", "legs", schema="xenon")

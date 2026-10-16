@@ -44,19 +44,23 @@ def test_nav_history_pk_is_scoped():
     assert pk_cols == ["broker", "account_env", "broker_account", "date", "source"]
 
 
-def test_order_idempotency_constraint_is_scoped():
-    uq = None
-    for c in order_submissions.constraints:
-        if getattr(c, "name", None) == "uq_order_sub_user_attempt":
-            uq = c
-            break
-    assert uq is not None
-    col_names = [col.name for col in uq.columns]
-    assert "broker" in col_names
-    assert "account_env" in col_names
-    assert "broker_account" in col_names
-    assert "user_id" in col_names
-    assert "client_attempt_id" in col_names
+def test_order_idempotency_constraints_expand_state():
+    """EXPAND state: the legacy identity-scoped key and the account-scoped
+    key coexist until the contract migration drops the old one."""
+    uqs = {c.name: [col.name for col in c.columns] for c in order_submissions.constraints}
+
+    old = uqs.get("uq_order_sub_user_attempt")
+    assert old is not None, "legacy identity-scoped key must remain during expand"
+    assert "broker" in old
+    assert "account_env" in old
+    assert "broker_account" in old
+    assert "user_id" in old
+    assert "client_attempt_id" in old
+
+    new = uqs.get("uq_order_sub_scope_attempt")
+    assert new is not None, "account-scoped key must exist in expand state"
+    assert new == ["broker", "account_env", "broker_account", "client_attempt_id"]
+    assert "user_id" not in new
 
 
 @pytest.fixture

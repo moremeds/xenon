@@ -14,11 +14,18 @@ Model:
   units, per effective leg = ratio x demand). For a pending amend or an
   in-flight modify the outstanding is max(old_total, new_total) - filled_total.
 - Effective legs: a SELL envelope flips each leg's action. Inside a
-  guaranteed BAG (stored `guaranteed is True`) leg deltas net per key; a net
-  long delta never supplies cover to other orders. Everywhere else legs are
-  independent.
+  guaranteed BAG leg deltas net per key when `netting_enabled` is set AND
+  `guaranteed is True` AND every leg is OPT; a net long delta never
+  supplies cover to other orders. Everywhere else legs are independent.
 - Key = (sym, tc, exp, mult). A long call covers a short call of the same
-  key only. Shares cover only standard deliverables (mult 100, tc == sym).
+  key only. Shares cover only standard deliverables: und_sec == 'STK',
+  mult 100, tc == sym. Missing or non-STK und_sec means shares never
+  cover that call.
+- Order quantity fields are validated before projection: ints only
+  (bool/float rejected), qty >= 1, remaining >= 0,
+  filled_after_snapshot >= 0, filled_after_snapshot + remaining <= qty,
+  pending_amend_qty / modify new_qty >= 1 when set, envelope in
+  {BUY, SELL}. Any violation rejects with a reason.
 - Anything we cannot classify fails closed: unknown contract metadata,
   incomplete/stale view, an order with no account, an unresolved BAG row
   with no stored legs, or a candidate from another account.
@@ -65,6 +72,8 @@ class Leg:
     `action` is the order-side leg action; a SELL envelope flips it.
     `ratio` multiplies the order demand units. `strike`/`con_id` are carried
     for reservation parity but do not participate in the coverage key.
+    `und_sec` is the underlying's security type; shares cover a short call
+    only when und_sec == 'STK' (index/futures/unknown deliverables do not).
     """
 
     action: str
@@ -77,6 +86,7 @@ class Leg:
     tc: str | None = None
     strike: float | None = None
     con_id: int | None = None
+    und_sec: str | None = None
 
 
 @dataclass(frozen=True)
@@ -141,7 +151,7 @@ def _leg_problem(leg: Leg) -> str | None:
         return "sym"
     if leg.sec not in (_STK, _OPT):
         return "sec"
-    if not isinstance(leg.ratio, int) or leg.ratio < 1:
+    if isinstance(leg.ratio, bool) or not isinstance(leg.ratio, int) or leg.ratio < 1:
         return "ratio"
     if leg.sec == _OPT:
         if leg.right not in (_CALL, _PUT):
@@ -169,6 +179,28 @@ def _holding_problem(h: Holding) -> str | None:
             return "mult"
         if not h.tc:
             return "tc"
+    return None
+
+
+def _order_problem(order: Order) -> str | None:
+    """Return why an order's quantity fields cannot be trusted, or None."""
+    if order.envelope not in (_BUY, _SELL):
+        return "envelope"
+    for name in ("qty", "remaining", "filled_after_snapshot"):
+        v = getattr(order, name)
+        if isinstance(v, bool) or not isinstance(v, int):
+            return name
+    if order.qty < 1:
+        return "qty"
+    if order.remaining < 0:
+        return "remaining"
+    if order.filled_after_snapshot < 0:
+        return "filled_after_snapshot"
+    if order.filled_after_snapshot + order.remaining > order.qty:
+        return "filled_bounds"
+    paq = order.pending_amend_qty
+    if paq is not None and (isinstance(paq, bool) or not isinstance(paq, int) or paq < 1):
+        return "pending_amend_qty"
     return None
 
 
@@ -200,47 +232,58 @@ def _add_order_demand(
     units: int,
     call_demand: dict[Key, int],
     stock_demand: dict[str, int],
-    problems: list[str],
+    call_share_ok: dict[Key, bool],
+    *,
+    netting_enabled: bool,
 ) -> None:
     """Accumulate one order's consuming-leg demand (consume-only).
 
-    guaranteed=True nets effective leg deltas per key inside the order;
-    the net short-call / short-stock delta is the demand and a net long
-    delta is discarded. Otherwise every leg is independent and only SELL
-    call / SELL stock legs consume.
+    Netting applies only when `netting_enabled` is set AND the order is
+    guaranteed AND every leg is OPT: effective leg deltas net per key,
+    the net short-call delta is the demand, and a net long delta is
+    discarded. Otherwise every leg is independent and only SELL call /
+    SELL stock legs consume.
+
+    `call_share_ok[key]` records whether every OPT leg seen at that key
+    carries und_sec == 'STK'; a missing or non-STK und_sec on any order
+    leg disables share cover for the key (holding-derived demand keeps
+    the mult 100 / tc == sym deliverable check, and long-call cover is
+    unaffected either way).
     """
     if units <= 0:
         return
+    legs = order.legs or ()
     flip = order.envelope == _SELL
-    if order.guaranteed is True:
+    netting = (
+        netting_enabled
+        and order.guaranteed is True
+        and all(leg.sec == _OPT for leg in legs)
+    )
+    if netting:
         call_net: dict[Key, int] = {}
-        stock_net: dict[str, int] = {}
-        for leg in order.legs or ():
+        for leg in legs:
             action = _flip(leg.action) if flip else leg.action
             units_leg = leg.ratio * units
             delta = units_leg if action == _BUY else -units_leg
-            if leg.sec == _OPT:
-                if leg.right == _CALL:
-                    k = _key(leg.sym, leg.tc, leg.exp, leg.mult)
-                    call_net[k] = call_net.get(k, 0) + delta
-                # puts never cover and never create naked-call demand
-            else:
-                stock_net[leg.sym] = stock_net.get(leg.sym, 0) + delta
+            k = _key(leg.sym, leg.tc, leg.exp, leg.mult)
+            call_share_ok[k] = call_share_ok.get(k, True) and leg.und_sec == _STK
+            if leg.right == _CALL:
+                call_net[k] = call_net.get(k, 0) + delta
+            # puts never cover and never create naked-call demand
         for k, d in call_net.items():
             if d < 0:
                 call_demand[k] = call_demand.get(k, 0) + (-d)
-        for s, d in stock_net.items():
-            if d < 0:
-                stock_demand[s] = stock_demand.get(s, 0) + (-d)
         return
-    for leg in order.legs or ():
+    for leg in legs:
+        if leg.sec == _OPT:
+            k = _key(leg.sym, leg.tc, leg.exp, leg.mult)
+            call_share_ok[k] = call_share_ok.get(k, True) and leg.und_sec == _STK
         action = _flip(leg.action) if flip else leg.action
         if action != _SELL:
             continue
         units_leg = leg.ratio * units
         if leg.sec == _OPT:
             if leg.right == _CALL:
-                k = _key(leg.sym, leg.tc, leg.exp, leg.mult)
                 call_demand[k] = call_demand.get(k, 0) + units_leg
             # short put is cash-secured: allowed, no cover consumed
         else:
@@ -254,6 +297,7 @@ def _project(
     scope_account: str | None,
     *,
     strict: bool,
+    netting_enabled: bool = False,
 ) -> tuple[dict[Key, int], dict[str, int], list[str]]:
     """Compute uncovered short calls per key and short stock per symbol.
 
@@ -264,6 +308,13 @@ def _project(
     problems: list[str] = []
     call_pos: dict[Key, int] = {}
     shares: dict[str, int] = {}
+    call_share_ok: dict[Key, bool] = {}
+
+    modify_valid = isinstance(candidate, Modify) and (
+        isinstance(candidate.new_qty, int)
+        and not isinstance(candidate.new_qty, bool)
+        and candidate.new_qty >= 1
+    )
 
     for h in holdings:
         bad = _holding_problem(h)
@@ -288,7 +339,16 @@ def _project(
             continue
         if scope_account is not None and o.account != scope_account:
             continue
-        new_qty = candidate.new_qty if isinstance(candidate, Modify) and candidate.order_id == o.id else None
+        bad = _order_problem(o)
+        if bad is not None:
+            if strict:
+                problems.append(f"order_invalid:{o.id}:{bad}")
+            continue
+        new_qty = (
+            candidate.new_qty
+            if modify_valid and candidate.order_id == o.id
+            else None
+        )
         if not o.legs:
             if strict:
                 problems.append(f"order_unresolved_legs:{o.id}")
@@ -298,11 +358,16 @@ def _project(
             if strict:
                 problems.append(f"order_unknown_metadata:{o.id}:{_leg_problem(bad_leg)}")
             continue
-        _add_order_demand(o, _demand_units(o, new_qty), call_demand, stock_demand, problems)
+        _add_order_demand(
+            o, _demand_units(o, new_qty), call_demand, stock_demand,
+            call_share_ok, netting_enabled=netting_enabled,
+        )
 
     if isinstance(candidate, Order):
         if scope_account is not None and candidate.account != scope_account:
             problems.append(f"candidate_account_mismatch:{candidate.account}")
+        elif _order_problem(candidate) is not None:
+            problems.append(f"candidate_invalid:{candidate.id}:{_order_problem(candidate)}")
         elif not candidate.legs:
             problems.append(f"candidate_unresolved_legs:{candidate.id}")
         else:
@@ -310,8 +375,13 @@ def _project(
             if bad_leg is not None:
                 problems.append(f"candidate_unknown_metadata:{candidate.id}:{_leg_problem(bad_leg)}")
             else:
-                _add_order_demand(candidate, candidate.qty, call_demand, stock_demand, problems)
+                _add_order_demand(
+                    candidate, candidate.qty, call_demand, stock_demand,
+                    call_share_ok, netting_enabled=netting_enabled,
+                )
     elif isinstance(candidate, Modify):
+        if not modify_valid:
+            problems.append(f"modify_invalid_new_qty:{candidate.new_qty}")
         scoped = [
             o
             for o in orders
@@ -328,15 +398,21 @@ def _project(
     short_stock = {sym: -q for sym, q in projected.items() if q < 0}
 
     # Long calls first (they can only cover their own key), then shares on
-    # standard deliverables only (mult 100, tc == sym). Shares are allocated
-    # per symbol across its keys in sorted-key order so every unit is used
-    # once and the result is deterministic.
+    # standard stock-underlying deliverables only (und_sec STK, mult 100,
+    # tc == sym). Shares are allocated per symbol across its keys in
+    # sorted-key order so every unit is used once and the result is
+    # deterministic.
     uncovered: dict[Key, int] = {}
     share_pool = {sym: max(q, 0) for sym, q in projected.items()}
     for k in sorted(call_demand.keys() | call_pos.keys()):
         residual = max(0, call_demand.get(k, 0) - call_pos.get(k, 0))
         sym, tc, _exp, mult = k
-        if residual > 0 and mult == _STANDARD_MULT and tc == sym:
+        if (
+            residual > 0
+            and mult == _STANDARD_MULT
+            and tc == sym
+            and call_share_ok.get(k, True)
+        ):
             pool = share_pool.get(sym, 0)
             covered = min(residual, pool // mult)
             if covered:
@@ -354,13 +430,17 @@ def evaluate(
     candidate: Order | Modify,
     view: View,
     scope_account: str,
+    netting_enabled: bool = False,
 ) -> Decision:
     """Preflight gate: accept iff the candidate adds no short stock and does
     not increase uncovered short calls on any key.
 
     Any fail-closed condition (incomplete or stale view, missing account,
     unresolved BAG legs, unknown metadata, foreign-account candidate,
-    unknown modify target) rejects.
+    unknown modify target, invalid quantity/envelope fields) rejects.
+
+    `netting_enabled` rolls out guaranteed-BAG per-key netting; while off,
+    guaranteed bags are evaluated leg-by-leg like any other order.
     """
     reasons: list[str] = []
     if view is None or not view.complete:
@@ -370,8 +450,12 @@ def evaluate(
     if not scope_account:
         reasons.append("scope_account_missing")
 
-    base_unc, base_ss, base_problems = _project(holdings, orders, None, scope_account, strict=True)
-    with_unc, with_ss, with_problems = _project(holdings, orders, candidate, scope_account, strict=True)
+    base_unc, base_ss, base_problems = _project(
+        holdings, orders, None, scope_account, strict=True, netting_enabled=netting_enabled
+    )
+    with_unc, with_ss, with_problems = _project(
+        holdings, orders, candidate, scope_account, strict=True, netting_enabled=netting_enabled
+    )
     problems = sorted(set(base_problems) | set(with_problems))
     reasons.extend(problems)
 
@@ -395,6 +479,8 @@ def uncovered(
     holdings: list[Holding] | tuple[Holding, ...],
     orders: list[Order] | tuple[Order, ...],
     candidate: Order | Modify | None = None,
+    *,
+    netting_enabled: bool = False,
 ) -> dict[Key, int]:
     """Uncovered short-call contracts per key for the naked-short audit.
 
@@ -402,7 +488,9 @@ def uncovered(
     skips per spec §2.4). Pass live orders only; no post-as_of overlap
     demand is added here.
     """
-    unc, _ss, _problems = _project(holdings, orders, candidate, None, strict=False)
+    unc, _ss, _problems = _project(
+        holdings, orders, candidate, None, strict=False, netting_enabled=netting_enabled
+    )
     return unc
 
 
@@ -410,7 +498,11 @@ def short_stock(
     holdings: list[Holding] | tuple[Holding, ...],
     orders: list[Order] | tuple[Order, ...],
     candidate: Order | Modify | None = None,
+    *,
+    netting_enabled: bool = False,
 ) -> dict[str, int]:
     """Projected short stock per symbol for the naked-short audit."""
-    _unc, ss, _problems = _project(holdings, orders, candidate, None, strict=False)
+    _unc, ss, _problems = _project(
+        holdings, orders, candidate, None, strict=False, netting_enabled=netting_enabled
+    )
     return ss
