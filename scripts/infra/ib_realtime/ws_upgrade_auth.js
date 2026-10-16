@@ -78,14 +78,12 @@ export async function authorizeUpgrade(req, deps = {}) {
     return { ok: false, status: 403, reason: "origin_not_allowed" };
   }
 
-  // Service credential path — X-API-Key accepted only with no Origin header.
-  // A browser cannot set this header on a WS upgrade; a request carrying both
-  // key and Origin is forged, so it is rejected outright.
+  // Service credential path — X-API-Key accepted only when the Origin header
+  // is ABSENT entirely (a present-but-empty Origin does not qualify; any
+  // present Origin takes the ticket path below). Browsers cannot set custom
+  // WS headers, so a browser-shaped request never reaches this branch.
   const apiKeyHeader = req.headers["x-api-key"];
-  if (apiKeyHeader != null) {
-    if (req.headers.origin != null && req.headers.origin !== "") {
-      return { ok: false, status: 403, reason: "origin_not_allowed" };
-    }
+  if (apiKeyHeader != null && req.headers.origin == null) {
     if (!queryApiKey) {
       return { ok: false, status: 401, reason: "api_key_disabled" };
     }

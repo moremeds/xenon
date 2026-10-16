@@ -68,6 +68,55 @@ describe("middleware browser-origin guard", () => {
     }
   });
 
+  it("403s cross-site GET on an allowed Host (Fetch Metadata)", async () => {
+    // A foreign page navigating a tailnet browser to the *legitimate* host —
+    // Host is valid, so only Sec-Fetch-Site distinguishes it. The rejected
+    // response never reaches the route handler (x-middleware-next absent),
+    // so zero upstream calls (incl. the portfolio background sync) can run.
+    const res = run(
+      req("/api/portfolio", {
+        method: "GET",
+        headers: { host: "localhost:3000", "sec-fetch-site": "cross-site" },
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect(res.headers.get("x-middleware-next")).toBeNull();
+    expect((await res.json()).reason).toBe("fetch_site");
+  });
+
+  it("403s same-site (cross-origin subdomain) GET", async () => {
+    const res = run(
+      req("/api/portfolio", {
+        method: "GET",
+        headers: { host: "localhost:3000", "sec-fetch-site": "same-site" },
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect((await res.json()).reason).toBe("fetch_site");
+  });
+
+  it("403s cross-site HEAD as well", async () => {
+    const res = run(
+      req("/api/portfolio", {
+        method: "HEAD",
+        headers: { host: "localhost:3000", "sec-fetch-site": "cross-site" },
+      }),
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("passes GET with Sec-Fetch-Site same-origin or none", () => {
+    for (const site of ["same-origin", "none"]) {
+      const res = run(
+        req("/api/portfolio", {
+          method: "GET",
+          headers: { host: "localhost:3000", "sec-fetch-site": site },
+        }),
+      );
+      expect(res.headers.get("x-middleware-next")).toBe("1");
+    }
+  });
+
   it("lets non-/api requests through unguarded (any Host)", () => {
     expect(statusOf(req("/portfolio", { method: "POST" }))).toBe(200);
     expect(

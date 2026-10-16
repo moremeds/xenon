@@ -129,7 +129,7 @@ test("wrong X-API-Key -> 401", async () => {
   assert.equal(d.reason, "bad_api_key");
 });
 
-test("correct X-API-Key WITH an Origin -> rejected", async () => {
+test("X-API-Key WITH an Origin -> key ignored, ticket path required", async () => {
   const d = await authorizeUpgrade(
     makeReq({ url: "/", apiKey: "svc-key-1", origin: "http://localhost:3000" }),
     {
@@ -139,7 +139,38 @@ test("correct X-API-Key WITH an Origin -> rejected", async () => {
     },
   );
   assert.equal(d.ok, false);
-  assert.equal(d.status, 403);
+  assert.equal(d.status, 401);
+  assert.equal(d.reason, "missing_ticket"); // took the ticket path, not the key path
+});
+
+test("X-API-Key with present-but-empty Origin -> ticket path, not key path", async () => {
+  const d = await authorizeUpgrade(
+    makeReq({ url: "/", apiKey: "svc-key-1", origin: "" }),
+    {
+      fetchImpl: okFetch,
+      origins: ORIGINS,
+      queryApiKey: "svc-key-1",
+    },
+  );
+  assert.equal(d.ok, false);
+  assert.equal(d.status, 401);
+  assert.equal(d.reason, "missing_ticket");
+});
+
+test("X-API-Key + allowed Origin + valid ticket -> ticket path accepts", async () => {
+  const d = await authorizeUpgrade(
+    makeReq({
+      url: "/?ticket=t1",
+      apiKey: "svc-key-1",
+      origin: "http://localhost:3000",
+    }),
+    {
+      fetchImpl: okFetch,
+      origins: ORIGINS,
+      queryApiKey: "svc-key-1",
+    },
+  );
+  assert.deepEqual(d, { ok: true });
 });
 
 test("XENON_QUERY_API_KEY unset -> key path disabled", async () => {

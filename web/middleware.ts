@@ -14,6 +14,13 @@ import { NextRequest, NextResponse } from "next/server";
  * All /api/** requests: Host ∈ XENON_ALLOWED_HOSTS (comma list; default
  * localhost:3000, 127.0.0.1:3000, localhost:3200, 127.0.0.1:3200).
  *
+ * GET/HEAD additionally: when Sec-Fetch-Site is present it must be
+ * "same-origin" (our own app) or "none" (direct navigation / bookmark /
+ * address bar). "cross-site" or "same-site" means a foreign page initiated
+ * the request — rejected, because some GETs have side effects (a stale
+ * /api/portfolio response triggers a credentialed background sync upstream).
+ * Header absent = non-browser client (curl, services) — allowed.
+ *
  * Non-GET/HEAD additionally requires ALL of:
  *   1. Origin's host matches the request Host exactly; when Origin is absent
  *      (curl, some navigations) Sec-Fetch-Site: same-origin is required;
@@ -66,6 +73,17 @@ export default function middleware(request: NextRequest) {
   }
 
   if (method === "GET" || method === "HEAD") {
+    // Fetch-metadata discriminator for GETs: a cross-site page can still
+    // navigate/embed requests at the *legitimate* allowed Host, so Host alone
+    // cannot stop cross-site reads or side-effecting GETs. same-origin = our
+    // app; none = user-initiated navigation; anything else = reject.
+    const fetchSite = request.headers.get("sec-fetch-site");
+    if (fetchSite !== null) {
+      const site = fetchSite.trim().toLowerCase();
+      if (site !== "same-origin" && site !== "none") {
+        return forbidden("fetch_site");
+      }
+    }
     return NextResponse.next();
   }
 
