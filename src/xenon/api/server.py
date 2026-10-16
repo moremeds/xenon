@@ -2380,7 +2380,7 @@ def _record_manage_event(
         )
 
 
-@app.post("/orders/cancel", dependencies=[Depends(require_mode_verified)])
+@app.post("/orders/cancel")
 async def orders_cancel(request: Request):
     """Cancel an open order via subprocess.
 
@@ -2485,7 +2485,7 @@ def _mark_submission_cancelled(ib_order_id: str, perm_id: str) -> None:
         )
 
 
-@app.post("/orders/modify", dependencies=[Depends(require_mode_verified)])
+@app.post("/orders/modify")
 async def orders_modify(request: Request):
     """Modify an open order via subprocess.
 

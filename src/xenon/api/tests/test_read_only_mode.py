@@ -82,6 +82,30 @@ def test_write_routes_return_403_in_read_only(read_only_client, path):
     assert "dev.sh live" in body["detail"] or "XENON_READ_ONLY" in body["detail"]
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/orders/place",
+        "/orders/cancel",
+        "/orders/modify",
+    ],
+)
+def test_write_routes_return_403_in_read_only_even_when_mode_unverified(read_only_client, monkeypatch, path):
+    """Read-only outranks mode verification on the HTTP routes too.
+
+    A `dev.sh live` session with an unverified IB mode handshake must still
+    get 403 READ_ONLY_MODE — a route-level Depends(require_mode_verified)
+    that runs before the handler would answer 503 instead, hiding the real
+    reason the write was refused.
+    """
+    import xenon.api.server as server
+
+    monkeypatch.setattr(server.app.state, "mode_verified", False, raising=False)
+    r = read_only_client.post(path, json={})
+    assert r.status_code == 403, r.text
+    assert r.json().get("reason_code") == "READ_ONLY_MODE", r.json()
+
+
 def test_journal_post_returns_403_in_read_only(read_only_client):
     """POST /journal also blocks — journal writes are user-authored state."""
     r = read_only_client.post(
