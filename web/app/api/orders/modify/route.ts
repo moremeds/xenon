@@ -221,9 +221,15 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    if (newPrice != null && newPrice <= 0) {
+    // Credit combos carry a NEGATIVE BAG limit. The modify request has no
+    // combo flag, so negatives pass through — the CLI knows the located
+    // trade's secType and decides. Only 0 is an unconditional local reject.
+    if (newPrice != null && newPrice === 0) {
       return NextResponse.json(
-        { error: "Must provide newPrice > 0", reason_code: "INVALID_ORDER_BODY" },
+        {
+          error: "Must provide newPrice != 0",
+          reason_code: "INVALID_ORDER_BODY",
+        },
         { status: 400 },
       );
     }

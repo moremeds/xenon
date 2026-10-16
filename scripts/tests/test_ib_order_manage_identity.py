@@ -234,6 +234,71 @@ class TestAccountUnverified:
         assert "account_unverified" not in _emitted(capsys)
 
 
+# ─── Signed BAG price — credit combos carry negative limits ──────────────
+
+
+class TestSignedBagModifyPrice:
+    def test_bag_modify_negative_price_accepted(self, capsys):
+        """Credit combos carry a NEGATIVE BAG limit — modify must accept a
+        signed price and send it through to place_order."""
+        t = make_trade(order_id=10, perm_id=12345, client_id=0)
+        t.contract.secType = "BAG"
+        client = make_client()
+        client.ib.client.clientId = 0
+        client.ib.errorEvent = ErrorEvent()
+        # The mutated order reports the new price on the first refresh →
+        # confirmed immediately.
+        client.get_open_orders.return_value = [t]
+        client.place_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            modify_order(client, 10, 12345, -1.25, "127.0.0.1", 4002)
+        assert exc.value.code == 0
+        data = _emitted(capsys)
+        assert data["status"] == "ok"
+        placed = client.place_order.call_args[0][1]
+        assert placed.lmtPrice == -1.25
+
+    def test_single_leg_negative_price_rejected(self, capsys):
+        """Negative limits are still illegal on non-BAG orders."""
+        t = make_trade(order_id=10, perm_id=12345, client_id=0)
+        client = make_client([t])
+        client.ib.client.clientId = 0
+        client.ib.errorEvent = ErrorEvent()
+        client.place_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            modify_order(client, 10, 12345, -1.25, "127.0.0.1", 4002)
+        assert exc.value.code == 1
+        data = _emitted(capsys)
+        assert data["status"] == "error"
+        assert data["classification"] == "ib_reject"
+        client.place_order.assert_not_called()
+
+    def test_bag_modify_zero_price_rejected(self, capsys):
+        """Zero is invalid even on a combo — a net-0 limit is meaningless."""
+        t = make_trade(order_id=10, perm_id=12345, client_id=0)
+        t.contract.secType = "BAG"
+        client = make_client([t])
+        client.ib.client.clientId = 0
+        client.ib.errorEvent = ErrorEvent()
+        client.place_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            modify_order(client, 10, 12345, 0, "127.0.0.1", 4002)
+        assert exc.value.code == 1
+        assert _emitted(capsys)["status"] == "error"
+        client.place_order.assert_not_called()
+
+    def test_single_leg_zero_price_rejected(self, capsys):
+        t = make_trade(order_id=10, perm_id=12345, client_id=0)
+        client = make_client([t])
+        client.ib.client.clientId = 0
+        client.ib.errorEvent = ErrorEvent()
+        client.place_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            modify_order(client, 10, 12345, 0, "127.0.0.1", 4002)
+        assert exc.value.code == 1
+        client.place_order.assert_not_called()
+
+
 # ─── cancel_order — identity enforcement end-to-end ──────────────────────
 
 

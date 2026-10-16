@@ -3,7 +3,7 @@
  * status + JSON body verbatim, and fall back to 500 + request_id only
  * for unexpected errors.
  */
-import { describe, test, expect, vi, beforeEach } from "vitest";
+import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("@/lib/xenonApi", async () => {
   const actual =
@@ -57,6 +57,11 @@ function modifyReq(): Request {
 describe("/api/orders/* — upstream status + detail passthrough", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+  afterEach(() => {
+    // Tests that 400 before reaching xenonFetch leave queued Once-mocks
+    // unconsumed; drain them so they can't leak into the next test.
+    mockFetch.mockReset();
   });
 
   test("preserves 502 detail verbatim (IB_CONNECTION on place)", async () => {
@@ -193,13 +198,41 @@ describe("/api/orders/* — upstream status + detail passthrough", () => {
     const body = await res.json();
     expect(body.reason_code).toBe("ORDER_IDENTIFIER_REQUIRED");
 
-    const badPrice = new Request("http://localhost/api/orders/modify", {
+    const zeroPrice = new Request("http://localhost/api/orders/modify", {
       method: "POST",
-      body: JSON.stringify({ orderId: 1, newPrice: -1 }),
+      body: JSON.stringify({ orderId: 1, newPrice: 0 }),
     });
-    const res2 = await modifyPost(badPrice);
+    const res2 = await modifyPost(zeroPrice);
     expect(res2.status).toBe(400);
     expect((await res2.json()).reason_code).toBe("INVALID_ORDER_BODY");
+  });
+
+  test("negative newPrice passes through — BAG combos carry signed limits", async () => {
+    // Credit combos carry a NEGATIVE BAG limit. The route has no combo flag,
+    // so it must NOT reject negatives locally — the CLI knows the located
+    // trade's secType and decides. Only 0 is an unconditional local 400.
+    mockFetch.mockResolvedValueOnce({ status: "ok", message: "Modified" });
+    mockFetch.mockResolvedValueOnce({ open_orders: [] }); // /orders/refresh
+    mockFetch.mockResolvedValueOnce({
+      open_orders: [
+        {
+          orderId: 1,
+          permId: 0,
+          limitPrice: -1.25,
+          totalQuantity: 1,
+        },
+      ],
+    }); // refreshed orders for confirmation
+
+    const req = new Request("http://localhost/api/orders/modify", {
+      method: "POST",
+      body: JSON.stringify({ orderId: 1, newPrice: -1.25 }),
+    });
+    const res = await modifyPost(req);
+    expect(res.status).toBe(200);
+    const [path, init] = mockFetch.mock.calls[0];
+    expect(path).toBe("/orders/modify");
+    expect(JSON.parse(init.body as string).newPrice).toBe(-1.25);
   });
 
   test("unknown error falls through to 500 with request_id", async () => {

@@ -480,8 +480,18 @@ def modify_order(
             **_identity_notes(trade, account),
         )
 
-    if new_price is not None and new_price <= 0:
-        output("error", "New price must be > 0", classification="ib_reject", **_identity_notes(trade, account))
+    if new_price is not None:
+        # Credit combos carry a NEGATIVE BAG limit — a signed price is legal
+        # on BAG orders. Zero is meaningless on anything; negative on a
+        # single-leg order is an error.
+        is_bag = trade.contract.secType == "BAG"
+        if new_price == 0 or (new_price < 0 and not is_bag):
+            output(
+                "error",
+                "New price must be non-zero" if is_bag else "New price must be > 0",
+                classification="ib_reject",
+                **_identity_notes(trade, account),
+            )
     if new_quantity is not None and new_quantity <= 0:
         output("error", "New quantity must be > 0", classification="ib_reject", **_identity_notes(trade, account))
 
