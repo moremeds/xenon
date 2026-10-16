@@ -12,9 +12,10 @@ import {
 
 const ORIGINS = allowedOrigins();
 
-function makeReq({ url = "/", host = "localhost:8765", origin } = {}) {
+function makeReq({ url = "/", host = "localhost:8765", origin, apiKey } = {}) {
   const headers = { host };
   if (origin !== undefined) headers.origin = origin;
+  if (apiKey !== undefined) headers["x-api-key"] = apiKey;
   return { url, headers };
 }
 
@@ -99,6 +100,57 @@ test("validate endpoint unreachable -> 503, no upgrade", async () => {
   });
   assert.equal(d.ok, false);
   assert.equal(d.status, 503);
+});
+
+// ── Service credential path (X-API-Key, no Origin) ──────────────────────
+
+test("correct X-API-Key with no Origin -> accepted without ticket", async () => {
+  let fetchCalled = false;
+  const d = await authorizeUpgrade(makeReq({ url: "/", apiKey: "svc-key-1" }), {
+    fetchImpl: async () => {
+      fetchCalled = true;
+      return { ok: true };
+    },
+    origins: ORIGINS,
+    queryApiKey: "svc-key-1",
+  });
+  assert.deepEqual(d, { ok: true });
+  assert.equal(fetchCalled, false); // no ticket validation call made
+});
+
+test("wrong X-API-Key -> 401", async () => {
+  const d = await authorizeUpgrade(makeReq({ url: "/", apiKey: "wrong" }), {
+    fetchImpl: okFetch,
+    origins: ORIGINS,
+    queryApiKey: "svc-key-1",
+  });
+  assert.equal(d.ok, false);
+  assert.equal(d.status, 401);
+  assert.equal(d.reason, "bad_api_key");
+});
+
+test("correct X-API-Key WITH an Origin -> rejected", async () => {
+  const d = await authorizeUpgrade(
+    makeReq({ url: "/", apiKey: "svc-key-1", origin: "http://localhost:3000" }),
+    {
+      fetchImpl: okFetch,
+      origins: ORIGINS,
+      queryApiKey: "svc-key-1",
+    },
+  );
+  assert.equal(d.ok, false);
+  assert.equal(d.status, 403);
+});
+
+test("XENON_QUERY_API_KEY unset -> key path disabled", async () => {
+  const d = await authorizeUpgrade(makeReq({ url: "/", apiKey: "svc-key-1" }), {
+    fetchImpl: okFetch,
+    origins: ORIGINS,
+    queryApiKey: "",
+  });
+  assert.equal(d.ok, false);
+  assert.equal(d.status, 401);
+  assert.equal(d.reason, "api_key_disabled");
 });
 
 test("isOriginAllowed honors the env-configured allowlist", () => {
