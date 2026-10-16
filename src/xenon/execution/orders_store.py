@@ -16,7 +16,7 @@ from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Text, cast, func, insert, literal, select, text, update
+from sqlalchemy import Text, cast, func, insert, literal, select, update
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -94,27 +94,12 @@ def _norm_expiry(value):
     return value.isoformat()
 
 
-def _has_legs_column(conn) -> bool:
-    """True iff order_submissions.legs exists on the connected DB."""
-    return (
-        conn.execute(
-            text(
-                "select 1 from information_schema.columns "
-                "where table_schema='xenon' and table_name='order_submissions' "
-                "and column_name='legs'"
-            )
-        ).scalar()
-        == 1
-    )
-
-
 def _request_body_matches(row, request: RequestRow, legs) -> bool:
     """True iff the stored row's request columns equal the incoming body.
 
     Compared fields are the reservation payload: the RequestRow columns plus
     `legs`. `user_id` is deliberately absent — idempotency is scoped to the
-    account, not the caller identity. `row.legs` may be absent on a
-    pre-migration DB, which reads as NULL.
+    account, not the caller identity.
     """
 
     def _num(v):
@@ -133,7 +118,7 @@ def _request_body_matches(row, request: RequestRow, legs) -> bool:
         and (None if row.con_id is None else int(row.con_id))
         == (None if request.con_id is None else int(request.con_id))
         and _num(row.limit_price) == _num(request.limit_price)
-        and _canon_json(getattr(row, "legs", None)) == _canon_json(legs)
+        and _canon_json(row.legs) == _canon_json(legs)
     )
 
 
@@ -192,36 +177,30 @@ def reserve_attempt(
     sid = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     engine = get_sync_engine()
-    # `legs` is added to the column list only when supplied so the pre-PR-03a
-    # insert shape (and a DB not yet migrated) keeps working unchanged. The
-    # ON CONFLICT clause names no arbiter for the same reason: a named
-    # constraint that does not exist yet would fail the statement outright.
-    values = dict(
-        submission_id=sid,
-        user_id=user_id,
-        client_attempt_id=client_attempt_id,
-        ticker=request.ticker,
-        security_type=request.security_type,
-        action=request.action,
-        quantity=request.quantity,
-        expiry=request.expiry,
-        strike=request.strike,
-        right=request.right,
-        multiplier=request.multiplier,
-        con_id=request.con_id,
-        limit_price=request.limit_price,
-        state="PENDING",
-        submitted_at=now,
-        updated_at=now,
-        broker=broker,
-        account_env=account_env,
-        broker_account=broker_account,
-    )
-    if legs is not None:
-        values["legs"] = legs
     with engine.begin() as conn:
-        stmt = pg_insert(order_submissions).values(**values)
-        stmt = stmt.on_conflict_do_nothing()
+        stmt = pg_insert(order_submissions).values(
+            submission_id=sid,
+            user_id=user_id,
+            client_attempt_id=client_attempt_id,
+            ticker=request.ticker,
+            security_type=request.security_type,
+            action=request.action,
+            quantity=request.quantity,
+            expiry=request.expiry,
+            strike=request.strike,
+            right=request.right,
+            multiplier=request.multiplier,
+            con_id=request.con_id,
+            limit_price=request.limit_price,
+            state="PENDING",
+            submitted_at=now,
+            updated_at=now,
+            broker=broker,
+            account_env=account_env,
+            broker_account=broker_account,
+            legs=legs,
+        )
+        stmt = stmt.on_conflict_do_nothing(constraint="uq_order_sub_scope_attempt")
         stmt = stmt.returning(order_submissions.c.submission_id)
         inserted = conn.execute(stmt).first()
 
@@ -252,11 +231,8 @@ def reserve_attempt(
                 reason_code=None,
             )
 
-        cols = list(order_submissions.c)
-        if not _has_legs_column(conn):
-            cols = [c for c in cols if c.name != "legs"]
         row = conn.execute(
-            select(*cols).where(
+            select(order_submissions).where(
                 order_submissions.c.broker == broker,
                 order_submissions.c.account_env == account_env,
                 order_submissions.c.broker_account == broker_account,
