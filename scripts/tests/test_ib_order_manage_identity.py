@@ -48,6 +48,10 @@ def make_trade(
     trade.order.outsideRth = False
     trade.order.clientId = client_id
     trade.order.account = account
+    # Deterministic fallthrough: ib_async Trade has no .account attribute, so
+    # _trade_account resolves order.account then trade.account — pin the
+    # latter to None so a MagicMock can't satisfy the check by accident.
+    trade.account = None
     trade.orderStatus.status = status
     trade.contract = MagicMock()
     trade.contract.secType = "OPT"
@@ -153,6 +157,81 @@ class TestFindTradeIdentity:
         t = make_trade(order_id=10, perm_id=12345, client_id=9, account="DU0000000")
         client = make_client([t])
         assert find_trade(client, 10, 12345, account="DU0000000", client_id=9) is t
+
+
+# ─── Empty account field — unverified, not a mismatch ────────────────────
+
+
+class TestAccountUnverified:
+    def test_missing_trade_account_is_not_a_mismatch(self):
+        """IB open-order snapshots do not always populate order.account —
+        an empty/None field must not block the operation; only a present
+        account that disagrees rejects."""
+        t = make_trade(order_id=10, perm_id=12345, account=None)
+        client = make_client([t])
+        assert find_trade(client, 10, 12345, account="DU0000000") is t
+
+    def test_empty_string_trade_account_is_not_a_mismatch(self):
+        """ib_async defaults Order.account to '' — same treatment as None."""
+        t = make_trade(order_id=10, perm_id=12345, account="")
+        client = make_client([t])
+        assert find_trade(client, 10, 12345, account="DU0000000") is t
+
+    def test_both_accounts_present_and_differ_still_rejects(self, capsys):
+        """The guard only loosens on a MISSING field — DU9999999 vs an
+        asserted DU0000000 stays an ownership reject."""
+        t = make_trade(order_id=10, perm_id=12345, account="DU9999999")
+        client = make_client([t])
+        with pytest.raises(SystemExit) as exc:
+            find_trade(client, 10, 12345, account="DU0000000")
+        assert exc.value.code == 1
+        assert _emitted(capsys)["classification"] == "ownership"
+
+    def test_cancel_ok_output_flags_account_unverified(self, capsys):
+        """Cancel success on an account-less trade carries
+        account_unverified=true in the JSON extra."""
+        t = make_trade(order_id=10, perm_id=12345, account=None, client_id=0)
+        client = make_client()
+        client.ib.client.clientId = 0
+        client.ib.errorEvent = ErrorEvent()
+        client.get_open_orders.side_effect = [[t], []]
+        client.cancel_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            cancel_order(client, 10, 12345, "127.0.0.1", 4002, account="DU0000000")
+        assert exc.value.code == 0
+        data = _emitted(capsys)
+        assert data["status"] == "ok"
+        assert data["account_unverified"] is True
+
+    def test_cancel_err_output_flags_account_unverified(self, capsys):
+        """A cancel timeout error on an account-less trade also carries the
+        flag — err extras get the note too."""
+        t = make_trade(order_id=10, perm_id=12345, account=None, client_id=0)
+        client = make_client()
+        client.ib.client.clientId = 0
+        client.ib.errorEvent = ErrorEvent()
+        client.get_open_orders.return_value = [t]  # never disappears → timeout
+        client.cancel_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            cancel_order(client, 10, 12345, "127.0.0.1", 4002, account="DU0000000")
+        assert exc.value.code == 1
+        data = _emitted(capsys)
+        assert data["status"] == "error"
+        assert data["account_unverified"] is True
+
+    def test_verified_account_omits_flag(self, capsys):
+        """When the trade does carry the asserted account there is nothing
+        unverified — no flag in the output."""
+        t = make_trade(order_id=10, perm_id=12345, account="DU0000000", client_id=0)
+        client = make_client()
+        client.ib.client.clientId = 0
+        client.ib.errorEvent = ErrorEvent()
+        client.get_open_orders.side_effect = [[t], []]
+        client.cancel_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            cancel_order(client, 10, 12345, "127.0.0.1", 4002, account="DU0000000")
+        assert exc.value.code == 0
+        assert "account_unverified" not in _emitted(capsys)
 
 
 # ─── cancel_order — identity enforcement end-to-end ──────────────────────

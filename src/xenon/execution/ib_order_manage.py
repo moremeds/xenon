@@ -188,6 +188,25 @@ def _reject_identity(message: str) -> NoReturn:
     )
 
 
+def _trade_account(trade) -> Optional[str]:
+    """The account stamped on a live trade — empty when the open-order
+    snapshot does not populate it (ib_async defaults Order.account to '')."""
+    return getattr(trade.order, "account", None) or getattr(trade, "account", None)
+
+
+def _identity_notes(trade, account: Optional[str]) -> dict:
+    """Output extras for asserted identity fields IB left unverifiable.
+
+    When the caller asserts a scope account but the located trade carries no
+    account field, the account leg of the tuple could not be checked — that
+    is not a mismatch, but the emitted JSON flags it so operators know the
+    verification was partial.
+    """
+    if trade is not None and account and not _trade_account(trade):
+        return {"account_unverified": True}
+    return {}
+
+
 def _verify_identity(
     trade,
     *,
@@ -198,14 +217,16 @@ def _verify_identity(
     """Reject when a located trade disagrees on an asserted tuple element.
 
     The element used for the match itself is already proven; this verifies
-    the rest of the caller-supplied identity.
+    the rest of the caller-supplied identity. A missing account field is
+    NOT a mismatch — only reject when both sides carry a value and differ
+    (cancel/modify must not be blocked by an unpopulated IB field).
     """
     problems = []
     if order_id > 0 and trade.order.orderId != order_id:
         problems.append(f"orderId={order_id} asserted but order has orderId={trade.order.orderId}")
     if account:
-        trade_account = getattr(trade.order, "account", None) or getattr(trade, "account", None)
-        if trade_account != account:
+        trade_account = _trade_account(trade)
+        if trade_account and trade_account != account:
             problems.append(f"account={account} asserted but order is on account={trade_account}")
     if client_id is not None and trade.order.clientId != client_id:
         problems.append(f"owner clientId={client_id} asserted but order is owned by clientId={trade.order.clientId}")
@@ -314,6 +335,7 @@ def cancel_order(
             f"Trade not found (orderId={order_id}, permId={perm_id})",
             classification="ib_reject",
             upstream={"code": 10147, "message": "Order not found (local lookup)"},
+            **_identity_notes(trade, account),
         )
 
     status = trade.orderStatus.status
@@ -322,6 +344,7 @@ def cancel_order(
             "error",
             f"Order already {status} — cannot cancel",
             classification="ib_reject",
+            **_identity_notes(trade, account),
         )
 
     # Reconnect as the original placer if needed (fixes Error 10147).
@@ -336,6 +359,7 @@ def cancel_order(
                 "Trade not found after reconnect as original clientId",
                 classification="ib_reject",
                 upstream={"code": 10147, "message": "Order not found (local lookup)"},
+                **_identity_notes(trade, account),
             )
 
     # Capture IB error events during the cancel attempt
@@ -364,6 +388,7 @@ def cancel_order(
                 f"Order cancelled (orderId={trade.order.orderId})",
                 orderId=trade.order.orderId,
                 finalStatus="Cancelled",
+                **_identity_notes(latest_trade or trade, account),
             )
 
         if refreshed_trade.orderStatus.status in ("Cancelled", "ApiCancelled"):
@@ -372,6 +397,7 @@ def cancel_order(
                 f"Order cancelled (orderId={refreshed_trade.order.orderId})",
                 orderId=refreshed_trade.order.orderId,
                 finalStatus=refreshed_trade.orderStatus.status,
+                **_identity_notes(refreshed_trade, account),
             )
 
         # Check for fatal errors (10147=order not found, 201=rejected)
@@ -382,6 +408,7 @@ def cancel_order(
                 f"IB rejected cancel: {fatal[0][1]}",
                 classification=classify_failure(fatal[0][0]),
                 upstream={"code": fatal[0][0], "message": fatal[0][1]},
+                **_identity_notes(refreshed_trade, account),
             )
 
     final_status = latest_trade.orderStatus.status if latest_trade is not None else trade.orderStatus.status
@@ -391,6 +418,7 @@ def cancel_order(
         orderId=trade.order.orderId,
         finalStatus=final_status,
         classification="ib_reject",
+        **_identity_notes(latest_trade or trade, account),
     )
 
 
@@ -423,6 +451,7 @@ def modify_order(
             f"Trade not found (orderId={order_id}, permId={perm_id})",
             classification="ib_reject",
             upstream={"code": 10147, "message": "Order not found (local lookup)"},
+            **_identity_notes(trade, account),
         )
 
     status = trade.orderStatus.status
@@ -431,6 +460,7 @@ def modify_order(
             "error",
             f"Order already {status} — cannot modify",
             classification="ib_reject",
+            **_identity_notes(trade, account),
         )
 
     order_type = trade.order.orderType
@@ -439,15 +469,21 @@ def modify_order(
             "error",
             f"Cannot modify price on {order_type} order — only LMT and STP LMT supported",
             classification="ib_reject",
+            **_identity_notes(trade, account),
         )
 
     if new_price is None and new_quantity is None and outside_rth is None:
-        output("error", "Must provide at least one modify field", classification="ib_reject")
+        output(
+            "error",
+            "Must provide at least one modify field",
+            classification="ib_reject",
+            **_identity_notes(trade, account),
+        )
 
     if new_price is not None and new_price <= 0:
-        output("error", "New price must be > 0", classification="ib_reject")
+        output("error", "New price must be > 0", classification="ib_reject", **_identity_notes(trade, account))
     if new_quantity is not None and new_quantity <= 0:
-        output("error", "New quantity must be > 0", classification="ib_reject")
+        output("error", "New quantity must be > 0", classification="ib_reject", **_identity_notes(trade, account))
 
     # Reconnect as the original placer if needed (fixes Error 103).
     # _reconnect_as_owner handles 326-retry + emits classified output on failure.
@@ -461,6 +497,7 @@ def modify_order(
                 "Trade not found after reconnect as original clientId",
                 classification="ib_reject",
                 upstream={"code": 10147, "message": "Order not found (local lookup)"},
+                **_identity_notes(trade, account),
             )
 
     # Capture IB error events during the modify attempt
@@ -518,6 +555,7 @@ def modify_order(
                 f"IB rejected modify: {fatal[0][1]}",
                 classification=classify_failure(fatal[0][0]),
                 upstream={"code": fatal[0][0], "message": fatal[0][1]},
+                **_identity_notes(refreshed_trade, account),
             )
 
     client.ib.errorEvent -= on_error
@@ -544,6 +582,7 @@ def modify_order(
             currentClientId=client.ib.client.clientId,
             ibErrors=captured_errors,
             classification="ib_reject",
+            **_identity_notes(latest_trade or trade, account),
         )
 
     final_status = confirmed_trade.orderStatus.status
@@ -564,6 +603,7 @@ def modify_order(
         oldQuantity=json_number(old_quantity),
         newQuantity=json_number(confirmed_trade.order.totalQuantity),
         finalStatus=final_status,
+        **_identity_notes(confirmed_trade, account),
     )
 
 

@@ -2464,7 +2464,11 @@ async def _orders_cancel_from_body(body: dict):
     # PR-05 identity tuple: the subprocess asserts the scope account plus the
     # recorded placing clientId (when a submission row carries one), so a
     # cancel can never land on a different account's/client's order.
-    args.extend(["--account", scope["broker_account"]])
+    # --account is emitted only when the scope resolved a real account —
+    # the legacy_unknown fallback would otherwise fail every identity check.
+    _broker_account = scope.get("broker_account") or ""
+    if _broker_account and _broker_account != "legacy_unknown":
+        args.extend(["--account", _broker_account])
     row = orders_store.load_submission_for_modify(
         order_id=str(order_id or ""), perm_id=str(perm_id or ""), **scope
     )
@@ -2647,7 +2651,11 @@ async def _orders_modify_from_body(body: dict):
     # PR-05 identity tuple: the subprocess asserts the scope account plus the
     # recorded placing clientId (when a submission row carries one), so a
     # modify can never land on a different account's/client's order.
-    args.extend(["--account", _scope["broker_account"]])
+    # --account is emitted only when the scope resolved a real account —
+    # the legacy_unknown fallback would otherwise fail every identity check.
+    _broker_account = _scope.get("broker_account") or ""
+    if _broker_account and _broker_account != "legacy_unknown":
+        args.extend(["--account", _broker_account])
     _row = orders_store.load_submission_for_modify(
         order_id=str(order_id or ""), perm_id=str(perm_id or ""), **_scope
     )

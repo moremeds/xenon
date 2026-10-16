@@ -676,6 +676,72 @@ def test_cancel_omits_client_id_when_no_submission_row(client, tmp_db, monkeypat
     assert "--account" in captured["args"]
 
 
+def test_cancel_omits_account_arg_on_legacy_unknown_scope(client, tmp_db, monkeypatch):
+    """The _resolve_scope_kwargs fallback returns broker_account='legacy_unknown'
+    — that is not a real account, so asserting it as --account would make every
+    subprocess identity check reject. The flag must be omitted."""
+    monkeypatch.delattr(server_mod.app.state, "account")
+    captured = {}
+
+    async def fake_runner(entry, args, timeout=30):
+        captured["args"] = args
+        return ScriptResult(ok=True, data={"status": "ok", "message": "Cancelled"})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post("/orders/cancel", json={"orderId": 0, "permId": 42})
+    assert resp.status_code == 200
+    assert "--account" not in captured["args"]
+
+
+def _seed_legacy_scope_submission(perm_id: str = "42") -> str:
+    """A submissions row in the legacy_unknown fallback scope so modify's
+    sequence gate passes while app.state has no account."""
+    sid = "sub-legacy-1"
+    engine = _pg_engine()
+    try:
+        with engine.begin() as con:
+            con.execute(
+                text(
+                    """
+            INSERT INTO xenon.order_submissions (
+                submission_id, user_id, client_attempt_id, ticker, security_type,
+                action, quantity, multiplier, limit_price, state, ib_order_id,
+                perm_id, modify_sequence, submitted_at, updated_at,
+                broker, account_env, broker_account
+            ) VALUES (:submission_id, 'local', 'cid-legacy', 'AAPL', 'STK', 'BUY', 1, 100, '1.23',
+                      'WORKING', '99', :perm_id, 5, NOW(), NOW(),
+                      'IB', 'legacy_unknown', 'legacy_unknown')
+            """
+                ),
+                {"submission_id": sid, "perm_id": perm_id},
+            )
+    finally:
+        engine.dispose()
+    return sid
+
+
+def test_modify_omits_account_arg_on_legacy_unknown_scope(client, tmp_db, monkeypatch):
+    """Same legacy_unknown rule on the modify path — sequence gate passes on
+    a legacy-scoped row, subprocess args omit --account."""
+    _seed_legacy_scope_submission(perm_id="42")
+    monkeypatch.delattr(server_mod.app.state, "account")
+    captured = {}
+
+    async def fake_runner(entry, args, timeout=30):
+        captured["args"] = args
+        return ScriptResult(ok=True, data={"status": "ok", "message": "Modified"})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post(
+        "/orders/modify",
+        json={"orderId": 0, "permId": 42, "newPrice": 1.50, "modifySequence": 6},
+    )
+    assert resp.status_code == 200
+    assert "--account" not in captured["args"]
+
+
 def test_dev_probe_not_in_auth_exempt_paths():
     """B3 — defense in depth: Clerk middleware must still cover the probe."""
     assert "/dev/rehydrate/synthetic" not in server_mod.AUTH_EXEMPT_PATHS
