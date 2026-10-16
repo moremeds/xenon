@@ -104,7 +104,7 @@ def test_broker_port_4001_connect_fails_loudly():
     """An unmarked test dialing the live gateway must raise, not connect."""
     sock = socket.socket()
     try:
-        with pytest.raises(RuntimeError, match="broker connection"):
+        with pytest.raises(ConnectionRefusedError, match="broker connection"):
             sock.connect(("127.0.0.1", 4001))
     finally:
         sock.close()
@@ -114,7 +114,7 @@ def test_broker_port_4001_denied_on_any_host():
     """The guard matches on the port — non-localhost 4001 is denied too."""
     sock = socket.socket()
     try:
-        with pytest.raises(RuntimeError, match="broker connection"):
+        with pytest.raises(ConnectionRefusedError, match="broker connection"):
             sock.connect(("192.0.2.1", 4001))
     finally:
         sock.close()

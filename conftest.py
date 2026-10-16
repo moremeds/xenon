@@ -18,8 +18,11 @@ a broker connection. Two layers enforce that:
   ports 4001/4002 on ANY host in-process, because module-level ``DEFAULT_*``
   constants in ``ib_client``/``ib_connection``/``ib_gateway`` are bound at
   import time and never see the monkeypatched env. ``connect`` raises
-  ``BrokerConnectDenied``; ``connect_ex`` (the non-raising probe API used by
-  health checks such as ``ib_gateway._port_listening``) returns ECONNREFUSED.
+  ``BrokerConnectDenied`` — a ``ConnectionRefusedError`` so probe-style
+  callers (``ib_gateway._port_listening`` and other ``except OSError``
+  health checks) still see a plain "closed" verdict while the message tells
+  the test author exactly why the dial was blocked; ``connect_ex`` returns
+  ECONNREFUSED.
 """
 
 import errno
@@ -35,8 +38,13 @@ os.environ.setdefault("XENON_AUTH_ALLOW_DEV_OPEN", "1")
 _BROKER_PORTS = frozenset({4001, 4002})
 
 
-class BrokerConnectDenied(RuntimeError):
-    """Raised when an unmarked test opens a socket toward a broker port."""
+class BrokerConnectDenied(ConnectionRefusedError):
+    """Raised when an unmarked test opens a socket toward a broker port.
+
+    A ``ConnectionRefusedError`` (not RuntimeError) so probe-style callers
+    that catch ``OSError`` see the port as simply closed — the same verdict a
+    missing gateway produces — while tests that genuinely need the broker
+    fail with a message naming the fix."""
 
 
 def _deny_broker_address(address: object) -> None:
