@@ -58,7 +58,7 @@ export const proofItems: ProofItem[] = [
   {
     label: "Guard",
     value: "Enforced",
-    detail: "UI pre-flight, API gate, and post-sync audit share one naked-short rule.",
+    detail: "UI pre-flight and API gate share one naked-short rule; a post-sync audit re-checks eligible active SELL orders.",
     tone: "strong",
   },
   {
@@ -133,7 +133,7 @@ export const moduleContents: Record<ModuleTab, ModuleContent> = {
   guard: {
     metrics: [
       { label: "Enforcement", value: "Layered", detail: "UI, API, audit" },
-      { label: "Naked Calls", value: "Blocked", detail: "No exceptions" },
+      { label: "Naked Calls", value: "Blocked", detail: "Cover required at entry" },
       { label: "Short Puts", value: "Allowed", detail: "Per guard policy" },
       { label: "Cover Ratio", value: "1:100", detail: "Contract to shares" },
     ],
@@ -278,15 +278,15 @@ export const surfaceItems: SurfaceItem[] = [
       { label: "Guard", value: "Enforced" },
     ],
     details: [
-      "Single-leg and multi-leg BAG orders with explicit leg actions and ratios.",
+      "Single-leg and multi-leg BAG orders with explicit leg actions and ratios; a BAG submits as one order, and legs may fill separately.",
       "Cancel and modify reconnect on the placing client id.",
-      "The naked-short rule applies at the UI, the API gate, and the post-sync audit.",
+      "The naked-short rule applies at the UI and the API gate; a post-sync audit re-checks eligible active single-leg SELL orders.",
       "Order state is tracked through a defined lifecycle, including unknown outcomes.",
     ],
   },
   {
     name: "Xenon Attribution",
-    headline: "Every fill reconciles back to P&L, Greeks, and a journal entry.",
+    headline: "Fills feed trade accounting; closed trades create automatic journal entries.",
     metrics: [
       { label: "Attribution", value: "Greeks" },
       { label: "Journal", value: "Append-only" },
@@ -303,7 +303,7 @@ export const auditItems: AuditItem[] = [
   {
     title: "Naked-Short Guard",
     detail:
-      "Coverage is checked before the broker sees the order and audited after every sync. Uncovered short calls are rejected, not flagged.",
+      "Coverage is checked before the broker sees the order; a post-sync audit re-checks eligible active single-leg SELL orders after each sync. Uncovered short calls are rejected, not flagged.",
   },
   {
     title: "Account Scoping",

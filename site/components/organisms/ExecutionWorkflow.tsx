@@ -32,7 +32,7 @@ export function ExecutionWorkflow() {
             <li>Every order carries broker, environment, and account scope.</li>
             <li>Coverage is checked before the broker sees the order.</li>
             <li>Short calls require long shares or same-expiry long calls; short puts are allowed.</li>
-            <li>Uncovered exposure is blocked at the UI, the API, and the post-sync audit.</li>
+            <li>Uncovered exposure is blocked at the UI and the API; the post-sync audit re-checks eligible active single-leg SELL orders.</li>
           </ul>
         </div>
       </aside>
