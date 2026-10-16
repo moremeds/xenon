@@ -1,6 +1,6 @@
 {
  "_doc": [
-  "Frozen Gate-4 acceptance fixture (lead-authored 2026-10-16, spec \u00a72.3 v3.2; reviewed by Fable). Quantities/strikes are hypothetical order shapes, not market data.",
+  "Frozen Gate-4 acceptance fixture (lead-authored 2026-10-16, spec \u00a72.3 v3.2; reviewed by Fable). Quantities/strikes are hypothetical order shapes, not market data. v2 2026-10-16: netting flag, und_sec deliverable, sign validation (Fable PR-03a review).",
   "holdings: confirmed positions of scope account U1 at as_of; qty signed; STK in shares; OPT in contracts.",
   "orders: existing orders, any state. Candidate id is always 'cand' (distinct). envelope = order action; effective leg action = leg.action if envelope BUY else flipped; leg qty = ratio*qty. Non-BAG orders have one leg with action BUY and envelope = order action.",
   "filled_after_snapshot = units filled after as_of (not in holdings). remaining = unfilled outstanding units (authoritative; do not derive from state or qty). qty - filled_after_snapshot - remaining = units filled before as_of (already in holdings; never counted again).",
@@ -9,7 +9,10 @@
   "Key = (sym, tc, exp, mult). Long call covers a short call of the same key. Shares cover only standard deliverable calls (mult 100, tc == sym). Unknown metadata => reject.",
   "Assignment order: long calls first (they can only cover their own key), then shares (standard deliverables only). This order is optimal and deterministic.",
   "view.complete defaults true; view.stale defaults false. Either false/true respectively => reject. Missing account on any order => reject. Candidate account must be U1.",
-  "expect: accept iff no short stock and uncovered short calls do not increase for any key; any fail-closed condition => reject."
+  "expect: accept iff no short stock and uncovered short calls do not increase for any key; any fail-closed condition => reject.",
+  "netting_enabled (case-level, default false) is passed to evaluate(netting_enabled=...). Netting applies only when it is true AND the BAG is guaranteed AND every leg is OPT; otherwise legs are independent.",
+  "OPT legs carry und_sec (underlying secType). Shares cover a short call only when und_sec == 'STK', mult 100, tc == sym. und_sec missing or not 'STK' => shares never cover that call.",
+  "Integers must satisfy qty >= 1, remaining >= 0, filled_after_snapshot >= 0, new_qty >= 1; otherwise reject."
  ],
  "scope_account": "U1",
  "cases": [
@@ -41,7 +44,8 @@
       "strike": 200,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -76,7 +80,8 @@
       "strike": 200,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -105,7 +110,8 @@
       "strike": 200,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -134,7 +140,8 @@
       "strike": 150,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -181,7 +188,8 @@
       "strike": 200,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -226,7 +234,8 @@
        "strike": 200,
        "exp": "20261218",
        "mult": 100,
-       "tc": "AAPL"
+       "tc": "AAPL",
+       "und_sec": "STK"
       }
      ]
     }
@@ -249,7 +258,8 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -284,7 +294,8 @@
        "strike": 200,
        "exp": "20261218",
        "mult": 100,
-       "tc": "AAPL"
+       "tc": "AAPL",
+       "und_sec": "STK"
       }
      ]
     }
@@ -307,7 +318,8 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -342,7 +354,8 @@
        "strike": 200,
        "exp": "20261218",
        "mult": 100,
-       "tc": "AAPL"
+       "tc": "AAPL",
+       "und_sec": "STK"
       }
      ]
     }
@@ -365,7 +378,8 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -400,7 +414,8 @@
        "strike": 200,
        "exp": "20261218",
        "mult": 100,
-       "tc": "AAPL"
+       "tc": "AAPL",
+       "und_sec": "STK"
       }
      ]
     }
@@ -423,7 +438,8 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -458,7 +474,8 @@
        "strike": 200,
        "exp": "20261218",
        "mult": 100,
-       "tc": "AAPL"
+       "tc": "AAPL",
+       "und_sec": "STK"
       }
      ]
     }
@@ -481,7 +498,8 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -516,7 +534,8 @@
        "strike": 200,
        "exp": "20261218",
        "mult": 100,
-       "tc": "AAPL"
+       "tc": "AAPL",
+       "und_sec": "STK"
       }
      ]
     }
@@ -539,7 +558,8 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -574,7 +594,8 @@
        "strike": 200,
        "exp": "20261218",
        "mult": 100,
-       "tc": "AAPL"
+       "tc": "AAPL",
+       "und_sec": "STK"
       }
      ]
     }
@@ -597,7 +618,8 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -642,7 +664,8 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -671,7 +694,8 @@
       "strike": 200,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      },
      {
       "action": "BUY",
@@ -682,13 +706,15 @@
       "strike": 150,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ],
     "guaranteed": true
    },
    "expect": "reject",
-   "why": "SELL envelope of (BUY C, BUY P) = short call + short put"
+   "why": "SELL envelope of (BUY C, BUY P) = short call + short put",
+   "netting_enabled": true
   },
   {
    "id": "vertical_close_guaranteed_bag",
@@ -733,7 +759,8 @@
       "strike": 200,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      },
      {
       "action": "SELL",
@@ -744,13 +771,15 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ],
     "guaranteed": true
    },
    "expect": "accept",
-   "why": "guaranteed option BAG nets per ratio unit (new-1)"
+   "why": "guaranteed option BAG nets per ratio unit (new-1)",
+   "netting_enabled": true
   },
   {
    "id": "vertical_close_nonguaranteed_bag",
@@ -795,7 +824,8 @@
       "strike": 200,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      },
      {
       "action": "SELL",
@@ -806,7 +836,8 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ],
     "guaranteed": false
@@ -857,7 +888,8 @@
       "strike": 200,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -907,7 +939,8 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -957,7 +990,8 @@
       "strike": 220,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -997,7 +1031,8 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -1026,7 +1061,8 @@
       "strike": 200,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      },
      {
       "action": "SELL",
@@ -1037,13 +1073,15 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ],
     "guaranteed": true
    },
    "expect": "reject",
-   "why": "1 long covers 1 of 2 shorts"
+   "why": "1 long covers 1 of 2 shorts",
+   "netting_enabled": true
   },
   {
    "id": "ratio_1x2_bag_qty2",
@@ -1078,7 +1116,8 @@
       "strike": 200,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      },
      {
       "action": "SELL",
@@ -1089,13 +1128,15 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ],
     "guaranteed": true
    },
    "expect": "reject",
-   "why": "qty 2 => 4 short vs 2 long + 1 held"
+   "why": "qty 2 => 4 short vs 2 long + 1 held",
+   "netting_enabled": true
   },
   {
    "id": "short_risk_reversal_buy_envelope",
@@ -1119,7 +1160,8 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      },
      {
       "action": "BUY",
@@ -1130,13 +1172,15 @@
       "strike": 150,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ],
     "guaranteed": true
    },
    "expect": "reject",
-   "why": "short call leg uncovered"
+   "why": "short call leg uncovered",
+   "netting_enabled": true
   },
   {
    "id": "sell_shares_covering_call",
@@ -1295,7 +1339,8 @@
       "strike": 5900,
       "exp": "20261218",
       "mult": 100,
-      "tc": "SPX"
+      "tc": "SPX",
+      "und_sec": "IND"
      }
     ]
    },
@@ -1335,7 +1380,8 @@
       "strike": 5900,
       "exp": "20261218",
       "mult": 100,
-      "tc": "SPXW"
+      "tc": "SPXW",
+      "und_sec": "IND"
      }
     ]
    },
@@ -1370,7 +1416,8 @@
       "strike": 200,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL1"
+      "tc": "AAPL1",
+      "und_sec": "STK"
      }
     ]
    },
@@ -1410,7 +1457,8 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -1445,7 +1493,8 @@
       "strike": 200,
       "exp": "20261218",
       "mult": null,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -1480,7 +1529,8 @@
        "strike": 200,
        "exp": "20261218",
        "mult": 100,
-       "tc": "AAPL"
+       "tc": "AAPL",
+       "und_sec": "STK"
       }
      ]
     }
@@ -1520,7 +1570,8 @@
        "strike": 200,
        "exp": "20261218",
        "mult": 100,
-       "tc": "AAPL"
+       "tc": "AAPL",
+       "und_sec": "STK"
       }
      ]
     }
@@ -1560,7 +1611,8 @@
        "strike": 200,
        "exp": "20261218",
        "mult": 100,
-       "tc": "AAPL"
+       "tc": "AAPL",
+       "und_sec": "STK"
       }
      ],
      "pending_amend_qty": 1
@@ -1584,7 +1636,8 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -1631,7 +1684,8 @@
       "strike": 200,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -1666,7 +1720,8 @@
       "strike": 200,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -1704,7 +1759,8 @@
        "strike": 200,
        "exp": "20261218",
        "mult": 100,
-       "tc": "AAPL"
+       "tc": "AAPL",
+       "und_sec": "STK"
       }
      ]
     }
@@ -1727,7 +1783,8 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -1762,7 +1819,8 @@
        "strike": 200,
        "exp": "20261218",
        "mult": 100,
-       "tc": "AAPL"
+       "tc": "AAPL",
+       "und_sec": "STK"
       }
      ]
     }
@@ -1785,7 +1843,8 @@
       "strike": 210,
       "exp": "20261218",
       "mult": 100,
-      "tc": "AAPL"
+      "tc": "AAPL",
+      "und_sec": "STK"
      }
     ]
    },
@@ -1825,7 +1884,8 @@
       "exp": "20261218",
       "mult": 100,
       "tc": "AAPL",
-      "ratio": 1
+      "ratio": 1,
+      "und_sec": "STK"
      }
     ]
    },
@@ -1880,7 +1940,8 @@
       "exp": "20270115",
       "mult": 100,
       "tc": "AAPL",
-      "ratio": 1
+      "ratio": 1,
+      "und_sec": "STK"
      }
     ]
    },
@@ -1935,7 +1996,8 @@
        "exp": "20261218",
        "mult": 100,
        "tc": "AAPL",
-       "ratio": 1
+       "ratio": 1,
+       "und_sec": "STK"
       }
      ]
     }
@@ -1958,7 +2020,8 @@
       "exp": "20261218",
       "mult": 100,
       "tc": "AAPL",
-      "ratio": 1
+      "ratio": 1,
+      "und_sec": "STK"
      }
     ]
    },
@@ -2003,7 +2066,8 @@
        "exp": "20261218",
        "mult": 100,
        "tc": "AAPL",
-       "ratio": 1
+       "ratio": 1,
+       "und_sec": "STK"
       }
      ]
     }
@@ -2026,7 +2090,8 @@
       "exp": "20261218",
       "mult": 100,
       "tc": "AAPL",
-      "ratio": 1
+      "ratio": 1,
+      "und_sec": "STK"
      }
     ]
    },
@@ -2071,7 +2136,8 @@
        "exp": "20261218",
        "mult": 100,
        "tc": "AAPL",
-       "ratio": 1
+       "ratio": 1,
+       "und_sec": "STK"
       }
      ]
     }
@@ -2094,7 +2160,8 @@
       "exp": "20261218",
       "mult": 100,
       "tc": "AAPL",
-      "ratio": 1
+      "ratio": 1,
+      "und_sec": "STK"
      }
     ]
    },
@@ -2123,7 +2190,8 @@
       "exp": "20270115",
       "mult": 100,
       "tc": "AAPL",
-      "ratio": 1
+      "ratio": 1,
+      "und_sec": "STK"
      },
      {
       "action": "SELL",
@@ -2134,13 +2202,15 @@
       "exp": "20261218",
       "mult": 100,
       "tc": "AAPL",
-      "ratio": 1
+      "ratio": 1,
+      "und_sec": "STK"
      }
     ],
     "guaranteed": true
    },
    "expect": "reject",
-   "why": "netting only within the same (sym,tc,exp,mult) key"
+   "why": "netting only within the same (sym,tc,exp,mult) key",
+   "netting_enabled": true
   },
   {
    "id": "candidate_other_account",
@@ -2170,7 +2240,8 @@
       "exp": "20261218",
       "mult": 100,
       "tc": "AAPL",
-      "ratio": 1
+      "ratio": 1,
+      "und_sec": "STK"
      }
     ]
    },
@@ -2205,7 +2276,8 @@
       "exp": "20261218",
       "mult": 100,
       "tc": "AAPL",
-      "ratio": 1
+      "ratio": 1,
+      "und_sec": "STK"
      }
     ]
    },
@@ -2214,6 +2286,364 @@
    },
    "expect": "reject",
    "why": "last complete pass older than the age limit"
+  },
+  {
+   "id": "vertical_close_guaranteed_bag_flag_off",
+   "holdings": [
+    {
+     "sym": "AAPL",
+     "sec": "OPT",
+     "right": "C",
+     "strike": 200,
+     "exp": "20261218",
+     "mult": 100,
+     "tc": "AAPL",
+     "qty": 1
+    },
+    {
+     "sym": "AAPL",
+     "sec": "OPT",
+     "right": "C",
+     "strike": 210,
+     "exp": "20261218",
+     "mult": 100,
+     "tc": "AAPL",
+     "qty": -1
+    }
+   ],
+   "orders": [],
+   "candidate": {
+    "id": "cand",
+    "account": "U1",
+    "state": "WORKING",
+    "envelope": "SELL",
+    "qty": 1,
+    "filled_after_snapshot": 0,
+    "remaining": 1,
+    "legs": [
+     {
+      "action": "BUY",
+      "sym": "AAPL",
+      "sec": "OPT",
+      "ratio": 1,
+      "right": "C",
+      "strike": 200,
+      "exp": "20261218",
+      "mult": 100,
+      "tc": "AAPL",
+      "und_sec": "STK"
+     },
+     {
+      "action": "SELL",
+      "sym": "AAPL",
+      "sec": "OPT",
+      "ratio": 1,
+      "right": "C",
+      "strike": 210,
+      "exp": "20261218",
+      "mult": 100,
+      "tc": "AAPL",
+      "und_sec": "STK"
+     }
+    ],
+    "guaranteed": true
+   },
+   "expect": "reject",
+   "why": "netting flag off by default until paper evidence: legs independent (spec \u00a72.3)"
+  },
+  {
+   "id": "spx_call_vs_spx_shares",
+   "holdings": [
+    {
+     "sym": "SPX",
+     "sec": "STK",
+     "qty": 100
+    }
+   ],
+   "orders": [],
+   "candidate": {
+    "id": "cand",
+    "account": "U1",
+    "state": "WORKING",
+    "envelope": "SELL",
+    "qty": 1,
+    "filled_after_snapshot": 0,
+    "remaining": 1,
+    "legs": [
+     {
+      "action": "BUY",
+      "sym": "SPX",
+      "sec": "OPT",
+      "ratio": 1,
+      "right": "C",
+      "strike": 6000,
+      "exp": "20261218",
+      "mult": 100,
+      "tc": "SPX",
+      "und_sec": "IND"
+     }
+    ]
+   },
+   "expect": "reject",
+   "why": "index/cash-settled call is never covered by shares (adv-11)"
+  },
+  {
+   "id": "missing_und_sec_no_share_cover",
+   "holdings": [
+    {
+     "sym": "AAPL",
+     "sec": "STK",
+     "qty": 100
+    }
+   ],
+   "orders": [],
+   "candidate": {
+    "id": "cand",
+    "account": "U1",
+    "state": "WORKING",
+    "envelope": "SELL",
+    "qty": 1,
+    "filled_after_snapshot": 0,
+    "remaining": 1,
+    "legs": [
+     {
+      "action": "BUY",
+      "sym": "AAPL",
+      "sec": "OPT",
+      "ratio": 1,
+      "right": "C",
+      "strike": 200,
+      "exp": "20261218",
+      "mult": 100,
+      "tc": "AAPL"
+     }
+    ]
+   },
+   "expect": "reject",
+   "why": "unknown deliverable metadata => shares cannot cover"
+  },
+  {
+   "id": "guaranteed_bag_with_stock_leg_independent",
+   "netting_enabled": true,
+   "holdings": [],
+   "orders": [],
+   "candidate": {
+    "id": "cand",
+    "account": "U1",
+    "state": "WORKING",
+    "envelope": "BUY",
+    "qty": 1,
+    "filled_after_snapshot": 0,
+    "remaining": 1,
+    "legs": [
+     {
+      "action": "SELL",
+      "sym": "AAPL",
+      "sec": "STK",
+      "ratio": 100
+     },
+     {
+      "action": "BUY",
+      "sym": "AAPL",
+      "sec": "STK",
+      "ratio": 100
+     }
+    ],
+    "guaranteed": true
+   },
+   "expect": "reject",
+   "why": "guarantee covers option-only BAGs; STK leg can fill alone => short stock"
+  },
+  {
+   "id": "negative_candidate_qty",
+   "holdings": [],
+   "orders": [],
+   "candidate": {
+    "id": "cand",
+    "account": "U1",
+    "state": "WORKING",
+    "envelope": "SELL",
+    "qty": -1,
+    "filled_after_snapshot": 0,
+    "remaining": 0,
+    "legs": [
+     {
+      "action": "BUY",
+      "sym": "AAPL",
+      "sec": "OPT",
+      "ratio": 1,
+      "right": "C",
+      "strike": 200,
+      "exp": "20261218",
+      "mult": 100,
+      "tc": "AAPL",
+      "und_sec": "STK"
+     }
+    ]
+   },
+   "expect": "reject",
+   "why": "qty < 1 fails closed"
+  },
+  {
+   "id": "negative_remaining_on_order",
+   "holdings": [
+    {
+     "sym": "AAPL",
+     "sec": "STK",
+     "qty": 100
+    }
+   ],
+   "orders": [
+    {
+     "id": "o1",
+     "account": "U1",
+     "state": "WORKING",
+     "envelope": "SELL",
+     "qty": 1,
+     "filled_after_snapshot": 0,
+     "remaining": -5,
+     "legs": [
+      {
+       "action": "BUY",
+       "sym": "AAPL",
+       "sec": "OPT",
+       "ratio": 1,
+       "right": "C",
+       "strike": 200,
+       "exp": "20261218",
+       "mult": 100,
+       "tc": "AAPL",
+       "und_sec": "STK"
+      }
+     ]
+    }
+   ],
+   "candidate": {
+    "id": "cand",
+    "account": "U1",
+    "state": "WORKING",
+    "envelope": "SELL",
+    "qty": 1,
+    "filled_after_snapshot": 0,
+    "remaining": 1,
+    "legs": [
+     {
+      "action": "BUY",
+      "sym": "AAPL",
+      "sec": "OPT",
+      "ratio": 1,
+      "right": "C",
+      "strike": 200,
+      "exp": "20261218",
+      "mult": 100,
+      "tc": "AAPL",
+      "und_sec": "STK"
+     }
+    ]
+   },
+   "expect": "reject",
+   "why": "remaining < 0 fails closed"
+  },
+  {
+   "id": "negative_filled_after_snapshot",
+   "holdings": [
+    {
+     "sym": "AAPL",
+     "sec": "STK",
+     "qty": 100
+    }
+   ],
+   "orders": [
+    {
+     "id": "o1",
+     "account": "U1",
+     "state": "WORKING",
+     "envelope": "SELL",
+     "qty": 1,
+     "filled_after_snapshot": -1,
+     "remaining": 1,
+     "legs": [
+      {
+       "action": "BUY",
+       "sym": "AAPL",
+       "sec": "OPT",
+       "ratio": 1,
+       "right": "C",
+       "strike": 200,
+       "exp": "20261218",
+       "mult": 100,
+       "tc": "AAPL",
+       "und_sec": "STK"
+      }
+     ]
+    }
+   ],
+   "candidate": {
+    "id": "cand",
+    "account": "U1",
+    "state": "WORKING",
+    "envelope": "SELL",
+    "qty": 1,
+    "filled_after_snapshot": 0,
+    "remaining": 1,
+    "legs": [
+     {
+      "action": "BUY",
+      "sym": "AAPL",
+      "sec": "OPT",
+      "ratio": 1,
+      "right": "C",
+      "strike": 210,
+      "exp": "20261218",
+      "mult": 100,
+      "tc": "AAPL",
+      "und_sec": "STK"
+     }
+    ]
+   },
+   "expect": "reject",
+   "why": "filled_after_snapshot < 0 fails closed"
+  },
+  {
+   "id": "modify_new_qty_zero",
+   "holdings": [
+    {
+     "sym": "AAPL",
+     "sec": "STK",
+     "qty": 100
+    }
+   ],
+   "orders": [
+    {
+     "id": "o1",
+     "account": "U1",
+     "state": "WORKING",
+     "envelope": "SELL",
+     "qty": 1,
+     "filled_after_snapshot": 0,
+     "remaining": 1,
+     "legs": [
+      {
+       "action": "BUY",
+       "sym": "AAPL",
+       "sec": "OPT",
+       "ratio": 1,
+       "right": "C",
+       "strike": 200,
+       "exp": "20261218",
+       "mult": 100,
+       "tc": "AAPL",
+       "und_sec": "STK"
+      }
+     ]
+    }
+   ],
+   "candidate": {
+    "modify": "o1",
+    "new_qty": 0
+   },
+   "expect": "reject",
+   "why": "new_qty < 1 fails closed"
   }
  ]
 }
