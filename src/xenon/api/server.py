@@ -110,6 +110,9 @@ _futu_lock: Optional[asyncio.Lock] = None
 # would look "recently synced" and serve stale cache instead of a real fetch.
 _futu_last_sync_monotonic: Optional[float] = None
 FUTU_COOLDOWN_S = 10
+# Hard bound on OpenD calls — matches the 15s bound in _futu_refresh_db_first.
+# A port-open but handshaking-hung OpenD must fail the route, not wedge it.
+FUTU_SYNC_TIMEOUT_S = 15.0
 
 
 def _get_futu_lock() -> asyncio.Lock:
@@ -2754,11 +2757,18 @@ async def futu_sync():
                 return {"ok": True, **cached}
 
         client = _get_futu_client()
-        loop = asyncio.get_running_loop()
         try:
             if not client.is_connected():
-                await loop.run_in_executor(None, client.connect)
-            result = await loop.run_in_executor(None, lambda: client.fetch_portfolio(force=True))
+                await asyncio.wait_for(asyncio.to_thread(client.connect), timeout=FUTU_SYNC_TIMEOUT_S)
+            result = await asyncio.wait_for(
+                asyncio.to_thread(client.fetch_portfolio, force=True),
+                timeout=FUTU_SYNC_TIMEOUT_S,
+            )
+        except TimeoutError:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Futu OpenD did not respond within {FUTU_SYNC_TIMEOUT_S:.0f}s",
+            )
         except FutuConnectionError as exc:
             raise HTTPException(status_code=503, detail=f"Futu OpenD unreachable: {exc}")
         except FutuError as exc:
@@ -3093,9 +3103,12 @@ _IB_CONN_REFUSED_PATTERNS = (
 )
 
 # Cooldown: after an IB subprocess fails with a connection error, skip
-# subsequent attempts for this many seconds to avoid churn.
+# subsequent attempts for this many seconds to avoid churn. Tracked per
+# traffic class — order-mutating entries and data/read entries get separate
+# timestamps so a failure in one class never blocks the other.
 _IB_SCRIPT_COOLDOWN_SECS = 15.0
-_ib_last_failure: float = 0.0  # monotonic timestamp of last IB connection failure
+_IB_ORDER_ENTRIES = frozenset({"xenon-ib-place-order", "xenon-ib-order-manage"})
+_ib_last_failure: dict[str, float] = {"data": 0.0, "order": 0.0}
 
 
 def _is_ib_connection_error(error_msg: str) -> bool:
@@ -3125,15 +3138,17 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
     2. Pool check: if pool is disconnected, verify Gateway before spawning
     3. Post-failure: verify Gateway health before restarting
     """
-    global _ib_last_failure
+    kind = "order" if entry in _IB_ORDER_ENTRIES else "data"
 
-    # Layer 1: Cooldown — skip if a recent failure occurred
+    # Layer 1: Cooldown — skip if a recent failure occurred in this lane
     now = time.monotonic()
-    if _ib_last_failure > 0 and (now - _ib_last_failure) < _IB_SCRIPT_COOLDOWN_SECS:
-        elapsed = now - _ib_last_failure
+    last_failure = _ib_last_failure.get(kind, 0.0)
+    if last_failure > 0 and (now - last_failure) < _IB_SCRIPT_COOLDOWN_SECS:
+        elapsed = now - last_failure
         logger.debug(
-            "Skipping %s — IB cooldown active (%.1fs since last failure, %ds cooldown)",
+            "Skipping %s — IB %s cooldown active (%.1fs since last failure, %ds cooldown)",
             entry,
+            kind,
             elapsed,
             _IB_SCRIPT_COOLDOWN_SECS,
         )
@@ -3149,7 +3164,7 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
         upstream_dead = gw_status.get("upstream_dead", False)
 
         if not port_ok or upstream_dead:
-            _ib_last_failure = now
+            _ib_last_failure[kind] = now
             logger.warning(
                 "Skipping %s — Gateway down (port=%s, upstream_dead=%s), pool disconnected",
                 entry,
@@ -3165,11 +3180,11 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
 
     # Clear cooldown on success
     if result.ok:
-        _ib_last_failure = 0.0
+        _ib_last_failure[kind] = 0.0
 
     if not result.ok and _is_ib_connection_error(result.error):
         # Set cooldown to prevent churn from repeated failures
-        _ib_last_failure = time.monotonic()
+        _ib_last_failure[kind] = time.monotonic()
 
         # Verify Gateway is actually down before restarting
         gw_status = await check_ib_gateway()
@@ -3211,7 +3226,7 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
 
             if gw_result.get("restarted") and gw_result.get("port_listening"):
                 logger.info("IB Gateway restarted, retrying %s", entry)
-                _ib_last_failure = 0.0  # Clear cooldown after successful restart
+                _ib_last_failure[kind] = 0.0  # Clear cooldown after successful restart
                 if ib_pool:
                     await ib_pool.disconnect_all()
                     await ib_pool.connect_all()

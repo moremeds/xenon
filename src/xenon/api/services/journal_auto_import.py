@@ -85,10 +85,20 @@ class JournalAutoImportSubscriber:
             return
         self._loop = asyncio.get_running_loop()
         await asyncio.to_thread(self.replay_unconsumed)
-        self._subscriber = EventSubscriber(dsn=dsn, channels=[CHANNEL_TRADE_CLOSED])
+        self._subscriber = EventSubscriber(
+            dsn=dsn,
+            channels=[CHANNEL_TRADE_CLOSED],
+            on_reconnect=self._replay_after_reconnect,
+        )
         self._subscriber.on(CHANNEL_TRADE_CLOSED, self._on_notification)
         await self._subscriber.start()
         logger.info("journal auto-import listener started")
+
+    async def _replay_after_reconnect(self) -> None:
+        """Re-LISTEN fired after a drop — NOTIFY rows emitted during the gap are
+        lost, so replay every unconsumed outbox row to catch up."""
+        replayed = await asyncio.to_thread(self.replay_unconsumed)
+        logger.info("journal auto-import replayed %d event(s) after reconnect", replayed)
 
     def _on_notification(self, _channel: str, payload: str) -> None:
         try:
