@@ -368,6 +368,122 @@ class TestModifyIdentity:
         client.place_order.assert_not_called()
 
 
+# ─── Frozen identity — observation-to-action preservation ────────────────
+
+
+class TestFrozenIdentity:
+    def test_cancel_orderid_only_ignores_stranger_after_reconnect(self, capsys):
+        """orderId-only request: first snapshot holds client 9's order, the
+        post-reconnect snapshot holds client 26's DIFFERENT order with the
+        same orderId. The frozen identity (clientId=9, permId=111) must not
+        match it — 'not found' error, stranger's order never cancelled."""
+        ours = make_trade(order_id=10, perm_id=111, client_id=9)
+        stranger = make_trade(order_id=10, perm_id=222, client_id=26)
+        client = make_client()
+        client.ib.client.clientId = 0  # must reconnect as owner 9
+        client.ib.errorEvent = ErrorEvent()
+        client.get_open_orders.side_effect = [[ours], [stranger]]
+        client.cancel_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            cancel_order(client, 10, 0, "127.0.0.1", 4002)
+        assert exc.value.code == 1
+        data = _emitted(capsys)
+        assert data["status"] == "error"
+        assert data["upstream"]["code"] == 10147
+        client.cancel_order.assert_not_called()
+
+    def test_cancel_orderid_only_success_acts_on_frozen_order(self, capsys):
+        """Our order cancels then vanishes while a stranger's same-orderId
+        order stays open — disappearance-as-ack holds because the FROZEN
+        order is what vanished, and only our order object is cancelled."""
+        ours = make_trade(order_id=10, perm_id=111, client_id=0)
+        stranger = make_trade(order_id=10, perm_id=222, client_id=26)
+        client = make_client()
+        client.ib.client.clientId = 0
+        client.ib.errorEvent = ErrorEvent()
+        client.get_open_orders.side_effect = [[ours], [stranger]]
+        client.cancel_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            cancel_order(client, 10, 0, "127.0.0.1", 4002)  # orderId-only
+        assert exc.value.code == 0
+        data = _emitted(capsys)
+        assert data["status"] == "ok"
+        client.cancel_order.assert_called_once_with(ours.order)
+
+    def test_cancel_stranger_disappearance_is_not_success(self, capsys):
+        """A DIFFERENT order sharing the orderId disappearing mid-poll is
+        not our ack — the frozen order still being open keeps waiting and
+        the operation errors out (never a false success)."""
+        ours = make_trade(order_id=10, perm_id=111, client_id=0)
+        stranger = make_trade(order_id=10, perm_id=222, client_id=26)
+        client = make_client()
+        client.ib.client.clientId = 0
+        client.ib.errorEvent = ErrorEvent()
+        # ours open; stranger joins then leaves; ours persists to timeout.
+        client.get_open_orders.side_effect = (
+            [[ours]] + [[ours, stranger]] + [[ours]] * 12
+        )
+        client.cancel_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            cancel_order(client, 10, 0, "127.0.0.1", 4002)
+        assert exc.value.code == 1
+        data = _emitted(capsys)
+        assert data["status"] == "error"
+        client.cancel_order.assert_called_once_with(ours.order)
+
+    def test_modify_orderid_only_ignores_stranger_after_reconnect(self, capsys):
+        ours = make_trade(order_id=10, perm_id=111, client_id=9)
+        stranger = make_trade(order_id=10, perm_id=222, client_id=26)
+        client = make_client()
+        client.ib.client.clientId = 0  # must reconnect as owner 9
+        client.ib.errorEvent = ErrorEvent()
+        client.get_open_orders.side_effect = [[ours], [stranger]]
+        client.place_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            modify_order(client, 10, 0, 22.50, "127.0.0.1", 4002)
+        assert exc.value.code == 1
+        data = _emitted(capsys)
+        assert data["upstream"]["code"] == 10147
+        client.place_order.assert_not_called()
+
+    def test_modify_confirmation_requires_the_same_order(self, capsys):
+        """A refresh containing a DIFFERENT order that happens to carry the
+        new price must not confirm the modify — the frozen tuple is what
+        confirmation is checked against."""
+        ours = make_trade(order_id=10, perm_id=111, client_id=0)
+        stranger = make_trade(order_id=10, perm_id=222, client_id=26, lmt_price=22.50)
+        client = make_client()
+        client.ib.client.clientId = 0
+        client.ib.errorEvent = ErrorEvent()
+        # ours placed; every refresh shows only the stranger (already at
+        # the requested price) — frozen lookup never returns it.
+        client.get_open_orders.side_effect = [[ours]] + [[stranger]] * 12
+        client.place_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            modify_order(client, 10, 0, 22.50, "127.0.0.1", 4002)
+        assert exc.value.code == 1
+        data = _emitted(capsys)
+        assert data["status"] == "error"
+        assert "not confirmed" in data["message"].lower()
+        client.place_order.assert_called_once()  # placed on OUR order
+
+    def test_modify_frozen_identity_confirms_on_same_order(self, capsys):
+        """Happy path under orderId-only: the frozen order itself reflects
+        the new price on refresh → confirmed ok."""
+        ours = make_trade(order_id=10, perm_id=111, client_id=0)
+        client = make_client()
+        client.ib.client.clientId = 0
+        client.ib.errorEvent = ErrorEvent()
+        client.get_open_orders.return_value = [ours]  # mutated in place
+        client.place_order = MagicMock()
+        with pytest.raises(SystemExit) as exc:
+            modify_order(client, 10, 0, 22.50, "127.0.0.1", 4002)
+        assert exc.value.code == 0
+        assert _emitted(capsys)["status"] == "ok"
+        placed = client.place_order.call_args[0][1]
+        assert placed.lmtPrice == 22.50
+
+
 # ─── IBConnectionError → JSON contract ───────────────────────────────────
 
 

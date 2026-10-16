@@ -742,6 +742,117 @@ def test_modify_omits_account_arg_on_legacy_unknown_scope(client, tmp_db, monkey
     assert "--account" not in captured["args"]
 
 
+def _seed_dual_client_submissions(ib_order_id: str = "10") -> None:
+    """Two scoped submissions sharing one ib_order_id on different placing
+    clients — orderIds collide across IB client sessions, so the stored
+    owner must never be resolved by an arbitrary first match."""
+    engine = _pg_engine()
+    try:
+        with engine.begin() as con:
+            for sid, perm, cid in (
+                ("sub-dual-a", "42", 26),
+                ("sub-dual-b", "43", 27),
+            ):
+                con.execute(
+                    text(
+                        """
+                INSERT INTO xenon.order_submissions (
+                    submission_id, user_id, client_attempt_id, ticker, security_type,
+                    action, quantity, multiplier, limit_price, state, ib_order_id,
+                    perm_id, modify_sequence, submitted_at, updated_at,
+                    broker, account_env, broker_account, placing_client_id
+                ) VALUES (:submission_id, 'local', 'cid-' || :submission_id, 'AAPL', 'STK', 'BUY', 1, 100, '1.23',
+                          'WORKING', :ib_order_id, :perm_id, 5, NOW(), NOW(),
+                          'IB', 'paper', 'DU0000000', :placing_client_id)
+                """
+                    ),
+                    {
+                        "submission_id": sid,
+                        "ib_order_id": ib_order_id,
+                        "perm_id": perm,
+                        "placing_client_id": cid,
+                    },
+                )
+    finally:
+        engine.dispose()
+
+
+def test_cancel_permid_resolves_its_own_owner_with_duplicate_order_ids(client, tmp_db, monkeypatch):
+    """Two scoped rows share ib_order_id=10 — a permId request must resolve
+    ITS row (permId 43 → client 27), never the LIMIT-1 orderId match."""
+    _seed_dual_client_submissions()
+    captured = {}
+
+    async def fake_runner(entry, args, timeout=30):
+        captured["args"] = args
+        return ScriptResult(ok=True, data={"status": "ok", "message": "Cancelled"})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post("/orders/cancel", json={"orderId": 10, "permId": 43})
+    assert resp.status_code == 200
+    args = captured["args"]
+    assert "--client-id" in args
+    assert args[args.index("--client-id") + 1] == "27"
+
+
+def test_cancel_orderid_only_duplicate_rows_sends_no_client_id(client, tmp_db, monkeypatch):
+    """orderId-only + two scoped rows sharing that ib_order_id → the stored
+    owner is ambiguous; omit --client-id and let the CLI's ambiguity rule
+    decide rather than forwarding an arbitrary owner."""
+    _seed_dual_client_submissions()
+    captured = {}
+
+    async def fake_runner(entry, args, timeout=30):
+        captured["args"] = args
+        return ScriptResult(ok=True, data={"status": "ok", "message": "Cancelled"})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post("/orders/cancel", json={"orderId": 10})
+    assert resp.status_code == 200
+    assert "--client-id" not in captured["args"]
+
+
+def test_cancel_permid_row_with_mismatched_order_id_sends_no_client_id(client, tmp_db, monkeypatch):
+    """permId resolves a row whose ib_order_id contradicts the request —
+    the stored identity is inconsistent → omit --client-id."""
+    _seed_dual_client_submissions()
+    captured = {}
+
+    async def fake_runner(entry, args, timeout=30):
+        captured["args"] = args
+        return ScriptResult(ok=True, data={"status": "ok", "message": "Cancelled"})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post("/orders/cancel", json={"orderId": 99, "permId": 43})
+    assert resp.status_code == 200
+    assert "--client-id" not in captured["args"]
+
+
+def test_modify_permid_resolves_its_own_owner_with_duplicate_order_ids(client, tmp_db, monkeypatch):
+    """Same rule on modify: permId 43 resolves row sub-dual-b (client 27)
+    past the sequence gate, and that owner — not the orderId match — is
+    forwarded."""
+    _seed_dual_client_submissions()
+    captured = {}
+
+    async def fake_runner(entry, args, timeout=30):
+        captured["args"] = args
+        return ScriptResult(ok=True, data={"status": "ok", "message": "Modified"})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake_runner)
+
+    resp = client.post(
+        "/orders/modify",
+        json={"orderId": 0, "permId": 43, "newPrice": 1.50, "modifySequence": 6},
+    )
+    assert resp.status_code == 200
+    args = captured["args"]
+    assert args[args.index("--client-id") + 1] == "27"
+
+
 def test_dev_probe_not_in_auth_exempt_paths():
     """B3 — defense in depth: Clerk middleware must still cover the probe."""
     assert "/dev/rehydrate/synthetic" not in server_mod.AUTH_EXEMPT_PATHS

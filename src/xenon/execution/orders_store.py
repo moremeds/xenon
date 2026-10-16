@@ -734,27 +734,39 @@ def load_submission_for_modify(
     account_env: str = "legacy_unknown",
     broker_account: str = "legacy_unknown",
 ) -> dict | None:
-    """Return the full submission row identified by order_id or perm_id.
+    """Return the scoped submission row for a cancel/modify identity.
 
-    Used by the modify route to reconstruct a PreflightRequest for the
-    regime gate (modify body only carries IDs+price+qty+sequence).
-    Scope-filtered so a paper-account modify cannot resolve a live row.
+    permId wins when supplied — it is globally unique, and the resolved
+    row's ``ib_order_id`` is verified against the request's orderId.
+    orderId-only requests must resolve to exactly ONE scoped row: zero or
+    several rows means the stored owner is ambiguous (two clients can share
+    an orderId), so None is returned and the CLI's own ambiguity rule
+    decides — never an arbitrary LIMIT 1 owner.
+
+    Used by the cancel/modify routes to assert the recorded placing
+    clientId. Scope-filtered so a paper-account modify cannot resolve a
+    live row.
     """
     conditions = [
         order_submissions.c.broker == broker,
         order_submissions.c.account_env == account_env,
         order_submissions.c.broker_account == broker_account,
     ]
-    if order_id:
-        conditions.append(order_submissions.c.ib_order_id == str(order_id))
-    elif perm_id:
+    if perm_id:
         conditions.append(order_submissions.c.perm_id == str(perm_id))
+    elif order_id:
+        conditions.append(order_submissions.c.ib_order_id == str(order_id))
     else:
         return None
     engine = get_sync_engine()
     with engine.connect() as conn:
-        row = conn.execute(select(order_submissions).where(*conditions).limit(1)).first()
-    return dict(row._mapping) if row else None
+        rows = conn.execute(select(order_submissions).where(*conditions)).all()
+    if len(rows) != 1:
+        return None
+    row = dict(rows[0]._mapping)
+    if perm_id and order_id and str(row.get("ib_order_id") or "") != str(order_id):
+        return None
+    return row
 
 
 def lookup_submission_id_by_ib_order_id(

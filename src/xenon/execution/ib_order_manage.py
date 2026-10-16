@@ -281,13 +281,38 @@ def find_trade(
     return None
 
 
+def find_frozen_trade(
+    client: IBClient,
+    order_id: int,
+    perm_id: int,
+    client_id: int,
+    account: Optional[str] = None,
+):
+    """Re-locate the SAME order by its frozen identity tuple.
+
+    After the first verified lookup we know the order's true owner
+    (clientId, orderId, and permId when non-zero). Every later snapshot
+    must contain THAT order — a different permId or clientId occupying the
+    same orderId is "not found", never an alternate match, and never a
+    disappearance-ack we didn't cause.
+    """
+    for t in client.get_open_orders():
+        if t.order.orderId != order_id or t.order.clientId != client_id:
+            continue
+        if perm_id > 0 and t.order.permId != perm_id:
+            continue
+        _verify_identity(t, order_id=order_id, account=account, client_id=client_id)
+        return t
+    return None
+
+
 def _await_order_state(
     client: IBClient,
     order_id: int,
     perm_id: int,
     *,
     account: Optional[str] = None,
-    client_id: Optional[int] = None,
+    client_id: int,
     initial_trade=None,
 ) -> Iterator[tuple]:
     """Poll refreshed open-order state — 10 ticks × 0.5s (unchanged).
@@ -295,15 +320,16 @@ def _await_order_state(
     Yields ``(latest_trade, refreshed_trade)`` per tick. ``latest_trade`` is
     the most recent non-None snapshot (``initial_trade`` until the first
     refresh lands) so callers can report last-seen state after a timeout;
-    ``refreshed_trade`` is this tick's raw ``find_trade`` result — ``None``
-    when the verified order vanished from open orders (the
-    disappearance-as-ack rule). Identity args are forwarded so a poll never
-    matches a different client's order sharing the same orderId.
+    ``refreshed_trade`` is this tick's raw ``find_frozen_trade`` result —
+    ``None`` when the FROZEN order vanished from open orders (the
+    disappearance-as-ack rule). The frozen (clientId, orderId, permId)
+    tuple is matched on every poll so a different order sharing the same
+    orderId can never be picked up mid-operation.
     """
     latest = initial_trade
     for _ in range(10):
         client.sleep(0.5)
-        refreshed = find_trade(client, order_id, perm_id, account=account, client_id=client_id)
+        refreshed = find_frozen_trade(client, order_id, perm_id, client_id, account=account)
         if refreshed is not None:
             latest = refreshed
         yield latest, refreshed
@@ -347,12 +373,21 @@ def cancel_order(
             **_identity_notes(trade, account),
         )
 
+    # Freeze the observed identity — every later lookup must find THIS
+    # order, not another sharing the same orderId. A different permId or
+    # clientId in a later snapshot is "not found", never a match.
+    order_id, perm_id, client_id = (
+        trade.order.orderId,
+        trade.order.permId or 0,
+        trade.order.clientId,
+    )
+
     # Reconnect as the original placer if needed (fixes Error 10147).
     # _reconnect_as_owner handles 326-retry + emits classified output on failure.
-    original_client_id = trade.order.clientId
+    original_client_id = client_id
     if client.ib.client.clientId != original_client_id:
         _reconnect_as_owner(client, host, port, original_client_id)
-        trade = find_trade(client, order_id, perm_id, account=account, client_id=client_id)
+        trade = find_frozen_trade(client, order_id, perm_id, client_id, account=account)
         if trade is None:
             output(
                 "error",
@@ -495,12 +530,21 @@ def modify_order(
     if new_quantity is not None and new_quantity <= 0:
         output("error", "New quantity must be > 0", classification="ib_reject", **_identity_notes(trade, account))
 
+    # Freeze the observed identity — every later lookup must find THIS
+    # order, not another sharing the same orderId. A different permId or
+    # clientId in a later snapshot is "not found", never a match.
+    order_id, perm_id, client_id = (
+        trade.order.orderId,
+        trade.order.permId or 0,
+        trade.order.clientId,
+    )
+
     # Reconnect as the original placer if needed (fixes Error 103).
     # _reconnect_as_owner handles 326-retry + emits classified output on failure.
-    original_client_id = trade.order.clientId
+    original_client_id = client_id
     if client.ib.client.clientId != original_client_id:
         _reconnect_as_owner(client, host, port, original_client_id)
-        trade = find_trade(client, order_id, perm_id, account=account, client_id=client_id)
+        trade = find_frozen_trade(client, order_id, perm_id, client_id, account=account)
         if trade is None:
             output(
                 "error",
