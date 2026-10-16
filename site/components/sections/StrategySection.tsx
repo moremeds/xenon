@@ -18,9 +18,9 @@ export function StrategySection() {
           </p>
         </div>
         <div className="flex flex-wrap gap-3">
-          <SignalPill tone="core">41 Allowed</SignalPill>
-          <SignalPill tone="warn">14 Blocked</SignalPill>
-          <SignalPill tone="violet">3 Guard Gaps</SignalPill>
+          <SignalPill tone="core">Allowed</SignalPill>
+          <SignalPill tone="warn">Blocked</SignalPill>
+          <SignalPill tone="violet">Guard Gaps</SignalPill>
         </div>
       </div>
       <div className="mt-8">

@@ -51,14 +51,14 @@ export const proofItems: ProofItem[] = [
   },
   {
     label: "Structure Catalog",
-    value: "58",
-    detail: "Catalogued option structures with guard decisions and P&L attribution labels.",
+    value: "Catalogued",
+    detail: "Option structures carry explicit guard decisions and P&L attribution labels.",
     tone: "strong",
   },
   {
-    label: "Guard Layers",
-    value: "3",
-    detail: "UI pre-flight, API gate, and post-sync audit enforce one naked-short rule.",
+    label: "Guard",
+    value: "Enforced",
+    detail: "UI pre-flight, API gate, and post-sync audit share one naked-short rule.",
     tone: "strong",
   },
   {
@@ -103,7 +103,7 @@ export const moduleContents: Record<ModuleTab, ModuleContent> = {
   orders: {
     metrics: [
       { label: "Routing", value: "IB", detail: "Direct order path" },
-      { label: "Combos", value: "BAG", detail: "Atomic multi-leg" },
+      { label: "Combos", value: "BAG", detail: "One multi-leg order" },
       { label: "Lifecycle", value: "Tracked", detail: "Submission to fill" },
       { label: "Guard", value: "Active", detail: "Naked short block" },
     ],
@@ -132,15 +132,15 @@ export const moduleContents: Record<ModuleTab, ModuleContent> = {
   },
   guard: {
     metrics: [
-      { label: "Layers", value: "3", detail: "UI, API, audit" },
+      { label: "Enforcement", value: "Layered", detail: "UI, API, audit" },
       { label: "Naked Calls", value: "Blocked", detail: "No exceptions" },
-      { label: "Short Puts", value: "Secured", detail: "Cash-backed only" },
+      { label: "Short Puts", value: "Allowed", detail: "Per guard policy" },
       { label: "Cover Ratio", value: "1:100", detail: "Contract to shares" },
     ],
     commands: [
       { label: "Pre-Trade Guard", state: "UI + API", command: "nakedShortGuard" },
       { label: "Post-Sync Audit", state: "Enforced", command: "xenon-naked-short-audit" },
-      { label: "Structure Rules", state: "58 Entries", command: "options-structures" },
+      { label: "Structure Rules", state: "Catalog", command: "options-structures" },
     ],
     commandLabel: "Guard Surface",
     commandPill: "Fail Closed",
@@ -163,10 +163,10 @@ export const structures: StructureItem[] = [
   {
     name: "Short Put (Cash-Secured)",
     description:
-      "Single-leg short put backed by reserved cash. Allowed by policy and sized against the full strike obligation.",
+      "Single-leg short put at or out of the money. Short puts are allowed by the guard; the naked-short rule covers calls and stock shorts.",
     legs: "Short put (ATM or OTM)",
     category: "Single leg",
-    guard: "Allow — cash-secured",
+    guard: "Allow — short put",
     bias: "Bullish",
     decision: "Allowed",
     slug: "short-put-cash-secured",
@@ -187,7 +187,7 @@ export const structures: StructureItem[] = [
   {
     name: "Long Iron Condor",
     description:
-      "Two out-of-the-money credit verticals sharing one expiry. All four legs stay atomic inside a single BAG order.",
+      "Two out-of-the-money credit verticals sharing one expiry. All four legs are submitted as one multi-leg BAG order.",
     legs: "Put credit spread + call credit spread",
     category: "Multi-leg",
     guard: "Allow — defined risk",
@@ -238,7 +238,7 @@ export const executionItems: ExecutionItem[] = [
   {
     step: "Guard",
     summary:
-      "Coverage is verified before routing: no uncovered short calls, no stock shorts, cash-secured puts only.",
+      "Coverage is verified before routing: no uncovered short calls and no stock shorts; short puts are allowed.",
     metadata: "1 contract = 100 shares, fail closed",
   },
   {
@@ -275,7 +275,7 @@ export const surfaceItems: SurfaceItem[] = [
     headline: "Placement, cancel, and modify run one guarded path to the broker.",
     metrics: [
       { label: "Routing", value: "IB" },
-      { label: "Guard", value: "3 Layers" },
+      { label: "Guard", value: "Enforced" },
     ],
     details: [
       "Single-leg and multi-leg BAG orders with explicit leg actions and ratios.",
@@ -313,7 +313,7 @@ export const auditItems: AuditItem[] = [
   {
     title: "Structure Catalog",
     detail:
-      "58 catalogued option structures with guard decisions, risk profiles, and P&L attribution labels — including three documented guard gaps.",
+      "Catalogued option structures with guard decisions, risk profiles, and P&L attribution labels — including documented guard gaps.",
   },
   {
     title: "Postgres Truth",

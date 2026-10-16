@@ -31,7 +31,7 @@ export function ExecutionWorkflow() {
           <ul className="mt-4 space-y-3 text-sm leading-6 text-secondary">
             <li>Every order carries broker, environment, and account scope.</li>
             <li>Coverage is checked before the broker sees the order.</li>
-            <li>Short calls require long shares or same-expiry long calls; cash-secured puts are allowed.</li>
+            <li>Short calls require long shares or same-expiry long calls; short puts are allowed.</li>
             <li>Uncovered exposure is blocked at the UI, the API, and the post-sync audit.</li>
           </ul>
         </div>
