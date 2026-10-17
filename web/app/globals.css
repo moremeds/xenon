@@ -14,6 +14,10 @@
   --text-on-fill: #ffffff;
   /* label text on bright fills (e.g. positive green) — always dark */
   --text-on-fill-dark: #0a0f14;
+  /* ratings-bar segment fills — fixed in both themes to keep label contrast */
+  --rating-strong-buy-fill: #048a7a;
+  /* ratings-bar hold segment — slate fill, always paired with --text-on-fill */
+  --rating-hold-fill: #475569;
 }
 
 [data-theme="dark"] {
@@ -3836,7 +3840,7 @@ tr.leg-row td {
   min-width: 20px;
 }
 .ratings-strong-buy {
-  background: var(--signal-deep);
+  background: var(--rating-strong-buy-fill);
   color: var(--text-on-fill);
 }
 .ratings-buy {
@@ -3844,7 +3848,7 @@ tr.leg-row td {
   color: var(--text-on-fill-dark);
 }
 .ratings-hold {
-  background: var(--text-muted);
+  background: var(--rating-hold-fill);
   color: var(--text-on-fill);
 }
 .ratings-sell {
