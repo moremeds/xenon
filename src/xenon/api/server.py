@@ -1896,12 +1896,18 @@ def _preflight_block_response(verdict: Verdict) -> JSONResponse:
     )
 
 
-def _gate4_reject_verdict(reasons: list[str], uncovered: dict | None, short_stock: dict | None) -> Verdict:
+def _gate4_reject_verdict(
+    reasons: list[str],
+    uncovered: dict | None,
+    short_stock: dict | None,
+    split_required: bool = False,
+) -> Verdict:
     """Map a coverage rejection to the route's reason-code contract.
 
     Infrastructure failures (view/scope) take precedence — a classifiable
     coverage breach computed on unprovable data is still reported, but the
-    integrity problem is the headline.
+    integrity problem is the headline. `split_required` marks a guaranteed
+    BAG that only fails leg-by-leg — spec §2.3 says close it as two orders.
     """
     from xenon.execution.universe import is_index
 
@@ -1916,6 +1922,12 @@ def _gate4_reject_verdict(reasons: list[str], uncovered: dict | None, short_stoc
             accept=False,
             reason_code=ReasonCode.PORTFOLIO_SNAPSHOT_STALE,
             reason_detail="Portfolio snapshot is stale; sync before submitting SELL exposure",
+        )
+    if split_required:
+        return Verdict(
+            accept=False,
+            reason_code=ReasonCode.VERTICAL_CLOSE_SPLIT_REQUIRED,
+            reason_detail="Close the vertical as two orders: buy back the short leg first, then sell the long leg",
         )
     if short_stock:
         sym = sorted(short_stock)[0]
@@ -2389,7 +2401,9 @@ async def _orders_place_from_body(body: dict):
     )
     if outcome.status == "rejected":
         return _preflight_block_response(
-            _gate4_reject_verdict(outcome.reasons, outcome.uncovered, outcome.short_stock)
+            _gate4_reject_verdict(
+                outcome.reasons, outcome.uncovered, outcome.short_stock, outcome.split_required
+            )
         )
     if outcome.status == "body_mismatch":
         return JSONResponse(
@@ -2889,7 +2903,9 @@ async def _orders_modify_from_body(body: dict):
             )
         mod_outcome = gate4.begin_modify(_submission_id, new_quantity, _scope)
         if not mod_outcome.accept:
-            v = _gate4_reject_verdict(mod_outcome.reasons, mod_outcome.uncovered, mod_outcome.short_stock)
+            v = _gate4_reject_verdict(
+                mod_outcome.reasons, mod_outcome.uncovered, mod_outcome.short_stock, mod_outcome.split_required
+            )
             return order_error(
                 400,
                 v.reason_code.value if v.reason_code else ReasonCode.GATE4_UNRESOLVED.value,

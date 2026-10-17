@@ -79,6 +79,21 @@ def _stock(sym, qty):
     }
 
 
+def _opt_pos(sym, qty, *, strike, right="Call", expiry="2026-12-18"):
+    return {
+        "ticker": sym,
+        "expiry": expiry,
+        "legs": [
+            {
+                "direction": "LONG" if qty >= 0 else "SHORT",
+                "type": right,
+                "contracts": abs(qty),
+                "strike": strike,
+            }
+        ],
+    }
+
+
 @pytest.fixture(autouse=True)
 def _pg(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", _sync_url())
@@ -231,6 +246,39 @@ def test_sell_envelope_combo_evaluated_and_blocked(client, broker_calls):
     assert resp.status_code == 400
     assert resp.json()["reason_code"] == "ETF_CALL_UNCOVERED"
     assert broker_calls == []
+
+
+def test_vertical_close_split_required_reason(client, broker_calls):
+    """Spec §2.3: a held-vertical close submitted as ONE guaranteed BAG gets
+    the split-required code at top level — close as two orders, short leg
+    first. Zero broker calls; nothing reaches IB."""
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_opt_pos("SPY", 1, strike=500), _opt_pos("SPY", -1, strike=510)])
+    engine.dispose()
+
+    resp = client.post(
+        "/orders/place",
+        json={
+            "type": "combo",
+            "symbol": "SPY",
+            "action": "SELL",
+            "quantity": 1,
+            "limitPrice": 1.0,
+            "nonGuaranteed": 0,
+            "client_attempt_id": "rt-vsplit-1",
+            "legs": [
+                {"action": "BUY", "right": "C", "expiry": "2026-12-18", "strike": 500.0, "ratio": 1},
+                {"action": "SELL", "right": "C", "expiry": "2026-12-18", "strike": 510.0, "ratio": 1},
+            ],
+        },
+    )
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["reason_code"] == "VERTICAL_CLOSE_SPLIT_REQUIRED"
+    assert "short leg" in body["detail"]
+    assert broker_calls == []
+    assert _submission_rows() == []
 
 
 def test_guaranteed_bag_mode_reaches_broker_payload(client, broker_calls):
@@ -387,7 +435,11 @@ def test_modify_rejects_guarantee_mode_change(client, broker_calls):
 
 
 def test_modify_quantity_reserves_cover(client, broker_calls):
-    """A qty-up modify that exhausts cover is blocked before the broker."""
+    """A qty-up modify that exhausts cover is blocked before the broker.
+
+    The stored mode is guaranteed, so under netting the doubled legs would
+    still net internally — the reject carries the split-required code, not
+    the generic uncovered one."""
     _place_bag(client, "rt-mod-qty-1", shares=100)
 
     # The BAG's SELL leg consumes 100 shares; bumping qty to 2 needs 200.
@@ -402,7 +454,7 @@ def test_modify_quantity_reserves_cover(client, broker_calls):
     )
 
     assert resp.status_code == 400
-    assert resp.json()["reason_code"] == "ETF_CALL_UNCOVERED"
+    assert resp.json()["reason_code"] == "VERTICAL_CLOSE_SPLIT_REQUIRED"
     assert len(broker_calls) == 1
 
 

@@ -59,6 +59,9 @@ class ReasonCode(StrEnum):
     # neither view staleness nor a classifiable coverage breach.
     GATE4_UNRESOLVED = "GATE4_UNRESOLVED"
     MODIFY_GUARANTEE_MODE = "MODIFY_GUARANTEE_MODE"
+    # Guaranteed BAG rejected leg-by-leg but accepted under netting — the
+    # spec §2.3 "vertical closes are two orders, short leg first" case.
+    VERTICAL_CLOSE_SPLIT_REQUIRED = "VERTICAL_CLOSE_SPLIT_REQUIRED"
     READ_ONLY_BROKER = "READ_ONLY_BROKER"
     # F7 — pending timeout (PR-D)
     PENDING_TIMEOUT = "PENDING_TIMEOUT"

@@ -87,6 +87,27 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
     severity: "error",
     copy: "Portfolio snapshot required before placing short-exposure orders.",
   },
+  PORTFOLIO_SNAPSHOT_STALE: {
+    severity: "error",
+    copy: "Portfolio snapshot is stale. Sync the account, then retry.",
+  },
+  // PR-03b — Gate-4 atomic reservation
+  GATE4_UNRESOLVED: {
+    severity: "error",
+    copy: "Coverage could not be verified. Sync the account and retry.",
+  },
+  MODIFY_GUARANTEE_MODE: {
+    severity: "error",
+    copy: "Guarantee mode is fixed at placement. Cancel and re-enter to change it.",
+  },
+  VERTICAL_CLOSE_SPLIT_REQUIRED: {
+    severity: "error",
+    copy: "Close the vertical as two orders: buy back the short leg first, then sell the long leg.",
+  },
+  ATTEMPT_BODY_MISMATCH: {
+    severity: "error",
+    copy: "Retry id was reused with a different order. Rebuild the ticket.",
+  },
   READ_ONLY_BROKER: {
     severity: "error",
     copy: "Selected broker is read-only for order placement.",

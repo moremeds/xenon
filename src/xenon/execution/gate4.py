@@ -597,6 +597,27 @@ class Gate4Outcome:
     # Structured reject detail for reason-code mapping (no string parsing).
     uncovered: dict | None = None
     short_stock: dict | None = None
+    # Rejected leg-by-leg but accepted under guaranteed-BAG netting — the
+    # spec §2.3 "vertical closes are two orders" case (route maps it to
+    # VERTICAL_CLOSE_SPLIT_REQUIRED).
+    split_required: bool = False
+
+
+def _accepted_with_netting(inputs: Gate4Inputs, candidate) -> bool:
+    """Would this candidate pass under guaranteed-BAG netting?
+
+    The re-eval only nets when the candidate is guaranteed and every leg is
+    OPT, so a non-guaranteed or mixed-security candidate fails identically —
+    and a truly naked BAG stays rejected under both modes.
+    """
+    return coverage.evaluate(
+        inputs.holdings,
+        inputs.orders,
+        candidate,
+        inputs.view,
+        inputs.scope_account,
+        netting_enabled=True,
+    ).accept
 
 
 def _legs_for_body_match(legs_payload):
@@ -694,6 +715,10 @@ def evaluate_and_reserve(
                 reasons=list(decision.reasons),
                 uncovered=dict(decision.uncovered),
                 short_stock=dict(decision.short_stock),
+                split_required=(
+                    not netting_enabled()
+                    and _accepted_with_netting(inputs, candidate)
+                ),
             )
 
     now = datetime.now(timezone.utc)
@@ -800,6 +825,7 @@ class ModifyReservationOutcome:
     submission_id: str | None = None
     uncovered: dict | None = None
     short_stock: dict | None = None
+    split_required: bool = False
 
 
 def _set_pending_amend(conn, submission_id: str, value: int | None) -> None:
@@ -834,10 +860,11 @@ def begin_modify(submission_id: str, new_qty: int, scope: dict) -> ModifyReserva
             {"k": scope_lock_key(scope)},
         )
         inputs = load_inputs(conn, scope)
+        modify_candidate = coverage.Modify(order_id=submission_id, new_qty=new_qty)
         decision = coverage.evaluate(
             inputs.holdings,
             inputs.orders,
-            coverage.Modify(order_id=submission_id, new_qty=new_qty),
+            modify_candidate,
             inputs.view,
             inputs.scope_account,
             netting_enabled=netting_enabled(),
@@ -848,6 +875,10 @@ def begin_modify(submission_id: str, new_qty: int, scope: dict) -> ModifyReserva
                 reasons=list(decision.reasons),
                 uncovered=dict(decision.uncovered),
                 short_stock=dict(decision.short_stock),
+                split_required=(
+                    not netting_enabled()
+                    and _accepted_with_netting(inputs, modify_candidate)
+                ),
             )
         _set_pending_amend(conn, submission_id, int(new_qty))
         return ModifyReservationOutcome(accept=True, submission_id=submission_id)

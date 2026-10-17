@@ -178,6 +178,38 @@ test.describe("Gate-4 order entry — blocked combo toast + valid vertical paylo
     expect(placeCalls).toBe(1);
   });
 
+  test("Guaranteed-BAG vertical close shows the split-required toast", async ({
+    page,
+  }) => {
+    // Spec §2.3: with netting off, a held vertical closes as two orders —
+    // Gate 4 rejects the one-BAG submission with a dedicated reason whose
+    // copy says exactly how to leg out. Never auto-split, never auto-submit.
+    await page.route("**/api/orders/place", (route) =>
+      route.fulfill({
+        status: 400,
+        contentType: "application/json",
+        body: JSON.stringify({
+          detail:
+            "Close the vertical as two orders: buy back the short leg first, then sell the long leg",
+          reason_code: "VERTICAL_CLOSE_SPLIT_REQUIRED",
+          reason_detail:
+            "Close the vertical as two orders: buy back the short leg first, then sell the long leg",
+        }),
+      }),
+    );
+
+    await openSpxuOrderTab(page);
+    await fillComboForm(page, "2.25");
+
+    const errorMsg = page.locator(".order-error");
+    await errorMsg.waitFor({ timeout: 5_000 });
+    await expect(errorMsg).toBeVisible();
+    await expect(errorMsg).toContainText(
+      /Close the vertical as two orders: buy back the short leg first, then sell the long leg/i,
+    );
+    await expect(page.locator(".order-success")).not.toBeVisible();
+  });
+
   test("Valid vertical submits the correct SELL-envelope BAG payload", async ({
     page,
   }) => {

@@ -497,6 +497,84 @@ def test_guaranteed_bag_mode_persisted_and_netting(monkeypatch):
     assert row.legs["guaranteed"] is True
 
 
+def _vertical_close_body(attempt, *, non_guaranteed=0, qty=1):
+    """SELL-envelope BAG closing a held 500/510 bull call spread — legs carry
+    structure actions (LONG leg → BUY, SHORT → SELL), guaranteed mode."""
+    return {
+        "type": "combo",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": qty,
+        "nonGuaranteed": non_guaranteed,
+        "client_attempt_id": attempt,
+        "legs": [
+            {"action": "BUY", "right": "C", "expiry": "2026-12-18", "strike": 500.0, "ratio": 1},
+            {"action": "SELL", "right": "C", "expiry": "2026-12-18", "strike": 510.0, "ratio": 1},
+        ],
+    }
+
+
+def _bag_reserve(attempt, body, qty=1):
+    candidate, legs = gate4.candidate_from_place_body(body, SCOPE["broker_account"])
+    return gate4.reserve_with_coverage(
+        "u1",
+        attempt,
+        RequestRow(ticker="SPY", security_type="BAG", action=body["action"], quantity=qty, multiplier=100, limit_price=Decimal("1")),
+        candidate=candidate,
+        legs_payload=legs,
+        scope=SCOPE,
+    )
+
+
+def test_vertical_close_split_required_when_netting_off():
+    """Spec §2.3: with netting off a held-vertical close submitted as one
+    guaranteed BAG is rejected — but marked split_required so the route can
+    tell the user to leg out as two orders instead of a generic naked call."""
+    _seed_snapshot(_snapshot_payload([_opt_leg_pos("SPY", 1, strike=500), _opt_leg_pos("SPY", -1, strike=510)]))
+    out = _bag_reserve("att-vc-1", _vertical_close_body("att-vc-1"))
+    assert out.status == "rejected"
+    assert any("uncovered_call_increase" in r for r in out.reasons)
+    assert out.split_required is True
+
+
+def test_vertical_close_accepted_when_netting_on(monkeypatch):
+    monkeypatch.setenv("XENON_GATE4_NETTING", "1")
+    _seed_snapshot(_snapshot_payload([_opt_leg_pos("SPY", 1, strike=500), _opt_leg_pos("SPY", -1, strike=510)]))
+    out = _bag_reserve("att-vc-2", _vertical_close_body("att-vc-2"))
+    assert out.status == "winner"
+
+
+def test_naked_bag_still_uncovered_not_split():
+    """A guaranteed BAG whose legs don't internally offset (both SELL calls)
+    is rejected under netting too — plain uncovered code, no split hint."""
+    _seed_snapshot(_snapshot_payload([]))
+    body = {
+        "type": "combo",
+        "symbol": "SPY",
+        "action": "BUY",
+        "quantity": 1,
+        "nonGuaranteed": 0,
+        "client_attempt_id": "att-nbag-1",
+        "legs": [
+            {"action": "SELL", "right": "C", "expiry": "2026-12-18", "strike": 500.0, "ratio": 1},
+            {"action": "SELL", "right": "C", "expiry": "2026-12-18", "strike": 510.0, "ratio": 1},
+        ],
+    }
+    out = _bag_reserve("att-nbag-1", body)
+    assert out.status == "rejected"
+    assert any("uncovered_call_increase" in r for r in out.reasons)
+    assert out.split_required is False
+
+
+def test_non_guaranteed_vertical_close_not_split():
+    """nonGuaranteed=1 (stored/requested mode) disables netting — the same
+    held-vertical close rejects with the plain uncovered code."""
+    _seed_snapshot(_snapshot_payload([_opt_leg_pos("SPY", 1, strike=500), _opt_leg_pos("SPY", -1, strike=510)]))
+    out = _bag_reserve("att-vc-ng", _vertical_close_body("att-vc-ng", non_guaranteed=1))
+    assert out.status == "rejected"
+    assert out.split_required is False
+
+
 # ---------------------------------------------------------------------------
 # Idempotent replay under the same lock
 # ---------------------------------------------------------------------------
