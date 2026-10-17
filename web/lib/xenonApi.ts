@@ -51,7 +51,7 @@ export async function xenonFetch<T = Record<string, unknown>>(
   if (!res.ok) {
     // Read the body ONCE as text — a failed res.json() leaves the stream
     // consumed, so a second res.text() can never recover non-JSON detail.
-    const raw = await res.text();
+    const raw = await res.text().catch(() => "");
     let detail: string;
     let bodyJson: Record<string, unknown> | null = null;
     try {
