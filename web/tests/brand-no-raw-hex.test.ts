@@ -1,19 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { extname, join, relative, resolve } from "node:path";
+import postcss from "postcss";
+import ts from "typescript";
 
 /**
  * Brand guard (brand/CLAUDE.md: "All colors via tokens — no raw hex").
  *
- * Scans web/app, web/components and web/lib source (.ts/.tsx/.css) and fails
- * on raw `#hex` / `rgb()` / `rgba()` / `hsl()` literals in color-bearing
- * syntax — CSS declaration values and JS/TS strings used as style values —
- * while ignoring:
+ * Scans web/app, web/components and web/lib source (.ts/.tsx/.css) with real
+ * parsers — postcss for CSS, the TypeScript AST for TS/TSX — and fails on
+ * raw color literals (whole-token `#hex`, `rgb()/rgba()/hsl()/hsla()`)
+ * outside:
  *
- *   - `--name: value;` token definitions, but only inside the approved
- *     token blocks (`:root`, `[data-theme="dark"]`, `[data-theme="light"]`)
- *     of web/app/globals.css, and only the declaration span;
- *   - fragment/id refs such as `href="#deadbeef"` or `id="#fff-row"`;
+ *   - CSS custom-property declarations (`--name: value`) whose DIRECT
+ *     parent rule is exactly `:root`, `[data-theme="dark"]` or
+ *     `[data-theme="light"]` in web/app/globals.css — the approved token
+ *     blocks;
+ *   - JSX attribute values named `href`, `id`, `key`, `htmlFor` or `data-*`,
+ *     and import/export module specifiers;
  *   - lines carrying a documented-exception comment `// brand:` or
  *     `/* brand:` (global-error literals that must survive globals.css not
  *     loading, devtools console styles that cannot resolve var()).
@@ -22,43 +26,26 @@ const WEB = resolve(__dirname, "..");
 const SCAN_DIRS = ["app", "components", "lib"];
 const EXTENSIONS = new Set([".ts", ".tsx", ".css"]);
 
-const BRAND_MARKER = /(\/\/|\/\*)\s*brand:/;
-const VAR_DEF = /^\s*--[\w-]+\s*:/;
-
-/** Token definitions are only legitimate inside these globals.css blocks. */
 const TOKEN_FILE = "app/globals.css";
-const TOKEN_BLOCK_OPEN = /^\s*(?::root|\[data-theme="(?:dark|light)"\])\s*\{/;
+const APPROVED_TOKEN_SELECTORS = new Set([
+  ":root",
+  '[data-theme="dark"]',
+  '[data-theme="light"]',
+]);
 
-const HEX = /#[0-9a-fA-F]{3,8}\b/g;
-const COLOR_FN = /\brgba?\s*\(|\bhsla?\s*\(/;
+const BRAND_MARKER = /(\/\/|\/\*)\s*brand:/;
+
+/** Whole-token hex, or a color function call, inside a value string. */
+const HEX_TOKEN = /(^|[\s(:,])#[0-9a-fA-F]{3,8}\b(?=[\s),;:'"`!]|$)/;
+const COLOR_FN = /\b(?:rgba?|hsla?)\s*\(/;
 const URL_REF = /url\([^)]*\)/g;
-/** `attr="#…"` fragment/id refs are links, not colors. */
-const TS_FRAGMENT_ATTR =
-  /\b(?:href|to|id|rel|name|anchor|fragment)\s*=\s*["'`][^"'`]*["'`]/g;
-/** hex in a color-value position: quote-adjacent or after `:`, `,`, `(`. */
-const TS_HEX_VALUE = /["'`:(,]\s*#[0-9a-fA-F]{3,8}(?=["'`);,\s]|$)/;
-
-/** CSS: a literal counts only inside a declaration value (after the colon). */
-function cssHasRawColor(text: string): boolean {
-  const t = text.replace(URL_REF, "url()");
-  if (COLOR_FN.test(t)) return true;
-  const colon = t.indexOf(":");
-  if (colon === -1) return false;
-  return [...t.matchAll(HEX)].some((m) => (m.index ?? 0) > colon);
-}
-
-/** TS/TSX: a literal counts in a style string / color call, not fragments. */
-function tsHasRawColor(text: string): boolean {
-  const t = text.replace(TS_FRAGMENT_ATTR, '""');
-  return COLOR_FN.test(t) || TS_HEX_VALUE.test(t);
-}
 
 /**
  * Listed exceptions. A violation is skipped only when the file matches the
- * path AND the line matches one of the patterns — anything else in the same
- * file still fails. Currently empty: surviving literals carry a line-level
- * `// brand:` / `/* brand:` marker instead (global-error, perfTracker,
- * .ratings-strong-sell background).
+ * path AND the offending source line matches one of the patterns — anything
+ * else in the same file still fails. Currently empty: surviving literals
+ * carry a line-level `// brand:` / `/* brand:` marker instead (global-error,
+ * perfTracker, .ratings-strong-sell background).
  */
 const LISTED_EXCEPTIONS: Record<string, RegExp[]> = {};
 
@@ -75,54 +62,104 @@ function* sourceFiles(dir: string): Generator<string> {
   }
 }
 
-function scanSource(
-  source: string,
-  opts: { isCss: boolean; rel: string },
-): string[] {
+function markedOrExcepted(lines: string[], rel: string): boolean {
+  const exceptions = LISTED_EXCEPTIONS[rel] ?? [];
+  return lines.some(
+    (l) => BRAND_MARKER.test(l) || exceptions.some((re) => re.test(l)),
+  );
+}
+
+function scanCss(source: string, rel: string): string[] {
+  const root = postcss.parse(source);
+  const lines = source.split("\n");
   const hits: string[] = [];
-  const isTokenFile = opts.rel === TOKEN_FILE;
-  let inTokenBlock = false;
-  let inVarDef = false;
-  source.split("\n").forEach((rawLine, i) => {
-    let text = rawLine;
-    if (opts.isCss) {
-      if (inVarDef) {
-        const end = text.indexOf(";");
-        if (end === -1) return; // inside a multi-line token value
-        inVarDef = false;
-        text = text.slice(end + 1); // scan the rest of the line
-      }
-      if (!inTokenBlock && isTokenFile && TOKEN_BLOCK_OPEN.test(text)) {
-        inTokenBlock = true;
-        text = text.slice(text.indexOf("{") + 1);
-      }
-      // `--name: value;` defs inside an approved block are exempt — but only
-      // the declaration span; the remainder of the line is still scanned.
-      while (inTokenBlock && VAR_DEF.test(text)) {
-        const end = text.indexOf(";");
-        if (end === -1) {
-          inVarDef = true;
-          return;
-        }
-        text = text.slice(end + 1);
-      }
-      if (inTokenBlock && text.includes("}")) inTokenBlock = false;
+  root.walkDecls((decl) => {
+    const parent = decl.parent;
+    const isTokenDecl =
+      rel === TOKEN_FILE &&
+      decl.prop.startsWith("--") &&
+      parent?.type === "rule" &&
+      APPROVED_TOKEN_SELECTORS.has((parent as postcss.Rule).selector.trim());
+    if (isTokenDecl) return;
+    if (!HEX_TOKEN.test(decl.value.replace(URL_REF, "url()")) &&
+        !COLOR_FN.test(decl.value)) {
+      return;
     }
-    const excepted = (LISTED_EXCEPTIONS[opts.rel] ?? []).some((re) =>
-      re.test(rawLine),
-    );
-    if (excepted || BRAND_MARKER.test(rawLine)) return;
-    const dirty = opts.isCss ? cssHasRawColor(text) : tsHasRawColor(text);
-    if (dirty) hits.push(`${opts.rel}:${i + 1}: ${rawLine.trim()}`);
+    const start = (decl.source?.start?.line ?? 1) - 1;
+    const end = (decl.source?.end?.line ?? start + 1) - 1;
+    if (markedOrExcepted(lines.slice(start, end + 1), rel)) return;
+    hits.push(`${rel}:${start + 1}: ${decl.toString().trim()}`);
   });
   return hits;
 }
 
+const FRAGMENT_ATTRS = new Set(["href", "id", "key", "htmlFor"]);
+
+/** Literal is the value of a JSX fragment/id attribute — a link, not a color. */
+function isFragmentAttr(node: ts.Node): boolean {
+  let attr: ts.JsxAttribute | undefined;
+  if (ts.isJsxAttribute(node.parent)) {
+    attr = node.parent;
+  } else if (
+    ts.isJsxExpression(node.parent) &&
+    ts.isJsxAttribute(node.parent.parent)
+  ) {
+    attr = node.parent.parent;
+  }
+  if (!attr) return false;
+  const name = attr.name.text;
+  return FRAGMENT_ATTRS.has(name) || name.startsWith("data-");
+}
+
+function isModuleSpecifier(node: ts.Node): boolean {
+  const p = node.parent;
+  return (
+    ts.isImportDeclaration(p) ||
+    ts.isExportDeclaration(p) ||
+    (ts.isCallExpression(p) &&
+      p.expression.kind === ts.SyntaxKind.ImportKeyword)
+  );
+}
+
+const LITERAL_KINDS = new Set([
+  ts.SyntaxKind.StringLiteral,
+  ts.SyntaxKind.NoSubstitutionTemplateLiteral,
+  ts.SyntaxKind.TemplateHead,
+  ts.SyntaxKind.TemplateMiddle,
+  ts.SyntaxKind.TemplateTail,
+]);
+
+function scanTs(source: string, rel: string): string[] {
+  const kind =
+    rel.endsWith(".tsx") || rel.endsWith(".jsx")
+      ? ts.ScriptKind.TSX
+      : ts.ScriptKind.TS;
+  const sf = ts.createSourceFile(rel, source, ts.ScriptTarget.Latest, true, kind);
+  const lines = source.split("\n");
+  const hits: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (LITERAL_KINDS.has(node.kind)) {
+      const text = (node as ts.StringLiteralLike).text;
+      const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+      if (
+        (HEX_TOKEN.test(text) || COLOR_FN.test(text)) &&
+        !markedOrExcepted([lines[line] ?? ""], rel) &&
+        !isFragmentAttr(node) &&
+        !isModuleSpecifier(node)
+      ) {
+        hits.push(`${rel}:${line + 1}: ${(lines[line] ?? "").trim()}`);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return hits;
+}
+
 function violations(file: string): string[] {
-  return scanSource(readFileSync(file, "utf8"), {
-    isCss: file.endsWith(".css"),
-    rel: relative(WEB, file),
-  });
+  const source = readFileSync(file, "utf8");
+  const rel = relative(WEB, file);
+  return file.endsWith(".css") ? scanCss(source, rel) : scanTs(source, rel);
 }
 
 describe("brand tokens", () => {
@@ -161,62 +198,141 @@ describe("brand tokens", () => {
     }
   });
 
-  it("flags raw colors only in color-bearing syntax", () => {
-    const tsCases: [string, number][] = [
-      ['const a = "/help#abc";', 0],
-      ['<a href="#deadbeef">x</a>', 0],
-      ['<div id="#fff-row" />', 0],
-      ['const c = "#E85D6C";', 1],
-      ['style={{ color: "#fff" }}', 1],
-      ['bg: "rgba(0,0,0,0.4)"', 1],
-      ['x: "var(--fault, #E85D6C)"', 1],
-      ['t: "hsl(0, 0%, 50%)"', 1],
-    ];
-    for (const [line, want] of tsCases) {
-      expect(
-        scanSource(`${line}\n`, { isCss: false, rel: "x.tsx" }),
-        line,
-      ).toHaveLength(want);
-    }
-    const cssCases: [string, number][] = [
-      ['.x#a1b2c3:hover { content: ""; }', 0],
-      ['background: url("/img#f00d");', 0],
-      ["color: #e85d6c;", 1],
-      ["border: 1px solid #05ad98;", 1],
-      ["background: rgba(0, 0, 0, 0.4);", 1],
-    ];
-    for (const [line, want] of cssCases) {
-      expect(
-        scanSource(`${line}\n`, { isCss: true, rel: "app/x.css" }),
-        line,
-      ).toHaveLength(want);
+  // Resolved-value parity: each ratings fill/label pair must resolve to the
+  // original color in BOTH themes.
+  it("keeps the original ratings fill/label colors in both themes", () => {
+    const root = postcss.parse(readFileSync(join(WEB, "app/globals.css"), "utf8"));
+    const themeTokens: Record<string, Record<string, string>> = {
+      ":root": {},
+      '[data-theme="dark"]': {},
+      '[data-theme="light"]': {},
+    };
+    root.walkRules((rule) => {
+      const sel = rule.selector.trim();
+      if (sel in themeTokens) {
+        rule.walkDecls((d) => {
+          if (d.prop.startsWith("--")) themeTokens[sel][d.prop] = d.value.trim();
+        });
+      }
+    });
+    const declValue = (selector: string, prop: string): string => {
+      let out = "";
+      root.walkRules(selector, (rule) => {
+        rule.walkDecls(prop, (d) => {
+          out = d.value;
+        });
+      });
+      return out;
+    };
+    const resolveValue = (theme: string, value: string): string => {
+      const seen = new Set<string>();
+      const walk = (v: string): string =>
+        v.replace(/var\(\s*(--[\w-]+)\s*(?:,[^)]*)?\)/g, (_, name: string) => {
+          if (seen.has(name)) return `var(${name})`;
+          seen.add(name);
+          const t = themeTokens[theme][name] ?? themeTokens[":root"][name];
+          return t === undefined ? `var(${name})` : walk(t);
+        });
+      return walk(value).toLowerCase();
+    };
+    const expected: Record<
+      string,
+      { dark: { bg: string; fg: string }; light: { bg: string; fg: string } }
+    > = {
+      "ratings-strong-buy": {
+        dark: { bg: "#048a7a", fg: "#ffffff" },
+        light: { bg: "#048a7a", fg: "#ffffff" },
+      },
+      "ratings-buy": {
+        dark: { bg: "#05ad98", fg: "#000000" },
+        light: { bg: "#048a7a", fg: "#000000" },
+      },
+      "ratings-hold": {
+        dark: { bg: "#475569", fg: "#ffffff" },
+        light: { bg: "#475569", fg: "#ffffff" },
+      },
+      "ratings-sell": {
+        dark: { bg: "#e85d6c", fg: "#ffffff" },
+        light: { bg: "#d4183d", fg: "#ffffff" },
+      },
+      "ratings-strong-sell": {
+        dark: { bg: "#9f1239", fg: "#ffffff" },
+        light: { bg: "#9f1239", fg: "#ffffff" },
+      },
+    };
+    for (const [selector, themes] of Object.entries(expected)) {
+      for (const [theme, want] of Object.entries(themes)) {
+        expect(
+          resolveValue(
+            theme === "dark" ? '[data-theme="dark"]' : '[data-theme="light"]',
+            declValue(`.${selector}`, "background"),
+          ),
+          `.${selector} background (${theme})`,
+        ).toBe(want.bg);
+        expect(
+          resolveValue(
+            theme === "dark" ? '[data-theme="dark"]' : '[data-theme="light"]',
+            declValue(`.${selector}`, "color"),
+          ),
+          `.${selector} color (${theme})`,
+        ).toBe(want.fg);
+      }
     }
   });
 
-  it("exempts token definitions only in approved globals.css blocks", () => {
-    const exempt: string[] = [
-      ":root {\n  --text-on-fill: #ffffff;\n}\n",
-      ":root {\n  --a: linear-gradient(180deg,\n    #fff,\n    #000);\n}\n",
-      '[data-theme="dark"] {\n  --bg-base: #0a0f14;\n}\n',
-      '[data-theme="light"] {\n  --bg-base: #ffffff;\n}\n',
-      ":root {\n  --a: #fff; --b: #000;\n}\n",
+  it("flags raw colors in TS/TSX literals but not fragments or specifiers", () => {
+    const cases: [string, number][] = [
+      ['const style = { border: "1px solid #fff" };', 1],
+      ["const css = `0 0 2px #fff`;", 1],
+      ['boxShadow: `0 0 2px #fff`,', 1],
+      ['const c = "rgb(255,0,0)";', 1],
+      ['const c = "rgba(0,0,0,0.4)";', 1],
+      ['const c = "hsl(0, 0%, 50%)";', 1],
+      ['const c = "#E85D6C";', 1],
+      ['x: "var(--fault, #E85D6C)"', 1],
+      ['const a = "/help#abc";', 0],
+      ['<a href={"#deadbeef"} />', 0],
+      ['<a href="#deadbeef">x</a>', 0],
+      ['<div id="fff" />', 0],
+      ['<div data-cell="#a1b2c3" />', 0],
+      ['import x from "#a1b2c3";', 0],
+      ['export { x } from "#a1b2c3";', 0],
+      ['const path = "#fff-row";', 0],
     ];
-    for (const src of exempt) {
-      expect(
-        scanSource(src, { isCss: true, rel: "app/globals.css" }),
-        src,
-      ).toEqual([]);
+    for (const [line, want] of cases) {
+      expect(scanTs(`${line}\n`, "x.tsx"), line).toHaveLength(want);
     }
-    const flagged: [string, string][] = [
-      // a declaration sharing the line after a token def must still be scanned
-      [":root {\n  --local: var(--positive); color: #fff;\n}\n", "app/globals.css"],
-      // defs outside the approved blocks are not exempt
-      [".card {\n  --accent: #fff;\n}\n", "app/globals.css"],
-      // token defs are only allowed in globals.css
-      [":root {\n  --x: #fff;\n}\n", "app/other.css"],
+  });
+
+  it("flags raw CSS colors only in declarations outside token blocks", () => {
+    const mustFlag: string[] = [
+      ".x { color:\n #fff;\n}\n",
+      ".x { color: rgb(255,0,0); }\n",
+      ".x { color: hsl(0, 0%, 50%); }\n",
+      '.x { border: 1px solid #05ad98; }\n',
+      ':root { --a: #fff }\n.x { color: #fff; }\n',
+      ':root { .card { --local: #fff; } }\n',
+      '.zz { --local: var(--positive); color: #fff; }\n',
     ];
-    for (const [src, rel] of flagged) {
-      expect(scanSource(src, { isCss: true, rel }), src).toHaveLength(1);
+    for (const src of mustFlag) {
+      expect(
+        scanCss(src, "app/globals.css"),
+        JSON.stringify(src),
+      ).not.toHaveLength(0);
+    }
+    const clean: [string, string][] = [
+      ['.x:hover #abc { display: block; }\n', "app/globals.css"],
+      [':root {\n  --text-on-fill: #ffffff;\n}\n', "app/globals.css"],
+      [':root {\n  --a: linear-gradient(180deg,\n    #fff,\n    #000);\n}\n', "app/globals.css"],
+      ['[data-theme="dark"] {\n  --bg-base: #0a0f14;\n}\n', "app/globals.css"],
+      ['[data-theme="light"] {\n  --bg-base: #ffffff;\n}\n', "app/globals.css"],
+      ['.x { background: url("/img#f00d"); }\n', "app/globals.css"],
+      // token defs are only legitimate in globals.css
+      [':root {\n  --x: #fff;\n}\n', "app/other.css"],
+    ];
+    expect(scanCss(clean[6][0], clean[6][1])).not.toHaveLength(0);
+    for (const [src, rel] of clean.slice(0, 6)) {
+      expect(scanCss(src, rel), JSON.stringify(src)).toEqual([]);
     }
   });
 });
