@@ -113,5 +113,35 @@ def test_sync_open_order_read_failure_skips_audit(monkeypatch):
     _run(monkeypatch, fake)
     row = _health_row()
     assert row is not None and row.state == "skipped"
-    assert json.loads(row.detail)["reason"] == "view_incomplete"
+    assert json.loads(row.detail)["reason"] == "observation_incomplete"
+    assert fake.cancels == []
+
+
+def test_sync_order_without_account_makes_pass_incomplete_for_audit(monkeypatch):
+    """Astra P2-1: the sync passes its observation stamp, so an accountless
+    open order (reads.order_accounts=False) skips the audit for the pass."""
+    fake = CancelRecordingClient(positions=[])
+    fake.add_details(_opt(500, con_id=111))
+    fake.open_orders.append(_trade(_opt(500, con_id=111), order_id=9001, perm_id=990001, account=""))
+    fake.open_orders.append(_trade(_opt(505, con_id=112), order_id=9002, perm_id=990002))
+    fake.add_details(_opt(505, con_id=112))
+    _run(monkeypatch, fake)
+    row = _health_row()
+    assert row is not None and row.state == "skipped"
+    assert json.loads(row.detail)["reason"] == "observation_incomplete"
+
+
+def test_read_only_sync_still_audits_what_it_sees(monkeypatch, caplog):
+    """The audit reads no Postgres, so a read-only pass (which persists
+    nothing) still evaluates its in-process view; only the health write
+    no-ops under XENON_READ_ONLY."""
+    fake = _naked_call_client()
+    monkeypatch.setattr(ib_sync, "connect_ib", lambda *a, **k: fake)
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", ACCOUNT)
+    monkeypatch.setenv("XENON_READ_ONLY", "1")
+    with caplog.at_level("WARNING", logger="xenon.naked_short_audit"):
+        ib_sync.main(["--sync", "--no-prices"])
+    assert "NAKED SHORT AUDIT (shadow): 1 violation(s)" in caplog.text
+    assert _health_row() is None
     assert fake.cancels == []

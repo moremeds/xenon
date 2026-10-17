@@ -1572,13 +1572,17 @@ def main(argv=None):
             # ── Naked Short Audit (post-sync, shadow mode — spec §2.4 Phase A) ──
             # Audits this pass's in-process holdings + scoped live open orders
             # (never Postgres). Logs + records service_health only; it has no
-            # cancel path. A failed positions/open-order read skips it.
+            # cancel path. It gets this pass's observation stamp; any failed
+            # IB read or accountless order skips it. The Postgres persist step
+            # is left out of the audit's `complete`: the audit reads no PG,
+            # so a read-only pass still audits what it saw.
             if not args.skip_audit:
+                audit_reads = {k: v for k, v in reads.items() if k != "persisted"}
                 naked_short_audit.run_shadow_audit(
                     portfolio,
                     open_orders,
                     ib_account,
-                    view_complete=reads["positions"] and reads["open_orders"],
+                    observation=_observation_stamp(pass_started, audit_reads, ib_account),
                 )
 
             print("\n⚠️  Note: kelly_optimal, target, and stop fields need manual evaluation")

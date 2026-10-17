@@ -45,6 +45,12 @@ SERVICE = "naked_short_audit"
 # (worst case: PendingCancel can still fill).
 TERMINAL_IB_STATUSES = frozenset({"Cancelled", "ApiCancelled", "Filled", "Inactive"})
 
+# A snapshot older than this is not audited (the offline CLI reads saved
+# payloads; the in-process sync pass hands over its own just-taken stamp).
+AUDIT_MAX_AGE_S = 15 * 60.0
+# Tolerated clock skew for an `as_of` slightly in the future.
+_AS_OF_SKEW_S = 60.0
+
 
 @dataclass
 class AuditResult:
@@ -96,6 +102,32 @@ def _unclassifiable(order: coverage.Order) -> str | None:
     return None
 
 
+def _observation_problem(observation, scope_account: str, now: datetime, max_age_s: float) -> str | None:
+    """Why this snapshot observation cannot be audited (None = it can).
+
+    The stamp must say the pass was complete (`complete is True`), name the
+    scope account, and be fresh (`as_of` within `max_age_s`).
+    """
+    if not isinstance(observation, dict):
+        return "observation_missing"
+    if observation.get("complete") is not True:
+        return "observation_incomplete"
+    if observation.get("account") != scope_account:
+        return "observation_account_mismatch"
+    try:
+        as_of = datetime.fromisoformat(str(observation.get("as_of")))
+    except ValueError:
+        return "observation_as_of_invalid"
+    if as_of.tzinfo is None:
+        return "observation_as_of_invalid"
+    age = (now - as_of).total_seconds()
+    if age < -_AS_OF_SKEW_S:
+        return "observation_as_of_invalid"
+    if age > max_age_s:
+        return "observation_stale"
+    return None
+
+
 def _to_coverage_order(o: dict, idx: int) -> tuple[coverage.Order | None, frozenset[str], str | None]:
     """Map one scoped live open order to (coverage.Order, symbols, skip_reason)."""
     legs_payload = gate4.legs_payload_from_snapshot_order(o)
@@ -131,8 +163,10 @@ def find_violations(
     open_orders: list[dict],
     scope_account: str,
     *,
-    view_complete: bool,
+    observation: dict | None,
     netting_enabled: bool = False,
+    max_age_s: float = AUDIT_MAX_AGE_S,
+    now: datetime | None = None,
 ) -> AuditResult:
     """Pure: which live orders of `scope_account` create naked short exposure.
 
@@ -140,10 +174,11 @@ def find_violations(
     some key or short stock on some symbol — every contributor is reported
     with its identity (clientId, orderId, permId) for the operator.
     """
-    if not view_complete:
-        return AuditResult("skipped", reason="view_incomplete")
     if not coverage.is_real_account(scope_account):
         return AuditResult("skipped", reason="scope_account_invalid")
+    problem = _observation_problem(observation, scope_account, now or datetime.now(timezone.utc), max_age_s)
+    if problem is not None:
+        return AuditResult("skipped", reason=problem)
 
     skipped: list[dict] = []
     skip_syms: set[str] = set()
@@ -253,7 +288,7 @@ def run_shadow_audit(
     open_orders: list[dict],
     scope_account: str,
     *,
-    view_complete: bool,
+    observation: dict | None,
 ) -> AuditResult:
     """Audit the sync pass, log the outcome, record service health.
 
@@ -266,7 +301,7 @@ def run_shadow_audit(
             payload,
             open_orders,
             scope_account,
-            view_complete=view_complete,
+            observation=observation,
             netting_enabled=gate4.netting_enabled(),
         )
         _log(result, scope_account)
@@ -299,8 +334,9 @@ def main(argv=None) -> dict:
         payload = json.load(f)
     with open(args.orders) as f:
         open_orders = json.load(f).get("open_orders", [])
-    account = args.account or (payload.get("observation") or {}).get("account") or ""
-    summary = find_violations(payload, open_orders, account, view_complete=True).summary()
+    observation = payload.get("observation")
+    account = args.account or (observation or {}).get("account") or ""
+    summary = find_violations(payload, open_orders, account, observation=observation).summary()
     print(json.dumps(summary, indent=2, default=str))
     return summary
 

@@ -12,6 +12,7 @@ import importlib.util
 import inspect
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -61,8 +62,13 @@ def _call_pos(sym="AAPL", contracts=1, direction="LONG", account=ACCT, tc=None, 
     }
 
 
-def _payload(*positions):
-    return {"positions": list(positions)}
+def _obs(*, account=ACCT, complete=True, age_s=5.0):
+    as_of = datetime.now(timezone.utc) - timedelta(seconds=age_s)
+    return {"as_of": as_of.isoformat(), "complete": complete, "account": account, "reads": {}}
+
+
+def _payload(*positions, observation=None):
+    return {"positions": list(positions), "observation": _obs() if observation is None else observation}
 
 
 def _opt_contract(sym="AAPL", right="C", strike=200.0, con_id=111, tc=None, mult=100, und_sec="STK", meta=True):
@@ -136,12 +142,12 @@ def _bag_leg(action, right="C", strike=200.0, con_id=111, sym="AAPL", ratio=1, m
     return leg
 
 
-def _find(payload, orders, *, view_complete=True, scope=ACCT):
-    return nsa.find_violations(payload, orders, scope, view_complete=view_complete)
+def _find(payload, orders, *, scope=ACCT):
+    return nsa.find_violations(payload, orders, scope, observation=payload.get("observation"))
 
 
-def _run(payload, orders, *, view_complete=True, scope=ACCT):
-    return nsa.run_shadow_audit(payload, orders, scope, view_complete=view_complete)
+def _run(payload, orders, *, scope=ACCT):
+    return nsa.run_shadow_audit(payload, orders, scope, observation=payload.get("observation"))
 
 
 def _perm_ids(result):
@@ -295,9 +301,56 @@ def test_fractional_quantity_skips_its_symbol():
     assert r.violations == [] and r.skipped[0]["reason"] == "invalid_quantity"
 
 
-def test_incomplete_view_skips_whole_audit():
-    r = _find(_payload(), [_order(_opt_contract())], view_complete=False)
-    assert r.status == "skipped" and r.reason == "view_incomplete" and r.violations == []
+# Astra P2-1: the snapshot itself must be complete, of this scope, and fresh.
+BAD_OBSERVATIONS = {
+    "observation_missing": {},
+    "observation_incomplete": {"complete": False},
+    "observation_account_mismatch": {"account": FOREIGN},
+    "observation_stale": {"age_s": nsa.AUDIT_MAX_AGE_S + 60},
+    "observation_as_of_invalid": {"as_of": "not-a-time"},
+}
+
+
+def _bad_obs(reason):
+    if reason == "observation_missing":
+        return None
+    kw = dict(BAD_OBSERVATIONS[reason])
+    as_of = kw.pop("as_of", None)
+    obs = _obs(**kw)
+    if as_of is not None:
+        obs["as_of"] = as_of
+    return obs
+
+
+@pytest.mark.parametrize("reason", sorted(BAD_OBSERVATIONS))
+def test_bad_snapshot_observation_skips_whole_audit(reason, monkeypatch):
+    payload = {"positions": [], "observation": _bad_obs(reason)}
+    r = _find(payload, [_order(_opt_contract())])
+    assert (r.status, r.reason, r.violations) == ("skipped", reason, [])
+
+    calls = []
+    monkeypatch.setattr(nsa, "record_service_health", lambda *a, **k: calls.append((a, k)))
+    r = _run(payload, [_order(_opt_contract())])
+    assert (r.status, r.violations) == ("skipped", [])
+    assert calls[0][0] == ("naked_short_audit", "skipped")
+    assert json.loads(calls[0][1]["detail"])["reason"] == reason
+
+
+def test_observation_complete_must_be_true_not_truthy():
+    obs = _obs()
+    obs["complete"] = "yes"
+    r = _find({"positions": [], "observation": obs}, [_order(_opt_contract())])
+    assert r.reason == "observation_incomplete"
+
+
+@pytest.mark.parametrize("reason", sorted(BAD_OBSERVATIONS))
+def test_cli_skips_bad_snapshot_observation(reason, tmp_path, capsys):
+    pf = tmp_path / "portfolio.json"
+    of = tmp_path / "orders.json"
+    pf.write_text(json.dumps({"positions": [], "observation": _bad_obs(reason)}))
+    of.write_text(json.dumps({"open_orders": [_order(_opt_contract())]}))
+    summary = nsa.main(["--portfolio", str(pf), "--orders", str(of), "--account", ACCT])
+    assert (summary["status"], summary["reason"], summary["violations"]) == ("skipped", reason, [])
 
 
 @pytest.mark.parametrize("scope", ["", "  ", "legacy_unknown", "unknown"])
@@ -332,7 +385,7 @@ def test_run_shadow_audit_logs_and_records_health(monkeypatch, caplog):
     calls = []
     monkeypatch.setattr(nsa, "record_service_health", lambda *a, **k: calls.append((a, k)))
     with caplog.at_level("WARNING", logger="xenon.naked_short_audit"):
-        r = nsa.run_shadow_audit(_payload(), [_order(_opt_contract())], ACCT, view_complete=True)
+        r = _run(_payload(), [_order(_opt_contract())])
     assert r.status == "violations"
     assert "NAKED SHORT AUDIT (shadow)" in caplog.text
     ((args, kwargs),) = calls
@@ -350,7 +403,7 @@ def test_run_shadow_audit_never_raises(monkeypatch):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(nsa, "find_violations", _boom)
-    r = nsa.run_shadow_audit(_payload(), [], ACCT, view_complete=True)
+    r = _run(_payload(), [])
     assert r.status == "error"
     assert calls[0][0] == ("naked_short_audit", "error")
 
