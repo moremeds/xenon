@@ -1,6 +1,6 @@
 {
  "_doc": [
-  "Frozen Gate-4 acceptance fixture (lead-authored 2026-10-16, spec \u00a72.3 v3.2; reviewed by Fable). Quantities/strikes are hypothetical order shapes, not market data. v2 2026-10-16: netting flag, und_sec deliverable, sign validation (Fable PR-03a review).",
+  "Frozen Gate-4 acceptance fixture (lead-authored 2026-10-16, spec \u00a72.3 v3.2; reviewed by Fable). Quantities/strikes are hypothetical order shapes, not market data. v3 2026-10-17: holding account + und_sec + int qty (Astra PR-03a delta); v2 2026-10-16: netting flag, und_sec deliverable, sign validation (Fable PR-03a review).",
   "holdings: confirmed positions of scope account U1 at as_of; qty signed; STK in shares; OPT in contracts.",
   "orders: existing orders, any state. Candidate id is always 'cand' (distinct). envelope = order action; effective leg action = leg.action if envelope BUY else flipped; leg qty = ratio*qty. Non-BAG orders have one leg with action BUY and envelope = order action.",
   "filled_after_snapshot = units filled after as_of (not in holdings). remaining = unfilled outstanding units (authoritative; do not derive from state or qty). qty - filled_after_snapshot - remaining = units filled before as_of (already in holdings; never counted again).",
@@ -12,7 +12,8 @@
   "expect: accept iff no short stock and uncovered short calls do not increase for any key; any fail-closed condition => reject.",
   "netting_enabled (case-level, default false) is passed to evaluate(netting_enabled=...). Netting applies only when it is true AND the BAG is guaranteed AND every leg is OPT; otherwise legs are independent.",
   "OPT legs carry und_sec (underlying secType). Shares cover a short call only when und_sec == 'STK', mult 100, tc == sym. und_sec missing or not 'STK' => shares never cover that call.",
-  "Integers must satisfy qty >= 1, remaining >= 0, filled_after_snapshot >= 0, new_qty >= 1; otherwise reject."
+  "Integers must satisfy qty >= 1, remaining >= 0, filled_after_snapshot >= 0, new_qty >= 1; otherwise reject.",
+  "Holdings carry account (must equal scope U1; missing => reject; other account => ignored as supply) and int qty (bool/float/non-numeric => reject). OPT holdings carry und_sec with the same share-cover rule as legs; an OPT holding without und_sec => reject (unknown metadata)."
  ],
  "scope_account": "U1",
  "cases": [
@@ -22,7 +23,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [],
@@ -58,7 +60,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 99
+     "qty": 99,
+     "account": "U1"
     }
    ],
    "orders": [],
@@ -202,7 +205,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     },
     {
      "sym": "AAPL",
@@ -212,7 +216,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": -1
+     "qty": -1,
+     "account": "U1",
+     "und_sec": "STK"
     }
    ],
    "orders": [
@@ -272,7 +278,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [
@@ -332,7 +339,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 200
+     "qty": 200,
+     "account": "U1"
     }
    ],
    "orders": [
@@ -392,7 +400,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [
@@ -452,7 +461,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 200
+     "qty": 200,
+     "account": "U1"
     }
    ],
    "orders": [
@@ -512,7 +522,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [
@@ -572,7 +583,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [
@@ -632,7 +644,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     },
     {
      "sym": "AAPL",
@@ -642,7 +655,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": -1
+     "qty": -1,
+     "account": "U1",
+     "und_sec": "STK"
     }
    ],
    "orders": [],
@@ -727,7 +742,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": 1
+     "qty": 1,
+     "account": "U1",
+     "und_sec": "STK"
     },
     {
      "sym": "AAPL",
@@ -737,7 +754,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": -1
+     "qty": -1,
+     "account": "U1",
+     "und_sec": "STK"
     }
    ],
    "orders": [],
@@ -792,7 +811,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": 1
+     "qty": 1,
+     "account": "U1",
+     "und_sec": "STK"
     },
     {
      "sym": "AAPL",
@@ -802,7 +823,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": -1
+     "qty": -1,
+     "account": "U1",
+     "und_sec": "STK"
     }
    ],
    "orders": [],
@@ -856,7 +879,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": 1
+     "qty": 1,
+     "account": "U1",
+     "und_sec": "STK"
     },
     {
      "sym": "AAPL",
@@ -866,7 +891,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": -1
+     "qty": -1,
+     "account": "U1",
+     "und_sec": "STK"
     }
    ],
    "orders": [],
@@ -907,7 +934,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": 1
+     "qty": 1,
+     "account": "U1",
+     "und_sec": "STK"
     },
     {
      "sym": "AAPL",
@@ -917,7 +946,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": -1
+     "qty": -1,
+     "account": "U1",
+     "und_sec": "STK"
     }
    ],
    "orders": [],
@@ -958,7 +989,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": 1
+     "qty": 1,
+     "account": "U1",
+     "und_sec": "STK"
     },
     {
      "sym": "AAPL",
@@ -968,7 +1001,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": -1
+     "qty": -1,
+     "account": "U1",
+     "und_sec": "STK"
     }
    ],
    "orders": [],
@@ -1009,7 +1044,9 @@
      "exp": "20270115",
      "mult": 100,
      "tc": "AAPL",
-     "qty": 1
+     "qty": 1,
+     "account": "U1",
+     "und_sec": "STK"
     }
    ],
    "orders": [],
@@ -1094,7 +1131,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": 1
+     "qty": 1,
+     "account": "U1",
+     "und_sec": "STK"
     }
    ],
    "orders": [],
@@ -1188,7 +1227,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     },
     {
      "sym": "AAPL",
@@ -1198,7 +1238,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": -1
+     "qty": -1,
+     "account": "U1",
+     "und_sec": "STK"
     }
    ],
    "orders": [],
@@ -1228,7 +1270,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [],
@@ -1282,7 +1325,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 50
+     "qty": 50,
+     "account": "U1"
     }
    ],
    "orders": [],
@@ -1317,7 +1361,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "SPX",
-     "qty": 1
+     "qty": 1,
+     "account": "U1",
+     "und_sec": "IND"
     }
    ],
    "orders": [],
@@ -1358,7 +1404,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "SPX",
-     "qty": 1
+     "qty": 1,
+     "account": "U1",
+     "und_sec": "IND"
     }
    ],
    "orders": [],
@@ -1394,7 +1442,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [],
@@ -1435,7 +1484,9 @@
      "exp": "20261218",
      "mult": 10,
      "tc": "AAPL",
-     "qty": 1
+     "qty": 1,
+     "account": "U1",
+     "und_sec": "STK"
     }
    ],
    "orders": [],
@@ -1471,7 +1522,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [],
@@ -1507,7 +1559,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [
@@ -1548,7 +1601,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 200
+     "qty": 200,
+     "account": "U1"
     }
    ],
    "orders": [
@@ -1589,7 +1643,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 200
+     "qty": 200,
+     "account": "U1"
     }
    ],
    "orders": [
@@ -1650,7 +1705,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [
@@ -1698,7 +1754,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [],
@@ -1737,7 +1794,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [
@@ -1797,7 +1855,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [
@@ -1862,7 +1921,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": 1
+     "qty": 1,
+     "account": "U1",
+     "und_sec": "STK"
     }
    ],
    "orders": [],
@@ -1898,7 +1959,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     },
     {
      "sym": "AAPL",
@@ -1908,7 +1970,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": 1
+     "qty": 1,
+     "account": "U1",
+     "und_sec": "STK"
     },
     {
      "sym": "AAPL",
@@ -1918,7 +1982,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": -1
+     "qty": -1,
+     "account": "U1",
+     "und_sec": "STK"
     }
    ],
    "orders": [],
@@ -1959,7 +2025,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": 1
+     "qty": 1,
+     "account": "U1",
+     "und_sec": "STK"
     },
     {
      "sym": "AAPL",
@@ -1969,12 +2037,15 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": -1
+     "qty": -1,
+     "account": "U1",
+     "und_sec": "STK"
     },
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [
@@ -2034,7 +2105,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 300
+     "qty": 300,
+     "account": "U1"
     },
     {
      "sym": "AAPL",
@@ -2044,7 +2116,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": -1
+     "qty": -1,
+     "account": "U1",
+     "und_sec": "STK"
     }
    ],
    "orders": [
@@ -2104,7 +2178,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 200
+     "qty": 200,
+     "account": "U1"
     },
     {
      "sym": "AAPL",
@@ -2114,7 +2189,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": -1
+     "qty": -1,
+     "account": "U1",
+     "und_sec": "STK"
     }
    ],
    "orders": [
@@ -2218,7 +2295,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [],
@@ -2254,7 +2332,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [],
@@ -2298,7 +2377,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": 1
+     "qty": 1,
+     "account": "U1",
+     "und_sec": "STK"
     },
     {
      "sym": "AAPL",
@@ -2308,7 +2389,9 @@
      "exp": "20261218",
      "mult": 100,
      "tc": "AAPL",
-     "qty": -1
+     "qty": -1,
+     "account": "U1",
+     "und_sec": "STK"
     }
    ],
    "orders": [],
@@ -2357,7 +2440,8 @@
     {
      "sym": "SPX",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [],
@@ -2393,7 +2477,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [],
@@ -2490,7 +2575,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [
@@ -2550,7 +2636,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [
@@ -2610,7 +2697,8 @@
     {
      "sym": "AAPL",
      "sec": "STK",
-     "qty": 100
+     "qty": 100,
+     "account": "U1"
     }
    ],
    "orders": [
@@ -2644,6 +2732,299 @@
    },
    "expect": "reject",
    "why": "new_qty < 1 fails closed"
+  },
+  {
+   "id": "holding_qty_nan_long_call",
+   "holdings": [
+    {
+     "sym": "AAPL",
+     "sec": "OPT",
+     "right": "C",
+     "strike": 200,
+     "exp": "20261218",
+     "mult": 100,
+     "tc": "AAPL",
+     "qty": "NaN",
+     "account": "U1",
+     "und_sec": "STK"
+    }
+   ],
+   "orders": [],
+   "candidate": {
+    "id": "cand",
+    "account": "U1",
+    "state": "WORKING",
+    "envelope": "SELL",
+    "qty": 1,
+    "filled_after_snapshot": 0,
+    "remaining": 1,
+    "legs": [
+     {
+      "action": "BUY",
+      "sym": "AAPL",
+      "sec": "OPT",
+      "ratio": 1,
+      "right": "C",
+      "strike": 200,
+      "exp": "20261218",
+      "mult": 100,
+      "tc": "AAPL",
+      "und_sec": "STK"
+     }
+    ]
+   },
+   "expect": "reject",
+   "why": "non-integer holding qty fails closed"
+  },
+  {
+   "id": "holding_qty_float_stock",
+   "holdings": [
+    {
+     "sym": "AAPL",
+     "sec": "STK",
+     "qty": 100.0,
+     "account": "U1"
+    }
+   ],
+   "orders": [],
+   "candidate": {
+    "id": "cand",
+    "account": "U1",
+    "state": "WORKING",
+    "envelope": "SELL",
+    "qty": 1,
+    "filled_after_snapshot": 0,
+    "remaining": 1,
+    "legs": [
+     {
+      "action": "BUY",
+      "sym": "AAPL",
+      "sec": "OPT",
+      "ratio": 1,
+      "right": "C",
+      "strike": 210,
+      "exp": "20261218",
+      "mult": 100,
+      "tc": "AAPL",
+      "und_sec": "STK"
+     }
+    ]
+   },
+   "expect": "reject",
+   "why": "holding qty must be int, not float"
+  },
+  {
+   "id": "holding_qty_bool",
+   "holdings": [
+    {
+     "sym": "AAPL",
+     "sec": "OPT",
+     "right": "C",
+     "strike": 200,
+     "exp": "20261218",
+     "mult": 100,
+     "tc": "AAPL",
+     "qty": true,
+     "account": "U1",
+     "und_sec": "STK"
+    }
+   ],
+   "orders": [],
+   "candidate": {
+    "id": "cand",
+    "account": "U1",
+    "state": "WORKING",
+    "envelope": "SELL",
+    "qty": 1,
+    "filled_after_snapshot": 0,
+    "remaining": 1,
+    "legs": [
+     {
+      "action": "BUY",
+      "sym": "AAPL",
+      "sec": "OPT",
+      "ratio": 1,
+      "right": "C",
+      "strike": 200,
+      "exp": "20261218",
+      "mult": 100,
+      "tc": "AAPL",
+      "und_sec": "STK"
+     }
+    ]
+   },
+   "expect": "reject",
+   "why": "bool True is not a long-call quantity"
+  },
+  {
+   "id": "holding_missing_account",
+   "holdings": [
+    {
+     "sym": "AAPL",
+     "sec": "STK",
+     "qty": 100
+    }
+   ],
+   "orders": [],
+   "candidate": {
+    "id": "cand",
+    "account": "U1",
+    "state": "WORKING",
+    "envelope": "SELL",
+    "qty": 1,
+    "filled_after_snapshot": 0,
+    "remaining": 1,
+    "legs": [
+     {
+      "action": "BUY",
+      "sym": "AAPL",
+      "sec": "OPT",
+      "ratio": 1,
+      "right": "C",
+      "strike": 210,
+      "exp": "20261218",
+      "mult": 100,
+      "tc": "AAPL",
+      "und_sec": "STK"
+     }
+    ]
+   },
+   "expect": "reject",
+   "why": "holding provenance missing => incomplete view"
+  },
+  {
+   "id": "holding_other_account_not_cover",
+   "holdings": [
+    {
+     "sym": "AAPL",
+     "sec": "STK",
+     "qty": 100,
+     "account": "U2"
+    }
+   ],
+   "orders": [],
+   "candidate": {
+    "id": "cand",
+    "account": "U1",
+    "state": "WORKING",
+    "envelope": "SELL",
+    "qty": 1,
+    "filled_after_snapshot": 0,
+    "remaining": 1,
+    "legs": [
+     {
+      "action": "BUY",
+      "sym": "AAPL",
+      "sec": "OPT",
+      "ratio": 1,
+      "right": "C",
+      "strike": 210,
+      "exp": "20261218",
+      "mult": 100,
+      "tc": "AAPL",
+      "und_sec": "STK"
+     }
+    ]
+   },
+   "expect": "reject",
+   "why": "another account's shares never cover"
+  },
+  {
+   "id": "held_spx_short_call_not_share_covered",
+   "holdings": [
+    {
+     "sym": "SPX",
+     "sec": "STK",
+     "qty": 200,
+     "account": "U1"
+    },
+    {
+     "sym": "SPX",
+     "sec": "OPT",
+     "right": "C",
+     "strike": 6000,
+     "exp": "20261218",
+     "mult": 100,
+     "tc": "SPX",
+     "qty": -1,
+     "account": "U1",
+     "und_sec": "IND"
+    }
+   ],
+   "orders": [],
+   "candidate": {
+    "id": "cand",
+    "account": "U1",
+    "state": "WORKING",
+    "envelope": "SELL",
+    "qty": 1,
+    "filled_after_snapshot": 0,
+    "remaining": 1,
+    "legs": [
+     {
+      "action": "BUY",
+      "sym": "SPX",
+      "sec": "OPT",
+      "ratio": 1,
+      "right": "C",
+      "strike": 6100,
+      "exp": "20261218",
+      "mult": 100,
+      "tc": "SPX",
+      "und_sec": "IND"
+     }
+    ]
+   },
+   "expect": "reject",
+   "why": "200 SPX shares never cover index calls: held call stays uncovered and the new one adds exposure"
+  },
+  {
+   "id": "held_short_call_missing_und_sec",
+   "holdings": [
+    {
+     "sym": "AAPL",
+     "sec": "STK",
+     "qty": 200,
+     "account": "U1"
+    },
+    {
+     "sym": "AAPL",
+     "sec": "OPT",
+     "right": "C",
+     "strike": 200,
+     "exp": "20261218",
+     "mult": 100,
+     "tc": "AAPL",
+     "qty": -1,
+     "account": "U1"
+    }
+   ],
+   "orders": [],
+   "candidate": {
+    "id": "cand",
+    "account": "U1",
+    "state": "WORKING",
+    "envelope": "SELL",
+    "qty": 1,
+    "filled_after_snapshot": 0,
+    "remaining": 1,
+    "legs": [
+     {
+      "action": "BUY",
+      "sym": "AAPL",
+      "sec": "OPT",
+      "ratio": 1,
+      "right": "C",
+      "strike": 210,
+      "exp": "20261218",
+      "mult": 100,
+      "tc": "AAPL",
+      "und_sec": "STK"
+     }
+    ]
+   },
+   "expect": "reject",
+   "why": "unknown deliverable metadata on a held option => reject (fail closed)"
   }
  ]
 }
