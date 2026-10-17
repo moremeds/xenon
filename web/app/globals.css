@@ -10,6 +10,10 @@
   --font-sans: "Inter", -apple-system, sans-serif;
   --font-mono: "IBM Plex Mono", monospace;
   --ease-out: cubic-bezier(0.25, 1, 0.5, 1);
+  /* label text on saturated accent/semantic fills — always light */
+  --text-on-fill: #ffffff;
+  /* label text on bright fills (e.g. positive green) — always dark */
+  --text-on-fill-dark: #0a0f14;
 }
 
 [data-theme="dark"] {
@@ -2073,7 +2077,7 @@ tr.leg-row td {
   gap: 8px;
   padding: 8px 20px;
   background: var(--banner-negative);
-  color: var(--accent-text);
+  color: var(--text-on-fill);
   font-family: var(--font-mono);
   font-size: 11px;
   letter-spacing: 0.03em;
@@ -2783,7 +2787,7 @@ tr.leg-row td {
   padding: 8px 16px;
   border: 1px solid var(--negative);
   background: var(--negative);
-  color: var(--accent-text);
+  color: var(--text-on-fill);
   cursor: pointer;
   transition: all 150ms ease-in-out;
 }
@@ -3833,23 +3837,23 @@ tr.leg-row td {
 }
 .ratings-strong-buy {
   background: var(--signal-deep);
-  color: var(--accent-text);
+  color: var(--text-on-fill);
 }
 .ratings-buy {
   background: var(--positive);
-  color: var(--accent-text);
+  color: var(--text-on-fill-dark);
 }
 .ratings-hold {
   background: var(--text-muted);
-  color: var(--accent-text);
+  color: var(--text-on-fill);
 }
 .ratings-sell {
   background: var(--negative);
-  color: var(--accent-text);
+  color: var(--text-on-fill);
 }
 .ratings-strong-sell {
   background: #9f1239; /* brand: no deep-negative token in design tokens */
-  color: #fff; /* brand: needs always-light label on the deep-red segment */
+  color: var(--text-on-fill);
 }
 .ratings-bar-labels {
   display: flex;

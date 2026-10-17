@@ -25,15 +25,11 @@ const VAR_DEF_START = /^\s*--[\w-]+\s*:/;
 /**
  * Listed exceptions. A violation is skipped only when the file matches the
  * path AND the line matches one of the patterns — anything else in the same
- * file still fails.
- *
- * app/[ticker]/not-found.tsx: three `var(--token, #fallback)` fallbacks.
- * The file is outside this PR's ownership scope (frozen by the execution
- * contract), so its literals cannot be edited here — flagged for follow-up.
+ * file still fails. Currently empty: surviving literals carry a line-level
+ * `// brand:` / `/* brand:` marker instead (global-error, perfTracker,
+ * .ratings-strong-sell background).
  */
-const LISTED_EXCEPTIONS: Record<string, RegExp[]> = {
-  "app/[ticker]/not-found.tsx": [/var\(--[\w-]+,\s*#[0-9a-fA-F]{3,8}\)/],
-};
+const LISTED_EXCEPTIONS: Record<string, RegExp[]> = {};
 
 function* sourceFiles(dir: string): Generator<string> {
   for (const entry of readdirSync(dir)) {
@@ -73,5 +69,26 @@ describe("brand tokens", () => {
       [...sourceFiles(join(WEB, dir))].flatMap(violations),
     );
     expect(found).toEqual([]);
+  });
+
+  // Regression: --accent-text is theme-dependent (#0a0f14 dark / #ffffff
+  // light); labels on saturated fills must use the theme-independent
+  // --text-on-fill / --text-on-fill-dark tokens to keep the original contrast.
+  it("uses theme-independent on-fill label tokens on saturated fills", () => {
+    const css = readFileSync(join(WEB, "app/globals.css"), "utf8");
+    const expected: Record<string, string> = {
+      "connection-banner": "--text-on-fill",
+      "btn-danger": "--text-on-fill",
+      "ratings-strong-buy": "--text-on-fill",
+      "ratings-buy": "--text-on-fill-dark",
+      "ratings-hold": "--text-on-fill",
+      "ratings-sell": "--text-on-fill",
+    };
+    for (const [selector, token] of Object.entries(expected)) {
+      const block = css.match(new RegExp(`\\.${selector}\\s*\\{[^}]*\\}`));
+      expect(block?.[0] ?? "", `.${selector}`).toContain(
+        `color: var(${token})`,
+      );
+    }
   });
 });
