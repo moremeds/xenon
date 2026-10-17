@@ -62,12 +62,13 @@ class _ConnectProbe:
         self.created: list[_FakeConnection] = []
         self.errors: list[BaseException] = []
         self.calls = 0
+        self.factory = _FakeConnection
 
     async def __call__(self, dsn: str) -> _FakeConnection:
         self.calls += 1
         if self.errors:
             raise self.errors.pop(0)
-        conn = _FakeConnection()
+        conn = self.factory()
         self.created.append(conn)
         return conn
 
@@ -188,6 +189,168 @@ async def test_journal_consumer_replays_unconsumed_on_reconnect(monkeypatch):
     assert callable(on_reconnect)
     await on_reconnect()
     assert replay_calls == [1, 1]  # replay ran again after the reconnect
+
+
+async def test_failed_replay_retries_while_socket_healthy(probe):
+    """A failing on_reconnect must retry with backoff on the SAME socket —
+    events missed during the outage can't wait for another disconnect."""
+    attempts = []
+
+    def _hook():
+        attempts.append(1)
+        if len(attempts) < 2:
+            raise RuntimeError("transient replay failure")
+
+    sub = _subscriber(on_reconnect=_hook)
+    await sub.start()
+    probe.created[0].terminate()
+    await _wait_for(lambda: len(probe.created) == 2, what="reconnect")
+
+    # Socket stays healthy — the failed replay must still retry until it
+    # succeeds, with no further reconnect.
+    await _wait_for(lambda: len(attempts) >= 2, what="replay retry")
+    assert probe.calls == 2
+    assert not sub._replay_pending
+    await sub.stop()
+
+
+async def test_journal_boot_replay_failure_requests_retry(monkeypatch):
+    """If the boot replay has failed rows, the subscriber is armed to retry."""
+    from xenon.api.services import journal_auto_import as jai
+
+    captured: dict = {}
+
+    class _StubSubscriber:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def on(self, channel, cb):
+            captured.setdefault("channels", []).append(channel)
+
+        def request_replay(self):
+            captured["replay_requested"] = True
+
+        async def start(self):
+            captured["started"] = True
+
+        async def stop(self):
+            captured["stopped"] = True
+
+    monkeypatch.setattr(jai, "EventSubscriber", _StubSubscriber)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u@h/db")
+
+    sub = jai.JournalAutoImportSubscriber()
+
+    def _bad_replay():
+        sub.last_replay_failed = 1
+        return 0
+
+    monkeypatch.setattr(sub, "replay_unconsumed", _bad_replay)
+    await sub.start()
+    assert captured.get("replay_requested") is True
+
+
+async def test_replay_unconsumed_counts_row_failures(monkeypatch):
+    """Per-row failures are counted, not swallowed — a later pass retries them."""
+    from types import SimpleNamespace
+
+    from xenon.api.services import journal_auto_import as jai
+
+    class _Rows:
+        def fetchall(self):
+            return [SimpleNamespace(id=1), SimpleNamespace(id=2), SimpleNamespace(id=3)]
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, _stmt):
+            return _Rows()
+
+    class _Eng:
+        def connect(self):
+            return _Conn()
+
+    sub = jai.JournalAutoImportSubscriber()
+    monkeypatch.setattr(jai, "get_sync_engine", lambda: _Eng())
+
+    calls: list[int] = []
+
+    def _handle(oid):
+        calls.append(oid)
+        if oid == 2 and calls.count(2) == 1:
+            raise RuntimeError("transient row failure")
+
+    monkeypatch.setattr(sub, "handle_notification_id", _handle)
+
+    assert sub.replay_unconsumed() == 2
+    assert sub.last_replay_failed == 1
+    # Second pass (the retry): the transient failure succeeds.
+    assert sub.replay_unconsumed() == 3
+    assert sub.last_replay_failed == 0
+
+
+async def test_replay_after_reconnect_raises_on_incomplete(monkeypatch):
+    """Failed rows must surface so the subscriber keeps the retry armed."""
+    from xenon.api.services import journal_auto_import as jai
+
+    sub = jai.JournalAutoImportSubscriber()
+    sub.last_replay_failed = 2
+    monkeypatch.setattr(sub, "replay_unconsumed", lambda: 5)
+    with pytest.raises(RuntimeError, match="incomplete"):
+        await sub._replay_after_reconnect()
+
+
+async def test_open_connection_closes_on_listen_failure(probe):
+    """A LISTEN setup error must close the not-yet-owned connection."""
+
+    class _FailListen(_FakeConnection):
+        async def add_listener(self, channel, callback):
+            raise RuntimeError("listen refused")
+
+    probe.factory = _FailListen
+    sub = _subscriber()
+    with pytest.raises(RuntimeError, match="listen refused"):
+        await sub._open_connection()
+    assert probe.created[0].is_closed()
+
+
+async def test_open_connection_closes_when_cancelled_during_listen(probe):
+    """Cancellation mid-LISTEN (e.g. watchdog stopped) must not leak the conn."""
+
+    class _StuckListen(_FakeConnection):
+        async def add_listener(self, channel, callback):
+            await asyncio.Event().wait()  # never returns
+
+    probe.factory = _StuckListen
+    sub = _subscriber()
+    task = asyncio.create_task(sub._open_connection())
+    await _wait_for(lambda: len(probe.created) == 1, what="connect")
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert probe.created[0].is_closed()
+
+
+async def test_stop_during_pending_listen_closes_new_conn(probe):
+    """stop() while the watchdog's reconnect is inside add_listener must not
+    leave the half-configured socket open."""
+
+    class _StuckListen(_FakeConnection):
+        async def add_listener(self, channel, callback):
+            await asyncio.Event().wait()  # never returns
+
+    sub = _subscriber()
+    await sub.start()
+    probe.created[0].terminate()
+    probe.factory = _StuckListen
+
+    await _wait_for(lambda: len(probe.created) == 2, what="reconnect attempt")
+    await sub.stop()
+    assert probe.created[1].is_closed()
 
 
 async def test_reconnect_against_real_postgres():

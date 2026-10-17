@@ -96,6 +96,9 @@ class EventSubscriber:
         self._stopping = False
         self._dropped: asyncio.Event | None = None
         self._watchdog_task: asyncio.Task | None = None
+        # Set when the last replay/on_reconnect attempt failed — retried with
+        # backoff independently of socket health.
+        self._replay_pending = False
 
     def on(self, channel: str, callback: Callable) -> None:
         self._callbacks.setdefault(channel, []).append(callback)
@@ -105,16 +108,43 @@ class EventSubscriber:
         self._stopping = False
         self._dropped = asyncio.Event()
         self._conn = await self._open_connection()
+        if self._stopping:
+            # stop() raced the connect — don't leave a socket behind.
+            conn = self._conn
+            self._conn = None
+            await conn.close()
+            return
         logger.info("EventSubscriber listening on %s", self._channels)
         if self._watchdog_task is None or self._watchdog_task.done():
             self._watchdog_task = self._loop.create_task(self._watchdog())
 
+    def request_replay(self) -> None:
+        """Mark replay incomplete — the watchdog retries the on_reconnect
+        hook with backoff even while the LISTEN socket stays healthy."""
+        self._replay_pending = True
+
+    async def _invoke_reconnect_hook(self) -> None:
+        if self._on_reconnect is None:
+            return
+        result = self._on_reconnect()
+        if inspect.isawaitable(result):
+            await result
+
     async def _open_connection(self) -> asyncpg.Connection:
         raw_dsn = re.sub(r"^postgresql\+\w+://", "postgresql://", self._dsn)
         conn = await asyncpg.connect(raw_dsn)
-        for ch in self._channels:
-            await conn.add_listener(ch, self._on_notification)
-        conn.add_termination_listener(self._on_termination)
+        try:
+            for ch in self._channels:
+                await conn.add_listener(ch, self._on_notification)
+            conn.add_termination_listener(self._on_termination)
+        except BaseException:
+            # Setup failed or was cancelled before self._conn could own the
+            # socket — close it here or it leaks.
+            try:
+                conn.terminate()
+            except Exception:
+                pass
+            raise
         return conn
 
     def _on_termination(self, connection: asyncpg.Connection) -> None:
@@ -127,6 +157,7 @@ class EventSubscriber:
 
     async def _watchdog(self) -> None:
         delay = self._reconnect_min_delay
+        replay_delay = self._reconnect_min_delay
         while not self._stopping:
             conn = self._conn
             if conn is not None and not conn.is_closed():
@@ -134,8 +165,24 @@ class EventSubscriber:
                 # poll interval re-checks is_closed() for drops the transport
                 # has not surfaced yet.
                 self._dropped.clear()
+                wait = self._poll_interval
+                if self._replay_pending:
+                    # Replay is independent of socket health — a failed hook
+                    # must retry or events missed during the outage stay lost.
+                    try:
+                        await self._invoke_reconnect_hook()
+                    except Exception:
+                        logger.exception(
+                            "EventSubscriber replay retry failed; retrying in %.1fs",
+                            replay_delay,
+                        )
+                        wait = replay_delay
+                        replay_delay = min(replay_delay * 2, self._reconnect_max_delay)
+                    else:
+                        self._replay_pending = False
+                        replay_delay = self._reconnect_min_delay
                 try:
-                    await asyncio.wait_for(self._dropped.wait(), timeout=self._poll_interval)
+                    await asyncio.wait_for(self._dropped.wait(), timeout=wait)
                 except asyncio.TimeoutError:
                     pass
                 continue
@@ -154,11 +201,12 @@ class EventSubscriber:
             logger.info("EventSubscriber reconnected; listening on %s", self._channels)
             if self._on_reconnect is not None:
                 try:
-                    result = self._on_reconnect()
-                    if inspect.isawaitable(result):
-                        await result
+                    await self._invoke_reconnect_hook()
                 except Exception:
-                    logger.exception("EventSubscriber on_reconnect hook failed")
+                    logger.exception(
+                        "EventSubscriber on_reconnect hook failed; replay marked pending"
+                    )
+                    self._replay_pending = True
 
     def _on_notification(self, connection, pid, channel, payload):
         for cb in self._callbacks.get(channel, []):
@@ -166,6 +214,7 @@ class EventSubscriber:
 
     async def stop(self) -> None:
         self._stopping = True
+        self._replay_pending = False
         task = self._watchdog_task
         self._watchdog_task = None
         if task is not None:
