@@ -71,15 +71,12 @@ jobs:
       - run: cd web && npm run typecheck
       - run: cd web && npm run lint
       # Match ci.yml web-tests: exclude order-e2e.test.ts (pre-existing schema
-      # drift tracked in #41) and site/lib/seo.test.ts (empty DEFAULT_SITE_URL
-      # throws at module load — fix lands with the site copy rewrite).
-      # Regenerate universe fixtures like CI does.
+      # drift tracked in #41). Regenerate universe fixtures like CI does.
       - name: Run vitest suite
         run: |
           cd web && npm run universe:gen
-          cd .. && NODE_ENV=test ASSISTANT_MOCK=1 npx vitest run --config vitest.config.ts web/tests site/lib \
-            --exclude 'web/tests/order-e2e.test.ts' \
-            --exclude 'site/lib/seo.test.ts'
+          cd .. && NODE_ENV=test ASSISTANT_MOCK=1 npx vitest run --config vitest.config.ts web/tests \
+            --exclude 'web/tests/order-e2e.test.ts'
       - run: uv run --no-sync python scripts/release/version_sync_check.py
 
   publish:

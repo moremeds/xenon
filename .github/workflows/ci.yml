@@ -50,16 +50,13 @@ jobs:
       - run: cd web && npm run lint
 
   web-tests:
-    # Unified vitest job — runs web/tests plus site/lib, including tests that
-    # spawn xenon-* CLIs from .venv/. Two excludes:
-    # - `order-e2e` exercises the FastAPI /orders/* contract and currently
-    #   exposes a real schema drift (reverted PR #34 aftermath). Tracked in
-    #   #41 — fix the drift, then drop the exclude. (It also skips cleanly
-    #   when no test FastAPI is available, so it is safe to keep in the suite
-    #   once green.)
-    # - `site/lib/seo.test.ts` is broken upstream: `DEFAULT_SITE_URL` is empty
-    #   so `new URL()` throws at module load; fix lands with the site copy
-    #   rewrite. Root lib/tools vitest stays off — pending PR-15 cleanup.
+    # Unified vitest job — runs web/tests, including tests that spawn
+    # xenon-* CLIs from .venv/. `order-e2e` stays excluded: it exercises the
+    # FastAPI /orders/* contract and currently exposes a real schema drift
+    # (reverted PR #34 aftermath). Tracked in #41 — fix the drift, then drop
+    # the exclude. (It also skips cleanly when no test FastAPI is available,
+    # so it is safe to keep in the suite once green.) Root lib/tools vitest
+    # stays off — pending PR-15 cleanup.
     #
     # Fixtures: minimal data/*.json stubs are seeded by vitest globalSetup at
     # web/tests/setup/seed-fixtures.ts (portfolio.json, trade_log.json,
@@ -85,9 +82,8 @@ jobs:
       - name: Run vitest suite
         run: |
           cd web && npm run universe:gen
-          cd .. && NODE_ENV=test ASSISTANT_MOCK=1 npx vitest run --config vitest.config.ts web/tests site/lib \
-            --exclude 'web/tests/order-e2e.test.ts' \
-            --exclude 'site/lib/seo.test.ts'
+          cd .. && NODE_ENV=test ASSISTANT_MOCK=1 npx vitest run --config vitest.config.ts web/tests \
+            --exclude 'web/tests/order-e2e.test.ts'
 
   python-tests:
     runs-on: ubuntu-latest
