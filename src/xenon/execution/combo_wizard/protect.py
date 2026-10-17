@@ -23,6 +23,9 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
+from starlette.responses import Response
+
+from xenon.api.guards import is_read_only, read_only_403
 from xenon.db.engine import get_sync_engine
 from xenon.db.queries import combo_wizard
 from xenon.execution.combo_wizard.session import _assert_session_scope
@@ -138,7 +141,7 @@ def attach_protection(
     base_backoff: float = 2.0,
     sleep: Callable[[float], None] | None = None,
     db_path: Any = None,  # deprecated, ignored — kept for call-site compat
-) -> dict[str, Any]:
+) -> dict[str, Any] | Response:
     """Attach combo TP + Risk Alert after a filled wizard session.
 
     Args:
@@ -159,6 +162,9 @@ def attach_protection(
         `tp_refused_reason` (if naked-short-guarded), `noop` (if session was
         already PROTECTED).
     """
+    if is_read_only():
+        return read_only_403()
+
     if sleep is None:
         import time as _time
 

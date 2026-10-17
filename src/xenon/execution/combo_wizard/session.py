@@ -7,6 +7,7 @@ from typing import Any
 
 from starlette.responses import Response
 
+from xenon.api.guards import is_read_only, read_only_403
 from xenon.db.engine import get_sync_engine
 from xenon.db.queries import combo_wizard as cwq
 from xenon.execution.combo_wizard import planner as combo_planner
@@ -147,7 +148,9 @@ def create_session(
     intent: str,
     structure_name: str,
     payload: dict[str, Any],
-) -> dict[str, Any]:
+) -> dict[str, Any] | Response:
+    if is_read_only():
+        return read_only_403()
     session_id = f"wiz-{uuid.uuid4().hex[:12]}"
     now = _now()
     engine = get_sync_engine()
@@ -258,7 +261,9 @@ def plan_session(
     legs: list[dict[str, Any]],
     quotes: dict[str, dict[str, Any]],
     order_payload: dict[str, Any],
-) -> dict[str, Any]:
+) -> dict[str, Any] | Response:
+    if is_read_only():
+        return read_only_403()
     plan_legs = [ComboLegSpec.model_validate(leg) for leg in legs]
     plan = combo_planner.build_plan(
         ticker=ticker,
@@ -290,7 +295,9 @@ def plan_session(
     }
 
 
-async def submit_combo(session_id: str, request: dict[str, Any]) -> dict[str, Any]:
+async def submit_combo(session_id: str, request: dict[str, Any]) -> dict[str, Any] | Response:
+    if is_read_only():
+        return read_only_403()
     attempt_id = uuid.uuid4().hex
     session = _claim_session_for_submit(session_id, attempt_id)
 
@@ -370,7 +377,9 @@ async def submit_combo(session_id: str, request: dict[str, Any]) -> dict[str, An
     }
 
 
-async def reprice_combo(session_id: str, request: dict[str, Any]) -> dict[str, Any]:
+async def reprice_combo(session_id: str, request: dict[str, Any]) -> dict[str, Any] | Response:
+    if is_read_only():
+        return read_only_403()
     session = _load_session(session_id)
     current = _load_current_attempt(session_id)
     state = str(session.get("state") or "")
@@ -463,6 +472,8 @@ def get_session(session_id: str) -> dict[str, Any]:
 
 
 async def abort_session(session_id: str) -> dict[str, Any] | Response:
+    if is_read_only():
+        return read_only_403()
     session = _load_session(session_id)
     state = str(session.get("state") or "")
     upper = state.upper()
