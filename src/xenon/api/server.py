@@ -1896,9 +1896,9 @@ def _preflight_block_response(verdict: Verdict) -> JSONResponse:
     )
 
 
-# The route SIGKILLs the modify subprocess after this many seconds. Must stay
-# below ib_order_manage.MODIFY_WALL_CLOCK_S (the amend sender bound gate4
-# uses to expire an unresolved amend).
+# The route SIGKILLs the modify subprocess after this many seconds. Stays
+# below ib_order_manage.MODIFY_WALL_CLOCK_S (the CLI's own backstop). Gate 4
+# expiry does not depend on either: it uses the --send-by fence.
 _MODIFY_SUBPROCESS_TIMEOUT_S = 15
 
 
@@ -2657,7 +2657,7 @@ def _map_ib_reject_status(upstream_code: Any) -> int:
 def _classify_to_http(data: dict) -> tuple[int, str]:
     """Map subprocess classification → (http_status, reason_code)."""
     classification = data.get("classification")
-    if classification == "connection":
+    if classification in ("connection", "send_window_closed"):
         return 503, ReasonCode.IB_CONNECTION.value
     if classification == "ownership":
         return 409, ReasonCode.OWNERSHIP.value
@@ -3052,6 +3052,10 @@ async def _orders_modify_from_body(body: dict):
                 },
             )
         _amend_id = mod_outcome.amend_id
+        if mod_outcome.send_by is not None:
+            # Send-by fence (round 5, item 2): the spawner refuses to start
+            # the CLI after it, and the CLI re-checks before placeOrder.
+            args.extend(["--send-by", mod_outcome.send_by.isoformat()])
 
     result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=_MODIFY_SUBPROCESS_TIMEOUT_S)
     if not result.ok:
@@ -3642,6 +3646,18 @@ def _pool_has_any_connection() -> bool:
     return False
 
 
+def _send_window_closed(args: list) -> bool:
+    """True when args carry `--send-by <iso>` and that instant has passed."""
+    if "--send-by" not in args:
+        return False
+    i = args.index("--send-by")
+    try:
+        send_by = datetime.fromisoformat(str(args[i + 1]))
+    except (IndexError, ValueError):
+        return True  # malformed fence: fail closed, send nothing
+    return datetime.now(timezone.utc) >= send_by
+
+
 async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 30) -> ScriptResult:
     """Run an IB-dependent xenon-* entry point with pre-flight health check and cooldown.
 
@@ -3687,6 +3703,11 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
                 ok=False,
                 error="IB Gateway is not accepting connections. Check IBKR Mobile for 2FA approval.",
             )
+
+    if _send_window_closed(args):
+        # Cooldown / gateway probe delayed the spawn past the amend's send-by
+        # instant: never start a sender Gate 4 already counts as finished.
+        return ScriptResult(ok=False, error="Modify send window closed before the IB request was sent. Retry the change.")
 
     result = await run_entry_point(entry, args, timeout=timeout)
 

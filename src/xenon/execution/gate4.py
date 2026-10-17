@@ -13,10 +13,10 @@ Data sources (all read *inside* the locked transaction):
   pass-start observation boundary, complete=False when any read in the pass
   (positions / all-account open orders / executions) failed.
 - orders    — every `order_submissions` row in scope (any state). Demand =
-  fills after `as_of` + outstanding remaining; terminal rows keep
+  fills after `as_of - FILL_LAG_S` + outstanding remaining; terminal rows keep
   remaining=0 but still consume via post-snapshot fills.
 - fills     — `order_fills` in scope, attributed to orders by submission_id
-  (or perm_id fallback). Post-as_of fills that resolve to no in-scope order
+  (or perm_id fallback). Fills after `as_of - FILL_LAG_S` that resolve to no in-scope order
   mark the view incomplete — an unattributed fill is demand we cannot
   model, so new risk must fail closed.
 
@@ -38,7 +38,7 @@ from IB contract qualification (`contract_meta`). Nothing here derives it
 from the symbol or a universe default: a leg without it fails closed.
 
 Liveness (round 3): only rows that can still owe demand enter the
-evaluation — non-terminal rows and rows with fills at/after `as_of`.
+evaluation — non-terminal rows and rows with fills at/after `as_of - FILL_LAG_S`.
 Quantity-0 rows and pure-BUY rows hold no cover demand and are ignored. A row
 that cannot be classified (unresolved BAG legs, unknown metadata, invalid
 quantity fields) blocks only candidates on its own symbol: cover is
@@ -323,6 +323,10 @@ def _holdings_from_payload(payload: dict) -> list[coverage.Holding]:
     return out
 
 
+# Seconds an IB position update may lag the execution that caused it.
+FILL_LAG_S = 60.0
+
+
 def load_inputs(conn, scope: dict) -> Gate4Inputs:
     """Assemble holdings/orders/view for coverage.evaluate on `conn`.
 
@@ -402,13 +406,17 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
 
     fill_rows_total: dict[str, Decimal] = {}
     fills_before: dict[str, Decimal] = {}
+    # Round 5, item 6: a fill shortly before as_of may not be in the
+    # positions read yet (IB position updates lag executions). Fills inside
+    # FILL_LAG_S of as_of count as after-snapshot demand — over-reserves.
+    fill_boundary = as_of - timedelta(seconds=FILL_LAG_S) if as_of is not None else None
     for f in fill_rows:
         sub_id = f.submission_id or perm_to_sub.get(str(f.perm_id or ""))
         if sub_id is None or sub_id not in sub_sec:
             # Orphan fill: no in-scope order to attribute it to. If it
             # post-dates the observation boundary its demand is invisible
             # to the evaluation — the view is incomplete.
-            if as_of is not None and _as_utc(f.filled_at) is not None and _as_utc(f.filled_at) >= as_of:
+            if fill_boundary is not None and _as_utc(f.filled_at) is not None and _as_utc(f.filled_at) >= fill_boundary:
                 complete = False
             continue
         meta = f.metadata if isinstance(f.metadata, dict) else {}
@@ -424,7 +432,7 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
             continue
         qty = Decimal(str(f.qty))
         fill_rows_total[sub_id] = fill_rows_total.get(sub_id, Decimal(0)) + qty
-        if as_of is not None and _as_utc(f.filled_at) is not None and _as_utc(f.filled_at) < as_of:
+        if fill_boundary is not None and _as_utc(f.filled_at) is not None and _as_utc(f.filled_at) < fill_boundary:
             fills_before[sub_id] = fills_before.get(sub_id, Decimal(0)) + qty
 
     orders = []
@@ -758,18 +766,25 @@ def _accepted_with_netting(inputs: Gate4Inputs, candidate) -> bool:
 
 
 def _legs_for_body_match(legs_payload):
-    """Strip server-side reservation state before request-body comparison.
+    """Project a legs payload onto the request-owned keys (round 5, item 5).
 
-    `pending_amend_qty` / `pending_amend_id` are written by the modify path, not the client — a
-    replayed identical body must still dedupe after an amend was pending.
+    Whitelist, not blacklist: only what the client's body determines in
+    `candidate_from_place_body` is compared — the leg identity and the
+    guarantee mode. Everything else in the payload is server or mirror
+    state (pending amend, observed_qty, account provenance, IB-qualified
+    tc/mult/und_sec/con_id) and must not turn an identical replay into a
+    body mismatch.
     """
-    if isinstance(legs_payload, dict):
-        return {k: v for k, v in legs_payload.items() if k not in _SERVER_PAYLOAD_KEYS}
-    return legs_payload
+    if not isinstance(legs_payload, dict):
+        return legs_payload
+    legs = legs_payload.get("legs")
+    if isinstance(legs, list):
+        legs = [{k: leg.get(k) for k in _REQUEST_LEG_KEYS} if isinstance(leg, dict) else leg for leg in legs]
+    return {"legs": legs, "guaranteed": legs_payload.get("guaranteed")}
 
 
-# Reservation state the server/mirror writes into the legs payload.
-_SERVER_PAYLOAD_KEYS = frozenset({"pending_amend_qty", "pending_amend_id", "pending_amend_deadline", "observed_qty"})
+# Leg fields the place body itself determines (the rest come from IB).
+_REQUEST_LEG_KEYS = ("action", "sym", "sec", "ratio", "right", "exp", "strike")
 
 
 def _classify_existing(row, request: RequestRow, legs_payload) -> Gate4Outcome:
@@ -961,22 +976,30 @@ class ModifyReservationOutcome:
     # Generation token of this amend; settle_modify is a no-op unless the
     # row still carries it (stale replies never release newer demand).
     amend_id: str | None = None
+    # Latest instant any sender may still transmit this amend (round 5,
+    # item 2). The route refuses to spawn after it and passes it to the CLI
+    # as --send-by; the CLI checks it before every placeOrder.
+    send_by: datetime | None = None
 
 
 MODIFY_PENDING_REASON = "modify_pending"
 
+# Send window of one amend generation, from begin_modify (round 5, item 2).
+MODIFY_SEND_WINDOW_S = 15.0
 # Seconds IB may still take to apply an amend message it already received.
-AMEND_IB_GRACE_S = 10.0
+# Accepted residual: IB applying a received amend later than this is not
+# measured.
+AMEND_IB_GRACE_S = 60.0
 
 
-def amend_sender_deadline(opened_at: datetime) -> datetime:
-    """Latest instant the original sender of an amend opened at `opened_at`
-    can still apply it: the modify CLI exits by its own hard wall-clock
-    bound (MODIFY_WALL_CLOCK_S, also when the API process died) plus the IB
-    processing grace. The route SIGKILLs it earlier (15 s)."""
-    from xenon.execution.ib_order_manage import MODIFY_WALL_CLOCK_S
+def amend_deadlines(opened_at: datetime) -> tuple[datetime, datetime]:
+    """(send_by, expiry deadline) of an amend opened at `opened_at`.
 
-    return opened_at + timedelta(seconds=MODIFY_WALL_CLOCK_S + AMEND_IB_GRACE_S)
+    No sender transmits after send_by (route + CLI fence), so after
+    send_by + AMEND_IB_GRACE_S a fresh read shows the broker order as it
+    really is. The CLI watchdog stays as a backstop only."""
+    send_by = opened_at + timedelta(seconds=MODIFY_SEND_WINDOW_S)
+    return send_by, send_by + timedelta(seconds=AMEND_IB_GRACE_S)
 
 
 def _lock_scope(conn, scope: dict) -> None:
@@ -992,11 +1015,12 @@ def _row_payload(conn, submission_id: str) -> dict | None:
     return orders_store.normalize_legs_payload(row[0])
 
 
-def _write_payload(conn, submission_id: str, payload: dict, **values) -> None:
+def _write_payload(conn, submission_id: str, payload: dict, now: datetime | None = None, **values) -> None:
+    """Caller holds the account-scope lock; the watermark is monotone."""
     conn.execute(
         update(order_submissions)
         .where(order_submissions.c.submission_id == submission_id)
-        .values(legs=payload, updated_at=datetime.now(timezone.utc), **values)
+        .values(legs=payload, updated_at=orders_store.monotone_updated_at(now or datetime.now(timezone.utc)), **values)
     )
 
 
@@ -1036,11 +1060,15 @@ def begin_modify(submission_id: str, new_qty: int | None, scope: dict) -> Modify
                     split_required=(not netting_enabled() and _accepted_with_netting(inputs, modify_candidate)),
                 )
         amend_id = str(uuid.uuid4())
+        opened_at = datetime.now(timezone.utc)  # under the lock
+        send_by, deadline = amend_deadlines(opened_at)
         payload["pending_amend_id"] = amend_id
         payload["pending_amend_qty"] = int(new_qty) if new_qty is not None else None
-        payload["pending_amend_deadline"] = amend_sender_deadline(datetime.now(timezone.utc)).isoformat()
-        _write_payload(conn, submission_id, payload)
-        return ModifyReservationOutcome(accept=True, submission_id=submission_id, amend_id=amend_id)
+        payload["pending_amend_opened_at"] = opened_at.isoformat()
+        payload["pending_amend_send_by"] = send_by.isoformat()
+        payload["pending_amend_deadline"] = deadline.isoformat()
+        _write_payload(conn, submission_id, payload, now=opened_at)
+        return ModifyReservationOutcome(accept=True, submission_id=submission_id, amend_id=amend_id, send_by=send_by)
 
 
 def settle_modify(
@@ -1072,14 +1100,8 @@ def settle_modify(
             return False
         qty_amend = payload.get("pending_amend_qty") is not None
         if outcome == "uncertain" and qty_amend:
-            # The sender finished (reply, error or kill): record that, so the
-            # first fresh mirror read after the IB processing grace can
-            # confirm or expire this generation. Demand stays max(old, new).
-            finished = datetime.now(timezone.utc) + timedelta(seconds=AMEND_IB_GRACE_S)
-            current = orders_store._as_aware(payload.get("pending_amend_deadline"))
-            if current is None or finished < current:
-                payload["pending_amend_deadline"] = finished.isoformat()
-                _write_payload(conn, submission_id, payload)
+            # Demand stays max(old, new) until a fresh read after the
+            # send_by + grace deadline confirms or expires this generation.
             return False
         values = {}
         if outcome == "confirmed" and qty_amend and new_qty is not None:

@@ -102,8 +102,8 @@ def test_lost_price_only_reply_recovers_after_sender_deadline():
 
 def test_unapplied_quantity_amend_keeps_max_until_fresh_read_after_sender_finished():
     """1->2 was sent, the reply was lost (uncertain), IB never applied it.
-    Until a fresh read after the sender finished, demand stays max(1,2)=2;
-    the deadline alone (no read) never clears it. Afterwards demand is 1."""
+    Until a fresh read after send_by + grace, demand stays max(1,2)=2; the
+    deadline alone (no read) never clears it. Afterwards demand is 1."""
     _seed_snapshot(_snapshot_payload([_stock("SPY", 200)]))
     sub_id = _working_with_legs("r4-qty-lost", qty=1)
     _set_perm(sub_id, "990202")
@@ -111,7 +111,7 @@ def test_unapplied_quantity_amend_keeps_max_until_fresh_read_after_sender_finish
     opened_deadline = _deadline(sub_id)
     assert not gate4.settle_modify(sub_id, a.amend_id, "uncertain", SCOPE)
     finished = _deadline(sub_id)
-    assert finished < opened_deadline  # sender finished early
+    assert finished == opened_deadline  # round 5: settle never moves the fence-based deadline
 
     _mirror("990202", 1, observed_at=_now())  # inside the IB grace
     assert _legs(sub_id)[1]["pending_amend_qty"] == 2
@@ -126,8 +126,8 @@ def test_unapplied_quantity_amend_keeps_max_until_fresh_read_after_sender_finish
 
 def test_api_restart_amend_expires_only_after_cli_bound():
     """No settle at all (API process died mid-modify). The deadline is
-    opened_at + MODIFY_WALL_CLOCK_S + grace: the modify CLI kills itself at
-    its wall-clock bound, so after that no sender exists."""
+    send_by + grace (round 5): no sender transmits after send_by (route and
+    CLI fence), so after that only IB's processing grace remains."""
     from xenon.api import server
     from xenon.execution import ib_order_manage
 
@@ -138,7 +138,9 @@ def test_api_restart_amend_expires_only_after_cli_bound():
     before = _now()
     gate4.begin_modify(sub_id, 2, SCOPE)
     deadline = _deadline(sub_id)
-    assert deadline >= before + timedelta(seconds=ib_order_manage.MODIFY_WALL_CLOCK_S + gate4.AMEND_IB_GRACE_S)
+    send_by = datetime.fromisoformat(_legs(sub_id)[1]["pending_amend_send_by"])
+    assert send_by >= before + timedelta(seconds=gate4.MODIFY_SEND_WINDOW_S)
+    assert deadline == send_by + timedelta(seconds=gate4.AMEND_IB_GRACE_S)
 
     _mirror("990203", 1, observed_at=deadline - timedelta(seconds=1))
     assert _legs(sub_id)[1]["pending_amend_qty"] == 2

@@ -12,7 +12,7 @@ import json
 import os
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Literal
 
@@ -110,6 +110,17 @@ def _lock_gate4_scope(conn, broker, account_env, broker_account) -> None:
     )
 
 
+def monotone_updated_at(now: datetime):
+    """SQL value for an `order_submissions.updated_at` write (round 5, item 1).
+
+    The freshness watermark must never move backwards: the write is
+    max(now, previous updated_at + 1 µs). Reservation writers take `now`
+    AFTER the account-scope lock is held, so a write that waited on the lock
+    can never stamp a time earlier than a write that committed before it.
+    """
+    return func.greatest(now, order_submissions.c.updated_at + timedelta(microseconds=1))
+
+
 _PENDING_KEYS = ("pending_amend_qty", "pending_amend_id")
 
 
@@ -182,7 +193,8 @@ def _clear_pending(payload: dict) -> dict:
     out = dict(payload)
     out["pending_amend_qty"] = None
     out["pending_amend_id"] = None
-    out.pop("pending_amend_deadline", None)
+    for k in ("pending_amend_deadline", "pending_amend_opened_at", "pending_amend_send_by"):
+        out.pop(k, None)
     return out
 
 
@@ -195,22 +207,28 @@ def _reconcile_pending(payload: dict, observed_qty: int, *, observed_at=None, fr
     Every outcome needs a FRESH observation (read began after the amend
     token was written — round 4 item 1), so a delayed read can never confirm
     a newer generation. "expired" additionally needs the read to begin after
-    `pending_amend_deadline`: the instant after which the original sender
-    can no longer apply the amend (route returned, or the modify CLI's
-    hard wall-clock bound passed — this also covers an API restart). The
-    broker order is then observed as it really is, so the token is released
-    and demand follows the durable/observed quantity again (item 4).
+    `pending_amend_deadline` = send_by + IB grace: no sender transmits after
+    send_by (route and CLI fence, round 5), so this also covers an API
+    restart. The broker order is then observed as it really is, so the
+    token is released and demand follows the durable/observed quantity
+    again (item 4).
     A pending amend without a deadline never expires.
+
+    Round 5: the read must also have begun after the amend was opened
+    (`pending_amend_opened_at`), independent of the row watermark.
     """
     if payload.get("pending_amend_id") is None and payload.get("pending_amend_qty") is None:
         return payload, None
     if not fresh:
         return payload, None
+    obs = _as_aware(observed_at)
+    opened = _as_aware(payload.get("pending_amend_opened_at"))
+    if opened is not None and (obs is None or obs <= opened):
+        return payload, None
     pending = payload.get("pending_amend_qty")
     if pending is not None and int(pending) == int(observed_qty):
         return _clear_pending(payload), "confirmed"
     deadline = _as_aware(payload.get("pending_amend_deadline"))
-    obs = _as_aware(observed_at)
     if deadline is not None and obs is not None and obs > deadline:
         return _clear_pending(payload), "expired"
     return payload, None
@@ -244,30 +262,21 @@ def _mirror_uuid_row(
     - pending-amend confirmation / expiry (fresh reads only).
 
     A terminal row the broker still reports open is resurrected only by a
-    fresh read (a read that began before the cancel proves nothing).
+    fresh read (a read that began before the cancel proves nothing). The
+    resurrection writes the same observed-qty + metadata merge in the same
+    single UPDATE (round 5, item 3), so the revived row reserves what IB
+    reports.
     """
-    if existing_state in _TERMINAL_STATES | {"FILLED"}:
-        if not fresh:
-            return {"action": "SKIPPED_UUID", "drift": None}
-        conn.execute(
-            update(order_submissions)
-            .where(order_submissions.c.submission_id == submission_id)
-            .values(state="WORKING", reason_code=None, updated_at=now)
-        )
-        conn.execute(
-            insert(order_events).values(
-                submission_id=submission_id,
-                kind="IB_MIRROR_RESURRECT",
-                detail={"from_state": existing_state, "to_state": "WORKING", "reason": "ib_still_reports_open"},
-                at=now,
-            )
-        )
-        return {"action": "RESURRECTED", "drift": None}
+    terminal = existing_state in _TERMINAL_STATES | {"FILLED"}
+    if terminal and not fresh:
+        return {"action": "SKIPPED_UUID", "drift": None}
 
     stored = normalize_legs_payload(existing_legs)
     payload = merge_observed_legs(existing_legs, observed_legs) if observed_legs is not _UNSET else dict(stored)
     payload, outcome = _reconcile_pending(payload, observed_qty, observed_at=observed_at, fresh=fresh)
     values: dict = {}
+    if terminal:
+        values.update(state="WORKING", reason_code=None)
     if outcome == "confirmed":
         values["quantity"] = observed_qty
     durable = values.get("quantity", existing_quantity)
@@ -287,17 +296,18 @@ def _mirror_uuid_row(
     conn.execute(
         update(order_submissions)
         .where(order_submissions.c.submission_id == submission_id)
-        .values(legs=payload, updated_at=now, **values)
+        .values(legs=payload, updated_at=monotone_updated_at(now), **values)
     )
-    kind = {"confirmed": "AMEND_RECONCILED", "expired": "AMEND_EXPIRED"}.get(outcome, "IB_MIRROR_OBSERVED")
-    conn.execute(
-        insert(order_events).values(
-            submission_id=submission_id,
-            kind=kind,
-            detail={"quantity": observed_qty, "observed_qty": payload.get("observed_qty")},
-            at=now,
-        )
-    )
+    if terminal:
+        kind = "IB_MIRROR_RESURRECT"
+        detail = {"from_state": existing_state, "to_state": "WORKING", "reason": "ib_still_reports_open"}
+    else:
+        kind = {"confirmed": "AMEND_RECONCILED", "expired": "AMEND_EXPIRED"}.get(outcome, "IB_MIRROR_OBSERVED")
+        detail = {}
+    detail.update(quantity=observed_qty, observed_qty=payload.get("observed_qty"))
+    conn.execute(insert(order_events).values(submission_id=submission_id, kind=kind, detail=detail, at=now))
+    if terminal:
+        return {"action": "RESURRECTED", "drift": None}
     out = {"action": "SKIPPED_UUID", "drift": None}
     if outcome == "confirmed":
         out["reconciled"] = True
@@ -566,7 +576,7 @@ def apply_modify(
             )
             .values(
                 modify_sequence=sequence,
-                updated_at=datetime.now(timezone.utc),
+                updated_at=monotone_updated_at(datetime.now(timezone.utc)),
             )
             .returning(order_submissions.c.modify_sequence)
         )
@@ -606,6 +616,7 @@ def register_from_snapshot(
     tif: str = "DAY",
     legs=_UNSET,
     observed_at: datetime | None = None,
+    client_id: int | None = None,
 ) -> dict:
     """Mirror an IB-side open order into `xenon.order_submissions`.
 
@@ -633,31 +644,54 @@ def register_from_snapshot(
     amend). A stale observation applies only conservative changes (it can
     raise demand, never lower or release it). `observed_at=None` (legacy
     callers) keeps the old drift behavior but never touches a pending amend.
+
+    `client_id` is the IB clientId that placed the order (from the
+    observation). When no row carries this permId, a Xenon (UUID) row whose
+    perm_id was never stamped (permId=0 race at placement) is matched by
+    (ib_order_id, placing_client_id); the permId is stamped on it and the
+    observation mirrors onto it instead of inserting a snapshot row.
     """
     ensure_writable()
     submission_id = f"snapshot-{perm_id}"
     client_attempt_id = f"snapshot-{perm_id}"
-    now = datetime.now(timezone.utc)
     engine = get_sync_engine()
     with engine.begin() as conn:
         # Reservation state (legs / pending amend / quantity) is written
         # under the same account-scope lock as the gate's check+insert.
         _lock_gate4_scope(conn, broker, account_env, broker_account)
-        existing = conn.execute(
-            select(
-                order_submissions.c.submission_id,
-                order_submissions.c.limit_price,
-                order_submissions.c.quantity,
-                order_submissions.c.state,
-                order_submissions.c.legs,
-                order_submissions.c.updated_at,
-            ).where(
-                order_submissions.c.perm_id == str(perm_id),
-                order_submissions.c.broker == broker,
-                order_submissions.c.account_env == account_env,
-                order_submissions.c.broker_account == broker_account,
-            )
-        ).first()
+        # Taken AFTER the lock (round 5, item 1): see monotone_updated_at.
+        now = datetime.now(timezone.utc)
+        scope_conds = (
+            order_submissions.c.broker == broker,
+            order_submissions.c.account_env == account_env,
+            order_submissions.c.broker_account == broker_account,
+        )
+        cols = (
+            order_submissions.c.submission_id,
+            order_submissions.c.limit_price,
+            order_submissions.c.quantity,
+            order_submissions.c.state,
+            order_submissions.c.legs,
+            order_submissions.c.updated_at,
+        )
+        existing = conn.execute(select(*cols).where(order_submissions.c.perm_id == str(perm_id), *scope_conds)).first()
+        if existing is None and client_id is not None and ib_order_id not in (None, "", "0"):
+            unstamped = conn.execute(
+                select(*cols).where(
+                    func.coalesce(order_submissions.c.perm_id, "").in_(("", "0")),
+                    order_submissions.c.ib_order_id == str(ib_order_id),
+                    order_submissions.c.placing_client_id == int(client_id),
+                    ~order_submissions.c.submission_id.startswith("snapshot-"),
+                    *scope_conds,
+                )
+            ).all()
+            if len(unstamped) == 1:  # ambiguous → fall through (snapshot row over-reserves)
+                existing = unstamped[0]
+                conn.execute(
+                    update(order_submissions)
+                    .where(order_submissions.c.submission_id == existing[0])
+                    .values(perm_id=str(perm_id))
+                )
 
         # Pull existing tif separately so we don't break the positional unpack
         # of older callers if this query expands further.
@@ -708,7 +742,7 @@ def register_from_snapshot(
                     limit_price=float(limit_price),
                     quantity=int(quantity),
                     tif=tif,
-                    updated_at=now,
+                    updated_at=monotone_updated_at(now),
                 )
                 if legs is not _UNSET:
                     resurrect_values["legs"] = merge_observed_legs(existing_legs, legs)
@@ -769,7 +803,7 @@ def register_from_snapshot(
 
             drift_values = dict(
                 quantity=new_quantity,
-                updated_at=now,
+                updated_at=monotone_updated_at(now),
             )
             if drift_ok:
                 drift_values["limit_price"] = float(limit_price)
@@ -872,7 +906,7 @@ def apply_modify_by_perm_id(
                 order_submissions.c.modify_sequence < sequence,
                 *scope_conds,
             )
-            .values(modify_sequence=sequence, updated_at=datetime.now(timezone.utc))
+            .values(modify_sequence=sequence, updated_at=monotone_updated_at(datetime.now(timezone.utc)))
             .returning(order_submissions.c.modify_sequence)
         )
         updated = result.first()
@@ -920,7 +954,7 @@ def mark_submitted(
                 perm_id=str(perm_id) if perm_id is not None else None,
                 placing_client_id=placing_client_id,
                 state="WORKING",
-                updated_at=now,
+                updated_at=monotone_updated_at(now),
             )
         )
         conn.execute(
@@ -957,7 +991,7 @@ def mark_terminal(
     stmt = update(order_submissions).where(order_submissions.c.submission_id == submission_id)
     if expected_states is not None:
         stmt = stmt.where(order_submissions.c.state.in_(expected_states))
-    values = dict(state=state, reason_code=reason_code, updated_at=now)
+    values = dict(state=state, reason_code=reason_code, updated_at=monotone_updated_at(now))
     if filled_qty is not None:
         # filled_qty=None keeps the stored fill state: a cancel releases only
         # the unfilled remainder and must never erase executed quantity.

@@ -217,6 +217,9 @@ def open_orders_from_trades(client: IBClient, trades: list) -> list:
             {
                 "orderId": order.orderId,
                 "permId": order.permId,
+                # Placing API clientId (IB reports it on every openOrder) —
+                # matches a Xenon row whose permId was not known at placement.
+                "clientId": getattr(order, "clientId", None),
                 "symbol": format_contract(contract),
                 "contract": serialize_contract(contract, resolved_legs, details),
                 "action": order.action,  # BUY or SELL
@@ -300,9 +303,10 @@ def sync_open_orders_to_postgres(
       - registered: new rows INSERTed
       - updated:    snapshot-* rows UPDATEd because TWS values drifted
       - skipped:    UUID-authored rows left untouched (existing dedupe)
-      - unidentified: open orders with neither permId nor orderId — they
-        cannot be keyed, so their demand is NOT persisted; a sync pass must
-        not attest completeness while this is non-zero
+      - unidentified: open orders without a permId (0 or missing, even
+        when orderId is set) — they cannot be keyed, so their demand is NOT
+        persisted; a sync pass must not attest completeness while this is
+        non-zero
 
     `observed_at` is when the caller started the IB open-order read; it
     gates which reservation changes the mirror may apply (see
@@ -340,14 +344,17 @@ def sync_open_orders_to_postgres(
         contract = order.get("contract") or {}
         sec_type = str(contract.get("secType") or "STK")
         multiplier = 100 if sec_type in {"OPT", "BAG"} else 1
-        # IB returns BAG combos with orderId=0 when fetched from a non-originating
-        # clientId. perm_id is the cross-client stable identifier — that alone is
-        # enough to register the snapshot. ib_order_id falls back to "0".
-        perm_id = str(order.get("permId") or order.get("orderId") or "")
+        # permId is the only account-wide order key. orderId is unique only
+        # per clientId (two clients can both have orderId 7), so an order
+        # without a permId (the permId=0 race) is unidentified: not written,
+        # and the pass is incomplete (round 5, item 4). ib_order_id falls
+        # back to "0" (IB reports BAGs from another client with orderId=0).
+        perm_id = str(order.get("permId") or "")
         ib_order_id = str(order.get("orderId") or "0")
-        if not perm_id:
+        if not perm_id or perm_id == "0":
             unidentified += 1
             continue
+        raw_client_id = order.get("clientId")
         strike_val = contract.get("strike")
         con_id_val = contract.get("conId")
         result = orders_store.register_from_snapshot(
@@ -366,6 +373,7 @@ def sync_open_orders_to_postgres(
             tif=str(order.get("tif") or "DAY"),
             legs=gate4.legs_payload_from_snapshot_order(order),
             observed_at=observed_at,
+            client_id=int(raw_client_id) if raw_client_id is not None else None,
             **resolved,
         )
         action = result.get("action") if isinstance(result, dict) else None

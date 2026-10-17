@@ -17,6 +17,7 @@ import re
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Literal, NoReturn, Optional
 
@@ -96,8 +97,8 @@ _FATAL_MODIFY_CODES = (103, 201, 202)
 
 # Hard wall-clock bound for one modify process (PR-03b round 4). The route
 # SIGKILLs the subprocess at 15 s; this watchdog also ends an orphan whose
-# API parent died. Gate 4 treats "opened_at + this + IB grace" as the instant
-# after which the amend's sender can no longer apply it.
+# API parent died. Backstop only since round 5: Gate 4's expiry deadline is
+# --send-by + IB grace, enforced by the check before placeOrder.
 MODIFY_WALL_CLOCK_S = 20.0
 
 
@@ -519,6 +520,7 @@ def modify_order(
     account: Optional[str] = None,
     client_id: Optional[int] = None,
     non_guaranteed: Optional[int] = None,
+    send_by: Optional[datetime] = None,
 ):
     """Modify an open order.
 
@@ -652,6 +654,18 @@ def modify_order(
             TagValue("NonGuaranteed", str(non_guaranteed) if non_guaranteed is not None else "1")
         ]
 
+    # Send-by fence (round 5, item 2): Gate 4 expires the amend at
+    # send_by + IB grace, so nothing may be transmitted after send_by —
+    # checked immediately before the (only) placeOrder, after any reconnect.
+    if send_by is not None and datetime.now(timezone.utc) >= send_by:
+        client.ib.errorEvent -= on_error
+        output(
+            "error",
+            f"Modify send window closed at {send_by.isoformat()}; nothing was sent",
+            classification="send_window_closed",
+            **_identity_notes(trade, account),
+        )
+
     # From here on the amend may have reached IB: any failure without an
     # explicit rejection is "unconfirmed", never proof it did not apply.
     _amend_stage["value"] = "unconfirmed"
@@ -738,6 +752,13 @@ def modify_order(
     )
 
 
+def _parse_send_by(value: str) -> datetime:
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        raise argparse.ArgumentTypeError("--send-by needs a timezone-aware ISO-8601 instant")
+    return dt
+
+
 def main():
     parser = argparse.ArgumentParser(description="Cancel or modify IB orders")
     sub = parser.add_subparsers(dest="action", required=True)
@@ -772,6 +793,12 @@ def main():
         dest="outside_rth",
         action="store_false",
         help="Restrict order to regular trading hours only",
+    )
+    modify_p.add_argument(
+        "--send-by",
+        type=_parse_send_by,
+        default=None,
+        help="ISO-8601 instant after which no placeOrder may be sent (Gate-4 amend fence)",
     )
     modify_p.add_argument("--host", default=DEFAULT_HOST)
     modify_p.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -825,6 +852,7 @@ def _run(args) -> None:
                 account=args.account,
                 client_id=args.client_id,
                 non_guaranteed=args.non_guaranteed,
+                send_by=args.send_by,
             )
     except IBConnectionError as exc:
         # Connection dropped mid-operation (stale socket, gateway restart) —
