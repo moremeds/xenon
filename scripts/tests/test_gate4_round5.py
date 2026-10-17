@@ -114,6 +114,37 @@ def test_mirror_that_waited_on_the_lock_cannot_hide_a_newer_amend(monkeypatch):
     assert _reserve("r5-barrier-next").status == "rejected"
 
 
+def test_reservation_write_never_moves_watermark_back():
+    """GREATEST clause alone. An out-of-lock writer (or a clock step back)
+    left updated_at later than the next reservation writer's `now`. The
+    amend write must not lower it, and a read that began before that later
+    stamp (but after the amend opened) must not count as fresh."""
+    _seed_snapshot(_snapshot_payload([_stock("SPY", 300)]))
+    sub_id = _working_with_legs("r5-greatest", qty=1)
+    _set_perm(sub_id, "990302")
+    later = _now() + timedelta(seconds=5)
+    _committed_sql("UPDATE xenon.order_submissions SET updated_at=:t WHERE submission_id=:s", t=later, s=sub_id)
+
+    b = gate4.begin_modify(sub_id, 2, SCOPE)
+
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        stamp = conn.execute(
+            select(order_submissions.c.updated_at).where(order_submissions.c.submission_id == sub_id)
+        ).scalar_one()
+    engine.dispose()
+    assert stamp > later
+    opened_at = datetime.fromisoformat(_legs(sub_id)[1]["pending_amend_opened_at"])
+    read_started = later - timedelta(seconds=1)
+    assert opened_at < read_started  # the opened_at gate alone would not stop it
+
+    out = _mirror("990302", 2, observed_at=read_started)
+
+    assert "reconciled" not in out
+    qty, legs = _legs(sub_id)
+    assert qty == 1 and legs["pending_amend_id"] == b.amend_id
+
+
 def test_confirm_needs_read_after_amend_opened():
     """`pending_amend_opened_at` gates confirm/expire on its own, even when
     the row watermark says the read is fresh."""
