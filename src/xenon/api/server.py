@@ -2882,12 +2882,22 @@ async def futu_sync():
             # late cleanup can never close a newer session.
             marker = concurrent.futures.Future()
             _futu_sync_future = marker
-            threading.Thread(
-                target=_futu_cleanup_after_timeout,
-                args=(client, fetch, marker),
-                name="xenon-futu-cleanup",
-                daemon=True,
-            ).start()
+            try:
+                threading.Thread(
+                    target=_futu_cleanup_after_timeout,
+                    args=(client, fetch, marker),
+                    name="xenon-futu-cleanup",
+                    daemon=True,
+                ).start()
+            except Exception:
+                # Thread spawn failed (e.g. RuntimeError: cannot start new
+                # thread). Never fall back to disconnect() on the loop — the
+                # marker completes when the fetch worker exits instead, so the
+                # endpoint is not stuck at 503 forever.
+                logger.exception("Futu cleanup thread failed to start; marker completes with fetch")
+                fetch.add_done_callback(
+                    lambda _f: marker.set_result(None) if not marker.done() else None
+                )
             raise HTTPException(
                 status_code=503,
                 detail=f"Futu OpenD did not respond within {FUTU_SYNC_TIMEOUT_S:.0f}s",

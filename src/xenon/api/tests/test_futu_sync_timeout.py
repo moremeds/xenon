@@ -265,3 +265,48 @@ async def test_timeout_cleanup_off_loop_no_extra_worker_then_recovers(
     assert body["ok"] is True
     assert fake.connect_calls == 1
     assert fake.fetch_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_cleanup_thread_spawn_failure_still_recovers(_futu_state, monkeypatch) -> None:
+    """If the cleanup daemon thread can't start (RuntimeError: cannot start
+    new thread), the published marker must still complete when the fetch
+    exits — the timeout response stays a normal 503, never a 500."""
+    fake = _HungClient()
+    monkeypatch.setattr(server, "_get_futu_client", lambda: fake)
+
+    real_start = threading.Thread.start
+
+    def _boom_start(self):
+        if self.name == "xenon-futu-cleanup":
+            raise RuntimeError("cannot start new thread")
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", _boom_start)
+
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(HTTPException) as excinfo:
+            await server.futu_sync()
+        # Normal timeout 503 — the spawn failure must not escape as a 500.
+        assert excinfo.value.status_code == 503
+        assert time.monotonic() - t0 < 2
+        assert fake.fetch_calls == 1
+        # No cleanup ran — and none was attempted on the event loop.
+        assert fake.disconnect_calls == 0
+
+        # Fetch still blocked → still 503, no new worker.
+        with pytest.raises(HTTPException) as excinfo2:
+            await server.futu_sync()
+        assert excinfo2.value.status_code == 503
+        assert fake.fetch_calls == 1
+    finally:
+        fake.release_fetch.set()
+        fake.release_disconnect.set()
+
+    # Marker completes via the fetch done-callback — endpoint unsticks.
+    await _await_worker_done()
+    body = await server.futu_sync()
+    assert body["ok"] is True
+    assert fake.fetch_calls == 2
+    assert fake.disconnect_calls == 0
