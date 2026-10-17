@@ -163,6 +163,12 @@ def _to_coverage_order(o: dict, idx: int) -> tuple[coverage.Order | None, frozen
     raw = legs_payload["legs"]
     legs = tuple(gate4._leg_from_dict(x) for x in raw) if raw is not None else None
     syms = _order_symbols(o, legs)
+    sec = (o.get("contract") or {}).get("secType")
+    if legs is None and sec == "BAG":
+        # gate4 leaves BAG legs unresolved when comboLegs are missing or any
+        # leg has no symbol: the constituent symbols cannot all be known.
+        # Checked before quantity so a malformed BAG still skips the pass.
+        return None, syms, _UNRESOLVED_BAG
     qty = _as_int(o.get("totalQuantity"))
     filled = _as_int(o.get("filled") or 0)
     if qty is None or filled is None or qty < 1:
@@ -182,10 +188,7 @@ def _to_coverage_order(o: dict, idx: int) -> tuple[coverage.Order | None, frozen
     if gate4._pure_buy(order):
         return order, syms, None  # owes no demand; metadata irrelevant
     if legs is None:
-        sec = (o.get("contract") or {}).get("secType")
-        # gate4 leaves BAG legs unresolved when comboLegs are missing or any
-        # leg has no symbol: the constituent symbols cannot all be known.
-        return None, syms, _UNRESOLVED_BAG if sec == "BAG" else f"unsupported_instrument:{sec}"
+        return None, syms, f"unsupported_instrument:{sec}"
     return order, syms, _unclassifiable(order)
 
 

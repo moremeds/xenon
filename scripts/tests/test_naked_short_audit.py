@@ -508,3 +508,17 @@ def test_held_exposure_excludes_skipped_symbols(monkeypatch):
 
 def test_docstring_says_violations_are_not_the_cancel_set():
     assert "not the cancel set" in nsa.__doc__
+
+
+@pytest.mark.parametrize("bad_qty", [0, 1.5])
+def test_unresolved_bag_with_invalid_quantity_still_skips_whole_audit(bad_qty):
+    # Astra PR-197 delta P2: the quantity check must not pre-empt the
+    # unresolved-BAG whole-pass skip — the BAG's constituents stay unknown.
+    bag = _bag([], sym="AAPL")
+    orders = [
+        _order(bag, action="BUY", qty=bad_qty, perm_id=1001),
+        _order(_opt_contract(sym="MSFT", con_id=300), perm_id=3001, order_id=3),
+    ]
+    r = _find(_payload(), orders)
+    assert (r.status, r.reason) == ("skipped", "unresolved_bag_symbols")
+    assert r.violations == []
