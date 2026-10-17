@@ -28,12 +28,6 @@ vi.mock("@tools/wrappers/ib-orders", () => ({
   ibOrders: mockIbOrders,
 }));
 
-// Mock @tools/wrappers/ib-sync for portfolio route (legacy — no longer used by routes)
-const mockIbSync = vi.fn().mockResolvedValue({ ok: false, stderr: "mocked" });
-vi.mock("@tools/wrappers/ib-sync", () => ({
-  ibSync: mockIbSync,
-}));
-
 // Mock @/lib/xenonApi — the NEW dependency for migrated routes
 const mockXenonFetch = vi.fn().mockRejectedValue(new Error("mocked"));
 vi.mock("@/lib/xenonApi", () => ({

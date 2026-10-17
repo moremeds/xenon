@@ -26,8 +26,9 @@ function securityHeaders() {
       value: "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
     },
   ];
-  // Avoid HSTS on local `next start` (can pin broken HTTPS on localhost). Vercel sets VERCEL=1.
-  if (process.env.VERCEL === "1" || process.env.XENON_ENABLE_HSTS === "1") {
+  // Avoid HSTS on local `next start` (can pin broken HTTPS on localhost).
+  // Opt in explicitly on HTTPS-terminated deploys.
+  if (process.env.XENON_ENABLE_HSTS === "1") {
     headers.push({
       key: "Strict-Transport-Security",
       value: "max-age=31536000; includeSubDomains; preload",

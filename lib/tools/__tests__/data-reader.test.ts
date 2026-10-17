@@ -3,9 +3,11 @@ import { Type } from "@sinclair/typebox";
 import { readDataFile } from "../data-reader";
 import { PortfolioData } from "../schemas/ib-sync";
 
+const FIXTURES = "lib/tools/__tests__/fixtures";
+
 describe("readDataFile", () => {
   it("reads an existing JSON file", async () => {
-    const result = await readDataFile("data/watchlist.json");
+    const result = await readDataFile(`${FIXTURES}/watchlist.json`);
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.data).toHaveProperty("tickers");
@@ -21,9 +23,11 @@ describe("readDataFile", () => {
   });
 
   it("validates against schema when provided", async () => {
-    // portfolio.json should match the PortfolioData schema if it exists
-    const result = await readDataFile("data/portfolio.json", PortfolioData);
-    // File may or may not exist, but if it does, it should pass validation
+    const result = await readDataFile(
+      `${FIXTURES}/portfolio.json`,
+      PortfolioData,
+    );
+    expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.data).toHaveProperty("bankroll");
       expect(result.data).toHaveProperty("positions");
@@ -31,12 +35,15 @@ describe("readDataFile", () => {
   });
 
   it("returns validation error when data doesn't match schema", async () => {
-    // watchlist.json has {tickers: [...]}, which won't match PortfolioData
+    // watchlist fixture has {tickers: [...]}, which won't match StrictSchema
     const StrictSchema = Type.Object({
       bankroll: Type.Number(),
       impossible_field_xyz: Type.String(),
     });
-    const result = await readDataFile("data/watchlist.json", StrictSchema);
+    const result = await readDataFile(
+      `${FIXTURES}/watchlist.json`,
+      StrictSchema,
+    );
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toContain("Validation failed");
@@ -44,7 +51,6 @@ describe("readDataFile", () => {
   });
 
   it("returns error for file with invalid JSON", async () => {
-    // .pi directory has non-JSON files — use README.md
     const result = await readDataFile("README.md");
     expect(result.ok).toBe(false);
     if (!result.ok) {

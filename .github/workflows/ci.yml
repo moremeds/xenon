@@ -55,8 +55,8 @@ jobs:
     # FastAPI /orders/* contract and currently exposes a real schema drift
     # (reverted PR #34 aftermath). Tracked in #41 — fix the drift, then drop
     # the exclude. (It also skips cleanly when no test FastAPI is available,
-    # so it is safe to keep in the suite once green.) Root lib/tools vitest
-    # stays off — pending PR-15 cleanup.
+    # so it is safe to keep in the suite once green.) Surviving lib/tools
+    # tests (runner, data-reader, schemas) run via the lib/tools path filter.
     #
     # Fixtures: minimal data/*.json stubs are seeded by vitest globalSetup at
     # web/tests/setup/seed-fixtures.ts (portfolio.json, trade_log.json,
@@ -82,7 +82,7 @@ jobs:
       - name: Run vitest suite
         run: |
           cd web && npm run universe:gen
-          cd .. && NODE_ENV=test ASSISTANT_MOCK=1 npx vitest run --config vitest.config.ts web/tests \
+          cd .. && NODE_ENV=test ASSISTANT_MOCK=1 npx vitest run --config vitest.config.ts web/tests lib/tools \
             --exclude 'web/tests/order-e2e.test.ts'
 
   python-tests:

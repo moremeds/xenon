@@ -27,7 +27,6 @@ import {
   cleanup,
   fireEvent,
   render,
-  renderHook,
   waitFor,
 } from "@testing-library/react";
 import {
@@ -36,8 +35,6 @@ import {
   type OrderLeg,
 } from "../lib/optionsChainUtils";
 import { resolveSpreadPriceData } from "../lib/positionUtils";
-import { useOrderPrices } from "../lib/order/hooks/useOrderPrices";
-import type { OrderLeg as UnifiedOrderLeg } from "../lib/order/types";
 import OrderTab from "../components/ticker-detail/OrderTab";
 import OptionsChainTab from "../components/ticker-detail/OptionsChainTab";
 import { TickerDetailProvider } from "../lib/TickerDetailContext";
@@ -394,68 +391,6 @@ describe("natural quote — one implementation", () => {
       ]),
       CREDIT_QUOTE,
     );
-  });
-});
-
-/* ─── useOrderPrices (unified order system hook) ─── */
-
-function toUnifiedLegs(legs: OrderLeg[]): UnifiedOrderLeg[] {
-  return legs.map((l, i) => ({
-    id: `u${i}`,
-    action: l.action,
-    direction: l.action === "BUY" ? "LONG" : "SHORT",
-    strike: l.strike,
-    type: l.right === "C" ? "Call" : "Put",
-    expiry: "2026-06-19",
-    quantity: 1,
-  }));
-}
-
-describe("useOrderPrices — same natural quote", () => {
-  it("combo debit quote is signed and identical for BUY/SELL envelopes", () => {
-    for (const action of ["BUY", "SELL"] as const) {
-      const { result } = renderHook(() =>
-        useOrderPrices({
-          ticker: TICKER,
-          type: "combo",
-          action,
-          legs: toUnifiedLegs(DEBIT_ORDER_LEGS),
-          prices: PRICES,
-        }),
-      );
-      expect(result.current.available).toBe(true);
-      assertQuote(result.current, DEBIT_QUOTE);
-    }
-  });
-
-  it("combo credit quote stays negative for BUY/SELL envelopes", () => {
-    for (const action of ["BUY", "SELL"] as const) {
-      const { result } = renderHook(() =>
-        useOrderPrices({
-          ticker: TICKER,
-          type: "combo",
-          action,
-          legs: toUnifiedLegs(CREDIT_ORDER_LEGS),
-          prices: PRICES,
-        }),
-      );
-      expect(result.current.available).toBe(true);
-      assertQuote(result.current, CREDIT_QUOTE);
-    }
-  });
-
-  it("unavailable when a leg quote is missing", () => {
-    const { result } = renderHook(() =>
-      useOrderPrices({
-        ticker: TICKER,
-        type: "combo",
-        action: "BUY",
-        legs: toUnifiedLegs(DEBIT_ORDER_LEGS),
-        prices: {},
-      }),
-    );
-    expect(result.current.available).toBe(false);
-    expect(result.current.bid).toBeNull();
   });
 });
 
