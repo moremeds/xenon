@@ -11,7 +11,8 @@ import { test, expect } from "@playwright/test";
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Open the SPXU ticker detail modal and navigate to the Order tab. */
+/** Open the SPXU ticker detail page; the order ticket is always mounted in
+ *  the desktop act column — there is no Order tab to click. */
 async function openSpxuOrderTab(page: import("@playwright/test").Page) {
   // Navigate to portfolio page
   await page.goto("/portfolio");
@@ -20,11 +21,10 @@ async function openSpxuOrderTab(page: import("@playwright/test").Page) {
   const spxuLink = page.locator('[aria-label="View details for SPXU"]').first();
   await spxuLink.waitFor({ timeout: 10_000 });
   await spxuLink.click();
+  await page.waitForURL("**/SPXU**", { timeout: 5_000 });
 
-  // Click the Order tab in the modal
-  const orderTab = page.locator(".ticker-tab", { hasText: /^Order/ }).first();
-  await orderTab.waitFor({ timeout: 5_000 });
-  await orderTab.click();
+  // Combo order form renders directly in the act column for the held spread
+  await page.locator(".act-ticket .order-form").waitFor({ timeout: 10_000 });
 }
 
 /** Fill in the combo order form and click Place Combo Order (first click). */

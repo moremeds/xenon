@@ -1,6 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { expect, test } from "@playwright/test";
 
+// Must match MOCK_BACKEND_PORT in playwright.config.ts — the webServer hands
+// it to Next as XENON_API_URL so /api/orders/cancel proxies here.
 const MOCK_BACKEND_PORT = 8325;
 
 const PORTFOLIO_MOCK = {

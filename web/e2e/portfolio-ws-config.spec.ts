@@ -1,7 +1,5 @@
 import { expect, test } from "@playwright/test";
 
-const BASE_URL = process.env.PW_BASE_URL ?? "http://127.0.0.1:3000";
-
 test("portfolio uses the resolved realtime websocket config without the old localhost:8765 403 failure", async ({
   page,
 }) => {
@@ -12,7 +10,7 @@ test("portfolio uses the resolved realtime websocket config without the old loca
     }
   });
 
-  await page.goto(`${BASE_URL}/portfolio`);
+  await page.goto("/portfolio");
 
   await expect(page.getByText("CONNECTED", { exact: true })).toBeVisible({
     timeout: 20_000,
