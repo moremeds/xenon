@@ -685,6 +685,53 @@ def test_reserve_attempt_scope_isolation(_throwaway_pg_db):
     assert second.submission_id != first.submission_id
 
 
+def test_reserve_attempt_conflict_row_not_in_scope(_throwaway_pg_db, monkeypatch):
+    """DO NOTHING lost on a key the scope/attempt lookup cannot see (here a
+    colliding submission_id owned by a different scope): explicit non-winner
+    body_mismatch — never a second insert, never an exception. With the old
+    single-arbiter form this insert raised UniqueViolation instead.
+    """
+    from xenon.db.engine import get_sync_engine
+    from xenon.execution import orders_store
+
+    seeded_sid = str(uuid.uuid4())
+    with get_sync_engine().begin() as conn:
+        conn.execute(
+            insert(order_submissions).values(
+                submission_id=seeded_sid,
+                user_id="other-user",
+                client_attempt_id="att-elsewhere",
+                ticker="QQQ",
+                security_type="STK",
+                action="BUY",
+                quantity=5,
+                state="PENDING",
+                submitted_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+                broker="IB",
+                account_env="live",
+                broker_account="DU_FOREIGN",
+            )
+        )
+    monkeypatch.setattr(
+        orders_store.uuid, "uuid4", lambda: uuid.UUID(seeded_sid)
+    )
+    out = reserve_attempt("u1", "att-clash-1", _req(), **_SCOPE)
+    assert out.status == "body_mismatch"
+    assert out.reason_code == ATTEMPT_BODY_MISMATCH
+    assert out.submission_id is None
+    # No second row materialized for this attempt; the seeded row is
+    # untouched.
+    with get_sync_engine().begin() as conn:
+        attempt_rows = conn.execute(
+            select(order_submissions.c.submission_id).where(
+                order_submissions.c.client_attempt_id == "att-clash-1"
+            )
+        ).fetchall()
+    assert attempt_rows == []
+    assert _fetch_submission(seeded_sid) is not None
+
+
 def test_previous_release_writer_sql_still_succeeds(_throwaway_pg_db):
     """The previous release's actual reserve_attempt statement — old insert
     shape (no `legs`) with ON CONFLICT ON CONSTRAINT uq_order_sub_user_attempt

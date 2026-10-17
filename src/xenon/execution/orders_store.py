@@ -54,8 +54,8 @@ class RequestRow(BaseModel):
 @dataclass
 class ReservationOutcome:
     status: Literal["winner", "duplicate", "terminal", "body_mismatch"]
-    submission_id: str
-    state: str
+    submission_id: str | None
+    state: str | None
     duplicate_of: str | None
     reason_code: str | None
 
@@ -200,7 +200,13 @@ def reserve_attempt(
             broker_account=broker_account,
             legs=legs,
         )
-        stmt = stmt.on_conflict_do_nothing(constraint="uq_order_sub_scope_attempt")
+        # EXPAND keeps both attempt keys live (legacy user-scoped +
+        # account-scoped). Postgres speculative insertion only honors the
+        # named arbiter index — naming one key still raises UniqueViolation
+        # when a concurrent insert collides on the other. Bare DO NOTHING
+        # makes every unique index an arbiter; the scope/attempt lookup
+        # below then classifies which conflict actually happened.
+        stmt = stmt.on_conflict_do_nothing()
         stmt = stmt.returning(order_submissions.c.submission_id)
         inserted = conn.execute(stmt).first()
 
@@ -239,7 +245,19 @@ def reserve_attempt(
                 order_submissions.c.client_attempt_id == client_attempt_id,
             )
         ).first()
-        assert row is not None, "ON CONFLICT hit but row not found"
+        if row is None:
+            # The conflict resolved on a key this lookup cannot see — e.g.
+            # a submission_id collision, or the conflicting row vanished
+            # between the insert and this read. Never a second insert and
+            # never an exception: fail closed as a non-winner; the API maps
+            # body_mismatch / ATTEMPT_BODY_MISMATCH to 409.
+            return ReservationOutcome(
+                status="body_mismatch",
+                submission_id=None,
+                state=None,
+                duplicate_of=None,
+                reason_code=ATTEMPT_BODY_MISMATCH,
+            )
         if not _request_body_matches(row, request, legs):
             return ReservationOutcome(
                 status="body_mismatch",
@@ -497,7 +515,10 @@ def register_from_snapshot(
                 con_id=con_id,
                 tif=tif,
             )
-            .on_conflict_do_nothing(index_elements=["submission_id"])
+            # client_attempt_id is non-null here (snapshot-<perm_id>), so a
+            # racing sibling conflicts on the attempt keys too — a PK-only
+            # arbiter would raise UniqueViolation instead of no-op'ing.
+            .on_conflict_do_nothing()
             .returning(order_submissions.c.submission_id)
         )
         if result.first() is None:
