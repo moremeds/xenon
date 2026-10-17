@@ -44,6 +44,7 @@ class ReasonCode(StrEnum):
     LIMIT_OFF_TICK = "LIMIT_OFF_TICK"
     # F4 — idempotency (PR-B)
     ATTEMPT_ID_TERMINAL = "ATTEMPT_ID_TERMINAL"
+    ATTEMPT_BODY_MISMATCH = "ATTEMPT_BODY_MISMATCH"
     # F5 — cancel/modify failure classification (PR-C)
     IB_CONNECTION = "IB_CONNECTION"
     OWNERSHIP = "OWNERSHIP"

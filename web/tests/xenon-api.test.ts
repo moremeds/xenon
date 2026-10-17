@@ -129,8 +129,7 @@ describe("xenonFetch — error handling", () => {
   });
 
   it("handles non-JSON error body gracefully", async () => {
-    // When res.json() fails on a text body, the body stream is consumed.
-    // res.text() also fails → falls back to "HTTP {status}"
+    // The body is read once as text, so non-JSON upstream detail survives.
     mockFetch.mockResolvedValue(textResponse("Internal Server Error", 500));
 
     try {
@@ -139,8 +138,7 @@ describe("xenonFetch — error handling", () => {
     } catch (err) {
       const e = err as InstanceType<typeof XenonApiError>;
       expect(e.status).toBe(500);
-      // Body consumed by failed json() → text() also fails → fallback
-      expect(e.detail).toBe("HTTP 500");
+      expect(e.detail).toBe("Internal Server Error");
     }
   });
 

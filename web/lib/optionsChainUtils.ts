@@ -5,6 +5,8 @@ import { optionKey } from "@/lib/pricesProtocol";
 
 export type OrderLeg = {
   id: string;
+  /** Underlying symbol. When omitted, recovered from the `SYMBOL_…` id prefix. */
+  symbol?: string;
   action: "BUY" | "SELL";
   right: "C" | "P";
   strike: number;
@@ -133,7 +135,7 @@ export function computeNetPrice(legs: OrderLeg[], prices: Record<string, PriceDa
   let net = 0;
   for (const leg of legs) {
     const key = optionKey({
-      symbol: leg.id.split("_")[0],
+      symbol: leg.symbol ?? leg.id.split("_")[0],
       expiry: leg.expiry,
       strike: leg.strike,
       right: leg.right,
@@ -157,19 +159,30 @@ export type NetOptionQuote = {
 };
 
 /**
- * Compute the marketable bid/ask/mid for a combo order.
- *
- * For a debit spread (net positive, paying to open):
- *   - BID = what you'd receive if you SELL the spread (hit bids on longs, lift asks on shorts)
- *   - ASK = what you'd pay if you BUY the spread (lift asks on longs, hit bids on shorts)
+ * Compute the marketable bid/ask/mid for a combo order — the SINGLE
+ * natural-quote implementation used by the order builder, the spread
+ * price bar, OrderTab combo pricing, and ModifyOrderModal.
  *
  * The "natural market" perspective:
  *   - BUY leg: you pay the ASK to acquire it, receive the BID to liquidate it
  *   - SELL leg: you receive the BID to open it, pay the ASK to close it
  *
- * So for the combo as a whole:
- *   - netAsk (cost to BUY) = sum of (ask * qty) for BUY legs - sum of (bid * qty) for SELL legs
- *   - netBid (proceeds to SELL) = sum of (bid * qty) for BUY legs - sum of (ask * qty) for SELL legs
+ * So for the combo as a whole (cross-fields, never sign * bid / sign * ask):
+ *   - ask = cost to BUY the structure
+ *         = sum of (ask * qty) for BUY legs - sum of (bid * qty) for SELL legs
+ *   - bid = proceeds to SELL the structure
+ *         = sum of (bid * qty) for BUY legs - sum of (ask * qty) for SELL legs
+ *
+ * Each leg is priced under its own symbol: `leg.symbol` when set, else
+ * recovered from the `SYMBOL_…` `leg.id` prefix (same convention as
+ * `computeNetPrice`); `ticker` is only a fallback when a leg carries no
+ * symbol at all. This keeps mixed-underlying BAG orders correct.
+ *
+ * Values are SIGNED: debit structures quote positive, credit structures
+ * quote negative (IB BAG limit convention: negative limit = net credit).
+ * ask >= bid holds whenever every leg's ask >= its bid, so no absolute-value
+ * normalization is applied — that would strip the credit sign and invert
+ * bid/ask ordering.
  */
 export function computeNetOptionQuote(
   legs: OrderLeg[],
@@ -185,7 +198,7 @@ export function computeNetOptionQuote(
 
   for (const leg of legs) {
     const key = optionKey({
-      symbol: ticker,
+      symbol: leg.symbol ?? (leg.id.split("_")[0] || ticker),
       expiry: leg.expiry,
       strike: leg.strike,
       right: leg.right,
@@ -213,16 +226,13 @@ export function computeNetOptionQuote(
     }
   }
 
-  // For debit spreads: netAsk > 0 (pay), netBid > 0 (receive)
-  // For credit spreads: netAsk < 0 (receive credit), netBid < 0 (pay credit)
-  // Normalize: bid < ask (bid is always the worse price for the order placer)
-  const absBid = Math.abs(netBid);
-  const absAsk = Math.abs(netAsk);
-  const bid = Math.min(absBid, absAsk);
-  const ask = Math.max(absBid, absAsk);
-  const mid = (bid + ask) / 2;
-
-  return { bid, ask, mid };
+  // Signed quote: netAsk >= netBid by construction (each leg contributes
+  // ask - bid >= 0 to netAsk - netBid). Debits positive, credits negative.
+  // Round to 4 decimals to clear float dust (e.g. 3.25 - 3.02 =
+  // 0.2299…98) without losing half-cent mid precision.
+  const round4 = (v: number) => Math.round(v * 10000) / 10000;
+  const mid = (netBid + netAsk) / 2;
+  return { bid: round4(netBid), ask: round4(netAsk), mid: round4(mid) };
 }
 
 /* ─── ATM strike finder ─── */

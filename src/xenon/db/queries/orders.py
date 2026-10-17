@@ -4,70 +4,9 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import insert, select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from xenon.db.schema import order_events, order_submissions
-
-
-async def reserve_attempt(
-    conn: AsyncConnection,
-    *,
-    submission_id: str,
-    user_id: str,
-    client_attempt_id: str,
-    ticker: str,
-    security_type: str,
-    action: str,
-    quantity: int,
-    limit_price: Decimal,
-    expiry=None,
-    strike=None,
-    right=None,
-    multiplier: int = 100,
-    con_id: int | None = None,
-    broker: str = "IB",
-    account_env: str = "legacy_unknown",
-    broker_account: str = "legacy_unknown",
-) -> dict:
-    now = datetime.now(timezone.utc)
-    values = dict(
-        submission_id=submission_id,
-        user_id=user_id,
-        client_attempt_id=client_attempt_id,
-        ticker=ticker,
-        security_type=security_type,
-        action=action,
-        quantity=quantity,
-        limit_price=limit_price,
-        expiry=expiry,
-        strike=strike,
-        right=right,
-        multiplier=multiplier,
-        con_id=con_id,
-        state="PENDING",
-        submitted_at=now,
-        updated_at=now,
-        broker=broker,
-        account_env=account_env,
-        broker_account=broker_account,
-    )
-    stmt = pg_insert(order_submissions).values(**values)
-    stmt = stmt.on_conflict_do_nothing(constraint="uq_order_sub_user_attempt")
-    stmt = stmt.returning(order_submissions.c.submission_id)
-    result = await conn.execute(stmt)
-    inserted = result.first()
-    if inserted is not None:
-        return await get_by_submission_id(conn, submission_id)
-    existing = await lookup_by_attempt(
-        conn,
-        user_id,
-        client_attempt_id,
-        broker=broker,
-        account_env=account_env,
-        broker_account=broker_account,
-    )
-    return existing
 
 
 async def get_by_submission_id(conn: AsyncConnection, submission_id: str) -> dict | None:
@@ -170,30 +109,6 @@ async def lookup_by_ib_order_id(conn: AsyncConnection, ib_order_id: int | str) -
     stmt = select(order_submissions.c.submission_id).where(order_submissions.c.ib_order_id == str(ib_order_id))
     row = (await conn.execute(stmt)).first()
     return row[0] if row else None
-
-
-async def lookup_by_attempt(
-    conn: AsyncConnection,
-    user_id: str,
-    client_attempt_id: str,
-    *,
-    broker: str | None = None,
-    account_env: str | None = None,
-    broker_account: str | None = None,
-) -> dict | None:
-    conditions = [
-        order_submissions.c.user_id == user_id,
-        order_submissions.c.client_attempt_id == client_attempt_id,
-    ]
-    if broker is not None:
-        conditions.append(order_submissions.c.broker == broker)
-    if account_env is not None:
-        conditions.append(order_submissions.c.account_env == account_env)
-    if broker_account is not None:
-        conditions.append(order_submissions.c.broker_account == broker_account)
-    stmt = select(order_submissions).where(*conditions)
-    row = (await conn.execute(stmt)).first()
-    return dict(row._mapping) if row else None
 
 
 async def working_orders_for(
