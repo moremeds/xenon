@@ -5,6 +5,30 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+### Removed
+
+- The standalone marketing site (`site/`, 68 files) and its site-only tooling — the core product does not need it. **Operator follow-up:** disconnect the Vercel project for `site/` or Vercel reports failed builds.
+- Clerk authentication end to end: `@clerk/*` packages, sign-in/up pages, providers, the FastAPI JWT path, `CLERK_*` env vars, `ALLOWED_USER_IDS`, `XENON_DISABLE_AUTH`, `PLAYWRIGHT_DISABLE_AUTH`, and `dev.sh --no-auth`.
+- ~18k lines of unreachable web code and most of `lib/tools/` (kept only `runner.ts` for the Ratings tab), the dead regime client in `OrderTab`, mirror tests, the dead `VERCEL === "1"` HSTS branch, and the unused `@vercel/analytics` dependency.
+- The dead nightly Playwright workflow (disabled for inactivity after 100 consecutive failures) and 33 e2e specs that targeted routes removed in the pure-portfolio pivot.
+
+### Changed
+
+- **Auth is credential-only; the browser boundary is enforced.** FastAPI accepts `X-Internal-Token` (Next → API) or a path-scoped `X-API-Key`; only `/health` is exempt and the loopback pass is deleted — a `tailscale serve` or Docker proxy makes every peer look local. Next middleware now guards every `/api/**` request: `Host` must be on `XENON_ALLOWED_HOSTS`, GET/HEAD require `Sec-Fetch-Site: same-origin` or `none` when present, and mutations need a matching `Origin` (or the same-origin marker) plus `Content-Type: application/json`. Rejections return 403 before any FastAPI call. Realtime relay upgrades require a single-use ticket and an allowed `Origin`. **Release prerequisites:** prod env must set `XENON_ALLOWED_HOSTS` and `XENON_WS_ALLOWED_ORIGINS`, and the WS service consumers (`argon-ws-consumer`, apex) must send `X-API-Key` on upgrade.
+- **Order idempotency is account-scoped.** The attempt key is now `(broker, account_env, broker_account, client_attempt_id)` — caller identity no longer participates. A retry with the same key and a different body returns **409 `ATTEMPT_BODY_MISMATCH`** instead of a duplicate order. `order_submissions` gains a durable `legs jsonb` column; the migration is expand-only and must be applied (manual migrator) before or with the new image.
+- **One natural-quote implementation.** `computeNetOptionQuote` now serves `ModifyOrderModal`, the OrderTab combo, `resolveSpreadPriceData`, `OptionsChainTab` and `useOrderPrices`; the hand-rolled loops are deleted. Leg ratios are applied everywhere (a 1x2 quote no longer sums raw leg prices) and the credit/debit sign convention holds — the modify strip no longer drops the sign. `ModifyOrderModal` accepts a negative limit for BAG orders (signed credit); single-leg orders still require a price > 0.
+- **API resilience.** IB cooldown is split per traffic class — a data failure no longer blocks order entry, and an order failure no longer blocks data. After a gateway restart order requests are never auto-resent (the first attempt may already have reached IB); data requests keep their retry. `/futu/sync` bounds `connect` and `fetch_portfolio` at 15s each and returns 503 instead of wedging the event loop. The Postgres LISTEN/NOTIFY subscriber reconnects with exponential backoff, and journal auto-import replays unconsumed outbox rows after a reconnect.
+- **Cancel/modify error contract.** Non-JSON or empty upstream error bodies now reach the toast as their text or `HTTP <status>` instead of collapsing to `HTTP 502`; every error path carries a top-level `reason_code`.
+- **Futu portfolio route proxies FastAPI only** — the disk fallback is gone: 404 renders a "not yet synced" empty state, other failures return 502.
+- **CI cleanup.** Dead `--ignore` flags removed; CI runs on Node 22 and `uv run` (no bare `python3.13`); the realtime relay gets a `node --test` job; the `:latest` GHCR tag is promoted only after the full build matrix succeeds, so a failed image build promotes nothing.
+- `WorkspaceSections.tsx` (2754 lines) is split into `web/components/workspace/` modules. Pure move; no behaviour change.
+
+### Fixed
+
+- **Read-only mode is actually read-only.** Under `XENON_READ_ONLY=1` (`dev.sh live`), the wizard POSTs, in-process combo-session calls (`submit_combo`, `attach_protection`), and `POST /orders/refresh` could still write or reach IB — only the three order routes checked the flag. One guard now covers every order-mutating path (including `POST /journal`, whose refusal now precedes scope resolution), malformed-JSON and trailing-slash write forms get the same 403 contract, refresh returns the Postgres view without running a sync subprocess, and all `orders_store` writers refuse.
+- **Cancel/modify can no longer act on the wrong order.** The stored-owner lookup preferred `orderId` and took the first row, so two clients sharing an `orderId` could inherit each other's orders; identity is now asserted as (scope account, owner clientId, orderId, permId), `permId` never falls back to `orderId`, and the first observed `permId` is latched across reconnects and polls. `IBConnectionError` now produces the JSON error contract instead of a traceback, and BAG credit modifies accept a signed negative limit.
+- **Postgres tests actually run.** The async PG fixture called `text()` without importing it, and a broad `except` reported the NameError as "PG unreachable", so every async PG test silently skipped. A reachable-but-unmigrated database now errors loudly instead of skipping. Unmarked tests — and their child processes — can no longer dial broker ports 4001/4002/7496/7497 (`live_ib` / `paper_ib` markers with a socket guard).
+
 ## [0.8.4] — 2026-10-16
 
 ### Fixed
