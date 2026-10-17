@@ -26,6 +26,6 @@ export default defineConfig({
     command: `XENON_TRADING_MODE=paper ASSISTANT_MOCK=1 npx next dev --turbopack -p ${PORT}`,
     url: `http://localhost:${PORT}`,
     reuseExistingServer: true,
-    timeout: 60_000,
+    timeout: 180_000,
   },
 });
