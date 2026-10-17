@@ -150,7 +150,6 @@ Futu OpenD  ─┘   (xenon.api.server)   (snapshots,        (web/)             
 
 - `src/xenon/` — Python services (FastAPI, IB / Futu clients, execution, reports, monitor daemon)
 - `web/` — Next.js terminal (portfolio, orders, AI chat)
-- `site/` — standalone marketing site (separate deployment)
 - `brand/` — design system and tokens
 - `data/` — runtime artifacts (gitignored)
 - `docs/` — architecture, runbooks, references ([index](docs/README.md))

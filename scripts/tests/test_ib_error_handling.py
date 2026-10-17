@@ -8,6 +8,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Mock-transport tests — bypass the broker *boundary* check; the socket
+# denylist still refuses any real dial.
+pytestmark = pytest.mark.usefixtures("bypass_broker_boundary")
+
 from xenon.clients.ib_client import IBClient
 
 

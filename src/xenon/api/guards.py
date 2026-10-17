@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from xenon.api import trading_mode
 from xenon.execution.account_scope import AccountScope, resolve_from_app_state
+from xenon.execution.preflight import ReasonCode
 
 
 def is_read_only() -> bool:
@@ -66,16 +67,10 @@ def mask_account(account: str | None) -> str:
     return account[:2] + "***" + account[-4:]
 
 
-def require_mode_verified(request: Request) -> None:
-    """FastAPI dependency: reject order-mutating requests when mode is unverified.
-
-    Reads `app.state.{trading_mode,account,mode_verified}` populated by the
-    server lifespan guard. Returns 503 with both the declared mode and the
-    observed account in the body so the operator can fix the mismatch
-    (edit .env or relog Gateway). The 503 detail is auth-gated (only routes
-    behind auth call this), so leaking the raw account here is fine.
-    """
-    state = request.app.state
+def _check_mode_verified(state) -> None:
+    """Mode-mismatch check shared by `require_mode_verified` and
+    `ensure_order_allowed`. `state` is an app.state-like object carrying
+    `{trading_mode, account, mode_verified}`."""
     if getattr(state, "mode_verified", False):
         return
     declared = getattr(state, "trading_mode", trading_mode.MODE)
@@ -89,6 +84,75 @@ def require_mode_verified(request: Request) -> None:
             f"Fix: align .env with the Gateway login and restart."
         ),
     )
+
+
+def require_mode_verified(request: Request) -> None:
+    """FastAPI dependency: reject order-mutating requests when mode is unverified.
+
+    Reads `app.state.{trading_mode,account,mode_verified}` populated by the
+    server lifespan guard. Returns 503 with both the declared mode and the
+    observed account in the body so the operator can fix the mismatch
+    (edit .env or relog Gateway). The 503 detail is auth-gated (only routes
+    behind auth call this), so leaking the raw account here is fine.
+    """
+    _check_mode_verified(request.app.state)
+
+
+def ensure_order_allowed(kind: str, state) -> JSONResponse | None:
+    """Single guard for every order-mutating path.
+
+    Called at the top of each order write entry point (HTTP routes and the
+    in-process `_orders_*_from_body` helpers the wizard reaches without
+    going through a route). Checks, in order:
+
+    1. `XENON_READ_ONLY=1` → 403 `READ_ONLY_MODE` JSONResponse.
+    2. Non-IB `app.state.broker` → 403 `READ_ONLY_BROKER` JSONResponse.
+       Broker denial precedes the mode check: FUTU carries no IB trading
+       mode to verify (see test_place_quote_gate.py
+       `test_futu_scope_rejects_before_ib_mode_verification`).
+    3. Unverified trading mode → HTTPException 503 (same detail as
+       `require_mode_verified`).
+
+    `kind` names the operation in denial copy ("order placement").
+    `state` is the FastAPI `app.state` — `request.app.state` in routes,
+    the module-global `app.state` inside server.py helpers. Returns None
+    when the mutation may proceed.
+    """
+    if is_read_only():
+        return read_only_403()
+    broker = str(getattr(state, "broker", "IB") or "IB").upper()
+    if broker != "IB":
+        return JSONResponse(
+            status_code=403,
+            content={
+                "detail": f"{broker} is read-only for {kind}",
+                "reason_code": ReasonCode.READ_ONLY_BROKER.value,
+                "reason_detail": f"{broker} is read-only for {kind}",
+            },
+        )
+    _check_mode_verified(state)
+    return None
+
+
+class ReadOnlyDenied(Exception):
+    """Signal: request refused because XENON_READ_ONLY=1.
+
+    Raised by `require_writable` route dependencies; the app-level
+    exception handler in server.py converts it to the `read_only_403`
+    JSONResponse so the refusal keeps the top-level `reason_code` shape."""
+
+
+def require_writable() -> None:
+    """Route dependency: refuse writes under XENON_READ_ONLY=1 early.
+
+    Declared via `dependencies=[Depends(require_writable)]` — FastAPI
+    solves route-level dependencies before sibling param dependencies
+    (scope resolution) and request-body validation, so a `dev.sh live`
+    session gets 403 READ_ONLY_MODE ahead of any 4xx/5xx those would
+    produce.
+    """
+    if is_read_only():
+        raise ReadOnlyDenied()
 
 
 def get_account_scope(request: Request) -> AccountScope:
