@@ -24,7 +24,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -1561,18 +1561,32 @@ async def portfolio_sync(scope=Depends(get_account_scope)):
     return payload
 
 
+# Single-flight slot for /portfolio/background-sync: at most one background
+# ib_sync (and its post-sync audit) runs at a time. Also keeps a strong
+# reference so the task is not garbage-collected mid-run.
+_bg_sync_task: asyncio.Task | None = None
+
+
 @app.post("/portfolio/background-sync", status_code=202)
-async def portfolio_background_sync(bg: BackgroundTasks):
-    """Fire-and-forget portfolio sync."""
-    bg.add_task(_bg_sync_via_subprocess)
+async def portfolio_background_sync():
+    """Fire-and-forget portfolio sync. Single-flight: while one runs, a new
+    trigger returns `in_progress` and spawns nothing."""
+    global _bg_sync_task
+    if _bg_sync_task is not None and not _bg_sync_task.done():
+        return {"status": "in_progress"}
+    _bg_sync_task = asyncio.create_task(_bg_sync_via_subprocess())
     return {"status": "accepted"}
 
 
 async def _bg_sync_via_subprocess():
     """Background task: run ib_sync.py as subprocess with auto-recovery."""
-    result = await _run_ib_script_with_recovery(
-        "xenon-ib-sync", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
-    )
+    try:
+        result = await _run_ib_script_with_recovery(
+            "xenon-ib-sync", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
+        )
+    except Exception:  # noqa: BLE001 — a detached task must log, not raise into the void
+        logger.exception("Background portfolio sync failed")
+        return
     if result.ok:
         logger.info("Background portfolio sync complete")
     else:

@@ -1,463 +1,363 @@
-"""Tests for naked_short_audit.py — naked short violation detection and cancellation."""
+"""Naked-short audit — shadow mode (spec §2.4 Phase A, PR-06).
 
+The audit is an adapter over `xenon.execution.coverage`: IB open orders
+(the `open_orders_from_trades` shape) -> working-order legs -> coverage
+over the in-process holdings of the sync pass. It only logs violations and
+records `service_health("naked_short_audit")`; no cancel path exists.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import inspect
 import json
-from unittest.mock import MagicMock, patch
+import sys
 
 import pytest
 
-# Will be importable once implemented
-from xenon.execution.naked_short_audit import cancel_violations, find_naked_short_violations
+import xenon.execution as execution_pkg
+from xenon.execution import naked_short_audit as nsa
+
+ACCT = "U1"
+FOREIGN = "U2"
+EXP = "2026-12-18"
+
 
 # ---------------------------------------------------------------------------
-# Helpers — build minimal order / position dicts matching real data shapes
+# Builders — payload legs as ib_sync stamps them, orders as ib_orders shapes them
 # ---------------------------------------------------------------------------
 
 
-def make_order(
-    order_id,
-    perm_id,
-    symbol,
-    sec_type,
-    action,
-    qty,
+def _stock_pos(sym="AAPL", shares=100, account=ACCT):
+    return {
+        "ticker": sym,
+        "expiry": "N/A",
+        "legs": [
+            {
+                "type": "Stock",
+                "direction": "LONG" if shares >= 0 else "SHORT",
+                "contracts": abs(shares),
+                "account": account,
+            }
+        ],
+    }
+
+
+def _call_pos(sym="AAPL", contracts=1, direction="LONG", account=ACCT, tc=None, mult=100, und_sec="STK"):
+    return {
+        "ticker": sym,
+        "expiry": EXP,
+        "legs": [
+            {
+                "type": "Call",
+                "direction": direction,
+                "contracts": contracts,
+                "account": account,
+                "tc": tc or sym,
+                "mult": mult,
+                "und_sec": und_sec,
+            }
+        ],
+    }
+
+
+def _payload(*positions):
+    return {"positions": list(positions)}
+
+
+def _opt_contract(sym="AAPL", right="C", strike=200.0, con_id=111, tc=None, mult=100, und_sec="STK", meta=True):
+    c = {"conId": con_id, "symbol": sym, "secType": "OPT", "strike": strike, "right": right, "expiry": EXP}
+    if meta:
+        c.update({"tradingClass": tc or sym, "multiplier": mult, "underSecType": und_sec})
+    return c
+
+
+def _order(
+    contract,
+    *,
+    action="SELL",
+    qty=1,
+    order_id=1,
+    perm_id=1001,
+    client_id=0,
+    account=ACCT,
     status="Submitted",
-    right="?",
-    strike=0.0,
-    expiry=None,
+    filled=0,
+    non_guaranteed=None,
     order_ref=None,
 ):
     return {
         "orderId": order_id,
         "permId": perm_id,
-        "symbol": symbol,
-        "orderRef": order_ref,
-        "contract": {
-            "conId": 100000 + order_id,
-            "symbol": symbol,
-            "secType": sec_type,
-            "strike": strike,
-            "right": right,
-            "expiry": expiry,
-        },
+        "clientId": client_id,
+        "symbol": contract.get("symbol"),
+        "contract": contract,
         "action": action,
         "orderType": "LMT",
         "totalQuantity": float(qty),
-        "limitPrice": 10.0,
-        "auxPrice": 0.0,
         "status": status,
-        "filled": 0.0,
-        "remaining": float(qty),
-        "avgFillPrice": 0.0,
-        "tif": "GTC",
+        "account": account,
+        "nonGuaranteed": non_guaranteed,
+        "filled": float(filled),
+        "remaining": float(qty - filled),
+        "orderRef": order_ref,
     }
 
 
-def make_stock_position(ticker, shares):
+def _stk_contract(sym="AAPL"):
+    return {"conId": 265598, "symbol": sym, "secType": "STK", "strike": 0.0, "right": None, "expiry": None}
+
+
+def _bag(legs, sym="AAPL"):
     return {
-        "ticker": ticker,
-        "structure_type": "Stock",
-        "contracts": shares,
-        "direction": "LONG",
-        "legs": [
-            {
-                "direction": "LONG",
-                "contracts": shares,
-                "type": "Stock",
-                "strike": 0.0,
-            }
-        ],
+        "conId": 28812380,
+        "symbol": sym,
+        "secType": "BAG",
+        "strike": 0.0,
+        "right": None,
+        "expiry": None,
+        "comboLegs": legs,
     }
 
 
-def make_option_position(ticker, direction, opt_type, contracts, strike=100.0, expiry=None):
-    """Build an option position (e.g. SHORT call leg in portfolio)."""
-    return {
-        "ticker": ticker,
-        "structure_type": "Long Call" if direction == "LONG" else "Short Call",
-        "contracts": contracts,
-        "direction": direction,
-        "expiry": expiry,
-        "legs": [
-            {
-                "direction": direction,
-                "contracts": contracts,
-                "type": opt_type,
-                "strike": strike,
-            }
-        ],
+def _bag_leg(action, right="C", strike=200.0, con_id=111, sym="AAPL", ratio=1, meta=True):
+    leg = {
+        "conId": con_id,
+        "ratio": ratio,
+        "action": action,
+        "symbol": sym,
+        "strike": strike,
+        "right": right,
+        "expiry": EXP,
+        "secType": "OPT",
     }
+    if meta:
+        leg.update({"tradingClass": sym, "multiplier": 100, "underSecType": "STK"})
+    return leg
 
 
-def make_spread_position(ticker, contracts, long_strike, short_strike):
-    """Bull call spread — has both a LONG and SHORT call leg."""
-    return {
-        "ticker": ticker,
-        "structure_type": "Bull Call Spread",
-        "contracts": contracts,
-        "direction": "DEBIT",
-        "legs": [
-            {"direction": "LONG", "contracts": contracts, "type": "Call", "strike": long_strike},
-            {"direction": "SHORT", "contracts": contracts, "type": "Call", "strike": short_strike},
-        ],
-    }
+def _find(payload, orders, *, view_complete=True, scope=ACCT):
+    return nsa.find_violations(payload, orders, scope, view_complete=view_complete)
 
 
-# ===========================================================================
-# Test: find_naked_short_violations
-# ===========================================================================
-
-
-class TestFindNakedShortViolations:
-    def test_no_orders_no_violations(self):
-        assert find_naked_short_violations([], []) == []
-
-    def test_buy_order_never_violation(self):
-        orders = [make_order(1, 100, "AAPL", "STK", "BUY", 100)]
-        violations = find_naked_short_violations(orders, [])
-        assert violations == []
-
-    def test_sell_stock_no_position_violation(self):
-        orders = [make_order(1, 100, "AAPL", "STK", "SELL", 100)]
-        violations = find_naked_short_violations(orders, [])
-        assert len(violations) == 1
-        assert violations[0]["order_id"] == 1
-        assert violations[0]["perm_id"] == 100
-        assert violations[0]["symbol"] == "AAPL"
-        assert (
-            "no LONG stock position" in violations[0]["reason"].lower()
-            or "no long stock" in violations[0]["reason"].lower()
-        )
-
-    def test_sell_stock_within_position_no_violation(self):
-        orders = [make_order(1, 100, "AAPL", "STK", "SELL", 100)]
-        positions = [make_stock_position("AAPL", 200)]
-        violations = find_naked_short_violations(orders, positions)
-        assert violations == []
-
-    def test_sell_stock_exceeds_position_violation(self):
-        orders = [make_order(1, 100, "AAPL", "STK", "SELL", 500)]
-        positions = [make_stock_position("AAPL", 200)]
-        violations = find_naked_short_violations(orders, positions)
-        assert len(violations) == 1
-        assert violations[0]["order_id"] == 1
-        assert "exceeds" in violations[0]["reason"].lower() or ">" in violations[0]["reason"]
-
-    def test_sell_call_no_stock_violation(self):
-        orders = [make_order(1, 100, "AAPL", "OPT", "SELL", 5, right="C", strike=150.0, expiry="2026-06-20")]
-        violations = find_naked_short_violations(orders, [])
-        assert len(violations) == 1
-        assert violations[0]["order_id"] == 1
-        assert "naked" in violations[0]["reason"].lower() or "no long stock" in violations[0]["reason"].lower()
-
-    def test_sell_call_covered_no_violation(self):
-        orders = [make_order(1, 100, "AAPL", "OPT", "SELL", 2, right="C", strike=150.0, expiry="2026-06-20")]
-        positions = [make_stock_position("AAPL", 500)]
-        violations = find_naked_short_violations(orders, positions)
-        assert violations == []
-
-    def test_sell_call_undercovered_violation(self):
-        """Existing 3 SHORT calls in portfolio + 5 new SELL call order = 8 contracts.
-        8 * 100 = 800 shares needed. Only have 500 shares → violation."""
-        orders = [make_order(1, 100, "AAPL", "OPT", "SELL", 5, right="C", strike=150.0, expiry="2026-06-20")]
-        positions = [
-            make_stock_position("AAPL", 500),
-            make_option_position("AAPL", "SHORT", "Call", 3, strike=150.0),
-        ]
-        violations = find_naked_short_violations(orders, positions)
-        assert len(violations) == 1
-        assert violations[0]["order_id"] == 1
-
-    def test_sell_put_no_violation(self):
-        orders = [make_order(1, 100, "AAPL", "OPT", "SELL", 10, right="P", strike=100.0, expiry="2026-06-20")]
-        violations = find_naked_short_violations(orders, [])
-        assert violations == []
-
-    def test_bag_combo_no_violation(self):
-        orders = [make_order(1, 100, "AAPL", "BAG", "SELL", 10)]
-        violations = find_naked_short_violations(orders, [])
-        assert violations == []
-
-    def test_multiple_violations(self):
-        orders = [
-            make_order(1, 100, "AAPL", "STK", "SELL", 100),
-            make_order(2, 200, "GOOG", "OPT", "SELL", 5, right="C", strike=200.0, expiry="2026-06-20"),
-            make_order(3, 300, "MSFT", "STK", "BUY", 50),  # not a violation
-        ]
-        violations = find_naked_short_violations(orders, [])
-        assert len(violations) == 2
-        ids = {v["order_id"] for v in violations}
-        assert ids == {1, 2}
-
-    def test_inactive_orders_skipped(self):
-        """Orders with status Filled/Cancelled should be ignored."""
-        orders = [
-            make_order(1, 100, "AAPL", "STK", "SELL", 100, status="Filled"),
-            make_order(2, 200, "GOOG", "STK", "SELL", 100, status="Cancelled"),
-        ]
-        violations = find_naked_short_violations(orders, [])
-        assert violations == []
-
-    def test_sell_call_covered_by_spread_short_leg(self):
-        """Short call leg in a spread position counts toward existing short calls."""
-        orders = [make_order(1, 100, "AAPL", "OPT", "SELL", 2, right="C", strike=160.0, expiry="2026-06-20")]
-        positions = [
-            make_stock_position("AAPL", 500),
-            make_spread_position("AAPL", 3, 140.0, 160.0),  # 3 SHORT calls in spread
-        ]
-        # Existing 3 short calls + 2 new = 5 total, 5*100=500 = shares held → OK
-        violations = find_naked_short_violations(orders, positions)
-        assert violations == []
-
-
-# ===========================================================================
-# Test: cancel_violations
-# ===========================================================================
-
-
-class TestCancelViolations:
-    def test_cancel_calls_client(self):
-        client = MagicMock()
-        # Set up mock trades that match by permId
-        trade1 = MagicMock()
-        trade1.order.permId = 100
-        trade1.order.orderId = 1
-        trade2 = MagicMock()
-        trade2.order.permId = 200
-        trade2.order.orderId = 2
-        client.get_open_orders.return_value = [trade1, trade2]
-
-        violations = [
-            {"order_id": 1, "perm_id": 100, "reason": "test", "symbol": "AAPL"},
-            {"order_id": 2, "perm_id": 200, "reason": "test", "symbol": "GOOG"},
-        ]
-        count = cancel_violations(client, violations)
-        assert count == 2
-        assert client.cancel_order.call_count == 2
-
-    def test_cancel_empty_list(self):
-        client = MagicMock()
-        count = cancel_violations(client, [])
-        assert count == 0
-
-
-# ===========================================================================
-# Test: dry-run mode (main)
-# ===========================================================================
-
-
-class TestDryRun:
-    def test_dry_run_does_not_cancel(self, tmp_path):
-        """Dry-run prints violations but does not connect to IB or cancel."""
-        portfolio = {"positions": []}
-        orders = {
-            "open_orders": [
-                make_order(1, 100, "AAPL", "STK", "SELL", 100),
-            ]
-        }
-        pf = tmp_path / "portfolio.json"
-        of = tmp_path / "orders.json"
-        pf.write_text(json.dumps(portfolio))
-        of.write_text(json.dumps(orders))
-
-        import sys
-
-        from xenon.execution.naked_short_audit import main as audit_main
-
-        with patch.object(
-            sys,
-            "argv",
-            [
-                "execution.naked_short_audit.py",
-                "--dry-run",
-                "--portfolio",
-                str(pf),
-                "--orders",
-                str(of),
-            ],
-        ):
-            with patch("xenon.execution.naked_short_audit.IBClient") as mock_ib:
-                result = audit_main()
-                mock_ib.assert_not_called()
-                assert result["violations_found"] == 1
-                assert result["cancelled"] == 0
+def _perm_ids(result):
+    return sorted(v["perm_id"] for v in result.violations)
 
 
 # ---------------------------------------------------------------------------
-# F1: long-call cover at same expiry (parity with nakedShortGuard.ts:254-260)
+# Policy over coverage
 # ---------------------------------------------------------------------------
 
 
-def test_short_call_with_long_call_same_expiry_not_violation():
-    """Parity with TS guard: long call at same expiry (any strike) covers short call."""
+def test_naked_short_call_is_a_violation():
+    r = _find(_payload(), [_order(_opt_contract())])
+    assert r.status == "violations"
+    assert _perm_ids(r) == [1001]
+    v = r.violations[0]
+    assert (v["client_id"], v["order_id"], v["perm_id"], v["account"]) == (0, 1, 1001, ACCT)
+    assert v["symbol"] == "AAPL"
+    assert v["uncovered_calls"] == {"AAPL|AAPL|20261218|100": 1}
+
+
+def test_short_call_covered_by_shares_is_clean():
+    r = _find(_payload(_stock_pos(shares=100)), [_order(_opt_contract())])
+    assert r.status == "ok" and r.violations == []
+
+
+def test_short_calls_beyond_share_cover_flag_every_contributor():
     orders = [
-        make_order(
-            1,
-            1001,
-            "SPY",
-            "OPT",
-            "SELL",
-            1,
-            right="C",
-            strike=510.0,
-            expiry="20260620",
-        ),
+        _order(_opt_contract(), perm_id=1001),
+        _order(_opt_contract(strike=210.0, con_id=112), perm_id=1002, order_id=2),
     ]
-    positions = [
-        make_option_position(
-            "SPY",
-            direction="LONG",
-            opt_type="Call",
-            contracts=1,
-            strike=500.0,
-            expiry="20260620",
-        ),
-    ]
-
-    violations = find_naked_short_violations(orders, positions)
-
-    assert violations == [], (
-        "SPY short call with SPY long call same expiry (vertical spread) "
-        "must not be flagged as naked — parity with nakedShortGuard.ts"
-    )
+    r = _find(_payload(_stock_pos(shares=100)), orders)
+    assert _perm_ids(r) == [1001, 1002]
 
 
-def test_short_call_with_long_call_different_expiry_still_violation():
-    """Different-expiry long call is NOT cover — still violation."""
+def test_short_call_covered_by_long_call_same_key_is_clean():
+    r = _find(_payload(_call_pos(contracts=1)), [_order(_opt_contract(strike=210.0))])
+    assert r.violations == []
+
+
+def test_cash_secured_put_is_clean():
+    r = _find(_payload(), [_order(_opt_contract(right="P"))])
+    assert r.violations == []
+
+
+def test_buy_orders_never_violate_and_never_supply_cover():
     orders = [
-        make_order(
-            2,
-            1002,
-            "SPY",
-            "OPT",
-            "SELL",
-            1,
-            right="C",
-            strike=510.0,
-            expiry="20260620",
-        ),
+        _order(_stk_contract(), action="BUY", qty=100, perm_id=2001, order_id=2),
+        _order(_opt_contract(), perm_id=1001),
     ]
-    positions = [
-        make_option_position(
-            "SPY",
-            direction="LONG",
-            opt_type="Call",
-            contracts=1,
-            strike=500.0,
-            expiry="20260718",  # different expiry
-        ),
-    ]
-
-    violations = find_naked_short_violations(orders, positions)
-
-    assert len(violations) == 1
-    assert violations[0]["symbol"] == "SPY"
+    r = _find(_payload(), orders)
+    # The resting BUY of shares is not cover (coverage: holdings only).
+    assert _perm_ids(r) == [1001]
 
 
-def test_short_call_exact_match_sell_to_close_not_violation():
-    """Selling exactly the long call you hold (same strike+expiry) is a close, not a naked short."""
-    orders = [
-        make_order(
-            3,
-            1003,
-            "SPY",
-            "OPT",
-            "SELL",
-            1,
-            right="C",
-            strike=500.0,
-            expiry="20260620",
-        ),
-    ]
-    positions = [
-        make_option_position(
-            "SPY",
-            direction="LONG",
-            opt_type="Call",
-            contracts=1,
-            strike=500.0,
-            expiry="20260620",
-        ),
-    ]
+def test_sell_stock_beyond_holdings_is_short_stock():
+    r = _find(_payload(_stock_pos(shares=50)), [_order(_stk_contract(), qty=100)])
+    assert _perm_ids(r) == [1001]
+    assert r.violations[0]["short_stock"] == {"AAPL": 50}
+    assert _find(_payload(_stock_pos(shares=100)), [_order(_stk_contract(), qty=100)]).violations == []
 
-    violations = find_naked_short_violations(orders, positions)
 
-    assert violations == []
+def test_bag_short_risk_reversal_is_a_violation():
+    bag = _bag([_bag_leg("SELL", "C", 210.0, 112), _bag_leg("BUY", "P", 190.0, 113)])
+    r = _find(_payload(), [_order(bag, action="BUY")])
+    assert _perm_ids(r) == [1001]
+
+
+def test_bag_sell_envelope_flips_legs():
+    # SELL envelope of (BUY call) = selling a call -> naked without cover.
+    bag = _bag([_bag_leg("BUY", "C", 200.0, 111), _bag_leg("BUY", "P", 190.0, 113)])
+    assert _perm_ids(_find(_payload(), [_order(bag, action="SELL")])) == [1001]
+    assert _find(_payload(), [_order(bag, action="BUY")]).violations == []
+
+
+def test_terminal_orders_are_not_live():
+    for status in ("Cancelled", "ApiCancelled", "Filled", "Inactive"):
+        assert _find(_payload(), [_order(_opt_contract(), status=status)]).violations == []
+
+
+def test_partially_filled_order_counts_only_remaining():
+    # 2 of 3 filled (now in holdings as -2 calls covered by 200 shares).
+    payload = _payload(_stock_pos(shares=300), _call_pos(contracts=2, direction="SHORT"))
+    r = _find(payload, [_order(_opt_contract(), qty=3, filled=2)])
+    assert r.violations == []
+
+
+def test_wizard_tagged_orders_are_evaluated_like_others():
+    r = _find(_payload(), [_order(_opt_contract(), order_ref="leg_wizard:abc")])
+    assert _perm_ids(r) == [1001]
 
 
 # ---------------------------------------------------------------------------
-# F1: leg_wizard tag skip (wizard-owned orders are governed server-side)
+# Scope (Fable N1) and skip-and-log cases
 # ---------------------------------------------------------------------------
 
 
-def test_leg_wizard_tagged_order_is_skipped():
-    """Order with orderRef starting 'leg_wizard:' is skipped even if apparently naked."""
+def test_foreign_account_holdings_never_cover():
+    r = _find(_payload(_stock_pos(shares=100, account=FOREIGN)), [_order(_opt_contract())])
+    assert _perm_ids(r) == [1001]
+
+
+def test_foreign_account_orders_are_not_audited():
+    r = _find(_payload(), [_order(_opt_contract(), account=FOREIGN)])
+    assert r.status == "ok" and r.violations == []
+
+
+def test_order_without_account_skips_its_symbol():
     orders = [
-        make_order(
-            10, 2001, "SPY", "OPT", "SELL", 1,
-            right="C", strike=510.0, expiry="20260620",
-            order_ref="leg_wizard:session_abc123",
-        ),
+        _order(_opt_contract(), account=None, perm_id=1001),
+        _order(_opt_contract(con_id=112), perm_id=1002, order_id=2),
+        _order(_opt_contract(sym="MSFT", con_id=300), perm_id=3001, order_id=3),
     ]
-    positions = []  # no cover — would normally violate
-
-    violations = find_naked_short_violations(orders, positions)
-
-    assert violations == [], (
-        "Wizard-tagged orders are governed by server-side Gate 4; "
-        "the post-sync audit must skip them per spec Wiz §11.1"
-    )
+    r = _find(_payload(), orders)
+    assert _perm_ids(r) == [3001]
+    assert {"symbol": "AAPL", "reason": "order_missing_account"}.items() <= r.skipped[0].items()
 
 
-def test_non_wizard_order_still_checked():
-    """Control: same naked order without the tag is still flagged."""
-    orders = [
-        make_order(
-            11, 2002, "SPY", "OPT", "SELL", 1,
-            right="C", strike=510.0, expiry="20260620",
-            order_ref=None,
-        ),
-    ]
-    positions = []
-
-    violations = find_naked_short_violations(orders, positions)
-
-    assert len(violations) == 1
+def test_unresolved_bag_skips_its_symbol():
+    bag = _bag([])  # comboLegs never resolved
+    orders = [_order(bag, action="BUY", perm_id=1001), _order(_opt_contract(), perm_id=1002, order_id=2)]
+    r = _find(_payload(), orders)
+    assert r.violations == []
+    assert r.skipped and r.skipped[0]["reason"].startswith("unresolved")
 
 
-def test_leg_wizard_tag_prefix_must_match_exactly():
-    """orderRef must start with literal 'leg_wizard:' — partial matches don't skip."""
-    orders = [
-        make_order(
-            12, 2003, "SPY", "OPT", "SELL", 1,
-            right="C", strike=510.0, expiry="20260620",
-            order_ref="manual_leg_wizard_misleading",
-        ),
-    ]
-    positions = []
-
-    violations = find_naked_short_violations(orders, positions)
-
-    assert len(violations) == 1, "Only exact 'leg_wizard:' prefix skips"
+def test_unknown_option_metadata_skips_its_symbol():
+    r = _find(_payload(), [_order(_opt_contract(meta=False))])
+    assert r.violations == []
+    assert r.skipped[0]["symbol"] == "AAPL"
 
 
-def test_naked_short_stock_flagged_for_jpy_ticker_same_as_usd():
-    """The guard is currency-agnostic: a SELL of a foreign (JPY) stock with no
-    covering shares is naked-short exactly like a USD ticker. Real ticker:
-    5016 JX Advanced Metals (TSEJ/JPY)."""
-    orders = [make_order(1, 1001, "5016", "STK", "SELL", 100)]
-    positions = []  # no long shares → uncovered short
-
-    violations = find_naked_short_violations(orders, positions)
-
-    assert len(violations) == 1
-    assert violations[0]["symbol"] == "5016"
+def test_unsupported_instrument_skips_its_symbol():
+    fut = {"conId": 5, "symbol": "ES", "secType": "FUT", "strike": 0.0, "right": None, "expiry": "2026-12-18"}
+    r = _find(_payload(), [_order(fut)])
+    assert r.violations == [] and r.skipped[0]["symbol"] == "ES"
 
 
-def test_covered_sell_not_flagged_for_jpy_ticker():
-    """A SELL covered by long shares is allowed — no currency special-casing."""
-    orders = [make_order(1, 1001, "5016", "STK", "SELL", 100)]
-    positions = [make_stock_position("5016", 100)]  # fully covered
+def test_holding_with_unknown_metadata_skips_its_symbol():
+    # A long call we cannot classify must not turn into a false violation.
+    payload = _payload(_call_pos(mult=None))
+    r = _find(payload, [_order(_opt_contract(strike=210.0))])
+    assert r.violations == []
+    assert r.skipped[0]["symbol"] == "AAPL"
 
-    violations = find_naked_short_violations(orders, positions)
 
-    assert violations == []
+def test_fractional_quantity_skips_its_symbol():
+    o = _order(_stk_contract(), qty=1)
+    o["totalQuantity"] = 0.5
+    r = _find(_payload(), [o])
+    assert r.violations == [] and r.skipped[0]["reason"] == "invalid_quantity"
+
+
+def test_incomplete_view_skips_whole_audit():
+    r = _find(_payload(), [_order(_opt_contract())], view_complete=False)
+    assert r.status == "skipped" and r.reason == "view_incomplete" and r.violations == []
+
+
+def test_missing_scope_account_skips_whole_audit():
+    r = _find(_payload(), [_order(_opt_contract())], scope="")
+    assert r.status == "skipped" and r.reason == "scope_account_missing"
+
+
+# ---------------------------------------------------------------------------
+# Shadow only: logging + service_health, no cancel path
+# ---------------------------------------------------------------------------
+
+
+def test_module_has_no_cancel_path():
+    src = inspect.getsource(nsa)
+    for needle in ("cancel_violations", "cancel_order", "cancelOrder", "IBClient", "acquire_owner"):
+        assert needle not in src, needle
+
+
+def test_run_shadow_audit_logs_and_records_health(monkeypatch, caplog):
+    calls = []
+    monkeypatch.setattr(nsa, "record_service_health", lambda *a, **k: calls.append((a, k)))
+    with caplog.at_level("WARNING", logger="xenon.naked_short_audit"):
+        r = nsa.run_shadow_audit(_payload(), [_order(_opt_contract())], ACCT, view_complete=True)
+    assert r.status == "violations"
+    assert "NAKED SHORT AUDIT (shadow)" in caplog.text
+    ((args, kwargs),) = calls
+    assert args == ("naked_short_audit", "violations")
+    assert kwargs["broker_account"] == ACCT
+    detail = json.loads(kwargs["detail"])
+    assert detail["mode"] == "shadow" and detail["violations"] == 1
+
+
+def test_run_shadow_audit_never_raises(monkeypatch):
+    calls = []
+    monkeypatch.setattr(nsa, "record_service_health", lambda *a, **k: calls.append((a, k)))
+
+    def _boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(nsa, "find_violations", _boom)
+    r = nsa.run_shadow_audit(_payload(), [], ACCT, view_complete=True)
+    assert r.status == "error"
+    assert calls[0][0] == ("naked_short_audit", "error")
+
+
+def test_cli_is_offline_and_shadow_only(tmp_path, capsys):
+    pf = tmp_path / "portfolio.json"
+    of = tmp_path / "orders.json"
+    pf.write_text(json.dumps(_payload()))
+    of.write_text(json.dumps({"open_orders": [_order(_opt_contract())]}))
+    summary = nsa.main(["--portfolio", str(pf), "--orders", str(of), "--account", ACCT])
+    assert summary["status"] == "violations"
+    assert json.loads(capsys.readouterr().out)["violations"][0]["perm_id"] == 1001
+
+
+# ---------------------------------------------------------------------------
+# ib_sync imports the audit as a package module (no ImportError skip)
+# ---------------------------------------------------------------------------
+
+
+def test_ib_sync_import_fails_loudly_when_audit_is_broken(monkeypatch):
+    monkeypatch.setitem(sys.modules, "xenon.execution.naked_short_audit", None)
+    monkeypatch.delattr(execution_pkg, "naked_short_audit", raising=False)
+    spec = importlib.util.find_spec("xenon.execution.ib_sync")
+    fresh = importlib.util.module_from_spec(spec)
+    with pytest.raises(ImportError):
+        spec.loader.exec_module(fresh)

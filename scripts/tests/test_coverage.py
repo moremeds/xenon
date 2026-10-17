@@ -390,11 +390,11 @@ def test_uncovered_held_spx_call_not_share_covered():
         Holding(account=SCOPE, sym="SPX", sec="STK", qty=100),
         _call_holding(-1, sym="SPX", tc="SPX", und_sec="IND"),
     ]
-    unc = uncovered(holdings, [])
+    unc = uncovered(holdings, [], scope_account=SCOPE)
     assert unc[("SPX", "SPX", _EXP, 100)] == 1
     # Same held call with und_sec STK -> the 100 shares do cover it.
     holdings[1] = _call_holding(-1, sym="SPX", tc="SPX", und_sec="STK")
-    assert uncovered(holdings, []) == {}
+    assert uncovered(holdings, [], scope_account=SCOPE) == {}
 
 
 def test_long_call_first_then_shares_assignment():
@@ -411,9 +411,9 @@ def test_long_call_first_then_shares_assignment():
 def test_uncovered_and_short_stock_helpers():
     holdings = [Holding(account=SCOPE, sym="AAPL", sec="STK", qty=100)]
     orders = [_sell_call_order(qty=3, remaining=3)]
-    unc = uncovered(holdings, orders)
+    unc = uncovered(holdings, orders, scope_account=SCOPE)
     assert unc[_KEY] == 2
-    ss = short_stock(holdings, orders)
+    ss = short_stock(holdings, orders, scope_account=SCOPE)
     assert ss == {}
     # live SELL stock order beyond holdings -> short stock
     orders2 = [
@@ -426,23 +426,23 @@ def test_uncovered_and_short_stock_helpers():
             legs=(Leg(action="BUY", sym="AAPL", sec="STK", ratio=1),),
         )
     ]
-    assert short_stock(holdings, orders2)["AAPL"] == 50
+    assert short_stock(holdings, orders2, scope_account=SCOPE)["AAPL"] == 50
     # lenient: an unresolvable order is skipped, not raised
     orders3 = [Order(id="u1", account=SCOPE, envelope="BUY", qty=1, legs=None)]
-    assert uncovered(holdings, orders3) == {}
+    assert uncovered(holdings, orders3, scope_account=SCOPE) == {}
 
 
 def test_uncovered_helper_with_candidate():
     cand = _sell_call_cand()
-    assert uncovered([], [], cand)[_KEY] == 1
-    assert uncovered([_call_holding(1)], [], cand) == {}
+    assert uncovered([], [], cand, scope_account=SCOPE)[_KEY] == 1
+    assert uncovered([_call_holding(1)], [], cand, scope_account=SCOPE) == {}
 
 
 def test_state_irrelevant_to_demand():
     # Demand comes from filled_after + remaining regardless of order state.
     for state in ("FILLED", "CANCELLED", "UNKNOWN", "WORKING", "PENDING"):
         o = _sell_call_order(state=state, qty=1, remaining=0, filled_after=1)
-        assert uncovered([], [o])[_KEY] == 1
+        assert uncovered([], [o], scope_account=SCOPE)[_KEY] == 1
 
 
 def test_candidate_account_must_match_scope():
@@ -949,3 +949,26 @@ def test_migration_upgrade_downgrade_upgrade(_throwaway_pg_db, pg_test_engine, m
             command.upgrade(cfg, "head")
         except Exception:
             pass
+
+
+def test_audit_helpers_use_only_scope_account_holdings():
+    """Fable N1: another account's shares never cover the scope's short call.
+
+    U2 holds 100 AAPL; U1 has a live SELL 1 AAPL call. Audited for U1, the
+    short is uncovered (U2's shares are not U1's cover)."""
+    holdings = [Holding(account="U2", sym="AAPL", sec="STK", qty=100)]
+    orders = [_sell_call_order(account="U1")]
+    assert uncovered(holdings, orders, scope_account="U1") == {_KEY: 1}
+    # The same short audited for U1 with U1-held shares is covered.
+    own = [Holding(account="U1", sym="AAPL", sec="STK", qty=100)]
+    assert uncovered(own, orders, scope_account="U1") == {}
+    # short_stock: a U1 SELL of shares only U2 holds is short stock for U1.
+    sell_stk = [
+        Order(
+            id="s1", account="U1", envelope="SELL", qty=100, remaining=100,
+            legs=(Leg(action="BUY", sym="AAPL", sec="STK", ratio=1),),
+        )
+    ]
+    assert short_stock(holdings, sell_stk, scope_account="U1") == {"AAPL": 100}
+    # Another account's orders are not U1's demand.
+    assert uncovered([], orders, scope_account="U2") == {}
