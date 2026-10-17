@@ -7,10 +7,10 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ### Removed
 
-- The standalone marketing site (`site/`, 68 files) and its site-only tooling — the core product does not need it. **Operator follow-up:** disconnect the Vercel project for `site/` or Vercel reports failed builds.
+- The standalone marketing site (`site/`, 68 files) and its site-only tooling — the core product does not need it.
 - Clerk authentication end to end: `@clerk/*` packages, sign-in/up pages, providers, the FastAPI JWT path, `CLERK_*` env vars, `ALLOWED_USER_IDS`, `XENON_DISABLE_AUTH`, `PLAYWRIGHT_DISABLE_AUTH`, and `dev.sh --no-auth`.
 - ~18k lines of unreachable web code and most of `lib/tools/` (kept only `runner.ts` for the Ratings tab), the dead regime client in `OrderTab`, mirror tests, the dead `VERCEL === "1"` HSTS branch, and the unused `@vercel/analytics` dependency.
-- The dead nightly Playwright workflow (disabled for inactivity after 100 consecutive failures) and 33 e2e specs that targeted routes removed in the pure-portfolio pivot.
+- The dead nightly Playwright workflow (disabled for inactivity; every recent run failed) and 33 e2e specs that targeted routes removed in the pure-portfolio pivot.
 
 ### Changed
 
