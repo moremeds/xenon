@@ -3,7 +3,7 @@ import { xenonFetch } from "@/lib/xenonApi";
 import { passThroughXenonError } from "@/lib/passThroughXenonError";
 import { getRequestId } from "@/lib/apiContracts";
 import type { ModifyCancelTarget, ReplaceComboOrder } from "@/lib/orderModify";
-import type { OrdersData } from "@tools/schemas/ib-orders";
+import type { OrdersData } from "@/lib/order/types";
 
 export const runtime = "nodejs";
 

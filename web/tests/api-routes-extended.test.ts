@@ -41,33 +41,6 @@ vi.mock("@tools/runner", () => ({
   resolveProjectRoot: vi.fn().mockReturnValue("/mock/root"),
 }));
 
-// Mock @tools/wrappers/ib-order-manage for cancel + modify
-const mockIbCancelOrder = vi.fn();
-const mockIbModifyOrder = vi.fn();
-vi.mock("@tools/wrappers/ib-order-manage", () => ({
-  ibCancelOrder: mockIbCancelOrder,
-  ibModifyOrder: mockIbModifyOrder,
-}));
-
-// Mock @tools/wrappers/ib-orders for post-action refresh
-const mockIbOrders = vi.fn().mockResolvedValue({ ok: true, stderr: "" });
-vi.mock("@tools/wrappers/ib-orders", () => ({
-  ibOrders: mockIbOrders,
-}));
-
-// Mock @tools/data-reader for legacy cached-file routes.
-const mockReadDataFile = vi
-  .fn()
-  .mockResolvedValue({ ok: false, error: "not found" });
-vi.mock("@tools/data-reader", () => ({
-  readDataFile: mockReadDataFile,
-}));
-
-// Mock @tools/schemas/ib-orders (TypeBox schema import)
-vi.mock("@tools/schemas/ib-orders", () => ({
-  OrdersData: {},
-}));
-
 // previous-close mints WS tickets server-side via the internal token; the
 // global fetch mock below covers the /ws-ticket call.
 
@@ -683,16 +656,6 @@ describe("POST /api/orders/cancel — extended", () => {
   beforeEach(() => {
     vi.resetModules();
     mockXenonFetch.mockReset();
-    mockReadDataFile.mockReset();
-    mockReadDataFile.mockResolvedValue({
-      ok: true,
-      data: {
-        open_orders: [],
-        executed_orders: [],
-        open_count: 0,
-        executed_count: 0,
-      },
-    });
   });
 
   it("returns success when cancel succeeds", async () => {
@@ -721,7 +684,6 @@ describe("POST /api/orders/cancel — extended", () => {
     expect(body.status).toBe("ok");
     expect(body.message).toBe("Order 101 cancelled");
     expect(body.orders).toEqual(ordersPayload);
-    expect(mockReadDataFile).not.toHaveBeenCalled();
     expect(mockXenonFetch.mock.calls.map((call) => call[0])).toEqual([
       "/orders/cancel",
       "/orders/refresh",
@@ -800,16 +762,6 @@ describe("POST /api/orders/modify — extended", () => {
   beforeEach(() => {
     vi.resetModules();
     mockXenonFetch.mockReset();
-    mockReadDataFile.mockReset();
-    mockReadDataFile.mockResolvedValue({
-      ok: true,
-      data: {
-        open_orders: [],
-        executed_orders: [],
-        open_count: 0,
-        executed_count: 0,
-      },
-    });
   });
 
   it("returns success when modify succeeds", async () => {
@@ -843,7 +795,6 @@ describe("POST /api/orders/modify — extended", () => {
     expect(body.status).toBe("ok");
     expect(body.message).toBe("Order 101 modified to 5.50");
     expect(body.orders).toEqual(ordersPayload);
-    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
   it("returns 500 when modify fails via xenonFetch", async () => {
@@ -913,7 +864,6 @@ describe("POST /api/orders/modify — extended", () => {
       permId: 0,
       newQuantity: 75,
     });
-    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
   it("returns 502 when refreshed orders do not confirm the modified price", async () => {
@@ -955,7 +905,6 @@ describe("POST /api/orders/modify — extended", () => {
     const body = await res.json();
     expect(String(body.error).toLowerCase()).toContain("not confirmed");
     expect(body.orders).toEqual(ordersPayload);
-    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
   it("replaces combo orders via cancel then place when replacement payload provided", async () => {
@@ -1061,7 +1010,6 @@ describe("POST /api/orders/modify — extended", () => {
         },
       ],
     });
-    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
   it("returns 400 when modify fields are missing", async () => {
@@ -1092,16 +1040,6 @@ describe("POST /api/orders/place — extended", () => {
   beforeEach(() => {
     vi.resetModules();
     mockXenonFetch.mockReset();
-    mockReadDataFile.mockReset();
-    mockReadDataFile.mockResolvedValue({
-      ok: true,
-      data: {
-        open_orders: [],
-        executed_orders: [],
-        open_count: 0,
-        executed_count: 0,
-      },
-    });
   });
 
   it("returns success with orderId when placement succeeds", async () => {
@@ -1242,16 +1180,6 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
   beforeEach(() => {
     vi.resetModules();
     mockXenonFetch.mockReset();
-    mockReadDataFile.mockReset();
-    mockReadDataFile.mockResolvedValue({
-      ok: true,
-      data: {
-        open_orders: [],
-        executed_orders: [],
-        open_count: 0,
-        executed_count: 0,
-      },
-    });
   });
 
   it("returns 502 when IB silently cancels the order (Cancelled status)", async () => {

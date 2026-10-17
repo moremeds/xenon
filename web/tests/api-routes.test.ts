@@ -22,12 +22,6 @@ vi.mock("@tools/runner", () => ({
   resolveProjectRoot: vi.fn().mockReturnValue("/mock/root"),
 }));
 
-// Mock @tools/wrappers/ib-orders for orders routes (legacy — no longer used by routes)
-const mockIbOrders = vi.fn().mockResolvedValue({ ok: false, stderr: "mocked" });
-vi.mock("@tools/wrappers/ib-orders", () => ({
-  ibOrders: mockIbOrders,
-}));
-
 // Mock @/lib/xenonApi — the NEW dependency for migrated routes
 const mockXenonFetch = vi.fn().mockRejectedValue(new Error("mocked"));
 vi.mock("@/lib/xenonApi", () => ({
@@ -42,24 +36,6 @@ vi.mock("@/lib/xenonApi", () => ({
       this.detail = detail;
     }
   },
-}));
-
-// Mock @tools/data-reader for portfolio + orders routes
-const mockReadDataFile = vi
-  .fn()
-  .mockResolvedValue({ ok: false, error: "not found" });
-vi.mock("@tools/data-reader", () => ({
-  readDataFile: mockReadDataFile,
-}));
-
-// Mock @tools/schemas/ib-orders (TypeBox schema import)
-vi.mock("@tools/schemas/ib-orders", () => ({
-  OrdersData: {},
-}));
-
-// Mock @tools/schemas/ib-sync (TypeBox schema import)
-vi.mock("@tools/schemas/ib-sync", () => ({
-  PortfolioData: {},
 }));
 
 // Mock @/lib/syncMutex — return a factory that wraps the provided fn
@@ -488,7 +464,6 @@ describe("GET /api/portfolio", () => {
 
   beforeEach(async () => {
     vi.resetModules();
-    mockReadDataFile.mockReset();
     const mod = await import("../app/api/portfolio/route");
     GET = mod.GET;
   });
@@ -540,7 +515,6 @@ describe("POST /api/portfolio", () => {
   beforeEach(async () => {
     vi.resetModules();
     mockXenonFetch.mockReset();
-    mockReadDataFile.mockReset();
     const mod = await import("../app/api/portfolio/route");
     POST = mod.POST;
   });
@@ -570,7 +544,6 @@ describe("POST /api/portfolio", () => {
 
   it("returns 502 when sync fails and no cache", async () => {
     mockXenonFetch.mockRejectedValue(new Error("connection refused"));
-    mockReadDataFile.mockResolvedValue({ ok: false, error: "not found" });
 
     const res = await POST();
     expect(res.status).toBe(502);
@@ -587,7 +560,6 @@ describe("GET /api/orders", () => {
   beforeEach(async () => {
     vi.resetModules();
     mockXenonFetch.mockReset();
-    mockReadDataFile.mockReset();
     const mod = await import("../app/api/orders/route");
     GET = mod.GET;
   });
@@ -608,7 +580,6 @@ describe("GET /api/orders", () => {
     expect(body.executed_orders).toEqual([]);
     expect(body.open_count).toBe(0);
     expect(body.executed_count).toBe(0);
-    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
   it("returns order data from FastAPI", async () => {
@@ -651,7 +622,6 @@ describe("GET /api/orders", () => {
     expect(body.open_orders).toHaveLength(1);
     expect(body.open_orders[0].symbol).toBe("AAPL");
     expect(body.open_count).toBe(1);
-    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 });
 
@@ -665,7 +635,6 @@ describe("POST /api/orders", () => {
   beforeEach(async () => {
     vi.resetModules();
     mockXenonFetch.mockReset();
-    mockReadDataFile.mockReset();
     const mod = await import("../app/api/orders/route");
     POST = mod.POST;
   });
@@ -677,7 +646,6 @@ describe("POST /api/orders", () => {
     expect(res.status).toBe(502);
     const body = await res.json();
     expect(body.error).toContain("IB gateway timeout");
-    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
   it("returns refreshed orders on success", async () => {
@@ -718,7 +686,6 @@ describe("POST /api/orders", () => {
     expect(body.executed_orders).toHaveLength(1);
     expect(body.executed_orders[0].symbol).toBe("GOOG");
     expect(body.executed_count).toBe(1);
-    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 });
 

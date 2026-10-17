@@ -5,30 +5,13 @@ vi.mock("@/lib/xenonApi", () => ({
   xenonFetch: mockXenonFetch,
 }));
 
-const mockReadDataFile = vi.fn();
-vi.mock("@tools/data-reader", () => ({
-  readDataFile: mockReadDataFile,
-}));
-
-vi.mock("@tools/schemas/ib-orders", () => ({
-  OrdersData: {},
-}));
-
 describe("POST /api/orders/place — signed combo prices", () => {
   beforeEach(() => {
     vi.resetModules();
     mockXenonFetch.mockReset();
-    mockReadDataFile.mockReset();
   });
 
   it("allows a negative combo limit price and forwards the sign unchanged", async () => {
-    mockReadDataFile
-      .mockResolvedValueOnce({ ok: false, error: "skip naked-short fixture" })
-      .mockResolvedValueOnce({
-        ok: true,
-        data: { open_orders: [], executed_orders: [], open_count: 0, executed_count: 0 },
-      });
-
     mockXenonFetch
       .mockResolvedValueOnce({
         status: "ok",

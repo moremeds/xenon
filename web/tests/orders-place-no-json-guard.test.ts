@@ -24,20 +24,10 @@ vi.mock("@/lib/xenonApi", () => ({
   xenonFetch: mockXenonFetch,
 }));
 
-const mockReadDataFile = vi.fn();
-vi.mock("@tools/data-reader", () => ({
-  readDataFile: mockReadDataFile,
-}));
-
-vi.mock("@tools/schemas/ib-orders", () => ({
-  OrdersData: {},
-}));
-
 describe("POST /api/orders/place — FastAPI owns runtime Gate 4", () => {
   beforeEach(() => {
     vi.resetModules();
     mockXenonFetch.mockReset();
-    mockReadDataFile.mockReset();
   });
 
   it("does not read JSON files before forwarding a BUY stock order", async () => {
@@ -51,15 +41,6 @@ describe("POST /api/orders/place — FastAPI owns runtime Gate 4", () => {
         tif: "GTC",
       })
       .mockResolvedValueOnce({});
-    mockReadDataFile.mockImplementation(async (path: string) => {
-      if (path === "data/portfolio.json") {
-        throw new Error("portfolio JSON guard was called");
-      }
-      return {
-        ok: true,
-        data: { open_orders: [], executed_orders: [], open_count: 0, executed_count: 0 },
-      };
-    });
 
     const { POST } = await import("../app/api/orders/place/route");
     const res = await POST(
@@ -81,7 +62,6 @@ describe("POST /api/orders/place — FastAPI owns runtime Gate 4", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.tif).toBe("GTC");
-    expect(mockReadDataFile).not.toHaveBeenCalled();
     const forwarded = JSON.parse(mockXenonFetch.mock.calls[0][1].body as string);
     expect(forwarded.client_attempt_id).toBe("buy-stock-1");
     expect(forwarded.action).toBe("BUY");

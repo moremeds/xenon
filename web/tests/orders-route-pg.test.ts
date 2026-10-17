@@ -13,10 +13,6 @@ vi.mock("next/server", () => ({
   },
 }));
 
-const mockReadDataFile = vi.fn();
-vi.mock("@tools/data-reader", () => ({ readDataFile: mockReadDataFile }));
-vi.mock("@tools/schemas/ib-orders", () => ({ OrdersData: {} }));
-
 const mockXenonFetch = vi.fn();
 vi.mock("@/lib/xenonApi", () => ({ xenonFetch: mockXenonFetch }));
 
@@ -31,11 +27,7 @@ const ordersPayload = {
 describe("/api/orders route", () => {
   beforeEach(() => {
     vi.resetModules();
-    mockReadDataFile.mockReset();
     mockXenonFetch.mockReset();
-    mockReadDataFile.mockImplementation(async (path: string) => {
-      throw new Error(`orders route must not read data/orders.json: ${path}`);
-    });
   });
 
   it("GET proxies FastAPI /orders without reading orders.json", async () => {
@@ -47,7 +39,6 @@ describe("/api/orders route", () => {
 
     expect(response.status).toBe(200);
     expect(body).toEqual(ordersPayload);
-    expect(mockReadDataFile).not.toHaveBeenCalled();
     expect(mockXenonFetch).toHaveBeenCalledWith(
       "/orders",
       expect.objectContaining({ method: "GET", timeout: 10_000 }),
@@ -65,7 +56,6 @@ describe("/api/orders route", () => {
 
     expect(response.status).toBe(200);
     expect(body.open_count).toBe(1);
-    expect(mockReadDataFile).not.toHaveBeenCalled();
     expect(mockXenonFetch.mock.calls.map((call) => call[0])).toEqual([
       "/orders/refresh",
       "/orders",

@@ -4,6 +4,8 @@
  * Shared type definitions for the order component system.
  */
 
+import type { ExecutedOrder, OpenOrder } from "@/lib/types";
+
 export type OrderAction = "BUY" | "SELL";
 export type OrderTif = "DAY" | "GTC";
 
@@ -29,6 +31,17 @@ export interface OrderLeg {
   bid?: number | null;
   ask?: number | null;
 }
+
+/** Orders snapshot returned by FastAPI GET /orders
+ *  (was `@tools/schemas/ib-orders` — moved here when lib/tools was trimmed;
+ *  member shapes come from `@/lib/types`). */
+export type OrdersData = {
+  last_sync: string;
+  open_orders: OpenOrder[];
+  executed_orders: ExecutedOrder[];
+  open_count: number;
+  executed_count: number;
+};
 
 /** Order summary for confirmation */
 export interface OrderSummary {
