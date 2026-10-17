@@ -119,6 +119,60 @@ async function stubApis(page: import("@playwright/test").Page) {
 }
 
 test.describe("Order modify confirmation", () => {
+  test("surfaces upstream {detail} in the toast when modify fails without reason_code", async ({ page }) => {
+    await stubApis(page);
+
+    // Override the modify stub: upstream FastAPI sends ONLY {detail: ...} —
+    // no top-level error or reason_code (502 passthrough path). The toast
+    // must render the human-readable upstream detail verbatim.
+    await page.route("**/api/orders/modify", (route) =>
+      route.fulfill({
+        status: 502,
+        contentType: "application/json",
+        body: JSON.stringify({
+          detail: "Modify not confirmed by refreshed IB open orders",
+        }),
+      }),
+    );
+
+    await page.goto("/orders");
+
+    const row = page.locator("tbody tr").filter({ hasText: "AAOI" }).first();
+    await expect(row).toBeVisible({ timeout: 10_000 });
+    await expect(row).toContainText("$5.70");
+
+    await row.getByRole("button", { name: "MODIFY" }).click();
+
+    const modal = page.locator(".modify-dialog");
+    await expect(modal).toBeVisible();
+    await modal.locator("#modify-price-input").fill("5.55");
+
+    const modifyResponse = page.waitForResponse(
+      (response) =>
+        response.url().includes("/api/orders/modify") &&
+        response.request().method() === "POST",
+    );
+    await modal.getByRole("button", { name: /modify order/i }).click();
+
+    // Upstream status passes through unchanged.
+    const response = await modifyResponse;
+    expect(response.status()).toBe(502);
+
+    // The upstream detail — not a generic "Modify failed" — is the toast.
+    const errorToast = page.locator(".toast-message").filter({
+      hasText: "Modify not confirmed by refreshed IB open orders",
+    });
+    await expect(errorToast).toBeVisible();
+    await expect(errorToast).toContainText(
+      "Modify not confirmed by refreshed IB open orders",
+    );
+
+    // Pending-state checks retained: no fake pending overlay on failure.
+    await expect(row).toContainText("$5.70");
+    await expect(row).not.toContainText("Modifying...");
+    await expect(row).not.toContainText("PENDING");
+  });
+
   test("does not enter a fake pending state when modify is not confirmed", async ({ page }) => {
     await stubApis(page);
 
