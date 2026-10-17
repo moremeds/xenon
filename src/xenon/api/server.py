@@ -10,11 +10,13 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import json
 import logging
 import os
 import sys
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -112,6 +114,18 @@ _futu_lock: Optional[asyncio.Lock] = None
 # would look "recently synced" and serve stale cache instead of a real fetch.
 _futu_last_sync_monotonic: Optional[float] = None
 FUTU_COOLDOWN_S = 10
+# Hard bound on OpenD calls — matches the 15s bound in _futu_refresh_db_first.
+# A port-open but handshaking-hung OpenD must fail the route, not wedge it.
+FUTU_SYNC_TIMEOUT_S = 15.0
+# Single-worker executor for /futu/sync: the blocking SDK call runs here so at
+# most one OpenD call is ever in flight. `_futu_sync_future` tracks the worker
+# at thread level — asyncio.wait_for cancels the await on timeout but cannot
+# kill the thread, so the future stays the in-flight marker until the worker
+# actually exits.
+_futu_sync_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="xenon-futu-sync"
+)
+_futu_sync_future: Optional[concurrent.futures.Future] = None
 
 
 def _get_futu_lock() -> asyncio.Lock:
@@ -133,6 +147,41 @@ def _get_futu_client() -> FutuClient:
             filter_trading_market=os.environ.get("FUTU_MARKET", "US"),
         )
     return _futu_client
+
+
+def _futu_fetch_portfolio_blocking(client: FutuClient) -> dict:
+    """Blocking /futu/sync work: connect if needed, then force-fetch.
+
+    Runs on the dedicated single-worker executor so the whole call is one
+    thread — a hang holds the client's RLock but never multiplies workers.
+    """
+    if not client.is_connected():
+        client.connect()
+    return client.fetch_portfolio(force=True)
+
+
+def _futu_cleanup_after_timeout(
+    client: FutuClient,
+    fetch: "concurrent.futures.Future",
+    marker: "concurrent.futures.Future",
+) -> None:
+    """Daemon-thread cleanup after a /futu/sync timeout.
+
+    The Futu SDK's ``close()`` takes its own RLock — running ``disconnect()``
+    on the event loop would block every request while the SDK is stuck.
+    Completes the combined in-flight marker only after BOTH the hung fetch
+    worker and the reset have finished, so a late cleanup can never close a
+    newer session.
+    """
+    try:
+        client.disconnect()
+    except Exception:
+        logger.exception("Futu client reset after sync timeout failed")
+    try:
+        fetch.result()
+    except Exception:
+        pass
+    marker.set_result(None)
 
 
 # Shared state
@@ -2848,10 +2897,12 @@ async def futu_sync():
     - **Partial-failure preservation (tribunal T15).** If the new snapshot
       has warnings and fewer positions than the cache, the cache is
       preserved untouched and a sidecar error file is written.
-    - **Off-loop blocking calls.** The Futu SDK is fully sync; all calls
-      run in the default thread pool executor.
+    - **Off-loop blocking calls.** The Futu SDK is fully sync; the call runs
+      on a dedicated single-worker executor. While a worker is still alive
+      (e.g. after a timeout), new requests 503 instead of queueing behind the
+      client's RLock; a timeout also resets the client via ``disconnect()``.
     """
-    global _futu_last_sync_monotonic
+    global _futu_last_sync_monotonic, _futu_sync_future
     import time as _time
 
     lock = _get_futu_lock()
@@ -2862,6 +2913,14 @@ async def futu_sync():
         if cached:
             return {"ok": True, **cached}
 
+    # A timed-out SDK call keeps its worker thread — and the client's RLock —
+    # alive. Never queue a second worker behind it.
+    inflight = _futu_sync_future
+    if inflight is not None and not inflight.done():
+        raise HTTPException(
+            status_code=503, detail="Futu sync already in flight — retry shortly"
+        )
+
     async with lock:
         # Re-check inside lock — race guard so two tabs inside the lock
         # window piggyback on the same result.
@@ -2870,12 +2929,49 @@ async def futu_sync():
             if cached:
                 return {"ok": True, **cached}
 
+        inflight = _futu_sync_future
+        if inflight is not None and not inflight.done():
+            raise HTTPException(
+                status_code=503, detail="Futu sync already in flight — retry shortly"
+            )
+
         client = _get_futu_client()
-        loop = asyncio.get_running_loop()
+        fetch = _futu_sync_executor.submit(_futu_fetch_portfolio_blocking, client)
+        _futu_sync_future = fetch
         try:
-            if not client.is_connected():
-                await loop.run_in_executor(None, client.connect)
-            result = await loop.run_in_executor(None, lambda: client.fetch_portfolio(force=True))
+            result = await asyncio.wait_for(
+                asyncio.wrap_future(fetch),
+                timeout=FUTU_SYNC_TIMEOUT_S,
+            )
+        except TimeoutError:
+            # The fetch worker is still running and may hold the client's
+            # RLock. Cleanup must NOT run on the event loop — the SDK's
+            # close() takes its own RLock and would block every request.
+            # Swap the marker for a combined future that completes only when
+            # BOTH the hung fetch and the daemon cleanup thread finish, so a
+            # late cleanup can never close a newer session.
+            marker = concurrent.futures.Future()
+            _futu_sync_future = marker
+            try:
+                threading.Thread(
+                    target=_futu_cleanup_after_timeout,
+                    args=(client, fetch, marker),
+                    name="xenon-futu-cleanup",
+                    daemon=True,
+                ).start()
+            except Exception:
+                # Thread spawn failed (e.g. RuntimeError: cannot start new
+                # thread). Never fall back to disconnect() on the loop — the
+                # marker completes when the fetch worker exits instead, so the
+                # endpoint is not stuck at 503 forever.
+                logger.exception("Futu cleanup thread failed to start; marker completes with fetch")
+                fetch.add_done_callback(
+                    lambda _f: marker.set_result(None) if not marker.done() else None
+                )
+            raise HTTPException(
+                status_code=503,
+                detail=f"Futu OpenD did not respond within {FUTU_SYNC_TIMEOUT_S:.0f}s",
+            )
         except FutuConnectionError as exc:
             raise HTTPException(status_code=503, detail=f"Futu OpenD unreachable: {exc}")
         except FutuError as exc:
@@ -3210,9 +3306,12 @@ _IB_CONN_REFUSED_PATTERNS = (
 )
 
 # Cooldown: after an IB subprocess fails with a connection error, skip
-# subsequent attempts for this many seconds to avoid churn.
+# subsequent attempts for this many seconds to avoid churn. Tracked per
+# traffic class — order-mutating entries and data/read entries get separate
+# timestamps so a failure in one class never blocks the other.
 _IB_SCRIPT_COOLDOWN_SECS = 15.0
-_ib_last_failure: float = 0.0  # monotonic timestamp of last IB connection failure
+_IB_ORDER_ENTRIES = frozenset({"xenon-ib-place-order", "xenon-ib-order-manage"})
+_ib_last_failure: dict[str, float] = {"data": 0.0, "order": 0.0}
 
 
 def _is_ib_connection_error(error_msg: str) -> bool:
@@ -3242,15 +3341,17 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
     2. Pool check: if pool is disconnected, verify Gateway before spawning
     3. Post-failure: verify Gateway health before restarting
     """
-    global _ib_last_failure
+    kind = "order" if entry in _IB_ORDER_ENTRIES else "data"
 
-    # Layer 1: Cooldown — skip if a recent failure occurred
+    # Layer 1: Cooldown — skip if a recent failure occurred in this lane
     now = time.monotonic()
-    if _ib_last_failure > 0 and (now - _ib_last_failure) < _IB_SCRIPT_COOLDOWN_SECS:
-        elapsed = now - _ib_last_failure
+    last_failure = _ib_last_failure.get(kind, 0.0)
+    if last_failure > 0 and (now - last_failure) < _IB_SCRIPT_COOLDOWN_SECS:
+        elapsed = now - last_failure
         logger.debug(
-            "Skipping %s — IB cooldown active (%.1fs since last failure, %ds cooldown)",
+            "Skipping %s — IB %s cooldown active (%.1fs since last failure, %ds cooldown)",
             entry,
+            kind,
             elapsed,
             _IB_SCRIPT_COOLDOWN_SECS,
         )
@@ -3266,7 +3367,7 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
         upstream_dead = gw_status.get("upstream_dead", False)
 
         if not port_ok or upstream_dead:
-            _ib_last_failure = now
+            _ib_last_failure[kind] = now
             logger.warning(
                 "Skipping %s — Gateway down (port=%s, upstream_dead=%s), pool disconnected",
                 entry,
@@ -3282,11 +3383,11 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
 
     # Clear cooldown on success
     if result.ok:
-        _ib_last_failure = 0.0
+        _ib_last_failure[kind] = 0.0
 
     if not result.ok and _is_ib_connection_error(result.error):
         # Set cooldown to prevent churn from repeated failures
-        _ib_last_failure = time.monotonic()
+        _ib_last_failure[kind] = time.monotonic()
 
         # Verify Gateway is actually down before restarting
         gw_status = await check_ib_gateway()
@@ -3327,12 +3428,24 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
             gw_result = await restart_ib_gateway()
 
             if gw_result.get("restarted") and gw_result.get("port_listening"):
-                logger.info("IB Gateway restarted, retrying %s", entry)
-                _ib_last_failure = 0.0  # Clear cooldown after successful restart
+                _ib_last_failure[kind] = 0.0  # Clear cooldown after successful restart
                 if ib_pool:
                     await ib_pool.disconnect_all()
                     await ib_pool.connect_all()
-                result = await run_entry_point(entry, args, timeout=timeout)
+                if kind == "order":
+                    # OP-1: the first attempt may have reached IB before the
+                    # connection dropped — resending could duplicate the order.
+                    logger.warning(
+                        "IB Gateway restarted; NOT resending order entry %s (possible duplicate)",
+                        entry,
+                    )
+                    result = ScriptResult(
+                        ok=False,
+                        error="IB Gateway restarted; order request NOT resent — check open orders before retrying",
+                    )
+                else:
+                    logger.info("IB Gateway restarted, retrying %s", entry)
+                    result = await run_entry_point(entry, args, timeout=timeout)
             else:
                 logger.error("IB Gateway restart failed: %s", gw_result)
                 result = ScriptResult(
