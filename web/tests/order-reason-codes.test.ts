@@ -65,9 +65,13 @@ describe("getReasonToast fallback", () => {
     );
   });
 
-  it("MODIFY_PENDING tells the user to wait for the earlier amend", () => {
+  it("MODIFY_PENDING says what the user can do (retry later or cancel)", () => {
     const toast = getReasonToast("MODIFY_PENDING");
     expect(toast.severity).toBe("warn");
-    expect(toast.copy).toContain("not confirmed yet");
+    expect(toast.copy).toContain("not confirmed by IB yet");
+    expect(toast.copy).toContain("Retry in about two minutes");
+    expect(toast.copy).toContain("cancel the order");
+    // Recovery needs IB to report the order again, not just any sync.
+    expect(toast.copy).not.toMatch(/wait for the order to sync/i);
   });
 });

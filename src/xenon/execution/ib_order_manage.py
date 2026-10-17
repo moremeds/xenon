@@ -12,8 +12,10 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Iterator, Literal, NoReturn, Optional
@@ -91,6 +93,20 @@ def _is_clientid_in_use(exc: BaseException) -> bool:
 # keeps the max(old,new) reservation for anything else.
 _amend_stage: dict = {"value": None}
 _FATAL_MODIFY_CODES = (103, 201, 202)
+
+# Hard wall-clock bound for one modify process (PR-03b round 4). The route
+# SIGKILLs the subprocess at 15 s; this watchdog also ends an orphan whose
+# API parent died. Gate 4 treats "opened_at + this + IB grace" as the instant
+# after which the amend's sender can no longer apply it.
+MODIFY_WALL_CLOCK_S = 20.0
+
+
+def _arm_sender_watchdog(seconds: float = MODIFY_WALL_CLOCK_S) -> threading.Timer:
+    """Exit the process (no reply) once `seconds` have passed."""
+    timer = threading.Timer(seconds, os._exit, args=(3,))
+    timer.daemon = True
+    timer.start()
+    return timer
 
 
 def output(status: str, message: str, **extra) -> NoReturn:
@@ -761,7 +777,17 @@ def main():
     modify_p.add_argument("--port", type=int, default=DEFAULT_PORT)
 
     args = parser.parse_args()
+    watchdog = _arm_sender_watchdog() if args.action == "modify" else None
+    try:
+        _run(args)
+    finally:
+        # Normal exits (including output()'s SystemExit) disarm it; only a
+        # modify still running at the bound is killed.
+        if watchdog is not None:
+            watchdog.cancel()
 
+
+def _run(args) -> None:
     if args.order_id == 0 and args.perm_id == 0:
         output("error", "Must provide --order-id or --perm-id", classification="ib_reject")
 

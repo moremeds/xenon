@@ -824,3 +824,22 @@ def test_adjusted_candidate_not_covered_by_standard_long_call(client, broker_cal
     assert ok.status_code == 200, ok.text
     legs = _submission_rows()[0]._mapping["legs"]["legs"][0]
     assert (legs["tc"], legs["mult"], legs["und_sec"], legs["con_id"]) == ("SPY", 100, "STK", 111)
+
+
+def test_quantity_modify_of_resting_buy_order_is_accepted(client, broker_calls, fresh_quote):
+    """Round 4 item 5 (Fable P1): a pure-BUY row owes no cover, so it is
+    excluded from the demand list — but it must stay a valid modify target.
+    A quantity modify of a resting BUY call reaches the broker and lands."""
+    engine = _pg_engine()
+    _seed_snapshot(engine, [])
+    engine.dispose()
+    body = dict(_sell_call_body("rt-buy-mod-1"), action="BUY")
+    assert client.post("/orders/place", json=body).status_code == 200
+
+    resp = _modify_qty(client, 2, 1)
+
+    assert resp.status_code == 200, resp.text
+    assert broker_calls[-1]["entry"] == "xenon-ib-order-manage"
+    row = _submission_rows()[0]._mapping
+    assert row["quantity"] == 2
+    assert row["legs"]["pending_amend_id"] is None

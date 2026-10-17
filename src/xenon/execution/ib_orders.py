@@ -17,7 +17,7 @@ import argparse
 import math
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
@@ -288,13 +288,25 @@ def build_orders_data(open_orders: list, executed_orders: list) -> dict:
     }
 
 
-def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | AccountScope | None = None) -> dict:
+def sync_open_orders_to_postgres(
+    open_orders: list[dict],
+    *,
+    scope: dict | AccountScope | None = None,
+    observed_at: datetime | None = None,
+) -> dict:
     """Register IB open-order snapshots in xenon.order_submissions.
 
     Returns counts per branch so a periodic poller can publish drift metrics:
       - registered: new rows INSERTed
       - updated:    snapshot-* rows UPDATEd because TWS values drifted
       - skipped:    UUID-authored rows left untouched (existing dedupe)
+      - unidentified: open orders with neither permId nor orderId — they
+        cannot be keyed, so their demand is NOT persisted; a sync pass must
+        not attest completeness while this is non-zero
+
+    `observed_at` is when the caller started the IB open-order read; it
+    gates which reservation changes the mirror may apply (see
+    orders_store.register_from_snapshot).
     """
     if scope is None:
         resolved = resolve_from_env().as_dict()
@@ -309,6 +321,7 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
     resurrected = 0
     foreign = 0
     unprovenanced = 0
+    unidentified = 0
     scope_account = resolved.get("broker_account") or ""
     scoped = bool(scope_account and scope_account != "legacy_unknown")
     for order in open_orders:
@@ -333,6 +346,7 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
         perm_id = str(order.get("permId") or order.get("orderId") or "")
         ib_order_id = str(order.get("orderId") or "0")
         if not perm_id:
+            unidentified += 1
             continue
         strike_val = contract.get("strike")
         con_id_val = contract.get("conId")
@@ -351,6 +365,7 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
             con_id=int(con_id_val) if con_id_val else None,
             tif=str(order.get("tif") or "DAY"),
             legs=gate4.legs_payload_from_snapshot_order(order),
+            observed_at=observed_at,
             **resolved,
         )
         action = result.get("action") if isinstance(result, dict) else None
@@ -369,6 +384,7 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
         "skipped": skipped,
         "skipped_foreign": foreign,
         "skipped_unprovenanced": unprovenanced,
+        "unidentified": unidentified,
         "open_count": len(open_orders),
     }
 
@@ -414,6 +430,7 @@ def main():
 
     try:
         print("Fetching open orders...")
+        observed_at = datetime.now(timezone.utc)
         open_orders = fetch_open_orders(client)
 
         print("Fetching executed fills...")
@@ -425,7 +442,7 @@ def main():
             accounts = client.ib.managedAccounts()
             if accounts:
                 os.environ["XENON_BROKER_ACCOUNT"] = accounts[0]
-            result = sync_open_orders_to_postgres(open_orders)
+            result = sync_open_orders_to_postgres(open_orders, observed_at=observed_at)
             print(f"Registered {result['registered']} open-order snapshots in Postgres")
         else:
             print("\nRun with --sync to register open-order snapshots in Postgres")

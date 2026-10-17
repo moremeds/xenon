@@ -31,7 +31,7 @@ def test_sync_open_orders_to_postgres_registers_snapshot_rows():
         scope=BROKER_SCOPE,
     )
 
-    assert result == {"registered": 1, "updated": 0, "resurrected": 0, "skipped": 0, "skipped_foreign": 0, "skipped_unprovenanced": 0, "open_count": 1}
+    assert result == {"registered": 1, "updated": 0, "resurrected": 0, "skipped": 0, "skipped_foreign": 0, "skipped_unprovenanced": 0, "unidentified": 0, "open_count": 1}
     engine = get_sync_engine()
     with engine.connect() as conn:
         row = conn.execute(select(order_submissions)).one()._mapping
@@ -180,7 +180,7 @@ def test_sync_counts_updates_and_skips_separately():
         ],
         scope=BROKER_SCOPE,
     )
-    assert first == {"registered": 1, "updated": 0, "resurrected": 0, "skipped": 0, "skipped_foreign": 0, "skipped_unprovenanced": 0, "open_count": 1}
+    assert first == {"registered": 1, "updated": 0, "resurrected": 0, "skipped": 0, "skipped_foreign": 0, "skipped_unprovenanced": 0, "unidentified": 0, "open_count": 1}
 
     second = sync_open_orders_to_postgres(
         [
@@ -197,4 +197,4 @@ def test_sync_counts_updates_and_skips_separately():
         ],
         scope=BROKER_SCOPE,
     )
-    assert second == {"registered": 0, "updated": 1, "resurrected": 0, "skipped": 0, "skipped_foreign": 0, "skipped_unprovenanced": 0, "open_count": 1}
+    assert second == {"registered": 0, "updated": 1, "resurrected": 0, "skipped": 0, "skipped_foreign": 0, "skipped_unprovenanced": 0, "unidentified": 0, "open_count": 1}

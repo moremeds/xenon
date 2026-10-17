@@ -75,8 +75,20 @@ def fetch_meta(client: Any, contract: Any) -> dict | None:
     return meta_from_details(details[0])
 
 
+# conId -> qualified metadata. A conId names one immutable contract, so a
+# successful lookup never goes stale. Failed lookups are not cached.
+# ponytail: FIFO-bounded process dict; add a TTL only if IB ever re-keys a conId.
+_CACHE: dict[int, dict] = {}
+_CACHE_MAX = 4096
+
+
+def clear_cache() -> None:
+    _CACHE.clear()
+
+
 def fetch_meta_by_con_ids(client: Any, con_ids: Iterable[Any]) -> dict[int, dict]:
-    """Batch lookup by conId. Missing / ambiguous ids are simply absent."""
+    """Batch lookup by conId. Missing / ambiguous ids are simply absent.
+    Known conIds are served from the process cache (no IB round trip)."""
     from ib_async import Contract
 
     out: dict[int, dict] = {}
@@ -87,7 +99,13 @@ def fetch_meta_by_con_ids(client: Any, con_ids: Iterable[Any]) -> dict[int, dict
             continue
         if cid <= 0 or cid in out:
             continue
-        meta = fetch_meta(client, Contract(conId=cid))
-        if meta is not None and meta["con_id"] == cid:
-            out[cid] = meta
+        meta = _CACHE.get(cid)
+        if meta is None:
+            meta = fetch_meta(client, Contract(conId=cid))
+            if meta is None or meta["con_id"] != cid:
+                continue
+            if len(_CACHE) >= _CACHE_MAX:
+                _CACHE.pop(next(iter(_CACHE)))
+            _CACHE[cid] = meta
+        out[cid] = dict(meta)
     return out

@@ -50,7 +50,7 @@ from __future__ import annotations
 import os
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -212,12 +212,16 @@ def order_from_row(row: Any, *, filled_total: int, filled_after: int) -> coverag
         account = m["broker_account"]
     state = m["state"] or ""
     terminal = state in TERMINAL_STATES
-    remaining = 0 if terminal else max(int(m["quantity"]) - int(filled_total), 0)
+    # The mirror records the broker's quantity when it differs from the
+    # durable one (TWS edit of a Xenon order, stale amend): reserve the max.
+    observed = orders_store.normalize_legs_payload(m["legs"]).get("observed_qty")
+    qty = max(int(m["quantity"]), int(observed or 0))
+    remaining = 0 if terminal else max(qty - int(filled_total), 0)
     return coverage.Order(
         id=m["submission_id"],
         account=account,
         envelope=m["action"],
-        qty=int(m["quantity"]),
+        qty=qty,
         legs=legs,
         state=state,
         filled_after_snapshot=int(filled_after),
@@ -277,6 +281,9 @@ class Gate4Inputs:
     snapshot_at: datetime | None
     # submission_id -> symbols the order can touch (None = unknown).
     order_syms: dict[str, frozenset[str] | None] = field(default_factory=dict)
+    # Live pure-BUY rows: excluded from `orders` (they owe no demand) but
+    # still valid modify targets (round 4, item 5).
+    pure_buy_ids: frozenset[str] = frozenset()
 
 
 def _holdings_from_payload(payload: dict) -> list[coverage.Holding]:
@@ -422,6 +429,7 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
 
     orders = []
     order_syms: dict[str, frozenset[str] | None] = {}
+    pure_buy_ids: set[str] = set()
     for r in rows:
         # filled_total = max(fill rows, the row's denormalized filled_qty).
         # The cache can only be *ahead* of the ledger (a fill row still in
@@ -439,6 +447,7 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
             continue
         order = order_from_row(r, filled_total=total, filled_after=after)
         if _pure_buy(order):
+            pure_buy_ids.add(order.id)
             continue
         orders.append(order)
         order_syms[order.id] = _row_symbols(r._mapping, order.legs)
@@ -452,6 +461,7 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
         as_of=as_of,
         snapshot_at=snapshot_at,
         order_syms=order_syms,
+        pure_buy_ids=frozenset(pure_buy_ids),
     )
 
 
@@ -754,8 +764,12 @@ def _legs_for_body_match(legs_payload):
     replayed identical body must still dedupe after an amend was pending.
     """
     if isinstance(legs_payload, dict):
-        return {k: v for k, v in legs_payload.items() if k not in ("pending_amend_qty", "pending_amend_id")}
+        return {k: v for k, v in legs_payload.items() if k not in _SERVER_PAYLOAD_KEYS}
     return legs_payload
+
+
+# Reservation state the server/mirror writes into the legs payload.
+_SERVER_PAYLOAD_KEYS = frozenset({"pending_amend_qty", "pending_amend_id", "pending_amend_deadline", "observed_qty"})
 
 
 def _classify_existing(row, request: RequestRow, legs_payload) -> Gate4Outcome:
@@ -951,6 +965,19 @@ class ModifyReservationOutcome:
 
 MODIFY_PENDING_REASON = "modify_pending"
 
+# Seconds IB may still take to apply an amend message it already received.
+AMEND_IB_GRACE_S = 10.0
+
+
+def amend_sender_deadline(opened_at: datetime) -> datetime:
+    """Latest instant the original sender of an amend opened at `opened_at`
+    can still apply it: the modify CLI exits by its own hard wall-clock
+    bound (MODIFY_WALL_CLOCK_S, also when the API process died) plus the IB
+    processing grace. The route SIGKILLs it earlier (15 s)."""
+    from xenon.execution.ib_order_manage import MODIFY_WALL_CLOCK_S
+
+    return opened_at + timedelta(seconds=MODIFY_WALL_CLOCK_S + AMEND_IB_GRACE_S)
+
 
 def _lock_scope(conn, scope: dict) -> None:
     conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": scope_lock_key(scope)})
@@ -995,8 +1022,9 @@ def begin_modify(submission_id: str, new_qty: int | None, scope: dict) -> Modify
             return ModifyReservationOutcome(accept=False, reasons=[f"modify_target_not_found:{submission_id}"])
         if payload.get("pending_amend_id") is not None or payload.get("pending_amend_qty") is not None:
             return ModifyReservationOutcome(accept=False, reasons=[MODIFY_PENDING_REASON])
-        if new_qty is not None:
-            inputs = load_inputs(conn, scope)
+        inputs = load_inputs(conn, scope) if new_qty is not None else None
+        if inputs is not None and submission_id not in inputs.pure_buy_ids:
+            # A resting pure-BUY order owes no cover at any quantity.
             modify_candidate = coverage.Modify(order_id=submission_id, new_qty=new_qty)
             decision = _evaluate(inputs, modify_candidate, netting=netting_enabled())
             if not decision.accept:
@@ -1010,6 +1038,7 @@ def begin_modify(submission_id: str, new_qty: int | None, scope: dict) -> Modify
         amend_id = str(uuid.uuid4())
         payload["pending_amend_id"] = amend_id
         payload["pending_amend_qty"] = int(new_qty) if new_qty is not None else None
+        payload["pending_amend_deadline"] = amend_sender_deadline(datetime.now(timezone.utc)).isoformat()
         _write_payload(conn, submission_id, payload)
         return ModifyReservationOutcome(accept=True, submission_id=submission_id, amend_id=amend_id)
 
@@ -1043,13 +1072,19 @@ def settle_modify(
             return False
         qty_amend = payload.get("pending_amend_qty") is not None
         if outcome == "uncertain" and qty_amend:
+            # The sender finished (reply, error or kill): record that, so the
+            # first fresh mirror read after the IB processing grace can
+            # confirm or expire this generation. Demand stays max(old, new).
+            finished = datetime.now(timezone.utc) + timedelta(seconds=AMEND_IB_GRACE_S)
+            current = orders_store._as_aware(payload.get("pending_amend_deadline"))
+            if current is None or finished < current:
+                payload["pending_amend_deadline"] = finished.isoformat()
+                _write_payload(conn, submission_id, payload)
             return False
         values = {}
         if outcome == "confirmed" and qty_amend and new_qty is not None:
             values["quantity"] = int(new_qty)
-        payload["pending_amend_id"] = None
-        payload["pending_amend_qty"] = None
-        _write_payload(conn, submission_id, payload, **values)
+        _write_payload(conn, submission_id, orders_store._clear_pending(payload), **values)
         return True
 
 

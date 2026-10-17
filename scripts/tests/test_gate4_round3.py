@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import threading
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -42,9 +43,13 @@ def _set_perm(sub_id, perm):
         )
 
 
-def _mirror(perm, qty, legs=orders_store._UNSET):
-    """What the IB mirror (sync pass / activity poller) writes for one order."""
-    return orders_store.register_from_snapshot(perm, "4242", "SPY", "OPT", "SELL", qty, 5.0, 100, legs=legs, **SCOPE)
+def _mirror(perm, qty, legs=orders_store._UNSET, observed_at=None):
+    """What the IB mirror (sync pass / activity poller) writes for one order.
+    Default: a read that started now (fresh against every earlier write)."""
+    return orders_store.register_from_snapshot(
+        perm, "4242", "SPY", "OPT", "SELL", qty, 5.0, 100, legs=legs,
+        observed_at=observed_at or datetime.now(timezone.utc), **SCOPE,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +161,7 @@ def test_drift_update_keeps_pending_and_guarantee_mode():
     sub_id = _snapshot_row_with_state("880101", pending_qty=3, guaranteed=True)
     # Price drift + an observation that carries no routing tags.
     out = orders_store.register_from_snapshot(
-        "880101", "4242", "SPY", "OPT", "SELL", 1, 6.0, 100, legs=_observed(None), **SCOPE
+        "880101", "4242", "SPY", "OPT", "SELL", 1, 6.0, 100, legs=_observed(None), observed_at=datetime.now(timezone.utc), **SCOPE
     )
     assert out["action"] == "UPDATED"
     _, legs = _legs(sub_id)
@@ -167,9 +172,9 @@ def test_drift_update_keeps_pending_and_guarantee_mode():
 
 def test_drift_reconciles_pending_only_on_matching_quantity():
     sub_id = _snapshot_row_with_state("880201", pending_qty=3)
-    orders_store.register_from_snapshot("880201", "4242", "SPY", "OPT", "SELL", 2, 5.0, 100, legs=_observed(), **SCOPE)
+    orders_store.register_from_snapshot("880201", "4242", "SPY", "OPT", "SELL", 2, 5.0, 100, legs=_observed(), observed_at=datetime.now(timezone.utc), **SCOPE)
     assert _legs(sub_id)[1]["pending_amend_qty"] == 3
-    orders_store.register_from_snapshot("880201", "4242", "SPY", "OPT", "SELL", 3, 5.0, 100, legs=_observed(), **SCOPE)
+    orders_store.register_from_snapshot("880201", "4242", "SPY", "OPT", "SELL", 3, 5.0, 100, legs=_observed(), observed_at=datetime.now(timezone.utc), **SCOPE)
     qty, legs = _legs(sub_id)
     assert qty == 3 and legs["pending_amend_qty"] is None and legs["pending_amend_id"] is None
 
@@ -201,7 +206,7 @@ def test_mirror_legs_write_waits_for_account_lock():
         t = threading.Thread(
             target=lambda: (
                 orders_store.register_from_snapshot(
-                    "880401", "4242", "SPY", "OPT", "SELL", 5, 5.0, 100, legs=_observed(), **SCOPE
+                    "880401", "4242", "SPY", "OPT", "SELL", 5, 5.0, 100, legs=_observed(), observed_at=datetime.now(timezone.utc), **SCOPE
                 ),
                 done.set(),
             )

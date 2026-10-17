@@ -1896,6 +1896,12 @@ def _preflight_block_response(verdict: Verdict) -> JSONResponse:
     )
 
 
+# The route SIGKILLs the modify subprocess after this many seconds. Must stay
+# below ib_order_manage.MODIFY_WALL_CLOCK_S (the amend sender bound gate4
+# uses to expire an unresolved amend).
+_MODIFY_SUBPROCESS_TIMEOUT_S = 15
+
+
 def _gate4_reject_verdict(
     reasons: list[str],
     uncovered: dict | None,
@@ -3027,7 +3033,10 @@ async def _orders_modify_from_body(body: dict):
                     409,
                     ReasonCode.MODIFY_PENDING.value,
                     {
-                        "message": "A previous modify of this order is still unresolved; wait for the next sync or cancel the order",
+                        "message": (
+                            "An earlier change to this order is not confirmed by IB yet. "
+                            "Retry in about two minutes, after IB reports the order again, or cancel the order."
+                        ),
                         "http_status": 409,
                     },
                 )
@@ -3044,7 +3053,7 @@ async def _orders_modify_from_body(body: dict):
             )
         _amend_id = mod_outcome.amend_id
 
-    result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=15)
+    result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=_MODIFY_SUBPROCESS_TIMEOUT_S)
     if not result.ok:
         # DB sequence is already advanced; don't roll back — prevents
         # double-apply on a retry. Log and surface to caller.

@@ -102,7 +102,7 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
   },
   MODIFY_PENDING: {
     severity: "warn",
-    copy: "An earlier change to this order is not confirmed yet. Wait for the order to sync, then retry.",
+    copy: "An earlier change to this order is not confirmed by IB yet. Retry in about two minutes, after IB reports the order again, or cancel the order.",
   },
   COMBO_SPLIT_REQUIRED: {
     severity: "error",

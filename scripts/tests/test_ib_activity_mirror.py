@@ -241,9 +241,10 @@ def test_run_activity_poll_tick_calls_both_surfaces(monkeypatch, scope):
         lambda c, lookback_days=7: [{"exec_id": "x1", "perm_id": "9", "symbol": "QQQ"}],
     )
 
-    def fake_sync(open_orders, *, scope):
+    def fake_sync(open_orders, *, scope, observed_at=None):
         captured["sync_orders"] = open_orders
         captured["sync_scope"] = scope
+        captured["observed_at"] = observed_at
         return {"registered": 1, "updated": 0, "skipped": 0, "open_count": 1}
 
     def fake_record(executions, *, scope):
@@ -260,6 +261,8 @@ def test_run_activity_poll_tick_calls_both_surfaces(monkeypatch, scope):
     )
 
     assert captured["sync_scope"] == scope
+    # PR-03b round 4: the tick passes its read-start watermark to the mirror.
+    assert captured["observed_at"] is not None and captured["observed_at"].tzinfo is not None
     assert captured["record_scope"] == scope
     assert result["open_orders"]["registered"] == 1
     assert result["fills"]["inserted"] == 1

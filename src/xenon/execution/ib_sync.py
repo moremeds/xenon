@@ -1321,26 +1321,38 @@ def _stamp_option_metadata(client, collapsed: list) -> None:
             leg["und_sec"] = m["und_sec"] if m else None
 
 
-def _trade_key(trade) -> tuple:
-    order = getattr(trade, "order", None)
-    perm = getattr(order, "permId", 0) or 0
-    if perm:
-        return ("perm", perm)
-    return ("oid", getattr(order, "clientId", None), getattr(order, "orderId", None))
-
-
 def _read_pass_activity(client) -> dict:
-    """Open orders + executions for this sync pass (after the positions read).
+    """Open orders, then executions, for this sync pass (after positions).
 
-    Read order: open orders → executions → open orders again. The confirming
-    open-order read catches an order placed while executions were read; the
-    union of both order reads is what gets persisted. Every read result is
-    returned with its success flag so the stamp can attest it.
+    Read order: positions -> open orders -> executions (PR-03b round 4).
+    The snapshot's `as_of` is the pass start and gate 4 counts every fill
+    at/after `as_of`, so:
+
+    - an order working at the open-order read is persisted as demand;
+    - an order placed AND filled anywhere before the executions read
+      (between any two reads) shows up as a fill after `as_of`;
+    - an order working at the open-order read that fills later is both.
+
+    Not visible to this pass (accepted after-pass limitation): an order
+    placed after the open-order read that is still unfilled at the
+    executions read, and anything after the executions read. Any sequence
+    of discrete reads has such a tail — whatever the last read is, one
+    event kind can land just before it unseen; ending on executions means
+    the unseen kind is a still-working order, never a completed short.
+    The next pass sees it.
+
+    `executions_client_id` records which IB clientId issued reqExecutions
+    (cross-client execution visibility is verified on live IB separately).
     """
     log = logging.getLogger("ib_sync.pass")
-    out = {"trades": [], "audit_trades": [], "fills": [], "open_orders_ok": False, "executions_ok": False}
+    out = {"trades": [], "fills": [], "open_orders_ok": False, "executions_ok": False}
     try:
-        first = list(client.get_open_orders())
+        out["executions_client_id"] = getattr(getattr(client.ib, "client", None), "clientId", None)
+    except Exception:  # noqa: BLE001 — diagnostics only
+        out["executions_client_id"] = None
+    try:
+        out["trades"] = list(client.get_open_orders())
+        out["open_orders_ok"] = True
     except Exception as exc:
         log.warning("open-order read failed (%s)", exc)
         return out
@@ -1349,20 +1361,11 @@ def _read_pass_activity(client) -> dict:
         out["executions_ok"] = True
     except Exception as exc:
         log.warning("executions read failed (%s)", exc)
-    try:
-        second = list(client.get_open_orders())
-    except Exception as exc:
-        log.warning("confirming open-order read failed (%s)", exc)
-        return out
-    union = {_trade_key(t): t for t in first}
-    union.update({_trade_key(t): t for t in second})
-    out["trades"] = list(union.values())
-    out["audit_trades"] = second
-    out["open_orders_ok"] = True
+    log.info("pass reads: reqExecutions on clientId=%s", out["executions_client_id"])
     return out
 
 
-def _persist_pass_activity(open_orders: list[dict], executions: list[dict]) -> bool:
+def _persist_pass_activity(open_orders: list[dict], executions: list[dict], *, observed_at=None) -> bool:
     """Persist this pass's scoped open orders + executions to Postgres.
 
     Runs BEFORE the snapshot is published: a snapshot may claim
@@ -1378,8 +1381,15 @@ def _persist_pass_activity(open_orders: list[dict], executions: list[dict]) -> b
         from xenon.execution.ib_reconcile import record_external_fills
 
         scope = resolve_from_env()
-        sync_open_orders_to_postgres(open_orders, scope=scope)
+        result = sync_open_orders_to_postgres(open_orders, scope=scope, observed_at=observed_at)
         record_external_fills(executions, scope=scope)
+        if (result or {}).get("unidentified"):
+            # An open order without permId/orderId could not be keyed, so
+            # its demand is not in Postgres — the pass is not complete.
+            logging.getLogger("ib_sync.pass").warning(
+                "%d open order(s) without permId/orderId — pass incomplete", result["unidentified"]
+            )
+            return False
         return True
     except Exception as exc:  # noqa: BLE001 — any failure degrades the stamp
         logging.getLogger("ib_sync.pass").warning("pass activity persist failed (%s)", exc, exc_info=True)
@@ -1585,6 +1595,7 @@ def main():
             # read here, persisted to Postgres, and only then is the snapshot
             # published. The open-order read is part of the attestation even
             # when --skip-audit is set.
+            orders_read_at = datetime.now(timezone.utc)
             activity = _read_pass_activity(client)
             reads["open_orders"] = activity["open_orders_ok"]
             reads["executions"] = activity["executions_ok"]
@@ -1595,9 +1606,11 @@ def main():
             # the pass cannot claim it saw a whole, scoped picture.
             reads["order_accounts"] = all(o.get("account") for o in open_orders)
             reads["persisted"] = (
-                reads["open_orders"] and reads["executions"] and _persist_pass_activity(open_orders, executions)
+                reads["open_orders"]
+                and reads["executions"]
+                and _persist_pass_activity(open_orders, executions, observed_at=orders_read_at)
             )
-            orders_for_audit = _audit_orders_from_trades(activity["audit_trades"])
+            orders_for_audit = _audit_orders_from_trades(activity["trades"])
             fill_dates = build_fill_dates(client, fills=activity["fills"])
             _stamp_option_metadata(client, collapsed)
             portfolio = convert_to_portfolio_format(
@@ -1607,6 +1620,7 @@ def main():
             # read succeeded, every row named an account, and the observed
             # orders/fills were persisted before this snapshot.
             portfolio["observation"] = _observation_stamp(pass_started, reads, ib_account)
+            portfolio["observation"]["executions_client_id"] = activity.get("executions_client_id")
             save_portfolio(portfolio)
 
             # ── Naked Short Audit (post-sync) ──
