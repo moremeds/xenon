@@ -11,7 +11,9 @@ from xenon.db.queries.nav_history import load_inception_date, load_nav_curve
 from xenon.execution.account_scope import AccountScope
 from xenon.utils.portfolio_loader import upsert_nav_sync
 
-pytestmark = pytest.mark.asyncio
+# committed_db: seeds nav via the sync engine while the async engine reads —
+# the writes must really commit to be visible cross-connection.
+pytestmark = [pytest.mark.asyncio, pytest.mark.committed_db]
 
 _SCOPE = AccountScope(broker="FUTU", account_env="live", broker_account="FUTU_PE1")
 
