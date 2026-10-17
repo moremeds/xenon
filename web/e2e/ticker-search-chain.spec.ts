@@ -191,7 +191,7 @@ test.describe("Ticker Search → Detail Page → Chain", () => {
   test("search input focuses on CMD+K and opens detail page on selection", async ({ page }) => {
     await page.unrouteAll({ behavior: "ignoreErrors" });
     stubApis(page);
-    await page.goto("http://127.0.0.1:3000/portfolio");
+    await page.goto("/portfolio");
 
     // Focus search via keyboard shortcut
     await page.keyboard.press("Meta+k");
@@ -202,7 +202,7 @@ test.describe("Ticker Search → Detail Page → Chain", () => {
   test("Book tab shows L1 order book with bid/ask/spread", async ({ page }) => {
     await page.unrouteAll({ behavior: "ignoreErrors" });
     stubApis(page);
-    await page.goto("http://127.0.0.1:3000/portfolio");
+    await page.goto("/portfolio");
 
     // Inject prices for AAPL
     await page.evaluate((pd) => {
@@ -224,7 +224,7 @@ test.describe("Ticker Search → Detail Page → Chain", () => {
   test("Chain tab loads expirations and shows strike grid", async ({ page }) => {
     await page.unrouteAll({ behavior: "ignoreErrors" });
     stubApis(page);
-    await page.goto("http://127.0.0.1:3000/portfolio");
+    await page.goto("/portfolio");
 
     // Inject underlying price for ATM centering
     await page.evaluate((pd) => {
@@ -234,7 +234,7 @@ test.describe("Ticker Search → Detail Page → Chain", () => {
     }, makePriceData("AAPL", 205.50, 205.40, 205.60));
 
     // Navigate directly to ticker detail page with chain tab
-    await page.goto("http://127.0.0.1:3000/AAPL?tab=chain");
+    await page.goto("/AAPL?tab=chain");
 
     const detail = page.locator(".ticker-detail-page").last();
     await detail.waitFor({ timeout: 5_000 });
@@ -259,7 +259,7 @@ test.describe("Ticker Search → Detail Page → Chain", () => {
   test("clicking chain bid/ask adds legs to order builder", async ({ page }) => {
     await page.unrouteAll({ behavior: "ignoreErrors" });
     stubApis(page);
-    await page.goto("http://127.0.0.1:3000/portfolio");
+    await page.goto("/portfolio");
 
     // Inject prices
     const prices = [
@@ -277,7 +277,7 @@ test.describe("Ticker Search → Detail Page → Chain", () => {
     }, prices);
 
     // Navigate directly to ticker detail page with chain tab
-    await page.goto("http://127.0.0.1:3000/AAPL?tab=chain");
+    await page.goto("/AAPL?tab=chain");
 
     const detail = page.locator(".ticker-detail-page");
     await detail.waitFor({ timeout: 5_000 });
@@ -314,7 +314,7 @@ test.describe("Ticker Search → Detail Page → Chain", () => {
       });
     });
 
-    await page.goto("http://127.0.0.1:3000/AAPL?tab=chain");
+    await page.goto("/AAPL?tab=chain");
 
     const detail = page.locator(".ticker-detail-page").last();
     await detail.waitFor({ timeout: 5_000 });
@@ -373,7 +373,7 @@ test.describe("Ticker Search → Detail Page → Chain", () => {
       });
     });
 
-    await page.goto("http://127.0.0.1:3000/AAPL?tab=chain");
+    await page.goto("/AAPL?tab=chain");
 
     const detail = page.locator(".ticker-detail-page");
     await detail.waitFor({ timeout: 5_000 });
@@ -426,7 +426,7 @@ test.describe("Ticker Search → Detail Page → Chain", () => {
       });
     });
 
-    await page.goto("http://127.0.0.1:3000/AAPL?tab=chain");
+    await page.goto("/AAPL?tab=chain");
 
     const detail = page.locator(".ticker-detail-page").last();
     await detail.waitFor({ timeout: 5_000 });
