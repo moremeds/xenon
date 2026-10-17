@@ -59,9 +59,10 @@ describe("resolveSpreadPriceData", () => {
 
     const result = resolveSpreadPriceData("IWM", riskReversal, prices);
     expect(result).not.toBeNull();
-    expect(result!.bid).toBeCloseTo(0.25, 2);
-    expect(result!.ask).toBeCloseTo(0.26, 2);
-    expect(result!.last).toBeCloseTo(0.26, 2);
+    // Cross-field natural market: bid = 3.25 − 3.02 = 0.23, ask = 3.28 − 3.00 = 0.28
+    expect(result!.bid).toBeCloseTo(0.23, 2);
+    expect(result!.ask).toBeCloseTo(0.28, 2);
+    expect(result!.last).toBeCloseTo(0.255, 3);
     expect(result!.lastIsCalculated).toBe(true);
   });
 
@@ -73,12 +74,12 @@ describe("resolveSpreadPriceData", () => {
 
     const result = resolveSpreadPriceData("GOOG", bullCallSpread, prices);
     expect(result).not.toBeNull();
-    // Net bid = Σ(sign × leg.bid) = 8.50 - 4.00 = 4.50
-    // Net ask = Σ(sign × leg.ask) = 8.80 - 4.20 = 4.60
-    // lo = min(4.50, 4.60) = 4.50, hi = max(4.50, 4.60) = 4.60
-    // Net last = long last - short last = 8.65 - 4.10 = 4.55
-    expect(result!.bid).toBeCloseTo(4.50, 2);
-    expect(result!.ask).toBeCloseTo(4.60, 2);
+    // Cross-field natural market:
+    // Net bid = long bid - short ask = 8.50 - 4.20 = 4.30
+    // Net ask = long ask - short bid = 8.80 - 4.00 = 4.80
+    // Net mark (last) = mid = 4.55
+    expect(result!.bid).toBeCloseTo(4.30, 2);
+    expect(result!.ask).toBeCloseTo(4.80, 2);
     expect(result!.last).toBeCloseTo(4.55, 2);
     expect(result!.symbol).toBe("GOOG");
   });
