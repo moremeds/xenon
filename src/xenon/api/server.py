@@ -1821,6 +1821,24 @@ def _portfolio_has_matching_long_option(
     return held >= quantity
 
 
+# TIFs the place flow supports end to end (web OrderTif / placeOrderBodySchema;
+# the place CLI passes the value to IB LimitOrder unchanged).
+_PLACE_TIFS = frozenset({"DAY", "GTC"})
+
+
+def _canonical_tif(raw) -> str:
+    """Strip + upper; None / "" → DAY (the CLI default). Raises ValueError
+    for anything outside _PLACE_TIFS."""
+    if raw is None:
+        return "DAY"
+    if not isinstance(raw, str):
+        raise ValueError(f"tif must be one of {sorted(_PLACE_TIFS)}")
+    tif = raw.strip().upper() or "DAY"
+    if tif not in _PLACE_TIFS:
+        raise ValueError(f"tif must be one of {sorted(_PLACE_TIFS)}, got {raw!r}")
+    return tif
+
+
 def _invalid_order_body_response(exc: Exception) -> Verdict:
     return Verdict(
         accept=False,
@@ -2467,6 +2485,10 @@ async def _orders_place_from_body(body: dict):
     security_type = "STK" if body.get("type") == "stock" else "BAG" if body.get("type") == "combo" else "OPT"
     ticker = str(body.get("symbol", "")).upper()
     try:
+        # One canonical TIF for the reservation, the stored column and the
+        # place CLI (PR-03b round 7). Unknown values fail before reserving.
+        tif = _canonical_tif(body.get("tif"))
+        body["tif"] = tif
         req_row = orders_store.RequestRow(
             ticker=ticker,
             security_type=security_type,
@@ -2481,7 +2503,7 @@ async def _orders_place_from_body(body: dict):
             multiplier=gate4.server_multiplier(ticker),
             con_id=int(body.get("con_id") or 0) or None,
             limit_price=Decimal(str(body.get("limitPrice", "0"))),
-            tif=body.get("tif"),
+            tif=tif,
         )
     except (ValueError, TypeError, ValidationError) as exc:
         return _preflight_block_response(_invalid_order_body_response(exc))

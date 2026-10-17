@@ -263,16 +263,23 @@ def _identity_compatible(row_action, row_legs, obs_action, obs_legs) -> bool:
         if x.get("con_id") is not None and y.get("con_id") is not None:
             return int(x["con_id"]) == int(y["con_id"])
 
+        if str(x.get("sym") or "").upper() != str(y.get("sym") or "").upper() or x.get("sec") != y.get("sec"):
+            return False
+        # Stock & other non-option legs: the place leg carries None while the
+        # IB snapshot carries strike 0.0 / right "" (ib_async Stock), so
+        # None, 0 and "" compare equal there (round 7, item 1).
+        blank = (lambda v: None if v in (None, "", 0) else v) if x.get("sec") != "OPT" else (lambda v: v)
+
         def _f(v):
+            v = blank(v)
             return None if v is None else float(v)
 
         def _e(v):
+            v = blank(v)
             return None if v is None else str(v).replace("-", "")
 
         return (
-            str(x.get("sym") or "").upper() == str(y.get("sym") or "").upper()
-            and x.get("sec") == y.get("sec")
-            and (x.get("right") or None) == (y.get("right") or None)
+            (blank(x.get("right")) or None) == (blank(y.get("right")) or None)
             and _e(x.get("exp")) == _e(y.get("exp"))
             and _f(x.get("strike")) == _f(y.get("strike"))
         )
@@ -425,10 +432,12 @@ def _request_body_matches(row, request: RequestRow, legs) -> bool:
         and (None if row.con_id is None else int(row.con_id))
         == (None if request.con_id is None else int(request.con_id))
         and _num(row.limit_price) == _num(request.limit_price)
-        # Rows written before round 6 never stored the request TIF: the
-        # column's server default 'DAY' is what the place path assumed for
-        # them, so they compare as DAY (a legacy GTC replay is a mismatch,
-        # never a silent duplicate of a different instruction).
+        # Rows written before round 6 never stored the request TIF: the old
+        # place path forwarded the body TIF to the CLI but never wrote the
+        # column, so every legacy row holds the server default 'DAY' — also
+        # a legacy GTC order. A legacy GTC replay therefore returns
+        # body_mismatch (409), the safe direction: never a duplicate of a
+        # different instruction, never a second order.
         and str(row.tif or "DAY").upper() == request.tif
         and _canon_json(row.legs) == _canon_json(legs)
     )

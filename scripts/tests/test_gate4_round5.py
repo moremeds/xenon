@@ -51,6 +51,7 @@ from scripts.tests.test_gate4_sync_pass import (  # noqa: F401 — fixtures
     _row,
     _run_sync,
     _shares_client,
+    _stk,
     _trade,
 )
 from xenon.api import server as server_mod
@@ -617,3 +618,70 @@ def test_rehydrate_state_writer_never_moves_watermark_back():
         ).scalar_one()
     engine.dispose()
     assert stamp > later
+
+
+# ---------------------------------------------------------------------------
+# round 7 item 1 — unstamped stock rows are adoptable
+# ---------------------------------------------------------------------------
+
+
+def test_unstamped_stock_row_is_adopted(monkeypatch, client, broker_calls, fresh_quote):
+    """Fable delta-4 P2: the place leg of a stock order has strike/right/exp
+    None, the IB snapshot leg has strike 0.0 / right "" (ib_async Stock), and
+    the place leg has no con_id. They are the same order."""
+    from xenon.execution import coverage
+
+    stock_legs = gate4.legs_payload_for(
+        legs=[coverage.Leg(action="BUY", sym="SPY", sec="STK", ratio=1)], guaranteed=False
+    )
+    sub_id = _unstamped_uuid_row(990340, legs=stock_legs)
+    _committed_sql(
+        "UPDATE xenon.order_submissions SET security_type='STK', strike=NULL, \"right\"=NULL, expiry=NULL,"
+        " con_id=NULL, multiplier=1 WHERE submission_id=:s",
+        s=sub_id,
+    )
+    fake = _shares_client(200)
+    t = _trade(_stk(), order_id=990340 - 900000, perm_id=990340)
+    t.order.clientId = 26
+    fake.open_orders.append(t)
+
+    _run_sync(monkeypatch, fake)
+
+    assert not _has_snapshot_row(990340)
+    assert _row(sub_id)["perm_id"] == "990340"
+
+
+# ---------------------------------------------------------------------------
+# round 7 item 2 — one canonical TIF before the reservation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("raw", "canon"), [(None, "DAY"), ("", "DAY"), ("  day ", "DAY"), (" gtc\t", "GTC")])
+def test_place_tif_is_canonicalized_once(raw, canon, client, broker_calls, fresh_quote):
+    engine = _pg_engine()
+    _route_seed_snapshot(engine, [_route_stock("SPY", 200)])
+    engine.dispose()
+    body = {**_sell_call_body("r7-tif"), "tif": raw}
+
+    assert client.post("/orders/place", json=body).status_code == 200
+    assert _submission_rows()[0]._mapping["tif"] == canon
+    sent = json.loads(broker_calls[0]["args"][broker_calls[0]["args"].index("--json") + 1])
+    assert sent["tif"] == canon
+    # Any spelling of the same TIF replays as a duplicate; the other TIF does not.
+    assert client.post("/orders/place", json={**body, "tif": canon.lower()}).status_code == 200
+    other = "GTC" if canon == "DAY" else "DAY"
+    assert client.post("/orders/place", json={**body, "tif": other}).status_code == 409
+    assert len(broker_calls) == 1
+
+
+@pytest.mark.parametrize("raw", ["IOC", "XYZ", "G T C", 7])
+def test_place_unknown_tif_rejected_before_reservation(raw, client, broker_calls, fresh_quote):
+    engine = _pg_engine()
+    _route_seed_snapshot(engine, [_route_stock("SPY", 200)])
+    engine.dispose()
+
+    resp = client.post("/orders/place", json={**_sell_call_body("r7-tif-bad"), "tif": raw})
+
+    assert resp.status_code == 400 and resp.json()["reason_code"] == "INVALID_ORDER_BODY", resp.text
+    assert _submission_rows() == []
+    assert broker_calls == []
