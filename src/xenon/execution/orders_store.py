@@ -9,6 +9,7 @@ Spec: docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md §12.
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,6 +24,31 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from xenon.db.engine import get_sync_engine
 from xenon.db.events import CHANNEL_FILL_COMMISSION_UPDATED, CHANNEL_FILL_RECORDED, emit_outbox_in_txn
 from xenon.db.schema import order_events, order_fills, order_submissions, regime_overrides
+
+# ── Read-only choke point ──
+
+
+class ReadOnlyWriteError(RuntimeError):
+    """Raised by every orders_store writer under XENON_READ_ONLY=1.
+
+    Set by `scripts/infra/dev.sh live` for debugging sessions against live
+    IB: reads stay open, but no live-derived order state may land in
+    core_test. Real prod writes go through the macmini Docker stack, which
+    never sets the flag.
+    """
+
+
+def ensure_writable() -> None:
+    """Single choke point: refuse every orders_store write under XENON_READ_ONLY=1.
+
+    First statement of every write function in this module so subprocess
+    and in-process callers alike fail closed instead of silently persisting.
+    """
+    if os.environ.get("XENON_READ_ONLY") == "1":
+        raise ReadOnlyWriteError(
+            "XENON_READ_ONLY=1 — orders_store writes disabled (dev.sh live session)"
+        )
+
 
 # ── Schema init ──
 
@@ -174,6 +200,7 @@ def reserve_attempt(
     `route, vcg_tier, cri_tier, binding_side, block_reason, user_reason,
     order_payload`.
     """
+    ensure_writable()
     sid = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     engine = get_sync_engine()
@@ -303,6 +330,7 @@ def apply_modify(
     is provided we filter on it to avoid colliding with rows from a different
     paper/live account.
     """
+    ensure_writable()
     scope_conds: list = []
     if broker is not None:
         scope_conds.append(order_submissions.c.broker == broker)
@@ -379,6 +407,7 @@ def register_from_snapshot(
     DB: the previous insert-only behavior left snapshot rows frozen at
     their first-seen values.
     """
+    ensure_writable()
     submission_id = f"snapshot-{perm_id}"
     client_attempt_id = f"snapshot-{perm_id}"
     now = datetime.now(timezone.utc)
@@ -542,6 +571,7 @@ def apply_modify_by_perm_id(
     both within the same engine session to avoid TOCTOU. Scope filters
     isolate paper/live rows that may share a perm_id namespace.
     """
+    ensure_writable()
     scope_conds: list = []
     if broker is not None:
         scope_conds.append(order_submissions.c.broker == broker)
@@ -589,6 +619,8 @@ def mark_submitted(
     perm_id: str | None,
     placing_client_id: int | None,
 ) -> None:
+    ensure_writable()
+
     def _int_or_none(value: str | None) -> int | None:
         if value is None:
             return None
@@ -644,6 +676,7 @@ def mark_terminal(
     landing between a caller's read and this write) leaves the row untouched
     and returns 0, so the caller can avoid clobbering a newer terminal state.
     """
+    ensure_writable()
     now = datetime.now(timezone.utc)
     engine = get_sync_engine()
     stmt = update(order_submissions).where(order_submissions.c.submission_id == submission_id)
@@ -682,6 +715,7 @@ def record_fill(
     broker_account: str,
 ) -> bool:
     """Idempotently record one execution-grain fill and emit fill.recorded."""
+    ensure_writable()
     if account_env == "legacy_unknown" or broker_account == "legacy_unknown":
         raise ValueError("record_fill requires explicit account scope")
 
@@ -752,6 +786,7 @@ def update_fill_commission(
     and realizedPNL on a separate message, so this writer only patches those
     post-fill report fields and emits an outbox event when anything changed.
     """
+    ensure_writable()
     incoming_commission = Decimal(str(commission))
     realized_pnl_text = str(realized_pnl) if realized_pnl is not None else None
 
@@ -815,6 +850,7 @@ def record_event(
     kind: str,
     detail: dict,
 ) -> None:
+    ensure_writable()
     engine = get_sync_engine()
     with engine.begin() as conn:
         conn.execute(
