@@ -7,9 +7,67 @@
 
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { ensureTestFastApi } from "./fastapiHarness";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { ensureTestFastApi, type FastApiHarness } from "./fastapiHarness";
 
-const fastApiHarness = await ensureTestFastApi();
+// The harness spawns `.venv/bin/python -m uvicorn xenon.api.server:app`. When
+// the project venv is absent (deps not synced) that spawn emits an unhandled
+// 'error' event on the child process, which fails this file instead of
+// skipping it. Gate the call: without a venv interpreter, only a reachable
+// external test-mode FastAPI (XENON_TEST_FASTAPI_URL / XENON_API_URL) can
+// satisfy these tests; anything else skips cleanly.
+const VENV_PYTHON = fileURLToPath(
+  new URL("../../.venv/bin/python", import.meta.url),
+);
+
+async function probeExternalTestApi(baseUrl: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${baseUrl}/health`, {
+      signal: AbortSignal.timeout(1_500),
+    });
+    if (!res.ok) return false;
+    const body = (await res.json()) as {
+      status?: string;
+      test_mode?: boolean;
+    };
+    return body.status === "ok" && body.test_mode === true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveHarness(): Promise<FastApiHarness> {
+  const explicitBaseUrl =
+    process.env.XENON_TEST_FASTAPI_URL ?? process.env.XENON_API_URL;
+  if (
+    !existsSync(VENV_PYTHON) &&
+    !(explicitBaseUrl && (await probeExternalTestApi(explicitBaseUrl)))
+  ) {
+    return {
+      available: false,
+      baseUrl: "",
+      mode: "unavailable",
+      skipReason:
+        "no project .venv to spawn test FastAPI (run `uv sync --extra test`) " +
+        "and no reachable test-mode XENON_TEST_FASTAPI_URL",
+      close: async () => {},
+    };
+  }
+  try {
+    return await ensureTestFastApi();
+  } catch (err) {
+    return {
+      available: false,
+      baseUrl: "",
+      mode: "unavailable",
+      skipReason: err instanceof Error ? err.message : String(err),
+      close: async () => {},
+    };
+  }
+}
+
+const fastApiHarness = await resolveHarness();
 const fastApiIt = fastApiHarness.available ? it : it.skip;
 
 if (!fastApiHarness.available && fastApiHarness.skipReason) {

@@ -11,7 +11,10 @@ from xenon.api.services.performance_futu_flows import load_futu_flows_per_day
 from xenon.db.queries.futu_history import insert_cashflows
 from xenon.execution.account_scope import AccountScope
 
-pytestmark = pytest.mark.asyncio
+# committed_db: async-engine writes commit for real (no txn-rollback
+# isolation), so cross-test isolation needs the Phase 1 TRUNCATE pre+post
+# path — otherwise same-file seeds leak into later tests' queries.
+pytestmark = [pytest.mark.asyncio, pytest.mark.committed_db]
 
 _SCOPE = AccountScope(broker="FUTU", account_env="live", broker_account="FUTU_FLOW1")
 

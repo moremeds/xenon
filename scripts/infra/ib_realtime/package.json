@@ -1,0 +1,8 @@
+{
+  "name": "xenon-ib-realtime",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"__tests__/*.test.mjs\""
+  }
+}

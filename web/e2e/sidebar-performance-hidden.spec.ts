@@ -60,7 +60,7 @@ async function setupMocks(page: import("@playwright/test").Page) {
 test.describe("Sidebar navigation", () => {
   test("does not show the hidden Performance route in the visible nav", async ({ page }) => {
     await setupMocks(page);
-    await page.goto("http://127.0.0.1:3000/portfolio");
+    await page.goto("/portfolio");
 
     await expect(page.getByRole("link", { name: "Portfolio" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Orders" })).toBeVisible();

@@ -130,7 +130,7 @@ test.describe("Combo order modify flow", () => {
       });
     });
 
-    await page.goto("http://127.0.0.1:3000/orders");
+    await page.goto("/orders");
 
     const row = page.locator("tbody tr").filter({ hasText: "AAOI" }).first();
     await expect(row).toBeVisible({ timeout: 10_000 });
@@ -138,7 +138,7 @@ test.describe("Combo order modify flow", () => {
 
     const modal = page.locator(".modify-dialog");
     await expect(modal).toBeVisible();
-    await expect(modal.getByText("Combo Legs")).toBeVisible();
+    await expect(modal.getByText("Edit Legs")).toBeVisible();
 
     const modalContent = page.locator(".modal-content");
     const box = await modalContent.boundingBox();

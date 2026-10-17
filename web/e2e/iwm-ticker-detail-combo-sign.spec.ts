@@ -292,19 +292,24 @@ test("IWM ticker detail preserves signed combo leg and order quotes", async ({ p
     });
   });
 
-  await page.goto("http://127.0.0.1:3000/IWM?posId=12&tab=position");
+  await page.goto("/IWM?posId=12&tab=position");
 
   await page.getByRole("button", { name: /Legs \(2\)/i }).click();
 
+  // Market column = resolveRealtimePrice mark: the fixture last sits outside
+  // the bid/ask spread on both legs, so the stale-last rule displays the mid
+  // (put: (3.80+3.86)/2 = 3.83; call: (3.40+3.46)/2 = 3.43).
   const shortRow = page.locator(".pos-legs-table tbody tr").filter({ hasText: "SHORT" }).first();
   await expect(shortRow).toContainText("-$3.57");
-  await expect(shortRow).toContainText("-$3.88");
+  await expect(shortRow).toContainText("-$3.83");
 
   const longRow = page.locator(".pos-legs-table tbody tr").filter({ hasText: "LONG" }).first();
   await expect(longRow).toContainText("$3.46");
-  await expect(longRow).toContainText("$3.63");
+  await expect(longRow).toContainText("$3.43");
 
-  await page.getByRole("button", { name: "Order" }).click();
+  // Close the position deck — the order ticket lives in the act column behind
+  // it and is already mounted (desktop cockpit has no Order tab).
+  await page.locator(".asset-deck-x").click();
 
   const strip = page.locator(".spread-price-strip");
   await expect(strip).toContainText("-$0.46");
