@@ -16,11 +16,21 @@ Shadow only: violations are logged and recorded in
 `service_health("naked_short_audit")`. This module has no broker access and
 no cancel path; enforcement (PR-11) is a separate, opt-in step.
 
-Skip-and-log, never a violation: an incomplete pass view or a placeholder scope
-account skips the whole audit; an order without account, an unsupported
-instrument, unresolved BAG legs, unknown option metadata or a fractional
-quantity skips that order's symbol (as does an unclassifiable holding).
-Foreign-account orders are not this scope's demand and are ignored.
+Skip-and-log, never a violation. The whole audit is skipped when:
+- the scope account is blank, whitespace or an unknown-account sentinel
+  (`coverage.is_real_account`);
+- the snapshot observation is missing, not `complete is True`, names another
+  account, or its `as_of` is unparseable, more than 60 s in the future or
+  older than `AUDIT_MAX_AGE_S`;
+- an unresolved BAG (gate4 could not build its legs from `comboLegs`) or an
+  order with no usable symbol is live — its constituents are unknown.
+One symbol is skipped (all its orders) when a live order on it has no
+account, a non-integer or < 1 quantity, an unsupported secType, or fields
+coverage cannot classify (envelope, quantity bounds, leg action / secType /
+option metadata) unless every effective leg is a BUY (owes no demand); or
+when a holding on it has no account or unknown metadata. Foreign-account
+orders and IB-terminal statuses are not this scope's live demand and are
+ignored.
 
 CLI (`xenon-naked-short-audit`): offline forensics over a saved portfolio
 payload + open-orders file. It prints the result and touches nothing.
@@ -81,11 +91,16 @@ def _as_int(value) -> int | None:
     return int(f) if f.is_integer() else None
 
 
+_UNRESOLVED_BAG = "unresolved_bag_symbols"
+
+
 def _order_symbols(o: dict, legs) -> frozenset[str]:
+    """Symbols the order touches; empty = unknown (a compound symbol such as
+    'AAPL,MSFT' is not one symbol and cannot be trusted as a skip key)."""
     if legs:
         return frozenset(str(leg.sym).upper() for leg in legs if leg.sym)
     sym = str((o.get("contract") or {}).get("symbol") or o.get("symbol") or "").strip().upper()
-    return frozenset({sym}) if sym else frozenset()
+    return frozenset({sym}) if sym and "," not in sym else frozenset()
 
 
 def _unclassifiable(order: coverage.Order) -> str | None:
@@ -154,7 +169,9 @@ def _to_coverage_order(o: dict, idx: int) -> tuple[coverage.Order | None, frozen
         return order, syms, None  # owes no demand; metadata irrelevant
     if legs is None:
         sec = (o.get("contract") or {}).get("secType")
-        return None, syms, "unresolved_bag_legs" if sec == "BAG" else f"unsupported_instrument:{sec}"
+        # gate4 leaves BAG legs unresolved when comboLegs are missing or any
+        # leg has no symbol: the constituent symbols cannot all be known.
+        return None, syms, _UNRESOLVED_BAG if sec == "BAG" else f"unsupported_instrument:{sec}"
     return order, syms, _unclassifiable(order)
 
 
@@ -205,6 +222,10 @@ def find_violations(
         if account and account != scope_account:
             continue  # another scope's order is not this account's demand
         order, syms, reason = _to_coverage_order(o, idx)
+        if reason == _UNRESOLVED_BAG:
+            # Its legs may consume or release cover on any symbol we cannot
+            # name, so no symbol's result is safe for this pass.
+            return AuditResult("skipped", skipped=skipped, reason=_UNRESOLVED_BAG)
         if not syms:
             return AuditResult("skipped", skipped=skipped, reason="order_symbol_unknown")
         if not account:

@@ -266,12 +266,43 @@ def test_order_without_account_skips_its_symbol():
     assert {"symbol": "AAPL", "reason": "order_missing_account"}.items() <= r.skipped[0].items()
 
 
-def test_unresolved_bag_skips_its_symbol():
-    bag = _bag([])  # comboLegs never resolved
+def test_unresolved_bag_skips_whole_audit():
+    bag = _bag([])  # comboLegs never resolved: constituents unknown
     orders = [_order(bag, action="BUY", perm_id=1001), _order(_opt_contract(), perm_id=1002, order_id=2)]
     r = _find(_payload(), orders)
-    assert r.violations == []
-    assert r.skipped and r.skipped[0]["reason"].startswith("unresolved")
+    assert (r.status, r.reason, r.violations) == ("skipped", "unresolved_bag_symbols", [])
+
+
+def test_unresolved_multi_symbol_bag_never_yields_constituent_violation():
+    """Astra P2-2: an unresolved BAG whose contract symbol is 'AAPL,MSFT' may
+    hold AAPL legs; the AAPL SELL call next to it must not be flagged."""
+    bag = _bag([], sym="AAPL,MSFT")
+    orders = [_order(bag, action="BUY", perm_id=1001), _order(_opt_contract(), perm_id=1002, order_id=2)]
+    r = _find(_payload(), orders)
+    assert r.status == "skipped" and r.reason == "unresolved_bag_symbols"
+    assert not any(v["symbol"] == "AAPL" for v in r.violations)
+
+
+def test_partially_resolved_bag_skips_whole_audit():
+    # One combo leg's conId never resolved (no symbol) -> constituents unknown.
+    unresolved = {"conId": 999, "ratio": 1, "action": "SELL"}
+    bag = _bag([_bag_leg("BUY", "C", 200.0, 111), unresolved])
+    orders = [_order(bag, action="BUY", perm_id=1001), _order(_opt_contract(sym="MSFT", con_id=300), perm_id=3001)]
+    r = _find(_payload(), orders)
+    assert (r.status, r.reason) == ("skipped", "unresolved_bag_symbols")
+
+
+def test_unclassifiable_bag_skips_every_constituent_symbol():
+    # Symbols known from comboLegs, but the AAPL leg lacks option metadata.
+    bag = _bag([_bag_leg("BUY", "C", 200.0, 111, meta=False), _bag_leg("BUY", "C", 300.0, 301, sym="MSFT")])
+    orders = [
+        _order(bag, action="SELL", perm_id=1001),
+        _order(_opt_contract(sym="MSFT", con_id=300), perm_id=3001, order_id=3),
+        _order(_opt_contract(sym="NVDA", con_id=400), perm_id=4001, order_id=4),
+    ]
+    r = _find(_payload(), orders)
+    assert _perm_ids(r) == [4001]
+    assert {s["symbol"] for s in r.skipped} == {"AAPL", "MSFT"}
 
 
 def test_unknown_option_metadata_skips_its_symbol():
