@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -157,6 +158,30 @@ def _futu_fetch_portfolio_blocking(client: FutuClient) -> dict:
     if not client.is_connected():
         client.connect()
     return client.fetch_portfolio(force=True)
+
+
+def _futu_cleanup_after_timeout(
+    client: FutuClient,
+    fetch: "concurrent.futures.Future",
+    marker: "concurrent.futures.Future",
+) -> None:
+    """Daemon-thread cleanup after a /futu/sync timeout.
+
+    The Futu SDK's ``close()`` takes its own RLock — running ``disconnect()``
+    on the event loop would block every request while the SDK is stuck.
+    Completes the combined in-flight marker only after BOTH the hung fetch
+    worker and the reset have finished, so a late cleanup can never close a
+    newer session.
+    """
+    try:
+        client.disconnect()
+    except Exception:
+        logger.exception("Futu client reset after sync timeout failed")
+    try:
+        fetch.result()
+    except Exception:
+        pass
+    marker.set_result(None)
 
 
 # Shared state
@@ -2841,21 +2866,28 @@ async def futu_sync():
             )
 
         client = _get_futu_client()
-        _futu_sync_future = _futu_sync_executor.submit(_futu_fetch_portfolio_blocking, client)
+        fetch = _futu_sync_executor.submit(_futu_fetch_portfolio_blocking, client)
+        _futu_sync_future = fetch
         try:
             result = await asyncio.wait_for(
-                asyncio.wrap_future(_futu_sync_future),
+                asyncio.wrap_future(fetch),
                 timeout=FUTU_SYNC_TIMEOUT_S,
             )
         except TimeoutError:
-            # The worker is still running. Reset the client context so the
-            # hung SDK call can unwind; the next request reconnects.
-            # _futu_sync_future stays the in-flight marker until the thread
-            # exits — single-flight ownership is preserved through cleanup.
-            try:
-                client.disconnect()
-            except Exception:
-                logger.exception("Futu client reset after sync timeout failed")
+            # The fetch worker is still running and may hold the client's
+            # RLock. Cleanup must NOT run on the event loop — the SDK's
+            # close() takes its own RLock and would block every request.
+            # Swap the marker for a combined future that completes only when
+            # BOTH the hung fetch and the daemon cleanup thread finish, so a
+            # late cleanup can never close a newer session.
+            marker = concurrent.futures.Future()
+            _futu_sync_future = marker
+            threading.Thread(
+                target=_futu_cleanup_after_timeout,
+                args=(client, fetch, marker),
+                name="xenon-futu-cleanup",
+                daemon=True,
+            ).start()
             raise HTTPException(
                 status_code=503,
                 detail=f"Futu OpenD did not respond within {FUTU_SYNC_TIMEOUT_S:.0f}s",

@@ -20,6 +20,7 @@ import pytest
 from fastapi import HTTPException
 
 from xenon.api import server
+from xenon.clients.futu_exceptions import FutuConnectionError
 
 
 @pytest.fixture()
@@ -45,7 +46,7 @@ def _hang_until(release: threading.Event):
 
 
 async def _await_worker_done(timeout: float = 5.0) -> None:
-    """Wait until the in-flight sync worker thread actually exits."""
+    """Wait until the in-flight marker completes (fetch AND cleanup done)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         fut = server._futu_sync_future
@@ -53,6 +54,15 @@ async def _await_worker_done(timeout: float = 5.0) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError("sync worker still running")
+
+
+async def _wait_for(predicate, timeout: float = 5.0, what: str = "condition") -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{what} not met within {timeout}s")
 
 
 @pytest.mark.asyncio
@@ -138,10 +148,12 @@ async def test_futu_sync_503_does_not_poison_next_success(_futu_state, monkeypat
 
 
 class _HungClient:
-    """FutuClient stand-in whose fetch blocks until released or reset.
+    """FutuClient stand-in whose fetch blocks until reset.
 
-    ``disconnect()`` is the reset path — it flips the client to disconnected
-    so the next request reconnects, like ``FutuClient.disconnect`` does.
+    ``disconnect()`` blocks on its own event (modelling an SDK close that
+    itself waits on the SDK's RLock) and — like a real ctx close — unwinds
+    the hung fetch when it completes, so the test never releases the fetch
+    by hand on the primary path.
     """
 
     ENVELOPE = {
@@ -155,8 +167,11 @@ class _HungClient:
         "account_summary": None,
     }
 
-    def __init__(self) -> None:
-        self.release = threading.Event()
+    def __init__(self, disconnect_block_s: float = 5.0) -> None:
+        self.release_fetch = threading.Event()
+        self.release_disconnect = threading.Event()
+        self.disconnect_entered = threading.Event()
+        self.disconnect_block_s = disconnect_block_s
         self.connected = True
         self.connect_calls = 0
         self.disconnect_calls = 0
@@ -171,33 +186,57 @@ class _HungClient:
 
     def disconnect(self) -> None:
         self.disconnect_calls += 1
+        self.disconnect_entered.set()
+        self.release_disconnect.wait(timeout=self.disconnect_block_s)
+        # Real-ctx-close semantics: the hung SDK call unwinds and the client
+        # is marked disconnected so the next request reconnects.
         self.connected = False
+        self.release_fetch.set()
 
     def fetch_portfolio(self, force: bool = False) -> dict:
         self.fetch_calls += 1
-        self.release.wait(timeout=30)
+        self.release_fetch.wait(timeout=30)
+        if not self.connected:
+            raise FutuConnectionError("context closed by reset")
         return dict(self.ENVELOPE)
 
 
 @pytest.mark.asyncio
-async def test_timeout_never_starts_second_worker_and_recovers(_futu_state, monkeypatch) -> None:
-    """Strict single-flight: while the timed-out worker is still alive, new
-    requests 503 without queueing another worker on the client's RLock; the
-    client is reset so the next request reconnects."""
+async def test_timeout_cleanup_off_loop_no_extra_worker_then_recovers(
+    _futu_state, monkeypatch
+) -> None:
+    """Strict single-flight with off-loop cleanup: a blocking disconnect()
+    must not stall the event loop, no second worker starts while fetch or
+    cleanup is still alive, and the endpoint recovers once both finish."""
     fake = _HungClient()
     monkeypatch.setattr(server, "_get_futu_client", lambda: fake)
 
+    heartbeat = {"ticks": 0, "stop": False}
+
+    async def _beat() -> None:
+        while not heartbeat["stop"]:
+            heartbeat["ticks"] += 1
+            await asyncio.sleep(0.01)
+
+    beat = asyncio.create_task(_beat())
     try:
-        # First request hangs in fetch → 503 at the bound, and the timeout
-        # path must reset the client (disconnect) so the SDK call can unwind.
+        # (a) fetch hangs → 503 at the bound even though the reset's
+        # disconnect() blocks for seconds — it runs on a daemon thread.
+        t0 = time.monotonic()
         with pytest.raises(HTTPException) as excinfo:
             await server.futu_sync()
         assert excinfo.value.status_code == 503
-        assert fake.disconnect_calls == 1
+        assert time.monotonic() - t0 < 2
         assert fake.fetch_calls == 1
 
-        # Worker is still blocked — a repeat request must 503 immediately and
-        # must NOT start a second worker or a reconnect attempt.
+        # Cleanup started off-loop; the loop itself kept beating while a
+        # blocking disconnect() is still in flight.
+        await _wait_for(lambda: fake.disconnect_entered.is_set(), what="cleanup start")
+        ticks_before = heartbeat["ticks"]
+        await asyncio.sleep(0.1)
+        assert heartbeat["ticks"] > ticks_before
+
+        # (b) fetch and cleanup both still blocked → immediate 503, no worker.
         t0 = time.monotonic()
         with pytest.raises(HTTPException) as excinfo2:
             await server.futu_sync()
@@ -205,12 +244,23 @@ async def test_timeout_never_starts_second_worker_and_recovers(_futu_state, monk
         assert time.monotonic() - t0 < 0.25
         assert fake.fetch_calls == 1
         assert fake.connect_calls == 0
+
+        # Fetch released on its own (SDK call returned late) while cleanup is
+        # still blocked → still 503, still no worker.
+        fake.release_fetch.set()
+        with pytest.raises(HTTPException) as excinfo3:
+            await server.futu_sync()
+        assert excinfo3.value.status_code == 503
+        assert fake.fetch_calls == 1
+        assert fake.connect_calls == 0
     finally:
-        fake.release.set()
+        heartbeat["stop"] = True
+        await beat
+        fake.release_fetch.set()
+        fake.release_disconnect.set()
     await _await_worker_done()
 
-    # Hung call returned after the reset — the endpoint recovers: client was
-    # marked disconnected, so this request reconnects and fetches normally.
+    # (c) fetch + cleanup both finished → next request reconnects + succeeds.
     body = await server.futu_sync()
     assert body["ok"] is True
     assert fake.connect_calls == 1
