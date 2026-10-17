@@ -104,7 +104,7 @@ async function setupMocks(page: import("@playwright/test").Page) {
 test.describe("/portfolio closed-market load", () => {
   test("renders cached account metrics instead of awaiting sync forever", async ({ page }) => {
     await setupMocks(page);
-    await page.goto("http://127.0.0.1:3000/portfolio");
+    await page.goto("/portfolio");
 
     await expect(page.locator(".metric-card", { hasText: "Net Liquidation" }).first()).toContainText("1,131,051.65");
     await expect(page.locator(".metric-card", { hasText: "Day P&L" }).first()).toContainText("-$17,071.27");

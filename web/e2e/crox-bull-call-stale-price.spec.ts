@@ -271,7 +271,7 @@ test("portfolio row uses guarded spread marks for CROX instead of stale leg last
   await installMockWebSocket(page);
   await stubApis(page);
 
-  await page.goto("http://127.0.0.1:3000/portfolio");
+  await page.goto("/portfolio");
 
   const croxRow = page.locator("table tbody tr").filter({ hasText: "CROX" }).first();
   await expect(croxRow).toBeVisible();

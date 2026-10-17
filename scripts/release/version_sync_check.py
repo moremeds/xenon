@@ -4,9 +4,6 @@ VERSION is the source of truth. Both the root package.json and web/package.json
 must match it: backend and frontend ship from a single release procedure today,
 so they version in lockstep. If/when the frontend gets its own release pipeline,
 drop web/package.json from TRACKED_PACKAGES and let it version independently.
-
-site/package.json is intentionally NOT tracked — the marketing site (xenon.run)
-is a separate Vercel deployment with its own lifecycle and versions on its own.
 """
 
 from __future__ import annotations

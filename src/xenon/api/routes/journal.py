@@ -7,7 +7,13 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from xenon.api.guards import get_account_scope, get_broker_scope, is_read_only, read_only_403
+from xenon.api.guards import (
+    get_account_scope,
+    get_broker_scope,
+    is_read_only,
+    read_only_403,
+    require_writable,
+)
 from xenon.db.engine import get_sync_engine
 from xenon.db.queries.journal import (
     create_journal_entry,
@@ -58,7 +64,7 @@ async def journal_list(
     return {"trades": trades}
 
 
-@router.post("/journal")
+@router.post("/journal", dependencies=[Depends(require_writable)])
 async def journal_create(
     body: dict[str, Any],
     scope: AccountScope = Depends(get_account_scope),

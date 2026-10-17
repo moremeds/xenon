@@ -213,7 +213,7 @@ test("portfolio day move prefers IB daily P&L over positive mark-to-close math f
   await installMockWebSocket(page);
   stubApis(page);
 
-  await page.goto("http://127.0.0.1:3000/portfolio");
+  await page.goto("/portfolio");
 
   const todayPnlRow = page.locator(".metrics-grid-3").filter({ hasText: "Day Move" }).first();
   await expect(todayPnlRow).toContainText("Day Move");

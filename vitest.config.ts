@@ -14,7 +14,6 @@ export default defineConfig({
   test: {
     include: [
       "lib/tools/__tests__/**/*.test.ts",
-      "site/lib/**/*.test.ts",
       "web/tests/**/*.test.ts",
       "web/tests/**/*.test.tsx",
     ],
@@ -23,8 +22,6 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       include: [
-        "site/app/**/*.ts",
-        "site/lib/**/*.ts",
         "web/lib/**/*.ts",
         "web/app/api/**/*.ts",
         "lib/tools/**/*.ts",

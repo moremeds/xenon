@@ -145,6 +145,71 @@ const PRICES = {
   },
 };
 
+function installMockWebSocket(page: import("@playwright/test").Page) {
+  return page.addInitScript((priceFixtures: Record<string, unknown>) => {
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+
+      url: string;
+      readyState = MockWebSocket.CONNECTING;
+      onopen: ((event?: unknown) => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: ((event?: unknown) => void) | null = null;
+      onerror: ((event?: unknown) => void) | null = null;
+
+      constructor(url: string) {
+        this.url = url;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.({});
+          this.emit({
+            type: "status",
+            ib_connected: true,
+            ib_issue: null,
+            ib_status_message: null,
+            subscriptions: [],
+          });
+        }, 0);
+      }
+
+      send(raw: string) {
+        const message = JSON.parse(raw) as {
+          action?: string;
+          symbols?: string[];
+          contracts?: Array<{ symbol: string; expiry: string; strike: number; right: "C" | "P" }>;
+        };
+        if (message.action !== "subscribe") return;
+
+        const updates: Record<string, unknown> = {};
+        for (const symbol of message.symbols ?? []) {
+          if (priceFixtures[symbol]) updates[symbol] = priceFixtures[symbol];
+        }
+        for (const contract of message.contracts ?? []) {
+          const expiry = String(contract.expiry).replace(/-/g, "");
+          const key = `${String(contract.symbol).toUpperCase()}_${expiry}_${Number(contract.strike)}_${contract.right}`;
+          if (priceFixtures[key]) updates[key] = priceFixtures[key];
+        }
+        if (Object.keys(updates).length > 0) this.emit({ type: "batch", updates });
+      }
+
+      close() {
+        this.readyState = MockWebSocket.CLOSED;
+        this.onclose?.({});
+      }
+
+      emit(payload: unknown) {
+        this.onmessage?.({ data: JSON.stringify(payload) });
+      }
+    }
+
+    // @ts-expect-error test-only replacement
+    window.WebSocket = MockWebSocket;
+  }, PRICES);
+}
+
 function stubApis(page: import("@playwright/test").Page) {
   page.route("**/api/portfolio", (route) =>
     route.fulfill({
@@ -211,23 +276,10 @@ function stubApis(page: import("@playwright/test").Page) {
 test.describe("Portfolio order ticket quote telemetry", () => {
   test("shows BID, MID, ASK ordering and raw spread percent in the instrument ticket", async ({ page }) => {
     await page.unrouteAll({ behavior: "ignoreErrors" });
+    await installMockWebSocket(page);
     stubApis(page);
 
     await page.goto("/portfolio");
-
-    await page.evaluate((prices) => {
-      for (const [, priceData] of Object.entries(prices)) {
-        window.dispatchEvent(
-          new CustomEvent("ws-price", {
-            detail: {
-              type: "price",
-              symbol: (priceData as { symbol: string }).symbol,
-              data: priceData,
-            },
-          }),
-        );
-      }
-    }, PRICES);
 
     const expandLegs = page.locator('button[aria-label="Expand legs for AAOI"]').first();
     await expandLegs.waitFor({ timeout: 10_000 });
