@@ -83,6 +83,16 @@ def _is_clientid_in_use(exc: BaseException) -> bool:
     return bool(_CLIENTID_IN_USE_RE.search(msg)) and "client id" in msg
 
 
+# Disposition of an amend, stamped on every modify error reply as
+# ``amend_outcome`` (PR-03b round 3). ``not_sent``: failed before
+# placeOrder; ``rejected``: IB explicitly rejected the amend (103/201/202);
+# ``unconfirmed``: placeOrder was sent but no refreshed state proved either
+# outcome. Only the first two prove the amend did not apply — the route
+# keeps the max(old,new) reservation for anything else.
+_amend_stage: dict = {"value": None}
+_FATAL_MODIFY_CODES = (103, 201, 202)
+
+
 def output(status: str, message: str, **extra) -> NoReturn:
     """Print JSON result and exit.
 
@@ -90,6 +100,8 @@ def output(status: str, message: str, **extra) -> NoReturn:
     ``connection`` | ``ownership`` | ``ib_reject`` — consumed by the
     FastAPI route to map to HTTP 503 / 409 / 4xx (F5.4).
     """
+    if status != "ok" and _amend_stage["value"] is not None:
+        extra.setdefault("amend_outcome", _amend_stage["value"])
     print(json.dumps({"status": status, "message": message, **extra}))
     sys.exit(0 if status == "ok" else 1)
 
@@ -369,6 +381,7 @@ def cancel_order(
     ``account``/``client_id`` assert the rest of the identity tuple
     (spec §2.4): scope account and recorded placing clientId.
     """
+    _amend_stage["value"] = "not_sent"
     trade = find_trade(client, order_id, perm_id, account=account, client_id=client_id)
     if trade is None:
         output(
@@ -501,6 +514,7 @@ def modify_order(
     ``account``/``client_id`` assert the rest of the identity tuple
     (spec §2.4): scope account and recorded placing clientId.
     """
+    _amend_stage["value"] = "not_sent"
     trade = find_trade(client, order_id, perm_id, account=account, client_id=client_id)
     if trade is None:
         output(
@@ -622,6 +636,9 @@ def modify_order(
             TagValue("NonGuaranteed", str(non_guaranteed) if non_guaranteed is not None else "1")
         ]
 
+    # From here on the amend may have reached IB: any failure without an
+    # explicit rejection is "unconfirmed", never proof it did not apply.
+    _amend_stage["value"] = "unconfirmed"
     client.place_order(trade.contract, trade.order)
 
     # Wait for refreshed IB state to reflect the requested modify.
@@ -634,7 +651,7 @@ def modify_order(
             confirmed_trade = refreshed_trade
             break
         # Check for fatal errors (103=duplicate id, 201=rejected, 202=cancelled)
-        fatal = [e for e in error_msgs if e[0] in (103, 201, 202)]
+        fatal = [e for e in error_msgs if e[0] in _FATAL_MODIFY_CODES]
         if fatal:
             client.ib.errorEvent -= on_error
             output(
@@ -642,12 +659,23 @@ def modify_order(
                 f"IB rejected modify: {fatal[0][1]}",
                 classification=classify_failure(fatal[0][0]),
                 upstream={"code": fatal[0][0], "message": fatal[0][1]},
+                amend_outcome="rejected",
                 **_identity_notes(refreshed_trade, account),
             )
 
     client.ib.errorEvent -= on_error
 
     if confirmed_trade is None:
+        fatal = [e for e in error_msgs if e[0] in _FATAL_MODIFY_CODES]
+        if fatal:
+            output(
+                "error",
+                f"IB rejected modify: {fatal[0][1]}",
+                classification=classify_failure(fatal[0][0]),
+                upstream={"code": fatal[0][0], "message": fatal[0][1]},
+                amend_outcome="rejected",
+                **_identity_notes(latest_trade or trade, account),
+            )
         latest_status = latest_trade.orderStatus.status if latest_trade is not None else "Unknown"
         latest_price = latest_trade.order.lmtPrice if latest_trade is not None else None
         latest_quantity = json_number(latest_trade.order.totalQuantity) if latest_trade is not None else None

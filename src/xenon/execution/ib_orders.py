@@ -63,13 +63,24 @@ def format_contract(contract) -> str:
         return f"{symbol} ({sec_type})"
 
 
-def serialize_contract(contract, resolved_legs: dict = None) -> dict:
+def _meta_fields(meta: dict | None) -> dict:
+    """Qualified option metadata (contract_meta) in the adapter's key names."""
+    if not meta:
+        return {}
+    return {"tradingClass": meta.get("tc"), "multiplier": meta.get("mult"), "underSecType": meta.get("und_sec")}
+
+
+def serialize_contract(contract, resolved_legs: dict = None, meta: dict | None = None) -> dict:
     """Serialize contract fields for JSON.
 
     Args:
         contract: IB contract object.
         resolved_legs: Optional dict mapping conId -> qualified Contract for BAG legs.
+        meta: Optional dict mapping conId -> contract_meta dict. OPT contracts
+            and BAG option legs gain tradingClass / multiplier / underSecType
+            ONLY from it (Gate 4 never infers them).
     """
+    meta = meta or {}
     expiry = getattr(contract, "lastTradeDateOrContractMonth", "")
     if len(expiry) == 8:
         expiry = f"{expiry[:4]}-{expiry[4:6]}-{expiry[6:8]}"
@@ -82,6 +93,8 @@ def serialize_contract(contract, resolved_legs: dict = None) -> dict:
         "right": getattr(contract, "right", None),
         "expiry": expiry or None,
     }
+    if contract.secType == "OPT":
+        result.update(_meta_fields(meta.get(getattr(contract, "conId", None))))
 
     # Include resolved combo leg details for BAG orders
     combo_legs = getattr(contract, "comboLegs", None)
@@ -105,10 +118,24 @@ def serialize_contract(contract, resolved_legs: dict = None) -> dict:
                 # Coverage legs need the leg's own sec type (a BAG can carry
                 # a stock leg next to option legs).
                 leg_data["secType"] = getattr(resolved, "secType", None)
+                if leg_data["secType"] == "OPT":
+                    leg_data.update(_meta_fields(meta.get(cl.conId)))
             legs.append(leg_data)
         result["comboLegs"] = legs
 
     return result
+
+
+class _ResolvedLeg:
+    """Contract-like view of a contract_meta dict for serialize_contract."""
+
+    def __init__(self, meta: dict):
+        exp = meta.get("exp") or ""
+        self.symbol = meta.get("sym")
+        self.strike = meta.get("strike")
+        self.right = meta.get("right")
+        self.lastTradeDateOrContractMonth = exp
+        self.secType = meta.get("sec")
 
 
 def safe_float(value) -> Optional[float]:
@@ -142,36 +169,43 @@ def _non_guaranteed_mode(order) -> int | None:
 
 
 def fetch_open_orders(client: IBClient) -> list:
-    """Fetch open orders from all clients.
+    """Fetch open orders from all clients (one ``reqAllOpenOrders`` read)."""
+    return open_orders_from_trades(client, client.get_open_orders())
+
+
+def open_orders_from_trades(client: IBClient, trades: list) -> list:
+    """Shape IB open-order trades for display and the Postgres mirror.
 
     For BAG orders, resolves combo leg conIds to full contract details
     (symbol, strike, right, expiry) so the frontend can subscribe to
     real-time prices and compute BID/MID/ASK for spread modification.
+    Every option contract (single-leg or combo leg) also gets its
+    IB-qualified tradingClass / multiplier / underSecType via
+    ``contract_meta`` — Gate 4 reads them from the mirrored row and fails
+    closed when a lookup failed.
     """
-    trades = client.get_open_orders()
+    from xenon.execution import contract_meta
 
     # Collect all unique combo leg conIds that need resolving
     combo_con_ids: set = set()
+    opt_con_ids: set = set()
     for trade in trades:
         contract = trade.contract
         combo_legs = getattr(contract, "comboLegs", None)
         if contract.secType == "BAG" and combo_legs:
             for cl in combo_legs:
                 combo_con_ids.add(cl.conId)
+        elif contract.secType == "OPT" and getattr(contract, "conId", None):
+            opt_con_ids.add(contract.conId)
 
-    # Batch-resolve combo leg contracts
+    # One reqContractDetails per distinct conId: the qualified contract for
+    # combo legs plus the option metadata for every option contract.
+    details = contract_meta.fetch_meta_by_con_ids(client, sorted(combo_con_ids | opt_con_ids))
     resolved_legs: dict = {}
-    if combo_con_ids:
-        from ib_async import Contract as IBContract
-
-        for con_id in combo_con_ids:
-            try:
-                c = IBContract(conId=con_id)
-                qualified = client.qualify_contracts(c)
-                if qualified:
-                    resolved_legs[con_id] = qualified[0]
-            except Exception:
-                pass  # Skip unresolvable legs — frontend falls back to portfolio
+    for con_id in combo_con_ids:
+        m = details.get(con_id)
+        if m is not None:
+            resolved_legs[con_id] = _ResolvedLeg(m)
 
     orders = []
     for trade in trades:
@@ -184,7 +218,7 @@ def fetch_open_orders(client: IBClient) -> list:
                 "orderId": order.orderId,
                 "permId": order.permId,
                 "symbol": format_contract(contract),
-                "contract": serialize_contract(contract, resolved_legs),
+                "contract": serialize_contract(contract, resolved_legs, details),
                 "action": order.action,  # BUY or SELL
                 "orderType": order.orderType,  # LMT, MKT, STP, etc.
                 "totalQuantity": float(order.totalQuantity),

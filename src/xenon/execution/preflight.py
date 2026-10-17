@@ -62,6 +62,9 @@ class ReasonCode(StrEnum):
     # Guaranteed all-OPT BAG rejected leg-by-leg but accepted under netting
     # — send the legs as separate orders, BUY leg first (spec §2.3).
     COMBO_SPLIT_REQUIRED = "COMBO_SPLIT_REQUIRED"
+    # PR-03b round 3 — an earlier modify of the order is unresolved; a new
+    # amend could overwrite its max(old,new) reservation, so it is refused.
+    MODIFY_PENDING = "MODIFY_PENDING"
     READ_ONLY_BROKER = "READ_ONLY_BROKER"
     # F7 — pending timeout (PR-D)
     PENDING_TIMEOUT = "PENDING_TIMEOUT"

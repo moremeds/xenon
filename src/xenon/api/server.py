@@ -1924,6 +1924,16 @@ def _gate4_reject_verdict(
             reason_code=ReasonCode.PORTFOLIO_SNAPSHOT_STALE,
             reason_detail="Portfolio snapshot is stale; sync before submitting SELL exposure",
         )
+    if any(r.startswith("candidate_unknown_metadata") and r.rsplit(":", 1)[-1] in ("mult", "tc") for r in reasons):
+        # The candidate's contract could not be qualified at IB (conId /
+        # tradingClass / multiplier / underlying type) — never guessed.
+        # Other leg problems (right/action/exp/…) are body defects and fall
+        # through to INVALID_ORDER_BODY below.
+        return Verdict(
+            accept=False,
+            reason_code=ReasonCode.GATE4_UNRESOLVED,
+            reason_detail="Contract metadata unavailable from IB; cannot verify cover. " + "; ".join(reasons),
+        )
     if split_required:
         return Verdict(
             accept=False,
@@ -2327,6 +2337,84 @@ async def orders_place(request: Request):
     return await _orders_place_from_body(body)
 
 
+def _gate4_leg_specs(body: dict) -> list[dict]:
+    """One spec per option leg the gate must qualify (combo legs in body
+    order; a single option body is one leg)."""
+    sym = str(body.get("symbol", "")).upper()
+    raw_legs = body.get("legs") or [] if body.get("type") == "combo" else [body]
+    specs = []
+    for leg in raw_legs:
+        con_id = leg.get("con_id") or leg.get("conId")
+        try:
+            strike = float(leg.get("strike")) if leg.get("strike") is not None else None
+        except (TypeError, ValueError):
+            strike = None
+        specs.append(
+            {
+                "sym": sym,
+                "right": str(leg.get("right") or "").upper() or None,
+                "exp": str(leg.get("expiry") or "").replace("-", "") or None,
+                "strike": strike,
+                "con_id": int(con_id) if str(con_id or "").isdigit() and int(con_id) > 0 else None,
+            }
+        )
+    return specs
+
+
+def _resolve_leg_meta_with_client(client: Any, specs: list[dict]) -> list[dict | None]:
+    """Qualify each leg via reqContractDetails; a leg whose qualified contract
+    does not match the body (symbol/right/expiry/strike) resolves to None."""
+    from xenon.execution import contract_meta
+
+    _ensure_thread_event_loop()
+    out: list[dict | None] = []
+    for spec in specs:
+        if spec["con_id"] is not None:
+            contract = Contract(conId=spec["con_id"])
+        elif spec["right"] and spec["exp"] and spec["strike"] is not None:
+            contract = Option(
+                symbol=spec["sym"],
+                lastTradeDateOrContractMonth=spec["exp"],
+                strike=spec["strike"],
+                right=spec["right"],
+                exchange="SMART",
+                currency="USD",
+            )
+        else:
+            out.append(None)
+            continue
+        meta = contract_meta.fetch_meta(client, contract)
+        if (
+            meta is None
+            or meta["sec"] != "OPT"
+            or meta["sym"] != spec["sym"]
+            or meta["right"] != spec["right"]
+            or meta["exp"] != spec["exp"]
+            or spec["strike"] is None
+            or meta["strike"] is None
+            or abs(meta["strike"] - spec["strike"]) > 1e-6
+        ):
+            out.append(None)
+            continue
+        out.append(meta)
+    return out
+
+
+async def _resolve_gate4_leg_meta(body: dict) -> list[dict | None]:
+    """IB-qualified option metadata for the Gate-4 candidate (spec §2.3 cover
+    unit). Any failure leaves the leg unqualified → the gate fails closed."""
+    specs = _gate4_leg_specs(body)
+    pool = ib_pool
+    if pool is None or not specs:
+        return [None] * len(specs)
+    try:
+        async with pool.acquire("data") as client:
+            return await pool.run_sync("data", _resolve_leg_meta_with_client, client, specs)
+    except Exception as exc:  # noqa: BLE001 — fail closed, never guess metadata
+        logger.warning("gate4 contract qualification failed: %s", exc)
+        return [None] * len(specs)
+
+
 def _resolve_scope_kwargs() -> dict[str, str]:
     """Resolve broker account scope from app.state with safe fallback.
 
@@ -2390,7 +2478,8 @@ async def _orders_place_from_body(body: dict):
         )
     except (ValueError, TypeError, ValidationError) as exc:
         return _preflight_block_response(_invalid_order_body_response(exc))
-    candidate, legs_payload = gate4.candidate_from_place_body(body, scope["broker_account"])
+    leg_meta = await _resolve_gate4_leg_meta(body) if gate4.needs_contract_meta(body) else None
+    candidate, legs_payload = gate4.candidate_from_place_body(body, scope["broker_account"], leg_meta)
     outcome = gate4.reserve_with_coverage(
         user_id,
         cid,
@@ -2743,11 +2832,13 @@ def _mark_submission_cancelled(ib_order_id: str, perm_id: str) -> None:
             sid = orders_store.lookup_submission_id_by_perm_id(perm_id, **scope)
         if sid is None:
             return
+        # filled_qty=None keeps executed quantity: a cancel releases only
+        # the unfilled remainder (spec §2.3), even before the fill row lands.
         orders_store.mark_terminal(
             submission_id=sid,
             state="CANCELLED",
             reason_code="USER_CANCEL",
-            filled_qty=0,
+            filled_qty=None,
             avg_fill_price=None,
         )
     except Exception:  # pragma: no cover — best-effort
@@ -2886,41 +2977,12 @@ async def _orders_modify_from_body(body: dict):
     if _row and _row.get("placing_client_id") is not None:
         args.extend(["--client-id", str(_row["placing_client_id"])])
 
-    # Gate 4 (PR-03b): a quantity modify moves cover demand, so it evaluates
-    # the same coverage model as placement — under the same advisory lock —
-    # and persists pending_amend_qty so an acknowledgement lost in flight
-    # keeps reserving max(old, new) - filled instead of the smaller side.
-    _submission_id = _row.get("submission_id") if _row else None
-    _pending_modify = False
-    if new_quantity is not None:
-        if _submission_id is None:
-            return order_error(
-                404,
-                ReasonCode.ORDER_NOT_FOUND.value,
-                {
-                    "message": "Quantity modify requires a resolvable submission row",
-                    "http_status": 404,
-                },
-            )
-        mod_outcome = gate4.begin_modify(_submission_id, new_quantity, _scope)
-        if not mod_outcome.accept:
-            v = _gate4_reject_verdict(
-                mod_outcome.reasons, mod_outcome.uncovered, mod_outcome.short_stock, mod_outcome.split_required
-            )
-            return order_error(
-                400,
-                v.reason_code.value if v.reason_code else ReasonCode.GATE4_UNRESOLVED.value,
-                {
-                    "message": v.reason_detail or "Modify blocked by coverage gate",
-                    "http_status": 400,
-                },
-            )
-        _pending_modify = True
-
     # BAG guarantee mode is durable order state, never client-mutable. The
     # broker always receives it explicitly — a resubmitted BAG without
     # NonGuaranteed raises "Missing or invalid NonGuaranteed value", and a
     # default could silently flip a guaranteed combo to non-guaranteed.
+    # Checked BEFORE the amend opens so a refused mode change never leaves
+    # a pending amend behind.
     if _row and _row.get("security_type") == "BAG":
         stored_guaranteed = gate4.persisted_guarantee(_row)
         effective_ng = 0 if stored_guaranteed else 1
@@ -2941,6 +3003,47 @@ async def _orders_modify_from_body(body: dict):
                 )
         args.extend(["--non-guaranteed", str(effective_ng)])
 
+    # Gate 4 (PR-03b): every modify of a known row opens one amend generation
+    # under the account-scope advisory lock. A row with an unresolved amend
+    # refuses the new modify (MODIFY_PENDING). A quantity modify evaluates
+    # the same coverage model as placement and persists pending_amend_qty, so
+    # an acknowledgement lost in flight keeps reserving max(old, new) - filled.
+    _submission_id = _row.get("submission_id") if _row else None
+    _amend_id: str | None = None
+    if new_quantity is not None and _submission_id is None:
+        return order_error(
+            404,
+            ReasonCode.ORDER_NOT_FOUND.value,
+            {
+                "message": "Quantity modify requires a resolvable submission row",
+                "http_status": 404,
+            },
+        )
+    if _submission_id is not None:
+        mod_outcome = gate4.begin_modify(_submission_id, new_quantity, _scope)
+        if not mod_outcome.accept:
+            if gate4.MODIFY_PENDING_REASON in mod_outcome.reasons:
+                return order_error(
+                    409,
+                    ReasonCode.MODIFY_PENDING.value,
+                    {
+                        "message": "A previous modify of this order is still unresolved; wait for the next sync or cancel the order",
+                        "http_status": 409,
+                    },
+                )
+            v = _gate4_reject_verdict(
+                mod_outcome.reasons, mod_outcome.uncovered, mod_outcome.short_stock, mod_outcome.split_required
+            )
+            return order_error(
+                400,
+                v.reason_code.value if v.reason_code else ReasonCode.GATE4_UNRESOLVED.value,
+                {
+                    "message": v.reason_detail or "Modify blocked by coverage gate",
+                    "http_status": 400,
+                },
+            )
+        _amend_id = mod_outcome.amend_id
+
     result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=15)
     if not result.ok:
         # DB sequence is already advanced; don't roll back — prevents
@@ -2951,10 +3054,10 @@ async def _orders_modify_from_body(body: dict):
             modify_sequence,
             result.error,
         )
-        if _pending_modify:
+        if _amend_id is not None:
             # The amend never provably reached the broker — keep the max
             # reservation rather than release cover we may still owe.
-            gate4.settle_modify(_submission_id, "uncertain")
+            gate4.settle_modify(_submission_id, _amend_id, "uncertain", _scope)
         detail = {
             "reason_code": ReasonCode.IB_CONNECTION.value,
             "message": result.error or "Subprocess failed",
@@ -2966,12 +3069,16 @@ async def _orders_modify_from_body(body: dict):
 
     data = result.data or {}
     if data.get("status") == "error":
-        if _pending_modify:
-            # ib_reject is a broker-side NO — provably unapplied, release the
-            # pending reservation. Any other failure is uncertain: keep max.
+        if _amend_id is not None:
+            # Only an amend the producer proves unapplied (never sent, or an
+            # explicit IB rejection) releases the pending reservation. A
+            # sent-but-unconfirmed amend — or a reply without the field — is
+            # uncertain: keep max(old, new).
             gate4.settle_modify(
                 _submission_id,
-                "rejected" if data.get("classification") == "ib_reject" else "uncertain",
+                _amend_id,
+                "rejected" if data.get("amend_outcome") in ("rejected", "not_sent") else "uncertain",
+                _scope,
             )
         http_status, reason_code = _classify_to_http(data)
         detail = {
@@ -2985,8 +3092,14 @@ async def _orders_modify_from_body(body: dict):
         _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""), scope=_scope)
         return order_error(http_status, reason_code, detail)
 
-    if _pending_modify:
-        gate4.settle_modify(_submission_id, "confirmed", new_qty=int(new_quantity))
+    if _amend_id is not None:
+        gate4.settle_modify(
+            _submission_id,
+            _amend_id,
+            "confirmed",
+            _scope,
+            new_qty=int(new_quantity) if new_quantity is not None else None,
+        )
     _record_manage_event(
         str(order_id or ""),
         "MODIFY",

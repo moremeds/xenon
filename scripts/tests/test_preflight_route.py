@@ -30,6 +30,11 @@ def _insert_portfolio_snapshot(payload: dict, *, snapshot_at: datetime | None = 
 
     at = snapshot_at or datetime.now(timezone.utc)
     payload = dict(payload)
+    # ib_sync (round 3) stamps the raw IB account on every position leg.
+    payload["positions"] = [
+        {**pos, "legs": [{"account": "DU0000000", **leg} for leg in pos.get("legs") or []]}
+        for pos in payload.get("positions") or []
+    ]
     payload.setdefault(
         "observation",
         {
@@ -65,6 +70,19 @@ def _insert_portfolio_snapshot(payload: dict, *, snapshot_at: datetime | None = 
 @pytest.fixture(autouse=True)
 def _test_mode(monkeypatch, tmp_path):
     monkeypatch.setenv("XENON_API_TEST_MODE", "1")
+    from xenon.api import server
+
+    async def _ib_qualified(body):
+        # Stand-in for reqContractDetails on standard equity options: IB
+        # reports tradingClass=symbol, multiplier 100, underlying STK — the
+        # body's own `multiplier` is never consulted.
+        sym = str(body.get("symbol", "")).upper()
+        return [
+            {"con_id": 7000 + i, "tc": sym, "mult": 100, "und_sec": "STK"}
+            for i, _ in enumerate(server._gate4_leg_specs(body))
+        ]
+
+    monkeypatch.setattr(server, "_resolve_gate4_leg_meta", _ib_qualified)
     # Point data dir at an empty portfolio
     portfolio = {"positions": []}
     pf_file = tmp_path / "portfolio.json"
@@ -155,7 +173,7 @@ def test_spy_buy_passes_preflight(client):
 def test_spoofed_multiplier_cannot_bypass_gate(client, monkeypatch, tmp_path):
     """Codex pass-3 P2: attacker posts multiplier=1 to turn 100 SPY shares into
     100 cover units, bypassing Gate 4 on a SELL call. The server must derive
-    multiplier from universe.py, not the request body.
+    multiplier from IB contract qualification, not the request body.
     """
     # Portfolio with 100 SPY shares → 1 contract of cover at multiplier=100
     portfolio = {

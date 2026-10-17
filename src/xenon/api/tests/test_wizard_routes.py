@@ -61,7 +61,7 @@ def _seed_gate4_snapshot(engine) -> None:
                 "direction": "LONG",
                 "contracts": 100,
                 "expiry": None,
-                "legs": [{"direction": "LONG", "type": "Stock", "contracts": 100, "strike": 0.0}],
+                "legs": [{"direction": "LONG", "type": "Stock", "contracts": 100, "strike": 0.0, "account": "DU0000000"}],
             }
         ],
         "available_funds": 0,
@@ -112,6 +112,16 @@ def _setup_pg(monkeypatch):
 @pytest.fixture(autouse=True)
 def _force_test_mode_on(monkeypatch):
     monkeypatch.setenv("XENON_API_TEST_MODE", "1")
+    from xenon.api import server
+
+    async def _ib_qualified(body):
+        # Stand-in for reqContractDetails (standard SPY options).
+        return [
+            {"con_id": 7000 + i, "tc": "SPY", "mult": 100, "und_sec": "STK"}
+            for i, _ in enumerate(server._gate4_leg_specs(body))
+        ]
+
+    monkeypatch.setattr(server, "_resolve_gate4_leg_meta", _ib_qualified)
     yield
 
 

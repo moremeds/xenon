@@ -104,9 +104,12 @@ def get_trade_log_trades(trade_log: dict) -> set:
 
 def fetch_ib_executions(client: IBClient, lookback_days: int = 7) -> list:
     """Fetch executions from IB for the last N days."""
-    executions = []
-    fills = client.get_fills()
+    return executions_from_fills(client.get_fills())
 
+
+def executions_from_fills(fills: list) -> list:
+    """Shape ib_async Fill objects into record_external_fills dicts."""
+    executions = []
     for fill in fills:
         e = fill.execution
         c = fill.contract

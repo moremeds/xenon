@@ -42,15 +42,27 @@ def _snapshot_payload(positions, *, as_of=None, complete=True, account="DU000000
     }
 
 
-def _stock(sym, qty):
+ACCOUNT = "DU0000000"
+
+
+def _stock(sym, qty, *, account=ACCOUNT):
     return {
         "ticker": sym,
         "expiry": None,
-        "legs": [{"direction": "LONG" if qty >= 0 else "SHORT", "type": "Stock", "contracts": abs(qty), "strike": 0}],
+        "legs": [
+            {
+                "direction": "LONG" if qty >= 0 else "SHORT",
+                "type": "Stock",
+                "contracts": abs(qty),
+                "strike": 0,
+                "account": account,
+            }
+        ],
     }
 
 
-def _opt_leg_pos(sym, qty, *, right="C", strike=500, exp="2026-12-18"):
+def _opt_leg_pos(sym, qty, *, right="C", strike=500, exp="2026-12-18", tc=None, mult=100, und_sec="STK"):
+    # ib_sync shape: raw IB account + IB-qualified option metadata per leg.
     return {
         "ticker": sym,
         "expiry": exp,
@@ -60,9 +72,26 @@ def _opt_leg_pos(sym, qty, *, right="C", strike=500, exp="2026-12-18"):
                 "type": "Call" if right == "C" else "Put",
                 "contracts": abs(qty),
                 "strike": strike,
+                "account": ACCOUNT,
+                "tc": tc or sym,
+                "mult": mult,
+                "und_sec": und_sec,
             }
         ],
     }
+
+
+def _std_meta(sym="SPY", con_id=None):
+    """What IB contract details return for a standard equity option."""
+    return {"con_id": con_id or 111, "tc": sym, "mult": 100, "und_sec": "STK"}
+
+
+def _cand(body):
+    """candidate_from_place_body with IB-qualified metadata for every option
+    leg (the route resolves it via contract_meta before the gate)."""
+    n = len(body.get("legs") or []) if body.get("type") == "combo" else 1
+    metas = [_std_meta(str(body.get("symbol", "SPY")).upper(), con_id=111 + i) for i in range(n)]
+    return gate4.candidate_from_place_body(body, SCOPE["broker_account"], metas)
 
 
 def _seed_snapshot(payload, *, snapshot_at=None):
@@ -105,7 +134,7 @@ def _sell_call_candidate(qty=1, attempt="cand-1"):
         "strike": 500.0,
         "client_attempt_id": attempt,
     }
-    return gate4.candidate_from_place_body(body, SCOPE["broker_account"])
+    return _cand(body)
 
 
 def _reserve(attempt, body=None, req=None):
@@ -119,7 +148,7 @@ def _reserve(attempt, body=None, req=None):
         "strike": 500.0,
         "client_attempt_id": attempt,
     }
-    candidate, legs = gate4.candidate_from_place_body(body, SCOPE["broker_account"])
+    candidate, legs = _cand(body)
     return gate4.reserve_with_coverage(
         "u1",
         attempt,
@@ -171,7 +200,7 @@ def test_short_stock_rejected():
         "quantity": 100,
         "client_attempt_id": "att-shortstk-1",
     }
-    candidate, legs = gate4.candidate_from_place_body(body, SCOPE["broker_account"])
+    candidate, legs = _cand(body)
     out = gate4.reserve_with_coverage(
         "u1",
         "att-shortstk-1",
@@ -194,7 +223,7 @@ def test_buy_single_leg_passes_without_snapshot():
         "quantity": 100,
         "client_attempt_id": "att-buy-1",
     }
-    candidate, legs = gate4.candidate_from_place_body(body, SCOPE["broker_account"])
+    candidate, legs = _cand(body)
     assert candidate is None
     out = gate4.reserve_with_coverage(
         "u1",
@@ -242,16 +271,37 @@ def test_stale_snapshot_fails_closed(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _insert_submission(attempt, *, state="WORKING", qty=1, action="SELL", sec="OPT", legs=None, scope=None):
+_DEFAULT_LEGS = object()
+
+
+def _default_legs(sec):
+    """Reservation payload the place path writes (qualified option metadata)."""
+    if sec == "OPT":
+        leg = coverage.Leg(
+            action="BUY", sym="SPY", sec="OPT", ratio=1, right="C",
+            exp="20261218", mult=100, tc="SPY", strike=500.0, con_id=111, und_sec="STK",
+        )
+    elif sec == "STK":
+        leg = coverage.Leg(action="BUY", sym="SPY", sec="STK", ratio=1)
+    else:
+        return None
+    return gate4.legs_payload_for(legs=[leg], guaranteed=False)
+
+
+def _insert_submission(
+    attempt, *, state="WORKING", qty=1, action="SELL", sec="OPT", legs=_DEFAULT_LEGS, scope=None, ticker="SPY", perm_id=None
+):
     engine = get_sync_engine()
     sc = scope or SCOPE
+    if legs is _DEFAULT_LEGS:
+        legs = _default_legs(sec)
     with engine.begin() as conn:
         conn.execute(
             insert(order_submissions).values(
                 submission_id=f"sub-{attempt}",
                 user_id="u1",
                 client_attempt_id=attempt,
-                ticker="SPY",
+                ticker=ticker,
                 security_type=sec,
                 action=action,
                 quantity=qty,
@@ -266,6 +316,7 @@ def _insert_submission(attempt, *, state="WORKING", qty=1, action="SELL", sec="O
                 updated_at=NOW,
                 legs=legs,
                 ib_order_id=str(hash(attempt) % 100000),
+                perm_id=perm_id,
                 **sc,
             )
         )
@@ -436,7 +487,7 @@ def test_sell_envelope_combo_flips_legs():
             {"action": "SELL", "right": "C", "expiry": "2026-12-18", "strike": 510.0, "ratio": 1},
         ],
     }
-    candidate, legs = gate4.candidate_from_place_body(body, SCOPE["broker_account"])
+    candidate, legs = _cand(body)
     out = gate4.reserve_with_coverage(
         "u1",
         "att-sellenv-1",
@@ -453,7 +504,7 @@ def test_sell_envelope_combo_flips_legs():
         snapshot_at=NOW + timedelta(seconds=5),
     )
     body["client_attempt_id"] = "att-sellenv-2"
-    candidate, legs = gate4.candidate_from_place_body(body, SCOPE["broker_account"])
+    candidate, legs = _cand(body)
     out2 = gate4.reserve_with_coverage(
         "u1",
         "att-sellenv-2",
@@ -482,7 +533,7 @@ def test_guaranteed_bag_mode_persisted_and_netting(monkeypatch):
             {"action": "SELL", "right": "C", "expiry": "2026-12-18", "strike": 510.0, "ratio": 1},
         ],
     }
-    candidate, legs = gate4.candidate_from_place_body(body, SCOPE["broker_account"])
+    candidate, legs = _cand(body)
     assert legs["guaranteed"] is True
     out = gate4.reserve_with_coverage(
         "u1",
@@ -515,7 +566,7 @@ def _vertical_close_body(attempt, *, non_guaranteed=0, qty=1):
 
 
 def _bag_reserve(attempt, body, qty=1):
-    candidate, legs = gate4.candidate_from_place_body(body, SCOPE["broker_account"])
+    candidate, legs = _cand(body)
     return gate4.reserve_with_coverage(
         "u1",
         attempt,
@@ -602,13 +653,14 @@ def test_naked_bag_still_uncovered_not_split():
     assert out.split_required is False
 
 
-def test_non_guaranteed_vertical_close_not_split():
-    """nonGuaranteed=1 (stored/requested mode) disables netting — the same
-    held-vertical close rejects with the plain uncovered code."""
+def test_non_guaranteed_vertical_close_still_split():
+    """Item 9: the split hint does not depend on the requested mode. A
+    nonGuaranteed=1 held-vertical close is rejected (no netting for it), but
+    it would pass as a guaranteed BAG, so it gets COMBO_SPLIT_REQUIRED."""
     _seed_snapshot(_snapshot_payload([_opt_leg_pos("SPY", 1, strike=500), _opt_leg_pos("SPY", -1, strike=510)]))
     out = _bag_reserve("att-vc-ng", _vertical_close_body("att-vc-ng", non_guaranteed=1))
     assert out.status == "rejected"
-    assert out.split_required is False
+    assert out.split_required is True
 
 
 # ---------------------------------------------------------------------------
@@ -657,6 +709,7 @@ def test_begin_modify_reserves_max_until_settled():
     sub_id = _working_with_legs("att-mod-1", qty=1)
     out = gate4.begin_modify(sub_id, 2, SCOPE)
     assert out.accept
+    assert out.amend_id
     engine = get_sync_engine()
     with engine.begin() as conn:
         row = conn.execute(
@@ -680,8 +733,9 @@ def test_begin_modify_rejects_when_cover_insufficient():
 def test_settle_confirmed_applies_new_qty():
     _seed_snapshot(_snapshot_payload([_stock("SPY", 250)]))
     sub_id = _working_with_legs("att-mod-3", qty=1)
-    assert gate4.begin_modify(sub_id, 2, SCOPE).accept
-    gate4.settle_modify(sub_id, "confirmed", new_qty=2)
+    out = gate4.begin_modify(sub_id, 2, SCOPE)
+    assert out.accept
+    assert gate4.settle_modify(sub_id, out.amend_id, "confirmed", SCOPE, new_qty=2)
     engine = get_sync_engine()
     with engine.begin() as conn:
         row = conn.execute(
@@ -696,8 +750,9 @@ def test_settle_confirmed_applies_new_qty():
 def test_settle_uncertain_keeps_max_reservation():
     _seed_snapshot(_snapshot_payload([_stock("SPY", 250)]))
     sub_id = _working_with_legs("att-mod-4", qty=1)
-    assert gate4.begin_modify(sub_id, 2, SCOPE).accept
-    gate4.settle_modify(sub_id, "uncertain")
+    out = gate4.begin_modify(sub_id, 2, SCOPE)
+    assert out.accept
+    assert not gate4.settle_modify(sub_id, out.amend_id, "uncertain", SCOPE)
     engine = get_sync_engine()
     with engine.begin() as conn:
         row = conn.execute(
@@ -711,8 +766,9 @@ def test_settle_uncertain_keeps_max_reservation():
 def test_settle_rejected_clears_pending():
     _seed_snapshot(_snapshot_payload([_stock("SPY", 300)]))
     sub_id = _working_with_legs("att-mod-5", qty=1)
-    assert gate4.begin_modify(sub_id, 2, SCOPE).accept
-    gate4.settle_modify(sub_id, "rejected")
+    out = gate4.begin_modify(sub_id, 2, SCOPE)
+    assert out.accept
+    assert gate4.settle_modify(sub_id, out.amend_id, "rejected", SCOPE)
     engine = get_sync_engine()
     with engine.begin() as conn:
         row = conn.execute(
@@ -733,18 +789,31 @@ def _env_for_subprocess():
 
 
 _CHILD = r"""
-import sys
+import os, sys, time
 from decimal import Decimal
+from pathlib import Path
 from xenon.execution import gate4
 from xenon.execution.orders_store import RequestRow
 
 SCOPE = {"broker": "IB", "account_env": "paper", "broker_account": "DU0000000"}
 attempt, mode = sys.argv[1], sys.argv[2]
+barrier = os.environ.get("GATE4_RACE_BARRIER")
+if barrier:
+    # Hold the check->insert window open until the parent says go.
+    def _hold():
+        Path(barrier, f"checked-{attempt}").touch()
+        deadline = time.monotonic() + 30
+        while not Path(barrier, "go").exists():
+            if time.monotonic() > deadline:
+                raise SystemExit("barrier timeout")
+            time.sleep(0.02)
+    gate4._after_check_hook = _hold
 if mode == "sell":
     body = {"type": "option", "symbol": "SPY", "action": "SELL", "quantity": 1,
             "right": "C", "expiry": "2026-12-18", "strike": 500.0,
             "client_attempt_id": attempt}
-    cand, legs = gate4.candidate_from_place_body(body, SCOPE["broker_account"])
+    meta = [{"con_id": 111, "tc": "SPY", "mult": 100, "und_sec": "STK"}]
+    cand, legs = gate4.candidate_from_place_body(body, SCOPE["broker_account"], meta)
     out = gate4.reserve_with_coverage(
         "u1", attempt,
         RequestRow(ticker="SPY", security_type="OPT", action="SELL", quantity=1,
@@ -755,16 +824,10 @@ if mode == "sell":
 """
 
 
-@pytest.mark.committed_db
-def test_two_processes_race_for_one_cover():
-    """Two separate processes racing for the last unit of cover: exactly one
-    must be accepted. The advisory lock + atomic check+insert is what makes
-    this safe — on the pre-PR-03b path (separate check and insert txns) both
-    could observe the same free cover and both reserve."""
-    as_of = NOW - timedelta(minutes=1)
-    payload = _snapshot_payload([_stock("SPY", 100)], as_of=as_of)
+def _seed_committed_snapshot(shares=100):
     from sqlalchemy import create_engine
 
+    payload = _snapshot_payload([_stock("SPY", shares)], as_of=NOW - timedelta(minutes=1))
     eng = create_engine(os.environ["DATABASE_URL"])
     with eng.begin() as conn:
         conn.execute(
@@ -778,18 +841,62 @@ def test_two_processes_race_for_one_cover():
         )
     eng.dispose()
 
+
+def _waiting_advisory_locks(eng) -> int:
+    with eng.connect() as conn:
+        return conn.execute(
+            text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")
+        ).scalar_one()
+
+
+@pytest.mark.committed_db
+def test_two_processes_race_for_one_cover(tmp_path):
+    """Item 10: two processes race for the last unit of cover; exactly one wins.
+
+    Deterministic: each child blocks in `gate4._after_check_hook` (between
+    the coverage check and the reservation insert) until the parent creates
+    `go`. The parent releases only once the race is provably overlapping:
+    child 1 has passed its check AND child 2 is either past its own check
+    (no lock → both saw free cover → 2 winners) or blocked on the advisory
+    lock in pg_locks (lock held → child 2 re-checks after child 1 commits).
+    """
+    from sqlalchemy import create_engine
+    import time
+
+    _seed_committed_snapshot(100)
+    env = _env_for_subprocess()
+    env["GATE4_RACE_BARRIER"] = str(tmp_path)
     procs = [
         subprocess.Popen(
             [sys.executable, "-c", _CHILD, f"race-{i}", "sell"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=_env_for_subprocess(),
+            env=env,
             text=True,
         )
-        for i in range(4)
+        for i in range(2)
     ]
-    statuses = [p.communicate(timeout=60)[0].strip() for p in procs]
-    assert statuses.count("winner") == 1, f"expected exactly one winner, got {statuses}"
+    eng = create_engine(os.environ["DATABASE_URL"])
+    try:
+        deadline = time.monotonic() + 45
+        while True:
+            checked = len(list(tmp_path.glob("checked-*")))
+            if checked >= 2 or (checked == 1 and _waiting_advisory_locks(eng) >= 1):
+                break
+            assert time.monotonic() < deadline, "race never overlapped"
+            assert all(p.poll() is None for p in procs), [p.communicate() for p in procs]
+            time.sleep(0.02)
+        overlap = "both_checked" if checked >= 2 else "second_waiting_on_lock"
+        (tmp_path / "go").touch()
+        results = [p.communicate(timeout=60) for p in procs]
+    finally:
+        eng.dispose()
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+    statuses = [out.strip() for out, _ in results]
+    print(f"race overlap={overlap} statuses={statuses}")
+    assert statuses.count("winner") == 1, f"expected exactly one winner ({overlap}), got {statuses} {[e for _, e in results]}"
     assert all(s == "rejected" for s in statuses if s != "winner")
 
 
@@ -798,21 +905,7 @@ def test_restart_rebuilds_reservations_from_postgres():
     """A second process with zero in-memory state must see the first
     process's durable reservation — cover consumed before 'restart' still
     blocks the next short."""
-    payload = _snapshot_payload([_stock("SPY", 100)], as_of=NOW - timedelta(minutes=1))
-    from sqlalchemy import create_engine
-
-    eng = create_engine(os.environ["DATABASE_URL"])
-    with eng.begin() as conn:
-        conn.execute(
-            insert(account_snapshots).values(
-                account="DU0000000",
-                bankroll=Decimal("0"),
-                payload=payload,
-                snapshot_at=NOW,
-                **SCOPE,
-            )
-        )
-    eng.dispose()
+    _seed_committed_snapshot(100)
 
     p1 = subprocess.run(
         [sys.executable, "-c", _CHILD, "restart-a", "sell"],

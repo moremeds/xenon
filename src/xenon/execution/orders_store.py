@@ -17,7 +17,7 @@ from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Text, cast, func, insert, literal, select, update
+from sqlalchemy import Text, cast, func, insert, literal, select, text, update
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -93,6 +93,78 @@ ATTEMPT_BODY_MISMATCH = "ATTEMPT_BODY_MISMATCH"
 # Sentinel for optional JSONB write-through params (register_from_snapshot):
 # "not provided" must not overwrite a stored value the caller never computed.
 _UNSET = object()
+
+
+def gate4_lock_key(broker, account_env, broker_account) -> str:
+    """Gate-4 account-scope advisory-lock key (PG `hashtext` of this string).
+
+    Every writer of reservation state — place, modify begin/settle, and the
+    snapshot mirror's legs/pending writes — serializes on this key."""
+    return f"gate4:{broker or ''}:{account_env or ''}:{broker_account or ''}"
+
+
+def _lock_gate4_scope(conn, broker, account_env, broker_account) -> None:
+    conn.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+        {"k": gate4_lock_key(broker, account_env, broker_account)},
+    )
+
+
+_PENDING_KEYS = ("pending_amend_qty", "pending_amend_id")
+
+
+def normalize_legs_payload(raw) -> dict:
+    """Stored `legs` column → dict shape {legs, guaranteed, pending_amend_qty,
+    pending_amend_id[, account]}. Handles the PR-03b dict, the legacy bare
+    leg list and NULL. `account` is present only when the payload recorded
+    provenance."""
+    if isinstance(raw, dict):
+        out = dict(raw)
+        out.setdefault("legs", None)
+        out.setdefault("guaranteed", None)
+        for k in _PENDING_KEYS:
+            out.setdefault(k, None)
+        return out
+    if isinstance(raw, list):
+        guaranteed = None
+        if raw and all(isinstance(x, dict) for x in raw):
+            vals = {x.get("guaranteed") for x in raw}
+            vals.discard(None)
+            guaranteed = vals.pop() if len(vals) == 1 else None
+        return {"legs": list(raw), "guaranteed": guaranteed, "pending_amend_qty": None, "pending_amend_id": None}
+    return {"legs": None, "guaranteed": None, "pending_amend_qty": None, "pending_amend_id": None}
+
+
+def merge_observed_legs(stored_raw, observed) -> dict:
+    """Merge a fresh IB observation into stored reservation state (item 6).
+
+    Observation owns the leg list (when it resolved one) and the account
+    provenance. Reservation state is never cleared by drift: pending amend
+    fields always survive, and a known guarantee mode survives an
+    observation whose routing tags are absent (guaranteed=None)."""
+    obs = normalize_legs_payload(observed)
+    if stored_raw is None:
+        return obs
+    merged = normalize_legs_payload(stored_raw)
+    if obs["legs"] is not None:
+        merged["legs"] = obs["legs"]
+    if obs["guaranteed"] is not None:
+        merged["guaranteed"] = obs["guaranteed"]
+    if isinstance(observed, dict) and "account" in observed:
+        merged["account"] = observed["account"]
+    return merged
+
+
+def _reconcile_pending(payload: dict, observed_qty: int) -> tuple[dict, bool]:
+    """A pending quantity amend is confirmed only when IB reports exactly the
+    pending quantity. Any other observation leaves it pending (max kept)."""
+    pending = payload.get("pending_amend_qty")
+    if pending is None or int(pending) != int(observed_qty):
+        return payload, False
+    out = dict(payload)
+    out["pending_amend_qty"] = None
+    out["pending_amend_id"] = None
+    return out, True
 
 
 def _canon_json(value):
@@ -418,12 +490,16 @@ def register_from_snapshot(
     now = datetime.now(timezone.utc)
     engine = get_sync_engine()
     with engine.begin() as conn:
+        # Reservation state (legs / pending amend / quantity) is written
+        # under the same account-scope lock as the gate's check+insert.
+        _lock_gate4_scope(conn, broker, account_env, broker_account)
         existing = conn.execute(
             select(
                 order_submissions.c.submission_id,
                 order_submissions.c.limit_price,
                 order_submissions.c.quantity,
                 order_submissions.c.state,
+                order_submissions.c.legs,
             ).where(
                 order_submissions.c.perm_id == str(perm_id),
                 order_submissions.c.broker == broker,
@@ -446,11 +522,30 @@ def register_from_snapshot(
             existing_limit_price = float(existing[1]) if existing[1] is not None else None
             existing_quantity = int(existing[2]) if existing[2] is not None else None
             existing_state = str(existing[3]) if existing[3] is not None else ""
+            existing_legs = existing[4]
 
             # UUID-authored rows are off-limits: their modify_sequence is
             # the source of truth. TWS-side modifies on those need a
-            # separate, conscious policy decision.
+            # separate, conscious policy decision. The one write allowed is
+            # confirming a pending quantity amend that IB now reports.
             if not existing_submission_id.startswith("snapshot-"):
+                if existing_legs is not None and existing_state not in _TERMINAL_STATES | {"FILLED"}:
+                    payload, confirmed = _reconcile_pending(normalize_legs_payload(existing_legs), int(quantity))
+                    if confirmed:
+                        conn.execute(
+                            update(order_submissions)
+                            .where(order_submissions.c.submission_id == existing_submission_id)
+                            .values(legs=payload, quantity=int(quantity), updated_at=now)
+                        )
+                        conn.execute(
+                            insert(order_events).values(
+                                submission_id=existing_submission_id,
+                                kind="AMEND_RECONCILED",
+                                detail={"quantity": int(quantity)},
+                                at=now,
+                            )
+                        )
+                        return {"action": "SKIPPED_UUID", "drift": None, "reconciled": True}
                 return {"action": "SKIPPED_UUID", "drift": None}
 
             # IB still reports this order as open while we have it in a
@@ -466,7 +561,7 @@ def register_from_snapshot(
                     updated_at=now,
                 )
                 if legs is not _UNSET:
-                    resurrect_values["legs"] = legs
+                    resurrect_values["legs"] = merge_observed_legs(existing_legs, legs)
                 conn.execute(
                     update(order_submissions)
                     .where(order_submissions.c.submission_id == existing_submission_id)
@@ -502,6 +597,14 @@ def register_from_snapshot(
                 }
             if existing_tif is not None and existing_tif != tif:
                 drift["tif"] = {"from": existing_tif, "to": tif}
+            merged_legs = _UNSET
+            if legs is not _UNSET:
+                merged_legs = merge_observed_legs(existing_legs, legs)
+                merged_legs, confirmed = _reconcile_pending(merged_legs, int(quantity))
+                if confirmed:
+                    drift["pending_amend_qty"] = {"confirmed": int(quantity)}
+                if existing_legs is None or merged_legs != normalize_legs_payload(existing_legs):
+                    drift.setdefault("legs", "updated")
             if not drift:
                 return {"action": "NOOP", "drift": None}
 
@@ -511,8 +614,8 @@ def register_from_snapshot(
                 tif=tif,
                 updated_at=now,
             )
-            if legs is not _UNSET:
-                drift_values["legs"] = legs
+            if merged_legs is not _UNSET:
+                drift_values["legs"] = merged_legs
             conn.execute(
                 update(order_submissions)
                 .where(order_submissions.c.submission_id == existing_submission_id)
@@ -675,7 +778,7 @@ def mark_terminal(
     submission_id: str,
     state: Literal["FILLED", "REJECTED", "CANCELLED", "FAILED", "PARTIALLY_FILLED"],
     reason_code: str | None,
-    filled_qty: int,
+    filled_qty: int | None,
     avg_fill_price: Decimal | None,
     expected_states: tuple[str, ...] | None = None,
 ) -> int:
@@ -694,16 +797,13 @@ def mark_terminal(
     stmt = update(order_submissions).where(order_submissions.c.submission_id == submission_id)
     if expected_states is not None:
         stmt = stmt.where(order_submissions.c.state.in_(expected_states))
+    values = dict(state=state, reason_code=reason_code, updated_at=now)
+    if filled_qty is not None:
+        # filled_qty=None keeps the stored fill state: a cancel releases only
+        # the unfilled remainder and must never erase executed quantity.
+        values.update(filled_qty=filled_qty, avg_fill_price=avg_fill_price)
     with engine.begin() as conn:
-        result = conn.execute(
-            stmt.values(
-                state=state,
-                reason_code=reason_code,
-                filled_qty=filled_qty,
-                avg_fill_price=avg_fill_price,
-                updated_at=now,
-            )
-        )
+        result = conn.execute(stmt.values(**values))
     return result.rowcount
 
 

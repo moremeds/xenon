@@ -530,6 +530,9 @@ def collapse_positions(positions: list) -> list:
                     "type": "Call" if leg.get("right") == "C" else ("Put" if leg.get("right") == "P" else "Stock"),
                     "strike": leg.get("strike"),
                     "conId": leg.get("conId"),
+                    # Raw IB account of the position (PR-03b round 3): Gate 4
+                    # credits cover only to legs that name the scope account.
+                    "account": leg.get("account"),
                     "entry_cost": leg["entry_cost"],
                     "avg_cost": leg["avgCost"],
                     "market_price": leg.get("marketPrice"),
@@ -648,6 +651,7 @@ def fetch_positions(client: IBClient) -> list:
                 "right": getattr(contract, "right", None),
                 "structure": format_option_structure(contract, position_size),
                 "conId": contract.conId,  # Needed for reqPnLSingle
+                "account": getattr(pos, "account", None) or None,
                 "contract": contract,  # Keep for market data requests
             }
         )
@@ -894,7 +898,7 @@ def build_account_summary(account: dict, pnl_data: dict) -> dict:
     }
 
 
-def build_fill_dates(client, *, status: dict | None = None) -> dict:
+def build_fill_dates(client, *, status: dict | None = None, fills: list | None = None) -> dict:
     """Extract earliest execution date per contract from IB session fills.
 
     Returns dict keyed by "TICKER|EXPIRY|RIGHT|STRIKE" → "YYYY-MM-DD".
@@ -905,14 +909,15 @@ def build_fill_dates(client, *, status: dict | None = None) -> dict:
     must degrade the snapshot to complete=False instead of passing silently.
     """
     fill_dates: dict[str, str] = {}
-    try:
-        fills = client.get_fills()
-    except Exception:
+    if fills is None:
+        try:
+            fills = client.get_fills()
+        except Exception:
+            if status is not None:
+                status["executions"] = False
+            return fill_dates
         if status is not None:
-            status["executions"] = False
-        return fill_dates
-    if status is not None:
-        status["executions"] = True
+            status["executions"] = True
 
     for fill in fills:
         contract = fill.contract
@@ -1227,22 +1232,14 @@ def save_portfolio(portfolio: dict):
             print(f"  Warning: NAV snapshot failed: {exc}")
 
 
-def _fetch_open_orders_for_pass(client) -> tuple[list[dict], bool]:
-    """Pull open orders from IB and shape them for naked_short_audit.
+def _audit_orders_from_trades(trades: list) -> list[dict]:
+    """Shape live ib_async Trade objects for naked_short_audit.
 
-    Returns (orders, ok) — `ok` attests the read succeeded so the sync pass
-    can stamp `observation.reads.open_orders`. Replaces the old
-    `data/orders.json` read. The audit's pure function
-    (`find_naked_short_violations`) expects a list of dicts shaped like the
-    web app's open_orders payload — this adapter mirrors that shape from
-    live ib_async Trade objects so we don't depend on a separate process
-    having written to disk first.
+    The audit's pure function (`find_naked_short_violations`) expects a list
+    of dicts shaped like the web app's open_orders payload — this adapter
+    mirrors that shape so we don't depend on a separate process having
+    written to disk first.
     """
-    try:
-        trades = client.get_open_orders()
-    except Exception as exc:
-        logging.getLogger("ib_sync.audit").warning("could not fetch open orders for audit (%s); skipping", exc)
-        return [], False
     out: list[dict] = []
     for trade in trades:
         order = getattr(trade, "order", None)
@@ -1270,13 +1267,123 @@ def _fetch_open_orders_for_pass(client) -> tuple[list[dict], bool]:
                 },
             }
         )
-    return out, True
+    return out
+
+
+def _fetch_open_orders_for_pass(client) -> tuple[list[dict], bool]:
+    """Audit-shaped open orders + read success (compat for older callers)."""
+    try:
+        trades = client.get_open_orders()
+    except Exception as exc:
+        logging.getLogger("ib_sync.audit").warning("could not fetch open orders for audit (%s); skipping", exc)
+        return [], False
+    return _audit_orders_from_trades(trades), True
 
 
 def _open_orders_for_audit(client) -> list[dict]:
     """Compat wrapper — prefer _fetch_open_orders_for_pass for new callers."""
     orders, _ok = _fetch_open_orders_for_pass(client)
     return orders
+
+
+def _scope_positions(positions: list, ib_account: str | None) -> tuple[list, bool]:
+    """Keep only the scope account's positions (PR-03b round 3, item 2).
+
+    Foreign-account rows are dropped BEFORE structure classification so they
+    can never be grouped with, or stamped as, the scope's holdings. Any row
+    without an account makes the read unattested (returned ok=False): an
+    accountless position is never credited as scoped cover.
+    """
+    ok = bool(ib_account) and all(p.get("account") for p in positions)
+    return [p for p in positions if ib_account and p.get("account") == ib_account], ok
+
+
+def _stamp_option_metadata(client, collapsed: list) -> None:
+    """Stamp IB-qualified tradingClass / multiplier / underlying sec type on
+    every option leg (contract details by conId). A failed lookup leaves the
+    fields None — Gate 4 then fails that symbol closed; nothing is guessed."""
+    from xenon.execution import contract_meta
+
+    con_ids = [
+        leg.get("conId")
+        for pos in collapsed
+        for leg in pos.get("legs") or []
+        if leg.get("type") in ("Call", "Put") and leg.get("conId")
+    ]
+    meta = contract_meta.fetch_meta_by_con_ids(client, con_ids) if con_ids else {}
+    for pos in collapsed:
+        for leg in pos.get("legs") or []:
+            if leg.get("type") not in ("Call", "Put"):
+                continue
+            m = meta.get(leg.get("conId"))
+            leg["tc"] = m["tc"] if m else None
+            leg["mult"] = m["mult"] if m else None
+            leg["und_sec"] = m["und_sec"] if m else None
+
+
+def _trade_key(trade) -> tuple:
+    order = getattr(trade, "order", None)
+    perm = getattr(order, "permId", 0) or 0
+    if perm:
+        return ("perm", perm)
+    return ("oid", getattr(order, "clientId", None), getattr(order, "orderId", None))
+
+
+def _read_pass_activity(client) -> dict:
+    """Open orders + executions for this sync pass (after the positions read).
+
+    Read order: open orders → executions → open orders again. The confirming
+    open-order read catches an order placed while executions were read; the
+    union of both order reads is what gets persisted. Every read result is
+    returned with its success flag so the stamp can attest it.
+    """
+    log = logging.getLogger("ib_sync.pass")
+    out = {"trades": [], "audit_trades": [], "fills": [], "open_orders_ok": False, "executions_ok": False}
+    try:
+        first = list(client.get_open_orders())
+    except Exception as exc:
+        log.warning("open-order read failed (%s)", exc)
+        return out
+    try:
+        out["fills"] = list(client.get_executions())
+        out["executions_ok"] = True
+    except Exception as exc:
+        log.warning("executions read failed (%s)", exc)
+    try:
+        second = list(client.get_open_orders())
+    except Exception as exc:
+        log.warning("confirming open-order read failed (%s)", exc)
+        return out
+    union = {_trade_key(t): t for t in first}
+    union.update({_trade_key(t): t for t in second})
+    out["trades"] = list(union.values())
+    out["audit_trades"] = second
+    out["open_orders_ok"] = True
+    return out
+
+
+def _persist_pass_activity(open_orders: list[dict], executions: list[dict]) -> bool:
+    """Persist this pass's scoped open orders + executions to Postgres.
+
+    Runs BEFORE the snapshot is published: a snapshot may claim
+    `complete=true` only if every order and fill it observed is already in
+    `order_submissions` / `order_fills` (the rows Gate 4 reads). Foreign-
+    account rows are dropped by the writers. Any failure → False.
+    """
+    if os.environ.get("XENON_READ_ONLY") == "1":
+        return False
+    try:
+        from xenon.execution.account_scope import resolve_from_env
+        from xenon.execution.ib_orders import sync_open_orders_to_postgres
+        from xenon.execution.ib_reconcile import record_external_fills
+
+        scope = resolve_from_env()
+        sync_open_orders_to_postgres(open_orders, scope=scope)
+        record_external_fills(executions, scope=scope)
+        return True
+    except Exception as exc:  # noqa: BLE001 — any failure degrades the stamp
+        logging.getLogger("ib_sync.pass").warning("pass activity persist failed (%s)", exc, exc_info=True)
+        return False
 
 
 def _observation_stamp(pass_started: datetime, reads: dict, ib_account: str | None) -> dict:
@@ -1343,9 +1450,10 @@ def main():
             os.environ["XENON_BROKER_ACCOUNT"] = ib_account
         pnl_obj = client.ib.reqPnL(ib_account) if ib_account else None
 
-        # Fetch positions while PnL streams
-        positions = fetch_positions(client)
-        reads["positions"] = True
+        # Fetch positions while PnL streams. Foreign-account rows are dropped
+        # before classification; an accountless row leaves the read unattested.
+        positions, positions_ok = _scope_positions(fetch_positions(client), ib_account)
+        reads["positions"] = positions_ok
 
         if not args.no_prices and positions:
             # ── Phase 3: Set exchange + request ALL data at once ──
@@ -1470,18 +1578,34 @@ def main():
 
         # Sync if requested
         if args.sync:
-            fill_dates = build_fill_dates(client, status=reads)
-            # Open-order read is part of the observation attestation even
-            # when --skip-audit is set: without it gate4 can't prove the
-            # reservation view is whole.
-            orders_for_audit, orders_ok = _fetch_open_orders_for_pass(client)
-            reads["open_orders"] = orders_ok
+            from xenon.execution.ib_orders import open_orders_from_trades
+            from xenon.execution.ib_reconcile import executions_from_fills
+
+            # One coherent pass (PR-03b round 3): open orders + executions are
+            # read here, persisted to Postgres, and only then is the snapshot
+            # published. The open-order read is part of the attestation even
+            # when --skip-audit is set.
+            activity = _read_pass_activity(client)
+            reads["open_orders"] = activity["open_orders_ok"]
+            reads["executions"] = activity["executions_ok"]
+            open_orders = open_orders_from_trades(client, activity["trades"]) if activity["trades"] else []
+            executions = executions_from_fills(activity["fills"])
+            # An open order without account provenance makes the view
+            # incomplete (adv-14) — it is persisted (legs.account=null) but
+            # the pass cannot claim it saw a whole, scoped picture.
+            reads["order_accounts"] = all(o.get("account") for o in open_orders)
+            reads["persisted"] = (
+                reads["open_orders"] and reads["executions"] and _persist_pass_activity(open_orders, executions)
+            )
+            orders_for_audit = _audit_orders_from_trades(activity["audit_trades"])
+            fill_dates = build_fill_dates(client, fills=activity["fills"])
+            _stamp_option_metadata(client, collapsed)
             portfolio = convert_to_portfolio_format(
                 account, collapsed, pnl_data, fill_dates=fill_dates, fx_rates=fx_rates
             )
-            # PR-03b observation stamp: gate4 rejects new risk when the pass
-            # cannot attest all three reads (positions / open orders /
-            # executions) inside one coherent boundary.
+            # PR-03b observation stamp: gate4 rejects new risk unless every
+            # read succeeded, every row named an account, and the observed
+            # orders/fills were persisted before this snapshot.
             portfolio["observation"] = _observation_stamp(pass_started, reads, ib_account)
             save_portfolio(portfolio)
 

@@ -64,7 +64,10 @@ def _seed_snapshot(engine, positions, *, complete=True):
         )
 
 
-def _stock(sym, qty):
+ACCOUNT = "DU0000000"
+
+
+def _stock(sym, qty, *, account=ACCOUNT):
     return {
         "ticker": sym,
         "expiry": None,
@@ -74,12 +77,14 @@ def _stock(sym, qty):
                 "type": "Stock",
                 "contracts": abs(qty),
                 "strike": 0,
+                "account": account,
             }
         ],
     }
 
 
-def _opt_pos(sym, qty, *, strike, right="Call", expiry="2026-12-18"):
+def _opt_pos(sym, qty, *, strike, right="Call", expiry="2026-12-18", tc=None, mult=100, und_sec="STK"):
+    # Shape ib_sync writes: raw IB account + IB-qualified option metadata.
     return {
         "ticker": sym,
         "expiry": expiry,
@@ -89,9 +94,94 @@ def _opt_pos(sym, qty, *, strike, right="Call", expiry="2026-12-18"):
                 "type": right,
                 "contracts": abs(qty),
                 "strike": strike,
+                "account": ACCOUNT,
+                "tc": tc or sym,
+                "mult": mult,
+                "und_sec": und_sec,
             }
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# IB data-role double: the place route qualifies every evaluated option leg
+# via reqContractDetails (contract_meta). This fake pool runs the REAL
+# resolver (_resolve_leg_meta_with_client) against a ContractDetails table.
+# ---------------------------------------------------------------------------
+
+
+def _details(sym, exp, strike, right, *, con_id, tc=None, mult="100", und_sec="STK"):
+    from ib_async import Contract, ContractDetails
+
+    return ContractDetails(
+        contract=Contract(
+            conId=con_id,
+            symbol=sym,
+            secType="OPT",
+            lastTradeDateOrContractMonth=exp,
+            strike=float(strike),
+            right=right,
+            multiplier=mult,
+            tradingClass=tc or sym,
+            exchange="SMART",
+            currency="USD",
+        ),
+        underSecType=und_sec,
+    )
+
+
+class _FakeDataClient:
+    """get_contract_details by conId or by (symbol, expiry, strike, right)."""
+
+    def __init__(self):
+        self.by_con_id = {}
+        self.by_fields = {}
+        self.calls = 0
+
+    def add(self, details):
+        c = details.contract
+        self.by_con_id[c.conId] = details
+        self.by_fields[(c.symbol, c.lastTradeDateOrContractMonth, float(c.strike), c.right)] = details
+
+    def get_contract_details(self, contract):
+        self.calls += 1
+        if getattr(contract, "conId", 0):
+            d = self.by_con_id.get(contract.conId)
+            return [d] if d else []
+        key = (contract.symbol, contract.lastTradeDateOrContractMonth, float(contract.strike), contract.right)
+        d = self.by_fields.get(key)
+        return [d] if d else []
+
+
+class _FakePool:
+    def __init__(self, client):
+        self.client = client
+
+    def acquire(self, role):
+        client = self.client
+
+        class _Ctx:
+            async def __aenter__(self):
+                return client
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _Ctx()
+
+    async def run_sync(self, role, fn, *args):
+        return fn(*args)
+
+
+@pytest.fixture(autouse=True)
+def ib_data(monkeypatch):
+    client = _FakeDataClient()
+    for strike in (500.0, 510.0, 520.0):
+        for right in ("C", "P"):
+            con_id = 111 if (strike, right) == (500.0, "C") else int(strike) * 10 + (1 if right == "C" else 2)
+            client.add(_details("SPY", "20261218", strike, right, con_id=con_id))
+    monkeypatch.setattr(server_mod, "ib_pool", _FakePool(client))
+    return client
 
 
 @pytest.fixture(autouse=True)
@@ -222,7 +312,9 @@ def test_incomplete_view_blocks_before_broker(client, broker_calls, fresh_quote)
 
 
 def test_sell_envelope_combo_evaluated_and_blocked(client, broker_calls):
-    """SELL-envelope combos are NOT exempt — legs flip and demand is real."""
+    """SELL-envelope combos are NOT exempt — legs flip and demand is real.
+    The flipped 2x1 ratio nets to one short call even under netting, so it
+    keeps the uncovered code (never the split hint)."""
     engine = _pg_engine()
     _seed_snapshot(engine, [])
     engine.dispose()
@@ -237,7 +329,7 @@ def test_sell_envelope_combo_evaluated_and_blocked(client, broker_calls):
             "limitPrice": 1.0,
             "client_attempt_id": "rt-sellenv-1",
             "legs": [
-                {"action": "BUY", "right": "C", "expiry": "2026-12-18", "strike": 500.0, "ratio": 1},
+                {"action": "BUY", "right": "C", "expiry": "2026-12-18", "strike": 500.0, "ratio": 2},
                 {"action": "SELL", "right": "C", "expiry": "2026-12-18", "strike": 510.0, "ratio": 1},
             ],
         },
@@ -484,35 +576,251 @@ def test_modify_uncertain_keeps_max_reservation(client, broker_calls, monkeypatc
     assert row["legs"]["pending_amend_qty"] == 2
 
 
-def test_modify_rejected_clears_pending(client, broker_calls, monkeypatch):
-    """A classified ib_reject is a broker-side NO — release the pending
-    reservation (provably unapplied)."""
-    _place_bag(client, "rt-mod-rej-1", shares=250)
+def _real_cli_modify_reply(*, reject_code=None, new_quantity=2):
+    """Run the REAL `ib_order_manage.modify_order` against a fake IB and
+    return the JSON it prints — the exact reply shape the route settles on.
 
-    async def rejected(entry: str, args: list, timeout: float = 30):
+    The fake's refreshed open orders never show the new quantity. With
+    `reject_code`, IB emits that error for the order right after placeOrder
+    (an explicit rejection); without it the amend is sent and simply never
+    confirmed.
+    """
+    import contextlib
+    import io
+    from unittest.mock import MagicMock
+
+    from xenon.execution import ib_order_manage as iom
+
+    class _Event:
+        def __init__(self):
+            self.handlers = []
+
+        def __iadd__(self, handler):
+            self.handlers.append(handler)
+            return self
+
+        def __isub__(self, handler):
+            if handler in self.handlers:
+                self.handlers.remove(handler)
+            return self
+
+    def _trade(qty):
+        t = MagicMock()
+        t.order.orderId = 4242
+        t.order.permId = 777001
+        t.order.clientId = 0
+        t.order.orderType = "LMT"
+        t.order.lmtPrice = 2.0
+        t.order.totalQuantity = qty
+        t.order.outsideRth = False
+        t.orderStatus.status = "Submitted"
+        t.contract.secType = "BAG"
+        return t
+
+    client = MagicMock()
+    client.ib.client.clientId = 0
+    client.ib.errorEvent = _Event()
+    client.get_open_orders.side_effect = [[_trade(1)]] + [[_trade(1)]] * 50
+
+    def _place(contract, order):
+        if reject_code is not None:
+            for handler in list(client.ib.errorEvent.handlers):
+                handler(4242, reject_code, "Order rejected - reason: amend refused")
+
+    client.place_order.side_effect = _place
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), pytest.raises(SystemExit):
+        iom.modify_order(client, 4242, 777001, None, "127.0.0.1", 4002, new_quantity=new_quantity, non_guaranteed=0)
+    return json.loads(buf.getvalue())
+
+
+def _manage_returns(monkeypatch, broker_calls, reply):
+    async def fake(entry: str, args: list, timeout: float = 30):
         broker_calls.append({"entry": entry, "args": args})
-        return ScriptResult(
-            ok=True,
-            data={
-                "status": "error",
-                "classification": "ib_reject",
-                "message": "IB rejected",
-                "upstream": {"code": "201"},
-            },
-        )
+        if entry == "xenon-ib-order-manage":
+            # run_entry_point hands back exit-1 JSON as ok=True + data.
+            return ScriptResult(ok=True, data=reply)
+        return ScriptResult(ok=True, data={"status": "ok", "orderId": 5151, "permId": 888001, "clientId": 26})
 
-    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", rejected)
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake)
 
-    resp = client.post(
+
+def _modify_qty(client, qty, seq):
+    return client.post(
         "/orders/modify",
-        json={
-            "orderId": 4242,
-            "permId": 777001,
-            "newQuantity": 2,
-            "modifySequence": 1,
-        },
+        json={"orderId": 4242, "permId": 777001, "newQuantity": qty, "modifySequence": seq},
     )
+
+
+def test_modify_unconfirmed_cli_reply_keeps_max_reservation(client, broker_calls, monkeypatch, fresh_quote):
+    """Item 4: the real CLI reply for a sent-but-unconfirmed amend
+    (classification ib_reject, amend_outcome unconfirmed) is NOT proof the
+    amend failed — the route keeps max(old,new) and the next short on the
+    released cover is blocked."""
+    _place_bag(client, "rt-mod-unconf-1", shares=200)
+    reply = _real_cli_modify_reply()
+    assert reply["status"] == "error"
+    assert reply["classification"] == "ib_reject"
+    assert reply["amend_outcome"] == "unconfirmed"
+    _manage_returns(monkeypatch, broker_calls, reply)
+
+    resp = _modify_qty(client, 2, 1)
+
+    assert resp.status_code == 400
+    row = _submission_rows()[0]._mapping
+    assert row["legs"]["pending_amend_qty"] == 2
+    assert row["quantity"] == 1
+    # max(1,2)=2 short-call units consume all 200 shares.
+    nxt = client.post("/orders/place", json=_sell_call_body("rt-after-unconf-1"))
+    assert nxt.status_code == 400
+    assert nxt.json()["reason_code"] == "ETF_CALL_UNCOVERED"
+
+
+def test_modify_explicit_ib_rejection_releases_pending(client, broker_calls, monkeypatch, fresh_quote):
+    """Item 4: an explicit IB rejection of the amend (code 201 on the
+    order) is provably unapplied — pending clears and cover is released."""
+    _place_bag(client, "rt-mod-rej-1", shares=200)
+    reply = _real_cli_modify_reply(reject_code=201)
+    assert reply["amend_outcome"] == "rejected"
+    _manage_returns(monkeypatch, broker_calls, reply)
+
+    resp = _modify_qty(client, 2, 1)
 
     assert resp.status_code == 400
     row = _submission_rows()[0]._mapping
     assert row["legs"]["pending_amend_qty"] is None
+    assert row["legs"]["pending_amend_id"] is None
+    nxt = client.post("/orders/place", json=_sell_call_body("rt-after-rej-1"))
+    assert nxt.status_code == 200, nxt.text
+
+
+def test_modify_refused_while_amend_pending(client, broker_calls, monkeypatch, fresh_quote):
+    """Item 5 (review counterexample 1): 200 shares, qty 1 → uncertain
+    increase to 2 reserves 2. A later decrease to 1 must NOT overwrite the
+    pending maximum: it is refused with MODIFY_PENDING before the broker,
+    and another short stays blocked."""
+    _place_bag(client, "rt-mod-pend-1", shares=200)
+    _manage_returns(monkeypatch, broker_calls, _real_cli_modify_reply())
+    assert _modify_qty(client, 2, 1).status_code == 400
+    calls_before = len(broker_calls)
+
+    resp = _modify_qty(client, 1, 2)
+
+    assert resp.status_code == 409
+    assert resp.json()["reason_code"] == "MODIFY_PENDING"
+    assert len(broker_calls) == calls_before
+    row = _submission_rows()[0]._mapping
+    assert row["legs"]["pending_amend_qty"] == 2
+    nxt = client.post("/orders/place", json=_sell_call_body("rt-after-pend-1"))
+    assert nxt.status_code == 400
+
+
+def test_cancel_keeps_filled_quantity(client, broker_calls, monkeypatch, fresh_quote):
+    """Item 8: a user cancel of a partially filled SELL call keeps
+    filled_qty — the executed contract still consumes cover until a newer
+    snapshot shows it."""
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_stock("SPY", 200)])
+    engine.dispose()
+    assert client.post("/orders/place", json=_sell_call_body("rt-cx-1", qty=2)).status_code == 200
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE xenon.order_submissions SET state='PARTIALLY_FILLED', filled_qty=1 "
+                "WHERE client_attempt_id='rt-cx-1'"
+            )
+        )
+    engine.dispose()
+
+    async def cancel_ok(entry: str, args: list, timeout: float = 30):
+        broker_calls.append({"entry": entry, "args": args})
+        return ScriptResult(ok=True, data={"status": "ok", "message": "Order cancelled"})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", cancel_ok)
+    resp = client.post("/orders/cancel", json={"orderId": 4242, "permId": 777001})
+    assert resp.status_code == 200, resp.text
+
+    row = _submission_rows()[0]._mapping
+    assert row["state"] == "CANCELLED"
+    assert row["filled_qty"] == 1
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", broker_calls_fake(broker_calls))
+    # 200 shares − 1 executed short call (100) leaves 100: SELL 2 is uncovered.
+    nxt = client.post("/orders/place", json=_sell_call_body("rt-cx-2", qty=2))
+    assert nxt.status_code == 400
+    assert nxt.json()["reason_code"] == "ETF_CALL_UNCOVERED"
+
+
+def broker_calls_fake(calls):
+    async def fake(entry: str, args: list, timeout: float = 30):
+        calls.append({"entry": entry, "args": args})
+        return ScriptResult(ok=True, data={"status": "ok", "orderId": 4343, "permId": 777002, "clientId": 26})
+
+    return fake
+
+
+def test_ui_vertical_close_without_mode_gets_split_code(client, broker_calls):
+    """Item 9: the UI never sends nonGuaranteed. A held-vertical close that
+    passes only as a guaranteed BAG under netting still gets
+    COMBO_SPLIT_REQUIRED, not the generic uncovered code."""
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_opt_pos("SPY", 1, strike=500), _opt_pos("SPY", -1, strike=510)])
+    engine.dispose()
+
+    resp = client.post(
+        "/orders/place",
+        json={
+            "type": "combo",
+            "symbol": "SPY",
+            "action": "SELL",
+            "quantity": 1,
+            "limitPrice": 1.0,
+            "client_attempt_id": "rt-ui-vclose-1",
+            "legs": [
+                {"action": "BUY", "right": "C", "expiry": "2026-12-18", "strike": 500.0, "ratio": 1},
+                {"action": "SELL", "right": "C", "expiry": "2026-12-18", "strike": 510.0, "ratio": 1},
+            ],
+        },
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["reason_code"] == "COMBO_SPLIT_REQUIRED"
+    assert broker_calls == []
+
+
+def test_candidate_without_ib_qualification_fails_closed(client, broker_calls, fresh_quote, monkeypatch):
+    """Item 3: no IB contract details for the candidate → GATE4_UNRESOLVED.
+    The gate never substitutes tradingClass=symbol / multiplier=100."""
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_stock("SPY", 100)])
+    engine.dispose()
+    monkeypatch.setattr(server_mod, "ib_pool", None)
+
+    resp = client.post("/orders/place", json=_sell_call_body("rt-nometa-1"))
+
+    assert resp.status_code == 400
+    assert resp.json()["reason_code"] == "GATE4_UNRESOLVED"
+    assert broker_calls == []
+    assert _submission_rows() == []
+
+
+def test_adjusted_candidate_not_covered_by_standard_long_call(client, broker_calls, fresh_quote, ib_data):
+    """Item 3: the candidate's key comes from IB qualification. An adjusted
+    call (tradingClass SPY1, multiplier 150) is not covered by a held
+    standard SPY call of the same expiry."""
+    ib_data.add(_details("SPY", "20261218", 500.0, "C", con_id=9001, tc="SPY1", mult="150"))
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_opt_pos("SPY", 1, strike=490)])
+    engine.dispose()
+    body = dict(_sell_call_body("rt-adj-1"), con_id=9001)
+
+    resp = client.post("/orders/place", json=body)
+
+    assert resp.status_code == 400
+    assert resp.json()["reason_code"] == "ETF_CALL_UNCOVERED"
+    assert broker_calls == []
+    # Control: the standard contract IS covered by the same long call.
+    ok = client.post("/orders/place", json=_sell_call_body("rt-adj-2"))
+    assert ok.status_code == 200, ok.text
+    legs = _submission_rows()[0]._mapping["legs"]["legs"][0]
+    assert (legs["tc"], legs["mult"], legs["und_sec"], legs["con_id"]) == ("SPY", 100, "STK", 111)

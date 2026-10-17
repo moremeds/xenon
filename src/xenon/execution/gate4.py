@@ -25,18 +25,31 @@ Durable reservation payload (`order_submissions.legs` JSONB):
     {"legs": [ {action, sym, sec, ratio, right, exp, mult, tc, strike,
                 con_id, und_sec} ... ] | null,
      "guaranteed": bool | null,          # BAG guarantee mode (NonGuaranteed=0)
-     "pending_amend_qty": int | null}    # uncertain modify keeps max(old,new)
+     "account": str | null,              # adapter provenance (mirrored rows)
+     "pending_amend_qty": int | null,    # uncertain modify keeps max(old,new)
+     "pending_amend_id": str | null}     # amend generation in flight
 
 A pre-PR-03b row stores a bare leg list (or NULL); non-BAG rows without
 stored legs are re-synthesized from row columns, unresolved BAG rows fail
 closed — `coverage` treats legs=None/() as unclassifiable.
+
+Option metadata (tradingClass, multiplier, underlying sec type) comes only
+from IB contract qualification (`contract_meta`). Nothing here derives it
+from the symbol or a universe default: a leg without it fails closed.
+
+Liveness (round 3): only rows that can still owe demand enter the
+evaluation — non-terminal rows and rows with fills at/after `as_of`.
+Quantity-0 rows and pure-BUY rows hold no cover demand and are ignored. A row
+that cannot be classified (unresolved BAG legs, unknown metadata, invalid
+quantity fields) blocks only candidates on its own symbol: cover is
+per-symbol, so it cannot change another symbol's result.
 """
 
 from __future__ import annotations
 
 import os
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Literal
@@ -46,7 +59,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from xenon.db.engine import get_sync_engine
 from xenon.db.schema import account_snapshots, order_fills, order_submissions, regime_overrides
-from xenon.execution import coverage
+from xenon.execution import coverage, orders_store
 from xenon.execution.orders_store import (
     ATTEMPT_BODY_MISMATCH,
     RequestRow,
@@ -54,7 +67,7 @@ from xenon.execution.orders_store import (
     _request_body_matches,
     ensure_writable,
 )
-from xenon.execution.universe import INDEX_UNIVERSE, UNIVERSE, get_multiplier
+from xenon.execution.universe import UNIVERSE, get_multiplier
 
 TERMINAL_STATES = frozenset({"FILLED", "CANCELLED", "REJECTED", "FAILED"})
 
@@ -72,7 +85,7 @@ def netting_enabled() -> bool:
 
 def scope_lock_key(scope: dict) -> str:
     """Deterministic advisory-lock key — stable across processes (no hash())."""
-    return f"gate4:{scope.get('broker') or ''}:{scope.get('account_env') or ''}:{scope.get('broker_account') or ''}"
+    return orders_store.gate4_lock_key(scope.get("broker"), scope.get("account_env"), scope.get("broker_account"))
 
 
 def _norm_expiry(value: Any) -> str | None:
@@ -85,20 +98,13 @@ def _norm_expiry(value: Any) -> str | None:
     return value.strftime("%Y%m%d") if hasattr(value, "strftime") else None
 
 
-def _und_sec(sym: str) -> str:
-    """Underlying sec-type fallback for rows/snapshots that predate sync-side
-    stamping. Xenon's option universe is only US equity and cash-settled
-    index underlyings, so und_sec ∈ {STK, IND}."""
-    return "IND" if sym in INDEX_UNIVERSE else "STK"
-
-
-def _mult_for(sym: str) -> int:
-    return get_multiplier(sym) if sym in UNIVERSE else 100
-
-
 def server_multiplier(sym: str) -> int:
-    """Server-authoritative contract multiplier for the request/durable row."""
-    return _mult_for(sym)
+    """Request-row `multiplier` column (idempotency body match only).
+
+    Coverage never reads this column: option legs carry the qualified IB
+    multiplier in the legs payload, and a leg without one fails closed.
+    """
+    return get_multiplier(sym) if sym in UNIVERSE else 100
 
 
 def _as_utc(dt: Any) -> datetime | None:
@@ -164,42 +170,33 @@ def _decode_legs_payload(payload: Any) -> tuple[tuple[coverage.Leg, ...] | None,
     distinguishes "payload never recorded provenance" (fall back to the
     row's scope columns).
     """
-    if payload is None:
-        return None, None, None, _UNSET
-    if isinstance(payload, dict):
-        raw = payload.get("legs")
-        guaranteed = payload.get("guaranteed")
-        pending = payload.get("pending_amend_qty")
-        account = payload["account"] if "account" in payload else _UNSET
-        if raw is None:
-            return None, guaranteed, pending, account
-        return tuple(_leg_from_dict(x) for x in raw), guaranteed, pending, account
-    if isinstance(payload, list):
-        legs = tuple(_leg_from_dict(x) for x in payload)
-        guaranteed = None
-        if payload and all(isinstance(x, dict) for x in payload):
-            vals = {x.get("guaranteed") for x in payload}
-            vals.discard(None)
-            guaranteed = vals.pop() if len(vals) == 1 else None
-        return legs, guaranteed, None, _UNSET
-    return None, None, None, _UNSET
+    norm = orders_store.normalize_legs_payload(payload)
+    raw = norm["legs"]
+    legs = tuple(_leg_from_dict(x) for x in raw) if raw is not None else None
+    account = norm["account"] if "account" in norm else _UNSET
+    return legs, norm["guaranteed"], norm["pending_amend_qty"], account
 
 
 def _synthesized_leg(m: Any) -> coverage.Leg:
-    """Reconstruct a single leg from row columns (non-BAG rows only)."""
-    sym = m["ticker"]
+    """Reconstruct a single leg from row columns (non-BAG rows only).
+
+    Row columns never carried qualified option metadata, so an OPT leg
+    rebuilt here has no tradingClass / multiplier / underlying type and
+    fails closed (for its own symbol) if it can still owe demand.
+    """
+    sec = m["security_type"]
     return coverage.Leg(
         action="BUY",
-        sym=sym,
-        sec=m["security_type"],
+        sym=m["ticker"],
+        sec=sec,
         ratio=1,
         right=m["right"],
         exp=_norm_expiry(m["expiry"]),
-        mult=_mult_for(sym) if sym in UNIVERSE else (int(m["multiplier"]) if m["multiplier"] is not None else 100),
-        tc=sym,
+        mult=None,
+        tc=None,
         strike=float(m["strike"]) if m["strike"] is not None else None,
         con_id=int(m["con_id"]) if m["con_id"] is not None else None,
-        und_sec=_und_sec(sym) if m["security_type"] == "OPT" else None,
+        und_sec=None,
     )
 
 
@@ -232,6 +229,39 @@ def order_from_row(row: Any, *, filled_total: int, filled_after: int) -> coverag
     )
 
 
+def _pure_buy(order: coverage.Order) -> bool:
+    """True when no effective leg can consume cover (every leg BUY after the
+    envelope flip). Such an order owes no demand under any netting mode, so
+    its metadata is irrelevant. Unknown actions/envelopes are never pure."""
+    if order.envelope not in ("BUY", "SELL") or not order.legs:
+        return False
+    flip = order.envelope == "SELL"
+    for leg in order.legs:
+        if leg.action not in ("BUY", "SELL"):
+            return False
+        effective = ("SELL" if leg.action == "BUY" else "BUY") if flip else leg.action
+        if effective == "SELL":
+            return False
+    return True
+
+
+def _unresolvable(order: coverage.Order) -> bool:
+    """Order coverage would flag as a problem (other than its account)."""
+    if coverage._order_problem(order) is not None or not order.legs:
+        return True
+    return any(coverage._leg_problem(leg) is not None for leg in order.legs)
+
+
+def _row_symbols(m: Any, legs: tuple[coverage.Leg, ...] | None) -> frozenset[str] | None:
+    """Symbols an order can touch; None = unknown (relevant to every symbol)."""
+    if legs and all(leg.sym for leg in legs):
+        return frozenset(str(leg.sym).upper() for leg in legs)
+    ticker = str(m["ticker"] or "").strip().upper()
+    if not ticker or "," in ticker:
+        return None
+    return frozenset({ticker})
+
+
 # ---------------------------------------------------------------------------
 # Coverage inputs — read inside the locked transaction
 # ---------------------------------------------------------------------------
@@ -245,9 +275,18 @@ class Gate4Inputs:
     scope_account: str
     as_of: datetime | None
     snapshot_at: datetime | None
+    # submission_id -> symbols the order can touch (None = unknown).
+    order_syms: dict[str, frozenset[str] | None] = field(default_factory=dict)
 
 
-def _holdings_from_payload(payload: dict, scope_account: str) -> list[coverage.Holding]:
+def _holdings_from_payload(payload: dict) -> list[coverage.Holding]:
+    """Holdings straight from the sync pass's stamped legs.
+
+    Every leg carries the raw IB `account` and, for options, the qualified
+    `tc` / `mult` / `und_sec` (ib_sync stamps them from contract details).
+    Nothing is defaulted: a leg without account fails the view closed, an
+    option leg without metadata fails its symbol closed.
+    """
     out: list[coverage.Holding] = []
     for pos in payload.get("positions") or []:
         sym = pos.get("ticker")
@@ -256,27 +295,22 @@ def _holdings_from_payload(payload: dict, scope_account: str) -> list[coverage.H
             leg_type = leg.get("type")
             direction = leg.get("direction")
             contracts = leg.get("contracts")
+            qty = contracts if direction == "LONG" else -contracts if isinstance(contracts, int) else contracts
+            account = leg.get("account")
             if leg_type == "Stock":
-                out.append(
-                    coverage.Holding(
-                        sym=sym,
-                        sec="STK",
-                        qty=contracts if direction == "LONG" else -contracts,
-                        account=scope_account,
-                    )
-                )
+                out.append(coverage.Holding(sym=sym, sec="STK", qty=qty, account=account))
             elif leg_type in ("Call", "Put"):
                 out.append(
                     coverage.Holding(
                         sym=sym,
                         sec="OPT",
-                        qty=contracts if direction == "LONG" else -contracts,
-                        account=scope_account,
+                        qty=qty,
+                        account=account,
                         right="C" if leg_type == "Call" else "P",
                         exp=exp,
-                        mult=leg.get("mult") if leg.get("mult") is not None else _mult_for(sym),
-                        tc=leg.get("tc") or sym,
-                        und_sec=leg.get("und_sec") or _und_sec(sym),
+                        mult=leg.get("mult"),
+                        tc=leg.get("tc"),
+                        und_sec=leg.get("und_sec"),
                     )
                 )
     return out
@@ -325,11 +359,10 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
             obs_account = observation.get("account")
             if obs_account is not None and obs_account != broker_account:
                 complete = False
-        holdings = _holdings_from_payload(payload, broker_account)
+        holdings = _holdings_from_payload(payload)
 
     rows = conn.execute(
-        select(order_submissions)
-        .where(
+        select(order_submissions).where(
             order_submissions.c.broker == broker,
             order_submissions.c.account_env == account_env,
             order_submissions.c.broker_account == broker_account,
@@ -388,6 +421,7 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
             fills_before[sub_id] = fills_before.get(sub_id, Decimal(0)) + qty
 
     orders = []
+    order_syms: dict[str, frozenset[str] | None] = {}
     for r in rows:
         # filled_total = max(fill rows, the row's denormalized filled_qty).
         # The cache can only be *ahead* of the ledger (a fill row still in
@@ -396,8 +430,18 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
         total = max(int(fill_rows_total.get(r.submission_id, 0)), stored_filled[r.submission_id])
         # Fills of unknown time land in filled_after: anything not provably
         # inside the observation window is demand the snapshot can't show.
-        after = total - int(fills_before.get(r.submission_id, 0))
-        orders.append(order_from_row(r, filled_total=total, filled_after=max(after, 0)))
+        after = max(total - int(fills_before.get(r.submission_id, 0)), 0)
+        # Liveness: a quantity-0 row reserves nothing; a terminal row with no
+        # fill at/after as_of owes nothing the snapshot doesn't already show.
+        if int(r.quantity or 0) <= 0:
+            continue
+        if (r.state or "") in TERMINAL_STATES and after == 0:
+            continue
+        order = order_from_row(r, filled_total=total, filled_after=after)
+        if _pure_buy(order):
+            continue
+        orders.append(order)
+        order_syms[order.id] = _row_symbols(r._mapping, order.legs)
 
     view = coverage.View(complete=complete, stale=_snapshot_stale(as_of))
     return Gate4Inputs(
@@ -407,6 +451,7 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
         scope_account=broker_account,
         as_of=as_of,
         snapshot_at=snapshot_at,
+        order_syms=order_syms,
     )
 
 
@@ -428,7 +473,11 @@ def _non_guaranteed_flag(body: dict) -> int:
     return 1
 
 
-def _opt_leg(sym: str, *, action: str, ratio: int, right, expiry, strike, con_id=None, mult: int | None = None) -> coverage.Leg:
+def _opt_leg(sym: str, *, action: str, ratio: int, right, expiry, strike, meta: dict | None) -> coverage.Leg:
+    """Candidate option leg. tc / mult / und_sec / con_id come only from the
+    IB-qualified `meta` (contract_meta); without it they stay None and the
+    candidate fails closed (GATE4_UNRESOLVED)."""
+    meta = meta or {}
     return coverage.Leg(
         action=action,
         sym=sym,
@@ -436,11 +485,11 @@ def _opt_leg(sym: str, *, action: str, ratio: int, right, expiry, strike, con_id
         ratio=ratio,
         right=right,
         exp=_norm_expiry(expiry),
-        mult=mult if mult is not None else _mult_for(sym),
-        tc=sym,
+        mult=meta.get("mult"),
+        tc=meta.get("tc"),
         strike=float(strike) if strike is not None else None,
-        con_id=int(con_id) if con_id else None,
-        und_sec=_und_sec(sym),
+        con_id=meta.get("con_id"),
+        und_sec=meta.get("und_sec"),
     )
 
 
@@ -455,15 +504,28 @@ def legs_payload_for(*, legs: list[coverage.Leg] | None, guaranteed: bool | None
     return payload
 
 
+def _snapshot_meta(c: dict) -> dict:
+    """Qualified metadata the open-order adapter attached (contract_meta)."""
+    mult = c.get("multiplier")
+    try:
+        mult = int(mult) if mult is not None else None
+    except (TypeError, ValueError):
+        mult = None
+    return {"tc": c.get("tradingClass") or None, "mult": mult, "und_sec": c.get("underSecType") or None}
+
+
 def legs_payload_from_snapshot_order(order: dict) -> dict:
     """Durable legs payload for an IB open-order snapshot row.
 
     BAG legs come from `contract.comboLegs` (resolved by fetch_open_orders);
     unresolved BAG legs persist `legs: null`, which coverage treats as
-    unresolvable — fail closed by construction. `guaranteed` mirrors the
-    order's NonGuaranteed tag (0→True, 1→False, missing→None). `account`
-    preserves the adapter provenance — a null here is the "seen without
-    account" marker coverage flags as missing.
+    unresolvable — fail closed by construction. Option legs carry the
+    tradingClass / multiplier / underSecType the adapter qualified via
+    `contract_meta`; absent metadata stays None (fail closed), it is never
+    derived from the symbol. `guaranteed` mirrors the order's NonGuaranteed
+    tag (0→True, 1→False, missing→None). `account` preserves the adapter
+    provenance — a null here is the "seen without account" marker coverage
+    flags as missing.
     """
     contract = order.get("contract") or {}
     sec_type = str(contract.get("secType") or "")
@@ -474,29 +536,33 @@ def legs_payload_from_snapshot_order(order: dict) -> dict:
         combo = contract.get("comboLegs") or []
         ng = order.get("nonGuaranteed")
         guaranteed = True if ng == 0 else (False if ng == 1 else None)
-        if not combo:
+        if not combo or any(not cl.get("symbol") for cl in combo):
             return legs_payload_for(legs=None, guaranteed=guaranteed, account=account)
-        legs = [
-            coverage.Leg(
-                action=str(cl.get("action") or "").upper(),
-                sym=str(cl.get("symbol") or sym).upper(),
-                sec=str(cl.get("secType") or "OPT"),
-                ratio=int(cl.get("ratio") or 1),
-                right=cl.get("right"),
-                exp=_norm_expiry(cl.get("expiry")),
-                mult=_mult_for(sym),
-                tc=sym,
-                strike=float(cl["strike"]) if cl.get("strike") is not None else None,
-                con_id=int(cl["conId"]) if cl.get("conId") is not None else None,
-                und_sec=_und_sec(sym) if str(cl.get("secType") or "OPT") == "OPT" else None,
+        legs = []
+        for cl in combo:
+            leg_sec = str(cl.get("secType") or "")
+            meta = _snapshot_meta(cl) if leg_sec == "OPT" else {}
+            legs.append(
+                coverage.Leg(
+                    action=str(cl.get("action") or "").upper(),
+                    sym=str(cl.get("symbol")).upper(),
+                    sec=leg_sec,
+                    ratio=int(cl.get("ratio") or 1),
+                    right=cl.get("right"),
+                    exp=_norm_expiry(cl.get("expiry")),
+                    mult=meta.get("mult"),
+                    tc=meta.get("tc"),
+                    strike=float(cl["strike"]) if cl.get("strike") is not None else None,
+                    con_id=int(cl["conId"]) if cl.get("conId") is not None else None,
+                    und_sec=meta.get("und_sec"),
+                )
             )
-            for cl in combo
-        ]
         return legs_payload_for(legs=legs, guaranteed=guaranteed, account=account)
 
     if sec_type not in ("STK", "OPT"):
         return legs_payload_for(legs=None, guaranteed=None, account=account)
 
+    meta = _snapshot_meta(contract) if sec_type == "OPT" else {}
     leg = coverage.Leg(
         action="BUY",
         sym=sym,
@@ -504,21 +570,37 @@ def legs_payload_from_snapshot_order(order: dict) -> dict:
         ratio=1,
         right=contract.get("right"),
         exp=_norm_expiry(contract.get("expiry")),
-        mult=_mult_for(sym) if sec_type == "OPT" else None,
-        tc=sym,
+        mult=meta.get("mult"),
+        tc=meta.get("tc"),
         strike=float(contract["strike"]) if contract.get("strike") is not None else None,
         con_id=int(contract["conId"]) if contract.get("conId") is not None else None,
-        und_sec=_und_sec(sym) if sec_type == "OPT" else None,
+        und_sec=meta.get("und_sec"),
     )
     return legs_payload_for(legs=[leg], guaranteed=None, account=account)
 
 
-def candidate_from_place_body(body: dict, scope_account: str | None) -> tuple[coverage.Order | None, dict]:
+def needs_contract_meta(body: dict) -> bool:
+    """Bodies the gate evaluates AND that carry option legs: they need
+    IB-qualified metadata before the reservation (single-leg BUY and stock
+    bodies do not)."""
+    if body.get("type") == "combo":
+        return True
+    return body.get("type") == "option" and str(body.get("action", "")).upper() != "BUY"
+
+
+def candidate_from_place_body(
+    body: dict, scope_account: str | None, leg_meta: list[dict | None] | None = None
+) -> tuple[coverage.Order | None, dict]:
     """Build the coverage candidate + durable legs payload for /orders/place.
 
     Returns (candidate, legs_payload). candidate is None only for the pinned
     single-leg BUY pass-through (spec §3): it creates no demand, so the gate
     must not evaluate it — view/completeness problems must not block a BUY.
+
+    `leg_meta` is the IB-qualified metadata per option leg (combo: one entry
+    per body leg; single option: one entry), produced by the route via
+    `contract_meta`. A missing entry leaves the leg unqualified → the
+    candidate fails closed.
 
     Every other body (all SELLs, every combo regardless of envelope) becomes
     a coverage.Order and is evaluated under the advisory lock.
@@ -528,6 +610,10 @@ def candidate_from_place_body(body: dict, scope_account: str | None) -> tuple[co
     # Raw quantity — coverage validates it is a real int (bool/float/str
     # reject); coercing here would launder invalid bodies into valid ints.
     qty = body.get("quantity")
+    metas = list(leg_meta or [])
+
+    def _meta(i: int) -> dict | None:
+        return metas[i] if i < len(metas) else None
 
     if body.get("type") == "combo":
         non_guaranteed = _non_guaranteed_flag(body)
@@ -539,9 +625,9 @@ def candidate_from_place_body(body: dict, scope_account: str | None) -> tuple[co
                 right=str(leg.get("right") or "").upper() or None,
                 expiry=leg.get("expiry"),
                 strike=leg.get("strike"),
-                con_id=leg.get("con_id") or leg.get("conId"),
+                meta=_meta(i),
             )
-            for leg in body.get("legs") or []
+            for i, leg in enumerate(body.get("legs") or [])
         ]
         payload = legs_payload_for(legs=legs, guaranteed=(non_guaranteed == 0))
     else:
@@ -557,7 +643,7 @@ def candidate_from_place_body(body: dict, scope_account: str | None) -> tuple[co
                     right=str(body.get("right") or "").upper() or None,
                     expiry=body.get("expiry"),
                     strike=body.get("strike"),
-                    con_id=body.get("con_id"),
+                    meta=_meta(0),
                 )
             ]
         payload = legs_payload_for(legs=legs, guaranteed=False)
@@ -603,31 +689,72 @@ class Gate4Outcome:
     split_required: bool = False
 
 
-def _accepted_with_netting(inputs: Gate4Inputs, candidate) -> bool:
-    """Would this candidate pass under guaranteed-BAG netting?
+def _candidate_symbols(inputs: Gate4Inputs, candidate) -> frozenset[str] | None:
+    """Symbols the candidate touches; None = unknown (everything relevant)."""
+    if isinstance(candidate, coverage.Modify):
+        return inputs.order_syms.get(candidate.order_id)
+    legs = getattr(candidate, "legs", None) or ()
+    if legs and all(leg.sym for leg in legs):
+        return frozenset(str(leg.sym).upper() for leg in legs)
+    return None
 
-    The re-eval only nets when the candidate is guaranteed and every leg is
-    OPT, so a non-guaranteed or mixed-security candidate fails identically —
-    and a truly naked BAG stays rejected under both modes.
+
+def _evaluation_inputs(inputs: Gate4Inputs, candidate) -> tuple[list, list]:
+    """Holdings/orders for one evaluation, with unclassifiable rows of OTHER
+    symbols dropped (liveness: an unresolved row blocks its own symbol only).
+    Cover and demand are per symbol, so a row on another symbol can never
+    change the candidate's result. A missing account stays global — an
+    accountless row means the view itself is incomplete (adv-14)."""
+    syms = _candidate_symbols(inputs, candidate)
+    if syms is None:
+        return list(inputs.holdings), list(inputs.orders)
+    orders = []
+    for o in inputs.orders:
+        if o.account is not None and _unresolvable(o):
+            o_syms = inputs.order_syms.get(o.id)
+            if o_syms is not None and not (o_syms & syms):
+                continue
+        orders.append(o)
+    holdings = [
+        h
+        for h in inputs.holdings
+        if h.account is None or coverage._holding_problem(h) is None or str(h.sym or "").upper() in syms
+    ]
+    return holdings, orders
+
+
+def _evaluate(inputs: Gate4Inputs, candidate, *, netting: bool) -> coverage.Decision:
+    holdings, orders = _evaluation_inputs(inputs, candidate)
+    return coverage.evaluate(holdings, orders, candidate, inputs.view, inputs.scope_account, netting_enabled=netting)
+
+
+def _accepted_with_netting(inputs: Gate4Inputs, candidate) -> bool:
+    """Would this candidate pass as a guaranteed BAG under netting?
+
+    The UI never sends a guarantee mode, so a place candidate is re-evaluated
+    as guaranteed whenever every leg is OPT, regardless of the requested
+    mode (round 3, item 9). A modify keeps its stored mode — the order
+    already exists at the broker. A mixed-security or truly naked BAG fails
+    identically under both modes and keeps its uncovered code.
     """
-    return coverage.evaluate(
-        inputs.holdings,
-        inputs.orders,
-        candidate,
-        inputs.view,
-        inputs.scope_account,
-        netting_enabled=True,
-    ).accept
+    if isinstance(candidate, coverage.Order):
+        legs = candidate.legs or ()
+        # Only a multi-leg option combo can be split into legs; a single-leg
+        # order never gets the split hint.
+        if len(legs) < 2 or any(leg.sec != "OPT" for leg in legs):
+            return False
+        candidate = replace(candidate, guaranteed=True)
+    return _evaluate(inputs, candidate, netting=True).accept
 
 
 def _legs_for_body_match(legs_payload):
     """Strip server-side reservation state before request-body comparison.
 
-    `pending_amend_qty` is written by the modify path, not the client — a
+    `pending_amend_qty` / `pending_amend_id` are written by the modify path, not the client — a
     replayed identical body must still dedupe after an amend was pending.
     """
     if isinstance(legs_payload, dict):
-        return {k: v for k, v in legs_payload.items() if k != "pending_amend_qty"}
+        return {k: v for k, v in legs_payload.items() if k not in ("pending_amend_qty", "pending_amend_id")}
     return legs_payload
 
 
@@ -701,26 +828,17 @@ def evaluate_and_reserve(
 
     if candidate is not None:
         inputs = load_inputs(conn, scope)
-        decision = coverage.evaluate(
-            inputs.holdings,
-            inputs.orders,
-            candidate,
-            inputs.view,
-            inputs.scope_account,
-            netting_enabled=netting_enabled(),
-        )
+        decision = _evaluate(inputs, candidate, netting=netting_enabled())
         if not decision.accept:
             return Gate4Outcome(
                 status="rejected",
                 reasons=list(decision.reasons),
                 uncovered=dict(decision.uncovered),
                 short_stock=dict(decision.short_stock),
-                split_required=(
-                    not netting_enabled()
-                    and _accepted_with_netting(inputs, candidate)
-                ),
+                split_required=(not netting_enabled() and _accepted_with_netting(inputs, candidate)),
             )
 
+    _after_check_hook()
     now = datetime.now(timezone.utc)
     stmt = (
         pg_insert(order_submissions)
@@ -826,83 +944,123 @@ class ModifyReservationOutcome:
     uncovered: dict | None = None
     short_stock: dict | None = None
     split_required: bool = False
+    # Generation token of this amend; settle_modify is a no-op unless the
+    # row still carries it (stale replies never release newer demand).
+    amend_id: str | None = None
 
 
-def _set_pending_amend(conn, submission_id: str, value: int | None) -> None:
+MODIFY_PENDING_REASON = "modify_pending"
+
+
+def _lock_scope(conn, scope: dict) -> None:
+    conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": scope_lock_key(scope)})
+
+
+def _row_payload(conn, submission_id: str) -> dict | None:
     row = conn.execute(
         select(order_submissions.c.legs).where(order_submissions.c.submission_id == submission_id)
     ).first()
-    payload = row[0] if row and isinstance(row[0], dict) else {}
-    payload = dict(payload)
-    payload.setdefault("legs", None)
-    payload.setdefault("guaranteed", None)
-    payload["pending_amend_qty"] = value
+    if row is None:
+        return None
+    return orders_store.normalize_legs_payload(row[0])
+
+
+def _write_payload(conn, submission_id: str, payload: dict, **values) -> None:
     conn.execute(
         update(order_submissions)
         .where(order_submissions.c.submission_id == submission_id)
-        .values(legs=payload, updated_at=datetime.now(timezone.utc))
+        .values(legs=payload, updated_at=datetime.now(timezone.utc), **values)
     )
 
 
-def begin_modify(submission_id: str, new_qty: int, scope: dict) -> ModifyReservationOutcome:
-    """Gate a quantity modify: coverage says yes → persist pending_amend_qty.
+def begin_modify(submission_id: str, new_qty: int | None, scope: dict) -> ModifyReservationOutcome:
+    """Open one amend generation on a submission row (round 3, item 5).
 
-    Lock + view + evaluate + pending write in one transaction. On accept the
-    reservation keeps max(old,new)-filled until settle_modify resolves the
-    broker outcome; a lost acknowledgement leaves pending_amend_qty in place
-    so the reservation never under-counts.
+    Lock + pending check + (quantity amends only) view + evaluate + pending
+    write, all in one transaction under the account-scope advisory lock:
+
+    - A row that already carries an unresolved amend (`pending_amend_id` or
+      `pending_amend_qty`) refuses the new modify with `modify_pending` —
+      a later amend can never overwrite an earlier uncertain maximum.
+    - A quantity amend evaluates coverage with max(old,new) and, on accept,
+      stores pending_amend_qty=new_qty. A price-only amend stores only the
+      generation token so a concurrent quantity amend cannot interleave.
     """
     ensure_writable()
     engine = get_sync_engine()
     with engine.begin() as conn:
-        conn.execute(
-            text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
-            {"k": scope_lock_key(scope)},
-        )
-        inputs = load_inputs(conn, scope)
-        modify_candidate = coverage.Modify(order_id=submission_id, new_qty=new_qty)
-        decision = coverage.evaluate(
-            inputs.holdings,
-            inputs.orders,
-            modify_candidate,
-            inputs.view,
-            inputs.scope_account,
-            netting_enabled=netting_enabled(),
-        )
-        if not decision.accept:
-            return ModifyReservationOutcome(
-                accept=False,
-                reasons=list(decision.reasons),
-                uncovered=dict(decision.uncovered),
-                short_stock=dict(decision.short_stock),
-                split_required=(
-                    not netting_enabled()
-                    and _accepted_with_netting(inputs, modify_candidate)
-                ),
-            )
-        _set_pending_amend(conn, submission_id, int(new_qty))
-        return ModifyReservationOutcome(accept=True, submission_id=submission_id)
+        _lock_scope(conn, scope)
+        payload = _row_payload(conn, submission_id)
+        if payload is None:
+            return ModifyReservationOutcome(accept=False, reasons=[f"modify_target_not_found:{submission_id}"])
+        if payload.get("pending_amend_id") is not None or payload.get("pending_amend_qty") is not None:
+            return ModifyReservationOutcome(accept=False, reasons=[MODIFY_PENDING_REASON])
+        if new_qty is not None:
+            inputs = load_inputs(conn, scope)
+            modify_candidate = coverage.Modify(order_id=submission_id, new_qty=new_qty)
+            decision = _evaluate(inputs, modify_candidate, netting=netting_enabled())
+            if not decision.accept:
+                return ModifyReservationOutcome(
+                    accept=False,
+                    reasons=list(decision.reasons),
+                    uncovered=dict(decision.uncovered),
+                    short_stock=dict(decision.short_stock),
+                    split_required=(not netting_enabled() and _accepted_with_netting(inputs, modify_candidate)),
+                )
+        amend_id = str(uuid.uuid4())
+        payload["pending_amend_id"] = amend_id
+        payload["pending_amend_qty"] = int(new_qty) if new_qty is not None else None
+        _write_payload(conn, submission_id, payload)
+        return ModifyReservationOutcome(accept=True, submission_id=submission_id, amend_id=amend_id)
 
 
-def settle_modify(submission_id: str, outcome: Literal["confirmed", "rejected", "uncertain"], new_qty: int | None = None) -> None:
-    """Resolve a pending modify reservation against the broker result.
+def settle_modify(
+    submission_id: str,
+    amend_id: str | None,
+    outcome: Literal["confirmed", "rejected", "uncertain"],
+    scope: dict,
+    new_qty: int | None = None,
+) -> bool:
+    """Resolve one amend generation against the broker reply.
 
-    confirmed → row quantity becomes new_qty, pending clears.
-    rejected  → broker state provably unchanged, pending clears.
-    uncertain → acknowledgement lost: keep pending so coverage reserves
-    max(old,new)-filled until the next sync/modify settles it.
+    Runs under the same account-scope advisory lock as begin_modify and the
+    place path. A no-op (returns False) unless the row still carries
+    `amend_id` — a delayed reply from an older amend never touches a newer
+    one, and a reply after mirror reconciliation never rewrites quantity.
+
+    confirmed → quantity becomes new_qty (quantity amends), amend clears.
+    rejected  → the broker provably did not apply the amend, amend clears.
+    uncertain → a quantity amend keeps pending_amend_qty + token so coverage
+                keeps reserving max(old,new); a price-only amend clears its
+                token (it resent IB's own quantity, so no demand moved).
     """
     ensure_writable()
     engine = get_sync_engine()
     with engine.begin() as conn:
-        if outcome == "confirmed" and new_qty is not None:
-            conn.execute(
-                update(order_submissions)
-                .where(order_submissions.c.submission_id == submission_id)
-                .values(quantity=int(new_qty), updated_at=datetime.now(timezone.utc))
-            )
-        if outcome != "uncertain":
-            _set_pending_amend(conn, submission_id, None)
+        _lock_scope(conn, scope)
+        payload = _row_payload(conn, submission_id)
+        if payload is None or amend_id is None or payload.get("pending_amend_id") != amend_id:
+            return False
+        qty_amend = payload.get("pending_amend_qty") is not None
+        if outcome == "uncertain" and qty_amend:
+            return False
+        values = {}
+        if outcome == "confirmed" and qty_amend and new_qty is not None:
+            values["quantity"] = int(new_qty)
+        payload["pending_amend_id"] = None
+        payload["pending_amend_qty"] = None
+        _write_payload(conn, submission_id, payload, **values)
+        return True
+
+
+def _after_check_hook() -> None:
+    """Test seam between the coverage check and the reservation insert.
+
+    No-op in production. The two-process race test replaces it (inside the
+    child processes) with a barrier so the check→insert window is held open
+    deterministically; the advisory lock is what keeps a second process out
+    of that window.
+    """
 
 
 def persisted_guarantee(row: Any) -> bool | None:
