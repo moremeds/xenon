@@ -13,6 +13,7 @@ import os
 import socket
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from sqlalchemy.engine import Engine
@@ -363,6 +364,67 @@ def test_ibclient_paper_ib_delegates_to_ib_connect():
     client.connect(host="127.0.0.1", port=4002, client_id=0)
     assert len(calls) == 1
     assert calls[0][0][:2] == ("127.0.0.1", 4002)
+
+
+class _FakeIBAsync:
+    """Sentinel ib_async.IB stand-in — records (never performs) dials."""
+
+    def __init__(self):
+        self.connect_calls: list = []
+
+    async def connectAsync(self, *a, **k):
+        self.connect_calls.append((a, k))
+
+    def disconnect(self):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_spike_connect_async_refused_at_boundary(monkeypatch):
+    """scripts/spike/option_chain_minimal main() must refuse a custom endpoint
+    before connectAsync — sentinel proves the transport is never reached."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_option_chain_minimal",
+        Path(__file__).parent.parent / "spike" / "option_chain_minimal.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    fake_ib = _FakeIBAsync()
+    monkeypatch.setattr(mod, "IB", lambda: fake_ib)
+    monkeypatch.setattr(sys, "argv", ["ocm", "--host", "10.9.9.9", "--port", "4500"])
+    monkeypatch.setenv("OPTION_CHAIN_DATABASE_URL", "postgresql://x@127.0.0.1:1/none")
+
+    with pytest.raises(BrokerEndpointDenied, match="broker guard refused"):
+        await mod.main()
+    assert fake_ib.connect_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ib_realtime_probe_connect_async_refused_at_boundary(monkeypatch):
+    """scripts/infra/ib_realtime's connectivity probe records the refusal as
+    a failed connect result and never reaches connectAsync."""
+    import importlib.util
+
+    import ib_async
+
+    spec = importlib.util.spec_from_file_location(
+        "_ib_realtime_probe",
+        Path(__file__).parent.parent / "infra" / "ib_realtime" / "test_ib_realtime.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    fake_ib = _FakeIBAsync()
+    monkeypatch.setattr(ib_async, "IB", lambda: fake_ib)
+    await mod.test_ib_connection("10.9.9.9", 4500)
+    assert fake_ib.connect_calls == []
+    assert any(
+        name == "IB connect" and "broker guard refused" in msg
+        for name, msg in mod.results.errors
+    )
 
 
 @pytest.mark.live_ib
