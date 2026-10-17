@@ -12,7 +12,7 @@ import React from "react";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BlotterData } from "../lib/types";
-import { HistoricalTradesSection } from "../components/WorkspaceSections";
+import { HistoricalTradesSection } from "../components/workspace/HistoricalTradesSection";
 
 vi.mock("../components/TickerLink", () => ({
   default: (props: { ticker: string }) =>

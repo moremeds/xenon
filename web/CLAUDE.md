@@ -21,7 +21,7 @@ Day Chg % = Daily P&L / |Yesterday's Close Value| × 100
 NEVER divide by entry cost.
 ```
 
-Per-leg: `sign × (last - close) × contracts × 100`. Denominator: `sign × close × contracts × 100`. Impl: `getOptionDailyChg()` in `WorkspaceSections.tsx`. Tests: `daily-chg.test.ts`.
+Per-leg: `sign × (last - close) × contracts × 100`. Denominator: `sign × close × contracts × 100`. Impl: `getOptionDailyChg()` in `web/lib/positionUtils.ts`. Tests: `daily-chg.test.ts`.
 
 ### Spread Net Mid
 

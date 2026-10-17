@@ -6,7 +6,7 @@ import React from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { BlotterData } from "../lib/types";
-import { HistoricalTradesSection } from "../components/WorkspaceSections";
+import { HistoricalTradesSection } from "../components/workspace/HistoricalTradesSection";
 
 vi.mock("../components/TickerLink", () => ({
   default: (props: { ticker: string }) => React.createElement("span", null, props.ticker),

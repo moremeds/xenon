@@ -11,7 +11,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { cleanup, render, screen, fireEvent } from "@testing-library/react";
 import React from "react";
-import WorkspaceSections from "../components/WorkspaceSections";
+import WorkspaceSections from "../components/workspace/WorkspaceSections";
 import type { TradeEntry } from "@/lib/types";
 
 vi.mock("../components/TickerLink", () => ({
