@@ -199,7 +199,7 @@ export const structures: StructureItem[] = [
   {
     name: "Short Call (Naked)",
     description:
-      "An uncovered short call carries unlimited upside loss. Xenon rejects it at order entry and again in the post-sync audit.",
+      "An uncovered short call carries unlimited upside loss. Xenon rejects it at order entry, in the UI and at the API gate.",
     legs: "Short call, no cover",
     category: "Single leg",
     guard: "Block — uncovered short",
