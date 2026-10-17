@@ -53,16 +53,23 @@ _STANDARD_MULT = 100
 class Holding:
     """One confirmed position of the scope account at snapshot as_of.
 
-    qty is signed: STK in shares, OPT in contracts.
+    qty is signed: STK in shares, OPT in contracts — an int; bool/float/
+    non-numeric values reject (invalid supply can corrupt cover math).
+    `account` is required; a holding from another account supplies nothing
+    (never cover). OPT holdings must carry `und_sec` — shares cover a held
+    short call only when und_sec == 'STK'; a missing und_sec rejects as
+    unknown metadata.
     """
 
     sym: str
     sec: str
     qty: int
+    account: str | None = None
     right: str | None = None
     exp: str | None = None
     mult: int | None = None
     tc: str | None = None
+    und_sec: str | None = None
 
 
 @dataclass(frozen=True)
@@ -170,15 +177,20 @@ def _holding_problem(h: Holding) -> str | None:
         return "sym"
     if h.sec not in (_STK, _OPT):
         return "sec"
+    # qty feeds cover arithmetic directly — it must be a real int.
+    if isinstance(h.qty, bool) or not isinstance(h.qty, int):
+        return "qty"
     if h.sec == _OPT:
         if h.right not in (_CALL, _PUT):
             return "right"
         if not h.exp:
             return "exp"
-        if not isinstance(h.mult, int) or h.mult < 1:
+        if isinstance(h.mult, bool) or not isinstance(h.mult, int) or h.mult < 1:
             return "mult"
         if not h.tc:
             return "tc"
+        if not h.und_sec:
+            return "und_sec"
     return None
 
 
@@ -317,14 +329,21 @@ def _project(
     )
 
     for h in holdings:
+        if h.account is None:
+            if strict:
+                problems.append(f"holding_missing_account:{h.sym}")
+            continue
+        if scope_account is not None and h.account != scope_account:
+            continue  # foreign-account supply never covers
         bad = _holding_problem(h)
         if bad is not None:
             if strict:
                 problems.append(f"holding_unknown_metadata:{h.sym}:{bad}")
             continue
         if h.sec == _OPT:
+            k = _key(h.sym, h.tc, h.exp, h.mult)
+            call_share_ok[k] = call_share_ok.get(k, True) and h.und_sec == _STK
             if h.right == _CALL:
-                k = _key(h.sym, h.tc, h.exp, h.mult)
                 call_pos[k] = call_pos.get(k, 0) + h.qty
         else:
             shares[h.sym] = shares.get(h.sym, 0) + h.qty

@@ -9,7 +9,6 @@ Part 2: focused unit tests for the helpers the module exposes.
 
 from __future__ import annotations
 
-import getpass
 import json
 import os
 import uuid
@@ -19,7 +18,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, insert, select, text
-from sqlalchemy.engine import URL, make_url
+from sqlalchemy.engine import make_url
 
 import xenon._test_db as _test_db
 from xenon.db.schema import order_submissions
@@ -81,10 +80,12 @@ def _holding(d: dict) -> Holding:
         sym=d.get("sym"),
         sec=d.get("sec"),
         qty=d.get("qty"),
+        account=d.get("account"),
         right=d.get("right"),
         exp=d.get("exp"),
         mult=d.get("mult"),
         tc=d.get("tc"),
+        und_sec=d.get("und_sec"),
     )
 
 
@@ -135,8 +136,8 @@ def _opt_leg(
     return Leg(action=action, sym=sym, sec="OPT", ratio=ratio, right=right, exp=exp, mult=mult, tc=tc, strike=strike, und_sec=und_sec)
 
 
-def _call_holding(qty, sym="AAPL", exp=_EXP, mult=100, tc="AAPL", strike=200):
-    return Holding(sym=sym, sec="OPT", qty=qty, right="C", exp=exp, mult=mult, tc=tc)
+def _call_holding(qty, sym="AAPL", exp=_EXP, mult=100, tc="AAPL", strike=200, account=SCOPE, und_sec="STK"):
+    return Holding(sym=sym, sec="OPT", qty=qty, account=account, right="C", exp=exp, mult=mult, tc=tc, und_sec=und_sec)
 
 
 def _sell_call_order(id="o1", account=SCOPE, qty=1, remaining=1, filled_after=0, **kw):
@@ -181,7 +182,7 @@ def test_sell_envelope_flips_leg_actions():
 
 def test_buy_leg_never_supplies_cover():
     # Resting BUY call does not cover a new short call.
-    holdings = [Holding(sym="AAPL", sec="STK", qty=100)]
+    holdings = [Holding(account=SCOPE, sym="AAPL", sec="STK", qty=100)]
     orders = [
         Order(id="o1", account=SCOPE, envelope="BUY", qty=1, remaining=1, legs=(_opt_leg("BUY", strike=200),))
     ]
@@ -204,18 +205,18 @@ def test_modify_max_semantics_direct():
         legs=(_opt_leg("BUY"),),
     )
     # demand = filled_after(1) + max(4, 5) - 2 = 1 + 3 = 4 short calls
-    d = evaluate([Holding(sym="AAPL", sec="STK", qty=300)], [order], Modify("o1", 5), View(), SCOPE)
+    d = evaluate([Holding(account=SCOPE, sym="AAPL", sec="STK", qty=300)], [order], Modify("o1", 5), View(), SCOPE)
     assert not d.accept  # 4 calls need 400 shares
-    d = evaluate([Holding(sym="AAPL", sec="STK", qty=400)], [order], Modify("o1", 5), View(), SCOPE)
+    d = evaluate([Holding(account=SCOPE, sym="AAPL", sec="STK", qty=400)], [order], Modify("o1", 5), View(), SCOPE)
     assert d.accept
 
 
 def test_pending_amend_keeps_max():
     order = _sell_call_order(qty=1, remaining=1, pending_amend_qty=3)
     # demand = max(1, 3) - 0 = 3
-    d = evaluate([Holding(sym="AAPL", sec="STK", qty=200)], [order], _sell_call_cand(), View(), SCOPE)
+    d = evaluate([Holding(account=SCOPE, sym="AAPL", sec="STK", qty=200)], [order], _sell_call_cand(), View(), SCOPE)
     assert not d.accept
-    d = evaluate([Holding(sym="AAPL", sec="STK", qty=400)], [order], _sell_call_cand(), View(), SCOPE)
+    d = evaluate([Holding(account=SCOPE, sym="AAPL", sec="STK", qty=400)], [order], _sell_call_cand(), View(), SCOPE)
     assert d.accept
 
 
@@ -294,7 +295,7 @@ def test_guaranteed_net_long_never_supplies_cover():
 
 
 def test_stock_cover_requires_standard_deliverable():
-    holdings = [Holding(sym="AAPL", sec="STK", qty=100)]
+    holdings = [Holding(account=SCOPE, sym="AAPL", sec="STK", qty=100)]
     # standard: und_sec STK, mult 100, tc == sym -> shares cover
     assert evaluate(holdings, [], _sell_call_cand(), View(), SCOPE).accept
     # mini: mult 10 -> no share cover
@@ -303,7 +304,7 @@ def test_stock_cover_requires_standard_deliverable():
     assert not evaluate(holdings, [], _sell_call_cand(tc="AAPL1"), View(), SCOPE).accept
     # index underlying (e.g. SPX): shares never cover
     assert not evaluate(
-        [Holding(sym="SPX", sec="STK", qty=100)], [],
+        [Holding(account=SCOPE, sym="SPX", sec="STK", qty=100)], [],
         _sell_call_cand(sym="SPX", tc="SPX", und_sec="IND"), View(), SCOPE,
     ).accept
     # missing und_sec -> shares never cover that call
@@ -325,7 +326,7 @@ def test_order_quantity_validation_rejects():
         base.update(kw)
         return Order(**base)
 
-    good = [Holding(sym="AAPL", sec="STK", qty=200)]
+    good = [Holding(account=SCOPE, sym="AAPL", sec="STK", qty=200)]
     assert evaluate(good, [], cand(), View(), SCOPE).accept
     for kw in (
         {"qty": 0}, {"qty": True}, {"qty": 1.5},
@@ -348,10 +349,58 @@ def test_order_quantity_validation_rejects():
     assert evaluate(good, [order], Modify("o1", 2), View(), SCOPE).accept
 
 
+def test_holding_qty_must_be_int():
+    # bool / float / NaN / inf / string supply must not reach cover arithmetic.
+    cand = _sell_call_cand()
+    for bad_qty in (True, 1.5, float("nan"), float("inf"), -float("inf"), "100"):
+        d = evaluate(
+            [Holding(account=SCOPE, sym="AAPL", sec="STK", qty=bad_qty)],
+            [], cand, View(), SCOPE,
+        )
+        assert not d.accept, f"holding qty {bad_qty!r} should reject"
+        assert d.reasons
+    # NaN/float long-call supply cannot silently cover either.
+    for bad_qty in (float("nan"), 2.5, False):
+        d = evaluate(
+            [_call_holding(bad_qty)],
+            [], _sell_call_cand(strike=200), View(), SCOPE,
+        )
+        assert not d.accept, f"OPT holding qty {bad_qty!r} should reject"
+
+
+def test_holding_account_scoping():
+    cand = _sell_call_cand()
+    # Missing account on a holding -> incomplete view -> reject.
+    no_acct = Holding(sym="AAPL", sec="STK", qty=200, account=None)
+    d = evaluate([no_acct], [], cand, View(), SCOPE)
+    assert not d.accept
+    assert any("holding_missing_account" in r for r in d.reasons)
+    # Foreign-account supply is ignored — shares there never cover.
+    foreign = Holding(sym="AAPL", sec="STK", qty=200, account="OTHER")
+    d = evaluate([foreign], [], cand, View(), SCOPE)
+    assert not d.accept
+    assert any("uncovered_call_increase" in r for r in d.reasons)
+    assert not any("holding_missing_account" in r for r in d.reasons)
+
+
+def test_uncovered_held_spx_call_not_share_covered():
+    # A held SPX short call (und_sec IND) is never share-covered: the SPX
+    # "shares" cannot be delivered. Direct unit check on the audit helper.
+    holdings = [
+        Holding(account=SCOPE, sym="SPX", sec="STK", qty=100),
+        _call_holding(-1, sym="SPX", tc="SPX", und_sec="IND"),
+    ]
+    unc = uncovered(holdings, [])
+    assert unc[("SPX", "SPX", _EXP, 100)] == 1
+    # Same held call with und_sec STK -> the 100 shares do cover it.
+    holdings[1] = _call_holding(-1, sym="SPX", tc="SPX", und_sec="STK")
+    assert uncovered(holdings, []) == {}
+
+
 def test_long_call_first_then_shares_assignment():
     # long call covers the same-key short so shares remain for the new key.
     holdings = [
-        Holding(sym="AAPL", sec="STK", qty=100),
+        Holding(account=SCOPE, sym="AAPL", sec="STK", qty=100),
         _call_holding(1, strike=200),
         _call_holding(-1, strike=210),
     ]
@@ -360,7 +409,7 @@ def test_long_call_first_then_shares_assignment():
 
 
 def test_uncovered_and_short_stock_helpers():
-    holdings = [Holding(sym="AAPL", sec="STK", qty=100)]
+    holdings = [Holding(account=SCOPE, sym="AAPL", sec="STK", qty=100)]
     orders = [_sell_call_order(qty=3, remaining=3)]
     unc = uncovered(holdings, orders)
     assert unc[_KEY] == 2
@@ -398,7 +447,7 @@ def test_state_irrelevant_to_demand():
 
 def test_candidate_account_must_match_scope():
     cand = _sell_call_cand(account="U2")
-    d = evaluate([Holding(sym="AAPL", sec="STK", qty=100)], [], cand, View(), SCOPE)
+    d = evaluate([Holding(account=SCOPE, sym="AAPL", sec="STK", qty=100)], [], cand, View(), SCOPE)
     assert not d.accept
     assert any("candidate_account_mismatch" in r for r in d.reasons)
 
@@ -418,14 +467,14 @@ def test_ratio_multiplies_demand():
         remaining=1,
         legs=(_opt_leg("BUY", ratio=2),),
     )
-    d = evaluate([Holding(sym="AAPL", sec="STK", qty=100)], [], cand, View(), SCOPE)
+    d = evaluate([Holding(account=SCOPE, sym="AAPL", sec="STK", qty=100)], [], cand, View(), SCOPE)
     assert not d.accept  # 2 contracts vs 100 shares
     assert d.uncovered[_KEY] == 1
 
 
 def test_view_defaults_and_flags():
     cand = _sell_call_cand()
-    good = evaluate([Holding(sym="AAPL", sec="STK", qty=100)], [], cand, View(), SCOPE)
+    good = evaluate([Holding(account=SCOPE, sym="AAPL", sec="STK", qty=100)], [], cand, View(), SCOPE)
     assert good.accept
     assert not evaluate([], [], cand, View(complete=False), SCOPE).accept
     assert not evaluate([], [], cand, View(stale=True), SCOPE).accept
@@ -440,50 +489,43 @@ _SCOPE = dict(broker="IB", account_env="paper", broker_account="DU_TEST")
 
 @pytest.fixture(scope="module")
 def _throwaway_pg_db():
-    """Point the requesting DB test at a throwaway DB on LOCAL Postgres.
+    """Point the requesting DB test at a throwaway DB on the test Postgres.
 
-    Lead directive: the shared macmini core_test (DATABASE_URL_TEST) must
-    stay at master's schema — migrations and write tests run only against
-    `xe_a2_mig_<rand>` on the host from DATABASE_URL_PAPER (127.0.0.1),
-    created here, migrated to head, and dropped at teardown. Module-scoped
-    and opt-in: pure coverage cases never touch PG and run unconditionally
-    (e.g. CI without DATABASE_URL_PAPER). Skips only the requesting test
-    when no local admin connection or CREATEDB is available.
+    Lead directive: never touch the remote shared core_test — migrations and
+    write tests run only against `xe_a2_mig_<rand>` created on the server
+    from DATABASE_URL_TEST, migrated to head, and dropped at teardown.
+    Module-scoped and opt-in: pure coverage cases never touch PG and run
+    unconditionally. Only the requesting tests skip when provisioning fails.
 
-    The test-side URLs carry the configured DATABASE_URL_PAPER credentials
-    (user + password) — nothing is discarded. Only CREATE/DROP DATABASE
-    goes through the local OS superuser, because the configured role has
-    no CREATEDB on the local instance; the throwaway is created with the
-    configured role as OWNER so migrations/DML run as it.
+    Admin connection = the configured DATABASE_URL_TEST role on database
+    `postgres`, rebuilt via render_as_string(hide_password=False) so the
+    configured password is carried (str() must not mask it). CI's postgres
+    service user (POSTGRES_USER xenon_app) is the bootstrap superuser, so
+    CREATE DATABASE works there; the remote app role has no CREATEDB on a
+    local instance, where this skips with an explicit reason.
     """
-    base_env = os.environ.get("DATABASE_URL_PAPER") or os.environ.get(
-        "DATABASE_URL_TEST_PAPER"
-    )
+    base_env = os.environ.get("DATABASE_URL_TEST")
     if not base_env:
-        pytest.skip("DATABASE_URL_PAPER not set — no local throwaway Postgres")
+        pytest.skip("DATABASE_URL_TEST not set — no throwaway test Postgres")
     try:
         base = make_url(base_env)
-        admin = URL.create(
-            "postgresql+psycopg",
-            username=getpass.getuser(),
-            host=base.host,
-            port=base.port or 5432,
-            database="postgres",
+        # Unmasked render so the configured password survives the round-trip.
+        admin = make_url(base.render_as_string(hide_password=False)).set(
+            drivername="postgresql+psycopg", database="postgres"
         )
         admin_engine = create_engine(
             admin, isolation_level="AUTOCOMMIT", connect_args={"connect_timeout": 3}
         )
     except Exception:
-        pytest.skip("no usable local Postgres admin URL")
-    app_user = base.username or getpass.getuser()
+        pytest.skip("no usable Postgres admin URL derivable from DATABASE_URL_TEST")
     dbname = f"xe_a2_mig_{uuid.uuid4().hex[:10]}"
     try:
         with admin_engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-            conn.execute(text(f'CREATE DATABASE "{dbname}" OWNER "{app_user}"'))
-        # Configured credentials, not the admin role — the app role owns the
-        # throwaway so CREATE SCHEMA and the alembic_version table work.
-        test_async = base.set(drivername="postgresql+asyncpg", database=dbname)
+            # Same role creates the throwaway — it then owns it, so
+            # schema creation and `alembic upgrade head` run as configured.
+            conn.execute(text(f'CREATE DATABASE "{dbname}"'))
+        test_async = base.set(database=dbname)
         boot = create_engine(
             test_async.set(drivername="postgresql+psycopg"),
             isolation_level="AUTOCOMMIT",
@@ -493,13 +535,14 @@ def _throwaway_pg_db():
             conn.execute(text("CREATE SCHEMA IF NOT EXISTS xenon"))
             conn.execute(text("CREATE SCHEMA IF NOT EXISTS events"))
         boot.dispose()
-    except Exception:
+    except Exception as e:
         admin_engine.dispose()
-        pytest.skip("local Postgres admin connect/CREATE DATABASE failed")
+        pytest.skip(f"throwaway DB provisioning failed (CREATE DATABASE or schema init): {e}")
 
     old_db, old_test = os.environ.get("DATABASE_URL"), os.environ.get("DATABASE_URL_TEST")
-    os.environ["DATABASE_URL"] = str(test_async)
-    os.environ["DATABASE_URL_TEST"] = str(test_async)
+    test_dsn = test_async.render_as_string(hide_password=False)
+    os.environ["DATABASE_URL"] = test_dsn
+    os.environ["DATABASE_URL_TEST"] = test_dsn
     if _test_db._SESSION_ENGINE is not None:
         _test_db._SESSION_ENGINE.dispose()
     _test_db._SESSION_ENGINE = None
