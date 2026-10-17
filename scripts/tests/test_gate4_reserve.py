@@ -526,10 +526,28 @@ def _bag_reserve(attempt, body, qty=1):
     )
 
 
+def _credit_spread_open_body(attempt):
+    """SELL-envelope guaranteed BAG OPENING a 500/510 credit call spread —
+    SELL the 500C (short), BUY the 510C (protection). Legs carry structure
+    actions; no holdings required for the netting verdict."""
+    return {
+        "type": "combo",
+        "symbol": "SPY",
+        "action": "SELL",
+        "quantity": 1,
+        "nonGuaranteed": 0,
+        "client_attempt_id": attempt,
+        "legs": [
+            {"action": "SELL", "right": "C", "expiry": "2026-12-18", "strike": 500.0, "ratio": 1},
+            {"action": "BUY", "right": "C", "expiry": "2026-12-18", "strike": 510.0, "ratio": 1},
+        ],
+    }
+
+
 def test_vertical_close_split_required_when_netting_off():
     """Spec §2.3: with netting off a held-vertical close submitted as one
     guaranteed BAG is rejected — but marked split_required so the route can
-    tell the user to leg out as two orders instead of a generic naked call."""
+    tell the user to send the legs as separate orders."""
     _seed_snapshot(_snapshot_payload([_opt_leg_pos("SPY", 1, strike=500), _opt_leg_pos("SPY", -1, strike=510)]))
     out = _bag_reserve("att-vc-1", _vertical_close_body("att-vc-1"))
     assert out.status == "rejected"
@@ -541,6 +559,24 @@ def test_vertical_close_accepted_when_netting_on(monkeypatch):
     monkeypatch.setenv("XENON_GATE4_NETTING", "1")
     _seed_snapshot(_snapshot_payload([_opt_leg_pos("SPY", 1, strike=500), _opt_leg_pos("SPY", -1, strike=510)]))
     out = _bag_reserve("att-vc-2", _vertical_close_body("att-vc-2"))
+    assert out.status == "winner"
+
+
+def test_open_credit_spread_split_required_when_netting_off():
+    """Same split path with NO holdings: an opening credit call spread as
+    one guaranteed BAG — the SELL 500C is uncovered leg-by-leg but the bag
+    nets, so the operator sends the BUY leg as its own order first."""
+    _seed_snapshot(_snapshot_payload([]))
+    out = _bag_reserve("att-cs-1", _credit_spread_open_body("att-cs-1"))
+    assert out.status == "rejected"
+    assert any("uncovered_call_increase" in r for r in out.reasons)
+    assert out.split_required is True
+
+
+def test_open_credit_spread_accepted_when_netting_on(monkeypatch):
+    monkeypatch.setenv("XENON_GATE4_NETTING", "1")
+    _seed_snapshot(_snapshot_payload([]))
+    out = _bag_reserve("att-cs-2", _credit_spread_open_body("att-cs-2"))
     assert out.status == "winner"
 
 

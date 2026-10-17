@@ -178,22 +178,22 @@ test.describe("Gate-4 order entry — blocked combo toast + valid vertical paylo
     expect(placeCalls).toBe(1);
   });
 
-  test("Guaranteed-BAG vertical close shows the split-required toast", async ({
+  test("Guaranteed-BAG combo shows the split-required toast", async ({
     page,
   }) => {
-    // Spec §2.3: with netting off, a held vertical closes as two orders —
-    // Gate 4 rejects the one-BAG submission with a dedicated reason whose
-    // copy says exactly how to leg out. Never auto-split, never auto-submit.
+    // With netting off, a guaranteed BAG that only fails leg-by-leg is
+    // rejected with a dedicated reason whose copy says exactly how to send
+    // the legs as separate orders. Never auto-split, never auto-submit.
     await page.route("**/api/orders/place", (route) =>
       route.fulfill({
         status: 400,
         contentType: "application/json",
         body: JSON.stringify({
           detail:
-            "Close the vertical as two orders: buy back the short leg first, then sell the long leg",
-          reason_code: "VERTICAL_CLOSE_SPLIT_REQUIRED",
+            "Combo legs are checked one by one while netting is off. Send the BUY leg as its own order first; send the SELL leg after the BUY fills and the portfolio syncs.",
+          reason_code: "COMBO_SPLIT_REQUIRED",
           reason_detail:
-            "Close the vertical as two orders: buy back the short leg first, then sell the long leg",
+            "Combo legs are checked one by one while netting is off. Send the BUY leg as its own order first; send the SELL leg after the BUY fills and the portfolio syncs.",
         }),
       }),
     );
@@ -205,7 +205,10 @@ test.describe("Gate-4 order entry — blocked combo toast + valid vertical paylo
     await errorMsg.waitFor({ timeout: 5_000 });
     await expect(errorMsg).toBeVisible();
     await expect(errorMsg).toContainText(
-      /Close the vertical as two orders: buy back the short leg first, then sell the long leg/i,
+      /Combo legs are checked one by one while netting is off/i,
+    );
+    await expect(errorMsg).toContainText(
+      /Send the BUY leg as its own order first/i,
     );
     await expect(page.locator(".order-success")).not.toBeVisible();
   });

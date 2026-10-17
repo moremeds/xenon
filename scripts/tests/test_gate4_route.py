@@ -248,10 +248,10 @@ def test_sell_envelope_combo_evaluated_and_blocked(client, broker_calls):
     assert broker_calls == []
 
 
-def test_vertical_close_split_required_reason(client, broker_calls):
-    """Spec §2.3: a held-vertical close submitted as ONE guaranteed BAG gets
-    the split-required code at top level — close as two orders, short leg
-    first. Zero broker calls; nothing reaches IB."""
+def test_combo_split_required_reason(client, broker_calls):
+    """A guaranteed BAG that only fails leg-by-leg gets the split-required
+    code at top level — send the BUY leg as its own order first. Zero broker
+    calls; nothing reaches IB."""
     engine = _pg_engine()
     _seed_snapshot(engine, [_opt_pos("SPY", 1, strike=500), _opt_pos("SPY", -1, strike=510)])
     engine.dispose()
@@ -275,8 +275,8 @@ def test_vertical_close_split_required_reason(client, broker_calls):
 
     assert resp.status_code == 400
     body = resp.json()
-    assert body["reason_code"] == "VERTICAL_CLOSE_SPLIT_REQUIRED"
-    assert "short leg" in body["detail"]
+    assert body["reason_code"] == "COMBO_SPLIT_REQUIRED"
+    assert "BUY leg as its own order first" in body["detail"]
     assert broker_calls == []
     assert _submission_rows() == []
 
@@ -454,7 +454,7 @@ def test_modify_quantity_reserves_cover(client, broker_calls):
     )
 
     assert resp.status_code == 400
-    assert resp.json()["reason_code"] == "VERTICAL_CLOSE_SPLIT_REQUIRED"
+    assert resp.json()["reason_code"] == "COMBO_SPLIT_REQUIRED"
     assert len(broker_calls) == 1
 
 

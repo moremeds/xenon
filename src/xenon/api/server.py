@@ -1907,7 +1907,8 @@ def _gate4_reject_verdict(
     Infrastructure failures (view/scope) take precedence — a classifiable
     coverage breach computed on unprovable data is still reported, but the
     integrity problem is the headline. `split_required` marks a guaranteed
-    BAG that only fails leg-by-leg — spec §2.3 says close it as two orders.
+    BAG that only fails leg-by-leg — the operator sends the legs as
+    separate orders, BUY leg first.
     """
     from xenon.execution.universe import is_index
 
@@ -1926,8 +1927,8 @@ def _gate4_reject_verdict(
     if split_required:
         return Verdict(
             accept=False,
-            reason_code=ReasonCode.VERTICAL_CLOSE_SPLIT_REQUIRED,
-            reason_detail="Close the vertical as two orders: buy back the short leg first, then sell the long leg",
+            reason_code=ReasonCode.COMBO_SPLIT_REQUIRED,
+            reason_detail="Combo legs are checked one by one while netting is off. Send the BUY leg as its own order first; send the SELL leg after the BUY fills and the portfolio syncs.",
         )
     if short_stock:
         sym = sorted(short_stock)[0]

@@ -100,9 +100,9 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
     severity: "error",
     copy: "Guarantee mode is fixed at placement. Cancel and re-enter to change it.",
   },
-  VERTICAL_CLOSE_SPLIT_REQUIRED: {
+  COMBO_SPLIT_REQUIRED: {
     severity: "error",
-    copy: "Close the vertical as two orders: buy back the short leg first, then sell the long leg.",
+    copy: "Combo legs are checked one by one while netting is off. Send the BUY leg as its own order first; send the SELL leg after the BUY fills and the portfolio syncs.",
   },
   ATTEMPT_BODY_MISMATCH: {
     severity: "error",

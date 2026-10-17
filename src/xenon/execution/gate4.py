@@ -598,8 +598,8 @@ class Gate4Outcome:
     uncovered: dict | None = None
     short_stock: dict | None = None
     # Rejected leg-by-leg but accepted under guaranteed-BAG netting — the
-    # spec §2.3 "vertical closes are two orders" case (route maps it to
-    # VERTICAL_CLOSE_SPLIT_REQUIRED).
+    # spec §2.3 leg-out case: any guaranteed all-OPT BAG, open or close
+    # (route maps it to COMBO_SPLIT_REQUIRED).
     split_required: bool = False
 
 
