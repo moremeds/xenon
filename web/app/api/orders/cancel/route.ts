@@ -19,7 +19,10 @@ export async function POST(request: Request): Promise<Response> {
 
     if (orderId === 0 && permId === 0) {
       return NextResponse.json(
-        { error: "Must provide orderId or permId" },
+        {
+          error: "Must provide orderId or permId",
+          reason_code: "ORDER_IDENTIFIER_REQUIRED",
+        },
         { status: 400 },
       );
     }

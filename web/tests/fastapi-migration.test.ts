@@ -335,7 +335,17 @@ describe("POST /api/orders/modify (via xenonFetch)", () => {
     expect(res.status).toBe(400);
   });
 
-  it("returns 400 when newPrice is negative", async () => {
+  it("forwards negative newPrice — BAG credit combos carry signed limits", async () => {
+    // The modify request has no combo flag, so the route must not block
+    // negatives locally; the CLI decides from the located trade's secType.
+    mockXenonFetch
+      .mockResolvedValueOnce({ status: "ok", message: "Modified" })
+      .mockResolvedValueOnce({ open_orders: [] })
+      .mockResolvedValueOnce({
+        open_orders: [
+          { orderId: 123, permId: 0, limitPrice: -5, totalQuantity: 1 },
+        ],
+      });
     const { POST } = await import("../app/api/orders/modify/route");
     const req = makeRequest("http://localhost/api/orders/modify", {
       method: "POST",
@@ -343,7 +353,10 @@ describe("POST /api/orders/modify (via xenonFetch)", () => {
       body: JSON.stringify({ orderId: 123, newPrice: -5 }),
     });
     const res = await POST(req);
-    expect(res.status).toBe(400);
+    expect(res.status).not.toBe(400);
+    const [path, init] = mockXenonFetch.mock.calls[0];
+    expect(path).toBe("/orders/modify");
+    expect(JSON.parse(init.body as string).newPrice).toBe(-5);
   });
 });
 

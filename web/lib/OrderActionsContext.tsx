@@ -219,9 +219,16 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
           // optimistically mark the order cancelled. Surface reason-code copy
           // and let the caller render a FAILED pill; the button re-enables.
           const reasonCode = readReasonCode(json);
+          // No reason_code → still surface human-readable upstream detail:
+          // FastAPI HTTPException bodies carry it as a string or as
+          // detail.message — passThroughXenonError forwards either verbatim.
           const message = reasonCode
             ? getReasonToast(reasonCode).copy
-            : json?.error || "Cancel failed";
+            : json?.error ||
+              (typeof json?.detail === "string"
+                ? json.detail
+                : json?.detail?.message) ||
+              "Cancel failed";
           pushNotification({ type: "error", message });
           return { ok: false, status: res.status, reasonCode, message };
         }
@@ -371,7 +378,11 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
           }
           const message = reasonCode
             ? getReasonToast(reasonCode).copy
-            : json?.error || "Modify failed";
+            : json?.error ||
+              (typeof json?.detail === "string"
+                ? json.detail
+                : json?.detail?.message) ||
+              "Modify failed";
           pushNotification({ type: "error", message });
           return { ok: false, status: res.status, reasonCode, message };
         }
