@@ -29,9 +29,12 @@ async function openSpxuOrderTab(page: import("@playwright/test").Page) {
 
 /** Fill in the combo order form and click Place Combo Order (first click). */
 async function fillComboForm(page: import("@playwright/test").Page, price: string) {
-  // Wait for the combo order form to be visible
+  // OrderTab renders the single-leg ticket while the position resolves, then
+  // swaps to ComboOrderForm — a remount that would discard a premature fill.
+  // Wait for a combo-only marker so the fill lands on the mounted combo input.
+  await page.locator(".combo-legs-pills").waitFor({ timeout: 10_000 });
   const limitPriceInput = page
-    .locator(".modify-price-input")
+    .locator(".act-ticket .order-form .modify-price-input")
     .first();
   await limitPriceInput.waitFor({ timeout: 5_000 });
   await limitPriceInput.fill(price);
