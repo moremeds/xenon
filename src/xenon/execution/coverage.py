@@ -105,6 +105,8 @@ class Order:
     `filled_after_snapshot` + `remaining` are authoritative demand inputs;
     `qty` is the order's total. `pending_amend_qty` marks an uncertain amend:
     the order reserves max(qty, pending_amend_qty) - filled_total.
+    Adapters must set terminal orders' `remaining=0` while still passing
+    `filled_after_snapshot` — post-snapshot fills keep counting as demand.
     """
 
     id: str

@@ -503,10 +503,23 @@ def _throwaway_pg_db():
     service user (POSTGRES_USER xenon_app) is the bootstrap superuser, so
     CREATE DATABASE works there; the remote app role has no CREATEDB on a
     local instance, where this skips with an explicit reason.
+
+    The created name already carries the xdist worker suffix
+    (`xe_a2_mig_<rand>_gw0`) when PYTEST_XDIST_WORKER is set — each worker
+    provisions its own DB and `_test_db.sync_test_db_url`'s idempotent
+    suffix guard then returns the env URL unchanged. Provisioning or
+    connection failures are pytest.skip locally but pytest.fail under CI
+    (`env CI`), so the eight migration/writer tests are a hard gate there.
     """
+
+    def _skip_or_fail(reason: str) -> None:
+        if os.environ.get("CI"):
+            pytest.fail(f"throwaway test DB provisioning must succeed under CI: {reason}")
+        pytest.skip(reason)
+
     base_env = os.environ.get("DATABASE_URL_TEST")
     if not base_env:
-        pytest.skip("DATABASE_URL_TEST not set — no throwaway test Postgres")
+        _skip_or_fail("DATABASE_URL_TEST not set — no throwaway test Postgres")
     try:
         base = make_url(base_env)
         # Unmasked render so the configured password survives the round-trip.
@@ -517,8 +530,13 @@ def _throwaway_pg_db():
             admin, isolation_level="AUTOCOMMIT", connect_args={"connect_timeout": 3}
         )
     except Exception:
-        pytest.skip("no usable Postgres admin URL derivable from DATABASE_URL_TEST")
+        _skip_or_fail("no usable Postgres admin URL derivable from DATABASE_URL_TEST")
     dbname = f"xe_a2_mig_{uuid.uuid4().hex[:10]}"
+    # Mirror _test_db._resolve_worker_id so the env URL's dbname already ends
+    # with the suffix sync_test_db_url would append (idempotent-guard hit).
+    wid = os.environ.get("PYTEST_XDIST_WORKER")
+    if wid and wid != "master":
+        dbname = f"{dbname}_{wid}"
     try:
         with admin_engine.connect() as conn:
             conn.execute(text("SELECT 1"))
@@ -537,7 +555,7 @@ def _throwaway_pg_db():
         boot.dispose()
     except Exception as e:
         admin_engine.dispose()
-        pytest.skip(f"throwaway DB provisioning failed (CREATE DATABASE or schema init): {e}")
+        _skip_or_fail(f"throwaway DB provisioning failed (CREATE DATABASE or schema init): {e}")
 
     old_db, old_test = os.environ.get("DATABASE_URL"), os.environ.get("DATABASE_URL_TEST")
     test_dsn = test_async.render_as_string(hide_password=False)
