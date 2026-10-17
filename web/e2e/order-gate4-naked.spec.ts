@@ -181,11 +181,17 @@ test.describe("Gate-4 order entry — blocked combo toast + valid vertical paylo
   test("Guaranteed-BAG combo shows the split-required toast", async ({
     page,
   }) => {
-    // With netting off, a guaranteed BAG that only fails leg-by-leg is
-    // rejected with a dedicated reason whose copy says exactly how to send
-    // the legs as separate orders. Never auto-split, never auto-submit.
-    await page.route("**/api/orders/place", (route) =>
-      route.fulfill({
+    // With netting off, a held-vertical close that would pass only as a
+    // guaranteed BAG is rejected with a dedicated reason whose copy says
+    // exactly how to send the legs as separate orders. Never auto-split,
+    // never auto-submit. Round 3 item 9: the UI never sends a guarantee
+    // mode, and the server returns this code regardless of the requested
+    // mode (scripts/tests/test_gate4_route.py::
+    // test_ui_vertical_close_without_mode_gets_split_code posts this shape).
+    let placeBody: Record<string, unknown> | null = null;
+    await page.route("**/api/orders/place", (route) => {
+      placeBody = route.request().postDataJSON() as Record<string, unknown>;
+      return route.fulfill({
         status: 400,
         contentType: "application/json",
         body: JSON.stringify({
@@ -195,8 +201,8 @@ test.describe("Gate-4 order entry — blocked combo toast + valid vertical paylo
           reason_detail:
             "Combo legs are checked one by one while netting is off. Send the BUY leg as its own order first; send the SELL leg after the BUY fills and the portfolio syncs.",
         }),
-      }),
-    );
+      });
+    });
 
     await openSpxuOrderTab(page);
     await fillComboForm(page, "2.25");
@@ -211,6 +217,18 @@ test.describe("Gate-4 order entry — blocked combo toast + valid vertical paylo
       /Send the BUY leg as its own order first/i,
     );
     await expect(page.locator(".order-success")).not.toBeVisible();
+
+    // The blocked request is the plain UI vertical close: SELL envelope,
+    // structure-encoding legs, and no nonGuaranteed field at all.
+    expect(placeBody).not.toBeNull();
+    const body = placeBody as unknown as Record<string, unknown>;
+    expect(body.type).toBe("combo");
+    expect(body.action).toBe("SELL");
+    expect("nonGuaranteed" in body).toBe(false);
+    expect(body.legs).toEqual([
+      { expiry: "20260313", strike: 53, right: "C", action: "BUY", ratio: 1 },
+      { expiry: "20260313", strike: 60, right: "C", action: "SELL", ratio: 1 },
+    ]);
   });
 
   test("Valid vertical submits the correct SELL-envelope BAG payload", async ({

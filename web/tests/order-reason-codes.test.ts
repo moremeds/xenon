@@ -64,4 +64,10 @@ describe("getReasonToast fallback", () => {
       "Order submission timed out before IB acknowledged.",
     );
   });
+
+  it("MODIFY_PENDING tells the user to wait for the earlier amend", () => {
+    const toast = getReasonToast("MODIFY_PENDING");
+    expect(toast.severity).toBe("warn");
+    expect(toast.copy).toContain("not confirmed yet");
+  });
 });

@@ -100,6 +100,10 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
     severity: "error",
     copy: "Guarantee mode is fixed at placement. Cancel and re-enter to change it.",
   },
+  MODIFY_PENDING: {
+    severity: "warn",
+    copy: "An earlier change to this order is not confirmed yet. Wait for the order to sync, then retry.",
+  },
   COMBO_SPLIT_REQUIRED: {
     severity: "error",
     copy: "Combo legs are checked one by one while netting is off. Send the BUY leg as its own order first; send the SELL leg after the BUY fills and the portfolio syncs.",
