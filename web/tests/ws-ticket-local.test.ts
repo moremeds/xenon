@@ -25,7 +25,7 @@ describe("wsTicket local routing", () => {
     );
 
     const { getWsTicket } = await import("@/lib/wsTicket");
-    const ticket = await getWsTicket("test-clerk-token");
+    const ticket = await getWsTicket();
 
     expect(ticket).toBe("local-ticket-abc");
     const [url] = mockFetch.mock.calls[0];
@@ -41,7 +41,7 @@ describe("wsTicket local routing", () => {
     );
 
     const { getWsTicket } = await import("@/lib/wsTicket");
-    await getWsTicket("token");
+    await getWsTicket();
 
     const [url] = mockFetch.mock.calls[0];
     // Must be same-origin path, never an absolute URL

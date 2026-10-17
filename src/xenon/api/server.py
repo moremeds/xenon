@@ -42,7 +42,6 @@ from xenon.api.auth import (
     classify_auth,
     validate_auth_config,
     verify_api_key,
-    verify_clerk_jwt,
 )
 from xenon.api.guards import (
     ReadOnlyDenied,
@@ -733,12 +732,12 @@ async def read_only_write_guard(request: Request, call_next):
     return await call_next(request)
 
 
-# Auth middleware — only /health and the internal ticket-validate probe are exempt.
-# /docs and /openapi.json are deliberately NOT exempt: they expose the full trading
-# API schema and now require auth (localhost / internal token / Clerk).
+# Auth middleware — only /health is exempt. /docs and /openapi.json are
+# deliberately NOT exempt: they expose the full trading API schema.
+# /ws-ticket/validate is NOT exempt either: the Node relay authenticates with
+# X-Internal-Token, so an external caller cannot burn or probe tickets.
 AUTH_EXEMPT_PATHS = {
     "/health",
-    "/ws-ticket/validate",
     # /dev/rehydrate/synthetic intentionally NOT listed: gated by _dev_probes_enabled()
     # AND now by classify_auth (fail-closed). Exempting it would risk a public write
     # endpoint if DEV_PROBES=1 leaked into a non-local env.
@@ -747,7 +746,7 @@ AUTH_EXEMPT_PATHS = {
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    """Authorize via classify_auth (fail-closed); defer Clerk JWT to async validation."""
+    """Authorize via classify_auth (fail-closed, credential-only)."""
     if request.url.path in AUTH_EXEMPT_PATHS:
         return await call_next(request)
 
@@ -755,17 +754,6 @@ async def auth_middleware(request: Request, call_next):
 
     if decision.action == "pass":
         request.state.user = decision.identity
-        return await call_next(request)
-
-    if decision.action == "clerk":
-        try:
-            payload = await verify_clerk_jwt(request)
-            request.state.user = payload
-        except HTTPException as exc:
-            return JSONResponse(
-                status_code=exc.status_code,
-                content={"detail": exc.detail},
-            )
         return await call_next(request)
 
     return JSONResponse(
@@ -1399,9 +1387,8 @@ async def dev_rehydrate_synthetic():
 async def get_ws_ticket(request: Request):
     """Issue a short-lived ticket for WebSocket authentication.
 
-    The middleware already authorized this request (localhost / internal token /
-    API key / Clerk) and set request.state.user. Reading it here avoids a second
-    Clerk validation that would raise when CLERK_JWKS_URL is unset (prod).
+    The middleware already authorized this request (internal token or scoped
+    API key) and set request.state.user. Reading it here avoids re-validating.
     """
     user = getattr(request.state, "user", None) or {}
     ticket = create_ticket(user.get("sub", "unknown"))

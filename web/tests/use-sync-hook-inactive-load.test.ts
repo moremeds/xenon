@@ -47,7 +47,10 @@ describe("useSyncHook inactive initial load", () => {
 
     expect(result.current.data?.value).toBe(7);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/internals", { method: "GET" });
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/internals", {
+      method: "GET",
+      headers: undefined,
+    });
   });
 
   it("triggers the first sync when a previously inactive hook becomes active", async () => {
@@ -74,7 +77,10 @@ describe("useSyncHook inactive initial load", () => {
     rerender({ active: true });
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/internals", { method: "POST" });
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/internals", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
   });
 
   it("retries stale cached data even when polling is inactive", async () => {
@@ -110,7 +116,10 @@ describe("useSyncHook inactive initial load", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/internals", { method: "GET" });
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/internals", {
+      method: "GET",
+      headers: undefined,
+    });
     expect(result.current.data?.value).toBe(8);
   });
 });

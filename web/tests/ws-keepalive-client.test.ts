@@ -10,10 +10,23 @@ import { usePrices } from "../lib/usePrices";
 import { IBStatusProvider, useIBStatusContext } from "../lib/IBStatusContext";
 import type { ReactNode } from "react";
 
-// Mock Clerk auth — IBStatusProvider calls useAuth() for WS ticket
-vi.mock("@clerk/nextjs", () => ({
-  useAuth: () => ({ getToken: async () => null }),
-}));
+// The providers mint a WS ticket before connecting — mock the module (fetch
+// stubs don't reach the dynamically imported copy). ws-config + health still
+// go through the fetch stub below.
+vi.mock("@/lib/wsTicket", () => ({ getWsTicket: async () => "test-ticket" }));
+
+function stubRealtimeFetches() {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/ib/ws-ticket")) {
+        return { ok: true, json: async () => ({ ticket: "test-ticket" }) };
+      }
+      return { ok: true, json: async () => ({ url: "ws://localhost:8765" }) };
+    }) as unknown as typeof fetch,
+  );
+}
 
 /* ---------- MockWebSocket ---------- */
 class MockWebSocket {
@@ -68,6 +81,7 @@ const ibWrapper = ({ children }: { children: ReactNode }) =>
 beforeEach(() => {
   wsInstances = [];
   vi.useFakeTimers();
+  stubRealtimeFetches();
   vi.stubGlobal(
     "WebSocket",
     class extends MockWebSocket {
@@ -86,7 +100,9 @@ afterEach(() => {
 describe("usePrices ping/pong", () => {
   it("responds to ping message with pong", async () => {
     renderHook(() => usePrices({ symbols: ["AAPL"], enabled: true }));
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     const ws = latestWs();
     act(() => ws.simulateOpen());
     act(() => ws.simulateMessage({ type: "ping" }));
@@ -97,7 +113,9 @@ describe("usePrices ping/pong", () => {
 
   it("force-reconnects after 60s of silence", async () => {
     renderHook(() => usePrices({ symbols: ["AAPL"], enabled: true }));
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     const ws = latestWs();
     act(() => ws.simulateOpen());
 
@@ -118,7 +136,9 @@ describe("usePrices ping/pong", () => {
 describe("IBStatusContext ping/pong", () => {
   it("responds to ping message with pong", async () => {
     renderHook(() => useIBStatusContext(), { wrapper: ibWrapper });
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     const ws = latestWs();
     act(() => ws.simulateOpen());
     act(() => ws.simulateMessage({ type: "ping" }));
@@ -135,7 +155,9 @@ describe("IBStatusContext ping/pong", () => {
 
   it("force-reconnects after 60s of silence", async () => {
     renderHook(() => useIBStatusContext(), { wrapper: ibWrapper });
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     const ws = latestWs();
     act(() => ws.simulateOpen());
 

@@ -17,19 +17,24 @@ const source = readFileSync(
   "utf8",
 );
 
-describe("ib_realtime_server.js localhost auth bypass", () => {
-  it("skips ticket validation for localhost connections", () => {
-    // The upgrade handler must bypass auth for localhost remoteAddress
-    expect(source).toContain('remoteAddr === "127.0.0.1"');
-    expect(source).toContain('remoteAddr === "::1"');
-    expect(source).toContain('remoteAddr === "::ffff:127.0.0.1"');
+describe("ib_realtime_server.js upgrade auth", () => {
+  it("never bypasses ticket validation on peer address", () => {
+    // Reachability is not authentication — no loopback shortcut may exist in
+    // the upgrade handler.
+    const upgradeBlock =
+      source.match(/httpServer\.on\("upgrade"[\s\S]*?\n\}\);/)?.[0] ?? "";
+    expect(upgradeBlock).not.toContain('remoteAddr === "127.0.0.1"');
+    expect(upgradeBlock).not.toContain('remoteAddr === "::1"');
+    expect(upgradeBlock).not.toContain('remoteAddr === "::ffff:127.0.0.1"');
+    expect(upgradeBlock).toContain("authorizeUpgrade(req)");
   });
 
-  it("still validates tickets for non-localhost when CLERK_JWKS_URL is set", () => {
-    // Ticket validation block must exist after the localhost bypass
-    expect(source).toContain('const ticket = url.searchParams.get("ticket")');
-    expect(source).toContain("TICKET_VALIDATE_URL");
+  it("validates every ticket via the FastAPI endpoint", () => {
+    // Missing/foreign/expired tickets are rejected inside ws_upgrade_auth.js;
+    // the handler delegates and destroys the socket on non-ok decisions.
+    expect(source).toContain("authorizeUpgrade");
     expect(source).toContain("401 Unauthorized");
+    expect(source).toContain("403 Forbidden");
   });
 });
 

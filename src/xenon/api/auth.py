@@ -1,8 +1,16 @@
 """Authentication middleware for FastAPI.
 
-Supports two auth methods:
-1. Clerk JWT — browser-based user auth via JWKS
-2. API key — headless machine-to-machine auth (scoped to read-only data endpoints)
+Two credentials only — no peer-address trust (a tailscale-serve / Docker proxy
+makes every remote peer look local, so client IP is never an identity):
+
+1. X-Internal-Token — Next.js server → API. Full access.
+2. X-API-Key — machine-to-machine, path-scoped to read-only data endpoints:
+   MDW_API_KEY → API_KEY_ALLOWED_PATHS; XENON_QUERY_API_KEY → QUERY_API_KEY_PATHS.
+
+/health is exempt upstream (server.py AUTH_EXEMPT_PATHS). The relay's
+/ws-ticket/validate calls authenticate with X-Internal-Token like everything
+else.
+XENON_AUTH_ALLOW_DEV_OPEN=1 is a dev/test-only escape hatch production never sets.
 """
 
 import hmac
@@ -10,108 +18,21 @@ import logging
 import os
 from dataclasses import dataclass
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Request
 
 logger = logging.getLogger("xenon.auth")
-
-_jwks_client = None
-_algorithms = ["RS256"]
-
-_LOCALHOST_HOSTS = frozenset({"127.0.0.1", "::1"})
 
 
 @dataclass(frozen=True)
 class AuthDecision:
     """Outcome of the synchronous auth pre-check.
 
-    action: "pass"  → authorized (use identity); call next.
-            "clerk" → defer to async Clerk JWT validation.
-            "deny"  → 401.
+    action: "pass" → authorized (use identity); call next.
+            "deny" → 401.
     """
 
     action: str
     identity: dict | None = None
-
-
-def _get_jwks_client():
-    """Lazy-initialize JWKS client with key caching."""
-    global _jwks_client
-    if _jwks_client is None:
-        import jwt as pyjwt
-
-        jwks_url = os.environ.get("CLERK_JWKS_URL", "")
-        if not jwks_url:
-            raise RuntimeError("CLERK_JWKS_URL not set")
-        _jwks_client = pyjwt.PyJWKClient(jwks_url, cache_keys=True)
-    return _jwks_client
-
-
-def _get_allowed_users() -> set[str]:
-    """Parse comma-separated ALLOWED_USER_IDS env var."""
-    raw = os.environ.get("ALLOWED_USER_IDS", "")
-    return {uid.strip() for uid in raw.split(",") if uid.strip()}
-
-
-def _get_issuer() -> str:
-    """Get Clerk issuer URL from env."""
-    return os.environ.get("CLERK_ISSUER", "")
-
-
-async def verify_clerk_jwt(request: Request) -> dict:
-    """FastAPI dependency: extract and validate Clerk JWT from Authorization header.
-
-    Returns the decoded payload on success.
-    Raises HTTPException(401) for missing/invalid tokens.
-    Raises HTTPException(403) for non-allowlisted users.
-    Bypasses validation for localhost requests (server-to-server).
-    """
-    # Skip auth for server-to-server calls from localhost (Next.js → FastAPI)
-    client_host = request.client.host if request.client else None
-    if client_host in ("127.0.0.1", "::1"):
-        return {"sub": "localhost", "local": True}
-
-    import jwt as pyjwt
-
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-
-    token = auth_header.removeprefix("Bearer ")
-
-    try:
-        jwks_client = _get_jwks_client()
-        signing_key = jwks_client.get_signing_key_from_jwt(token)
-
-        issuer = _get_issuer()
-        decode_options = {"verify_aud": False}
-
-        payload = pyjwt.decode(
-            token,
-            signing_key.key,
-            algorithms=_algorithms,
-            issuer=issuer if issuer else None,
-            options=decode_options,
-        )
-    except pyjwt.exceptions.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except pyjwt.exceptions.PyJWTError as e:
-        logger.warning("JWT validation failed: %s", e)
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    allowed = _get_allowed_users()
-    if allowed and payload.get("sub") not in allowed:
-        logger.warning("Access denied for user %s", payload.get("sub"))
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    return payload
-
-
-def auth_required():
-    """Return the verify_clerk_jwt dependency for use in route decorators.
-
-    Usage: @app.get("/protected", dependencies=[Depends(auth_required())])
-    """
-    return Depends(verify_clerk_jwt)
 
 
 # ---------------------------------------------------------------------------
@@ -202,12 +123,9 @@ def classify_auth(request: Request) -> AuthDecision:
     A non-exempt request is DENIED unless it proves identity. The only
     non-authenticated pass is the explicit dev opt-in XENON_AUTH_ALLOW_DEV_OPEN=1,
     which production never sets — so an unloaded/misconfigured prod env denies
-    rather than exposes the trading API.
+    rather than exposes the trading API. Client address is never consulted:
+    reachability is not authentication.
     """
-    client_host = request.client.host if request.client else None
-    if client_host in _LOCALHOST_HOSTS:
-        return AuthDecision("pass", {"sub": "localhost", "local": True})
-
     internal_token = os.environ.get("XENON_INTERNAL_API_TOKEN")
     if internal_token:
         hdr = request.headers.get("X-Internal-Token")
@@ -217,9 +135,6 @@ def classify_auth(request: Request) -> AuthDecision:
     identity = verify_api_key(request)
     if identity is not None:
         return AuthDecision("pass", identity)
-
-    if os.environ.get("CLERK_JWKS_URL"):
-        return AuthDecision("clerk")
 
     if _truthy_env("XENON_AUTH_ALLOW_DEV_OPEN"):
         return AuthDecision("pass", {"sub": "dev-open", "dev_open": True})
@@ -241,9 +156,9 @@ def validate_auth_config() -> str:
             "XENON_INTERNAL_API_TOKEN must differ from XENON_QUERY_API_KEY "
             "(equal values let a leaked read-only key gain write access)"
         )
-    configured = bool(internal_token or query_key or os.environ.get("MDW_API_KEY") or os.environ.get("CLERK_JWKS_URL"))
+    configured = bool(internal_token or query_key or os.environ.get("MDW_API_KEY"))
     if configured:
-        return "auth: ENFORCED (authenticated access required for non-localhost)"
+        return "auth: ENFORCED (credential required for all non-exempt paths)"
     if _truthy_env("XENON_AUTH_ALLOW_DEV_OPEN"):
-        return "auth: DEV-OPEN (XENON_AUTH_ALLOW_DEV_OPEN=1; non-localhost requests pass)"
-    return "auth: FAIL-CLOSED (no secrets, no dev-open; non-localhost requests denied)"
+        return "auth: DEV-OPEN (XENON_AUTH_ALLOW_DEV_OPEN=1; requests pass unauthenticated)"
+    return "auth: FAIL-CLOSED (no secrets, no dev-open; all non-exempt requests denied)"

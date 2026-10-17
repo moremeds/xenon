@@ -1,17 +1,6 @@
-import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
-
-// Clerk's auth() is mocked so the route's gate can be driven per-test. vi.mock
-// is hoisted, so the spy is created via vi.hoisted to be referenceable inside
-// the factory.
-const { authMock } = vi.hoisted(() => ({ authMock: vi.fn() }));
-vi.mock("@clerk/nextjs/server", () => ({ auth: authMock }));
+import { describe, it, expect, vi, afterEach } from "vitest";
 
 import { GET, parseUwQuotaHeaders } from "@/app/api/admin/uw-quota/route";
-
-beforeEach(() => {
-  // Default: an authenticated session.
-  authMock.mockResolvedValue({ userId: "user_test" });
-});
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -45,25 +34,7 @@ describe("parseUwQuotaHeaders", () => {
 });
 
 describe("GET /api/admin/uw-quota", () => {
-  it("returns 401 when there is no Clerk session", async () => {
-    authMock.mockResolvedValue({ userId: null });
-    const res = await GET();
-    expect(res.status).toBe(401);
-    const body = await res.json();
-    expect(body.error).toBe("Unauthorized");
-  });
-
-  it("bypasses auth when XENON_DISABLE_AUTH=1 (dev/E2E)", async () => {
-    authMock.mockResolvedValue({ userId: null });
-    vi.stubEnv("XENON_DISABLE_AUTH", "1");
-    vi.stubEnv("UW_TOKEN", "");
-    const res = await GET();
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.configured).toBe(false);
-  });
-
-  it("returns configured:false when UW_TOKEN is unset (authed)", async () => {
+  it("returns configured:false when UW_TOKEN is unset", async () => {
     vi.stubEnv("UW_TOKEN", "");
     const res = await GET();
     expect(res.status).toBe(200);

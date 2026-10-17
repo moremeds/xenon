@@ -144,7 +144,6 @@ class TestClassifyAuth:
     # .env. So the decision under test is never masked by the dev-open pass or a
     # leaked secret. Each test overrides only the var(s) it exercises.
     BASE = {
-        "CLERK_JWKS_URL": "",
         "MDW_API_KEY": "",
         "XENON_QUERY_API_KEY": "",
         "XENON_INTERNAL_API_TOKEN": "",
@@ -174,13 +173,23 @@ class TestClassifyAuth:
             req = FakeRequest("/portfolio", "GET", {}, client_host="100.66.147.98")
             assert classify_auth(req).action == "deny"
 
-    def test_localhost_passes(self):
+    def test_localhost_denied_without_creds(self):
+        # No peer-address trust (spec §2.1): a tailscale-serve / Docker proxy
+        # makes every remote peer look local, so 127.0.0.1/::1 alone is NOT
+        # an identity. Localhost callers authenticate like everyone else.
         with patch.dict(os.environ, self._env(), clear=False):
             for host in ("127.0.0.1", "::1"):
                 req = FakeRequest("/portfolio", "GET", {}, client_host=host)
-                d = classify_auth(req)
-                assert d.action == "pass", host
-                assert d.identity["local"] is True
+                assert classify_auth(req).action == "deny", host
+
+    def test_internal_token_passes_from_localhost(self):
+        # Credential-only: the internal token is what authorizes the Next
+        # server (which is on localhost in the single-host deployment).
+        with patch.dict(os.environ, self._env(XENON_INTERNAL_API_TOKEN="itok"), clear=False):
+            req = FakeRequest("/portfolio", "GET", {"X-Internal-Token": "itok"}, client_host="127.0.0.1")
+            d = classify_auth(req)
+            assert d.action == "pass"
+            assert d.identity["internal"] is True
 
     def test_internal_token_passes_any_path(self):
         with patch.dict(os.environ, self._env(XENON_INTERNAL_API_TOKEN="itok"), clear=False):
@@ -211,10 +220,12 @@ class TestClassifyAuth:
             req = FakeRequest("/portfolio", "GET", {}, client_host="100.66.147.98")
             assert classify_auth(req).action == "deny"
 
-    def test_clerk_branch_when_configured_and_no_other_match(self):
-        with patch.dict(os.environ, self._env(CLERK_JWKS_URL="https://x/jwks"), clear=False):
-            req = FakeRequest("/portfolio", "GET", {}, client_host="100.66.147.98")
-            assert classify_auth(req).action == "clerk"
+    def test_bearer_token_alone_denied(self):
+        # No third credential path: a Bearer header without an internal token
+        # or scoped API key denies.
+        with patch.dict(os.environ, self._env(), clear=False):
+            req = FakeRequest("/portfolio", "GET", {"Authorization": "Bearer x"}, client_host="100.66.147.98")
+            assert classify_auth(req).action == "deny"
 
 
 class TestValidateAuthConfig:
@@ -238,7 +249,6 @@ class TestMiddlewareIntegration:
         "XENON_QUERY_API_KEY": "qk",
         "XENON_AUTH_ALLOW_DEV_OPEN": "",
         "XENON_INTERNAL_API_TOKEN": "",
-        "CLERK_JWKS_URL": "",
         "MDW_API_KEY": "",
     }
 
@@ -279,13 +289,43 @@ class TestMiddlewareIntegration:
             r = self._client().get("/portfolio", headers={"X-Internal-Token": "itok"})
             assert r.status_code in (200, 404)
 
-    def test_ws_ticket_with_internal_token_no_clerk(self):
-        # /ws-ticket must work via the middleware identity (no Clerk in prod).
+    def test_ws_ticket_with_internal_token(self):
+        # /ws-ticket mints via the middleware identity (internal token).
         # create_ticket is in-memory, so this is fully deterministic.
         with patch.dict(os.environ, {**self.GATED, "XENON_INTERNAL_API_TOKEN": "itok"}, clear=False):
             r = self._client().post("/ws-ticket", headers={"X-Internal-Token": "itok"})
             assert r.status_code == 200
             assert "ticket" in r.json()
+
+    def test_ws_ticket_validate_denied_without_credential(self):
+        # /ws-ticket/validate is no longer auth-exempt — an unauthenticated
+        # caller must not be able to burn or probe tickets.
+        with patch.dict(os.environ, self.GATED, clear=False):
+            r = self._client().post("/ws-ticket/validate", json={"ticket": "x"})
+            assert r.status_code == 401
+
+    def test_ws_ticket_validate_denied_with_query_key(self):
+        # The scoped query key has no (POST, /ws-ticket/validate) entry.
+        with patch.dict(os.environ, self.GATED, clear=False):
+            r = self._client().post(
+                "/ws-ticket/validate",
+                headers={"X-API-Key": "qk"},
+                json={"ticket": "x"},
+            )
+            assert r.status_code == 401
+
+    def test_ws_ticket_validate_round_trip_with_internal_token(self):
+        # The relay path: mint with the token, validate with the token.
+        with patch.dict(os.environ, {**self.GATED, "XENON_INTERNAL_API_TOKEN": "itok"}, clear=False):
+            client = self._client()
+            ticket = client.post("/ws-ticket", headers={"X-Internal-Token": "itok"}).json()["ticket"]
+            r = client.post(
+                "/ws-ticket/validate",
+                headers={"X-Internal-Token": "itok"},
+                json={"ticket": ticket},
+            )
+            assert r.status_code == 200
+            assert "user_id" in r.json()
 
     def test_ws_ticket_denied_without_creds(self):
         with patch.dict(os.environ, self.GATED, clear=False):
