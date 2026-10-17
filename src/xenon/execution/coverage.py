@@ -533,9 +533,24 @@ def short_stock(
     return ss
 
 
+# Placeholder account values used in this repo for "account not known":
+# `legacy_unknown` (scope column server default / pre-scope rows) and
+# `unknown` (service_health scope fallback). Neither names a real account.
+UNKNOWN_ACCOUNT_SENTINELS = frozenset({"legacy_unknown", "unknown"})
+
+
+def is_real_account(account: object) -> bool:
+    """True when `account` names a real broker account (not blank, not a
+    whitespace-only string, not an unknown-account sentinel)."""
+    if not isinstance(account, str) or not account.strip():
+        return False
+    return account.strip().lower() not in UNKNOWN_ACCOUNT_SENTINELS
+
+
 def _require_scope(scope_account: str) -> str:
     # `_project` treats None as "every account"; the audit helpers must never
-    # pool holdings across accounts, so an empty scope is a caller bug.
-    if not scope_account:
-        raise ValueError("scope_account is required")
+    # pool holdings across accounts, and a placeholder scope would pool every
+    # unknown-account row as one account — both are caller bugs.
+    if not is_real_account(scope_account):
+        raise ValueError(f"scope_account must name a real account, got {scope_account!r}")
     return scope_account

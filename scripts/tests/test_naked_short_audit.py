@@ -140,6 +140,10 @@ def _find(payload, orders, *, view_complete=True, scope=ACCT):
     return nsa.find_violations(payload, orders, scope, view_complete=view_complete)
 
 
+def _run(payload, orders, *, view_complete=True, scope=ACCT):
+    return nsa.run_shadow_audit(payload, orders, scope, view_complete=view_complete)
+
+
 def _perm_ids(result):
     return sorted(v["perm_id"] for v in result.violations)
 
@@ -296,9 +300,21 @@ def test_incomplete_view_skips_whole_audit():
     assert r.status == "skipped" and r.reason == "view_incomplete" and r.violations == []
 
 
-def test_missing_scope_account_skips_whole_audit():
-    r = _find(_payload(), [_order(_opt_contract())], scope="")
-    assert r.status == "skipped" and r.reason == "scope_account_missing"
+@pytest.mark.parametrize("scope", ["", "  ", "legacy_unknown", "unknown"])
+def test_placeholder_scope_account_skips_whole_audit(scope, monkeypatch):
+    """Astra P2-3: a placeholder scope is never an account identity — the audit
+    skips (and records it), it never reports violations under it."""
+    stk = _stock_pos(shares=100, account=scope)
+    orders = [_order(_opt_contract(), account=scope), _order(_opt_contract(con_id=112), account=scope, perm_id=1002)]
+    r = _find(_payload(stk), orders, scope=scope)
+    assert r.status == "skipped" and r.reason == "scope_account_invalid" and r.violations == []
+
+    calls = []
+    monkeypatch.setattr(nsa, "record_service_health", lambda *a, **k: calls.append((a, k)))
+    r = _run(_payload(stk), orders, scope=scope)
+    assert r.status == "skipped" and r.violations == []
+    assert calls[0][0] == ("naked_short_audit", "skipped")
+    assert json.loads(calls[0][1]["detail"])["reason"] == "scope_account_invalid"
 
 
 # ---------------------------------------------------------------------------

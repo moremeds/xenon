@@ -972,3 +972,16 @@ def test_audit_helpers_use_only_scope_account_holdings():
     assert short_stock(holdings, sell_stk, scope_account="U1") == {"AAPL": 100}
     # Another account's orders are not U1's demand.
     assert uncovered([], orders, scope_account="U2") == {}
+
+
+@pytest.mark.parametrize("scope", ["", "   ", "legacy_unknown", "unknown", " LEGACY_UNKNOWN ", None])
+def test_audit_helpers_reject_placeholder_scope(scope):
+    """Astra P2-3: blank/whitespace and the repo's unknown-account sentinels
+    are not account identities — pooling 'legacy_unknown' rows as one account
+    would let placeholder holdings cover placeholder shorts."""
+    holdings = [Holding(account="legacy_unknown", sym="AAPL", sec="STK", qty=100)]
+    orders = [_sell_call_order(account="legacy_unknown")]
+    with pytest.raises(ValueError):
+        uncovered(holdings, orders, scope_account=scope)
+    with pytest.raises(ValueError):
+        short_stock(holdings, orders, scope_account=scope)

@@ -16,7 +16,7 @@ Shadow only: violations are logged and recorded in
 `service_health("naked_short_audit")`. This module has no broker access and
 no cancel path; enforcement (PR-11) is a separate, opt-in step.
 
-Skip-and-log, never a violation: an incomplete pass view or missing scope
+Skip-and-log, never a violation: an incomplete pass view or a placeholder scope
 account skips the whole audit; an order without account, an unsupported
 instrument, unresolved BAG legs, unknown option metadata or a fractional
 quantity skips that order's symbol (as does an unclassifiable holding).
@@ -142,8 +142,8 @@ def find_violations(
     """
     if not view_complete:
         return AuditResult("skipped", reason="view_incomplete")
-    if not scope_account:
-        return AuditResult("skipped", reason="scope_account_missing")
+    if not coverage.is_real_account(scope_account):
+        return AuditResult("skipped", reason="scope_account_invalid")
 
     skipped: list[dict] = []
     skip_syms: set[str] = set()
@@ -278,7 +278,7 @@ def run_shadow_audit(
     record_service_health(
         SERVICE,
         result.status,
-        broker_account=scope_account or None,
+        broker_account=scope_account if coverage.is_real_account(scope_account) else None,
         started_at=started,
         finished_at=datetime.now(timezone.utc),
         detail=_health_detail(result),
