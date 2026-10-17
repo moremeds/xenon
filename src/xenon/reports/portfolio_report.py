@@ -62,7 +62,10 @@ def connect_ib(port: int = 4001, client_id: int = 55):
     """Connect to IB Gateway/TWS."""
     from ib_async import IB
 
+    from xenon.utils.ib_connection import assert_broker_endpoint_allowed
+
     ib = IB()
+    assert_broker_endpoint_allowed(DEFAULT_HOST, port)
     ib.connect(DEFAULT_HOST, port, clientId=client_id)
     ib.reqMarketDataType(4)  # frozen data fallback
     return ib

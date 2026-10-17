@@ -11,7 +11,8 @@ import { test, expect } from "@playwright/test";
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Open the SPXU ticker detail modal and navigate to the Order tab. */
+/** Open the SPXU ticker detail page; the order ticket is always mounted in
+ *  the desktop act column — there is no Order tab to click. */
 async function openSpxuOrderTab(page: import("@playwright/test").Page) {
   // Navigate to portfolio page
   await page.goto("/portfolio");
@@ -20,18 +21,20 @@ async function openSpxuOrderTab(page: import("@playwright/test").Page) {
   const spxuLink = page.locator('[aria-label="View details for SPXU"]').first();
   await spxuLink.waitFor({ timeout: 10_000 });
   await spxuLink.click();
+  await page.waitForURL("**/SPXU**", { timeout: 5_000 });
 
-  // Click the Order tab in the modal
-  const orderTab = page.locator(".ticker-tab", { hasText: /^Order/ }).first();
-  await orderTab.waitFor({ timeout: 5_000 });
-  await orderTab.click();
+  // Combo order form renders directly in the act column for the held spread
+  await page.locator(".act-ticket .order-form").waitFor({ timeout: 10_000 });
 }
 
 /** Fill in the combo order form and click Place Combo Order (first click). */
 async function fillComboForm(page: import("@playwright/test").Page, price: string) {
-  // Wait for the combo order form to be visible
+  // OrderTab renders the single-leg ticket while the position resolves, then
+  // swaps to ComboOrderForm — a remount that would discard a premature fill.
+  // Wait for a combo-only marker so the fill lands on the mounted combo input.
+  await page.locator(".combo-legs-pills").waitFor({ timeout: 10_000 });
   const limitPriceInput = page
-    .locator(".modify-price-input")
+    .locator(".act-ticket .order-form .modify-price-input")
     .first();
   await limitPriceInput.waitFor({ timeout: 5_000 });
   await limitPriceInput.fill(price);

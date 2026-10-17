@@ -83,8 +83,7 @@ mv "$tmp" package.json
 
 # web/package.json: bumped in lockstep with root (single release procedure for
 # backend + frontend; see version_sync_check.py). Surgical line replace keeps the
-# large dep-heavy file byte-stable except the version field. site/ is excluded —
-# the marketing site deploys separately on Vercel and versions on its own.
+# large dep-heavy file byte-stable except the version field.
 python3.13 - "$current" "$next" <<'PY'
 import sys
 current, nxt = sys.argv[1], sys.argv[2]

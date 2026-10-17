@@ -9,6 +9,7 @@ Spec: docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md §12.
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,6 +24,31 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from xenon.db.engine import get_sync_engine
 from xenon.db.events import CHANNEL_FILL_COMMISSION_UPDATED, CHANNEL_FILL_RECORDED, emit_outbox_in_txn
 from xenon.db.schema import order_events, order_fills, order_submissions, regime_overrides
+
+# ── Read-only choke point ──
+
+
+class ReadOnlyWriteError(RuntimeError):
+    """Raised by every orders_store writer under XENON_READ_ONLY=1.
+
+    Set by `scripts/infra/dev.sh live` for debugging sessions against live
+    IB: reads stay open, but no live-derived order state may land in
+    core_test. Real prod writes go through the macmini Docker stack, which
+    never sets the flag.
+    """
+
+
+def ensure_writable() -> None:
+    """Single choke point: refuse every orders_store write under XENON_READ_ONLY=1.
+
+    First statement of every write function in this module so subprocess
+    and in-process callers alike fail closed instead of silently persisting.
+    """
+    if os.environ.get("XENON_READ_ONLY") == "1":
+        raise ReadOnlyWriteError(
+            "XENON_READ_ONLY=1 — orders_store writes disabled (dev.sh live session)"
+        )
+
 
 # ── Schema init ──
 
@@ -53,14 +79,73 @@ class RequestRow(BaseModel):
 
 @dataclass
 class ReservationOutcome:
-    status: Literal["winner", "duplicate", "terminal"]
-    submission_id: str
-    state: str
+    status: Literal["winner", "duplicate", "terminal", "body_mismatch"]
+    submission_id: str | None
+    state: str | None
     duplicate_of: str | None
     reason_code: str | None
 
 
 _TERMINAL_STATES = {"REJECTED", "CANCELLED", "FAILED"}
+
+ATTEMPT_BODY_MISMATCH = "ATTEMPT_BODY_MISMATCH"
+
+
+def _canon_json(value):
+    """Normalize a JSON-shaped value for body equality.
+
+    Numbers become Decimals so int/float/Decimal round-trips through jsonb
+    compare equal; dicts are key-sorted by construction of dict comparison.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float, Decimal)):
+        return Decimal(str(value)).normalize()
+    if isinstance(value, dict):
+        return {k: _canon_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canon_json(v) for v in value]
+    return value
+
+
+def _norm_expiry(value):
+    """Dates and 'YYYYMMDD'/'YYYY-MM-DD' strings compare as ISO text."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        digits = value.replace("-", "")
+        if len(digits) == 8 and digits.isdigit():
+            return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+        return value
+    return value.isoformat()
+
+
+def _request_body_matches(row, request: RequestRow, legs) -> bool:
+    """True iff the stored row's request columns equal the incoming body.
+
+    Compared fields are the reservation payload: the RequestRow columns plus
+    `legs`. `user_id` is deliberately absent — idempotency is scoped to the
+    account, not the caller identity.
+    """
+
+    def _num(v):
+        return None if v is None else Decimal(str(v)).normalize()
+
+    return (
+        row.ticker == request.ticker
+        and row.security_type == request.security_type
+        and row.action == request.action
+        and int(row.quantity) == int(request.quantity)
+        and _norm_expiry(row.expiry) == _norm_expiry(request.expiry)
+        and _num(row.strike) == _num(request.strike)
+        and row.right == request.right
+        and (None if row.multiplier is None else int(row.multiplier))
+        == (None if request.multiplier is None else int(request.multiplier))
+        and (None if row.con_id is None else int(row.con_id))
+        == (None if request.con_id is None else int(request.con_id))
+        and _num(row.limit_price) == _num(request.limit_price)
+        and _canon_json(row.legs) == _canon_json(legs)
+    )
 
 
 @dataclass
@@ -91,10 +176,22 @@ def reserve_attempt(
     broker: str = "IB",
     account_env: str = "legacy_unknown",
     broker_account: str = "legacy_unknown",
+    legs: list | dict | None = None,
     override_audit: dict | None = None,
 ) -> ReservationOutcome:
     """Atomically reserve a submission slot keyed by
-    (broker, account_env, broker_account, user_id, client_attempt_id).
+    (broker, account_env, broker_account, client_attempt_id).
+
+    `legs` (optional) is the durable effective-leg payload for Gate-4
+    coverage — a list of effective-leg dicts (action, sym, sec, ratio,
+    right, exp, mult, tc, con_id, guaranteed) or a JSON object carrying
+    them; stored verbatim in `order_submissions.legs`.
+
+    Conflict on the account-scoped key replays idempotently: same request
+    body returns the existing row (`duplicate`/`terminal`); a different
+    body returns `body_mismatch` with reason_code ATTEMPT_BODY_MISMATCH
+    (the API maps it to 409). Caller identity (`user_id`) is still written
+    but no longer participates in the key.
 
     `override_audit` (when provided) writes a regime_overrides row in
     the same transaction as the submission reservation. The deferred
@@ -103,6 +200,7 @@ def reserve_attempt(
     `route, vcg_tier, cri_tier, binding_side, block_reason, user_reason,
     order_payload`.
     """
+    ensure_writable()
     sid = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     engine = get_sync_engine()
@@ -127,8 +225,15 @@ def reserve_attempt(
             broker=broker,
             account_env=account_env,
             broker_account=broker_account,
+            legs=legs,
         )
-        stmt = stmt.on_conflict_do_nothing(constraint="uq_order_sub_user_attempt")
+        # EXPAND keeps both attempt keys live (legacy user-scoped +
+        # account-scoped). Postgres speculative insertion only honors the
+        # named arbiter index — naming one key still raises UniqueViolation
+        # when a concurrent insert collides on the other. Bare DO NOTHING
+        # makes every unique index an arbiter; the scope/attempt lookup
+        # below then classifies which conflict actually happened.
+        stmt = stmt.on_conflict_do_nothing()
         stmt = stmt.returning(order_submissions.c.submission_id)
         inserted = conn.execute(stmt).first()
 
@@ -160,21 +265,40 @@ def reserve_attempt(
             )
 
         row = conn.execute(
-            select(
-                order_submissions.c.submission_id,
-                order_submissions.c.state,
-                order_submissions.c.ib_order_id,
-                order_submissions.c.reason_code,
-            ).where(
+            select(order_submissions).where(
                 order_submissions.c.broker == broker,
                 order_submissions.c.account_env == account_env,
                 order_submissions.c.broker_account == broker_account,
-                order_submissions.c.user_id == user_id,
                 order_submissions.c.client_attempt_id == client_attempt_id,
             )
         ).first()
-        assert row is not None, "ON CONFLICT hit but row not found"
-        existing_sid, state, ib_order_id, reason_code = row
+        if row is None:
+            # The conflict resolved on a key this lookup cannot see — e.g.
+            # a submission_id collision, or the conflicting row vanished
+            # between the insert and this read. Never a second insert and
+            # never an exception: fail closed as a non-winner; the API maps
+            # body_mismatch / ATTEMPT_BODY_MISMATCH to 409.
+            return ReservationOutcome(
+                status="body_mismatch",
+                submission_id=None,
+                state=None,
+                duplicate_of=None,
+                reason_code=ATTEMPT_BODY_MISMATCH,
+            )
+        if not _request_body_matches(row, request, legs):
+            return ReservationOutcome(
+                status="body_mismatch",
+                submission_id=row.submission_id,
+                state=row.state,
+                duplicate_of=None,
+                reason_code=ATTEMPT_BODY_MISMATCH,
+            )
+        existing_sid, state, ib_order_id, reason_code = (
+            row.submission_id,
+            row.state,
+            row.ib_order_id,
+            row.reason_code,
+        )
         if state in _TERMINAL_STATES:
             return ReservationOutcome(
                 status="terminal",
@@ -206,6 +330,7 @@ def apply_modify(
     is provided we filter on it to avoid colliding with rows from a different
     paper/live account.
     """
+    ensure_writable()
     scope_conds: list = []
     if broker is not None:
         scope_conds.append(order_submissions.c.broker == broker)
@@ -282,6 +407,7 @@ def register_from_snapshot(
     DB: the previous insert-only behavior left snapshot rows frozen at
     their first-seen values.
     """
+    ensure_writable()
     submission_id = f"snapshot-{perm_id}"
     client_attempt_id = f"snapshot-{perm_id}"
     now = datetime.now(timezone.utc)
@@ -418,7 +544,10 @@ def register_from_snapshot(
                 con_id=con_id,
                 tif=tif,
             )
-            .on_conflict_do_nothing(index_elements=["submission_id"])
+            # client_attempt_id is non-null here (snapshot-<perm_id>), so a
+            # racing sibling conflicts on the attempt keys too — a PK-only
+            # arbiter would raise UniqueViolation instead of no-op'ing.
+            .on_conflict_do_nothing()
             .returning(order_submissions.c.submission_id)
         )
         if result.first() is None:
@@ -442,6 +571,7 @@ def apply_modify_by_perm_id(
     both within the same engine session to avoid TOCTOU. Scope filters
     isolate paper/live rows that may share a perm_id namespace.
     """
+    ensure_writable()
     scope_conds: list = []
     if broker is not None:
         scope_conds.append(order_submissions.c.broker == broker)
@@ -489,6 +619,8 @@ def mark_submitted(
     perm_id: str | None,
     placing_client_id: int | None,
 ) -> None:
+    ensure_writable()
+
     def _int_or_none(value: str | None) -> int | None:
         if value is None:
             return None
@@ -544,6 +676,7 @@ def mark_terminal(
     landing between a caller's read and this write) leaves the row untouched
     and returns 0, so the caller can avoid clobbering a newer terminal state.
     """
+    ensure_writable()
     now = datetime.now(timezone.utc)
     engine = get_sync_engine()
     stmt = update(order_submissions).where(order_submissions.c.submission_id == submission_id)
@@ -582,6 +715,7 @@ def record_fill(
     broker_account: str,
 ) -> bool:
     """Idempotently record one execution-grain fill and emit fill.recorded."""
+    ensure_writable()
     if account_env == "legacy_unknown" or broker_account == "legacy_unknown":
         raise ValueError("record_fill requires explicit account scope")
 
@@ -652,6 +786,7 @@ def update_fill_commission(
     and realizedPNL on a separate message, so this writer only patches those
     post-fill report fields and emits an outbox event when anything changed.
     """
+    ensure_writable()
     incoming_commission = Decimal(str(commission))
     realized_pnl_text = str(realized_pnl) if realized_pnl is not None else None
 
@@ -715,6 +850,7 @@ def record_event(
     kind: str,
     detail: dict,
 ) -> None:
+    ensure_writable()
     engine = get_sync_engine()
     with engine.begin() as conn:
         conn.execute(

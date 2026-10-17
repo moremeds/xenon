@@ -19,6 +19,10 @@ SCRIPTS_DIR = Path(__file__).parent.parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+# Mock-transport tests — bypass the broker *boundary* check; the socket
+# denylist still refuses any real dial.
+pytestmark = pytest.mark.usefixtures("bypass_broker_boundary")
+
 
 # ---------------------------------------------------------------------------
 # 1. Range constants are correctly defined and non-overlapping

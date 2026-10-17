@@ -12,6 +12,10 @@ from unittest.mock import MagicMock, PropertyMock, call, patch
 
 import pytest
 
+# Every test here stubs ib_async.IB — bypass the broker *boundary* check so
+# connect plumbing runs; the socket denylist still refuses any real dial.
+pytestmark = pytest.mark.usefixtures("bypass_broker_boundary")
+
 # ---------------------------------------------------------------------------
 # Helpers — build mock IB objects
 # ---------------------------------------------------------------------------
