@@ -2481,6 +2481,7 @@ async def _orders_place_from_body(body: dict):
             multiplier=gate4.server_multiplier(ticker),
             con_id=int(body.get("con_id") or 0) or None,
             limit_price=Decimal(str(body.get("limitPrice", "0"))),
+            tif=body.get("tif"),
         )
     except (ValueError, TypeError, ValidationError) as exc:
         return _preflight_block_response(_invalid_order_body_response(exc))
@@ -3068,9 +3069,13 @@ async def _orders_modify_from_body(body: dict):
             result.error,
         )
         if _amend_id is not None:
-            # The amend never provably reached the broker — keep the max
-            # reservation rather than release cover we may still owe.
-            gate4.settle_modify(_submission_id, _amend_id, "uncertain", _scope)
+            # Refused before any spawn (cooldown, gateway down, send window
+            # closed): nothing reached IB, release the token (round 6,
+            # item 3). After a spawn the amend may have reached the broker —
+            # keep the max reservation rather than release cover we may owe.
+            gate4.settle_modify(
+                _submission_id, _amend_id, "rejected" if not getattr(result, "spawned", True) else "uncertain", _scope
+            )
         detail = {
             "reason_code": ReasonCode.IB_CONNECTION.value,
             "message": result.error or "Subprocess failed",
@@ -3683,6 +3688,7 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
         return ScriptResult(
             ok=False,
             error="IB Gateway connection recently failed. Retrying shortly.",
+            spawned=False,
         )
 
     # Layer 2: Pre-flight pool check
@@ -3702,12 +3708,17 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
             return ScriptResult(
                 ok=False,
                 error="IB Gateway is not accepting connections. Check IBKR Mobile for 2FA approval.",
+                spawned=False,
             )
 
     if _send_window_closed(args):
         # Cooldown / gateway probe delayed the spawn past the amend's send-by
         # instant: never start a sender Gate 4 already counts as finished.
-        return ScriptResult(ok=False, error="Modify send window closed before the IB request was sent. Retry the change.")
+        return ScriptResult(
+            ok=False,
+            error="Modify send window closed before the IB request was sent. Retry the change.",
+            spawned=False,
+        )
 
     result = await run_entry_point(entry, args, timeout=timeout)
 

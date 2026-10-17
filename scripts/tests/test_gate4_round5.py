@@ -42,6 +42,7 @@ from scripts.tests.test_gate4_route import (  # noqa: F401 — fixtures
 from scripts.tests.test_gate4_route import _seed_snapshot as _route_seed_snapshot
 from scripts.tests.test_gate4_route import _stock as _route_stock
 from scripts.tests.test_gate4_sync_pass import (  # noqa: F401 — fixtures
+    _QUALIFIED,
     ACCOUNT,
     _fresh_meta_cache,
     _insert_uuid_sell_call,
@@ -168,14 +169,38 @@ def test_confirm_needs_read_after_amend_opened():
 # ---------------------------------------------------------------------------
 
 
-def test_delayed_spawn_past_send_by_sends_nothing_and_keeps_max(client, broker_calls, fresh_quote, monkeypatch):
-    """The gateway probe delays the modify spawn past send_by: the route
-    never starts the CLI, settles uncertain, and demand stays max(1,2)
-    until a fresh read after send_by + grace."""
+def _refuse_cooldown(monkeypatch):
+    monkeypatch.setitem(server_mod._ib_last_failure, "order", time.monotonic())
+
+
+def _refuse_gateway_down(monkeypatch):
+    async def _down():
+        return {"port_listening": False, "upstream_dead": False}
+
+    monkeypatch.setattr(server_mod, "_pool_has_any_connection", lambda: False)
+    monkeypatch.setattr(server_mod, "check_ib_gateway", _down)
+
+
+def _refuse_send_window(monkeypatch):
+    async def _slow_probe():
+        await asyncio.sleep(0.3)  # spawn delayed past send_by
+        return {"port_listening": True, "upstream_dead": False}
+
+    monkeypatch.setattr(server_mod, "_pool_has_any_connection", lambda: False)
+    monkeypatch.setattr(server_mod, "check_ib_gateway", _slow_probe)
+    monkeypatch.setattr(gate4, "MODIFY_SEND_WINDOW_S", 0.1)
+
+
+@pytest.mark.parametrize("refuse", [_refuse_cooldown, _refuse_gateway_down, _refuse_send_window])
+def test_pre_spawn_refusal_sends_nothing_and_releases_token(refuse, client, broker_calls, fresh_quote, monkeypatch):
+    """Round 6 item 3 (Fable P3): the route refuses before any spawn —
+    cooldown, gateway down, or (round 5 item 2) send window closed. Nothing
+    reached IB, so the amend settles `rejected`: the token is released and a
+    retry is not blocked by MODIFY_PENDING."""
     engine = _pg_engine()
     _route_seed_snapshot(engine, [_route_stock("SPY", 200)])
     engine.dispose()
-    assert client.post("/orders/place", json=_sell_call_body("r5-fence-1")).status_code == 200
+    assert client.post("/orders/place", json=_sell_call_body("r6-refuse-1")).status_code == 200
 
     spawned = []
 
@@ -183,38 +208,38 @@ def test_delayed_spawn_past_send_by_sends_nothing_and_keeps_max(client, broker_c
         spawned.append(args)
         return ScriptResult(ok=True, data={"status": "ok"})
 
-    async def _slow_probe():
-        await asyncio.sleep(0.3)
-        return {"port_listening": True, "upstream_dead": False}
-
     monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", _REAL_RUN_IB_SCRIPT)
     monkeypatch.setattr(server_mod, "run_entry_point", _spawn)
-    monkeypatch.setattr(server_mod, "_pool_has_any_connection", lambda: False)
-    monkeypatch.setattr(server_mod, "check_ib_gateway", _slow_probe)
     monkeypatch.setitem(server_mod._ib_last_failure, "order", 0.0)
-    monkeypatch.setattr(gate4, "MODIFY_SEND_WINDOW_S", 0.1)
+    refuse(monkeypatch)
 
     resp = _modify_qty(client, 2, 1)
 
     assert resp.status_code == 503, resp.text
     assert spawned == []
     row = _submission_rows()[0]._mapping
-    legs = row["legs"]
-    assert legs["pending_amend_qty"] == 2 and row["quantity"] == 1
-    nxt = client.post("/orders/place", json=_sell_call_body("r5-fence-next"))
-    assert nxt.status_code == 400 and nxt.json()["reason_code"] == "ETF_CALL_UNCOVERED"
+    assert row["quantity"] == 1
+    assert row["legs"]["pending_amend_id"] is None and row["legs"]["pending_amend_qty"] is None
+    retry = _modify_qty(client, 2, 2)
+    assert retry.json().get("reason_code") != "MODIFY_PENDING", retry.text
+    assert spawned == []
 
+
+def test_open_amend_never_expires_before_send_by_plus_grace():
+    """No settle at all: a fresh read just before send_by + grace keeps the
+    max reservation; the first read after it expires the token."""
+    _seed_snapshot(_snapshot_payload([_stock("SPY", 300)]))
+    sub_id = _working_with_legs("r5-noexpiry", qty=1)
+    _set_perm(sub_id, "990303")
+    gate4.begin_modify(sub_id, 2, SCOPE)
+    legs = _legs(sub_id)[1]
     deadline = datetime.fromisoformat(legs["pending_amend_deadline"])
     send_by = datetime.fromisoformat(legs["pending_amend_send_by"])
     assert deadline == send_by + timedelta(seconds=gate4.AMEND_IB_GRACE_S)
-    perm = row["perm_id"]
-    late = deadline - timedelta(milliseconds=1)
-    orders_store.register_from_snapshot(perm, "4242", "SPY", "OPT", "SELL", 1, 5.0, 100, observed_at=late, **SCOPE)
-    assert _submission_rows()[0]._mapping["legs"]["pending_amend_qty"] == 2
-    out = orders_store.register_from_snapshot(
-        perm, "4242", "SPY", "OPT", "SELL", 1, 5.0, 100, observed_at=deadline + timedelta(seconds=1), **SCOPE
-    )
-    assert out["expired"] is True
+
+    _mirror("990303", 1, observed_at=deadline - timedelta(milliseconds=1))
+    assert _legs(sub_id)[1]["pending_amend_qty"] == 2
+    assert _mirror("990303", 1, observed_at=deadline + timedelta(seconds=1))["expired"] is True
 
 
 def test_route_passes_send_by_to_cli():
@@ -384,14 +409,98 @@ def test_fill_inside_lag_window_counts_as_after_snapshot(age_s, expect):
 # ---------------------------------------------------------------------------
 
 
-def _unstamped_uuid_row(perm_marker, *, placing_client_id=26):
-    sub_id = _insert_uuid_sell_call(perm_marker, qty=1, legs=None)
+def _unstamped_uuid_row(perm_marker, *, placing_client_id=26, state="WORKING", action="SELL", legs=_QUALIFIED):
+    """Xenon row placed during the permId=0 race: perm_id NULL, ib_order_id
+    = perm_marker - 900000."""
+    sub_id = _insert_uuid_sell_call(perm_marker, qty=1, legs=legs)
     _committed_sql(
-        "UPDATE xenon.order_submissions SET perm_id=NULL, placing_client_id=:c WHERE submission_id=:s",
+        "UPDATE xenon.order_submissions SET perm_id=NULL, placing_client_id=:c, state=:st, action=:a"
+        " WHERE submission_id=:s",
         c=placing_client_id,
+        st=state,
+        a=action,
         s=sub_id,
     )
     return sub_id
+
+
+def _sync_one_sell_call(monkeypatch, perm, *, shares=100, client_id=26):
+    c = _opt(500, con_id=111)
+    fake = _shares_client(shares)
+    fake.add_details(c)
+    t = _trade(c, order_id=perm - 900000, perm_id=perm)
+    t.order.clientId = client_id
+    fake.open_orders.append(t)
+    _run_sync(monkeypatch, fake)
+
+
+def _has_snapshot_row(perm):
+    return any(r._mapping["submission_id"] == f"snapshot-{perm}" for r in _submission_rows())
+
+
+def test_terminal_buy_row_is_not_adopted_by_a_new_sell(monkeypatch, client, broker_calls, fresh_quote):
+    """Astra delta-3 P1: a cancelled BUY (clientId 26, orderId reused) must
+    not absorb a new SELL call with the same ids — the SELL demand would be
+    dropped as pure BUY. A snapshot row reserves it; the next short is
+    blocked."""
+    sub_id = _unstamped_uuid_row(990330, state="CANCELLED", action="BUY")
+    _sync_one_sell_call(monkeypatch, 990330)
+
+    assert _has_snapshot_row(990330)
+    row = _row(sub_id)
+    assert row["perm_id"] is None and row["state"] == "CANCELLED"
+    resp = client.post("/orders/place", json=_sell_call_body("r6-adopt-next"))
+    assert resp.status_code == 400 and resp.json()["reason_code"] == "ETF_CALL_UNCOVERED", resp.text
+
+
+def test_cancelled_identical_row_is_not_adopted(monkeypatch, client, broker_calls, fresh_quote):
+    """Same contract, same envelope, no fills — but CANCELLED (e.g. an
+    orderId sequence reset reused clientId 26 / orderId). Only a live row
+    may be adopted."""
+    sub_id = _unstamped_uuid_row(990334, state="CANCELLED")
+    _sync_one_sell_call(monkeypatch, 990334)
+
+    assert _has_snapshot_row(990334)
+    row = _row(sub_id)
+    assert row["perm_id"] is None and row["state"] == "CANCELLED"
+
+
+@pytest.mark.parametrize("state", ["FILLED", "WORKING"])
+def test_row_with_recorded_fills_is_not_adopted(state, monkeypatch, client, broker_calls, fresh_quote):
+    """An old order whose fills are recorded (FILLED, or a row whose state
+    never moved) must not lend its fill history to a new order."""
+    sub_id = _unstamped_uuid_row(990331, state=state)
+    _insert_fill("r6-old-exec", sub_id=sub_id, qty=1, filled_at=_now() - timedelta(days=1))
+    _sync_one_sell_call(monkeypatch, 990331)
+
+    assert _has_snapshot_row(990331)
+    assert _row(sub_id)["perm_id"] is None
+
+
+def test_identity_mismatch_is_not_adopted(monkeypatch, client, broker_calls, fresh_quote):
+    other = {
+        **_QUALIFIED,
+        "legs": [{**_QUALIFIED["legs"][0], "strike": 510.0, "con_id": 5101}],
+    }
+    sub_id = _unstamped_uuid_row(990332, legs=other)
+    _sync_one_sell_call(monkeypatch, 990332)
+
+    assert _has_snapshot_row(990332)
+    assert _row(sub_id)["perm_id"] is None
+
+
+def test_two_compatible_rows_are_not_adopted(monkeypatch, client, broker_calls, fresh_quote):
+    first = _unstamped_uuid_row(990333)
+    second = _insert_uuid_sell_call(990333 + 1, qty=1, legs=_QUALIFIED)
+    _committed_sql(
+        "UPDATE xenon.order_submissions SET perm_id=NULL, placing_client_id=26, ib_order_id=:o WHERE submission_id=:s",
+        o=str(990333 - 900000),
+        s=second,
+    )
+    _sync_one_sell_call(monkeypatch, 990333)
+
+    assert _has_snapshot_row(990333)
+    assert _row(first)["perm_id"] is None and _row(second)["perm_id"] is None
 
 
 def test_unstamped_uuid_row_is_matched_by_order_and_client_id(monkeypatch, client, broker_calls, fresh_quote):
@@ -431,3 +540,80 @@ def test_unstamped_uuid_row_other_client_is_not_guessed(monkeypatch, client, bro
         ).first()
     engine.dispose()
     assert snap is not None
+
+
+# ---------------------------------------------------------------------------
+# round 6 item 2 — TIF is part of the request identity
+# ---------------------------------------------------------------------------
+
+
+def test_same_attempt_day_then_gtc_is_body_mismatch(client, broker_calls, fresh_quote):
+    engine = _pg_engine()
+    _route_seed_snapshot(engine, [_route_stock("SPY", 200)])
+    engine.dispose()
+    body = {**_sell_call_body("r6-tif-1"), "tif": "DAY"}
+    assert client.post("/orders/place", json=body).status_code == 200
+    assert _submission_rows()[0]._mapping["tif"] == "DAY"
+
+    gtc = client.post("/orders/place", json={**body, "tif": "GTC"})
+    assert gtc.status_code == 409 and gtc.json()["reason_code"] == "ATTEMPT_BODY_MISMATCH", gtc.text
+    # Omitted / lower-case TIF normalizes like the place CLI (DAY default).
+    no_tif = {k: v for k, v in body.items() if k != "tif"}
+    assert client.post("/orders/place", json=no_tif).status_code == 200
+    assert client.post("/orders/place", json={**body, "tif": "day"}).status_code == 200
+    assert len(broker_calls) == 1
+    # The stored TIF is the request's, not the column default.
+    gtc_body = {**_sell_call_body("r6-tif-2"), "tif": "GTC"}
+    assert client.post("/orders/place", json=gtc_body).status_code == 200
+    day = client.post("/orders/place", json={**gtc_body, "tif": "DAY"})
+    assert day.status_code == 409, day.text
+
+
+def test_legacy_row_without_stored_tif_compares_as_day():
+    """Pre-round-6 rows carry the column default ('DAY', or NULL in old
+    snapshots of the row): they dedupe a DAY replay and refuse GTC."""
+    from types import SimpleNamespace
+
+    req = orders_store.RequestRow(
+        ticker="SPY", security_type="OPT", action="SELL", quantity=1, multiplier=100, limit_price=5
+    )
+    row = SimpleNamespace(
+        ticker="SPY",
+        security_type="OPT",
+        action="SELL",
+        quantity=1,
+        expiry=None,
+        strike=None,
+        right=None,
+        multiplier=100,
+        con_id=None,
+        limit_price=5,
+        legs=None,
+        tif=None,
+    )
+    assert orders_store._request_body_matches(row, req, None)
+    gtc = req.model_copy(update={"tif": "GTC"})
+    assert not orders_store._request_body_matches(row, gtc, None)
+
+
+# ---------------------------------------------------------------------------
+# round 6 item 4 — the rehydrate writer keeps the watermark monotone
+# ---------------------------------------------------------------------------
+
+
+def test_rehydrate_state_writer_never_moves_watermark_back():
+    from xenon.db.engine import get_sync_engine
+    from xenon.db.queries import combo_wizard
+
+    sub_id = _working_with_legs("r6-rehydrate", qty=1)
+    later = _now() + timedelta(seconds=5)
+    _committed_sql("UPDATE xenon.order_submissions SET updated_at=:t WHERE submission_id=:s", t=later, s=sub_id)
+    with get_sync_engine().begin() as conn:
+        combo_wizard.update_order_state(conn, sub_id, "WORKING")
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        stamp = conn.execute(
+            select(order_submissions.c.updated_at).where(order_submissions.c.submission_id == sub_id)
+        ).scalar_one()
+    engine.dispose()
+    assert stamp > later

@@ -885,6 +885,7 @@ def evaluate_and_reserve(
             multiplier=request.multiplier,
             con_id=request.con_id,
             limit_price=request.limit_price,
+            tif=request.tif,
             state="PENDING",
             submitted_at=now,
             updated_at=now,

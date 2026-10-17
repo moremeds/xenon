@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import Text, cast, func, insert, literal, select, text, update
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -45,9 +45,7 @@ def ensure_writable() -> None:
     and in-process callers alike fail closed instead of silently persisting.
     """
     if os.environ.get("XENON_READ_ONLY") == "1":
-        raise ReadOnlyWriteError(
-            "XENON_READ_ONLY=1 — orders_store writes disabled (dev.sh live session)"
-        )
+        raise ReadOnlyWriteError("XENON_READ_ONLY=1 — orders_store writes disabled (dev.sh live session)")
 
 
 # ── Schema init ──
@@ -75,6 +73,14 @@ class RequestRow(BaseModel):
     multiplier: int
     con_id: int | None = None
     limit_price: Decimal
+    # Time in force, part of the request identity (round 6, item 2).
+    # Normalized like the place CLI (`params.get("tif", "DAY").upper()`).
+    tif: str = "DAY"
+
+    @field_validator("tif", mode="before")
+    @classmethod
+    def _norm_tif(cls, v):
+        return str(v or "DAY").strip().upper()
 
 
 @dataclass
@@ -198,7 +204,9 @@ def _clear_pending(payload: dict) -> dict:
     return out
 
 
-def _reconcile_pending(payload: dict, observed_qty: int, *, observed_at=None, fresh: bool = False) -> tuple[dict, str | None]:
+def _reconcile_pending(
+    payload: dict, observed_qty: int, *, observed_at=None, fresh: bool = False
+) -> tuple[dict, str | None]:
     """Resolve an open amend generation against one IB observation.
 
     Returns (payload, outcome) with outcome None (unchanged), "confirmed"
@@ -232,6 +240,52 @@ def _reconcile_pending(payload: dict, observed_qty: int, *, observed_at=None, fr
     if deadline is not None and obs is not None and obs > deadline:
         return _clear_pending(payload), "expired"
     return payload, None
+
+
+def _identity_compatible(row_action, row_legs, obs_action, obs_legs) -> bool:
+    """Same envelope action and the same legs (as a multiset).
+
+    Legs match on action + ratio, and on con_id when both sides carry one,
+    else on sym/sec/right/exp/strike. A side without a resolved leg list is
+    never compatible (round 6, item 1)."""
+    if str(row_action or "").upper() != str(obs_action or "").upper():
+        return False
+    a = normalize_legs_payload(row_legs).get("legs")
+    b = normalize_legs_payload(obs_legs).get("legs") if obs_legs is not None else None
+    if not a or not b or len(a) != len(b):
+        return False
+
+    def _same(x: dict, y: dict) -> bool:
+        if str(x.get("action") or "").upper() != str(y.get("action") or "").upper():
+            return False
+        if int(x.get("ratio") or 1) != int(y.get("ratio") or 1):
+            return False
+        if x.get("con_id") is not None and y.get("con_id") is not None:
+            return int(x["con_id"]) == int(y["con_id"])
+
+        def _f(v):
+            return None if v is None else float(v)
+
+        def _e(v):
+            return None if v is None else str(v).replace("-", "")
+
+        return (
+            str(x.get("sym") or "").upper() == str(y.get("sym") or "").upper()
+            and x.get("sec") == y.get("sec")
+            and (x.get("right") or None) == (y.get("right") or None)
+            and _e(x.get("exp")) == _e(y.get("exp"))
+            and _f(x.get("strike")) == _f(y.get("strike"))
+        )
+
+    unused = list(b)
+    for leg in a:
+        hit = next(
+            (i for i, o in enumerate(unused) if isinstance(leg, dict) and isinstance(o, dict) and _same(leg, o)), None
+        )
+        if hit is None:
+            return False
+        unused.pop(hit)
+    return True
 
 
 def _mirror_uuid_row(
@@ -371,6 +425,11 @@ def _request_body_matches(row, request: RequestRow, legs) -> bool:
         and (None if row.con_id is None else int(row.con_id))
         == (None if request.con_id is None else int(request.con_id))
         and _num(row.limit_price) == _num(request.limit_price)
+        # Rows written before round 6 never stored the request TIF: the
+        # column's server default 'DAY' is what the place path assumed for
+        # them, so they compare as DAY (a legacy GTC replay is a mismatch,
+        # never a silent duplicate of a different instruction).
+        and str(row.tif or "DAY").upper() == request.tif
         and _canon_json(row.legs) == _canon_json(legs)
     )
 
@@ -446,6 +505,7 @@ def reserve_attempt(
             multiplier=request.multiplier,
             con_id=request.con_id,
             limit_price=request.limit_price,
+            tif=request.tif,
             state="PENDING",
             submitted_at=now,
             updated_at=now,
@@ -676,17 +736,31 @@ def register_from_snapshot(
         )
         existing = conn.execute(select(*cols).where(order_submissions.c.perm_id == str(perm_id), *scope_conds)).first()
         if existing is None and client_id is not None and ib_order_id not in (None, "", "0"):
+            # Round 6, item 1: (clientId, orderId) is reusable, so it only
+            # narrows candidates. A row is adopted only when it is live (not
+            # terminal, no fills recorded), unstamped, in scope, and its
+            # envelope + legs match the observation. Anything else falls
+            # through to a snapshot row: double reservation is acceptable,
+            # dropping demand is not.
             unstamped = conn.execute(
-                select(*cols).where(
+                select(*cols, order_submissions.c.action).where(
                     func.coalesce(order_submissions.c.perm_id, "").in_(("", "0")),
                     order_submissions.c.ib_order_id == str(ib_order_id),
                     order_submissions.c.placing_client_id == int(client_id),
                     ~order_submissions.c.submission_id.startswith("snapshot-"),
+                    order_submissions.c.state.notin_(sorted(_TERMINAL_STATES | {"FILLED", "UNKNOWN"})),
+                    func.coalesce(order_submissions.c.filled_qty, 0) == 0,
+                    ~select(order_fills.c.exec_id)
+                    .where(order_fills.c.submission_id == order_submissions.c.submission_id)
+                    .exists(),
                     *scope_conds,
                 )
             ).all()
-            if len(unstamped) == 1:  # ambiguous → fall through (snapshot row over-reserves)
-                existing = unstamped[0]
+            compatible = [
+                r for r in unstamped if _identity_compatible(r.action, r.legs, action, None if legs is _UNSET else legs)
+            ]
+            if len(compatible) == 1:  # none or ambiguous → snapshot row (over-reserves)
+                existing = compatible[0]
                 conn.execute(
                     update(order_submissions)
                     .where(order_submissions.c.submission_id == existing[0])
