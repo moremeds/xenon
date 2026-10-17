@@ -153,8 +153,43 @@ import pytest_asyncio
 # Session-level asyncpg reachability cache: the probe runs at most once per
 # pytest session (per xdist worker). `is_pg_reachable` already caches the
 # sync probe; this caches the async one so a dead PG costs one timeout total,
-# not one per test.
+# not one per test. `None` = not yet probed; the probe runs ONLY while the
+# cache is None — a cached True must not trigger another SELECT 1.
 _ASYNC_PG_REACHABLE: bool | None = None
+
+
+async def _probe_async_pg(url: str) -> bool:
+    """One connection probe against the async test-DB URL.
+
+    Connection-level failures (SQLAlchemyError, OSError) return False;
+    anything else propagates — a non-connection error is a real bug and must
+    surface as an error, not a silent skip.
+    """
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    eng = create_async_engine(url, pool_pre_ping=True)
+    try:
+        async with eng.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except (SQLAlchemyError, OSError):
+        return False
+    finally:
+        await eng.dispose()
+    return True
+
+
+async def _ensure_async_pg_reachable(url: str) -> None:
+    """Resolve the async reachability cache exactly once, then skip or pass.
+
+    Probes only while `_ASYNC_PG_REACHABLE` is None: a cached False means
+    "proved unreachable" and a cached True means "proved reachable" — both
+    short-circuit without touching the DB again.
+    """
+    global _ASYNC_PG_REACHABLE
+    if _ASYNC_PG_REACHABLE is None:
+        _ASYNC_PG_REACHABLE = is_pg_reachable() and await _probe_async_pg(url)
+    if not _ASYNC_PG_REACHABLE:
+        pytest.skip(f"PG test DB unreachable at {url}")
 
 
 @pytest_asyncio.fixture
@@ -167,27 +202,31 @@ async def async_engine():
     """
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    global _ASYNC_PG_REACHABLE
-    if _ASYNC_PG_REACHABLE is False or not is_pg_reachable():
-        pytest.skip(f"PG test DB unreachable at {sync_test_db_url()}")
-
     url = async_test_db_url()
+    await _ensure_async_pg_reachable(url)
     eng = create_async_engine(url, pool_pre_ping=True)
-    try:
-        async with eng.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-    except (SQLAlchemyError, OSError) as exc:
-        # Connection-level failures only — anything else is a real bug and
-        # must surface as an error, not a silent skip.
-        await eng.dispose()
-        _ASYNC_PG_REACHABLE = False
-        pytest.skip(f"PG test DB unreachable at {url}: {exc}")
-    else:
-        _ASYNC_PG_REACHABLE = True
     try:
         yield eng
     finally:
         await eng.dispose()
+
+
+@pytest.fixture
+def bypass_broker_boundary(monkeypatch):
+    """Opt-in for mock-transport tests: neutralize the broker BOUNDARY
+    allowlist only, so `IBClient.connect`/`connect_ib` plumbing can run
+    against a stubbed `ib.connect`. The socket denylist and the child guard
+    stay armed — a real broker-port dial is still refused. Apply per-file
+    with `pytestmark = pytest.mark.usefixtures("bypass_broker_boundary")`.
+    """
+    monkeypatch.setattr(
+        "xenon.clients.ib_client.assert_broker_endpoint_allowed",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "xenon.utils.ib_connection.assert_broker_endpoint_allowed",
+        lambda *_a, **_k: None,
+    )
 
 
 @pytest.fixture

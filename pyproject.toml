@@ -122,7 +122,7 @@ norecursedirs = [
 markers = [
     "e2e: end-to-end tests requiring live external services",
     "committed_db: test needs row-level commits visible across separate SQLAlchemy engines (subprocess CLIs, ad-hoc create_engine helpers). Uses Phase 1 TRUNCATE pre+post instead of Phase 2 txn rollback.",
-    "live_ib: test connects to the live IB Gateway (port 4001). Deselected by default addopts; run explicitly with `pytest -m live_ib`.",
-    "paper_ib: test connects to the paper IB Gateway (127.0.0.1:4002). Exempt from the broker-connection deny fixture; only run when explicit paper config is in place.",
+    "live_ib: test connects to the live IB Gateway (port 4001). Deselected by default addopts; run explicitly with `pytest -m live_ib`. Operator opt-in — the only exemption from the broker guard (all layers no-op).",
+    "paper_ib: test connects to the paper IB Gateway (127.0.0.1:4002). Sets XENON_TEST_BROKER_ALLOW=127.0.0.1:4002 — the one endpoint every guard layer lets through; all other broker endpoints still refused. Only run when explicit paper config is in place.",
 ]
 

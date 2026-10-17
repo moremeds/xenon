@@ -7,10 +7,18 @@ workers using spawn). It patches ``socket.socket.connect`` / ``connect_ex``
 to refuse the broker API ports — IB Gateway 4001 (live) / 4002 (paper) and
 TWS 7496 (live) / 7497 (paper) — on ANY host.
 
+The guard is armed only while ``XENON_TEST_BROKER_GUARD`` equals ``"1"`` —
+the root conftest sets it for the pytest session and children inherit it.
+Outside a test session the env is absent and the patched functions are a
+pure pass-through, so production behavior is unchanged even if this file
+somehow lands on PYTHONPATH.
+
 Escape hatch: when ``XENON_TEST_BROKER_ALLOW`` equals exactly
 ``"127.0.0.1:4002"`` (set by the ``paper_ib`` marker in the parent pytest),
 a connect to exactly ``("127.0.0.1", 4002)`` delegates to the real socket.
-Everything else broker-port-bound is denied regardless.
+Everything else broker-port-bound is denied regardless. ``live_ib`` tests
+delete the guard env, so their children connect unguarded — ``-m live_ib``
+is an explicit operator opt-in.
 """
 
 import errno
@@ -32,6 +40,7 @@ for _p in sys.path:
 
 
 _BROKER_PORTS = frozenset({4001, 4002, 7496, 7497})
+_GUARD_ENV = "XENON_TEST_BROKER_GUARD"
 _ALLOW_ENV = "XENON_TEST_BROKER_ALLOW"
 _ALLOWED_ENDPOINT = ("127.0.0.1", 4002)
 
@@ -45,6 +54,8 @@ class BrokerConnectDenied(ConnectionRefusedError):
 
 
 def _denied(address) -> bool:
+    if os.environ.get(_GUARD_ENV) != "1":
+        return False
     if not (isinstance(address, tuple) and len(address) >= 2 and address[1] in _BROKER_PORTS):
         return False
     if (

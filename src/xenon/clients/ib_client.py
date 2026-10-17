@@ -32,6 +32,7 @@ from dotenv import load_dotenv
 from ib_async import IB, FlexReport, Option
 
 from xenon.api.trading_mode import EXPECTED_PORT as _EXPECTED_PORT
+from xenon.utils.ib_connection import assert_broker_endpoint_allowed
 
 # Load root .env so IB_GATEWAY_HOST is available before DEFAULT_HOST is computed
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -251,6 +252,10 @@ class IBClient:
                 *client_id* override is given.
             IBConnectionError: If the connection cannot be established.
         """
+        # Test-session broker boundary allowlist — no-op outside pytest
+        # (XENON_TEST_BROKER_GUARD unset in production). Covers this path,
+        # the "auto" allocation loop, and reconnects (which call connect()).
+        assert_broker_endpoint_allowed(host, port)
         # Resolve client ID
         if client_id == "auto":
             return self._connect_auto_allocate(host, port, timeout)
@@ -450,6 +455,10 @@ class IBClient:
         if self._reconnecting:
             self.logger.debug("Already reconnecting, skipping concurrent attempt")
             return
+
+        # Same boundary allowlist as connect() — this path calls
+        # self._ib.connect directly, so it needs its own check.
+        assert_broker_endpoint_allowed(self._last_host, self._last_port)
 
         self._reconnecting = True
         self.logger.warning("Disconnected from IB — attempting reconnection")
