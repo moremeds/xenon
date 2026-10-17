@@ -642,6 +642,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Read-only write guard — must stay INNER relative to auth_middleware (defined
+# below) so unauthenticated requests still get 401 first. Under
+# XENON_READ_ONLY=1 it refuses order/journal/wizard writes before FastAPI
+# decodes the body — malformed JSON would otherwise 422 ahead of the
+# route-level guards.
+_READ_ONLY_WRITE_PATHS = frozenset(
+    {
+        "/orders/place",
+        "/orders/cancel",
+        "/orders/modify",
+        "/journal",
+        "/wizard/plan",
+        "/wizard/sessions",
+    }
+)
+# POST /orders/refresh is deliberately absent: under read-only it serves the
+# PG view with 200 (no subprocess, no write).
+_WIZARD_SESSION_ACTIONS = frozenset({"submit", "reprice", "abort", "protect"})
+
+
+def _is_write_path(path: str) -> bool:
+    if path in _READ_ONLY_WRITE_PATHS:
+        return True
+    if path.startswith("/wizard/sessions/"):
+        return path.rsplit("/", 1)[-1] in _WIZARD_SESSION_ACTIONS
+    return False
+
+
+@app.middleware("http")
+async def read_only_write_guard(request: Request, call_next):
+    if (
+        is_read_only()
+        and request.method in {"POST", "PUT", "PATCH", "DELETE"}
+        and _is_write_path(request.url.path)
+    ):
+        return read_only_403()
+    return await call_next(request)
+
+
 # Auth middleware — only /health and the internal ticket-validate probe are exempt.
 # /docs and /openapi.json are deliberately NOT exempt: they expose the full trading
 # API schema and now require auth (localhost / internal token / Clerk).

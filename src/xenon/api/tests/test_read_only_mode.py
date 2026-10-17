@@ -134,6 +134,39 @@ def test_wizard_post_read_only_precedes_body_validation(read_only_client, path):
     assert r.json().get("reason_code") == "READ_ONLY_MODE", r.json()
 
 
+# Every write route the read-only ASGI guard covers — POST/PUT/PATCH/DELETE
+# only; /orders/refresh stays open under read-only (it serves the PG view).
+_WRITE_PATHS = [
+    "/orders/place",
+    "/orders/cancel",
+    "/orders/modify",
+    "/journal",
+    "/wizard/plan",
+    "/wizard/sessions",
+    "/wizard/sessions/wiz-ro/submit",
+    "/wizard/sessions/wiz-ro/reprice",
+    "/wizard/sessions/wiz-ro/abort",
+    "/wizard/sessions/wiz-ro/protect",
+]
+
+
+@pytest.mark.parametrize("path", _WRITE_PATHS)
+def test_read_only_refuses_malformed_json_body(read_only_client, path):
+    """Malformed JSON gets 403 READ_ONLY_MODE, not 422 — the ASGI guard runs
+    before FastAPI decodes the request body."""
+    r = read_only_client.post(path, content="{", headers={"Content-Type": "application/json"})
+    assert r.status_code == 403, r.text
+    assert r.json().get("reason_code") == "READ_ONLY_MODE", r.json()
+
+
+@pytest.mark.parametrize("path", _WRITE_PATHS)
+def test_read_only_refuses_schema_invalid_body(read_only_client, path):
+    """Schema-invalid bodies get the 403 refusal ahead of validation."""
+    r = read_only_client.post(path, json={"bogus": True})
+    assert r.status_code == 403, r.text
+    assert r.json().get("reason_code") == "READ_ONLY_MODE", r.json()
+
+
 def test_journal_post_returns_403_in_read_only(read_only_client):
     """POST /journal also blocks — journal writes are user-authored state."""
     r = read_only_client.post(
@@ -436,3 +469,28 @@ def test_combo_session_mutators_refuse_before_state_work(monkeypatch):
     _assert_read_only(asyncio.run(combo_session.submit_combo("wiz-x", {})))
     _assert_read_only(asyncio.run(combo_session.reprice_combo("wiz-x", {"target_price": "1.00"})))
     _assert_read_only(asyncio.run(combo_session.abort_session("wiz-x")))
+
+
+def test_attach_protection_refuses_in_read_only(monkeypatch):
+    """attach_protection under XENON_READ_ONLY returns the 403 refusal before
+    any session read or injected-broker call."""
+    monkeypatch.setenv("XENON_READ_ONLY", "1")
+    from xenon.execution.combo_wizard import protect as combo_protect
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("_load_session reached under read-only")
+
+    monkeypatch.setattr(combo_protect, "_load_session", _boom)
+
+    class _BoomIB:
+        def __getattr__(self, name):
+            raise AssertionError(f"ib.{name} reached under read-only")
+
+    resp = combo_protect.attach_protection(
+        "wiz-x",
+        ib=_BoomIB(),
+        tp_target_price=Decimal("1.00"),
+        alert_net_mid_threshold=Decimal("0.50"),
+    )
+    assert getattr(resp, "status_code", None) == 403, resp
+    assert json.loads(resp.body)["reason_code"] == "READ_ONLY_MODE"
