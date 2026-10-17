@@ -12,7 +12,17 @@ from xenon.db.queries.futu_history import insert_cashflows
 from xenon.execution.account_scope import AccountScope
 from xenon.utils.portfolio_loader import upsert_nav_sync
 
-pytestmark = pytest.mark.asyncio
+# committed_db: seeds nav via the sync engine while compute() reads via the
+# async engine — the writes must really commit to be visible cross-connection.
+pytestmark = [pytest.mark.asyncio, pytest.mark.committed_db]
+
+
+@pytest.fixture(autouse=True)
+def _below_min_days_gate(monkeypatch):
+    # This module pins flow-adjusted return semantics, not the min-history
+    # gate; a few-point curve must not trip XENON_PERF_MIN_DAYS_CURVE (def 5).
+    monkeypatch.setenv("XENON_PERF_MIN_DAYS_CURVE", "1")
+
 
 _SCOPE = AccountScope(broker="FUTU", account_env="live", broker_account="FUTU_UNMASK1")
 
