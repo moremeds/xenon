@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { optionKey } from "../lib/pricesProtocol";
 import type { PriceData } from "../lib/pricesProtocol";
 import type { PortfolioPosition } from "../lib/types";
-import { getOptionDailyChg } from "../lib/positionUtils";
+import { getOptionDailyChg, getTodayPnlDollars } from "../lib/positionUtils";
 
 /**
  * Real test of getOptionDailyChg (web/lib/positionUtils.ts) — the non-same-day
@@ -88,6 +88,28 @@ describe("getOptionDailyChg — non-same-day (close-value denominator)", () => {
     const prices = { [key]: makePriceData({ symbol: key, last: 1.4, close: 2.0 }) };
     // dailyPnl = (1.40 - 2.00) * 25 * 100 = -$1,500; closeValue = $5,000 → -30%
     expect(getOptionDailyChg(pos, prices)).toBeCloseTo(-30, 1);
+  });
+
+  it("short option (credit): negative net close value still yields signed % of |close value|", () => {
+    // Short Put — net yesterday-close value is NEGATIVE (short leg contributes
+    // -close). This is the case that breaks if Math.abs is dropped from the
+    // denominator: +$1,000 / -$5,000 = -20% instead of +20%.
+    const pos: PortfolioPosition = {
+      id: 5, ticker: "XYZW", structure: "Short Put $100",
+      structure_type: "Option", risk_profile: "undefined",
+      expiry: "2026-03-20", contracts: 10, direction: "SHORT",
+      entry_cost: -3000, max_risk: null, market_value: null,
+      ib_daily_pnl: null, kelly_optimal: null, target: null, stop: null,
+      entry_date: "2026-03-05",
+      legs: [{ direction: "SHORT", contracts: 10, type: "Put", strike: 100, entry_cost: -3000, avg_cost: 3.0, market_price: null, market_value: null }],
+    };
+    const key = optionKey({ symbol: "XYZW", expiry: "20260320", strike: 100, right: "P" });
+    const prices = { [key]: makePriceData({ symbol: key, last: 4.0, close: 5.0 }) };
+    // closeValue = -1 * 5.00 * 10 * 100 = -$5,000 (negative).
+    // dailyPnl   = -1 * (4.00 - 5.00) * 10 * 100 = +$1,000 (short decayed → gain).
+    // Denominator must be |-5,000| → +20%. Without Math.abs → -20% (fail).
+    expect(getTodayPnlDollars(pos, prices)).toBeCloseTo(1000, 1);
+    expect(getOptionDailyChg(pos, prices)).toBeCloseTo(20, 1);
   });
 
   it("returns null for stock positions", () => {

@@ -64,6 +64,7 @@ import type { ModifyOrderRequest } from "@/lib/orderModify";
 import PerformancePanel from "./PerformancePanel";
 import InfoTooltip from "./InfoTooltip";
 import { SECTION_TOOLTIPS } from "@/lib/sectionTooltips";
+import type { FutuInitialRead } from "@/lib/useFutuPortfolio";
 import TickerLink from "./TickerLink";
 import TickerWorkspace from "./TickerWorkspace";
 import { MarketState } from "@/lib/useMarketHours";
@@ -630,10 +631,18 @@ function PortfolioSections({
   portfolio,
   prices,
   activeAccount = "ib",
+  futuRead,
+  onFutuRetry,
+  futuRetrying = false,
 }: {
   portfolio: PortfolioData | null;
   prices?: Record<string, PriceData>;
   activeAccount?: "ib" | "futu";
+  /** Futu tab only: result of the initial /api/futu/portfolio read. */
+  futuRead?: FutuInitialRead;
+  /** Futu tab only: retry action wired to useFutuPortfolio().syncNow(). */
+  onFutuRetry?: () => void;
+  futuRetrying?: boolean;
 }) {
   const positions = useMemo(
     () => portfolio?.positions ?? EMPTY_POSITIONS,
@@ -748,6 +757,14 @@ function PortfolioSections({
   );
 
   if (!portfolio) {
+    // Futu tab: the initial read finished with a definitive non-data
+    // outcome — describe the measurement condition instead of spinning
+    // LOADING forever (nothing more arrives until the user syncs).
+    const futuEmptyState: "never_synced" | "unavailable" | null =
+      activeAccount === "futu" &&
+      (futuRead === "never_synced" || futuRead === "unavailable")
+        ? futuRead
+        : null;
     return (
       <>
         {toggleHeader}
@@ -758,10 +775,37 @@ function PortfolioSections({
               Portfolio
               <InfoTooltip text={SECTION_TOOLTIPS["Defined Risk Positions"]} />
             </div>
-            <span className="pill neutral">LOADING</span>
+            <span className="pill neutral">
+              {futuEmptyState === "never_synced"
+                ? "NEVER SYNCED"
+                : futuEmptyState === "unavailable"
+                  ? "UNAVAILABLE"
+                  : "LOADING"}
+            </span>
           </div>
           <div className="section-body">
-            <div className="alert-item">Waiting for portfolio data...</div>
+            {futuEmptyState ? (
+              <>
+                <div className="alert-item" data-testid="futu-empty-state">
+                  {futuEmptyState === "never_synced"
+                    ? "Futu not yet synced — start Futu OpenD, then sync."
+                    : "Futu unavailable — FastAPI did not return a snapshot."}
+                </div>
+                {onFutuRetry ? (
+                  <button
+                    type="button"
+                    className="sync-button"
+                    onClick={onFutuRetry}
+                    disabled={futuRetrying}
+                    data-testid="futu-retry"
+                  >
+                    {futuRetrying ? "Syncing..." : "Retry sync"}
+                  </button>
+                ) : null}
+              </>
+            ) : (
+              <div className="alert-item">Waiting for portfolio data...</div>
+            )}
           </div>
         </div>
       </>
@@ -2598,6 +2642,18 @@ type WorkspaceSectionsProps = {
    * IB data regardless of the broker tab.
    */
   activeAccount?: "ib" | "futu";
+  /**
+   * Futu tab only: result of the initial /api/futu/portfolio read from
+   * useFutuPortfolio(). When it resolves to `never_synced` (404) or
+   * `unavailable` (502/other) the portfolio section renders a
+   * measurement-condition empty state with a retry action instead of
+   * LOADING forever. Absent/`pending` keeps the existing LOADING panel
+   * (also used by the IB tab, whose hook has no such state).
+   */
+  futuRead?: FutuInitialRead;
+  /** Futu tab only: retry action wired to useFutuPortfolio().syncNow(). */
+  onFutuRetry?: () => void;
+  futuRetrying?: boolean;
 };
 
 // =============================================================================
@@ -2641,6 +2697,9 @@ export default function WorkspaceSections({
   theme,
   marketState,
   activeAccount = "ib",
+  futuRead,
+  onFutuRetry,
+  futuRetrying,
 }: WorkspaceSectionsProps) {
   usePerfTracker("WorkspaceSections");
   switch (section) {
@@ -2652,6 +2711,9 @@ export default function WorkspaceSections({
           portfolio={portfolio ?? null}
           prices={prices}
           activeAccount={activeAccount}
+          futuRead={futuRead}
+          onFutuRetry={onFutuRetry}
+          futuRetrying={futuRetrying}
         />
       );
     case "performance":
@@ -2683,6 +2745,9 @@ export default function WorkspaceSections({
           portfolio={portfolio ?? null}
           prices={prices}
           activeAccount={activeAccount}
+          futuRead={futuRead}
+          onFutuRetry={onFutuRetry}
+          futuRetrying={futuRetrying}
         />
       );
   }
