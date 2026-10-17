@@ -31,10 +31,10 @@ export function usePerfTracker(name: string, intervalMs = 5000) {
 
       const style =
         Number(rps) > 5
-          ? "color: #ff6b6b; font-weight: bold"
+          ? "color: #ff6b6b; font-weight: bold" // brand: devtools %c styles cannot resolve var()
           : Number(rps) > 1
-            ? "color: #ffd93d"
-            : "color: #6bff6b";
+            ? "color: #ffd93d" // brand: devtools %c styles cannot resolve var()
+            : "color: #6bff6b"; // brand: devtools %c styles cannot resolve var()
 
       console.log(
         `%c[perf ${pathname}] ${name}: ${count} renders in ${elapsed.toFixed(1)}s (${rps}/s)`,
