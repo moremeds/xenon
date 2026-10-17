@@ -461,3 +461,50 @@ def test_ib_sync_import_fails_loudly_when_audit_is_broken(monkeypatch):
     fresh = importlib.util.module_from_spec(spec)
     with pytest.raises(ImportError):
         spec.loader.exec_module(fresh)
+
+
+# ---------------------------------------------------------------------------
+# Shadow evidence for PR-11 (Fable P2-2, P3)
+# ---------------------------------------------------------------------------
+
+
+def _detail_of(payload, orders, monkeypatch):
+    calls = []
+    monkeypatch.setattr(nsa, "record_service_health", lambda *a, **k: calls.append((a, k)))
+    r = _run(payload, orders)
+    return r, json.loads(calls[0][1]["detail"])
+
+
+def test_health_detail_carries_violation_legs_and_guarantee(monkeypatch):
+    """A TWS vertical without a NonGuaranteed tag is flagged under leg
+    independence; legs + guaranteed let the shadow review count that class."""
+    bag = _bag([_bag_leg("BUY", "C", 200.0, 111), _bag_leg("SELL", "C", 210.0, 112)])
+    r, detail = _detail_of(_payload(), [_order(bag, action="BUY")], monkeypatch)
+    assert r.status == "violations"
+    (entry,) = detail["orders"]
+    assert entry["guaranteed"] is None
+    assert [(leg["action"], leg["right"], leg["strike"], leg["sec"]) for leg in entry["legs"]] == [
+        ("BUY", "C", 200.0, "OPT"),
+        ("SELL", "C", 210.0, "OPT"),
+    ]
+    assert r.violations[0]["legs"] == entry["legs"]
+    assert r.violations[0]["guaranteed"] is None
+
+
+def test_health_detail_reports_held_exposure_without_orders(monkeypatch):
+    payload = _payload(_call_pos(contracts=1, direction="SHORT"), _stock_pos(sym="MSFT", shares=-50))
+    r, detail = _detail_of(payload, [], monkeypatch)
+    assert r.status == "ok" and r.violations == []  # status semantics unchanged
+    assert detail["held_uncovered"] == {"AAPL|AAPL|20261218|100": 1}
+    assert detail["held_short_stock"] == {"MSFT": 50}
+    assert r.summary()["held_uncovered"] == detail["held_uncovered"]
+
+
+def test_held_exposure_excludes_skipped_symbols(monkeypatch):
+    payload = _payload(_call_pos(contracts=1, direction="SHORT"))
+    r, detail = _detail_of(payload, [_order(_opt_contract(con_id=112), account=None)], monkeypatch)
+    assert detail["held_uncovered"] == {}
+
+
+def test_docstring_says_violations_are_not_the_cancel_set():
+    assert "not the cancel set" in nsa.__doc__

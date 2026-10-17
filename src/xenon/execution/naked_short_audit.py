@@ -16,6 +16,14 @@ Shadow only: violations are logged and recorded in
 `service_health("naked_short_audit")`. This module has no broker access and
 no cancel path; enforcement (PR-11) is a separate, opt-in step.
 
+`violations` lists every contributor — each live order whose removal lowers
+uncovered short calls or short stock — and is not the cancel set: two SELL
+calls against 100 shares are both listed although cancelling one suffices.
+Enforcement must cancel one order, then re-sync and recompute (spec §2.4).
+Each entry carries its `legs` and `guaranteed` mode; `held_uncovered` /
+`held_short_stock` report exposure already in holdings with no attributable
+order (it does not change `status`).
+
 Skip-and-log, never a violation. The whole audit is skipped when:
 - the scope account is blank, whitespace or an unknown-account sentinel
   (`coverage.is_real_account`);
@@ -68,6 +76,10 @@ class AuditResult:
     violations: list[dict] = field(default_factory=list)
     skipped: list[dict] = field(default_factory=list)
     reason: str | None = None
+    # Exposure already in holdings (no order attributable): key -> contracts,
+    # symbol -> shares. Reported only; it never changes `status`.
+    held_uncovered: dict[str, int] = field(default_factory=dict)
+    held_short_stock: dict[str, int] = field(default_factory=dict)
 
     def summary(self) -> dict:
         return {
@@ -76,6 +88,8 @@ class AuditResult:
             "reason": self.reason,
             "violations": self.violations,
             "skipped": self.skipped,
+            "held_uncovered": self.held_uncovered,
+            "held_short_stock": self.held_short_stock,
         }
 
 
@@ -244,6 +258,7 @@ def find_violations(
         return coverage.uncovered(holdings, subset, **kw), coverage.short_stock(holdings, subset, **kw)
 
     unc_all, ss_all = _measure(orders)
+    held_unc, held_ss = _measure([])
     violations: list[dict] = []
     for i, (order, o) in enumerate(kept):
         unc_wo, ss_wo = _measure(orders[:i] + orders[i + 1 :])
@@ -261,9 +276,19 @@ def find_violations(
                     "status": order.state,
                     "uncovered_calls": calls,
                     "short_stock": stock,
+                    # Shadow evidence: lets the review count legitimate
+                    # structures flagged under leg independence.
+                    "legs": gate4.serialize_legs(list(order.legs or ())),
+                    "guaranteed": order.guaranteed,
                 }
             )
-    return AuditResult("violations" if violations else "ok", violations, skipped)
+    return AuditResult(
+        "violations" if violations else "ok",
+        violations,
+        skipped,
+        held_uncovered={_key_str(k): n for k, n in sorted(held_unc.items()) if k[0].upper() not in skip_syms},
+        held_short_stock={s: n for s, n in sorted(held_ss.items()) if s.upper() not in skip_syms},
+    )
 
 
 def _log(result: AuditResult, scope_account: str) -> None:
@@ -299,7 +324,12 @@ def _health_detail(result: AuditResult) -> str:
             "reason": result.reason,
             "violations": len(result.violations),
             "skipped": len(result.skipped),
-            "orders": [{k: v[k] for k in ("symbol", "client_id", "order_id", "perm_id")} for v in result.violations],
+            "orders": [
+                {k: v[k] for k in ("symbol", "client_id", "order_id", "perm_id", "legs", "guaranteed")}
+                for v in result.violations
+            ],
+            "held_uncovered": result.held_uncovered,
+            "held_short_stock": result.held_short_stock,
         }
     )
 
