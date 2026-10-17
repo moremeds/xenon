@@ -21,6 +21,7 @@ def test_sync_open_orders_to_postgres_registers_snapshot_rows():
                 "orderId": 7001,
                 "permId": 9001,
                 "symbol": "AAPL",
+                "account": "DU0000000",
                 "contract": {"secType": "STK", "symbol": "AAPL"},
                 "action": "BUY",
                 "totalQuantity": 100,
@@ -30,7 +31,7 @@ def test_sync_open_orders_to_postgres_registers_snapshot_rows():
         scope=BROKER_SCOPE,
     )
 
-    assert result == {"registered": 1, "updated": 0, "resurrected": 0, "skipped": 0, "open_count": 1}
+    assert result == {"registered": 1, "updated": 0, "resurrected": 0, "skipped": 0, "skipped_foreign": 0, "skipped_unprovenanced": 0, "open_count": 1}
     engine = get_sync_engine()
     with engine.connect() as conn:
         row = conn.execute(select(order_submissions)).one()._mapping
@@ -54,6 +55,7 @@ def test_sync_registers_bag_order_with_zero_order_id():
                 "orderId": 0,
                 "permId": 272529181,
                 "symbol": "SPX Spread",
+                "account": "DU0000000",
                 "contract": {"secType": "BAG", "symbol": "SPX", "conId": 28812380},
                 "action": "SELL",
                 "totalQuantity": 4,
@@ -85,6 +87,7 @@ def test_sync_persists_tif_from_ib_order():
                 "orderId": 16,
                 "permId": 9999,
                 "symbol": "QQQ",
+                "account": "DU0000000",
                 "contract": {"secType": "STK", "symbol": "QQQ"},
                 "action": "BUY",
                 "totalQuantity": 1,
@@ -117,6 +120,7 @@ def test_sync_resurrects_cancelled_snapshot_when_ib_still_reports_open():
                 "orderId": 8001,
                 "permId": 8101,
                 "symbol": "MSFT",
+                "account": "DU0000000",
                 "contract": {"secType": "STK", "symbol": "MSFT"},
                 "action": "BUY",
                 "totalQuantity": 5,
@@ -140,6 +144,7 @@ def test_sync_resurrects_cancelled_snapshot_when_ib_still_reports_open():
                 "orderId": 8001,
                 "permId": 8101,
                 "symbol": "MSFT",
+                "account": "DU0000000",
                 "contract": {"secType": "STK", "symbol": "MSFT"},
                 "action": "BUY",
                 "totalQuantity": 5,
@@ -166,6 +171,7 @@ def test_sync_counts_updates_and_skips_separately():
                 "orderId": 7100,
                 "permId": 9100,
                 "symbol": "QQQ",
+                "account": "DU0000000",
                 "contract": {"secType": "STK", "symbol": "QQQ"},
                 "action": "BUY",
                 "totalQuantity": 50,
@@ -174,7 +180,7 @@ def test_sync_counts_updates_and_skips_separately():
         ],
         scope=BROKER_SCOPE,
     )
-    assert first == {"registered": 1, "updated": 0, "resurrected": 0, "skipped": 0, "open_count": 1}
+    assert first == {"registered": 1, "updated": 0, "resurrected": 0, "skipped": 0, "skipped_foreign": 0, "skipped_unprovenanced": 0, "open_count": 1}
 
     second = sync_open_orders_to_postgres(
         [
@@ -182,6 +188,7 @@ def test_sync_counts_updates_and_skips_separately():
                 "orderId": 7100,
                 "permId": 9100,
                 "symbol": "QQQ",
+                "account": "DU0000000",
                 "contract": {"secType": "STK", "symbol": "QQQ"},
                 "action": "BUY",
                 "totalQuantity": 50,
@@ -190,4 +197,4 @@ def test_sync_counts_updates_and_skips_separately():
         ],
         scope=BROKER_SCOPE,
     )
-    assert second == {"registered": 0, "updated": 1, "resurrected": 0, "skipped": 0, "open_count": 1}
+    assert second == {"registered": 0, "updated": 1, "resurrected": 0, "skipped": 0, "skipped_foreign": 0, "skipped_unprovenanced": 0, "open_count": 1}

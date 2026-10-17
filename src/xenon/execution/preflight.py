@@ -55,6 +55,13 @@ class ReasonCode(StrEnum):
     ORDER_IDENTIFIER_REQUIRED = "ORDER_IDENTIFIER_REQUIRED"
     PORTFOLIO_SNAPSHOT_REQUIRED = "PORTFOLIO_SNAPSHOT_REQUIRED"
     PORTFOLIO_SNAPSHOT_STALE = "PORTFOLIO_SNAPSHOT_STALE"
+    # PR-03b — Gate-4 atomic reservation: data-integrity problems that are
+    # neither view staleness nor a classifiable coverage breach.
+    GATE4_UNRESOLVED = "GATE4_UNRESOLVED"
+    MODIFY_GUARANTEE_MODE = "MODIFY_GUARANTEE_MODE"
+    # Guaranteed all-OPT BAG rejected leg-by-leg but accepted under netting
+    # — send the legs as separate orders, BUY leg first (spec §2.3).
+    COMBO_SPLIT_REQUIRED = "COMBO_SPLIT_REQUIRED"
     READ_ONLY_BROKER = "READ_ONLY_BROKER"
     # F7 — pending timeout (PR-D)
     PENDING_TIMEOUT = "PENDING_TIMEOUT"

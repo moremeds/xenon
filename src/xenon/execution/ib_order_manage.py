@@ -489,6 +489,7 @@ def modify_order(
     new_quantity: Optional[int] = None,
     account: Optional[str] = None,
     client_id: Optional[int] = None,
+    non_guaranteed: Optional[int] = None,
 ):
     """Modify an open order.
 
@@ -611,10 +612,15 @@ def modify_order(
     # Ensure NonGuaranteed is set for combo/BAG orders.
     # IB's open order snapshot may strip smartComboRoutingParams;
     # re-submitting without it causes "Missing or invalid NonGuaranteed value".
+    # The mode is always sent explicitly from the API route's persisted
+    # value (--non-guaranteed); the "1" fallback only covers direct CLI use
+    # without the flag — never a silent mode change.
     if trade.contract.secType == "BAG":
         from ib_async import TagValue
 
-        trade.order.smartComboRoutingParams = [TagValue("NonGuaranteed", "1")]
+        trade.order.smartComboRoutingParams = [
+            TagValue("NonGuaranteed", str(non_guaranteed) if non_guaranteed is not None else "1")
+        ]
 
     client.place_order(trade.contract, trade.order)
 
@@ -708,6 +714,13 @@ def main():
     modify_p.add_argument("--new-price", type=float)
     modify_p.add_argument("--new-quantity", type=int)
     modify_p.add_argument(
+        "--non-guaranteed",
+        type=int,
+        choices=[0, 1],
+        default=None,
+        help="Explicit NonGuaranteed mode for BAG modifies (0=guaranteed, 1=non-guaranteed)",
+    )
+    modify_p.add_argument(
         "--outside-rth", action="store_true", default=None, help="Allow order to fill outside regular trading hours"
     )
     modify_p.add_argument(
@@ -757,6 +770,7 @@ def main():
                 new_quantity=args.new_quantity,
                 account=args.account,
                 client_id=args.client_id,
+                non_guaranteed=args.non_guaranteed,
             )
     except IBConnectionError as exc:
         # Connection dropped mid-operation (stale socket, gateway restart) —

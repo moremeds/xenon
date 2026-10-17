@@ -894,17 +894,25 @@ def build_account_summary(account: dict, pnl_data: dict) -> dict:
     }
 
 
-def build_fill_dates(client) -> dict:
+def build_fill_dates(client, *, status: dict | None = None) -> dict:
     """Extract earliest execution date per contract from IB session fills.
 
     Returns dict keyed by "TICKER|EXPIRY|RIGHT|STRIKE" → "YYYY-MM-DD".
     Covers same-session trades that haven't appeared in Flex Query (blotter) yet.
+
+    `status` (optional) receives ``executions=True/False`` — the sync pass's
+    observation stamp attests this read's success, so a failed fills read
+    must degrade the snapshot to complete=False instead of passing silently.
     """
     fill_dates: dict[str, str] = {}
     try:
         fills = client.get_fills()
     except Exception:
+        if status is not None:
+            status["executions"] = False
         return fill_dates
+    if status is not None:
+        status["executions"] = True
 
     for fill in fills:
         contract = fill.contract
@@ -1219,10 +1227,12 @@ def save_portfolio(portfolio: dict):
             print(f"  Warning: NAV snapshot failed: {exc}")
 
 
-def _open_orders_for_audit(client) -> list[dict]:
+def _fetch_open_orders_for_pass(client) -> tuple[list[dict], bool]:
     """Pull open orders from IB and shape them for naked_short_audit.
 
-    Replaces the old `data/orders.json` read. The audit's pure function
+    Returns (orders, ok) — `ok` attests the read succeeded so the sync pass
+    can stamp `observation.reads.open_orders`. Replaces the old
+    `data/orders.json` read. The audit's pure function
     (`find_naked_short_violations`) expects a list of dicts shaped like the
     web app's open_orders payload — this adapter mirrors that shape from
     live ib_async Trade objects so we don't depend on a separate process
@@ -1232,7 +1242,7 @@ def _open_orders_for_audit(client) -> list[dict]:
         trades = client.get_open_orders()
     except Exception as exc:
         logging.getLogger("ib_sync.audit").warning("could not fetch open orders for audit (%s); skipping", exc)
-        return []
+        return [], False
     out: list[dict] = []
     for trade in trades:
         order = getattr(trade, "order", None)
@@ -1248,6 +1258,9 @@ def _open_orders_for_audit(client) -> list[dict]:
                 "orderId": getattr(order, "orderId", None),
                 "permId": getattr(order, "permId", None),
                 "orderRef": getattr(order, "orderRef", "") or "",
+                # Account provenance — reqAllOpenOrders spans every account the
+                # connection can see; the consumer must verify scope before use.
+                "account": getattr(order, "account", None) or None,
                 "contract": {
                     "secType": getattr(contract, "secType", "") or "",
                     "symbol": getattr(contract, "symbol", "") or "",
@@ -1257,7 +1270,30 @@ def _open_orders_for_audit(client) -> list[dict]:
                 },
             }
         )
-    return out
+    return out, True
+
+
+def _open_orders_for_audit(client) -> list[dict]:
+    """Compat wrapper — prefer _fetch_open_orders_for_pass for new callers."""
+    orders, _ok = _fetch_open_orders_for_pass(client)
+    return orders
+
+
+def _observation_stamp(pass_started: datetime, reads: dict, ib_account: str | None) -> dict:
+    """PR-03b observation boundary stamped onto the portfolio snapshot.
+
+    `as_of` is the instant BEFORE the first read — a fill landing anywhere
+    inside the pass (between positions/open-orders/executions reads) still
+    post-dates this boundary and gate4 counts it via order_fills demand.
+    `complete` requires every read to have succeeded and the account to be
+    known; anything less fails the next SELL closed at gate4.view_incomplete.
+    """
+    return {
+        "as_of": pass_started.isoformat(),
+        "complete": all(reads.values()) and bool(ib_account),
+        "account": ib_account or "",
+        "reads": dict(reads),
+    }
 
 
 def main():
@@ -1272,6 +1308,12 @@ def main():
     parser.add_argument("--skip-audit", action="store_true", help="Skip naked short audit after sync")
 
     args = parser.parse_args()
+
+    # Observation boundary for this pass (PR-03b): the snapshot's holdings
+    # are "as of" pass start — fills landing after this instant are demand
+    # the snapshot cannot show and gate4 counts them via order_fills.
+    pass_started = datetime.now(timezone.utc)
+    reads = {"positions": False, "open_orders": False, "executions": False}
 
     # Connect
     client = connect_ib(args.host, args.port, args.client_id or "auto")
@@ -1303,6 +1345,7 @@ def main():
 
         # Fetch positions while PnL streams
         positions = fetch_positions(client)
+        reads["positions"] = True
 
         if not args.no_prices and positions:
             # ── Phase 3: Set exchange + request ALL data at once ──
@@ -1427,10 +1470,19 @@ def main():
 
         # Sync if requested
         if args.sync:
-            fill_dates = build_fill_dates(client)
+            fill_dates = build_fill_dates(client, status=reads)
+            # Open-order read is part of the observation attestation even
+            # when --skip-audit is set: without it gate4 can't prove the
+            # reservation view is whole.
+            orders_for_audit, orders_ok = _fetch_open_orders_for_pass(client)
+            reads["open_orders"] = orders_ok
             portfolio = convert_to_portfolio_format(
                 account, collapsed, pnl_data, fill_dates=fill_dates, fx_rates=fx_rates
             )
+            # PR-03b observation stamp: gate4 rejects new risk when the pass
+            # cannot attest all three reads (positions / open orders /
+            # executions) inside one coherent boundary.
+            portfolio["observation"] = _observation_stamp(pass_started, reads, ib_account)
             save_portfolio(portfolio)
 
             # ── Naked Short Audit (post-sync) ──
@@ -1444,7 +1496,13 @@ def main():
                     # data/orders.json (which is written by the web app and can
                     # lag actual IB state). Adapter shapes Trade objects into
                     # the dict shape `find_naked_short_violations` expects.
-                    orders = _open_orders_for_audit(client)
+                    # Scoped to the observed account — reqAllOpenOrders spans
+                    # every account the connection sees and auto-cancel must
+                    # never fire on a foreign account's order.
+                    orders = [
+                        o for o in orders_for_audit
+                        if not ib_account or o.get("account") == ib_account
+                    ]
 
                     violations = find_naked_short_violations(orders, portfolio["positions"])
                     if violations:
