@@ -22,7 +22,23 @@ from sqlalchemy import create_engine, text
 
 
 def _insert_portfolio_snapshot(payload: dict, *, snapshot_at: datetime | None = None) -> None:
+    """Seed a snapshot the way `ib_sync` writes it since PR-03b: the pass
+    stamps `observation` attesting positions+orders+executions completeness.
+    Gate 4 fails closed without it.
+    """
     import os
+
+    at = snapshot_at or datetime.now(timezone.utc)
+    payload = dict(payload)
+    payload.setdefault(
+        "observation",
+        {
+            "as_of": at.isoformat(),
+            "complete": True,
+            "account": "DU0000000",
+            "reads": {"positions": True, "open_orders": True, "executions": True},
+        },
+    )
 
     engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
     try:
@@ -39,7 +55,7 @@ def _insert_portfolio_snapshot(payload: dict, *, snapshot_at: datetime | None = 
                 {
                     "account": "DU0000000",
                     "payload": json.dumps(payload),
-                    "snapshot_at": snapshot_at or datetime.now(timezone.utc),
+                    "snapshot_at": at,
                 },
             )
     finally:
@@ -169,6 +185,7 @@ def test_spoofed_multiplier_cannot_bypass_gate(client, monkeypatch, tmp_path):
             "strike": 500.0,
             "multiplier": 1,  # malicious value
             "limitPrice": 5.0,
+            "client_attempt_id": "spoofed-mult-1",
         },
     )
     assert resp.status_code == 400, f"spoofed multiplier=1 must not bypass Gate 4; got {resp.status_code} {resp.json()}"
@@ -195,6 +212,7 @@ def test_missing_portfolio_snapshot_blocks_sell(monkeypatch, tmp_path):
             "action": "SELL",
             "quantity": 100,
             "limitPrice": 500.0,
+            "client_attempt_id": "missing-snap-1",
         },
     )
     assert resp.status_code == 400
@@ -249,7 +267,10 @@ def test_preflight_uses_postgres_snapshot_not_portfolio_json(client, monkeypatch
 
 def test_stale_portfolio_snapshot_blocks_sell(client, monkeypatch):
     """SELL exposure must not be approved from a stale PG portfolio snapshot."""
+    # Both thresholds: the run's market-open state is environment-dependent,
+    # and gate4 applies the open/closed variant independently of the route.
     monkeypatch.setenv("XENON_PORTFOLIO_SNAPSHOT_STALE_S", "300")
+    monkeypatch.setenv("XENON_PORTFOLIO_SNAPSHOT_STALE_CLOSED_S", "300")
     _insert_portfolio_snapshot(
         {
             "positions": [

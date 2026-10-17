@@ -42,6 +42,47 @@ def _truncate(engine):
         conn.execute(text("TRUNCATE xenon.wizard_events CASCADE"))
         conn.execute(text("TRUNCATE xenon.wizard_combo_attempts CASCADE"))
         conn.execute(text("TRUNCATE xenon.wizard_sessions CASCADE"))
+        conn.execute(text("TRUNCATE xenon.account_snapshots CASCADE"))
+
+
+def _seed_gate4_snapshot(engine) -> None:
+    """Every wizard submit/reprice drives the real Gate-4 path — seed the
+    observation-stamped snapshot (100 SPY shares covers the spread's SELL
+    leg) that ib_sync would have written for the harness scope."""
+    import json as _json
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    payload = {
+        "positions": [
+            {
+                "ticker": "SPY",
+                "structure_type": "Stock",
+                "direction": "LONG",
+                "contracts": 100,
+                "expiry": None,
+                "legs": [{"direction": "LONG", "type": "Stock", "contracts": 100, "strike": 0.0}],
+            }
+        ],
+        "available_funds": 0,
+        "observation": {
+            "as_of": now.isoformat(),
+            "complete": True,
+            "account": "DU0000000",
+            "reads": {"positions": True, "open_orders": True, "executions": True},
+        },
+    }
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO xenon.account_snapshots
+                  (account, bankroll, payload, snapshot_at, broker, account_env, broker_account)
+                VALUES ('DU0000000', 0, CAST(:p AS jsonb), :at, 'IB', 'paper', 'DU0000000')
+                """
+            ),
+            {"p": _json.dumps(payload), "at": now},
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -60,6 +101,7 @@ def _setup_pg(monkeypatch):
 
     engine = _pg_engine()
     _truncate(engine)
+    _seed_gate4_snapshot(engine)
     engine.dispose()
     yield
     engine = _pg_engine()

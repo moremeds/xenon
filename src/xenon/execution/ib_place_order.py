@@ -134,9 +134,18 @@ def place_order(params: dict) -> dict:
         )
 
         if order_type == "combo":
-            order.smartComboRoutingParams = [TagValue("NonGuaranteed", "1")]
+            # NonGuaranteed is always sent explicitly — 0=guaranteed,
+            # 1=non-guaranteed. The persisted reservation records the same
+            # mode (gate4 legs payload) so modify can never silently change it.
+            try:
+                non_guaranteed = int(params.get("nonGuaranteed", 1))
+            except (TypeError, ValueError):
+                non_guaranteed = 1
+            if non_guaranteed not in (0, 1):
+                non_guaranteed = 1
+            order.smartComboRoutingParams = [TagValue("NonGuaranteed", str(non_guaranteed))]
             print(
-                f"  Combo order: {len(legs_data)} legs, NonGuaranteed=1, ratios={[int(l.get('ratio', 1)) for l in legs_data]}"
+                f"  Combo order: {len(legs_data)} legs, NonGuaranteed={non_guaranteed}, ratios={[int(l.get('ratio', 1)) for l in legs_data]}"
             )
 
         # Place

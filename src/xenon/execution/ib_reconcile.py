@@ -135,6 +135,9 @@ def fetch_ib_executions(client: IBClient, lookback_days: int = 7) -> list:
                 "strike": c.strike if c.secType == "OPT" else None,
                 "expiry": c.lastTradeDateOrContractMonth if c.secType == "OPT" else None,
                 "right": c.right if c.secType == "OPT" else None,
+                # Account provenance (PR-03b): executions on a multi-account
+                # connection carry the account that owns the fill.
+                "account": getattr(e, "acctNumber", None) or None,
             }
         )
 
@@ -293,10 +296,23 @@ def record_external_fills(
     inserted = 0
     updated = 0
     replayed = 0
+    skipped_foreign = 0
     affected_legacy_ids: set[str] = set()
     affected_submission_ids: set[str] = set()
 
+    scope_account = resolved.broker_account or ""
+    scoped = bool(scope_account and scope_account != "legacy_unknown")
+
     for execution in executions:
+        # PR-03b provenance: a fill that names a DIFFERENT account must never
+        # land in this scope's ledger. A missing account stamps scope as
+        # before — unattributed fills can only over-reserve cover at the gate
+        # (fail-closed direction), never supply it.
+        if scoped:
+            fill_account = _field(execution, "account", "acctNumber")
+            if fill_account and fill_account != scope_account:
+                skipped_foreign += 1
+                continue
         perm_id = str(_field(execution, "perm_id", "permId") or "") or None
         submission_id = _resolve_submission_id_by_perm_id(perm_id, scope=resolved)
         legacy_id = _legacy_group_id(execution)
@@ -362,6 +378,7 @@ def record_external_fills(
         "inserted": inserted,
         "updated": updated,
         "replayed": replayed,
+        "skipped_foreign": skipped_foreign,
         "affected_legacy_ids": ordered_legacy_ids,
         "affected_submission_ids": ordered_submission_ids,
     }

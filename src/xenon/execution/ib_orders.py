@@ -21,7 +21,7 @@ from datetime import datetime
 from typing import Optional
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
-from xenon.execution import orders_store
+from xenon.execution import gate4, orders_store
 from xenon.execution.account_scope import AccountScope, resolve_from_env
 
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
@@ -102,6 +102,9 @@ def serialize_contract(contract, resolved_legs: dict = None) -> dict:
                 leg_data["strike"] = getattr(resolved, "strike", None)
                 leg_data["right"] = getattr(resolved, "right", None)
                 leg_data["expiry"] = leg_expiry or None
+                # Coverage legs need the leg's own sec type (a BAG can carry
+                # a stock leg next to option legs).
+                leg_data["secType"] = getattr(resolved, "secType", None)
             legs.append(leg_data)
         result["comboLegs"] = legs
 
@@ -119,6 +122,23 @@ def safe_float(value) -> Optional[float]:
         return round(f, 4)
     except (TypeError, ValueError):
         return None
+
+
+def _non_guaranteed_mode(order) -> int | None:
+    """Parse the NonGuaranteed tag from order.smartComboRoutingParams.
+
+    Returns 0 (guaranteed), 1 (non-guaranteed), or None when the order
+    carries no tag / an unparseable value. None means "unknown" — callers
+    must not assume a default when persisting reservation state.
+    """
+    for tag in getattr(order, "smartComboRoutingParams", None) or []:
+        if getattr(tag, "tag", None) == "NonGuaranteed":
+            try:
+                value = int(str(tag.value))
+            except (TypeError, ValueError):
+                return None
+            return value if value in (0, 1) else None
+    return None
 
 
 def fetch_open_orders(client: IBClient) -> list:
@@ -171,6 +191,12 @@ def fetch_open_orders(client: IBClient) -> list:
                 "limitPrice": safe_float(order.lmtPrice),
                 "auxPrice": safe_float(order.auxPrice),  # stop price
                 "status": status.status,  # Submitted, PreSubmitted, etc.
+                # Account provenance (PR-03b): reqAllOpenOrders spans every
+                # account the connection can see — consumers filter on this.
+                "account": getattr(order, "account", None) or None,
+                # BAG guarantee mode from smartComboRoutingParams — persisted
+                # on the reservation row so modify can never silently change it.
+                "nonGuaranteed": _non_guaranteed_mode(order),
                 "filled": float(status.filled),
                 "remaining": float(status.remaining),
                 "avgFillPrice": safe_float(status.avgFillPrice),
@@ -247,7 +273,23 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
     updated = 0
     skipped = 0
     resurrected = 0
+    foreign = 0
+    unprovenanced = 0
+    scope_account = resolved.get("broker_account") or ""
+    scoped = bool(scope_account and scope_account != "legacy_unknown")
     for order in open_orders:
+        # PR-03b account provenance: reqAllOpenOrders spans every account the
+        # connection can see. A row naming a DIFFERENT account must never
+        # enter this scope's reservation view. An order WITHOUT account
+        # provenance is still stored — `legs.account: null` marks it so the
+        # gate treats the view as incomplete rather than hiding the demand.
+        if scoped:
+            raw_account = order.get("account")
+            if raw_account and raw_account != scope_account:
+                foreign += 1
+                continue
+            if not raw_account:
+                unprovenanced += 1
         contract = order.get("contract") or {}
         sec_type = str(contract.get("secType") or "STK")
         multiplier = 100 if sec_type in {"OPT", "BAG"} else 1
@@ -274,6 +316,7 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
             expiry=contract.get("expiry") or None,
             con_id=int(con_id_val) if con_id_val else None,
             tif=str(order.get("tif") or "DAY"),
+            legs=gate4.legs_payload_from_snapshot_order(order),
             **resolved,
         )
         action = result.get("action") if isinstance(result, dict) else None
@@ -290,6 +333,8 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
         "updated": updated,
         "resurrected": resurrected,
         "skipped": skipped,
+        "skipped_foreign": foreign,
+        "skipped_unprovenanced": unprovenanced,
         "open_count": len(open_orders),
     }
 

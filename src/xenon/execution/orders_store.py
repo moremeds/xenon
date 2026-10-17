@@ -90,6 +90,10 @@ _TERMINAL_STATES = {"REJECTED", "CANCELLED", "FAILED"}
 
 ATTEMPT_BODY_MISMATCH = "ATTEMPT_BODY_MISMATCH"
 
+# Sentinel for optional JSONB write-through params (register_from_snapshot):
+# "not provided" must not overwrite a stored value the caller never computed.
+_UNSET = object()
+
 
 def _canon_json(value):
     """Normalize a JSON-shaped value for body equality.
@@ -387,6 +391,7 @@ def register_from_snapshot(
     expiry: str | None = None,
     con_id: int | None = None,
     tif: str = "DAY",
+    legs=_UNSET,
 ) -> dict:
     """Mirror an IB-side open order into `xenon.order_submissions`.
 
@@ -452,17 +457,20 @@ def register_from_snapshot(
             # terminal state — restore it. Operator error, race in the
             # cancel route, or out-of-band TWS action can drive this.
             if existing_state in {"CANCELLED", "FILLED", "REJECTED", "FAILED", "UNKNOWN"}:
+                resurrect_values = dict(
+                    state="WORKING",
+                    reason_code=None,
+                    limit_price=float(limit_price),
+                    quantity=int(quantity),
+                    tif=tif,
+                    updated_at=now,
+                )
+                if legs is not _UNSET:
+                    resurrect_values["legs"] = legs
                 conn.execute(
                     update(order_submissions)
                     .where(order_submissions.c.submission_id == existing_submission_id)
-                    .values(
-                        state="WORKING",
-                        reason_code=None,
-                        limit_price=float(limit_price),
-                        quantity=int(quantity),
-                        tif=tif,
-                        updated_at=now,
-                    )
+                    .values(**resurrect_values)
                 )
                 conn.execute(
                     insert(order_events).values(
@@ -497,15 +505,18 @@ def register_from_snapshot(
             if not drift:
                 return {"action": "NOOP", "drift": None}
 
+            drift_values = dict(
+                limit_price=float(limit_price),
+                quantity=int(quantity),
+                tif=tif,
+                updated_at=now,
+            )
+            if legs is not _UNSET:
+                drift_values["legs"] = legs
             conn.execute(
                 update(order_submissions)
                 .where(order_submissions.c.submission_id == existing_submission_id)
-                .values(
-                    limit_price=float(limit_price),
-                    quantity=int(quantity),
-                    tif=tif,
-                    updated_at=now,
-                )
+                .values(**drift_values)
             )
             conn.execute(
                 insert(order_events).values(
@@ -543,6 +554,7 @@ def register_from_snapshot(
                 expiry=expiry,
                 con_id=con_id,
                 tif=tif,
+                legs=None if legs is _UNSET else legs,
             )
             # client_attempt_id is non-null here (snapshot-<perm_id>), so a
             # racing sibling conflicts on the attempt keys too — a PK-only

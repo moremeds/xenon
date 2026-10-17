@@ -69,7 +69,7 @@ from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
 from xenon.db.engine import dispose_engine, get_sync_engine, init_engine
 from xenon.db.queries.blotter import blotter_has_trades, fetch_blotter_pg, fetch_futu_blotter, merge_pg_and_flex
 from xenon.db.schema import account_snapshots, order_events, order_submissions
-from xenon.execution import orders_store, preflight, quote_guard, quote_tokens
+from xenon.execution import gate4, orders_store, preflight, quote_guard, quote_tokens
 from xenon.execution.account_scope import resolve_from_app_state
 from xenon.execution.preflight import (
     PortfolioView,
@@ -1816,6 +1816,105 @@ def _portfolio_required_response(body: dict) -> Verdict | None:
     )
 
 
+def _universe_precheck(body: dict) -> Verdict | None:
+    """Pure-metadata Gate-4 checks that must precede the reservation.
+
+    Universe/index rules are request-shape validation — no portfolio data
+    needed — so they run before the advisory-locked coverage transaction.
+    """
+    from xenon.execution.universe import is_index, is_known
+
+    ticker = str(body.get("symbol", "")).upper()
+    currency = str(body.get("currency") or "USD").upper()
+    # Non-USD cash equities sit outside the V1 universe by definition; they
+    # gate on currency instead (same carve-out as the legacy preflight).
+    is_foreign_equity = body.get("type") == "stock" and currency != "USD"
+    if not is_foreign_equity and not is_known(ticker):
+        return Verdict(
+            accept=False,
+            reason_code=ReasonCode.UNIVERSE_UNKNOWN,
+            reason_detail=f"{ticker} not in V1 universe",
+        )
+    # is_index() raises KeyError for non-universe tickers — the is_known
+    # early return above guarantees this only runs for known USD tickers.
+    if body.get("type") == "stock" and not is_foreign_equity and is_index(ticker):
+        return Verdict(
+            accept=False,
+            reason_code=ReasonCode.INDEX_HAS_NO_STOCK,
+            reason_detail=f"{ticker} is an index — no stock leg exists",
+        )
+    return None
+
+
+def _preflight_block_response(verdict: Verdict) -> JSONResponse:
+    code = verdict.reason_code.value if verdict.reason_code else None
+    # `detail` is the field web/lib/xenonApi.ts:39 reads for human-readable
+    # error copy; the reason_code fields drive structured UI toast mapping.
+    return JSONResponse(
+        status_code=400,
+        content={
+            "detail": verdict.reason_detail or code or "Preflight blocked",
+            "reason_code": code,
+            "reason_detail": verdict.reason_detail,
+        },
+    )
+
+
+def _gate4_reject_verdict(reasons: list[str], uncovered: dict | None, short_stock: dict | None) -> Verdict:
+    """Map a coverage rejection to the route's reason-code contract.
+
+    Infrastructure failures (view/scope) take precedence — a classifiable
+    coverage breach computed on unprovable data is still reported, but the
+    integrity problem is the headline.
+    """
+    from xenon.execution.universe import is_index
+
+    if "view_incomplete" in reasons:
+        return Verdict(
+            accept=False,
+            reason_code=ReasonCode.PORTFOLIO_SNAPSHOT_REQUIRED,
+            reason_detail="Portfolio snapshot required to verify short exposure",
+        )
+    if "view_stale" in reasons:
+        return Verdict(
+            accept=False,
+            reason_code=ReasonCode.PORTFOLIO_SNAPSHOT_STALE,
+            reason_detail="Portfolio snapshot is stale; sync before submitting SELL exposure",
+        )
+    if short_stock:
+        sym = sorted(short_stock)[0]
+        return Verdict(
+            accept=False,
+            reason_code=ReasonCode.INSUFFICIENT_SHARES,
+            reason_detail=f"Insufficient shares to cover stock sell in {sym}",
+        )
+    if uncovered:
+        key = sorted(uncovered, key=str)[0]
+        sym = key[0] if isinstance(key, tuple) else str(key)
+        is_idx = False
+        try:
+            is_idx = bool(is_index(sym))
+        except KeyError:
+            is_idx = False
+        code = ReasonCode.INDEX_CALL_UNCOVERED if is_idx else ReasonCode.ETF_CALL_UNCOVERED
+        return Verdict(
+            accept=False,
+            reason_code=code,
+            reason_detail=f"Uncovered short call on {sym}",
+        )
+    if any(r.startswith("candidate_") for r in reasons):
+        return Verdict(
+            accept=False,
+            reason_code=ReasonCode.INVALID_ORDER_BODY,
+            reason_detail="; ".join(reasons),
+        )
+    return Verdict(
+        accept=False,
+        reason_code=ReasonCode.GATE4_UNRESOLVED,
+        reason_detail="; ".join(reasons) or "Gate-4 could not prove coverage",
+    )
+
+
 async def _run_preflight(body: dict, user_id: str = "local", cover_ratio: float = 1.0) -> Verdict:
     """Run server-side Gate 4. `cover_ratio` is plumbed from RegimeGate
     when binding_tier is TIER_2 (1.25 → 125 shares per short call)."""
@@ -2199,50 +2298,21 @@ async def _orders_place_from_body(body: dict):
         return denial
 
     # RegimeGate (VCG-CRI signal layer) was removed in the pure-portfolio
-    # pivot (#104). Order entry no longer gates on regime tiers; cover_ratio
-    # reverts to its NORMAL/no-gate default and there is no override audit.
-    cover_ratio_for_preflight = 1.0
+    # pivot (#104). Order entry no longer gates on regime tiers and there is
+    # no override audit.
     override_audit = None
 
-    # F2: server-side Gate 4. Run preflight before any subprocess invocation.
-    verdict = await _run_preflight(body, cover_ratio=cover_ratio_for_preflight)
-    if not verdict.accept:
-        code = verdict.reason_code.value if verdict.reason_code else None
-        # `detail` is the field web/lib/xenonApi.ts:39 reads for human-
-        # readable error copy; include the reason_code fields too so F6
-        # can drive structured UI toast mapping.
-        return JSONResponse(
-            status_code=400,
-            content={
-                "detail": verdict.reason_detail or code or "Preflight blocked",
-                "reason_code": code,
-                "reason_detail": verdict.reason_detail,
-            },
-        )
+    # Gate 4 (PR-03b): universe/index precheck — pure request-shape rules.
+    verdict = _universe_precheck(body)
+    if verdict is not None:
+        return _preflight_block_response(verdict)
 
-    # F3: quote-token + tick-grid + limit-band + market-hours
-    if body.get("type") != "combo":
-        qv, quote_status = await _validate_non_combo_quote(body)
-        _override_detail = None
-        if not qv.accept:
-            if qv.reason_code == ReasonCode.LIMIT_OUT_OF_BAND and body.get("acknowledge_limit_override") is True:
-                _override_detail = {
-                    "reason_detail": qv.reason_detail,
-                    "limit_price": body.get("limitPrice"),
-                }
-            else:
-                return JSONResponse(
-                    status_code=quote_status,
-                    content={
-                        "detail": qv.reason_detail,
-                        "reason_code": qv.reason_code.value if qv.reason_code else None,
-                        "reason_detail": qv.reason_detail,
-                    },
-                )
-    else:
-        _override_detail = None
-
-    # F4: atomic reservation
+    # Gate 4 (PR-03b): coverage.evaluate + reservation insert in ONE
+    # transaction serialized by an account-scope pg advisory lock. The SELL
+    # short-circuit is gone — every non-BUY candidate (and every combo,
+    # either envelope) is evaluated against the durable view. A single-leg
+    # BUY still skips evaluation (it creates no demand) but still serializes
+    # its reservation under the same lock.
     cid = body.get("client_attempt_id")
     if not cid:
         return JSONResponse(
@@ -2250,26 +2320,41 @@ async def _orders_place_from_body(body: dict):
             content={"detail": "client_attempt_id is required"},
         )
     user_id = "local"
+    scope = _resolve_scope_kwargs()
     security_type = "STK" if body.get("type") == "stock" else "BAG" if body.get("type") == "combo" else "OPT"
-    req_row = orders_store.RequestRow(
-        ticker=str(body.get("symbol", "")).upper(),
-        security_type=security_type,
-        action=str(body.get("action", "")).upper(),
-        quantity=int(body.get("quantity", 0)),
-        expiry=body.get("expiry"),
-        strike=Decimal(str(body["strike"])) if body.get("strike") is not None else None,
-        right=(body.get("right") or "").upper() or None,
-        multiplier=int(body.get("multiplier", 100)),
-        con_id=int(body.get("con_id") or 0) or None,
-        limit_price=Decimal(str(body.get("limitPrice", "0"))),
-    )
-    outcome = orders_store.reserve_attempt(
+    ticker = str(body.get("symbol", "")).upper()
+    try:
+        req_row = orders_store.RequestRow(
+            ticker=ticker,
+            security_type=security_type,
+            action=str(body.get("action", "")).upper(),
+            quantity=int(body.get("quantity", 0)),
+            expiry=body.get("expiry"),
+            strike=Decimal(str(body["strike"])) if body.get("strike") is not None else None,
+            right=(body.get("right") or "").upper() or None,
+            # Multiplier is server-authoritative — a client-provided value
+            # must never reach the reservation row (spoofed mult inflates
+            # share-cover math).
+            multiplier=gate4.server_multiplier(ticker),
+            con_id=int(body.get("con_id") or 0) or None,
+            limit_price=Decimal(str(body.get("limitPrice", "0"))),
+        )
+    except (ValueError, TypeError, ValidationError) as exc:
+        return _preflight_block_response(_invalid_order_body_response(exc))
+    candidate, legs_payload = gate4.candidate_from_place_body(body, scope["broker_account"])
+    outcome = gate4.reserve_with_coverage(
         user_id,
         cid,
         req_row,
+        candidate=candidate,
+        legs_payload=legs_payload,
+        scope=scope,
         override_audit=override_audit,
-        **_resolve_scope_kwargs(),
     )
+    if outcome.status == "rejected":
+        return _preflight_block_response(
+            _gate4_reject_verdict(outcome.reasons, outcome.uncovered, outcome.short_stock)
+        )
     if outcome.status == "body_mismatch":
         return JSONResponse(
             status_code=409,
@@ -2299,6 +2384,38 @@ async def _orders_place_from_body(body: dict):
             },
         )
     submission_id = outcome.submission_id
+
+    # F3: quote-token + tick-grid + limit-band + market-hours. Runs AFTER
+    # the reservation so a Gate-4 coverage reason always wins over a quote
+    # failure; a quote rejection marks the row REJECTED so the reservation
+    # releases its cover instead of leaking a PENDING row.
+    if body.get("type") != "combo":
+        qv, quote_status = await _validate_non_combo_quote(body)
+        _override_detail = None
+        if not qv.accept:
+            if qv.reason_code == ReasonCode.LIMIT_OUT_OF_BAND and body.get("acknowledge_limit_override") is True:
+                _override_detail = {
+                    "reason_detail": qv.reason_detail,
+                    "limit_price": body.get("limitPrice"),
+                }
+            else:
+                orders_store.mark_terminal(
+                    submission_id=submission_id,
+                    state="REJECTED",
+                    reason_code=qv.reason_code.value if qv.reason_code else "QUOTE_REJECT",
+                    filled_qty=0,
+                    avg_fill_price=None,
+                )
+                return JSONResponse(
+                    status_code=quote_status,
+                    content={
+                        "detail": qv.reason_detail,
+                        "reason_code": qv.reason_code.value if qv.reason_code else None,
+                        "reason_detail": qv.reason_detail,
+                    },
+                )
+    else:
+        _override_detail = None
 
     if _override_detail is not None:
         orders_store.record_event(submission_id, "PREFLIGHT_ACK_LIMIT", _override_detail)
@@ -2718,6 +2835,59 @@ async def _orders_modify_from_body(body: dict):
     if _row and _row.get("placing_client_id") is not None:
         args.extend(["--client-id", str(_row["placing_client_id"])])
 
+    # Gate 4 (PR-03b): a quantity modify moves cover demand, so it evaluates
+    # the same coverage model as placement — under the same advisory lock —
+    # and persists pending_amend_qty so an acknowledgement lost in flight
+    # keeps reserving max(old, new) - filled instead of the smaller side.
+    _submission_id = _row.get("submission_id") if _row else None
+    _pending_modify = False
+    if new_quantity is not None:
+        if _submission_id is None:
+            return order_error(
+                404,
+                ReasonCode.ORDER_NOT_FOUND.value,
+                {
+                    "message": "Quantity modify requires a resolvable submission row",
+                    "http_status": 404,
+                },
+            )
+        mod_outcome = gate4.begin_modify(_submission_id, new_quantity, _scope)
+        if not mod_outcome.accept:
+            v = _gate4_reject_verdict(mod_outcome.reasons, mod_outcome.uncovered, mod_outcome.short_stock)
+            return order_error(
+                400,
+                v.reason_code.value if v.reason_code else ReasonCode.GATE4_UNRESOLVED.value,
+                {
+                    "message": v.reason_detail or "Modify blocked by coverage gate",
+                    "http_status": 400,
+                },
+            )
+        _pending_modify = True
+
+    # BAG guarantee mode is durable order state, never client-mutable. The
+    # broker always receives it explicitly — a resubmitted BAG without
+    # NonGuaranteed raises "Missing or invalid NonGuaranteed value", and a
+    # default could silently flip a guaranteed combo to non-guaranteed.
+    if _row and _row.get("security_type") == "BAG":
+        stored_guaranteed = gate4.persisted_guarantee(_row)
+        effective_ng = 0 if stored_guaranteed else 1
+        requested_ng = body.get("nonGuaranteed")
+        if requested_ng is not None:
+            try:
+                req_ng = int(requested_ng)
+            except (TypeError, ValueError):
+                req_ng = -1
+            if req_ng != effective_ng:
+                return order_error(
+                    400,
+                    ReasonCode.MODIFY_GUARANTEE_MODE.value,
+                    {
+                        "message": "Guarantee mode is fixed at placement; cannot change NonGuaranteed on modify",
+                        "http_status": 400,
+                    },
+                )
+        args.extend(["--non-guaranteed", str(effective_ng)])
+
     result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=15)
     if not result.ok:
         # DB sequence is already advanced; don't roll back — prevents
@@ -2728,6 +2898,10 @@ async def _orders_modify_from_body(body: dict):
             modify_sequence,
             result.error,
         )
+        if _pending_modify:
+            # The amend never provably reached the broker — keep the max
+            # reservation rather than release cover we may still owe.
+            gate4.settle_modify(_submission_id, "uncertain")
         detail = {
             "reason_code": ReasonCode.IB_CONNECTION.value,
             "message": result.error or "Subprocess failed",
@@ -2739,6 +2913,13 @@ async def _orders_modify_from_body(body: dict):
 
     data = result.data or {}
     if data.get("status") == "error":
+        if _pending_modify:
+            # ib_reject is a broker-side NO — provably unapplied, release the
+            # pending reservation. Any other failure is uncertain: keep max.
+            gate4.settle_modify(
+                _submission_id,
+                "rejected" if data.get("classification") == "ib_reject" else "uncertain",
+            )
         http_status, reason_code = _classify_to_http(data)
         detail = {
             "reason_code": reason_code,
@@ -2751,6 +2932,8 @@ async def _orders_modify_from_body(body: dict):
         _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""), scope=_scope)
         return order_error(http_status, reason_code, detail)
 
+    if _pending_modify:
+        gate4.settle_modify(_submission_id, "confirmed", new_qty=int(new_quantity))
     _record_manage_event(
         str(order_id or ""),
         "MODIFY",
