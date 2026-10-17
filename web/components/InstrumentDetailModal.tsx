@@ -10,7 +10,7 @@ import { InstrumentOrderQuoteTelemetry } from "./QuoteTelemetry";
 import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
 import { OrderTifSelector } from "@/lib/order/components/OrderTifSelector";
 import { useClientAttemptId } from "@/components/ticker-detail/useClientAttemptId";
-import { getReasonToast } from "@/lib/orderReasonCodes";
+import { errorFromResponseBody } from "@/lib/order/responseError";
 
 export type InstrumentDetailProps = {
   leg: PortfolioLeg | null;
@@ -21,23 +21,6 @@ export type InstrumentDetailProps = {
 };
 
 type OrderAction = "BUY" | "SELL";
-
-function errorFromResponseBody(
-  body: Record<string, unknown> | null | undefined,
-  fallback: string,
-): string {
-  if (body && typeof body === "object") {
-    const code = body.reason_code;
-    if (typeof code === "string" && code.length > 0) {
-      return getReasonToast(code).copy;
-    }
-    const error = body.error;
-    if (typeof error === "string" && error.length > 0) return error;
-    const detail = body.detail;
-    if (typeof detail === "string" && detail.length > 0) return detail;
-  }
-  return fallback;
-}
 
 export default function InstrumentDetailModal({ leg, ticker, expiry, prices, onClose }: InstrumentDetailProps) {
   const [quantity, setQuantity] = useState(() => String(leg?.contracts ?? ""));

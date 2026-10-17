@@ -35,7 +35,7 @@ import WizardSessionStrip from "@/components/ticker-detail/WizardSessionStrip";
 import { useWizardLauncher } from "@/lib/useWizardLauncher";
 import { useWizardSession } from "@/lib/useWizardSession";
 import { useClientAttemptId } from "./useClientAttemptId";
-import { getReasonToast } from "@/lib/orderReasonCodes";
+import { errorFromResponseBody } from "@/lib/order/responseError";
 
 /* ─── Types ─── */
 
@@ -52,23 +52,6 @@ type ChainStrike = {
   callKey: string;
   putKey: string;
 };
-
-function errorFromResponseBody(
-  body: Record<string, unknown> | null | undefined,
-  fallback: string,
-): string {
-  if (body && typeof body === "object") {
-    const code = body.reason_code;
-    if (typeof code === "string" && code.length > 0) {
-      return getReasonToast(code).copy;
-    }
-    const detail = body.detail;
-    if (typeof detail === "string" && detail.length > 0) return detail;
-    const error = body.error;
-    if (typeof error === "string" && error.length > 0) return error;
-  }
-  return fallback;
-}
 
 /* ─── Chain Strike Row ─── */
 

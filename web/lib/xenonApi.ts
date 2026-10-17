@@ -2,7 +2,7 @@
  * Xenon FastAPI client — minimal fetch helper for Next.js routes.
  *
  * All POST operations go through FastAPI.
- * Attaches Clerk JWT when available for authenticated requests.
+ * Server-side calls attach the internal-token header for authentication.
  */
 
 const XENON_API = process.env.XENON_API_URL || "http://localhost:8321";
@@ -34,13 +34,10 @@ export function internalApiHeaders(headers: Headers): Headers {
 
 export async function xenonFetch<T = Record<string, unknown>>(
   path: string,
-  opts?: RequestInit & { timeout?: number; token?: string },
+  opts?: RequestInit & { timeout?: number },
 ): Promise<T> {
-  const { timeout = 30_000, token, ...fetchOpts } = opts ?? {};
+  const { timeout = 30_000, ...fetchOpts } = opts ?? {};
   const headers = new Headers(fetchOpts.headers);
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
   internalApiHeaders(headers);
   const res = await fetch(`${XENON_API}${path}`, {
     ...fetchOpts,

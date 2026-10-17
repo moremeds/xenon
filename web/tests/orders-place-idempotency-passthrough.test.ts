@@ -17,10 +17,6 @@ vi.mock("@/lib/xenonApi", async () => {
   };
 });
 
-vi.mock("@tools/data-reader", () => ({
-  readDataFile: vi.fn(async () => ({ ok: true, data: { positions: [] } })),
-}));
-
 import { POST } from "../app/api/orders/place/route";
 
 describe("/api/orders/place — idempotency passthrough", () => {

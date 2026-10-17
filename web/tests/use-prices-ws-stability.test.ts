@@ -9,6 +9,10 @@ import { renderHook, act } from "@testing-library/react";
 import { usePrices } from "../lib/usePrices";
 import type { PriceData } from "../lib/pricesProtocol";
 
+// The hook mints a WS ticket before connecting — mock the module (fetch
+// stubs don't reach the dynamically imported copy).
+vi.mock("@/lib/wsTicket", () => ({ getWsTicket: async () => "test-ticket" }));
+
 class MockWebSocket {
   static CONNECTING = 0 as const;
   static OPEN = 1 as const;
@@ -104,7 +108,9 @@ describe("Connection stability", () => {
         usePrices({ symbols: props.symbols, enabled: true }),
       { initialProps: { symbols: ["AAPL"] } },
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     expect(wsInstances).toHaveLength(1);
     act(() => latestWs().simulateOpen());
     rerender({ symbols: ["AAPL", "MSFT"] });
@@ -133,7 +139,9 @@ describe("Connection stability", () => {
         }),
       { initialProps: { contracts: [c1] } },
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     expect(wsInstances).toHaveLength(1);
     act(() => latestWs().simulateOpen());
     rerender({ contracts: [c1, c2] });
@@ -146,7 +154,9 @@ describe("Connection stability", () => {
         usePrices({ symbols: props.symbols, enabled: true }),
       { initialProps: { symbols: ["AAPL"] } },
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     const ws = latestWs();
     act(() => ws.simulateOpen());
     expect(sentMessages(ws)).toHaveLength(1);
@@ -165,7 +175,9 @@ describe("Connection stability", () => {
         usePrices({ symbols: props.symbols, enabled: true }),
       { initialProps: { symbols: ["AAPL", "MSFT"] } },
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     rerender({ symbols: ["AAPL"] });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -182,7 +194,9 @@ describe("Idempotent connect", () => {
     const { result } = renderHook(() =>
       usePrices({ symbols: ["AAPL"], enabled: true }),
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     expect(wsInstances).toHaveLength(1);
     act(() => result.current.reconnect());
     expect(wsInstances.length).toBeLessThanOrEqual(2);
@@ -190,7 +204,9 @@ describe("Idempotent connect", () => {
 
   it("calling connect while OPEN creates no extra socket", async () => {
     renderHook(() => usePrices({ symbols: ["AAPL"], enabled: true }));
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     expect(wsInstances).toHaveLength(1);
     act(() => latestWs().simulateOpen());
     expect(wsInstances).toHaveLength(1);
@@ -202,11 +218,15 @@ describe("Stale socket isolation", () => {
     const { result } = renderHook(() =>
       usePrices({ symbols: ["AAPL"], enabled: true }),
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     const oldWs = latestWs();
     act(() => oldWs.simulateOpen());
     act(() => result.current.reconnect());
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     expect(latestWs()).not.toBe(oldWs);
     act(() => {
       oldWs.readyState = MockWebSocket.CLOSED;
@@ -219,7 +239,9 @@ describe("Stale socket isolation", () => {
     const { result } = renderHook(() =>
       usePrices({ symbols: ["AAPL"], enabled: true }),
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     const oldWs = latestWs();
     act(() => oldWs.simulateOpen());
     act(() =>
@@ -231,7 +253,9 @@ describe("Stale socket isolation", () => {
     );
     expect(result.current.prices.AAPL?.last).toBe(100);
     act(() => result.current.reconnect());
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     act(() =>
       latestWs().simulateMessage({
@@ -260,7 +284,9 @@ describe("Reconnect timer cleanup", () => {
     const { unmount } = renderHook(() =>
       usePrices({ symbols: ["AAPL"], enabled: true }),
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     act(() => latestWs().simulateClose());
     unmount();
@@ -274,7 +300,9 @@ describe("Reconnect timer cleanup", () => {
         usePrices({ symbols: ["AAPL"], enabled: props.enabled }),
       { initialProps: { enabled: true } },
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     act(() => latestWs().simulateClose());
     rerender({ enabled: false });
@@ -285,22 +313,30 @@ describe("Reconnect timer cleanup", () => {
 
   it("reconnect timer does not stack multiple retries", async () => {
     renderHook(() => usePrices({ symbols: ["AAPL"], enabled: true }));
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     act(() => latestWs().simulateClose());
     const after = wsInstances.length;
     act(() => vi.advanceTimersByTime(1600));
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     expect(wsInstances.length).toBe(after + 1);
   });
 
   it("exponential backoff increases delay on sequential failures", async () => {
     renderHook(() => usePrices({ symbols: ["AAPL"], enabled: true }));
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     act(() => latestWs().simulateClose());
     act(() => vi.advanceTimersByTime(1600));
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     expect(wsInstances.length).toBe(2);
     act(() => latestWs().simulateOpen());
     act(() => latestWs().simulateClose());
@@ -312,15 +348,21 @@ describe("Reconnect timer cleanup", () => {
 
   it("backoff resets on successful open", async () => {
     renderHook(() => usePrices({ symbols: ["AAPL"], enabled: true }));
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     act(() => latestWs().simulateClose());
     act(() => vi.advanceTimersByTime(1600));
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     act(() => latestWs().simulateClose());
     act(() => vi.advanceTimersByTime(1600));
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     expect(wsInstances.length).toBeGreaterThanOrEqual(3);
   });
 });
@@ -332,7 +374,9 @@ describe("Subscription diff", () => {
         usePrices({ symbols: props.symbols, enabled: true }),
       { initialProps: { symbols: ["AAPL"] } },
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     const ws = latestWs();
     act(() => ws.simulateOpen());
     expect(ws.sent).toHaveLength(1);
@@ -346,7 +390,9 @@ describe("Subscription diff", () => {
         usePrices({ symbols: props.symbols, enabled: true }),
       { initialProps: { symbols: ["AAPL", "MSFT"] } },
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     rerender({ symbols: ["AAPL", "NVDA"] });
     const msgs = sentMessages(latestWs());
@@ -366,7 +412,9 @@ describe("Subscription diff", () => {
         usePrices({ symbols: props.symbols, enabled: true }),
       { initialProps: { symbols: ["AAPL", "MSFT"] } },
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     act(() => {
       latestWs().simulateMessage({
@@ -393,7 +441,9 @@ describe("Subscription diff", () => {
         usePrices({ symbols: props.symbols, enabled: true }),
       { initialProps: { symbols: ["AAPL"] } },
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     act(() => {
       latestWs().simulateMessage({
@@ -416,7 +466,9 @@ describe("Lifecycle transitions", () => {
     );
     expect(wsInstances).toHaveLength(0);
     rerender({ symbols: ["AAPL"] });
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     expect(wsInstances).toHaveLength(1);
     act(() => latestWs().simulateOpen());
     expect(result.current.connected).toBe(true);
@@ -428,7 +480,9 @@ describe("Lifecycle transitions", () => {
         usePrices({ symbols: props.symbols, enabled: true }),
       { initialProps: { symbols: ["AAPL"] } },
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     expect(result.current.connected).toBe(true);
     rerender({ symbols: [] as string[] });
@@ -441,7 +495,9 @@ describe("Lifecycle transitions", () => {
         usePrices({ symbols: ["AAPL"], enabled: props.enabled }),
       { initialProps: { enabled: true } },
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     expect(result.current.connected).toBe(true);
     rerender({ enabled: false });
@@ -457,12 +513,16 @@ describe("Lifecycle transitions", () => {
         usePrices({ symbols: ["AAPL"], enabled: props.enabled }),
       { initialProps: { enabled: true } },
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     rerender({ enabled: false });
     expect(result.current.connected).toBe(false);
     rerender({ enabled: true });
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     expect(result.current.connected).toBe(true);
   });
@@ -482,7 +542,9 @@ describe("Callback refs", () => {
         }),
       { initialProps: { cb: cb1 } },
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     rerender({ cb: cb2 });
     act(() => {
@@ -502,7 +564,9 @@ describe("Price state across reconnects", () => {
     const { result } = renderHook(() =>
       usePrices({ symbols: ["AAPL"], enabled: true }),
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     act(() => {
       latestWs().simulateMessage({
@@ -515,7 +579,9 @@ describe("Price state across reconnects", () => {
     act(() => latestWs().simulateClose());
     expect(result.current.prices.AAPL?.last).toBe(175);
     act(() => vi.advanceTimersByTime(1600));
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     expect(result.current.prices.AAPL?.last).toBe(175);
     act(() => {
@@ -534,7 +600,9 @@ describe("Message hardening", () => {
     const { result } = renderHook(() =>
       usePrices({ symbols: ["AAPL"], enabled: true }),
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     act(() => {
       latestWs().onmessage?.({ data: "not valid json{{{" });
@@ -547,7 +615,9 @@ describe("Message hardening", () => {
     const { result } = renderHook(() =>
       usePrices({ symbols: ["AAPL"], enabled: true }),
     );
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     act(() => {
       latestWs().simulateMessage({ type: "unknown_future_type", foo: "bar" });

@@ -13,6 +13,22 @@ const BASE_INTERVAL_MS = 30_000;
 const MAX_INTERVAL_MS = 300_000; // 5 min cap on backoff
 
 /**
+ * Result of the initial GET /api/futu/portfolio read (and any later
+ * applies). Lets consumers distinguish "still loading" from definitive
+ * empty states instead of rendering LOADING forever:
+ * - `pending`      — mount read hasn't completed yet
+ * - `loaded`       — a real snapshot arrived
+ * - `never_synced` — FastAPI has no snapshot (404, or the never_synced
+ *                    200 envelope): an account condition, not an error
+ * - `unavailable`  — FastAPI/Next failed to return a snapshot (502/other)
+ */
+export type FutuInitialRead =
+  | "pending"
+  | "loaded"
+  | "never_synced"
+  | "unavailable";
+
+/**
  * Hook: fetch the Futu portfolio from `/api/futu/portfolio` and adapt
  * it to the same `PortfolioData` shape IB uses, so downstream components
  * (MetricCards, WorkspaceSections) consume it without branching on broker.
@@ -32,6 +48,7 @@ export function useFutuPortfolio(enabled: boolean) {
   const [error, setError] = useState<string | null>(null);
   const [lastSync, setLastSync] = useState<string | null>(null);
   const [neverSynced, setNeverSynced] = useState(false);
+  const [initialRead, setInitialRead] = useState<FutuInitialRead>("pending");
 
   const syncingRef = useRef(false);
   const intervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -47,6 +64,7 @@ export function useFutuPortfolio(enabled: boolean) {
       setData(null);
       setLastSync(null);
       setNeverSynced(true);
+      setInitialRead("never_synced");
       setError(null);
       return;
     }
@@ -54,12 +72,24 @@ export function useFutuPortfolio(enabled: boolean) {
     setData(futuToPortfolioData(body));
     setLastSync(body.fetched_at);
     setNeverSynced(false);
+    setInitialRead("loaded");
     setError(null);
   }, []);
 
   const loadFromCache = useCallback(async () => {
     try {
       const res = await fetch("/api/futu/portfolio", { cache: "no-store" });
+      if (res.status === 404) {
+        // FastAPI has no snapshot — never synced is a measurement
+        // condition, not an error. Mirror the never_synced body path.
+        setEnvelope(null);
+        setData(null);
+        setLastSync(null);
+        setNeverSynced(true);
+        setInitialRead("never_synced");
+        setError(null);
+        return;
+      }
       if (!res.ok) {
         throw new Error(`GET /api/futu/portfolio: ${res.status}`);
       }
@@ -67,6 +97,7 @@ export function useFutuPortfolio(enabled: boolean) {
       applyResponse(body);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      setInitialRead("unavailable");
     } finally {
       didInitialReadRef.current = true;
     }
@@ -90,6 +121,7 @@ export function useFutuPortfolio(enabled: boolean) {
     try {
       const res = await fetch("/api/futu/portfolio", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
         cache: "no-store",
       });
       if (!res.ok) {
@@ -181,5 +213,14 @@ export function useFutuPortfolio(enabled: boolean) {
     }
   }, [scheduleNext, enabled]);
 
-  return { data, envelope, syncing, error, lastSync, syncNow, neverSynced };
+  return {
+    data,
+    envelope,
+    syncing,
+    error,
+    lastSync,
+    syncNow,
+    neverSynced,
+    initialRead,
+  };
 }

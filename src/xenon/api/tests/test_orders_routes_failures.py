@@ -854,7 +854,7 @@ def test_modify_permid_resolves_its_own_owner_with_duplicate_order_ids(client, t
 
 
 def test_dev_probe_not_in_auth_exempt_paths():
-    """B3 — defense in depth: Clerk middleware must still cover the probe."""
+    """B3 — defense in depth: the auth middleware must still cover the probe."""
     assert "/dev/rehydrate/synthetic" not in server_mod.AUTH_EXEMPT_PATHS
 
 

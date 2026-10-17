@@ -9,7 +9,7 @@ import { fmtPrice } from "@/lib/positionUtils";
 import { OrderLegPills, type OrderLeg as UnifiedOrderLeg } from "@/lib/order";
 import { OrderTifSelector } from "@/lib/order/components/OrderTifSelector";
 import { useClientAttemptId } from "@/components/ticker-detail/useClientAttemptId";
-import { getReasonToast } from "@/lib/orderReasonCodes";
+import { errorFromResponseBody } from "@/lib/order/responseError";
 import {
   seedTicketFromPosition,
   applyQtyChip,
@@ -23,22 +23,6 @@ type Props = {
   onClose: () => void;
   onSubmitted?: (orderId: string) => void;
 };
-
-function errorFromResponseBody(
-  body: Record<string, unknown> | null | undefined,
-  fallback: string,
-): string {
-  if (body && typeof body === "object") {
-    const code = (body as { reason_code?: unknown }).reason_code;
-    if (typeof code === "string" && code.length > 0)
-      return getReasonToast(code).copy;
-    const err = (body as { error?: unknown }).error;
-    if (typeof err === "string" && err.length > 0) return err;
-    const detail = (body as { detail?: unknown }).detail;
-    if (typeof detail === "string" && detail.length > 0) return detail;
-  }
-  return fallback;
-}
 
 function unifiedLegsFromPosition(pos: PortfolioPosition): UnifiedOrderLeg[] {
   return pos.legs

@@ -37,12 +37,9 @@ COPY context/ ./context/
 COPY docs/trading/ ./docs/trading/
 
 # Build-args for NEXT_PUBLIC_* values that must be inlined into the client
-# bundle. CLERK_SECRET_KEY is a runtime-only secret and is intentionally NOT
-# accepted as a build-arg.
-ARG NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=""
+# bundle.
 ARG NEXT_PUBLIC_IB_REALTIME_WS_URL=""
-ENV NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=$NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY \
-    NEXT_PUBLIC_IB_REALTIME_WS_URL=$NEXT_PUBLIC_IB_REALTIME_WS_URL \
+ENV NEXT_PUBLIC_IB_REALTIME_WS_URL=$NEXT_PUBLIC_IB_REALTIME_WS_URL \
     NEXT_TELEMETRY_DISABLED=1
 
 WORKDIR /app/web

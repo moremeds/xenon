@@ -101,7 +101,7 @@ async def list_overrides(
     """Return overrides for the given scope, newest first.
 
     `user_id` is optional — when supplied, results are scoped to that
-    user (used by GET /regime/overrides for the current Clerk user).
+    user (used by GET /regime/overrides for the current user).
     """
     stmt = (
         select(regime_overrides)

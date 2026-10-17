@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { errorFromResponseBody } from "./order/responseError";
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 type RetryMethod = "GET" | "POST";
@@ -88,11 +89,19 @@ export function useSyncHook<T>(
       }
       const reqEndpoint = endpoint;
       try {
-        const res = await fetch(reqEndpoint, { method });
+        // POST carries Content-Type: application/json even with an empty body —
+        // the /api middleware requires it on every mutating request.
+        const res = await fetch(reqEndpoint, {
+          method,
+          headers:
+            method === "POST"
+              ? { "Content-Type": "application/json" }
+              : undefined,
+        });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           throw new Error(
-            (body as { error?: string }).error ?? `Sync failed (${res.status})`,
+            errorFromResponseBody(body, `Sync failed (${res.status})`),
           );
         }
         const json = (await res.json()) as T;

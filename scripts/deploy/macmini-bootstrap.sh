@@ -22,7 +22,7 @@
 # What this script does NOT do (manual steps remain):
 #   - Apple ID sign-in / FileVault enable / SSH key add to GitHub
 #   - IB Gateway / TWS / IBC install (run scripts/infra/setup_ibc.sh after this)
-#   - Clerk / R2 / UW secret values (you fill these into .env when prompted)
+#   - Internal-token / R2 / UW secret values (you fill these into .env when prompted)
 #   - 2FA on first IB Gateway login
 #   - Database promotion from laptop (run scripts/deploy/macmini-data-promote.sh
 #     from the laptop after this finishes)
@@ -194,7 +194,7 @@ p.write_text(text)
 print("  .env scaffolded")
 PY
   warn "OPEN ${XENON_HOME}/.env AND FILL: MENTHORQ_USER, MENTHORQ_PASS, MASSIVE_API_KEY,"
-  warn "                                 CLERK_JWKS_URL, CLERK_ISSUER, ALLOWED_USER_IDS,"
+  warn "                                 XENON_INTERNAL_API_TOKEN,"
   warn "                                 R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY"
 else
   skip ".env exists (not overwriting)"
@@ -208,8 +208,7 @@ ANTHROPIC_API_KEY=
 UW_TOKEN=
 EXA_API_KEY=
 CEREBRAS_API_KEY=
-NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=
-CLERK_SECRET_KEY=
+XENON_INTERNAL_API_TOKEN=
 EOF
   warn "OPEN ${XENON_HOME}/web/.env AND FILL all values."
 else

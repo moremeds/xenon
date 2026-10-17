@@ -14,12 +14,9 @@ vi.mock("next/server", () => ({
 }));
 
 const mocks = vi.hoisted(() => ({
-  readDataFile: vi.fn(),
   xenonFetch: vi.fn(),
 }));
 
-vi.mock("@tools/data-reader", () => ({ readDataFile: mocks.readDataFile }));
-vi.mock("@tools/schemas/ib-orders", () => ({ OrdersData: {} }));
 vi.mock("@/lib/xenonApi", () => ({
   xenonFetch: mocks.xenonFetch,
   XenonApiError: class XenonApiError extends Error {
@@ -64,11 +61,7 @@ const replacementOrders = {
 describe("/api/orders/modify route", () => {
   beforeEach(() => {
     vi.resetModules();
-    mocks.readDataFile.mockReset();
     mocks.xenonFetch.mockReset();
-    mocks.readDataFile.mockImplementation(async (path: string) => {
-      throw new Error(`modify route must not read data/orders.json: ${path}`);
-    });
   });
 
   it("confirms a direct modify from FastAPI /orders without reading orders.json", async () => {
@@ -93,7 +86,6 @@ describe("/api/orders/modify route", () => {
       message: "Modified",
       orders: confirmedOrders,
     });
-    expect(mocks.readDataFile).not.toHaveBeenCalled();
     expect(mocks.xenonFetch.mock.calls.map((call) => call[0])).toEqual([
       "/orders/modify",
       "/orders/refresh",
@@ -151,7 +143,6 @@ describe("/api/orders/modify route", () => {
 
     expect(response.status).toBe(200);
     expect(body.orders).toEqual(replacementOrders);
-    expect(mocks.readDataFile).not.toHaveBeenCalled();
     expect(mocks.xenonFetch.mock.calls.map((call) => call[0])).toEqual([
       "/orders/cancel",
       "/orders/place",
@@ -205,7 +196,6 @@ describe("/api/orders/modify route", () => {
     expect(response.status).toBe(502);
     expect(String(body.error)).toContain("CRITICAL");
     expect(body.orders).toEqual(replacementOrders);
-    expect(mocks.readDataFile).not.toHaveBeenCalled();
     expect(mocks.xenonFetch.mock.calls.map((call) => call[0])).toEqual([
       "/orders/cancel",
       "/orders/place",

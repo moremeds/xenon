@@ -2,6 +2,7 @@
 
 import { useMemo, useState, useCallback } from "react";
 import { useSyncHook } from "./useSyncHook";
+import { errorFromResponseBody } from "./order/responseError";
 import type { TradeLogData } from "./types";
 
 const config = {
@@ -41,9 +42,12 @@ export function useJournal(
   const syncWithIB = useCallback(async () => {
     setSyncing(true);
     try {
-      const res = await fetch("/api/journal/sync", { method: "POST" });
+      const res = await fetch("/api/journal/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
       const body = await res.json();
-      if (!res.ok) throw new Error(body.error || "Sync failed");
+      if (!res.ok) throw new Error(errorFromResponseBody(body, "Sync failed"));
       setLastSyncResult({ imported: body.imported, skipped: body.skipped });
       // Refresh journal data after successful sync
       if (body.imported > 0) {

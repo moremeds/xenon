@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { errorFromResponseBody } from "./order/responseError";
 import type { OrdersData } from "./types";
 
 const SYNC_INTERVAL_MS = 30_000;
@@ -39,10 +40,13 @@ export function useOrders(
     const reqBroker = broker;
     setSyncing(true);
     try {
-      const res = await fetch(`/api/orders${q}`, { method: "POST" });
+      const res = await fetch(`/api/orders${q}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error((body as { error?: string }).error ?? "Sync failed");
+        throw new Error(errorFromResponseBody(body, "Sync failed"));
       }
       const json = (await res.json()) as OrdersData;
       if (brokerRef.current !== reqBroker) return; // switched tabs mid-flight

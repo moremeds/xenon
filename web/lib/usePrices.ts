@@ -74,8 +74,6 @@ export type UsePricesOptions = {
   onPriceUpdate?: (update: PriceUpdate) => void;
   /** Callback when connection status changes */
   onConnectionChange?: (connected: boolean) => void;
-  /** Clerk getToken function for WebSocket auth */
-  getToken?: () => Promise<string | null>;
 };
 
 export type UsePricesReturn = {
@@ -323,7 +321,6 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
     depthExpiry = null,
     onPriceUpdate,
     onConnectionChange,
-    getToken,
   } = options;
 
   const [prices, setPrices] = useState<Record<string, PriceData>>({});
@@ -379,7 +376,6 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
   // Callback refs (avoid stale closures in WS handlers)
   const onPriceUpdateRef = useRef(onPriceUpdate);
   const onConnectionChangeRef = useRef(onConnectionChange);
-  const getTokenRef = useRef(getToken);
 
   // Stable hashes for change detection
   const symbolHash = symbolKey(symbols);
@@ -449,7 +445,6 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
   desiredDepthExpiryRef.current = normalizedDepthExpiry;
   onPriceUpdateRef.current = onPriceUpdate;
   onConnectionChangeRef.current = onConnectionChange;
-  getTokenRef.current = getToken;
 
   // ---------------------------------------------------------------------------
   // Helpers
@@ -631,18 +626,10 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
   // ---------------------------------------------------------------------------
   const buildAuthenticatedUrl = useCallback(
     async (baseUrl: string): Promise<string> => {
-      if (!getTokenRef.current) return baseUrl;
-      try {
-        const token = await getTokenRef.current();
-        if (!token) return baseUrl;
-        const { getWsTicket } = await import("./wsTicket");
-        const ticket = await getWsTicket(token);
-        const separator = baseUrl.includes("?") ? "&" : "?";
-        return `${baseUrl}${separator}ticket=${ticket}`;
-      } catch (err) {
-        wsLog("Failed to get WS ticket, connecting without auth:", err);
-        return baseUrl;
-      }
+      const { getWsTicket } = await import("./wsTicket");
+      const ticket = await getWsTicket();
+      const separator = baseUrl.includes("?") ? "&" : "?";
+      return `${baseUrl}${separator}ticket=${ticket}`;
     },
     [],
   );
@@ -694,8 +681,17 @@ export function usePrices(options: UsePricesOptions): UsePricesReturn {
     }
 
     (async () => {
-      const socketUrl = await resolveBrowserIbRealtimeWsUrl();
-      const url = await buildAuthenticatedUrl(socketUrl);
+      let url: string;
+      try {
+        const socketUrl = await resolveBrowserIbRealtimeWsUrl();
+        url = await buildAuthenticatedUrl(socketUrl);
+      } catch (err) {
+        wsLog("WS ticket fetch failed; will retry:", err);
+        if (gen !== socketGenRef.current) return;
+        connStateRef.current = "closed";
+        scheduleReconnectRef.current();
+        return;
+      }
       if (gen !== socketGenRef.current) return; // stale connect attempt
 
       const ws = new WebSocket(url);

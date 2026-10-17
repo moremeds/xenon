@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { errorFromResponseBody } from "./order/responseError";
 import type { PortfolioData } from "./types";
 
 const BASE_INTERVAL_MS = 30_000;
@@ -65,10 +66,13 @@ export function usePortfolio(
     syncingRef.current = true;
     setSyncing(true);
     try {
-      const res = await fetch("/api/portfolio", { method: "POST" });
+      const res = await fetch("/api/portfolio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error((body as { error?: string }).error ?? "Sync failed");
+        throw new Error(errorFromResponseBody(body, "Sync failed"));
       }
       const json = (await res.json()) as PortfolioData;
       setData(json);

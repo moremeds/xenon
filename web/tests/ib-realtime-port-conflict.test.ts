@@ -94,7 +94,7 @@ describe("ib realtime server startup", () => {
       const [code] = await once(child, "exit");
 
       expect(stdout).toContain(
-        `WebSocket port already in use at ws://0.0.0.0:${port}`,
+        `WebSocket port already in use at ws://127.0.0.1:${port}`,
       );
       expect(stdout).toContain("occupied by a non-Xenon service");
       expect(stdout).toContain("using fallback port");
