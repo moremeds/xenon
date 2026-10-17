@@ -103,12 +103,12 @@ Key rules:
 
 1. **UI pre-submission** — `checkNakedShortRisk()` in `OrderTab.tsx` blocks form submission
 2. **API gate** — `orders/place/route.ts` returns 403 if guard fails
-3. **Post-sync audit** — `naked_short_audit.py` runs after every `ib_sync`, cancels violating open orders
+3. **Post-sync audit (shadow)** — `naked_short_audit.py` runs in-process after every `ib_sync --sync` over that pass's positions + scoped live open orders (via `coverage`); logs violations + `record_service_health("naked_short_audit")`, cancels nothing. Enforcement is a separate opt-in step (`XENON_AUDIT_CANCEL`, not shipped)
 
 **Combo check design**: IB BAG orders always use `action=BUY` envelope. Guard inspects leg-level `right` and `action` fields. `sellCallRatio - buyCallRatio` = uncovered short calls. Checked before the BUY early-return.
 
-**Implementation**: `web/lib/nakedShortGuard.ts` (shared guard), `src/xenon/execution/naked_short_audit.py` (audit + cancel)
-**Tests**: `web/tests/naked-short-guard.test.ts`, `scripts/tests/test_naked_short_audit.py`
+**Implementation**: `web/lib/nakedShortGuard.ts` (shared guard), `src/xenon/execution/naked_short_audit.py` (shadow audit, no cancel path)
+**Tests**: `web/tests/naked-short-guard.test.ts`, `scripts/tests/test_naked_short_audit.py`, `scripts/tests/test_ib_sync_audit_shadow.py`
 
 ## Order Execution Modules
 
@@ -117,7 +117,7 @@ Key rules:
 - `ib_place_order.py`, `ib_order_manage.py` (cancel/modify via subprocess; see `api/CLAUDE.md`)
 - `orders_store.py` — Postgres-backed public facade for `order_submissions` and `order_events`; preserve its function signatures
 - `single_leg_rehydrate.py` — three-source reconcile (orders DB, IB open orders, position monitor). Invoked in FastAPI lifespan on boot; exposed for testing via `POST /dev/rehydrate/synthetic`.
-- `naked_short_audit.py` — post-sync enforcement
+- `naked_short_audit.py` — post-sync audit (shadow mode: log + service_health, no cancels)
 - `quote_guard.py`, `contract_normalize.py`, `preflight.py` — order-path safety layers
 - `combo_wizard/` — combo order entry flow (plan/submit/reprice/abort/protect)
 - `futu_sync.py` — read-only Futu positions sync
