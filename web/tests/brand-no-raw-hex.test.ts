@@ -35,8 +35,9 @@ const APPROVED_TOKEN_SELECTORS = new Set([
 
 const BRAND_MARKER = /(\/\/|\/\*)\s*brand:/;
 
-/** Whole-token hex, or a color function call, inside a value string. */
-const HEX_TOKEN = /(^|[\s(:,])#[0-9a-fA-F]{3,8}\b(?=[\s),;:'"`!]|$)/;
+/** Whole-token hex (3, 4, 6 or 8 digits only) in a value string. */
+const HEX_TOKEN =
+  /(^|[\s(:,])#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})\b(?=[\s),;:'"`!}]|$)/;
 const COLOR_FN = /\b(?:rgba?|hsla?)\s*\(/;
 const URL_REF = /url\([^)]*\)/g;
 
@@ -95,20 +96,19 @@ function scanCss(source: string, rel: string): string[] {
 
 const FRAGMENT_ATTRS = new Set(["href", "id", "key", "htmlFor"]);
 
-/** Literal is the value of a JSX fragment/id attribute — a link, not a color. */
+/**
+ * Literal is the value of a JSX fragment/id attribute — a link, not a color.
+ * Climbs ancestors (e.g. TemplateHead → TemplateExpression → JsxExpression →
+ * JsxAttribute) so `href={`#deadbeef${id}`}` stays exempt.
+ */
 function isFragmentAttr(node: ts.Node): boolean {
-  let attr: ts.JsxAttribute | undefined;
-  if (ts.isJsxAttribute(node.parent)) {
-    attr = node.parent;
-  } else if (
-    ts.isJsxExpression(node.parent) &&
-    ts.isJsxAttribute(node.parent.parent)
-  ) {
-    attr = node.parent.parent;
+  for (let n: ts.Node | undefined = node.parent; n; n = n.parent) {
+    if (ts.isJsxAttribute(n)) {
+      const name = n.name.text;
+      return FRAGMENT_ATTRS.has(name) || name.startsWith("data-");
+    }
   }
-  if (!attr) return false;
-  const name = attr.name.text;
-  return FRAGMENT_ATTRS.has(name) || name.startsWith("data-");
+  return false;
 }
 
 function isModuleSpecifier(node: ts.Node): boolean {
@@ -290,9 +290,16 @@ describe("brand tokens", () => {
       ['const c = "hsl(0, 0%, 50%)";', 1],
       ['const c = "#E85D6C";', 1],
       ['x: "var(--fault, #E85D6C)"', 1],
+      // `}` is a valid hex terminator — the tail of a template expression
+      ["const s = css`.x{width:${w}px;color:#fff}`;", 1],
+      ['const c = "#abcd";', 1],
+      ['const c = "#abcde";', 0],
+      ['const c = "#abcdefg";', 0],
       ['const a = "/help#abc";', 0],
       ['<a href={"#deadbeef"} />', 0],
       ['<a href="#deadbeef">x</a>', 0],
+      // fragment exemption reaches through template expressions
+      ["<a href={`#deadbeef${id}`} />", 0],
       ['<div id="fff" />', 0],
       ['<div data-cell="#a1b2c3" />', 0],
       ['import x from "#a1b2c3";', 0],
@@ -310,6 +317,7 @@ describe("brand tokens", () => {
       ".x { color: rgb(255,0,0); }\n",
       ".x { color: hsl(0, 0%, 50%); }\n",
       '.x { border: 1px solid #05ad98; }\n',
+      '.x { color: #abcd; }\n',
       ':root { --a: #fff }\n.x { color: #fff; }\n',
       ':root { .card { --local: #fff; } }\n',
       '.zz { --local: var(--positive); color: #fff; }\n',
@@ -327,11 +335,14 @@ describe("brand tokens", () => {
       ['[data-theme="dark"] {\n  --bg-base: #0a0f14;\n}\n', "app/globals.css"],
       ['[data-theme="light"] {\n  --bg-base: #ffffff;\n}\n', "app/globals.css"],
       ['.x { background: url("/img#f00d"); }\n', "app/globals.css"],
+      // 5 hex digits is not a color length
+      ['.x { color: #abcde; }\n', "app/globals.css"],
       // token defs are only legitimate in globals.css
       [':root {\n  --x: #fff;\n}\n', "app/other.css"],
     ];
-    expect(scanCss(clean[6][0], clean[6][1])).not.toHaveLength(0);
-    for (const [src, rel] of clean.slice(0, 6)) {
+    // token defs are only legitimate in globals.css — last case must flag
+    expect(scanCss(clean[7][0], clean[7][1])).not.toHaveLength(0);
+    for (const [src, rel] of clean.slice(0, 7)) {
       expect(scanCss(src, rel), JSON.stringify(src)).toEqual([]);
     }
   });
