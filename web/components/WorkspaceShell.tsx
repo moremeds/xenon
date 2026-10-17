@@ -40,7 +40,7 @@ import { computeFutuStaleness } from "@/lib/futuStaleness";
 import ToastContainer from "@/components/Toast";
 
 const WorkspaceSections = dynamic(
-  () => import("@/components/WorkspaceSections"),
+  () => import("@/components/workspace/WorkspaceSections"),
   {
     loading: () => null,
   },

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { groupExecutedOrders } from "../components/WorkspaceSections";
+import { groupExecutedOrders } from "../components/workspace/fillGrouping";
 import type { ExecutedOrder } from "../lib/types";
 
 function stockFill(overrides: Partial<ExecutedOrder>): ExecutedOrder {
