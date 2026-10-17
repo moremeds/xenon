@@ -663,10 +663,13 @@ _WIZARD_SESSION_ACTIONS = frozenset({"submit", "reprice", "abort", "protect"})
 
 
 def _is_write_path(path: str) -> bool:
-    if path in _READ_ONLY_WRITE_PATHS:
+    # Trailing-slash forms ("/journal/", ".../protect/") would otherwise
+    # fall through to the router's 307 redirect instead of the refusal.
+    normalized = path.rstrip("/") or "/"
+    if normalized in _READ_ONLY_WRITE_PATHS:
         return True
-    if path.startswith("/wizard/sessions/"):
-        return path.rsplit("/", 1)[-1] in _WIZARD_SESSION_ACTIONS
+    if normalized.startswith("/wizard/sessions/"):
+        return normalized.rsplit("/", 1)[-1] in _WIZARD_SESSION_ACTIONS
     return False
 
 

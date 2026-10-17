@@ -150,21 +150,43 @@ _WRITE_PATHS = [
 ]
 
 
-@pytest.mark.parametrize("path", _WRITE_PATHS)
+_WRITE_PATH_FORMS = [p + suffix for p in _WRITE_PATHS for suffix in ("", "/")]
+
+
+@pytest.mark.parametrize("path", _WRITE_PATH_FORMS)
 def test_read_only_refuses_malformed_json_body(read_only_client, path):
-    """Malformed JSON gets 403 READ_ONLY_MODE, not 422 — the ASGI guard runs
-    before FastAPI decodes the request body."""
-    r = read_only_client.post(path, content="{", headers={"Content-Type": "application/json"})
+    """Malformed JSON gets 403 READ_ONLY_MODE, not 422 or a 307 trailing-slash
+    redirect — the ASGI guard normalizes the path and runs before FastAPI
+    decodes the request body."""
+    r = read_only_client.post(
+        path,
+        content="{",
+        headers={"Content-Type": "application/json"},
+        follow_redirects=False,
+    )
     assert r.status_code == 403, r.text
     assert r.json().get("reason_code") == "READ_ONLY_MODE", r.json()
 
 
-@pytest.mark.parametrize("path", _WRITE_PATHS)
+@pytest.mark.parametrize("path", _WRITE_PATH_FORMS)
 def test_read_only_refuses_schema_invalid_body(read_only_client, path):
-    """Schema-invalid bodies get the 403 refusal ahead of validation."""
-    r = read_only_client.post(path, json={"bogus": True})
+    """Schema-invalid bodies get the 403 refusal ahead of validation — in
+    canonical and trailing-slash form alike."""
+    r = read_only_client.post(path, json={"bogus": True}, follow_redirects=False)
     assert r.status_code == 403, r.text
     assert r.json().get("reason_code") == "READ_ONLY_MODE", r.json()
+
+
+@pytest.mark.parametrize("path", _WRITE_PATH_FORMS)
+def test_unauthenticated_still_401_in_read_only(read_only_client, monkeypatch, path):
+    """Auth stays outermost: a denied request gets 401 even under read-only —
+    the write-guard middleware must not preempt authentication."""
+    import xenon.api.server as server
+    from xenon.api.auth import AuthDecision
+
+    monkeypatch.setattr(server, "classify_auth", lambda request: AuthDecision("deny"))
+    r = read_only_client.post(path, json={}, follow_redirects=False)
+    assert r.status_code == 401, r.text
 
 
 def test_journal_post_returns_403_in_read_only(read_only_client):
