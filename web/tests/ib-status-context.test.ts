@@ -9,10 +9,23 @@ import React from "react";
 import { IBStatusProvider, useIBStatusContext } from "../lib/IBStatusContext";
 import type { ReactNode } from "react";
 
-// Mock Clerk auth — IBStatusProvider calls useAuth() for WS ticket
-vi.mock("@clerk/nextjs", () => ({
-  useAuth: () => ({ getToken: async () => null }),
-}));
+// The provider mints a WS ticket before connecting — mock the module (fetch
+// stubs don't reach the dynamically imported copy). ws-config + health still
+// go through the fetch stub below.
+vi.mock("@/lib/wsTicket", () => ({ getWsTicket: async () => "test-ticket" }));
+
+function stubRealtimeFetches() {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/ib/ws-ticket")) {
+        return { ok: true, json: async () => ({ ticket: "test-ticket" }) };
+      }
+      return { ok: true, json: async () => ({ url: "ws://localhost:8765" }) };
+    }) as unknown as typeof fetch,
+  );
+}
 
 /* ---------- MockWebSocket ---------- */
 class MockWebSocket {
@@ -62,6 +75,7 @@ const wrapper = ({ children }: { children: ReactNode }) =>
 beforeEach(() => {
   wsInstances = [];
   vi.useFakeTimers();
+  stubRealtimeFetches();
   vi.stubGlobal(
     "WebSocket",
     class extends MockWebSocket {
@@ -80,7 +94,9 @@ afterEach(() => {
 describe("IBStatusProvider", () => {
   it("renders children", async () => {
     const { result } = renderHook(() => useIBStatusContext(), { wrapper });
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     expect(result.current).toBeDefined();
     expect(result.current.wsConnected).toBe(false);
   });
@@ -93,7 +109,9 @@ describe("IBStatusProvider", () => {
     const { result: r1 } = renderHook(() => useIBStatusContext(), {
       wrapper: Wrapper,
     });
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     // Even with a second consumer, still only 1 WebSocket
     expect(wsInstances).toHaveLength(1);
     expect(r1.current).toBeDefined();
@@ -101,7 +119,9 @@ describe("IBStatusProvider", () => {
 
   it("wsConnected updates on WS open/close", async () => {
     const { result } = renderHook(() => useIBStatusContext(), { wrapper });
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     expect(result.current.wsConnected).toBe(false);
     act(() => latestWs().simulateOpen());
     expect(result.current.wsConnected).toBe(true);
@@ -111,7 +131,9 @@ describe("IBStatusProvider", () => {
 
   it("ibConnected updates from status message", async () => {
     const { result } = renderHook(() => useIBStatusContext(), { wrapper });
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     // Default ibConnected is true (assume connected until told otherwise)
     act(() =>
@@ -126,7 +148,9 @@ describe("IBStatusProvider", () => {
 
   it("disconnectedSince set when IB disconnects, cleared on reconnect", async () => {
     const { result } = renderHook(() => useIBStatusContext(), { wrapper });
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     expect(result.current.disconnectedSince).toBeNull();
     act(() =>
@@ -148,7 +172,9 @@ describe("IBStatusProvider", () => {
 
   it("connectionState derived correctly for all 3 states", async () => {
     const { result } = renderHook(() => useIBStatusContext(), { wrapper });
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     // Initial: relay offline (WS not connected)
     expect(result.current.connectionState).toBe("relay_offline");
 
@@ -169,7 +195,9 @@ describe("IBStatusProvider", () => {
 
   it("responds to ping with pong", async () => {
     const { result } = renderHook(() => useIBStatusContext(), { wrapper });
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     const ws = latestWs();
     act(() => ws.simulateMessage({ type: "ping" }));
@@ -185,20 +213,26 @@ describe("IBStatusProvider", () => {
 
   it("reconnects on WS close with backoff", async () => {
     const { result } = renderHook(() => useIBStatusContext(), { wrapper });
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     expect(wsInstances).toHaveLength(1);
     act(() => latestWs().simulateOpen());
     act(() => latestWs().simulateClose());
     // Should schedule reconnect
     const beforeCount = wsInstances.length;
     act(() => vi.advanceTimersByTime(2000));
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     expect(wsInstances.length).toBeGreaterThan(beforeCount);
   });
 
   it("cleans up WebSocket on unmount", async () => {
     const { unmount } = renderHook(() => useIBStatusContext(), { wrapper });
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     const ws = latestWs();
     unmount();
@@ -207,7 +241,9 @@ describe("IBStatusProvider", () => {
 
   it("sets wsConnected false and disconnectedSince when WS drops", async () => {
     const { result } = renderHook(() => useIBStatusContext(), { wrapper });
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     act(() =>
       latestWs().simulateMessage({ type: "status", ib_connected: true }),
@@ -223,17 +259,24 @@ describe("IBStatusProvider", () => {
     vi.useRealTimers();
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (url: string) =>
-        String(url).includes("/api/health")
-          ? {
-              ok: true,
-              json: async () => ({ ib_pool: { sync: { connected: true } } }),
-            }
-          : { ok: true, json: async () => ({ url: "ws://localhost:8765" }) },
-      ) as unknown as typeof fetch,
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes("/api/health")) {
+          return {
+            ok: true,
+            json: async () => ({ ib_pool: { sync: { connected: true } } }),
+          };
+        }
+        if (u.includes("/api/ib/ws-ticket")) {
+          return { ok: true, json: async () => ({ ticket: "test-ticket" }) };
+        }
+        return { ok: true, json: async () => ({ url: "ws://localhost:8765" }) };
+      }) as unknown as typeof fetch,
     );
     const { result } = renderHook(() => useIBStatusContext(), { wrapper });
-    await act(async () => {});
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
     act(() => latestWs().simulateOpen());
     act(() => latestWs().simulateClose());
     await waitFor(() => expect(result.current.wsConnected).toBe(false));

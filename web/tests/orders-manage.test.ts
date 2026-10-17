@@ -1,8 +1,21 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, vi } from "vitest";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { NextRequest } from "next/server";
+
+vi.mock("@/lib/xenonApi", async () => {
+  const actual =
+    await vi.importActual<typeof import("@/lib/xenonApi")>("@/lib/xenonApi");
+  return {
+    ...actual,
+    xenonFetch: vi.fn(),
+  };
+});
+
+import { xenonFetch } from "@/lib/xenonApi";
+
+const mockFetch = xenonFetch as unknown as ReturnType<typeof vi.fn>;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -103,7 +116,17 @@ describe("POST /api/orders/modify validation", () => {
     expect(res.status).toBe(400);
   });
 
-  it("rejects negative newPrice", async () => {
+  it("forwards negative newPrice — BAG credit combos carry signed limits", async () => {
+    // The route has no combo flag, so it must not block negatives locally;
+    // the CLI decides from the located trade's secType. Only 0 is rejected.
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValueOnce({ status: "ok", message: "Modified" });
+    mockFetch.mockResolvedValueOnce({ open_orders: [] });
+    mockFetch.mockResolvedValueOnce({
+      open_orders: [
+        { orderId: 0, permId: 12345, limitPrice: -5, totalQuantity: 1 },
+      ],
+    });
     const req = new NextRequest("http://localhost/api/orders/modify", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -111,7 +134,10 @@ describe("POST /api/orders/modify validation", () => {
     });
 
     const res = await modifyPOST(req);
-    expect(res.status).toBe(400);
+    expect(res.status).not.toBe(400);
+    const [path, init] = mockFetch.mock.calls[0];
+    expect(path).toBe("/orders/modify");
+    expect(JSON.parse(init.body as string).newPrice).toBe(-5);
   });
 });
 

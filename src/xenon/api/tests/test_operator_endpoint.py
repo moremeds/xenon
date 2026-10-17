@@ -5,7 +5,8 @@ from xenon.api import server as server_mod
 
 def test_operator_payload_shape(pg_session):
     # No per-route Depends; the global auth_middleware passes through in tests
-    # (CLERK_JWKS_URL unset) — same as every other data-route test. No token needed.
+    # (conftest sets XENON_AUTH_ALLOW_DEV_OPEN=1) — same as every other
+    # data-route test. No token needed.
     r = TestClient(server_mod.app).get("/admin/operator")
     assert r.status_code == 200
     body = r.json()

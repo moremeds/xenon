@@ -107,7 +107,7 @@ JSON data files: always `"ticker"`. IB contracts: `"symbol"`. Read defensively: 
 
 ## Xenon API Client
 
-`xenonFetch()` in `web/lib/xenonApi.ts` — all Next.js routes call FastAPI via this helper (never `spawn()`). Attaches Clerk Bearer token automatically. Errors surfaced as `XenonApiError` with upstream status + detail preserved.
+`xenonFetch()` in `web/lib/xenonApi.ts` — all Next.js routes call FastAPI via this helper (never `spawn()`). Attaches the `X-Internal-Token` credential from `XENON_INTERNAL_API_TOKEN` via `internalApiHeaders()`. Errors surfaced as `XenonApiError` with upstream status + detail preserved.
 
 ## Multi-Broker Account Tabs
 

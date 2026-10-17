@@ -1,11 +1,7 @@
-"""Tests for Clerk JWT auth middleware and WebSocket ticket system."""
+"""Tests for the WebSocket ticket system (single-use, 30s TTL)."""
 
-import os
 import time
 import uuid
-from unittest.mock import patch
-
-import pytest
 
 # --- ws_ticket tests ---
 from xenon.api.ws_ticket import TICKET_TTL_SECONDS, _ticket_store, create_ticket, validate_ticket
@@ -55,37 +51,3 @@ class TestValidateTicket:
         validate_ticket("dummy")
         assert t1 not in _ticket_store
         assert t2 in _ticket_store
-
-
-# --- auth.py tests ---
-
-from xenon.api.auth import _get_allowed_users, _get_issuer
-
-
-class TestGetAllowedUsers:
-    def test_empty_env(self):
-        with patch.dict(os.environ, {"ALLOWED_USER_IDS": ""}):
-            assert _get_allowed_users() == set()
-
-    def test_single_user(self):
-        with patch.dict(os.environ, {"ALLOWED_USER_IDS": "user_123"}):
-            assert _get_allowed_users() == {"user_123"}
-
-    def test_multiple_users(self):
-        with patch.dict(os.environ, {"ALLOWED_USER_IDS": "user_1,user_2,user_3"}):
-            assert _get_allowed_users() == {"user_1", "user_2", "user_3"}
-
-    def test_trims_whitespace(self):
-        with patch.dict(os.environ, {"ALLOWED_USER_IDS": " user_1 , user_2 "}):
-            assert _get_allowed_users() == {"user_1", "user_2"}
-
-
-class TestGetIssuer:
-    def test_returns_env_value(self):
-        with patch.dict(os.environ, {"CLERK_ISSUER": "https://app.clerk.dev"}):
-            assert _get_issuer() == "https://app.clerk.dev"
-
-    def test_returns_empty_when_not_set(self):
-        with patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("CLERK_ISSUER", None)
-            assert _get_issuer() == ""

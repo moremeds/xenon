@@ -39,7 +39,10 @@ export function useOrders(
     const reqBroker = broker;
     setSyncing(true);
     try {
-      const res = await fetch(`/api/orders${q}`, { method: "POST" });
+      const res = await fetch(`/api/orders${q}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error((body as { error?: string }).error ?? "Sync failed");

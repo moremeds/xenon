@@ -9,7 +9,6 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useAuth } from "@clerk/nextjs";
 import {
   createReconnectStrategy,
   type ReconnectState,
@@ -58,7 +57,6 @@ const STALENESS_THRESHOLD_MS = 60_000;
 /* ─── Provider ────────────────────────────────────────── */
 
 export function IBStatusProvider({ children }: { children: ReactNode }) {
-  const { getToken } = useAuth();
   const [wsConnected, setWsConnected] = useState(false);
   const [ibConnected, setIbConnected] = useState(true); // assume connected until told otherwise
   const [disconnectedSince, setDisconnectedSince] = useState<number | null>(
@@ -89,26 +87,12 @@ export function IBStatusProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const getTokenRef = useRef(getToken);
-  getTokenRef.current = getToken;
-
   const buildAuthenticatedUrl = useCallback(
     async (baseUrl: string): Promise<string> => {
-      if (!getTokenRef.current) return baseUrl;
-      try {
-        const token = await getTokenRef.current();
-        if (!token) return baseUrl;
-        const { getWsTicket } = await import("./wsTicket");
-        const ticket = await getWsTicket(token);
-        const separator = baseUrl.includes("?") ? "&" : "?";
-        return `${baseUrl}${separator}ticket=${ticket}`;
-      } catch (err) {
-        console.debug(
-          "[IBStatus] Failed to get WS ticket, connecting without auth:",
-          err,
-        );
-        return baseUrl;
-      }
+      const { getWsTicket } = await import("./wsTicket");
+      const ticket = await getWsTicket();
+      const separator = baseUrl.includes("?") ? "&" : "?";
+      return `${baseUrl}${separator}ticket=${ticket}`;
     },
     [],
   );
@@ -125,8 +109,22 @@ export function IBStatusProvider({ children }: { children: ReactNode }) {
     const gen = ++socketGenRef.current;
 
     (async () => {
-      const socketUrl = await resolveBrowserIbRealtimeWsUrl();
-      const url = await buildAuthenticatedUrl(socketUrl);
+      let url: string;
+      try {
+        const socketUrl = await resolveBrowserIbRealtimeWsUrl();
+        url = await buildAuthenticatedUrl(socketUrl);
+      } catch (err) {
+        console.debug("[IBStatus] WS ticket fetch failed; retrying:", err);
+        if (gen !== socketGenRef.current || !mountedRef.current) return;
+        setWsConnected(false);
+        if (strategyRef.current.canRetry()) {
+          const delay = strategyRef.current.nextDelay();
+          reconnectTimerRef.current = setTimeout(() => {
+            if (mountedRef.current) connect();
+          }, delay);
+        }
+        return;
+      }
       if (gen !== socketGenRef.current) return; // stale connect attempt
 
       const ws = new WebSocket(url);

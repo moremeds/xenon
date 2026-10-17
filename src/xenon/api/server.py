@@ -10,11 +10,13 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import json
 import logging
 import os
 import sys
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -40,7 +42,6 @@ from xenon.api.auth import (
     classify_auth,
     validate_auth_config,
     verify_api_key,
-    verify_clerk_jwt,
 )
 from xenon.api.guards import (
     ReadOnlyDenied,
@@ -112,6 +113,18 @@ _futu_lock: Optional[asyncio.Lock] = None
 # would look "recently synced" and serve stale cache instead of a real fetch.
 _futu_last_sync_monotonic: Optional[float] = None
 FUTU_COOLDOWN_S = 10
+# Hard bound on OpenD calls — matches the 15s bound in _futu_refresh_db_first.
+# A port-open but handshaking-hung OpenD must fail the route, not wedge it.
+FUTU_SYNC_TIMEOUT_S = 15.0
+# Single-worker executor for /futu/sync: the blocking SDK call runs here so at
+# most one OpenD call is ever in flight. `_futu_sync_future` tracks the worker
+# at thread level — asyncio.wait_for cancels the await on timeout but cannot
+# kill the thread, so the future stays the in-flight marker until the worker
+# actually exits.
+_futu_sync_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="xenon-futu-sync"
+)
+_futu_sync_future: Optional[concurrent.futures.Future] = None
 
 
 def _get_futu_lock() -> asyncio.Lock:
@@ -133,6 +146,41 @@ def _get_futu_client() -> FutuClient:
             filter_trading_market=os.environ.get("FUTU_MARKET", "US"),
         )
     return _futu_client
+
+
+def _futu_fetch_portfolio_blocking(client: FutuClient) -> dict:
+    """Blocking /futu/sync work: connect if needed, then force-fetch.
+
+    Runs on the dedicated single-worker executor so the whole call is one
+    thread — a hang holds the client's RLock but never multiplies workers.
+    """
+    if not client.is_connected():
+        client.connect()
+    return client.fetch_portfolio(force=True)
+
+
+def _futu_cleanup_after_timeout(
+    client: FutuClient,
+    fetch: "concurrent.futures.Future",
+    marker: "concurrent.futures.Future",
+) -> None:
+    """Daemon-thread cleanup after a /futu/sync timeout.
+
+    The Futu SDK's ``close()`` takes its own RLock — running ``disconnect()``
+    on the event loop would block every request while the SDK is stuck.
+    Completes the combined in-flight marker only after BOTH the hung fetch
+    worker and the reset have finished, so a late cleanup can never close a
+    newer session.
+    """
+    try:
+        client.disconnect()
+    except Exception:
+        logger.exception("Futu client reset after sync timeout failed")
+    try:
+        fetch.result()
+    except Exception:
+        pass
+    marker.set_result(None)
 
 
 # Shared state
@@ -684,12 +732,12 @@ async def read_only_write_guard(request: Request, call_next):
     return await call_next(request)
 
 
-# Auth middleware — only /health and the internal ticket-validate probe are exempt.
-# /docs and /openapi.json are deliberately NOT exempt: they expose the full trading
-# API schema and now require auth (localhost / internal token / Clerk).
+# Auth middleware — only /health is exempt. /docs and /openapi.json are
+# deliberately NOT exempt: they expose the full trading API schema.
+# /ws-ticket/validate is NOT exempt either: the Node relay authenticates with
+# X-Internal-Token, so an external caller cannot burn or probe tickets.
 AUTH_EXEMPT_PATHS = {
     "/health",
-    "/ws-ticket/validate",
     # /dev/rehydrate/synthetic intentionally NOT listed: gated by _dev_probes_enabled()
     # AND now by classify_auth (fail-closed). Exempting it would risk a public write
     # endpoint if DEV_PROBES=1 leaked into a non-local env.
@@ -698,7 +746,7 @@ AUTH_EXEMPT_PATHS = {
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    """Authorize via classify_auth (fail-closed); defer Clerk JWT to async validation."""
+    """Authorize via classify_auth (fail-closed, credential-only)."""
     if request.url.path in AUTH_EXEMPT_PATHS:
         return await call_next(request)
 
@@ -706,17 +754,6 @@ async def auth_middleware(request: Request, call_next):
 
     if decision.action == "pass":
         request.state.user = decision.identity
-        return await call_next(request)
-
-    if decision.action == "clerk":
-        try:
-            payload = await verify_clerk_jwt(request)
-            request.state.user = payload
-        except HTTPException as exc:
-            return JSONResponse(
-                status_code=exc.status_code,
-                content={"detail": exc.detail},
-            )
         return await call_next(request)
 
     return JSONResponse(
@@ -1350,9 +1387,8 @@ async def dev_rehydrate_synthetic():
 async def get_ws_ticket(request: Request):
     """Issue a short-lived ticket for WebSocket authentication.
 
-    The middleware already authorized this request (localhost / internal token /
-    API key / Clerk) and set request.state.user. Reading it here avoids a second
-    Clerk validation that would raise when CLERK_JWKS_URL is unset (prod).
+    The middleware already authorized this request (internal token or scoped
+    API key) and set request.state.user. Reading it here avoids re-validating.
     """
     user = getattr(request.state, "user", None) or {}
     ticket = create_ticket(user.get("sub", "unknown"))
@@ -2405,6 +2441,27 @@ def _classify_to_http(data: dict) -> tuple[int, str]:
     return 502, ReasonCode.IB_REJECT.value
 
 
+def order_error(status: int, reason_code: str, detail: dict, **extra) -> JSONResponse:
+    """Single error contract for the cancel/modify routes.
+
+    Emits ``reason_code`` at the TOP level of the body — that is what the
+    web toast helpers read via ``readReasonCode`` (``HTTPException(
+    detail=dict)`` only ever produced ``body.detail.reason_code``). The
+    structured payload stays under ``detail`` for the readers that consume
+    it (``detail.applied`` on MODIFY_STALE, ``upstream``, ``applied_
+    sequence``, ``http_status``); ``detail.reason_code`` is kept too so
+    nested readers keep working. ``**extra`` lands at the top level.
+    """
+    return JSONResponse(
+        status_code=status,
+        content={
+            "reason_code": reason_code,
+            "detail": {**detail, "reason_code": reason_code},
+            **extra,
+        },
+    )
+
+
 def _record_manage_event(
     ib_order_id: str,
     kind: str,
@@ -2474,11 +2531,37 @@ async def _orders_cancel_from_body(body: dict):
     order_id = body.get("orderId", 0)
     perm_id = body.get("permId", 0)
 
+    if not order_id and not perm_id:
+        return order_error(
+            400,
+            ReasonCode.ORDER_IDENTIFIER_REQUIRED.value,
+            {
+                "message": "Cancel request must include orderId or permId.",
+                "http_status": 400,
+            },
+        )
+
+    scope = _resolve_scope_kwargs()
+
     args = ["cancel"]
     if order_id:
         args.extend(["--order-id", str(order_id)])
     if perm_id:
         args.extend(["--perm-id", str(perm_id)])
+
+    # PR-05 identity tuple: the subprocess asserts the scope account plus the
+    # recorded placing clientId (when a submission row carries one), so a
+    # cancel can never land on a different account's/client's order.
+    # --account is emitted only when the scope resolved a real account —
+    # the legacy_unknown fallback would otherwise fail every identity check.
+    _broker_account = scope.get("broker_account") or ""
+    if _broker_account and _broker_account != "legacy_unknown":
+        args.extend(["--account", _broker_account])
+    row = orders_store.load_submission_for_modify(
+        order_id=str(order_id or ""), perm_id=str(perm_id or ""), **scope
+    )
+    if row and row.get("placing_client_id") is not None:
+        args.extend(["--client-id", str(row["placing_client_id"])])
 
     result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=15)
     if not result.ok:
@@ -2487,8 +2570,8 @@ async def _orders_cancel_from_body(body: dict):
             "message": result.error or "Subprocess failed",
             "http_status": 503,
         }
-        _record_manage_event(str(order_id or ""), "CANCEL", detail, perm_id=str(perm_id or ""))
-        raise HTTPException(status_code=503, detail=detail)
+        _record_manage_event(str(order_id or ""), "CANCEL", detail, perm_id=str(perm_id or ""), scope=scope)
+        return order_error(503, ReasonCode.IB_CONNECTION.value, detail)
 
     data = result.data or {}
     if data.get("status") == "error":
@@ -2500,8 +2583,8 @@ async def _orders_cancel_from_body(body: dict):
             "upstream": data.get("upstream"),
             "http_status": http_status,
         }
-        _record_manage_event(str(order_id or ""), "CANCEL", detail, perm_id=str(perm_id or ""))
-        raise HTTPException(status_code=http_status, detail=detail)
+        _record_manage_event(str(order_id or ""), "CANCEL", detail, perm_id=str(perm_id or ""), scope=scope)
+        return order_error(http_status, reason_code, detail)
 
     _record_manage_event(
         str(order_id or ""),
@@ -2584,10 +2667,10 @@ async def _orders_modify_from_body(body: dict):
     modify_sequence = body.get("modifySequence")
 
     if modify_sequence is None:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "reason_code": ReasonCode.MODIFY_SEQUENCE_REQUIRED.value,
+        return order_error(
+            400,
+            ReasonCode.MODIFY_SEQUENCE_REQUIRED.value,
+            {
                 "message": "modifySequence is required",
                 "http_status": 400,
             },
@@ -2595,10 +2678,10 @@ async def _orders_modify_from_body(body: dict):
     try:
         modify_sequence = int(modify_sequence)
     except (TypeError, ValueError):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "reason_code": ReasonCode.MODIFY_SEQUENCE_REQUIRED.value,
+        return order_error(
+            400,
+            ReasonCode.MODIFY_SEQUENCE_REQUIRED.value,
+            {
                 "message": "modifySequence must be an integer",
                 "http_status": 400,
             },
@@ -2608,10 +2691,10 @@ async def _orders_modify_from_body(body: dict):
     # supplied (UI-initiated modifies often have orderId=0), route through the
     # perm_id variant so we can still find the submissions row.
     if not order_id and not perm_id:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "reason_code": ReasonCode.ORDER_IDENTIFIER_REQUIRED.value,
+        return order_error(
+            400,
+            ReasonCode.ORDER_IDENTIFIER_REQUIRED.value,
+            {
                 "message": "Modify request must include orderId or permId.",
                 "http_status": 400,
             },
@@ -2625,18 +2708,18 @@ async def _orders_modify_from_body(body: dict):
     if not seq_outcome["applied"]:
         current = seq_outcome["current_sequence"]
         if current == -1:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "reason_code": ReasonCode.ORDER_NOT_FOUND.value,
+            return order_error(
+                404,
+                ReasonCode.ORDER_NOT_FOUND.value,
+                {
                     "message": f"Order {order_id} not found",
                     "http_status": 404,
                 },
             )
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "reason_code": ReasonCode.MODIFY_STALE.value,
+        return order_error(
+            409,
+            ReasonCode.MODIFY_STALE.value,
+            {
                 "message": f"modifySequence {modify_sequence} is stale; current is {current}",
                 "applied": current,
                 "http_status": 409,
@@ -2657,6 +2740,20 @@ async def _orders_modify_from_body(body: dict):
     elif outside_rth is False:
         args.append("--no-outside-rth")
 
+    # PR-05 identity tuple: the subprocess asserts the scope account plus the
+    # recorded placing clientId (when a submission row carries one), so a
+    # modify can never land on a different account's/client's order.
+    # --account is emitted only when the scope resolved a real account —
+    # the legacy_unknown fallback would otherwise fail every identity check.
+    _broker_account = _scope.get("broker_account") or ""
+    if _broker_account and _broker_account != "legacy_unknown":
+        args.extend(["--account", _broker_account])
+    _row = orders_store.load_submission_for_modify(
+        order_id=str(order_id or ""), perm_id=str(perm_id or ""), **_scope
+    )
+    if _row and _row.get("placing_client_id") is not None:
+        args.extend(["--client-id", str(_row["placing_client_id"])])
+
     result = await _run_ib_script_with_recovery("xenon-ib-order-manage", args, timeout=15)
     if not result.ok:
         # DB sequence is already advanced; don't roll back — prevents
@@ -2674,7 +2771,7 @@ async def _orders_modify_from_body(body: dict):
             "http_status": 503,
         }
         _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""), scope=_scope)
-        raise HTTPException(status_code=503, detail=detail)
+        return order_error(503, ReasonCode.IB_CONNECTION.value, detail)
 
     data = result.data or {}
     if data.get("status") == "error":
@@ -2688,7 +2785,7 @@ async def _orders_modify_from_body(body: dict):
             "http_status": http_status,
         }
         _record_manage_event(str(order_id or ""), "MODIFY", detail, perm_id=str(perm_id or ""), scope=_scope)
-        raise HTTPException(status_code=http_status, detail=detail)
+        return order_error(http_status, reason_code, detail)
 
     _record_manage_event(
         str(order_id or ""),
@@ -2787,10 +2884,12 @@ async def futu_sync():
     - **Partial-failure preservation (tribunal T15).** If the new snapshot
       has warnings and fewer positions than the cache, the cache is
       preserved untouched and a sidecar error file is written.
-    - **Off-loop blocking calls.** The Futu SDK is fully sync; all calls
-      run in the default thread pool executor.
+    - **Off-loop blocking calls.** The Futu SDK is fully sync; the call runs
+      on a dedicated single-worker executor. While a worker is still alive
+      (e.g. after a timeout), new requests 503 instead of queueing behind the
+      client's RLock; a timeout also resets the client via ``disconnect()``.
     """
-    global _futu_last_sync_monotonic
+    global _futu_last_sync_monotonic, _futu_sync_future
     import time as _time
 
     lock = _get_futu_lock()
@@ -2801,6 +2900,14 @@ async def futu_sync():
         if cached:
             return {"ok": True, **cached}
 
+    # A timed-out SDK call keeps its worker thread — and the client's RLock —
+    # alive. Never queue a second worker behind it.
+    inflight = _futu_sync_future
+    if inflight is not None and not inflight.done():
+        raise HTTPException(
+            status_code=503, detail="Futu sync already in flight — retry shortly"
+        )
+
     async with lock:
         # Re-check inside lock — race guard so two tabs inside the lock
         # window piggyback on the same result.
@@ -2809,12 +2916,49 @@ async def futu_sync():
             if cached:
                 return {"ok": True, **cached}
 
+        inflight = _futu_sync_future
+        if inflight is not None and not inflight.done():
+            raise HTTPException(
+                status_code=503, detail="Futu sync already in flight — retry shortly"
+            )
+
         client = _get_futu_client()
-        loop = asyncio.get_running_loop()
+        fetch = _futu_sync_executor.submit(_futu_fetch_portfolio_blocking, client)
+        _futu_sync_future = fetch
         try:
-            if not client.is_connected():
-                await loop.run_in_executor(None, client.connect)
-            result = await loop.run_in_executor(None, lambda: client.fetch_portfolio(force=True))
+            result = await asyncio.wait_for(
+                asyncio.wrap_future(fetch),
+                timeout=FUTU_SYNC_TIMEOUT_S,
+            )
+        except TimeoutError:
+            # The fetch worker is still running and may hold the client's
+            # RLock. Cleanup must NOT run on the event loop — the SDK's
+            # close() takes its own RLock and would block every request.
+            # Swap the marker for a combined future that completes only when
+            # BOTH the hung fetch and the daemon cleanup thread finish, so a
+            # late cleanup can never close a newer session.
+            marker = concurrent.futures.Future()
+            _futu_sync_future = marker
+            try:
+                threading.Thread(
+                    target=_futu_cleanup_after_timeout,
+                    args=(client, fetch, marker),
+                    name="xenon-futu-cleanup",
+                    daemon=True,
+                ).start()
+            except Exception:
+                # Thread spawn failed (e.g. RuntimeError: cannot start new
+                # thread). Never fall back to disconnect() on the loop — the
+                # marker completes when the fetch worker exits instead, so the
+                # endpoint is not stuck at 503 forever.
+                logger.exception("Futu cleanup thread failed to start; marker completes with fetch")
+                fetch.add_done_callback(
+                    lambda _f: marker.set_result(None) if not marker.done() else None
+                )
+            raise HTTPException(
+                status_code=503,
+                detail=f"Futu OpenD did not respond within {FUTU_SYNC_TIMEOUT_S:.0f}s",
+            )
         except FutuConnectionError as exc:
             raise HTTPException(status_code=503, detail=f"Futu OpenD unreachable: {exc}")
         except FutuError as exc:
@@ -3149,9 +3293,12 @@ _IB_CONN_REFUSED_PATTERNS = (
 )
 
 # Cooldown: after an IB subprocess fails with a connection error, skip
-# subsequent attempts for this many seconds to avoid churn.
+# subsequent attempts for this many seconds to avoid churn. Tracked per
+# traffic class — order-mutating entries and data/read entries get separate
+# timestamps so a failure in one class never blocks the other.
 _IB_SCRIPT_COOLDOWN_SECS = 15.0
-_ib_last_failure: float = 0.0  # monotonic timestamp of last IB connection failure
+_IB_ORDER_ENTRIES = frozenset({"xenon-ib-place-order", "xenon-ib-order-manage"})
+_ib_last_failure: dict[str, float] = {"data": 0.0, "order": 0.0}
 
 
 def _is_ib_connection_error(error_msg: str) -> bool:
@@ -3181,15 +3328,17 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
     2. Pool check: if pool is disconnected, verify Gateway before spawning
     3. Post-failure: verify Gateway health before restarting
     """
-    global _ib_last_failure
+    kind = "order" if entry in _IB_ORDER_ENTRIES else "data"
 
-    # Layer 1: Cooldown — skip if a recent failure occurred
+    # Layer 1: Cooldown — skip if a recent failure occurred in this lane
     now = time.monotonic()
-    if _ib_last_failure > 0 and (now - _ib_last_failure) < _IB_SCRIPT_COOLDOWN_SECS:
-        elapsed = now - _ib_last_failure
+    last_failure = _ib_last_failure.get(kind, 0.0)
+    if last_failure > 0 and (now - last_failure) < _IB_SCRIPT_COOLDOWN_SECS:
+        elapsed = now - last_failure
         logger.debug(
-            "Skipping %s — IB cooldown active (%.1fs since last failure, %ds cooldown)",
+            "Skipping %s — IB %s cooldown active (%.1fs since last failure, %ds cooldown)",
             entry,
+            kind,
             elapsed,
             _IB_SCRIPT_COOLDOWN_SECS,
         )
@@ -3205,7 +3354,7 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
         upstream_dead = gw_status.get("upstream_dead", False)
 
         if not port_ok or upstream_dead:
-            _ib_last_failure = now
+            _ib_last_failure[kind] = now
             logger.warning(
                 "Skipping %s — Gateway down (port=%s, upstream_dead=%s), pool disconnected",
                 entry,
@@ -3221,11 +3370,11 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
 
     # Clear cooldown on success
     if result.ok:
-        _ib_last_failure = 0.0
+        _ib_last_failure[kind] = 0.0
 
     if not result.ok and _is_ib_connection_error(result.error):
         # Set cooldown to prevent churn from repeated failures
-        _ib_last_failure = time.monotonic()
+        _ib_last_failure[kind] = time.monotonic()
 
         # Verify Gateway is actually down before restarting
         gw_status = await check_ib_gateway()
@@ -3266,12 +3415,24 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
             gw_result = await restart_ib_gateway()
 
             if gw_result.get("restarted") and gw_result.get("port_listening"):
-                logger.info("IB Gateway restarted, retrying %s", entry)
-                _ib_last_failure = 0.0  # Clear cooldown after successful restart
+                _ib_last_failure[kind] = 0.0  # Clear cooldown after successful restart
                 if ib_pool:
                     await ib_pool.disconnect_all()
                     await ib_pool.connect_all()
-                result = await run_entry_point(entry, args, timeout=timeout)
+                if kind == "order":
+                    # OP-1: the first attempt may have reached IB before the
+                    # connection dropped — resending could duplicate the order.
+                    logger.warning(
+                        "IB Gateway restarted; NOT resending order entry %s (possible duplicate)",
+                        entry,
+                    )
+                    result = ScriptResult(
+                        ok=False,
+                        error="IB Gateway restarted; order request NOT resent — check open orders before retrying",
+                    )
+                else:
+                    logger.info("IB Gateway restarted, retrying %s", entry)
+                    result = await run_entry_point(entry, args, timeout=timeout)
             else:
                 logger.error("IB Gateway restart failed: %s", gw_result)
                 result = ScriptResult(

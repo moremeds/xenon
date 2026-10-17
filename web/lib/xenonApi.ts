@@ -2,7 +2,7 @@
  * Xenon FastAPI client — minimal fetch helper for Next.js routes.
  *
  * All POST operations go through FastAPI.
- * Attaches Clerk JWT when available for authenticated requests.
+ * Server-side calls attach the internal-token header for authentication.
  */
 
 const XENON_API = process.env.XENON_API_URL || "http://localhost:8321";
@@ -34,13 +34,10 @@ export function internalApiHeaders(headers: Headers): Headers {
 
 export async function xenonFetch<T = Record<string, unknown>>(
   path: string,
-  opts?: RequestInit & { timeout?: number; token?: string },
+  opts?: RequestInit & { timeout?: number },
 ): Promise<T> {
-  const { timeout = 30_000, token, ...fetchOpts } = opts ?? {};
+  const { timeout = 30_000, ...fetchOpts } = opts ?? {};
   const headers = new Headers(fetchOpts.headers);
-  if (token) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
   internalApiHeaders(headers);
   const res = await fetch(`${XENON_API}${path}`, {
     ...fetchOpts,
@@ -49,14 +46,17 @@ export async function xenonFetch<T = Record<string, unknown>>(
     signal: AbortSignal.timeout(timeout),
   });
   if (!res.ok) {
+    // Read the body ONCE as text — a failed res.json() leaves the stream
+    // consumed, so a second res.text() can never recover non-JSON detail.
+    const raw = await res.text().catch(() => "");
     let detail: string;
     let bodyJson: Record<string, unknown> | null = null;
     try {
-      const body = await res.json();
+      const body = JSON.parse(raw);
       bodyJson = body && typeof body === "object" ? body : null;
-      detail = body.detail ?? body.error ?? JSON.stringify(body);
+      detail = (body?.detail ?? body?.error ?? raw) || `HTTP ${res.status}`;
     } catch {
-      detail = await res.text().catch(() => `HTTP ${res.status}`);
+      detail = raw || `HTTP ${res.status}`;
     }
     throw new XenonApiError(res.status, detail, bodyJson);
   }

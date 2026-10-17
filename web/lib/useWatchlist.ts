@@ -82,6 +82,7 @@ export function useWatchlist(): UseWatchlistReturn {
       try {
         const res = await fetch(`/api/watchlist/${encodeURIComponent(normalized)}`, {
           method: "DELETE",
+          headers: { "Content-Type": "application/json" },
           cache: "no-store",
         });
         if (!res.ok) throw new Error("Failed to remove from watchlist");

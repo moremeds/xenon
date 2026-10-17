@@ -34,6 +34,10 @@ class JournalAutoImportSubscriber:
     def __init__(self) -> None:
         self._subscriber: EventSubscriber | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Rows that failed in the last replay pass — the caller uses this to
+        # decide whether replay is complete (failures are counted, never
+        # silently swallowed).
+        self.last_replay_failed = 0
 
     # ---- sync core (test-friendly, single-row) ------------------------
 
@@ -68,11 +72,13 @@ class JournalAutoImportSubscriber:
                 select(outbox.c.id).where(outbox.c.channel == CHANNEL_TRADE_CLOSED).order_by(outbox.c.id)
             ).fetchall()
         replayed = 0
+        self.last_replay_failed = 0
         for row in rows:
             try:
                 self.handle_notification_id(int(row.id))
                 replayed += 1
             except Exception:
+                self.last_replay_failed += 1
                 logger.exception("replay failed for outbox id=%s", row.id)
         return replayed
 
@@ -85,10 +91,28 @@ class JournalAutoImportSubscriber:
             return
         self._loop = asyncio.get_running_loop()
         await asyncio.to_thread(self.replay_unconsumed)
-        self._subscriber = EventSubscriber(dsn=dsn, channels=[CHANNEL_TRADE_CLOSED])
+        self._subscriber = EventSubscriber(
+            dsn=dsn,
+            channels=[CHANNEL_TRADE_CLOSED],
+            on_reconnect=self._replay_after_reconnect,
+        )
         self._subscriber.on(CHANNEL_TRADE_CLOSED, self._on_notification)
+        if self.last_replay_failed:
+            # Boot replay was incomplete — arm the watchdog's retry so the
+            # failed rows are retried even while the socket stays healthy.
+            self._subscriber.request_replay()
         await self._subscriber.start()
         logger.info("journal auto-import listener started")
+
+    async def _replay_after_reconnect(self) -> None:
+        """Re-LISTEN fired after a drop — NOTIFY rows emitted during the gap are
+        lost, so replay every unconsumed outbox row to catch up."""
+        replayed = await asyncio.to_thread(self.replay_unconsumed)
+        if self.last_replay_failed:
+            raise RuntimeError(
+                f"journal replay incomplete: {self.last_replay_failed} outbox row(s) failed"
+            )
+        logger.info("journal auto-import replayed %d event(s) after reconnect", replayed)
 
     def _on_notification(self, _channel: str, payload: str) -> None:
         try:
