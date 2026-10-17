@@ -104,7 +104,7 @@ test.describe('Futu portfolio empty state', () => {
     await expect(page.getByTestId('futu-empty-state')).toContainText(
       'Futu not yet synced — start Futu OpenD, then sync.',
     );
-    await expect(page.getByText('NEVER SYNCED').last()).toBeVisible();
+    await expect(page.getByText('NEVER SYNCED', { exact: true }).last()).toBeVisible();
     await expect(page.getByTestId('futu-retry')).toBeVisible();
     await expect(page.getByText('Waiting for portfolio data...')).toHaveCount(0);
   });
@@ -116,7 +116,7 @@ test.describe('Futu portfolio empty state', () => {
     await expect(page.getByTestId('futu-empty-state')).toContainText(
       'Futu unavailable — FastAPI did not return a snapshot.',
     );
-    await expect(page.getByText('UNAVAILABLE')).toBeVisible();
+    await expect(page.getByText('UNAVAILABLE', { exact: true })).toBeVisible();
     await expect(page.getByTestId('futu-retry')).toBeVisible();
     await expect(page.getByText('Waiting for portfolio data...')).toHaveCount(0);
   });
