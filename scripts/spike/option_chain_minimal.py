@@ -398,6 +398,9 @@ async def main():
 
     ib = IB()
     log.info("Connecting to IB Gateway %s:%d clientId=%d", args.host, args.port, args.client_id)
+    from xenon.utils.ib_connection import assert_broker_endpoint_allowed
+
+    assert_broker_endpoint_allowed(args.host, args.port)
     await ib.connectAsync(args.host, args.port, clientId=args.client_id, timeout=15)
     log.info("Connected. serverVersion=%d", ib.client.serverVersion())
 

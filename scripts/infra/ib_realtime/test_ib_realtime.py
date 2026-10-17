@@ -66,9 +66,12 @@ async def test_ib_connection(host: str, port: int):
     results.ok("ib_async import")
     
     ib = IB()
-    
+
     # Test connection
     try:
+        from xenon.utils.ib_connection import assert_broker_endpoint_allowed
+
+        assert_broker_endpoint_allowed(host, port)
         await ib.connectAsync(host, port, clientId=200, timeout=10)
         results.ok("IB connect", f"{host}:{port}")
     except Exception as e:
