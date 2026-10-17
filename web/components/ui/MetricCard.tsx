@@ -54,19 +54,19 @@ export function MetricCard({
 export function SourceBadge({ source }: { source: "uw" | "mq" | "both" }) {
   const styles: Record<string, React.CSSProperties> = {
     uw: {
-      background: "rgba(15,110,86,0.18)",
+      background: "color-mix(in srgb, var(--signal-deep) 18%, transparent)",
       color: "var(--signal-core)",
-      border: "0.5px solid rgba(15,110,86,0.4)",
+      border: "0.5px solid color-mix(in srgb, var(--signal-deep) 40%, transparent)",
     },
     mq: {
-      background: "rgba(56,138,221,0.15)",
-      color: "#85b7eb",
-      border: "0.5px solid rgba(56,138,221,0.35)",
+      background: "color-mix(in srgb, var(--info) 15%, transparent)",
+      color: "var(--info)",
+      border: "0.5px solid color-mix(in srgb, var(--info) 35%, transparent)",
     },
     both: {
-      background: "rgba(93,202,165,0.12)",
+      background: "color-mix(in srgb, var(--signal-strong) 12%, transparent)",
       color: "var(--signal-core)",
-      border: "0.5px solid rgba(93,202,165,0.3)",
+      border: "0.5px solid color-mix(in srgb, var(--signal-strong) 30%, transparent)",
     },
   };
   const labels = { uw: "UW", mq: "MQ", both: "UW+MQ" };

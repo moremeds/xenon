@@ -53,7 +53,7 @@ export default function Sidebar({
                 }
               >
                 <span className="nav-icon">
-                  <Icon size={14} color={actionTone} strokeWidth={2} />
+                  <Icon size={14} style={{ color: actionTone }} strokeWidth={2} />
                 </span>
                 {item.label}
               </Link>

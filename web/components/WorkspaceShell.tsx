@@ -439,9 +439,7 @@ export default function WorkspaceShell({
 
   const resolvedTheme = theme ?? "dark";
 
-  const actionTone = useMemo(() => {
-    return resolvedTheme === "dark" ? "#e2e8f0" : "#0a0f14";
-  }, [resolvedTheme]);
+  const actionTone = "var(--text-primary)";
 
   const toggleTheme = () => {
     const next = resolvedTheme === "dark" ? "light" : "dark";

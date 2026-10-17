@@ -29,7 +29,7 @@ export default function ErrorBoundary({ error, reset }: { error: AppError; reset
           fontSize: "11px",
           letterSpacing: "0.1em",
           textTransform: "uppercase",
-          color: "var(--fault, #E85D6C)",
+          color: "var(--fault)",
         }}
       >
         Runtime Error
@@ -49,8 +49,8 @@ export default function ErrorBoundary({ error, reset }: { error: AppError; reset
             fontSize: "11px",
             padding: "8px 14px",
             borderRadius: "4px",
-            border: "1px solid var(--border-dim, #1e293b)",
-            background: "var(--bg-panel-raised, #151c22)",
+            border: "1px solid var(--border-dim)",
+            background: "var(--bg-panel-raised)",
             color: "var(--text-primary)",
             cursor: "pointer",
           }}
@@ -61,9 +61,9 @@ export default function ErrorBoundary({ error, reset }: { error: AppError; reset
           href="/dashboard"
           style={{
             fontSize: "11px",
-            color: "var(--signal-core, #05AD98)",
+            color: "var(--signal-core)",
             textDecoration: "none",
-            borderBottom: "1px solid var(--signal-core, #05AD98)",
+            borderBottom: "1px solid var(--signal-core)",
             paddingBottom: "1px",
             alignSelf: "center",
           }}
