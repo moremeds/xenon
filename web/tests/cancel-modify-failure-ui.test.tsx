@@ -175,6 +175,231 @@ describe("C1 — cancel/modify failure rendering (Vitest downgrade)", () => {
     expect(secondCallBody.modifySequence).toBe(4);
   });
 
+  test("test_cancel_top_level_reason_code_renders_toast_copy", async () => {
+    // PR-05 shape: FastAPI now emits reason_code at the TOP level (the toast
+    // helper reads body.reason_code first); detail keeps the structured
+    // payload for nested readers.
+    const fetchFn = mockFetchSequence([
+      {
+        status: 503,
+        body: {
+          reason_code: "IB_CONNECTION",
+          detail: {
+            reason_code: "IB_CONNECTION",
+            classification: "connection",
+            message: "IB gateway unreachable",
+            http_status: 503,
+          },
+        },
+      },
+    ]);
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      fetchFn as unknown as typeof fetch,
+    );
+
+    const { result } = renderHook(() => useOrderActions(), { wrapper });
+
+    let r: Awaited<ReturnType<typeof result.current.requestCancel>>;
+    await act(async () => {
+      r = await result.current.requestCancel(makeOrder());
+    });
+
+    expect(r!.ok).toBe(false);
+    if (!r!.ok) {
+      expect(r!.status).toBe(503);
+      expect(r!.reasonCode).toBe("IB_CONNECTION");
+      expect(r!.message).toBe(ORDER_REASON_CODES.IB_CONNECTION.copy);
+    }
+
+    const notifs = result.current.drainNotifications();
+    expect(notifs).toHaveLength(1);
+    expect(notifs[0].message).toBe(ORDER_REASON_CODES.IB_CONNECTION.copy);
+  });
+
+  test("test_cancel_502_string_detail_shows_upstream_detail_in_toast", async () => {
+    // Lead browser repro: FastAPI 502 {detail: "..."} passes through the
+    // Next route verbatim with no reason_code — the toast must carry the
+    // human-readable upstream detail, not the generic "Cancel failed".
+    const detail = "Cancel not confirmed by refreshed IB open orders";
+    const fetchFn = mockFetchSequence([{ status: 502, body: { detail } }]);
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      fetchFn as unknown as typeof fetch,
+    );
+
+    const { result } = renderHook(() => useOrderActions(), { wrapper });
+
+    let r: Awaited<ReturnType<typeof result.current.requestCancel>>;
+    await act(async () => {
+      r = await result.current.requestCancel(makeOrder());
+    });
+
+    expect(r!.ok).toBe(false);
+    if (!r!.ok) {
+      expect(r!.status).toBe(502);
+      expect(r!.reasonCode).toBeNull();
+      expect(r!.message).toBe(detail);
+    }
+    const notifs = result.current.drainNotifications();
+    expect(notifs).toHaveLength(1);
+    expect(notifs[0].message).toBe(detail);
+  });
+
+  test("test_cancel_object_detail_message_shows_upstream_message", async () => {
+    // FastAPI HTTPException({detail: {message: ...}}) without reason_code —
+    // the nested message is still human-readable and must surface.
+    const fetchFn = mockFetchSequence([
+      { status: 502, body: { detail: { message: "IB rejected: order filled" } } },
+    ]);
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      fetchFn as unknown as typeof fetch,
+    );
+
+    const { result } = renderHook(() => useOrderActions(), { wrapper });
+
+    let r: Awaited<ReturnType<typeof result.current.requestCancel>>;
+    await act(async () => {
+      r = await result.current.requestCancel(makeOrder());
+    });
+
+    expect(r!.ok).toBe(false);
+    if (!r!.ok) {
+      expect(r!.reasonCode).toBeNull();
+      expect(r!.message).toBe("IB rejected: order filled");
+    }
+    const notifs = result.current.drainNotifications();
+    expect(notifs[0].message).toBe("IB rejected: order filled");
+  });
+
+  test("test_modify_502_string_detail_shows_upstream_detail_in_toast", async () => {
+    const detail = "Modify not confirmed by refreshed IB open orders";
+    const fetchFn = mockFetchSequence([{ status: 502, body: { detail } }]);
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      fetchFn as unknown as typeof fetch,
+    );
+
+    const { result } = renderHook(() => useOrderActions(), { wrapper });
+
+    let r: Awaited<ReturnType<typeof result.current.requestModify>>;
+    await act(async () => {
+      r = await result.current.requestModify(makeOrder(), { newPrice: 5.5 });
+    });
+
+    expect(r!.ok).toBe(false);
+    if (!r!.ok) {
+      expect(r!.status).toBe(502);
+      expect(r!.reasonCode).toBeNull();
+      expect(r!.message).toBe(detail);
+    }
+    const notifs = result.current.drainNotifications();
+    expect(notifs[0].message).toBe(detail);
+  });
+
+  test("test_modify_object_detail_message_shows_upstream_message", async () => {
+    const fetchFn = mockFetchSequence([
+      {
+        status: 502,
+        body: { detail: { message: "IB rejected modify: duplicate id" } },
+      },
+    ]);
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      fetchFn as unknown as typeof fetch,
+    );
+
+    const { result } = renderHook(() => useOrderActions(), { wrapper });
+
+    let r: Awaited<ReturnType<typeof result.current.requestModify>>;
+    await act(async () => {
+      r = await result.current.requestModify(makeOrder(), { newPrice: 5.5 });
+    });
+
+    expect(r!.ok).toBe(false);
+    if (!r!.ok) {
+      expect(r!.message).toBe("IB rejected modify: duplicate id");
+    }
+    const notifs = result.current.drainNotifications();
+    expect(notifs[0].message).toBe("IB rejected modify: duplicate id");
+  });
+
+  test("test_cancel_non_json_upstream_detail_reaches_toast", async () => {
+    // Non-JSON upstream (e.g. gateway 502 text) — the route emits
+    // {detail: <raw text>} which the toast must show verbatim.
+    const fetchFn = mockFetchSequence([
+      { status: 502, body: { detail: "upstream unavailable" } },
+    ]);
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      fetchFn as unknown as typeof fetch,
+    );
+
+    const { result } = renderHook(() => useOrderActions(), { wrapper });
+
+    let r: Awaited<ReturnType<typeof result.current.requestCancel>>;
+    await act(async () => {
+      r = await result.current.requestCancel(makeOrder());
+    });
+
+    expect(r!.ok).toBe(false);
+    if (!r!.ok) {
+      expect(r!.message).toBe("upstream unavailable");
+    }
+    const notifs = result.current.drainNotifications();
+    expect(notifs[0].message).toBe("upstream unavailable");
+  });
+
+  test("test_modify_non_json_upstream_detail_reaches_toast", async () => {
+    const fetchFn = mockFetchSequence([
+      { status: 502, body: { detail: "upstream unavailable" } },
+    ]);
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      fetchFn as unknown as typeof fetch,
+    );
+
+    const { result } = renderHook(() => useOrderActions(), { wrapper });
+
+    let r: Awaited<ReturnType<typeof result.current.requestModify>>;
+    await act(async () => {
+      r = await result.current.requestModify(makeOrder(), { newPrice: 5.5 });
+    });
+
+    expect(r!.ok).toBe(false);
+    if (!r!.ok) {
+      expect(r!.message).toBe("upstream unavailable");
+    }
+    const notifs = result.current.drainNotifications();
+    expect(notifs[0].message).toBe("upstream unavailable");
+  });
+
+  test("test_reason_code_copy_still_wins_over_detail_message", async () => {
+    // When reason_code IS present its curated copy still wins — the detail
+    // fallback only applies when no reason_code exists.
+    const fetchFn = mockFetchSequence([
+      {
+        status: 404,
+        body: {
+          reason_code: "IB_REJECT",
+          detail: "Order not found (local lookup)",
+        },
+      },
+    ]);
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      fetchFn as unknown as typeof fetch,
+    );
+
+    const { result } = renderHook(() => useOrderActions(), { wrapper });
+
+    let r: Awaited<ReturnType<typeof result.current.requestCancel>>;
+    await act(async () => {
+      r = await result.current.requestCancel(makeOrder());
+    });
+
+    expect(r!.ok).toBe(false);
+    if (!r!.ok) {
+      expect(r!.reasonCode).toBe("IB_REJECT");
+      expect(r!.message).toBe(ORDER_REASON_CODES.IB_REJECT.copy);
+    }
+    const notifs = result.current.drainNotifications();
+    expect(notifs[0].message).toBe(ORDER_REASON_CODES.IB_REJECT.copy);
+  });
+
   test("test_cancel_unknown_order_upstream_10147_renders_ib_reject_copy", async () => {
     const fetchFn = mockFetchSequence([
       {

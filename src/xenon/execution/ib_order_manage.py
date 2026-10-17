@@ -16,9 +16,15 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Literal, NoReturn, Optional
+from typing import Iterator, Literal, NoReturn, Optional
 
-from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
+from xenon.clients.ib_client import (
+    CLIENT_IDS,
+    DEFAULT_GATEWAY_PORT,
+    DEFAULT_HOST,
+    IBClient,
+    IBConnectionError,
+)
 
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
 DEFAULT_CLIENT_ID = CLIENT_IDS["ib_order_manage"]
@@ -46,6 +52,11 @@ def classify_failure(
             return "connection"
         if _is_clientid_in_use(exc):
             return "ownership"
+        if isinstance(exc, IBConnectionError):
+            # Typed client failure after retries — the gateway could not be
+            # reached or stayed on. The 326 check above runs first so a
+            # clientId-in-use wrapped in IBConnectionError keeps "ownership".
+            return "connection"
     if error_code == 326:
         return "ownership"
     if error_code in _IB_REJECT_CODES:
@@ -99,9 +110,10 @@ def _reconnect_as_owner(client: "IBClient", host: str, port: int, original_clien
             client.disconnect()
             client.connect(host=host, port=port, client_id=original_client_id)
             return
-        except (ConnectionError, OSError, TimeoutError, RuntimeError) as exc:
-            # IBClient.connect surfaces 326 as RuntimeError (string-wrapped).
-            # Socket / gateway failures arrive as ConnectionError/OSError/TimeoutError.
+        except (ConnectionError, OSError, TimeoutError, RuntimeError, IBConnectionError) as exc:
+            # IBClient.connect surfaces exhausted retries as IBConnectionError
+            # (which can wrap a raw IB 326) and 326 as RuntimeError. Socket /
+            # gateway failures arrive as ConnectionError/OSError/TimeoutError.
             # Programmer errors (AttributeError, TypeError) deliberately propagate.
             last_exc = exc
             if _is_clientid_in_use(exc) and attempt < 2:
@@ -162,40 +174,209 @@ def modify_is_confirmed(trade, new_price, new_quantity, outside_rth):
     return True
 
 
-def find_trade(client: IBClient, order_id: int, perm_id: int):
-    """Find an open trade by permId (preferred) or orderId."""
+def _reject_identity(message: str) -> NoReturn:
+    """Emit an ownership-class identity rejection.
+
+    A live order whose (account, owner clientId, orderId, permId) tuple
+    disagrees with the caller's assertion is not ours to touch — same class
+    as IB 326 (the order belongs to another session) → 409 OWNERSHIP.
+    """
+    output(
+        "error",
+        f"Order identity mismatch — refusing to act: {message}",
+        classification="ownership",
+    )
+
+
+def _trade_account(trade) -> Optional[str]:
+    """The account stamped on a live trade — empty when the open-order
+    snapshot does not populate it (ib_async defaults Order.account to '')."""
+    return getattr(trade.order, "account", None) or getattr(trade, "account", None)
+
+
+def _identity_notes(trade, account: Optional[str]) -> dict:
+    """Output extras for asserted identity fields IB left unverifiable.
+
+    When the caller asserts a scope account but the located trade carries no
+    account field, the account leg of the tuple could not be checked — that
+    is not a mismatch, but the emitted JSON flags it so operators know the
+    verification was partial.
+    """
+    if trade is not None and account and not _trade_account(trade):
+        return {"account_unverified": True}
+    return {}
+
+
+def _verify_identity(
+    trade,
+    *,
+    order_id: int = 0,
+    account: Optional[str] = None,
+    client_id: Optional[int] = None,
+) -> None:
+    """Reject when a located trade disagrees on an asserted tuple element.
+
+    The element used for the match itself is already proven; this verifies
+    the rest of the caller-supplied identity. A missing account field is
+    NOT a mismatch — only reject when both sides carry a value and differ
+    (cancel/modify must not be blocked by an unpopulated IB field).
+    """
+    problems = []
+    if order_id > 0 and trade.order.orderId != order_id:
+        problems.append(f"orderId={order_id} asserted but order has orderId={trade.order.orderId}")
+    if account:
+        trade_account = _trade_account(trade)
+        if trade_account and trade_account != account:
+            problems.append(f"account={account} asserted but order is on account={trade_account}")
+    if client_id is not None and trade.order.clientId != client_id:
+        problems.append(f"owner clientId={client_id} asserted but order is owned by clientId={trade.order.clientId}")
+    if problems:
+        _reject_identity("; ".join(problems))
+
+
+def find_trade(
+    client: IBClient,
+    order_id: int,
+    perm_id: int,
+    account: Optional[str] = None,
+    client_id: Optional[int] = None,
+):
+    """Locate the open trade for the asserted identity tuple.
+
+    Identity is (scope account, owner clientId, orderId, permId) — spec
+    §2.4. permId is globally unique across sessions and is the only trusted
+    key when supplied: a missing permId NEVER falls back to orderId
+    (orderIds collide across clientIds, and a vanished permId means the
+    order changed identity — e.g. filled — before our request landed).
+
+    orderId-only lookups stay supported for orders that have no permId yet
+    (the permId=0 race right after placement), but a match shared by more
+    than one client is ambiguous → reject unless ``client_id`` pins it.
+    """
     trades = client.get_open_orders()
 
-    # Prefer permId (globally unique across IB sessions)
     if perm_id > 0:
-        for trade in trades:
-            if trade.order.permId == perm_id:
-                return trade
+        trade = next((t for t in trades if t.order.permId == perm_id), None)
+        if trade is None:
+            return None
+        _verify_identity(trade, order_id=order_id, account=account, client_id=client_id)
+        return trade
 
-    # Fallback to orderId
     if order_id > 0:
-        for trade in trades:
-            if trade.order.orderId == order_id:
-                return trade
+        matches = [t for t in trades if t.order.orderId == order_id]
+        if client_id is not None:
+            # (clientId, orderId) is a complete IB identity — orders owned
+            # by other clients are simply not candidates.
+            matches = [t for t in matches if t.order.clientId == client_id]
+        if len(matches) > 1:
+            _reject_identity(
+                f"{len(matches)} open orders share orderId={order_id} on different clients — resubmit with permId"
+            )
+        if not matches:
+            return None
+        trade = matches[0]
+        _verify_identity(trade, order_id=order_id, account=account, client_id=client_id)
+        return trade
 
     return None
 
 
-def cancel_order(client: IBClient, order_id: int, perm_id: int, host: str, port: int):
+def find_frozen_trade(
+    client: IBClient,
+    order_id: int,
+    perm_id: int,
+    client_id: int,
+    account: Optional[str] = None,
+):
+    """Re-locate the SAME order by its frozen identity tuple.
+
+    After the first verified lookup we know the order's true owner
+    (clientId, orderId, and permId when non-zero). Every later snapshot
+    must contain THAT order — a different permId or clientId occupying the
+    same orderId is "not found", never an alternate match, and never a
+    disappearance-ack we didn't cause.
+    """
+    for t in client.get_open_orders():
+        if t.order.orderId != order_id or t.order.clientId != client_id:
+            continue
+        if perm_id > 0 and t.order.permId != perm_id:
+            continue
+        _verify_identity(t, order_id=order_id, account=account, client_id=client_id)
+        return t
+    return None
+
+
+def _latch_perm_id(frozen: dict, trade) -> None:
+    """Pin the first observed nonzero permId onto the frozen identity.
+
+    While an order carries permId 0, (clientId, orderId) is the only
+    matchable identity. Once a snapshot shows a nonzero permId on that
+    frozen order the identity is complete — every later lookup must match
+    it, so a different nonzero permId occupying the same slot is "not
+    found", never a replacement we act on or an ack we didn't cause.
+    """
+    if trade is not None and frozen["perm_id"] <= 0 and (trade.order.permId or 0) > 0:
+        frozen["perm_id"] = trade.order.permId
+
+
+def _await_order_state(
+    client: IBClient,
+    frozen: dict,
+    *,
+    account: Optional[str] = None,
+    initial_trade=None,
+) -> Iterator[tuple]:
+    """Poll refreshed open-order state — 10 ticks × 0.5s (unchanged).
+
+    Yields ``(latest_trade, refreshed_trade)`` per tick. ``latest_trade`` is
+    the most recent non-None snapshot (``initial_trade`` until the first
+    refresh lands) so callers can report last-seen state after a timeout;
+    ``refreshed_trade`` is this tick's raw ``find_frozen_trade`` result —
+    ``None`` when the FROZEN order vanished from open orders (the
+    disappearance-as-ack rule). The frozen (clientId, orderId, permId)
+    tuple is matched on every poll so a different order sharing the same
+    orderId can never be picked up mid-operation. A nonzero permId
+    observed mid-poll is latched into ``frozen`` (see ``_latch_perm_id``).
+    """
+    latest = initial_trade
+    for _ in range(10):
+        client.sleep(0.5)
+        refreshed = find_frozen_trade(
+            client, frozen["order_id"], frozen["perm_id"], frozen["client_id"], account=account
+        )
+        if refreshed is not None:
+            _latch_perm_id(frozen, refreshed)
+            latest = refreshed
+        yield latest, refreshed
+
+
+def cancel_order(
+    client: IBClient,
+    order_id: int,
+    perm_id: int,
+    host: str,
+    port: int,
+    account: Optional[str] = None,
+    client_id: Optional[int] = None,
+):
     """Cancel an open order.
 
     IB's cancelOrder is scoped by (clientId, orderId) -- a cancel from a
     different clientId than the one that placed the order fails with
     Error 10147 (order not found).  We detect the original clientId
     from trade.order.clientId and reconnect as that client before cancelling.
+
+    ``account``/``client_id`` assert the rest of the identity tuple
+    (spec §2.4): scope account and recorded placing clientId.
     """
-    trade = find_trade(client, order_id, perm_id)
+    trade = find_trade(client, order_id, perm_id, account=account, client_id=client_id)
     if trade is None:
         output(
             "error",
             f"Trade not found (orderId={order_id}, permId={perm_id})",
             classification="ib_reject",
             upstream={"code": 10147, "message": "Order not found (local lookup)"},
+            **_identity_notes(trade, account),
         )
 
     status = trade.orderStatus.status
@@ -204,21 +385,38 @@ def cancel_order(client: IBClient, order_id: int, perm_id: int, host: str, port:
             "error",
             f"Order already {status} — cannot cancel",
             classification="ib_reject",
+            **_identity_notes(trade, account),
         )
+
+    # Freeze the observed identity — every later lookup must find THIS
+    # order, not another sharing the same orderId. A different permId or
+    # clientId in a later snapshot is "not found", never a match. permId 0
+    # keeps the (clientId, orderId) fallback only until a snapshot shows a
+    # nonzero permId, which _latch_perm_id pins into `frozen` — a later
+    # different nonzero permId is a different order.
+    frozen = {
+        "order_id": trade.order.orderId,
+        "perm_id": trade.order.permId or 0,
+        "client_id": trade.order.clientId,
+    }
 
     # Reconnect as the original placer if needed (fixes Error 10147).
     # _reconnect_as_owner handles 326-retry + emits classified output on failure.
-    original_client_id = trade.order.clientId
+    original_client_id = frozen["client_id"]
     if client.ib.client.clientId != original_client_id:
         _reconnect_as_owner(client, host, port, original_client_id)
-        trade = find_trade(client, order_id, perm_id)
+        trade = find_frozen_trade(
+            client, frozen["order_id"], frozen["perm_id"], frozen["client_id"], account=account
+        )
         if trade is None:
             output(
                 "error",
                 "Trade not found after reconnect as original clientId",
                 classification="ib_reject",
                 upstream={"code": 10147, "message": "Order not found (local lookup)"},
+                **_identity_notes(trade, account),
             )
+        _latch_perm_id(frozen, trade)
 
     # Capture IB error events during the cancel attempt
     error_msgs = []
@@ -237,24 +435,25 @@ def cancel_order(client: IBClient, order_id: int, perm_id: int, host: str, port:
         output(status_text, message, **extra)
 
     # Wait for refreshed open-order state to acknowledge the cancel.
-    for _ in range(10):
-        client.sleep(0.5)
-        refreshed_trade = find_trade(client, order_id, perm_id)
+    for latest_trade, refreshed_trade in _await_order_state(
+        client, frozen, account=account, initial_trade=trade
+    ):
         if refreshed_trade is None:
             finish(
                 "ok",
                 f"Order cancelled (orderId={trade.order.orderId})",
                 orderId=trade.order.orderId,
                 finalStatus="Cancelled",
+                **_identity_notes(latest_trade or trade, account),
             )
 
-        latest_trade = refreshed_trade
         if refreshed_trade.orderStatus.status in ("Cancelled", "ApiCancelled"):
             finish(
                 "ok",
                 f"Order cancelled (orderId={refreshed_trade.order.orderId})",
                 orderId=refreshed_trade.order.orderId,
                 finalStatus=refreshed_trade.orderStatus.status,
+                **_identity_notes(refreshed_trade, account),
             )
 
         # Check for fatal errors (10147=order not found, 201=rejected)
@@ -265,6 +464,7 @@ def cancel_order(client: IBClient, order_id: int, perm_id: int, host: str, port:
                 f"IB rejected cancel: {fatal[0][1]}",
                 classification=classify_failure(fatal[0][0]),
                 upstream={"code": fatal[0][0], "message": fatal[0][1]},
+                **_identity_notes(refreshed_trade, account),
             )
 
     final_status = latest_trade.orderStatus.status if latest_trade is not None else trade.orderStatus.status
@@ -274,6 +474,7 @@ def cancel_order(client: IBClient, order_id: int, perm_id: int, host: str, port:
         orderId=trade.order.orderId,
         finalStatus=final_status,
         classification="ib_reject",
+        **_identity_notes(latest_trade or trade, account),
     )
 
 
@@ -286,6 +487,8 @@ def modify_order(
     port: int,
     outside_rth=None,
     new_quantity: Optional[int] = None,
+    account: Optional[str] = None,
+    client_id: Optional[int] = None,
 ):
     """Modify an open order.
 
@@ -293,14 +496,18 @@ def modify_order(
     different clientId than the one that placed the order silently fails
     with Error 103 (Duplicate order id).  We detect the original clientId
     from trade.order.clientId and reconnect as that client before modifying.
+
+    ``account``/``client_id`` assert the rest of the identity tuple
+    (spec §2.4): scope account and recorded placing clientId.
     """
-    trade = find_trade(client, order_id, perm_id)
+    trade = find_trade(client, order_id, perm_id, account=account, client_id=client_id)
     if trade is None:
         output(
             "error",
             f"Trade not found (orderId={order_id}, permId={perm_id})",
             classification="ib_reject",
             upstream={"code": 10147, "message": "Order not found (local lookup)"},
+            **_identity_notes(trade, account),
         )
 
     status = trade.orderStatus.status
@@ -309,6 +516,7 @@ def modify_order(
             "error",
             f"Order already {status} — cannot modify",
             classification="ib_reject",
+            **_identity_notes(trade, account),
         )
 
     order_type = trade.order.orderType
@@ -317,29 +525,61 @@ def modify_order(
             "error",
             f"Cannot modify price on {order_type} order — only LMT and STP LMT supported",
             classification="ib_reject",
+            **_identity_notes(trade, account),
         )
 
     if new_price is None and new_quantity is None and outside_rth is None:
-        output("error", "Must provide at least one modify field", classification="ib_reject")
+        output(
+            "error",
+            "Must provide at least one modify field",
+            classification="ib_reject",
+            **_identity_notes(trade, account),
+        )
 
-    if new_price is not None and new_price <= 0:
-        output("error", "New price must be > 0", classification="ib_reject")
+    if new_price is not None:
+        # Credit combos carry a NEGATIVE BAG limit — a signed price is legal
+        # on BAG orders. Zero is meaningless on anything; negative on a
+        # single-leg order is an error.
+        is_bag = trade.contract.secType == "BAG"
+        if new_price == 0 or (new_price < 0 and not is_bag):
+            output(
+                "error",
+                "New price must be non-zero" if is_bag else "New price must be > 0",
+                classification="ib_reject",
+                **_identity_notes(trade, account),
+            )
     if new_quantity is not None and new_quantity <= 0:
-        output("error", "New quantity must be > 0", classification="ib_reject")
+        output("error", "New quantity must be > 0", classification="ib_reject", **_identity_notes(trade, account))
+
+    # Freeze the observed identity — every later lookup must find THIS
+    # order, not another sharing the same orderId. A different permId or
+    # clientId in a later snapshot is "not found", never a match. permId 0
+    # keeps the (clientId, orderId) fallback only until a snapshot shows a
+    # nonzero permId, which _latch_perm_id pins into `frozen` — a later
+    # different nonzero permId is a different order.
+    frozen = {
+        "order_id": trade.order.orderId,
+        "perm_id": trade.order.permId or 0,
+        "client_id": trade.order.clientId,
+    }
 
     # Reconnect as the original placer if needed (fixes Error 103).
     # _reconnect_as_owner handles 326-retry + emits classified output on failure.
-    original_client_id = trade.order.clientId
+    original_client_id = frozen["client_id"]
     if client.ib.client.clientId != original_client_id:
         _reconnect_as_owner(client, host, port, original_client_id)
-        trade = find_trade(client, order_id, perm_id)
+        trade = find_frozen_trade(
+            client, frozen["order_id"], frozen["perm_id"], frozen["client_id"], account=account
+        )
         if trade is None:
             output(
                 "error",
                 "Trade not found after reconnect as original clientId",
                 classification="ib_reject",
                 upstream={"code": 10147, "message": "Order not found (local lookup)"},
+                **_identity_notes(trade, account),
             )
+        _latch_perm_id(frozen, trade)
 
     # Capture IB error events during the modify attempt
     error_msgs = []
@@ -381,11 +621,9 @@ def modify_order(
     # Wait for refreshed IB state to reflect the requested modify.
     confirmed_trade = None
     latest_trade = trade
-    for _ in range(10):
-        client.sleep(0.5)
-        refreshed_trade = find_trade(client, order_id, perm_id)
-        if refreshed_trade is not None:
-            latest_trade = refreshed_trade
+    for latest_trade, refreshed_trade in _await_order_state(
+        client, frozen, account=account, initial_trade=trade
+    ):
         if modify_is_confirmed(refreshed_trade, new_price, new_quantity, outside_rth):
             confirmed_trade = refreshed_trade
             break
@@ -398,6 +636,7 @@ def modify_order(
                 f"IB rejected modify: {fatal[0][1]}",
                 classification=classify_failure(fatal[0][0]),
                 upstream={"code": fatal[0][0], "message": fatal[0][1]},
+                **_identity_notes(refreshed_trade, account),
             )
 
     client.ib.errorEvent -= on_error
@@ -424,6 +663,7 @@ def modify_order(
             currentClientId=client.ib.client.clientId,
             ibErrors=captured_errors,
             classification="ib_reject",
+            **_identity_notes(latest_trade or trade, account),
         )
 
     final_status = confirmed_trade.orderStatus.status
@@ -444,6 +684,7 @@ def modify_order(
         oldQuantity=json_number(old_quantity),
         newQuantity=json_number(confirmed_trade.order.totalQuantity),
         finalStatus=final_status,
+        **_identity_notes(confirmed_trade, account),
     )
 
 
@@ -454,12 +695,16 @@ def main():
     cancel_p = sub.add_parser("cancel")
     cancel_p.add_argument("--order-id", type=int, default=0)
     cancel_p.add_argument("--perm-id", type=int, default=0)
+    cancel_p.add_argument("--account", default=None, help="Asserted scope account (identity tuple)")
+    cancel_p.add_argument("--client-id", type=int, default=None, help="Asserted owner clientId (identity tuple)")
     cancel_p.add_argument("--host", default=DEFAULT_HOST)
     cancel_p.add_argument("--port", type=int, default=DEFAULT_PORT)
 
     modify_p = sub.add_parser("modify")
     modify_p.add_argument("--order-id", type=int, default=0)
     modify_p.add_argument("--perm-id", type=int, default=0)
+    modify_p.add_argument("--account", default=None, help="Asserted scope account (identity tuple)")
+    modify_p.add_argument("--client-id", type=int, default=None, help="Asserted owner clientId (identity tuple)")
     modify_p.add_argument("--new-price", type=float)
     modify_p.add_argument("--new-quantity", type=int)
     modify_p.add_argument(
@@ -491,7 +736,15 @@ def main():
 
     try:
         if args.action == "cancel":
-            cancel_order(client, args.order_id, args.perm_id, args.host, args.port)
+            cancel_order(
+                client,
+                args.order_id,
+                args.perm_id,
+                args.host,
+                args.port,
+                account=args.account,
+                client_id=args.client_id,
+            )
         elif args.action == "modify":
             modify_order(
                 client,
@@ -502,7 +755,17 @@ def main():
                 args.port,
                 outside_rth=args.outside_rth,
                 new_quantity=args.new_quantity,
+                account=args.account,
+                client_id=args.client_id,
             )
+    except IBConnectionError as exc:
+        # Connection dropped mid-operation (stale socket, gateway restart) —
+        # emit the JSON error contract instead of dying with a traceback.
+        output(
+            "error",
+            f"IB connection lost: {exc}",
+            classification="connection",
+        )
     finally:
         client.disconnect()
 
