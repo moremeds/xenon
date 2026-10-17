@@ -585,6 +585,9 @@ export default function WorkspaceShell({
               theme={resolvedTheme}
               marketState={marketState}
               activeAccount={activeAccount}
+              futuRead={futuData.initialRead}
+              onFutuRetry={futuData.syncNow}
+              futuRetrying={futuData.syncing}
             />
           ) : null}
         </div>

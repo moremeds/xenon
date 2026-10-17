@@ -1,47 +1,35 @@
 import { NextResponse } from "next/server";
-import { readFile } from "fs/promises";
-import { join } from "path";
 import { xenonFetch, XenonApiError } from "@/lib/xenonApi";
 
 export const runtime = "nodejs";
 
-const DATA_DIR = join(process.cwd(), "..", "data");
-const CACHE_PATH = join(DATA_DIR, "futu_portfolio.json");
-
 /**
  * GET /api/futu/portfolio
  *
- * Read-only Futu positions + account snapshot.
- *
- * Strategy: try FastAPI first (which serves from its singleton's in-memory
- * cache), fall back to the on-disk JSON written by the last sync. Never
- * blocks on OpenD — if the user wants fresh data they POST to /api/futu/sync.
+ * Read-only Futu positions + account snapshot, proxied from FastAPI
+ * (which serves from its singleton's in-memory cache). Never blocks on
+ * OpenD — if the user wants fresh data they POST to /api/futu/sync.
+ * No disk fallback: Postgres/FastAPI is the runtime source of truth.
  */
 export async function GET() {
-  // Try FastAPI first (fast, in-memory).
   try {
     const data = await xenonFetch("/futu/portfolio", { method: "GET" });
     return NextResponse.json(data);
   } catch (err) {
-    // 404 from FastAPI means "never synced" — fall through to disk.
-    if (!(err instanceof XenonApiError) || err.status !== 404) {
-      // Any other failure (FastAPI down, 5xx, etc.) also falls through so
-      // the UI keeps working off the last cached snapshot.
-      console.warn("[futu/portfolio] FastAPI unreachable, serving disk cache:", err);
+    // 404 from FastAPI means "never synced".
+    if (err instanceof XenonApiError && err.status === 404) {
+      return NextResponse.json(
+        {
+          error:
+            "Futu portfolio not yet synced. Start Futu OpenD and POST /api/futu/sync.",
+        },
+        { status: 404 },
+      );
     }
-  }
-
-  try {
-    const raw = await readFile(CACHE_PATH, "utf-8");
-    const data = JSON.parse(raw);
-    return NextResponse.json({ ...data, is_stale: true });
-  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
-      {
-        error: "Futu portfolio not yet synced. Start Futu OpenD and POST /api/futu/sync.",
-        detail: err instanceof Error ? err.message : String(err),
-      },
-      { status: 404 },
+      { error: `Futu portfolio unavailable: ${message}` },
+      { status: 502 },
     );
   }
 }

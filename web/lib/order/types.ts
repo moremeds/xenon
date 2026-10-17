@@ -4,9 +4,10 @@
  * Shared type definitions for the order component system.
  */
 
+import type { ExecutedOrder, OpenOrder } from "@/lib/types";
+
 export type OrderAction = "BUY" | "SELL";
 export type OrderTif = "DAY" | "GTC";
-export type OrderType = "stock" | "option" | "combo";
 
 /** Computed prices for an order (single or spread) */
 export interface OrderPrices {
@@ -31,29 +32,16 @@ export interface OrderLeg {
   ask?: number | null;
 }
 
-/** Order form state */
-export interface OrderFormState {
-  action: OrderAction;
-  quantity: string;
-  limitPrice: string;
-  tif: OrderTif;
-  confirmStep: boolean;
-  loading: boolean;
-  error: string | null;
-  success: string | null;
-}
-
-/** Validation result */
-export interface OrderValidation {
-  isValid: boolean;
-  errors: {
-    quantity?: string;
-    price?: string;
-    general?: string;
-  };
-  parsedQuantity: number;
-  parsedPrice: number;
-}
+/** Orders snapshot returned by FastAPI GET /orders
+ *  (was `@tools/schemas/ib-orders` — moved here when lib/tools was trimmed;
+ *  member shapes come from `@/lib/types`). */
+export type OrdersData = {
+  last_sync: string;
+  open_orders: OpenOrder[];
+  executed_orders: ExecutedOrder[];
+  open_count: number;
+  executed_count: number;
+};
 
 /** Order summary for confirmation */
 export interface OrderSummary {
@@ -65,28 +53,4 @@ export interface OrderSummary {
   breakeven?: number | null;  // For options/spreads
   estimatedPnl?: number | null;
   estimatedPnlLabel?: string;
-}
-
-/** Props for price-related components */
-export interface PriceDisplayProps {
-  prices: OrderPrices;
-  showSpread?: boolean;
-  compact?: boolean;
-}
-
-/** Props for leg display components */
-export interface LegDisplayProps {
-  legs: OrderLeg[];
-  compact?: boolean;
-  showPrices?: boolean;
-}
-
-/** Common order form props */
-export interface OrderFormProps {
-  ticker: string;
-  type: OrderType;
-  legs?: OrderLeg[];
-  defaultAction?: OrderAction;
-  defaultQuantity?: number;
-  onOrderPlaced?: () => void;
 }

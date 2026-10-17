@@ -11,10 +11,6 @@ vi.mock("@/lib/useWatchlist", () => ({
   useWatchlist: () => ({ isWatched: () => false, toggleWatch: vi.fn() }),
 }));
 
-vi.mock("../components/PriceChart", () => ({
-  default: () => createElement("div", { "data-testid": "mock-price-chart" }),
-}));
-
 vi.mock("../components/ticker-detail/PositionTab", () => ({
   default: () => createElement("div", { "data-testid": "mock-position-tab" }),
 }));

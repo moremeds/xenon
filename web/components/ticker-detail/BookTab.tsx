@@ -12,7 +12,7 @@ import OrderErrorBanner from "@/components/OrderErrorBanner";
 import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
 import { OrderTifSelector } from "@/lib/order/components/OrderTifSelector";
 import { useClientAttemptId } from "./useClientAttemptId";
-import { getReasonToast } from "@/lib/orderReasonCodes";
+import { errorFromResponseBody } from "@/lib/order/responseError";
 
 /* ─── Types ─── */
 
@@ -44,23 +44,6 @@ type BookTabProps = {
 };
 
 type OrderAction = "BUY" | "SELL";
-
-function errorFromResponseBody(
-  body: Record<string, unknown> | null | undefined,
-  fallback: string,
-): string {
-  if (body && typeof body === "object") {
-    const code = body.reason_code;
-    if (typeof code === "string" && code.length > 0) {
-      return getReasonToast(code).copy;
-    }
-    const error = body.error;
-    if (typeof error === "string" && error.length > 0) return error;
-    const detail = body.detail;
-    if (typeof detail === "string" && detail.length > 0) return detail;
-  }
-  return fallback;
-}
 
 /** Window-head label. An option subject shows its $strike·right·expiry rather
  *  than just the underlying ("QQQ $692P 07/17/26"), with the underlying symbol

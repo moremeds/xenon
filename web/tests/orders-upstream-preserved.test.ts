@@ -14,10 +14,6 @@ vi.mock("@/lib/xenonApi", async () => {
   };
 });
 
-vi.mock("@tools/data-reader", () => ({
-  readDataFile: vi.fn(async () => ({ ok: true, data: { positions: [] } })),
-}));
-
 import { xenonFetch, XenonApiError } from "@/lib/xenonApi";
 import { POST as placePost } from "../app/api/orders/place/route";
 import { POST as cancelPost } from "../app/api/orders/cancel/route";

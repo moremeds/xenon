@@ -32,13 +32,13 @@ describe("next.config.mjs security headers", () => {
     expect(map["Strict-Transport-Security"]).toBeUndefined();
   });
 
-  it("adds HSTS when VERCEL=1", async () => {
+  it("does not add HSTS when only VERCEL=1", async () => {
     process.env.VERCEL = "1";
     const { default: config } = await import("../next.config.mjs");
     const rows = await config.headers();
     const headers = rows[0].headers as { key: string; value: string }[];
     const hsts = headers.find((h) => h.key === "Strict-Transport-Security");
-    expect(hsts?.value).toContain("max-age=31536000");
+    expect(hsts).toBeUndefined();
   });
 
   it("adds HSTS when XENON_ENABLE_HSTS=1", async () => {

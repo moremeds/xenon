@@ -30,10 +30,16 @@ describe("resolveProjectRoot", () => {
   });
 });
 
+// `.venv/bin/python` exercises the entry-point spawn branch directly —
+// created by `uv sync` in CI and `uv run` locally, no PATH dependency.
+const PY = ".venv/bin/python";
+const KELLY_JSON =
+  "import json; print(json.dumps({'full_kelly_pct': 10.0, 'edge_exists': True, 'recommendation': 'bet'}))";
+
 describe("runScript", () => {
   it("returns ok: true with parsed JSON for a valid script", async () => {
-    const result = await runScript("src/xenon/reports/kelly.py", {
-      args: ["--prob", "0.6", "--odds", "2.0"],
+    const result = await runScript(PY, {
+      args: ["-c", KELLY_JSON],
       timeout: 10_000,
     });
 
@@ -55,9 +61,8 @@ describe("runScript", () => {
   });
 
   it("returns ok: false when script exits non-zero", async () => {
-    // fetch_ticker exits 1 when ticker not verified — use a guaranteed-bad ticker
-    const result = await runScript("src/xenon/reports/kelly.py", {
-      args: ["--prob", "not-a-number"],
+    const result = await runScript(PY, {
+      args: ["-c", "import sys; sys.exit(3)"],
       timeout: 10_000,
     });
 
@@ -65,8 +70,8 @@ describe("runScript", () => {
   });
 
   it("supports rawOutput mode (no JSON parsing)", async () => {
-    const result = await runScript("src/xenon/reports/kelly.py", {
-      args: ["--prob", "0.6", "--odds", "2.0"],
+    const result = await runScript(PY, {
+      args: ["-c", KELLY_JSON],
       rawOutput: true,
       timeout: 10_000,
     });
@@ -85,8 +90,8 @@ describe("runScript", () => {
       nonexistent_field: Type.String(),
     });
 
-    const result = await runScript("src/xenon/reports/kelly.py", {
-      args: ["--prob", "0.6", "--odds", "2.0"],
+    const result = await runScript(PY, {
+      args: ["-c", KELLY_JSON],
       outputSchema: WrongSchema,
       timeout: 10_000,
     });

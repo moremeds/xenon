@@ -23,9 +23,6 @@ vi.mock("next/server", () => ({
 const mockStat = vi.fn();
 vi.mock("fs/promises", () => ({ stat: mockStat }));
 
-const mockReadDataFile = vi.fn();
-vi.mock("@tools/data-reader", () => ({ readDataFile: mockReadDataFile }));
-
 const mockXenonFetch = vi.fn();
 vi.mock("@/lib/xenonApi", () => ({ xenonFetch: mockXenonFetch }));
 
@@ -89,7 +86,6 @@ describe("POST /api/portfolio — sync failure fallback", () => {
 
   it("returns 502 when sync fails (cache no longer participates)", async () => {
     mockXenonFetch.mockRejectedValue(new Error("Connect call failed"));
-    mockReadDataFile.mockResolvedValue({ ok: false, error: "File not found" });
 
     const { POST } = await import("../app/api/portfolio/route");
     const response = await POST();
@@ -100,7 +96,6 @@ describe("POST /api/portfolio — sync failure fallback", () => {
   it("returns cached portfolio data with 200 when sync succeeds", async () => {
     const synced = makePortfolio("2026-03-13T15:00:00Z");
     mockXenonFetch.mockResolvedValue(synced);
-    mockReadDataFile.mockResolvedValue({ ok: true, data: synced });
 
     const { POST } = await import("../app/api/portfolio/route");
     const response = await POST();
@@ -132,7 +127,6 @@ describe("POST /api/orders — PG-only refresh", () => {
       "/orders/refresh",
       expect.objectContaining({ method: "POST" }),
     );
-    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
   it("does not set X-Sync-Warning header because cache fallback is removed", async () => {
@@ -153,7 +147,6 @@ describe("POST /api/orders — PG-only refresh", () => {
     const response = await POST();
 
     expect(response.status).toBe(502);
-    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 
   it("returns PG orders data with 200 when refresh succeeds", async () => {
@@ -169,6 +162,5 @@ describe("POST /api/orders — PG-only refresh", () => {
     expect(response.status).toBe(200);
     expect(body.last_sync).toBe("2026-03-13T15:00:00Z");
     expect(response.headers.get("X-Sync-Warning")).toBeNull();
-    expect(mockReadDataFile).not.toHaveBeenCalled();
   });
 });

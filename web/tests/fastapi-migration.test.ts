@@ -34,18 +34,6 @@ vi.mock("@/lib/xenonApi", () => ({
   },
 }));
 
-// Mock @tools/data-reader for routes that read cached files
-const mockReadDataFile = vi
-  .fn()
-  .mockResolvedValue({ ok: false, error: "not found" });
-vi.mock("@tools/data-reader", () => ({
-  readDataFile: mockReadDataFile,
-}));
-
-// Mock @tools/schemas/ib-orders and ib-sync (TypeBox schemas)
-vi.mock("@tools/schemas/ib-orders", () => ({ OrdersData: {} }));
-vi.mock("@tools/schemas/ib-sync", () => ({ PortfolioData: {} }));
-
 // Mock fs/promises for routes that read/write cache files
 const mockReadFile = vi.fn();
 const mockWriteFile = vi.fn().mockResolvedValue(undefined);
@@ -90,7 +78,6 @@ function makeRequest(url: string, init?: RequestInit): Request {
 beforeEach(() => {
   vi.resetModules();
   mockXenonFetch.mockReset();
-  mockReadDataFile.mockReset();
   mockReadFile.mockReset();
   mockWriteFile.mockReset();
   mockStat.mockReset();
@@ -286,7 +273,6 @@ describe("POST /api/orders/cancel (via xenonFetch)", () => {
     const body = await res.json();
     expect(body.status).toBe("ok");
     expect(body.orders).toEqual(ordersPayload);
-    expect(mockReadDataFile).not.toHaveBeenCalled();
     expect(mockXenonFetch.mock.calls.map((call) => call[0])).toEqual([
       "/orders/cancel",
       "/orders/refresh",
@@ -443,10 +429,6 @@ describe("POST /api/orders/place (via xenonFetch)", () => {
         message: "BUY 10 AAPL @ $150.00 — Submitted",
       })
       .mockResolvedValueOnce({}); // orders refresh
-    mockReadDataFile.mockResolvedValue({
-      ok: true,
-      data: { open_orders: [], executed_orders: [] },
-    });
 
     const { POST } = await import("../app/api/orders/place/route");
     const req = makeRequest("http://localhost/api/orders/place", {
@@ -477,12 +459,6 @@ describe("POST /api/orders/place (via xenonFetch)", () => {
         initialStatus: "Submitted",
       })
       .mockResolvedValueOnce({});
-    mockReadDataFile
-      .mockResolvedValueOnce({ ok: true, data: { positions: [] } })
-      .mockResolvedValueOnce({
-        ok: true,
-        data: { open_orders: [], executed_orders: [] },
-      });
 
     const { POST } = await import("../app/api/orders/place/route");
     const req = makeRequest("http://localhost/api/orders/place", {

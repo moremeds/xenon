@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { errorFromResponseBody } from "./order/responseError";
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 type RetryMethod = "GET" | "POST";
@@ -100,7 +101,7 @@ export function useSyncHook<T>(
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           throw new Error(
-            (body as { error?: string }).error ?? `Sync failed (${res.status})`,
+            errorFromResponseBody(body, `Sync failed (${res.status})`),
           );
         }
         const json = (await res.json()) as T;

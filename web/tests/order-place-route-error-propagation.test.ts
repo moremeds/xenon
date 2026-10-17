@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockXenonFetch = vi.fn();
-const mockReadDataFile = vi.fn();
 
 vi.mock("@/lib/xenonApi", () => ({
   xenonFetch: mockXenonFetch,
@@ -17,20 +16,10 @@ vi.mock("@/lib/xenonApi", () => ({
   },
 }));
 
-vi.mock("@tools/data-reader", () => ({
-  readDataFile: mockReadDataFile,
-}));
-
-vi.mock("@tools/schemas/ib-orders", () => ({
-  OrdersData: {},
-}));
-
 describe("POST /api/orders/place upstream error propagation", () => {
   beforeEach(() => {
     vi.resetModules();
     mockXenonFetch.mockReset();
-    mockReadDataFile.mockReset();
-    mockReadDataFile.mockResolvedValue({ ok: true, data: { positions: [] } });
   });
 
   it("preserves upstream status and detail instead of wrapping with XenonApiError text", async () => {

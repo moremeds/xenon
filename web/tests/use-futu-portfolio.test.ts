@@ -73,6 +73,60 @@ describe("useFutuPortfolio", () => {
     expect(result.current.envelope).toBeNull();
     expect(result.current.error).toBeNull();
     expect(result.current.lastSync).toBeNull();
+    expect(result.current.initialRead).toBe("never_synced");
+  });
+
+  it("treats GET 404 as never_synced, not an error (route maps FastAPI 404)", async () => {
+    mockFetchOnce(
+      {
+        error:
+          "Futu portfolio not yet synced. Start Futu OpenD and POST /api/futu/sync.",
+      },
+      404,
+    );
+
+    const { result } = renderHook(() => useFutuPortfolio(false));
+    await waitFor(() => {
+      expect(result.current.initialRead).toBe("never_synced");
+    });
+
+    expect(result.current.neverSynced).toBe(true);
+    expect(result.current.data).toBeNull();
+    expect(result.current.envelope).toBeNull();
+    // Never-synced is a measurement condition — no error surfaced.
+    expect(result.current.error).toBeNull();
+    expect(result.current.lastSync).toBeNull();
+  });
+
+  it("treats GET 502 as unavailable and surfaces the error", async () => {
+    mockFetchOnce({ error: "Futu portfolio unavailable: boom" }, 502);
+
+    const { result } = renderHook(() => useFutuPortfolio(false));
+    await waitFor(() => {
+      expect(result.current.initialRead).toBe("unavailable");
+    });
+
+    expect(result.current.data).toBeNull();
+    expect(result.current.neverSynced).toBe(false);
+    expect(result.current.error).not.toBeNull();
+  });
+
+  it("recovers from unavailable when a later sync succeeds", async () => {
+    mockFetchOnce({ error: "Futu portfolio unavailable: boom" }, 502);
+    const { result } = renderHook(() => useFutuPortfolio(false));
+    await waitFor(() => {
+      expect(result.current.initialRead).toBe("unavailable");
+    });
+
+    mockFetchOnce(FIXTURE_ENVELOPE);
+    await act(async () => {
+      await result.current.syncNow();
+    });
+    await waitFor(() => {
+      expect(result.current.initialRead).toBe("loaded");
+    });
+    expect(result.current.data).not.toBeNull();
+    expect(result.current.error).toBeNull();
   });
 
   it("adapts a normal envelope into PortfolioData", async () => {
@@ -88,6 +142,7 @@ describe("useFutuPortfolio", () => {
     expect(result.current.envelope).toEqual(FIXTURE_ENVELOPE);
     expect(result.current.lastSync).toBe("2026-04-07T12:00:00.000Z");
     expect(result.current.data?.bankroll).toBe(148000);
+    expect(result.current.initialRead).toBe("loaded");
   });
 
   it("sets error on non-2xx response and leaves data untouched", async () => {
@@ -100,6 +155,7 @@ describe("useFutuPortfolio", () => {
 
     expect(result.current.data).toBeNull();
     expect(result.current.neverSynced).toBe(false);
+    expect(result.current.initialRead).toBe("unavailable");
   });
 
   it("flips neverSynced back to false when a real envelope arrives after a never_synced response", async () => {

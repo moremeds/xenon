@@ -14,12 +14,9 @@ vi.mock("next/server", () => ({
 }));
 
 const mocks = vi.hoisted(() => ({
-  readDataFile: vi.fn(),
   xenonFetch: vi.fn(),
 }));
 
-vi.mock("@tools/data-reader", () => ({ readDataFile: mocks.readDataFile }));
-vi.mock("@tools/schemas/ib-orders", () => ({ OrdersData: {} }));
 vi.mock("@/lib/xenonApi", () => ({
   xenonFetch: mocks.xenonFetch,
   XenonApiError: class XenonApiError extends Error {
@@ -48,11 +45,7 @@ const ordersPayload = {
 describe("/api/orders/cancel route", () => {
   beforeEach(() => {
     vi.resetModules();
-    mocks.readDataFile.mockReset();
     mocks.xenonFetch.mockReset();
-    mocks.readDataFile.mockImplementation(async (path: string) => {
-      throw new Error(`cancel route must not read data/orders.json: ${path}`);
-    });
   });
 
   it("returns refreshed Postgres orders without reading orders.json", async () => {
@@ -77,7 +70,6 @@ describe("/api/orders/cancel route", () => {
       message: "Cancelled",
       orders: ordersPayload,
     });
-    expect(mocks.readDataFile).not.toHaveBeenCalled();
     expect(mocks.xenonFetch.mock.calls.map((call) => call[0])).toEqual([
       "/orders/cancel",
       "/orders/refresh",
