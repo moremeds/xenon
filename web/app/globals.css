@@ -10,6 +10,14 @@
   --font-sans: "Inter", -apple-system, sans-serif;
   --font-mono: "IBM Plex Mono", monospace;
   --ease-out: cubic-bezier(0.25, 1, 0.5, 1);
+  /* label text on saturated accent/semantic fills — always light */
+  --text-on-fill: #ffffff;
+  /* label text on bright fills (e.g. positive green) — always dark */
+  --text-on-fill-dark: #000000;
+  /* ratings-bar segment fills — fixed in both themes to keep label contrast */
+  --rating-strong-buy-fill: #048a7a;
+  /* ratings-bar hold segment — slate fill, always paired with --text-on-fill */
+  --rating-hold-fill: #475569;
 }
 
 [data-theme="dark"] {
@@ -470,7 +478,7 @@ body {
 
 .account-tab-active {
   background: var(--bg-panel-raised);
-  color: var(--text-primary, #fff);
+  color: var(--text-primary);
   border-bottom-color: var(--signal-core);
 }
 
@@ -525,7 +533,7 @@ body {
 .account-tab-metric {
   font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
   font-size: 12px;
-  color: var(--text-primary, #fff);
+  color: var(--text-primary);
 }
 
 /* ─────────────────────────────────────────────────────────── */
@@ -937,7 +945,7 @@ td.last-price-cell {
 
 @keyframes last-price-flash-up {
   0% {
-    background: rgba(34, 197, 94, 0.15);
+    background: color-mix(in srgb, var(--positive) 15%, transparent);
   }
   100% {
     background: transparent;
@@ -946,7 +954,7 @@ td.last-price-cell {
 
 @keyframes last-price-flash-down {
   0% {
-    background: rgba(239, 68, 68, 0.15);
+    background: color-mix(in srgb, var(--negative) 15%, transparent);
   }
   100% {
     background: transparent;
@@ -1183,13 +1191,7 @@ td.last-price-cell {
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  background:
-    linear-gradient(
-      180deg,
-      rgba(5, 173, 152, 0.09) 0%,
-      rgba(5, 173, 152, 0.02) 100%
-    ),
-    var(--bg-panel);
+  background: var(--bg-panel);
 }
 
 .performance-hero-value {
@@ -1932,7 +1934,7 @@ td.negative,
   opacity: 0.7;
 }
 .ib-import {
-  color: var(--info, #8b5cf6);
+  color: var(--info);
 }
 
 /* ── Sync button (journal IB sync) ── */
@@ -1942,9 +1944,9 @@ td.negative,
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--info, #8b5cf6);
+  color: var(--info);
   background: transparent;
-  border: 1px solid var(--info, #8b5cf6);
+  border: 1px solid var(--info);
   padding: 2px 8px;
   cursor: pointer;
   transition:
@@ -1952,7 +1954,7 @@ td.negative,
     color 0.15s;
 }
 .btn-sync:hover:not(:disabled) {
-  background: rgba(139, 92, 246, 0.1);
+  background: color-mix(in srgb, var(--info) 10%, transparent);
 }
 .btn-sync:disabled {
   opacity: 0.5;
@@ -2079,7 +2081,7 @@ tr.leg-row td {
   gap: 8px;
   padding: 8px 20px;
   background: var(--banner-negative);
-  color: #fff;
+  color: var(--text-on-fill);
   font-family: var(--font-mono);
   font-size: 11px;
   letter-spacing: 0.03em;
@@ -2198,7 +2200,7 @@ tr.leg-row td {
   position: fixed;
   inset: 0;
   z-index: 10000;
-  background: rgba(0, 0, 0, 0.6);
+  background: color-mix(in srgb, black 60%, transparent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2318,7 +2320,7 @@ tr.leg-row td {
 }
 
 .btn-modify:not(:disabled):hover {
-  background: rgba(139, 92, 246, 0.1);
+  background: color-mix(in srgb, var(--info) 10%, transparent);
 }
 
 .btn-cancel {
@@ -2327,7 +2329,7 @@ tr.leg-row td {
 }
 
 .btn-cancel:not(:disabled):hover {
-  background: rgba(239, 68, 68, 0.1);
+  background: color-mix(in srgb, var(--negative) 10%, transparent);
 }
 
 /* ── Cancel Dialog ── */
@@ -2369,7 +2371,7 @@ tr.leg-row td {
   color: var(--warning);
   padding: 10px 12px;
   border: 1px solid var(--warning);
-  background: rgba(245, 158, 11, 0.05);
+  background: color-mix(in srgb, var(--warning) 5%, transparent);
 }
 
 .cancel-actions {
@@ -2789,7 +2791,7 @@ tr.leg-row td {
   padding: 8px 16px;
   border: 1px solid var(--negative);
   background: var(--negative);
-  color: #fff;
+  color: var(--text-on-fill);
   cursor: pointer;
   transition: all 150ms ease-in-out;
 }
@@ -2811,8 +2813,8 @@ tr.leg-row td {
     -45deg,
     transparent,
     transparent 8px,
-    rgba(239, 68, 68, 0.03) 8px,
-    rgba(239, 68, 68, 0.03) 16px
+    color-mix(in srgb, var(--negative) 3%, transparent) 8px,
+    color-mix(in srgb, var(--negative) 3%, transparent) 16px
   );
 }
 
@@ -2848,11 +2850,11 @@ tr.leg-row td {
 /* ── Cancelled Row in Executed Table ── */
 
 .row-cancelled {
-  background: rgba(239, 68, 68, 0.03);
+  background: color-mix(in srgb, var(--negative) 3%, transparent);
 }
 
 .row-cancelled:hover {
-  background: rgba(239, 68, 68, 0.06);
+  background: color-mix(in srgb, var(--negative) 6%, transparent);
 }
 
 .cancelled-icon {
@@ -3264,7 +3266,7 @@ tr.leg-row td {
   gap: 4px;
   padding: 8px 10px;
   border: 1px solid var(--negative);
-  background: rgba(239, 68, 68, 0.05);
+  background: color-mix(in srgb, var(--negative) 5%, transparent);
   color: var(--negative);
 }
 .order-error-summary {
@@ -3285,7 +3287,7 @@ tr.leg-row td {
   color: var(--positive);
   padding: 8px 10px;
   border: 1px solid var(--positive);
-  background: rgba(34, 197, 94, 0.05);
+  background: color-mix(in srgb, var(--positive) 5%, transparent);
 }
 .order-submit {
   margin-top: 4px;
@@ -3356,10 +3358,10 @@ tr.leg-row td {
   font-size: 11px;
 }
 .combo-leg-long {
-  background: rgba(34, 197, 94, 0.1);
+  background: color-mix(in srgb, var(--positive) 10%, transparent);
 }
 .combo-leg-short {
-  background: rgba(239, 68, 68, 0.1);
+  background: color-mix(in srgb, var(--negative) 10%, transparent);
 }
 .combo-leg-dir {
   font-weight: 600;
@@ -3481,10 +3483,10 @@ tr.leg-row td {
   font-size: 10px;
 }
 .order-leg-pill-long {
-  background: rgba(34, 197, 94, 0.1);
+  background: color-mix(in srgb, var(--positive) 10%, transparent);
 }
 .order-leg-pill-short {
-  background: rgba(239, 68, 68, 0.1);
+  background: color-mix(in srgb, var(--negative) 10%, transparent);
 }
 .order-leg-dir {
   font-weight: 600;
@@ -3579,7 +3581,7 @@ tr.leg-row td {
   margin-bottom: 12px;
 }
 .order-confirm-summary-info {
-  background: rgba(5, 173, 152, 0.08);
+  background: color-mix(in srgb, var(--signal-core) 8%, transparent);
   border-color: var(--signal-core);
 }
 .order-confirm-description {
@@ -3838,24 +3840,24 @@ tr.leg-row td {
   min-width: 20px;
 }
 .ratings-strong-buy {
-  background: #048a7a;
-  color: #fff;
+  background: var(--rating-strong-buy-fill);
+  color: var(--text-on-fill);
 }
 .ratings-buy {
   background: var(--positive);
-  color: #000;
+  color: var(--text-on-fill-dark);
 }
 .ratings-hold {
-  background: #475569;
-  color: #fff;
+  background: var(--rating-hold-fill);
+  color: var(--text-on-fill);
 }
 .ratings-sell {
   background: var(--negative);
-  color: #fff;
+  color: var(--text-on-fill);
 }
 .ratings-strong-sell {
-  background: #9f1239;
-  color: #fff;
+  background: #9f1239; /* brand: no deep-negative token in design tokens */
+  color: var(--text-on-fill);
 }
 .ratings-bar-labels {
   display: flex;
@@ -3975,8 +3977,8 @@ tr.leg-row td {
     -45deg,
     transparent,
     transparent 8px,
-    rgba(139, 92, 246, 0.03) 8px,
-    rgba(139, 92, 246, 0.03) 16px
+    color-mix(in srgb, var(--info) 3%, transparent) 8px,
+    color-mix(in srgb, var(--info) 3%, transparent) 16px
   );
 }
 
@@ -4248,15 +4250,15 @@ tr {
 }
 .seasonality-cell-badge.seasonality-favorable {
   color: var(--positive);
-  background: rgba(34, 197, 94, 0.1);
+  background: color-mix(in srgb, var(--positive) 10%, transparent);
 }
 .seasonality-cell-badge.seasonality-unfavorable {
   color: var(--negative);
-  background: rgba(239, 68, 68, 0.1);
+  background: color-mix(in srgb, var(--negative) 10%, transparent);
 }
 .seasonality-cell-badge.seasonality-neutral {
   color: var(--text-muted);
-  background: rgba(117, 117, 117, 0.1);
+  background: color-mix(in srgb, var(--text-muted) 10%, transparent);
 }
 
 /* Detail table */
@@ -4273,7 +4275,7 @@ tr {
   color: var(--text-muted);
 }
 .seasonality-row-current {
-  background: rgba(139, 92, 246, 0.05);
+  background: color-mix(in srgb, var(--info) 5%, transparent);
 }
 .seasonality-table-badge {
   font-family: var(--font-mono);
@@ -5367,17 +5369,17 @@ tr {
 
 .regime-relationship-marker-spread {
   fill: var(--signal-core);
-  stroke: rgba(5, 173, 152, 0.3);
+  stroke: color-mix(in srgb, var(--signal-core) 30%, transparent);
 }
 
 .regime-relationship-marker-rvol {
   fill: var(--warning);
-  stroke: rgba(245, 166, 35, 0.28);
+  stroke: color-mix(in srgb, var(--warning) 28%, transparent);
 }
 
 .regime-relationship-marker-cor1m {
   fill: var(--dislocation);
-  stroke: rgba(217, 70, 168, 0.28);
+  stroke: color-mix(in srgb, var(--dislocation) 28%, transparent);
 }
 
 .regime-relationship-axis-label,
@@ -5622,7 +5624,7 @@ tr {
   position: fixed;
   inset: 0;
   z-index: 10000;
-  background: rgba(0, 0, 0, 0.72);
+  background: color-mix(in srgb, black 72%, transparent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -5736,12 +5738,12 @@ tr {
 
 .cta-flag-short {
   color: var(--negative);
-  border-color: rgba(232, 93, 108, 0.4);
+  border-color: color-mix(in srgb, var(--negative) 40%, transparent);
 }
 
 .cta-flag-long {
   color: var(--signal-core);
-  border-color: rgba(5, 173, 152, 0.4);
+  border-color: color-mix(in srgb, var(--signal-core) 40%, transparent);
 }
 
 /* ─────────────────────────────────────────────────────── */
@@ -5950,10 +5952,10 @@ tr {
   color: var(--color-red);
 }
 .fills-row-positive {
-  background: rgba(34, 197, 94, 0.04);
+  background: color-mix(in srgb, var(--positive) 4%, transparent);
 }
 .fills-row-negative {
-  background: rgba(239, 68, 68, 0.04);
+  background: color-mix(in srgb, var(--negative) 4%, transparent);
 }
 
 .fills-summary {
@@ -6063,7 +6065,6 @@ tr {
   padding: 12px;
   font-family: var(--font-mono);
   font-size: 11px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 
 .share-pnl-popover-title {
@@ -7679,7 +7680,7 @@ tr {
   gap: 18px;
   padding: 0 14px;
   border-bottom: 1px solid var(--line-grid);
-  background: linear-gradient(180deg, var(--bg-panel-raised), var(--bg-panel));
+  background: var(--bg-panel);
   font-family: var(--font-mono);
   font-size: 12px;
 }
@@ -7860,7 +7861,7 @@ tr {
   gap: 14px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--line-grid);
-  background: linear-gradient(180deg, var(--bg-panel-raised), var(--bg-panel));
+  background: var(--bg-panel);
   /* Stable height: the live MID/BID/ASK/SPRD values change digit width every
      tick. Without nowrap + a pinned height the row reflowed and shoved the
      montage down. The flex spacer collapses first; overflow clips, not grows. */
@@ -8494,8 +8495,7 @@ tr {
   min-width: 0;
   overflow: hidden;
   background: var(--bg-panel);
-  box-shadow: -24px 0 60px -30px
-    color-mix(in srgb, var(--bg-base) 80%, transparent);
+  border-left: 1px solid var(--line-grid);
   opacity: 0;
   visibility: hidden;
   transition:
@@ -8694,7 +8694,7 @@ tr {
   padding: 6px 12px;
   border-radius: 4px;
   border: 1px solid var(--negative);
-  background: rgba(239, 68, 68, 0.08);
+  background: color-mix(in srgb, var(--negative) 8%, transparent);
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--negative);

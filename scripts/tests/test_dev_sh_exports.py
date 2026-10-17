@@ -59,6 +59,9 @@ def dev_sh_dryrun(tmp_path):
 def _run_dryrun(script: Path, mode: str, env_overrides: dict[str, str] | None = None) -> dict[str, str]:
     """Run the trimmed dev.sh and parse its env-dump output."""
     env = os.environ.copy()
+    # dev.sh fails closed without the internal token (PR #186); these tests
+    # cover account exports, so give it a dummy one.
+    env["XENON_INTERNAL_API_TOKEN"] = "test-internal-token"
     # dev.sh sources alembic from .env; isolate the test by using a tmp .env.
     # Skip alembic by pointing DATABASE_URL at empty so the `if -n DATABASE_URL`
     # branch is skipped. Same for IB Gateway — the TCP probe is non-blocking.
@@ -86,6 +89,9 @@ def test_paper_mode_requires_xenon_paper_account(dev_sh_dryrun):
     if not shutil.which("bash"):
         pytest.skip("bash not on PATH")
     env = os.environ.copy()
+    # dev.sh fails closed without the internal token (PR #186); these tests
+    # cover account exports, so give it a dummy one.
+    env["XENON_INTERNAL_API_TOKEN"] = "test-internal-token"
     env["DATABASE_URL"] = ""
     env["XENON_PAPER_ACCOUNT"] = ""
     result = subprocess.run(
@@ -117,6 +123,9 @@ def test_live_mode_requires_xenon_live_account(dev_sh_dryrun):
     if not shutil.which("bash"):
         pytest.skip("bash not on PATH")
     env = os.environ.copy()
+    # dev.sh fails closed without the internal token (PR #186); these tests
+    # cover account exports, so give it a dummy one.
+    env["XENON_INTERNAL_API_TOKEN"] = "test-internal-token"
     env["DATABASE_URL"] = ""
     env["XENON_LIVE_ACCOUNT"] = ""
     result = subprocess.run(

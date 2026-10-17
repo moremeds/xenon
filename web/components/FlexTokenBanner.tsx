@@ -38,10 +38,10 @@ export default function FlexTokenBanner() {
   const { days_remaining, expired, renewal_url, breadcrumb, token_masked } = data;
 
   const urgencyColor = expired
-    ? "var(--negative, #E85D6C)"
+    ? "var(--negative)"
     : days_remaining !== null && days_remaining <= 7
-      ? "var(--negative, #E85D6C)"
-      : "var(--warning, #F5A623)";
+      ? "var(--negative)"
+      : "var(--warning)";
 
   const label = expired
     ? "EXPIRED"
@@ -57,10 +57,10 @@ export default function FlexTokenBanner() {
         gap: "10px",
         padding: "8px 14px",
         background: expired
-          ? "rgba(232,93,108,0.10)"
-          : "rgba(245,166,35,0.08)",
+          ? "color-mix(in srgb, var(--negative) 10%, transparent)"
+          : "color-mix(in srgb, var(--warning) 8%, transparent)",
         borderLeft: `3px solid ${urgencyColor}`,
-        borderBottom: "1px solid var(--line-grid, #1e293b)",
+        borderBottom: "1px solid var(--line-grid)",
         fontFamily: "var(--font-mono, 'IBM Plex Mono', monospace)",
         fontSize: "11px",
         letterSpacing: "0.04em",
@@ -72,7 +72,7 @@ export default function FlexTokenBanner() {
         IB FLEX TOKEN {label}
       </span>
 
-      <span style={{ color: "var(--text-muted, #64748b)" }}>
+      <span style={{ color: "var(--text-muted)" }}>
         {token_masked}
       </span>
 
@@ -84,7 +84,7 @@ export default function FlexTokenBanner() {
           display: "inline-flex",
           alignItems: "center",
           gap: "4px",
-          color: "var(--signal-core, #05AD98)",
+          color: "var(--signal-core)",
           textDecoration: "none",
           fontWeight: 600,
         }}
@@ -94,7 +94,7 @@ export default function FlexTokenBanner() {
 
       <span
         style={{
-          color: "var(--text-muted, #475569)",
+          color: "var(--text-muted)",
           fontSize: "10px",
           marginLeft: "auto",
         }}
@@ -109,7 +109,7 @@ export default function FlexTokenBanner() {
           background: "none",
           border: "none",
           cursor: "pointer",
-          color: "var(--text-muted, #64748b)",
+          color: "var(--text-muted)",
           padding: "2px",
           flexShrink: 0,
         }}

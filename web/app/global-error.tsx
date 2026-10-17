@@ -35,7 +35,7 @@ export default function GlobalError({ error, reset }: { error: AppError; reset: 
               fontSize: "11px",
               letterSpacing: "0.1em",
               textTransform: "uppercase",
-              color: "var(--fault, #E85D6C)",
+              color: "var(--fault, #E85D6C)", // brand: global-error renders without globals.css
             }}
           >
             Application Error
@@ -54,8 +54,8 @@ export default function GlobalError({ error, reset }: { error: AppError; reset: 
               fontSize: "11px",
               padding: "8px 14px",
               borderRadius: "4px",
-              border: "1px solid var(--border-dim, #1e293b)",
-              background: "var(--bg-panel-raised, #151c22)",
+              border: "1px solid var(--border-dim, #1e293b)", // brand: global-error renders without globals.css
+              background: "var(--bg-panel-raised, #151c22)", // brand: global-error renders without globals.css
               color: "var(--text-primary)",
               cursor: "pointer",
             }}

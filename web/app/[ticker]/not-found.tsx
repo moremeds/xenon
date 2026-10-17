@@ -12,7 +12,7 @@ export default function TickerNotFound() {
       color: "var(--text-secondary)",
       gap: "16px",
     }}>
-      <span style={{ fontSize: "11px", letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--fault, #E85D6C)" }}>
+      <span style={{ fontSize: "11px", letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--fault)" }}>
         404 — Instrument Not Found
       </span>
       <span style={{ fontSize: "12px" }}>
@@ -22,9 +22,9 @@ export default function TickerNotFound() {
         href="/dashboard"
         style={{
           fontSize: "11px",
-          color: "var(--signal-core, #05AD98)",
+          color: "var(--signal-core)",
           textDecoration: "none",
-          borderBottom: "1px solid var(--signal-core, #05AD98)",
+          borderBottom: "1px solid var(--signal-core)",
           paddingBottom: "1px",
         }}
       >

@@ -169,7 +169,7 @@ function L1OrderBook({
             style={{
               fontFamily: "var(--font-mono)",
               fontSize: "14px",
-              color: "var(--text-primary, #e2e8f0)",
+              color: "var(--text-primary)",
             }}
           >
             {spread != null ? spread.toFixed(2) : "---"}
@@ -312,7 +312,7 @@ function OpenOrdersList({ orders }: { orders: OpenOrder[] }) {
               justifyContent: "space-between",
               alignItems: "center",
               padding: "6px 0",
-              borderBottom: "1px solid var(--line-grid, #1e293b)",
+              borderBottom: "1px solid var(--line-grid)",
               fontFamily: "var(--font-mono)",
               fontSize: "12px",
             }}
