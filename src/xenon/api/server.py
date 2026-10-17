@@ -2270,6 +2270,15 @@ async def _orders_place_from_body(body: dict):
         override_audit=override_audit,
         **_resolve_scope_kwargs(),
     )
+    if outcome.status == "body_mismatch":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "reason_code": ReasonCode.ATTEMPT_BODY_MISMATCH.value,
+                "detail": f"attempt {cid} already reserved with a different request body",
+                "submission_id": outcome.submission_id,
+            },
+        )
     if outcome.status == "terminal":
         return JSONResponse(
             status_code=409,

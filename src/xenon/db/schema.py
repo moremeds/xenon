@@ -603,11 +603,20 @@ order_submissions = Table(
     Column("broker", Text, nullable=False, server_default=text("'IB'")),
     Column("account_env", Text, nullable=False, server_default=text("'legacy_unknown'")),
     Column("broker_account", Text, nullable=False, server_default=text("'legacy_unknown'")),
+    # Durable reservation payload: effective legs (actions, ratios, conIds,
+    # multiplier, guarantee mode, original/replacement qty) for Gate-4
+    # coverage. NULL for pre-PR-03a rows and snapshot-imported orders.
+    Column("legs", JSONB),
     CheckConstraint("broker = 'IB'", name="ck_order_sub_broker_ib_only"),
     CheckConstraint(
         "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
         name="ck_order_sub_account_env",
     ),
+    # EXPAND state (lead decision, spec expand/contract): the legacy
+    # identity-scoped key stays so the previous release's writer keeps
+    # working; the account-scoped key runs alongside and dedupes the same
+    # (scope, client_attempt_id) across caller identities. The contract
+    # migration (drop of the old key) is a later PR after rollout.
     UniqueConstraint(
         "broker",
         "account_env",
@@ -615,6 +624,13 @@ order_submissions = Table(
         "user_id",
         "client_attempt_id",
         name="uq_order_sub_user_attempt",
+    ),
+    UniqueConstraint(
+        "broker",
+        "account_env",
+        "broker_account",
+        "client_attempt_id",
+        name="uq_order_sub_scope_attempt",
     ),
     # FK target for regime_overrides composite scope FK (ISSUE-5).
     # Logically redundant under the submission_id PK, but Postgres requires
