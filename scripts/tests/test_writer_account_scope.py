@@ -152,3 +152,60 @@ def test_fills_mirror_keeps_dict_without_account_key(fill_writes):
     ib_reconcile.record_external_fills([execution], scope=SCOPE)
 
     assert fill_writes == ["e-legacy"]
+
+
+# ---------------------------------------------------------------------------
+# TWS-cancel sweep: another account's order ids never mask a disappearance
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_sweep_ignores_other_account_order_ids(monkeypatch):
+    from contextlib import contextmanager
+
+    from xenon.api.services import ib_activity_mirror
+    from xenon.execution import orders_store
+
+    # One scope WORKING row (perm 900, orderId 5); it vanished from IB.
+    row = {"submission_id": "sub-1", "perm_id": "900", "ib_order_id": "5", "quantity": 1, "security_type": "STK"}
+
+    class _Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+        def scalar(self):
+            return 0
+
+        def one(self):
+            return (0, 0)
+
+    class _Conn:
+        calls = 0
+
+        def execute(self, _stmt):
+            _Conn.calls += 1
+            return _Result([row] if _Conn.calls == 1 else [])
+
+    class _Engine:
+        @contextmanager
+        def connect(self):
+            yield _Conn()
+
+    monkeypatch.setattr("xenon.db.engine.get_sync_engine", lambda: _Engine())
+    terminal = []
+    monkeypatch.setattr(orders_store, "mark_terminal", lambda **kw: terminal.append(kw["submission_id"]) or True)
+    monkeypatch.setattr(orders_store, "record_event", lambda *a, **k: None)
+
+    # The other account has an open order that happens to reuse orderId 5.
+    open_orders = [{"permId": 777, "orderId": 5, "account": OTHER}]
+    grace = {"sub-1"}  # already missing on the previous sweep
+
+    result = ib_activity_mirror.sweep_disappeared_orders(open_orders, scope=SCOPE, grace=grace)
+
+    assert result["cancelled"] == 1
+    assert terminal == ["sub-1"]

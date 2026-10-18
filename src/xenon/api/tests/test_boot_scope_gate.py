@@ -123,6 +123,7 @@ def helper_env(monkeypatch):
     pool = _FakePool()
     monkeypatch.setattr(server_mod, "ib_pool", pool)
     monkeypatch.setattr(server_mod.app.state, "trading_mode", trading_mode.MODE, raising=False)
+    monkeypatch.setattr(server_mod.app.state, "mode_verified", True, raising=False)
     monkeypatch.setattr("xenon.db.service_health.record_service_health", lambda *a, **k: None)
     return pool
 
@@ -151,3 +152,69 @@ async def test_fills_replay_helper_returns_early_without_account(helper_env, mon
     await server_mod._run_fills_replay_on_boot()
 
     assert helper_env.run_sync_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Helpers also fail closed on an unverified mode (Astra delta P2)
+# ---------------------------------------------------------------------------
+
+
+def _scope_state(monkeypatch, *, verified: bool):
+    monkeypatch.setattr(server_mod.app.state, "account", "DU0000000", raising=False)
+    monkeypatch.setattr(server_mod.app.state, "mode_verified", verified, raising=False)
+
+
+@pytest.mark.parametrize("helper", ["_run_rehydrate_on_boot", "_run_fills_replay_on_boot"])
+async def test_boot_helper_returns_early_when_mode_unverified(helper_env, monkeypatch, helper):
+    _scope_state(monkeypatch, verified=False)
+
+    await getattr(server_mod, helper)()
+
+    assert helper_env.run_sync_calls == []
+
+
+@pytest.mark.parametrize("helper", ["_run_rehydrate_on_boot", "_run_fills_replay_on_boot"])
+async def test_boot_helper_dispatches_when_verified(helper_env, monkeypatch, helper):
+    _scope_state(monkeypatch, verified=True)
+
+    await getattr(server_mod, helper)()
+
+    assert helper_env.run_sync_calls
+    assert all(
+        kw.get("broker_account", getattr(kw.get("scope"), "broker_account", None)) == "DU0000000"
+        for _r, _fn, kw in helper_env.run_sync_calls
+    )
+
+
+@pytest.fixture
+def poller_env(helper_env, monkeypatch):
+    monkeypatch.delenv("XENON_IB_ACTIVITY_POLLER", raising=False)
+    monkeypatch.setattr(server_mod.app.state, "ib_activity_poller_task", None, raising=False)
+    started = []
+
+    async def _loop(**kwargs):
+        started.append(kwargs["scope"].broker_account)
+
+    monkeypatch.setattr("xenon.api.services.ib_activity_mirror.activity_poller_loop", _loop)
+    return started
+
+
+async def test_activity_poller_not_started_when_mode_unverified(poller_env, monkeypatch):
+    _scope_state(monkeypatch, verified=False)
+
+    server_mod._maybe_start_activity_poller()
+
+    assert server_mod.app.state.ib_activity_poller_task is None
+
+
+async def test_activity_poller_started_when_verified(poller_env, monkeypatch):
+    import asyncio
+
+    _scope_state(monkeypatch, verified=True)
+
+    server_mod._maybe_start_activity_poller()
+
+    task = server_mod.app.state.ib_activity_poller_task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=1)
+    assert poller_env == ["DU0000000"]

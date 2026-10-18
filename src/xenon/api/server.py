@@ -239,6 +239,9 @@ async def _run_rehydrate_on_boot() -> None:
     if not _scope_account_env or not _scope_account:
         logger.error("rehydrate skipped: IB account scope unresolved (trading_mode/account empty)")
         return
+    if getattr(app.state, "mode_verified", False) is not True:
+        logger.error("rehydrate skipped: trading mode not verified for account %r", _scope_account)
+        return
     _scope_kwargs = {
         "broker": "IB",
         "account_env": _scope_account_env,
@@ -331,6 +334,9 @@ def _maybe_start_activity_poller() -> None:
     _scope_account = getattr(app.state, "account", None)
     if not _scope_account_env or not _scope_account:
         logger.info("ib activity poller skipped: scope not resolved")
+        return
+    if getattr(app.state, "mode_verified", False) is not True:
+        logger.error("ib activity poller skipped: trading mode not verified for account %r", _scope_account)
         return
 
     scope = AccountScope(
@@ -456,6 +462,9 @@ async def _run_fills_replay_on_boot() -> None:
     _scope_account = getattr(app.state, "account", None)
     if not _scope_account_env or not _scope_account:
         logger.error("ib fills replay skipped: scope not resolved (trading_mode/account empty)")
+        return
+    if getattr(app.state, "mode_verified", False) is not True:
+        logger.error("ib fills replay skipped: trading mode not verified for account %r", _scope_account)
         return
 
     scope = AccountScope(
