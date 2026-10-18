@@ -387,6 +387,10 @@ def sync_open_orders_to_postgres(
             resurrected += 1
         elif action == "SKIPPED_UUID":
             skipped += 1
+    if unprovenanced:
+        # The dropped accountless order's demand is not in Postgres: stop the
+        # scope's snapshot from proving cover until a later pass clears it.
+        gate4.invalidate_view(resolved, "unprovenanced_open_orders")
     return {
         "registered": registered,
         "updated": updated,

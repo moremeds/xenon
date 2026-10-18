@@ -567,3 +567,81 @@ def test_second_pass_reuses_cached_contract_metadata(monkeypatch, client, broker
     assert fake.detail_calls == first  # second pass: no IB call for known conIds
     leg = _latest_payload()["positions"][0]["legs"][0]
     assert (leg["tc"], leg["mult"]) == ("SPY", 100)
+
+
+# ---------------------------------------------------------------------------
+# merge-fix P1 — the activity poller drops accountless rows (#198 filter);
+# the scope's Gate-4 view must stop proving cover until a later pass clears it
+# ---------------------------------------------------------------------------
+
+
+def _poller_tick(fake):
+    from xenon.api.services.ib_activity_mirror import run_activity_poll_tick
+    from xenon.execution.account_scope import resolve_from_env
+
+    return run_activity_poll_tick(ib_client_factory=lambda: fake, scope=resolve_from_env())
+
+
+@pytest.mark.parametrize("account, allowed", [("", False), (FOREIGN, True)], ids=["accountless", "foreign"])
+def test_poller_open_order_without_scope_account(account, allowed, monkeypatch, client, broker_calls, fresh_quote):
+    fake = _shares_client(100)
+    _run_sync(monkeypatch, fake)
+    assert _latest_payload()["observation"]["complete"] is True
+    c = _opt(500, con_id=111)
+    fake.add_details(c)
+    fake.open_orders.append(_trade(c, order_id=9101, perm_id=991001, account=account))
+
+    _poller_tick(fake)
+
+    resp = client.post("/orders/place", json=_sell_call_body(f"sp-poll-oo-{account or 'none'}"))
+    if allowed:
+        assert resp.status_code == 200, resp.text
+    else:
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
+
+
+@pytest.mark.parametrize("account, allowed", [("", False), (FOREIGN, True)], ids=["accountless", "foreign"])
+def test_poller_fill_without_scope_account(account, allowed, monkeypatch, client, broker_calls, fresh_quote):
+    fake = _shares_client(100)
+    _run_sync(monkeypatch, fake)
+    assert _latest_payload()["observation"]["complete"] is True
+    c = _opt(500, con_id=111)
+    fake.add_details(c)
+    fake.fills.append(_fill(c, exec_id="0001.poll.01", perm_id=991002, order_id=9102, account=account))
+
+    _poller_tick(fake)
+
+    resp = client.post("/orders/place", json=_sell_call_body(f"sp-poll-fill-{account or 'none'}"))
+    if allowed:
+        assert resp.status_code == 200, resp.text
+    else:
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
+
+
+def test_poller_mark_survives_inflight_pass_and_later_pass_clears_it(monkeypatch, client, broker_calls, fresh_quote):
+    """A full pass that started BEFORE the poller's mark may not have seen the
+    accountless order, so its snapshot stays incomplete; only a pass started
+    after the mark (and seeing no accountless row) clears it."""
+    _run_sync(monkeypatch, _shares_client(100))
+    poller_view = _shares_client(100)
+    c = _opt(500, con_id=111)
+    poller_view.add_details(c)
+    poller_view.open_orders.append(_trade(c, order_id=9103, perm_id=991003, account=""))
+    inflight = _shares_client(100)
+    inflight.on_read["positions"] = lambda _f: _poller_tick(poller_view)
+
+    _run_sync(monkeypatch, inflight)
+
+    obs = _latest_payload()["observation"]
+    assert obs["complete"] is False
+    assert obs["invalidated_reason"] == "unprovenanced_open_orders"
+    resp = client.post("/orders/place", json=_sell_call_body("sp-poll-inflight"))
+    assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
+
+    _run_sync(monkeypatch, _shares_client(100))
+
+    assert _latest_payload()["observation"]["complete"] is True
+    resp = client.post("/orders/place", json=_sell_call_body("sp-poll-cleared"))
+    assert resp.status_code == 200, resp.text

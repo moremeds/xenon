@@ -367,6 +367,13 @@ def record_external_fills(
                 else:
                     affected_legacy_ids.add(legacy_id)
 
+    if skipped_unprovenanced:
+        # Same rule as the open-order writer: a dropped accountless fill's
+        # demand is not in Postgres, so the scope's view is not provable.
+        from xenon.execution import gate4
+
+        gate4.invalidate_view(resolved.as_dict(), "unprovenanced_fills")
+
     ordered_submission_ids = sorted(affected_submission_ids)
     for sid in ordered_submission_ids:
         aggregate_trade_from_fills(submission_id=sid)

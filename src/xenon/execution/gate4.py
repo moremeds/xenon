@@ -327,6 +327,73 @@ def _holdings_from_payload(payload: dict) -> list[coverage.Holding]:
 FILL_LAG_S = 60.0
 
 
+def _latest_snapshot(conn, scope: dict):
+    return conn.execute(
+        select(account_snapshots.c.id, account_snapshots.c.payload)
+        .where(
+            account_snapshots.c.broker == scope["broker"],
+            account_snapshots.c.account_env == scope["account_env"],
+            account_snapshots.c.broker_account == scope["broker_account"],
+        )
+        .order_by(account_snapshots.c.snapshot_at.desc())
+        .limit(1)
+    ).first()
+
+
+def invalidate_view(scope: dict, reason: str) -> None:
+    """Durably mark this scope's Gate-4 view incomplete.
+
+    A writer that drops an accountless open order or fill (#198 filter) leaves
+    its demand out of Postgres, so the latest snapshot must stop proving
+    cover. The mark (`complete=false`, `invalidated_at`) goes on the latest
+    snapshot's observation, the field `load_inputs` already reads.
+    `carry_invalidation` keeps it on a later snapshot whose pass started
+    before the mark; only a pass started after it clears it.
+
+    ponytail: with no PR-03b snapshot yet there is nothing to mark — the view
+    is already incomplete, but a first pass in flight could still publish
+    complete; a dedicated marker row closes that if it matters.
+    """
+    ensure_writable()
+    at = datetime.now(timezone.utc)
+    with get_sync_engine().begin() as conn:
+        _lock_scope(conn, scope)
+        row = _latest_snapshot(conn, scope)
+        if row is None or not isinstance(row.payload, dict) or not isinstance(row.payload.get("observation"), dict):
+            return
+        observation = {
+            **row.payload["observation"],
+            "complete": False,
+            "invalidated_at": at.isoformat(),
+            "invalidated_reason": reason,
+        }
+        conn.execute(
+            update(account_snapshots)
+            .where(account_snapshots.c.id == row.id)
+            .values(payload={**row.payload, "observation": observation})
+        )
+
+
+def carry_invalidation(conn, scope: dict, observation: dict) -> None:
+    """Snapshot writer hook: keep a pending `invalidate_view` mark.
+
+    Takes the scope lock on `conn` (the caller's insert transaction). A pass
+    whose `as_of` is not after the mark may have read IB before the writer
+    that set it, so its snapshot stays incomplete and carries the mark.
+    """
+    _lock_scope(conn, scope)
+    row = _latest_snapshot(conn, scope)
+    prior = row.payload.get("observation") if row is not None and isinstance(row.payload, dict) else None
+    mark = _as_utc(prior.get("invalidated_at")) if isinstance(prior, dict) else None
+    if mark is None:
+        return
+    as_of = _as_utc(observation.get("as_of"))
+    if as_of is None or as_of <= mark:
+        observation["complete"] = False
+        observation["invalidated_at"] = prior["invalidated_at"]
+        observation["invalidated_reason"] = prior.get("invalidated_reason")
+
+
 def load_inputs(conn, scope: dict) -> Gate4Inputs:
     """Assemble holdings/orders/view for coverage.evaluate on `conn`.
 

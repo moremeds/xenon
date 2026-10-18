@@ -1164,6 +1164,15 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
     engine = get_sync_engine()
     with engine.begin() as conn:
         conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('portfolio_sync'))"))
+        if isinstance(portfolio.get("observation"), dict):
+            from xenon.execution import gate4
+
+            # A poller mark newer than this pass's start keeps it incomplete.
+            gate4.carry_invalidation(
+                conn,
+                {"broker": broker, "account_env": account_env, "broker_account": broker_account},
+                portfolio["observation"],
+            )
         conn.execute(
             delete(positions).where(
                 positions.c.broker == broker,
