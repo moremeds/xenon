@@ -2299,12 +2299,13 @@ async def _orders_place_from_body(body: dict):
         con_id=int(body.get("con_id") or 0) or None,
         limit_price=Decimal(str(body.get("limitPrice", "0"))),
     )
+    scope_kwargs = _resolve_scope_kwargs()
     outcome = orders_store.reserve_attempt(
         user_id,
         cid,
         req_row,
         override_audit=override_audit,
-        **_resolve_scope_kwargs(),
+        **scope_kwargs,
     )
     if outcome.status == "body_mismatch":
         return JSONResponse(
@@ -2357,7 +2358,10 @@ async def _orders_place_from_body(body: dict):
             "submission_id": submission_id,
         }
 
-    order_json = json.dumps(body)
+    # Place on the account the reservation row was stamped with — never on an
+    # account named by the request body, never on IB's default. The
+    # subprocess fails closed if it is legacy_unknown or not managed.
+    order_json = json.dumps({**body, "account": scope_kwargs["broker_account"]})
     result = await _run_ib_script_with_recovery("xenon-ib-place-order", ["--json", order_json], timeout=15)
     if not result.ok:
         orders_store.mark_terminal(
@@ -2377,7 +2381,10 @@ async def _orders_place_from_body(body: dict):
         # row so we don't lose the info.
         ib_code = result.data.get("code")
         ib_message = result.data.get("message", "Order failed")
-        if str(ib_code) == "110":
+        account_reason = result.data.get("reason_code")
+        if account_reason in (ReasonCode.ACCOUNT_UNRESOLVED.value, ReasonCode.ACCOUNT_NOT_MANAGED.value):
+            reason_code = account_reason
+        elif str(ib_code) == "110":
             reason_code = ReasonCode.LIMIT_OFF_TICK.value
             logger.warning(
                 "IB rejected order with tick-rule violation: submission=%s ib_code=110 ib_message=%s",
@@ -2404,6 +2411,12 @@ async def _orders_place_from_body(body: dict):
                 "Failed to record IB_REJECT event for submission %s",
                 submission_id,
                 exc_info=True,
+            )
+        if account_reason == reason_code:
+            # Top-level reason_code so the toast helper renders account copy.
+            return JSONResponse(
+                status_code=502,
+                content={"detail": ib_message, "reason_code": reason_code},
             )
         raise HTTPException(status_code=502, detail=ib_message)
     if result.data:

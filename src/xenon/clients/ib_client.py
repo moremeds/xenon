@@ -55,6 +55,18 @@ class IBOrderError(IBError):
     """Raised when an order operation fails."""
 
 
+class IBOrderAccountError(IBOrderError):
+    """A new order has no usable account; it was NOT sent to IB.
+
+    ``reason_code`` is ``ACCOUNT_UNRESOLVED`` (empty / ``legacy_unknown``) or
+    ``ACCOUNT_NOT_MANAGED`` (not in ``ib.managedAccounts()``).
+    """
+
+    def __init__(self, reason_code: str, message: str):
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
 class IBTimeoutError(IBError):
     """Raised when an operation times out."""
 
@@ -585,13 +597,43 @@ class IBClient:
 
     # -- order operations ---------------------------------------------------
 
+    def _require_managed_account(self, account: Any) -> str:
+        """Return ``account`` if this gateway login manages it; else fail closed.
+
+        Never fall back to IB's default account: with several managed accounts
+        IB rejects the order (error 435); with one it silently picks it, which
+        can differ from the scope stamped on the order row.
+        """
+        acct = str(account or "").strip()
+        if not acct or acct == "legacy_unknown":
+            raise IBOrderAccountError(
+                "ACCOUNT_UNRESOLVED",
+                "Order account is unresolved (empty or legacy_unknown); refusing to place on IB's default account",
+            )
+        managed = [str(a) for a in (self._ib.managedAccounts() or [])]
+        if acct not in managed:
+            raise IBOrderAccountError(
+                "ACCOUNT_NOT_MANAGED",
+                f"Order account {acct!r} is not managed by this IB login ({len(managed)} managed account(s))",
+            )
+        return acct
+
     def place_order(self, contract: Any, order: Any) -> Any:
         """Place an order and return the ``Trade`` object.
 
+        A new order (``orderId`` unset) must carry ``order.account`` = the
+        scope account, and that account must be in ``managedAccounts()``.
+        A modify re-submits IB's own order object (``orderId`` set, account
+        already populated by IB) and is passed through unchanged.
+
         Raises:
+            IBOrderAccountError: New order without a managed account. Nothing
+                is sent to IB.
             IBOrderError: If the order placement fails.
         """
         self._require_connection()
+        if not getattr(order, "orderId", 0):
+            order.account = self._require_managed_account(getattr(order, "account", ""))
         try:
             trade = self._ib.placeOrder(contract, order)
             self.logger.info(
@@ -614,13 +656,20 @@ class IBClient:
         limit_price: float,
         take_profit_price: float,
         stop_loss_price: float,
+        *,
+        account: str,
     ) -> list:
-        """Place a bracket order (parent + take-profit + stop-loss).
+        """Place a bracket order (parent + take-profit + stop-loss) on ``account``.
+
+        ``account`` must be managed by this login (see ``place_order``); every
+        leg carries it. ``bracketOrder`` pre-assigns order ids, so the check
+        cannot rely on ``place_order``'s new-order detection.
 
         Returns:
             List of ``Trade`` objects ``[parent, take_profit, stop_loss]``.
         """
         self._require_connection()
+        acct = self._require_managed_account(account)
         try:
             bracket = self._ib.bracketOrder(
                 action,
@@ -631,6 +680,7 @@ class IBClient:
             )
             trades = []
             for order in bracket:
+                order.account = acct
                 trade = self._ib.placeOrder(contract, order)
                 trades.append(trade)
             self.logger.info(
