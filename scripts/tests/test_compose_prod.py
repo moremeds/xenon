@@ -354,7 +354,7 @@ def test_refresh_second_concurrent_run_exits_without_calling_pg(tmp_path: Path) 
     assert not (tmp_path / "lock.d").exists()
 
 
-def test_refresh_reclaims_a_stale_lock(tmp_path: Path) -> None:
+def test_refresh_stale_lock_gives_exit_3_and_no_pg_call(tmp_path: Path) -> None:
     bindir, calls = _stub_pg(tmp_path)
     env = _refresh_env(tmp_path, bindir, "core_dev", "core_test")
     lock = tmp_path / "lock.d"
@@ -363,5 +363,25 @@ def test_refresh_reclaims_a_stale_lock(tmp_path: Path) -> None:
     dead.wait()
     (lock / "pid").write_text(str(dead.pid))
     proc = _run_refresh(env)
+    assert proc.returncode == 3, proc.stdout + proc.stderr
+    assert not calls.exists()  # no PG command
+    assert lock.is_dir() and (lock / "pid").read_text() == str(dead.pid)  # left for the operator
+    log = (tmp_path / "log" / "refresh-core-test.log").read_text()
+    assert "rm -rf" in log and "check that pid" in log  # recovery instructions
+
+
+def test_refresh_exit_trap_keeps_a_lock_it_does_not_own(tmp_path: Path) -> None:
+    """If another run replaced the lock owner mid-run, our EXIT trap must leave the lock alone."""
+    bindir, calls = _stub_pg(tmp_path)
+    lock = tmp_path / "lock.d"
+    # first psql call (inside the locked section) simulates a successor taking over the lock
+    (bindir / "psql").write_text(
+        "#!/bin/sh\n"
+        f'echo "psql $*" >> "{calls}"\n'
+        f'echo 424242 > "{lock}/pid"\n'
+        "exit 0\n"
+    )
+    env = _refresh_env(tmp_path, bindir, "core_dev", "core_test")
+    proc = _run_refresh(env)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert calls.exists()
+    assert lock.is_dir() and (lock / "pid").read_text().strip() == "424242"

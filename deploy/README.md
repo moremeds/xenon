@@ -23,10 +23,10 @@ Names and booleans only: never print secret values. `docker-compose` below is `/
 
 A. Staged compose validation and backup
 1. From the laptop: `scp deploy/compose.prod.yml macmini:/opt/xenon/compose.new.yml`.
-2. On the mini: `cd /opt/xenon && docker-compose -f compose.new.yml config -q` (must exit 0; needs `.env`, `web.env`, GHCR_USER, GHCR_PAT, WATCHTOWER_NOTIFICATION_URL).
-3. Back up: `cp -p compose.yml compose.yml.bak-$(date +%Y%m%d%H%M)`.
-4. `diff compose.yml compose.new.yml` (expect: header comment and the webhook line only).
-5. Add `WATCHTOWER_NOTIFICATION_URL=<current ntfy URL from the live compose>` to `/opt/xenon/.env`. Confirm `GHCR_USER`, `GHCR_PAT`, `XENON_INTERNAL_API_TOKEN` exist there (names only: `grep -c '^NAME=' .env`).
+2. On the mini, first put the webhook variable in place. Add `WATCHTOWER_NOTIFICATION_URL=<current ntfy URL from the live compose>` to `/opt/xenon/.env`, then check `grep -c '^WATCHTOWER_NOTIFICATION_URL=' /opt/xenon/.env` prints `1`. Also confirm `GHCR_USER`, `GHCR_PAT`, `XENON_INTERNAL_API_TOKEN` exist there (names only: `grep -c '^NAME=' .env`).
+3. `cd /opt/xenon && docker-compose -f compose.new.yml config -q` (must exit 0; needs `.env`, `web.env` and the variables from step 2).
+4. Back up: `cp -p compose.yml compose.yml.bak-$(date +%Y%m%d%H%M)`.
+5. Diff without printing the webhook URL: `diff <(grep -v WATCHTOWER_NOTIFICATION_URL compose.yml) <(grep -v WATCHTOWER_NOTIFICATION_URL compose.new.yml)` (expect: header comment lines only; the filtered webhook line differs by design).
 6. Only then: `mv compose.new.yml compose.yml && docker-compose up -d`.
 
 B. Rollback
@@ -38,25 +38,34 @@ C. Post-up checks
 - `curl -fsS http://127.0.0.1:8321/health` and `curl -fsSI http://127.0.0.1:3000/sign-in | head -1`.
 - Watchtower: `docker logs xenon-watchtower-1 --tail 20` shows no auth or webhook error. Confirm the ntfy topic receives a notification on the next real update (the template is silent on no-op cycles); one way: after the next release, check the topic.
 
-D. Migrator/schema check (before deploying any image that carries a migration)
-- `cd /opt/xenon && docker-compose --profile migrate run --rm migrator alembic current` and compare with the head in the new image (`... run --rm migrator alembic heads`). If they differ, run `docker-compose --profile migrate run --rm migrator` by hand first. Never rely on Watchtower for schema.
+D. Migrator/schema gate (before the api rollout of any release that carries a migration)
+Watchtower deploys api only after `:latest` moves, and it never touches the migrator, so do this as soon as the release is published and before the api container is recreated. Never rely on Watchtower for schema.
+1. `cd /opt/xenon && docker-compose --profile migrate pull migrator` (pulls the image the compose file names, `xenon-migrator:latest`).
+2. Check the pulled image is the intended release. `VER` is the release version without the `v`:
+   `docker image inspect ghcr.io/moremeds/xenon-migrator:latest --format '{{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{json .RepoDigests}}'`
+   - The version label must equal `VER`, and the revision must equal the release commit (`git rev-parse vVER^{commit}` on the laptop).
+   - The digest in `RepoDigests` must equal the migrator digest for that release in `/opt/xenon/release-manifest.json` if that file lists it. Otherwise compare with the registry: `docker buildx imagetools inspect ghcr.io/moremeds/xenon-migrator:VER` (the immutable version tag; `:latest` is a copy of it).
+   - If the label is still the old version, `:latest` has not been promoted yet. Wait; do not continue.
+3. Only then: `docker-compose --profile migrate run --rm migrator alembic current`, then `... alembic heads`. If they differ, run `docker-compose --profile migrate run --rm migrator` by hand (this upgrades the schema).
+4. After the schema is at head, let the api roll out (Watchtower or `docker-compose up -d`).
 
-E. Before ANY job run (scheduled install or manual): read the effective settings inside the container. `web.env` overrides `.env` for the api service, so read them from the container, not from the files. Names and booleans only:
+E. Before ANY job run (scheduled install or manual): read the effective settings inside the container. `web.env` overrides `.env` for the api service, so read them from the container, not from the files. Names and booleans only. The operator supplies the expected account in the shell (`EXPECTED_ACCOUNT=<the intended live account, the U...31 account>`); the container compares by exact equality and prints a boolean:
 ```
-cd /opt/xenon && docker-compose -f compose.yml run --rm -T --no-deps --label com.centurylinklabs.watchtower.enable=false api python -c '
+cd /opt/xenon && docker-compose -f compose.yml run --rm -T --no-deps -e EXPECTED_ACCOUNT --label com.centurylinklabs.watchtower.enable=false api python -c '
 import os
 from urllib.parse import urlparse
 db = urlparse(os.environ.get("DATABASE_URL", "")).path.lstrip("/")
 acct = os.environ.get("XENON_BROKER_ACCOUNT") or os.environ.get("XENON_LIVE_ACCOUNT") or ""
+expected = os.environ.get("EXPECTED_ACCOUNT", "")
 print("db_name_is_core_dev:", db == "core_dev")
 print("trading_mode_is_live:", os.environ.get("XENON_TRADING_MODE") == "live")
 print("account_masked:", (acct[:1] + "..." + acct[-2:]) if acct else "MISSING")
-print("account_ends_31:", acct.endswith("31"))
+print("account_matches_expected:", bool(expected) and acct == expected)
 print("read_only_absent_or_0:", os.environ.get("XENON_READ_ONLY", "0") in ("", "0"))
 print("flex_token_set:", bool(os.environ.get("IB_FLEX_TOKEN")), "nav_query_id_set:", bool(os.environ.get("IB_FLEX_NAV_QUERY_ID")))
 '
 ```
-Every line must read `True` (account_masked shows the masked form). Also confirm the CLI exists: `... api sh -c 'command -v xenon-nav-flex-refresh'`. Stop if any value is wrong.
+Every boolean line must read `True` (account_masked shows the masked form). Also confirm the CLI exists: `... api sh -c 'command -v xenon-nav-flex-refresh'`. Stop if any value is wrong.
 
 F. nav-flex-refresh: manual unguarded run and evidence (REAL WRITES)
 ```
@@ -64,15 +73,19 @@ cd /opt/xenon && docker rm xenon-job-nav-flex-refresh 2>/dev/null; docker-compos
 ```
 Effects: calls the live IB Flex web service with the live token; UPSERTs `xenon.nav_history` rows (`source='close'`) and `xenon.ib_cash_flow` rows into the DB named by the container env (step E). Evidence the CLI ran: output lines `xenon-nav-flex-refresh: mode=live account=...` and `fetched N NAV rows`, exit code 0 (1 empty fetch, 2 not configured, 3 read-only), and NO `PG persist failed` line. The CLI prints "fetched N NAV rows" even when the DB write failed, so also check storage afterwards (read-only):
 ```
-PGOPTIONS="-c default_transaction_read_only=on" psql -h 100.66.147.98 -U xenon_prod core_dev -c "SELECT max(date), count(*), max(source) FROM xenon.nav_history WHERE broker='IB' AND account_env='live' AND source='close';"
+PGOPTIONS="-c default_transaction_read_only=on" psql -h 100.66.147.98 -U xenon_prod core_dev -v acct="$EXPECTED_ACCOUNT" -f - <<'SQL'
+SELECT max(date), count(*), max(source)
+  FROM xenon.nav_history
+ WHERE broker = 'IB' AND account_env = 'live' AND broker_account = :'acct' AND source = 'close';
+SQL
 ```
-(add `AND broker_account = '<account>'`; expect `max(date)` to be the last trading day.) If the Flex token is expired (spec F6, unverified) the exit code is 1.
+(Expect `max(date)` to be the last trading day and `count` greater than 0. An empty result for the scope is a failure even if the CLI exited 0.) If the Flex token is expired (spec F6, unverified) the exit code is 1.
 - `launchctl kickstart gui/$(id -u)/com.xenon.nav-flex-refresh` is NOT a test of the job: outside 17:00-17:59 New York time the guard exits 0 before Docker starts and nothing runs. Use the unguarded command above.
 
 G. core_test refresh
 - Copy `scripts/infra/refresh-core-test.sh` to `/opt/xenon/bin/`, create `/opt/xenon/.pgpass-refresh` (chmod 600).
 - Dry (reads core_dev, writes nothing): `PGHOST=localhost PGUSER=xenon_migrator PGPASSFILE=/opt/xenon/.pgpass-refresh /opt/xenon/bin/refresh-core-test.sh --dry`. Evidence: log line `DRY: pg_dump of core_dev succeeded`.
-- Real (REAL WRITES: DROPs the `xenon` and `events` schemas in core_test and restores core_dev into it): same command without the dry argument. Evidence: `=== refresh ok: core_dev -> core_test ===` in `/var/log/xenon/refresh-core-test.log`, exit 0. The script refuses any destination that is core_dev or lacks "test", and a second concurrent run exits 3.
+- Real (REAL WRITES: DROPs the `xenon` and `events` schemas in core_test and restores core_dev into it): same command without the dry argument. Evidence: `=== refresh ok: core_dev -> core_test ===` in `/var/log/xenon/refresh-core-test.log`, exit 0. The script refuses any destination that is core_dev or lacks "test", and a second concurrent run exits 3. A stale lock (crashed run) is never reclaimed automatically: the log line prints the recovery. Check the pid with `ps -p <pid>` and that no `refresh-core-test.sh` is running, then `rm -rf /tmp/xenon-refresh-core-test.lock.d` by hand.
 - Same kickstart caveat: outside 04:00-04:59 New York time the plist guard makes kickstart a no-op.
 
 H. Install schedule: `sudo mkdir -p /var/log/xenon && sudo chown $(whoami) /var/log/xenon`; copy both plists to `~/Library/LaunchAgents`, `plutil -lint`, `launchctl bootstrap gui/$(id -u) <plist>`. Do NOT change the host time zone (Asia/Hong_Kong; shared host). Check the LaunchAgent can reach Docker: `launchctl asuser $(id -u) docker ps` (unverified path).
