@@ -47,6 +47,8 @@ class ReasonCode(StrEnum):
     ATTEMPT_BODY_MISMATCH = "ATTEMPT_BODY_MISMATCH"
     # PR-07 fix3 — another replacement of the same order exists
     REPLACEMENT_IN_PROGRESS = "REPLACEMENT_IN_PROGRESS"
+    # PR-07 fix4 — a replacement target that names no single order
+    ORDER_TARGET_AMBIGUOUS = "ORDER_TARGET_AMBIGUOUS"
     # F5 — cancel/modify failure classification (PR-C)
     IB_CONNECTION = "IB_CONNECTION"
     OWNERSHIP = "OWNERSHIP"

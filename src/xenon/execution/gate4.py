@@ -851,7 +851,7 @@ def candidate_from_place_body(
 
 @dataclass
 class Gate4Outcome:
-    status: Literal["winner", "duplicate", "terminal", "body_mismatch", "rejected", "in_progress"]
+    status: Literal["winner", "duplicate", "terminal", "body_mismatch", "rejected", "in_progress", "target_unresolved"]
     submission_id: str | None = None
     state: str | None = None
     duplicate_of: str | None = None
@@ -864,6 +864,10 @@ class Gate4Outcome:
     # spec §2.3 leg-out case: any guaranteed all-OPT BAG, open or close
     # (route maps it to COMBO_SPLIT_REQUIRED).
     split_required: bool = False
+    # claim_replacement: targets resolved to canonical identities (winner),
+    # or the request target that could not be (target_unresolved).
+    targets: list[dict] = field(default_factory=list)
+    detail: str | None = None
 
 
 def _candidate_symbols(inputs: Gate4Inputs, candidate) -> frozenset[str] | None:
@@ -1142,14 +1146,60 @@ REPLACES_KEY = "replaces"
 _DEAD_CLAIM_STATES = ("FAILED", "REJECTED")
 
 
-def _target_keys(targets: list[dict]) -> set[str]:
+def _nonzero(value: Any) -> str | None:
+    v = str(value or "").strip()
+    return None if v in ("", "0") else v
+
+
+def _identity_keys(targets: list[dict]) -> set[str]:
+    """Canonical keys of resolved targets: the exact submission row and the
+    permId. Never the orderId — it is unique only per IB clientId."""
     keys = set()
     for t in targets:
-        if str(t.get("perm_id") or "0") not in ("", "0"):
+        if _nonzero(t.get("submission_id")):
+            keys.add(f"sub:{t['submission_id']}")
+        if _nonzero(t.get("perm_id")):
             keys.add(f"perm:{t['perm_id']}")
-        if str(t.get("ib_order_id") or "0") not in ("", "0"):
-            keys.add(f"oid:{t['ib_order_id']}")
     return keys
+
+
+def _resolve_target(conn, in_scope: tuple, target: dict) -> tuple[dict | None, str | None]:
+    """One request target → canonical identity, or (None, why).
+
+    permId (globally unique) wins: its row, if any, must carry the given
+    orderId. Without a permId the pair (placing clientId, orderId) must name
+    exactly one row in scope; the clientId may be omitted when the scope
+    holds a single row for that orderId. Never orderId alone."""
+    perm, oid = _nonzero(target.get("perm_id")), _nonzero(target.get("ib_order_id"))
+    client = _nonzero(target.get("client_id"))
+    cols = (
+        order_submissions.c.submission_id,
+        order_submissions.c.perm_id,
+        order_submissions.c.ib_order_id,
+        order_submissions.c.placing_client_id,
+    )
+    if perm is not None:
+        rows = conn.execute(select(*cols).where(*in_scope, order_submissions.c.perm_id == perm)).all()
+        if len(rows) > 1 or (rows and oid is not None and str(rows[0].ib_order_id or "") != oid):
+            return None, f"permId {perm} does not name exactly one order"
+        if not rows:  # not mirrored (e.g. a TWS order): the permId is the identity
+            return {"perm_id": perm, "ib_order_id": oid, "client_id": client, "submission_id": None}, None
+    elif oid is not None:
+        where = [*in_scope, order_submissions.c.ib_order_id == oid]
+        if client is not None:
+            where.append(order_submissions.c.placing_client_id == int(client))
+        rows = conn.execute(select(*cols).where(*where)).all()
+        if len(rows) != 1:
+            return None, f"orderId {oid} names {len(rows)} orders; send its permId"
+    else:
+        return None, "target has no permId or orderId"
+    r = rows[0]
+    return {
+        "perm_id": _nonzero(r.perm_id),
+        "ib_order_id": _nonzero(r.ib_order_id),
+        "client_id": str(r.placing_client_id) if r.placing_client_id is not None else client,
+        "submission_id": r.submission_id,
+    }, None
 
 
 def claim_replacement(
@@ -1164,16 +1214,18 @@ def claim_replacement(
 ) -> Gate4Outcome:
     """Claim a replacement BEFORE any cancel, in one txn under the scope lock.
 
-    `targets` = [{"perm_id": str, "ib_order_id": str}]. Refuses (status
-    in_progress) when another replacement of any target exists that is or
-    may be at IB — every state but FAILED / REJECTED: a successful earlier
-    replacement already cancelled the target, and a cancel of a gone order
-    counts as success, so a second one would place a duplicate. Otherwise
-    the usual dedupe → Gate-4 evaluate (targets released) → PENDING insert,
-    with the targets recorded under legs[REPLACES_KEY].
+    `targets` = [{"perm_id", "ib_order_id", "client_id"}] from the request.
+    Each is resolved ONCE, under the lock, to a canonical identity
+    (`_resolve_target`); an ambiguous or unresolved target refuses
+    (target_unresolved) before anything is cancelled. Refuses (in_progress)
+    when another replacement of the same submission row or permId exists
+    that is or may be at IB — every state but FAILED / REJECTED: a
+    successful earlier replacement already cancelled the target, and a
+    cancel of a gone order counts as success, so a second one would place a
+    duplicate. Otherwise dedupe → Gate-4 evaluate (exactly the resolved
+    rows released) → PENDING insert, identities under legs[REPLACES_KEY].
     """
     ensure_writable()
-    wanted = _target_keys(targets)
     engine = get_sync_engine()
     with engine.begin() as conn:
         _lock_scope(conn, scope)
@@ -1182,6 +1234,13 @@ def claim_replacement(
             order_submissions.c.account_env == scope["account_env"],
             order_submissions.c.broker_account == scope["broker_account"],
         )
+        resolved = []
+        for t in targets:
+            ident, why = _resolve_target(conn, in_scope, t)
+            if ident is None:
+                return Gate4Outcome(status="target_unresolved", targets=[t], detail=why)
+            resolved.append(ident)
+        wanted = _identity_keys(resolved)
         claims = conn.execute(
             select(order_submissions.c.submission_id, order_submissions.c.state, order_submissions.c.legs).where(
                 *in_scope,
@@ -1190,27 +1249,21 @@ def claim_replacement(
             )
         ).all()
         for c in claims:
-            if _target_keys(list((c.legs or {}).get(REPLACES_KEY) or [])) & wanted:
+            if _identity_keys(list((c.legs or {}).get(REPLACES_KEY) or [])) & wanted:
                 return Gate4Outcome(status="in_progress", submission_id=c.submission_id, state=c.state)
-        perms = [t["perm_id"] for t in targets if str(t.get("perm_id") or "0") not in ("", "0")]
-        oids = [t["ib_order_id"] for t in targets if str(t.get("ib_order_id") or "0") not in ("", "0")]
-        release = conn.execute(
-            select(order_submissions.c.submission_id).where(
-                *in_scope,
-                order_submissions.c.perm_id.in_(perms) | order_submissions.c.ib_order_id.in_(oids),
-            )
-        ).scalars()
-        return evaluate_and_reserve(
+        outcome = evaluate_and_reserve(
             conn,
             user_id,
             client_attempt_id,
             request,
             candidate=candidate,
-            legs_payload={**legs_payload, REPLACES_KEY: targets},
+            legs_payload={**legs_payload, REPLACES_KEY: resolved},
             scope=scope,
             submission_id=str(uuid.uuid4()),
-            release_ids=frozenset(release),
+            release_ids=frozenset(t["submission_id"] for t in resolved if t["submission_id"]),
         )
+        outcome.targets = resolved
+        return outcome
 
 
 def recheck_claim(submission_id: str, candidate: coverage.Order, scope: dict) -> Gate4Outcome | None:

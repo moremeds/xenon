@@ -2572,6 +2572,14 @@ def _reservation_refusal(outcome, cid: str, *, replacement: bool) -> JSONRespons
 
     `replacement`: a claim for /orders/replace — any existing attempt id is a
     refusal (nothing cancelled), never a 200 the client reads as replaced."""
+    if outcome.status == "target_unresolved":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "reason_code": ReasonCode.ORDER_TARGET_AMBIGUOUS.value,
+                "detail": f"{outcome.detail} — nothing was cancelled",
+            },
+        )
     if outcome.status == "in_progress":
         return JSONResponse(
             status_code=409,
@@ -2968,21 +2976,17 @@ def _record_manage_event(
 ) -> None:
     """Write orders_events row for a cancel/modify attempt.
 
-    Resolves the submission by ib_order_id when present, else falls back to
-    perm_id (UI-initiated cancel/modify often carries ``orderId=0`` and only
-    a permId). If no submission exists (order placed pre-F4, or before a
+    Resolves the submission canonically (`load_submission_for_modify`:
+    permId first, an orderId alone only when it names exactly one row —
+    orderIds are unique per clientId only). If no submission exists (order placed pre-F4, or before a
     reserve_attempt row was created), the event is skipped — orders_events
     .submission_id is NOT NULL and has no synthetic parent row available.
     """
     try:
         scope = scope or _resolve_scope_kwargs()
-        sid: str | None = None
-        if ib_order_id:
-            sid = orders_store.lookup_submission_id_by_ib_order_id(ib_order_id, **scope)
-        if sid is None and perm_id:
-            sid = orders_store.lookup_submission_id_by_perm_id(perm_id, **scope)
-        if sid:
-            orders_store.record_event(sid, kind, detail)
+        row = orders_store.load_submission_for_modify(order_id=ib_order_id, perm_id=perm_id, **scope)
+        if row:
+            orders_store.record_event(row["submission_id"], kind, detail)
     except Exception:  # pragma: no cover — event writes are best-effort
         logger.warning(
             "Failed to record %s event for order=%s perm=%s",
@@ -3021,10 +3025,14 @@ async def _orders_cancel_from_body(body: dict):
     return response
 
 
-async def _cancel_order(body: dict) -> tuple[str, Any]:
+async def _cancel_order(body: dict, row: dict | None = None) -> tuple[str, Any]:
     """Cancel one order → (kind, response). kind: "ok"; "failed" (nothing
     proves the cancel reached IB — refused, unreachable, or IB said no);
-    "uncertain" (the CLI started and died: the cancel may have landed)."""
+    "uncertain" (the CLI started and died: the cancel may have landed).
+
+    `row` = the target's submission row already resolved by the caller
+    ({submission_id, placing_client_id}); else it is resolved canonically
+    here. Only that row is marked CANCELLED."""
     if _is_test_mode():
         return "ok", {
             "status": "ok",
@@ -3061,9 +3069,10 @@ async def _cancel_order(body: dict) -> tuple[str, Any]:
     _broker_account = scope.get("broker_account") or ""
     if _broker_account and _broker_account != "legacy_unknown":
         args.extend(["--account", _broker_account])
-    row = orders_store.load_submission_for_modify(
-        order_id=str(order_id or ""), perm_id=str(perm_id or ""), **scope
-    )
+    if row is None:
+        row = orders_store.load_submission_for_modify(
+            order_id=str(order_id or ""), perm_id=str(perm_id or ""), client_id=body.get("clientId"), **scope
+        )
     if row and row.get("placing_client_id") is not None:
         args.extend(["--client-id", str(row["placing_client_id"])])
 
@@ -3096,7 +3105,7 @@ async def _cancel_order(body: dict) -> tuple[str, Any]:
         {"status": data.get("status"), "message": data.get("message"), "http_status": 200},
         perm_id=str(perm_id or ""),
     )
-    _mark_submission_cancelled(str(order_id or ""), str(perm_id or ""))
+    _mark_submission_cancelled((row or {}).get("submission_id"))
     return "ok", data
 
 
@@ -3116,23 +3125,29 @@ async def orders_replace(request: Request):
 
 
 def _replace_targets(body: dict) -> list[dict]:
-    """Deduplicated cancel targets: body.cancelOrders, else orderId/permId."""
-    raw = body.get("cancelOrders") or [{"orderId": body.get("orderId"), "permId": body.get("permId")}]
+    """Deduplicated cancel targets: body.cancelOrders, else orderId/permId
+    (+ optional clientId, the placing client — needed for an orderId-only
+    target when the scope holds more than one row with that orderId)."""
+    raw = body.get("cancelOrders") or [
+        {"orderId": body.get("orderId"), "permId": body.get("permId"), "clientId": body.get("clientId")}
+    ]
     seen: set[str] = set()
     targets: list[dict] = []
     for t in raw if isinstance(raw, list) else []:
         try:
             oid = int((t or {}).get("orderId") or 0)
             perm = int((t or {}).get("permId") or 0)
+            client = (t or {}).get("clientId")
+            client = int(client) if client is not None else None
         except (TypeError, ValueError, AttributeError):
             continue
         if oid <= 0 and perm <= 0:
             continue
-        key = f"perm:{perm}" if perm > 0 else f"oid:{oid}"
+        key = f"perm:{perm}" if perm > 0 else f"oid:{client}:{oid}"
         if key in seen:
             continue
         seen.add(key)
-        targets.append({"orderId": oid, "permId": perm})
+        targets.append({"orderId": oid, "permId": perm, "clientId": client})
     return targets
 
 
@@ -3182,17 +3197,24 @@ async def _orders_replace_from_body(body: dict):
         candidate=candidate,
         legs_payload=legs_payload,
         scope=scope,
-        targets=[{"perm_id": str(t["permId"] or ""), "ib_order_id": str(t["orderId"] or "")} for t in targets],
+        targets=[
+            {"perm_id": str(t["permId"] or ""), "ib_order_id": str(t["orderId"] or ""), "client_id": t["clientId"]}
+            for t in targets
+        ],
     )
     refusal = _reservation_refusal(outcome, cid, replacement=True)
     if refusal is not None:
         return refusal
     submission_id = outcome.submission_id
 
-    # 2. Cancel every target. Nothing is placed unless all are confirmed.
+    # 2. Cancel every target by its resolved identity (permId when known)
+    #    and persist the cancel on exactly its row. Nothing is placed unless
+    #    all are confirmed.
     cancelled: list[dict] = []
-    for target in targets:
-        kind, resp = await _cancel_order({k: v for k, v in target.items() if v})
+    for ident in outcome.targets:
+        target = {"orderId": int(ident["ib_order_id"] or 0), "permId": int(ident["perm_id"] or 0)}
+        row = {"submission_id": ident["submission_id"], "placing_client_id": ident["client_id"]}
+        kind, resp = await _cancel_order({k: v for k, v in target.items() if v}, row=row)
         if kind == "failed":
             orders_store.mark_terminal(
                 submission_id=submission_id,
@@ -3258,37 +3280,29 @@ async def _orders_replace_from_body(body: dict):
     )
 
 
-def _mark_submission_cancelled(ib_order_id: str, perm_id: str) -> None:
-    """Transition the order_submissions row to CANCELLED after a successful
-    /orders/cancel. The activity poller cannot do this on its own — naive
+def _mark_submission_cancelled(submission_id: str | None) -> None:
+    """Transition exactly this order_submissions row to CANCELLED after a
+    successful cancel. The activity poller cannot do this on its own — naive
     disappearance-detection misclassifies fills as cancels — so the cancel
-    route is the only authoritative trigger.
+    path is the only authoritative trigger. The row comes from a canonical
+    resolve (permId, or a unique clientId+orderId), never an orderId-first
+    lookup: orderIds repeat across clients, and marking the wrong live order
+    terminal would drop its Gate-4 demand. No row → nothing is marked.
     """
+    if not submission_id:
+        return
     try:
-        scope = _resolve_scope_kwargs()
-        sid: str | None = None
-        if ib_order_id:
-            sid = orders_store.lookup_submission_id_by_ib_order_id(ib_order_id, **scope)
-        if sid is None and perm_id:
-            sid = orders_store.lookup_submission_id_by_perm_id(perm_id, **scope)
-        if sid is None:
-            return
         # filled_qty=None keeps executed quantity: a cancel releases only
         # the unfilled remainder (spec §2.3), even before the fill row lands.
         orders_store.mark_terminal(
-            submission_id=sid,
+            submission_id=submission_id,
             state="CANCELLED",
             reason_code="USER_CANCEL",
             filled_qty=None,
             avg_fill_price=None,
         )
     except Exception:  # pragma: no cover — best-effort
-        logger.warning(
-            "Failed to mark submission CANCELLED for order=%s perm=%s",
-            ib_order_id,
-            perm_id,
-            exc_info=True,
-        )
+        logger.warning("Failed to mark submission %s CANCELLED", submission_id, exc_info=True)
 
 
 @app.post("/orders/modify")

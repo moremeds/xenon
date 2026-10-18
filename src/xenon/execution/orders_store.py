@@ -1312,6 +1312,7 @@ def load_submission_for_modify(
     *,
     order_id: str = "",
     perm_id: str = "",
+    client_id: int | str | None = None,
     broker: str = "IB",
     account_env: str = "legacy_unknown",
     broker_account: str = "legacy_unknown",
@@ -1338,6 +1339,9 @@ def load_submission_for_modify(
         conditions.append(order_submissions.c.perm_id == str(perm_id))
     elif order_id:
         conditions.append(order_submissions.c.ib_order_id == str(order_id))
+        if client_id is not None and str(client_id) != "":
+            # orderIds are unique per clientId: the pair names one order.
+            conditions.append(order_submissions.c.placing_client_id == int(client_id))
     else:
         return None
     engine = get_sync_engine()
@@ -1349,50 +1353,6 @@ def load_submission_for_modify(
     if perm_id and order_id and str(row.get("ib_order_id") or "") != str(order_id):
         return None
     return row
-
-
-def lookup_submission_id_by_ib_order_id(
-    ib_order_id: str,
-    *,
-    broker: str | None = None,
-    account_env: str | None = None,
-    broker_account: str | None = None,
-) -> str | None:
-    if not ib_order_id:
-        return None
-    conditions = [order_submissions.c.ib_order_id == str(ib_order_id)]
-    if broker is not None:
-        conditions.append(order_submissions.c.broker == broker)
-    if account_env is not None:
-        conditions.append(order_submissions.c.account_env == account_env)
-    if broker_account is not None:
-        conditions.append(order_submissions.c.broker_account == broker_account)
-    engine = get_sync_engine()
-    with engine.connect() as conn:
-        row = conn.execute(select(order_submissions.c.submission_id).where(*conditions)).first()
-    return row[0] if row else None
-
-
-def lookup_submission_id_by_perm_id(
-    perm_id: str,
-    *,
-    broker: str | None = None,
-    account_env: str | None = None,
-    broker_account: str | None = None,
-) -> str | None:
-    if not perm_id:
-        return None
-    conditions = [order_submissions.c.perm_id == str(perm_id)]
-    if broker is not None:
-        conditions.append(order_submissions.c.broker == broker)
-    if account_env is not None:
-        conditions.append(order_submissions.c.account_env == account_env)
-    if broker_account is not None:
-        conditions.append(order_submissions.c.broker_account == broker_account)
-    engine = get_sync_engine()
-    with engine.connect() as conn:
-        row = conn.execute(select(order_submissions.c.submission_id).where(*conditions).limit(1)).first()
-    return row[0] if row else None
 
 
 def lookup_by_attempt(

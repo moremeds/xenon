@@ -1125,9 +1125,7 @@ def _combo(cid, legs=((500.0, "BUY", 1), (510.0, "SELL", 1)), qty=1):
         "quantity": qty,
         "limitPrice": 2.0,
         "client_attempt_id": cid,
-        "legs": [
-            {"action": a, "right": "C", "expiry": "2026-12-18", "strike": k, "ratio": r} for k, a, r in legs
-        ],
+        "legs": [{"action": a, "right": "C", "expiry": "2026-12-18", "strike": k, "ratio": r} for k, a, r in legs],
     }
 
 
@@ -1178,13 +1176,22 @@ def _race(client, broker, first_body, second_body):
 
 def test_replace_happy_path_cancels_then_places_once(client, broker):
     target = _original(client, broker)
-    resp = client.post("/orders/replace", json=_replace_body(target, "rep-1", legs=((500.0, "BUY", 1), (520.0, "SELL", 1))))
+    resp = client.post(
+        "/orders/replace", json=_replace_body(target, "rep-1", legs=((500.0, "BUY", 1), (520.0, "SELL", 1)))
+    )
     assert resp.status_code == 200, resp.text
     assert [c["entry"] for c in broker.calls] == ["xenon-ib-order-manage", "xenon-ib-place-order"]
     assert "--perm-id" in broker.calls[0]["args"] and str(target["permId"]) in broker.calls[0]["args"]
     rep = _row("rep-1")
     assert rep["state"] == "WORKING"
-    assert rep["legs"]["replaces"] == [{"perm_id": str(target["permId"]), "ib_order_id": str(target["orderId"])}]
+    assert rep["legs"]["replaces"] == [
+        {
+            "perm_id": str(target["permId"]),
+            "ib_order_id": str(target["orderId"]),
+            "client_id": "26",
+            "submission_id": _row("orig-1")["submission_id"],
+        }
+    ]
     assert json.loads(broker.calls[1]["args"][1])["submission_id"] == rep["submission_id"]
     assert _row("orig-1")["state"] == "CANCELLED"
 
@@ -1352,3 +1359,102 @@ def test_replace_claim_releases_the_target_cover(client, broker):
     )
     assert resp.status_code == 200, resp.text
     assert (broker.cancels, broker.places) == (1, 1)
+
+
+# --- target identity (PR-07 fix4): orderIds repeat across IB clientIds ------
+
+_PURE_BUY = ((500.0, "BUY", 1), (510.0, "BUY", 1))  # owes no cover
+
+
+def _placed(oid, perm, client):
+    return ScriptResult(ok=True, data={"status": "ok", "orderId": oid, "permId": perm, "clientId": client})
+
+
+def _two_clients_same_order_id(client, broker):
+    """A (pure-BUY combo, client 30) and B (short call holding all 100
+    shares, client 31) share orderId 7 with distinct permIds."""
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_stock("SPY", 100)])
+    engine.dispose()
+    broker.place_results = [_placed(7, 9101, 30), _placed(7, 9102, 31)]
+    assert client.post("/orders/place", json=_combo("ord-a", legs=_PURE_BUY)).status_code == 200
+    assert client.post("/orders/place", json=_sell_call_body("ord-b")).status_code == 200
+    broker.calls.clear()
+
+
+def test_replace_cross_client_same_order_id_leaves_the_other_order(client, broker, fresh_quote):
+    _two_clients_same_order_id(client, broker)
+    # A successor needing B's 100 shares is still blocked: B's demand stays.
+    needs_cover = client.post(
+        "/orders/replace",
+        json=_replace_body({"orderId": 7, "permId": 9101}, "rep-x1", legs=((500.0, "BUY", 1), (520.0, "SELL", 1))),
+    )
+    assert needs_cover.status_code == 400, needs_cover.text
+    assert broker.calls == []
+    # A pure-BUY successor of A goes through and marks ONLY A cancelled.
+    ok = client.post("/orders/replace", json=_replace_body({"orderId": 7, "permId": 9101}, "rep-x2", legs=_PURE_BUY))
+    assert ok.status_code == 200, ok.text
+    assert (_row("ord-a")["state"], _row("ord-b")["state"]) == ("CANCELLED", "WORKING")
+    assert "9101" in broker.calls[0]["args"] and "30" in broker.calls[0]["args"]
+
+
+def test_replace_ambiguous_order_id_only_target_refused(client, broker, fresh_quote):
+    _two_clients_same_order_id(client, broker)
+    resp = client.post("/orders/replace", json=_replace_body({"orderId": 7}, "rep-amb", legs=_PURE_BUY))
+    assert (resp.status_code, resp.json()["reason_code"]) == (409, "ORDER_TARGET_AMBIGUOUS")
+    assert "nothing was cancelled" in resp.json()["detail"]
+    assert broker.calls == []
+    # The placing clientId disambiguates.
+    body = {"cancelOrders": [{"orderId": 7, "clientId": 30}], "replaceOrder": _combo("rep-amb-2", legs=_PURE_BUY)}
+    assert client.post("/orders/replace", json=body).status_code == 200
+    assert (_row("ord-a")["state"], _row("ord-b")["state"]) == ("CANCELLED", "WORKING")
+
+
+def test_replace_distinct_perm_ids_sharing_an_order_id_do_not_conflict(client, broker, fresh_quote):
+    _two_clients_same_order_id(client, broker)
+    assert (
+        client.post("/orders/replace", json=_replace_body({"permId": 9101}, "rep-d1", legs=_PURE_BUY)).status_code
+        == 200
+    )
+    resp = client.post(
+        "/orders/replace", json=_replace_body({"permId": 9102}, "rep-d2", legs=((500.0, "BUY", 1), (510.0, "SELL", 1)))
+    )
+    assert resp.status_code == 200, resp.text
+    assert broker.cancels == 2
+
+
+def test_replace_perm_only_and_order_id_only_aliases_conflict(client, broker):
+    target = _original(client, broker)  # unique orderId in scope
+    first, second = _race(
+        client,
+        broker,
+        _replace_body({"permId": target["permId"]}, "rep-al1"),
+        _replace_body({"orderId": target["orderId"]}, "rep-al2"),
+    )
+    assert first.status_code == 200, first.text
+    assert (second.status_code, second.json()["reason_code"]) == (409, "REPLACEMENT_IN_PROGRESS")
+    assert (broker.cancels, broker.places) == (1, 1)
+
+
+def test_replace_same_attempt_id_different_target_cancels_nothing(client, broker, fresh_quote):
+    _two_clients_same_order_id(client, broker)
+    first, second = _race(
+        client,
+        broker,
+        _replace_body({"permId": 9101}, "rep-sid", legs=_PURE_BUY),
+        _replace_body({"permId": 9102}, "rep-sid", legs=_PURE_BUY),
+    )
+    assert first.status_code == 200, first.text
+    assert second.status_code in (409, 502), second.text
+    assert (broker.cancels, broker.places) == (1, 1)
+    assert _row("ord-b")["state"] == "WORKING"
+
+
+def test_plain_cancel_marks_only_the_canonical_row(client, broker, fresh_quote):
+    """/orders/cancel shares the persistence: an ambiguous orderId marks
+    nothing; a permId marks exactly its row."""
+    _two_clients_same_order_id(client, broker)
+    assert client.post("/orders/cancel", json={"orderId": 7}).status_code == 200
+    assert (_row("ord-a")["state"], _row("ord-b")["state"]) == ("WORKING", "WORKING")
+    assert client.post("/orders/cancel", json={"orderId": 7, "permId": 9102}).status_code == 200
+    assert (_row("ord-a")["state"], _row("ord-b")["state"]) == ("WORKING", "CANCELLED")

@@ -68,6 +68,10 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
     severity: "error",
     copy: "Another replacement of this order is in progress or done. Nothing was cancelled — check working orders.",
   },
+  ORDER_TARGET_AMBIGUOUS: {
+    severity: "error",
+    copy: "Could not identify the order to replace. Nothing was cancelled — refresh working orders and retry.",
+  },
   // F5 — cancel/modify failure classification
   IB_CONNECTION: { severity: "error", copy: "IB connection lost — retry." },
   OWNERSHIP: { severity: "error", copy: "Order owned by another session." },
