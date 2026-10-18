@@ -384,7 +384,7 @@ def _local_seq(conn, seq: int | None) -> int | None:
 
 
 _INVALIDATE_SQL = text(
-    """
+    f"""
     INSERT INTO xenon.service_health
         (service, broker, account_env, broker_account, state, detail, last_finished_at, updated_at)
     VALUES (:service, :broker, :account_env, :broker_account, 'invalidated',
@@ -392,7 +392,10 @@ _INVALIDATE_SQL = text(
             :at, :at)
     ON CONFLICT ON CONSTRAINT pk_service_health DO UPDATE SET
         detail = CASE
-            WHEN service_health.detail IS NULL OR left(service_health.detail, 1) <> '{' THEN EXCLUDED.detail
+            WHEN service_health.detail IS NULL OR left(service_health.detail, 1) <> '{{' THEN EXCLUDED.detail
+            -- A foreign stored seq (restored from another cluster) never
+            -- outranks a local one: view_watermark ignores it.
+            WHEN (service_health.detail::jsonb ->> 'seq')::numeric >= {_XMAX_SQL} THEN EXCLUDED.detail
             WHEN (service_health.detail::jsonb ->> 'seq')::numeric >= (EXCLUDED.detail::jsonb ->> 'seq')::numeric
                 THEN service_health.detail
             ELSE EXCLUDED.detail

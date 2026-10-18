@@ -35,7 +35,7 @@ from ib_async import (
     Position,
     Trade,
 )
-from sqlalchemy import insert, select, update
+from sqlalchemy import insert, select, text, update
 
 from scripts.tests.test_gate4_route import (  # noqa: F401 — autouse fixtures
     _pg,
@@ -709,23 +709,22 @@ def test_view_watermark_only_moves_forward():
         second = gate4.view_watermark(conn, scope)
     assert first is not None and second > first
 
-    # A row carrying a higher seq (e.g. written by a later transaction that
-    # committed first) is never moved back.
-    future = second + 10**12
-    with engine.begin() as conn:
-        conn.execute(
-            update(service_health)
-            .where(service_health.c.service == gate4.VIEW_WATERMARK_SERVICE)
-            .values(detail=json.dumps({"reason": "future", "seq": str(future)}))
+    # An older transaction (lower xid) that upserts after a newer one
+    # committed never moves the watermark back.
+    with engine.connect() as older:
+        tx = older.begin()
+        older_xid = int(older.execute(text("SELECT pg_current_xact_id()::text")).scalar())
+        gate4.invalidate_view(scope, "newer")
+        with engine.connect() as conn:
+            newer = gate4.view_watermark(conn, scope)
+        assert newer > older_xid
+        older.execute(
+            gate4._INVALIDATE_SQL,
+            {"service": gate4.VIEW_WATERMARK_SERVICE, **scope, "reason": "older", "at": datetime.now(timezone.utc)},
         )
-    gate4.invalidate_view(scope, "third")
+        tx.commit()
     with engine.connect() as conn:
-        detail = conn.execute(
-            select(service_health.c.detail).where(service_health.c.service == gate4.VIEW_WATERMARK_SERVICE)
-        ).scalar()
-    # Raw row: the upsert kept the greater seq (view_watermark would ignore
-    # it as foreign, being above this cluster's xmax).
-    assert json.loads(detail) == {"reason": "future", "seq": str(future)}
+        assert gate4.view_watermark(conn, scope) == newer
 
 
 def test_clock_regression_pass_with_higher_seq_is_published(monkeypatch, client, broker_calls, fresh_quote):
@@ -882,5 +881,37 @@ def test_foreign_only_snapshot_is_incomplete(monkeypatch, client, broker_calls, 
     _make_latest_seq_foreign()
 
     resp = client.post("/orders/place", json=_sell_call_body("sp-foreign-only"))
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
+
+
+def test_local_invalidation_replaces_restored_foreign_watermark(monkeypatch, client, broker_calls, fresh_quote):
+    """A restored (foreign) watermark must not swallow a later local
+    invalidation: the local seq replaces it and still blocks older passes."""
+    from sqlalchemy import text as sa_text
+
+    from xenon.execution import gate4
+
+    scope = {"broker": "IB", "account_env": "paper", "broker_account": ACCOUNT}
+    _run_sync(monkeypatch, _shares_client(100))
+    pass_seq = int(_latest_payload()["observation"]["pass_seq"])
+    gate4.invalidate_view(scope, "restored")
+    engine = gate4.get_sync_engine()
+    with engine.begin() as conn:
+        foreign = (
+            int(conn.execute(sa_text("SELECT pg_snapshot_xmax(pg_current_snapshot())::text")).scalar()) + 1_000_000
+        )
+        conn.execute(
+            update(service_health)
+            .where(service_health.c.service == gate4.VIEW_WATERMARK_SERVICE)
+            .values(detail=json.dumps({"reason": "restored", "seq": str(foreign)}))
+        )
+
+    gate4.invalidate_view(scope, "unprovenanced_open_orders")
+
+    with engine.connect() as conn:
+        mark = gate4.view_watermark(conn, scope)
+    assert mark is not None and pass_seq < mark < foreign
+    resp = client.post("/orders/place", json=_sell_call_body("sp-foreign-mark-replaced"))
     assert resp.status_code == 400, resp.text
     assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
