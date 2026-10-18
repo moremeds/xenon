@@ -316,15 +316,15 @@ describe("OrderTab / InstrumentDetailModal — uncertain place blocks a resubmit
   });
 });
 
-// PR-08: the original place body replayed after the order was modified.
+// PR-08: same attempt id, different body, and that attempt may be at IB.
 const ALREADY_PLACED_BODY = {
   reason_code: "ATTEMPT_ALREADY_PLACED",
-  detail: "attempt c-unc-1 was already placed and since modified — check working orders",
+  detail: "attempt c-unc-1 belongs to an existing order; the requested terms are not confirmed",
   state: "WORKING",
   submission_id: "sub-1",
 };
 
-describe("ATTEMPT_ALREADY_PLACED — a replay after a modify never invites a resubmit", () => {
+describe("ATTEMPT_ALREADY_PLACED — a same-id different body never invites a resubmit", () => {
   it("Next /api/orders/place passes the 409 body through unchanged", async () => {
     xenonFetch.mockRejectedValueOnce(new XenonApiError(409, ALREADY_PLACED_BODY.detail, ALREADY_PLACED_BODY));
     const { POST } = await import("../app/api/orders/place/route");
@@ -344,7 +344,9 @@ describe("ATTEMPT_ALREADY_PLACED — a replay after a modify never invites a res
       out = await submitPlaceOrder(result.current, { symbol: "SPY" });
     });
     expect(out).toEqual({ kind: "uncertain", message: ATTEMPT_ALREADY_PLACED_COPY });
-    expect(ATTEMPT_ALREADY_PLACED_COPY).toMatch(/already placed.*do not resubmit/i);
+    expect(ATTEMPT_ALREADY_PLACED_COPY).toBe(
+      "This attempt id belongs to an existing order. The requested terms are not confirmed. Check working orders; do not resubmit.",
+    );
     expect(ATTEMPT_ALREADY_PLACED_COPY).not.toMatch(/rebuild/i);
     expect(result.current.id).toBe(first);
     expect(result.current.uncertain).toBe(true);
@@ -370,7 +372,7 @@ describe("ATTEMPT_ALREADY_PLACED — a replay after a modify never invites a res
       <PositionOrderModal position={pos} prices={{ TSLA: { last: 350, bid: 349.9, ask: 350.1 } as any }} onClose={() => {}} />,
     );
     fireEvent.click(getByRole("button", { name: /^Submit/i }));
-    await findByText(/already placed \(and since modified\)/i);
+    await findByText(/belongs to an existing order\. The requested terms are not confirmed/i);
     expect(queryByText(/rebuild the ticket/i)).toBeNull();
     await waitFor(() => expect((getByRole("button", { name: /^Submit/i }) as HTMLButtonElement).disabled).toBe(true));
     fireEvent.click(getByRole("button", { name: /^Submit/i }));

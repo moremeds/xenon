@@ -32,9 +32,9 @@ export type PlaceOutcome =
   | { kind: "uncertain"; message: string }
   | { kind: "terminal"; message: string };
 
-/** The attempt was already placed and since modified (PR-08): the order
- * exists and may be working, so the form stays locked like an uncertain
- * place — same attempt id, no resubmit. */
+/** Same attempt id, different body, and that attempt may be at IB (PR-08):
+ * the form stays locked like an uncertain place — same attempt id, no
+ * resubmit; the new terms were not placed. */
 export const ATTEMPT_ALREADY_PLACED_COPY =
   ORDER_REASON_CODES.ATTEMPT_ALREADY_PLACED.copy;
 

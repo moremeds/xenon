@@ -434,7 +434,8 @@ def test_body_mismatch_same_attempt_409(client, broker_calls, fresh_quote):
 
     assert first.status_code == 200
     assert second.status_code == 409
-    assert second.json()["reason_code"] == "ATTEMPT_BODY_MISMATCH"
+    # PR-08: the first attempt is at IB, so the id belongs to a live order.
+    assert second.json()["reason_code"] == "ATTEMPT_ALREADY_PLACED"
     assert len(broker_calls) == 1
     assert len(_submission_rows()) == 1
 
@@ -849,10 +850,50 @@ def test_stale_mirror_read_never_overwrites_settled_price(client, broker_calls, 
     assert float(_submission_rows()[0]._mapping["limit_price"]) == 1.9
 
 
-def test_replay_after_modify_is_already_placed_not_body_mismatch(client, broker_calls, monkeypatch):
-    """PR-08: the ORIGINAL place body replayed after a price modify differs
-    only in the amended price. The order exists (may be working): 409
-    ATTEMPT_ALREADY_PLACED, never 'rebuild the ticket', nothing sent."""
+def _place_again(client, broker_calls, body):
+    sent = len(broker_calls)
+    resp = client.post("/orders/place", json=body)
+    assert len(broker_calls) == sent  # nothing reaches the broker
+    return resp
+
+
+def _already_placed(resp):
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["reason_code"] == "ATTEMPT_ALREADY_PLACED"
+    assert "not confirmed" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("field,value", [("limitPrice", 2.35), ("quantity", 2)])
+def test_same_id_new_terms_on_live_attempt_is_already_placed(field, value, client, broker_calls):
+    """PR-08: same attempt id, different price or qty, and the attempt is
+    at IB (WORKING with broker ids): 409 ATTEMPT_ALREADY_PLACED, nothing
+    placed, the stored terms unchanged."""
+    _place_bag(client, f"rt-same-id-{field}", shares=250)
+    body = {**_guaranteed_bag_body(f"rt-same-id-{field}"), field: value}
+    _already_placed(_place_again(client, broker_calls, body))
+    row = _submission_rows()[0]._mapping
+    assert (float(row["limit_price"]), row["quantity"]) == (2.0, 1)
+
+
+def test_failed_modify_then_new_terms_is_already_placed(client, broker_calls, monkeypatch):
+    """A modify the broker refused still consumed its sequence; the new
+    price was never applied. A place with that price on the same id is
+    ATTEMPT_ALREADY_PLACED (never a claim that the price was placed)."""
+    _place_bag(client, "rt-failed-mod", shares=250)
+
+    async def refused(entry: str, args: list, timeout: float = 30):
+        broker_calls.append({"entry": entry, "args": args})
+        return ScriptResult(ok=True, data={"status": "error", "message": "rejected", "amend_outcome": "rejected"})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", refused)
+    resp = client.post("/orders/modify", json={"orderId": 4242, "permId": 777001, "newPrice": 2.4, "modifySequence": 1})
+    assert resp.status_code >= 400
+    row = _submission_rows()[0]._mapping
+    assert row["modify_sequence"] == 1 and float(row["limit_price"]) == 2.0
+    _already_placed(_place_again(client, broker_calls, {**_guaranteed_bag_body("rt-failed-mod"), "limitPrice": 2.4}))
+
+
+def test_replay_after_confirmed_modify_is_already_placed(client, broker_calls, monkeypatch):
     _place_bag(client, "rt-replay-1", shares=250)
     _manage_reply(monkeypatch, broker_calls, price=1.75, qty=1)
     assert (
@@ -861,46 +902,33 @@ def test_replay_after_modify_is_already_placed_not_body_mismatch(client, broker_
         ).status_code
         == 200
     )
-    sent = len(broker_calls)
-
-    resp = client.post("/orders/place", json=_guaranteed_bag_body("rt-replay-1"))
-    assert resp.status_code == 409, resp.text
-    assert resp.json()["reason_code"] == "ATTEMPT_ALREADY_PLACED"
-    assert len(broker_calls) == sent
-
-    # A genuinely different body (another strike) on the same id stays a mismatch.
-    other = _guaranteed_bag_body("rt-replay-1")
-    other["legs"][1]["strike"] = 520.0
-    resp = client.post("/orders/place", json=other)
-    assert resp.status_code == 409 and resp.json()["reason_code"] == "ATTEMPT_BODY_MISMATCH"
+    _already_placed(_place_again(client, broker_calls, _guaranteed_bag_body("rt-replay-1")))
 
 
-def test_reused_id_with_new_price_on_unmodified_order_stays_body_mismatch(client, broker_calls):
-    _place_bag(client, "rt-replay-2", shares=250)
-    body = _guaranteed_bag_body("rt-replay-2")
-    body["limitPrice"] = float(body["limitPrice"]) + 0.05
-    resp = client.post("/orders/place", json=body)
-    assert resp.status_code == 409 and resp.json()["reason_code"] == "ATTEMPT_BODY_MISMATCH"
+@pytest.mark.parametrize("state", ["UNKNOWN", "PENDING"])
+def test_uncertain_attempt_without_ids_is_already_placed(state, client, broker_calls):
+    """No broker ids yet, but the state does not prove "not placed": the id
+    may belong to a live IB order, so a new body is ATTEMPT_ALREADY_PLACED."""
+    _place_bag(client, f"rt-unc-{state}", shares=250)
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE xenon.order_submissions SET state=:s, ib_order_id=NULL, perm_id=NULL"), {"s": state})
+    engine.dispose()
+    _already_placed(_place_again(client, broker_calls, {**_guaranteed_bag_body(f"rt-unc-{state}"), "limitPrice": 2.35}))
 
 
-def test_replay_after_mirrored_tws_price_edit_is_already_placed(client, broker_calls):
-    from xenon.execution import orders_store
-
-    _place_bag(client, "rt-replay-3", shares=250)
-    orders_store.register_from_snapshot(
-        perm_id="777001",
-        ib_order_id="4242",
-        ticker="SPY",
-        security_type="BAG",
-        action="BUY",
-        quantity=1,
-        limit_price=2.15,
-        multiplier=100,
-        observed_at=datetime.now(timezone.utc),
-        **SCOPE,
-    )
-    resp = client.post("/orders/place", json=_guaranteed_bag_body("rt-replay-3"))
-    assert resp.status_code == 409 and resp.json()["reason_code"] == "ATTEMPT_ALREADY_PLACED"
+@pytest.mark.parametrize("state", ["FAILED", "REJECTED"])
+def test_not_placed_attempt_with_new_body_stays_body_mismatch(state, client, broker_calls):
+    """An attempt that provably never reached IB (FAILED / REJECTED, no
+    broker ids) keeps ATTEMPT_BODY_MISMATCH for a different body."""
+    _place_bag(client, f"rt-np-{state}", shares=250)
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE xenon.order_submissions SET state=:s, ib_order_id=NULL, perm_id=NULL"), {"s": state})
+    engine.dispose()
+    body = {**_guaranteed_bag_body(f"rt-np-{state}"), "limitPrice": 2.35}
+    resp = _place_again(client, broker_calls, body)
+    assert resp.status_code == 409 and resp.json()["reason_code"] == "ATTEMPT_BODY_MISMATCH", resp.text
 
 
 def test_modify_rejects_guarantee_mode_change(client, broker_calls):

@@ -121,10 +121,10 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
     severity: "error",
     copy: "Retry id was reused with a different order. Rebuild the ticket.",
   },
-  // PR-08: the original place body replayed after the order was modified.
+  // PR-08: same attempt id, different body, and that attempt may be at IB.
   ATTEMPT_ALREADY_PLACED: {
     severity: "warn",
-    copy: "This order was already placed (and since modified). Check working orders; do not resubmit.",
+    copy: "This attempt id belongs to an existing order. The requested terms are not confirmed. Check working orders; do not resubmit.",
   },
   READ_ONLY_BROKER: {
     severity: "error",

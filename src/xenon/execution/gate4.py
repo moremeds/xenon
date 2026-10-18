@@ -59,14 +59,7 @@ from sqlalchemy import Numeric, case, func, insert, literal_column, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from xenon.db.engine import get_sync_engine
-from xenon.db.schema import (
-    account_snapshots,
-    order_events,
-    order_fills,
-    order_submissions,
-    regime_overrides,
-    service_health,
-)
+from xenon.db.schema import account_snapshots, order_fills, order_submissions, regime_overrides, service_health
 from xenon.execution import coverage, orders_store
 from xenon.execution.orders_store import (
     ATTEMPT_BODY_MISMATCH,
@@ -960,42 +953,25 @@ _REQUEST_LEG_KEYS = ("action", "sym", "sec", "ratio", "right", "exp", "strike")
 ATTEMPT_ALREADY_PLACED = "ATTEMPT_ALREADY_PLACED"
 
 
-def _was_amended(conn, m) -> bool:
-    """The row's price/qty moved after placement: a modify passed the
-    sequence gate, or the mirror stored a broker price (PR-08)."""
-    if int(m["modify_sequence"] or 0) > 0:
-        return True
-    return (
-        conn.execute(
-            select(order_events.c.submission_id)
-            .where(
-                order_events.c.submission_id == m["submission_id"],
-                order_events.c.detail.has_key("limit_price"),
-            )
-            .limit(1)
-        ).first()
-        is not None
-    )
+def _may_be_at_ib(m) -> bool:
+    """The existing attempt may hold a live (or once-live) IB order: it has
+    broker ids, or its state is not a proven not-placed outcome."""
+    ids = [str(m["ib_order_id"] or ""), str(m["perm_id"] or "")]
+    return any(v not in ("", "0") for v in ids) or m["state"] not in ("FAILED", "REJECTED")
 
 
-def _classify_existing(conn, row, request: RequestRow, legs_payload) -> Gate4Outcome:
+def _classify_existing(row, request: RequestRow, legs_payload) -> Gate4Outcome:
     m = row._mapping if hasattr(row, "_mapping") else row
     body_legs = _legs_for_body_match(m["legs"])
-    req_legs = _legs_for_body_match(legs_payload)
-    if not _request_body_matches(_RowView(m, legs=body_legs), request, req_legs):
-        # A replay of the ORIGINAL body after a modify differs only in the
-        # amended price/qty: the order exists (and may be working), so the
-        # client must not be told to rebuild and resubmit.
-        amended_replay = _was_amended(conn, m) and _request_body_matches(
-            _RowView(m, legs=body_legs, limit_price=request.limit_price, quantity=request.quantity),
-            request,
-            req_legs,
-        )
+    if not _request_body_matches(_RowView(m, legs=body_legs), request, _legs_for_body_match(legs_payload)):
+        # Same attempt id, different body. If that attempt may be at IB, the
+        # client must not be told to rebuild and resubmit: the id belongs to
+        # an existing order and the new terms were never placed (PR-08).
         return Gate4Outcome(
             status="body_mismatch",
             submission_id=row.submission_id,
             state=row.state,
-            reason_code=ATTEMPT_ALREADY_PLACED if amended_replay else ATTEMPT_BODY_MISMATCH,
+            reason_code=ATTEMPT_ALREADY_PLACED if _may_be_at_ib(m) else ATTEMPT_BODY_MISMATCH,
         )
     if row.state in {"REJECTED", "CANCELLED", "FAILED"}:
         return Gate4Outcome(
@@ -1056,7 +1032,7 @@ def evaluate_and_reserve(
         )
     ).first()
     if existing is not None:
-        return _classify_existing(conn, existing, request, legs_payload)
+        return _classify_existing(existing, request, legs_payload)
 
     if candidate is not None:
         inputs = load_inputs(conn, scope)
@@ -1119,7 +1095,7 @@ def evaluate_and_reserve(
         ).first()
         if row is None:
             return Gate4Outcome(status="body_mismatch", reason_code=ATTEMPT_BODY_MISMATCH)
-        return _classify_existing(conn, row, request, legs_payload)
+        return _classify_existing(row, request, legs_payload)
 
     if override_audit is not None:
         conn.execute(

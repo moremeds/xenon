@@ -557,7 +557,9 @@ def test_same_attempt_day_then_gtc_is_body_mismatch(client, broker_calls, fresh_
     assert _submission_rows()[0]._mapping["tif"] == "DAY"
 
     gtc = client.post("/orders/place", json={**body, "tif": "GTC"})
-    assert gtc.status_code == 409 and gtc.json()["reason_code"] == "ATTEMPT_BODY_MISMATCH", gtc.text
+    # Different TIF on a live attempt id: refused, nothing placed. PR-08 names
+    # it ATTEMPT_ALREADY_PLACED because the first attempt is at IB.
+    assert gtc.status_code == 409 and gtc.json()["reason_code"] == "ATTEMPT_ALREADY_PLACED", gtc.text
     # Omitted / lower-case TIF normalizes like the place CLI (DAY default).
     no_tif = {k: v for k, v in body.items() if k != "tif"}
     assert client.post("/orders/place", json=no_tif).status_code == 200
