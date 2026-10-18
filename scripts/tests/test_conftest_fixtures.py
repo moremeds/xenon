@@ -76,12 +76,13 @@ def test_pg_test_engine_points_at_test_db(pg_test_engine):
     )
 
 
-def test_truncate_postgres_tables_treats_missing_schema_as_offline(monkeypatch):
-    """A reachable but unmigrated test DB should not fail unrelated tests.
+def test_truncate_postgres_tables_reraises_missing_schema(monkeypatch):
+    """A TRUNCATE failure that is not a connection error must surface.
 
-    Contract guarded here: when TRUNCATE fails with SQLAlchemyError (the
-    typical symptom of a missing schema), the helper must swallow it and
-    flip the reachability cache to False so subsequent tests skip TRUNCATE.
+    Contract guarded here: a non-connection SQLAlchemyError (missing schema,
+    deadlock) re-raises and leaves the reachability cache alone. The old
+    "swallow and go offline" contract let later tests write through a cached
+    non-test engine (INV-test-db-leak).
     """
 
     class FakeConnection:
@@ -104,9 +105,10 @@ def test_truncate_postgres_tables_treats_missing_schema_as_offline(monkeypatch):
     monkeypatch.setattr(db_fixture, "_PG_REACHABLE", True)
     monkeypatch.setattr(db_fixture, "_SESSION_ENGINE", FakeEngine())
 
-    db_fixture.truncate_all_xenon_tables()
+    with pytest.raises(SQLAlchemyError, match="missing schema"):
+        db_fixture.truncate_all_xenon_tables()
 
-    assert db_fixture._PG_REACHABLE is False
+    assert db_fixture._PG_REACHABLE is True
 
 
 # ---------------------------------------------------------------------------

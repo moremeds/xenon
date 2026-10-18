@@ -242,12 +242,16 @@ def find_naked_short_violations(orders: list, positions: list) -> list:
     return violations
 
 
-def cancel_violations(client, violations: list) -> int:
-    """Cancel each violating order via IBClient.
+def cancel_violations(client, violations: list, *, account: str) -> int:
+    """Cancel each violating order via IBClient — scope account's orders only.
 
     Args:
         client: connected IBClient instance
         violations: list of violation dicts from find_naked_short_violations
+        account: scope account. An order whose ``trade.order.account`` is any
+            other value (or empty) is logged and skipped: it was judged
+            against this account's positions, so a cancel could kill another
+            account's covered order.
 
     Returns:
         Count of orders cancelled.
@@ -282,6 +286,17 @@ def cancel_violations(client, violations: list) -> int:
                 )
                 continue
 
+            order_account = getattr(trade.order, "account", "") or ""
+            if not account or order_account != account:
+                logger.warning(
+                    "Refusing to cancel %s orderId=%s: order account %r is not the scope account %r",
+                    symbol,
+                    order_id,
+                    order_account,
+                    account,
+                )
+                continue
+
             client.cancel_order(trade.order)
             client.sleep(1)
             cancelled += 1
@@ -307,6 +322,7 @@ def _shape_open_order_for_audit(trade) -> dict | None:
         "orderId": getattr(order, "orderId", None),
         "permId": getattr(order, "permId", None),
         "orderRef": getattr(order, "orderRef", "") or "",
+        "account": getattr(order, "account", "") or "",
         "contract": {
             "secType": getattr(contract, "secType", "") or "",
             "symbol": getattr(contract, "symbol", "") or "",
@@ -315,6 +331,11 @@ def _shape_open_order_for_audit(trade) -> dict | None:
             "strike": getattr(contract, "strike", 0) or 0,
         },
     }
+
+
+def _scope_orders(orders: list, account: str) -> list:
+    """Keep only orders that name the scope account; drop other / no account."""
+    return [o for o in orders if account and o.get("account") == account]
 
 
 def main(argv=None):
@@ -343,16 +364,35 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
 
+    # Scope account: positions are the scope's snapshot, so only the scope
+    # account's orders may be judged (and cancelled). Unresolved → skip the
+    # audit; never cancel without a scope.
+    from xenon.execution.account_scope import resolve_from_env
+
+    try:
+        scope = resolve_from_env()
+    except ValueError as exc:
+        summary = {
+            "violations_found": 0,
+            "violations": [],
+            "cancelled": 0,
+            "dry_run": args.dry_run,
+            "error": f"audit skipped: IB account scope unresolved: {exc}",
+        }
+        logger.error(summary["error"])
+        print(json.dumps(summary, indent=2))
+        return summary
+    scope_account = scope.broker_account
+
     # Positions: PG by default, optional file override.
     if args.portfolio is not None:
         with open(args.portfolio) as f:
             portfolio_data = json.load(f)
         positions = portfolio_data.get("positions", [])
     else:
-        from xenon.execution.account_scope import resolve_from_env
         from xenon.utils.portfolio_loader import load_portfolio_payload_sync
 
-        payload = load_portfolio_payload_sync(scope=resolve_from_env())
+        payload = load_portfolio_payload_sync(scope=scope)
         if payload is None:
             print(json.dumps({"error": "no portfolio snapshot in PG for current scope"}, indent=2))
             return {"violations_found": 0, "violations": [], "cancelled": 0, "error": "no portfolio snapshot"}
@@ -366,7 +406,7 @@ def main(argv=None):
     if args.orders is not None:
         with open(args.orders) as f:
             orders_data = json.load(f)
-        orders = orders_data.get("open_orders", [])
+        orders = _scope_orders(orders_data.get("open_orders", []), scope_account)
         violations = find_naked_short_violations(orders, positions)
         summary = {
             "violations_found": len(violations),
@@ -383,7 +423,7 @@ def main(argv=None):
                 client = IBClient()
                 try:
                     client.connect(host=args.host, port=args.port, client_id=audit_client_id)
-                    summary["cancelled"] = cancel_violations(client, violations)
+                    summary["cancelled"] = cancel_violations(client, violations, account=scope_account)
                 except Exception as e:
                     logger.error("IB connection failed: %s", e)
                     summary["error"] = str(e)
@@ -407,7 +447,9 @@ def main(argv=None):
             try:
                 client.connect(host=args.host, port=args.port, client_id=audit_client_id)
                 trades = client.get_open_orders()
-                orders = [o for o in (_shape_open_order_for_audit(t) for t in trades) if o is not None]
+                orders = _scope_orders(
+                    [o for o in (_shape_open_order_for_audit(t) for t in trades) if o is not None], scope_account
+                )
                 violations = find_naked_short_violations(orders, positions)
                 summary = {
                     "violations_found": len(violations),
@@ -416,7 +458,7 @@ def main(argv=None):
                     "dry_run": args.dry_run,
                 }
                 if violations and not args.dry_run:
-                    summary["cancelled"] = cancel_violations(client, violations)
+                    summary["cancelled"] = cancel_violations(client, violations, account=scope_account)
             except Exception as e:
                 logger.error("IB session failed: %s", e)
                 summary = {

@@ -183,8 +183,11 @@ class ComboWizardIbAdapter:
     ``protect.attach_protection`` and ``rehydrate.rehydrate_combo_sessions``.
     """
 
-    def __init__(self, ib_client: Any, *, db_path: Path | str | None = None):
+    def __init__(self, ib_client: Any, *, account: str = "", db_path: Path | str | None = None):
         self._ib = ib_client
+        # Scope account every new order is placed on. IBClient.place_order
+        # rejects an empty / unmanaged account before anything reaches IB.
+        self._account = account
         self._db_path = db_path
 
     # ------------------------------------------------------------------
@@ -281,6 +284,7 @@ class ComboWizardIbAdapter:
             lmtPrice=float(target_price),
             tif="GTC",
         )
+        order.account = self._account
 
         # IBClient.place_order wraps ib.placeOrder. Citation:
         # src/xenon/clients/ib_client.py:548 — place_order(contract, order).

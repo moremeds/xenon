@@ -369,6 +369,20 @@ def test_accountless_open_order_makes_pass_incomplete(monkeypatch, client, broke
     assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
 
 
+def test_accountless_fill_makes_pass_incomplete(monkeypatch, client, broker_calls, fresh_quote):
+    """#198 drops an execution with no acctNumber; the pass must then not
+    claim it saw every fill (an unattributed short fill could need cover)."""
+    fake = _shares_client(100)
+    c = _opt(510, con_id=5102)
+    fake.add_details(c)
+    fake.fills.append(_fill(c, exec_id="0001.noacct.01", perm_id=990004, order_id=9004, account=""))
+    _run_sync(monkeypatch, fake)
+
+    obs = _latest_payload()["observation"]
+    assert obs["complete"] is False
+    assert obs["reads"]["fill_accounts"] is False
+
+
 # ---------------------------------------------------------------------------
 # item 3 — contract metadata from IB objects
 # ---------------------------------------------------------------------------

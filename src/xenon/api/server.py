@@ -71,7 +71,7 @@ from xenon.db.engine import dispose_engine, get_sync_engine, init_engine
 from xenon.db.queries.blotter import blotter_has_trades, fetch_blotter_pg, fetch_futu_blotter, merge_pg_and_flex
 from xenon.db.schema import account_snapshots, order_events, order_submissions
 from xenon.execution import gate4, orders_store, preflight, quote_guard, quote_tokens
-from xenon.execution.account_scope import resolve_from_app_state
+from xenon.execution.account_scope import IBAccountSelectionError, resolve_from_app_state, select_ib_account
 from xenon.execution.preflight import (
     PortfolioView,
     PreflightRequest,
@@ -231,14 +231,21 @@ async def _run_rehydrate_on_boot() -> None:
         logger.info("test_mode: skipping rehydrate")
         return
 
-    # Resolve scope from app.state populated earlier in lifespan. None values
-    # mean "no scope filter" — pre-scope rows still get reconciled.
+    # Resolve scope from app.state populated earlier in lifespan. Fail
+    # closed: an empty scope would map to broker_account=None, which
+    # rehydrate treats as "no account filter" (every account's rows).
     _scope_account_env = getattr(app.state, "trading_mode", None)
     _scope_account = getattr(app.state, "account", None)
+    if not _scope_account_env or not _scope_account:
+        logger.error("rehydrate skipped: IB account scope unresolved (trading_mode/account empty)")
+        return
+    if getattr(app.state, "mode_verified", False) is not True:
+        logger.error("rehydrate skipped: trading mode not verified for account %r", _scope_account)
+        return
     _scope_kwargs = {
-        "broker": "IB" if _scope_account_env else None,
+        "broker": "IB",
         "account_env": _scope_account_env,
-        "broker_account": _scope_account or None,
+        "broker_account": _scope_account,
     }
 
     # Operator heartbeat: record "ok" only when BOTH phases finish without
@@ -327,6 +334,9 @@ def _maybe_start_activity_poller() -> None:
     _scope_account = getattr(app.state, "account", None)
     if not _scope_account_env or not _scope_account:
         logger.info("ib activity poller skipped: scope not resolved")
+        return
+    if getattr(app.state, "mode_verified", False) is not True:
+        logger.error("ib activity poller skipped: trading mode not verified for account %r", _scope_account)
         return
 
     scope = AccountScope(
@@ -451,7 +461,10 @@ async def _run_fills_replay_on_boot() -> None:
     _scope_account_env = getattr(app.state, "trading_mode", None)
     _scope_account = getattr(app.state, "account", None)
     if not _scope_account_env or not _scope_account:
-        logger.info("ib fills replay skipped: scope not resolved (trading_mode/account empty)")
+        logger.error("ib fills replay skipped: scope not resolved (trading_mode/account empty)")
+        return
+    if getattr(app.state, "mode_verified", False) is not True:
+        logger.error("ib fills replay skipped: trading mode not verified for account %r", _scope_account)
         return
 
     scope = AccountScope(
@@ -502,11 +515,15 @@ async def _run_fills_replay_on_boot() -> None:
 
 
 def _get_managed_account_for_health() -> str:
-    """Return the first managedAccount from the IB pool's sync client.
+    """Return the boot scope account, chosen by ``select_ib_account``.
 
-    Returns "" when the pool isn't connected (test mode, Gateway down, etc.).
-    Pulled out as a module-level function so tests can monkeypatch it
-    without booting a real IB connection.
+    ``XENON_BROKER_ACCOUNT`` wins when set and managed by the login; with it
+    unset, the login must manage exactly one account. Never
+    ``managedAccounts()[0]``. Returns "" when the pool isn't connected (test
+    mode, Gateway down, etc.) or no account can be chosen — the lifespan then
+    sets ``mode_verified=False`` and order routes refuse. Pulled out as a
+    module-level function so tests can monkeypatch it without booting a real
+    IB connection.
     """
     if ib_pool is None:
         return ""
@@ -517,7 +534,11 @@ def _get_managed_account_for_health() -> str:
         accounts = client.ib.managedAccounts()
     except Exception:  # noqa: BLE001
         return ""
-    return accounts[0] if accounts else ""
+    try:
+        return select_ib_account(accounts)
+    except IBAccountSelectionError as exc:
+        logger.error("IB ACCOUNT SCOPE UNRESOLVED — order routes stay disabled: %s", exc)
+        return ""
 
 
 @asynccontextmanager
@@ -589,6 +610,15 @@ async def lifespan(app: FastAPI):
     # nothing lands in core_test.
     if is_read_only():
         logger.warning("XENON_READ_ONLY=1 — skipping rehydrate, fills replay, and activity poller (no PG writes).")
+    elif not account or not verified:
+        # Boot writers stamp and filter rows by this account; without a
+        # resolved, verified account they would write or reconcile unscoped.
+        logger.error(
+            "IB account scope unresolved or unverified (account=%r, mode_verified=%s) — "
+            "skipping rehydrate, fills replay, and activity poller.",
+            account,
+            verified,
+        )
     else:
         # F7.2 — single-leg three-source rehydrate. Runs synchronously before
         # the server starts serving so our view of in-flight orders is accurate
@@ -2607,7 +2637,10 @@ async def _orders_place_from_body(body: dict):
             "submission_id": submission_id,
         }
 
-    order_json = json.dumps(body)
+    # Place on the account the reservation row was stamped with — never on an
+    # account named by the request body, never on IB's default. The
+    # subprocess fails closed if it is legacy_unknown or not managed.
+    order_json = json.dumps({**body, "account": scope["broker_account"]})
     result = await _run_ib_script_with_recovery("xenon-ib-place-order", ["--json", order_json], timeout=15)
     if not result.ok:
         orders_store.mark_terminal(
@@ -2627,7 +2660,10 @@ async def _orders_place_from_body(body: dict):
         # row so we don't lose the info.
         ib_code = result.data.get("code")
         ib_message = result.data.get("message", "Order failed")
-        if str(ib_code) == "110":
+        account_reason = result.data.get("reason_code")
+        if account_reason in (ReasonCode.ACCOUNT_UNRESOLVED.value, ReasonCode.ACCOUNT_NOT_MANAGED.value):
+            reason_code = account_reason
+        elif str(ib_code) == "110":
             reason_code = ReasonCode.LIMIT_OFF_TICK.value
             logger.warning(
                 "IB rejected order with tick-rule violation: submission=%s ib_code=110 ib_message=%s",
@@ -2654,6 +2690,12 @@ async def _orders_place_from_body(body: dict):
                 "Failed to record IB_REJECT event for submission %s",
                 submission_id,
                 exc_info=True,
+            )
+        if account_reason == reason_code:
+            # Top-level reason_code so the toast helper renders account copy.
+            return JSONResponse(
+                status_code=502,
+                content={"detail": ib_message, "reason_code": reason_code},
             )
         raise HTTPException(status_code=502, detail=ib_message)
     if result.data:

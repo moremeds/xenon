@@ -158,8 +158,15 @@ async def wizard_protect(session_id: str, request: Request, body: ProtectRequest
     if server_mod.ib_pool is None or not server_mod.ib_pool.is_connected("orders"):
         raise HTTPException(status_code=503, detail="IB orders pool is not connected")
 
+    from xenon.execution.account_scope import resolve_from_app_state
+
+    try:
+        scope_account = resolve_from_app_state(request.app.state).broker_account
+    except ValueError:
+        scope_account = ""  # IBClient.place_order fails closed on an empty account
+
     async with server_mod.ib_pool.acquire("orders") as ib_client:
-        adapter = ComboWizardIbAdapter(ib_client)
+        adapter = ComboWizardIbAdapter(ib_client, account=scope_account)
         try:
             return await server_mod.ib_pool.run_sync(
                 "orders",
