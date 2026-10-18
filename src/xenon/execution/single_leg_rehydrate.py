@@ -603,7 +603,7 @@ def rehydrate_on_boot(
         if decision.to_state != row["state"]:
             if decision.to_state == "WORKING":
                 # No dedicated helper; use a direct UPDATE via Postgres for state shift.
-                _update_state_only(row["submission_id"], decision.to_state)
+                _update_state_only(row["submission_id"], decision.to_state, expected=row["state"])
             elif decision.to_state in (
                 "FILLED",
                 "CANCELLED",
@@ -618,6 +618,7 @@ def rehydrate_on_boot(
                     if decision.filled_qty is not None
                     else int(row.get("filled_qty") or 0),
                     avg_fill_price=decision.avg_fill_price,
+                    expected_states=(row["state"],),
                 )
             elif decision.to_state == "UNKNOWN" and decision.reason_code:
                 orders_store.mark_terminal(
@@ -626,9 +627,10 @@ def rehydrate_on_boot(
                     reason_code=decision.reason_code,
                     filled_qty=None,
                     avg_fill_price=None,
+                    expected_states=(row["state"],),
                 )
             elif decision.to_state == "UNKNOWN":
-                _update_state_only(row["submission_id"], "UNKNOWN")
+                _update_state_only(row["submission_id"], "UNKNOWN", expected=row["state"])
 
         orders_store.record_event(
             row["submission_id"],
@@ -639,7 +641,9 @@ def rehydrate_on_boot(
     return decisions
 
 
-def _update_state_only(submission_id: str, state: str) -> None:
+def _update_state_only(submission_id: str, state: str, *, expected: str) -> None:
+    """State shift from the state this pass read; a row that moved on since
+    the read is left alone (no-op, logged)."""
     engine = get_sync_engine()
     with engine.begin() as conn:
-        combo_wizard.update_order_state(conn, submission_id, state)
+        combo_wizard.update_order_state(conn, submission_id, state, expected_states=(expected,))

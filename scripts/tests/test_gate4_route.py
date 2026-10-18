@@ -729,6 +729,31 @@ def test_modify_bag_sends_persisted_guarantee_mode(client, broker_calls):
     assert args[args.index("--non-guaranteed") + 1] == "0"
 
 
+def test_modify_success_persists_limit_price_and_quantity(client, broker_calls):
+    """PR-08: a confirmed modify writes the new limit_price (price-only and
+    price+qty amends) and the new quantity onto the submission row."""
+    _place_bag(client, "rt-mod-persist-1", shares=250)
+
+    resp = client.post(
+        "/orders/modify",
+        json={"orderId": 4242, "permId": 777001, "newPrice": 1.90, "modifySequence": 1},
+    )
+    assert resp.status_code == 200, resp.text
+    row = _submission_rows()[0]._mapping
+    assert float(row["limit_price"]) == 1.90
+    assert row["quantity"] == 1
+
+    resp = client.post(
+        "/orders/modify",
+        json={"orderId": 4242, "permId": 777001, "newPrice": 1.75, "newQuantity": 2, "modifySequence": 2},
+    )
+    assert resp.status_code == 200, resp.text
+    row = _submission_rows()[0]._mapping
+    assert float(row["limit_price"]) == 1.75
+    assert row["quantity"] == 2
+    assert row["legs"].get("pending_amend_id") is None
+
+
 def test_modify_rejects_guarantee_mode_change(client, broker_calls):
     _place_bag(client, "rt-mod-flip-1")
 

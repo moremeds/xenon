@@ -9,6 +9,7 @@ Spec: docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md §12.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from dataclasses import dataclass
@@ -24,6 +25,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from xenon.db.engine import get_sync_engine
 from xenon.db.events import CHANNEL_FILL_COMMISSION_UPDATED, CHANNEL_FILL_RECORDED, emit_outbox_in_txn
 from xenon.db.schema import order_events, order_fills, order_submissions, regime_overrides
+
+logger = logging.getLogger(__name__)
 
 # ── Read-only choke point ──
 
@@ -92,7 +95,33 @@ class ReservationOutcome:
     reason_code: str | None
 
 
+# Single source for every order_submissions.state value (DATA-2 / OP-9).
+# Migration 2026_10_18_order_state_check freezes the same list in the DB
+# CHECK ck_order_sub_state; a test pins the two equal. Adding a state means
+# a new migration first.
+ORDER_STATES: tuple[str, ...] = (
+    "PENDING",
+    "WORKING",
+    "PARTIALLY_FILLED",
+    "FILLED",
+    "CANCELLED",
+    "REJECTED",
+    "FAILED",
+    "UNKNOWN",
+)
 _TERMINAL_STATES = {"REJECTED", "CANCELLED", "FAILED"}
+# States a cancel / terminal transition may leave: not FILLED, not terminal.
+NON_TERMINAL_STATES: tuple[str, ...] = ("PENDING", "WORKING", "PARTIALLY_FILLED", "UNKNOWN")
+
+
+def _log_noop(writer: str, submission_id: str, to_state: str, expected_states) -> None:
+    logger.info(
+        "orders_store.%s: %s -> %s skipped; row not in expected states %s",
+        writer,
+        submission_id,
+        to_state,
+        tuple(expected_states),
+    )
 
 ATTEMPT_BODY_MISMATCH = "ATTEMPT_BODY_MISMATCH"
 
@@ -370,11 +399,16 @@ def _mirror_uuid_row(
 
     if payload == stored and not values:
         return {"action": "SKIPPED_UUID", "drift": None}
-    conn.execute(
+    # Expected state = the state read in this transaction: a concurrent
+    # transition (cancel, fill) since the read makes this a no-op.
+    written = conn.execute(
         update(order_submissions)
-        .where(order_submissions.c.submission_id == submission_id)
+        .where(order_submissions.c.submission_id == submission_id, order_submissions.c.state == existing_state)
         .values(legs=payload, updated_at=monotone_updated_at(now), **values)
     )
+    if not written.rowcount:
+        _log_noop("register_from_snapshot", submission_id, values.get("state", existing_state), (existing_state,))
+        return {"action": "NOOP", "drift": None}
     if terminal:
         kind = "IB_MIRROR_RESURRECT"
         detail = {"from_state": existing_state, "to_state": "WORKING", "reason": "ib_still_reports_open"}
@@ -845,11 +879,17 @@ def register_from_snapshot(
                 )
                 if legs is not _UNSET:
                     resurrect_values["legs"] = merge_observed_legs(existing_legs, legs)
-                conn.execute(
+                written = conn.execute(
                     update(order_submissions)
-                    .where(order_submissions.c.submission_id == existing_submission_id)
+                    .where(
+                        order_submissions.c.submission_id == existing_submission_id,
+                        order_submissions.c.state == existing_state,
+                    )
                     .values(**resurrect_values)
                 )
+                if not written.rowcount:
+                    _log_noop("register_from_snapshot", existing_submission_id, "WORKING", (existing_state,))
+                    return {"action": "NOOP", "drift": None}
                 conn.execute(
                     insert(order_events).values(
                         submission_id=existing_submission_id,
@@ -1026,11 +1066,12 @@ def mark_submitted(
     ib_order_id: str,
     perm_id: str | None,
     placing_client_id: int | None,
-    expected_states: tuple[str, ...] | None = None,
+    expected_states: tuple[str, ...],
 ) -> int:
-    """Stamp IB ids and move the row to WORKING. ``expected_states`` guards
-    the transition (orderRef recovery only adopts UNKNOWN / PENDING rows).
-    Returns the affected rowcount."""
+    """Stamp IB ids and move the row to WORKING, only from one of
+    ``expected_states`` (required: the place path passes PENDING, orderRef
+    recovery UNKNOWN / PENDING). A row in any other state is left as is,
+    logged, and 0 is returned. Returns the affected rowcount."""
     ensure_writable()
 
     def _int_or_none(value: str | None) -> int | None:
@@ -1048,9 +1089,10 @@ def mark_submitted(
     perm_id_int = _int_or_none(perm_id)
     ib_order_id_int = _int_or_none(ib_order_id)
     engine = get_sync_engine()
-    stmt = update(order_submissions).where(order_submissions.c.submission_id == submission_id)
-    if expected_states is not None:
-        stmt = stmt.where(order_submissions.c.state.in_(expected_states))
+    stmt = update(order_submissions).where(
+        order_submissions.c.submission_id == submission_id,
+        order_submissions.c.state.in_(expected_states),
+    )
     with engine.begin() as conn:
         result = conn.execute(
             stmt.values(
@@ -1063,6 +1105,7 @@ def mark_submitted(
             )
         )
         if not result.rowcount:
+            _log_noop("mark_submitted", submission_id, "WORKING", expected_states)
             return 0
         conn.execute(
             update(regime_overrides)
@@ -1082,6 +1125,7 @@ def mark_place_unknown(
     perm_id: str | None,
     placing_client_id: int | None,
     reason_code: str,
+    expected_states: tuple[str, ...],
 ) -> int:
     """PENDING → UNKNOWN for a place whose outcome the route cannot prove,
     stamping any IB ids the CLI returned. One conditional UPDATE: a row the
@@ -1101,9 +1145,14 @@ def mark_place_unknown(
         now = datetime.now(timezone.utc)
         result = conn.execute(
             update(order_submissions)
-            .where(order_submissions.c.submission_id == submission_id, order_submissions.c.state == "PENDING")
+            .where(
+                order_submissions.c.submission_id == submission_id,
+                order_submissions.c.state.in_(expected_states),
+            )
             .values(**values, updated_at=monotone_updated_at(now))
         )
+    if not result.rowcount:
+        _log_noop("mark_place_unknown", submission_id, "UNKNOWN", expected_states)
     return result.rowcount
 
 
@@ -1114,23 +1163,24 @@ def mark_terminal(
     reason_code: str | None,
     filled_qty: int | None,
     avg_fill_price: Decimal | None,
-    expected_states: tuple[str, ...] | None = None,
+    expected_states: tuple[str, ...],
 ) -> int:
     """Transition a submission to a terminal state. Returns the affected
     rowcount.
 
-    ``expected_states`` is an optional optimistic-concurrency guard: when
-    provided, the UPDATE only applies if the row is still in one of those
-    states. A concurrent transition (e.g. a user cancel or a fill event
-    landing between a caller's read and this write) leaves the row untouched
-    and returns 0, so the caller can avoid clobbering a newer terminal state.
+    ``expected_states`` (required) is the optimistic-concurrency guard: the
+    UPDATE only applies if the row is still in one of those states. A
+    concurrent transition (e.g. a user cancel or a fill event landing
+    between a caller's read and this write) leaves the row untouched, is
+    logged, and returns 0, so the caller never clobbers a newer state.
     """
     ensure_writable()
     now = datetime.now(timezone.utc)
     engine = get_sync_engine()
-    stmt = update(order_submissions).where(order_submissions.c.submission_id == submission_id)
-    if expected_states is not None:
-        stmt = stmt.where(order_submissions.c.state.in_(expected_states))
+    stmt = update(order_submissions).where(
+        order_submissions.c.submission_id == submission_id,
+        order_submissions.c.state.in_(expected_states),
+    )
     values = dict(state=state, reason_code=reason_code, updated_at=monotone_updated_at(now))
     if filled_qty is not None:
         # filled_qty=None keeps the stored fill state: a cancel releases only
@@ -1138,6 +1188,8 @@ def mark_terminal(
         values.update(filled_qty=filled_qty, avg_fill_price=avg_fill_price)
     with engine.begin() as conn:
         result = conn.execute(stmt.values(**values))
+    if not result.rowcount:
+        _log_noop("mark_terminal", submission_id, state, expected_states)
     return result.rowcount
 
 

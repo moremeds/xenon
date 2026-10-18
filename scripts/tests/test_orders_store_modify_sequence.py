@@ -41,6 +41,7 @@ def _seed_order(db_path, *, user_id: str, client_attempt_id: str, ib_order_id: s
         ib_order_id=ib_order_id,
         perm_id=None,
         placing_client_id=1,
+        expected_states=("PENDING",),
     )
 
 
@@ -124,6 +125,7 @@ def test_apply_modify_by_perm_id_monotonic(db_path):
         ib_order_id="77",
         perm_id="P77",
         placing_client_id=1,
+        expected_states=("PENDING",),
     )
 
     first = apply_modify_by_perm_id(perm_id="P77", sequence=1)

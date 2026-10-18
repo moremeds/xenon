@@ -86,6 +86,7 @@ def test_terminal_replay_returns_409(client):
         reason_code="IB_REJECT_201",
         filled_qty=0,
         avg_fill_price=None,
+        expected_states=("WORKING",),
     )
     r2 = client.post("/orders/place", json=_body(cid))
     assert r2.status_code == 409

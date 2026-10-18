@@ -32,7 +32,7 @@ def _insert_submission(conn, submission_id: str, perm_id: str | None) -> None:
             action="BUY",
             quantity=1,
             limit_price=100,
-            state="COMPLETED",
+            state="FILLED",
             perm_id=perm_id,
             submitted_at=_SUBMITTED,
             broker=_SCOPE.broker,

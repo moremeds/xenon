@@ -1397,12 +1397,23 @@ def begin_modify(submission_id: str, new_qty: int | None, scope: dict) -> Modify
         return ModifyReservationOutcome(accept=True, submission_id=submission_id, amend_id=amend_id, send_by=send_by)
 
 
+def _finite_decimal(value) -> Decimal | None:
+    """Decimal for a finite number, else None (the broker already accepted
+    the amend; an unparsable echo must never fail the settle)."""
+    try:
+        out = Decimal(str(value))
+    except (ArithmeticError, ValueError):
+        return None
+    return out if out.is_finite() else None
+
+
 def settle_modify(
     submission_id: str,
     amend_id: str | None,
     outcome: Literal["confirmed", "rejected", "uncertain"],
     scope: dict,
     new_qty: int | None = None,
+    new_limit_price: Decimal | float | str | None = None,
 ) -> bool:
     """Resolve one amend generation against the broker reply.
 
@@ -1411,7 +1422,8 @@ def settle_modify(
     `amend_id` — a delayed reply from an older amend never touches a newer
     one, and a reply after mirror reconciliation never rewrites quantity.
 
-    confirmed → quantity becomes new_qty (quantity amends), amend clears.
+    confirmed → quantity becomes new_qty (quantity amends) and limit_price
+                becomes new_limit_price (when given), amend clears.
     rejected  → the broker provably did not apply the amend, amend clears.
     uncertain → a quantity amend keeps pending_amend_qty + token so coverage
                 keeps reserving max(old,new); a price-only amend clears its
@@ -1432,6 +1444,10 @@ def settle_modify(
         values = {}
         if outcome == "confirmed" and qty_amend and new_qty is not None:
             values["quantity"] = int(new_qty)
+        if outcome == "confirmed" and new_limit_price is not None:
+            price = _finite_decimal(new_limit_price)
+            if price is not None:
+                values["limit_price"] = price
         _write_payload(conn, submission_id, orders_store._clear_pending(payload), **values)
         return True
 

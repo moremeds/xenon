@@ -1040,23 +1040,41 @@ def _snapshotter_health(scope: dict | None = None) -> dict:
 def _order_submissions_health(scope: dict | None = None) -> dict:
     """Every UNKNOWN row in scope (no age window): an unresolved uncertain
     place keeps its Gate-4 reservation until an operator or the orderRef
-    recovery resolves it, so it must stay visible however old it is."""
+    recovery resolves it, so it must stay visible however old it is.
+
+    `stale_pending_count` counts PENDING rows older than the rehydrate
+    PENDING timeout: a place that crashed or lost its DB write after IB
+    may have accepted it. The activity poller binds such a row only from
+    broker evidence (orderRef); a row without evidence is counted here and
+    never changed (spec §2.6)."""
+    from xenon.execution.single_leg_rehydrate import PENDING_TIMEOUT_SECONDS
+
     try:
         engine = get_sync_engine()
+        stale_before = datetime.now(timezone.utc) - timedelta(seconds=PENDING_TIMEOUT_SECONDS)
         with engine.connect() as conn:
-            stmt = select(func.count(), func.min(order_submissions.c.submitted_at)).where(
-                order_submissions.c.state == "UNKNOWN"
-            )
+            stmt = select(
+                func.count().filter(order_submissions.c.state == "UNKNOWN"),
+                func.min(order_submissions.c.submitted_at).filter(order_submissions.c.state == "UNKNOWN"),
+                func.count().filter(
+                    order_submissions.c.state == "PENDING", order_submissions.c.submitted_at < stale_before
+                ),
+            ).where(order_submissions.c.state.in_(("UNKNOWN", "PENDING")))
             if scope is not None:
                 stmt = stmt.where(
                     order_submissions.c.broker == scope["broker"],
                     order_submissions.c.account_env == scope["account_env"],
                     order_submissions.c.broker_account == scope["broker_account"],
                 )
-            unknown_count, oldest = conn.execute(stmt).one()
+            unknown_count, oldest, stale_pending = conn.execute(stmt).one()
     except Exception:
         logger.warning("[health] failed to load order submissions health", exc_info=True)
-        return {"unknown_count": None, "oldest_unknown_age_seconds": None, "alarm": False}
+        return {
+            "unknown_count": None,
+            "oldest_unknown_age_seconds": None,
+            "stale_pending_count": None,
+            "alarm": False,
+        }
 
     count = int(unknown_count or 0)
     oldest_age = None
@@ -1064,7 +1082,12 @@ def _order_submissions_health(scope: dict | None = None) -> dict:
         if oldest.tzinfo is None:
             oldest = oldest.replace(tzinfo=timezone.utc)
         oldest_age = max(0, int((datetime.now(timezone.utc) - oldest).total_seconds()))
-    return {"unknown_count": count, "oldest_unknown_age_seconds": oldest_age, "alarm": count > 5}
+    return {
+        "unknown_count": count,
+        "oldest_unknown_age_seconds": oldest_age,
+        "stale_pending_count": int(stale_pending or 0),
+        "alarm": count > 5,
+    }
 
 
 def _flex_divergence_health() -> dict:
@@ -2671,6 +2694,7 @@ async def _place_reserved(body: dict, submission_id: str, scope: dict):
                     reason_code=qv.reason_code.value if qv.reason_code else "QUOTE_REJECT",
                     filled_qty=0,
                     avg_fill_price=None,
+                    expected_states=("PENDING",),
                 )
                 return JSONResponse(
                     status_code=quote_status,
@@ -2693,6 +2717,7 @@ async def _place_reserved(body: dict, submission_id: str, scope: dict):
             ib_order_id=str(order_id),
             perm_id=str(perm_id),
             placing_client_id=26,
+            expected_states=("PENDING",),
         )
         return {
             "status": "ok",
@@ -2896,6 +2921,7 @@ def _place_outcome_unknown(submission_id: str, data: dict) -> JSONResponse:
             perm_id=str(data.get("permId") or "") or None,
             placing_client_id=int(data["clientId"]) if data.get("clientId") is not None else None,
             reason_code=ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
+            expected_states=("PENDING",),
         )
         if applied and (data.get("orderId") or data.get("permId") or data.get("code")):
             _record_place_event(
@@ -3250,6 +3276,7 @@ async def _orders_replace_from_body(body: dict):
                 perm_id=None,
                 placing_client_id=None,
                 reason_code="REPLACE_CANCEL_UNCERTAIN",
+                expected_states=("PENDING",),
             )
             return JSONResponse(
                 status_code=502,
@@ -3314,6 +3341,9 @@ def _mark_submission_cancelled(submission_id: str | None) -> None:
             reason_code="USER_CANCEL",
             filled_qty=None,
             avg_fill_price=None,
+            # Never over FILLED or an earlier terminal state (a fill or a
+            # TWS-cancel mirror that landed first wins).
+            expected_states=orders_store.NON_TERMINAL_STATES,
         )
     except Exception:  # pragma: no cover — best-effort
         logger.warning("Failed to mark submission %s CANCELLED", submission_id, exc_info=True)
@@ -3579,6 +3609,7 @@ async def _orders_modify_from_body(body: dict):
             "confirmed",
             _scope,
             new_qty=int(new_quantity) if new_quantity is not None else None,
+            new_limit_price=new_price,
         )
     _record_manage_event(
         str(order_id or ""),
