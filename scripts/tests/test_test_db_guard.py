@@ -86,6 +86,65 @@ def test_guard_refuses_non_test_db_name(dbname: str) -> None:
         tdb.bind_database_url_to_test_db(env)
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "dbname=core_dev",  # psycopg would connect to core_dev
+        "host=127.0.0.1",  # overrides the URL host
+        "hostaddr=10.0.0.1",
+        "port=5433",
+        "service=prod",
+        "options=-c%20dbname%3Dcore_dev",
+    ],
+)
+def test_guard_refuses_routing_query_in_test_url(query: str) -> None:
+    """Query params can re-route the connection away from the URL's
+    host/dbname, so the guard cannot trust what it parsed."""
+    env = _env(DATABASE_URL_TEST=f"postgresql+psycopg://u@localhost/xenon_test?{query}")
+    with pytest.raises(tdb.UnsafeTestDatabaseError, match="routing"):
+        tdb.bind_database_url_to_test_db(env)
+
+
+def test_guard_refuses_test_url_rerouted_onto_database_url() -> None:
+    """Counterexample from review: `elsewhere/core_test?host=127.0.0.1` looks
+    different from `localhost/core_test` but connects to it."""
+    env = _env(
+        DATABASE_URL="postgresql+asyncpg://u@localhost/core_test",
+        DATABASE_URL_TEST="postgresql+asyncpg://u@elsewhere/core_test?host=127.0.0.1",
+    )
+    with pytest.raises(tdb.UnsafeTestDatabaseError):
+        tdb.bind_database_url_to_test_db(env)
+
+
+def test_guard_refuses_database_url_with_routing_query() -> None:
+    """An original DATABASE_URL with routing params cannot be compared."""
+    env = _env(
+        DATABASE_URL="postgresql+asyncpg://u@elsewhere/other?dbname=xenon_test&host=localhost",
+        DATABASE_URL_TEST="postgresql+asyncpg://u@localhost/xenon_test",
+    )
+    with pytest.raises(tdb.UnsafeTestDatabaseError, match="DATABASE_URL"):
+        tdb.bind_database_url_to_test_db(env)
+
+
+def test_guard_keeps_non_routing_query_and_suffixes_database() -> None:
+    env = _env(
+        DATABASE_URL_TEST="postgresql+asyncpg://u@localhost/xenon_test?application_name=pytest",
+        PYTEST_XDIST_WORKER="gw0",
+    )
+    bound = tdb.bind_database_url_to_test_db(env)
+    assert bound == "postgresql+asyncpg://u@localhost/xenon_test_gw0?application_name=pytest"
+
+
+def test_worker_suffix_changes_database_not_query(monkeypatch) -> None:
+    """Review counterexample: a raw-string split suffixed the query value
+    (`application_name=pytest_gw0`) and left every worker on `xenon_test`."""
+    monkeypatch.setenv("DATABASE_URL_TEST", "postgresql+asyncpg://u@localhost/xenon_test?application_name=pytest")
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw0")
+    url = tdb.sync_test_db_url()
+    assert url == "postgresql+psycopg://u@localhost/xenon_test_gw0?application_name=pytest"
+    assert tdb.sync_test_db_url() == url  # idempotent
+
+
 def test_guard_in_xdist_worker_uses_inherited_original_and_worker_db() -> None:
     """xdist workers inherit the controller's rewritten DATABASE_URL. The guard
     must compare against the inherited original identity, not the rewritten
@@ -182,6 +241,9 @@ class _RaisingEngine:
     def begin(self):
         raise self._exc
 
+    def connect(self):
+        raise self._exc
+
 
 def test_truncate_reraises_non_connection_errors(monkeypatch) -> None:
     exc = OperationalError("TRUNCATE ...", {}, psycopg.errors.DeadlockDetected("deadlock detected"))
@@ -197,6 +259,25 @@ def test_truncate_marks_offline_on_connection_error(monkeypatch) -> None:
     monkeypatch.setattr(tdb, "_PG_REACHABLE", True)
     monkeypatch.setattr(tdb, "get_session_engine", lambda: _RaisingEngine(exc))
     tdb.truncate_all_xenon_tables()
+    assert tdb._PG_REACHABLE is False
+
+
+def test_reachability_probe_reraises_non_connection_errors(monkeypatch) -> None:
+    """A probe failure that is not a connection error must surface instead of
+    caching "offline" for the whole session."""
+    exc = ProgrammingError("SELECT 1", {}, psycopg.errors.InsufficientPrivilege("permission denied"))
+    monkeypatch.setattr(tdb, "_PG_REACHABLE", None)
+    monkeypatch.setattr(tdb, "get_session_engine", lambda: _RaisingEngine(exc))
+    with pytest.raises(ProgrammingError):
+        tdb.is_pg_reachable()
+    assert tdb._PG_REACHABLE is None
+
+
+def test_reachability_probe_caches_offline_on_connection_error(monkeypatch) -> None:
+    exc = OperationalError("connect", {}, psycopg.OperationalError("connection refused"))
+    monkeypatch.setattr(tdb, "_PG_REACHABLE", None)
+    monkeypatch.setattr(tdb, "get_session_engine", lambda: _RaisingEngine(exc))
+    assert tdb.is_pg_reachable() is False
     assert tdb._PG_REACHABLE is False
 
 
@@ -250,6 +331,24 @@ def test_worker_db_created_from_unsuffixed_template(monkeypatch) -> None:
     tdb._prepare_worker_db("gw3")
     create = [s for s in statements if s.startswith("CREATE DATABASE")]
     assert create == ['CREATE DATABASE "xenon_test_gw3" TEMPLATE "xenon_test"']
+
+
+def test_worker_db_with_query_url_is_not_the_template(monkeypatch) -> None:
+    statements: list[str] = []
+    _patch_admin(monkeypatch, _FakeAdminEngine(_FakeAdminConn(None, statements)))
+    monkeypatch.setenv("DATABASE_URL_TEST", "postgresql+asyncpg://u@127.0.0.1:5432/xenon_test?application_name=pytest")
+    tdb._prepare_worker_db("gw3")
+    create = [s for s in statements if s.startswith("CREATE DATABASE")]
+    assert create == ['CREATE DATABASE "xenon_test_gw3" TEMPLATE "xenon_test"']
+
+
+def test_worker_db_equal_to_template_fails_loudly(monkeypatch) -> None:
+    """Defense in depth: if suffixing ever leaves the worker DB equal to the
+    template, the worker must fail instead of sharing the template DB."""
+    _patch_admin(monkeypatch, _FakeAdminEngine(_FakeAdminConn(None, [])))
+    monkeypatch.setattr(tdb, "_with_worker_suffix", lambda url, wid: url)
+    with pytest.raises(tdb.UnsafeTestDatabaseError, match="not distinct"):
+        tdb._prepare_worker_db("gw3")
 
 
 def test_worker_db_create_failure_fails_loudly(monkeypatch) -> None:

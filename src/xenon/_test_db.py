@@ -143,22 +143,32 @@ def _base_test_db_url(environ: Any) -> str:
 
 
 def _with_worker_suffix(url: str, wid: str | None) -> str:
+    """Suffix the parsed database name with `_<wid>`; keep the query string.
+
+    Only `URL.database` changes: a raw string split would suffix the last
+    query value instead (`?application_name=pytest_gw0`) and leave every
+    worker on the shared DB. Idempotent: the autouse fixture rewrites
+    DATABASE_URL_TEST in env to the worker URL, and the next call reads that
+    already-suffixed value — it must not become `xenon_test_gw0_gw0`.
+    """
     if wid is None:
         return url
-    base, _, dbname = url.rpartition("/")
-    # Idempotent suffix: the autouse fixture rewrites DATABASE_URL_TEST in env
-    # so test helpers reading it directly land on the worker DB. The NEXT call
-    # reads the already-suffixed env value — without this guard we'd append
-    # `_gw0` to `xenon_test_gw0` and get `xenon_test_gw0_gw0`.
+    from sqlalchemy.engine.url import make_url
+
+    parsed = make_url(url)
+    dbname = parsed.database or ""
     suffix = f"_{wid}"
     if dbname.endswith(suffix):
         return url
-    return f"{base}/{dbname}{suffix}"
+    return parsed.set(database=f"{dbname}{suffix}").render_as_string(hide_password=False)
 
 
 def _without_worker_suffix(url: str, wid: str) -> str:
-    base, _, dbname = url.rpartition("/")
-    return f"{base}/{dbname.removesuffix(f'_{wid}')}"
+    from sqlalchemy.engine.url import make_url
+
+    parsed = make_url(url)
+    dbname = (parsed.database or "").removesuffix(f"_{wid}")
+    return parsed.set(database=dbname).render_as_string(hide_password=False)
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +185,24 @@ _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 class UnsafeTestDatabaseError(RuntimeError):
     """The test DB could be a non-test database; the session must not run."""
+
+
+# libpq/psycopg connection params that can re-route a connection away from
+# the URL's own host/dbname (`?dbname=core_dev`, `?host=...`). `options` only
+# counts when it mentions dbname.
+_ROUTING_QUERY_KEYS = frozenset({"host", "hostaddr", "port", "dbname", "database", "service", "servicefile"})
+
+
+def _routing_query_keys(url: str) -> list[str]:
+    """Query keys of `url` that can change which server/database it reaches."""
+    from sqlalchemy.engine.url import make_url
+
+    keys = []
+    for key, value in make_url(url).query.items():
+        values = value if isinstance(value, tuple) else (value,)
+        if key.lower() in _ROUTING_QUERY_KEYS or (key.lower() == "options" and any("dbname" in v for v in values)):
+            keys.append(key)
+    return sorted(keys)
 
 
 def _db_identity(url: str) -> str:
@@ -201,13 +229,21 @@ def bind_database_url_to_test_db(environ: Any = None) -> str:
 
     Called at root-conftest import, before any xenon module that caches an
     engine is imported. Refuses (raises `UnsafeTestDatabaseError`) when the
-    test DB name is `core_dev` or lacks `test`, or when the test DB has the
-    same host+dbname as the original `DATABASE_URL`. Returns the bound
+    test DB name is `core_dev` or lacks `test`, when the test DB has the
+    same host+dbname as the original `DATABASE_URL`, or when either URL has
+    connection-routing query params (host, hostaddr, port, dbname, database,
+    service, servicefile, or options naming a dbname). Returns the bound
     (asyncpg, worker-suffixed under xdist) URL.
     """
     env = os.environ if environ is None else environ
     if DB_GUARD_ORIGINAL_ENV not in env:
         original = env.get("DATABASE_URL", "")
+        if original and _routing_query_keys(original):
+            raise UnsafeTestDatabaseError(
+                "Refusing to run pytest: DATABASE_URL has connection-routing query "
+                f"params {_routing_query_keys(original)}, so the test DB cannot be "
+                f"proved to be a different database. {_GUARD_FIX_HINT}"
+            )
         env[DB_GUARD_ORIGINAL_ENV] = _db_identity(original) if original else ""
     original_identity = env[DB_GUARD_ORIGINAL_ENV]
 
@@ -215,6 +251,13 @@ def bind_database_url_to_test_db(environ: Any = None) -> str:
 
     base = _base_test_db_url(env).replace("postgresql+psycopg://", "postgresql+asyncpg://")
     bound = _with_worker_suffix(base, _resolve_worker_id(env.get("PYTEST_XDIST_WORKER", "")))
+    routing = _routing_query_keys(base)
+    if routing:
+        raise UnsafeTestDatabaseError(
+            f"Refusing to run pytest: DATABASE_URL_TEST has connection-routing query "
+            f"params {routing}; they can connect to a different server or database "
+            f"than the URL shows. {_GUARD_FIX_HINT}"
+        )
     for url in (base, bound):
         dbname = make_url(url).database or ""
         if dbname == "core_dev" or "test" not in dbname.lower():
@@ -264,7 +307,11 @@ def is_pg_reachable() -> bool:
         with get_session_engine().connect() as conn:
             conn.execute(text("SELECT 1"))
         _PG_REACHABLE = True
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
+        # Only "cannot connect" is offline. Anything else (permission denied,
+        # a bad statement) re-raises instead of silently skipping PG tests.
+        if not _is_connection_error(exc):
+            raise
         _PG_REACHABLE = False
     return _PG_REACHABLE
 
@@ -272,10 +319,11 @@ def is_pg_reachable() -> bool:
 def mark_offline() -> None:
     """Downgrade reachability cache to False.
 
-    Called when a TRUNCATE fails despite the connectivity probe passing —
-    typically a missing schema on a freshly-spun PG instance. Subsequent
-    tests then skip truncation entirely and rely on `pg_test_engine`'s
-    explicit skip for tests that actually need the DB.
+    Called when a TRUNCATE hits a connection error after the probe passed
+    (PG went away mid-session). A missing schema is not offline: TRUNCATE
+    re-raises it and `_pg_schema_guard` reports the missing tables.
+    Subsequent tests skip truncation and rely on `pg_test_engine`'s explicit
+    skip for tests that actually need the DB.
     """
     global _PG_REACHABLE
     _PG_REACHABLE = False
@@ -510,6 +558,11 @@ def _prepare_worker_db(wid: str) -> None:
     template_url = make_url(_without_worker_suffix(sync_test_db_url(worker_id=wid), wid))
     target_db = target_url.database
     template_db = template_url.database
+    if not target_db or target_db == template_db:
+        raise UnsafeTestDatabaseError(
+            f"xdist worker {wid}: worker DB {target_db!r} is not distinct from the "
+            f"template {template_db!r}; workers must not share one DB."
+        )
     admin_engine = create_engine(
         target_url.set(database="postgres"),
         isolation_level="AUTOCOMMIT",
