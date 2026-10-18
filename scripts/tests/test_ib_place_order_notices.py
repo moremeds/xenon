@@ -377,3 +377,22 @@ def test_filled_then_399_is_accepted(cli):
     assert result["initialStatus"] == "ValidationError"
     assert result["outcome"] == "accepted"
     assert result["status"] == "ok"
+
+
+def test_hard_error_then_genuine_submitted_is_accepted(cli):
+    # Any non-warning order error makes ib_async Wrapper.error cancel the
+    # trade locally (Cancelled + errorCode log entry). A LATER genuine IB
+    # orderStatus (errorCode 0) with a permId is IB's own word that the order
+    # is working; rejecting it would orphan a live order and invite a
+    # duplicate, so the later status clears the earlier hard error.
+    _WrapperClient.steps = [
+        ("error", _ORDER_ID, 10349, "order-scoped error"),
+        ("status", "Submitted", 4242),
+    ]
+
+    result = cli.place_order(dict(_STOCK))
+
+    assert result["outcome"] == "accepted"
+    assert result["status"] == "ok"
+    assert result["brokerStatus"] == "Submitted"
+    assert result["permId"] == 4242
