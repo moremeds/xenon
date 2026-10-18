@@ -27,7 +27,7 @@ later 399 → ValidationError — are ib_async's own. No network.
 from __future__ import annotations
 
 import pytest
-from ib_async import IB, Trade
+from ib_async import IB, Execution, Trade
 from ib_async import OrderStatus as IBOrderStatus
 
 from xenon.execution import ib_place_order
@@ -41,13 +41,17 @@ class _WrapperClient:
 
     ``steps`` replay during the ack wait (``sleep``):
     ``("error", reqId, code, msg)`` → ``Wrapper.error``;
-    ``("status", status, permId)`` → ``Wrapper.orderStatus``.
+    ``("status", status, permId)`` → ``Wrapper.orderStatus``;
+    ``("fill", permId, shares, price)`` → ``Wrapper.execDetails`` (live fill).
     """
 
     steps: list[tuple] = []
     connected = False
 
+    last: "_WrapperClient | None" = None
+
     def __init__(self):
+        self.__class__.last = self
         self._ib = IB()
         self._ib.wrapper.clientId = _CLIENT_ID
         self.trade: Trade | None = None
@@ -75,6 +79,17 @@ class _WrapperClient:
             if step[0] == "error":
                 _, req_id, code, msg = step
                 wrapper.error(req_id, code, msg, "")
+            elif step[0] == "fill":
+                _, perm_id, shares, price = step
+                execution = Execution(
+                    execId=f"exec-{len(self.trade.fills) + 1}",
+                    orderId=_ORDER_ID,
+                    clientId=_CLIENT_ID,
+                    permId=perm_id,
+                    shares=shares,
+                    price=price,
+                )
+                wrapper.execDetails(-1, self.trade.contract, execution)
             else:
                 _, status, perm_id = step
                 qty = float(self.trade.order.totalQuantity)
@@ -396,3 +411,58 @@ def test_hard_error_then_genuine_submitted_is_accepted(cli):
     assert result["status"] == "ok"
     assert result["brokerStatus"] == "Submitted"
     assert result["permId"] == 4242
+
+
+# --- round 5: a fill is acceptance; fill log entries are not status ----------
+
+
+def test_presubmitted_201_399_then_fill_is_accepted(cli):
+    _WrapperClient.steps = [
+        ("status", "PreSubmitted", 55),
+        ("error", _ORDER_ID, 201, "Order rejected - reason: margin"),
+        ("error", _ORDER_ID, 399, _W399),
+        ("fill", 55, 1.0, 1.0),
+    ]
+
+    result = cli.place_order(dict(_STOCK))
+
+    assert _WrapperClient.last.trade.log[-1].message == "Fill 1.0@1.0"
+    assert result["outcome"] == "accepted"
+    assert result["status"] == "ok"
+    assert result["filled"] is True
+    assert result["fillCount"] == 1
+    # The fill entry copied ValidationError; it is not broker status.
+    assert result["brokerStatus"] == "PreSubmitted"
+
+
+def test_inactive_399_then_fill_is_accepted(cli):
+    _WrapperClient.steps = [
+        ("status", "Inactive", 0),
+        ("error", _ORDER_ID, 399, _W399),
+        ("fill", 0, 1.0, 1.0),
+    ]
+
+    result = cli.place_order(dict(_STOCK))
+
+    assert result["outcome"] == "accepted"
+    assert result["filled"] is True
+    assert result["brokerStatus"] == "Inactive"
+
+
+def test_inactive_55_then_399_without_fill_is_rejected(cli):
+    _WrapperClient.steps = [("status", "Inactive", 55), ("error", _ORDER_ID, 399, _W399)]
+
+    result = cli.place_order(dict(_STOCK))
+
+    assert result["outcome"] == "rejected"
+    assert result["filled"] is False
+    assert result["fillCount"] == 0
+
+
+def test_201_399_without_fill_is_rejected(cli):
+    _WrapperClient.steps = [("error", _ORDER_ID, 201, "Order rejected"), ("error", _ORDER_ID, 399, _W399)]
+
+    result = cli.place_order(dict(_STOCK))
+
+    assert result["outcome"] == "rejected"
+    assert result["filled"] is False

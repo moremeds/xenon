@@ -12,6 +12,7 @@ Usage:
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -69,7 +70,13 @@ def is_hard_error(code: object) -> bool:
     return value in _NEW_ORDER_VALIDATION_FAILURES or not _is_notice(value)
 
 
-def decide_outcome(log: list, perm_id: int) -> tuple[str, int | None, str | None, str]:
+# ib_async 2.1.0 ``Wrapper.execDetails`` (ib_async/wrapper.py line 833, the
+# ``TradeLogEntry(time, trade.orderStatus.status, f"Fill {execution.shares}@{execution.price}")``
+# call) logs every new execution with errorCode 0 and a COPIED status.
+_FILL_ENTRY = re.compile(r"^Fill \S+@\S+$")
+
+
+def decide_outcome(log: list, perm_id: int) -> tuple[str, int | None, str | None, str, int]:
     """Classify a new order from its ordered ib_async ``Trade.log``.
 
     ib_async ``Wrapper.error`` overwrites ``trade.orderStatus.status`` on a
@@ -78,12 +85,17 @@ def decide_outcome(log: list, perm_id: int) -> tuple[str, int | None, str | None
     for status entries (``placeOrder``'s PendingSubmit, ``Wrapper.orderStatus``)
     and the IB code for error / warning entries.
 
-    Returns ``(outcome, code, message, broker_status)``; outcome is
-    ``accepted`` | ``rejected`` | ``unconfirmed``:
+    Returns ``(outcome, code, message, broker_status, fill_count)``; outcome
+    is ``accepted`` | ``rejected`` | ``unconfirmed``:
 
-    - broker_status := status of the LAST errorCode == 0 entry (warning and
-      error entries never count; ``execDetails`` fill entries also carry
-      errorCode 0 and copy the current status — not special-cased);
+    - any fill entry → accepted, whatever the status or permId says. A fill
+      is the strongest evidence that IB accepted AND executed the order;
+      reporting a traded order as rejected invites a duplicate. Fill entries
+      (``Fill <shares>@<price>``, errorCode 0) copy whatever status is
+      current, so they never count as broker_status and never reset a
+      hard error;
+    - broker_status := status of the LAST non-fill errorCode == 0 entry
+      (warning and error entries never count);
     - rejected: broker_status terminal (Cancelled / ApiCancelled / Inactive),
       or a hard error after the last broker_status. An earlier permId never
       clears a later rejection;
@@ -95,22 +107,27 @@ def decide_outcome(log: list, perm_id: int) -> tuple[str, int | None, str | None
     broker_status = ""
     hard_after: tuple[int, str] | None = None
     first_hard: tuple[int, str] | None = None
+    fill_count = 0
     for entry in log:
         code = int(getattr(entry, "errorCode", 0) or 0)
         message = str(getattr(entry, "message", "") or "")
-        if code == 0:
+        if code == 0 and _FILL_ENTRY.match(message):
+            fill_count += 1
+        elif code == 0:
             broker_status = str(getattr(entry, "status", "") or "")
             hard_after = None
         elif is_hard_error(code):
             first_hard = first_hard or (code, message)
             hard_after = hard_after or (code, message)
+    if fill_count:
+        return "accepted", None, None, broker_status, fill_count
     if broker_status in TERMINAL_STATUSES or hard_after:
         code, message = hard_after or first_hard or (None, f"order {broker_status}")
-        return "rejected", code, message, broker_status
+        return "rejected", code, message, broker_status, 0
     live = broker_status in OrderStatus.ActiveStates and perm_id > 0
     if broker_status == OrderStatus.Filled or live:
-        return "accepted", None, None, broker_status
-    return "unconfirmed", None, None, broker_status
+        return "accepted", None, None, broker_status, 0
+    return "unconfirmed", None, None, broker_status, 0
 
 
 def _parse_quantity(raw: object) -> int | None:
@@ -283,7 +300,7 @@ def place_order(params: dict) -> dict:
         status = trade.orderStatus.status if trade.orderStatus else "Unknown"
 
         notices = [{"reqId": r, "code": c, "message": m} for r, c, m in ib_events]
-        outcome, code, msg, broker_status = decide_outcome(list(getattr(trade, "log", None) or []), perm_id)
+        outcome, code, msg, broker_status, fill_count = decide_outcome(list(getattr(trade, "log", None) or []), perm_id)
         if outcome == "rejected":
             # Prefer IB's raw text over ib_async's "Error 201, reqId 7: ..." log line.
             msg = next((m for r, c, m in ib_events if r == order_id and c == code), msg)
@@ -319,6 +336,8 @@ def place_order(params: dict) -> dict:
                 "initialStatus": status,
                 "brokerStatus": broker_status,
                 "outcome": outcome,
+                "filled": False,
+                "fillCount": 0,
                 "clientId": client_id,
                 "ibNotices": notices,
             }
@@ -332,6 +351,8 @@ def place_order(params: dict) -> dict:
             "message": f"{action} {quantity} {symbol} @ ${limit_price:.2f} {accepted_tif} — {status}",
             "brokerStatus": broker_status,
             "outcome": outcome,
+            "filled": fill_count > 0,
+            "fillCount": fill_count,
             "clientId": client_id,
             "ibNotices": notices,
         }
