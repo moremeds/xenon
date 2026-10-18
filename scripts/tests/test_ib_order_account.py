@@ -169,10 +169,11 @@ class _FakeCliClient:
         cls.placed_order = order
         if cls.emit_error is not None:
             for handler in self._ib.errorEvent.handlers:
-                handler(0, *cls.emit_error)
+                handler(1, *cls.emit_error)  # reqId == the orderId placeOrder assigned
         return SimpleNamespace(
             order=SimpleNamespace(orderId=1, permId=0, tif=order.tif),
-            orderStatus=SimpleNamespace(status="Cancelled"),
+            # ib_async cancels a new order on a hard error; otherwise IB acks it.
+            orderStatus=SimpleNamespace(status="Cancelled" if cls.emit_error else "Submitted"),
         )
 
     def sleep(self, _seconds):

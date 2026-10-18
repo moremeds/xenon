@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 try:
-    from ib_async import ComboLeg, Contract, LimitOrder, Option, Stock, TagValue, util
+    from ib_async import ComboLeg, Contract, LimitOrder, Option, OrderStatus, Stock, TagValue, util
 except ImportError:
     print(json.dumps({"status": "error", "message": "ib_async not installed"}))
     sys.exit(1)
@@ -29,6 +29,36 @@ PORT = DEFAULT_GATEWAY_PORT
 # IB error 435 "You must specify an account": the gateway login manages more
 # than one account and the order named none.
 _IB_ACCOUNT_REQUIRED = 435
+
+# Data-farm status chatter — dropped entirely (not even surfaced as notices).
+_IB_FARM_STATUS_CODES = frozenset({2104, 2106, 2108, 2158, 10358})
+
+# IB codes that are warnings / notices, never a rejection by themselves.
+# Source: ib_async 2.1.0 ``Wrapper.error`` (ib_async/wrapper.py) warningCodes
+# {105, 110, 165, 321, 329, 399, 404, 434, 492, 10167} plus the 2100-2199
+# range that the same function also treats as warnings (its comments cite
+# the IBKR message-code table,
+# https://ibkrcampus.com/campus/ibkr-api-page/twsapi-doc/#api-error-codes).
+# 110 is excluded on purpose: on a new
+# (PendingSubmit) order ib_async itself turns 110 into a cancel, and the
+# place route maps it to LIMIT_OFF_TICK.
+_IB_NOTICE_CODES = frozenset({105, 165, 321, 329, 399, 404, 434, 492, 10167})
+
+# ib_async OrderStatus.DoneStates minus Filled: the order is dead at IB.
+_TERMINAL_STATUSES = OrderStatus.DoneStates - {OrderStatus.Filled}
+
+
+def _is_notice(code: int) -> bool:
+    return code in _IB_NOTICE_CODES or 2100 <= code < 2200
+
+
+def _order_is_live(status: str, perm_id: int) -> bool:
+    """True when IB holds the order: an ib_async active state (this includes
+    ValidationError, which ib_async sets on a warning for a still-live order),
+    or a permId assigned with no terminal status."""
+    if status in OrderStatus.ActiveStates:
+        return True
+    return bool(perm_id) and perm_id > 0 and status not in _TERMINAL_STATUSES
 
 
 def _build_stock_contract(params: dict) -> "Stock":
@@ -123,13 +153,14 @@ def place_order(params: dict) -> dict:
                 return {"status": "error", "message": f"Could not qualify contract: {symbol}"}
             contract = qualified[0]
 
-        # Capture IB error events so we can detect silent rejections
-        ib_errors: list = []
+        # Capture IB error events during the ack wait. Only events whose
+        # reqId is THIS order's orderId can reject it; reqId -1 is a
+        # connection-wide message and other reqIds belong to other requests.
+        ib_events: list[tuple[int, int, str]] = []
 
         def _on_error(reqId, errorCode, errorString, contract=None):
-            # Ignore informational codes
-            if errorCode not in (2104, 2106, 2108, 2158, 10358):
-                ib_errors.append((errorCode, errorString))
+            if errorCode not in _IB_FARM_STATUS_CODES:
+                ib_events.append((reqId, errorCode, errorString))
 
         client._ib.errorEvent += _on_error
 
@@ -162,9 +193,13 @@ def place_order(params: dict) -> dict:
         accepted_tif = getattr(trade.order, "tif", None) or tif
         status = trade.orderStatus.status if trade.orderStatus else "Unknown"
 
-        # Surface any IB error events caught during the wait
-        if ib_errors:
-            code, msg = ib_errors[0]
+        # Decide by order state, not by "any errorEvent arrived".
+        order_events = [(c, m) for r, c, m in ib_events if r == order_id]
+        hard_errors = [(c, m) for c, m in order_events if not _is_notice(c)]
+        notices = [{"reqId": r, "code": c, "message": m} for r, c, m in ib_events]
+        live = _order_is_live(status, perm_id or 0)
+        if status in _TERMINAL_STATUSES or (hard_errors and not live):
+            code, msg = (hard_errors or order_events or [(None, f"order {status}")])[0]
             # Code 110 = "The price does not conform to the minimum price
             # variation for this contract." Means our 0.01 tick stub
             # under-approximated the real tick rule for this instrument.
@@ -190,11 +225,12 @@ def place_order(params: dict) -> dict:
                 "status": "error",
                 "code": code,
                 **reason,
-                "message": f"IB error {code}: {msg}",
+                "message": f"IB error {code}: {msg}" if code is not None else f"IB {msg}",
                 "orderId": order_id,
                 "permId": perm_id,
                 "tif": accepted_tif,
                 "initialStatus": status,
+                "ibNotices": notices,
             }
 
         return {
@@ -204,6 +240,7 @@ def place_order(params: dict) -> dict:
             "tif": accepted_tif,
             "initialStatus": status,
             "message": f"{action} {quantity} {symbol} @ ${limit_price:.2f} {accepted_tif} — {status}",
+            "ibNotices": notices,
         }
 
     except IBOrderAccountError as e:

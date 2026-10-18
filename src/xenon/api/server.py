@@ -98,7 +98,7 @@ logging.getLogger("ib_async.wrapper").setLevel(logging.WARNING)
 logging.getLogger("ib_async.client").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
-from ib_async import Contract, Index, Option, Stock
+from ib_async import Contract, Index, Option, OrderStatus, Stock
 
 from xenon.clients.futu_client import FutuClient
 from xenon.clients.futu_exceptions import FutuConnectionError, FutuError
@@ -2402,6 +2402,28 @@ async def _orders_place_from_body(body: dict):
             avg_fill_price=None,
         )
         raise HTTPException(status_code=502, detail=result.error)
+    if result.data and result.data.get("status") == "error" and _place_result_is_live(result.data):
+        # IB holds the order (live status, or a permId with no terminal
+        # status) even though the CLI reported an error. Never mark it
+        # REJECTED: the user would retry and place a duplicate. Record the
+        # IB message and fall through to WORKING so the activity poller /
+        # rehydrate reconcile against IB by permId.
+        logger.warning(
+            "IB order live despite CLI error: submission=%s ib_code=%s status=%s permId=%s",
+            submission_id,
+            result.data.get("code"),
+            result.data.get("initialStatus"),
+            result.data.get("permId"),
+        )
+        _record_place_event(
+            submission_id,
+            {
+                "ib_code": result.data.get("code"),
+                "ib_message": result.data.get("message"),
+                "initial_status": result.data.get("initialStatus"),
+            },
+        )
+        result.data = {**result.data, "status": "ok"}
     if result.data and result.data.get("status") == "error":
         # B6 — write a reason_code the UI toast map can resolve. Most IB
         # rejections collapse to IB_REJECT, but tick-rule rejections
@@ -2456,7 +2478,30 @@ async def _orders_place_from_body(body: dict):
             perm_id=str(result.data.get("permId") or ""),
             placing_client_id=int(result.data.get("clientId") or 26),
         )
+        if result.data.get("ibNotices"):
+            _record_place_event(submission_id, {"notices": result.data["ibNotices"]})
     return result.data
+
+
+def _place_result_is_live(data: dict) -> bool:
+    """True when the place CLI result shows IB holding the order: an ib_async
+    active status, or a permId > 0 with no terminal (done) status."""
+    status = str(data.get("initialStatus") or "")
+    if status in OrderStatus.ActiveStates:
+        return True
+    try:
+        perm_id = int(data.get("permId") or 0)
+    except (TypeError, ValueError):
+        perm_id = 0
+    return perm_id > 0 and status not in OrderStatus.DoneStates
+
+
+def _record_place_event(submission_id: str, detail: dict) -> None:
+    """Best-effort IB_NOTICE audit row; a failed write never fails the place."""
+    try:
+        orders_store.record_event(submission_id, "IB_NOTICE", detail)
+    except Exception:  # pragma: no cover — event writes are best-effort
+        logger.warning("Failed to record IB_NOTICE event for submission %s", submission_id, exc_info=True)
 
 
 # F5.4 — cancel/modify failure classification

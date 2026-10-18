@@ -3,6 +3,7 @@
 The reservation row is stamped with the app.state scope account; the IB order
 must go to that same account, never to an account named by the request body
 and never to IB's default. Account failures surface a top-level reason_code.
+A CLI "error" for an order that is live at IB must never mark it REJECTED.
 
 No DB, no IB: orders_store, preflight and the subprocess runner are stubbed.
 """
@@ -12,6 +13,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from fastapi import HTTPException
 
 from xenon.api import server as server_mod
 from xenon.api.subprocess import ScriptResult
@@ -47,7 +49,7 @@ def harness(monkeypatch):
     monkeypatch.setattr(server_mod.app.state, "account", "U2222222", raising=False)
     monkeypatch.setattr(server_mod.app.state, "broker", "IB", raising=False)
 
-    calls: dict = {"terminal": [], "events": [], "runner": []}
+    calls: dict = {"terminal": [], "events": [], "runner": [], "submitted": []}
     monkeypatch.setattr(
         orders_store,
         "reserve_attempt",
@@ -57,7 +59,7 @@ def harness(monkeypatch):
     )
     monkeypatch.setattr(orders_store, "mark_terminal", lambda **kw: calls["terminal"].append(kw))
     monkeypatch.setattr(orders_store, "record_event", lambda *a, **_k: calls["events"].append(a))
-    monkeypatch.setattr(orders_store, "mark_submitted", lambda **_kw: None)
+    monkeypatch.setattr(orders_store, "mark_submitted", lambda **kw: calls["submitted"].append(kw))
 
     def set_result(data: dict):
         async def _runner(entry, args, timeout=30):
@@ -110,3 +112,64 @@ async def test_place_ib_435_maps_to_account_unresolved(harness):
     body = json.loads(resp.body)
     assert body["reason_code"] == "ACCOUNT_UNRESOLVED"
     assert harness["terminal"][0]["reason_code"] == "ACCOUNT_UNRESOLVED"
+
+
+# ---------------------------------------------------------------------------
+# A live order is never marked REJECTED (2026-10-17 399-warning incident)
+# ---------------------------------------------------------------------------
+
+
+async def test_place_error_payload_with_live_perm_id_is_not_rejected(harness):
+    # Older / defensive CLI payload: "error" while IB holds the order live.
+    harness["set_result"](
+        {
+            "status": "error",
+            "code": 399,
+            "message": "IB error 399: Order Message: Warning: your order will not be placed until ...",
+            "orderId": 7,
+            "permId": 123456,
+            "initialStatus": "PreSubmitted",
+        }
+    )
+
+    resp = await server_mod._orders_place_from_body(dict(_COMBO))
+
+    assert harness["terminal"] == []
+    assert harness["submitted"] == [
+        {"submission_id": "sub-1", "ib_order_id": "7", "perm_id": "123456", "placing_client_id": 26}
+    ]
+    assert resp["status"] == "ok"
+    assert resp["permId"] == 123456
+    assert any(e[1] == "IB_NOTICE" for e in harness["events"])
+
+
+async def test_place_error_payload_with_perm_id_but_cancelled_is_rejected(harness):
+    harness["set_result"](
+        {
+            "status": "error",
+            "code": 201,
+            "message": "IB error 201: Order rejected",
+            "orderId": 7,
+            "permId": 123456,
+            "initialStatus": "Cancelled",
+        }
+    )
+
+    with pytest.raises(HTTPException):
+        await server_mod._orders_place_from_body(dict(_COMBO))
+
+    assert harness["terminal"][0]["state"] == "REJECTED"
+    assert harness["submitted"] == []
+
+
+async def test_place_ok_with_notices_records_ib_notice_event(harness):
+    notices = [{"reqId": 7, "code": 399, "message": "Warning: ..."}]
+    harness["set_result"](
+        {"status": "ok", "orderId": 7, "permId": 123456, "initialStatus": "PreSubmitted", "ibNotices": notices}
+    )
+
+    resp = await server_mod._orders_place_from_body(dict(_COMBO))
+
+    assert resp["status"] == "ok"
+    assert harness["submitted"][0]["perm_id"] == "123456"
+    assert ("sub-1", "IB_NOTICE", {"notices": notices}) in harness["events"]
