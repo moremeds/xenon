@@ -2644,9 +2644,23 @@ async def _orders_place_from_body(body: dict):
     # Place on the account the reservation row was stamped with — never on an
     # account named by the request body, never on IB's default. The
     # subprocess fails closed if it is legacy_unknown or not managed.
-    order_json = json.dumps({**body, "account": scope["broker_account"]})
-    result = await _run_ib_script_with_recovery("xenon-ib-place-order", ["--json", order_json], timeout=15)
+    # submission_id becomes orderRef "xo:<submission_id>" (recovery key); a
+    # body-supplied orderRef is dropped.
+    cli_body = {k: v for k, v in body.items() if k != "orderRef"}
+    order_json = json.dumps({**cli_body, "account": scope["broker_account"], "submission_id": submission_id})
+    # Budget: connect (10 s) + qualify + ack wait (5 s combo) must fit with
+    # margin — a kill mid-place leaves the order's fate unknown.
+    result = await _run_ib_script_with_recovery(
+        "xenon-ib-place-order", ["--json", order_json], timeout=_PLACE_SUBPROCESS_TIMEOUT_S
+    )
+    if not result.ok and result.spawned:
+        # Timeout (SIGKILL), crash, or a Gateway drop after the CLI started:
+        # IB may hold the order. Never FAILED without broker evidence (OP-1).
+        logger.warning("place subprocess failed after spawn: submission=%s error=%s", submission_id, result.error)
+        return _place_outcome_unknown(submission_id, result.data or {})
     if not result.ok:
+        # Refused before the CLI started (cooldown / Gateway down): nothing
+        # reached IB, so the reservation is released.
         orders_store.mark_terminal(
             submission_id=submission_id,
             state="FAILED",
@@ -2725,12 +2739,23 @@ async def _orders_place_from_body(body: dict):
         )
     # The CLI returns the clientId it really placed with ("auto" allocates
     # one); cancel / modify must reuse it. 26 is only the legacy fallback.
-    orders_store.mark_submitted(
-        submission_id=submission_id,
-        ib_order_id=str(result.data.get("orderId") or ""),
-        perm_id=str(result.data.get("permId") or ""),
-        placing_client_id=int(result.data.get("clientId") or 26),
-    )
+    try:
+        orders_store.mark_submitted(
+            submission_id=submission_id,
+            ib_order_id=str(result.data.get("orderId") or ""),
+            perm_id=str(result.data.get("permId") or ""),
+            placing_client_id=int(result.data.get("clientId") or 26),
+        )
+    except Exception as exc:
+        # IB accepted the order: report it (never a 5xx that invites a
+        # resend). The row stays PENDING; orderRef recovery repairs it.
+        logger.error("place: IB accepted but persist failed: submission=%s", submission_id, exc_info=True)
+        _record_place_event(submission_id, {"persist_error": str(exc)})
+        return {
+            **result.data,
+            "submission_id": submission_id,
+            "persist_warning": "Order accepted by IB but not saved; it will be reconciled from IB.",
+        }
     if result.data.get("ibNotices"):
         _record_place_event(submission_id, {"notices": result.data["ibNotices"]})
     return result.data
@@ -2755,6 +2780,8 @@ def _place_verdict(data: dict | None) -> str:
     if not data:
         return "unknown"
     outcome = data.get("outcome")
+    if data.get("status") == "uncertain" or outcome == "uncertain":
+        return "unknown"
     if outcome == "rejected":
         return "rejected"
     if outcome in ("accepted", "unconfirmed"):
@@ -2775,34 +2802,41 @@ def _place_outcome_unknown(submission_id: str, data: dict) -> JSONResponse:
     same-attempt retry would return "duplicate" and nothing would resolve
     it) and never call it rejected. UNKNOWN is the uncertain state /health
     counts; an operator resolves it against IB working orders. Any IB ids the
-    CLI returned are stored first so the row can be matched."""
-    if data.get("orderId") or data.get("permId"):
-        orders_store.mark_submitted(
+    CLI returned are stored first so the row can be matched; the activity
+    poller resolves the row by orderRef "xo:<submission_id>". A DB failure
+    here still returns the uncertain 502 (the row then stays PENDING, which
+    keeps the reservation too)."""
+    try:
+        if data.get("orderId") or data.get("permId"):
+            orders_store.mark_submitted(
+                submission_id=submission_id,
+                ib_order_id=str(data.get("orderId") or ""),
+                perm_id=str(data.get("permId") or ""),
+                placing_client_id=int(data.get("clientId") or 26),
+            )
+            _record_place_event(
+                submission_id,
+                {
+                    "ib_code": data.get("code"),
+                    "ib_message": data.get("message"),
+                    "initial_status": data.get("initialStatus"),
+                },
+            )
+        orders_store.mark_terminal(
             submission_id=submission_id,
-            ib_order_id=str(data.get("orderId") or ""),
-            perm_id=str(data.get("permId") or ""),
-            placing_client_id=int(data.get("clientId") or 26),
+            state="UNKNOWN",
+            reason_code=ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
+            filled_qty=0,
+            avg_fill_price=None,
         )
-        _record_place_event(
-            submission_id,
-            {
-                "ib_code": data.get("code"),
-                "ib_message": data.get("message"),
-                "initial_status": data.get("initialStatus"),
-            },
-        )
-    orders_store.mark_terminal(
-        submission_id=submission_id,
-        state="UNKNOWN",
-        reason_code=ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
-        filled_qty=0,
-        avg_fill_price=None,
-    )
+    except Exception:
+        logger.error("place: failed to persist UNKNOWN for submission %s", submission_id, exc_info=True)
     return JSONResponse(
         status_code=502,
         content={
             "detail": "Order outcome unknown — check working orders before placing it again. Do not resubmit.",
             "reason_code": ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
+            "submission_id": submission_id,
         },
     )
 
@@ -3799,6 +3833,8 @@ _IB_CONN_REFUSED_PATTERNS = (
 # traffic class — order-mutating entries and data/read entries get separate
 # timestamps so a failure in one class never blocks the other.
 _IB_SCRIPT_COOLDOWN_SECS = 15.0
+# connect timeout 10 s + qualify + ack wait 5 s (combo) ≈ 15 s; 30 s leaves margin.
+_PLACE_SUBPROCESS_TIMEOUT_S = 30
 _IB_ORDER_ENTRIES = frozenset({"xenon-ib-place-order", "xenon-ib-order-manage"})
 _ib_last_failure: dict[str, float] = {"data": 0.0, "order": 0.0}
 

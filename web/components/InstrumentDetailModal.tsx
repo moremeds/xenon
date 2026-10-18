@@ -10,7 +10,7 @@ import { InstrumentOrderQuoteTelemetry } from "./QuoteTelemetry";
 import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
 import { OrderTifSelector } from "@/lib/order/components/OrderTifSelector";
 import { useClientAttemptId } from "@/components/ticker-detail/useClientAttemptId";
-import { errorFromResponseBody } from "@/lib/order/responseError";
+import { errorFromResponseBody, isPlaceOutcomeUnknown } from "@/lib/order/responseError";
 
 export type InstrumentDetailProps = {
   leg: PortfolioLeg | null;
@@ -180,7 +180,9 @@ function LegOrderForm({
       const json = await res.json();
       if (!res.ok) {
         setError(errorFromResponseBody(json, "Order placement failed"));
-        attemptId.markTerminal();
+        // Uncertain: keep the attempt id (a resend never places twice).
+        if (isPlaceOutcomeUnknown(json)) attemptId.markUncertain();
+        else attemptId.markTerminal();
       } else {
         setSuccess(`Order placed: ${action} ${parsedQty}x ${ticker} ${strikeStr}${right} @ ${fmtPrice(parsedPrice)}`);
         setConfirmStep(false);

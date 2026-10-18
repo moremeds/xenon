@@ -9,7 +9,7 @@ import { fmtPrice } from "@/lib/positionUtils";
 import { OrderLegPills, type OrderLeg as UnifiedOrderLeg } from "@/lib/order";
 import { OrderTifSelector } from "@/lib/order/components/OrderTifSelector";
 import { useClientAttemptId } from "@/components/ticker-detail/useClientAttemptId";
-import { errorFromResponseBody } from "@/lib/order/responseError";
+import { errorFromResponseBody, isPlaceOutcomeUnknown } from "@/lib/order/responseError";
 import {
   seedTicketFromPosition,
   applyQtyChip,
@@ -127,7 +127,9 @@ export default function PositionOrderModal({
       const json = await res.json().catch(() => ({}));
       if (!res.ok) {
         setError(errorFromResponseBody(json, "Order placement failed"));
-        attemptId.markTerminal();
+        // Uncertain: keep the attempt id (a resend never places twice).
+        if (isPlaceOutcomeUnknown(json)) attemptId.markUncertain();
+        else attemptId.markTerminal();
         return;
       }
       const orderId = typeof json.orderId === "string" ? json.orderId : "";
@@ -462,7 +464,7 @@ export default function PositionOrderModal({
           <button
             className="btn-primary"
             onClick={handleSubmit}
-            disabled={submitting || !isValidQty || !isValidPrice}
+            disabled={submitting || !isValidQty || !isValidPrice || attemptId.uncertain}
             aria-label={submitLabel}
           >
             {submitLabel}

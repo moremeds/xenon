@@ -35,7 +35,7 @@ import WizardSessionStrip from "@/components/ticker-detail/WizardSessionStrip";
 import { useWizardLauncher } from "@/lib/useWizardLauncher";
 import { useWizardSession } from "@/lib/useWizardSession";
 import { useClientAttemptId } from "./useClientAttemptId";
-import { errorFromResponseBody } from "@/lib/order/responseError";
+import { errorFromResponseBody, isPlaceOutcomeUnknown } from "@/lib/order/responseError";
 
 /* ─── Types ─── */
 
@@ -412,7 +412,9 @@ function OrderBuilder({
       const json = await res.json();
       if (!res.ok) {
         setError(errorFromResponseBody(json, "Order placement failed"));
-        attemptId.markTerminal();
+        // Uncertain: keep the attempt id (a resend never places twice).
+        if (isPlaceOutcomeUnknown(json)) attemptId.markUncertain();
+        else attemptId.markTerminal();
       } else {
         setSuccess(`Order placed: ${structure || "Option"} on ${ticker}`);
         setConfirmStep(false);

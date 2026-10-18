@@ -24,6 +24,9 @@ export function useClientAttemptId({ ticker }: Options) {
   const [id, setId] = useState(() => randomAttemptId());
   const submitted = useRef(false);
   const first = useRef(true);
+  // PLACE_OUTCOME_UNKNOWN: IB may hold the order. The id is kept and the
+  // caller offers no retry until the user edits the order or switches ticker.
+  const [uncertain, setUncertain] = useState(false);
 
   useEffect(() => {
     if (first.current) {
@@ -32,6 +35,7 @@ export function useClientAttemptId({ ticker }: Options) {
     }
     setId(randomAttemptId());
     submitted.current = false;
+    setUncertain(false);
   }, [ticker]);
 
   const markSubmitted = useCallback(() => {
@@ -40,13 +44,18 @@ export function useClientAttemptId({ ticker }: Options) {
   const markTerminal = useCallback(() => {
     setId(randomAttemptId());
     submitted.current = false;
+    setUncertain(false);
+  }, []);
+  const markUncertain = useCallback(() => {
+    setUncertain(true);
   }, []);
   const onFieldEdit = useCallback((_field: string) => {
     if (submitted.current) {
       setId(randomAttemptId());
       submitted.current = false;
+      setUncertain(false);
     }
   }, []);
 
-  return { id, markSubmitted, markTerminal, onFieldEdit };
+  return { id, markSubmitted, markTerminal, markUncertain, uncertain, onFieldEdit };
 }

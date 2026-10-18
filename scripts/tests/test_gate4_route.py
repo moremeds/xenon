@@ -499,6 +499,101 @@ def test_place_outcome_vs_gate4_reservation(data, second_status, monkeypatch, cl
         assert first.json()["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
 
 
+# PR-07 (OP-1): a place subprocess that may have reached IB never ends FAILED.
+@pytest.mark.parametrize(
+    "script_result",
+    [
+        ScriptResult(ok=False, error="Entry point timed out after 30s"),
+        ScriptResult(ok=False, error="Entry point exited with code -9", exit_code=-9),
+        ScriptResult(ok=True, data={}),
+        ScriptResult(
+            ok=True,
+            data={"status": "uncertain", "outcome": "uncertain", "orderId": 4246, "permId": 0, "clientId": 31},
+        ),
+    ],
+    ids=["timeout", "crash", "empty-stdout", "crash-after-place"],
+)
+def test_uncertain_place_is_unknown_502_and_keeps_reservation(
+    script_result, monkeypatch, client, broker_calls, fresh_quote
+):
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_stock("SPY", 100)])
+    engine.dispose()
+    results = [script_result]
+
+    async def fake(entry: str, args: list, timeout: float = 30):
+        broker_calls.append({"entry": entry, "args": args, "timeout": timeout})
+        if results:
+            return results.pop(0)
+        return ScriptResult(ok=True, data={"status": "ok", "orderId": 4247, "permId": 777005, "clientId": 26})
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake)
+
+    first = client.post("/orders/place", json=_sell_call_body("rt-unc-1"))
+    assert first.status_code == 502, first.text
+    assert first.json()["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
+    row = _submission_rows()[0]._mapping
+    assert row["state"] == "UNKNOWN"
+    assert row["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
+    # The CLI carries orderRef "xo:<submission_id>" and a budget > connect+qualify+wait.
+    sent = json.loads(broker_calls[0]["args"][1])
+    assert sent["submission_id"] == row["submission_id"]
+    assert broker_calls[0]["timeout"] >= 30
+    # Reservation kept: the 100 shares stay committed to the unknown call.
+    second = client.post("/orders/place", json=_sell_call_body("rt-unc-2"))
+    assert second.status_code == 400, second.text
+    assert second.json()["reason_code"] == "ETF_CALL_UNCOVERED"
+    # Same attempt id again never reaches the broker a second time.
+    again = client.post("/orders/place", json=_sell_call_body("rt-unc-1"))
+    assert again.status_code in (200, 409), again.text
+    assert len(broker_calls) == 1
+
+
+def test_refused_before_spawn_is_failed_and_releases(monkeypatch, client, broker_calls, fresh_quote):
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_stock("SPY", 100)])
+    engine.dispose()
+
+    async def refused(entry: str, args: list, timeout: float = 30):
+        broker_calls.append({"entry": entry})
+        return ScriptResult(ok=False, error="IB Gateway is not accepting connections.", spawned=False)
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", refused)
+    resp = client.post("/orders/place", json=_sell_call_body("rt-refused-1"))
+    assert resp.status_code == 502
+    row = _submission_rows()[0]._mapping
+    assert (row["state"], row["reason_code"]) == ("FAILED", "SUBPROCESS_ERROR")
+
+
+def test_body_order_ref_is_never_forwarded(client, broker_calls, fresh_quote):
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_stock("SPY", 100)])
+    engine.dispose()
+    body = {**_sell_call_body("rt-ref-1"), "orderRef": "leg_wizard:spoof"}
+    resp = client.post("/orders/place", json=body)
+    assert resp.status_code == 200, resp.text
+    sent = json.loads(broker_calls[0]["args"][1])
+    assert "orderRef" not in sent
+    assert sent["submission_id"] == _submission_rows()[0]._mapping["submission_id"]
+
+
+def test_db_failure_after_ack_returns_200_with_persist_warning(monkeypatch, client, broker_calls, fresh_quote):
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_stock("SPY", 100)])
+    engine.dispose()
+
+    def db_down(**_kwargs):
+        raise RuntimeError("connection to server at 127.0.0.1 failed")
+
+    monkeypatch.setattr(server_mod.orders_store, "mark_submitted", db_down)
+    resp = client.post("/orders/place", json=_sell_call_body("rt-persist-1"))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert (body["orderId"], body["permId"]) == (4242, 777001)
+    assert body["persist_warning"]
+    assert body["submission_id"]
+
+
 # ---------------------------------------------------------------------------
 # /orders/modify — Gate 4 quantity reserve + persisted guarantee mode
 # ---------------------------------------------------------------------------

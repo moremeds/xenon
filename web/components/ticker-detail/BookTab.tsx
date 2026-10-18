@@ -12,7 +12,7 @@ import OrderErrorBanner from "@/components/OrderErrorBanner";
 import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
 import { OrderTifSelector } from "@/lib/order/components/OrderTifSelector";
 import { useClientAttemptId } from "./useClientAttemptId";
-import { errorFromResponseBody } from "@/lib/order/responseError";
+import { errorFromResponseBody, isPlaceOutcomeUnknown } from "@/lib/order/responseError";
 
 /* ─── Types ─── */
 
@@ -423,7 +423,9 @@ function StockOrderForm({
       const json = await res.json();
       if (!res.ok) {
         setError(errorFromResponseBody(json, "Order placement failed"));
-        attemptId.markTerminal();
+        // Uncertain: keep the attempt id (a resend never places twice).
+        if (isPlaceOutcomeUnknown(json)) attemptId.markUncertain();
+        else attemptId.markTerminal();
       } else {
         setSuccess(
           `Order placed: ${action} ${parsedQty} ${ticker} @ ${fmtPrice(parsedPrice)}`,

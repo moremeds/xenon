@@ -137,7 +137,7 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
   },
   PLACE_OUTCOME_UNKNOWN: {
     severity: "error",
-    copy: "Order outcome unknown — check working orders. Do not resubmit.",
+    copy: "Order submitted, status unknown — check working orders. Do not resubmit.",
   },
 };
 

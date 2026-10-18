@@ -661,7 +661,7 @@ def test_pending_timeout_older_than_60s(db_path):
     rehydrate_on_boot(lambda: ib, orders_store)
 
     state, _filled, _avg, reason, cai = _fetch_row(db_path, sid)
-    assert state == "FAILED"
+    assert state == "UNKNOWN"  # PR-07: no broker evidence → never FAILED
     assert reason == "PENDING_TIMEOUT"
     assert cai == "cai-P-5"  # client_attempt_id retained
 
@@ -888,5 +888,5 @@ def test_reconcile_helper_pending_timeout_pure():
         positions_changed=None,
         now=now_ts,
     )
-    assert d.to_state == "FAILED"
+    assert d.to_state == "UNKNOWN"
     assert d.reason_code == "PENDING_TIMEOUT"

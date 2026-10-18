@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { xenonFetch } from "@/lib/xenonApi";
+import { isXenonTimeout, PLACE_OUTCOME_UNKNOWN_BODY } from "@/lib/order/placeOutcome";
 import { passThroughXenonError } from "@/lib/passThroughXenonError";
 import {
   getRequestId,
@@ -199,30 +200,9 @@ export async function POST(request: Request): Promise<Response> {
       },
     );
 
-    // IB silent rejection: order was submitted but immediately cancelled/inactive.
-    const REJECTED_STATUSES = new Set([
-      "Cancelled",
-      "ApiCancelled",
-      "Inactive",
-      "Unknown",
-    ]);
-    const initialStatus = orderResult.initialStatus as string | undefined;
-    if (initialStatus && REJECTED_STATUSES.has(initialStatus)) {
-      const reason =
-        initialStatus === "Unknown"
-          ? `no acknowledgement (${initialStatus}) — order may not have reached IB`
-          : initialStatus;
-      return setNoStoreResponseHeaders(
-        jsonApiError({
-          message: `Order rejected by IB: ${reason}`,
-          status: 502,
-          code: "UPSTREAM_ERROR",
-          detail: JSON.stringify(orderResult),
-          requestId,
-        }),
-        requestId,
-      );
-    }
+    // FastAPI owns the place verdict (ordered Trade.log): a 200 means IB
+    // accepted or may hold the order. Never relabel it "rejected" from the
+    // final status — that invited a resend that duplicates the order.
 
     // Refresh orders after placement
     let refreshedOrders: Record<string, unknown> | null = null;
@@ -242,11 +222,23 @@ export async function POST(request: Request): Promise<Response> {
       tif: orderResult.tif ?? orderPayload.tif,
       initialStatus: orderResult.initialStatus,
       message: orderResult.message,
+      submission_id: orderResult.submission_id,
+      // IB accepted but the DB write failed; reconciliation repairs it.
+      ...(orderResult.persist_warning
+        ? { persist_warning: orderResult.persist_warning }
+        : {}),
       orders: refreshedOrders,
       requestId,
     });
     return setNoStoreResponseHeaders(response, requestId);
   } catch (error) {
+    if (isXenonTimeout(error)) {
+      // FastAPI may have placed the order; never report a plain failure.
+      const res = NextResponse.json(PLACE_OUTCOME_UNKNOWN_BODY, {
+        status: 502,
+      });
+      return setNoStoreResponseHeaders(res, requestId);
+    }
     return setNoStoreResponseHeaders(
       passThroughXenonError(error, requestId),
       requestId,

@@ -32,7 +32,7 @@ import WizardModal from "@/components/ticker-detail/WizardModal";
 import WizardSessionStrip from "@/components/ticker-detail/WizardSessionStrip";
 import { useWizardLauncher } from "@/lib/useWizardLauncher";
 import { useWizardSession } from "@/lib/useWizardSession";
-import { errorFromResponseBody } from "@/lib/order/responseError";
+import { errorFromResponseBody, isPlaceOutcomeUnknown } from "@/lib/order/responseError";
 
 type OrderTabProps = {
   ticker: string;
@@ -465,7 +465,9 @@ function NewOrderForm({
       const json = await res.json().catch(() => null);
       if (!res.ok) {
         setError(errorFromResponseBody(json, "Order placement failed"));
-        attemptId.markTerminal();
+        // Uncertain: keep the attempt id (a resend never places twice).
+        if (isPlaceOutcomeUnknown(json)) attemptId.markUncertain();
+        else attemptId.markTerminal();
       } else {
         setSuccess(
           `Order placed: ${action} ${parsedQty} ${ticker} @ ${fmtPrice(parsedPrice)}`,
@@ -634,7 +636,7 @@ function NewOrderForm({
             <button
               className={`btn-primary ${action === "SELL" ? "btn-danger" : ""}`}
               onClick={handlePlace}
-              disabled={!isValid || loading || !!nakedShortWarning}
+              disabled={!isValid || loading || !!nakedShortWarning || attemptId.uncertain}
             >
               {loading ? "Placing..." : "Confirm Order"}
             </button>
@@ -643,7 +645,7 @@ function NewOrderForm({
           <button
             className="btn-primary"
             onClick={handlePlace}
-            disabled={!isValid || loading || !!nakedShortWarning}
+            disabled={!isValid || loading || !!nakedShortWarning || attemptId.uncertain}
             style={{ width: "100%" }}
           >
             Place Order
@@ -814,7 +816,9 @@ function ComboOrderForm({
       const json = await res.json().catch(() => null);
       if (!res.ok) {
         setError(errorFromResponseBody(json, "Order placement failed"));
-        attemptId.markTerminal();
+        // Uncertain: keep the attempt id (a resend never places twice).
+        if (isPlaceOutcomeUnknown(json)) attemptId.markUncertain();
+        else attemptId.markTerminal();
       } else {
         setSuccess(
           `Combo order placed: ${action} ${parsedQty}x ${position.structure} @ ${fmtSignedPrice(parsedPrice)}`,
@@ -1309,7 +1313,7 @@ function ComboOrderForm({
             <button
               className={`btn-primary ${action === "SELL" ? "btn-danger" : ""}`}
               onClick={handlePlace}
-              disabled={!isValid || loading || !!nakedShortWarning}
+              disabled={!isValid || loading || !!nakedShortWarning || attemptId.uncertain}
             >
               {loading ? "Placing..." : "Confirm Order"}
             </button>
@@ -1318,7 +1322,7 @@ function ComboOrderForm({
           <button
             className="btn-primary"
             onClick={handlePlace}
-            disabled={!isValid || loading || !!nakedShortWarning}
+            disabled={!isValid || loading || !!nakedShortWarning || attemptId.uncertain}
             style={{ width: "100%" }}
           >
             Place Combo Order

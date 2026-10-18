@@ -96,6 +96,22 @@ _TERMINAL_STATES = {"REJECTED", "CANCELLED", "FAILED"}
 
 ATTEMPT_BODY_MISMATCH = "ATTEMPT_BODY_MISMATCH"
 
+# IB ``orderRef`` on every Xenon-placed order: "xo:<submission_id>". The
+# leg wizard keeps its own "leg_wizard:" prefix (naked_short_audit).
+XO_REF_PREFIX = "xo:"
+
+
+def order_ref_for(submission_id: str) -> str:
+    return f"{XO_REF_PREFIX}{submission_id}"
+
+
+def submission_id_from_order_ref(ref: object) -> str | None:
+    """The submission_id a Xenon orderRef names, else None (wizard,
+    TWS-typed, or empty refs)."""
+    if isinstance(ref, str) and ref.startswith(XO_REF_PREFIX) and len(ref) > len(XO_REF_PREFIX):
+        return ref[len(XO_REF_PREFIX) :]
+    return None
+
 # Sentinel for optional JSONB write-through params (register_from_snapshot):
 # "not provided" must not overwrite a stored value the caller never computed.
 _UNSET = object()
@@ -1010,7 +1026,11 @@ def mark_submitted(
     ib_order_id: str,
     perm_id: str | None,
     placing_client_id: int | None,
-) -> None:
+    expected_states: tuple[str, ...] | None = None,
+) -> int:
+    """Stamp IB ids and move the row to WORKING. ``expected_states`` guards
+    the transition (orderRef recovery only adopts UNKNOWN / PENDING rows).
+    Returns the affected rowcount."""
     ensure_writable()
 
     def _int_or_none(value: str | None) -> int | None:
@@ -1028,18 +1048,22 @@ def mark_submitted(
     perm_id_int = _int_or_none(perm_id)
     ib_order_id_int = _int_or_none(ib_order_id)
     engine = get_sync_engine()
+    stmt = update(order_submissions).where(order_submissions.c.submission_id == submission_id)
+    if expected_states is not None:
+        stmt = stmt.where(order_submissions.c.state.in_(expected_states))
     with engine.begin() as conn:
-        conn.execute(
-            update(order_submissions)
-            .where(order_submissions.c.submission_id == submission_id)
-            .values(
+        result = conn.execute(
+            stmt.values(
                 ib_order_id=str(ib_order_id),
                 perm_id=str(perm_id) if perm_id is not None else None,
                 placing_client_id=placing_client_id,
                 state="WORKING",
+                reason_code=None,
                 updated_at=monotone_updated_at(now),
             )
         )
+        if not result.rowcount:
+            return 0
         conn.execute(
             update(regime_overrides)
             .where(regime_overrides.c.submission_id == submission_id)
@@ -1048,6 +1072,7 @@ def mark_submitted(
                 ib_order_id=ib_order_id_int,
             )
         )
+    return result.rowcount
 
 
 def mark_terminal(

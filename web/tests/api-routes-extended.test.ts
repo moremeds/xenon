@@ -1162,6 +1162,8 @@ describe("POST /api/orders/place — extended", () => {
 // 6b. POST /api/orders/place — silent IB rejection (SPXU combo bug)
 // =============================================================================
 
+// PR-07: FastAPI decides rejected vs accepted from the ordered Trade.log
+// (terminal status → 502 IB_REJECT there). Next never relabels a 200.
 describe("POST /api/orders/place — silent IB rejection states", () => {
   const SPXU_COMBO_BODY = {
     client_attempt_id: "test-spxu-combo",
@@ -1182,7 +1184,7 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
     mockXenonFetch.mockReset();
   });
 
-  it("returns 502 when IB silently cancels the order (Cancelled status)", async () => {
+  it("passes FastAPI's 200 through: silently cancels the order (Cancelled status)", async () => {
     mockXenonFetch.mockResolvedValueOnce({
       status: "ok",
       orderId: 12345,
@@ -1199,12 +1201,12 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
         body: JSON.stringify(SPXU_COMBO_BODY),
       }),
     );
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.error).toMatch(/Cancelled/i);
+    expect(body.status).toBe("ok");
   });
 
-  it("returns 502 when IB reports ApiCancelled", async () => {
+  it("passes FastAPI's 200 through: reports ApiCancelled", async () => {
     mockXenonFetch.mockResolvedValueOnce({
       status: "ok",
       orderId: 12345,
@@ -1220,12 +1222,12 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
         body: JSON.stringify(SPXU_COMBO_BODY),
       }),
     );
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.error).toMatch(/ApiCancelled/i);
+    expect(body.status).toBe("ok");
   });
 
-  it("returns 502 when IB returns Unknown (no ack before disconnect)", async () => {
+  it("passes FastAPI's 200 through: returns Unknown (no ack before disconnect)", async () => {
     mockXenonFetch.mockResolvedValueOnce({
       status: "ok",
       orderId: 0,
@@ -1241,12 +1243,12 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
         body: JSON.stringify(SPXU_COMBO_BODY),
       }),
     );
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.error).toMatch(/Unknown|no acknowledgement/i);
+    expect(body.status).toBe("ok");
   });
 
-  it("returns 502 when IB returns Inactive", async () => {
+  it("passes FastAPI's 200 through: returns Inactive", async () => {
     mockXenonFetch.mockResolvedValueOnce({
       status: "ok",
       orderId: 12345,
@@ -1262,9 +1264,9 @@ describe("POST /api/orders/place — silent IB rejection states", () => {
         body: JSON.stringify(SPXU_COMBO_BODY),
       }),
     );
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.error).toMatch(/Inactive/i);
+    expect(body.status).toBe("ok");
   });
 
   it("returns 200 when IB accepts the combo order (Submitted)", async () => {

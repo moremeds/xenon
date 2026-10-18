@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { xenonFetch } from "@/lib/xenonApi";
+import { placeOutcomeUnknownBody } from "@/lib/order/placeOutcome";
 import { passThroughXenonError } from "@/lib/passThroughXenonError";
 import { getRequestId } from "@/lib/apiContracts";
 import type { ModifyCancelTarget, ReplaceComboOrder } from "@/lib/orderModify";
@@ -165,7 +166,7 @@ export async function POST(request: Request): Promise<Response> {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(replaceOrder),
-          timeout: 20_000,
+          timeout: 60_000,
         });
       } catch (placeErr) {
         // Refresh so the UI sees the cancelled state.
@@ -178,6 +179,20 @@ export async function POST(request: Request): Promise<Response> {
           /* non-fatal */
         }
         const orders = await fetchOrders();
+        // Uncertain replacement: IB may hold it. Keep the uncertain body —
+        // "place a new order manually" here would duplicate the order.
+        const uncertainBody = placeOutcomeUnknownBody(placeErr);
+        if (uncertainBody) {
+          return NextResponse.json(
+            {
+              ...uncertainBody,
+              error:
+                "Original order cancelled; replacement submitted, status unknown — check working orders. Do not resubmit.",
+              orders,
+            },
+            { status: 502 },
+          );
+        }
         const placeMsg =
           placeErr instanceof Error ? placeErr.message : String(placeErr);
         return NextResponse.json(
