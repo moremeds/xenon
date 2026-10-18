@@ -127,6 +127,7 @@ describe("Next /api/orders/modify — combo replacement after cancel", () => {
 
   it("an uncertain replacement keeps PLACE_OUTCOME_UNKNOWN, never 'place a new order manually'", async () => {
     xenonFetch.mockImplementation(async (path: string) => {
+      if (String(path).startsWith("/orders/attempts/")) return { known: false, state: null };
       if (path === "/orders/cancel") return { status: "ok" };
       if (path === "/orders/place") throw new XenonApiError(502, UNKNOWN_BODY.detail, UNKNOWN_BODY);
       return { orders: [] };
@@ -155,6 +156,7 @@ describe("Next /api/orders/modify — combo replacement after cancel", () => {
     ["5xx without a reason_code", new XenonApiError(500, "Internal Server Error", null)],
   ])("replacement place %s is uncertain, never 'place a new order manually'", async (_n, err) => {
     xenonFetch.mockImplementation(async (path: string) => {
+      if (String(path).startsWith("/orders/attempts/")) return { known: false, state: null };
       if (path === "/orders/cancel") return { status: "ok" };
       if (path === "/orders/place") throw err;
       return { orders: [] };
@@ -169,6 +171,7 @@ describe("Next /api/orders/modify — combo replacement after cancel", () => {
 
   it("an uncertain cancel throws before any replacement is placed", async () => {
     xenonFetch.mockImplementation(async (path: string) => {
+      if (String(path).startsWith("/orders/attempts/")) return { known: false, state: null };
       if (path === "/orders/cancel") throw new XenonApiError(503, "gateway", { reason_code: "IB_CONNECTION" });
       return { orders: [] };
     });

@@ -915,6 +915,7 @@ describe("POST /api/orders/modify — extended", () => {
       executed_count: 0,
     };
     mockXenonFetch
+      .mockResolvedValueOnce({ known: false, state: null })
       .mockResolvedValueOnce({ status: "ok", message: "Order cancelled" })
       .mockResolvedValueOnce({ status: "ok", message: "Order cancelled" })
       .mockResolvedValueOnce({
@@ -968,26 +969,27 @@ describe("POST /api/orders/modify — extended", () => {
     );
     expect(res.status).toBe(200);
 
-    expect(mockXenonFetch).toHaveBeenCalledTimes(5);
-    expect(mockXenonFetch.mock.calls[0][0]).toBe("/orders/cancel");
-    expect(
-      JSON.parse(String(mockXenonFetch.mock.calls[0][1].body)),
-    ).toMatchObject({
-      orderId: 77,
-      permId: 653611587,
-    });
+    expect(mockXenonFetch).toHaveBeenCalledTimes(6);
+    expect(mockXenonFetch.mock.calls[0][0]).toBe("/orders/attempts/rep-attempt-1");
     expect(mockXenonFetch.mock.calls[1][0]).toBe("/orders/cancel");
     expect(
       JSON.parse(String(mockXenonFetch.mock.calls[1][1].body)),
     ).toMatchObject({
+      orderId: 77,
+      permId: 653611587,
+    });
+    expect(mockXenonFetch.mock.calls[2][0]).toBe("/orders/cancel");
+    expect(
+      JSON.parse(String(mockXenonFetch.mock.calls[2][1].body)),
+    ).toMatchObject({
       orderId: 78,
       permId: 653611588,
     });
-    expect(mockXenonFetch.mock.calls[2][0]).toBe("/orders/place");
-    expect(mockXenonFetch.mock.calls[3][0]).toBe("/orders/refresh");
-    expect(mockXenonFetch.mock.calls[4][0]).toBe("/orders");
+    expect(mockXenonFetch.mock.calls[3][0]).toBe("/orders/place");
+    expect(mockXenonFetch.mock.calls[4][0]).toBe("/orders/refresh");
+    expect(mockXenonFetch.mock.calls[5][0]).toBe("/orders");
     expect(
-      JSON.parse(String(mockXenonFetch.mock.calls[2][1].body)),
+      JSON.parse(String(mockXenonFetch.mock.calls[3][1].body)),
     ).toMatchObject({
       type: "combo",
       symbol: "AAOI",

@@ -15,6 +15,10 @@ import { errorFromResponseBody } from "./responseError";
 export const PLACE_UNCERTAIN_COPY =
   ORDER_REASON_CODES.PLACE_OUTCOME_UNKNOWN.copy;
 
+/** Combo replacement (cancel + place) whose place outcome is unknown. */
+export const REPLACEMENT_UNCERTAIN_COPY =
+  "Replacement status unknown — check working orders; do not resubmit.";
+
 export interface PlaceAttempt {
   id: string;
   isUncertain: () => boolean;

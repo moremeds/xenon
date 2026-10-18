@@ -69,6 +69,7 @@ export function OrdersSections({
     cancelledOrders,
     requestCancel,
     requestModify,
+    lockedReplacements,
   } = useOrderActions();
   const openOrderExtract = useMemo(
     () => makeOpenOrderExtract(prices, portfolio),
@@ -233,6 +234,10 @@ export function OrdersSections({
         portfolio={portfolio}
         onConfirm={handleModify}
         onClose={() => setModifyTarget(null)}
+        locked={
+          modifyTarget != null &&
+          Boolean(lockedReplacements?.has(modifyTarget.requestOrder.permId))
+        }
       />
 
       <div className="section">

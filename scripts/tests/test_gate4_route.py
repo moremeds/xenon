@@ -1066,3 +1066,18 @@ def test_quantity_modify_of_resting_buy_order_is_accepted(client, broker_calls, 
     row = _submission_rows()[0]._mapping
     assert row["quantity"] == 2
     assert row["legs"]["pending_amend_id"] is None
+
+
+def test_attempt_state_route_reports_known_keys(client, broker_calls, fresh_quote):
+    """PR-07: the replacement path checks its key before cancelling."""
+    assert client.get("/orders/attempts/rt-att-1").json() == {
+        "client_attempt_id": "rt-att-1",
+        "known": False,
+        "state": None,
+    }
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_stock("SPY", 100)])
+    engine.dispose()
+    assert client.post("/orders/place", json=_sell_call_body("rt-att-1")).status_code == 200
+    body = client.get("/orders/attempts/rt-att-1").json()
+    assert (body["known"], body["state"]) == (True, "WORKING")

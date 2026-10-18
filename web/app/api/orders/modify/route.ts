@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { xenonFetch } from "@/lib/xenonApi";
 import { placeOutcomeUnknownBody } from "@/lib/order/placeOutcome";
 import { firstPlaceOrderSchemaErrorMessage } from "@/lib/placeOrderBodySchema";
+import { readReasonCode } from "@/lib/readReasonCode";
 import { passThroughXenonError } from "@/lib/passThroughXenonError";
 import { getRequestId } from "@/lib/apiContracts";
 import type { ModifyCancelTarget, ReplaceComboOrder } from "@/lib/orderModify";
@@ -162,6 +163,39 @@ export async function POST(request: Request): Promise<Response> {
         );
       }
 
+      // The replacement key must be new. A key FastAPI already holds (any
+      // state) would not place the replacement as a new order — duplicate,
+      // terminal or body mismatch — so the cancel below would lose the
+      // working order. Refuse before cancelling anything; a failed lookup
+      // refuses too.
+      let attempt: { known?: unknown; state?: unknown };
+      try {
+        attempt = await xenonFetch<{ known?: unknown; state?: unknown }>(
+          `/orders/attempts/${encodeURIComponent(String(replaceOrder.client_attempt_id))}`,
+          { timeout: 10_000 },
+        );
+      } catch {
+        return NextResponse.json(
+          {
+            error:
+              "Could not verify the replacement attempt id — nothing was cancelled. Retry.",
+            reason_code: "IB_CONNECTION",
+          },
+          { status: 503 },
+        );
+      }
+      if (attempt.known !== false) {
+        return NextResponse.json(
+          {
+            error:
+              "Replacement attempt id already used — nothing was cancelled. Reopen the modify dialog.",
+            reason_code: "ATTEMPT_BODY_MISMATCH",
+            state: attempt.state ?? null,
+          },
+          { status: 409 },
+        );
+      }
+
       // Cancel-then-place is unavoidable here (IB has no atomic restructure for
       // combo legs), but we wrap in try/catch so a place failure surfaces a
       // CRITICAL error that names the data-loss situation explicitly. The user
@@ -210,10 +244,16 @@ export async function POST(request: Request): Promise<Response> {
         }
         const placeMsg =
           placeErr instanceof Error ? placeErr.message : String(placeErr);
+        // A proven rejection (4xx or a known reason_code): carry the code so
+        // the browser classifies it as terminal, not "status unknown".
+        const placeCode =
+          readReasonCode((placeErr as { body?: unknown } | null)?.body) ??
+          "INVALID_ORDER_BODY";
         return NextResponse.json(
           {
             error:
               "CRITICAL: Original order cancelled, replacement FAILED. Place a new order manually.",
+            reason_code: placeCode,
             detail: { placeError: placeMsg, requestId },
             orders,
           },

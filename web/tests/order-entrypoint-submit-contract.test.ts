@@ -26,9 +26,11 @@ describe("order entrypoints submit contract", () => {
     expect(source).toContain("client_attempt_id: attempt.id");
   });
 
-  it("ModifyOrderModal sends a stable client_attempt_id with a combo replacement", () => {
-    const source = readFileSync(resolve(root, "web/components/ModifyOrderModal.tsx"), "utf8");
-    expect(source).toContain("const [replaceAttemptId] = useState(() => randomAttemptId());");
-    expect(source).toContain("client_attempt_id: replaceAttemptId");
+  it("the replacement client_attempt_id is owned by OrderActionsContext, not the modal mount", () => {
+    const modal = readFileSync(resolve(root, "web/components/ModifyOrderModal.tsx"), "utf8");
+    const ctx = readFileSync(resolve(root, "web/lib/OrderActionsContext.tsx"), "utf8");
+    expect(modal).not.toContain("randomAttemptId");
+    expect(modal).not.toContain("client_attempt_id");
+    expect(ctx).toContain("replaceOrder: { ...request.replaceOrder, client_attempt_id: attemptId }");
   });
 });

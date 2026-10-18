@@ -13,6 +13,11 @@ import type { OpenOrder, OrdersData } from "@/lib/types";
 import type { ModifyOrderRequest } from "@/lib/orderModify";
 import { getReasonToast } from "@/lib/orderReasonCodes";
 import { readReasonCode } from "@/lib/readReasonCode";
+import {
+  isUncertainPlaceResponse,
+  REPLACEMENT_UNCERTAIN_COPY,
+} from "@/lib/order/submitPlace";
+import { randomAttemptId } from "@/components/ticker-detail/useClientAttemptId";
 
 /** Result surfaced to callers of requestCancel/requestModify so the row can
  *  render a FAILED pill (F6.2). `status` is the HTTP status from the Next.js
@@ -59,6 +64,9 @@ type OrderActionsContextValue = {
   ) => Promise<ActionResult>;
   drainNotifications: () => Notification[];
   setOrdersUpdater: (fn: ((data: OrdersData) => void) | null) => void;
+  /** permIds whose combo replacement ended uncertain: the replacement form
+   * for that order is locked (no retry) until the page reloads. */
+  lockedReplacements: Set<number>;
 };
 
 const OrderActionsContext = createContext<OrderActionsContextValue | null>(
@@ -346,11 +354,96 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
     [pushNotification, pushOrdersData],
   );
 
+  // Combo replacement = cancel original + place successor (PR-07, OP-1).
+  // One client_attempt_id per logical replacement, keyed to the target
+  // order: kept while that replacement is in flight or uncertain, dropped
+  // after a resolved result, minted fresh for a new target.
+  const replaceAttemptsRef = useRef(
+    new Map<number, { id: string; uncertain: boolean }>(),
+  );
+  const [lockedReplacements, setLockedReplacements] = useState<Set<number>>(
+    new Set(),
+  );
+
+  const requestReplace = useCallback(
+    async (
+      order: OpenOrder,
+      request: ModifyRequestWithOutsideRth,
+    ): Promise<ActionResult> => {
+      const key = order.permId;
+      const uncertain = (): ActionResult => {
+        replaceAttemptsRef.current.set(key, {
+          id: replaceAttemptsRef.current.get(key)?.id ?? "",
+          uncertain: true,
+        });
+        setLockedReplacements((prev) => new Set(prev).add(key));
+        pushNotification({ type: "error", message: REPLACEMENT_UNCERTAIN_COPY });
+        return {
+          ok: false,
+          status: 0,
+          reasonCode: "PLACE_OUTCOME_UNKNOWN",
+          message: REPLACEMENT_UNCERTAIN_COPY,
+        };
+      };
+      const prior = replaceAttemptsRef.current.get(key);
+      if (prior?.uncertain) return uncertain();
+      const attemptId = prior?.id || randomAttemptId();
+      replaceAttemptsRef.current.set(key, { id: attemptId, uncertain: false });
+
+      const { outsideRth, ...requestBody } = request;
+      const nextSeq = (modifySeqCountsRef.current.get(order.permId) ?? 0) + 1;
+      modifySeqCountsRef.current.set(order.permId, nextSeq);
+      let res: Response;
+      try {
+        res = await fetch("/api/orders/modify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            orderId: order.orderId,
+            permId: order.permId,
+            ...requestBody,
+            replaceOrder: { ...request.replaceOrder, client_attempt_id: attemptId },
+            outsideRth,
+            modifySequence: nextSeq,
+          }),
+        });
+      } catch {
+        return uncertain(); // dispatched or not, we cannot tell
+      }
+      let json: Record<string, unknown> | null = null;
+      try {
+        const parsed: unknown = await res.json();
+        json = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+      } catch {
+        json = null;
+      }
+      const orders = json?.orders as OrdersData | undefined;
+      if (orders) ordersUpdaterRef.current?.(orders);
+      if (res.ok && json) {
+        replaceAttemptsRef.current.delete(key);
+        pushNotification({ type: "success", message: `${order.symbol} order replaced` });
+        return { ok: true };
+      }
+      // An unreadable 200, an uncertain reason_code or an unexplained 5xx:
+      // the replacement may be live at IB.
+      if (res.ok || isUncertainPlaceResponse(res.status, json)) return uncertain();
+      replaceAttemptsRef.current.delete(key);
+      const reasonCode = readReasonCode(json);
+      const message =
+        (typeof json?.error === "string" && json.error) ||
+        (reasonCode ? getReasonToast(reasonCode).copy : "Replacement failed");
+      pushNotification({ type: "error", message });
+      return { ok: false, status: res.status, reasonCode, message };
+    },
+    [pushNotification],
+  );
+
   const requestModify = useCallback(
     async (
       order: OpenOrder,
       request: ModifyRequestWithOutsideRth,
     ): Promise<ActionResult> => {
+      if (request.replaceOrder) return requestReplace(order, request);
       try {
         const { outsideRth, ...requestBody } = request;
         const nextSeq = (modifySeqCountsRef.current.get(order.permId) ?? 0) + 1;
@@ -409,19 +502,7 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
         }
 
         if (json.orders) {
-          if (request.replaceOrder) {
-            ordersUpdaterRef.current?.(json.orders);
-          } else {
-            pushOrdersData(json.orders);
-          }
-        }
-
-        if (request.replaceOrder) {
-          pushNotification({
-            type: "success",
-            message: `${order.symbol} order replaced`,
-          });
-          return { ok: true };
+          pushOrdersData(json.orders);
         }
 
         if (request.newPrice != null || request.newQuantity != null) {
@@ -434,21 +515,12 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
         }
         return { ok: true };
       } catch {
-        // A replacement may already have been placed (the original was
-        // cancelled first): never invite a manual re-place.
-        const message = request.replaceOrder
-          ? getReasonToast("PLACE_OUTCOME_UNKNOWN").copy
-          : "Modify request failed";
+        const message = "Modify request failed";
         pushNotification({ type: "error", message });
-        return {
-          ok: false,
-          status: 0,
-          reasonCode: request.replaceOrder ? "PLACE_OUTCOME_UNKNOWN" : null,
-          message,
-        };
+        return { ok: false, status: 0, reasonCode: null, message };
       }
     },
-    [pushNotification, startModifyPoll, pushOrdersData],
+    [pushNotification, startModifyPoll, pushOrdersData, requestReplace],
   );
 
   /* ── Shared infrastructure ──────────────────────────── */
@@ -487,6 +559,7 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
         requestModify,
         drainNotifications,
         setOrdersUpdater,
+        lockedReplacements,
       }}
     >
       {children}

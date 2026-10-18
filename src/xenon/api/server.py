@@ -2357,6 +2357,17 @@ async def _validate_non_combo_quote(body: dict) -> tuple[quote_guard.QuoteVerdic
     )
 
 
+@app.get("/orders/attempts/{client_attempt_id}")
+async def orders_attempt_state(client_attempt_id: str):
+    """Is this place idempotency key already used in the active scope?
+
+    The combo-replacement path asks BEFORE it cancels the original: a known
+    key (any state) means the replacement would not be placed as a new
+    order (duplicate / terminal / body mismatch), so nothing is cancelled."""
+    state = orders_store.attempt_state(client_attempt_id, **_resolve_scope_kwargs())
+    return {"client_attempt_id": client_attempt_id, "known": state is not None, "state": state}
+
+
 @app.get("/orders/quote")
 async def orders_quote(ticker: str, con_id: int):
     secret = os.environ.get("XENON_QUOTE_TOKEN_SECRET")

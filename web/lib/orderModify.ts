@@ -15,8 +15,9 @@ export type ReplaceComboOrder = {
   limitPrice: number;
   tif?: "DAY" | "GTC";
   legs: ModifyComboLeg[];
-  /** Idempotency key for the replacement place (stable for the modal). */
-  client_attempt_id: string;
+  /** Idempotency key for the replacement place. OrderActionsContext sets it:
+   * one key per logical replacement of one target order. */
+  client_attempt_id?: string;
 };
 
 export type ModifyCancelTarget = {

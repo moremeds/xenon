@@ -1,12 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { REPLACEMENT_UNCERTAIN_COPY } from "@/lib/order/submitPlace";
 import type { OpenOrder, PortfolioData } from "@/lib/types";
 import type { PriceData } from "@/lib/pricesProtocol";
 import { optionKey } from "@/lib/pricesProtocol";
 import type { ModifyComboLeg, ModifyOrderRequest } from "@/lib/orderModify";
 import Modal from "./Modal";
-import { randomAttemptId } from "@/components/ticker-detail/useClientAttemptId";
 import { getQuoteMetrics } from "@/lib/quoteTelemetry";
 import { applyRestingLimitToQuote } from "@/lib/modifyOrderQuote";
 import { fmtPrice, positionToOrderLegs } from "@/lib/positionUtils";
@@ -37,6 +37,8 @@ type ModifyOrderModalProps = {
   portfolio?: PortfolioData | null;
   onConfirm: (request: ModifyOrderRequest) => void;
   onClose: () => void;
+  /** The last combo replacement for this order ended uncertain: no retry. */
+  locked?: boolean;
 };
 
 function normalizeLegAction(action?: string | null): "BUY" | "SELL" {
@@ -241,14 +243,12 @@ export default function ModifyOrderModal({
   portfolio,
   onConfirm,
   onClose,
+  locked = false,
 }: ModifyOrderModalProps) {
   const [newPrice, setNewPrice] = useState("");
   const [newQuantity, setNewQuantity] = useState("");
   const [outsideRth, setOutsideRth] = useState(false);
   const [editableLegs, setEditableLegs] = useState<EditableComboLeg[]>([]);
-  // One idempotency key per opened modal: a retry of the same replacement
-  // re-sends it, so an uncertain first place can never be placed twice.
-  const [replaceAttemptId] = useState(() => randomAttemptId());
 
   // Reset price only when a different order is selected (by permId), not on every re-render
   const orderPermId = order?.permId ?? null;
@@ -305,6 +305,7 @@ export default function ModifyOrderModal({
     isComboOrder && currentLegsSnapshot !== originalLegsSnapshot;
   const canSubmit =
     !loading &&
+    !locked &&
     (isComboOrder
       ? Boolean(
           isValidPrice &&
@@ -345,7 +346,6 @@ export default function ModifyOrderModal({
           limitPrice: parsedNew,
           tif: order.tif === "GTC" ? "GTC" : "DAY",
           legs: normalizedLegs,
-          client_attempt_id: replaceAttemptId,
         },
       });
       return;
@@ -662,6 +662,11 @@ export default function ModifyOrderModal({
           )}
         </div>
 
+        {locked && (
+          <div className="order-error" role="alert">
+            {REPLACEMENT_UNCERTAIN_COPY}
+          </div>
+        )}
         <div className="modify-actions">
           <button
             className="btn-secondary"

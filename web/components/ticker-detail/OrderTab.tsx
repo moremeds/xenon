@@ -1330,7 +1330,7 @@ export default function OrderTab({
     position.legs.length > 1 &&
     position.structure_type !== "Stock";
 
-  const { requestModify } = useOrderActions();
+  const { requestModify, lockedReplacements } = useOrderActions();
   const [modifyTarget, setModifyTarget] = useState<OpenOrder | null>(null);
   const [modifyLoading, setModifyLoading] = useState(false);
   // F6.2: track modify failures per-order so the row renders a FAILED pill.
@@ -1374,6 +1374,10 @@ export default function OrderTab({
         portfolio={portfolio}
         onConfirm={handleModifyConfirm}
         onClose={() => setModifyTarget(null)}
+        locked={
+          modifyTarget != null &&
+          Boolean(lockedReplacements?.has(modifyTarget.permId))
+        }
       />
 
       <div className="order-tab">
