@@ -12,8 +12,16 @@
   What runs:   /opt/xenon/bin/refresh-core-test.sh
                (copy of scripts/infra/refresh-core-test.sh)
   Schedule:    every day 04:00 ET.
-  TZ:          launchd StartCalendarInterval uses the SYSTEM time zone
-               (want America/New_York; check: sudo systemsetup -gettimezone).
+  TZ:          launchd StartCalendarInterval fires in the SYSTEM time zone, and
+               the TZ environment variable does not change that. The Mac mini
+               system zone is Asia/Hong_Kong (HKT, no DST). Do NOT change the
+               host zone: other stacks share the host. 04:00 ET is 16:00 HKT
+               while ET is on EDT (summer) and 17:00 HKT while ET is on EST
+               (winter). The job therefore fires at BOTH 16:00 and 17:00 HKT
+               (two calendar dicts below). The sh wrapper runs the script only
+               when the New York hour is 04 and exits 0 otherwise, so exactly
+               one of the two firings does the work. A late run after sleep may
+               be skipped by the guard. The next night's run covers it.
   Lock:        launchd never starts a second instance of a running label.
                The script refuses SRC == DST. For a manual run during the
                scheduled window, wrap it:  lockf -t 0 /tmp/xenon-refresh-core-test.lock <cmd>
@@ -41,23 +49,33 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/xenon/bin/refresh-core-test.sh</string>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>[ "$(TZ=America/New_York date +%H)" = 04 ] || exit 0; exec /opt/xenon/bin/refresh-core-test.sh</string>
   </array>
 
+  <!-- System zone is HKT: 16:00 HKT = 04:00 EDT, 17:00 HKT = 04:00 EST.
+       The sh guard in ProgramArguments picks the one that matches. -->
   <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key>
-    <integer>4</integer>
-    <key>Minute</key>
-    <integer>0</integer>
-  </dict>
+  <array>
+    <dict>
+      <key>Hour</key>
+      <integer>16</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>17</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+  </array>
 
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-    <key>TZ</key>
-    <string>America/New_York</string>
     <key>PGHOST</key>
     <string>localhost</string>
     <key>PGPORT</key>

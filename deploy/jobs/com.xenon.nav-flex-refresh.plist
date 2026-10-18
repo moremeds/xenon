@@ -6,9 +6,18 @@
 
   What runs:   docker-compose -f /opt/xenon/compose.yml run (one-off, removed on exit) api xenon-nav-flex-refresh
   Schedule:    every day 17:30 ET (one hour after the close).
-  TZ:          launchd StartCalendarInterval uses the SYSTEM time zone. The
-               EnvironmentVariables TZ below only affects the child process.
-               Check:  sudo systemsetup -gettimezone   (want America/New_York).
+  TZ:          launchd StartCalendarInterval fires in the SYSTEM time zone, and
+               the TZ environment variable does not change that. The Mac mini
+               system zone is Asia/Hong_Kong (HKT, no DST). Do NOT change the
+               host zone: other stacks share the host. ET has DST, HKT does not,
+               so 17:30 ET is 05:30 HKT while ET is on EDT (summer) and 06:30
+               HKT while ET is on EST (winter). The job therefore fires at BOTH
+               05:30 and 06:30 HKT (two calendar dicts below). The sh wrapper
+               runs the job only when the New York hour is 17 and exits 0
+               otherwise, so exactly one of the two firings does the work.
+               If the Mac is asleep and launchd runs a missed firing late, the
+               guard may skip it. The next day's run covers it (the Flex query
+               is a rolling window).
   Lock:        (1) launchd never starts a second instance of a running label.
                (2) the fixed container name in ProgramArguments (xenon-job-nav-flex-refresh) makes Docker refuse
                a duplicate run (manual run while the job runs) with a name
@@ -43,19 +52,9 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/docker-compose</string>
-    <string>-f</string>
-    <string>/opt/xenon/compose.yml</string>
-    <string>run</string>
-    <string>--rm</string>
-    <string>-T</string>
-    <string>--no-deps</string>
-    <string>--name</string>
-    <string>xenon-job-nav-flex-refresh</string>
-    <string>--label</string>
-    <string>com.centurylinklabs.watchtower.enable=false</string>
-    <string>api</string>
-    <string>xenon-nav-flex-refresh</string>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>[ "$(TZ=America/New_York date +%H)" = 17 ] || exit 0; exec /opt/homebrew/bin/docker-compose -f /opt/xenon/compose.yml run --rm -T --no-deps --name xenon-job-nav-flex-refresh --label com.centurylinklabs.watchtower.enable=false api xenon-nav-flex-refresh</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -65,17 +64,25 @@
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-    <key>TZ</key>
-    <string>America/New_York</string>
   </dict>
 
+  <!-- System zone is HKT: 05:30 HKT = 17:30 EDT, 06:30 HKT = 17:30 EST.
+       The sh guard in ProgramArguments picks the one that matches. -->
   <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key>
-    <integer>17</integer>
-    <key>Minute</key>
-    <integer>30</integer>
-  </dict>
+  <array>
+    <dict>
+      <key>Hour</key>
+      <integer>5</integer>
+      <key>Minute</key>
+      <integer>30</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>6</integer>
+      <key>Minute</key>
+      <integer>30</integer>
+    </dict>
+  </array>
 
   <key>StandardOutPath</key>
   <string>/var/log/xenon/nav-flex-refresh.stdout.log</string>

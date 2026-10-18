@@ -17,7 +17,9 @@ import plistlib
 import re
 import shutil
 import subprocess
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -147,29 +149,97 @@ def test_docker_compose_config_accepts_prod_file(tmp_path: Path) -> None:
         assert svc.get("image"), name
 
 
-@pytest.mark.parametrize(
-    ("plist", "hour", "minute"),
-    [("com.xenon.nav-flex-refresh.plist", 17, 30), ("com.xenon.refresh-core-test.plist", 4, 0)],
-)
-def test_job_plists_parse_and_schedule(plist: str, hour: int, minute: int) -> None:
-    data = plistlib.loads((JOBS_DIR / plist).read_bytes())
-    assert data["Label"] == plist.removesuffix(".plist")
-    assert data["StartCalendarInterval"] == {"Hour": hour, "Minute": minute}
+ET = ZoneInfo("America/New_York")
+HKT = ZoneInfo("Asia/Hong_Kong")  # system zone of the Mac mini; launchd and cron fire in it
+# job plist -> (ET hour, ET minute) the job is meant to run at
+JOBS = {
+    "com.xenon.nav-flex-refresh.plist": (17, 30),
+    "com.xenon.refresh-core-test.plist": (4, 0),
+}
+# One day in each DST state of New York.
+DST_DAYS = {"EDT": date(2026, 7, 15), "EST": date(2026, 1, 15)}
+GUARD = re.compile(r'\[ "\$\(TZ=America/New_York date \+\\?%H\)" = (\d\d) \]')
+
+
+def _plist(name: str) -> dict:
+    return plistlib.loads((JOBS_DIR / name).read_bytes())
+
+
+def _hkt_times(plist: dict) -> list[tuple[int, int]]:
+    cal = plist["StartCalendarInterval"]
+    cal = cal if isinstance(cal, list) else [cal]
+    return [(c["Hour"], c["Minute"]) for c in cal]
+
+
+def _fires_et_hour(hkt: tuple[int, int], day: date) -> tuple[int, int]:
+    """ET (hour, minute) of a daily HKT firing that lands on the given ET day's DST state."""
+    noon_utc = datetime(day.year, day.month, day.day, 12, tzinfo=ZoneInfo("UTC"))
+    hkt_day = noon_utc.astimezone(HKT).date()
+    fired = datetime(hkt_day.year, hkt_day.month, hkt_day.day, hkt[0], hkt[1], tzinfo=HKT)
+    et = fired.astimezone(ET)
+    return et.hour, et.minute
+
+
+def _guard_hour(command: str) -> int:
+    m = GUARD.search(command)
+    assert m, f"no ET-hour guard in: {command}"
+    return int(m.group(1))
+
+
+@pytest.mark.parametrize("plist_name", sorted(JOBS))
+def test_job_plists_parse_and_have_et_hour_guard(plist_name: str) -> None:
+    data = _plist(plist_name)
+    et_hour, _ = JOBS[plist_name]
+    assert data["Label"] == plist_name.removesuffix(".plist")
     assert data["RunAtLoad"] is False
-    assert data["EnvironmentVariables"]["TZ"] == "America/New_York"
+    args = data["ProgramArguments"]
+    assert args[:2] == ["/bin/sh", "-c"] and len(args) == 3
+    assert _guard_hour(args[2]) == et_hour
+    assert "|| exit 0;" in args[2]  # guard skips with success, never fails the job
     blob = json.dumps(data)
     assert "__XENON_ROOT__" not in blob and "projects/xenon" not in blob  # no checkout needed
     assert not re.search(r"(PASSWORD|TOKEN)\"\s*:\s*\"[^\"]", blob)
 
 
+@pytest.mark.parametrize("plist_name", sorted(JOBS))
+def test_job_hkt_times_hit_the_et_time_in_both_dst_states(plist_name: str) -> None:
+    et_hour, et_minute = JOBS[plist_name]
+    times = _hkt_times(_plist(plist_name))
+    assert len(times) == 2, "need one candidate HKT time per DST state"
+    for state, day in DST_DAYS.items():
+        landing = [_fires_et_hour(t, day) for t in times]
+        # exactly one firing lands on the stated ET time; the guard rejects the other
+        assert landing.count((et_hour, et_minute)) == 1, (state, times, landing)
+        other = next(x for x in landing if x != (et_hour, et_minute))
+        assert other[0] != et_hour, "second firing must fail the ET-hour guard"
+
+
+def test_cron_entries_have_et_hour_guard_and_candidate_hkt_times() -> None:
+    lines = [
+        ln for ln in (JOBS_DIR / "crontab.example").read_text().splitlines()
+        if ln and not ln.startswith("#") and not ln.startswith("PATH=")
+    ]
+    assert len(lines) == len(JOBS)
+    expected = {"xenon-nav-flex-refresh": (17, 30), "refresh-core-test.sh": (4, 0)}
+    for line in lines:
+        minute, hours, *_ = line.split()
+        key = next(k for k in expected if k in line)
+        et_hour, et_minute = expected[key]
+        assert "\\%H" in line, "percent must be escaped in crontab"
+        assert _guard_hour(line) == et_hour
+        times = [(int(h), int(minute)) for h in hours.split(",")]
+        assert len(times) == 2
+        for day in DST_DAYS.values():
+            landing = [_fires_et_hour(t, day) for t in times]
+            assert landing.count((et_hour, et_minute)) == 1, (line, landing)
+
+
 def test_nav_flex_job_runs_cli_from_deployed_image() -> None:
-    args = plistlib.loads((JOBS_DIR / "com.xenon.nav-flex-refresh.plist").read_bytes())["ProgramArguments"]
-    assert args[0].endswith("docker-compose")
-    assert args[args.index("-f") + 1] == "/opt/xenon/compose.yml"
-    assert "run" in args and "--rm" in args and "-T" in args
-    assert "--name" in args  # fixed container name doubles as the lock
-    assert "com.centurylinklabs.watchtower.enable=false" in args
-    assert args[-2:] == ["api", "xenon-nav-flex-refresh"]
+    cmd = _plist("com.xenon.nav-flex-refresh.plist")["ProgramArguments"][2]
+    assert "exec /opt/homebrew/bin/docker-compose -f /opt/xenon/compose.yml run --rm -T" in cmd
+    assert "--name xenon-job-nav-flex-refresh" in cmd  # fixed container name doubles as the lock
+    assert "--label com.centurylinklabs.watchtower.enable=false" in cmd
+    assert cmd.endswith(" api xenon-nav-flex-refresh")
 
 
 def test_job_clis_exist_in_pyproject_scripts() -> None:
