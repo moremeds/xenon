@@ -625,10 +625,8 @@ def modify_order(
 
     old_price = trade.order.lmtPrice
     old_quantity = trade.order.totalQuantity
-    applied_price = old_price
     if new_price is not None:
         trade.order.lmtPrice = new_price
-        applied_price = new_price
     if new_quantity is not None:
         trade.order.totalQuantity = new_quantity
     if outside_rth is not None:
@@ -731,9 +729,13 @@ def modify_order(
         )
 
     final_status = confirmed_trade.orderStatus.status
+    # Report what the broker holds, not the request: confirmation allows a
+    # <0.001 price tolerance, and the API persists these values (PR-08).
+    confirmed_price = json_number(confirmed_trade.order.lmtPrice)
+    confirmed_quantity = json_number(confirmed_trade.order.totalQuantity)
     changes = []
-    if new_price is not None and old_price != applied_price:
-        changes.append(f"${old_price} → ${applied_price}")
+    if new_price is not None and old_price != confirmed_price:
+        changes.append(f"${old_price} → ${confirmed_price}")
     if new_quantity is not None and old_quantity != confirmed_trade.order.totalQuantity:
         changes.append(f"qty {old_quantity} → {confirmed_trade.order.totalQuantity}")
     if outside_rth is not None:
@@ -744,9 +746,11 @@ def modify_order(
         f"Order modified{suffix}",
         orderId=trade.order.orderId,
         oldPrice=old_price,
-        newPrice=applied_price,
+        newPrice=confirmed_price,
         oldQuantity=json_number(old_quantity),
-        newQuantity=json_number(confirmed_trade.order.totalQuantity),
+        newQuantity=confirmed_quantity,
+        confirmedPrice=confirmed_price,
+        confirmedQuantity=confirmed_quantity,
         finalStatus=final_status,
         **_identity_notes(confirmed_trade, account),
     )

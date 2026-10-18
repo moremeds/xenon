@@ -20,7 +20,9 @@ VALIDATE: the table holds about a hundred rows, so the validating scan
 takes milliseconds under the ADD lock, and alembic runs the revision in one
 transaction, where a VALIDATE in the same transaction would not shorten the
 ACCESS EXCLUSIVE lock anyway. A validated constraint also proves the
-existing rows, not only new writes.
+existing rows, not only new writes. Lock acquisition is bounded by
+`lock_timeout = 5s`: if a long transaction holds the table, the migration
+fails fast (no order write waits behind it) and the operator re-runs it.
 
 Downgrade drops only this constraint; no row changes.
 """
@@ -64,6 +66,10 @@ def upgrade() -> None:
             f"order_submissions holds states outside ORDER_STATES: {listed}. "
             "No row was changed; reconcile them by hand, then re-run the migration."
         )
+    # ADD CONSTRAINT needs ACCESS EXCLUSIVE; fail fast (and retry the
+    # migrator) instead of queueing every order write behind a long-running
+    # transaction. SET LOCAL ends with this migration's transaction.
+    op.execute("SET LOCAL lock_timeout = '5s'")
     states_sql = ", ".join(f"'{s}'" for s in ORDER_STATES)
     op.create_check_constraint(_NAME, "order_submissions", f"state IN ({states_sql})", schema="xenon")
 

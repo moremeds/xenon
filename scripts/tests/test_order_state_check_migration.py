@@ -15,16 +15,14 @@ import importlib.util
 import os
 import uuid
 from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, insert, text, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 
-from xenon.db.schema import order_submissions, regime_overrides
+from xenon.db.schema import order_submissions
 from xenon.execution import orders_store
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -191,135 +189,146 @@ def test_migration_upgrade_downgrade_with_pending_and_unknown_rows(throwaway_db)
 
 
 # ---------------------------------------------------------------------------
-# Old-writer test: origin/master orders_store writers vs the migrated schema
+# Old-writer gate (spec §2.11 adv-18): the REAL previous orders_store
 # ---------------------------------------------------------------------------
-# Copied from origin/master (2e1562b3) src/xenon/execution/orders_store.py:
-# reserve_attempt INSERT (state PENDING), mark_submitted (WORKING),
-# mark_terminal (any target state, optional expected_states),
-# register_from_snapshot INSERT + resurrect (WORKING), and
-# db/queries/combo_wizard.update_order_state (raw state).
+# The package `src/xenon` is extracted at each pinned commit with
+# `git archive` and imported in a child process (PYTHONPATH first, so no
+# candidate module is loaded: the previous schema.py, engine.py and
+# orders_store.py run as released). Its writers then run against the
+# throwaway DB migrated to this PR's head.
+#   2e1562b3 = v0.8.4, the release running in prod (lead inventory 2026-10-18)
+#   14cf70e5 = origin/master when this gate was written (adds PR #192 writers)
+
+_OLD_WRITER_SHAS = {
+    "v0.8.4": "2e1562b3ca43f4b48872f84e68fcad0f1052b352",
+    "origin-master": "14cf70e5fc3734d92dfd280f2e5ff1712c5b3a24",
+}
+
+_OLD_WRITER_SCRIPT = r"""
+import json, os, sys
+from datetime import datetime, timezone
+from decimal import Decimal
+
+import xenon
+assert xenon.__file__.startswith(os.environ["OLD_SRC"]), xenon.__file__
+from xenon.execution import orders_store as old
+
+SCOPE = dict(broker="IB", account_env="paper", broker_account="DU_OLDW")
+now = datetime.now(timezone.utc)
+
+def req(qty=1):
+    return old.RequestRow(ticker="SPY", security_type="STK", action="BUY", quantity=qty,
+                          multiplier=1, limit_price=Decimal("1.00"))
+
+out = {}
+win = old.reserve_attempt("old", "ow-fill", req(), **SCOPE)
+sid = win.submission_id
+old.mark_submitted(submission_id=sid, ib_order_id="71", perm_id="7171", placing_client_id=0)
+old.record_fill(exec_id="ow-exec-1", submission_id=sid, perm_id="7171", con_id=None, ticker="SPY",
+                side="BUY", qty=Decimal(1), price=Decimal("1.00"), filled_at=now, **SCOPE)
+out["fill_terminal"] = old.mark_terminal(submission_id=sid, state="FILLED", reason_code=None,
+                                         filled_qty=1, avg_fill_price=Decimal("1.00"))
+for st in ("REJECTED", "CANCELLED", "FAILED", "PARTIALLY_FILLED"):
+    w = old.reserve_attempt("old", f"ow-{st}", req(), **SCOPE)
+    out[st] = old.mark_terminal(submission_id=w.submission_id, state=st, reason_code="OLD",
+                                filled_qty=0, avg_fill_price=None)
+snap = dict(perm_id="8181", ib_order_id="81", ticker="SPY", security_type="STK", action="BUY",
+            quantity=1, limit_price=1.0, **SCOPE)
+out["snap_insert"] = old.register_from_snapshot(**snap)["action"]
+old.mark_terminal(submission_id="snapshot-8181", state="CANCELLED", reason_code="OLD",
+                  filled_qty=0, avg_fill_price=None)
+out["snap_resurrect"] = old.register_from_snapshot(**snap)["action"]
+print(json.dumps(out))
+"""
 
 
-def _old_reserve(conn, sid: str) -> None:
-    now = datetime.now(timezone.utc)
-    conn.execute(
-        pg_insert(order_submissions)
-        .values(
-            submission_id=sid,
-            user_id="old",
-            client_attempt_id=f"old-{sid}",
-            ticker="SPY",
-            security_type="STK",
-            action="BUY",
-            quantity=1,
-            expiry=None,
-            strike=None,
-            right=None,
-            multiplier=1,
-            con_id=None,
-            limit_price=Decimal("1.00"),
-            state="PENDING",
-            submitted_at=now,
-            updated_at=now,
-            broker="IB",
-            account_env="paper",
-            broker_account="DU_OLD",
-            legs=None,
-        )
-        .on_conflict_do_nothing()
+def _extract_old_src(sha: str, dest: Path) -> Path:
+    import shutil
+    import subprocess
+    import tarfile
+    import io
+
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable: cannot load the previous release's orders_store")
+    probe = subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=_ROOT, capture_output=True)
+    if probe.returncode != 0:
+        pytest.skip(f"pinned commit {sha} not in this clone (fetch origin): old-writer gate cannot run")
+    blob = subprocess.run(
+        ["git", "archive", "--format=tar", sha, "src/xenon"], cwd=_ROOT, capture_output=True, check=True
     )
+    with tarfile.open(fileobj=io.BytesIO(blob.stdout)) as tar:
+        tar.extractall(dest, filter="data")
+    return dest / "src"
 
 
-def _old_mark_submitted(conn, sid: str) -> None:
-    conn.execute(
-        update(order_submissions)
-        .where(order_submissions.c.submission_id == sid)
-        .values(
-            ib_order_id="7", perm_id="7007", placing_client_id=0, state="WORKING", updated_at=datetime.now(timezone.utc)
-        )
-    )
-    conn.execute(
-        update(regime_overrides).where(regime_overrides.c.submission_id == sid).values(perm_id=7007, ib_order_id=7)
-    )
+@pytest.mark.parametrize("release", sorted(_OLD_WRITER_SHAS))
+def test_old_writer_runs_against_migrated_schema(release, throwaway_db, tmp_path):
+    import json
+    import subprocess
+    import sys
 
+    from alembic import command
 
-def _old_mark_terminal(conn, sid: str, state: str, expected_states=None) -> int:
-    stmt = update(order_submissions).where(order_submissions.c.submission_id == sid)
-    if expected_states is not None:
-        stmt = stmt.where(order_submissions.c.state.in_(expected_states))
-    return conn.execute(
-        stmt.values(
-            state=state, reason_code=None, filled_qty=0, avg_fill_price=None, updated_at=datetime.now(timezone.utc)
-        )
-    ).rowcount
-
-
-def _old_snapshot_insert(conn, perm: str) -> None:
-    now = datetime.now(timezone.utc)
-    conn.execute(
-        pg_insert(order_submissions)
-        .values(
-            submission_id=f"snapshot-{perm}",
-            user_id="snapshot",
-            client_attempt_id=f"snapshot-{perm}",
-            ticker="SPY",
-            security_type="STK",
-            action="BUY",
-            quantity=1,
-            multiplier=1,
-            ib_order_id="9",
-            perm_id=perm,
-            limit_price=1.0,
-            state="WORKING",
-            submitted_at=now,
-            updated_at=now,
-            modify_sequence=0,
-            broker="IB",
-            account_env="paper",
-            broker_account="DU_OLD",
-            tif="DAY",
-        )
-        .on_conflict_do_nothing()
-    )
-
-
-def test_old_writer_lifecycle_against_migrated_schema(pg_test_engine):
-    """Every state transition the previous release writes passes the CHECK."""
-    with pg_test_engine.connect() as c:
-        assert c.execute(text("select count(*) from pg_constraint where conname='ck_order_sub_state'")).scalar() == 1
-    targets = ("FILLED", "REJECTED", "CANCELLED", "FAILED", "PARTIALLY_FILLED", "UNKNOWN")
-    with pg_test_engine.begin() as conn:
-        for state in targets:
-            sid = f"old-{state}"
-            _old_reserve(conn, sid)
-            _old_mark_submitted(conn, sid)
-            assert _old_mark_terminal(conn, sid, state, expected_states=("WORKING",)) == 1
-        _old_reserve(conn, "old-reject-pending")
-        assert _old_mark_terminal(conn, "old-reject-pending", "REJECTED") == 1
-        _old_snapshot_insert(conn, "880088")
-        # register_from_snapshot resurrect + combo_wizard.update_order_state
-        conn.execute(
-            update(order_submissions)
-            .where(order_submissions.c.submission_id == "old-CANCELLED")
-            .values(state="WORKING", reason_code=None)
-        )
-        conn.execute(
-            update(order_submissions).where(order_submissions.c.submission_id == "old-UNKNOWN").values(state="UNKNOWN")
-        )
-        got = dict(
-            conn.execute(
-                text("select submission_id, state from xenon.order_submissions where broker_account='DU_OLD'")
+    command.upgrade(_cfg(), "head")
+    assert _has_check(throwaway_db)
+    src = _extract_old_src(_OLD_WRITER_SHAS[release], tmp_path / "old")
+    script = tmp_path / "old_writers.py"
+    script.write_text(_OLD_WRITER_SCRIPT)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("XENON_") and k != "PYTHONPATH"}
+    env.update(PYTHONPATH=str(src), OLD_SRC=str(src), DATABASE_URL=os.environ["DATABASE_URL"])
+    run = subprocess.run([sys.executable, str(script)], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr[-3000:]
+    out = json.loads(run.stdout.strip().splitlines()[-1])
+    assert out == {
+        "fill_terminal": 1,
+        "REJECTED": 1,
+        "CANCELLED": 1,
+        "FAILED": 1,
+        "PARTIALLY_FILLED": 1,
+        "snap_insert": "INSERTED",
+        "snap_resurrect": "RESURRECTED",
+    }
+    with throwaway_db.connect() as c:
+        states = dict(
+            c.execute(
+                text("select client_attempt_id, state from xenon.order_submissions where broker_account='DU_OLDW'")
             ).all()
         )
-        conn.rollback()
-    assert got["old-FILLED"] == "FILLED"
-    assert got["old-CANCELLED"] == "WORKING"
-    assert got["old-reject-pending"] == "REJECTED"
-    assert got["snapshot-880088"] == "WORKING"
+        fills = c.execute(text("select count(*) from xenon.order_fills where exec_id='ow-exec-1'")).scalar()
+    assert states["ow-fill"] == "FILLED" and states["snapshot-8181"] == "WORKING"
+    assert fills == 1
 
 
-def test_old_writer_unlisted_state_is_rejected(pg_test_engine):
+def test_unlisted_state_is_rejected_after_upgrade(throwaway_db):
+    from alembic import command
+
+    command.upgrade(_cfg(), "head")
     with pytest.raises(IntegrityError, match="ck_order_sub_state"):
-        with pg_test_engine.begin() as conn:
-            _old_reserve(conn, "old-bad")
-            _old_mark_terminal(conn, "old-bad", "EXPIRED")
+        with throwaway_db.begin() as conn:
+            conn.execute(insert(order_submissions).values(**_row("bad-x", "EXPIRED")))
+
+
+def test_migration_sets_lock_timeout(throwaway_db):
+    """A long transaction holding order_submissions makes the upgrade fail
+    fast (lock_timeout 5s) instead of queueing order writes behind the
+    ACCESS EXCLUSIVE request; after it ends, a re-run succeeds."""
+    import time
+
+    from alembic import command
+
+    cfg = _cfg()
+    command.upgrade(cfg, _PARENT)
+    holder = throwaway_db.connect()
+    tx = holder.begin()
+    holder.execute(text("LOCK TABLE xenon.order_submissions IN ACCESS SHARE MODE"))
+    try:
+        started = time.monotonic()
+        with pytest.raises(Exception, match="lock timeout"):
+            command.upgrade(cfg, _REV)
+        assert time.monotonic() - started < 30
+    finally:
+        tx.rollback()
+        holder.close()
+    assert not _has_check(throwaway_db)
+    command.upgrade(cfg, _REV)
+    assert _has_check(throwaway_db)

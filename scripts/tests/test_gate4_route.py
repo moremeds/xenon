@@ -729,29 +729,124 @@ def test_modify_bag_sends_persisted_guarantee_mode(client, broker_calls):
     assert args[args.index("--non-guaranteed") + 1] == "0"
 
 
-def test_modify_success_persists_limit_price_and_quantity(client, broker_calls):
-    """PR-08: a confirmed modify writes the new limit_price (price-only and
-    price+qty amends) and the new quantity onto the submission row."""
+def _manage_reply(monkeypatch, broker_calls, *, price, qty, before=None):
+    """Modify CLI fake: the broker confirms `price` / `qty` (may differ from
+    the request within the CLI tolerance). `before` runs first, inside the
+    subprocess window (e.g. an activity-mirror pass)."""
+
+    async def fake(entry: str, args: list, timeout: float = 30):
+        broker_calls.append({"entry": entry, "args": args})
+        if before is not None:
+            before()
+        return ScriptResult(
+            ok=True,
+            data={
+                "status": "ok",
+                "orderId": 4242,
+                "newPrice": price,
+                "confirmedPrice": price,
+                "confirmedQuantity": qty,
+            },
+        )
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake)
+
+
+def test_modify_success_persists_broker_confirmed_price_and_quantity(client, broker_calls, monkeypatch):
+    """PR-08: a confirmed modify stores what the broker holds, not the
+    request. Request 1.9005 confirms against broker 1.9000 (<0.001
+    tolerance); the row gets 1.9000."""
     _place_bag(client, "rt-mod-persist-1", shares=250)
 
+    _manage_reply(monkeypatch, broker_calls, price=1.9000, qty=1)
     resp = client.post(
         "/orders/modify",
-        json={"orderId": 4242, "permId": 777001, "newPrice": 1.90, "modifySequence": 1},
+        json={"orderId": 4242, "permId": 777001, "newPrice": 1.9005, "modifySequence": 1},
     )
     assert resp.status_code == 200, resp.text
     row = _submission_rows()[0]._mapping
-    assert float(row["limit_price"]) == 1.90
+    assert float(row["limit_price"]) == 1.9
     assert row["quantity"] == 1
 
+    _manage_reply(monkeypatch, broker_calls, price=1.75, qty=2)
     resp = client.post(
         "/orders/modify",
-        json={"orderId": 4242, "permId": 777001, "newPrice": 1.75, "newQuantity": 2, "modifySequence": 2},
+        json={"orderId": 4242, "permId": 777001, "newPrice": 1.7502, "newQuantity": 2, "modifySequence": 2},
     )
     assert resp.status_code == 200, resp.text
     row = _submission_rows()[0]._mapping
     assert float(row["limit_price"]) == 1.75
     assert row["quantity"] == 2
     assert row["legs"].get("pending_amend_id") is None
+
+
+def test_modify_mirror_before_reply_keeps_price(client, broker_calls, monkeypatch):
+    """PR-08 interleaving: a fresh activity-mirror read sees the amended
+    order (qty 2, 1.75) before the CLI reply lands. The mirror confirms the
+    amend and clears its token, so the route settlement is a no-op; the
+    price must still reach the row (from the fresh observation)."""
+    from xenon.execution import orders_store
+
+    _place_bag(client, "rt-mod-race-1", shares=250)
+    mirror_out = {}
+
+    def mirror_pass():
+        mirror_out.update(
+            orders_store.register_from_snapshot(
+                perm_id="777001",
+                ib_order_id="4242",
+                ticker="SPY",
+                security_type="BAG",
+                action="BUY",
+                quantity=2,
+                limit_price=1.75,
+                multiplier=100,
+                observed_at=datetime.now(timezone.utc),
+                **SCOPE,
+            )
+        )
+
+    _manage_reply(monkeypatch, broker_calls, price=1.75, qty=2, before=mirror_pass)
+    resp = client.post(
+        "/orders/modify",
+        json={"orderId": 4242, "permId": 777001, "newPrice": 1.75, "newQuantity": 2, "modifySequence": 1},
+    )
+    assert resp.status_code == 200, resp.text
+    assert mirror_out.get("reconciled") is True  # the mirror cleared the token first
+    row = _submission_rows()[0]._mapping
+    assert row["quantity"] == 2
+    assert float(row["limit_price"]) == 1.75
+    assert row["legs"].get("pending_amend_id") is None
+
+
+def test_stale_mirror_read_never_overwrites_settled_price(client, broker_calls, monkeypatch):
+    """The freshness fence holds: a read that began before the settlement
+    (it saw the pre-modify price) does not undo the confirmed price."""
+    from xenon.execution import orders_store
+
+    _place_bag(client, "rt-mod-stale-1", shares=250)
+    read_started = datetime.now(timezone.utc)
+    _manage_reply(monkeypatch, broker_calls, price=1.9, qty=1)
+    assert (
+        client.post(
+            "/orders/modify",
+            json={"orderId": 4242, "permId": 777001, "newPrice": 1.9, "modifySequence": 1},
+        ).status_code
+        == 200
+    )
+    orders_store.register_from_snapshot(
+        perm_id="777001",
+        ib_order_id="4242",
+        ticker="SPY",
+        security_type="BAG",
+        action="BUY",
+        quantity=1,
+        limit_price=1.5,
+        multiplier=100,
+        observed_at=read_started,
+        **SCOPE,
+    )
+    assert float(_submission_rows()[0]._mapping["limit_price"]) == 1.9
 
 
 def test_modify_rejects_guarantee_mode_change(client, broker_calls):

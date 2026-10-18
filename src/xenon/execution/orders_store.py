@@ -352,6 +352,8 @@ def _mirror_uuid_row(
     observed_at,
     fresh: bool,
     now: datetime,
+    existing_price: float | None = None,
+    observed_price: float | None = None,
 ) -> dict:
     """Mirror one observation onto a Xenon-authored (UUID) row.
 
@@ -365,7 +367,12 @@ def _mirror_uuid_row(
       durable one (TWS-side edit). Coverage reserves max(durable, observed)
       so the pass persists conservative demand instead of skipping it. A
       stale read can only raise it;
-    - pending-amend confirmation / expiry (fresh reads only).
+    - pending-amend confirmation / expiry (fresh reads only);
+    - the broker's limit price (fresh reads only, PR-08). A fresh read
+      began after the row's last local write, so it can never undo a newer
+      modify settlement; it repairs the price when the mirror confirmed a
+      price+qty amend before the route's settlement (which then finds the
+      token cleared and writes nothing). 0.0 means "no price observed".
 
     A terminal row the broker still reports open is resurrected only by a
     fresh read (a read that began before the cancel proves nothing). The
@@ -385,6 +392,10 @@ def _mirror_uuid_row(
         values.update(state="WORKING", reason_code=None)
     if outcome == "confirmed":
         values["quantity"] = observed_qty
+    if fresh and observed_price not in (None, 0.0):
+        new_price = round(float(observed_price), 4)
+        if existing_price is None or round(float(existing_price), 4) != new_price:
+            values["limit_price"] = Decimal(str(new_price))
     durable = values.get("quantity", existing_quantity)
     prev_obs = payload.get("observed_qty")
     if fresh:
@@ -416,6 +427,8 @@ def _mirror_uuid_row(
         kind = {"confirmed": "AMEND_RECONCILED", "expired": "AMEND_EXPIRED"}.get(outcome, "IB_MIRROR_OBSERVED")
         detail = {}
     detail.update(quantity=observed_qty, observed_qty=payload.get("observed_qty"))
+    if "limit_price" in values:
+        detail["limit_price"] = {"from": existing_price, "to": float(values["limit_price"])}
     conn.execute(insert(order_events).values(submission_id=submission_id, kind=kind, detail=detail, at=now))
     if terminal:
         return {"action": "RESURRECTED", "drift": None}
@@ -860,6 +873,8 @@ def register_from_snapshot(
                     observed_at=observed_at,
                     fresh=fresh,
                     now=now,
+                    existing_price=existing_limit_price,
+                    observed_price=float(limit_price) if limit_price is not None else None,
                 )
 
             # IB still reports this order as open while we have it in a

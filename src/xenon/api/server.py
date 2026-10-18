@@ -3369,6 +3369,19 @@ async def orders_modify(request: Request):
     return await _orders_modify_from_body(body)
 
 
+def _confirmed_int(confirmed, requested) -> int | None:
+    """Broker-confirmed quantity when the CLI reports one, else the request
+    (a quantity amend confirms only on exact equality)."""
+    for value in (confirmed, requested):
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 async def _orders_modify_from_body(body: dict):
     denial = ensure_order_allowed("order modification", app.state)
     if denial is not None:
@@ -3608,8 +3621,11 @@ async def _orders_modify_from_body(body: dict):
             _amend_id,
             "confirmed",
             _scope,
-            new_qty=int(new_quantity) if new_quantity is not None else None,
-            new_limit_price=new_price,
+            # The broker's confirmed values (CLI confirmedPrice /
+            # confirmedQuantity), never the request: confirmation tolerates
+            # a <0.001 price difference.
+            new_qty=_confirmed_int(data.get("confirmedQuantity"), new_quantity),
+            new_limit_price=data.get("confirmedPrice"),
         )
     _record_manage_event(
         str(order_id or ""),
