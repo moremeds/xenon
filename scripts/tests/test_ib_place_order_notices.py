@@ -10,10 +10,11 @@ Rule under test (``ib_place_order.place_order``):
 - accepted := permId > 0 and status not Cancelled / ApiCancelled / Inactive
   (Filled counts) → ok.
 - not accepted + an order-scoped non-notice error → error (earliest one).
-- not accepted + status ValidationError → error (new-order validation
-  failure), even when only "notice" codes such as 321 / 434 arrived.
+- not accepted + a new-order validation failure (321 / 434) → error, even
+  though ib_async classes them as warnings.
 - not accepted + terminal status → error.
-- otherwise (no ack yet: PendingSubmit / ApiPending) → unconfirmed ok.
+- otherwise (no ack yet: PendingSubmit / ApiPending, or ValidationError
+  caused only by notices such as 399) → unconfirmed ok.
 
 The client fake drives the REAL installed ib_async ``Wrapper.error`` and
 ``Wrapper.orderStatus`` against a registered ``Trade`` (the same registration
@@ -233,15 +234,31 @@ def test_validation_error_without_perm_id_is_error(cli, code, msg):
     assert result["code"] == code
 
 
-def test_399_alone_without_ack_is_error(cli):
-    # Caveat of the rule: a warning with no permId within the wait is a
-    # validation failure, even though IB may still ack the order later.
+def test_399_on_pending_submit_without_perm_id_is_unconfirmed_ok(cli):
+    # Off-hours IB holds the order and may send the permId after the wait.
+    # Wrapper.error relabels the PendingSubmit trade ValidationError; that is
+    # a notice, not a rejection.
     _WrapperClient.steps = [("error", _ORDER_ID, 399, _W399)]
 
     result = cli.place_order(dict(_STOCK))
 
+    assert result["status"] == "ok"
+    assert result["orderId"] == _ORDER_ID
+    assert result["permId"] == 0
+    assert result["initialStatus"] == "ValidationError"
+    assert result["ibNotices"] == [{"reqId": _ORDER_ID, "code": 399, "message": _W399}]
+
+
+def test_399_then_434_without_perm_id_is_error(cli):
+    _WrapperClient.steps = [
+        ("error", _ORDER_ID, 399, _W399),
+        ("error", _ORDER_ID, 434, "The order size cannot be zero."),
+    ]
+
+    result = cli.place_order(dict(_STOCK))
+
     assert result["status"] == "error"
-    assert result["code"] == 399
+    assert result["code"] == 434
 
 
 def test_terminal_inactive_without_error_event_is_error(cli):

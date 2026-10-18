@@ -44,6 +44,14 @@ _IB_FARM_STATUS_CODES = frozenset({2104, 2106, 2108, 2158, 10358})
 # place route maps it to LIMIT_OFF_TICK.
 _IB_NOTICE_CODES = frozenset({105, 165, 321, 329, 399, 404, 434, 492, 10167})
 
+# Notice codes that, on a NEW order, mean IB did not accept it. Source: the
+# same ib_async 2.1.0 ``Wrapper.error`` comments — 434 "The order size cannot
+# be zero." and 321 "Server error when validating an API client request."
+# (with its TODO that 321 on new placement may need the order deleted). The
+# other notice codes are modify-only (105, 329), "held, still live" (404,
+# 399 "will not be placed at the exchange until ...") or not order related.
+_NEW_ORDER_VALIDATION_FAILURES = frozenset({321, 434})
+
 # ib_async OrderStatus.DoneStates minus Filled: the order is dead at IB.
 _TERMINAL_STATUSES = OrderStatus.DoneStates - {OrderStatus.Filled}
 
@@ -96,14 +104,15 @@ def place_order(params: dict) -> dict:
       / Inactive; Filled counts) → ``ok``;
     - not accepted and an order-scoped non-notice error arrived → ``error``
       with the earliest such code (110 / 435 keep their route mappings);
-    - not accepted and status ValidationError, or a terminal status →
-      ``error`` (new-order validation failure / rejection);
-    - otherwise — no permId yet, PendingSubmit / ApiPending, no error — the
-      order is UNCONFIRMED and still returns ``ok``: IB may ack it after the
-      wait. The route stores it WORKING without a permId.
+    - not accepted and a new-order validation failure (321 / 434) arrived,
+      or a terminal status → ``error``;
+    - otherwise — no permId yet, PendingSubmit / ApiPending, or ib_async's
+      ValidationError label caused only by notices such as 399 — the order
+      is UNCONFIRMED and returns ``ok``: off-hours IB can send the permId
+      after the wait. The route stores it WORKING by orderId (no permId).
 
-    Caveats: a warning (e.g. 399) with no permId inside the wait returns
-    ``error`` even if IB acks the order later. OP-1 is NOT fixed here: if the
+    Caveats: an unconfirmed ``ok`` can still be an order IB later rejects;
+    the WORKING row then waits for reconciliation. OP-1 is NOT fixed here: if the
     route's 15 s subprocess timeout fires after IB accepted the order, the
     reservation goes FAILED and a retry with a new attempt id can duplicate.
     """
@@ -246,9 +255,11 @@ def place_order(params: dict) -> dict:
         order_events = [(c, m) for r, c, m in ib_events if r == order_id]
         hard_errors = [(c, m) for c, m in order_events if not _is_notice(c)]
         notices = [{"reqId": r, "code": c, "message": m} for r, c, m in ib_events]
-        rejected = hard_errors or status in _TERMINAL_STATUSES or status == OrderStatus.ValidationError
+        validation_failed = any(c in _NEW_ORDER_VALIDATION_FAILURES for c, _ in order_events)
+        rejected = hard_errors or validation_failed or status in _TERMINAL_STATUSES
         if not order_accepted(status, perm_id) and rejected:
-            code, msg = (hard_errors or order_events or [(None, f"order {status}")])[0]
+            failures = [(c, m) for c, m in order_events if c in _NEW_ORDER_VALIDATION_FAILURES]
+            code, msg = (hard_errors or failures or order_events or [(None, f"order {status}")])[0]
             # Code 110 = "The price does not conform to the minimum price
             # variation for this contract." Means our 0.01 tick stub
             # under-approximated the real tick rule for this instrument.

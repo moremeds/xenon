@@ -265,3 +265,27 @@ async def test_place_ok_with_notices_records_ib_notice_event(harness):
     assert resp["status"] == "ok"
     assert harness["submitted"][0]["perm_id"] == "123456"
     assert ("sub-1", "IB_NOTICE", {"notices": notices}) in harness["events"]
+
+
+async def test_place_unconfirmed_399_without_perm_id_goes_working(harness):
+    # The CLI payload for a 399 on a PendingSubmit order with no permId
+    # inside the wait (scripts/tests/test_ib_place_order_notices.py).
+    notices = [{"reqId": 7, "code": 399, "message": "Warning: your order will not be placed until ..."}]
+    harness["set_result"](
+        {
+            "status": "ok",
+            "orderId": 7,
+            "permId": 0,
+            "initialStatus": "ValidationError",
+            "clientId": 20,
+            "ibNotices": notices,
+        }
+    )
+
+    resp = await server_mod._orders_place_from_body(dict(_COMBO))
+
+    assert resp["status"] == "ok"
+    assert harness["terminal"] == []
+    assert harness["submitted"] == [
+        {"submission_id": "sub-1", "ib_order_id": "7", "perm_id": "", "placing_client_id": 20}
+    ]
