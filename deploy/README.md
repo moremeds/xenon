@@ -27,7 +27,7 @@ A. Staged compose validation and backup
 3. `cd /opt/xenon && docker-compose -f compose.new.yml config -q` (must exit 0; needs `.env`, `web.env` and the variables from step 2). Then check that the effective webhook is a non-empty string, printing only a boolean: `docker-compose -f compose.new.yml config --format json | jq -e '.services.watchtower.environment.WATCHTOWER_NOTIFICATION_URL | type == "string" and (gsub("\\s"; "") | length > 0)'` prints `true` and exits 0. Stop on `false` or a non-zero exit.
 4. Back up: `cp -p compose.yml compose.yml.bak-$(date +%Y%m%d%H%M)`.
 5. Diff without printing the webhook URL: `diff <(grep -v WATCHTOWER_NOTIFICATION_URL compose.yml) <(grep -v WATCHTOWER_NOTIFICATION_URL compose.new.yml)` (expect: header comment lines only; the filtered webhook line differs by design).
-6. Only then: `mv compose.new.yml compose.yml && docker-compose up -d`. Run `up -d --pull never` so no image changes in this step, and do section A only when no release is in flight.
+6. Only then: `mv compose.new.yml compose.yml && docker-compose up -d --pull never` (`--pull never`: no image changes in this step), and do section A only when no release is in flight.
 
 B. Rollback
 - `cp -p compose.yml.bak-<stamp> compose.yml && docker-compose up -d`. This restores the previous definition. Images are `:latest`; Watchtower still tracks them, so a rollback of the file does not pin an image.
