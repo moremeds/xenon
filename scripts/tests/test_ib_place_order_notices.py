@@ -6,7 +6,9 @@ Live incident 2026-10-17 (Saturday): a BUY 1 SPY BAG was accepted by IB
 wait. The place route then marked the reservation REJECTED while the order
 was live at IB — orphan order, retry → duplicate order.
 
-Rule under test (``ib_place_order.place_order``):
+Rule under test (``ib_place_order.decide_outcome`` over the ordered
+``Trade.log``; the final ``orderStatus.status`` is never trusted because
+``Wrapper.error`` overwrites it on every warning). Round-3 summary:
 - accepted := permId > 0 and status not Cancelled / ApiCancelled / Inactive
   (Filled counts) → ok.
 - not accepted + an order-scoped non-notice error → error (earliest one).
@@ -125,6 +127,8 @@ def test_399_after_presubmitted_ack_is_ok(cli):
     assert result["ibNotices"] == [{"reqId": _ORDER_ID, "code": 399, "message": _W399}]
     # The real placing clientId, so cancel / modify can reuse it.
     assert result["clientId"] == _CLIENT_ID
+    assert result["outcome"] == "accepted"
+    assert result["brokerStatus"] == "PreSubmitted"
 
 
 def test_399_before_presubmitted_ack_is_ok(cli):
@@ -301,3 +305,75 @@ def test_invalid_quantity_is_refused_before_connecting(cli, quantity):
     assert result["status"] == "error"
     assert result["reason_code"] == "INVALID_ORDER_BODY"
     assert _WrapperClient.connected is False
+
+
+# --- round 4: decide from the ordered Trade.log, never the final status ------
+
+
+def test_presubmitted_then_201_then_399_is_rejected(cli):
+    # A historical permId never clears a later rejection.
+    _WrapperClient.steps = [
+        ("status", "PreSubmitted", 123456),
+        ("error", _ORDER_ID, 201, "Order rejected - reason: margin"),
+        ("error", _ORDER_ID, 399, _W399),
+    ]
+
+    result = cli.place_order(dict(_STOCK))
+
+    assert result["initialStatus"] == "ValidationError"
+    assert result["permId"] == 123456
+    assert result["outcome"] == "rejected"
+    assert result["status"] == "error"
+    assert result["code"] == 201
+    assert result["message"] == "IB error 201: Order rejected - reason: margin"
+
+
+@pytest.mark.parametrize("perm_id", [0, 55])
+def test_inactive_then_399_is_rejected(cli, perm_id):
+    _WrapperClient.steps = [("status", "Inactive", perm_id), ("error", _ORDER_ID, 399, _W399)]
+
+    result = cli.place_order(dict(_STOCK))
+
+    assert result["initialStatus"] == "ValidationError"
+    assert result["brokerStatus"] == "Inactive"
+    assert result["outcome"] == "rejected"
+    assert result["status"] == "error"
+
+
+def test_presubmitted_399_submitted_is_accepted(cli):
+    _WrapperClient.steps = [
+        ("status", "PreSubmitted", 77),
+        ("error", _ORDER_ID, 399, _W399),
+        ("status", "Submitted", 77),
+    ]
+
+    result = cli.place_order(dict(_STOCK))
+
+    assert result["outcome"] == "accepted"
+    assert result["status"] == "ok"
+    assert result["initialStatus"] == "Submitted"
+
+
+def test_201_then_399_outcome_is_rejected(cli):
+    _WrapperClient.steps = [("error", _ORDER_ID, 201, "Order rejected"), ("error", _ORDER_ID, 399, _W399)]
+
+    assert cli.place_order(dict(_STOCK))["outcome"] == "rejected"
+
+
+def test_399_only_outcome_is_unconfirmed(cli):
+    _WrapperClient.steps = [("error", _ORDER_ID, 399, _W399)]
+
+    result = cli.place_order(dict(_STOCK))
+
+    assert result["outcome"] == "unconfirmed"
+    assert result["status"] == "ok"
+
+
+def test_filled_then_399_is_accepted(cli):
+    _WrapperClient.steps = [("status", "Filled", 9), ("error", _ORDER_ID, 399, _W399)]
+
+    result = cli.place_order(dict(_STOCK))
+
+    assert result["initialStatus"] == "ValidationError"
+    assert result["outcome"] == "accepted"
+    assert result["status"] == "ok"

@@ -170,10 +170,16 @@ class _FakeCliClient:
         if cls.emit_error is not None:
             for handler in self._ib.errorEvent.handlers:
                 handler(1, *cls.emit_error)  # reqId == the orderId placeOrder assigned
+        # ib_async logs PendingSubmit on placeOrder and, on a hard error,
+        # cancels the order with a log entry carrying the IB code.
+        log = [SimpleNamespace(status="PendingSubmit", message="", errorCode=0)]
+        if cls.emit_error is not None:
+            code, msg = cls.emit_error
+            log.append(SimpleNamespace(status="Cancelled", message=f"Error {code}, reqId 1: {msg}", errorCode=code))
         return SimpleNamespace(
             order=SimpleNamespace(orderId=1, permId=0, tif=order.tif),
-            # ib_async cancels a new order on a hard error; otherwise IB acks it.
-            orderStatus=SimpleNamespace(status="Cancelled" if cls.emit_error else "Submitted"),
+            orderStatus=SimpleNamespace(status="Cancelled" if cls.emit_error else "PendingSubmit"),
+            log=log,
         )
 
     def sleep(self, _seconds):

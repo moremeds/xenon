@@ -289,3 +289,71 @@ async def test_place_unconfirmed_399_without_perm_id_goes_working(harness):
     assert harness["submitted"] == [
         {"submission_id": "sub-1", "ib_order_id": "7", "perm_id": "", "placing_client_id": 20}
     ]
+
+
+# ---------------------------------------------------------------------------
+# Round 4: the route trusts the CLI's explicit outcome
+# ---------------------------------------------------------------------------
+
+
+async def test_place_outcome_rejected_wins_over_perm_id_and_live_status(harness):
+    # PreSubmitted(permId) → 201 → 399: final status ValidationError, permId
+    # set, but the CLI timeline says rejected.
+    harness["set_result"](
+        {
+            "status": "error",
+            "outcome": "rejected",
+            "code": 201,
+            "message": "IB error 201: Order rejected - reason: margin",
+            "orderId": 7,
+            "permId": 123456,
+            "initialStatus": "ValidationError",
+            "brokerStatus": "PreSubmitted",
+        }
+    )
+
+    resp = await server_mod._orders_place_from_body(dict(_COMBO))
+
+    assert resp.status_code == 502
+    assert json.loads(resp.body)["reason_code"] == "IB_REJECT"
+    assert harness["terminal"][0]["state"] == "REJECTED"
+    assert harness["submitted"] == []
+
+
+@pytest.mark.parametrize("outcome", ["accepted", "unconfirmed"])
+async def test_place_outcome_accepted_or_unconfirmed_goes_working(harness, outcome):
+    harness["set_result"](
+        {"status": "ok", "outcome": outcome, "orderId": 7, "permId": 0, "initialStatus": "ValidationError"}
+    )
+
+    resp = await server_mod._orders_place_from_body(dict(_COMBO))
+
+    assert resp["status"] == "ok"
+    assert harness["terminal"] == []
+    assert harness["submitted"][0]["ib_order_id"] == "7"
+
+
+async def test_place_legacy_hard_error_with_perm_id_and_live_status_is_unknown(harness):
+    # No ``outcome``: never REJECT (permId > 0, non-terminal) and never
+    # accept (hard-error code present) → UNKNOWN.
+    harness["set_result"](
+        {
+            "status": "error",
+            "code": 201,
+            "message": "IB error 201: Order rejected",
+            "orderId": 7,
+            "permId": 123456,
+            "initialStatus": "PreSubmitted",
+            "clientId": 20,
+        }
+    )
+
+    resp = await server_mod._orders_place_from_body(dict(_COMBO))
+
+    assert resp.status_code == 502
+    assert json.loads(resp.body)["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
+    assert harness["submitted"] == [
+        {"submission_id": "sub-1", "ib_order_id": "7", "perm_id": "123456", "placing_client_id": 20}
+    ]
+    assert harness["terminal"][0]["state"] == "UNKNOWN"
+    assert harness["terminal"][0]["reason_code"] == "PLACE_OUTCOME_UNKNOWN"

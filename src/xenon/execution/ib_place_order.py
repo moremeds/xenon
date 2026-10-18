@@ -33,8 +33,8 @@ _IB_ACCOUNT_REQUIRED = 435
 # Data-farm status chatter — dropped entirely (not even surfaced as notices).
 _IB_FARM_STATUS_CODES = frozenset({2104, 2106, 2108, 2158, 10358})
 
-# IB codes that are warnings / notices, never a rejection by themselves.
-# Source: ib_async 2.1.0 ``Wrapper.error`` (ib_async/wrapper.py) warningCodes
+# Codes that do not reject an order by themselves. This is ib_async's warning
+# set, not a verified broker-semantics list. Source: ib_async 2.1.0 ``Wrapper.error`` (ib_async/wrapper.py) warningCodes
 # {105, 110, 165, 321, 329, 399, 404, 434, 492, 10167} plus the 2100-2199
 # range that the same function also treats as warnings (its comments cite
 # the IBKR message-code table,
@@ -44,32 +44,73 @@ _IB_FARM_STATUS_CODES = frozenset({2104, 2106, 2108, 2158, 10358})
 # place route maps it to LIMIT_OFF_TICK.
 _IB_NOTICE_CODES = frozenset({105, 165, 321, 329, 399, 404, 434, 492, 10167})
 
-# Notice codes that, on a NEW order, mean IB did not accept it. Source: the
+# Warning codes that, on a NEW order, mean IB did not accept it. Source: the
 # same ib_async 2.1.0 ``Wrapper.error`` comments — 434 "The order size cannot
 # be zero." and 321 "Server error when validating an API client request."
 # (with its TODO that 321 on new placement may need the order deleted). The
-# other notice codes are modify-only (105, 329), "held, still live" (404,
-# 399 "will not be placed at the exchange until ...") or not order related.
+# broker semantics of the other warning codes on a new order are unverified.
 _NEW_ORDER_VALIDATION_FAILURES = frozenset({321, 434})
 
 # ib_async OrderStatus.DoneStates minus Filled: the order is dead at IB.
-_TERMINAL_STATUSES = OrderStatus.DoneStates - {OrderStatus.Filled}
+TERMINAL_STATUSES = OrderStatus.DoneStates - {OrderStatus.Filled}
 
 
 def _is_notice(code: int) -> bool:
     return code in _IB_NOTICE_CODES or 2100 <= code < 2200
 
 
-def order_accepted(status: str, perm_id: object) -> bool:
-    """Broker acceptance: IB assigned a permId and the order is not dead.
-    Filled counts as accepted. ib_async's ValidationError label alone is NOT
-    acceptance — the wrapper also sets it for new-order validation failures
-    (321, 434) and after a 201 rejection when a later warning arrives."""
+def is_hard_error(code: object) -> bool:
+    """An order-scoped code that rejects a new order: any non-notice code, or
+    a new-order validation failure (321 / 434)."""
     try:
-        perm = int(perm_id or 0)
+        value = int(code)
     except (TypeError, ValueError):
-        perm = 0
-    return perm > 0 and status not in _TERMINAL_STATUSES
+        return False
+    return value in _NEW_ORDER_VALIDATION_FAILURES or not _is_notice(value)
+
+
+def decide_outcome(log: list, perm_id: int) -> tuple[str, int | None, str | None, str]:
+    """Classify a new order from its ordered ib_async ``Trade.log``.
+
+    ib_async ``Wrapper.error`` overwrites ``trade.orderStatus.status`` on a
+    warning (ValidationError) and on a hard error (Cancelled), so the final
+    status cannot be trusted. Its log can: ``TradeLogEntry.errorCode`` is 0
+    for status entries (``placeOrder``'s PendingSubmit, ``Wrapper.orderStatus``)
+    and the IB code for error / warning entries.
+
+    Returns ``(outcome, code, message, broker_status)``; outcome is
+    ``accepted`` | ``rejected`` | ``unconfirmed``:
+
+    - broker_status := status of the LAST errorCode == 0 entry (warning and
+      error entries never count; ``execDetails`` fill entries also carry
+      errorCode 0 and copy the current status — not special-cased);
+    - rejected: broker_status terminal (Cancelled / ApiCancelled / Inactive),
+      or a hard error after the last broker_status. An earlier permId never
+      clears a later rejection;
+    - accepted: broker_status Filled, or a live broker_status with permId > 0
+      and no hard error after it;
+    - unconfirmed: otherwise (no ack / no permId yet, only notices) — e.g. a
+      399 off-hours, where IB sends the permId after the wait.
+    """
+    broker_status = ""
+    hard_after: tuple[int, str] | None = None
+    first_hard: tuple[int, str] | None = None
+    for entry in log:
+        code = int(getattr(entry, "errorCode", 0) or 0)
+        message = str(getattr(entry, "message", "") or "")
+        if code == 0:
+            broker_status = str(getattr(entry, "status", "") or "")
+            hard_after = None
+        elif is_hard_error(code):
+            first_hard = first_hard or (code, message)
+            hard_after = hard_after or (code, message)
+    if broker_status in TERMINAL_STATUSES or hard_after:
+        code, message = hard_after or first_hard or (None, f"order {broker_status}")
+        return "rejected", code, message, broker_status
+    live = broker_status in OrderStatus.ActiveStates and perm_id > 0
+    if broker_status == OrderStatus.Filled or live:
+        return "accepted", None, None, broker_status
+    return "unconfirmed", None, None, broker_status
 
 
 def _parse_quantity(raw: object) -> int | None:
@@ -96,23 +137,15 @@ def _build_stock_contract(params: dict) -> "Stock":
 def place_order(params: dict) -> dict:
     """Place a limit order and return result as dict.
 
-    Result rule after the ack wait (only events with reqId == this orderId
-    can reject the order; every other non-farm event is an ``ibNotices``
-    entry):
+    After the ack wait the result carries an explicit ``outcome`` from
+    ``decide_outcome`` (the ordered ``Trade.log`` timeline, never the final
+    status): ``accepted`` / ``unconfirmed`` → ``status: ok``; ``rejected`` →
+    ``status: error`` with the hard error's code (110 / 435 keep their route
+    mappings). Only this order's log can reject it; every non-farm
+    errorEvent (any reqId, including -1) is returned in ``ibNotices``.
 
-    - accepted (``order_accepted``: permId > 0, not Cancelled / ApiCancelled
-      / Inactive; Filled counts) → ``ok``;
-    - not accepted and an order-scoped non-notice error arrived → ``error``
-      with the earliest such code (110 / 435 keep their route mappings);
-    - not accepted and a new-order validation failure (321 / 434) arrived,
-      or a terminal status → ``error``;
-    - otherwise — no permId yet, PendingSubmit / ApiPending, or ib_async's
-      ValidationError label caused only by notices such as 399 — the order
-      is UNCONFIRMED and returns ``ok``: off-hours IB can send the permId
-      after the wait. The route stores it WORKING by orderId (no permId).
-
-    Caveats: an unconfirmed ``ok`` can still be an order IB later rejects;
-    the WORKING row then waits for reconciliation. OP-1 is NOT fixed here: if the
+    Caveats: an ``unconfirmed`` order (no permId inside the wait) can still be
+    one IB later rejects; its WORKING row then waits for reconciliation. OP-1 is NOT fixed here: if the
     route's 15 s subprocess timeout fires after IB accepted the order, the
     reservation goes FAILED and a retry with a new attempt id can duplicate.
     """
@@ -249,17 +282,11 @@ def place_order(params: dict) -> dict:
         accepted_tif = getattr(trade.order, "tif", None) or tif
         status = trade.orderStatus.status if trade.orderStatus else "Unknown"
 
-        # Decide by broker acceptance, not by "any errorEvent arrived" and not
-        # by the final status alone (ib_async lets a later warning overwrite a
-        # 201 Cancelled with ValidationError).
-        order_events = [(c, m) for r, c, m in ib_events if r == order_id]
-        hard_errors = [(c, m) for c, m in order_events if not _is_notice(c)]
         notices = [{"reqId": r, "code": c, "message": m} for r, c, m in ib_events]
-        validation_failed = any(c in _NEW_ORDER_VALIDATION_FAILURES for c, _ in order_events)
-        rejected = hard_errors or validation_failed or status in _TERMINAL_STATUSES
-        if not order_accepted(status, perm_id) and rejected:
-            failures = [(c, m) for c, m in order_events if c in _NEW_ORDER_VALIDATION_FAILURES]
-            code, msg = (hard_errors or failures or order_events or [(None, f"order {status}")])[0]
+        outcome, code, msg, broker_status = decide_outcome(list(getattr(trade, "log", None) or []), perm_id)
+        if outcome == "rejected":
+            # Prefer IB's raw text over ib_async's "Error 201, reqId 7: ..." log line.
+            msg = next((m for r, c, m in ib_events if r == order_id and c == code), msg)
             # Code 110 = "The price does not conform to the minimum price
             # variation for this contract." Means our 0.01 tick stub
             # under-approximated the real tick rule for this instrument.
@@ -290,6 +317,8 @@ def place_order(params: dict) -> dict:
                 "permId": perm_id,
                 "tif": accepted_tif,
                 "initialStatus": status,
+                "brokerStatus": broker_status,
+                "outcome": outcome,
                 "clientId": client_id,
                 "ibNotices": notices,
             }
@@ -301,6 +330,8 @@ def place_order(params: dict) -> dict:
             "tif": accepted_tif,
             "initialStatus": status,
             "message": f"{action} {quantity} {symbol} @ ${limit_price:.2f} {accepted_tif} — {status}",
+            "brokerStatus": broker_status,
+            "outcome": outcome,
             "clientId": client_id,
             "ibNotices": notices,
         }

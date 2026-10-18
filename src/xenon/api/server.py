@@ -72,7 +72,7 @@ from xenon.db.queries.blotter import blotter_has_trades, fetch_blotter_pg, fetch
 from xenon.db.schema import account_snapshots, order_events, order_submissions
 from xenon.execution import orders_store, preflight, quote_guard, quote_tokens
 from xenon.execution.account_scope import IBAccountSelectionError, resolve_from_app_state, select_ib_account
-from xenon.execution.ib_place_order import order_accepted
+from xenon.execution.ib_place_order import TERMINAL_STATUSES, is_hard_error
 from xenon.execution.preflight import (
     PortfolioView,
     PreflightRequest,
@@ -2403,39 +2403,13 @@ async def _orders_place_from_body(body: dict):
             avg_fill_price=None,
         )
         raise HTTPException(status_code=502, detail=result.error)
-    if not result.data:
-        # The subprocess exited OK but printed no JSON result: IB may or may
-        # not hold the order. Never leave the row PENDING (a same-attempt
-        # retry would return "duplicate" and nothing would ever resolve it)
-        # and never call it rejected. UNKNOWN is the uncertain state that
-        # /health counts; an operator resolves it against IB working orders.
-        orders_store.mark_terminal(
-            submission_id=submission_id,
-            state="UNKNOWN",
-            reason_code=ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
-            filled_qty=0,
-            avg_fill_price=None,
-        )
-        return JSONResponse(
-            status_code=502,
-            content={
-                "detail": "Order outcome unknown — check working orders before placing it again. Do not resubmit.",
-                "reason_code": ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
-            },
-        )
-    if result.data.get("status") == "error" and order_accepted(
-        str(result.data.get("initialStatus") or ""), result.data.get("permId")
-    ):
-        # IB accepted the order (permId > 0, not Cancelled / ApiCancelled /
-        # Inactive; Filled counts) even though the CLI reported an error.
+    verdict = _place_verdict(result.data)
+    if verdict == "unknown":
+        return _place_outcome_unknown(submission_id, result.data or {})
+    if verdict == "accepted" and result.data.get("status") == "error":
+        # Legacy payload (no ``outcome``): IB holds the order (permId > 0,
+        # non-terminal status, notice-only code) though the CLI said error.
         # Never mark it REJECTED: the user would retry and place a duplicate.
-        # Store it WORKING with its permId; the activity poller and fill
-        # mirror then update it from IB open orders / executions. Caveat:
-        # the activity-mirror sweep (`sweep_disappeared_orders`) skips an empty
-        # open-order snapshot and needs two consecutive
-        # misses, and boot rehydrate without a positions baseline leaves the
-        # row as is — a per-row grace / unknown-order reconciliation is a
-        # follow-up.
         logger.warning(
             "IB order accepted despite CLI error: submission=%s ib_code=%s status=%s permId=%s",
             submission_id,
@@ -2452,7 +2426,7 @@ async def _orders_place_from_body(body: dict):
             },
         )
         result.data = {**result.data, "status": "ok"}
-    if result.data.get("status") == "error":
+    if verdict == "rejected":
         # B6 — write a reason_code the UI toast map can resolve. Most IB
         # rejections collapse to IB_REJECT, but tick-rule rejections
         # (code 110) re-map to LIMIT_OFF_TICK so the user sees a clean
@@ -2508,6 +2482,77 @@ async def _orders_place_from_body(body: dict):
     if result.data.get("ibNotices"):
         _record_place_event(submission_id, {"notices": result.data["ibNotices"]})
     return result.data
+
+
+def _place_verdict(data: dict | None) -> str:
+    """``accepted`` | ``rejected`` | ``unknown`` for a place CLI result.
+
+    The CLI's explicit ``outcome`` (from the ordered ib_async Trade.log) is
+    trusted: ``accepted`` / ``unconfirmed`` → accepted (stored WORKING),
+    ``rejected`` → rejected. Payloads without ``outcome`` (older CLI, or an
+    error raised before placement) fall back conservatively: an error with
+    permId > 0 and a non-terminal status is never REJECTED — accepted when
+    its code is a notice, UNKNOWN when it is a hard error.
+
+    A WORKING row is then updated by the activity poller / fill mirror, but
+    the activity-mirror sweep (``sweep_disappeared_orders``) skips an empty
+    open-order snapshot and needs two consecutive misses, and boot rehydrate
+    without a positions baseline leaves the row as is — a per-row grace /
+    unknown-order reconciliation is a follow-up.
+    """
+    if not data:
+        return "unknown"
+    outcome = data.get("outcome")
+    if outcome == "rejected":
+        return "rejected"
+    if outcome in ("accepted", "unconfirmed"):
+        return "accepted"
+    if data.get("status") != "error":
+        return "accepted"
+    try:
+        perm_id = int(data.get("permId") or 0)
+    except (TypeError, ValueError):
+        perm_id = 0
+    if perm_id > 0 and str(data.get("initialStatus") or "") not in TERMINAL_STATUSES:
+        return "unknown" if is_hard_error(data.get("code")) else "accepted"
+    return "rejected"
+
+
+def _place_outcome_unknown(submission_id: str, data: dict) -> JSONResponse:
+    """IB may or may not hold the order. Never leave the row PENDING (a
+    same-attempt retry would return "duplicate" and nothing would resolve
+    it) and never call it rejected. UNKNOWN is the uncertain state /health
+    counts; an operator resolves it against IB working orders. Any IB ids the
+    CLI returned are stored first so the row can be matched."""
+    if data.get("orderId") or data.get("permId"):
+        orders_store.mark_submitted(
+            submission_id=submission_id,
+            ib_order_id=str(data.get("orderId") or ""),
+            perm_id=str(data.get("permId") or ""),
+            placing_client_id=int(data.get("clientId") or 26),
+        )
+        _record_place_event(
+            submission_id,
+            {
+                "ib_code": data.get("code"),
+                "ib_message": data.get("message"),
+                "initial_status": data.get("initialStatus"),
+            },
+        )
+    orders_store.mark_terminal(
+        submission_id=submission_id,
+        state="UNKNOWN",
+        reason_code=ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
+        filled_qty=0,
+        avg_fill_price=None,
+    )
+    return JSONResponse(
+        status_code=502,
+        content={
+            "detail": "Order outcome unknown — check working orders before placing it again. Do not resubmit.",
+            "reason_code": ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
+        },
+    )
 
 
 def _record_place_event(submission_id: str, detail: dict) -> None:
