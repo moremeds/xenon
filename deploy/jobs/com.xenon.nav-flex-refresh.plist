@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.xenon.nav-flex-refresh.plist: daily IB Flex NAV refresh, run FROM THE
+  DEPLOYED api IMAGE (no git checkout on the Mac mini).
+
+  What runs:   docker-compose -f /opt/xenon/compose.yml run (one-off, removed on exit) api xenon-nav-flex-refresh
+  Schedule:    every day 17:30 ET (one hour after the close).
+  TZ:          launchd StartCalendarInterval uses the SYSTEM time zone. The
+               EnvironmentVariables TZ below only affects the child process.
+               Check:  sudo systemsetup -gettimezone   (want America/New_York).
+  Lock:        (1) launchd never starts a second instance of a running label.
+               (2) the fixed container name in ProgramArguments (xenon-job-nav-flex-refresh) makes Docker refuse
+               a duplicate run (manual run while the job runs) with a name
+               conflict. No flock needed.
+  Creds:       none in this file. The api service env_file (/opt/xenon/.env,
+               /opt/xenon/web.env) supplies DATABASE_URL, IB_FLEX_TOKEN,
+               IB_FLEX_NAV_QUERY_ID, XENON_TRADING_MODE (must be "live"),
+               XENON_LIVE_ACCOUNT.
+  Volumes:     the api service mounts: /opt/xenon/.env -> /app/.env (read-only)
+               and /opt/xenon/data -> /app/data. The CLI writes to Postgres only.
+  Image:       the api image the stack runs now (Watchtower keeps :latest
+               current), so the job and the api never drift apart.
+  Watchtower:  the label override stops Watchtower from recreating this
+               one-off container if a new image lands mid-run.
+  Logs:        /var/log/xenon/nav-flex-refresh.stdout.log and .stderr.log
+               (the CLI logs to stderr). The directory must exist and be
+               writable by the LaunchAgent user:
+                 sudo mkdir -p /var/log/xenon && sudo chown $(whoami) /var/log/xenon
+
+  Install (Mac mini, as the user that runs the docker stack):
+    cp deploy/jobs/com.xenon.nav-flex-refresh.plist ~/Library/LaunchAgents/
+    plutil -lint ~/Library/LaunchAgents/com.xenon.nav-flex-refresh.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.xenon.nav-flex-refresh.plist
+    launchctl print gui/$(id -u)/com.xenon.nav-flex-refresh | grep -A5 calendar
+  Test now:  launchctl kickstart gui/$(id -u)/com.xenon.nav-flex-refresh
+  Uninstall: launchctl bootout gui/$(id -u)/com.xenon.nav-flex-refresh
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.xenon.nav-flex-refresh</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/docker-compose</string>
+    <string>-f</string>
+    <string>/opt/xenon/compose.yml</string>
+    <string>run</string>
+    <string>--rm</string>
+    <string>-T</string>
+    <string>--no-deps</string>
+    <string>--name</string>
+    <string>xenon-job-nav-flex-refresh</string>
+    <string>--label</string>
+    <string>com.centurylinklabs.watchtower.enable=false</string>
+    <string>api</string>
+    <string>xenon-nav-flex-refresh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/opt/xenon</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>TZ</key>
+    <string>America/New_York</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>17</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/var/log/xenon/nav-flex-refresh.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/var/log/xenon/nav-flex-refresh.stderr.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
