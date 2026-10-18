@@ -110,6 +110,10 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
     severity: "error",
     copy: "Scope account not managed by this IB login — order not placed.",
   },
+  PLACE_OUTCOME_UNKNOWN: {
+    severity: "error",
+    copy: "Order outcome unknown — check working orders. Do not resubmit.",
+  },
 };
 
 const FALLBACK: ReasonToast = {

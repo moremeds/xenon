@@ -52,13 +52,27 @@ def _is_notice(code: int) -> bool:
     return code in _IB_NOTICE_CODES or 2100 <= code < 2200
 
 
-def _order_is_live(status: str, perm_id: int) -> bool:
-    """True when IB holds the order: an ib_async active state (this includes
-    ValidationError, which ib_async sets on a warning for a still-live order),
-    or a permId assigned with no terminal status."""
-    if status in OrderStatus.ActiveStates:
-        return True
-    return bool(perm_id) and perm_id > 0 and status not in _TERMINAL_STATUSES
+def order_accepted(status: str, perm_id: object) -> bool:
+    """Broker acceptance: IB assigned a permId and the order is not dead.
+    Filled counts as accepted. ib_async's ValidationError label alone is NOT
+    acceptance — the wrapper also sets it for new-order validation failures
+    (321, 434) and after a 201 rejection when a later warning arrives."""
+    try:
+        perm = int(perm_id or 0)
+    except (TypeError, ValueError):
+        perm = 0
+    return perm > 0 and status not in _TERMINAL_STATUSES
+
+
+def _parse_quantity(raw: object) -> int | None:
+    """Positive whole-number quantity, else None."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0 or not value.is_integer():
+        return None
+    return int(value)
 
 
 def _build_stock_contract(params: dict) -> "Stock":
@@ -72,11 +86,37 @@ def _build_stock_contract(params: dict) -> "Stock":
 
 
 def place_order(params: dict) -> dict:
-    """Place a limit order and return result as dict."""
+    """Place a limit order and return result as dict.
+
+    Result rule after the ack wait (only events with reqId == this orderId
+    can reject the order; every other non-farm event is an ``ibNotices``
+    entry):
+
+    - accepted (``order_accepted``: permId > 0, not Cancelled / ApiCancelled
+      / Inactive; Filled counts) → ``ok``;
+    - not accepted and an order-scoped non-notice error arrived → ``error``
+      with the earliest such code (110 / 435 keep their route mappings);
+    - not accepted and status ValidationError, or a terminal status →
+      ``error`` (new-order validation failure / rejection);
+    - otherwise — no permId yet, PendingSubmit / ApiPending, no error — the
+      order is UNCONFIRMED and still returns ``ok``: IB may ack it after the
+      wait. The route stores it WORKING without a permId.
+
+    Caveats: a warning (e.g. 399) with no permId inside the wait returns
+    ``error`` even if IB acks the order later. OP-1 is NOT fixed here: if the
+    route's 15 s subprocess timeout fires after IB accepted the order, the
+    reservation goes FAILED and a retry with a new attempt id can duplicate.
+    """
     order_type = params.get("type", "stock")
     symbol = params["symbol"].upper()
     action = params["action"].upper()
-    quantity = int(params["quantity"])
+    quantity = _parse_quantity(params.get("quantity"))
+    if quantity is None:
+        return {
+            "status": "error",
+            "reason_code": "INVALID_ORDER_BODY",
+            "message": f"quantity must be a positive whole number, got {params.get('quantity')!r}",
+        }
     limit_price = float(params["limitPrice"])
     tif = params.get("tif", "DAY").upper()
     # FastAPI forwards the scope account it stamped on the reservation row.
@@ -189,16 +229,25 @@ def place_order(params: dict) -> dict:
         client.sleep(wait_secs)
 
         order_id = trade.order.orderId
-        perm_id = trade.order.permId
+        # openOrder fills order.permId, orderStatus fills orderStatus.permId;
+        # either one proves IB accepted the order.
+        perm_id = max(
+            int(getattr(trade.order, "permId", 0) or 0),
+            int(getattr(trade.orderStatus, "permId", 0) or 0) if trade.orderStatus else 0,
+        )
+        # Cancel / modify must reuse the placing clientId ("auto" allocates one).
+        client_id = getattr(trade.order, "clientId", 0) or getattr(client, "_last_client_id", 0) or None
         accepted_tif = getattr(trade.order, "tif", None) or tif
         status = trade.orderStatus.status if trade.orderStatus else "Unknown"
 
-        # Decide by order state, not by "any errorEvent arrived".
+        # Decide by broker acceptance, not by "any errorEvent arrived" and not
+        # by the final status alone (ib_async lets a later warning overwrite a
+        # 201 Cancelled with ValidationError).
         order_events = [(c, m) for r, c, m in ib_events if r == order_id]
         hard_errors = [(c, m) for c, m in order_events if not _is_notice(c)]
         notices = [{"reqId": r, "code": c, "message": m} for r, c, m in ib_events]
-        live = _order_is_live(status, perm_id or 0)
-        if status in _TERMINAL_STATUSES or (hard_errors and not live):
+        rejected = hard_errors or status in _TERMINAL_STATUSES or status == OrderStatus.ValidationError
+        if not order_accepted(status, perm_id) and rejected:
             code, msg = (hard_errors or order_events or [(None, f"order {status}")])[0]
             # Code 110 = "The price does not conform to the minimum price
             # variation for this contract." Means our 0.01 tick stub
@@ -230,6 +279,7 @@ def place_order(params: dict) -> dict:
                 "permId": perm_id,
                 "tif": accepted_tif,
                 "initialStatus": status,
+                "clientId": client_id,
                 "ibNotices": notices,
             }
 
@@ -240,6 +290,7 @@ def place_order(params: dict) -> dict:
             "tif": accepted_tif,
             "initialStatus": status,
             "message": f"{action} {quantity} {symbol} @ ${limit_price:.2f} {accepted_tif} — {status}",
+            "clientId": client_id,
             "ibNotices": notices,
         }
 

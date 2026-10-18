@@ -1,70 +1,82 @@
-"""xenon-ib-place-order decides by order state, not by "any errorEvent".
+"""xenon-ib-place-order decides by broker acceptance, not by "any errorEvent".
 
 Live incident 2026-10-17 (Saturday): a BUY 1 SPY BAG was accepted by IB
 (PreSubmitted, permId set, visible in reqAllOpenOrders) but the CLI returned
-"error" because IB sent a 399 "Order Message: Warning: ..." during the ack
+"error" because IB sent a warning (399 is the expected cause) during the ack
 wait. The place route then marked the reservation REJECTED while the order
 was live at IB — orphan order, retry → duplicate order.
 
-Fake IB only — no network.
+Rule under test (``ib_place_order.place_order``):
+- accepted := permId > 0 and status not Cancelled / ApiCancelled / Inactive
+  (Filled counts) → ok.
+- not accepted + an order-scoped non-notice error → error (earliest one).
+- not accepted + status ValidationError → error (new-order validation
+  failure), even when only "notice" codes such as 321 / 434 arrived.
+- not accepted + terminal status → error.
+- otherwise (no ack yet: PendingSubmit / ApiPending) → unconfirmed ok.
+
+The client fake drives the REAL installed ib_async ``Wrapper.error`` and
+``Wrapper.orderStatus`` against a registered ``Trade`` (the same registration
+``IB.placeOrder`` does), so the status transitions — 201 → Cancelled, then a
+later 399 → ValidationError — are ib_async's own. No network.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
+from ib_async import IB, Trade
+from ib_async import OrderStatus as IBOrderStatus
 
 from xenon.execution import ib_place_order
 
 _ORDER_ID = 7
+_CLIENT_ID = 26
 
 
-class _ErrorEvent:
-    def __init__(self):
-        self.handlers: list = []
+class _WrapperClient:
+    """``IBClient`` stand-in backed by a real, unconnected ``ib_async.IB``.
 
-    def __iadd__(self, handler):
-        self.handlers.append(handler)
-        return self
+    ``steps`` replay during the ack wait (``sleep``):
+    ``("error", reqId, code, msg)`` → ``Wrapper.error``;
+    ``("status", status, permId)`` → ``Wrapper.orderStatus``.
+    """
 
-
-class _FakeClient:
-    """Places one order; emits ``events`` during the ack wait (``sleep``),
-    then reports ``final_status`` / ``final_perm_id`` — the ib_async order
-    of operations (placeOrder assigns orderId, then IB messages arrive)."""
-
-    events: list[tuple[int, int, str]] = []
-    final_status = "PreSubmitted"
-    final_perm_id = 0
+    steps: list[tuple] = []
+    connected = False
 
     def __init__(self):
-        self._ib = SimpleNamespace(errorEvent=_ErrorEvent())
-        self._trade = None
+        self._ib = IB()
+        self._ib.wrapper.clientId = _CLIENT_ID
+        self.trade: Trade | None = None
 
     def connect(self, **_kwargs):
-        return None
+        self.__class__.connected = True
 
     def qualify_contracts(self, *contracts):
         for idx, contract in enumerate(contracts, start=1):
             contract.conId = idx
         return list(contracts)
 
-    def place_order(self, _contract, order):
+    def place_order(self, contract, order):
+        # Mirrors ib_async IB.placeOrder for a new order (ib.py placeOrder).
         order.orderId = _ORDER_ID
-        self._trade = SimpleNamespace(
-            order=SimpleNamespace(orderId=_ORDER_ID, permId=0, tif=order.tif),
-            orderStatus=SimpleNamespace(status="PendingSubmit"),
-        )
-        return self._trade
+        order.clientId = _CLIENT_ID
+        status = IBOrderStatus(orderId=_ORDER_ID, status=IBOrderStatus.PendingSubmit)
+        self.trade = Trade(contract, order, status, [], [])
+        self._ib.wrapper.trades[(_CLIENT_ID, _ORDER_ID)] = self.trade
+        return self.trade
 
     def sleep(self, _seconds):
-        cls = self.__class__
-        for req_id, code, msg in cls.events:
-            for handler in self._ib.errorEvent.handlers:
-                handler(req_id, code, msg, None)
-        self._trade.order.permId = cls.final_perm_id
-        self._trade.orderStatus.status = cls.final_status
+        wrapper = self._ib.wrapper
+        for step in self.__class__.steps:
+            if step[0] == "error":
+                _, req_id, code, msg = step
+                wrapper.error(req_id, code, msg, "")
+            else:
+                _, status, perm_id = step
+                qty = float(self.trade.order.totalQuantity)
+                filled = qty if status == IBOrderStatus.Filled else 0.0
+                wrapper.orderStatus(_ORDER_ID, status, filled, qty - filled, 0.0, perm_id, 0, 0.0, _CLIENT_ID, "", 0.0)
 
     def disconnect(self):
         return None
@@ -72,10 +84,9 @@ class _FakeClient:
 
 @pytest.fixture
 def cli(monkeypatch):
-    _FakeClient.events = []
-    _FakeClient.final_status = "PreSubmitted"
-    _FakeClient.final_perm_id = 0
-    monkeypatch.setattr(ib_place_order, "IBClient", _FakeClient)
+    _WrapperClient.steps = []
+    _WrapperClient.connected = False
+    monkeypatch.setattr(ib_place_order, "IBClient", _WrapperClient)
     return ib_place_order
 
 
@@ -96,51 +107,51 @@ _STOCK = {"type": "stock", "symbol": "SPY", "action": "BUY", "quantity": 1, "lim
 _W399 = "Order Message:\nBUY 1 SPY BAG\nWarning: your order will not be placed at the exchange until 2026-10-19 09:30:00 US/Eastern"
 
 
-def test_399_warning_on_live_presubmitted_order_is_ok(cli):
-    _FakeClient.events = [(_ORDER_ID, 399, _W399)]
-    _FakeClient.final_status = "PreSubmitted"
-    _FakeClient.final_perm_id = 123456
+# --- accepted orders ---------------------------------------------------------
+
+
+def test_399_after_presubmitted_ack_is_ok(cli):
+    # Wrapper.error turns the PreSubmitted trade into ValidationError; the
+    # permId proves IB accepted the order.
+    _WrapperClient.steps = [("status", "PreSubmitted", 123456), ("error", _ORDER_ID, 399, _W399)]
 
     result = cli.place_order(dict(_COMBO))
 
     assert result["status"] == "ok"
     assert result["orderId"] == _ORDER_ID
     assert result["permId"] == 123456
-    assert result["initialStatus"] == "PreSubmitted"
+    assert result["initialStatus"] == "ValidationError"
     assert result["ibNotices"] == [{"reqId": _ORDER_ID, "code": 399, "message": _W399}]
+    # The real placing clientId, so cancel / modify can reuse it.
+    assert result["clientId"] == _CLIENT_ID
 
 
-def test_399_warning_sets_validation_error_status_still_ok(cli):
-    # ib_async's wrapper.error() sets orderStatus.status = ValidationError on a
-    # warning for a known trade — the order is still live at the broker.
-    _FakeClient.events = [(_ORDER_ID, 399, _W399)]
-    _FakeClient.final_status = "ValidationError"
-    _FakeClient.final_perm_id = 123456
+def test_399_before_presubmitted_ack_is_ok(cli):
+    _WrapperClient.steps = [("error", _ORDER_ID, 399, _W399), ("status", "PreSubmitted", 123456)]
 
     result = cli.place_order(dict(_COMBO))
 
     assert result["status"] == "ok"
-    assert result["initialStatus"] == "ValidationError"
+    assert result["initialStatus"] == "PreSubmitted"
 
 
-def test_connection_wide_notice_with_req_id_minus_one_is_ok(cli):
-    _FakeClient.events = [
-        (-1, 2110, "Connectivity between TWS and server is broken. It will be restored automatically.")
+def test_connection_wide_2110_req_id_minus_one_is_ok(cli):
+    _WrapperClient.steps = [
+        ("error", -1, 2110, "Connectivity between TWS and server is broken. It will be restored automatically."),
+        ("status", "Submitted", 555),
     ]
-    _FakeClient.final_status = "Submitted"
-    _FakeClient.final_perm_id = 555
 
     result = cli.place_order(dict(_STOCK))
 
     assert result["status"] == "ok"
-    assert result["ibNotices"][0]["reqId"] == -1
-    assert result["ibNotices"][0]["code"] == 2110
+    assert result["ibNotices"][0] == {"reqId": -1, "code": 2110, "message": result["ibNotices"][0]["message"]}
 
 
 def test_other_req_id_hard_error_does_not_reject_this_order(cli):
-    _FakeClient.events = [(99, 200, "No security definition has been found for the request")]
-    _FakeClient.final_status = "Submitted"
-    _FakeClient.final_perm_id = 555
+    _WrapperClient.steps = [
+        ("error", 99, 200, "No security definition has been found for the request"),
+        ("status", "Submitted", 555),
+    ]
 
     result = cli.place_order(dict(_STOCK))
 
@@ -148,30 +159,93 @@ def test_other_req_id_hard_error_does_not_reject_this_order(cli):
     assert result["ibNotices"][0]["reqId"] == 99
 
 
-def test_order_scoped_201_rejection_with_cancelled_status_is_error(cli):
-    _FakeClient.events = [(_ORDER_ID, 201, "Order rejected - reason: insufficient buying power")]
-    _FakeClient.final_status = "Cancelled"
+def test_filled_immediately_is_ok(cli):
+    _WrapperClient.steps = [("status", "Filled", 9)]
 
     result = cli.place_order(dict(_STOCK))
 
+    assert result["status"] == "ok"
+    assert result["permId"] == 9
+
+
+# --- unconfirmed (no ack within the wait) -------------------------------------
+
+
+def test_no_ack_and_no_error_is_unconfirmed_ok(cli):
+    result = cli.place_order(dict(_STOCK))
+
+    assert result["status"] == "ok"
+    assert result["initialStatus"] == "PendingSubmit"
+    assert result["permId"] == 0
+
+
+def test_connection_loss_before_ack_is_unconfirmed_ok(cli):
+    _WrapperClient.steps = [("error", -1, 1100, "Connectivity between IB and Trader Workstation has been lost.")]
+
+    result = cli.place_order(dict(_STOCK))
+
+    assert result["status"] == "ok"
+    assert result["ibNotices"][0]["code"] == 1100
+
+
+# --- rejected orders ---------------------------------------------------------
+
+
+def test_201_then_399_keeps_the_rejection(cli):
+    # Wrapper.error: 201 → Cancelled, then 399 overwrites to ValidationError.
+    _WrapperClient.steps = [
+        ("error", _ORDER_ID, 201, "Order rejected - reason: insufficient buying power"),
+        ("error", _ORDER_ID, 399, _W399),
+    ]
+
+    result = cli.place_order(dict(_STOCK))
+
+    assert result["initialStatus"] == "ValidationError"
     assert result["status"] == "error"
     assert result["code"] == 201
     assert "insufficient buying power" in result["message"]
-    assert result["initialStatus"] == "Cancelled"
 
 
-def test_order_scoped_hard_error_without_any_status_is_error(cli):
-    _FakeClient.events = [(_ORDER_ID, 201, "Order rejected - reason: x")]
-    _FakeClient.final_status = ""  # no orderStatus ever arrived, permId 0
+def test_201_with_cancelled_status_is_error(cli):
+    _WrapperClient.steps = [("error", _ORDER_ID, 201, "Order rejected - reason: insufficient buying power")]
 
     result = cli.place_order(dict(_STOCK))
 
     assert result["status"] == "error"
     assert result["code"] == 201
+    assert result["initialStatus"] == "Cancelled"
+
+
+@pytest.mark.parametrize(
+    ("code", "msg"),
+    [
+        (434, "The order size cannot be zero."),
+        (321, "Error validating request.-'bN' : cause - invalid order"),
+    ],
+)
+def test_validation_error_without_perm_id_is_error(cli, code, msg):
+    _WrapperClient.steps = [("error", _ORDER_ID, code, msg)]
+
+    result = cli.place_order(dict(_STOCK))
+
+    assert result["initialStatus"] == "ValidationError"
+    assert result["status"] == "error"
+    assert result["code"] == code
+
+
+def test_399_alone_without_ack_is_error(cli):
+    # Caveat of the rule: a warning with no permId within the wait is a
+    # validation failure, even though IB may still ack the order later.
+    _WrapperClient.steps = [("error", _ORDER_ID, 399, _W399)]
+
+    result = cli.place_order(dict(_STOCK))
+
+    assert result["status"] == "error"
+    assert result["code"] == 399
 
 
 def test_terminal_inactive_without_error_event_is_error(cli):
-    _FakeClient.final_status = "Inactive"
+    _WrapperClient.steps = [("status", "Inactive", 5)]
 
     result = cli.place_order(dict(_STOCK))
 
@@ -180,20 +254,19 @@ def test_terminal_inactive_without_error_event_is_error(cli):
 
 
 def test_code_110_still_returns_code_for_limit_off_tick(cli):
-    _FakeClient.events = [
-        (_ORDER_ID, 110, "The price does not conform to the minimum price variation for this contract.")
+    _WrapperClient.steps = [
+        ("error", _ORDER_ID, 110, "The price does not conform to the minimum price variation for this contract.")
     ]
-    _FakeClient.final_status = "Cancelled"
 
     result = cli.place_order(dict(_STOCK))
 
     assert result["status"] == "error"
     assert result["code"] == 110
+    assert result["initialStatus"] == "Cancelled"
 
 
 def test_code_435_still_maps_to_account_unresolved(cli):
-    _FakeClient.events = [(_ORDER_ID, 435, "You must specify an account.")]
-    _FakeClient.final_status = "Cancelled"
+    _WrapperClient.steps = [("error", _ORDER_ID, 435, "You must specify an account.")]
 
     result = cli.place_order(dict(_STOCK))
 
@@ -201,44 +274,13 @@ def test_code_435_still_maps_to_account_unresolved(cli):
     assert result["reason_code"] == "ACCOUNT_UNRESOLVED"
 
 
-def test_filled_immediately_is_ok(cli):
-    _FakeClient.final_status = "Filled"
-    _FakeClient.final_perm_id = 9
-
-    result = cli.place_order(dict(_STOCK))
-
-    assert result["status"] == "ok"
+# --- quantity validation (before any IB connection) ---------------------------
 
 
-def test_connection_loss_before_ack_does_not_reject(cli):
-    # No ack yet (no status, permId 0) and only a connection-wide reqId -1
-    # message: nothing rejected THIS order, so it is not an error.
-    _FakeClient.events = [(-1, 1100, "Connectivity between IB and Trader Workstation has been lost.")]
-    _FakeClient.final_status = ""
+@pytest.mark.parametrize("quantity", [0, -1, 1.5, "1.5"])
+def test_invalid_quantity_is_refused_before_connecting(cli, quantity):
+    result = cli.place_order({**_COMBO, "quantity": quantity})
 
-    result = cli.place_order(dict(_STOCK))
-
-    assert result["status"] == "ok"
-    assert result["ibNotices"][0]["code"] == 1100
-
-
-def test_order_scoped_warning_before_ack_does_not_reject(cli):
-    _FakeClient.events = [(_ORDER_ID, 399, _W399)]
-    _FakeClient.final_status = ""
-
-    result = cli.place_order(dict(_STOCK))
-
-    assert result["status"] == "ok"
-
-
-def test_order_scoped_non_notice_code_on_live_order_is_ok(cli):
-    # State decides: any order-scoped message on an order IB reports live
-    # is carried as a notice, not a rejection.
-    _FakeClient.events = [(_ORDER_ID, 10349, "order-scoped message")]
-    _FakeClient.final_status = "Submitted"
-    _FakeClient.final_perm_id = 42
-
-    result = cli.place_order(dict(_STOCK))
-
-    assert result["status"] == "ok"
-    assert result["ibNotices"][0]["code"] == 10349
+    assert result["status"] == "error"
+    assert result["reason_code"] == "INVALID_ORDER_BODY"
+    assert _WrapperClient.connected is False

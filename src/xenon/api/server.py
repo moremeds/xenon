@@ -72,6 +72,7 @@ from xenon.db.queries.blotter import blotter_has_trades, fetch_blotter_pg, fetch
 from xenon.db.schema import account_snapshots, order_events, order_submissions
 from xenon.execution import orders_store, preflight, quote_guard, quote_tokens
 from xenon.execution.account_scope import IBAccountSelectionError, resolve_from_app_state, select_ib_account
+from xenon.execution.ib_place_order import order_accepted
 from xenon.execution.preflight import (
     PortfolioView,
     PreflightRequest,
@@ -98,7 +99,7 @@ logging.getLogger("ib_async.wrapper").setLevel(logging.WARNING)
 logging.getLogger("ib_async.client").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
-from ib_async import Contract, Index, Option, OrderStatus, Stock
+from ib_async import Contract, Index, Option, Stock
 
 from xenon.clients.futu_client import FutuClient
 from xenon.clients.futu_exceptions import FutuConnectionError, FutuError
@@ -2402,14 +2403,41 @@ async def _orders_place_from_body(body: dict):
             avg_fill_price=None,
         )
         raise HTTPException(status_code=502, detail=result.error)
-    if result.data and result.data.get("status") == "error" and _place_result_is_live(result.data):
-        # IB holds the order (live status, or a permId with no terminal
-        # status) even though the CLI reported an error. Never mark it
-        # REJECTED: the user would retry and place a duplicate. Record the
-        # IB message and fall through to WORKING so the activity poller /
-        # rehydrate reconcile against IB by permId.
+    if not result.data:
+        # The subprocess exited OK but printed no JSON result: IB may or may
+        # not hold the order. Never leave the row PENDING (a same-attempt
+        # retry would return "duplicate" and nothing would ever resolve it)
+        # and never call it rejected. UNKNOWN is the uncertain state that
+        # /health counts; an operator resolves it against IB working orders.
+        orders_store.mark_terminal(
+            submission_id=submission_id,
+            state="UNKNOWN",
+            reason_code=ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
+            filled_qty=0,
+            avg_fill_price=None,
+        )
+        return JSONResponse(
+            status_code=502,
+            content={
+                "detail": "Order outcome unknown — check working orders before placing it again. Do not resubmit.",
+                "reason_code": ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
+            },
+        )
+    if result.data.get("status") == "error" and order_accepted(
+        str(result.data.get("initialStatus") or ""), result.data.get("permId")
+    ):
+        # IB accepted the order (permId > 0, not Cancelled / ApiCancelled /
+        # Inactive; Filled counts) even though the CLI reported an error.
+        # Never mark it REJECTED: the user would retry and place a duplicate.
+        # Store it WORKING with its permId; the activity poller and fill
+        # mirror then update it from IB open orders / executions. Caveat:
+        # the activity-mirror sweep (`sweep_disappeared_orders`) skips an empty
+        # open-order snapshot and needs two consecutive
+        # misses, and boot rehydrate without a positions baseline leaves the
+        # row as is — a per-row grace / unknown-order reconciliation is a
+        # follow-up.
         logger.warning(
-            "IB order live despite CLI error: submission=%s ib_code=%s status=%s permId=%s",
+            "IB order accepted despite CLI error: submission=%s ib_code=%s status=%s permId=%s",
             submission_id,
             result.data.get("code"),
             result.data.get("initialStatus"),
@@ -2424,7 +2452,7 @@ async def _orders_place_from_body(body: dict):
             },
         )
         result.data = {**result.data, "status": "ok"}
-    if result.data and result.data.get("status") == "error":
+    if result.data.get("status") == "error":
         # B6 — write a reason_code the UI toast map can resolve. Most IB
         # rejections collapse to IB_REJECT, but tick-rule rejections
         # (code 110) re-map to LIMIT_OFF_TICK so the user sees a clean
@@ -2464,36 +2492,22 @@ async def _orders_place_from_body(body: dict):
                 submission_id,
                 exc_info=True,
             )
-        if account_reason == reason_code:
-            # Top-level reason_code so the toast helper renders account copy.
-            return JSONResponse(
-                status_code=502,
-                content={"detail": ib_message, "reason_code": reason_code},
-            )
-        raise HTTPException(status_code=502, detail=ib_message)
-    if result.data:
-        orders_store.mark_submitted(
-            submission_id=submission_id,
-            ib_order_id=str(result.data.get("orderId") or ""),
-            perm_id=str(result.data.get("permId") or ""),
-            placing_client_id=int(result.data.get("clientId") or 26),
+        # Top-level reason_code so the toast helper renders the mapped copy.
+        return JSONResponse(
+            status_code=502,
+            content={"detail": ib_message, "reason_code": reason_code},
         )
-        if result.data.get("ibNotices"):
-            _record_place_event(submission_id, {"notices": result.data["ibNotices"]})
+    # The CLI returns the clientId it really placed with ("auto" allocates
+    # one); cancel / modify must reuse it. 26 is only the legacy fallback.
+    orders_store.mark_submitted(
+        submission_id=submission_id,
+        ib_order_id=str(result.data.get("orderId") or ""),
+        perm_id=str(result.data.get("permId") or ""),
+        placing_client_id=int(result.data.get("clientId") or 26),
+    )
+    if result.data.get("ibNotices"):
+        _record_place_event(submission_id, {"notices": result.data["ibNotices"]})
     return result.data
-
-
-def _place_result_is_live(data: dict) -> bool:
-    """True when the place CLI result shows IB holding the order: an ib_async
-    active status, or a permId > 0 with no terminal (done) status."""
-    status = str(data.get("initialStatus") or "")
-    if status in OrderStatus.ActiveStates:
-        return True
-    try:
-        perm_id = int(data.get("permId") or 0)
-    except (TypeError, ValueError):
-        perm_id = 0
-    return perm_id > 0 and status not in OrderStatus.DoneStates
 
 
 def _record_place_event(submission_id: str, detail: dict) -> None:

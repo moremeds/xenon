@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 
 import pytest
-from fastapi import HTTPException
 
 from xenon.api import server as server_mod
 from xenon.api.subprocess import ScriptResult
@@ -155,11 +154,104 @@ async def test_place_error_payload_with_perm_id_but_cancelled_is_rejected(harnes
         }
     )
 
-    with pytest.raises(HTTPException):
-        await server_mod._orders_place_from_body(dict(_COMBO))
+    resp = await server_mod._orders_place_from_body(dict(_COMBO))
 
+    assert resp.status_code == 502
+    body = json.loads(resp.body)
+    assert body["reason_code"] == "IB_REJECT"
+    assert body["detail"] == "IB error 201: Order rejected"
+    assert harness["terminal"][0]["state"] == "REJECTED"
+    assert harness["terminal"][0]["reason_code"] == "IB_REJECT"
+    assert harness["submitted"] == []
+
+
+async def test_place_validation_error_without_perm_id_is_rejected(harness):
+    # ib_async's ValidationError label is not broker acceptance (321 / 434).
+    harness["set_result"](
+        {
+            "status": "error",
+            "code": 434,
+            "message": "IB error 434: The order size cannot be zero.",
+            "orderId": 7,
+            "permId": 0,
+            "initialStatus": "ValidationError",
+        }
+    )
+
+    resp = await server_mod._orders_place_from_body(dict(_COMBO))
+
+    assert resp.status_code == 502
     assert harness["terminal"][0]["state"] == "REJECTED"
     assert harness["submitted"] == []
+
+
+async def test_place_error_payload_filled_with_perm_id_is_accepted(harness):
+    harness["set_result"](
+        {
+            "status": "error",
+            "code": 399,
+            "message": "IB error 399: Warning",
+            "orderId": 7,
+            "permId": 9,
+            "initialStatus": "Filled",
+        }
+    )
+
+    resp = await server_mod._orders_place_from_body(dict(_COMBO))
+
+    assert harness["terminal"] == []
+    assert harness["submitted"][0]["perm_id"] == "9"
+    assert resp["status"] == "ok"
+
+
+async def test_place_110_returns_top_level_limit_off_tick(harness):
+    harness["set_result"](
+        {
+            "status": "error",
+            "code": 110,
+            "message": "IB error 110: The price does not conform to the minimum price variation for this contract.",
+            "orderId": 7,
+            "permId": 0,
+            "initialStatus": "Cancelled",
+        }
+    )
+
+    resp = await server_mod._orders_place_from_body(dict(_COMBO))
+
+    assert resp.status_code == 502
+    assert json.loads(resp.body)["reason_code"] == "LIMIT_OFF_TICK"
+    assert harness["terminal"][0]["reason_code"] == "LIMIT_OFF_TICK"
+
+
+@pytest.mark.parametrize("data", [{}, None])
+async def test_place_empty_cli_output_marks_unknown_not_pending(harness, data):
+    harness["set_result"](data)
+
+    resp = await server_mod._orders_place_from_body(dict(_COMBO))
+
+    assert resp.status_code == 502
+    body = json.loads(resp.body)
+    assert body["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
+    assert "working orders" in body["detail"].lower()
+    assert "do not resubmit" in body["detail"].lower()
+    assert harness["terminal"] == [
+        {
+            "submission_id": "sub-1",
+            "state": "UNKNOWN",
+            "reason_code": "PLACE_OUTCOME_UNKNOWN",
+            "filled_qty": 0,
+            "avg_fill_price": None,
+        }
+    ]
+    assert harness["submitted"] == []
+
+
+async def test_place_stores_the_cli_placing_client_id(harness):
+    harness["set_result"]({"status": "ok", "orderId": 7, "permId": 8, "clientId": 20})
+
+    await server_mod._orders_place_from_body(dict(_COMBO))
+
+    assert harness["submitted"][0]["placing_client_id"] == 20
 
 
 async def test_place_ok_with_notices_records_ib_notice_event(harness):
