@@ -1171,7 +1171,10 @@ def _resolve_target(conn, in_scope: tuple, target: dict) -> tuple[dict | None, s
     exactly one row in scope; the clientId may be omitted when the scope
     holds a single row for that orderId. Never orderId alone."""
     perm, oid = _nonzero(target.get("perm_id")), _nonzero(target.get("ib_order_id"))
-    client = _nonzero(target.get("client_id"))
+    # clientId 0 is a real IB client (permId 0 / orderId 0 are not ids):
+    # only a missing value means unknown.
+    raw_client = target.get("client_id")
+    client = None if raw_client is None or str(raw_client).strip() == "" else str(int(raw_client))
     cols = (
         order_submissions.c.submission_id,
         order_submissions.c.perm_id,

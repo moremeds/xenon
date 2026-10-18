@@ -181,12 +181,13 @@ def recover_by_order_ref(open_orders: list[dict], executions: list[dict], *, sco
             unresolved += 1
             continue
         perm = int(ev.get("perm_id") or 0)
-        client_id = ev.get("client_id") or row["placing_client_id"]
+        # clientId 0 is a real IB client: only a missing value falls back.
+        client_id = ev.get("client_id") if ev.get("client_id") is not None else row["placing_client_id"]
         applied = orders_store.mark_submitted(
             submission_id=sid,
             ib_order_id=str(ev.get("ib_order_id") or ""),
             perm_id=str(perm) if perm > 0 else None,
-            placing_client_id=int(client_id) if client_id else None,
+            placing_client_id=int(client_id) if client_id is not None else None,
             expected_states=_RECOVERABLE_STATES,
         )
         if applied:

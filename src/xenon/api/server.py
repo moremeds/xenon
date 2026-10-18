@@ -2819,7 +2819,8 @@ async def _place_reserved(body: dict, submission_id: str, scope: dict):
             submission_id=submission_id,
             ib_order_id=str(result.data.get("orderId") or ""),
             perm_id=str(result.data.get("permId") or ""),
-            placing_client_id=int(result.data.get("clientId") or 26),
+            # clientId 0 is a real IB client; only a missing value falls back.
+            placing_client_id=int(result.data["clientId"]) if result.data.get("clientId") is not None else 26,
             expected_states=("PENDING",),
         )
     except Exception as exc:
@@ -2893,7 +2894,7 @@ def _place_outcome_unknown(submission_id: str, data: dict) -> JSONResponse:
             submission_id=submission_id,
             ib_order_id=str(data.get("orderId") or "") or None,
             perm_id=str(data.get("permId") or "") or None,
-            placing_client_id=int(data.get("clientId") or 0) or None,
+            placing_client_id=int(data["clientId"]) if data.get("clientId") is not None else None,
             reason_code=ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
         )
         if applied and (data.get("orderId") or data.get("permId") or data.get("code")):
@@ -3070,6 +3071,19 @@ async def _cancel_order(body: dict, row: dict | None = None) -> tuple[str, Any]:
     if _broker_account and _broker_account != "legacy_unknown":
         args.extend(["--account", _broker_account])
     if row is None:
+        if not perm_id and (
+            orders_store.count_submissions_for_order_id(str(order_id), client_id=body.get("clientId"), **scope) > 1
+        ):
+            # Several rows share this orderId (different clients): the CLI
+            # could cancel the wrong one. No row at all (TWS order) → CLI.
+            return "failed", order_error(
+                409,
+                ReasonCode.ORDER_TARGET_AMBIGUOUS.value,
+                {
+                    "message": f"orderId {order_id} names several orders; send its permId. Nothing was cancelled.",
+                    "http_status": 409,
+                },
+            )
         row = orders_store.load_submission_for_modify(
             order_id=str(order_id or ""), perm_id=str(perm_id or ""), client_id=body.get("clientId"), **scope
         )

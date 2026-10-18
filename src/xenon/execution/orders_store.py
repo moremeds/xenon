@@ -1094,7 +1094,7 @@ def mark_place_unknown(
         values["ib_order_id"] = str(ib_order_id)
     if perm_id and str(perm_id) not in ("", "0"):
         values["perm_id"] = str(perm_id)
-    if placing_client_id:
+    if placing_client_id is not None:  # clientId 0 is a real client
         values["placing_client_id"] = int(placing_client_id)
     engine = get_sync_engine()
     with engine.begin() as conn:
@@ -1353,6 +1353,29 @@ def load_submission_for_modify(
     if perm_id and order_id and str(row.get("ib_order_id") or "") != str(order_id):
         return None
     return row
+
+
+def count_submissions_for_order_id(
+    order_id: str,
+    *,
+    client_id: int | str | None = None,
+    broker: str = "IB",
+    account_env: str = "legacy_unknown",
+    broker_account: str = "legacy_unknown",
+) -> int:
+    """Rows in scope with this orderId (and placing clientId, when given;
+    clientId 0 is a real client). >1 means an orderId-only request is
+    ambiguous: orderIds are unique per clientId only."""
+    conditions = [
+        order_submissions.c.broker == broker,
+        order_submissions.c.account_env == account_env,
+        order_submissions.c.broker_account == broker_account,
+        order_submissions.c.ib_order_id == str(order_id),
+    ]
+    if client_id is not None and str(client_id) != "":
+        conditions.append(order_submissions.c.placing_client_id == int(client_id))
+    with get_sync_engine().connect() as conn:
+        return int(conn.execute(select(func.count()).select_from(order_submissions).where(*conditions)).scalar() or 0)
 
 
 def lookup_by_attempt(

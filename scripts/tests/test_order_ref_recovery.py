@@ -180,3 +180,21 @@ def test_terminal_row_is_never_adopted(pg_test_engine):
     out = ib_activity_mirror.recover_by_order_ref([], [_execution()], scope=SCOPE)
     assert out == {"recovered": 0, "unresolved": 0}
     assert _row()["state"] == "CANCELLED"
+
+
+def test_client_id_zero_evidence_is_kept(pg_test_engine):
+    """IB clientId 0 is a real client: it never falls back to the stored id."""
+    from sqlalchemy import update
+
+    _seed()
+    with get_sync_engine().begin() as conn:
+        conn.execute(update(order_submissions).values(placing_client_id=27))
+    open_order = {
+        "orderId": 78,
+        "permId": 555002,
+        "clientId": 0,
+        "orderRef": orders_store.order_ref_for(SID),
+        "account": "DU0000000",
+    }
+    assert ib_activity_mirror.recover_by_order_ref([open_order], [], scope=SCOPE)["recovered"] == 1
+    assert _row()["placing_client_id"] == 0

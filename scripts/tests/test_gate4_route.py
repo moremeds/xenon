@@ -1451,10 +1451,54 @@ def test_replace_same_attempt_id_different_target_cancels_nothing(client, broker
 
 
 def test_plain_cancel_marks_only_the_canonical_row(client, broker, fresh_quote):
-    """/orders/cancel shares the persistence: an ambiguous orderId marks
-    nothing; a permId marks exactly its row."""
+    """/orders/cancel shares the persistence: an ambiguous orderId is refused
+    before the CLI; a permId cancels and marks exactly its row; an orderId
+    with no row at all (TWS order) still goes to the CLI."""
     _two_clients_same_order_id(client, broker)
-    assert client.post("/orders/cancel", json={"orderId": 7}).status_code == 200
+    amb = client.post("/orders/cancel", json={"orderId": 7})
+    assert (amb.status_code, amb.json()["reason_code"]) == (409, "ORDER_TARGET_AMBIGUOUS")
+    assert broker.calls == []
     assert (_row("ord-a")["state"], _row("ord-b")["state"]) == ("WORKING", "WORKING")
     assert client.post("/orders/cancel", json={"orderId": 7, "permId": 9102}).status_code == 200
     assert (_row("ord-a")["state"], _row("ord-b")["state"]) == ("WORKING", "CANCELLED")
+    assert client.post("/orders/cancel", json={"orderId": 4711}).status_code == 200
+    assert broker.cancels == 2
+
+
+def test_client_id_zero_is_a_real_client(client, broker, fresh_quote):
+    """IB clientId 0 is valid: only a missing clientId means unknown."""
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_stock("SPY", 100)])
+    engine.dispose()
+    broker.place_results = [_placed(7, 9102, 31)]
+    assert client.post("/orders/place", json=_sell_call_body("ord-b")).status_code == 200
+    broker.calls.clear()
+    # Only (client 31, order 7) is mirrored: (client 0, order 7) is missing.
+    body = {"cancelOrders": [{"orderId": 7, "clientId": 0}], "replaceOrder": _combo("rep-c0", legs=_PURE_BUY)}
+    resp = client.post("/orders/replace", json=body)
+    assert (resp.status_code, resp.json()["reason_code"]) == (409, "ORDER_TARGET_AMBIGUOUS")
+    assert broker.calls == []
+    # Now (client 0, order 7) exists too: clientId 0 selects it, never B.
+    broker.place_results = [_placed(7, 9101, 0)]
+    assert client.post("/orders/place", json=_combo("ord-a", legs=_PURE_BUY)).status_code == 200
+    assert _row("ord-a")["placing_client_id"] == 0
+    broker.calls.clear()
+    body["replaceOrder"] = _combo("rep-c0-2", legs=_PURE_BUY)
+    resp = client.post("/orders/replace", json=body)
+    assert resp.status_code == 200, resp.text
+    args = broker.calls[0]["args"]
+    assert "9101" in args and args[args.index("--client-id") + 1] == "0"
+    assert (_row("ord-a")["state"], _row("ord-b")["state"]) == ("CANCELLED", "WORKING")
+
+
+def test_uncertain_place_keeps_client_id_zero(client, broker, fresh_quote):
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_stock("SPY", 100)])
+    engine.dispose()
+    broker.place_results = [
+        ScriptResult(ok=True, data={"status": "uncertain", "outcome": "uncertain", "orderId": 5, "clientId": 0})
+    ]
+    resp = client.post("/orders/place", json=_sell_call_body("unc-c0"))
+    assert resp.status_code == 502, resp.text
+    row = _row("unc-c0")
+    assert (row["state"], row["ib_order_id"], row["placing_client_id"]) == ("UNKNOWN", "5", 0)
