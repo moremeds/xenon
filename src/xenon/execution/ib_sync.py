@@ -83,14 +83,16 @@ ACCOUNT_TAGS = [
 ]
 
 
-def get_account_summary(client: IBClient) -> dict:
-    """Fetch account summary from cached account values (instant, no round-trip).
+def get_account_summary(client: IBClient, account: str) -> dict:
+    """Fetch the scope account's summary from cached account values (instant, no round-trip).
 
     Uses ib.accountValues() which reads from ib_async's internal cache
     (populated automatically at connect time) instead of ib.accountSummary()
-    which makes a blocking round-trip (~200-700ms).
+    which makes a blocking round-trip (~200-700ms). The cache spans every
+    managed account; keep only ``account``'s rows, or each tag would hold
+    whichever account's value arrived last.
     """
-    account_values = client.ib.accountValues()
+    account_values = [av for av in client.ib.accountValues() if av.account == account]
 
     summary = {}
     for av in account_values:
@@ -100,15 +102,15 @@ def get_account_summary(client: IBClient) -> dict:
     return summary
 
 
-def get_fx_rates(client: IBClient) -> dict:
-    """USD-per-unit FX rates from IB's cached accountValues ExchangeRate rows.
+def get_fx_rates(client: IBClient, account: str) -> dict:
+    """USD-per-unit FX rates from the scope account's cached ExchangeRate rows.
 
     For a USD-base account IB reports each non-USD currency's ExchangeRate as the
     native→USD multiplier (base = native * ExchangeRate), so the returned map is
     directly usable as usd_per_unit. Always includes USD: 1.0."""
     from xenon.utils.fx import usd_per_unit_from_account_values
 
-    return usd_per_unit_from_account_values(client.ib.accountValues())
+    return usd_per_unit_from_account_values([av for av in client.ib.accountValues() if av.account == account])
 
 
 def get_pnl(client: IBClient, account: str = "") -> dict:
@@ -617,9 +619,15 @@ def _resolve_market_price(
     return None, False
 
 
-def fetch_positions(client: IBClient) -> list:
-    """Fetch all positions from IB"""
+def fetch_positions(client: IBClient, account: str | None = None) -> list:
+    """Fetch positions from IB; with ``account``, only that account's rows.
+
+    ib.positions() spans every managed account. Rows naming another account
+    (or no account) are dropped so they never blend into the scope snapshot.
+    """
     positions = client.get_positions()
+    if account is not None:
+        positions = [p for p in positions if getattr(p, "account", None) == account]
 
     formatted = []
     for pos in positions:
@@ -1277,10 +1285,24 @@ def main():
     client = connect_ib(args.host, args.port, args.client_id or "auto")
 
     try:
+        # Export the scope account so downstream DB writers
+        # (`_save_portfolio_to_postgres`, `_append_nav_snapshot`,
+        # `naked_short_audit` subprocess) stamp scope rows with it. A
+        # configured XENON_BROKER_ACCOUNT is kept (it must be managed); with it
+        # unset the login must manage exactly one account. Never
+        # managedAccounts()[0] — abort rather than write under a guessed scope.
+        # Every account-data read below is filtered to this account.
+        try:
+            ib_account = select_ib_account(client.ib.managedAccounts())
+        except IBAccountSelectionError as exc:
+            print(f"✗ Not syncing portfolio: {exc}")
+            sys.exit(1)
+        os.environ["XENON_BROKER_ACCOUNT"] = ib_account
+
         # ── Phase 1: Account summary (fast, no sleep needed) ──
         print("Fetching account summary...")
-        account = get_account_summary(client)
-        fx_rates = get_fx_rates(client)
+        account = get_account_summary(client, ib_account)
+        fx_rates = get_fx_rates(client, ib_account)
 
         # ── Phase 2: Request account PnL + positions concurrently ──
         # reqPnL is a subscription — request it, then do other work while it streams
@@ -1290,22 +1312,10 @@ def main():
         def _valid_pnl(val):
             return val is not None and not ib_util.isNan(val)
 
-        # Export the scope account so downstream DB writers
-        # (`_save_portfolio_to_postgres`, `_append_nav_snapshot`,
-        # `naked_short_audit` subprocess) stamp scope rows with it. A
-        # configured XENON_BROKER_ACCOUNT is kept (it must be managed); with it
-        # unset the login must manage exactly one account. Never
-        # managedAccounts()[0] — abort rather than write under a guessed scope.
-        try:
-            ib_account = select_ib_account(client.ib.managedAccounts())
-        except IBAccountSelectionError as exc:
-            print(f"✗ Not syncing portfolio: {exc}")
-            sys.exit(1)
-        os.environ["XENON_BROKER_ACCOUNT"] = ib_account
         pnl_obj = client.ib.reqPnL(ib_account)
 
         # Fetch positions while PnL streams
-        positions = fetch_positions(client)
+        positions = fetch_positions(client, ib_account)
 
         if not args.no_prices and positions:
             # ── Phase 3: Set exchange + request ALL data at once ──

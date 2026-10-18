@@ -198,10 +198,10 @@ def _ib_sync_main(monkeypatch, managed, env):
     client = MagicMock()
     client.ib.managedAccounts.return_value = list(managed)
     monkeypatch.setattr(ib_sync, "connect_ib", lambda *a, **k: client)
-    monkeypatch.setattr(ib_sync, "get_account_summary", lambda _c: {})
-    monkeypatch.setattr(ib_sync, "get_fx_rates", lambda _c: {"USD": 1.0})
+    monkeypatch.setattr(ib_sync, "get_account_summary", lambda _c, _acct: {})
+    monkeypatch.setattr(ib_sync, "get_fx_rates", lambda _c, _acct: {"USD": 1.0})
 
-    def _stop(_c):
+    def _stop(_c, _acct=None):
         raise _StopAfterScope
 
     monkeypatch.setattr(ib_sync, "fetch_positions", _stop)
@@ -254,3 +254,80 @@ def test_ib_sync_pnl_helpers_do_not_default_to_first_account(monkeypatch):
 
     assert ib_sync.get_pnl(client) == {}
     client.get_pnl.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# ib_sync reads only the scope account's data
+# ---------------------------------------------------------------------------
+# ib.accountValues() / ib.positions() without an account span every managed
+# account. Unfiltered, each summary tag kept whichever account's row came
+# last, so NAV / bankroll / summary mixed both accounts.
+
+
+def _av(account, tag, value, currency="USD"):
+    return SimpleNamespace(account=account, tag=tag, value=value, currency=currency)
+
+
+def test_account_summary_uses_only_scope_account_values():
+    from xenon.execution import ib_sync
+
+    # Scope account's rows first, so an unfiltered read is overwritten by
+    # the foreign account's values.
+    avs = [
+        _av("DU2222222", "NetLiquidation", "200000"),
+        _av("DU2222222", "TotalCashValue", "50000"),
+        _av("DU1111111", "NetLiquidation", "999999"),
+        _av("DU1111111", "TotalCashValue", "888888"),
+    ]
+    client = SimpleNamespace(ib=SimpleNamespace(accountValues=lambda: list(avs)))
+
+    summary = ib_sync.get_account_summary(client, "DU2222222")
+
+    assert summary["NetLiquidation"] == 200000.0
+    assert summary["TotalCashValue"] == 50000.0
+
+
+def test_fx_rates_use_only_scope_account_rows():
+    from xenon.execution import ib_sync
+
+    avs = [
+        _av("DU2222222", "ExchangeRate", "0.006186", "JPY"),
+        _av("DU1111111", "ExchangeRate", "0.5", "JPY"),
+    ]
+    client = SimpleNamespace(ib=SimpleNamespace(accountValues=lambda: list(avs)))
+
+    assert ib_sync.get_fx_rates(client, "DU2222222")["JPY"] == 0.006186
+
+
+def test_fetch_positions_keeps_only_scope_account_rows():
+    from xenon.execution import ib_sync
+
+    def _pos(account, symbol):
+        contract = SimpleNamespace(
+            symbol=symbol, secType="STK", conId=hash(symbol) % 1000, currency="USD", primaryExchange="", exchange=""
+        )
+        return SimpleNamespace(account=account, contract=contract, avgCost=1.0, position=10)
+
+    client = SimpleNamespace(
+        get_positions=lambda: [_pos("DU2222222", "SPY"), _pos("DU1111111", "QQQ"), _pos("", "IWM")]
+    )
+
+    assert [p["symbol"] for p in ib_sync.fetch_positions(client, "DU2222222")] == ["SPY"]
+
+
+def test_ib_sync_main_reads_summary_and_positions_for_scope_account(monkeypatch):
+    client, ib_sync = _ib_sync_main(monkeypatch, TWO, "DU2222222")
+    seen = {}
+    monkeypatch.setattr(ib_sync, "get_account_summary", lambda _c, acct: seen.setdefault("summary", acct) and {})
+    monkeypatch.setattr(ib_sync, "get_fx_rates", lambda _c, acct: seen.setdefault("fx", acct) and {"USD": 1.0})
+
+    def _positions(_c, acct):
+        seen["positions"] = acct
+        raise _StopAfterScope
+
+    monkeypatch.setattr(ib_sync, "fetch_positions", _positions)
+
+    with pytest.raises(_StopAfterScope):
+        ib_sync.main()
+
+    assert seen == {"summary": "DU2222222", "fx": "DU2222222", "positions": "DU2222222"}

@@ -147,11 +147,11 @@ def test_get_fx_rates_reads_exchange_rate():
     # Real USD-per-unit rates derived from IB IDEALPRO (2026-06-22):
     # USD.JPY 161.6575 → 0.006186 ; USD.KRW 1538.505 → 0.00065.
     avs = [
-        SimpleNamespace(tag="ExchangeRate", value="0.006186", currency="JPY"),
-        SimpleNamespace(tag="ExchangeRate", value="0.00065", currency="KRW"),
+        SimpleNamespace(account="DU0000000", tag="ExchangeRate", value="0.006186", currency="JPY"),
+        SimpleNamespace(account="DU0000000", tag="ExchangeRate", value="0.00065", currency="KRW"),
     ]
     client = SimpleNamespace(ib=SimpleNamespace(accountValues=lambda: avs))
-    rates = get_fx_rates(client)
+    rates = get_fx_rates(client, "DU0000000")
     assert rates["JPY"] == 0.006186
     assert rates["KRW"] == 0.00065
     assert rates["USD"] == 1.0
