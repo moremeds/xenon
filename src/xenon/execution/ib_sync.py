@@ -1458,12 +1458,12 @@ def main():
     reads = {"positions": False, "open_orders": False, "executions": False}
     # Ordering key for this pass (xid8, no wall clock). Taken before any IB
     # read; without it the pass cannot be published (gate4.is_stale_publication).
-    pass_seq = None
+    pass_seq = pass_cluster = None
     if os.environ.get("XENON_READ_ONLY") != "1":
         try:
             from xenon.execution import gate4
 
-            pass_seq = gate4.next_pass_seq()
+            pass_seq, pass_cluster = gate4.next_pass_seq()
         except Exception as exc:  # noqa: BLE001 — degrade: snapshot is not published
             logging.getLogger("ib_sync.pass").warning("pass_seq unavailable (%s)", exc)
 
@@ -1669,6 +1669,7 @@ def main():
             # orders/fills were persisted before this snapshot.
             portfolio["observation"] = _observation_stamp(pass_started, reads, ib_account)
             portfolio["observation"]["pass_seq"] = str(pass_seq) if pass_seq is not None else None
+            portfolio["observation"]["pass_cluster"] = pass_cluster
             portfolio["observation"]["executions_client_id"] = activity.get("executions_client_id")
             save_portfolio(portfolio)
 

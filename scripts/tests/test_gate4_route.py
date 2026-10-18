@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from xenon._test_db import committed_pass_seq
+from xenon._test_db import committed_pass_stamp
 
 pytestmark = pytest.mark.committed_db
 
@@ -51,8 +51,8 @@ def _seed_snapshot(engine, positions, *, complete=True):
             "complete": complete,
             "account": "DU0000000",
             "reads": {"positions": True, "open_orders": True, "executions": True},
-            # xid8 ordering key from a committed txn, as ib_sync stamps it.
-            "pass_seq": committed_pass_seq(),
+            # xid8 ordering key + cluster id from a committed txn, as ib_sync stamps them.
+            **committed_pass_stamp(),
         },
     }
     with engine.begin() as conn:

@@ -48,7 +48,7 @@ from scripts.tests.test_gate4_route import (  # noqa: F401 — autouse fixtures
     fresh_quote,
     ib_data,
 )
-from xenon.db.schema import account_snapshots, nav_history, order_submissions, service_health
+from xenon.db.schema import account_snapshots, nav_history, order_submissions
 from xenon.execution import contract_meta, ib_sync
 
 pytestmark = pytest.mark.committed_db
@@ -779,10 +779,15 @@ def _nav_rows():
 def _bare_portfolio(net_liq):
     from xenon.execution import gate4
 
+    seq, cluster = gate4.next_pass_seq()
     return {
         "positions": [],
         "account_summary": {"net_liquidation": net_liq},
-        "observation": {"as_of": datetime.now(timezone.utc).isoformat(), "pass_seq": str(gate4.next_pass_seq())},
+        "observation": {
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "pass_seq": str(seq),
+            "pass_cluster": cluster,
+        },
     }
 
 
@@ -823,95 +828,145 @@ def test_save_portfolio_skips_nav_when_pass_not_published(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# xid8 seqs from another cluster (pg_dump/pg_restore) never order anything
+# Every seq carries its cluster id (pg_control_system().system_identifier).
+# A seq from another cluster (pg_dump/pg_restore) or without one is foreign
+# forever, however far this cluster's xids advance.
 # ---------------------------------------------------------------------------
 
+FOREIGN_CLUSTER = "7000000000000000001"
+SCOPE = {"broker": "IB", "account_env": "paper", "broker_account": ACCOUNT}
 
-def _make_latest_seq_foreign():
-    """Rewrite the latest snapshot's pass_seq to xmax + 1e6, as a restore from
-    a busier cluster leaves it. Returns the foreign seq."""
-    from sqlalchemy import func as sa_func
-    from sqlalchemy import text as sa_text
 
+def _sql(stmt, **params):
     engine = _pg_engine()
     with engine.begin() as conn:
-        foreign = (
-            int(conn.execute(sa_text("SELECT pg_snapshot_xmax(pg_current_snapshot())::text")).scalar()) + 1_000_000
-        )
-        latest = conn.execute(select(sa_func.max(account_snapshots.c.id))).scalar()
-        conn.execute(
-            sa_text(
-                "UPDATE xenon.account_snapshots SET payload = jsonb_set(payload, '{observation,pass_seq}', "
-                "to_jsonb(CAST(:seq AS text))) WHERE id = :id"
-            ),
-            {"seq": str(foreign), "id": latest},
-        )
+        res = conn.execute(text(stmt), params)
+        out = res.first() if res.returns_rows else None
     engine.dispose()
-    return foreign
+    return out
 
 
-def test_restored_foreign_seqs_do_not_block_new_passes(monkeypatch, client, broker_calls, fresh_quote):
+def _restamp_latest(*, seq, cluster, copy=False):
+    """Give the latest snapshot (or a copy of it) another pass_seq/pass_cluster,
+    as a restore from another cluster leaves it. cluster=None drops the key."""
+    obs_expr = "jsonb_set(payload, '{observation,pass_seq}', to_jsonb(CAST(:seq AS text)))"
+    obs_expr = (
+        f"jsonb_set({obs_expr}, '{{observation,pass_cluster}}', to_jsonb(CAST(:cluster AS text)))"
+        if cluster is not None
+        else f"({obs_expr}) #- '{{observation,pass_cluster}}'"
+    )
+    latest = "(SELECT max(id) FROM xenon.account_snapshots)"
+    if copy:
+        _sql(
+            "INSERT INTO xenon.account_snapshots (account, bankroll, peak_value, net_liquidation, payload, "
+            "broker, account_env, broker_account) SELECT account, bankroll, peak_value, net_liquidation, "
+            f"{obs_expr}, broker, account_env, broker_account FROM xenon.account_snapshots WHERE id = {latest}",
+            seq=str(seq),
+            cluster=cluster,
+        )
+    else:
+        _sql(
+            f"UPDATE xenon.account_snapshots SET payload = {obs_expr} WHERE id = {latest}",
+            seq=str(seq),
+            cluster=cluster,
+        )
+
+
+def _set_watermark(seq, cluster):
     from xenon.execution import gate4
 
+    gate4.invalidate_view(SCOPE, "seed")
+    _sql(
+        "UPDATE xenon.service_health SET detail = :d WHERE service = :s",
+        d=json.dumps({"reason": "restored", "seq": str(seq), "cluster": cluster}),
+        s=gate4.VIEW_WATERMARK_SERVICE,
+    )
+
+
+def _xmax():
+    return int(_sql("SELECT pg_snapshot_xmax(pg_current_snapshot())::text")[0])
+
+
+@pytest.mark.parametrize("which", ["lower", "higher"])
+def test_other_cluster_rows_never_rank_or_block(which, monkeypatch, client, broker_calls, fresh_quote):
+    """(a)/(b) A restored 200-share snapshot and watermark from another
+    cluster, with a seq below or far above every local one: a new local
+    100-share pass publishes, is the one Gate 4 reads, and is not blocked."""
     _run_sync(monkeypatch, FakeSyncClient(positions=[Position(ACCOUNT, _stk(), 200, 500.0)]))
-    foreign = _make_latest_seq_foreign()
-    gate4.invalidate_view({"broker": "IB", "account_env": "paper", "broker_account": ACCOUNT}, "restored")
-    engine = _pg_engine()
-    with engine.begin() as conn:
-        conn.execute(
-            update(service_health)
-            .where(service_health.c.service == gate4.VIEW_WATERMARK_SERVICE)
-            .values(detail=json.dumps({"reason": "restored", "seq": str(foreign)}))
-        )
-    engine.dispose()
+    foreign_seq = 1 if which == "lower" else _xmax() + 1_000_000
+    _restamp_latest(seq=foreign_seq, cluster=FOREIGN_CLUSTER)
+    _set_watermark(foreign_seq if which == "higher" else _xmax() + 1_000_000, FOREIGN_CLUSTER)
 
     _run_sync(monkeypatch, _shares_client(100))
 
-    # The new pass published and is the snapshot Gate 4 reads (100 shares,
-    # not the restored 200), and the restored watermark does not block it.
-    two = client.post("/orders/place", json=_sell_call_body("sp-restore-2", qty=2))
+    assert [leg["contracts"] for p in _latest_payload()["positions"] for leg in p["legs"]] == [100]
+    two = client.post("/orders/place", json=_sell_call_body(f"sp-cluster-{which}-2", qty=2))
     assert two.status_code == 400, two.text
     assert two.json()["reason_code"] == "ETF_CALL_UNCOVERED"
-    one = client.post("/orders/place", json=_sell_call_body("sp-restore-1"))
+    one = client.post("/orders/place", json=_sell_call_body(f"sp-cluster-{which}-1"))
     assert one.status_code == 200, one.text
 
 
-def test_foreign_only_snapshot_is_incomplete(monkeypatch, client, broker_calls, fresh_quote):
-    _run_sync(monkeypatch, _shares_client(100))
-    _make_latest_seq_foreign()
+def test_restored_row_stays_foreign_after_xids_advance(monkeypatch, client, broker_calls, fresh_quote):
+    """(c) Review horizon case: a restored row with seq F just above xmax
+    stays foreign after local xids pass F, so it never outranks the local
+    snapshot nor beats the local invalidation."""
+    from xenon.execution import gate4
 
-    resp = client.post("/orders/place", json=_sell_call_body("sp-foreign-only"))
+    _run_sync(monkeypatch, _shares_client(100))
+    restored = _xmax() + 20
+    _restamp_latest(seq=restored, cluster=FOREIGN_CLUSTER, copy=True)
+    gate4.invalidate_view(SCOPE, "unprovenanced_open_orders")
+    for _ in range(40):
+        gate4.next_pass_seq()  # each call commits one local xid
+    assert _xmax() > restored
+
+    resp = client.post("/orders/place", json=_sell_call_body("sp-horizon"))
     assert resp.status_code == 400, resp.text
     assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
 
 
-def test_local_invalidation_replaces_restored_foreign_watermark(monkeypatch, client, broker_calls, fresh_quote):
-    """A restored (foreign) watermark must not swallow a later local
-    invalidation: the local seq replaces it and still blocks older passes."""
-    from sqlalchemy import text as sa_text
-
+def test_local_invalidation_replaces_foreign_watermark(monkeypatch, client, broker_calls, fresh_quote):
+    """(d) A stored other-cluster watermark (even with a huge seq) is replaced
+    by a local invalidation, which then blocks the earlier local snapshot."""
     from xenon.execution import gate4
 
-    scope = {"broker": "IB", "account_env": "paper", "broker_account": ACCOUNT}
     _run_sync(monkeypatch, _shares_client(100))
     pass_seq = int(_latest_payload()["observation"]["pass_seq"])
-    gate4.invalidate_view(scope, "restored")
-    engine = gate4.get_sync_engine()
-    with engine.begin() as conn:
-        foreign = (
-            int(conn.execute(sa_text("SELECT pg_snapshot_xmax(pg_current_snapshot())::text")).scalar()) + 1_000_000
-        )
-        conn.execute(
-            update(service_health)
-            .where(service_health.c.service == gate4.VIEW_WATERMARK_SERVICE)
-            .values(detail=json.dumps({"reason": "restored", "seq": str(foreign)}))
-        )
+    _set_watermark(_xmax() + 1_000_000, FOREIGN_CLUSTER)
 
-    gate4.invalidate_view(scope, "unprovenanced_open_orders")
+    gate4.invalidate_view(SCOPE, "unprovenanced_open_orders")
 
-    with engine.connect() as conn:
-        mark = gate4.view_watermark(conn, scope)
-    assert mark is not None and pass_seq < mark < foreign
+    with gate4.get_sync_engine().connect() as conn:
+        mark = gate4.view_watermark(conn, SCOPE)
+    assert mark is not None and mark > pass_seq
     resp = client.post("/orders/place", json=_sell_call_body("sp-foreign-mark-replaced"))
     assert resp.status_code == 400, resp.text
     assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
+
+
+@pytest.mark.parametrize("cluster", [None, FOREIGN_CLUSTER], ids=["legacy-no-cluster", "other-cluster"])
+def test_snapshot_without_local_cluster_is_incomplete(cluster, monkeypatch, client, broker_calls, fresh_quote):
+    """(e) The only snapshot has no cluster (legacy) or another cluster's."""
+    _run_sync(monkeypatch, _shares_client(100))
+    seq = int(_latest_payload()["observation"]["pass_seq"])
+    _restamp_latest(seq=seq, cluster=cluster)
+
+    resp = client.post("/orders/place", json=_sell_call_body(f"sp-nocluster-{cluster}"))
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
+
+
+def test_pass_stamped_by_another_cluster_is_not_published(monkeypatch):
+    """A pass whose seq came from another cluster (DB switched mid-pass)
+    cannot be ordered here, so it is not published."""
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", ACCOUNT)
+    monkeypatch.delenv("XENON_READ_ONLY", raising=False)
+    portfolio = _bare_portfolio(1000.0)
+    portfolio["observation"]["pass_cluster"] = FOREIGN_CLUSTER
+
+    ib_sync.save_portfolio(portfolio)
+
+    assert _sql("SELECT count(*) FROM xenon.account_snapshots")[0] == 0
+    assert _nav_rows() == []

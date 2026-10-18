@@ -342,15 +342,26 @@ def _scope_where(table, scope: dict):
     )
 
 
-def next_pass_seq() -> int:
-    """A Postgres transaction id (xid8) as this sync pass's sequence number.
+# This Postgres cluster's identity: random per initdb, the same for every DB
+# in the cluster, executable by PUBLIC. An xid8 seq orders things only
+# within the cluster that issued it, so every stored seq carries it.
+_CLUSTER_SQL = "(SELECT system_identifier FROM pg_control_system())::text"
+
+
+def next_pass_seq() -> tuple[int, str]:
+    """(xid8, cluster id) — this sync pass's sequence number.
 
     Taken at pass start in its own short transaction. xids are handed out in
-    increasing order, so `pass_seq` orders passes and watermarks without any
-    wall clock (`as_of` stays for display and freshness only).
+    increasing order within one cluster, so `pass_seq` orders passes and
+    watermarks without any wall clock (`as_of` stays for display and
+    freshness only). Raises if either value is unavailable — the pass then
+    has no seq and is not published.
     """
     with get_sync_engine().begin() as conn:
-        return int(conn.execute(text("SELECT pg_current_xact_id()::text")).scalar())
+        seq, cluster = conn.execute(text(f"SELECT pg_current_xact_id()::text, {_CLUSTER_SQL}")).one()
+    if not cluster:
+        raise RuntimeError("pg_control_system() returned no system_identifier")
+    return int(seq), cluster
 
 
 def _seq(value: Any) -> int | None:
@@ -364,23 +375,20 @@ def _seq(value: Any) -> int | None:
     return None
 
 
-# Snapshot ordering key: observation.pass_seq as a number (NULL for legacy rows).
+# Snapshot ordering key: observation.pass_seq as a number, only when the
+# snapshot's pass_cluster is this cluster. Legacy rows (no cluster) and rows
+# restored from another cluster are FOREIGN forever: NULL here, so they rank
+# last and never count as the newest published pass.
 _PASS_SEQ = account_snapshots.c.payload[("observation", "pass_seq")].astext.cast(Numeric)
-
-# A seq at/above this snapshot's xmax was not handed out by this cluster —
-# e.g. rows copied from another cluster by pg_dump/pg_restore. Such a FOREIGN
-# seq never orders anything here: snapshots rank like legacy rows (and are
-# incomplete when read), watermarks are ignored (every pass in this cluster
-# runs after the restore). xmax needs no xid and works read-only.
-_XMAX_SQL = "pg_snapshot_xmax(pg_current_snapshot())::text::numeric"
-_LOCAL_PASS_SEQ = case((_PASS_SEQ < literal_column(_XMAX_SQL), _PASS_SEQ), else_=None)
+_PASS_CLUSTER = account_snapshots.c.payload[("observation", "pass_cluster")].astext
+_LOCAL_PASS_SEQ = case((_PASS_CLUSTER == literal_column(_CLUSTER_SQL), _PASS_SEQ), else_=None)
 
 
-def _local_seq(conn, seq: int | None) -> int | None:
-    """`seq` if this cluster handed it out, else None (foreign or missing)."""
-    if seq is None:
+def _local_seq(conn, seq: int | None, cluster: Any) -> int | None:
+    """`seq` if this cluster issued it, else None (foreign, legacy or missing)."""
+    if seq is None or not isinstance(cluster, str) or not cluster:
         return None
-    return seq if seq < int(conn.execute(text(f"SELECT {_XMAX_SQL}")).scalar()) else None
+    return seq if cluster == conn.execute(text(f"SELECT {_CLUSTER_SQL}")).scalar() else None
 
 
 _INVALIDATE_SQL = text(
@@ -388,14 +396,17 @@ _INVALIDATE_SQL = text(
     INSERT INTO xenon.service_health
         (service, broker, account_env, broker_account, state, detail, last_finished_at, updated_at)
     VALUES (:service, :broker, :account_env, :broker_account, 'invalidated',
-            json_build_object('reason', CAST(:reason AS text), 'seq', pg_current_xact_id()::text)::text,
+            json_build_object('reason', CAST(:reason AS text), 'seq', pg_current_xact_id()::text,
+                              'cluster', {_CLUSTER_SQL})::text,
             :at, :at)
     ON CONFLICT ON CONSTRAINT pk_service_health DO UPDATE SET
         detail = CASE
             WHEN service_health.detail IS NULL OR left(service_health.detail, 1) <> '{{' THEN EXCLUDED.detail
-            -- A foreign stored seq (restored from another cluster) never
-            -- outranks a local one: view_watermark ignores it.
-            WHEN (service_health.detail::jsonb ->> 'seq')::numeric >= {_XMAX_SQL} THEN EXCLUDED.detail
+            -- Keep the stored seq only when the same cluster issued it and it
+            -- is not lower; a foreign/legacy stored seq never outranks a
+            -- local one (view_watermark ignores it) and is replaced.
+            WHEN (service_health.detail::jsonb ->> 'cluster') IS DISTINCT FROM (EXCLUDED.detail::jsonb ->> 'cluster')
+                THEN EXCLUDED.detail
             WHEN (service_health.detail::jsonb ->> 'seq')::numeric >= (EXCLUDED.detail::jsonb ->> 'seq')::numeric
                 THEN service_health.detail
             ELSE EXCLUDED.detail
@@ -433,29 +444,33 @@ def invalidate_view(scope: dict, reason: str) -> None:
 
 
 def view_watermark(conn, scope: dict) -> int | None:
-    """Watermark seq, or None. A pre-seq (non-JSON) detail is ignored."""
+    """Local watermark seq, or None. Non-JSON, legacy (no cluster) and
+    other-cluster watermarks are ignored: every pass in this cluster ran
+    after a restore, so it is after that invalidation."""
     detail = conn.execute(
         select(service_health.c.detail).where(
             service_health.c.service == VIEW_WATERMARK_SERVICE, *_scope_where(service_health, scope)
         )
     ).scalar()
     try:
-        seq = _seq(json.loads(detail).get("seq")) if detail else None
-    except (ValueError, AttributeError):
+        mark = json.loads(detail) if detail else None
+        if not isinstance(mark, dict):
+            return None
+    except ValueError:
         return None
-    return _local_seq(conn, seq)
+    return _local_seq(conn, _seq(mark.get("seq")), mark.get("cluster"))
 
 
 def is_stale_publication(conn, scope: dict, observation: dict) -> bool:
     """Snapshot writer check, under the scope lock on `conn`.
 
-    True when this pass has no `pass_seq` or its `pass_seq` is not greater
-    than the newest published one for the scope: the writer then skips
+    True when this pass has no local `pass_seq` or its `pass_seq` is not
+    greater than the newest published local one for the scope: the writer then skips
     publishing, so the newer snapshot's holdings stay what `load_inputs`
     reads (it orders by `pass_seq`).
     """
     _lock_scope(conn, scope)
-    seq = _seq(observation.get("pass_seq"))
+    seq = _local_seq(conn, _seq(observation.get("pass_seq")), observation.get("pass_cluster"))
     if seq is None:
         return True
     prior = conn.execute(select(func.max(_LOCAL_PASS_SEQ)).where(*_scope_where(account_snapshots, scope))).scalar()
@@ -479,8 +494,8 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
             account_snapshots.c.account_env == account_env,
             account_snapshots.c.broker_account == broker_account,
         )
-        # Newest pass by pass_seq (xid order); legacy rows and foreign seqs
-        # sort last and fall back to snapshot_at.
+        # Newest local pass by pass_seq (xid order); legacy and other-cluster
+        # rows sort last and fall back to snapshot_at.
         .order_by(_LOCAL_PASS_SEQ.desc().nulls_last(), account_snapshots.c.snapshot_at.desc())
         .limit(1)
     ).first()
@@ -509,8 +524,8 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
                 complete = False
             # A writer dropped an accountless row at watermark seq `mark`:
             # only a pass that started after it can prove cover. No pass_seq
-            # (or a foreign one) → the pass cannot be ordered against it.
-            pass_seq = _local_seq(conn, _seq(observation.get("pass_seq")))
+            # (or a legacy / other-cluster one) → the pass cannot be ordered.
+            pass_seq = _local_seq(conn, _seq(observation.get("pass_seq")), observation.get("pass_cluster"))
             mark = view_watermark(conn, scope)
             if pass_seq is None or (mark is not None and pass_seq <= mark):
                 complete = False
