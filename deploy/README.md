@@ -23,11 +23,11 @@ Names and booleans only: never print secret values. `docker-compose` below is `/
 
 A. Staged compose validation and backup
 1. From the laptop: `scp deploy/compose.prod.yml macmini:/opt/xenon/compose.new.yml`.
-2. On the mini, first put the webhook variable in place. Add `WATCHTOWER_NOTIFICATION_URL=<current ntfy URL from the live compose>` to `/opt/xenon/.env`, then check `grep -c '^WATCHTOWER_NOTIFICATION_URL=' /opt/xenon/.env` prints `1`. Also confirm `GHCR_USER`, `GHCR_PAT`, `XENON_INTERNAL_API_TOKEN` exist there (names only: `grep -c '^NAME=' .env`).
-3. `cd /opt/xenon && docker-compose -f compose.new.yml config -q` (must exit 0; needs `.env`, `web.env` and the variables from step 2).
+2. On the mini, first put the webhook variable in place. Add `WATCHTOWER_NOTIFICATION_URL=<current ntfy URL from the live compose>` to `/opt/xenon/.env`, then check that it is set and non-empty: `grep -Ec '^WATCHTOWER_NOTIFICATION_URL=.+' /opt/xenon/.env` prints `1`. Also confirm `GHCR_USER`, `GHCR_PAT`, `XENON_INTERNAL_API_TOKEN` exist there (names only: `grep -c '^NAME=' .env`).
+3. `cd /opt/xenon && docker-compose -f compose.new.yml config -q` (must exit 0; needs `.env`, `web.env` and the variables from step 2). Then check that the interpolated webhook is non-empty, without printing it: `docker-compose -f compose.new.yml config 2>/dev/null | grep -Ec 'WATCHTOWER_NOTIFICATION_URL: .+'` prints `1`.
 4. Back up: `cp -p compose.yml compose.yml.bak-$(date +%Y%m%d%H%M)`.
 5. Diff without printing the webhook URL: `diff <(grep -v WATCHTOWER_NOTIFICATION_URL compose.yml) <(grep -v WATCHTOWER_NOTIFICATION_URL compose.new.yml)` (expect: header comment lines only; the filtered webhook line differs by design).
-6. Only then: `mv compose.new.yml compose.yml && docker-compose up -d`.
+6. Only then: `mv compose.new.yml compose.yml && docker-compose up -d`. `up -d` does not pull images; do section A only when no release is in flight.
 
 B. Rollback
 - `cp -p compose.yml.bak-<stamp> compose.yml && docker-compose up -d`. This restores the previous definition. Images are `:latest`; Watchtower still tracks them, so a rollback of the file does not pin an image.
@@ -38,18 +38,20 @@ C. Post-up checks
 - `curl -fsS http://127.0.0.1:8321/health` and `curl -fsSI http://127.0.0.1:3000/sign-in | head -1`.
 - Watchtower: `docker logs xenon-watchtower-1 --tail 20` shows no auth or webhook error. Confirm the ntfy topic receives a notification on the next real update (the template is silent on no-op cycles); one way: after the next release, check the topic.
 
-D. Migrator/schema gate (before the api rollout of any release that carries a migration)
-Watchtower deploys api only after `:latest` moves, and it never touches the migrator, so do this as soon as the release is published and before the api container is recreated. Never rely on Watchtower for schema.
-1. `cd /opt/xenon && docker-compose --profile migrate pull migrator` (pulls the image the compose file names, `xenon-migrator:latest`).
-2. Check the pulled image is the intended release. `VER` is the release version without the `v`:
-   `docker image inspect ghcr.io/moremeds/xenon-migrator:latest --format '{{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{json .RepoDigests}}'`
+D. Migrator/schema gate (every release that carries a migration)
+`release.yml` pushes `:VER` and then promotes `:latest` for api, web, realtime and migrator in one run. Watchtower recreates api as soon as `:latest` moves, and it never runs the migrator. So hold Watchtower for the whole release and migrate before any api is recreated. Never rely on Watchtower for schema.
+1. BEFORE pushing the release tag: `docker stop xenon-watchtower-1`. While it is stopped nothing deploys; the running api stays on the old image.
+2. After `release.yml` is green, pull and verify the immutable version tag (`VER` = the release version without the `v`):
+   `docker pull ghcr.io/moremeds/xenon-migrator:VER`
+   `docker image inspect ghcr.io/moremeds/xenon-migrator:VER --format '{{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}} {{json .RepoDigests}}'`
    - The version label must equal `VER`, and the revision must equal the release commit (`git rev-parse vVER^{commit}` on the laptop).
-   - The digest in `RepoDigests` must equal the migrator digest for that release in `/opt/xenon/release-manifest.json` if that file lists it. Otherwise compare with the registry: `docker buildx imagetools inspect ghcr.io/moremeds/xenon-migrator:VER` (the immutable version tag; `:latest` is a copy of it).
-   - If the label is still the old version, `:latest` has not been promoted yet. Wait; do not continue.
-3. Only then: `docker-compose --profile migrate run --rm migrator alembic current`, then `... alembic heads`. If they differ, run `docker-compose --profile migrate run --rm migrator` by hand (this upgrades the schema).
-4. After the schema is at head, let the api roll out (Watchtower or `docker-compose up -d`).
+   - The digest in `RepoDigests` must equal `docker buildx imagetools inspect ghcr.io/moremeds/xenon-migrator:VER` (or the migrator digest in `/opt/xenon/release-manifest.json`, if that file lists it).
+3. Point the compose migrator at the verified image: `docker tag ghcr.io/moremeds/xenon-migrator:VER ghcr.io/moremeds/xenon-migrator:latest`.
+4. `docker-compose --profile migrate run --rm migrator alembic current`, then `... alembic heads`. If they differ, run `docker-compose --profile migrate run --rm migrator` (this upgrades the schema) and repeat `alembic current` until it equals the head.
+5. Only after the schema is at head: `docker start xenon-watchtower-1` (or `docker-compose pull api web realtime && docker-compose up -d api web realtime`). Then section C.
+6. If the migration fails: leave Watchtower stopped (the old api keeps running on the old schema), and fix forward or restore before restarting it.
 
-E. Before ANY job run (scheduled install or manual): read the effective settings inside the container. `web.env` overrides `.env` for the api service, so read them from the container, not from the files. Names and booleans only. The operator supplies the expected account in the shell (`EXPECTED_ACCOUNT=<the intended live account, the U...31 account>`); the container compares by exact equality and prints a boolean:
+E. Before ANY job run (scheduled install or manual): read the effective settings inside the container. `web.env` overrides `.env` for the api service, so read them from the container, not from the files. Names and booleans only. The operator exports the expected account first (`export EXPECTED_ACCOUNT=<the intended live account, the U...31 account>`; a plain assignment is not passed to `-e EXPECTED_ACCOUNT`); the container compares by exact equality and prints a boolean:
 ```
 cd /opt/xenon && docker-compose -f compose.yml run --rm -T --no-deps -e EXPECTED_ACCOUNT --label com.centurylinklabs.watchtower.enable=false api python -c '
 import os
