@@ -1140,7 +1140,7 @@ def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
     print(f"✓ NAV snapshot: {today} → ${net_liq:,.2f}")
 
 
-def _save_portfolio_to_postgres(portfolio: dict) -> None:
+def _save_portfolio_to_postgres(portfolio: dict) -> bool:
     """Write positions + account snapshot to Postgres.
 
     The full structured `portfolio` dict is also stamped into
@@ -1153,7 +1153,7 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
     if os.environ.get("XENON_READ_ONLY") == "1":
         n = len(portfolio.get("positions") or [])
         print(f"⏭  XENON_READ_ONLY=1 — skipping portfolio→PG write ({n} positions, snapshot not persisted)")
-        return
+        return False
 
     from sqlalchemy import delete, func, insert, text
 
@@ -1176,7 +1176,7 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
                 observation,
             ):
                 print(f"⏭  Stale sync pass (as_of {observation.get('as_of')}) — newer snapshot kept, not published")
-                return
+                return False
         conn.execute(
             delete(positions).where(
                 positions.c.broker == broker,
@@ -1238,12 +1238,16 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
                 snapshot_at=func.clock_timestamp(),
             )
         )
+    return True
 
 
 def save_portfolio(portfolio: dict):
     """Save portfolio to Postgres."""
     try:
-        _save_portfolio_to_postgres(portfolio)
+        if not _save_portfolio_to_postgres(portfolio):
+            # Read-only or stale pass: nothing published, so no NAV row either
+            # (a stale pass would overwrite the newer pass's intraday NAV).
+            return
         print("✓ Saved portfolio to Postgres")
     except Exception as exc:
         print(f"  Warning: Postgres write failed: {exc}")

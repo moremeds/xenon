@@ -712,3 +712,21 @@ def test_view_watermark_only_moves_forward(monkeypatch):
     monkeypatch.undo()
     with gate4.get_sync_engine().connect() as conn:
         assert gate4.view_watermark(conn, scope) == t2
+
+
+def test_save_portfolio_skips_nav_when_pass_not_published(monkeypatch):
+    """A stale (or read-only) pass publishes nothing, so it must not write NAV:
+    the older pass's intraday NAV would overwrite the newer pass's row."""
+    from xenon.execution import ib_sync as sync_mod
+
+    nav_calls = []
+    monkeypatch.setattr(sync_mod, "_append_nav_snapshot", lambda *a, **k: nav_calls.append(a))
+    portfolio = {"account_summary": {"net_liquidation": 1000.0}}
+
+    monkeypatch.setattr(sync_mod, "_save_portfolio_to_postgres", lambda _p: False)
+    sync_mod.save_portfolio(portfolio)
+    assert nav_calls == []
+
+    monkeypatch.setattr(sync_mod, "_save_portfolio_to_postgres", lambda _p: True)
+    sync_mod.save_portfolio(portfolio)
+    assert nav_calls == [(1000.0, None)]

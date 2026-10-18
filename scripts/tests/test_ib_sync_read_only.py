@@ -41,7 +41,7 @@ def test_save_portfolio_noop_in_read_only(read_only_env, monkeypatch, capsys):
     portfolio = {"positions": [{"symbol": "SPY"}, {"symbol": "QQQ"}, {"symbol": "IWM"}]}
     result = ib_sync._save_portfolio_to_postgres(portfolio)
 
-    assert result is None
+    assert result is False
     captured = capsys.readouterr()
     assert "XENON_READ_ONLY" in captured.out
     assert "3 positions" in captured.out
