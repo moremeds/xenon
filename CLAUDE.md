@@ -258,18 +258,20 @@ cd web && npx playwright test                                       # E2E
 
 Order-route integration tests use `web/tests/fastapiHarness.ts` with `XENON_API_TEST_MODE` to stub broker calls — no live IB required.
 
+**Prod-DB guard.** The root `conftest.py` sets `DATABASE_URL` to the test DB (`DATABASE_URL_TEST`, per-worker under xdist) before collection, so no test, import-time singleton, or subprocess CLI uses the exported/`.env` `DATABASE_URL`. The session exits with an error when the test DB has the same host+dbname as `DATABASE_URL`, is `core_dev`, or has no `test` in its name. Fix: export `DATABASE_URL_TEST` to a separate `*_test` DB. Tests: `scripts/tests/test_test_db_guard.py`.
+
 ### Pytest infrastructure (3-phase speedup)
 
 The full Python suite is intentionally cheap to run locally. Don't disable or bypass these layers:
 
 - **Phase 1** — session-scoped engine + single `TRUNCATE` reset (`src/xenon/_test_db.py::truncate_all_xenon_tables`).
 - **Phase 2** — autouse `BEGIN/ROLLBACK` per test, via `_postgres_orders_test_db` in `scripts/tests/conftest.py`. Each test sees an empty schema; the app engine is monkeypatched to share the test's outer transaction. ~10× cheaper than Phase 1 and avoids locking tables the test never touches.
-- **Phase 3** — `pytest-xdist` per-worker DB clones (`_ensure_worker_db`). `pytest -n auto` works because each `gwN` worker gets its own database template.
+- **Phase 3** — `pytest-xdist` per-worker DB clones (`_ensure_worker_db`). `pytest -n auto` works because each `gwN` worker gets its own database, cloned from the unsuffixed test DB. A worker DB that cannot be created (no `CREATEDB`, no pre-create) fails the worker loudly; workers never fall back to one shared DB.
 
 Two escape hatches:
 
 - **`@pytest.mark.committed_db`** — when a test forks a subprocess CLI (e.g. `ib_sync`, `xenon-ib-place-order`) or builds its own `create_engine()`, that opens a _second physical connection_ that cannot see the outer transaction. Marker switches that test back to Phase 1 TRUNCATE pre+post semantics. Use sparingly — most new tests should leave the marker off.
-- **Offline dev** — when Postgres isn't reachable, the autouse fixture silently no-ops. Tests that genuinely require PG depend on the `pg_test_engine` fixture, which skips explicitly when offline.
+- **Offline dev** — when Postgres isn't reachable, the autouse fixture silently no-ops (it still clears the cached app engines). Only connection errors count as offline; any other TRUNCATE error fails the test. Tests that genuinely require PG depend on the `pg_test_engine` fixture, which skips explicitly when offline.
 
 `DATABASE_URL` and `DATABASE_URL_TEST` are both rewritten to the per-worker DB so subprocess CLIs and helpers that build their own engine from those env vars land on the same database as the parent test.
 

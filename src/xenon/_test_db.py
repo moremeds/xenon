@@ -11,8 +11,13 @@ Semantics are identical to the previous per-test setup:
   - PG unreachable → silently no-op (offline development)
   - Truncate before AND after each test
   - CASCADE drops dependents
-  - SQLAlchemyError during truncate (e.g. missing schema) → downgrade
-    reachability to False so subsequent tests stop trying
+  - Connection error during truncate → downgrade reachability to False so
+    subsequent tests stop trying; any other SQLAlchemyError re-raises
+
+Prod-DB guard (INV-test-db-leak): `bind_database_url_to_test_db()` runs at
+root-conftest import, before any xenon import, and points `DATABASE_URL` at
+the test DB so import-time singletons never bind to the developer's
+`DATABASE_URL` (e.g. prod `core_dev` from `.env`).
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ from typing import Any
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection, Engine
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import InterfaceError, OperationalError, SQLAlchemyError
 
 # Eagerly load `.env` so DATABASE_URL_TEST is set before any fixture (esp.
 # the session-scoped `_ensure_worker_db`) runs. In serial pytest this is
@@ -90,15 +95,6 @@ XENON_TABLES: tuple[str, ...] = (
 _PG_REACHABLE: bool | None = None
 _SESSION_ENGINE: Engine | None = None
 
-# Phase 3: flipped by `_ensure_worker_db` when the PG user lacks CREATEDB
-# (typical for shared remote dev PGs locked down to app-tier roles). When
-# True, `sync_test_db_url()` ignores the xdist worker suffix and all workers
-# share the master DB. This is sub-optimal — Phase 2-level isolation only —
-# but the suite stays runnable for users who can't grant CREATEDB on their
-# shared dev PG. CI's postgres-image `xenon_app` is superuser, so CI gets
-# the full Phase 3 win.
-_WORKER_DB_DISABLED: bool = False
-
 
 def _resolve_worker_id(worker_id: str | None) -> str | None:
     """Return the xdist worker id, or None for serial mode.
@@ -108,8 +104,6 @@ def _resolve_worker_id(worker_id: str | None) -> str | None:
     "master" (xdist's sentinel for the controller). Both serial cases must
     resolve to None so the URL stays on the unsuffixed `xenon_test`.
     """
-    if _WORKER_DB_DISABLED:
-        return None
     wid = worker_id if worker_id is not None else os.environ.get("PYTEST_XDIST_WORKER")
     if not wid or wid == "master":
         return None
@@ -137,23 +131,104 @@ def sync_test_db_url(worker_id: str | None = None) -> str:
     supplies it explicitly. Rewrites only the final path segment so DB names
     that contain `xenon_test` mid-string are not mangled.
     """
-    url = os.environ.get(
-        "DATABASE_URL_TEST",
-        "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test",
-    )
-    url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
-    wid = _resolve_worker_id(worker_id)
+    url = _base_test_db_url(os.environ).replace("postgresql+asyncpg://", "postgresql+psycopg://")
+    return _with_worker_suffix(url, _resolve_worker_id(worker_id))
+
+
+_DEFAULT_TEST_DB_URL = "postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/xenon_test"
+
+
+def _base_test_db_url(environ: Any) -> str:
+    return environ.get("DATABASE_URL_TEST", _DEFAULT_TEST_DB_URL)
+
+
+def _with_worker_suffix(url: str, wid: str | None) -> str:
     if wid is None:
         return url
     base, _, dbname = url.rpartition("/")
     # Idempotent suffix: the autouse fixture rewrites DATABASE_URL_TEST in env
     # so test helpers reading it directly land on the worker DB. The NEXT call
-    # to this function reads the already-suffixed env value — without this
-    # guard we'd append `_gw0` to `xenon_test_gw0` and get `xenon_test_gw0_gw0`.
+    # reads the already-suffixed env value — without this guard we'd append
+    # `_gw0` to `xenon_test_gw0` and get `xenon_test_gw0_gw0`.
     suffix = f"_{wid}"
     if dbname.endswith(suffix):
         return url
     return f"{base}/{dbname}{suffix}"
+
+
+def _without_worker_suffix(url: str, wid: str) -> str:
+    base, _, dbname = url.rpartition("/")
+    return f"{base}/{dbname.removesuffix(f'_{wid}')}"
+
+
+# ---------------------------------------------------------------------------
+# Prod-DB guard
+# ---------------------------------------------------------------------------
+
+# Identity (`host/dbname`, no credentials) of the DATABASE_URL the developer
+# had before the guard rewrote it. Set once by the first pytest process and
+# inherited by xdist workers, whose DATABASE_URL is already the rewritten one.
+DB_GUARD_ORIGINAL_ENV = "XENON_TEST_DB_GUARD_ORIGINAL"
+
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+class UnsafeTestDatabaseError(RuntimeError):
+    """The test DB could be a non-test database; the session must not run."""
+
+
+def _db_identity(url: str) -> str:
+    """`host/dbname` of a DB URL. Loopback aliases collapse to one host."""
+    from sqlalchemy.engine.url import make_url
+
+    parsed = make_url(url)
+    host = (parsed.host or "localhost").lower()
+    if host in _LOOPBACK_HOSTS:
+        host = "localhost"
+    return f"{host}/{parsed.database or ''}"
+
+
+_GUARD_FIX_HINT = (
+    "Fix: export DATABASE_URL_TEST to a separate local test database whose name "
+    "contains 'test' (CI uses postgresql+asyncpg://xenon_app:xenon_dev@localhost:5432/"
+    "xenon_test), and make sure it is not the DATABASE_URL database (exported or "
+    "from .env). pytest replaces DATABASE_URL with the test URL for the session."
+)
+
+
+def bind_database_url_to_test_db(environ: Any = None) -> str:
+    """Point `DATABASE_URL` at the test DB, or refuse the session.
+
+    Called at root-conftest import, before any xenon module that caches an
+    engine is imported. Refuses (raises `UnsafeTestDatabaseError`) when the
+    test DB name is `core_dev` or lacks `test`, or when the test DB has the
+    same host+dbname as the original `DATABASE_URL`. Returns the bound
+    (asyncpg, worker-suffixed under xdist) URL.
+    """
+    env = os.environ if environ is None else environ
+    if DB_GUARD_ORIGINAL_ENV not in env:
+        original = env.get("DATABASE_URL", "")
+        env[DB_GUARD_ORIGINAL_ENV] = _db_identity(original) if original else ""
+    original_identity = env[DB_GUARD_ORIGINAL_ENV]
+
+    from sqlalchemy.engine.url import make_url
+
+    base = _base_test_db_url(env).replace("postgresql+psycopg://", "postgresql+asyncpg://")
+    bound = _with_worker_suffix(base, _resolve_worker_id(env.get("PYTEST_XDIST_WORKER", "")))
+    for url in (base, bound):
+        dbname = make_url(url).database or ""
+        if dbname == "core_dev" or "test" not in dbname.lower():
+            raise UnsafeTestDatabaseError(
+                f"Refusing to run pytest: test DB name {dbname!r} (DATABASE_URL_TEST) "
+                f"must contain 'test' and must not be core_dev. {_GUARD_FIX_HINT}"
+            )
+        if original_identity and _db_identity(url) == original_identity:
+            raise UnsafeTestDatabaseError(
+                f"Refusing to run pytest: DATABASE_URL_TEST ({_db_identity(url)}) is the "
+                f"same database as DATABASE_URL. {_GUARD_FIX_HINT}"
+            )
+    env["DATABASE_URL"] = bound
+    return bound
 
 
 def get_session_engine() -> Engine:
@@ -212,7 +287,9 @@ def truncate_all_xenon_tables() -> None:
     Behavior contract (must match the legacy per-test fixture):
       - PG unreachable → no-op (offline dev workflow stays usable)
       - CASCADE so dependents do not block
-      - SQLAlchemyError (e.g. missing schema) → mark offline, do not raise
+      - Connection error → mark offline, do not raise. Any other
+        SQLAlchemyError (deadlock, missing table) re-raises: "offline" must
+        never hide a real failure (INV-test-db-leak trigger 4a)
       - Single statement so the parser, planner, and lock acquisition run
         once instead of 26 times
     """
@@ -222,8 +299,26 @@ def truncate_all_xenon_tables() -> None:
     try:
         with get_session_engine().begin() as conn:
             conn.execute(text(stmt))
-    except SQLAlchemyError:
+    except SQLAlchemyError as exc:
+        if not _is_connection_error(exc):
+            raise
         mark_offline()
+
+
+def _is_connection_error(exc: SQLAlchemyError) -> bool:
+    """True when PG could not be reached, not when a statement failed.
+
+    psycopg reports client-side connection failures with no SQLSTATE; the
+    server uses class 08 (connection exception) and 57P (shutdown / cannot
+    connect now). A deadlock (40P01) is also an OperationalError, so the
+    exception class alone is not enough.
+    """
+    if getattr(exc, "connection_invalidated", False):
+        return True
+    if not isinstance(exc, (OperationalError, InterfaceError)):
+        return False
+    sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+    return sqlstate is None or sqlstate.startswith(("08", "57P"))
 
 
 # ---------------------------------------------------------------------------
@@ -391,62 +486,60 @@ def _ensure_worker_db() -> Any:
     workers don't contend on shared tables — Phase 2's per-test BEGIN/ROLLBACK
     is connection-scoped, not cross-worker.
 
-    Two creation paths, no race:
+    Two creation paths:
       1. **CI** pre-creates the per-worker DBs in the workflow yaml, serially,
          before pytest starts. This fixture then just verifies the DB exists.
-      2. **Local opt-in**: the user grants CREATEDB to xenon_app and runs the
-         one-time bootstrap (see docs). This fixture detects the missing DB
-         and creates it on demand for that worker.
+      2. **Local**: when the role has CREATEDB, this fixture creates the
+         missing worker DB from the unsuffixed test DB as template.
 
-    If the DB still doesn't exist after this check (no CREATEDB perm, no
-    pre-create), `_WORKER_DB_DISABLED` is flipped so the suite falls back to
-    the master DB — the worker still runs, just without Phase 3 isolation.
-
-    Design note: an earlier version did `DROP+CREATE … TEMPLATE` from inside
-    the fixture under an advisory lock. That sounds clean but produced races
-    in CI when multiple workers fought to hold an admin connection during
-    pytest's tight worker-startup phase. Moving the create work into the CI
-    workflow (serial, deterministic) removed an entire class of failure modes.
+    A worker DB that cannot be created fails the worker loudly. There is no
+    fallback to one shared DB: shared DBs deadlocked TRUNCATE, which used to
+    flip the session "offline" and let tests write to the cached
+    `DATABASE_URL` engine (INV-test-db-leak trigger 4b).
     """
     wid = _resolve_worker_id(None)
-    if wid is None:
-        yield
-        return
+    if wid is not None:
+        _prepare_worker_db(wid)
+    yield
 
+
+def _prepare_worker_db(wid: str) -> None:
     from sqlalchemy.engine.url import make_url
 
     target_url = make_url(sync_test_db_url(worker_id=wid))
-    template_url = make_url(sync_test_db_url(worker_id=None))
+    template_url = make_url(_without_worker_suffix(sync_test_db_url(worker_id=wid), wid))
     target_db = target_url.database
     template_db = template_url.database
-    admin_url = target_url.set(database="postgres")
-
     admin_engine = create_engine(
-        admin_url,
+        target_url.set(database="postgres"),
         isolation_level="AUTOCOMMIT",
         connect_args={"connect_timeout": 2},
     )
-    global _WORKER_DB_DISABLED, _SESSION_ENGINE, _PG_REACHABLE
     try:
-        with admin_engine.connect() as conn:
+        try:
+            conn_cm = admin_engine.connect()
+        except SQLAlchemyError as exc:
+            if _is_connection_error(exc):
+                # PG unreachable: `is_pg_reachable()` on the worker URL decides
+                # (offline). The worker never switches to the shared DB.
+                return
+            raise
+        with conn_cm as conn:
             exists = conn.execute(
                 text("SELECT 1 FROM pg_database WHERE datname = :n"),
                 {"n": target_db},
             ).scalar()
-            if not exists:
-                # Local opt-in path: try to create on demand. Wrapped in its
-                # own try so a permission denied here cleanly falls back.
-                try:
-                    conn.execute(text(f'CREATE DATABASE "{target_db}" TEMPLATE "{template_db}"'))
-                except SQLAlchemyError:
-                    raise
-    except SQLAlchemyError:
-        # Worker DB doesn't exist and we can't create it → fall back to master.
-        _WORKER_DB_DISABLED = True
-        if _SESSION_ENGINE is not None:
-            _SESSION_ENGINE.dispose()
-            _SESSION_ENGINE = None
-        _PG_REACHABLE = None
+            if exists:
+                return
+            try:
+                conn.execute(text(f'CREATE DATABASE "{target_db}" TEMPLATE "{template_db}"'))
+            except SQLAlchemyError as exc:
+                raise UnsafeTestDatabaseError(
+                    f"xdist worker {wid}: cannot create worker DB {target_db!r} from "
+                    f"template {template_db!r} ({exc.__class__.__name__}: {exc}). Workers "
+                    "must not share one DB. Fix: pre-create it (CREATE DATABASE "
+                    f'"{target_db}" TEMPLATE "{template_db}"), grant CREATEDB to the '
+                    "test role, or run pytest without -n."
+                ) from exc
     finally:
         admin_engine.dispose()
-    yield

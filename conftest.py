@@ -55,7 +55,21 @@ import pytest
 
 # Imported for fixture registration: `_pg_schema_guard` depends on it so the
 # schema check runs after the per-worker DB rewrite under pytest-xdist.
-from xenon._test_db import _ensure_worker_db  # noqa: F401
+from xenon._test_db import (
+    UnsafeTestDatabaseError,
+    _ensure_worker_db,  # noqa: F401
+    bind_database_url_to_test_db,
+)
+
+# Prod-DB guard (INV-test-db-leak): point DATABASE_URL at the test DB NOW —
+# before collection imports any xenon module — so import-time singletons
+# (e.g. `uw_api_stats.stats`) and subprocess CLIs never bind to the
+# exported/.env DATABASE_URL (prod `core_dev` on a dev machine). Refuse the
+# session when the test DB could be that database.
+try:
+    bind_database_url_to_test_db()
+except UnsafeTestDatabaseError as _exc:
+    pytest.exit(str(_exc), returncode=pytest.ExitCode.USAGE_ERROR)
 
 os.environ.setdefault("XENON_AUTH_ALLOW_DEV_OPEN", "1")
 
@@ -97,11 +111,9 @@ _BROKER_ALLOWED_ENDPOINT = ("127.0.0.1", 4002)
 def _pg_schema_guard(_ensure_worker_db):  # noqa: F811 — param shadows the import on purpose
     """Fail loudly when the PG test DB is reachable but schema-incomplete.
 
-    `truncate_all_xenon_tables` treats any SQLAlchemyError (including
-    UndefinedTable) as "offline" and flips `mark_offline`, which silently
-    skips every PG-dependent test for the rest of the session. A reachable
-    but incomplete schema is not the offline case — error once per worker
-    with the missing table names instead. Offline (unreachable) stays a
+    A reachable but incomplete schema is not the offline case — error once
+    per worker with the missing table names instead of failing every
+    TRUNCATE (`truncate_all_xenon_tables` re-raises non-connection errors). Offline (unreachable) stays a
     no-op so offline dev runs are unaffected. Depends on `_ensure_worker_db`
     so the check targets the per-worker DB under xdist.
     """

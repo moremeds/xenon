@@ -93,6 +93,14 @@ def _postgres_orders_test_db(monkeypatch, request):
         sync_url.replace("postgresql+psycopg://", "postgresql+asyncpg://"),
     )
 
+    # Clear the cached app engines on EVERY path, offline included: a cached
+    # engine may point at a non-test DB, and the env rewrite above does not
+    # reach it (INV-test-db-leak). The next caller rebuilds from the test URL.
+    import xenon.db.engine as engine_mod
+
+    monkeypatch.setattr(engine_mod, "_sync_engine", None)
+    monkeypatch.setattr(engine_mod, "_engine", None)
+
     if not is_pg_reachable():
         # Offline dev: keep the suite runnable without a live PG.
         yield
@@ -100,14 +108,6 @@ def _postgres_orders_test_db(monkeypatch, request):
 
     if request.node.get_closest_marker("committed_db"):
         # Phase 1 legacy path: TRUNCATE pre+post, no txn isolation.
-        # The app engine cache is cleared so the next caller rebuilds against
-        # the test DB URL set above.
-        try:
-            import xenon.db.engine as engine_mod
-
-            monkeypatch.setattr(engine_mod, "_sync_engine", None)
-        except Exception:
-            pass
         truncate_all_xenon_tables()
         yield
         truncate_all_xenon_tables()
@@ -117,12 +117,7 @@ def _postgres_orders_test_db(monkeypatch, request):
     # Pull pg_session lazily so the offline branch above doesn't trigger its
     # pytest.skip() — we want offline tests to *run* (and most don't touch PG).
     conn = request.getfixturevalue("pg_session")
-    try:
-        import xenon.db.engine as engine_mod
-
-        monkeypatch.setattr(engine_mod, "_sync_engine", _BoundEngine(conn))
-    except Exception:
-        pass
+    monkeypatch.setattr(engine_mod, "_sync_engine", _BoundEngine(conn))
     yield
 
 
