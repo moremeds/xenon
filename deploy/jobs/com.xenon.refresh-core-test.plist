@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.xenon.refresh-core-test.plist: nightly pg_dump core_dev, then pg_restore
+  core_test on the Mac mini.
+
+  This job is HOST-NATIVE, not image-based: it needs pg_dump / pg_restore /
+  psql, and the xenon api image ships only libpq5 (no PG client tools). It
+  does NOT need a git checkout either. The operator copies the one script to
+  /opt/xenon/bin (see "Install").
+
+  What runs:   /opt/xenon/bin/refresh-core-test.sh
+               (copy of scripts/infra/refresh-core-test.sh)
+  Schedule:    every day 04:00 ET.
+  TZ:          launchd StartCalendarInterval fires in the SYSTEM time zone, and
+               the TZ environment variable does not change that. The Mac mini
+               system zone is Asia/Hong_Kong (HKT, no DST). Do NOT change the
+               host zone: other stacks share the host. 04:00 ET is 16:00 HKT
+               while ET is on EDT (summer) and 17:00 HKT while ET is on EST
+               (winter). The job therefore fires at BOTH 16:00 and 17:00 HKT
+               (two calendar dicts below). The sh wrapper runs the script only
+               when the New York hour is 04 and exits 0 otherwise, so exactly
+               one of the two firings does the work. A late run after sleep may
+               be skipped by the guard. The next night's run covers it.
+  Lock:        the script takes an atomic mkdir lock itself
+               (XENON_REFRESH_LOCK_DIR, default /tmp/xenon-refresh-core-test.lock.d),
+               so launchd, cron and manual runs exclude each other. A second run
+               exits 3 and calls no PG command. The script also refuses SRC equal
+               to DST and any DST that is core_dev or lacks "test" in its name.
+  Creds:       PGPASSFILE -> /opt/xenon/.pgpass-refresh (chmod 600, holds the
+               xenon_migrator password for host:5432). No password in this file.
+               The script does not read /opt/xenon/.env.
+  Volumes:     none (host PostgreSQL on localhost:5432).
+  Logs:        /var/log/xenon/refresh-core-test.log (script),
+               /var/log/xenon/refresh-core-test.stdout.log and .stderr.log (launchd).
+
+  Install (Mac mini):
+    mkdir -p /opt/xenon/bin
+    cp scripts/infra/refresh-core-test.sh /opt/xenon/bin/ && chmod +x /opt/xenon/bin/refresh-core-test.sh
+    /opt/xenon/bin/refresh-core-test.sh (run with the dry-run argument first: dump only, no restore)
+    cp deploy/jobs/com.xenon.refresh-core-test.plist ~/Library/LaunchAgents/
+    plutil -lint ~/Library/LaunchAgents/com.xenon.refresh-core-test.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.xenon.refresh-core-test.plist
+  Manual unguarded run (REAL WRITES): /opt/xenon/bin/refresh-core-test.sh has no
+  ET-hour guard, only the plist wrapper does. Running it DROPs the xenon and
+  events schemas in core_test and restores core_dev into it. Add the dry-run
+  argument to only dump core_dev to /dev/null (reads core_dev, writes nothing).
+  Evidence it ran: the log line "=== refresh ok: core_dev -> core_test ===" in
+  /var/log/xenon/refresh-core-test.log and exit code 0. launchctl kickstart
+  outside 04:00-04:59 New York time exits 0 and does nothing (guard).
+  Re-copy the script after any change to scripts/infra/refresh-core-test.sh.
+  Uninstall: launchctl bootout gui/$(id -u)/com.xenon.refresh-core-test
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.xenon.refresh-core-test</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>[ "$(TZ=America/New_York date +%H)" = 04 ] || exit 0; exec /opt/xenon/bin/refresh-core-test.sh</string>
+  </array>
+
+  <!-- System zone is HKT: 16:00 HKT = 04:00 EDT, 17:00 HKT = 04:00 EST.
+       The sh guard in ProgramArguments picks the one that matches. -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Hour</key>
+      <integer>16</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>17</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>PGHOST</key>
+    <string>localhost</string>
+    <key>PGPORT</key>
+    <string>5432</string>
+    <key>PGUSER</key>
+    <string>xenon_migrator</string>
+    <key>PGPASSFILE</key>
+    <string>/opt/xenon/.pgpass-refresh</string>
+    <key>XENON_REFRESH_SRC</key>
+    <string>core_dev</string>
+    <key>XENON_REFRESH_DST</key>
+    <string>core_test</string>
+    <key>XENON_REFRESH_LOG_DIR</key>
+    <string>/var/log/xenon</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/var/log/xenon/refresh-core-test.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/xenon/refresh-core-test.stderr.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
