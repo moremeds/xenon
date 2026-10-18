@@ -221,22 +221,24 @@ class TestCancelViolations:
         trade1 = MagicMock()
         trade1.order.permId = 100
         trade1.order.orderId = 1
+        trade1.order.account = "DU0000000"
         trade2 = MagicMock()
         trade2.order.permId = 200
         trade2.order.orderId = 2
+        trade2.order.account = "DU0000000"
         client.get_open_orders.return_value = [trade1, trade2]
 
         violations = [
             {"order_id": 1, "perm_id": 100, "reason": "test", "symbol": "AAPL"},
             {"order_id": 2, "perm_id": 200, "reason": "test", "symbol": "GOOG"},
         ]
-        count = cancel_violations(client, violations)
+        count = cancel_violations(client, violations, account="DU0000000")
         assert count == 2
         assert client.cancel_order.call_count == 2
 
     def test_cancel_empty_list(self):
         client = MagicMock()
-        count = cancel_violations(client, [])
+        count = cancel_violations(client, [], account="DU0000000")
         assert count == 0
 
 
@@ -249,9 +251,10 @@ class TestDryRun:
     def test_dry_run_does_not_cancel(self, tmp_path):
         """Dry-run prints violations but does not connect to IB or cancel."""
         portfolio = {"positions": []}
+        # Orders must name the scope account (conftest: DU0000000) to be audited.
         orders = {
             "open_orders": [
-                make_order(1, 100, "AAPL", "STK", "SELL", 100),
+                {**make_order(1, 100, "AAPL", "STK", "SELL", 100), "account": "DU0000000"},
             ]
         }
         pf = tmp_path / "portfolio.json"

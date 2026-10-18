@@ -29,7 +29,7 @@ from sqlalchemy import select
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 from xenon.db.engine import get_sync_engine
 from xenon.db.schema import account_snapshots
-from xenon.execution.account_scope import AccountScope, resolve_from_env
+from xenon.execution.account_scope import AccountScope, resolve_from_env, row_in_account
 from xenon.execution.orders_store import record_fill, update_fill_commission
 from xenon.execution.trade_aggregator import aggregate_trade_from_fills
 
@@ -135,6 +135,9 @@ def fetch_ib_executions(client: IBClient, lookback_days: int = 7) -> list:
                 "strike": c.strike if c.secType == "OPT" else None,
                 "expiry": c.lastTradeDateOrContractMonth if c.secType == "OPT" else None,
                 "right": c.right if c.secType == "OPT" else None,
+                # reqExecutions spans every managed account; writers keep
+                # only the scope account's fills.
+                "account": getattr(e, "acctNumber", "") or "",
             }
         )
 
@@ -297,6 +300,10 @@ def record_external_fills(
     affected_submission_ids: set[str] = set()
 
     for execution in executions:
+        # Another (or an empty) account's fill must not be stamped with this
+        # scope (Fable P2, PR #198).
+        if not row_in_account(execution, resolved.broker_account, "account", "acctNumber"):
+            continue
         perm_id = str(_field(execution, "perm_id", "permId") or "") or None
         submission_id = _resolve_submission_id_by_perm_id(perm_id, scope=resolved)
         legacy_id = _legacy_group_id(execution)

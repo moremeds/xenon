@@ -36,6 +36,9 @@ const PYTHON_REASON_CODES = [
   "PENDING_TIMEOUT",
   // B5 — place subprocess hard failure
   "SUBPROCESS_ERROR",
+  // IB account scope
+  "ACCOUNT_UNRESOLVED",
+  "ACCOUNT_NOT_MANAGED",
 ];
 
 describe("orderReasonCodes parity", () => {

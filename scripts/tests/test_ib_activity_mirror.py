@@ -191,7 +191,9 @@ def test_activity_poller_defaults_enabled_unless_explicitly_disabled(monkeypatch
     monkeypatch.setattr(
         server,
         "app",
-        SimpleNamespace(state=SimpleNamespace(trading_mode=scope.account_env, account=scope.broker_account)),
+        SimpleNamespace(
+            state=SimpleNamespace(trading_mode=scope.account_env, account=scope.broker_account, mode_verified=True)
+        ),
     )
     monkeypatch.setattr(
         server,

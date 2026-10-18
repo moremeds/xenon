@@ -60,6 +60,10 @@ class ReasonCode(StrEnum):
     PENDING_TIMEOUT = "PENDING_TIMEOUT"
     # B5 — hard subprocess failure on /orders/place (non-2xx from runner).
     SUBPROCESS_ERROR = "SUBPROCESS_ERROR"
+    # New order had no usable IB account (empty / legacy_unknown scope, or IB
+    # error 435), or the scope account is not managed by the gateway login.
+    ACCOUNT_UNRESOLVED = "ACCOUNT_UNRESOLVED"
+    ACCOUNT_NOT_MANAGED = "ACCOUNT_NOT_MANAGED"
 
 
 class PreflightRequest(BaseModel):

@@ -11,6 +11,7 @@ Usage:
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -20,10 +21,14 @@ except ImportError:
     print(json.dumps({"status": "error", "message": "ib_async not installed"}))
     sys.exit(1)
 
-from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
+from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient, IBOrderAccountError
 
 CLIENT_ID = CLIENT_IDS.get("ib_place_order", 26)
 PORT = DEFAULT_GATEWAY_PORT
+
+# IB error 435 "You must specify an account": the gateway login manages more
+# than one account and the order named none.
+_IB_ACCOUNT_REQUIRED = 435
 
 
 def _build_stock_contract(params: dict) -> "Stock":
@@ -44,6 +49,10 @@ def place_order(params: dict) -> dict:
     quantity = int(params["quantity"])
     limit_price = float(params["limitPrice"])
     tif = params.get("tif", "DAY").upper()
+    # FastAPI forwards the scope account it stamped on the reservation row.
+    # Direct CLI use falls back to the sync-subprocess scope env var. An empty
+    # value is rejected by IBClient.place_order (fail closed).
+    account = str(params.get("account") or os.environ.get("XENON_BROKER_ACCOUNT", "")).strip()
 
     client = IBClient()
 
@@ -132,6 +141,7 @@ def place_order(params: dict) -> dict:
             tif=tif,
             outsideRth=False,
         )
+        order.account = account
 
         if order_type == "combo":
             order.smartComboRoutingParams = [TagValue("NonGuaranteed", "1")]
@@ -175,9 +185,11 @@ def place_order(params: dict) -> dict:
                     ),
                     file=sys.stderr,
                 )
+            reason = {"reason_code": "ACCOUNT_UNRESOLVED"} if code == _IB_ACCOUNT_REQUIRED else {}
             return {
                 "status": "error",
                 "code": code,
+                **reason,
                 "message": f"IB error {code}: {msg}",
                 "orderId": order_id,
                 "permId": perm_id,
@@ -193,6 +205,9 @@ def place_order(params: dict) -> dict:
             "initialStatus": status,
             "message": f"{action} {quantity} {symbol} @ ${limit_price:.2f} {accepted_tif} — {status}",
         }
+
+    except IBOrderAccountError as e:
+        return {"status": "error", "reason_code": e.reason_code, "message": str(e)}
 
     except Exception as e:
         return {"status": "error", "message": str(e)}

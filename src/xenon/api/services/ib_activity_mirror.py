@@ -24,7 +24,7 @@ import logging
 from typing import Any, Awaitable, Callable, Optional
 
 from xenon.db.service_health import record_service_health
-from xenon.execution.account_scope import AccountScope
+from xenon.execution.account_scope import AccountScope, row_in_account
 from xenon.execution.ib_orders import fetch_open_orders as _fetch_open_orders
 from xenon.execution.ib_orders import sync_open_orders_to_postgres as _sync_open_orders_to_postgres
 from xenon.execution.ib_reconcile import fetch_ib_executions as _fetch_ib_executions
@@ -148,8 +148,11 @@ def sweep_disappeared_orders(
     # "present" if EITHER its perm_id OR its ib_order_id appears in the
     # snapshot — otherwise the permId=0 race would mark live orders as
     # disappeared and cancel them.
-    open_perm_ids = {str(o.get("permId")) for o in open_orders if o.get("permId")}
-    open_order_ids = {str(o.get("orderId")) for o in open_orders if o.get("orderId")}
+    # Identity sets come from the scope account's orders only: another
+    # account's order reusing an orderId must not mask a disappearance.
+    scoped_orders = [o for o in open_orders if row_in_account(o, scope.broker_account, "account")]
+    open_perm_ids = {str(o.get("permId")) for o in scoped_orders if o.get("permId")}
+    open_order_ids = {str(o.get("orderId")) for o in scoped_orders if o.get("orderId")}
 
     engine = get_sync_engine()
     with engine.connect() as conn:

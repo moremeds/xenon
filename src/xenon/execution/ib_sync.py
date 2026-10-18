@@ -32,6 +32,7 @@ except ImportError:
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 from xenon.db.engine import get_sync_engine
+from xenon.execution.account_scope import IBAccountSelectionError, select_ib_account
 
 # Default connection settings
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
@@ -82,14 +83,16 @@ ACCOUNT_TAGS = [
 ]
 
 
-def get_account_summary(client: IBClient) -> dict:
-    """Fetch account summary from cached account values (instant, no round-trip).
+def get_account_summary(client: IBClient, account: str) -> dict:
+    """Fetch the scope account's summary from cached account values (instant, no round-trip).
 
     Uses ib.accountValues() which reads from ib_async's internal cache
     (populated automatically at connect time) instead of ib.accountSummary()
-    which makes a blocking round-trip (~200-700ms).
+    which makes a blocking round-trip (~200-700ms). The cache spans every
+    managed account; keep only ``account``'s rows, or each tag would hold
+    whichever account's value arrived last.
     """
-    account_values = client.ib.accountValues()
+    account_values = [av for av in client.ib.accountValues() if av.account == account]
 
     summary = {}
     for av in account_values:
@@ -99,15 +102,15 @@ def get_account_summary(client: IBClient) -> dict:
     return summary
 
 
-def get_fx_rates(client: IBClient) -> dict:
-    """USD-per-unit FX rates from IB's cached accountValues ExchangeRate rows.
+def get_fx_rates(client: IBClient, account: str) -> dict:
+    """USD-per-unit FX rates from the scope account's cached ExchangeRate rows.
 
     For a USD-base account IB reports each non-USD currency's ExchangeRate as the
     native→USD multiplier (base = native * ExchangeRate), so the returned map is
     directly usable as usd_per_unit. Always includes USD: 1.0."""
     from xenon.utils.fx import usd_per_unit_from_account_values
 
-    return usd_per_unit_from_account_values(client.ib.accountValues())
+    return usd_per_unit_from_account_values([av for av in client.ib.accountValues() if av.account == account])
 
 
 def get_pnl(client: IBClient, account: str = "") -> dict:
@@ -118,10 +121,10 @@ def get_pnl(client: IBClient, account: str = "") -> dict:
         return val is not None and not ib_util.isNan(val)
 
     try:
-        # IB requires a non-empty account string for reqPnL
+        # IB requires a non-empty account string for reqPnL. Never default
+        # to managedAccounts()[0]; select_ib_account raises when ambiguous.
         if not account:
-            accounts = client.ib.managedAccounts()
-            account = accounts[0] if accounts else ""
+            account = select_ib_account(client.ib.managedAccounts())
         pnl = client.get_pnl(account)
         # Poll until dailyPnL is non-NaN (IB streams this asynchronously)
         for _ in range(8):  # 8 x 1s = 8s max on top of the 2s in get_pnl
@@ -616,9 +619,15 @@ def _resolve_market_price(
     return None, False
 
 
-def fetch_positions(client: IBClient) -> list:
-    """Fetch all positions from IB"""
+def fetch_positions(client: IBClient, account: str | None = None) -> list:
+    """Fetch positions from IB; with ``account``, only that account's rows.
+
+    ib.positions() spans every managed account. Rows naming another account
+    (or no account) are dropped so they never blend into the scope snapshot.
+    """
     positions = client.get_positions()
+    if account is not None:
+        positions = [p for p in positions if getattr(p, "account", None) == account]
 
     formatted = []
     for pos in positions:
@@ -717,11 +726,10 @@ def fetch_position_daily_pnl(client: IBClient, positions: list, account: str = "
         return val is not None and not ib_util.isNan(val) and val != 1.7976931348623157e308
 
     if not account:
-        accounts = client.ib.managedAccounts()
-        account = accounts[0] if accounts else ""
-
-    if not account:
-        return positions
+        try:
+            account = select_ib_account(client.ib.managedAccounts())
+        except IBAccountSelectionError:
+            return positions
 
     # Request PnL for all positions simultaneously — bypass IBClient's
     # get_pnl_single() which sleeps 0.5s per call, and call IB API directly.
@@ -1219,8 +1227,12 @@ def save_portfolio(portfolio: dict):
             print(f"  Warning: NAV snapshot failed: {exc}")
 
 
-def _open_orders_for_audit(client) -> list[dict]:
-    """Pull open orders from IB and shape them for naked_short_audit.
+def _open_orders_for_audit(client, account: str) -> list[dict]:
+    """Pull the scope account's open orders from IB, shaped for naked_short_audit.
+
+    reqAllOpenOrders spans every managed account. Only trades whose
+    ``order.account`` is ``account`` are kept (other / empty dropped): the
+    audit judges them against this account's positions only.
 
     Replaces the old `data/orders.json` read. The audit's pure function
     (`find_naked_short_violations`) expects a list of dicts shaped like the
@@ -1239,6 +1251,8 @@ def _open_orders_for_audit(client) -> list[dict]:
         contract = getattr(trade, "contract", None)
         status_obj = getattr(trade, "orderStatus", None)
         if order is None or contract is None:
+            continue
+        if not account or (getattr(order, "account", "") or "") != account:
             continue
         out.append(
             {
@@ -1277,10 +1291,24 @@ def main():
     client = connect_ib(args.host, args.port, args.client_id or "auto")
 
     try:
+        # Export the scope account so downstream DB writers
+        # (`_save_portfolio_to_postgres`, `_append_nav_snapshot`,
+        # `naked_short_audit` subprocess) stamp scope rows with it. A
+        # configured XENON_BROKER_ACCOUNT is kept (it must be managed); with it
+        # unset the login must manage exactly one account. Never
+        # managedAccounts()[0] — abort rather than write under a guessed scope.
+        # Every account-data read below is filtered to this account.
+        try:
+            ib_account = select_ib_account(client.ib.managedAccounts())
+        except IBAccountSelectionError as exc:
+            print(f"✗ Not syncing portfolio: {exc}")
+            sys.exit(1)
+        os.environ["XENON_BROKER_ACCOUNT"] = ib_account
+
         # ── Phase 1: Account summary (fast, no sleep needed) ──
         print("Fetching account summary...")
-        account = get_account_summary(client)
-        fx_rates = get_fx_rates(client)
+        account = get_account_summary(client, ib_account)
+        fx_rates = get_fx_rates(client, ib_account)
 
         # ── Phase 2: Request account PnL + positions concurrently ──
         # reqPnL is a subscription — request it, then do other work while it streams
@@ -1290,19 +1318,10 @@ def main():
         def _valid_pnl(val):
             return val is not None and not ib_util.isNan(val)
 
-        accounts = client.ib.managedAccounts()
-        ib_account = accounts[0] if accounts else ""
-        # Export the connected account ID so downstream DB writers
-        # (`_save_portfolio_to_postgres`, `_append_nav_snapshot`,
-        # `naked_short_audit` subprocess) stamp scope rows with the live
-        # account instead of the legacy_unknown env fallback. Per
-        # account_scope.py docstring: this is where the env var is set.
-        if ib_account:
-            os.environ["XENON_BROKER_ACCOUNT"] = ib_account
-        pnl_obj = client.ib.reqPnL(ib_account) if ib_account else None
+        pnl_obj = client.ib.reqPnL(ib_account)
 
         # Fetch positions while PnL streams
-        positions = fetch_positions(client)
+        positions = fetch_positions(client, ib_account)
 
         if not args.no_prices and positions:
             # ── Phase 3: Set exchange + request ALL data at once ──
@@ -1444,7 +1463,7 @@ def main():
                     # data/orders.json (which is written by the web app and can
                     # lag actual IB state). Adapter shapes Trade objects into
                     # the dict shape `find_naked_short_violations` expects.
-                    orders = _open_orders_for_audit(client)
+                    orders = _open_orders_for_audit(client, ib_account)
 
                     violations = find_naked_short_violations(orders, portfolio["positions"])
                     if violations:
@@ -1456,7 +1475,7 @@ def main():
                         if client.is_connected():
                             from naked_short_audit import cancel_violations
 
-                            cancelled = cancel_violations(client, violations)
+                            cancelled = cancel_violations(client, violations, account=ib_account)
                             log.warning("  Cancelled %d violating order(s)", cancelled)
                         else:
                             log.warning("  Client disconnected — skipping auto-cancel")
