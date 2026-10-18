@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from xenon.execution.gate4 import next_pass_seq as _next_pass_seq
+from xenon._test_db import committed_pass_seq
 # Phase 2 carve-out: this module's tests open their own SQLAlchemy engine
 # (helpers calling sqlalchemy.create_engine directly, or subprocess CLIs)
 # and therefore can't share the test's BEGIN/ROLLBACK transaction. They
@@ -44,8 +44,8 @@ def _insert_portfolio_snapshot(payload: dict, *, snapshot_at: datetime | None = 
             "complete": True,
             "account": "DU0000000",
             "reads": {"positions": True, "open_orders": True, "executions": True},
-            # xid8 ordering key, as ib_sync stamps it (gate4.next_pass_seq).
-            "pass_seq": str(_next_pass_seq()),
+            # xid8 ordering key from a committed txn, as ib_sync stamps it.
+            "pass_seq": committed_pass_seq(),
         },
     )
 

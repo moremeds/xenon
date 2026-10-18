@@ -720,7 +720,12 @@ def test_view_watermark_only_moves_forward():
         )
     gate4.invalidate_view(scope, "third")
     with engine.connect() as conn:
-        assert gate4.view_watermark(conn, scope) == future
+        detail = conn.execute(
+            select(service_health.c.detail).where(service_health.c.service == gate4.VIEW_WATERMARK_SERVICE)
+        ).scalar()
+    # Raw row: the upsert kept the greater seq (view_watermark would ignore
+    # it as foreign, being above this cluster's xmax).
+    assert json.loads(detail) == {"reason": "future", "seq": str(future)}
 
 
 def test_clock_regression_pass_with_higher_seq_is_published(monkeypatch, client, broker_calls, fresh_quote):
@@ -816,3 +821,66 @@ def test_save_portfolio_skips_nav_when_pass_not_published(monkeypatch):
     ib_sync.save_portfolio(older)  # stale: pass_seq not after the newest published
 
     assert _nav_rows() == [2000.0]
+
+
+# ---------------------------------------------------------------------------
+# xid8 seqs from another cluster (pg_dump/pg_restore) never order anything
+# ---------------------------------------------------------------------------
+
+
+def _make_latest_seq_foreign():
+    """Rewrite the latest snapshot's pass_seq to xmax + 1e6, as a restore from
+    a busier cluster leaves it. Returns the foreign seq."""
+    from sqlalchemy import func as sa_func
+    from sqlalchemy import text as sa_text
+
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        foreign = (
+            int(conn.execute(sa_text("SELECT pg_snapshot_xmax(pg_current_snapshot())::text")).scalar()) + 1_000_000
+        )
+        latest = conn.execute(select(sa_func.max(account_snapshots.c.id))).scalar()
+        conn.execute(
+            sa_text(
+                "UPDATE xenon.account_snapshots SET payload = jsonb_set(payload, '{observation,pass_seq}', "
+                "to_jsonb(CAST(:seq AS text))) WHERE id = :id"
+            ),
+            {"seq": str(foreign), "id": latest},
+        )
+    engine.dispose()
+    return foreign
+
+
+def test_restored_foreign_seqs_do_not_block_new_passes(monkeypatch, client, broker_calls, fresh_quote):
+    from xenon.execution import gate4
+
+    _run_sync(monkeypatch, FakeSyncClient(positions=[Position(ACCOUNT, _stk(), 200, 500.0)]))
+    foreign = _make_latest_seq_foreign()
+    gate4.invalidate_view({"broker": "IB", "account_env": "paper", "broker_account": ACCOUNT}, "restored")
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            update(service_health)
+            .where(service_health.c.service == gate4.VIEW_WATERMARK_SERVICE)
+            .values(detail=json.dumps({"reason": "restored", "seq": str(foreign)}))
+        )
+    engine.dispose()
+
+    _run_sync(monkeypatch, _shares_client(100))
+
+    # The new pass published and is the snapshot Gate 4 reads (100 shares,
+    # not the restored 200), and the restored watermark does not block it.
+    two = client.post("/orders/place", json=_sell_call_body("sp-restore-2", qty=2))
+    assert two.status_code == 400, two.text
+    assert two.json()["reason_code"] == "ETF_CALL_UNCOVERED"
+    one = client.post("/orders/place", json=_sell_call_body("sp-restore-1"))
+    assert one.status_code == 200, one.text
+
+
+def test_foreign_only_snapshot_is_incomplete(monkeypatch, client, broker_calls, fresh_quote):
+    _run_sync(monkeypatch, _shares_client(100))
+    _make_latest_seq_foreign()
+
+    resp = client.post("/orders/place", json=_sell_call_body("sp-foreign-only"))
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"

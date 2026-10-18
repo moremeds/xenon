@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from xenon.execution.gate4 import next_pass_seq as _next_pass_seq
+from xenon._test_db import committed_pass_seq
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from starlette.responses import JSONResponse
@@ -72,8 +72,8 @@ def _seed_gate4_snapshot(engine) -> None:
             "complete": True,
             "account": "DU0000000",
             "reads": {"positions": True, "open_orders": True, "executions": True},
-            # xid8 ordering key, as ib_sync stamps it (gate4.next_pass_seq).
-            "pass_seq": str(_next_pass_seq()),
+            # xid8 ordering key from a committed txn, as ib_sync stamps it.
+            "pass_seq": committed_pass_seq(),
         },
     }
     with engine.begin() as conn:

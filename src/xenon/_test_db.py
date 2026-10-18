@@ -297,6 +297,26 @@ def get_session_engine() -> Engine:
     return _SESSION_ENGINE
 
 
+_SEQ_ENGINE: Engine | None = None
+
+
+def committed_pass_seq() -> str:
+    """A Gate-4 `pass_seq` (xid8 text) from its own committed transaction.
+
+    Same value ib_sync stamps via `gate4.next_pass_seq`. Seeding with the
+    test's open outer transaction would use that transaction's own xid,
+    which stays at/above `pg_snapshot_xmax` until it commits, so gate4
+    would treat it as a foreign seq. NullPool: never takes a session-pool slot.
+    """
+    global _SEQ_ENGINE
+    if _SEQ_ENGINE is None:
+        from sqlalchemy.pool import NullPool
+
+        _SEQ_ENGINE = create_engine(sync_test_db_url(), poolclass=NullPool)
+    with _SEQ_ENGINE.begin() as conn:
+        return conn.execute(text("SELECT pg_current_xact_id()::text")).scalar()
+
+
 def is_pg_reachable() -> bool:
     """Probe PG with a real `SELECT 1`; cache the result for the session.
 

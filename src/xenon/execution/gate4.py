@@ -55,7 +55,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Literal
 
-from sqlalchemy import Numeric, func, insert, select, text, update
+from sqlalchemy import Numeric, case, func, insert, literal_column, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from xenon.db.engine import get_sync_engine
@@ -367,6 +367,22 @@ def _seq(value: Any) -> int | None:
 # Snapshot ordering key: observation.pass_seq as a number (NULL for legacy rows).
 _PASS_SEQ = account_snapshots.c.payload[("observation", "pass_seq")].astext.cast(Numeric)
 
+# A seq at/above this snapshot's xmax was not handed out by this cluster —
+# e.g. rows copied from another cluster by pg_dump/pg_restore. Such a FOREIGN
+# seq never orders anything here: snapshots rank like legacy rows (and are
+# incomplete when read), watermarks are ignored (every pass in this cluster
+# runs after the restore). xmax needs no xid and works read-only.
+_XMAX_SQL = "pg_snapshot_xmax(pg_current_snapshot())::text::numeric"
+_LOCAL_PASS_SEQ = case((_PASS_SEQ < literal_column(_XMAX_SQL), _PASS_SEQ), else_=None)
+
+
+def _local_seq(conn, seq: int | None) -> int | None:
+    """`seq` if this cluster handed it out, else None (foreign or missing)."""
+    if seq is None:
+        return None
+    return seq if seq < int(conn.execute(text(f"SELECT {_XMAX_SQL}")).scalar()) else None
+
+
 _INVALIDATE_SQL = text(
     """
     INSERT INTO xenon.service_health
@@ -421,9 +437,10 @@ def view_watermark(conn, scope: dict) -> int | None:
         )
     ).scalar()
     try:
-        return _seq(json.loads(detail).get("seq")) if detail else None
+        seq = _seq(json.loads(detail).get("seq")) if detail else None
     except (ValueError, AttributeError):
         return None
+    return _local_seq(conn, seq)
 
 
 def is_stale_publication(conn, scope: dict, observation: dict) -> bool:
@@ -438,7 +455,7 @@ def is_stale_publication(conn, scope: dict, observation: dict) -> bool:
     seq = _seq(observation.get("pass_seq"))
     if seq is None:
         return True
-    prior = conn.execute(select(func.max(_PASS_SEQ)).where(*_scope_where(account_snapshots, scope))).scalar()
+    prior = conn.execute(select(func.max(_LOCAL_PASS_SEQ)).where(*_scope_where(account_snapshots, scope))).scalar()
     return prior is not None and seq <= int(prior)
 
 
@@ -459,9 +476,9 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
             account_snapshots.c.account_env == account_env,
             account_snapshots.c.broker_account == broker_account,
         )
-        # Newest pass by pass_seq (xid order); legacy rows without one sort
-        # last and fall back to snapshot_at.
-        .order_by(_PASS_SEQ.desc().nulls_last(), account_snapshots.c.snapshot_at.desc())
+        # Newest pass by pass_seq (xid order); legacy rows and foreign seqs
+        # sort last and fall back to snapshot_at.
+        .order_by(_LOCAL_PASS_SEQ.desc().nulls_last(), account_snapshots.c.snapshot_at.desc())
         .limit(1)
     ).first()
 
@@ -489,8 +506,8 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
                 complete = False
             # A writer dropped an accountless row at watermark seq `mark`:
             # only a pass that started after it can prove cover. No pass_seq
-            # → the pass cannot be ordered against it.
-            pass_seq = _seq(observation.get("pass_seq"))
+            # (or a foreign one) → the pass cannot be ordered against it.
+            pass_seq = _local_seq(conn, _seq(observation.get("pass_seq")))
             mark = view_watermark(conn, scope)
             if pass_seq is None or (mark is not None and pass_seq <= mark):
                 complete = False
