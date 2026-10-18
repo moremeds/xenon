@@ -620,28 +620,95 @@ def test_poller_fill_without_scope_account(account, allowed, monkeypatch, client
         assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
 
 
-def test_poller_mark_survives_inflight_pass_and_later_pass_clears_it(monkeypatch, client, broker_calls, fresh_quote):
-    """A full pass that started BEFORE the poller's mark may not have seen the
-    accountless order, so its snapshot stays incomplete; only a pass started
-    after the mark (and seeing no accountless row) clears it."""
-    _run_sync(monkeypatch, _shares_client(100))
-    poller_view = _shares_client(100)
+def _accountless_poller_view():
+    view = _shares_client(100)
     c = _opt(500, con_id=111)
-    poller_view.add_details(c)
-    poller_view.open_orders.append(_trade(c, order_id=9103, perm_id=991003, account=""))
+    view.add_details(c)
+    view.open_orders.append(_trade(c, order_id=9103, perm_id=991003, account=""))
+    return view
+
+
+def _insert_legacy_snapshot():
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            insert(account_snapshots).values(
+                account=ACCOUNT,
+                bankroll=Decimal("0"),
+                payload={"positions": []},
+                broker="IB",
+                account_env="paper",
+                broker_account=ACCOUNT,
+            )
+        )
+    engine.dispose()
+
+
+@pytest.mark.parametrize("prior", ["empty", "legacy"])
+def test_first_publication_after_poller_mark_is_refused(prior, monkeypatch, client, broker_calls, fresh_quote):
+    """No PR-03b snapshot yet: the in-flight first pass started before the
+    poller's mark, so its publication cannot prove cover."""
+    if prior == "legacy":
+        _insert_legacy_snapshot()
     inflight = _shares_client(100)
-    inflight.on_read["positions"] = lambda _f: _poller_tick(poller_view)
+    inflight.on_read["executions"] = lambda _f: _poller_tick(_accountless_poller_view())
 
     _run_sync(monkeypatch, inflight)
 
-    obs = _latest_payload()["observation"]
-    assert obs["complete"] is False
-    assert obs["invalidated_reason"] == "unprovenanced_open_orders"
-    resp = client.post("/orders/place", json=_sell_call_body("sp-poll-inflight"))
+    assert _latest_payload()["observation"]["complete"] is True  # the pass itself saw a whole view
+    resp = client.post("/orders/place", json=_sell_call_body(f"sp-first-{prior}"))
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
+
+
+def test_overlapping_older_pass_cannot_replace_newer_snapshot(monkeypatch, client, broker_calls, fresh_quote):
+    """A starts -> poller mark -> B (started after the mark) publishes ->
+    A publishes. A's older 200-share view must not replace B's 100 shares."""
+    pass_b = _shares_client(100)
+    pass_a = FakeSyncClient(positions=[Position(ACCOUNT, _stk(), 200, 500.0)])
+
+    def _mark_then_b(_f):
+        _poller_tick(_accountless_poller_view())
+        _run_sync(monkeypatch, pass_b)
+
+    pass_a.on_read["positions"] = _mark_then_b
+    _run_sync(monkeypatch, pass_a)
+
+    payload = _latest_payload()
+    assert payload["observation"]["complete"] is True
+    assert [leg["contracts"] for p in payload["positions"] for leg in p["legs"]] == [100]
+    resp = client.post("/orders/place", json=_sell_call_body("sp-overlap-2", qty=2))
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["reason_code"] == "ETF_CALL_UNCOVERED"
+
+
+def test_pass_after_poller_mark_without_accountless_rows_is_allowed(monkeypatch, client, broker_calls, fresh_quote):
+    _run_sync(monkeypatch, _shares_client(100))
+    _poller_tick(_accountless_poller_view())
+    resp = client.post("/orders/place", json=_sell_call_body("sp-mark-blocked"))
     assert resp.json()["reason_code"] == "PORTFOLIO_SNAPSHOT_REQUIRED"
 
     _run_sync(monkeypatch, _shares_client(100))
 
-    assert _latest_payload()["observation"]["complete"] is True
-    resp = client.post("/orders/place", json=_sell_call_body("sp-poll-cleared"))
+    resp = client.post("/orders/place", json=_sell_call_body("sp-mark-cleared"))
     assert resp.status_code == 200, resp.text
+
+
+def test_view_watermark_only_moves_forward(monkeypatch):
+    from xenon.execution import gate4
+
+    scope = {"broker": "IB", "account_env": "paper", "broker_account": ACCOUNT}
+    t2 = datetime(2026, 10, 18, 15, 0, tzinfo=timezone.utc)
+    for t, reason in [(t2, "newer"), (t2 - timedelta(minutes=5), "older")]:
+
+        class _Clock(datetime):
+            @classmethod
+            def now(cls, tz=None, t=t):
+                return t
+
+        monkeypatch.setattr(gate4, "datetime", _Clock)
+        gate4.invalidate_view(scope, reason)
+
+    monkeypatch.undo()
+    with gate4.get_sync_engine().connect() as conn:
+        assert gate4.view_watermark(conn, scope) == t2

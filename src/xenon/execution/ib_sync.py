@@ -1155,7 +1155,7 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
         print(f"⏭  XENON_READ_ONLY=1 — skipping portfolio→PG write ({n} positions, snapshot not persisted)")
         return
 
-    from sqlalchemy import delete, insert, text
+    from sqlalchemy import delete, func, insert, text
 
     from xenon.db.schema import account_snapshots, positions
 
@@ -1164,15 +1164,19 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
     engine = get_sync_engine()
     with engine.begin() as conn:
         conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('portfolio_sync'))"))
-        if isinstance(portfolio.get("observation"), dict):
+        observation = portfolio.get("observation")
+        if isinstance(observation, dict):
             from xenon.execution import gate4
 
-            # A poller mark newer than this pass's start keeps it incomplete.
-            gate4.carry_invalidation(
+            # A pass that did not start after the newest published pass must
+            # not replace its holdings (overlapping passes).
+            if gate4.is_stale_publication(
                 conn,
                 {"broker": broker, "account_env": account_env, "broker_account": broker_account},
-                portfolio["observation"],
-            )
+                observation,
+            ):
+                print(f"⏭  Stale sync pass (as_of {observation.get('as_of')}) — newer snapshot kept, not published")
+                return
         conn.execute(
             delete(positions).where(
                 positions.c.broker == broker,
@@ -1229,6 +1233,9 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
                 broker=broker,
                 account_env=account_env,
                 broker_account=broker_account,
+                # Taken after the locks (now() is txn start): publication
+                # order by snapshot_at matches the lock order.
+                snapshot_at=func.clock_timestamp(),
             )
         )
 

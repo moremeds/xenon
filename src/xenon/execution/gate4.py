@@ -54,11 +54,11 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Literal
 
-from sqlalchemy import insert, select, text, update
+from sqlalchemy import case, func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from xenon.db.engine import get_sync_engine
-from xenon.db.schema import account_snapshots, order_fills, order_submissions, regime_overrides
+from xenon.db.schema import account_snapshots, order_fills, order_submissions, regime_overrides, service_health
 from xenon.execution import coverage, orders_store
 from xenon.execution.orders_store import (
     ATTEMPT_BODY_MISMATCH,
@@ -327,71 +327,86 @@ def _holdings_from_payload(payload: dict) -> list[coverage.Holding]:
 FILL_LAG_S = 60.0
 
 
-def _latest_snapshot(conn, scope: dict):
-    return conn.execute(
-        select(account_snapshots.c.id, account_snapshots.c.payload)
-        .where(
-            account_snapshots.c.broker == scope["broker"],
-            account_snapshots.c.account_env == scope["account_env"],
-            account_snapshots.c.broker_account == scope["broker_account"],
-        )
-        .order_by(account_snapshots.c.snapshot_at.desc())
-        .limit(1)
-    ).first()
+# xenon.service_health row (one per scope) holding the Gate-4 invalidation
+# watermark in `last_finished_at`. Reused instead of a new table: the PK is
+# (service, broker, account_env, broker_account) and the column is timestamptz.
+VIEW_WATERMARK_SERVICE = "gate4_view_invalidated"
+
+
+def _scope_where(table, scope: dict):
+    return (
+        table.c.broker == scope["broker"],
+        table.c.account_env == scope["account_env"],
+        table.c.broker_account == scope["broker_account"],
+    )
 
 
 def invalidate_view(scope: dict, reason: str) -> None:
-    """Durably mark this scope's Gate-4 view incomplete.
+    """Move this scope's Gate-4 invalidation watermark forward to now.
 
     A writer that drops an accountless open order or fill (#198 filter) leaves
-    its demand out of Postgres, so the latest snapshot must stop proving
-    cover. The mark (`complete=false`, `invalidated_at`) goes on the latest
-    snapshot's observation, the field `load_inputs` already reads.
-    `carry_invalidation` keeps it on a later snapshot whose pass started
-    before the mark; only a pass started after it clears it.
-
-    ponytail: with no PR-03b snapshot yet there is nothing to mark — the view
-    is already incomplete, but a first pass in flight could still publish
-    complete; a dedicated marker row closes that if it matters.
+    its demand out of Postgres. From then on a snapshot proves cover only if
+    its pass started after this instant (`load_inputs`). The watermark lives
+    apart from snapshots, only moves forward (GREATEST) and is never cleared,
+    so no later or earlier publication can erase it. `now` is taken after the
+    writer's IB read.
     """
     ensure_writable()
     at = datetime.now(timezone.utc)
+    values = {
+        "service": VIEW_WATERMARK_SERVICE,
+        **{k: scope[k] for k in ("broker", "account_env", "broker_account")},
+        "state": "invalidated",
+        "detail": reason,
+        "last_finished_at": at,
+        "updated_at": at,
+    }
+    stmt = pg_insert(service_health).values(**values)
+    newer = stmt.excluded.last_finished_at >= service_health.c.last_finished_at
+    stmt = stmt.on_conflict_do_update(
+        constraint="pk_service_health",
+        set_={
+            "last_finished_at": func.greatest(service_health.c.last_finished_at, stmt.excluded.last_finished_at),
+            "detail": case((newer, stmt.excluded.detail), else_=service_health.c.detail),
+            "state": "invalidated",
+            "updated_at": func.greatest(service_health.c.updated_at, stmt.excluded.updated_at),
+        },
+    )
     with get_sync_engine().begin() as conn:
         _lock_scope(conn, scope)
-        row = _latest_snapshot(conn, scope)
-        if row is None or not isinstance(row.payload, dict) or not isinstance(row.payload.get("observation"), dict):
-            return
-        observation = {
-            **row.payload["observation"],
-            "complete": False,
-            "invalidated_at": at.isoformat(),
-            "invalidated_reason": reason,
-        }
+        conn.execute(stmt)
+
+
+def view_watermark(conn, scope: dict) -> datetime | None:
+    return _as_utc(
         conn.execute(
-            update(account_snapshots)
-            .where(account_snapshots.c.id == row.id)
-            .values(payload={**row.payload, "observation": observation})
-        )
+            select(service_health.c.last_finished_at).where(
+                service_health.c.service == VIEW_WATERMARK_SERVICE, *_scope_where(service_health, scope)
+            )
+        ).scalar()
+    )
 
 
-def carry_invalidation(conn, scope: dict, observation: dict) -> None:
-    """Snapshot writer hook: keep a pending `invalidate_view` mark.
+def is_stale_publication(conn, scope: dict, observation: dict) -> bool:
+    """Snapshot writer check, under the scope lock on `conn`.
 
-    Takes the scope lock on `conn` (the caller's insert transaction). A pass
-    whose `as_of` is not after the mark may have read IB before the writer
-    that set it, so its snapshot stays incomplete and carries the mark.
+    True when this pass did not start after the newest published pass for the
+    scope: the writer then skips publishing, so the newer snapshot's holdings
+    stay what `load_inputs` reads. Publication is monotone in `as_of`, so the
+    latest observed snapshot carries the newest published `as_of`.
     """
     _lock_scope(conn, scope)
-    row = _latest_snapshot(conn, scope)
-    prior = row.payload.get("observation") if row is not None and isinstance(row.payload, dict) else None
-    mark = _as_utc(prior.get("invalidated_at")) if isinstance(prior, dict) else None
-    if mark is None:
-        return
+    prior = conn.execute(
+        select(account_snapshots.c.payload)
+        .where(*_scope_where(account_snapshots, scope), account_snapshots.c.payload.has_key("observation"))
+        .order_by(account_snapshots.c.snapshot_at.desc())
+        .limit(1)
+    ).scalar()
+    prior_as_of = _as_utc((prior or {}).get("observation", {}).get("as_of")) if isinstance(prior, dict) else None
+    if prior_as_of is None:
+        return False
     as_of = _as_utc(observation.get("as_of"))
-    if as_of is None or as_of <= mark:
-        observation["complete"] = False
-        observation["invalidated_at"] = prior["invalidated_at"]
-        observation["invalidated_reason"] = prior.get("invalidated_reason")
+    return as_of is None or as_of <= prior_as_of
 
 
 def load_inputs(conn, scope: dict) -> Gate4Inputs:
@@ -436,6 +451,12 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
                 complete = False
             obs_account = observation.get("account")
             if obs_account is not None and obs_account != broker_account:
+                complete = False
+            # A writer dropped an accountless row at `mark`: only a pass that
+            # started after it can prove cover (never cleared).
+            mark = view_watermark(conn, scope)
+            obs_as_of = _as_utc(observation.get("as_of"))
+            if mark is not None and (obs_as_of is None or obs_as_of <= mark):
                 complete = False
         holdings = _holdings_from_payload(payload)
 
