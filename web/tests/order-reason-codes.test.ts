@@ -39,6 +39,8 @@ const PYTHON_REASON_CODES = [
   // IB account scope
   "ACCOUNT_UNRESOLVED",
   "ACCOUNT_NOT_MANAGED",
+  // Place subprocess gave no result — IB may hold the order
+  "PLACE_OUTCOME_UNKNOWN",
 ];
 
 describe("orderReasonCodes parity", () => {

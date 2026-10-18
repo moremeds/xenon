@@ -64,6 +64,9 @@ class ReasonCode(StrEnum):
     # error 435), or the scope account is not managed by the gateway login.
     ACCOUNT_UNRESOLVED = "ACCOUNT_UNRESOLVED"
     ACCOUNT_NOT_MANAGED = "ACCOUNT_NOT_MANAGED"
+    # /orders/place subprocess exited OK with no JSON result: IB may hold the
+    # order. Row goes UNKNOWN; the user must check working orders first.
+    PLACE_OUTCOME_UNKNOWN = "PLACE_OUTCOME_UNKNOWN"
 
 
 class PreflightRequest(BaseModel):
