@@ -22,7 +22,13 @@ from typing import Optional
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 from xenon.execution import orders_store
-from xenon.execution.account_scope import AccountScope, IBAccountSelectionError, resolve_from_env, select_ib_account
+from xenon.execution.account_scope import (
+    AccountScope,
+    IBAccountSelectionError,
+    resolve_from_env,
+    row_in_account,
+    select_ib_account,
+)
 
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
 DEFAULT_CLIENT_ID = CLIENT_IDS["ib_orders"]
@@ -178,6 +184,9 @@ def fetch_open_orders(client: IBClient) -> list:
                 # Surface IB's orderRef so the naked-short audit can detect
                 # leg_wizard-tagged orders and skip them (Wiz spec §11.1).
                 "orderRef": getattr(order, "orderRef", None) or None,
+                # reqAllOpenOrders spans every managed account; writers keep
+                # only the scope account's rows.
+                "account": getattr(order, "account", "") or "",
             }
         )
 
@@ -248,6 +257,10 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
     skipped = 0
     resurrected = 0
     for order in open_orders:
+        # Another (or an empty) account's order must not be stamped with
+        # this scope (Fable P2, PR #198).
+        if not row_in_account(order, resolved["broker_account"], "account"):
+            continue
         contract = order.get("contract") or {}
         sec_type = str(contract.get("secType") or "STK")
         multiplier = 100 if sec_type in {"OPT", "BAG"} else 1

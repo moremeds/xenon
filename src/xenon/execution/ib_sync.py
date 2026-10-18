@@ -1227,8 +1227,12 @@ def save_portfolio(portfolio: dict):
             print(f"  Warning: NAV snapshot failed: {exc}")
 
 
-def _open_orders_for_audit(client) -> list[dict]:
-    """Pull open orders from IB and shape them for naked_short_audit.
+def _open_orders_for_audit(client, account: str) -> list[dict]:
+    """Pull the scope account's open orders from IB, shaped for naked_short_audit.
+
+    reqAllOpenOrders spans every managed account. Only trades whose
+    ``order.account`` is ``account`` are kept (other / empty dropped): the
+    audit judges them against this account's positions only.
 
     Replaces the old `data/orders.json` read. The audit's pure function
     (`find_naked_short_violations`) expects a list of dicts shaped like the
@@ -1247,6 +1251,8 @@ def _open_orders_for_audit(client) -> list[dict]:
         contract = getattr(trade, "contract", None)
         status_obj = getattr(trade, "orderStatus", None)
         if order is None or contract is None:
+            continue
+        if not account or (getattr(order, "account", "") or "") != account:
             continue
         out.append(
             {
@@ -1457,7 +1463,7 @@ def main():
                     # data/orders.json (which is written by the web app and can
                     # lag actual IB state). Adapter shapes Trade objects into
                     # the dict shape `find_naked_short_violations` expects.
-                    orders = _open_orders_for_audit(client)
+                    orders = _open_orders_for_audit(client, ib_account)
 
                     violations = find_naked_short_violations(orders, portfolio["positions"])
                     if violations:
@@ -1469,7 +1475,7 @@ def main():
                         if client.is_connected():
                             from naked_short_audit import cancel_violations
 
-                            cancelled = cancel_violations(client, violations)
+                            cancelled = cancel_violations(client, violations, account=ib_account)
                             log.warning("  Cancelled %d violating order(s)", cancelled)
                         else:
                             log.warning("  Client disconnected — skipping auto-cancel")

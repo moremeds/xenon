@@ -85,6 +85,24 @@ def env_from_trd_env(trd_env: str) -> str:
     raise ValueError(f"Unknown Futu trd_env: {trd_env!r}")
 
 
+def row_in_account(row, account: str, *names: str) -> bool:
+    """True iff an IB-sourced ``row`` belongs to ``account``.
+
+    ``names`` are the account field names to look for (dict key or
+    attribute). A field that is present but names another account, or is
+    empty, is out of scope. IB ``Order.account`` / ``Execution.acctNumber``
+    always exist, so IB rows are never kept accountless; only a row type that
+    has none of ``names`` at all (not built from an IB object) is kept.
+    """
+    for name in names:
+        if isinstance(row, dict):
+            if name in row:
+                return bool(account) and (row[name] or "") == account
+        elif hasattr(row, name):
+            return bool(account) and (getattr(row, name) or "") == account
+    return True
+
+
 def resolve_from_env() -> AccountScope:
     """Build scope from environment variables. Used by sync IB callers only.
 

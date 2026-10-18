@@ -231,14 +231,18 @@ async def _run_rehydrate_on_boot() -> None:
         logger.info("test_mode: skipping rehydrate")
         return
 
-    # Resolve scope from app.state populated earlier in lifespan. None values
-    # mean "no scope filter" — pre-scope rows still get reconciled.
+    # Resolve scope from app.state populated earlier in lifespan. Fail
+    # closed: an empty scope would map to broker_account=None, which
+    # rehydrate treats as "no account filter" (every account's rows).
     _scope_account_env = getattr(app.state, "trading_mode", None)
     _scope_account = getattr(app.state, "account", None)
+    if not _scope_account_env or not _scope_account:
+        logger.error("rehydrate skipped: IB account scope unresolved (trading_mode/account empty)")
+        return
     _scope_kwargs = {
-        "broker": "IB" if _scope_account_env else None,
+        "broker": "IB",
         "account_env": _scope_account_env,
-        "broker_account": _scope_account or None,
+        "broker_account": _scope_account,
     }
 
     # Operator heartbeat: record "ok" only when BOTH phases finish without
@@ -451,7 +455,7 @@ async def _run_fills_replay_on_boot() -> None:
     _scope_account_env = getattr(app.state, "trading_mode", None)
     _scope_account = getattr(app.state, "account", None)
     if not _scope_account_env or not _scope_account:
-        logger.info("ib fills replay skipped: scope not resolved (trading_mode/account empty)")
+        logger.error("ib fills replay skipped: scope not resolved (trading_mode/account empty)")
         return
 
     scope = AccountScope(
@@ -597,6 +601,15 @@ async def lifespan(app: FastAPI):
     # nothing lands in core_test.
     if is_read_only():
         logger.warning("XENON_READ_ONLY=1 — skipping rehydrate, fills replay, and activity poller (no PG writes).")
+    elif not account or not verified:
+        # Boot writers stamp and filter rows by this account; without a
+        # resolved, verified account they would write or reconcile unscoped.
+        logger.error(
+            "IB account scope unresolved or unverified (account=%r, mode_verified=%s) — "
+            "skipping rehydrate, fills replay, and activity poller.",
+            account,
+            verified,
+        )
     else:
         # F7.2 — single-leg three-source rehydrate. Runs synchronously before
         # the server starts serving so our view of in-flight orders is accurate
