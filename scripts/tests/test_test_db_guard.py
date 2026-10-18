@@ -28,7 +28,7 @@ from pathlib import Path
 import psycopg
 import psycopg.errors
 import pytest
-from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.exc import InterfaceError, OperationalError, ProgrammingError
 
 import xenon._test_db as tdb
 
@@ -95,6 +95,8 @@ def test_guard_refuses_non_test_db_name(dbname: str) -> None:
         "port=5433",
         "service=prod",
         "options=-c%20dbname%3Dcore_dev",
+        "dsn=postgresql%3A%2F%2Fu%40db.example%2Fcore_dev",  # asyncpg dsn
+        "target_session_attrs=any",  # any key outside the allowlist
     ],
 )
 def test_guard_refuses_routing_query_in_test_url(query: str) -> None:
@@ -124,6 +126,46 @@ def test_guard_refuses_database_url_with_routing_query() -> None:
     )
     with pytest.raises(tdb.UnsafeTestDatabaseError, match="DATABASE_URL"):
         tdb.bind_database_url_to_test_db(env)
+
+
+def test_guard_refuses_database_url_dsn_alias() -> None:
+    """Review counterexample: asyncpg resolves `?dsn=` to db.example/xenon_test,
+    the test target, although the URL itself has no host."""
+    env = _env(
+        DATABASE_URL="postgresql+asyncpg:///xenon_test?dsn=postgresql%3A%2F%2Fu%3Apw%40db.example%2Fxenon_test",
+        DATABASE_URL_TEST="postgresql+asyncpg://u:pw@db.example/xenon_test",
+    )
+    with pytest.raises(tdb.UnsafeTestDatabaseError, match="DATABASE_URL"):
+        tdb.bind_database_url_to_test_db(env)
+
+
+def test_guard_allows_allowlisted_query_keys() -> None:
+    env = _env(
+        DATABASE_URL="postgresql+asyncpg://u@db.example/core_dev?sslmode=require",
+        DATABASE_URL_TEST="postgresql+psycopg://u@localhost/xenon_test?sslmode=disable&connect_timeout=5",
+    )
+    assert tdb.bind_database_url_to_test_db(env).endswith("/xenon_test?sslmode=disable&connect_timeout=5")
+
+
+@pytest.mark.parametrize(
+    ("original", "test_url"),
+    [
+        ("postgresql+asyncpg://u@localhost/core_dev", "postgresql+asyncpg:///xenon_test"),
+        ("postgresql+asyncpg:///core_dev", "postgresql+asyncpg://u@localhost/xenon_test"),
+        ("postgresql+asyncpg:///xenon_test", "postgresql+asyncpg:///xenon_test"),
+    ],
+)
+def test_guard_refuses_empty_host_unless_both_and_distinct(original: str, test_url: str) -> None:
+    """An empty host routes via socket/PGHOST, so it cannot be compared with a
+    real host. Both empty: compare dbname only."""
+    env = _env(DATABASE_URL=original, DATABASE_URL_TEST=test_url)
+    with pytest.raises(tdb.UnsafeTestDatabaseError):
+        tdb.bind_database_url_to_test_db(env)
+
+
+def test_guard_allows_both_empty_hosts_with_distinct_dbnames() -> None:
+    env = _env(DATABASE_URL="postgresql+asyncpg:///core_dev", DATABASE_URL_TEST="postgresql+asyncpg:///xenon_test")
+    assert tdb.bind_database_url_to_test_db(env) == "postgresql+asyncpg:///xenon_test"
 
 
 def test_guard_keeps_non_routing_query_and_suffixes_database() -> None:
@@ -252,6 +294,25 @@ def test_truncate_reraises_non_connection_errors(monkeypatch) -> None:
     with pytest.raises(OperationalError):
         tdb.truncate_all_xenon_tables()
     assert tdb._PG_REACHABLE is True
+
+
+def test_truncate_reraises_cursor_interface_error(monkeypatch) -> None:
+    """Review counterexample: an InterfaceError without SQLSTATE is a client
+    lifecycle bug, not "offline", unless it names a lost connection."""
+    exc = InterfaceError("TRUNCATE ...", {}, psycopg.InterfaceError("cursor already closed"))
+    monkeypatch.setattr(tdb, "_PG_REACHABLE", True)
+    monkeypatch.setattr(tdb, "get_session_engine", lambda: _RaisingEngine(exc))
+    with pytest.raises(InterfaceError):
+        tdb.truncate_all_xenon_tables()
+    assert tdb._PG_REACHABLE is True
+
+
+def test_truncate_marks_offline_on_closed_connection_interface_error(monkeypatch) -> None:
+    exc = InterfaceError("TRUNCATE ...", {}, psycopg.InterfaceError("the connection is closed"))
+    monkeypatch.setattr(tdb, "_PG_REACHABLE", True)
+    monkeypatch.setattr(tdb, "get_session_engine", lambda: _RaisingEngine(exc))
+    tdb.truncate_all_xenon_tables()
+    assert tdb._PG_REACHABLE is False
 
 
 def test_truncate_marks_offline_on_connection_error(monkeypatch) -> None:

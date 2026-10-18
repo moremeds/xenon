@@ -187,30 +187,35 @@ class UnsafeTestDatabaseError(RuntimeError):
     """The test DB could be a non-test database; the session must not run."""
 
 
-# libpq/psycopg connection params that can re-route a connection away from
-# the URL's own host/dbname (`?dbname=core_dev`, `?host=...`). `options` only
-# counts when it mentions dbname.
-_ROUTING_QUERY_KEYS = frozenset({"host", "hostaddr", "port", "dbname", "database", "service", "servicefile"})
+# Query keys a test or original DB URL may carry. Anything else (`dbname`,
+# `host`, asyncpg `dsn`, `service`, ...) can re-route the connection away from
+# the URL's own host/dbname, so the guard refuses it: allowlist, not blocklist.
+_ALLOWED_QUERY_KEYS = frozenset({"sslmode", "sslrootcert", "sslcert", "sslkey", "connect_timeout", "application_name"})
 
 
-def _routing_query_keys(url: str) -> list[str]:
-    """Query keys of `url` that can change which server/database it reaches."""
+def _disallowed_query_keys(url: str) -> list[str]:
     from sqlalchemy.engine.url import make_url
 
-    keys = []
-    for key, value in make_url(url).query.items():
-        values = value if isinstance(value, tuple) else (value,)
-        if key.lower() in _ROUTING_QUERY_KEYS or (key.lower() == "options" and any("dbname" in v for v in values)):
-            keys.append(key)
-    return sorted(keys)
+    return sorted(k for k in make_url(url).query if k not in _ALLOWED_QUERY_KEYS)
+
+
+def _refuse_disallowed_query(url: str, var: str) -> None:
+    keys = _disallowed_query_keys(url)
+    if keys:
+        raise UnsafeTestDatabaseError(
+            f"Refusing to run pytest: {var} has query params {keys} outside the "
+            f"allowlist {sorted(_ALLOWED_QUERY_KEYS)}; they can re-route the connection "
+            f"(routing) to a different server or database than the URL shows. {_GUARD_FIX_HINT}"
+        )
 
 
 def _db_identity(url: str) -> str:
-    """`host/dbname` of a DB URL. Loopback aliases collapse to one host."""
+    """`host/dbname` of a DB URL. Loopback aliases collapse to one host; an
+    empty host (socket / PGHOST routed) stays empty: `/dbname`."""
     from sqlalchemy.engine.url import make_url
 
     parsed = make_url(url)
-    host = (parsed.host or "localhost").lower()
+    host = (parsed.host or "").lower()
     if host in _LOOPBACK_HOSTS:
         host = "localhost"
     return f"{host}/{parsed.database or ''}"
@@ -230,34 +235,24 @@ def bind_database_url_to_test_db(environ: Any = None) -> str:
     Called at root-conftest import, before any xenon module that caches an
     engine is imported. Refuses (raises `UnsafeTestDatabaseError`) when the
     test DB name is `core_dev` or lacks `test`, when the test DB has the
-    same host+dbname as the original `DATABASE_URL`, or when either URL has
-    connection-routing query params (host, hostaddr, port, dbname, database,
-    service, servicefile, or options naming a dbname). Returns the bound
+    same host+dbname as the original `DATABASE_URL`, when either URL has a
+    query key outside `_ALLOWED_QUERY_KEYS`, or when only one of the two URLs
+    has an empty host (both empty: dbname alone is compared). Returns the bound
     (asyncpg, worker-suffixed under xdist) URL.
     """
     env = os.environ if environ is None else environ
     if DB_GUARD_ORIGINAL_ENV not in env:
         original = env.get("DATABASE_URL", "")
-        if original and _routing_query_keys(original):
-            raise UnsafeTestDatabaseError(
-                "Refusing to run pytest: DATABASE_URL has connection-routing query "
-                f"params {_routing_query_keys(original)}, so the test DB cannot be "
-                f"proved to be a different database. {_GUARD_FIX_HINT}"
-            )
+        if original:
+            _refuse_disallowed_query(original, "DATABASE_URL")
         env[DB_GUARD_ORIGINAL_ENV] = _db_identity(original) if original else ""
     original_identity = env[DB_GUARD_ORIGINAL_ENV]
 
     from sqlalchemy.engine.url import make_url
 
     base = _base_test_db_url(env).replace("postgresql+psycopg://", "postgresql+asyncpg://")
+    _refuse_disallowed_query(base, "DATABASE_URL_TEST")
     bound = _with_worker_suffix(base, _resolve_worker_id(env.get("PYTEST_XDIST_WORKER", "")))
-    routing = _routing_query_keys(base)
-    if routing:
-        raise UnsafeTestDatabaseError(
-            f"Refusing to run pytest: DATABASE_URL_TEST has connection-routing query "
-            f"params {routing}; they can connect to a different server or database "
-            f"than the URL shows. {_GUARD_FIX_HINT}"
-        )
     for url in (base, bound):
         dbname = make_url(url).database or ""
         if dbname == "core_dev" or "test" not in dbname.lower():
@@ -265,9 +260,18 @@ def bind_database_url_to_test_db(environ: Any = None) -> str:
                 f"Refusing to run pytest: test DB name {dbname!r} (DATABASE_URL_TEST) "
                 f"must contain 'test' and must not be core_dev. {_GUARD_FIX_HINT}"
             )
-        if original_identity and _db_identity(url) == original_identity:
+        if not original_identity:
+            continue
+        identity = _db_identity(url)
+        if identity.startswith("/") != original_identity.startswith("/"):
             raise UnsafeTestDatabaseError(
-                f"Refusing to run pytest: DATABASE_URL_TEST ({_db_identity(url)}) is the "
+                "Refusing to run pytest: only one of DATABASE_URL / DATABASE_URL_TEST "
+                "has a host; an empty host routes via socket or PGHOST and cannot be "
+                f"compared. Give both URLs a host. {_GUARD_FIX_HINT}"
+            )
+        if identity == original_identity:
+            raise UnsafeTestDatabaseError(
+                f"Refusing to run pytest: DATABASE_URL_TEST ({identity}) is the "
                 f"same database as DATABASE_URL. {_GUARD_FIX_HINT}"
             )
     env["DATABASE_URL"] = bound
@@ -356,17 +360,30 @@ def truncate_all_xenon_tables() -> None:
 def _is_connection_error(exc: SQLAlchemyError) -> bool:
     """True when PG could not be reached, not when a statement failed.
 
-    psycopg reports client-side connection failures with no SQLSTATE; the
-    server uses class 08 (connection exception) and 57P (shutdown / cannot
-    connect now). A deadlock (40P01) is also an OperationalError, so the
-    exception class alone is not enough.
+    Written for the psycopg engines these helpers use (session, admin); it is
+    not claimed to classify asyncpg errors. Offline means:
+      - SQLSTATE class 08 (connection exception) or 57P0x (shutdown, cannot
+        connect now, database dropped);
+      - an OperationalError with no SQLSTATE (psycopg client-side connect
+        failure: refused, timeout, auth/database rejected at connect);
+      - an InterfaceError whose message names a closed/refused/lost
+        connection. Other InterfaceErrors ("cursor already closed") are
+        client bugs and re-raise.
+    A deadlock (40P01) is also an OperationalError, so the class alone is not
+    enough.
     """
     if getattr(exc, "connection_invalidated", False):
         return True
-    if not isinstance(exc, (OperationalError, InterfaceError)):
-        return False
-    sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
-    return sqlstate is None or sqlstate.startswith(("08", "57P"))
+    orig = getattr(exc, "orig", None)
+    sqlstate = getattr(orig, "sqlstate", None)
+    if sqlstate:
+        return sqlstate.startswith(("08", "57P0"))
+    if isinstance(exc, OperationalError):
+        return True
+    if isinstance(exc, InterfaceError):
+        msg = str(orig if orig is not None else exc).lower()
+        return "connection" in msg and any(w in msg for w in ("closed", "refused", "lost"))
+    return False
 
 
 # ---------------------------------------------------------------------------
