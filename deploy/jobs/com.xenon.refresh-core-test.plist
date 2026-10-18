@@ -22,9 +22,11 @@
                when the New York hour is 04 and exits 0 otherwise, so exactly
                one of the two firings does the work. A late run after sleep may
                be skipped by the guard. The next night's run covers it.
-  Lock:        launchd never starts a second instance of a running label.
-               The script refuses SRC == DST. For a manual run during the
-               scheduled window, wrap it:  lockf -t 0 /tmp/xenon-refresh-core-test.lock <cmd>
+  Lock:        the script takes an atomic mkdir lock itself
+               (XENON_REFRESH_LOCK_DIR, default /tmp/xenon-refresh-core-test.lock.d),
+               so launchd, cron and manual runs exclude each other. A second run
+               exits 3 and calls no PG command. The script also refuses SRC equal
+               to DST and any DST that is core_dev or lacks "test" in its name.
   Creds:       PGPASSFILE -> /opt/xenon/.pgpass-refresh (chmod 600, holds the
                xenon_migrator password for host:5432). No password in this file.
                The script does not read /opt/xenon/.env.
@@ -39,6 +41,13 @@
     cp deploy/jobs/com.xenon.refresh-core-test.plist ~/Library/LaunchAgents/
     plutil -lint ~/Library/LaunchAgents/com.xenon.refresh-core-test.plist
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.xenon.refresh-core-test.plist
+  Manual unguarded run (REAL WRITES): /opt/xenon/bin/refresh-core-test.sh has no
+  ET-hour guard, only the plist wrapper does. Running it DROPs the xenon and
+  events schemas in core_test and restores core_dev into it. Add the dry-run
+  argument to only dump core_dev to /dev/null (reads core_dev, writes nothing).
+  Evidence it ran: the log line "=== refresh ok: core_dev -> core_test ===" in
+  /var/log/xenon/refresh-core-test.log and exit code 0. launchctl kickstart
+  outside 04:00-04:59 New York time exits 0 and does nothing (guard).
   Re-copy the script after any change to scripts/infra/refresh-core-test.sh.
   Uninstall: launchctl bootout gui/$(id -u)/com.xenon.refresh-core-test
 -->

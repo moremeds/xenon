@@ -17,6 +17,7 @@ import plistlib
 import re
 import shutil
 import subprocess
+import time
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -245,3 +246,122 @@ def test_nav_flex_job_runs_cli_from_deployed_image() -> None:
 def test_job_clis_exist_in_pyproject_scripts() -> None:
     pyproject = (REPO_ROOT / "pyproject.toml").read_text()
     assert re.search(r"^xenon-nav-flex-refresh\s*=", pyproject, re.MULTILINE)
+
+
+def test_nav_flex_job_clears_a_dead_job_container_without_force() -> None:
+    """A container left by a failed start must not block later runs; a running one stays."""
+    cmd = _plist("com.xenon.nav-flex-refresh.plist")["ProgramArguments"][2]
+    rm = "docker rm xenon-job-nav-flex-refresh >/dev/null 2>&1;"
+    assert rm in cmd
+    # after the ET-hour guard, before docker-compose run
+    assert cmd.index("exit 0;") < cmd.index(rm) < cmd.index("exec /opt/homebrew/bin/docker-compose")
+    assert "docker rm -f" not in cmd and "--force" not in cmd and "docker kill" not in cmd
+    cron = [ln for ln in (JOBS_DIR / "crontab.example").read_text().splitlines()
+            if "xenon-nav-flex-refresh" in ln and ln.startswith("30 ")][0]
+    assert "docker rm xenon-job-nav-flex-refresh >/dev/null 2>&1;" in cron
+    assert "docker rm -f" not in cron
+
+
+def test_plist_comments_give_manual_unguarded_run_and_kickstart_caveat() -> None:
+    nav = (JOBS_DIR / "com.xenon.nav-flex-refresh.plist").read_text()
+    assert "exits 0 BEFORE Docker starts" in nav
+    assert "REAL WRITES" in nav and "PG persist failed" in nav
+    assert "Manual unguarded run" in (JOBS_DIR / "com.xenon.refresh-core-test.plist").read_text()
+    assert "lockf" not in (JOBS_DIR / "crontab.example").read_text().replace("no outer lockf", "")
+
+
+# ---- scripts/infra/refresh-core-test.sh: destination guard and lock, with stub PG tools ----
+
+REFRESH_SH = REPO_ROOT / "scripts" / "infra" / "refresh-core-test.sh"
+
+
+def _stub_pg(tmp_path: Path, sleep_s: float = 0.0) -> tuple[Path, Path]:
+    """Stub pg_dump/pg_restore/psql that only record their calls (no real PG is touched)."""
+    bindir = tmp_path / "stubbin"
+    bindir.mkdir()
+    calls = tmp_path / "calls.log"
+    for name in ("pg_dump", "pg_restore", "psql"):
+        stub = bindir / name
+        stub.write_text(
+            "#!/bin/sh\n"
+            f'echo "{name} $*" >> "{calls}"\n'
+            f"sleep {sleep_s}\n"
+            '[ "$(basename "$0")" = pg_restore ] && cat > /dev/null\n'
+            '[ "$(basename "$0")" = pg_dump ] && echo data\n'
+            "exit 0\n"
+        )
+        stub.chmod(0o755)
+    return bindir, calls
+
+
+def _refresh_env(tmp_path: Path, bindir: Path, src: str, dst: str) -> dict[str, str]:
+    return {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "XENON_REFRESH_PG_BIN": str(bindir),
+        "XENON_REFRESH_LOG_DIR": str(tmp_path / "log"),
+        "XENON_REFRESH_LOCK_DIR": str(tmp_path / "lock.d"),
+        "XENON_REFRESH_SRC": src,
+        "XENON_REFRESH_DST": dst,
+        "PGPASSWORD": "stub",
+    }
+
+
+def _run_refresh(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["bash", str(REFRESH_SH), *args], env=env, capture_output=True, text=True, timeout=60)
+
+
+@pytest.mark.parametrize(
+    ("src", "dst"),
+    [("core_test", "core_dev"), ("core_dev", "core_dev"), ("core_test", "core_test"),
+     ("core_dev", "xenon_prod"), ("core_dev", "core_dev_copy")],
+)
+def test_refresh_refuses_bad_destination_before_any_pg_call(tmp_path: Path, src: str, dst: str) -> None:
+    bindir, calls = _stub_pg(tmp_path)
+    for extra in ((), ("--dry",)):
+        proc = _run_refresh(_refresh_env(tmp_path, bindir, src, dst), *extra)
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert not calls.exists(), calls.read_text()
+
+
+def test_refresh_allows_core_dev_to_core_test_and_releases_lock(tmp_path: Path) -> None:
+    bindir, calls = _stub_pg(tmp_path)
+    env = _refresh_env(tmp_path, bindir, "core_dev", "core_test")
+    proc = _run_refresh(env)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    recorded = calls.read_text()
+    assert "psql" in recorded and "pg_dump" in recorded and "pg_restore" in recorded
+    assert not (tmp_path / "lock.d").exists()  # lock released on exit
+    assert _run_refresh(env).returncode == 0  # and a later run is not blocked
+
+
+def test_refresh_second_concurrent_run_exits_without_calling_pg(tmp_path: Path) -> None:
+    bindir, calls = _stub_pg(tmp_path, sleep_s=1.5)
+    env = _refresh_env(tmp_path, bindir, "core_dev", "core_test")
+    first = subprocess.Popen(["bash", str(REFRESH_SH)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.time() + 20
+        while not calls.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        assert calls.exists(), "first run never reached the PG stub"
+        before = calls.read_text()
+        second = _run_refresh(env)
+        assert second.returncode == 3, second.stdout + second.stderr
+        assert calls.read_text() == before  # the loser called no PG command
+    finally:
+        out, err = first.communicate(timeout=60)
+    assert first.returncode == 0, out + err
+    assert not (tmp_path / "lock.d").exists()
+
+
+def test_refresh_reclaims_a_stale_lock(tmp_path: Path) -> None:
+    bindir, calls = _stub_pg(tmp_path)
+    env = _refresh_env(tmp_path, bindir, "core_dev", "core_test")
+    lock = tmp_path / "lock.d"
+    lock.mkdir()
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    (lock / "pid").write_text(str(dead.pid))
+    proc = _run_refresh(env)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert calls.exists()
