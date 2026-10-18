@@ -18,6 +18,8 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+
+from xenon.execution.gate4 import next_pass_seq as _next_pass_seq
 from sqlalchemy import insert, select, text
 
 from xenon.db.engine import get_sync_engine
@@ -38,6 +40,8 @@ def _snapshot_payload(positions, *, as_of=None, complete=True, account="DU000000
             "complete": complete,
             "account": account,
             "reads": {"positions": True, "open_orders": True, "executions": True},
+            # xid8 ordering key, as ib_sync stamps it (gate4.next_pass_seq).
+            "pass_seq": str(_next_pass_seq()),
         },
     }
 

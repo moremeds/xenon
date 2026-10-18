@@ -15,6 +15,7 @@ pair of consecutive reads gets an injection. Activity after the last read
 
 from __future__ import annotations
 
+import json
 import math
 import sys
 import uuid
@@ -34,7 +35,7 @@ from ib_async import (
     Position,
     Trade,
 )
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 
 from scripts.tests.test_gate4_route import (  # noqa: F401 — autouse fixtures
     _pg,
@@ -47,7 +48,7 @@ from scripts.tests.test_gate4_route import (  # noqa: F401 — autouse fixtures
     fresh_quote,
     ib_data,
 )
-from xenon.db.schema import account_snapshots, order_submissions
+from xenon.db.schema import account_snapshots, nav_history, order_submissions, service_health
 from xenon.execution import contract_meta, ib_sync
 
 pytestmark = pytest.mark.committed_db
@@ -694,39 +695,124 @@ def test_pass_after_poller_mark_without_accountless_rows_is_allowed(monkeypatch,
     assert resp.status_code == 200, resp.text
 
 
-def test_view_watermark_only_moves_forward(monkeypatch):
+def test_view_watermark_only_moves_forward():
+    """The watermark seq is an xid8; a later invalidation never lowers it."""
     from xenon.execution import gate4
 
     scope = {"broker": "IB", "account_env": "paper", "broker_account": ACCOUNT}
-    t2 = datetime(2026, 10, 18, 15, 0, tzinfo=timezone.utc)
-    for t, reason in [(t2, "newer"), (t2 - timedelta(minutes=5), "older")]:
+    gate4.invalidate_view(scope, "first")
+    engine = gate4.get_sync_engine()
+    with engine.connect() as conn:
+        first = gate4.view_watermark(conn, scope)
+    gate4.invalidate_view(scope, "second")
+    with engine.connect() as conn:
+        second = gate4.view_watermark(conn, scope)
+    assert first is not None and second > first
 
-        class _Clock(datetime):
-            @classmethod
-            def now(cls, tz=None, t=t):
-                return t
+    # A row carrying a higher seq (e.g. written by a later transaction that
+    # committed first) is never moved back.
+    future = second + 10**12
+    with engine.begin() as conn:
+        conn.execute(
+            update(service_health)
+            .where(service_health.c.service == gate4.VIEW_WATERMARK_SERVICE)
+            .values(detail=json.dumps({"reason": "future", "seq": str(future)}))
+        )
+    gate4.invalidate_view(scope, "third")
+    with engine.connect() as conn:
+        assert gate4.view_watermark(conn, scope) == future
 
-        monkeypatch.setattr(gate4, "datetime", _Clock)
-        gate4.invalidate_view(scope, reason)
 
-    monkeypatch.undo()
-    with gate4.get_sync_engine().connect() as conn:
-        assert gate4.view_watermark(conn, scope) == t2
+def test_clock_regression_pass_with_higher_seq_is_published(monkeypatch, client, broker_calls, fresh_quote):
+    """Ordering is by pass_seq, not wall time: a later pass whose clock went
+    back still publishes, and its holdings are the ones Gate 4 reads."""
+    _run_sync(monkeypatch, _shares_client(100))
+    first_as_of = datetime.fromisoformat(_latest_payload()["observation"]["as_of"])
+
+    class _BackClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return first_as_of - timedelta(seconds=60)
+
+    monkeypatch.setattr(ib_sync, "datetime", _BackClock)
+    _run_sync(monkeypatch, FakeSyncClient(positions=[Position(ACCOUNT, _stk(), 200, 500.0)]))
+    monkeypatch.setattr(ib_sync, "datetime", datetime)
+
+    payload = _latest_payload()
+    assert datetime.fromisoformat(payload["observation"]["as_of"]) < first_as_of
+    assert [leg["contracts"] for p in payload["positions"] for leg in p["legs"]] == [200]
+    resp = client.post("/orders/place", json=_sell_call_body("sp-clock-back", qty=2))
+    assert resp.status_code == 200, resp.text
+
+
+def test_reader_orders_by_pass_seq_not_snapshot_at(monkeypatch, client, broker_calls, fresh_quote):
+    """A DB clock step back can give the newer pass an earlier snapshot_at;
+    load_inputs still reads the snapshot with the highest pass_seq."""
+    _run_sync(monkeypatch, _shares_client(100))
+    _run_sync(monkeypatch, FakeSyncClient(positions=[Position(ACCOUNT, _stk(), 200, 500.0)]))
+    engine = _pg_engine()
+    with engine.begin() as conn:
+        rows = conn.execute(select(account_snapshots.c.id).order_by(account_snapshots.c.id)).all()
+        conn.execute(
+            update(account_snapshots)
+            .where(account_snapshots.c.id == rows[0].id)
+            .values(snapshot_at=datetime.now(timezone.utc) + timedelta(hours=1))
+        )
+    engine.dispose()
+
+    resp = client.post("/orders/place", json=_sell_call_body("sp-seq-order", qty=2))
+    assert resp.status_code == 200, resp.text
+
+
+def _nav_rows():
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(select(nav_history.c.nav).where(nav_history.c.source == "intraday")).all()
+    engine.dispose()
+    return [float(r.nav) for r in rows]
+
+
+def _bare_portfolio(net_liq):
+    from xenon.execution import gate4
+
+    return {
+        "positions": [],
+        "account_summary": {"net_liquidation": net_liq},
+        "observation": {"as_of": datetime.now(timezone.utc).isoformat(), "pass_seq": str(gate4.next_pass_seq())},
+    }
+
+
+def test_overlapping_passes_cannot_interleave_nav(monkeypatch):
+    """A commits its snapshot, then B commits snapshot + NAV, then A would
+    write NAV. NAV is part of each publish transaction, so B's NAV stands."""
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", ACCOUNT)
+    monkeypatch.delenv("XENON_READ_ONLY", raising=False)
+    pass_a = _bare_portfolio(1000.0)
+    pass_b = _bare_portfolio(2000.0)
+    real_save = ib_sync._save_portfolio_to_postgres
+
+    def _a_commits_then_b(portfolio):
+        published = real_save(portfolio)
+        if portfolio is pass_a:
+            ib_sync.save_portfolio(pass_b)
+        return published
+
+    monkeypatch.setattr(ib_sync, "_save_portfolio_to_postgres", _a_commits_then_b)
+    ib_sync.save_portfolio(pass_a)
+
+    assert _nav_rows() == [2000.0]
 
 
 def test_save_portfolio_skips_nav_when_pass_not_published(monkeypatch):
-    """A stale (or read-only) pass publishes nothing, so it must not write NAV:
-    the older pass's intraday NAV would overwrite the newer pass's row."""
-    from xenon.execution import ib_sync as sync_mod
+    """A stale (or read-only) pass publishes nothing and writes no NAV."""
+    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
+    monkeypatch.setenv("XENON_BROKER_ACCOUNT", ACCOUNT)
+    monkeypatch.delenv("XENON_READ_ONLY", raising=False)
+    older = _bare_portfolio(1000.0)
+    newer = _bare_portfolio(2000.0)
+    ib_sync.save_portfolio(older)
+    ib_sync.save_portfolio(newer)
+    ib_sync.save_portfolio(older)  # stale: pass_seq not after the newest published
 
-    nav_calls = []
-    monkeypatch.setattr(sync_mod, "_append_nav_snapshot", lambda *a, **k: nav_calls.append(a))
-    portfolio = {"account_summary": {"net_liquidation": 1000.0}}
-
-    monkeypatch.setattr(sync_mod, "_save_portfolio_to_postgres", lambda _p: False)
-    sync_mod.save_portfolio(portfolio)
-    assert nav_calls == []
-
-    monkeypatch.setattr(sync_mod, "_save_portfolio_to_postgres", lambda _p: True)
-    sync_mod.save_portfolio(portfolio)
-    assert nav_calls == [(1000.0, None)]
+    assert _nav_rows() == [2000.0]

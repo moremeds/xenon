@@ -15,6 +15,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from xenon.execution.gate4 import next_pass_seq as _next_pass_seq
+
 pytestmark = pytest.mark.committed_db
 
 from fastapi.testclient import TestClient
@@ -49,6 +51,8 @@ def _seed_snapshot(engine, positions, *, complete=True):
             "complete": complete,
             "account": "DU0000000",
             "reads": {"positions": True, "open_orders": True, "executions": True},
+            # xid8 ordering key, as ib_sync stamps it (gate4.next_pass_seq).
+            "pass_seq": str(_next_pass_seq()),
         },
     }
     with engine.begin() as conn:

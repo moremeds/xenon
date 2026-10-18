@@ -1190,6 +1190,9 @@ def _service_health_rows() -> list[dict]:
                 conn.execute(
                     select(service_health)
                     .where(
+                        # The Gate-4 invalidation watermark is a sentinel row,
+                        # not a background writer — never shown as one.
+                        service_health.c.service != gate4.VIEW_WATERMARK_SERVICE,
                         or_(
                             and_(
                                 service_health.c.broker == kwargs["broker"],

@@ -47,6 +47,7 @@ per-symbol, so it cannot change another symbol's result.
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from dataclasses import dataclass, field, replace
@@ -54,7 +55,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Literal
 
-from sqlalchemy import case, func, insert, select, text, update
+from sqlalchemy import Numeric, func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from xenon.db.engine import get_sync_engine
@@ -341,72 +342,104 @@ def _scope_where(table, scope: dict):
     )
 
 
+def next_pass_seq() -> int:
+    """A Postgres transaction id (xid8) as this sync pass's sequence number.
+
+    Taken at pass start in its own short transaction. xids are handed out in
+    increasing order, so `pass_seq` orders passes and watermarks without any
+    wall clock (`as_of` stays for display and freshness only).
+    """
+    with get_sync_engine().begin() as conn:
+        return int(conn.execute(text("SELECT pg_current_xact_id()::text")).scalar())
+
+
+def _seq(value: Any) -> int | None:
+    """xid8 text/int → int (numeric compare, never string order)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+# Snapshot ordering key: observation.pass_seq as a number (NULL for legacy rows).
+_PASS_SEQ = account_snapshots.c.payload[("observation", "pass_seq")].astext.cast(Numeric)
+
+_INVALIDATE_SQL = text(
+    """
+    INSERT INTO xenon.service_health
+        (service, broker, account_env, broker_account, state, detail, last_finished_at, updated_at)
+    VALUES (:service, :broker, :account_env, :broker_account, 'invalidated',
+            json_build_object('reason', CAST(:reason AS text), 'seq', pg_current_xact_id()::text)::text,
+            :at, :at)
+    ON CONFLICT ON CONSTRAINT pk_service_health DO UPDATE SET
+        detail = CASE
+            WHEN service_health.detail IS NULL OR left(service_health.detail, 1) <> '{' THEN EXCLUDED.detail
+            WHEN (service_health.detail::jsonb ->> 'seq')::numeric >= (EXCLUDED.detail::jsonb ->> 'seq')::numeric
+                THEN service_health.detail
+            ELSE EXCLUDED.detail
+        END,
+        state = 'invalidated',
+        last_finished_at = GREATEST(service_health.last_finished_at, EXCLUDED.last_finished_at),
+        updated_at = GREATEST(service_health.updated_at, EXCLUDED.updated_at)
+    """
+)
+
+
 def invalidate_view(scope: dict, reason: str) -> None:
-    """Move this scope's Gate-4 invalidation watermark forward to now.
+    """Move this scope's Gate-4 invalidation watermark forward.
 
     A writer that drops an accountless open order or fill (#198 filter) leaves
     its demand out of Postgres. From then on a snapshot proves cover only if
-    its pass started after this instant (`load_inputs`). The watermark lives
-    apart from snapshots, only moves forward (GREATEST) and is never cleared,
-    so no later or earlier publication can erase it. `now` is taken after the
-    writer's IB read.
+    its `pass_seq` is greater than the watermark's `seq` (`load_inputs`).
+    The seq is this transaction's xid, assigned after the scope lock and after
+    the writer's IB read; the row keeps the greater seq and is never cleared.
+    `last_finished_at` is display only.
     """
     ensure_writable()
     at = datetime.now(timezone.utc)
-    values = {
-        "service": VIEW_WATERMARK_SERVICE,
-        **{k: scope[k] for k in ("broker", "account_env", "broker_account")},
-        "state": "invalidated",
-        "detail": reason,
-        "last_finished_at": at,
-        "updated_at": at,
-    }
-    stmt = pg_insert(service_health).values(**values)
-    newer = stmt.excluded.last_finished_at >= service_health.c.last_finished_at
-    stmt = stmt.on_conflict_do_update(
-        constraint="pk_service_health",
-        set_={
-            "last_finished_at": func.greatest(service_health.c.last_finished_at, stmt.excluded.last_finished_at),
-            "detail": case((newer, stmt.excluded.detail), else_=service_health.c.detail),
-            "state": "invalidated",
-            "updated_at": func.greatest(service_health.c.updated_at, stmt.excluded.updated_at),
-        },
-    )
     with get_sync_engine().begin() as conn:
         _lock_scope(conn, scope)
-        conn.execute(stmt)
-
-
-def view_watermark(conn, scope: dict) -> datetime | None:
-    return _as_utc(
         conn.execute(
-            select(service_health.c.last_finished_at).where(
-                service_health.c.service == VIEW_WATERMARK_SERVICE, *_scope_where(service_health, scope)
-            )
-        ).scalar()
-    )
+            _INVALIDATE_SQL,
+            {
+                "service": VIEW_WATERMARK_SERVICE,
+                **{k: scope[k] for k in ("broker", "account_env", "broker_account")},
+                "reason": reason,
+                "at": at,
+            },
+        )
+
+
+def view_watermark(conn, scope: dict) -> int | None:
+    """Watermark seq, or None. A pre-seq (non-JSON) detail is ignored."""
+    detail = conn.execute(
+        select(service_health.c.detail).where(
+            service_health.c.service == VIEW_WATERMARK_SERVICE, *_scope_where(service_health, scope)
+        )
+    ).scalar()
+    try:
+        return _seq(json.loads(detail).get("seq")) if detail else None
+    except (ValueError, AttributeError):
+        return None
 
 
 def is_stale_publication(conn, scope: dict, observation: dict) -> bool:
     """Snapshot writer check, under the scope lock on `conn`.
 
-    True when this pass did not start after the newest published pass for the
-    scope: the writer then skips publishing, so the newer snapshot's holdings
-    stay what `load_inputs` reads. Publication is monotone in `as_of`, so the
-    latest observed snapshot carries the newest published `as_of`.
+    True when this pass has no `pass_seq` or its `pass_seq` is not greater
+    than the newest published one for the scope: the writer then skips
+    publishing, so the newer snapshot's holdings stay what `load_inputs`
+    reads (it orders by `pass_seq`).
     """
     _lock_scope(conn, scope)
-    prior = conn.execute(
-        select(account_snapshots.c.payload)
-        .where(*_scope_where(account_snapshots, scope), account_snapshots.c.payload.has_key("observation"))
-        .order_by(account_snapshots.c.snapshot_at.desc())
-        .limit(1)
-    ).scalar()
-    prior_as_of = _as_utc((prior or {}).get("observation", {}).get("as_of")) if isinstance(prior, dict) else None
-    if prior_as_of is None:
-        return False
-    as_of = _as_utc(observation.get("as_of"))
-    return as_of is None or as_of <= prior_as_of
+    seq = _seq(observation.get("pass_seq"))
+    if seq is None:
+        return True
+    prior = conn.execute(select(func.max(_PASS_SEQ)).where(*_scope_where(account_snapshots, scope))).scalar()
+    return prior is not None and seq <= int(prior)
 
 
 def load_inputs(conn, scope: dict) -> Gate4Inputs:
@@ -426,7 +459,9 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
             account_snapshots.c.account_env == account_env,
             account_snapshots.c.broker_account == broker_account,
         )
-        .order_by(account_snapshots.c.snapshot_at.desc())
+        # Newest pass by pass_seq (xid order); legacy rows without one sort
+        # last and fall back to snapshot_at.
+        .order_by(_PASS_SEQ.desc().nulls_last(), account_snapshots.c.snapshot_at.desc())
         .limit(1)
     ).first()
 
@@ -452,11 +487,12 @@ def load_inputs(conn, scope: dict) -> Gate4Inputs:
             obs_account = observation.get("account")
             if obs_account is not None and obs_account != broker_account:
                 complete = False
-            # A writer dropped an accountless row at `mark`: only a pass that
-            # started after it can prove cover (never cleared).
+            # A writer dropped an accountless row at watermark seq `mark`:
+            # only a pass that started after it can prove cover. No pass_seq
+            # → the pass cannot be ordered against it.
+            pass_seq = _seq(observation.get("pass_seq"))
             mark = view_watermark(conn, scope)
-            obs_as_of = _as_utc(observation.get("as_of"))
-            if mark is not None and (obs_as_of is None or obs_as_of <= mark):
+            if pass_seq is None or (mark is not None and pass_seq <= mark):
                 complete = False
         holdings = _holdings_from_payload(payload)
 

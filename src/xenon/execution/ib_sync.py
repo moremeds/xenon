@@ -1103,14 +1103,15 @@ def _scope_from_env() -> tuple[str, str, str]:
     )
 
 
-def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
+def _append_nav_snapshot(net_liq: float, daily_pnl=None, *, conn=None) -> None:
     """Upsert today's intraday NAV via the unified writer.
 
     Pass-2 (writer unification): delegates to
     ``xenon.utils.portfolio_loader.upsert_nav_sync``. The cross-env guard
     (Decisions §13) and race-safe IntegrityError catch live inside the
     shared helper now — guard is default-on; do NOT pass
-    ``enforce_account_env_guard=False`` here.
+    ``enforce_account_env_guard=False`` here. ``conn``: the snapshot
+    publish transaction (see `_save_portfolio_to_postgres`).
     """
     if os.environ.get("XENON_READ_ONLY") == "1":
         print(f"⏭  XENON_READ_ONLY=1 — skipping NAV snapshot write (net_liq=${net_liq:,.2f})")
@@ -1135,6 +1136,7 @@ def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
         nav=nav_val,
         daily_pnl=pnl_val,
         source="intraday",
+        conn=conn,
     )
 
     print(f"✓ NAV snapshot: {today} → ${net_liq:,.2f}")
@@ -1175,7 +1177,9 @@ def _save_portfolio_to_postgres(portfolio: dict) -> bool:
                 {"broker": broker, "account_env": account_env, "broker_account": broker_account},
                 observation,
             ):
-                print(f"⏭  Stale sync pass (as_of {observation.get('as_of')}) — newer snapshot kept, not published")
+                print(
+                    f"⏭  Stale sync pass (pass_seq {observation.get('pass_seq')}) — newer snapshot kept, not published"
+                )
                 return False
         conn.execute(
             delete(positions).where(
@@ -1238,28 +1242,27 @@ def _save_portfolio_to_postgres(portfolio: dict) -> bool:
                 snapshot_at=func.clock_timestamp(),
             )
         )
+        # NAV commits with the snapshot under the same locks, so overlapping
+        # passes cannot interleave NAV writes (an older pass's NAV can never
+        # land after a newer published pass).
+        net_liq = acct.get("net_liquidation") or portfolio.get("bankroll")
+        if net_liq:
+            try:
+                _append_nav_snapshot(float(net_liq), acct.get("daily_pnl"), conn=conn)
+            except Exception as exc:  # noqa: BLE001 — savepoint rolled back; snapshot still commits
+                print(f"  Warning: NAV snapshot failed: {exc}")
     return True
 
 
 def save_portfolio(portfolio: dict):
     """Save portfolio to Postgres."""
+    # The intraday NAV row is written inside the publish transaction; a
+    # read-only, stale or failed publish writes no NAV.
     try:
-        if not _save_portfolio_to_postgres(portfolio):
-            # Read-only or stale pass: nothing published, so no NAV row either
-            # (a stale pass would overwrite the newer pass's intraday NAV).
-            return
-        print("✓ Saved portfolio to Postgres")
+        if _save_portfolio_to_postgres(portfolio):
+            print("✓ Saved portfolio to Postgres")
     except Exception as exc:
         print(f"  Warning: Postgres write failed: {exc}")
-
-    # Track daily NAV for performance history
-    acct = portfolio.get("account_summary", {})
-    net_liq = acct.get("net_liquidation") or portfolio.get("bankroll")
-    if net_liq:
-        try:
-            _append_nav_snapshot(float(net_liq), acct.get("daily_pnl"))
-        except Exception as exc:
-            print(f"  Warning: NAV snapshot failed: {exc}")
 
 
 def _audit_orders_from_trades(trades: list, account: str) -> list[dict]:
@@ -1453,6 +1456,16 @@ def main():
     # the snapshot cannot show and gate4 counts them via order_fills.
     pass_started = datetime.now(timezone.utc)
     reads = {"positions": False, "open_orders": False, "executions": False}
+    # Ordering key for this pass (xid8, no wall clock). Taken before any IB
+    # read; without it the pass cannot be published (gate4.is_stale_publication).
+    pass_seq = None
+    if os.environ.get("XENON_READ_ONLY") != "1":
+        try:
+            from xenon.execution import gate4
+
+            pass_seq = gate4.next_pass_seq()
+        except Exception as exc:  # noqa: BLE001 — degrade: snapshot is not published
+            logging.getLogger("ib_sync.pass").warning("pass_seq unavailable (%s)", exc)
 
     # Connect
     client = connect_ib(args.host, args.port, args.client_id or "auto")
@@ -1655,6 +1668,7 @@ def main():
             # read succeeded, every row named an account, and the observed
             # orders/fills were persisted before this snapshot.
             portfolio["observation"] = _observation_stamp(pass_started, reads, ib_account)
+            portfolio["observation"]["pass_seq"] = str(pass_seq) if pass_seq is not None else None
             portfolio["observation"]["executions_client_id"] = activity.get("executions_client_id")
             save_portfolio(portfolio)
 
