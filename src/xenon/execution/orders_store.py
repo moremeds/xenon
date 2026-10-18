@@ -1395,20 +1395,6 @@ def lookup_submission_id_by_perm_id(
     return row[0] if row else None
 
 
-def attempt_state(client_attempt_id: str, *, broker: str, account_env: str, broker_account: str) -> str | None:
-    """State of the row holding ``(scope, client_attempt_id)`` — the place
-    idempotency key — or None when the key was never reserved."""
-    with get_sync_engine().connect() as conn:
-        return conn.execute(
-            select(order_submissions.c.state).where(
-                order_submissions.c.client_attempt_id == client_attempt_id,
-                order_submissions.c.broker == broker,
-                order_submissions.c.account_env == account_env,
-                order_submissions.c.broker_account == broker_account,
-            )
-        ).scalar()
-
-
 def lookup_by_attempt(
     user_id: str,
     client_attempt_id: str,

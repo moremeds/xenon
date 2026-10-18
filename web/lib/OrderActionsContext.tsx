@@ -417,8 +417,11 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
       } catch {
         json = null;
       }
-      const orders = json?.orders as OrdersData | undefined;
-      if (orders) ordersUpdaterRef.current?.(orders);
+      // The replace response carries no orders: refresh the panel once.
+      void fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" } })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => data && ordersUpdaterRef.current?.(data as OrdersData))
+        .catch(() => undefined);
       if (res.ok && json) {
         replaceAttemptsRef.current.delete(key);
         pushNotification({ type: "success", message: `${order.symbol} order replaced` });

@@ -731,6 +731,7 @@ _READ_ONLY_WRITE_PATHS = frozenset(
         "/orders/place",
         "/orders/cancel",
         "/orders/modify",
+        "/orders/replace",
         "/journal",
         "/wizard/plan",
         "/wizard/sessions",
@@ -2357,17 +2358,6 @@ async def _validate_non_combo_quote(body: dict) -> tuple[quote_guard.QuoteVerdic
     )
 
 
-@app.get("/orders/attempts/{client_attempt_id}")
-async def orders_attempt_state(client_attempt_id: str):
-    """Is this place idempotency key already used in the active scope?
-
-    The combo-replacement path asks BEFORE it cancels the original: a known
-    key (any state) means the replacement would not be placed as a new
-    order (duplicate / terminal / body mismatch), so nothing is cancelled."""
-    state = orders_store.attempt_state(client_attempt_id, **_resolve_scope_kwargs())
-    return {"client_attempt_id": client_attempt_id, "known": state is not None, "state": state}
-
-
 @app.get("/orders/quote")
 async def orders_quote(ticker: str, con_id: int):
     secret = os.environ.get("XENON_QUOTE_TOKEN_SECRET")
@@ -2504,12 +2494,31 @@ async def _orders_place_from_body(body: dict):
     denial = ensure_order_allowed("order placement", app.state)
     if denial is not None:
         return denial
+    prep = await _prepare_place(body)
+    if isinstance(prep, JSONResponse):
+        return prep
+    cid, req_row, candidate, legs_payload, scope = prep
+    outcome = gate4.reserve_with_coverage(
+        "local",
+        cid,
+        req_row,
+        candidate=candidate,
+        legs_payload=legs_payload,
+        scope=scope,
+        override_audit=None,
+    )
+    refusal = _reservation_refusal(outcome, cid, replacement=False)
+    if refusal is not None:
+        return refusal
+    return await _place_reserved(body, outcome.submission_id, scope)
 
+
+async def _prepare_place(body: dict):
+    """Pre-reservation place checks → JSONResponse refusal, or
+    (cid, request row, Gate-4 candidate, legs payload, scope)."""
     # RegimeGate (VCG-CRI signal layer) was removed in the pure-portfolio
     # pivot (#104). Order entry no longer gates on regime tiers and there is
     # no override audit.
-    override_audit = None
-
     # Gate 4 (PR-03b): universe/index precheck — pure request-shape rules.
     verdict = _universe_precheck(body)
     if verdict is not None:
@@ -2527,7 +2536,6 @@ async def _orders_place_from_body(body: dict):
             status_code=400,
             content={"detail": "client_attempt_id is required"},
         )
-    user_id = "local"
     scope = _resolve_scope_kwargs()
     security_type = "STK" if body.get("type") == "stock" else "BAG" if body.get("type") == "combo" else "OPT"
     ticker = str(body.get("symbol", "")).upper()
@@ -2556,15 +2564,24 @@ async def _orders_place_from_body(body: dict):
         return _preflight_block_response(_invalid_order_body_response(exc))
     leg_meta = await _resolve_gate4_leg_meta(body) if gate4.needs_contract_meta(body) else None
     candidate, legs_payload = gate4.candidate_from_place_body(body, scope["broker_account"], leg_meta)
-    outcome = gate4.reserve_with_coverage(
-        user_id,
-        cid,
-        req_row,
-        candidate=candidate,
-        legs_payload=legs_payload,
-        scope=scope,
-        override_audit=override_audit,
-    )
+    return cid, req_row, candidate, legs_payload, scope
+
+
+def _reservation_refusal(outcome, cid: str, *, replacement: bool) -> JSONResponse | dict | None:
+    """Map a non-winner reservation outcome to its response (None = winner).
+
+    `replacement`: a claim for /orders/replace — any existing attempt id is a
+    refusal (nothing cancelled), never a 200 the client reads as replaced."""
+    if outcome.status == "in_progress":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "reason_code": ReasonCode.REPLACEMENT_IN_PROGRESS.value,
+                "detail": "Another replacement of this order is in progress or done — nothing was cancelled. Check working orders.",
+                "state": outcome.state,
+                "submission_id": outcome.submission_id,
+            },
+        )
     if outcome.status == "rejected":
         return _preflight_block_response(
             _gate4_reject_verdict(
@@ -2602,6 +2619,16 @@ async def _orders_place_from_body(body: dict):
                 "duplicate_of": outcome.duplicate_of,
             },
         )
+    if outcome.status == "duplicate" and replacement:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "reason_code": ReasonCode.ATTEMPT_BODY_MISMATCH.value,
+                "detail": f"attempt {cid} already used (state {outcome.state}) — nothing was cancelled",
+                "state": outcome.state,
+                "submission_id": outcome.submission_id,
+            },
+        )
     if outcome.status == "duplicate":
         return JSONResponse(
             status_code=200,
@@ -2611,8 +2638,11 @@ async def _orders_place_from_body(body: dict):
                 "submission_id": outcome.submission_id,
             },
         )
-    submission_id = outcome.submission_id
+    return None
 
+
+async def _place_reserved(body: dict, submission_id: str, scope: dict):
+    """Quote gate → broker place → verdict for a row already reserved PENDING."""
     # F3: quote-token + tick-grid + limit-band + market-hours. Runs AFTER
     # the reservation so a Gate-4 coverage reason always wins over a quote
     # failure; a quote rejection marks the row REJECTED so the reservation
@@ -2987,9 +3017,16 @@ async def _orders_cancel_from_body(body: dict):
     denial = ensure_order_allowed("order cancellation", app.state)
     if denial is not None:
         return denial
+    _kind, response = await _cancel_order(body)
+    return response
 
+
+async def _cancel_order(body: dict) -> tuple[str, Any]:
+    """Cancel one order → (kind, response). kind: "ok"; "failed" (nothing
+    proves the cancel reached IB — refused, unreachable, or IB said no);
+    "uncertain" (the CLI started and died: the cancel may have landed)."""
     if _is_test_mode():
-        return {
+        return "ok", {
             "status": "ok",
             "message": "Cancel accepted in test mode",
             "echo": body,
@@ -2999,7 +3036,7 @@ async def _orders_cancel_from_body(body: dict):
     perm_id = body.get("permId", 0)
 
     if not order_id and not perm_id:
-        return order_error(
+        return "failed", order_error(
             400,
             ReasonCode.ORDER_IDENTIFIER_REQUIRED.value,
             {
@@ -3038,7 +3075,7 @@ async def _orders_cancel_from_body(body: dict):
             "http_status": 503,
         }
         _record_manage_event(str(order_id or ""), "CANCEL", detail, perm_id=str(perm_id or ""), scope=scope)
-        return order_error(503, ReasonCode.IB_CONNECTION.value, detail)
+        return ("uncertain" if result.spawned else "failed"), order_error(503, ReasonCode.IB_CONNECTION.value, detail)
 
     data = result.data or {}
     if data.get("status") == "error":
@@ -3051,7 +3088,7 @@ async def _orders_cancel_from_body(body: dict):
             "http_status": http_status,
         }
         _record_manage_event(str(order_id or ""), "CANCEL", detail, perm_id=str(perm_id or ""), scope=scope)
-        return order_error(http_status, reason_code, detail)
+        return "failed", order_error(http_status, reason_code, detail)
 
     _record_manage_event(
         str(order_id or ""),
@@ -3060,7 +3097,165 @@ async def _orders_cancel_from_body(body: dict):
         perm_id=str(perm_id or ""),
     )
     _mark_submission_cancelled(str(order_id or ""), str(perm_id or ""))
-    return data
+    return "ok", data
+
+
+@app.post("/orders/replace")
+async def orders_replace(request: Request):
+    """Combo replacement: claim → cancel the original(s) → place the successor,
+    owned by ONE process (PR-07 fix3, OP-1). IB has no atomic restructure of
+    a BAG's legs, so cancel+place is unavoidable; the claim makes it safe:
+    a second replacement of the same target is refused before any cancel."""
+    if is_read_only():
+        return read_only_403()
+    broker = str(getattr(request.app.state, "broker", "IB") or "IB").upper()
+    if broker == "IB":
+        require_mode_verified(request)
+    body = await request.json()
+    return await _orders_replace_from_body(body)
+
+
+def _replace_targets(body: dict) -> list[dict]:
+    """Deduplicated cancel targets: body.cancelOrders, else orderId/permId."""
+    raw = body.get("cancelOrders") or [{"orderId": body.get("orderId"), "permId": body.get("permId")}]
+    seen: set[str] = set()
+    targets: list[dict] = []
+    for t in raw if isinstance(raw, list) else []:
+        try:
+            oid = int((t or {}).get("orderId") or 0)
+            perm = int((t or {}).get("permId") or 0)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if oid <= 0 and perm <= 0:
+            continue
+        key = f"perm:{perm}" if perm > 0 else f"oid:{oid}"
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append({"orderId": oid, "permId": perm})
+    return targets
+
+
+def _json_body(resp: Any) -> dict:
+    if isinstance(resp, JSONResponse):
+        return json.loads(bytes(resp.body))
+    return dict(resp or {})
+
+
+_REPLACE_FAILED_COPY = "CRITICAL: Original order cancelled, replacement FAILED. Place a new order manually."
+_REPLACE_UNKNOWN_COPY = (
+    "Original order cancelled; replacement submitted, status unknown — check working orders. Do not resubmit."
+)
+
+
+async def _orders_replace_from_body(body: dict):
+    denial = ensure_order_allowed("order replacement", app.state)
+    if denial is not None:
+        return denial
+    replacement = body.get("replaceOrder")
+    if not isinstance(replacement, dict):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "replaceOrder is required", "reason_code": ReasonCode.INVALID_ORDER_BODY.value},
+        )
+    targets = _replace_targets(body)
+    if not targets:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "detail": "At least one order to cancel is required",
+                "reason_code": ReasonCode.ORDER_IDENTIFIER_REQUIRED.value,
+            },
+        )
+    prep = await _prepare_place(replacement)
+    if isinstance(prep, JSONResponse):
+        return prep
+    cid, req_row, candidate, legs_payload, scope = prep
+
+    # 1. Claim (one txn, scope advisory lock): refuse a second replacement
+    #    of any target and any reused attempt id; else the successor's row
+    #    is reserved PENDING through the Gate-4 insert path.
+    outcome = gate4.claim_replacement(
+        "local",
+        cid,
+        req_row,
+        candidate=candidate,
+        legs_payload=legs_payload,
+        scope=scope,
+        targets=[{"perm_id": str(t["permId"] or ""), "ib_order_id": str(t["orderId"] or "")} for t in targets],
+    )
+    refusal = _reservation_refusal(outcome, cid, replacement=True)
+    if refusal is not None:
+        return refusal
+    submission_id = outcome.submission_id
+
+    # 2. Cancel every target. Nothing is placed unless all are confirmed.
+    cancelled: list[dict] = []
+    for target in targets:
+        kind, resp = await _cancel_order({k: v for k, v in target.items() if v})
+        if kind == "failed":
+            orders_store.mark_terminal(
+                submission_id=submission_id,
+                state="FAILED",
+                reason_code="REPLACE_CANCEL_FAILED",
+                filled_qty=0,
+                avg_fill_price=None,
+                expected_states=("PENDING",),
+            )
+            status = resp.status_code if isinstance(resp, JSONResponse) else 502
+            return JSONResponse(
+                status_code=status,
+                content={**_json_body(resp), "replacement_placed": False, "cancelled": cancelled},
+            )
+        if kind == "uncertain":
+            orders_store.mark_place_unknown(
+                submission_id=submission_id,
+                ib_order_id=None,
+                perm_id=None,
+                placing_client_id=None,
+                reason_code="REPLACE_CANCEL_UNCERTAIN",
+            )
+            return JSONResponse(
+                status_code=502,
+                content={
+                    **_PLACE_UNKNOWN_BODY,
+                    "error": "Cancel of the original order is unconfirmed; the replacement was NOT placed. "
+                    "Check working orders. Do not resubmit.",
+                    "replacement_placed": False,
+                    "submission_id": submission_id,
+                },
+            )
+        cancelled.append(target)
+
+    # 3. Gate 4 again on the post-cancel view, then the normal place path
+    #    for the claimed row (never the PENDING-duplicate branch).
+    if candidate is not None:
+        rejected = gate4.recheck_claim(submission_id, candidate, scope)
+        if rejected is not None:
+            verdict = _gate4_reject_verdict(
+                rejected.reasons, rejected.uncovered, rejected.short_stock, rejected.split_required
+            )
+            orders_store.mark_terminal(
+                submission_id=submission_id,
+                state="REJECTED",
+                reason_code=verdict.reason_code.value if verdict.reason_code else "GATE4_REJECT",
+                filled_qty=0,
+                avg_fill_price=None,
+                expected_states=("PENDING",),
+            )
+            resp = _preflight_block_response(verdict)
+            return JSONResponse(
+                status_code=resp.status_code, content={**_json_body(resp), "error": _REPLACE_FAILED_COPY}
+            )
+    resp = await _place_reserved(replacement, submission_id, scope)
+    if not isinstance(resp, JSONResponse) or resp.status_code < 400:
+        return resp
+    content = _json_body(resp)
+    unknown = content.get("reason_code") == ReasonCode.PLACE_OUTCOME_UNKNOWN.value
+    return JSONResponse(
+        status_code=resp.status_code,
+        content={**content, "error": _REPLACE_UNKNOWN_COPY if unknown else _REPLACE_FAILED_COPY},
+    )
 
 
 def _mark_submission_cancelled(ib_order_id: str, perm_id: str) -> None:

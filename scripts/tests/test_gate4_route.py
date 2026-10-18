@@ -1068,16 +1068,287 @@ def test_quantity_modify_of_resting_buy_order_is_accepted(client, broker_calls, 
     assert row["legs"]["pending_amend_id"] is None
 
 
-def test_attempt_state_route_reports_known_keys(client, broker_calls, fresh_quote):
-    """PR-07: the replacement path checks its key before cancelling."""
-    assert client.get("/orders/attempts/rt-att-1").json() == {
-        "client_attempt_id": "rt-att-1",
-        "known": False,
-        "state": None,
+# ---------------------------------------------------------------------------
+# POST /orders/replace (PR-07 fix3): claim → cancel → place in ONE process.
+# ---------------------------------------------------------------------------
+
+
+class _Broker:
+    """Subprocess double for cancel (xenon-ib-order-manage) + place."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+        self.cancel_results: list[ScriptResult] = []
+        self.place_results: list[ScriptResult] = []
+        self.cancel_hook = None
+        self._perm = 880000
+
+    async def __call__(self, entry: str, args: list, timeout: float = 30):
+        self.calls.append({"entry": entry, "args": args})
+        if entry == "xenon-ib-order-manage":
+            if self.cancel_hook is not None:
+                await self.cancel_hook()
+            if self.cancel_results:
+                return self.cancel_results.pop(0)
+            return ScriptResult(ok=True, data={"status": "ok", "message": "Cancelled"})
+        if self.place_results:
+            return self.place_results.pop(0)
+        self._perm += 1
+        return ScriptResult(
+            ok=True, data={"status": "ok", "orderId": self._perm - 875000, "permId": self._perm, "clientId": 26}
+        )
+
+    def count(self, entry: str) -> int:
+        return sum(1 for c in self.calls if c["entry"] == entry)
+
+    @property
+    def cancels(self) -> int:
+        return self.count("xenon-ib-order-manage")
+
+    @property
+    def places(self) -> int:
+        return self.count("xenon-ib-place-order")
+
+
+@pytest.fixture
+def broker(monkeypatch):
+    b = _Broker()
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", b)
+    return b
+
+
+def _combo(cid, legs=((500.0, "BUY", 1), (510.0, "SELL", 1)), qty=1):
+    return {
+        "type": "combo",
+        "symbol": "SPY",
+        "action": "BUY",
+        "quantity": qty,
+        "limitPrice": 2.0,
+        "client_attempt_id": cid,
+        "legs": [
+            {"action": a, "right": "C", "expiry": "2026-12-18", "strike": k, "ratio": r} for k, a, r in legs
+        ],
     }
+
+
+def _original(client, broker, cid="orig-1", shares=100, **combo_kw):
+    """A working combo placed through /orders/place → its IB ids."""
     engine = _pg_engine()
-    _seed_snapshot(engine, [_stock("SPY", 100)])
+    _seed_snapshot(engine, [_stock("SPY", shares)])
     engine.dispose()
-    assert client.post("/orders/place", json=_sell_call_body("rt-att-1")).status_code == 200
-    body = client.get("/orders/attempts/rt-att-1").json()
-    assert (body["known"], body["state"]) == (True, "WORKING")
+    resp = client.post("/orders/place", json=_combo(cid, **combo_kw))
+    assert resp.status_code == 200, resp.text
+    broker.calls.clear()
+    return {"orderId": resp.json()["orderId"], "permId": resp.json()["permId"]}
+
+
+def _replace_body(target, cid, **combo_kw):
+    return {**target, "replaceOrder": _combo(cid, **combo_kw)}
+
+
+def _row(cid):
+    return next(r._mapping for r in _submission_rows() if r.client_attempt_id == cid)
+
+
+def _race(client, broker, first_body, second_body):
+    """first holds its cancel open until second has returned."""
+    import asyncio
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+
+    async def hold_first_cancel():
+        if not started.is_set():
+            started.set()
+            for _ in range(200):
+                if release.is_set():
+                    break
+                await asyncio.sleep(0.05)
+
+    broker.cancel_hook = hold_first_cancel
+    out: dict = {}
+    t = threading.Thread(target=lambda: out.setdefault("first", client.post("/orders/replace", json=first_body)))
+    t.start()
+    assert started.wait(10)
+    second = client.post("/orders/replace", json=second_body)
+    release.set()
+    t.join(20)
+    return out["first"], second
+
+
+def test_replace_happy_path_cancels_then_places_once(client, broker):
+    target = _original(client, broker)
+    resp = client.post("/orders/replace", json=_replace_body(target, "rep-1", legs=((500.0, "BUY", 1), (520.0, "SELL", 1))))
+    assert resp.status_code == 200, resp.text
+    assert [c["entry"] for c in broker.calls] == ["xenon-ib-order-manage", "xenon-ib-place-order"]
+    assert "--perm-id" in broker.calls[0]["args"] and str(target["permId"]) in broker.calls[0]["args"]
+    rep = _row("rep-1")
+    assert rep["state"] == "WORKING"
+    assert rep["legs"]["replaces"] == [{"perm_id": str(target["permId"]), "ib_order_id": str(target["orderId"])}]
+    assert json.loads(broker.calls[1]["args"][1])["submission_id"] == rep["submission_id"]
+    assert _row("orig-1")["state"] == "CANCELLED"
+
+
+def test_concurrent_same_id_one_cancel_loser_cancels_nothing(client, broker):
+    target = _original(client, broker)
+    first, second = _race(client, broker, _replace_body(target, "rep-same"), _replace_body(target, "rep-same"))
+    assert first.status_code == 200, first.text
+    assert second.status_code == 409, second.text
+    assert second.json()["reason_code"] == "REPLACEMENT_IN_PROGRESS"
+    assert (broker.cancels, broker.places) == (1, 1)
+
+
+def test_concurrent_different_ids_same_target_one_wins(client, broker):
+    target = _original(client, broker)
+    first, second = _race(client, broker, _replace_body(target, "rep-tab-1"), _replace_body(target, "rep-tab-2"))
+    assert first.status_code == 200, first.text
+    assert (second.status_code, second.json()["reason_code"]) == (409, "REPLACEMENT_IN_PROGRESS")
+    assert (broker.cancels, broker.places) == (1, 1)
+    assert [r.client_attempt_id for r in _submission_rows() if r.client_attempt_id.startswith("rep-")] == ["rep-tab-1"]
+
+
+def test_second_replacement_of_a_replaced_target_is_refused(client, broker):
+    """Tab 2 arrives after tab 1 finished: the target is gone, its cancel
+    would 'succeed' and place a duplicate — refused before any cancel."""
+    target = _original(client, broker)
+    assert client.post("/orders/replace", json=_replace_body(target, "rep-a")).status_code == 200
+    broker.calls.clear()
+    late = client.post("/orders/replace", json=_replace_body(target, "rep-b"))
+    assert (late.status_code, late.json()["reason_code"]) == (409, "REPLACEMENT_IN_PROGRESS")
+    assert broker.calls == []
+
+
+def test_replace_cancel_fails_claim_failed_nothing_placed(client, broker):
+    target = _original(client, broker)
+    broker.cancel_results = [
+        ScriptResult(ok=True, data={"status": "error", "classification": "ownership", "message": "not owner"})
+    ]
+    resp = client.post("/orders/replace", json=_replace_body(target, "rep-cf"))
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["reason_code"] == "OWNERSHIP"
+    assert resp.json()["replacement_placed"] is False
+    assert (broker.cancels, broker.places) == (1, 0)
+    assert (_row("rep-cf")["state"], _row("rep-cf")["reason_code"]) == ("FAILED", "REPLACE_CANCEL_FAILED")
+    # A FAILED claim placed nothing: a fresh replacement of the target may run.
+    assert client.post("/orders/replace", json=_replace_body(target, "rep-cf-2")).status_code == 200
+
+
+def test_replace_cancel_uncertain_places_nothing(client, broker):
+    target = _original(client, broker)
+    broker.cancel_results = [ScriptResult(ok=False, error="timeout", spawned=True)]
+    resp = client.post("/orders/replace", json=_replace_body(target, "rep-cu"))
+    assert resp.status_code == 502, resp.text
+    assert resp.json()["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
+    assert resp.json()["replacement_placed"] is False
+    assert (broker.cancels, broker.places) == (1, 0)
+    assert _row("rep-cu")["state"] == "UNKNOWN"
+    # Unresolved: the target stays claimed.
+    again = client.post("/orders/replace", json=_replace_body(target, "rep-cu-2"))
+    assert (again.status_code, again.json()["reason_code"]) == (409, "REPLACEMENT_IN_PROGRESS")
+    assert broker.cancels == 1
+
+
+def test_replace_place_uncertain_after_cancel_is_unknown(client, broker):
+    target = _original(client, broker)
+    broker.place_results = [ScriptResult(ok=False, error="timeout", spawned=True)]
+    resp = client.post("/orders/replace", json=_replace_body(target, "rep-pu"))
+    assert resp.status_code == 502, resp.text
+    assert resp.json()["reason_code"] == "PLACE_OUTCOME_UNKNOWN"
+    assert "Do not resubmit" in resp.json()["error"]
+    assert _row("rep-pu")["state"] == "UNKNOWN"
+
+
+def test_replace_reused_attempt_id_refused_before_cancel(client, broker):
+    target = _original(client, broker)
+    resp = client.post("/orders/replace", json=_replace_body(target, "orig-1"))
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["reason_code"] == "ATTEMPT_BODY_MISMATCH"
+    assert broker.calls == []
+
+
+def test_replace_post_cancel_gate4_recheck_blocks_place(client, broker):
+    """Cover gone while the cancel ran: Gate 4 at place time refuses."""
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_stock("SPY", 200)])
+    engine.dispose()
+
+    async def shares_sold_meanwhile():
+        e = _pg_engine()
+        _seed_snapshot(e, [])
+        e.dispose()
+
+    broker.cancel_hook = shares_sold_meanwhile
+    ratio = ((500.0, "BUY", 1), (510.0, "SELL", 2))  # two short calls: 200 shares cover them leg by leg
+    resp = client.post("/orders/replace", json=_replace_body({"permId": 999}, "rep-rc", legs=ratio))
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["reason_code"] == "ETF_CALL_UNCOVERED"
+    assert resp.json()["error"].startswith("CRITICAL")
+    assert (broker.cancels, broker.places) == (1, 0)
+    assert _row("rep-rc")["state"] == "REJECTED"
+
+
+def test_replace_in_process_path_runs_every_guard(monkeypatch, client, broker):
+    """MEMORY 'In-process route bypass': the helper itself refuses."""
+    import asyncio
+
+    target = _original(client, broker)
+    # Gate 4 (claim): a naked replacement is refused with nothing cancelled.
+    naked = _replace_body(target, "rep-naked", legs=((510.0, "SELL", 1), (520.0, "SELL", 1)))
+    resp = asyncio.run(server_mod._orders_replace_from_body(naked))
+    assert resp.status_code == 400 and json.loads(resp.body)["reason_code"].endswith("UNCOVERED")
+    # Read-only and non-IB broker: refused in-process and over HTTP.
+    monkeypatch.setenv("XENON_READ_ONLY", "1")
+    resp = asyncio.run(server_mod._orders_replace_from_body(_replace_body(target, "rep-ro")))
+    assert json.loads(resp.body)["reason_code"] == "READ_ONLY_MODE"
+    assert client.post("/orders/replace", json=_replace_body(target, "rep-ro")).status_code == 403
+    monkeypatch.delenv("XENON_READ_ONLY")
+    monkeypatch.setattr(server_mod.app.state, "broker", "FUTU", raising=False)
+    resp = asyncio.run(server_mod._orders_replace_from_body(_replace_body(target, "rep-futu")))
+    assert json.loads(resp.body)["reason_code"] == "READ_ONLY_BROKER"
+    assert broker.calls == []
+    assert {r.client_attempt_id for r in _submission_rows()} == {"orig-1"}
+
+
+def test_concurrent_claims_serialize_on_the_scope_lock(monkeypatch, client, broker):
+    """Two claims inside the claim txn at once: the advisory lock holds the
+    second until the first is inserted, so it sees the claim and refuses."""
+    import threading
+    import time
+
+    from xenon.execution import gate4
+
+    target = _original(client, broker)
+    in_window = threading.Event()
+
+    def hold_first_claim_window():
+        if not in_window.is_set():
+            in_window.set()
+            time.sleep(1.0)
+
+    monkeypatch.setattr(gate4, "_after_check_hook", hold_first_claim_window)
+    out: dict = {}
+    t = threading.Thread(
+        target=lambda: out.setdefault("first", client.post("/orders/replace", json=_replace_body(target, "rep-l1")))
+    )
+    t.start()
+    assert in_window.wait(10)
+    second = client.post("/orders/replace", json=_replace_body(target, "rep-l2"))
+    t.join(20)
+    assert out["first"].status_code == 200, out["first"].text
+    assert (second.status_code, second.json()["reason_code"]) == (409, "REPLACEMENT_IN_PROGRESS")
+    assert (broker.cancels, broker.places) == (1, 1)
+
+
+def test_replace_claim_releases_the_target_cover(client, broker):
+    """The target's reservation is the cover the successor needs: the claim
+    evaluates it as if cancelled (it is, before the place)."""
+    ratio = ((500.0, "BUY", 1), (510.0, "SELL", 2))
+    target = _original(client, broker, shares=200, legs=ratio)
+    # A NEW order needing the same 200 shares is refused: the target holds them.
+    other = client.post("/orders/place", json=_combo("other-1", legs=((500.0, "BUY", 1), (520.0, "SELL", 2))))
+    assert other.status_code == 400, other.text
+    resp = client.post(
+        "/orders/replace", json=_replace_body(target, "rep-rel", legs=((500.0, "BUY", 1), (520.0, "SELL", 2)))
+    )
+    assert resp.status_code == 200, resp.text
+    assert (broker.cancels, broker.places) == (1, 1)

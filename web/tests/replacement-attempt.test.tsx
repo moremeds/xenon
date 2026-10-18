@@ -86,9 +86,23 @@ const okJson = (body: unknown) => ({
   status: 200,
   json: async () => body,
 });
-const sentAttemptId = (fetchMock: ReturnType<typeof vi.fn>, call: number) =>
-  JSON.parse(String(fetchMock.mock.calls[call][1].body)).replaceOrder
-    .client_attempt_id as string;
+type FetchMock = ReturnType<typeof vi.fn>;
+/** Stub fetch: POST /api/orders (panel refresh) answers an empty book;
+ * every other URL goes to `modify`. */
+function stubFetch(modify: (...args: unknown[]) => Promise<unknown>): FetchMock {
+  const fetchMock = vi.fn((url: unknown, init?: unknown) =>
+    url === "/api/orders"
+      ? Promise.resolve(okJson({ open_orders: [], executed_orders: [] }))
+      : modify(url, init),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+const modifyCalls = (fetchMock: FetchMock) =>
+  fetchMock.mock.calls.filter((c) => c[0] === "/api/orders/modify");
+const sentAttemptId = (fetchMock: FetchMock, call: number) =>
+  JSON.parse(String((modifyCalls(fetchMock)[call][1] as RequestInit).body))
+    .replaceOrder.client_attempt_id as string;
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -97,8 +111,7 @@ afterEach(() => {
 
 describe("combo replacement attempt id — one per logical replacement", () => {
   it("two consecutive replacements on different orders each get a fresh id and both resolve", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(okJson({ status: "ok" }));
-    vi.stubGlobal("fetch", fetchMock);
+    const fetchMock = stubFetch(() => Promise.resolve(okJson({ status: "ok" })));
     const { result } = renderHook(() => useOrderActions(), { wrapper });
 
     let a: unknown, b: unknown;
@@ -114,7 +127,9 @@ describe("combo replacement attempt id — one per logical replacement", () => {
     });
     expect(a).toEqual({ ok: true });
     expect(b).toEqual({ ok: true });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(modifyCalls(fetchMock)).toHaveLength(2);
+    // The replace response carries no orders: the panel is refreshed.
+    expect(fetchMock.mock.calls.some((c) => c[0] === "/api/orders")).toBe(true);
     const [idA, idB] = [
       sentAttemptId(fetchMock, 0),
       sentAttemptId(fetchMock, 1),
@@ -125,7 +140,7 @@ describe("combo replacement attempt id — one per logical replacement", () => {
   });
 
   it("a resolved replacement drops its id: the next replacement of the same order mints a new one", async () => {
-    const fetchMock = vi
+    const modify = vi
       .fn()
       .mockResolvedValueOnce({
         ok: false,
@@ -133,7 +148,7 @@ describe("combo replacement attempt id — one per logical replacement", () => {
         json: async () => ({ error: "bad", reason_code: "INVALID_ORDER_BODY" }),
       })
       .mockResolvedValueOnce(okJson({ status: "ok" }));
-    vi.stubGlobal("fetch", fetchMock);
+    const fetchMock = stubFetch(modify);
     const { result } = renderHook(() => useOrderActions(), { wrapper });
 
     let first: { ok: boolean } | undefined;
@@ -147,7 +162,7 @@ describe("combo replacement attempt id — one per logical replacement", () => {
     await act(async () => {
       await result.current.requestModify(comboOrder(9001), { replaceOrder });
     });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(modifyCalls(fetchMock)).toHaveLength(2);
     expect(sentAttemptId(fetchMock, 0)).not.toBe(sentAttemptId(fetchMock, 1));
   });
 });
@@ -190,8 +205,7 @@ describe("combo replacement response — unproven outcome is uncertain and locke
   ])(
     "%s → status unknown, form locked, no retry fetch",
     async (_label, respond) => {
-      const fetchMock = vi.fn(respond);
-      vi.stubGlobal("fetch", fetchMock);
+      const fetchMock = stubFetch(respond);
       const { result } = renderHook(() => useOrderActions(), { wrapper });
 
       let res:
@@ -221,7 +235,7 @@ describe("combo replacement response — unproven outcome is uncertain and locke
         })) as typeof res;
       });
       expect(res?.reasonCode).toBe("PLACE_OUTCOME_UNKNOWN");
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(modifyCalls(fetchMock)).toHaveLength(1);
     },
   );
 

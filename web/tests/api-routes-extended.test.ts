@@ -907,25 +907,14 @@ describe("POST /api/orders/modify — extended", () => {
     expect(body.orders).toEqual(ordersPayload);
   });
 
-  it("replaces combo orders via cancel then place when replacement payload provided", async () => {
+  it("forwards a combo replacement (cancel + place) to FastAPI /orders/replace", async () => {
     const ordersPayload = {
       open_orders: [],
       executed_orders: [],
       open_count: 0,
       executed_count: 0,
     };
-    mockXenonFetch
-      .mockResolvedValueOnce({ known: false, state: null })
-      .mockResolvedValueOnce({ status: "ok", message: "Order cancelled" })
-      .mockResolvedValueOnce({ status: "ok", message: "Order cancelled" })
-      .mockResolvedValueOnce({
-        status: "ok",
-        message: "Replacement placed",
-        orderId: 202,
-        permId: 999,
-      })
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce(ordersPayload);
+    mockXenonFetch.mockResolvedValueOnce({ status: "ok", orderId: 202, permId: 999 });
 
     const { POST } = await import("../app/api/orders/modify/route");
     const res = await POST(
@@ -968,50 +957,24 @@ describe("POST /api/orders/modify — extended", () => {
       }),
     );
     expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "ok", orderId: 202, permId: 999 });
 
-    expect(mockXenonFetch).toHaveBeenCalledTimes(6);
-    expect(mockXenonFetch.mock.calls[0][0]).toBe("/orders/attempts/rep-attempt-1");
-    expect(mockXenonFetch.mock.calls[1][0]).toBe("/orders/cancel");
-    expect(
-      JSON.parse(String(mockXenonFetch.mock.calls[1][1].body)),
-    ).toMatchObject({
-      orderId: 77,
-      permId: 653611587,
-    });
-    expect(mockXenonFetch.mock.calls[2][0]).toBe("/orders/cancel");
-    expect(
-      JSON.parse(String(mockXenonFetch.mock.calls[2][1].body)),
-    ).toMatchObject({
-      orderId: 78,
-      permId: 653611588,
-    });
-    expect(mockXenonFetch.mock.calls[3][0]).toBe("/orders/place");
-    expect(mockXenonFetch.mock.calls[4][0]).toBe("/orders/refresh");
-    expect(mockXenonFetch.mock.calls[5][0]).toBe("/orders");
-    expect(
-      JSON.parse(String(mockXenonFetch.mock.calls[3][1].body)),
-    ).toMatchObject({
+    // PR-07 fix3: one forward; FastAPI /orders/replace cancels both targets
+    // and places the successor in one process.
+    expect(mockXenonFetch).toHaveBeenCalledTimes(1);
+    expect(mockXenonFetch.mock.calls[0][0]).toBe("/orders/replace");
+    const forwarded = JSON.parse(String(mockXenonFetch.mock.calls[0][1].body));
+    expect(forwarded.cancelOrders).toEqual([
+      { orderId: 77, permId: 653611587 },
+      { orderId: 78, permId: 653611588 },
+    ]);
+    expect(forwarded.replaceOrder).toMatchObject({
       type: "combo",
       symbol: "AAOI",
       action: "SELL",
       quantity: 75,
       limitPrice: 0.75,
-      legs: [
-        {
-          expiry: "20260327",
-          strike: 90,
-          right: "P",
-          action: "SELL",
-          ratio: 1,
-        },
-        {
-          expiry: "20260327",
-          strike: 100,
-          right: "C",
-          action: "BUY",
-          ratio: 1,
-        },
-      ],
+      client_attempt_id: "rep-attempt-1",
     });
   });
 

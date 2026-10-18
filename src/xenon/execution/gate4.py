@@ -851,7 +851,7 @@ def candidate_from_place_body(
 
 @dataclass
 class Gate4Outcome:
-    status: Literal["winner", "duplicate", "terminal", "body_mismatch", "rejected"]
+    status: Literal["winner", "duplicate", "terminal", "body_mismatch", "rejected", "in_progress"]
     submission_id: str | None = None
     state: str | None = None
     duplicate_of: str | None = None
@@ -996,12 +996,15 @@ def evaluate_and_reserve(
     scope: dict,
     submission_id: str,
     override_audit: dict | None = None,
+    release_ids: frozenset[str] = frozenset(),
 ) -> Gate4Outcome:
     """Dedupe → coverage.evaluate → insert — inside the caller's locked txn.
 
     `conn` must already hold `pg_advisory_xact_lock(scope_lock_key(scope))`.
     candidate=None skips evaluation (pinned single-leg BUY pass-through);
-    the reservation still serializes under the lock.
+    the reservation still serializes under the lock. `release_ids`: rows
+    the caller is about to cancel (replacement targets) — evaluated like
+    terminal rows (remaining 0, post-snapshot fills still count).
     """
     existing = conn.execute(
         select(order_submissions).where(
@@ -1016,6 +1019,10 @@ def evaluate_and_reserve(
 
     if candidate is not None:
         inputs = load_inputs(conn, scope)
+        if release_ids:
+            inputs.orders = [
+                replace(o, remaining=0, pending_amend_qty=None) if o.id in release_ids else o for o in inputs.orders
+            ]
         decision = _evaluate(inputs, candidate, netting=netting_enabled())
         if not decision.accept:
             return Gate4Outcome(
@@ -1122,6 +1129,109 @@ def reserve_with_coverage(
             scope=scope,
             submission_id=str(uuid.uuid4()),
             override_audit=override_audit,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Combo replacement (cancel original + place successor) — PR-07 fix3
+# ---------------------------------------------------------------------------
+
+# legs-payload key on a replacement's row: the orders it replaces.
+REPLACES_KEY = "replaces"
+# Claim states that prove nothing of this claim is (or may be) at IB.
+_DEAD_CLAIM_STATES = ("FAILED", "REJECTED")
+
+
+def _target_keys(targets: list[dict]) -> set[str]:
+    keys = set()
+    for t in targets:
+        if str(t.get("perm_id") or "0") not in ("", "0"):
+            keys.add(f"perm:{t['perm_id']}")
+        if str(t.get("ib_order_id") or "0") not in ("", "0"):
+            keys.add(f"oid:{t['ib_order_id']}")
+    return keys
+
+
+def claim_replacement(
+    user_id: str,
+    client_attempt_id: str,
+    request: RequestRow,
+    *,
+    candidate: coverage.Order | None,
+    legs_payload: dict,
+    scope: dict,
+    targets: list[dict],
+) -> Gate4Outcome:
+    """Claim a replacement BEFORE any cancel, in one txn under the scope lock.
+
+    `targets` = [{"perm_id": str, "ib_order_id": str}]. Refuses (status
+    in_progress) when another replacement of any target exists that is or
+    may be at IB — every state but FAILED / REJECTED: a successful earlier
+    replacement already cancelled the target, and a cancel of a gone order
+    counts as success, so a second one would place a duplicate. Otherwise
+    the usual dedupe → Gate-4 evaluate (targets released) → PENDING insert,
+    with the targets recorded under legs[REPLACES_KEY].
+    """
+    ensure_writable()
+    wanted = _target_keys(targets)
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        _lock_scope(conn, scope)
+        in_scope = (
+            order_submissions.c.broker == scope["broker"],
+            order_submissions.c.account_env == scope["account_env"],
+            order_submissions.c.broker_account == scope["broker_account"],
+        )
+        claims = conn.execute(
+            select(order_submissions.c.submission_id, order_submissions.c.state, order_submissions.c.legs).where(
+                *in_scope,
+                order_submissions.c.legs.has_key(REPLACES_KEY),
+                order_submissions.c.state.notin_(_DEAD_CLAIM_STATES),
+            )
+        ).all()
+        for c in claims:
+            if _target_keys(list((c.legs or {}).get(REPLACES_KEY) or [])) & wanted:
+                return Gate4Outcome(status="in_progress", submission_id=c.submission_id, state=c.state)
+        perms = [t["perm_id"] for t in targets if str(t.get("perm_id") or "0") not in ("", "0")]
+        oids = [t["ib_order_id"] for t in targets if str(t.get("ib_order_id") or "0") not in ("", "0")]
+        release = conn.execute(
+            select(order_submissions.c.submission_id).where(
+                *in_scope,
+                order_submissions.c.perm_id.in_(perms) | order_submissions.c.ib_order_id.in_(oids),
+            )
+        ).scalars()
+        return evaluate_and_reserve(
+            conn,
+            user_id,
+            client_attempt_id,
+            request,
+            candidate=candidate,
+            legs_payload={**legs_payload, REPLACES_KEY: targets},
+            scope=scope,
+            submission_id=str(uuid.uuid4()),
+            release_ids=frozenset(release),
+        )
+
+
+def recheck_claim(submission_id: str, candidate: coverage.Order, scope: dict) -> Gate4Outcome | None:
+    """Gate 4 again after the targets are cancelled, just before the place:
+    the view may have changed while the cancel ran (fills, a new snapshot).
+    The claim's own reservation is left out. None = accepted."""
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        _lock_scope(conn, scope)
+        inputs = load_inputs(conn, scope)
+        inputs.orders = [o for o in inputs.orders if o.id != submission_id]
+        decision = _evaluate(inputs, candidate, netting=netting_enabled())
+        if decision.accept:
+            return None
+        return Gate4Outcome(
+            status="rejected",
+            submission_id=submission_id,
+            reasons=list(decision.reasons),
+            uncovered=dict(decision.uncovered),
+            short_stock=dict(decision.short_stock),
+            split_required=(not netting_enabled() and _accepted_with_netting(inputs, candidate)),
         )
 
 

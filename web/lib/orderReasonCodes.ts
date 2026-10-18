@@ -63,6 +63,11 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
     severity: "info",
     copy: "Previous attempt ended. Rotating id.",
   },
+  // PR-07 fix3 — /orders/replace claim
+  REPLACEMENT_IN_PROGRESS: {
+    severity: "error",
+    copy: "Another replacement of this order is in progress or done. Nothing was cancelled — check working orders.",
+  },
   // F5 — cancel/modify failure classification
   IB_CONNECTION: { severity: "error", copy: "IB connection lost — retry." },
   OWNERSHIP: { severity: "error", copy: "Order owned by another session." },

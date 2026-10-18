@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { xenonFetch } from "@/lib/xenonApi";
 import { placeOutcomeUnknownBody } from "@/lib/order/placeOutcome";
 import { firstPlaceOrderSchemaErrorMessage } from "@/lib/placeOrderBodySchema";
-import { readReasonCode } from "@/lib/readReasonCode";
 import { passThroughXenonError } from "@/lib/passThroughXenonError";
 import { getRequestId } from "@/lib/apiContracts";
 import type { ModifyCancelTarget, ReplaceComboOrder } from "@/lib/orderModify";
@@ -46,35 +45,6 @@ function isModifyConfirmed(
     newQuantity == null || order.totalQuantity === newQuantity;
 
   return priceConfirmed && quantityConfirmed;
-}
-
-function normalizeCancelTargets(
-  cancelOrders: ModifyCancelTarget[] | undefined,
-  fallbackOrderId: number,
-  fallbackPermId: number,
-): Array<{ orderId?: number; permId?: number }> {
-  const rawTargets = cancelOrders?.length
-    ? cancelOrders
-    : [{ orderId: fallbackOrderId, permId: fallbackPermId }];
-
-  const seen = new Set<string>();
-  const targets: Array<{ orderId?: number; permId?: number }> = [];
-
-  for (const target of rawTargets) {
-    const orderId = target.orderId ?? 0;
-    const permId = target.permId ?? 0;
-    if (orderId <= 0 && permId <= 0) continue;
-
-    const key = permId > 0 ? `perm:${permId}` : `order:${orderId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    targets.push({
-      ...(orderId > 0 ? { orderId } : {}),
-      ...(permId > 0 ? { permId } : {}),
-    });
-  }
-
-  return targets;
 }
 
 async function fetchOrders(): Promise<OrdersData | null> {
@@ -147,137 +117,34 @@ export async function POST(request: Request): Promise<Response> {
         );
       }
 
-      const cancelTargets = normalizeCancelTargets(
-        body.cancelOrders,
-        orderId,
-        permId,
-      );
-      if (cancelTargets.length === 0) {
-        return NextResponse.json(
-          {
-            error:
-              "Must provide at least one order to cancel before combo replacement",
-            reason_code: "ORDER_IDENTIFIER_REQUIRED",
-          },
-          { status: 400 },
-        );
-      }
-
-      // The replacement key must be new. A key FastAPI already holds (any
-      // state) would not place the replacement as a new order — duplicate,
-      // terminal or body mismatch — so the cancel below would lose the
-      // working order. Refuse before cancelling anything; a failed lookup
-      // refuses too.
-      let attempt: { known?: unknown; state?: unknown };
+      // FastAPI owns claim → cancel → place in one process (PR-07 fix3):
+      // a second replacement of the same order is refused there before any
+      // cancel. Forward body and status unchanged; only a failure that
+      // proves nothing (timeout, socket reset, uncoded 5xx) becomes the
+      // uncertain 502 — the original may be cancelled and the successor live.
       try {
-        attempt = await xenonFetch<{ known?: unknown; state?: unknown }>(
-          `/orders/attempts/${encodeURIComponent(String(replaceOrder.client_attempt_id))}`,
-          { timeout: 10_000 },
-        );
-      } catch {
-        return NextResponse.json(
+        const result = await xenonFetch<Record<string, unknown>>(
+          "/orders/replace",
           {
-            error:
-              "Could not verify the replacement attempt id — nothing was cancelled. Retry.",
-            reason_code: "IB_CONNECTION",
-          },
-          { status: 503 },
-        );
-      }
-      if (attempt.known !== false) {
-        return NextResponse.json(
-          {
-            error:
-              "Replacement attempt id already used — nothing was cancelled. Reopen the modify dialog.",
-            reason_code: "ATTEMPT_BODY_MISMATCH",
-            state: attempt.state ?? null,
-          },
-          { status: 409 },
-        );
-      }
-
-      // Cancel-then-place is unavoidable here (IB has no atomic restructure for
-      // combo legs), but we wrap in try/catch so a place failure surfaces a
-      // CRITICAL error that names the data-loss situation explicitly. The user
-      // sees exactly what happened: original cancelled, replacement failed.
-      for (const cancelTarget of cancelTargets) {
-        await xenonFetch<Record<string, unknown>>("/orders/cancel", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(cancelTarget),
-          timeout: 20_000,
-        });
-      }
-
-      let result: Record<string, unknown>;
-      try {
-        result = await xenonFetch<Record<string, unknown>>("/orders/place", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(replaceOrder),
-          timeout: 60_000,
-        });
-      } catch (placeErr) {
-        // Refresh so the UI sees the cancelled state.
-        try {
-          await xenonFetch("/orders/refresh", {
             method: "POST",
-            timeout: 10_000,
-          });
-        } catch {
-          /* non-fatal */
-        }
-        const orders = await fetchOrders();
-        // Uncertain replacement: IB may hold it. Keep the uncertain body —
-        // "place a new order manually" here would duplicate the order.
-        const uncertainBody = placeOutcomeUnknownBody(placeErr);
-        if (uncertainBody) {
-          return NextResponse.json(
-            {
-              ...uncertainBody,
-              error:
-                "Original order cancelled; replacement submitted, status unknown — check working orders. Do not resubmit.",
-              orders,
-            },
-            { status: 502 },
-          );
-        }
-        const placeMsg =
-          placeErr instanceof Error ? placeErr.message : String(placeErr);
-        // A proven rejection (4xx or a known reason_code): carry the code so
-        // the browser classifies it as terminal, not "status unknown".
-        const placeCode =
-          readReasonCode((placeErr as { body?: unknown } | null)?.body) ??
-          "INVALID_ORDER_BODY";
-        return NextResponse.json(
-          {
-            error:
-              "CRITICAL: Original order cancelled, replacement FAILED. Place a new order manually.",
-            reason_code: placeCode,
-            detail: { placeError: placeMsg, requestId },
-            orders,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              orderId,
+              permId,
+              cancelOrders: body.cancelOrders,
+              replaceOrder,
+            }),
+            timeout: 120_000,
           },
-          { status: 502 },
         );
+        return NextResponse.json(result);
+      } catch (replaceErr) {
+        const uncertainBody = placeOutcomeUnknownBody(replaceErr);
+        if (uncertainBody) {
+          return NextResponse.json(uncertainBody, { status: 502 });
+        }
+        return passThroughXenonError(replaceErr, requestId);
       }
-
-      try {
-        await xenonFetch("/orders/refresh", {
-          method: "POST",
-          timeout: 10_000,
-        });
-      } catch {
-        // Non-fatal
-      }
-      const orders = await fetchOrders();
-
-      return NextResponse.json({
-        status: "ok",
-        message: result.message,
-        orderId: result.orderId,
-        permId: result.permId,
-        orders,
-      });
     }
 
     if (newPrice == null && newQuantity == null && body.outsideRth == null) {

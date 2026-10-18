@@ -54,7 +54,10 @@ function post(url: string, body: unknown) {
   return new Request(url, { method: "POST", body: JSON.stringify(body) });
 }
 
-beforeEach(() => xenonFetch.mockReset());
+// Block body: a function returned from beforeEach runs as a cleanup hook.
+beforeEach(() => {
+  xenonFetch.mockReset();
+});
 afterEach(() => cleanup());
 
 describe("Next /api/orders/place — uncertain outcome", () => {
@@ -125,20 +128,17 @@ describe("Next /api/orders/modify — combo replacement after cancel", () => {
     },
   };
 
-  it("an uncertain replacement keeps PLACE_OUTCOME_UNKNOWN, never 'place a new order manually'", async () => {
+  it("an uncertain replacement keeps the FastAPI PLACE_OUTCOME_UNKNOWN body, never 'place a new order manually'", async () => {
     xenonFetch.mockImplementation(async (path: string) => {
-      if (String(path).startsWith("/orders/attempts/")) return { known: false, state: null };
-      if (path === "/orders/cancel") return { status: "ok" };
-      if (path === "/orders/place") throw new XenonApiError(502, UNKNOWN_BODY.detail, UNKNOWN_BODY);
-      return { orders: [] };
+      if (path === "/orders/replace") throw new XenonApiError(502, UNKNOWN_BODY.detail, UNKNOWN_BODY);
+      throw new Error(`unexpected ${path}`);
     });
     const { POST } = await import("../app/api/orders/modify/route");
     const res = await POST(post("http://localhost/api/orders/modify", replaceBody));
     expect(res.status).toBe(502);
     const body = await res.json();
-    expect(body.reason_code).toBe("PLACE_OUTCOME_UNKNOWN");
-    expect(body.error).not.toMatch(/Place a new order manually/);
-    expect(xenonFetch.mock.calls.filter(([p]) => p === "/orders/place")).toHaveLength(1);
+    expect(body).toEqual(UNKNOWN_BODY);
+    expect(xenonFetch).toHaveBeenCalledTimes(1);
   });
 
   it("an invalid replacement (no client_attempt_id) cancels nothing", async () => {
@@ -154,31 +154,16 @@ describe("Next /api/orders/modify — combo replacement after cancel", () => {
   it.each([
     ["socket reset (TypeError)", new TypeError("fetch failed")],
     ["5xx without a reason_code", new XenonApiError(500, "Internal Server Error", null)],
-  ])("replacement place %s is uncertain, never 'place a new order manually'", async (_n, err) => {
-    xenonFetch.mockImplementation(async (path: string) => {
-      if (String(path).startsWith("/orders/attempts/")) return { known: false, state: null };
-      if (path === "/orders/cancel") return { status: "ok" };
-      if (path === "/orders/place") throw err;
-      return { orders: [] };
+  ])("replacement forward %s is uncertain, never 'place a new order manually'", async (_n, err) => {
+    xenonFetch.mockImplementation(async () => {
+      throw err;
     });
     const { POST } = await import("../app/api/orders/modify/route");
     const res = await POST(post("http://localhost/api/orders/modify", replaceBody));
     const body = await res.json();
     expect(res.status).toBe(502);
     expect(body.reason_code).toBe("PLACE_OUTCOME_UNKNOWN");
-    expect(String(body.error)).not.toMatch(/Place a new order manually/);
-  });
-
-  it("an uncertain cancel throws before any replacement is placed", async () => {
-    xenonFetch.mockImplementation(async (path: string) => {
-      if (String(path).startsWith("/orders/attempts/")) return { known: false, state: null };
-      if (path === "/orders/cancel") throw new XenonApiError(503, "gateway", { reason_code: "IB_CONNECTION" });
-      return { orders: [] };
-    });
-    const { POST } = await import("../app/api/orders/modify/route");
-    const res = await POST(post("http://localhost/api/orders/modify", replaceBody));
-    expect(res.status).toBe(503);
-    expect(xenonFetch.mock.calls.some(([p]) => p === "/orders/place")).toBe(false);
+    expect(String(body.error ?? "")).not.toMatch(/Place a new order manually/);
   });
 });
 
