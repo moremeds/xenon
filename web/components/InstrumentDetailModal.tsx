@@ -10,7 +10,7 @@ import { InstrumentOrderQuoteTelemetry } from "./QuoteTelemetry";
 import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
 import { OrderTifSelector } from "@/lib/order/components/OrderTifSelector";
 import { useClientAttemptId } from "@/components/ticker-detail/useClientAttemptId";
-import { errorFromResponseBody, isPlaceOutcomeUnknown } from "@/lib/order/responseError";
+import { submitPlaceOrder } from "@/lib/order/submitPlace";
 
 export type InstrumentDetailProps = {
   leg: PortfolioLeg | null;
@@ -160,11 +160,7 @@ function LegOrderForm({
     setSuccess(null);
 
     try {
-      attemptId.markSubmitted();
-      const res = await fetch("/api/orders/place", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const placed = await submitPlaceOrder(attemptId, {
           type: "option",
           symbol: ticker,
           action,
@@ -175,14 +171,9 @@ function LegOrderForm({
           strike: leg.strike,
           right,
           client_attempt_id: attemptId.id,
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok) {
-        setError(errorFromResponseBody(json, "Order placement failed"));
-        // Uncertain: keep the attempt id (a resend never places twice).
-        if (isPlaceOutcomeUnknown(json)) attemptId.markUncertain();
-        else attemptId.markTerminal();
+        });
+      if (placed.kind !== "ok") {
+        setError(placed.message);
       } else {
         setSuccess(`Order placed: ${action} ${parsedQty}x ${ticker} ${strikeStr}${right} @ ${fmtPrice(parsedPrice)}`);
         setConfirmStep(false);
@@ -190,7 +181,6 @@ function LegOrderForm({
       }
     } catch {
       setError("Network error placing order");
-      attemptId.markTerminal();
     } finally {
       setLoading(false);
     }
@@ -282,13 +272,13 @@ function LegOrderForm({
             <button
               className={`btn-primary ${action === "SELL" ? "btn-danger" : ""}`}
               onClick={handlePlace}
-              disabled={!isValid || loading}
+              disabled={!isValid || loading || attemptId.uncertain}
             >
               {loading ? "Placing..." : "Confirm Order"}
             </button>
           </div>
         ) : (
-          <button className="btn-primary" onClick={handlePlace} disabled={!isValid || loading} style={{ width: "100%" }}>
+          <button className="btn-primary" onClick={handlePlace} disabled={!isValid || loading || attemptId.uncertain} style={{ width: "100%" }}>
             Place Order
           </button>
         )}

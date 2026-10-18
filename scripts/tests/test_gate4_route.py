@@ -543,9 +543,11 @@ def test_uncertain_place_is_unknown_502_and_keeps_reservation(
     second = client.post("/orders/place", json=_sell_call_body("rt-unc-2"))
     assert second.status_code == 400, second.text
     assert second.json()["reason_code"] == "ETF_CALL_UNCOVERED"
-    # Same attempt id again never reaches the broker a second time.
+    # Same attempt id again never reaches the broker a second time, and it
+    # answers the uncertain 502 — never a 200 the client reads as success.
     again = client.post("/orders/place", json=_sell_call_body("rt-unc-1"))
-    assert again.status_code in (200, 409), again.text
+    assert again.status_code == 502, again.text
+    assert (again.json()["reason_code"], again.json()["state"]) == ("PLACE_OUTCOME_UNKNOWN", "UNKNOWN")
     assert len(broker_calls) == 1
 
 
@@ -561,6 +563,85 @@ def test_refused_before_spawn_is_failed_and_releases(monkeypatch, client, broker
     monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", refused)
     resp = client.post("/orders/place", json=_sell_call_body("rt-refused-1"))
     assert resp.status_code == 502
+    assert resp.json()["reason_code"] == "SUBPROCESS_ERROR"
+    row = _submission_rows()[0]._mapping
+    assert (row["state"], row["reason_code"]) == ("FAILED", "SUBPROCESS_ERROR")
+
+
+def _bind_and_fill_like_poller(args: list) -> str:
+    """What the activity poller does while the route still awaits the CLI:
+    bind the row by orderRef from an execution, then mark it FILLED."""
+    from xenon.api.services import ib_activity_mirror
+    from xenon.execution import orders_store
+    from xenon.execution.account_scope import AccountScope
+
+    sid = json.loads(args[1])["submission_id"]
+    scope = AccountScope(**SCOPE)
+    execution = {
+        "order_ref": orders_store.order_ref_for(sid),
+        "perm_id": 777100,
+        "ib_order_id": 4300,
+        "client_id": 31,
+        "account": "DU0000000",
+    }
+    assert ib_activity_mirror.recover_by_order_ref([], [execution], scope=scope)["recovered"] == 1
+    orders_store.mark_terminal(
+        submission_id=sid,
+        state="FILLED",
+        reason_code=None,
+        filled_qty=1,
+        avg_fill_price=None,
+        expected_states=("WORKING",),
+    )
+    return sid
+
+
+@pytest.mark.parametrize(
+    "late_result",
+    [
+        ScriptResult(ok=False, error="Entry point timed out after 30s"),
+        ScriptResult(ok=True, data={"status": "ok", "outcome": "accepted", "orderId": 4300, "permId": 777100}),
+        ScriptResult(ok=True, data={"status": "error", "outcome": "rejected", "code": 201, "message": "x"}),
+    ],
+    ids=["late-timeout", "late-ack", "late-reject"],
+)
+def test_late_route_outcome_never_demotes_poller_fill(late_result, monkeypatch, client, fresh_quote):
+    """Interleaving: the poller binds and fills the row while the CLI is still
+    awaited; the route's late outcome must leave FILLED / filled_qty intact."""
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_stock("SPY", 100)])
+    engine.dispose()
+
+    async def fake(entry: str, args: list, timeout: float = 30):
+        _bind_and_fill_like_poller(args)
+        return late_result
+
+    monkeypatch.setattr(server_mod, "_run_ib_script_with_recovery", fake)
+    resp = client.post("/orders/place", json=_sell_call_body("rt-race-1"))
+    # Never "rejected" for an order the broker shows filled.
+    assert resp.json().get("reason_code") != "IB_REJECT", resp.text
+    row = _submission_rows()[0]._mapping
+    assert (row["state"], row["filled_qty"], row["perm_id"]) == ("FILLED", 1, "777100")
+
+
+@pytest.mark.parametrize("kind", ["missing-binary", "exec-oserror"])
+def test_spawn_failure_is_not_sent_failed_and_releases(kind, tmp_path, monkeypatch, client, fresh_quote):
+    """The process never started → spawned=False → FAILED (not UNKNOWN),
+    explicit SUBPROCESS_ERROR, reservation released."""
+    import xenon.api.subprocess as sub_mod
+
+    engine = _pg_engine()
+    _seed_snapshot(engine, [_stock("SPY", 100)])
+    engine.dispose()
+    monkeypatch.setattr(sub_mod, "VENV_BIN", tmp_path)
+    if kind == "exec-oserror":
+        (tmp_path / "xenon-ib-place-order").write_text("not executable")  # no +x → PermissionError
+    monkeypatch.setattr(server_mod, "_pool_has_any_connection", lambda: True)
+    monkeypatch.setitem(server_mod._ib_last_failure, "order", 0.0)
+
+    resp = client.post("/orders/place", json=_sell_call_body("rt-spawn-1"))
+    assert resp.status_code == 502, resp.text
+    assert resp.json()["reason_code"] == "SUBPROCESS_ERROR"
     row = _submission_rows()[0]._mapping
     assert (row["state"], row["reason_code"]) == ("FAILED", "SUBPROCESS_ERROR")
 

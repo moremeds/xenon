@@ -76,7 +76,7 @@ async def run_entry_point(
     """
     entry_path = VENV_BIN / entry
     if not entry_path.exists():
-        return ScriptResult(ok=False, error=f"Entry point not found: {entry}")
+        return ScriptResult(ok=False, error=f"Entry point not found: {entry}", spawned=False)
 
     cmd = [str(entry_path)] + (args or [])
     work_dir = cwd or str(PROJECT_ROOT)
@@ -88,7 +88,12 @@ async def run_entry_point(
             stderr=asyncio.subprocess.PIPE,
             cwd=work_dir,
         )
+    except OSError as e:
+        # The process never started (exec failure): nothing reached IB.
+        logger.error("Entry point %s failed to spawn: %s", entry, e)
+        return ScriptResult(ok=False, error=f"Entry point failed to start: {e}", spawned=False)
 
+    try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")

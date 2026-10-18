@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { xenonFetch } from "@/lib/xenonApi";
-import { isXenonTimeout, PLACE_OUTCOME_UNKNOWN_BODY } from "@/lib/order/placeOutcome";
+import { placeOutcomeUnknownBody } from "@/lib/order/placeOutcome";
 import { passThroughXenonError } from "@/lib/passThroughXenonError";
 import {
   getRequestId,
@@ -48,6 +48,9 @@ type PlaceBody = {
 
 export async function POST(request: Request): Promise<Response> {
   const requestId = getRequestId();
+  // Set right before the FastAPI call: any failure after it may have placed
+  // the order at IB (OP-1).
+  let dispatched = false;
   try {
     let parsed: unknown;
     try {
@@ -190,6 +193,7 @@ export async function POST(request: Request): Promise<Response> {
 
     const orderPayload = buildFastApiPlaceOrderPayload(body);
 
+    dispatched = true;
     const orderResult = await xenonFetch<Record<string, unknown>>(
       "/orders/place",
       {
@@ -232,11 +236,12 @@ export async function POST(request: Request): Promise<Response> {
     });
     return setNoStoreResponseHeaders(response, requestId);
   } catch (error) {
-    if (isXenonTimeout(error)) {
-      // FastAPI may have placed the order; never report a plain failure.
-      const res = NextResponse.json(PLACE_OUTCOME_UNKNOWN_BODY, {
-        status: 502,
-      });
+    // After dispatch, only a proven rejection is terminal; a timeout, socket
+    // reset, unreadable body or unexplained 5xx is "status unknown".
+    const uncertain = dispatched ? placeOutcomeUnknownBody(error) : null;
+    if (uncertain) {
+      const res = NextResponse.json(uncertain, { status: 502 });
+      res.headers.set("X-Request-Id", requestId);
       return setNoStoreResponseHeaders(res, requestId);
     }
     return setNoStoreResponseHeaders(

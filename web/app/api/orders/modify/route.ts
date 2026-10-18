@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { xenonFetch } from "@/lib/xenonApi";
 import { placeOutcomeUnknownBody } from "@/lib/order/placeOutcome";
+import { firstPlaceOrderSchemaErrorMessage } from "@/lib/placeOrderBodySchema";
 import { passThroughXenonError } from "@/lib/passThroughXenonError";
 import { getRequestId } from "@/lib/apiContracts";
 import type { ModifyCancelTarget, ReplaceComboOrder } from "@/lib/orderModify";
@@ -125,6 +126,20 @@ export async function POST(request: Request): Promise<Response> {
         return NextResponse.json(
           {
             error: "Invalid combo replacement payload",
+            reason_code: "INVALID_ORDER_BODY",
+          },
+          { status: 400 },
+        );
+      }
+      // The replacement must pass the same body schema /orders/place
+      // enforces (incl. client_attempt_id, the idempotency key) BEFORE the
+      // original is cancelled — otherwise FastAPI rejects it after the
+      // cancel and the working order is lost with nothing in its place.
+      const replaceSchemaErr = firstPlaceOrderSchemaErrorMessage(replaceOrder);
+      if (replaceSchemaErr) {
+        return NextResponse.json(
+          {
+            error: `Invalid combo replacement payload: ${replaceSchemaErr}`,
             reason_code: "INVALID_ORDER_BODY",
           },
           { status: 400 },

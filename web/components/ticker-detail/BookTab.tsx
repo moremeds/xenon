@@ -12,7 +12,7 @@ import OrderErrorBanner from "@/components/OrderErrorBanner";
 import { OrderConfirmSummary, type OrderSummary } from "@/lib/order";
 import { OrderTifSelector } from "@/lib/order/components/OrderTifSelector";
 import { useClientAttemptId } from "./useClientAttemptId";
-import { errorFromResponseBody, isPlaceOutcomeUnknown } from "@/lib/order/responseError";
+import { submitPlaceOrder } from "@/lib/order/submitPlace";
 
 /* ─── Types ─── */
 
@@ -406,11 +406,7 @@ function StockOrderForm({
     setSuccess(null);
 
     try {
-      attemptId.markSubmitted();
-      const res = await fetch("/api/orders/place", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const placed = await submitPlaceOrder(attemptId, {
           type: "stock",
           symbol: ticker,
           action,
@@ -418,14 +414,9 @@ function StockOrderForm({
           limitPrice: parsedPrice,
           tif,
           client_attempt_id: attemptId.id,
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok) {
-        setError(errorFromResponseBody(json, "Order placement failed"));
-        // Uncertain: keep the attempt id (a resend never places twice).
-        if (isPlaceOutcomeUnknown(json)) attemptId.markUncertain();
-        else attemptId.markTerminal();
+        });
+      if (placed.kind !== "ok") {
+        setError(placed.message);
       } else {
         setSuccess(
           `Order placed: ${action} ${parsedQty} ${ticker} @ ${fmtPrice(parsedPrice)}`,
@@ -435,7 +426,6 @@ function StockOrderForm({
       }
     } catch {
       setError("Network error placing order");
-      attemptId.markTerminal();
     } finally {
       setLoading(false);
     }
@@ -586,7 +576,7 @@ function StockOrderForm({
             <button
               className={`btn-primary ${action === "SELL" ? "btn-danger" : ""}`}
               onClick={handlePlace}
-              disabled={!isValid || loading}
+              disabled={!isValid || loading || attemptId.uncertain}
             >
               {loading ? "Placing..." : "Confirm Order"}
             </button>
@@ -595,7 +585,7 @@ function StockOrderForm({
           <button
             className="btn-primary"
             onClick={handlePlace}
-            disabled={!isValid || loading}
+            disabled={!isValid || loading || attemptId.uncertain}
             style={{ width: "100%" }}
           >
             Place Order

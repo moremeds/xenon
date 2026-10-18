@@ -939,6 +939,7 @@ describe("POST /api/orders/modify — extended", () => {
             { orderId: 78, permId: 653611588 },
           ],
           replaceOrder: {
+            client_attempt_id: "rep-attempt-1",
             type: "combo",
             symbol: "AAOI",
             action: "SELL",
@@ -1078,7 +1079,7 @@ describe("POST /api/orders/place — extended", () => {
     expect(body.orders).toBeDefined();
   });
 
-  it("returns 500 when xenonFetch fails", async () => {
+  it("returns 502 PLACE_OUTCOME_UNKNOWN when xenonFetch fails after dispatch", async () => {
     mockXenonFetch.mockRejectedValue(new Error("IB Gateway not running"));
 
     const { POST } = await import("../app/api/orders/place/route");
@@ -1096,11 +1097,11 @@ describe("POST /api/orders/place — extended", () => {
         }),
       }),
     );
-    expect(res.status).toBe(500);
+    // PR-07: FastAPI may have reached IB — never a plain 500 failure.
+    expect(res.status).toBe(502);
 
     const body = await res.json();
-    expect(body.error).toBe("internal");
-    expect(body.request_id).toBeTypeOf("string");
+    expect(body.reason_code).toBe("PLACE_OUTCOME_UNKNOWN");
   });
 
   it("returns 400 when required fields are missing", async () => {

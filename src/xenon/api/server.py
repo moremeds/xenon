@@ -1037,17 +1037,14 @@ def _snapshotter_health(scope: dict | None = None) -> dict:
 
 
 def _order_submissions_health(scope: dict | None = None) -> dict:
+    """Every UNKNOWN row in scope (no age window): an unresolved uncertain
+    place keeps its Gate-4 reservation until an operator or the orderRef
+    recovery resolves it, so it must stay visible however old it is."""
     try:
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
         engine = get_sync_engine()
         with engine.connect() as conn:
-            stmt = (
-                select(func.count())
-                .select_from(order_submissions)
-                .where(
-                    order_submissions.c.state == "UNKNOWN",
-                    order_submissions.c.submitted_at >= cutoff,
-                )
+            stmt = select(func.count(), func.min(order_submissions.c.submitted_at)).where(
+                order_submissions.c.state == "UNKNOWN"
             )
             if scope is not None:
                 stmt = stmt.where(
@@ -1055,13 +1052,18 @@ def _order_submissions_health(scope: dict | None = None) -> dict:
                     order_submissions.c.account_env == scope["account_env"],
                     order_submissions.c.broker_account == scope["broker_account"],
                 )
-            unknown_count = conn.execute(stmt).scalar()
+            unknown_count, oldest = conn.execute(stmt).one()
     except Exception:
         logger.warning("[health] failed to load order submissions health", exc_info=True)
-        return {"unknown_count": None, "alarm": False}
+        return {"unknown_count": None, "oldest_unknown_age_seconds": None, "alarm": False}
 
     count = int(unknown_count or 0)
-    return {"unknown_count": count, "alarm": count > 5}
+    oldest_age = None
+    if oldest is not None:
+        if oldest.tzinfo is None:
+            oldest = oldest.replace(tzinfo=timezone.utc)
+        oldest_age = max(0, int((datetime.now(timezone.utc) - oldest).total_seconds()))
+    return {"unknown_count": count, "oldest_unknown_age_seconds": oldest_age, "alarm": count > 5}
 
 
 def _flex_divergence_health() -> dict:
@@ -2577,6 +2579,18 @@ async def _orders_place_from_body(body: dict):
                 "prior_reason_code": outcome.reason_code,
             },
         )
+    if outcome.status == "duplicate" and outcome.state in ("UNKNOWN", "PENDING"):
+        # Same attempt id while the first send is unresolved / in flight:
+        # never a 200 the client reads as success (it would mint a new id).
+        return JSONResponse(
+            status_code=502,
+            content={
+                **_PLACE_UNKNOWN_BODY,
+                "state": outcome.state,
+                "submission_id": outcome.submission_id,
+                "duplicate_of": outcome.duplicate_of,
+            },
+        )
     if outcome.status == "duplicate":
         return JSONResponse(
             status_code=200,
@@ -2659,16 +2673,21 @@ async def _orders_place_from_body(body: dict):
         logger.warning("place subprocess failed after spawn: submission=%s error=%s", submission_id, result.error)
         return _place_outcome_unknown(submission_id, result.data or {})
     if not result.ok:
-        # Refused before the CLI started (cooldown / Gateway down): nothing
-        # reached IB, so the reservation is released.
+        # Refused before the CLI started (cooldown / Gateway down / spawn
+        # failure): nothing reached IB, so the reservation is released.
         orders_store.mark_terminal(
             submission_id=submission_id,
             state="FAILED",
             reason_code="SUBPROCESS_ERROR",
             filled_qty=0,
             avg_fill_price=None,
+            expected_states=("PENDING",),
         )
-        raise HTTPException(status_code=502, detail=result.error)
+        # Top-level reason_code: an explicit "not sent" the UI treats as final.
+        return JSONResponse(
+            status_code=502,
+            content={"detail": result.error, "reason_code": ReasonCode.SUBPROCESS_ERROR.value},
+        )
     verdict = _place_verdict(result.data)
     if verdict == "unknown":
         return _place_outcome_unknown(submission_id, result.data or {})
@@ -2713,13 +2732,18 @@ async def _orders_place_from_body(body: dict):
             )
         else:
             reason_code = ReasonCode.IB_REJECT.value
-        orders_store.mark_terminal(
+        # Conditional: a poller that already saw this order at IB wins, and
+        # then the CLI's "rejected" is contradicted by broker evidence.
+        if not orders_store.mark_terminal(
             submission_id=submission_id,
             state="REJECTED",
             reason_code=reason_code,
             filled_qty=0,
             avg_fill_price=None,
-        )
+            expected_states=("PENDING",),
+        ):
+            logger.warning("place: CLI rejected but row %s already moved on; not rejecting", submission_id)
+            return JSONResponse(status_code=502, content={**_PLACE_UNKNOWN_BODY, "submission_id": submission_id})
         try:
             orders_store.record_event(
                 submission_id,
@@ -2740,11 +2764,14 @@ async def _orders_place_from_body(body: dict):
     # The CLI returns the clientId it really placed with ("auto" allocates
     # one); cancel / modify must reuse it. 26 is only the legacy fallback.
     try:
+        # PENDING only: the activity poller may already have bound (WORKING)
+        # or finished (FILLED) this row from broker evidence; never demote it.
         orders_store.mark_submitted(
             submission_id=submission_id,
             ib_order_id=str(result.data.get("orderId") or ""),
             perm_id=str(result.data.get("permId") or ""),
             placing_client_id=int(result.data.get("clientId") or 26),
+            expected_states=("PENDING",),
         )
     except Exception as exc:
         # IB accepted the order: report it (never a 5xx that invites a
@@ -2797,23 +2824,30 @@ def _place_verdict(data: dict | None) -> str:
     return "rejected"
 
 
+_PLACE_UNKNOWN_BODY = {
+    "detail": "Order outcome unknown — check working orders before placing it again. Do not resubmit.",
+    "reason_code": ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
+}
+
+
 def _place_outcome_unknown(submission_id: str, data: dict) -> JSONResponse:
-    """IB may or may not hold the order. Never leave the row PENDING (a
-    same-attempt retry would return "duplicate" and nothing would resolve
-    it) and never call it rejected. UNKNOWN is the uncertain state /health
-    counts; an operator resolves it against IB working orders. Any IB ids the
-    CLI returned are stored first so the row can be matched; the activity
-    poller resolves the row by orderRef "xo:<submission_id>". A DB failure
-    here still returns the uncertain 502 (the row then stays PENDING, which
-    keeps the reservation too)."""
+    """IB may or may not hold the order. Never leave the row PENDING (it
+    would age into a rehydrate decision) and never call it rejected. UNKNOWN
+    is the uncertain state /health counts; it keeps the Gate-4 reservation.
+    Any IB ids the CLI returned are stored in the same conditional write
+    (PENDING → UNKNOWN only: a row the poller already bound or filled from
+    broker evidence is left as is). The activity poller resolves the row by
+    orderRef "xo:<submission_id>". A DB failure still returns the uncertain
+    502 (the row then stays PENDING, which keeps the reservation too)."""
     try:
-        if data.get("orderId") or data.get("permId"):
-            orders_store.mark_submitted(
-                submission_id=submission_id,
-                ib_order_id=str(data.get("orderId") or ""),
-                perm_id=str(data.get("permId") or ""),
-                placing_client_id=int(data.get("clientId") or 26),
-            )
+        applied = orders_store.mark_place_unknown(
+            submission_id=submission_id,
+            ib_order_id=str(data.get("orderId") or "") or None,
+            perm_id=str(data.get("permId") or "") or None,
+            placing_client_id=int(data.get("clientId") or 0) or None,
+            reason_code=ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
+        )
+        if applied and (data.get("orderId") or data.get("permId") or data.get("code")):
             _record_place_event(
                 submission_id,
                 {
@@ -2822,22 +2856,11 @@ def _place_outcome_unknown(submission_id: str, data: dict) -> JSONResponse:
                     "initial_status": data.get("initialStatus"),
                 },
             )
-        orders_store.mark_terminal(
-            submission_id=submission_id,
-            state="UNKNOWN",
-            reason_code=ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
-            filled_qty=0,
-            avg_fill_price=None,
-        )
     except Exception:
         logger.error("place: failed to persist UNKNOWN for submission %s", submission_id, exc_info=True)
     return JSONResponse(
         status_code=502,
-        content={
-            "detail": "Order outcome unknown — check working orders before placing it again. Do not resubmit.",
-            "reason_code": ReasonCode.PLACE_OUTCOME_UNKNOWN.value,
-            "submission_id": submission_id,
-        },
+        content={**_PLACE_UNKNOWN_BODY, "submission_id": submission_id},
     )
 
 
@@ -3966,7 +3989,7 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
                 if is_cloud_mode()
                 else "Docker will auto-restart the container. Check IBKR Mobile for 2FA approval."
             )
-            result = ScriptResult(ok=False, error=msg)
+            result = ScriptResult(ok=False, error=msg, spawned=result.spawned)
         else:
             logger.warning(
                 "IB Gateway unreachable (port=%s, upstream_dead=%s), attempting auto-restart...",
@@ -3990,6 +4013,7 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
                     result = ScriptResult(
                         ok=False,
                         error="IB Gateway restarted; order request NOT resent — check open orders before retrying",
+                        spawned=result.spawned,
                     )
                 else:
                     logger.info("IB Gateway restarted, retrying %s", entry)
@@ -4000,6 +4024,7 @@ async def _run_ib_script_with_recovery(entry: str, args: list, timeout: float = 
                     ok=False,
                     error=f"IB Gateway is down and restart failed. {gw_result.get('error', '')}".strip()
                     + " Check IBKR Mobile for 2FA approval.",
+                    spawned=result.spawned,
                 )
 
     return result

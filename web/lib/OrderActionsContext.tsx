@@ -434,9 +434,18 @@ export function OrderActionsProvider({ children }: { children: ReactNode }) {
         }
         return { ok: true };
       } catch {
-        const message = "Modify request failed";
+        // A replacement may already have been placed (the original was
+        // cancelled first): never invite a manual re-place.
+        const message = request.replaceOrder
+          ? getReasonToast("PLACE_OUTCOME_UNKNOWN").copy
+          : "Modify request failed";
         pushNotification({ type: "error", message });
-        return { ok: false, status: 0, reasonCode: null, message };
+        return {
+          ok: false,
+          status: 0,
+          reasonCode: request.replaceOrder ? "PLACE_OUTCOME_UNKNOWN" : null,
+          message,
+        };
       }
     },
     [pushNotification, startModifyPoll, pushOrdersData],

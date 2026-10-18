@@ -1075,6 +1075,38 @@ def mark_submitted(
     return result.rowcount
 
 
+def mark_place_unknown(
+    *,
+    submission_id: str,
+    ib_order_id: str | None,
+    perm_id: str | None,
+    placing_client_id: int | None,
+    reason_code: str,
+) -> int:
+    """PENDING → UNKNOWN for a place whose outcome the route cannot prove,
+    stamping any IB ids the CLI returned. One conditional UPDATE: a row the
+    activity poller already bound (WORKING) or finished (FILLED / ...) from
+    broker evidence is never demoted, and fills are never touched. Returns
+    the affected rowcount."""
+    ensure_writable()
+    values: dict = dict(state="UNKNOWN", reason_code=reason_code)
+    if ib_order_id:
+        values["ib_order_id"] = str(ib_order_id)
+    if perm_id and str(perm_id) not in ("", "0"):
+        values["perm_id"] = str(perm_id)
+    if placing_client_id:
+        values["placing_client_id"] = int(placing_client_id)
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        now = datetime.now(timezone.utc)
+        result = conn.execute(
+            update(order_submissions)
+            .where(order_submissions.c.submission_id == submission_id, order_submissions.c.state == "PENDING")
+            .values(**values, updated_at=monotone_updated_at(now))
+        )
+    return result.rowcount
+
+
 def mark_terminal(
     *,
     submission_id: str,

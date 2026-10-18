@@ -32,7 +32,8 @@ import WizardModal from "@/components/ticker-detail/WizardModal";
 import WizardSessionStrip from "@/components/ticker-detail/WizardSessionStrip";
 import { useWizardLauncher } from "@/lib/useWizardLauncher";
 import { useWizardSession } from "@/lib/useWizardSession";
-import { errorFromResponseBody, isPlaceOutcomeUnknown } from "@/lib/order/responseError";
+import { errorFromResponseBody } from "@/lib/order/responseError";
+import { submitPlaceOrder } from "@/lib/order/submitPlace";
 
 type OrderTabProps = {
   ticker: string;
@@ -456,18 +457,9 @@ function NewOrderForm({
         ...payload,
         client_attempt_id: attemptId.id,
       };
-      attemptId.markSubmitted();
-      const res = await fetch("/api/orders/place", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
-      });
-      const json = await res.json().catch(() => null);
-      if (!res.ok) {
-        setError(errorFromResponseBody(json, "Order placement failed"));
-        // Uncertain: keep the attempt id (a resend never places twice).
-        if (isPlaceOutcomeUnknown(json)) attemptId.markUncertain();
-        else attemptId.markTerminal();
+      const placed = await submitPlaceOrder(attemptId, requestBody);
+      if (placed.kind !== "ok") {
+        setError(placed.message);
       } else {
         setSuccess(
           `Order placed: ${action} ${parsedQty} ${ticker} @ ${fmtPrice(parsedPrice)}`,
@@ -807,18 +799,9 @@ function ComboOrderForm({
         legs,
         client_attempt_id: attemptId.id,
       };
-      attemptId.markSubmitted();
-      const res = await fetch("/api/orders/place", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
-      });
-      const json = await res.json().catch(() => null);
-      if (!res.ok) {
-        setError(errorFromResponseBody(json, "Order placement failed"));
-        // Uncertain: keep the attempt id (a resend never places twice).
-        if (isPlaceOutcomeUnknown(json)) attemptId.markUncertain();
-        else attemptId.markTerminal();
+      const placed = await submitPlaceOrder(attemptId, requestBody);
+      if (placed.kind !== "ok") {
+        setError(placed.message);
       } else {
         setSuccess(
           `Combo order placed: ${action} ${parsedQty}x ${position.structure} @ ${fmtSignedPrice(parsedPrice)}`,
@@ -829,7 +812,6 @@ function ComboOrderForm({
       }
     } catch {
       setError("Network error placing order");
-      attemptId.markTerminal();
     } finally {
       setLoading(false);
     }

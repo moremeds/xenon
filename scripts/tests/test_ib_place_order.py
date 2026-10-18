@@ -95,12 +95,58 @@ def test_crash_after_place_is_uncertain_not_error(monkeypatch):
     assert result["orderId"] == 12345
 
 
-def test_crash_before_place_stays_error(monkeypatch):
-    class _CrashBeforePlace(_FakeClient):
-        def place_order(self, _contract, _order):
-            raise ConnectionError("not connected")
+def test_exception_from_place_order_is_uncertain(monkeypatch):
+    """The send boundary is BEFORE place_order: an exception it raises may
+    come after the socket write, so it is uncertain, never error."""
 
-    monkeypatch.setattr(ib_place_order, "IBClient", _CrashBeforePlace)
+    class _RaisesInPlace(_FakeClient):
+        def place_order(self, _contract, _order):
+            raise ConnectionError("socket reset")
+
+    monkeypatch.setattr(ib_place_order, "IBClient", _RaisesInPlace)
+    assert ib_place_order.place_order(dict(_STOCK))["status"] == "uncertain"
+
+
+def test_real_sdk_exception_after_send_is_uncertain(monkeypatch):
+    """Real ib_async ``IB.placeOrder``: it sends (client.placeOrder) and only
+    then does bookkeeping. An exception after the send must be uncertain."""
+    from ib_async import IB
+
+    from xenon.clients.ib_client import IBClient
+
+    sent: list[int] = []
+
+    class _RealSdkClient(_FakeClient):
+        def __init__(self):
+            self._ib = IB()
+            self._ib.client.getReqId = lambda: 99
+            self._ib.client.placeOrder = lambda order_id, _c, _o: sent.append(order_id)
+
+            def _boom(*_a, **_k):
+                raise RuntimeError("bookkeeping failed after send")
+
+            self._ib.wrapper.orderKey = _boom
+            self.logger = __import__("logging").getLogger("test")
+
+        def place_order(self, contract, order):
+            self._require_connection = lambda: None
+            self._require_managed_account = lambda account: account
+            return IBClient.place_order(self, contract, order)
+
+    monkeypatch.setattr(ib_place_order, "IBClient", _RealSdkClient)
+    result = ib_place_order.place_order({**_STOCK, "submission_id": "sub-3"})
+    assert sent == [99]
+    assert result["status"] == "uncertain"
+
+
+def test_account_error_before_send_stays_error(monkeypatch):
+    from xenon.clients.ib_client import IBOrderAccountError
+
+    class _NoAccount(_FakeClient):
+        def place_order(self, _contract, _order):
+            raise IBOrderAccountError("ACCOUNT_UNRESOLVED", "no managed account")
+
+    monkeypatch.setattr(ib_place_order, "IBClient", _NoAccount)
     assert ib_place_order.place_order(dict(_STOCK))["status"] == "error"
 
 

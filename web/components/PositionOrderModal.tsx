@@ -9,7 +9,7 @@ import { fmtPrice } from "@/lib/positionUtils";
 import { OrderLegPills, type OrderLeg as UnifiedOrderLeg } from "@/lib/order";
 import { OrderTifSelector } from "@/lib/order/components/OrderTifSelector";
 import { useClientAttemptId } from "@/components/ticker-detail/useClientAttemptId";
-import { errorFromResponseBody, isPlaceOutcomeUnknown } from "@/lib/order/responseError";
+import { submitPlaceOrder } from "@/lib/order/submitPlace";
 import {
   seedTicketFromPosition,
   applyQtyChip,
@@ -110,35 +110,24 @@ export default function PositionOrderModal({
         intent === "close"
           ? Math.max(1, Math.min(fullQty, parsedQty))
           : Math.max(1, parsedQty);
-      attemptId.markSubmitted();
       const body = {
         ...draft.payload,
         quantity: clampedQty,
         limitPrice: parsedPrice,
         tif,
-        client_attempt_id: attemptId.id,
         ...(outsideRth && !isCombo ? { outsideRth: true } : {}),
       };
-      const res = await fetch("/api/orders/place", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setError(errorFromResponseBody(json, "Order placement failed"));
-        // Uncertain: keep the attempt id (a resend never places twice).
-        if (isPlaceOutcomeUnknown(json)) attemptId.markUncertain();
-        else attemptId.markTerminal();
+      const placed = await submitPlaceOrder(attemptId, body);
+      if (placed.kind !== "ok") {
+        setError(placed.message);
         return;
       }
-      const orderId = typeof json.orderId === "string" ? json.orderId : "";
-      attemptId.markTerminal();
+      const orderId =
+        typeof placed.json.orderId === "string" ? placed.json.orderId : "";
       onSubmitted?.(orderId);
       onClose();
     } catch {
       setError("Network error placing order");
-      attemptId.markTerminal();
     } finally {
       setSubmitting(false);
     }

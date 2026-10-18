@@ -296,11 +296,14 @@ def place_order(params: dict) -> dict:
                 f"  Combo order: {len(legs_data)} legs, NonGuaranteed={non_guaranteed}, ratios={[int(l.get('ratio', 1)) for l in legs_data]}"
             )
 
-        # Place. From here on IB may hold the order: a crash is "uncertain",
-        # never "error" (an error would release the reservation and invite a
-        # resend that duplicates the order).
-        trade = client.place_order(contract, order)
+        # Send boundary. ib_async ``IB.placeOrder`` writes the order to the
+        # socket FIRST and does its bookkeeping after, so from this line on IB
+        # may hold the order: any exception is "uncertain", never "error" (an
+        # error releases the reservation and invites a duplicate resend). Only
+        # IBOrderAccountError is proven pre-send (IBClient raises it before
+        # calling placeOrder).
         placed = True
+        trade = client.place_order(contract, order)
 
         # Combo orders need extra time: IB routes each leg independently and
         # risk checks take longer — 2 s is not enough to get an ack.
@@ -385,7 +388,9 @@ def place_order(params: dict) -> dict:
 
     except Exception as e:
         if placed:
-            order_obj = getattr(trade, "order", None)
+            # The trade may not exist yet (exception inside placeOrder after
+            # the send); the order object still carries what IB assigned.
+            order_obj = getattr(trade, "order", None) or order
             return {
                 "status": "uncertain",
                 "outcome": "uncertain",

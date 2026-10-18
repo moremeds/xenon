@@ -15,6 +15,8 @@ export type ReplaceComboOrder = {
   limitPrice: number;
   tif?: "DAY" | "GTC";
   legs: ModifyComboLeg[];
+  /** Idempotency key for the replacement place (stable for the modal). */
+  client_attempt_id: string;
 };
 
 export type ModifyCancelTarget = {

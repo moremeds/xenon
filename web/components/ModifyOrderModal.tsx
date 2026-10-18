@@ -6,6 +6,7 @@ import type { PriceData } from "@/lib/pricesProtocol";
 import { optionKey } from "@/lib/pricesProtocol";
 import type { ModifyComboLeg, ModifyOrderRequest } from "@/lib/orderModify";
 import Modal from "./Modal";
+import { randomAttemptId } from "@/components/ticker-detail/useClientAttemptId";
 import { getQuoteMetrics } from "@/lib/quoteTelemetry";
 import { applyRestingLimitToQuote } from "@/lib/modifyOrderQuote";
 import { fmtPrice, positionToOrderLegs } from "@/lib/positionUtils";
@@ -245,6 +246,9 @@ export default function ModifyOrderModal({
   const [newQuantity, setNewQuantity] = useState("");
   const [outsideRth, setOutsideRth] = useState(false);
   const [editableLegs, setEditableLegs] = useState<EditableComboLeg[]>([]);
+  // One idempotency key per opened modal: a retry of the same replacement
+  // re-sends it, so an uncertain first place can never be placed twice.
+  const [replaceAttemptId] = useState(() => randomAttemptId());
 
   // Reset price only when a different order is selected (by permId), not on every re-render
   const orderPermId = order?.permId ?? null;
@@ -341,6 +345,7 @@ export default function ModifyOrderModal({
           limitPrice: parsedNew,
           tif: order.tif === "GTC" ? "GTC" : "DAY",
           legs: normalizedLegs,
+          client_attempt_id: replaceAttemptId,
         },
       });
       return;

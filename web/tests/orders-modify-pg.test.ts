@@ -114,6 +114,7 @@ describe("/api/orders/modify route", () => {
           orderId: 7001,
           permId: 9001,
           replaceOrder: {
+            client_attempt_id: "rep-attempt-1",
             type: "combo",
             symbol: "AAPL",
             action: "SELL",
@@ -154,7 +155,9 @@ describe("/api/orders/modify route", () => {
   it("returns refreshed Postgres orders when replacement placement fails after cancel", async () => {
     mocks.xenonFetch
       .mockResolvedValueOnce({ status: "ok", message: "Cancelled" })
-      .mockRejectedValueOnce(new Error("place rejected"))
+      // A definite rejection (4xx validation); an uncertain one is covered in
+      // place-outcome-unknown.test.tsx and never says CRITICAL/re-place.
+      .mockRejectedValueOnce(Object.assign(new Error("place rejected"), { status: 400, body: { reason_code: "INVALID_ORDER_BODY" } }))
       .mockResolvedValueOnce({ status: "ok" })
       .mockResolvedValueOnce(replacementOrders);
 
@@ -166,6 +169,7 @@ describe("/api/orders/modify route", () => {
         body: JSON.stringify({
           orderId: 7001,
           replaceOrder: {
+            client_attempt_id: "rep-attempt-1",
             type: "combo",
             symbol: "AAPL",
             action: "SELL",
