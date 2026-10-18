@@ -32,6 +32,7 @@ except ImportError:
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 from xenon.db.engine import get_sync_engine
+from xenon.execution.account_scope import IBAccountSelectionError, select_ib_account
 
 # Default connection settings
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
@@ -118,10 +119,10 @@ def get_pnl(client: IBClient, account: str = "") -> dict:
         return val is not None and not ib_util.isNan(val)
 
     try:
-        # IB requires a non-empty account string for reqPnL
+        # IB requires a non-empty account string for reqPnL. Never default
+        # to managedAccounts()[0]; select_ib_account raises when ambiguous.
         if not account:
-            accounts = client.ib.managedAccounts()
-            account = accounts[0] if accounts else ""
+            account = select_ib_account(client.ib.managedAccounts())
         pnl = client.get_pnl(account)
         # Poll until dailyPnL is non-NaN (IB streams this asynchronously)
         for _ in range(8):  # 8 x 1s = 8s max on top of the 2s in get_pnl
@@ -717,11 +718,10 @@ def fetch_position_daily_pnl(client: IBClient, positions: list, account: str = "
         return val is not None and not ib_util.isNan(val) and val != 1.7976931348623157e308
 
     if not account:
-        accounts = client.ib.managedAccounts()
-        account = accounts[0] if accounts else ""
-
-    if not account:
-        return positions
+        try:
+            account = select_ib_account(client.ib.managedAccounts())
+        except IBAccountSelectionError:
+            return positions
 
     # Request PnL for all positions simultaneously — bypass IBClient's
     # get_pnl_single() which sleeps 0.5s per call, and call IB API directly.
@@ -1290,16 +1290,19 @@ def main():
         def _valid_pnl(val):
             return val is not None and not ib_util.isNan(val)
 
-        accounts = client.ib.managedAccounts()
-        ib_account = accounts[0] if accounts else ""
-        # Export the connected account ID so downstream DB writers
+        # Export the scope account so downstream DB writers
         # (`_save_portfolio_to_postgres`, `_append_nav_snapshot`,
-        # `naked_short_audit` subprocess) stamp scope rows with the live
-        # account instead of the legacy_unknown env fallback. Per
-        # account_scope.py docstring: this is where the env var is set.
-        if ib_account:
-            os.environ["XENON_BROKER_ACCOUNT"] = ib_account
-        pnl_obj = client.ib.reqPnL(ib_account) if ib_account else None
+        # `naked_short_audit` subprocess) stamp scope rows with it. A
+        # configured XENON_BROKER_ACCOUNT is kept (it must be managed); with it
+        # unset the login must manage exactly one account. Never
+        # managedAccounts()[0] — abort rather than write under a guessed scope.
+        try:
+            ib_account = select_ib_account(client.ib.managedAccounts())
+        except IBAccountSelectionError as exc:
+            print(f"✗ Not syncing portfolio: {exc}")
+            sys.exit(1)
+        os.environ["XENON_BROKER_ACCOUNT"] = ib_account
+        pnl_obj = client.ib.reqPnL(ib_account)
 
         # Fetch positions while PnL streams
         positions = fetch_positions(client)

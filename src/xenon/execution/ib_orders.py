@@ -22,7 +22,7 @@ from typing import Optional
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 from xenon.execution import orders_store
-from xenon.execution.account_scope import AccountScope, resolve_from_env
+from xenon.execution.account_scope import AccountScope, IBAccountSelectionError, resolve_from_env, select_ib_account
 
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
 DEFAULT_CLIENT_ID = CLIENT_IDS["ib_orders"]
@@ -343,9 +343,14 @@ def main():
         display_orders(open_orders, executed_orders)
 
         if args.sync:
-            accounts = client.ib.managedAccounts()
-            if accounts:
-                os.environ["XENON_BROKER_ACCOUNT"] = accounts[0]
+            # A configured XENON_BROKER_ACCOUNT is kept (select returns it when
+            # managed); it is only exported when unset and the login manages
+            # exactly one account. Never managedAccounts()[0].
+            try:
+                os.environ["XENON_BROKER_ACCOUNT"] = select_ib_account(client.ib.managedAccounts())
+            except IBAccountSelectionError as exc:
+                print(f"✗ Not syncing open orders: {exc}")
+                sys.exit(1)
             result = sync_open_orders_to_postgres(open_orders)
             print(f"Registered {result['registered']} open-order snapshots in Postgres")
         else:

@@ -4,7 +4,8 @@ Two resolution paths:
 1. FastAPI: `resolve_from_app_state(app_state)` reads `app.state.{trading_mode, account}`.
 2. Sync callers (ib_sync, ib_execute, rehydrate): `resolve_from_env()` reads
    `XENON_BROKER`, `XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT` env vars. The IB sync path
-   should set `XENON_BROKER_ACCOUNT` from `managedAccounts()[0]` at connect time.
+   exports `XENON_BROKER_ACCOUNT` from `select_ib_account()` at connect time — never
+   from `managedAccounts()[0]`.
 
 Both paths return a frozen AccountScope that gets stamped on every DB write.
 """
@@ -12,6 +13,7 @@ Both paths return a frozen AccountScope that gets stamped on every DB write.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -31,6 +33,40 @@ class AccountScope:
 
 
 _MODE_TO_PREFIX: dict[str, str] = {"paper": "DU", "live": "U"}
+
+
+class IBAccountSelectionError(ValueError):
+    """No single IB account can be chosen for this process."""
+
+
+def select_ib_account(managed: Iterable[str] | None, configured: str | None = None) -> str:
+    """Pick the IB account this process acts on. Never IB's list order.
+
+    ``configured`` defaults to ``XENON_BROKER_ACCOUNT``. When it is set, it
+    must be in ``managed`` (``ib.managedAccounts()``). When it is unset, the
+    login must manage exactly one account. Anything else raises
+    ``IBAccountSelectionError`` — a login with several accounts lists them in
+    an order Xenon does not control, so ``managed[0]`` is never a default.
+    """
+    if configured is None:
+        configured = os.environ.get("XENON_BROKER_ACCOUNT", "")
+    configured = (configured or "").strip()
+    accounts = [str(a).strip() for a in (managed or []) if str(a).strip()]
+    if configured:
+        if configured not in accounts:
+            raise IBAccountSelectionError(
+                f"XENON_BROKER_ACCOUNT={configured!r} is not managed by this IB login "
+                f"({len(accounts)} managed account(s))"
+            )
+        return configured
+    if len(accounts) == 1:
+        return accounts[0]
+    if not accounts:
+        raise IBAccountSelectionError("IB login reports no managed accounts")
+    raise IBAccountSelectionError(
+        f"XENON_BROKER_ACCOUNT is unset and this IB login manages {len(accounts)} accounts; "
+        "set XENON_BROKER_ACCOUNT to choose one"
+    )
 
 
 def env_from_trd_env(trd_env: str) -> str:
@@ -70,7 +106,7 @@ def resolve_from_env() -> AccountScope:
     if not account:
         raise ValueError(
             "XENON_BROKER_ACCOUNT must be set (e.g. DU1234567). "
-            "The IB sync path should set this from managedAccounts()[0]."
+            "The IB sync path exports it from select_ib_account()."
         )
     expected_prefix = _MODE_TO_PREFIX.get(MODE, "")
     if expected_prefix == "U":

@@ -71,7 +71,7 @@ from xenon.db.engine import dispose_engine, get_sync_engine, init_engine
 from xenon.db.queries.blotter import blotter_has_trades, fetch_blotter_pg, fetch_futu_blotter, merge_pg_and_flex
 from xenon.db.schema import account_snapshots, order_events, order_submissions
 from xenon.execution import orders_store, preflight, quote_guard, quote_tokens
-from xenon.execution.account_scope import resolve_from_app_state
+from xenon.execution.account_scope import IBAccountSelectionError, resolve_from_app_state, select_ib_account
 from xenon.execution.preflight import (
     PortfolioView,
     PreflightRequest,
@@ -502,11 +502,15 @@ async def _run_fills_replay_on_boot() -> None:
 
 
 def _get_managed_account_for_health() -> str:
-    """Return the first managedAccount from the IB pool's sync client.
+    """Return the boot scope account, chosen by ``select_ib_account``.
 
-    Returns "" when the pool isn't connected (test mode, Gateway down, etc.).
-    Pulled out as a module-level function so tests can monkeypatch it
-    without booting a real IB connection.
+    ``XENON_BROKER_ACCOUNT`` wins when set and managed by the login; with it
+    unset, the login must manage exactly one account. Never
+    ``managedAccounts()[0]``. Returns "" when the pool isn't connected (test
+    mode, Gateway down, etc.) or no account can be chosen — the lifespan then
+    sets ``mode_verified=False`` and order routes refuse. Pulled out as a
+    module-level function so tests can monkeypatch it without booting a real
+    IB connection.
     """
     if ib_pool is None:
         return ""
@@ -517,7 +521,11 @@ def _get_managed_account_for_health() -> str:
         accounts = client.ib.managedAccounts()
     except Exception:  # noqa: BLE001
         return ""
-    return accounts[0] if accounts else ""
+    try:
+        return select_ib_account(accounts)
+    except IBAccountSelectionError as exc:
+        logger.error("IB ACCOUNT SCOPE UNRESOLVED — order routes stay disabled: %s", exc)
+        return ""
 
 
 @asynccontextmanager
