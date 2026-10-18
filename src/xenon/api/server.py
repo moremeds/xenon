@@ -2619,6 +2619,18 @@ def _reservation_refusal(outcome, cid: str, *, replacement: bool) -> JSONRespons
                 outcome.reasons, outcome.uncovered, outcome.short_stock, outcome.split_required
             )
         )
+    if outcome.status == "body_mismatch" and outcome.reason_code == ReasonCode.ATTEMPT_ALREADY_PLACED.value:
+        # The original body replayed after a modify: the order exists and
+        # may be working. Never invite a rebuild/resubmit (PR-08).
+        return JSONResponse(
+            status_code=409,
+            content={
+                "reason_code": ReasonCode.ATTEMPT_ALREADY_PLACED.value,
+                "detail": f"attempt {cid} was already placed and since modified — check working orders",
+                "state": outcome.state,
+                "submission_id": outcome.submission_id,
+            },
+        )
     if outcome.status == "body_mismatch":
         return JSONResponse(
             status_code=409,

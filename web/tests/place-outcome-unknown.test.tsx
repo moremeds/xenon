@@ -315,3 +315,65 @@ describe("OrderTab / InstrumentDetailModal — uncertain place blocks a resubmit
     );
   });
 });
+
+// PR-08: the original place body replayed after the order was modified.
+const ALREADY_PLACED_BODY = {
+  reason_code: "ATTEMPT_ALREADY_PLACED",
+  detail: "attempt c-unc-1 was already placed and since modified — check working orders",
+  state: "WORKING",
+  submission_id: "sub-1",
+};
+
+describe("ATTEMPT_ALREADY_PLACED — a replay after a modify never invites a resubmit", () => {
+  it("Next /api/orders/place passes the 409 body through unchanged", async () => {
+    xenonFetch.mockRejectedValueOnce(new XenonApiError(409, ALREADY_PLACED_BODY.detail, ALREADY_PLACED_BODY));
+    const { POST } = await import("../app/api/orders/place/route");
+    const res = await POST(post("http://localhost/api/orders/place", placeBody));
+    expect(res.status).toBe(409);
+    expect((await res.json()).reason_code).toBe("ATTEMPT_ALREADY_PLACED");
+  });
+
+  it("submitPlaceOrder locks the form like an uncertain place, with the 'already placed' copy", async () => {
+    const { submitPlaceOrder, ATTEMPT_ALREADY_PLACED_COPY } = await import("@/lib/order/submitPlace");
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 409, json: async () => ALREADY_PLACED_BODY }));
+    (global as any).fetch = fetchMock;
+    const { result } = renderHook(() => useClientAttemptId({ ticker: "SPY" }));
+    const first = result.current.id;
+    let out: Awaited<ReturnType<typeof submitPlaceOrder>> | undefined;
+    await act(async () => {
+      out = await submitPlaceOrder(result.current, { symbol: "SPY" });
+    });
+    expect(out).toEqual({ kind: "uncertain", message: ATTEMPT_ALREADY_PLACED_COPY });
+    expect(ATTEMPT_ALREADY_PLACED_COPY).toMatch(/already placed.*do not resubmit/i);
+    expect(ATTEMPT_ALREADY_PLACED_COPY).not.toMatch(/rebuild/i);
+    expect(result.current.id).toBe(first);
+    expect(result.current.uncertain).toBe(true);
+    let again: typeof out;
+    await act(async () => {
+      again = await submitPlaceOrder(result.current, { symbol: "SPY" });
+    });
+    expect(again!.kind).toBe("uncertain");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("PositionOrderModal shows the copy and keeps submit disabled", async () => {
+    const pos = {
+      id: 1, ticker: "TSLA", structure: "Stock", structure_type: "Stock", risk_profile: "equity",
+      expiry: "", contracts: 300, direction: "LONG", entry_cost: 96000, max_risk: null, market_value: 105000,
+      legs: [{ direction: "LONG", contracts: 300, type: "Stock", strike: null, entry_cost: 96000, avg_cost: 320,
+        market_price: 350, market_value: 105000, market_price_is_calculated: false }],
+      ib_daily_pnl: null, kelly_optimal: null, target: null, stop: null, entry_date: "",
+    } as unknown as PortfolioPosition;
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 409, json: async () => ALREADY_PLACED_BODY });
+    (global as any).fetch = fetchMock;
+    const { getByRole, findByText, queryByText } = render(
+      <PositionOrderModal position={pos} prices={{ TSLA: { last: 350, bid: 349.9, ask: 350.1 } as any }} onClose={() => {}} />,
+    );
+    fireEvent.click(getByRole("button", { name: /^Submit/i }));
+    await findByText(/already placed \(and since modified\)/i);
+    expect(queryByText(/rebuild the ticket/i)).toBeNull();
+    await waitFor(() => expect((getByRole("button", { name: /^Submit/i }) as HTMLButtonElement).disabled).toBe(true));
+    fireEvent.click(getByRole("button", { name: /^Submit/i }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});

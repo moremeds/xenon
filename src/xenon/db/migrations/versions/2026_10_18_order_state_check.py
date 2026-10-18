@@ -53,6 +53,11 @@ _NAME = "ck_order_sub_state"
 
 def upgrade() -> None:
     conn = op.get_bind()
+    # Bound every lock wait of this revision (the preflight SELECT and the
+    # ADD CONSTRAINT, which needs ACCESS EXCLUSIVE): a long transaction
+    # makes it fail fast (re-run the migrator) instead of queueing order
+    # writes behind it. SET LOCAL ends with this migration's transaction.
+    op.execute("SET LOCAL lock_timeout = '5s'")
     bad = conn.execute(
         sa.text(
             "SELECT state, count(*) FROM xenon.order_submissions "
@@ -66,10 +71,6 @@ def upgrade() -> None:
             f"order_submissions holds states outside ORDER_STATES: {listed}. "
             "No row was changed; reconcile them by hand, then re-run the migration."
         )
-    # ADD CONSTRAINT needs ACCESS EXCLUSIVE; fail fast (and retry the
-    # migrator) instead of queueing every order write behind a long-running
-    # transaction. SET LOCAL ends with this migration's transaction.
-    op.execute("SET LOCAL lock_timeout = '5s'")
     states_sql = ", ".join(f"'{s}'" for s in ORDER_STATES)
     op.create_check_constraint(_NAME, "order_submissions", f"state IN ({states_sql})", schema="xenon")
 

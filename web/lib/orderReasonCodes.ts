@@ -121,6 +121,11 @@ export const ORDER_REASON_CODES: Record<string, ReasonToast> = {
     severity: "error",
     copy: "Retry id was reused with a different order. Rebuild the ticket.",
   },
+  // PR-08: the original place body replayed after the order was modified.
+  ATTEMPT_ALREADY_PLACED: {
+    severity: "warn",
+    copy: "This order was already placed (and since modified). Check working orders; do not resubmit.",
+  },
   READ_ONLY_BROKER: {
     severity: "error",
     copy: "Selected broker is read-only for order placement.",

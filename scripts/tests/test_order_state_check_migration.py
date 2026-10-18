@@ -61,14 +61,22 @@ def test_order_states_cover_every_state_constant():
 # ---------------------------------------------------------------------------
 
 
+def _skip_or_fail(reason: str):
+    """Local runs may skip a missing prerequisite with the reason; CI
+    (GitHub sets CI=true) fails closed — this is a mandatory release gate."""
+    if os.environ.get("CI"):
+        pytest.fail(f"old-writer/migration gate prerequisite missing in CI: {reason}")
+    pytest.skip(reason)
+
+
 @pytest.fixture
 def throwaway_db():
     base_env = os.environ.get("DATABASE_URL_TEST")
     if not base_env:
-        pytest.skip("DATABASE_URL_TEST not set")
+        _skip_or_fail("DATABASE_URL_TEST not set")
     base = make_url(base_env)
     if base.host not in ("127.0.0.1", "localhost"):
-        pytest.skip("migration round-trip runs on a local Postgres only")
+        _skip_or_fail("migration round-trip runs on a local Postgres only")
     plain = make_url(base.render_as_string(hide_password=False)).set(drivername="postgresql+psycopg")
     admin = create_engine(plain.set(database="postgres"), isolation_level="AUTOCOMMIT")
     name = f"xe_a13_mig_test_{uuid.uuid4().hex[:10]}"
@@ -77,7 +85,7 @@ def throwaway_db():
             conn.execute(text(f'CREATE DATABASE "{name}"'))
     except Exception as exc:  # pragma: no cover — env without CREATEDB
         admin.dispose()
-        pytest.skip(f"cannot create throwaway DB: {exc}")
+        _skip_or_fail(f"cannot create throwaway DB: {exc}")
     url = plain.set(database=name)
     engine = create_engine(url)
     with engine.begin() as conn:
@@ -249,10 +257,10 @@ def _extract_old_src(sha: str, dest: Path) -> Path:
     import io
 
     if shutil.which("git") is None:
-        pytest.skip("git unavailable: cannot load the previous release's orders_store")
+        _skip_or_fail("git unavailable: cannot load the previous release's orders_store")
     probe = subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], cwd=_ROOT, capture_output=True)
     if probe.returncode != 0:
-        pytest.skip(f"pinned commit {sha} not in this clone (fetch origin): old-writer gate cannot run")
+        _skip_or_fail(f"pinned commit {sha} not in this clone (fetch origin): old-writer gate cannot run")
     blob = subprocess.run(
         ["git", "archive", "--format=tar", sha, "src/xenon"], cwd=_ROOT, capture_output=True, check=True
     )
@@ -332,3 +340,52 @@ def test_migration_sets_lock_timeout(throwaway_db):
     assert not _has_check(throwaway_db)
     command.upgrade(cfg, _REV)
     assert _has_check(throwaway_db)
+
+
+def test_preflight_select_is_bounded_by_lock_timeout(throwaway_db):
+    """lock_timeout is set before the preflight SELECT: an ACCESS EXCLUSIVE
+    holder (which blocks even reads) makes the whole upgrade fail fast."""
+    import time
+
+    from alembic import command
+
+    cfg = _cfg()
+    command.upgrade(cfg, _PARENT)
+    holder = throwaway_db.connect()
+    tx = holder.begin()
+    holder.execute(text("LOCK TABLE xenon.order_submissions IN ACCESS EXCLUSIVE MODE"))
+    try:
+        started = time.monotonic()
+        with pytest.raises(Exception, match="lock timeout"):
+            command.upgrade(cfg, _REV)
+        assert time.monotonic() - started < 30
+    finally:
+        tx.rollback()
+        holder.close()
+    command.upgrade(cfg, _REV)
+    assert _has_check(throwaway_db)
+
+
+def _outcome(fn):
+    """The pytest outcome a call raises (Skipped vs Failed), caught here so a
+    skip cannot silently turn this test itself into a skip."""
+    try:
+        fn()
+    except BaseException as exc:  # noqa: BLE001 — pytest outcomes are BaseException
+        return exc
+    return None
+
+
+def test_gate_prerequisites_fail_closed_in_ci(monkeypatch, tmp_path):
+    monkeypatch.setenv("CI", "true")
+    out = _outcome(lambda: _skip_or_fail("x"))
+    assert isinstance(out, pytest.fail.Exception), out
+    out = _outcome(lambda: _extract_old_src("0" * 40, tmp_path / "x"))
+    assert isinstance(out, pytest.fail.Exception) and "not in this clone" in str(out), out
+    monkeypatch.setenv("DATABASE_URL_TEST", "postgresql+psycopg://u:p@db.example.invalid:5432/x_test")
+    out = _outcome(lambda: next(throwaway_db.__wrapped__()))
+    assert isinstance(out, pytest.fail.Exception) and "local Postgres only" in str(out), out
+
+    monkeypatch.delenv("CI")
+    out = _outcome(lambda: _skip_or_fail("x"))
+    assert isinstance(out, pytest.skip.Exception), out

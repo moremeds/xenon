@@ -849,6 +849,60 @@ def test_stale_mirror_read_never_overwrites_settled_price(client, broker_calls, 
     assert float(_submission_rows()[0]._mapping["limit_price"]) == 1.9
 
 
+def test_replay_after_modify_is_already_placed_not_body_mismatch(client, broker_calls, monkeypatch):
+    """PR-08: the ORIGINAL place body replayed after a price modify differs
+    only in the amended price. The order exists (may be working): 409
+    ATTEMPT_ALREADY_PLACED, never 'rebuild the ticket', nothing sent."""
+    _place_bag(client, "rt-replay-1", shares=250)
+    _manage_reply(monkeypatch, broker_calls, price=1.75, qty=1)
+    assert (
+        client.post(
+            "/orders/modify", json={"orderId": 4242, "permId": 777001, "newPrice": 1.75, "modifySequence": 1}
+        ).status_code
+        == 200
+    )
+    sent = len(broker_calls)
+
+    resp = client.post("/orders/place", json=_guaranteed_bag_body("rt-replay-1"))
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["reason_code"] == "ATTEMPT_ALREADY_PLACED"
+    assert len(broker_calls) == sent
+
+    # A genuinely different body (another strike) on the same id stays a mismatch.
+    other = _guaranteed_bag_body("rt-replay-1")
+    other["legs"][1]["strike"] = 520.0
+    resp = client.post("/orders/place", json=other)
+    assert resp.status_code == 409 and resp.json()["reason_code"] == "ATTEMPT_BODY_MISMATCH"
+
+
+def test_reused_id_with_new_price_on_unmodified_order_stays_body_mismatch(client, broker_calls):
+    _place_bag(client, "rt-replay-2", shares=250)
+    body = _guaranteed_bag_body("rt-replay-2")
+    body["limitPrice"] = float(body["limitPrice"]) + 0.05
+    resp = client.post("/orders/place", json=body)
+    assert resp.status_code == 409 and resp.json()["reason_code"] == "ATTEMPT_BODY_MISMATCH"
+
+
+def test_replay_after_mirrored_tws_price_edit_is_already_placed(client, broker_calls):
+    from xenon.execution import orders_store
+
+    _place_bag(client, "rt-replay-3", shares=250)
+    orders_store.register_from_snapshot(
+        perm_id="777001",
+        ib_order_id="4242",
+        ticker="SPY",
+        security_type="BAG",
+        action="BUY",
+        quantity=1,
+        limit_price=2.15,
+        multiplier=100,
+        observed_at=datetime.now(timezone.utc),
+        **SCOPE,
+    )
+    resp = client.post("/orders/place", json=_guaranteed_bag_body("rt-replay-3"))
+    assert resp.status_code == 409 and resp.json()["reason_code"] == "ATTEMPT_ALREADY_PLACED"
+
+
 def test_modify_rejects_guarantee_mode_change(client, broker_calls):
     _place_bag(client, "rt-mod-flip-1")
 

@@ -45,6 +45,8 @@ class ReasonCode(StrEnum):
     # F4 — idempotency (PR-B)
     ATTEMPT_ID_TERMINAL = "ATTEMPT_ID_TERMINAL"
     ATTEMPT_BODY_MISMATCH = "ATTEMPT_BODY_MISMATCH"
+    # PR-08 — the attempt was placed and later modified (price/qty moved)
+    ATTEMPT_ALREADY_PLACED = "ATTEMPT_ALREADY_PLACED"
     # PR-07 fix3 — another replacement of the same order exists
     REPLACEMENT_IN_PROGRESS = "REPLACEMENT_IN_PROGRESS"
     # PR-07 fix4 — a replacement target that names no single order

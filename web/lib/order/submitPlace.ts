@@ -32,13 +32,19 @@ export type PlaceOutcome =
   | { kind: "uncertain"; message: string }
   | { kind: "terminal"; message: string };
 
+/** The attempt was already placed and since modified (PR-08): the order
+ * exists and may be working, so the form stays locked like an uncertain
+ * place — same attempt id, no resubmit. */
+export const ATTEMPT_ALREADY_PLACED_COPY =
+  ORDER_REASON_CODES.ATTEMPT_ALREADY_PLACED.copy;
+
 /** Uncertain unless the response proves the order was not placed. */
 export function isUncertainPlaceResponse(
   status: number,
   body: Record<string, unknown> | null,
 ): boolean {
   const code = readReasonCode(body);
-  if (code === "PLACE_OUTCOME_UNKNOWN") return true;
+  if (code === "PLACE_OUTCOME_UNKNOWN" || code === "ATTEMPT_ALREADY_PLACED") return true;
   if (status < 500) return false;
   return !(code && code in ORDER_REASON_CODES);
 }
@@ -73,6 +79,10 @@ export async function submitPlaceOrder(
   if (res.ok && json) {
     attempt.markTerminal();
     return { kind: "ok", json };
+  }
+  if (readReasonCode(json) === "ATTEMPT_ALREADY_PLACED") {
+    attempt.markUncertain();
+    return { kind: "uncertain", message: ATTEMPT_ALREADY_PLACED_COPY };
   }
   if (res.ok || isUncertainPlaceResponse(res.status, json)) {
     attempt.markUncertain();
