@@ -7,7 +7,7 @@
 #
 # Exits 0 always — this is advisory, not blocking. Layer 2 (pre-commit) is
 # the deterministic gate. See:
-#   docs/superpowers/plans/_archive/2026-04-28-order-path-regression-prevention.md
+#   docs/reference/order-path-incident-history.md
 
 set -euo pipefail
 
@@ -66,7 +66,7 @@ shipped silent regressions here. Keep these invariants:
    route does not enforce it. Do not add a frontend-only guard that
    in-process callers can bypass.
 
-Reference: docs/superpowers/plans/_archive/2026-04-28-order-path-regression-prevention.md
+Reference: docs/reference/order-path-incident-history.md
 Reference: docs/reference/order-path-incident-history.md
 EOF
 

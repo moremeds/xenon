@@ -70,7 +70,7 @@ echo "$next" > VERSION
 
 # package.json: surgical python rewrite to avoid reordering keys
 tmp="$(mktemp)"
-python3.13 - "$current" "$next" <<'PY' > "$tmp"
+uv run --no-sync python - "$current" "$next" <<'PY' > "$tmp"
 import json, sys
 current, nxt = sys.argv[1], sys.argv[2]
 with open("package.json") as f:
@@ -84,7 +84,7 @@ mv "$tmp" package.json
 # web/package.json: bumped in lockstep with root (single release procedure for
 # backend + frontend; see version_sync_check.py). Surgical line replace keeps the
 # large dep-heavy file byte-stable except the version field.
-python3.13 - "$current" "$next" <<'PY'
+uv run --no-sync python - "$current" "$next" <<'PY'
 import sys
 current, nxt = sys.argv[1], sys.argv[2]
 path = "web/package.json"
@@ -97,7 +97,7 @@ PY
 # CHANGELOG rewrite — single deterministic pass.
 # Move the body currently under ## [Unreleased] to a new ## [X.Y.Z] — DATE heading,
 # leave [Unreleased] empty. Preserves the rest of the file verbatim.
-python3.13 - "$next" "$today" <<'PY'
+uv run --no-sync python - "$next" "$today" <<'PY'
 import re, sys
 nxt, today = sys.argv[1], sys.argv[2]
 path = "CHANGELOG.md"

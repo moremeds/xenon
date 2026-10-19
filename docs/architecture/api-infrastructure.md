@@ -101,10 +101,10 @@ Image: `ghcr.io/gnzsnz/ib-gateway` (pinned to digest). Config: `docker/ib-gatewa
 
 | Command                                | Action                                                |
 | -------------------------------------- | ----------------------------------------------------- |
-| `scripts/docker_ib_gateway.sh start`   | Start (validates secrets, checks launchd not running) |
-| `scripts/docker_ib_gateway.sh stop`    | Stop                                                  |
-| `scripts/docker_ib_gateway.sh restart` | Restart                                               |
-| `scripts/docker_ib_gateway.sh status`  | Status                                                |
+| `scripts/infra/docker_ib_gateway.sh start`   | Start (validates secrets, checks launchd not running) |
+| `scripts/infra/docker_ib_gateway.sh stop`    | Stop                                                  |
+| `scripts/infra/docker_ib_gateway.sh restart` | Restart                                               |
+| `scripts/infra/docker_ib_gateway.sh status`  | Status                                                |
 | `npm run ib:start` (from web/)         | Convenience alias                                     |
 
 Docker handles reliability via `restart: unless-stopped` + healthcheck. `READ_ONLY_API=no` (Xenon places orders). Password via Docker secrets (`docker/ib-gateway/secrets/ib_password.txt`, chmod 600).

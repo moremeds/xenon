@@ -24,7 +24,7 @@ Forbidden patterns (Python):
 - `json.load*(... data/*.json ...)`
 - `Path("data/orders.json").read_text()` (and similar)
 
-Reference: docs/plans/2026-04-28-order-path-regression-prevention.md §Layer 2.
+Reference: docs/reference/order-path-incident-history.md (Layer 2 guards).
 """
 
 from __future__ import annotations
