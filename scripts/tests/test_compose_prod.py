@@ -23,6 +23,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 PROD_COMPOSE = REPO_ROOT / "deploy" / "compose.prod.yml"
@@ -118,14 +119,17 @@ def test_only_opted_in_services_carry_watchtower_label() -> None:
     assert 'profiles: ["migrate"]' in text
 
 
-def test_realtime_binds_wildcard_and_web_healthcheck_hits_a_live_route() -> None:
-    """v0.9.0 shipped without these: the relay defaults WS_HOST to 127.0.0.1, so the
-    published port refused every client, and web probed the deleted /sign-in page."""
-    text = _text()
-    realtime = text.split("\n  realtime:\n", 1)[1].split("\n  watchtower:\n", 1)[0]
-    assert re.search(r'^      WS_HOST: "?0\.0\.0\.0"?\s*$', realtime, re.MULTILINE)
-    probe = re.search(r'"wget", "--spider", "-q", "http://127\.0\.0\.1:3000(/[^"]*)"', text)
-    assert probe and probe.group(1) == "/", probe and probe.group(1)
+def test_cross_container_urls_and_web_healthcheck() -> None:
+    """v0.9.0 shipped without these: the relay defaults WS_HOST and its ticket
+    validator to 127.0.0.1 (its own loopback, not the published port or the api),
+    the api probed relay /status on its own loopback, and web probed the deleted
+    /sign-in page."""
+    services = yaml.safe_load(_text())["services"]
+    rt_env = services["realtime"]["environment"]
+    assert rt_env["WS_HOST"] == "0.0.0.0"
+    assert rt_env["TICKET_VALIDATE_URL"] == "http://api:8321/ws-ticket/validate"
+    assert services["api"]["environment"]["IB_REALTIME_STATUS_URL"] == "http://realtime:8765/status"
+    assert services["web"]["healthcheck"]["test"][-1] == "http://127.0.0.1:3000/"
 
 
 def test_dev_compose_header_points_to_prod_truth() -> None:

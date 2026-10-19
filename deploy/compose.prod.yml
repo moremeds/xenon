@@ -62,6 +62,8 @@ services:
       - ./web.env
     environment:
       FUTU_OPEND_HOST: host.docker.internal
+      # Sibling container; a missing URL falls back to the api's own loopback.
+      IB_REALTIME_STATUS_URL: http://realtime:8765/status
     ports:
       - "127.0.0.1:8321:8321"
     volumes:
@@ -111,6 +113,8 @@ services:
       # The relay defaults to 127.0.0.1; inside the container that refuses the
       # published port. The 127.0.0.1:8765 host mapping keeps it off the LAN.
       WS_HOST: "0.0.0.0"
+      # Same reason: the default 127.0.0.1:8321 is the relay itself, not the api.
+      TICKET_VALIDATE_URL: http://api:8321/ws-ticket/validate
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
