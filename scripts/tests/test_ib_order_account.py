@@ -88,48 +88,6 @@ def test_unresolved_account_fails_closed(MockIB, account):
     mock_ib.placeOrder.assert_not_called()
 
 
-@patch("xenon.clients.ib_client.IB")
-def test_modify_keeps_existing_order_account(MockIB):
-    """Modify re-submits IB's own order object (orderId set) — leave it alone."""
-    client, mock_ib = _connected_client(MockIB, ["U1111111", "U2222222"])
-    order = _new_order("U2222222")
-    order.orderId = 42
-
-    client.modify_order(MagicMock(), order, lmt_price=1.5)
-    # ib_order_manage's modify path calls place_order directly with trade.order.
-    client.place_order(MagicMock(), order)
-
-    assert mock_ib.placeOrder.call_count == 2
-    for call in mock_ib.placeOrder.call_args_list:
-        assert call.args[1].account == "U2222222"
-        assert call.args[1].orderId == 42
-
-
-@patch("xenon.clients.ib_client.IB")
-def test_bracket_order_stamps_account_on_every_leg(MockIB):
-    client, mock_ib = _connected_client(MockIB, ["U1111111", "U2222222"])
-    legs = [_new_order(), _new_order(), _new_order()]
-    for i, leg in enumerate(legs, start=1):
-        leg.orderId = i  # ib.bracketOrder pre-assigns order ids
-    mock_ib.bracketOrder.return_value = legs
-
-    client.place_bracket_order(MagicMock(), "BUY", 1, 1.0, 2.0, 0.5, account="U2222222")
-
-    assert mock_ib.placeOrder.call_count == 3
-    assert [c.args[1].account for c in mock_ib.placeOrder.call_args_list] == ["U2222222"] * 3
-
-
-@patch("xenon.clients.ib_client.IB")
-def test_bracket_order_unmanaged_account_places_nothing(MockIB):
-    client, mock_ib = _connected_client(MockIB, ["U1111111", "U2222222"])
-    mock_ib.bracketOrder.return_value = [_new_order(), _new_order(), _new_order()]
-
-    with pytest.raises(IBOrderAccountError):
-        client.place_bracket_order(MagicMock(), "BUY", 1, 1.0, 2.0, 0.5, account="U9999999")
-
-    mock_ib.placeOrder.assert_not_called()
-
-
 # ---------------------------------------------------------------------------
 # xenon-ib-place-order CLI
 # ---------------------------------------------------------------------------

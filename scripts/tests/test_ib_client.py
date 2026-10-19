@@ -304,19 +304,6 @@ class TestConnection:
         assert client.is_connected()
 
     @patch("xenon.clients.ib_client.IB")
-    def test_reconnect(self, MockIB):
-        """Reconnect should disconnect then connect again."""
-        mock_ib = MockIB.return_value
-        mock_ib.isConnected.return_value = True
-
-        client = IBClient()
-        client.connect(host="127.0.0.1", port=4001, client_id=5)
-        client.reconnect()
-
-        assert mock_ib.disconnect.call_count == 1
-        assert mock_ib.connect.call_count == 2
-
-    @patch("xenon.clients.ib_client.IB")
     def test_context_manager(self, MockIB):
         """Test using IBClient as a context manager."""
         mock_ib = MockIB.return_value
@@ -380,56 +367,6 @@ class TestPortfolioOperations:
         assert positions == []
 
     @patch("xenon.clients.ib_client.IB")
-    def test_get_portfolio(self, MockIB):
-        mock_ib = MockIB.return_value
-        mock_ib.isConnected.return_value = True
-        mock_ib.portfolio.return_value = [
-            _make_portfolio_item("AAPL", 100, 155.0, 150.0),
-        ]
-
-        client = IBClient()
-        client.connect(client_id=1)
-        items = client.get_portfolio()
-
-        mock_ib.portfolio.assert_called_once()
-        assert len(items) == 1
-        assert items[0].contract.symbol == "AAPL"
-
-    @patch("xenon.clients.ib_client.IB")
-    def test_get_account_summary(self, MockIB):
-        mock_ib = MockIB.return_value
-        mock_ib.isConnected.return_value = True
-        mock_ib.accountSummary.return_value = [
-            _make_account_value("NetLiquidation", "100000", "USD"),
-            _make_account_value("TotalCashValue", "50000", "USD"),
-            _make_account_value("BuyingPower", "200000", "USD"),
-            _make_account_value("AvailableFunds", "80000", "USD"),
-        ]
-
-        client = IBClient()
-        client.connect(client_id=1)
-        summary = client.get_account_summary()
-
-        mock_ib.accountSummary.assert_called_once()
-        assert len(summary) == 4
-
-    @patch("xenon.clients.ib_client.IB")
-    def test_get_account_summary_filtered(self, MockIB):
-        """get_account_summary with specific tags."""
-        mock_ib = MockIB.return_value
-        mock_ib.isConnected.return_value = True
-        mock_ib.accountSummary.return_value = [
-            _make_account_value("NetLiquidation", "100000", "USD"),
-            _make_account_value("TotalCashValue", "50000", "USD"),
-        ]
-
-        client = IBClient()
-        client.connect(client_id=1)
-        summary = client.get_account_summary(tags=["NetLiquidation", "TotalCashValue"])
-
-        assert len(summary) == 2
-
-    @patch("xenon.clients.ib_client.IB")
     def test_operations_require_connection(self, MockIB):
         """Calling operations without connecting should raise."""
         mock_ib = MockIB.return_value
@@ -478,35 +415,6 @@ class TestOrderOperations:
             client.place_order(MagicMock(), MagicMock())
 
     @patch("xenon.clients.ib_client.IB")
-    def test_place_bracket_order(self, MockIB):
-        mock_ib = MockIB.return_value
-        mock_ib.isConnected.return_value = True
-
-        parent = _make_trade(order_id=1, status="Submitted")
-        take_profit = _make_trade(order_id=2, status="PreSubmitted")
-        stop_loss = _make_trade(order_id=3, status="PreSubmitted")
-        mock_ib.bracketOrder.return_value = [parent.order, take_profit.order, stop_loss.order]
-        mock_ib.placeOrder.side_effect = [parent, take_profit, stop_loss]
-        mock_ib.managedAccounts.return_value = ["DU0000000"]
-
-        client = IBClient()
-        client.connect(client_id=2)
-
-        contract = MagicMock()
-        trades = client.place_bracket_order(
-            contract=contract,
-            action="BUY",
-            quantity=10,
-            limit_price=150.0,
-            take_profit_price=160.0,
-            stop_loss_price=145.0,
-            account="DU0000000",
-        )
-
-        assert mock_ib.bracketOrder.call_count == 1
-        assert mock_ib.placeOrder.call_count == 3
-
-    @patch("xenon.clients.ib_client.IB")
     def test_cancel_order(self, MockIB):
         mock_ib = MockIB.return_value
         mock_ib.isConnected.return_value = True
@@ -531,39 +439,6 @@ class TestOrderOperations:
 
         with pytest.raises(IBOrderError):
             client.cancel_order(MagicMock())
-
-    @patch("xenon.clients.ib_client.IB")
-    def test_modify_order(self, MockIB):
-        """Modify an existing order by changing price."""
-        mock_ib = MockIB.return_value
-        mock_ib.isConnected.return_value = True
-
-        trade = _make_trade(order_id=42, status="Submitted", lmt_price=150.0)
-        mock_ib.placeOrder.return_value = trade
-
-        client = IBClient()
-        client.connect(client_id=0)
-        result = client.modify_order(trade.contract, trade.order, lmt_price=155.0)
-
-        # The order's lmtPrice should be updated before placing
-        assert trade.order.lmtPrice == 155.0
-        mock_ib.placeOrder.assert_called_once_with(trade.contract, trade.order)
-
-    @patch("xenon.clients.ib_client.IB")
-    def test_modify_order_multiple_fields(self, MockIB):
-        """Modify order with multiple field changes."""
-        mock_ib = MockIB.return_value
-        mock_ib.isConnected.return_value = True
-
-        trade = _make_trade(order_id=42, status="Submitted", lmt_price=150.0, qty=10)
-        mock_ib.placeOrder.return_value = trade
-
-        client = IBClient()
-        client.connect(client_id=0)
-        result = client.modify_order(trade.contract, trade.order, lmt_price=155.0, total_quantity=20)
-
-        assert trade.order.lmtPrice == 155.0
-        assert trade.order.totalQuantity == 20
 
     @patch("xenon.clients.ib_client.IB")
     def test_get_open_orders(self, MockIB):
@@ -601,51 +476,6 @@ class TestOrderOperations:
 
         assert client.get_open_orders() == []
         mock_ib.reqAllOpenOrders.assert_called_once()
-
-    @patch("xenon.clients.ib_client.IB")
-    def test_get_order_status(self, MockIB):
-        mock_ib = MockIB.return_value
-        mock_ib.isConnected.return_value = True
-
-        trade = _make_trade(order_id=42, status="Filled", filled=10, avg_fill_price=150.5)
-        mock_ib.openTrades.return_value = [trade]
-        mock_ib.trades.return_value = [trade]
-
-        client = IBClient()
-        client.connect(client_id=0)
-        found_trade = client.get_order_status(order_id=42)
-
-        assert found_trade is not None
-        assert found_trade.orderStatus.status == "Filled"
-
-    @patch("xenon.clients.ib_client.IB")
-    def test_get_order_status_not_found(self, MockIB):
-        mock_ib = MockIB.return_value
-        mock_ib.isConnected.return_value = True
-        mock_ib.trades.return_value = []
-
-        client = IBClient()
-        client.connect(client_id=0)
-        result = client.get_order_status(order_id=999)
-
-        assert result is None
-
-    @patch("xenon.clients.ib_client.IB")
-    def test_get_order_status_by_perm_id(self, MockIB):
-        mock_ib = MockIB.return_value
-        mock_ib.isConnected.return_value = True
-
-        trade = _make_trade(order_id=42, status="Submitted")
-        trade.order.permId = 99999
-        mock_ib.trades.return_value = [trade]
-
-        client = IBClient()
-        client.connect(client_id=0)
-        found_trade = client.get_order_status(perm_id=99999)
-
-        assert found_trade is not None
-        assert found_trade.order.permId == 99999
-
 
 # ===========================================================================
 # MARKET DATA
@@ -724,21 +554,6 @@ class TestMarketData:
         chains = client.get_option_chain("ZZZZZ")
 
         assert chains == []
-
-    @patch("xenon.clients.ib_client.IB")
-    def test_get_option_price(self, MockIB):
-        mock_ib = MockIB.return_value
-        mock_ib.isConnected.return_value = True
-        mock_ib.qualifyContracts.return_value = [MagicMock()]
-
-        ticker = _make_ticker(bid=5.0, ask=5.50, last=5.25)
-        mock_ib.reqMktData.return_value = ticker
-
-        client = IBClient()
-        client.connect(client_id=1)
-        quote = client.get_option_price("AAPL", "20260417", 150.0, "C")
-
-        assert quote is not None
 
     @patch("xenon.clients.ib_client.IB")
     def test_qualify_contract(self, MockIB):
@@ -867,67 +682,6 @@ class TestExecutionOperations:
         mock_ib.fills.assert_called_once()
         assert len(fills) == 1
         assert fills[0].execution.shares == 10
-
-    @patch("xenon.clients.ib_client.IB")
-    def test_wait_for_fill_success(self, MockIB):
-        """wait_for_fill returns when trade is filled within timeout."""
-        mock_ib = MockIB.return_value
-        mock_ib.isConnected.return_value = True
-
-        trade = _make_trade(order_id=1, status="Submitted")
-
-        call_count = [0]
-
-        def sleep_side_effect(secs):
-            call_count[0] += 1
-            if call_count[0] >= 2:
-                trade.orderStatus.status = "Filled"
-                trade.orderStatus.filled = 10
-                trade.orderStatus.avgFillPrice = 150.5
-
-        mock_ib.sleep.side_effect = sleep_side_effect
-
-        client = IBClient()
-        client.connect(client_id=1)
-        result = client.wait_for_fill(trade, timeout=10)
-
-        assert result.orderStatus.status == "Filled"
-
-    @patch("xenon.clients.ib_client.IB")
-    def test_wait_for_fill_timeout(self, MockIB):
-        """wait_for_fill raises IBTimeoutError when trade doesn't fill."""
-        mock_ib = MockIB.return_value
-        mock_ib.isConnected.return_value = True
-        mock_ib.sleep.return_value = None
-
-        trade = _make_trade(order_id=1, status="Submitted")
-        # Trade never fills
-
-        client = IBClient()
-        client.connect(client_id=1)
-
-        with pytest.raises(IBTimeoutError):
-            client.wait_for_fill(trade, timeout=2)
-
-    @patch("xenon.clients.ib_client.IB")
-    def test_wait_for_fill_cancelled(self, MockIB):
-        """wait_for_fill raises IBOrderError when trade is cancelled."""
-        mock_ib = MockIB.return_value
-        mock_ib.isConnected.return_value = True
-
-        trade = _make_trade(order_id=1, status="Submitted")
-
-        def sleep_side_effect(secs):
-            trade.orderStatus.status = "Cancelled"
-
-        mock_ib.sleep.side_effect = sleep_side_effect
-
-        client = IBClient()
-        client.connect(client_id=1)
-
-        with pytest.raises(IBOrderError, match="[Cc]ancelled"):
-            client.wait_for_fill(trade, timeout=10)
-
 
 # ===========================================================================
 # FLEX QUERY
@@ -1229,35 +983,3 @@ class TestUtilities:
 
 class TestOpenTrades:
     """Test open trades retrieval."""
-
-    @patch("xenon.clients.ib_client.IB")
-    def test_get_open_trades(self, MockIB):
-        mock_ib = MockIB.return_value
-        mock_ib.isConnected.return_value = True
-        mock_ib.openTrades.return_value = [
-            _make_trade(order_id=1, status="Submitted"),
-        ]
-
-        client = IBClient()
-        client.connect(client_id=0)
-        trades = client.get_open_trades()
-
-        mock_ib.openTrades.assert_called_once()
-        assert len(trades) == 1
-
-    @patch("xenon.clients.ib_client.IB")
-    def test_get_trades(self, MockIB):
-        """Get all trades (open + completed) for the session."""
-        mock_ib = MockIB.return_value
-        mock_ib.isConnected.return_value = True
-        mock_ib.trades.return_value = [
-            _make_trade(order_id=1, status="Filled"),
-            _make_trade(order_id=2, status="Submitted"),
-        ]
-
-        client = IBClient()
-        client.connect(client_id=0)
-        trades = client.get_trades()
-
-        mock_ib.trades.assert_called_once()
-        assert len(trades) == 2

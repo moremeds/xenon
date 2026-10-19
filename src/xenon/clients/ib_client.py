@@ -26,10 +26,10 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 from dotenv import load_dotenv
-from ib_async import IB, FlexReport, Option
+from ib_async import IB, FlexReport
 
 from xenon.api.trading_mode import EXPECTED_PORT as _EXPECTED_PORT
 from xenon.utils.ib_connection import assert_broker_endpoint_allowed
@@ -368,17 +368,6 @@ class IBClient:
         else:
             self.logger.debug("disconnect() called but already disconnected")
 
-    def reconnect(self) -> None:
-        """Disconnect and reconnect using the last connection parameters."""
-        self.logger.info("Reconnecting to IB (%s:%s)", self._last_host, self._last_port)
-        self.disconnect()
-        self.connect(
-            host=self._last_host,
-            port=self._last_port,
-            client_id=self._last_client_id,
-            timeout=self._last_timeout,
-        )
-
     def is_connected(self) -> bool:
         """Return ``True`` if connected to IB."""
         return self._ib.isConnected()
@@ -540,27 +529,12 @@ class IBClient:
 
     # -- subscription management --------------------------------------------
 
-    def clear_subscriptions(self) -> None:
-        """Clear all tracked subscriptions."""
-        self._subscriptions.clear()
-        self.logger.debug("Cleared all tracked subscriptions")
-
     # -- portfolio operations -----------------------------------------------
 
     def get_positions(self) -> list:
         """Return current positions (``ib.positions()``)."""
         self._require_connection()
         return self._ib.positions()
-
-    def get_portfolio(self, account: str = "") -> list:
-        """Return portfolio items (``ib.portfolio()``)."""
-        self._require_connection()
-        return self._ib.portfolio(account)
-
-    def get_account_summary(self, group: str = "", tags: Optional[List[str]] = None) -> list:
-        """Return account summary values."""
-        self._require_connection()
-        return self._ib.accountSummary(account=group)
 
     def get_pnl(self, account: str = "") -> Any:
         """Request P&L for account. Returns PnL with dailyPnL, unrealizedPnL, realizedPnL."""
@@ -573,19 +547,6 @@ class IBClient:
         """Cancel P&L subscription."""
         if pnl_obj:
             self._ib.cancelPnL(pnl_obj)
-
-    def get_pnl_single(self, account: str, con_id: int) -> Any:
-        """Request per-position P&L via reqPnLSingle.
-
-        Returns a PnLSingle with dailyPnL, unrealizedPnL, realizedPnL,
-        value, and position. IB correctly handles intraday additions
-        (e.g., buying more contracts today) — the dailyPnL reflects
-        overnight-held contracts' mark-to-close plus intraday fills.
-        """
-        self._require_connection()
-        pnl = self._ib.reqPnLSingle(account, "", con_id)
-        self._ib.sleep(0.5)  # brief sleep; batch callers will poll separately
-        return pnl
 
     def cancel_pnl_single(self, account: str, con_id: int) -> None:
         """Cancel per-position P&L subscription."""
@@ -647,54 +608,6 @@ class IBClient:
         except Exception as exc:
             raise IBOrderError(f"Failed to place order: {exc}") from exc
 
-    def place_bracket_order(
-        self,
-        contract: Any,
-        action: str,
-        quantity: float,
-        limit_price: float,
-        take_profit_price: float,
-        stop_loss_price: float,
-        *,
-        account: str,
-    ) -> list:
-        """Place a bracket order (parent + take-profit + stop-loss) on ``account``.
-
-        ``account`` must be managed by this login (see ``place_order``); every
-        leg carries it. ``bracketOrder`` pre-assigns order ids, so the check
-        cannot rely on ``place_order``'s new-order detection.
-
-        Returns:
-            List of ``Trade`` objects ``[parent, take_profit, stop_loss]``.
-        """
-        self._require_connection()
-        acct = self._require_managed_account(account)
-        try:
-            bracket = self._ib.bracketOrder(
-                action,
-                quantity,
-                limit_price,
-                take_profit_price,
-                stop_loss_price,
-            )
-            trades = []
-            for order in bracket:
-                order.account = acct
-                trade = self._ib.placeOrder(contract, order)
-                trades.append(trade)
-            self.logger.info(
-                "Placed bracket order: %s %s %s limit=%.2f TP=%.2f SL=%.2f",
-                action,
-                quantity,
-                contract.symbol if hasattr(contract, "symbol") else contract,
-                limit_price,
-                take_profit_price,
-                stop_loss_price,
-            )
-            return trades
-        except Exception as exc:
-            raise IBOrderError(f"Failed to place bracket order: {exc}") from exc
-
     def cancel_order(self, order: Any) -> Any:
         """Cancel an open order.
 
@@ -712,37 +625,6 @@ class IBClient:
         except Exception as exc:
             raise IBOrderError(f"Failed to cancel order: {exc}") from exc
 
-    def modify_order(self, contract: Any, order: Any, **kwargs: Any) -> Any:
-        """Modify an existing order by updating fields and re-submitting.
-
-        Supported kwargs: ``lmt_price``, ``total_quantity``, ``aux_price``, ``tif``.
-
-        Raises:
-            IBOrderError: If the modification fails.
-        """
-        self._require_connection()
-
-        # Apply modifications
-        if "lmt_price" in kwargs:
-            order.lmtPrice = kwargs["lmt_price"]
-        if "total_quantity" in kwargs:
-            order.totalQuantity = kwargs["total_quantity"]
-        if "aux_price" in kwargs:
-            order.auxPrice = kwargs["aux_price"]
-        if "tif" in kwargs:
-            order.tif = kwargs["tif"]
-
-        try:
-            trade = self._ib.placeOrder(contract, order)
-            self.logger.info(
-                "Modified order: orderId=%s new fields=%s",
-                getattr(order, "orderId", "?"),
-                kwargs,
-            )
-            return trade
-        except Exception as exc:
-            raise IBOrderError(f"Failed to modify order: {exc}") from exc
-
     def get_open_orders(self) -> list:
         """Return all open orders across all clients.
 
@@ -756,47 +638,6 @@ class IBClient:
         """
         self._require_connection()
         return list(self._ib.reqAllOpenOrders() or [])
-
-    def get_open_trades(self) -> list:
-        """Return this session's open trades from the client-side cache.
-
-        Only reliable for orders this client placed itself. For "is this
-        order open at the broker" use :meth:`get_open_orders`.
-        """
-        self._require_connection()
-        return self._ib.openTrades()
-
-    def get_trades(self) -> list:
-        """Return all trades (open + completed) for this session."""
-        self._require_connection()
-        return self._ib.trades()
-
-    def get_order_status(
-        self,
-        order_id: Optional[int] = None,
-        perm_id: Optional[int] = None,
-    ) -> Optional[Any]:
-        """Look up a trade by order ID or permanent ID.
-
-        Returns:
-            The matching ``Trade`` or ``None`` if not found.
-        """
-        self._require_connection()
-        trades = self._ib.trades()
-
-        # Prefer perm_id (globally unique)
-        if perm_id is not None:
-            for trade in trades:
-                if trade.order.permId == perm_id:
-                    return trade
-
-        # Fallback to order_id
-        if order_id is not None:
-            for trade in trades:
-                if trade.order.orderId == order_id:
-                    return trade
-
-        return None
 
     # -- market data --------------------------------------------------------
 
@@ -840,35 +681,6 @@ class IBClient:
         self._require_connection()
         # IB needs underlying conId — qualify first if needed
         return self._ib.reqSecDefOptParams(symbol, exchange, sec_type, 0)
-
-    def get_option_price(
-        self,
-        symbol: str,
-        expiry: str,
-        strike: float,
-        right: str,
-        exchange: str = "SMART",
-        currency: str = "USD",
-    ) -> Any:
-        """Get a quote for a specific option contract.
-
-        Creates, qualifies, and requests market data for the option.
-        """
-        self._require_connection()
-        contract = Option(
-            symbol=symbol,
-            lastTradeDateOrContractMonth=expiry,
-            strike=strike,
-            right=right,
-            exchange=exchange,
-            currency=currency,
-        )
-        qualified = self._ib.qualifyContracts(contract)
-        if not qualified:
-            raise IBContractError(f"Could not qualify option: {symbol} {expiry} ${strike} {right}")
-        ticker = self._ib.reqMktData(qualified[0], "", False, False)
-        self._ib.sleep(2)
-        return ticker
 
     def qualify_contract(self, contract: Any) -> Any:
         """Qualify a single contract, filling in IB-assigned fields.
@@ -917,50 +729,6 @@ class IBClient:
         """Return recent fills for this session."""
         self._require_connection()
         return self._ib.fills()
-
-    def wait_for_fill(self, trade: Any, timeout: int = 60, poll_interval: float = 1.0) -> Any:
-        """Wait for a trade to fill, polling at ``poll_interval``.
-
-        Args:
-            trade: The ``Trade`` object to monitor.
-            timeout: Maximum seconds to wait.
-            poll_interval: Seconds between status checks.
-
-        Returns:
-            The ``Trade`` object once filled.
-
-        Raises:
-            IBTimeoutError: If the trade does not fill within *timeout*.
-            IBOrderError: If the trade is cancelled or enters an error state.
-        """
-        self._require_connection()
-        elapsed = 0.0
-        while elapsed < timeout:
-            self._ib.sleep(poll_interval)
-            elapsed += poll_interval
-
-            status = trade.orderStatus.status
-            if status == "Filled":
-                self.logger.info(
-                    "Order filled: orderId=%s avg=%.2f qty=%s",
-                    trade.order.orderId,
-                    trade.orderStatus.avgFillPrice,
-                    trade.orderStatus.filled,
-                )
-                return trade
-
-            if status in ("Cancelled", "ApiCancelled"):
-                raise IBOrderError(f"Order cancelled (orderId={trade.order.orderId}): {status}")
-
-            if status == "Inactive":
-                self.logger.warning(
-                    "Order inactive: orderId=%s — may be rejected",
-                    trade.order.orderId,
-                )
-
-        raise IBTimeoutError(
-            f"Order not filled within {timeout}s (orderId={trade.order.orderId}, status={trade.orderStatus.status})"
-        )
 
     # -- historical data ----------------------------------------------------
 
