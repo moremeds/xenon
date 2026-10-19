@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.xenon.nav-flex-refresh.plist: daily IB Flex NAV refresh, run FROM THE
+  DEPLOYED api IMAGE (no git checkout on the Mac mini).
+
+  What runs:   docker-compose -f /opt/xenon/compose.yml run (one-off, removed on exit) api xenon-nav-flex-refresh
+  Schedule:    every day 17:30 ET (one hour after the close).
+  TZ:          launchd StartCalendarInterval fires in the SYSTEM time zone, and
+               the TZ environment variable does not change that. The Mac mini
+               system zone is Asia/Hong_Kong (HKT, no DST). Do NOT change the
+               host zone: other stacks share the host. ET has DST, HKT does not,
+               so 17:30 ET is 05:30 HKT while ET is on EDT (summer) and 06:30
+               HKT while ET is on EST (winter). The job therefore fires at BOTH
+               05:30 and 06:30 HKT (two calendar dicts below). The sh wrapper
+               runs the job only when the New York hour is 17 and exits 0
+               otherwise, so exactly one of the two firings does the work.
+               If the Mac is asleep and launchd runs a missed firing late, the
+               guard may skip it. The next day's run covers it (the Flex query
+               is a rolling window).
+  Lock:        (1) launchd never starts a second instance of a running label.
+               (2) the fixed container name in ProgramArguments (xenon-job-nav-flex-refresh)
+               makes Docker refuse a second run while one is active (name conflict).
+               (3) before each run the job removes a NOT RUNNING container of that
+               name (docker rm without the force flag; it cannot remove a running
+               one). So a container left in the created or exited state by a
+               failed start cannot block every later run. A running job is never
+               touched.
+  Creds:       none in this file. The api service env_file (/opt/xenon/.env,
+               /opt/xenon/web.env) supplies DATABASE_URL, IB_FLEX_TOKEN,
+               IB_FLEX_NAV_QUERY_ID, XENON_TRADING_MODE (must be "live"),
+               XENON_LIVE_ACCOUNT.
+  Volumes:     the api service mounts: /opt/xenon/.env -> /app/.env (read-only)
+               and /opt/xenon/data -> /app/data. The CLI writes to Postgres only.
+  Image:       the api image the stack runs now (Watchtower keeps :latest
+               current), so the job and the api never drift apart.
+  Watchtower:  the label override stops Watchtower from recreating this
+               one-off container if a new image lands mid-run.
+  Logs:        /var/log/xenon/nav-flex-refresh.stdout.log and .stderr.log
+               (the CLI logs to stderr). The directory must exist and be
+               writable by the LaunchAgent user:
+                 sudo mkdir -p /var/log/xenon && sudo chown $(whoami) /var/log/xenon
+
+  Install (Mac mini, as the user that runs the docker stack):
+    cp deploy/jobs/com.xenon.nav-flex-refresh.plist ~/Library/LaunchAgents/
+    plutil -lint ~/Library/LaunchAgents/com.xenon.nav-flex-refresh.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.xenon.nav-flex-refresh.plist
+    launchctl print gui/$(id -u)/com.xenon.nav-flex-refresh | grep -A5 calendar
+  Test now:  launchctl kickstart gui/$(id -u)/com.xenon.nav-flex-refresh
+             ONLY exercises the schedule path. Outside 17:00-17:59 New York time the
+             ET-hour guard exits 0 BEFORE Docker starts, so nothing happens and
+             the exit code is still 0. Do not read that as proof the job works.
+  Manual unguarded run (REAL WRITES): take the third ProgramArguments string
+             below, delete everything up to and including the first "exit 0; "
+             (the guard), then run the rest from /opt/xenon. The exact command is
+             in deploy/jobs/crontab.example (section "Manual runs") and in the PR
+             notes. It calls the live IB Flex web service with the live token and
+             UPSERTs xenon.nav_history rows (source close) and ib_cash_flow rows
+             into the database named by the container environment. Read the
+             container settings first (checklist in the PR notes). Evidence the
+             CLI really ran: a log line "xenon-nav-flex-refresh: mode=live
+             account=..." and "fetched N NAV rows", exit code 0, NO line
+             "PG persist failed", and a read-only psql check that the nav_history
+             rows for the scope are fresh. The CLI prints "fetched N NAV rows"
+             even when the database write failed, so the psql check is required.
+  Uninstall: launchctl bootout gui/$(id -u)/com.xenon.nav-flex-refresh
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.xenon.nav-flex-refresh</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>[ "$(TZ=America/New_York date +%H)" = 17 ] || exit 0; docker rm xenon-job-nav-flex-refresh >/dev/null 2>&amp;1; exec /opt/homebrew/bin/docker-compose -f /opt/xenon/compose.yml run --rm -T --no-deps --name xenon-job-nav-flex-refresh --label com.centurylinklabs.watchtower.enable=false api xenon-nav-flex-refresh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/opt/xenon</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <!-- System zone is HKT: 05:30 HKT = 17:30 EDT, 06:30 HKT = 17:30 EST.
+       The sh guard in ProgramArguments picks the one that matches. -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Hour</key>
+      <integer>5</integer>
+      <key>Minute</key>
+      <integer>30</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>6</integer>
+      <key>Minute</key>
+      <integer>30</integer>
+    </dict>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>/var/log/xenon/nav-flex-refresh.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/var/log/xenon/nav-flex-refresh.stderr.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

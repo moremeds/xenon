@@ -1,3 +1,7 @@
+# LOCAL / DEV BUILD COMPOSE. Builds images from this checkout (docker/*.Dockerfile)
+# for local smoke tests. Production does NOT use this file. The deploy truth for
+# the Mac mini is deploy/compose.prod.yml (GHCR images + Watchtower).
+#
 # Phase 1 Stage A — single compose file for both this Mac (dev workspace)
 # and the remote Mac mini (when Stage B lands). Postgres lives outside
 # compose. IB Gateway also lives outside compose (Java GUI, not
