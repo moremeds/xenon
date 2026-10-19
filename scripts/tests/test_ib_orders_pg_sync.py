@@ -201,7 +201,7 @@ def test_sync_counts_updates_and_skips_separately():
 
 
 # ---------------------------------------------------------------------------
-# Incident #32 — a cancelled order must not come back from ib_async's
+# Incident #35 — a cancelled order must not come back from ib_async's
 # stale openTrades() cache on a long-lived connection.
 # ---------------------------------------------------------------------------
 

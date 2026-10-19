@@ -131,6 +131,7 @@ def test_mark_submitted_stamps_ib_order_id(db_path):
         ib_order_id="5001",
         perm_id="9901",
         placing_client_id=26,
+        expected_states=("PENDING",),
     )
     row = lookup_by_attempt("local", "cid-S")
     assert row.ib_order_id == "5001"
@@ -148,6 +149,7 @@ def test_mark_terminal_sets_reason_code(db_path):
         reason_code="IB_REJECT_201",
         filled_qty=0,
         avg_fill_price=None,
+        expected_states=("PENDING",),
     )
     row = lookup_by_attempt("local", "cid-T")
     assert row.state == "REJECTED"
@@ -182,6 +184,7 @@ def test_working_reservations_sums_active_sell_rows(db_path):
         ib_order_id="6001",
         perm_id="8001",
         placing_client_id=26,
+        expected_states=("PENDING",),
     )
     r3 = reserve_attempt("local", "cid-W3", _req(quantity=77))
     mark_terminal(
@@ -190,6 +193,7 @@ def test_working_reservations_sums_active_sell_rows(db_path):
         reason_code=None,
         filled_qty=0,
         avg_fill_price=None,
+        expected_states=("PENDING",),
     )
     res = working_reservations_for("local", "SPY")
     assert res.stock_sell_qty == 150

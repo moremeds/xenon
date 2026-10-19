@@ -48,7 +48,7 @@ Two DBs on the macmini Postgres: `core_dev` (prod, written exclusively by the ma
 
 ### Writer CLIs respect `XENON_READ_ONLY=1`
 
-`ib_sync._save_portfolio_to_postgres` and `_append_nav_snapshot` no-op when `XENON_READ_ONLY=1` is set (exported by `dev.sh live` for debugging-against-live-IB sessions). Naked-short audit, fills replay, and similar writer CLIs called from the FastAPI lifespan are skipped at boot under the same flag. New persistence code in this package must check the flag — see `src/xenon/api/CLAUDE.md` § Read-Only Mode for the full surface map.
+`ib_sync._save_portfolio_to_postgres` and `_append_nav_snapshot` no-op when `XENON_READ_ONLY=1` is set (exported by `dev.sh live` for debugging-against-live-IB sessions). Fills replay and similar writer CLIs called from the FastAPI lifespan are skipped at boot under the same flag. The naked-short audit is not a boot step: it runs inside every `ib_sync --sync` pass, still evaluates under the flag (it reads no Postgres), and only its `service_health` write no-ops. New persistence code in this package must check the flag — see `src/xenon/api/CLAUDE.md` § Read-Only Mode for the full surface map.
 
 ### Broker Account Scope
 
@@ -103,12 +103,12 @@ Key rules:
 
 1. **UI pre-submission** — `checkNakedShortRisk()` in `OrderTab.tsx` blocks form submission
 2. **API gate** — `orders/place/route.ts` returns 403 if guard fails
-3. **Post-sync audit** — `naked_short_audit.py` runs after every `ib_sync`, cancels violating open orders
+3. **Post-sync audit (shadow, observes only)** — `naked_short_audit.py` runs in-process after every `ib_sync --sync` over that pass's positions + scoped live open orders (via `coverage`); logs violations + `record_service_health("naked_short_audit")`, cancels nothing. Enforcement is a separate opt-in step (`XENON_AUDIT_CANCEL`, not shipped). `violations` lists every contributing order, not a cancel set. The audit records `skipped` (no violations) for the whole pass when: the scope account is blank, whitespace, `legacy_unknown` or `unknown`; the pass observation is missing, not `complete is True` (any failed IB read or accountless order/position; the Postgres persist step does not count), names another account, or has an `as_of` that is unparseable, > 60 s in the future or older than 15 min; or a live BAG's legs could not be resolved from `comboLegs`, or a live order has no usable symbol. It skips one symbol (all its orders) when a live order on it has no account, a non-integer or < 1 quantity, an unsupported secType, or fields `coverage` cannot classify (envelope, quantity bounds, leg action / secType / option tradingClass, multiplier, underlying type) unless every effective leg is a BUY; or when a holding on it has no account or unknown metadata. Foreign-account orders and IB-terminal statuses (Cancelled, ApiCancelled, Filled, Inactive) are ignored
 
 **Combo check design**: IB BAG orders always use `action=BUY` envelope. Guard inspects leg-level `right` and `action` fields. `sellCallRatio - buyCallRatio` = uncovered short calls. Checked before the BUY early-return.
 
-**Implementation**: `web/lib/nakedShortGuard.ts` (shared guard), `src/xenon/execution/naked_short_audit.py` (audit + cancel)
-**Tests**: `web/tests/naked-short-guard.test.ts`, `scripts/tests/test_naked_short_audit.py`
+**Implementation**: `web/lib/nakedShortGuard.ts` (shared guard), `src/xenon/execution/naked_short_audit.py` (shadow audit, no cancel path)
+**Tests**: `web/tests/naked-short-guard.test.ts`, `scripts/tests/test_naked_short_audit.py`, `scripts/tests/test_ib_sync_audit_shadow.py`
 
 ## Order Execution Modules
 
@@ -117,7 +117,7 @@ Key rules:
 - `ib_place_order.py`, `ib_order_manage.py` (cancel/modify via subprocess; see `api/CLAUDE.md`)
 - `orders_store.py` — Postgres-backed public facade for `order_submissions` and `order_events`; preserve its function signatures
 - `single_leg_rehydrate.py` — three-source reconcile (orders DB, IB open orders, position monitor). Invoked in FastAPI lifespan on boot; exposed for testing via `POST /dev/rehydrate/synthetic`.
-- `naked_short_audit.py` — post-sync enforcement
+- `naked_short_audit.py` — post-sync audit (shadow mode: log + service_health, no cancels)
 - `quote_guard.py`, `contract_normalize.py`, `preflight.py` — order-path safety layers
 - `combo_wizard/` — combo order entry flow (plan/submit/reprice/abort/protect)
 - `futu_sync.py` — read-only Futu positions sync
@@ -155,7 +155,7 @@ Postgres is primary for portfolio, orders, NAV, trades, UW stats, and journal en
 | `xenon-ib-reconcile`      | Reconcile IB vs Postgres orders + fills                               |
 | `xenon-ib-execute`        | Direct execution helper                                               |
 | `xenon-futu-sync`         | Pull read-only positions from local Futu OpenD                        |
-| `xenon-naked-short-audit` | Post-sync cancellation of any uncovered short positions               |
+| `xenon-naked-short-audit` | Offline shadow audit over a saved payload + orders file; never cancels |
 | `xenon-blotter`           | Today's fills + P&L                                                   |
 | `xenon-blotter-history`   | Historical trades (Flex Query)                                        |
 | `xenon-portfolio-report`  | HTML portfolio report                                                 |

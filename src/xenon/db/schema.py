@@ -612,6 +612,9 @@ order_submissions = Table(
         "account_env IN ('paper', 'live', 'sim', 'legacy_unknown')",
         name="ck_order_sub_account_env",
     ),
+    # ck_order_sub_state (state IN orders_store.ORDER_STATES) lives in
+    # migration 2026_10_18_order_state_check; it is not declared here
+    # because schema.py cannot import orders_store (import cycle).
     # EXPAND state (lead decision, spec expand/contract): the legacy
     # identity-scoped key stays so the previous release's writer keeps
     # working; the account-scoped key runs alongside and dedupes the same

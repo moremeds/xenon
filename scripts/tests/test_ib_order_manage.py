@@ -15,6 +15,7 @@ from xenon.execution.ib_order_manage import find_trade, cancel_order, modify_ord
 
 # ─── Helpers ────────────────────────────────────────────
 
+
 def make_trade(order_id=10, perm_id=12345, status="Submitted", order_type="LMT", lmt_price=22.50):
     trade = MagicMock()
     trade.order.orderId = order_id
@@ -41,6 +42,7 @@ def make_client(trades=None):
 
 # ─── find_trade ─────────────────────────────────────────
 
+
 class TestFindTrade:
     def test_find_by_perm_id(self):
         t = make_trade(order_id=10, perm_id=999)
@@ -64,6 +66,7 @@ class TestFindTrade:
 
 
 # ─── cancel_order ───────────────────────────────────────
+
 
 class TestCancelOrder:
     def test_cancel_success(self):
@@ -143,9 +146,11 @@ class TestCancelOrder:
 
         client = make_client([t])
         client.ib.client.clientId = 0
+
         # cancel_order is called but status stays PendingCancel
         def side_effect(order):
             t.orderStatus.status = "PendingCancel"
+
         client.cancel_order = MagicMock(side_effect=side_effect)
 
         with pytest.raises(SystemExit) as exc:
@@ -177,6 +182,7 @@ class TestCancelOrder:
 
 # ─── modify_order ───────────────────────────────────────
 
+
 class TestModifyOrder:
     def test_modify_success(self):
         t = make_trade(status="Submitted", order_type="LMT", lmt_price=20.00)
@@ -190,6 +196,25 @@ class TestModifyOrder:
         assert exc.value.code == 0
         assert t.order.lmtPrice == 22.50
         client.place_order.assert_called_once_with(t.contract, t.order)
+
+    def test_modify_reports_broker_confirmed_price_not_request(self, capsys):
+        """PR-08: request 1.9005 confirms against broker 1.9000 (<0.001
+        tolerance); the reply carries the broker's values."""
+        t = make_trade(status="Submitted", order_type="LMT", lmt_price=1.80)
+        t.order.totalQuantity = 3
+        confirmed = make_trade(status="Submitted", order_type="LMT", lmt_price=1.9000)
+        confirmed.order.totalQuantity = 3
+        client = make_client()
+        client.get_open_orders.side_effect = [[t], [confirmed]]
+        client.place_order = MagicMock()
+
+        with pytest.raises(SystemExit) as exc:
+            modify_order(client, 10, 12345, 1.9005, "127.0.0.1", 4001)
+        assert exc.value.code == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["confirmedPrice"] == 1.9
+        assert data["newPrice"] == 1.9
+        assert data["confirmedQuantity"] == 3
 
     def test_modify_non_lmt_fails(self):
         t = make_trade(status="Submitted", order_type="MKT")
@@ -315,6 +340,7 @@ class TestModifyOrder:
     def test_modify_bag_order_sets_non_guaranteed(self):
         """Modifying a BAG/combo order must set NonGuaranteed to prevent IB rejection."""
         from ib_async import TagValue
+
         t = make_trade(status="Submitted", order_type="LMT", lmt_price=20.00)
         t.contract.secType = "BAG"
         t.order.smartComboRoutingParams = None  # IB snapshot may strip this
@@ -346,6 +372,7 @@ class TestModifyOrder:
 
 
 # ─── output ─────────────────────────────────────────────
+
 
 class TestOutput:
     def test_output_ok(self, capsys):

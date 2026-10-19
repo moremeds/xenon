@@ -9,6 +9,7 @@ Spec: docs/superpowers/specs/2026-04-20-single-leg-hardening-design.md §12.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from dataclasses import dataclass
@@ -24,6 +25,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from xenon.db.engine import get_sync_engine
 from xenon.db.events import CHANNEL_FILL_COMMISSION_UPDATED, CHANNEL_FILL_RECORDED, emit_outbox_in_txn
 from xenon.db.schema import order_events, order_fills, order_submissions, regime_overrides
+
+logger = logging.getLogger(__name__)
 
 # ── Read-only choke point ──
 
@@ -92,9 +95,51 @@ class ReservationOutcome:
     reason_code: str | None
 
 
+# Single source for every order_submissions.state value (DATA-2 / OP-9).
+# Migration 2026_10_18_order_state_check freezes the same list in the DB
+# CHECK ck_order_sub_state; a test pins the two equal. Adding a state means
+# a new migration first.
+ORDER_STATES: tuple[str, ...] = (
+    "PENDING",
+    "WORKING",
+    "PARTIALLY_FILLED",
+    "FILLED",
+    "CANCELLED",
+    "REJECTED",
+    "FAILED",
+    "UNKNOWN",
+)
 _TERMINAL_STATES = {"REJECTED", "CANCELLED", "FAILED"}
+# States a cancel / terminal transition may leave: not FILLED, not terminal.
+NON_TERMINAL_STATES: tuple[str, ...] = ("PENDING", "WORKING", "PARTIALLY_FILLED", "UNKNOWN")
+
+
+def _log_noop(writer: str, submission_id: str, to_state: str, expected_states) -> None:
+    logger.info(
+        "orders_store.%s: %s -> %s skipped; row not in expected states %s",
+        writer,
+        submission_id,
+        to_state,
+        tuple(expected_states),
+    )
 
 ATTEMPT_BODY_MISMATCH = "ATTEMPT_BODY_MISMATCH"
+
+# IB ``orderRef`` on every Xenon-placed order: "xo:<submission_id>". The
+# leg wizard keeps its own "leg_wizard:" prefix (naked_short_audit).
+XO_REF_PREFIX = "xo:"
+
+
+def order_ref_for(submission_id: str) -> str:
+    return f"{XO_REF_PREFIX}{submission_id}"
+
+
+def submission_id_from_order_ref(ref: object) -> str | None:
+    """The submission_id a Xenon orderRef names, else None (wizard,
+    TWS-typed, or empty refs)."""
+    if isinstance(ref, str) and ref.startswith(XO_REF_PREFIX) and len(ref) > len(XO_REF_PREFIX):
+        return ref[len(XO_REF_PREFIX) :]
+    return None
 
 # Sentinel for optional JSONB write-through params (register_from_snapshot):
 # "not provided" must not overwrite a stored value the caller never computed.
@@ -307,6 +352,8 @@ def _mirror_uuid_row(
     observed_at,
     fresh: bool,
     now: datetime,
+    existing_price: float | None = None,
+    observed_price: float | None = None,
 ) -> dict:
     """Mirror one observation onto a Xenon-authored (UUID) row.
 
@@ -320,7 +367,12 @@ def _mirror_uuid_row(
       durable one (TWS-side edit). Coverage reserves max(durable, observed)
       so the pass persists conservative demand instead of skipping it. A
       stale read can only raise it;
-    - pending-amend confirmation / expiry (fresh reads only).
+    - pending-amend confirmation / expiry (fresh reads only);
+    - the broker's limit price (fresh reads only, PR-08). A fresh read
+      began after the row's last local write, so it can never undo a newer
+      modify settlement; it repairs the price when the mirror confirmed a
+      price+qty amend before the route's settlement (which then finds the
+      token cleared and writes nothing). 0.0 means "no price observed".
 
     A terminal row the broker still reports open is resurrected only by a
     fresh read (a read that began before the cancel proves nothing). The
@@ -340,6 +392,10 @@ def _mirror_uuid_row(
         values.update(state="WORKING", reason_code=None)
     if outcome == "confirmed":
         values["quantity"] = observed_qty
+    if fresh and observed_price not in (None, 0.0):
+        new_price = round(float(observed_price), 4)
+        if existing_price is None or round(float(existing_price), 4) != new_price:
+            values["limit_price"] = Decimal(str(new_price))
     durable = values.get("quantity", existing_quantity)
     prev_obs = payload.get("observed_qty")
     if fresh:
@@ -354,11 +410,16 @@ def _mirror_uuid_row(
 
     if payload == stored and not values:
         return {"action": "SKIPPED_UUID", "drift": None}
-    conn.execute(
+    # Expected state = the state read in this transaction: a concurrent
+    # transition (cancel, fill) since the read makes this a no-op.
+    written = conn.execute(
         update(order_submissions)
-        .where(order_submissions.c.submission_id == submission_id)
+        .where(order_submissions.c.submission_id == submission_id, order_submissions.c.state == existing_state)
         .values(legs=payload, updated_at=monotone_updated_at(now), **values)
     )
+    if not written.rowcount:
+        _log_noop("register_from_snapshot", submission_id, values.get("state", existing_state), (existing_state,))
+        return {"action": "NOOP", "drift": None}
     if terminal:
         kind = "IB_MIRROR_RESURRECT"
         detail = {"from_state": existing_state, "to_state": "WORKING", "reason": "ib_still_reports_open"}
@@ -366,6 +427,8 @@ def _mirror_uuid_row(
         kind = {"confirmed": "AMEND_RECONCILED", "expired": "AMEND_EXPIRED"}.get(outcome, "IB_MIRROR_OBSERVED")
         detail = {}
     detail.update(quantity=observed_qty, observed_qty=payload.get("observed_qty"))
+    if "limit_price" in values:
+        detail["limit_price"] = {"from": existing_price, "to": float(values["limit_price"])}
     conn.execute(insert(order_events).values(submission_id=submission_id, kind=kind, detail=detail, at=now))
     if terminal:
         return {"action": "RESURRECTED", "drift": None}
@@ -810,6 +873,8 @@ def register_from_snapshot(
                     observed_at=observed_at,
                     fresh=fresh,
                     now=now,
+                    existing_price=existing_limit_price,
+                    observed_price=float(limit_price) if limit_price is not None else None,
                 )
 
             # IB still reports this order as open while we have it in a
@@ -829,11 +894,17 @@ def register_from_snapshot(
                 )
                 if legs is not _UNSET:
                     resurrect_values["legs"] = merge_observed_legs(existing_legs, legs)
-                conn.execute(
+                written = conn.execute(
                     update(order_submissions)
-                    .where(order_submissions.c.submission_id == existing_submission_id)
+                    .where(
+                        order_submissions.c.submission_id == existing_submission_id,
+                        order_submissions.c.state == existing_state,
+                    )
                     .values(**resurrect_values)
                 )
+                if not written.rowcount:
+                    _log_noop("register_from_snapshot", existing_submission_id, "WORKING", (existing_state,))
+                    return {"action": "NOOP", "drift": None}
                 conn.execute(
                     insert(order_events).values(
                         submission_id=existing_submission_id,
@@ -1010,7 +1081,12 @@ def mark_submitted(
     ib_order_id: str,
     perm_id: str | None,
     placing_client_id: int | None,
-) -> None:
+    expected_states: tuple[str, ...],
+) -> int:
+    """Stamp IB ids and move the row to WORKING, only from one of
+    ``expected_states`` (required: the place path passes PENDING, orderRef
+    recovery UNKNOWN / PENDING). A row in any other state is left as is,
+    logged, and 0 is returned. Returns the affected rowcount."""
     ensure_writable()
 
     def _int_or_none(value: str | None) -> int | None:
@@ -1028,18 +1104,24 @@ def mark_submitted(
     perm_id_int = _int_or_none(perm_id)
     ib_order_id_int = _int_or_none(ib_order_id)
     engine = get_sync_engine()
+    stmt = update(order_submissions).where(
+        order_submissions.c.submission_id == submission_id,
+        order_submissions.c.state.in_(expected_states),
+    )
     with engine.begin() as conn:
-        conn.execute(
-            update(order_submissions)
-            .where(order_submissions.c.submission_id == submission_id)
-            .values(
+        result = conn.execute(
+            stmt.values(
                 ib_order_id=str(ib_order_id),
                 perm_id=str(perm_id) if perm_id is not None else None,
                 placing_client_id=placing_client_id,
                 state="WORKING",
+                reason_code=None,
                 updated_at=monotone_updated_at(now),
             )
         )
+        if not result.rowcount:
+            _log_noop("mark_submitted", submission_id, "WORKING", expected_states)
+            return 0
         conn.execute(
             update(regime_overrides)
             .where(regime_overrides.c.submission_id == submission_id)
@@ -1048,6 +1130,45 @@ def mark_submitted(
                 ib_order_id=ib_order_id_int,
             )
         )
+    return result.rowcount
+
+
+def mark_place_unknown(
+    *,
+    submission_id: str,
+    ib_order_id: str | None,
+    perm_id: str | None,
+    placing_client_id: int | None,
+    reason_code: str,
+    expected_states: tuple[str, ...],
+) -> int:
+    """PENDING → UNKNOWN for a place whose outcome the route cannot prove,
+    stamping any IB ids the CLI returned. One conditional UPDATE: a row the
+    activity poller already bound (WORKING) or finished (FILLED / ...) from
+    broker evidence is never demoted, and fills are never touched. Returns
+    the affected rowcount."""
+    ensure_writable()
+    values: dict = dict(state="UNKNOWN", reason_code=reason_code)
+    if ib_order_id:
+        values["ib_order_id"] = str(ib_order_id)
+    if perm_id and str(perm_id) not in ("", "0"):
+        values["perm_id"] = str(perm_id)
+    if placing_client_id is not None:  # clientId 0 is a real client
+        values["placing_client_id"] = int(placing_client_id)
+    engine = get_sync_engine()
+    with engine.begin() as conn:
+        now = datetime.now(timezone.utc)
+        result = conn.execute(
+            update(order_submissions)
+            .where(
+                order_submissions.c.submission_id == submission_id,
+                order_submissions.c.state.in_(expected_states),
+            )
+            .values(**values, updated_at=monotone_updated_at(now))
+        )
+    if not result.rowcount:
+        _log_noop("mark_place_unknown", submission_id, "UNKNOWN", expected_states)
+    return result.rowcount
 
 
 def mark_terminal(
@@ -1057,23 +1178,24 @@ def mark_terminal(
     reason_code: str | None,
     filled_qty: int | None,
     avg_fill_price: Decimal | None,
-    expected_states: tuple[str, ...] | None = None,
+    expected_states: tuple[str, ...],
 ) -> int:
     """Transition a submission to a terminal state. Returns the affected
     rowcount.
 
-    ``expected_states`` is an optional optimistic-concurrency guard: when
-    provided, the UPDATE only applies if the row is still in one of those
-    states. A concurrent transition (e.g. a user cancel or a fill event
-    landing between a caller's read and this write) leaves the row untouched
-    and returns 0, so the caller can avoid clobbering a newer terminal state.
+    ``expected_states`` (required) is the optimistic-concurrency guard: the
+    UPDATE only applies if the row is still in one of those states. A
+    concurrent transition (e.g. a user cancel or a fill event landing
+    between a caller's read and this write) leaves the row untouched, is
+    logged, and returns 0, so the caller never clobbers a newer state.
     """
     ensure_writable()
     now = datetime.now(timezone.utc)
     engine = get_sync_engine()
-    stmt = update(order_submissions).where(order_submissions.c.submission_id == submission_id)
-    if expected_states is not None:
-        stmt = stmt.where(order_submissions.c.state.in_(expected_states))
+    stmt = update(order_submissions).where(
+        order_submissions.c.submission_id == submission_id,
+        order_submissions.c.state.in_(expected_states),
+    )
     values = dict(state=state, reason_code=reason_code, updated_at=monotone_updated_at(now))
     if filled_qty is not None:
         # filled_qty=None keeps the stored fill state: a cancel releases only
@@ -1081,6 +1203,8 @@ def mark_terminal(
         values.update(filled_qty=filled_qty, avg_fill_price=avg_fill_price)
     with engine.begin() as conn:
         result = conn.execute(stmt.values(**values))
+    if not result.rowcount:
+        _log_noop("mark_terminal", submission_id, state, expected_states)
     return result.rowcount
 
 
@@ -1255,6 +1379,7 @@ def load_submission_for_modify(
     *,
     order_id: str = "",
     perm_id: str = "",
+    client_id: int | str | None = None,
     broker: str = "IB",
     account_env: str = "legacy_unknown",
     broker_account: str = "legacy_unknown",
@@ -1281,6 +1406,9 @@ def load_submission_for_modify(
         conditions.append(order_submissions.c.perm_id == str(perm_id))
     elif order_id:
         conditions.append(order_submissions.c.ib_order_id == str(order_id))
+        if client_id is not None and str(client_id) != "":
+            # orderIds are unique per clientId: the pair names one order.
+            conditions.append(order_submissions.c.placing_client_id == int(client_id))
     else:
         return None
     engine = get_sync_engine()
@@ -1294,48 +1422,27 @@ def load_submission_for_modify(
     return row
 
 
-def lookup_submission_id_by_ib_order_id(
-    ib_order_id: str,
+def count_submissions_for_order_id(
+    order_id: str,
     *,
-    broker: str | None = None,
-    account_env: str | None = None,
-    broker_account: str | None = None,
-) -> str | None:
-    if not ib_order_id:
-        return None
-    conditions = [order_submissions.c.ib_order_id == str(ib_order_id)]
-    if broker is not None:
-        conditions.append(order_submissions.c.broker == broker)
-    if account_env is not None:
-        conditions.append(order_submissions.c.account_env == account_env)
-    if broker_account is not None:
-        conditions.append(order_submissions.c.broker_account == broker_account)
-    engine = get_sync_engine()
-    with engine.connect() as conn:
-        row = conn.execute(select(order_submissions.c.submission_id).where(*conditions)).first()
-    return row[0] if row else None
-
-
-def lookup_submission_id_by_perm_id(
-    perm_id: str,
-    *,
-    broker: str | None = None,
-    account_env: str | None = None,
-    broker_account: str | None = None,
-) -> str | None:
-    if not perm_id:
-        return None
-    conditions = [order_submissions.c.perm_id == str(perm_id)]
-    if broker is not None:
-        conditions.append(order_submissions.c.broker == broker)
-    if account_env is not None:
-        conditions.append(order_submissions.c.account_env == account_env)
-    if broker_account is not None:
-        conditions.append(order_submissions.c.broker_account == broker_account)
-    engine = get_sync_engine()
-    with engine.connect() as conn:
-        row = conn.execute(select(order_submissions.c.submission_id).where(*conditions).limit(1)).first()
-    return row[0] if row else None
+    client_id: int | str | None = None,
+    broker: str = "IB",
+    account_env: str = "legacy_unknown",
+    broker_account: str = "legacy_unknown",
+) -> int:
+    """Rows in scope with this orderId (and placing clientId, when given;
+    clientId 0 is a real client). >1 means an orderId-only request is
+    ambiguous: orderIds are unique per clientId only."""
+    conditions = [
+        order_submissions.c.broker == broker,
+        order_submissions.c.account_env == account_env,
+        order_submissions.c.broker_account == broker_account,
+        order_submissions.c.ib_order_id == str(order_id),
+    ]
+    if client_id is not None and str(client_id) != "":
+        conditions.append(order_submissions.c.placing_client_id == int(client_id))
+    with get_sync_engine().connect() as conn:
+        return int(conn.execute(select(func.count()).select_from(order_submissions).where(*conditions)).scalar() or 0)
 
 
 def lookup_by_attempt(

@@ -753,7 +753,7 @@ class IBClient:
         long-lived connection it is not kept in sync for other clients'
         orders. An order that another client cancelled stays there as
         ``Submitted`` forever, so the cache can resurrect a cancelled order
-        (incident #32 in docs/reference/order-path-incident-history.md).
+        (incident #35 in docs/reference/order-path-incident-history.md).
         """
         self._require_connection()
         return list(self._ib.reqAllOpenOrders() or [])
@@ -887,6 +887,23 @@ class IBClient:
         """Qualify multiple contracts in a single call."""
         self._require_connection()
         return self._ib.qualifyContracts(*contracts)
+
+    def qualify_all(self, *contracts: Any) -> list:
+        """Qualify every contract or raise ``IBContractError``.
+
+        ib_async 2.x returns a positional list with ``None`` for an unknown
+        or ambiguous contract, so a length / truthiness check never fires.
+        """
+        self._require_connection()
+        results = list(self._ib.qualifyContracts(*contracts) or [])
+        if len(results) != len(contracts) or any(r is None for r in results):
+            missing = [str(c) for c, r in zip(contracts, results + [None] * len(contracts)) if r is None]
+            raise IBContractError(f"Could not qualify contract(s): {', '.join(missing)}")
+        return results
+
+    def qualify_one(self, contract: Any) -> Any:
+        """Qualify one contract or raise ``IBContractError``."""
+        return self.qualify_all(contract)[0]
 
     # -- execution / fill operations ----------------------------------------
 

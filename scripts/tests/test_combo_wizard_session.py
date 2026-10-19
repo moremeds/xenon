@@ -203,3 +203,54 @@ def test_get_session_rejects_explicit_scope_mismatch():
 
     with pytest.raises(ValueError, match="scope mismatch"):
         session.get_session(sid)
+
+
+def _place_returns(monkeypatch, status: int, content: dict):
+    from fastapi.responses import JSONResponse
+
+    from xenon.api import server
+
+    async def _place(_payload):
+        return JSONResponse(status_code=status, content=content)
+
+    monkeypatch.setattr(server, "_orders_place_from_body", _place)
+
+
+def _session_claim(session_id: str):
+    engine = _pg_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT state, current_attempt_id FROM xenon.wizard_sessions WHERE session_id = :sid"),
+            {"sid": session_id},
+        ).fetchone()
+    engine.dispose()
+    return row
+
+
+def test_submit_combo_keeps_claim_on_uncertain_place(monkeypatch):
+    """PR-07: IB may hold the combo — the claim stays, so a second submit
+    cannot place a duplicate."""
+    planned = session.create_session(
+        ticker="SPY", intent="OPEN", structure_name="Bull Call Spread", payload=_plan_payload()
+    )
+    _place_returns(monkeypatch, 502, {"reason_code": "PLACE_OUTCOME_UNKNOWN", "detail": "Do not resubmit."})
+
+    result = asyncio.run(session.submit_combo(planned["session_id"], {"target_price": "2.45"}))
+
+    assert result.status_code == 502
+    state, attempt = _session_claim(planned["session_id"])
+    assert attempt is not None and str(state).lower() == "submitting"
+    with pytest.raises(ValueError):
+        asyncio.run(session.submit_combo(planned["session_id"], {"target_price": "2.45"}))
+
+
+def test_submit_combo_releases_claim_on_rejection(monkeypatch):
+    planned = session.create_session(
+        ticker="SPY", intent="OPEN", structure_name="Bull Call Spread", payload=_plan_payload()
+    )
+    _place_returns(monkeypatch, 502, {"reason_code": "IB_REJECT", "detail": "rejected"})
+
+    asyncio.run(session.submit_combo(planned["session_id"], {"target_price": "2.45"}))
+
+    _state, attempt = _session_claim(planned["session_id"])
+    assert attempt is None

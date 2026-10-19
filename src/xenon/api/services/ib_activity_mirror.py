@@ -100,18 +100,100 @@ def _safe_open_orders_tick(client: Any, *, scope: AccountScope) -> dict:
         return {"error": str(exc)}
 
 
-def _safe_fills_tick(client: Any, *, scope: AccountScope, lookback_days: int) -> dict:
-    """Best-effort: fetch + record fills. Catches & returns instead of raising."""
-    try:
-        executions = _fetch_ib_executions(client, lookback_days=lookback_days)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("ib_activity_mirror tick: fetch_ib_executions failed: %s", exc)
-        return {"error": str(exc)}
+def _safe_fills_tick(
+    client: Any, *, scope: AccountScope, lookback_days: int, executions: list[dict] | None = None
+) -> dict:
+    """Best-effort: fetch + record fills. Catches & returns instead of raising.
+    ``executions`` already fetched by the caller are recorded as given."""
+    if executions is None:
+        try:
+            executions = _fetch_ib_executions(client, lookback_days=lookback_days)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ib_activity_mirror tick: fetch_ib_executions failed: %s", exc)
+            return {"error": str(exc)}
     try:
         return _record_external_fills(executions, scope=scope)
     except Exception as exc:  # noqa: BLE001
         logger.warning("ib_activity_mirror tick: record_external_fills failed: %s", exc)
         return {"error": str(exc)}
+
+
+_RECOVERABLE_STATES = ("UNKNOWN", "PENDING")
+
+
+def recover_by_order_ref(open_orders: list[dict], executions: list[dict], *, scope: AccountScope) -> dict:
+    """Bind UNKNOWN / PENDING Xenon rows to IB evidence by orderRef.
+
+    A place that timed out or crashed (OP-1) leaves a row with no IB ids.
+    IB echoes ``orderRef = "xo:<submission_id>"`` on open orders and on
+    executions (an order that filled before the poll is no longer open), so
+    the row gets its ids and moves to WORKING; the permId-keyed mirror,
+    fill recorder and cancel sweep then finish it (FILLED / CANCELLED).
+    Rows without evidence are left as they are (UNKNOWN is counted on
+    /health). Never re-sends anything.
+    """
+    from sqlalchemy import select
+
+    from xenon.db.engine import get_sync_engine
+    from xenon.db.schema import order_submissions
+    from xenon.execution import orders_store
+
+    evidence: dict[str, dict] = {}
+    for o in open_orders:
+        sid = orders_store.submission_id_from_order_ref(o.get("orderRef"))
+        if sid and row_in_account(o, scope.broker_account, "account"):
+            evidence[sid] = {
+                "source": "open_order",
+                "ib_order_id": o.get("orderId"),
+                "perm_id": o.get("permId"),
+                "client_id": o.get("clientId"),
+            }
+    for e in executions:
+        sid = orders_store.submission_id_from_order_ref(e.get("order_ref"))
+        if sid and sid not in evidence and row_in_account(e, scope.broker_account, "account"):
+            evidence[sid] = {
+                "source": "execution",
+                "ib_order_id": e.get("ib_order_id"),
+                "perm_id": e.get("perm_id"),
+                "client_id": e.get("client_id"),
+            }
+
+    engine = get_sync_engine()
+    with engine.connect() as conn:
+        rows = (
+            conn.execute(
+                select(order_submissions.c.submission_id, order_submissions.c.placing_client_id).where(
+                    order_submissions.c.state.in_(_RECOVERABLE_STATES),
+                    order_submissions.c.broker == scope.broker,
+                    order_submissions.c.account_env == scope.account_env,
+                    order_submissions.c.broker_account == scope.broker_account,
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+    recovered = unresolved = 0
+    for row in rows:
+        sid = row["submission_id"]
+        ev = evidence.get(sid)
+        if ev is None:
+            unresolved += 1
+            continue
+        perm = int(ev.get("perm_id") or 0)
+        # clientId 0 is a real IB client: only a missing value falls back.
+        client_id = ev.get("client_id") if ev.get("client_id") is not None else row["placing_client_id"]
+        applied = orders_store.mark_submitted(
+            submission_id=sid,
+            ib_order_id=str(ev.get("ib_order_id") or ""),
+            perm_id=str(perm) if perm > 0 else None,
+            placing_client_id=int(client_id) if client_id is not None else None,
+            expected_states=_RECOVERABLE_STATES,
+        )
+        if applied:
+            recovered += 1
+            orders_store.record_event(sid, "RECONCILED", {"source": "order_ref", "evidence": ev["source"]})
+    return {"recovered": recovered, "unresolved": unresolved}
 
 
 TWS_CANCEL_REASON = "TWS_CANCEL_MIRROR"
@@ -326,6 +408,20 @@ def run_activity_poll_tick(
         logger.warning("ib_activity_mirror tick: fetch_open_orders failed: %s", exc)
         open_orders = None
 
+    try:
+        executions = _fetch_ib_executions(client, lookback_days=lookback_days)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ib_activity_mirror tick: fetch_ib_executions failed: %s", exc)
+        executions = None
+
+    # orderRef recovery runs first so the open-order sync and fill recorder
+    # (both keyed by permId) see the recovered ids in this same tick.
+    try:
+        recovery = recover_by_order_ref(open_orders or [], executions or [], scope=scope)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ib_activity_mirror tick: order_ref recovery failed: %s", exc)
+        recovery = {"error": str(exc)}
+
     if open_orders is None:
         oo_result: dict = {"error": "fetch_open_orders failed"}
     else:
@@ -335,7 +431,10 @@ def run_activity_poll_tick(
             logger.warning("ib_activity_mirror tick: sync_open_orders_to_postgres failed: %s", exc)
             oo_result = {"error": str(exc)}
 
-    fills_result = _safe_fills_tick(client, scope=scope, lookback_days=lookback_days)
+    if executions is None:
+        fills_result: dict = {"error": "fetch_ib_executions failed"}
+    else:
+        fills_result = _safe_fills_tick(client, scope=scope, lookback_days=lookback_days, executions=executions)
 
     # Sweep only when BOTH feeds succeeded this tick — a failed open-order
     # fetch would otherwise mass-cancel everything, and missing fills data
@@ -349,7 +448,12 @@ def run_activity_poll_tick(
     else:
         sweep_result = {"skipped": True}
 
-    return {"open_orders": oo_result, "fills": fills_result, "cancel_sweep": sweep_result}
+    return {
+        "open_orders": oo_result,
+        "fills": fills_result,
+        "cancel_sweep": sweep_result,
+        "order_ref_recovery": recovery,
+    }
 
 
 async def _default_async_runner(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:

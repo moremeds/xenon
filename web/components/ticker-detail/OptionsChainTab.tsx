@@ -36,6 +36,7 @@ import { useWizardLauncher } from "@/lib/useWizardLauncher";
 import { useWizardSession } from "@/lib/useWizardSession";
 import { useClientAttemptId } from "./useClientAttemptId";
 import { errorFromResponseBody } from "@/lib/order/responseError";
+import { submitPlaceOrder } from "@/lib/order/submitPlace";
 
 /* ─── Types ─── */
 
@@ -400,19 +401,12 @@ function OrderBuilder({
             right: legs[0].right === "C" ? "CALL" : "PUT",
           };
 
-      attemptId.markSubmitted();
-      const res = await fetch("/api/orders/place", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const placed = await submitPlaceOrder(attemptId, {
           ...body,
           client_attempt_id: attemptId.id,
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok) {
-        setError(errorFromResponseBody(json, "Order placement failed"));
-        attemptId.markTerminal();
+        });
+      if (placed.kind !== "ok") {
+        setError(placed.message);
       } else {
         setSuccess(`Order placed: ${structure || "Option"} on ${ticker}`);
         setConfirmStep(false);
@@ -420,7 +414,6 @@ function OrderBuilder({
       }
     } catch {
       setError("Network error placing order");
-      attemptId.markTerminal();
     } finally {
       setLoading(false);
     }
@@ -1004,7 +997,7 @@ function OrderBuilder({
             <button
               className={`btn-primary ${isDebit === false ? "btn-danger" : ""}`}
               onClick={handlePlace}
-              disabled={!isValidPrice || loading}
+              disabled={!isValidPrice || loading || attemptId.uncertain}
             >
               {loading ? "Placing..." : "Confirm Order"}
             </button>
@@ -1013,7 +1006,7 @@ function OrderBuilder({
           <button
             className="btn-primary"
             onClick={handlePlace}
-            disabled={!isValidPrice}
+            disabled={!isValidPrice || attemptId.uncertain}
             style={{ width: "100%" }}
           >
             Place {structure || "Order"}

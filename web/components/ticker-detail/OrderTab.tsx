@@ -33,6 +33,7 @@ import WizardSessionStrip from "@/components/ticker-detail/WizardSessionStrip";
 import { useWizardLauncher } from "@/lib/useWizardLauncher";
 import { useWizardSession } from "@/lib/useWizardSession";
 import { errorFromResponseBody } from "@/lib/order/responseError";
+import { submitPlaceOrder } from "@/lib/order/submitPlace";
 
 type OrderTabProps = {
   ticker: string;
@@ -456,16 +457,9 @@ function NewOrderForm({
         ...payload,
         client_attempt_id: attemptId.id,
       };
-      attemptId.markSubmitted();
-      const res = await fetch("/api/orders/place", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
-      });
-      const json = await res.json().catch(() => null);
-      if (!res.ok) {
-        setError(errorFromResponseBody(json, "Order placement failed"));
-        attemptId.markTerminal();
+      const placed = await submitPlaceOrder(attemptId, requestBody);
+      if (placed.kind !== "ok") {
+        setError(placed.message);
       } else {
         setSuccess(
           `Order placed: ${action} ${parsedQty} ${ticker} @ ${fmtPrice(parsedPrice)}`,
@@ -634,7 +628,7 @@ function NewOrderForm({
             <button
               className={`btn-primary ${action === "SELL" ? "btn-danger" : ""}`}
               onClick={handlePlace}
-              disabled={!isValid || loading || !!nakedShortWarning}
+              disabled={!isValid || loading || !!nakedShortWarning || attemptId.uncertain}
             >
               {loading ? "Placing..." : "Confirm Order"}
             </button>
@@ -643,7 +637,7 @@ function NewOrderForm({
           <button
             className="btn-primary"
             onClick={handlePlace}
-            disabled={!isValid || loading || !!nakedShortWarning}
+            disabled={!isValid || loading || !!nakedShortWarning || attemptId.uncertain}
             style={{ width: "100%" }}
           >
             Place Order
@@ -805,16 +799,9 @@ function ComboOrderForm({
         legs,
         client_attempt_id: attemptId.id,
       };
-      attemptId.markSubmitted();
-      const res = await fetch("/api/orders/place", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
-      });
-      const json = await res.json().catch(() => null);
-      if (!res.ok) {
-        setError(errorFromResponseBody(json, "Order placement failed"));
-        attemptId.markTerminal();
+      const placed = await submitPlaceOrder(attemptId, requestBody);
+      if (placed.kind !== "ok") {
+        setError(placed.message);
       } else {
         setSuccess(
           `Combo order placed: ${action} ${parsedQty}x ${position.structure} @ ${fmtSignedPrice(parsedPrice)}`,
@@ -825,7 +812,6 @@ function ComboOrderForm({
       }
     } catch {
       setError("Network error placing order");
-      attemptId.markTerminal();
     } finally {
       setLoading(false);
     }
@@ -1309,7 +1295,7 @@ function ComboOrderForm({
             <button
               className={`btn-primary ${action === "SELL" ? "btn-danger" : ""}`}
               onClick={handlePlace}
-              disabled={!isValid || loading || !!nakedShortWarning}
+              disabled={!isValid || loading || !!nakedShortWarning || attemptId.uncertain}
             >
               {loading ? "Placing..." : "Confirm Order"}
             </button>
@@ -1318,7 +1304,7 @@ function ComboOrderForm({
           <button
             className="btn-primary"
             onClick={handlePlace}
-            disabled={!isValid || loading || !!nakedShortWarning}
+            disabled={!isValid || loading || !!nakedShortWarning || attemptId.uncertain}
             style={{ width: "100%" }}
           >
             Place Combo Order
@@ -1344,7 +1330,7 @@ export default function OrderTab({
     position.legs.length > 1 &&
     position.structure_type !== "Stock";
 
-  const { requestModify } = useOrderActions();
+  const { requestModify, lockedReplacements } = useOrderActions();
   const [modifyTarget, setModifyTarget] = useState<OpenOrder | null>(null);
   const [modifyLoading, setModifyLoading] = useState(false);
   // F6.2: track modify failures per-order so the row renders a FAILED pill.
@@ -1388,6 +1374,10 @@ export default function OrderTab({
         portfolio={portfolio}
         onConfirm={handleModifyConfirm}
         onClose={() => setModifyTarget(null)}
+        locked={
+          modifyTarget != null &&
+          Boolean(lockedReplacements?.has(modifyTarget.permId))
+        }
       />
 
       <div className="order-tab">

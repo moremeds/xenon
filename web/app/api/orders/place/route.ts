@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { xenonFetch } from "@/lib/xenonApi";
+import { placeOutcomeUnknownBody } from "@/lib/order/placeOutcome";
 import { passThroughXenonError } from "@/lib/passThroughXenonError";
 import {
   getRequestId,
@@ -47,6 +48,9 @@ type PlaceBody = {
 
 export async function POST(request: Request): Promise<Response> {
   const requestId = getRequestId();
+  // Set right before the FastAPI call: any failure after it may have placed
+  // the order at IB (OP-1).
+  let dispatched = false;
   try {
     let parsed: unknown;
     try {
@@ -189,6 +193,7 @@ export async function POST(request: Request): Promise<Response> {
 
     const orderPayload = buildFastApiPlaceOrderPayload(body);
 
+    dispatched = true;
     const orderResult = await xenonFetch<Record<string, unknown>>(
       "/orders/place",
       {
@@ -199,30 +204,9 @@ export async function POST(request: Request): Promise<Response> {
       },
     );
 
-    // IB silent rejection: order was submitted but immediately cancelled/inactive.
-    const REJECTED_STATUSES = new Set([
-      "Cancelled",
-      "ApiCancelled",
-      "Inactive",
-      "Unknown",
-    ]);
-    const initialStatus = orderResult.initialStatus as string | undefined;
-    if (initialStatus && REJECTED_STATUSES.has(initialStatus)) {
-      const reason =
-        initialStatus === "Unknown"
-          ? `no acknowledgement (${initialStatus}) — order may not have reached IB`
-          : initialStatus;
-      return setNoStoreResponseHeaders(
-        jsonApiError({
-          message: `Order rejected by IB: ${reason}`,
-          status: 502,
-          code: "UPSTREAM_ERROR",
-          detail: JSON.stringify(orderResult),
-          requestId,
-        }),
-        requestId,
-      );
-    }
+    // FastAPI owns the place verdict (ordered Trade.log): a 200 means IB
+    // accepted or may hold the order. Never relabel it "rejected" from the
+    // final status — that invited a resend that duplicates the order.
 
     // Refresh orders after placement
     let refreshedOrders: Record<string, unknown> | null = null;
@@ -242,11 +226,24 @@ export async function POST(request: Request): Promise<Response> {
       tif: orderResult.tif ?? orderPayload.tif,
       initialStatus: orderResult.initialStatus,
       message: orderResult.message,
+      submission_id: orderResult.submission_id,
+      // IB accepted but the DB write failed; reconciliation repairs it.
+      ...(orderResult.persist_warning
+        ? { persist_warning: orderResult.persist_warning }
+        : {}),
       orders: refreshedOrders,
       requestId,
     });
     return setNoStoreResponseHeaders(response, requestId);
   } catch (error) {
+    // After dispatch, only a proven rejection is terminal; a timeout, socket
+    // reset, unreadable body or unexplained 5xx is "status unknown".
+    const uncertain = dispatched ? placeOutcomeUnknownBody(error) : null;
+    if (uncertain) {
+      const res = NextResponse.json(uncertain, { status: 502 });
+      res.headers.set("X-Request-Id", requestId);
+      return setNoStoreResponseHeaders(res, requestId);
+    }
     return setNoStoreResponseHeaders(
       passThroughXenonError(error, requestId),
       requestId,

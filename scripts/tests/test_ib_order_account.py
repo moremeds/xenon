@@ -157,10 +157,13 @@ class _FakeCliClient:
     def connect(self, **_kwargs):
         return None
 
-    def qualify_contracts(self, *contracts):
+    def qualify_all(self, *contracts):
         for idx, contract in enumerate(contracts, start=1):
             contract.conId = idx
         return list(contracts)
+
+    def qualify_one(self, contract):
+        return self.qualify_all(contract)[0]
 
     def place_order(self, _contract, order):
         cls = self.__class__

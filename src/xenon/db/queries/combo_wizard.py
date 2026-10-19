@@ -258,16 +258,28 @@ def list_unresolved_orders(
     return [dict(r._mapping) for r in result]
 
 
-def update_order_state(conn: Connection, submission_id: str, state: str) -> None:
+def update_order_state(conn: Connection, submission_id: str, state: str, *, expected_states: tuple[str, ...]) -> int:
+    """Set one order_submissions row's state, only from ``expected_states``
+    (required). Returns the rowcount; 0 (logged) when the row moved on."""
+    import logging
+
     from xenon.db.schema import order_submissions
     from xenon.execution.orders_store import monotone_updated_at
 
     # Gate-4 freshness watermark: updated_at never moves backwards.
-    conn.execute(
+    result = conn.execute(
         update(order_submissions)
-        .where(order_submissions.c.submission_id == submission_id)
+        .where(order_submissions.c.submission_id == submission_id, order_submissions.c.state.in_(expected_states))
         .values(state=state, updated_at=monotone_updated_at(datetime.now(timezone.utc)))
     )
+    if not result.rowcount:
+        logging.getLogger(__name__).info(
+            "update_order_state: %s -> %s skipped; row not in expected states %s",
+            submission_id,
+            state,
+            tuple(expected_states),
+        )
+    return result.rowcount
 
 
 def get_order_modify_sequence(conn: Connection, *, ib_order_id: str = "", perm_id: str = "") -> int | None:

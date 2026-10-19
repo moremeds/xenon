@@ -32,6 +32,7 @@ except ImportError:
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 from xenon.db.engine import get_sync_engine
+from xenon.execution import naked_short_audit
 from xenon.execution.account_scope import IBAccountSelectionError, select_ib_account
 
 # Default connection settings
@@ -1265,64 +1266,6 @@ def save_portfolio(portfolio: dict):
         print(f"  Warning: Postgres write failed: {exc}")
 
 
-def _audit_orders_from_trades(trades: list, account: str) -> list[dict]:
-    """Shape live ib_async Trade objects for naked_short_audit, scope account only.
-
-    reqAllOpenOrders spans every managed account. Only trades whose
-    ``order.account`` is ``account`` are kept (other / empty dropped): the
-    audit judges them against this account's positions only (#198).
-    The audit's pure function (`find_naked_short_violations`) expects a list
-    of dicts shaped like the web app's open_orders payload — this adapter
-    mirrors that shape so we don't depend on a separate process having
-    written to disk first.
-    """
-    out: list[dict] = []
-    for trade in trades:
-        order = getattr(trade, "order", None)
-        contract = getattr(trade, "contract", None)
-        status_obj = getattr(trade, "orderStatus", None)
-        if order is None or contract is None:
-            continue
-        if not account or (getattr(order, "account", "") or "") != account:
-            continue
-        out.append(
-            {
-                "status": getattr(status_obj, "status", "") if status_obj else "",
-                "action": getattr(order, "action", "") or "",
-                "totalQuantity": int(getattr(order, "totalQuantity", 0) or 0),
-                "orderId": getattr(order, "orderId", None),
-                "permId": getattr(order, "permId", None),
-                "orderRef": getattr(order, "orderRef", "") or "",
-                # Account provenance — reqAllOpenOrders spans every account the
-                # connection can see; the consumer must verify scope before use.
-                "account": getattr(order, "account", None) or None,
-                "contract": {
-                    "secType": getattr(contract, "secType", "") or "",
-                    "symbol": getattr(contract, "symbol", "") or "",
-                    "right": getattr(contract, "right", "") or "",
-                    "expiry": getattr(contract, "lastTradeDateOrContractMonth", "") or "",
-                    "strike": getattr(contract, "strike", 0) or 0,
-                },
-            }
-        )
-    return out
-
-
-def _open_orders_for_audit(client, account: str) -> list[dict]:
-    """Read the open orders from IB and shape the scope account's for the audit.
-
-    The sync pass itself reuses its single open-order read
-    (`_audit_orders_from_trades(activity["trades"], account)`); this wrapper
-    serves standalone callers.
-    """
-    try:
-        trades = client.get_open_orders()
-    except Exception as exc:
-        logging.getLogger("ib_sync.audit").warning("could not fetch open orders for audit (%s); skipping", exc)
-        return []
-    return _audit_orders_from_trades(trades, account)
-
-
 def _stamp_option_metadata(client, collapsed: list) -> None:
     """Stamp IB-qualified tradingClass / multiplier / underlying sec type on
     every option leg (contract details by conId). A failed lookup leaves the
@@ -1438,7 +1381,7 @@ def _observation_stamp(pass_started: datetime, reads: dict, ib_account: str | No
     }
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description="Sync portfolio from Interactive Brokers")
     parser.add_argument("--host", default=DEFAULT_HOST, help="TWS/Gateway host")
     parser.add_argument(
@@ -1449,7 +1392,7 @@ def main():
     parser.add_argument("--no-prices", action="store_true", help="Skip market price fetch")
     parser.add_argument("--skip-audit", action="store_true", help="Skip naked short audit after sync")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # Observation boundary for this pass (PR-03b): the snapshot's holdings
     # are "as of" pass start — fills landing after this instant are demand
@@ -1473,7 +1416,7 @@ def main():
     try:
         # Export the scope account so downstream DB writers
         # (`_save_portfolio_to_postgres`, `_append_nav_snapshot`,
-        # `naked_short_audit` subprocess) stamp scope rows with it. A
+        # the in-process naked-short audit heartbeat) stamp scope rows with it. A
         # configured XENON_BROKER_ACCOUNT is kept (it must be managed); with it
         # unset the login must manage exactly one account. Never
         # managedAccounts()[0] — abort rather than write under a guessed scope.
@@ -1658,7 +1601,6 @@ def main():
                 and reads["executions"]
                 and _persist_pass_activity(open_orders, executions, observed_at=orders_read_at)
             )
-            orders_for_audit = _audit_orders_from_trades(activity["trades"], ib_account)
             fill_dates = build_fill_dates(client, fills=activity["fills"])
             _stamp_option_metadata(client, collapsed)
             portfolio = convert_to_portfolio_format(
@@ -1673,46 +1615,21 @@ def main():
             portfolio["observation"]["executions_client_id"] = activity.get("executions_client_id")
             save_portfolio(portfolio)
 
-            # ── Naked Short Audit (post-sync) ──
+            # ── Naked Short Audit (post-sync, shadow mode — spec §2.4 Phase A) ──
+            # Audits this pass's in-process holdings + scoped live open orders
+            # (never Postgres). Logs + records service_health only; it has no
+            # cancel path. It gets this pass's observation stamp; any failed
+            # IB read or accountless order skips it. The Postgres persist step
+            # is left out of the audit's `complete`: the audit reads no PG,
+            # so a read-only pass still audits what it saw.
             if not args.skip_audit:
-                try:
-                    from naked_short_audit import find_naked_short_violations
-
-                    log = logging.getLogger("ib_sync.audit")
-
-                    # Pull open orders directly from IB rather than reading
-                    # data/orders.json (which is written by the web app and can
-                    # lag actual IB state). Adapter shapes Trade objects into
-                    # the dict shape `find_naked_short_violations` expects.
-                    # Same single open-order read as the pass, already
-                    # scoped to ib_account by _audit_orders_from_trades.
-                    orders = orders_for_audit
-
-                    violations = find_naked_short_violations(orders, portfolio["positions"])
-                    if violations:
-                        log.warning("NAKED SHORT AUDIT: %d violation(s) detected", len(violations))
-                        for v in violations:
-                            log.warning("  → %s: %s (order %s)", v["symbol"], v["reason"], v["order_id"])
-
-                        # Auto-cancel only if client is still connected
-                        if client.is_connected():
-                            from naked_short_audit import cancel_violations
-
-                            cancelled = cancel_violations(client, violations, account=ib_account)
-                            log.warning("  Cancelled %d violating order(s)", cancelled)
-                        else:
-                            log.warning("  Client disconnected — skipping auto-cancel")
-                    else:
-                        print("✓ Naked short audit: no violations")
-                except ImportError:
-                    logging.getLogger("ib_sync.audit").warning(
-                        "naked_short_audit module not available — skipping audit"
-                    )
-                except Exception:
-                    logging.getLogger("ib_sync.audit").warning(
-                        "Naked short audit failed — sync completed successfully",
-                        exc_info=True,
-                    )
+                audit_reads = {k: v for k, v in reads.items() if k != "persisted"}
+                naked_short_audit.run_shadow_audit(
+                    portfolio,
+                    open_orders,
+                    ib_account,
+                    observation=_observation_stamp(pass_started, audit_reads, ib_account),
+                )
 
             print("\n⚠️  Note: kelly_optimal, target, and stop fields need manual evaluation")
         else:

@@ -588,7 +588,7 @@ class TestOrderOperations:
 
     @patch("xenon.clients.ib_client.IB")
     def test_get_open_orders_ignores_stale_open_trades_cache(self, MockIB):
-        """Incident #32: another client cancelled the order. IB's fresh
+        """Incident #35: another client cancelled the order. IB's fresh
         reqAllOpenOrders response omits it, but ib_async's openTrades()
         cache on this long-lived connection still holds it as Submitted.
         get_open_orders must return the fresh response, not the cache."""

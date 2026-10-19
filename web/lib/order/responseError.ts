@@ -7,6 +7,15 @@ import { getReasonToast } from "@/lib/orderReasonCodes";
  * {detail: {reason_code}} envelope via readReasonCode), then a string
  * `error` field, then a string `detail` field, then the caller's fallback.
  */
+/** FastAPI's uncertain-place 502: IB may hold the order. Callers keep the
+ * client_attempt_id (a resend of the same id never places twice) and offer
+ * no retry. */
+export function isPlaceOutcomeUnknown(
+  body: Record<string, unknown> | null | undefined,
+): boolean {
+  return !!body && readReasonCode(body) === "PLACE_OUTCOME_UNKNOWN";
+}
+
 export function errorFromResponseBody(
   body: Record<string, unknown> | null | undefined,
   fallback: string,

@@ -86,6 +86,7 @@ def test_terminal_replay_returns_409(client):
         reason_code="IB_REJECT_201",
         filled_qty=0,
         avg_fill_price=None,
+        expected_states=("WORKING",),
     )
     r2 = client.post("/orders/place", json=_body(cid))
     assert r2.status_code == 409
@@ -93,8 +94,9 @@ def test_terminal_replay_returns_409(client):
 
 
 def test_body_mismatch_returns_409_no_broker_call(client, monkeypatch):
-    """Same client_attempt_id with a changed body → 409 ATTEMPT_BODY_MISMATCH,
-    and the broker/runner stub must not be invoked a second time."""
+    """Same client_attempt_id with a changed body → 409, and the broker/runner
+    stub must not be invoked a second time. The first attempt is WORKING at
+    IB, so the reason is ATTEMPT_ALREADY_PLACED (PR-08)."""
     from xenon.api import server
 
     calls = {"n": 0}
@@ -115,10 +117,13 @@ def test_body_mismatch_returns_409_no_broker_call(client, monkeypatch):
     body2["quantity"] = 5
     r2 = client.post("/orders/place", json=body2)
     assert r2.status_code == 409
-    assert r2.json()["reason_code"] == "ATTEMPT_BODY_MISMATCH"
+    assert r2.json()["reason_code"] == "ATTEMPT_ALREADY_PLACED"
     assert calls["n"] == 1  # zero additional broker/runner calls
 
 
+# Real connections per thread: the Phase-2 shared outer transaction cannot
+# serve six concurrent requests (savepoint errors crash threads silently).
+@pytest.mark.committed_db
 def test_concurrent_same_cid_only_one_subprocess(client, monkeypatch):
     from xenon.api import server
 
@@ -144,5 +149,12 @@ def test_concurrent_same_cid_only_one_subprocess(client, monkeypatch):
         t.start()
     for t in threads:
         t.join()
-    assert all(r.status_code == 200 for r in results)
+    # PR-07: a same-id duplicate that lands while the winner is still in
+    # flight (row PENDING) answers the uncertain 502, never a success 200.
+    for r in results:
+        assert r.status_code == 200 or (
+            r.status_code == 502 and r.json()["reason_code"] == "PLACE_OUTCOME_UNKNOWN" and r.json()["state"] == "PENDING"
+        ), r.text
+    assert len(results) == 6, "a request thread crashed"
+    assert any(r.status_code == 200 for r in results), [r.status_code for r in results]
     assert calls["n"] == 1
