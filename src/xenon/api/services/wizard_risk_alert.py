@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL_S = 30.0  # daemon handler interval_seconds
 NO_QUOTE_AFTER_S = 120.0  # spec §2.9: a quote older than 2 min is "no quote"
+CLOCK_SKEW_S = 5.0  # a tick this much newer than our clock still counts as fresh
 EVENT_KIND = "RISK_ALERT_CROSSED"
 
 
@@ -137,10 +138,14 @@ class RiskAlertMonitor:
             if threshold is None:
                 continue
             quote = await self._fetch(s)
+            # Age is measured AFTER the quote arrives: acquisition takes ~2 s
+            # per leg, so a clock read before it would make a fresh tick
+            # future-dated.
+            now = self._now()
             fresh = (
                 quote is not None
                 and quote.as_of is not None
-                and 0 <= (now - quote.as_of).total_seconds() <= NO_QUOTE_AFTER_S
+                and -CLOCK_SKEW_S <= (now - quote.as_of).total_seconds() <= NO_QUOTE_AFTER_S
             )
             state = {
                 "session_id": sid,

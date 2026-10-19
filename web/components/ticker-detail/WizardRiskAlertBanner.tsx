@@ -13,7 +13,7 @@ function alertText(a: WizardRiskAlert): string {
   if (a.state === "CROSSED") {
     return `${a.ticker} net mid ${a.quote ?? "---"} crossed alert line ${a.threshold}. Assisted Exit: confirm the close manually.`;
   }
-  return `${a.ticker} no fresh quote (older than 2 min). Alert line ${a.threshold} not evaluated.`;
+  return `${a.ticker} no fresh quote. Alert line ${a.threshold} not evaluated.`;
 }
 
 /**

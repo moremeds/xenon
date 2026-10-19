@@ -75,3 +75,35 @@ def test_health_and_operator_expose_flex_token(monkeypatch, tmp_path, path):
     assert body["flex_token"]["configured"] is True
     assert body["flex_token"]["expires_at"] == "2099-01-01T00:00:00+00:00"
     assert body["flex_token"]["should_warn"] is False
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        {"expires_at": "2027-01-01T00:00:00+00:00", "reminder_days": ["invalid"]},
+        {"expires_at": "2027-01-01T00:00:00+00:00", "reminder_days": [None]},
+        {"expires_at": "2027-01-01T00:00:00+00:00", "reminder_days": 7},
+        {"expires_at": 20270101},
+        {"expires_at": "not-a-date"},
+    ],
+)
+def test_malformed_config_returns_invalid_state(tmp_path, cfg):
+    s = flex_token.flex_token_status(_write(tmp_path, **cfg), now=NOW)
+    assert s == {"configured": False, "error": "invalid flex_token_config"}
+
+
+def test_malformed_config_keeps_health_up(monkeypatch, tmp_path):
+    from xenon.api import server
+
+    async def fake_gateway():
+        return {"port_listening": True}
+
+    monkeypatch.setattr(server, "check_ib_gateway", fake_gateway)
+    monkeypatch.setattr(
+        flex_token,
+        "CONFIG_PATH",
+        _write(tmp_path, expires_at="2027-01-01T00:00:00+00:00", reminder_days=["invalid"]),
+    )
+    r = TestClient(server.app).get("/health")
+    assert r.status_code == 200
+    assert r.json()["flex_token"]["configured"] is False

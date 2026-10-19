@@ -326,3 +326,113 @@ def test_pool_quote_older_than_two_minutes_is_none():
     sid = _seed_legs()
     ib = _FakeIB({1: _Tick(5.0, 5.2, 10), 2: _Tick(2.0, 2.2, 121)})
     assert wra._combo_quote_with_client(ib, sid) is None
+
+
+# --- Freshness clock is read AFTER acquisition (review PR-211 P1) ----------
+
+
+class _Clock:
+    def __init__(self, start):
+        self.t = start
+
+    def __call__(self):
+        return self.t
+
+
+def test_quote_received_during_acquisition_triggers(order_spy):
+    """Acquisition advances the clock ~2 s and the quote is stamped at
+    completion; it must count as fresh → CROSSED and one event."""
+    clock = _Clock(NOW)
+    rec = _Recorder()
+
+    async def quote_fn(session):
+        clock.t = clock.t + timedelta(seconds=2)
+        return wra.ComboQuote(mid=Decimal("1.00"), as_of=clock.t)
+
+    mon = wra.RiskAlertMonitor(
+        list_sessions_fn=lambda: [_session()],
+        quote_fn=quote_fn,
+        record_event_fn=rec,
+        read_only_fn=lambda: False,
+        now_fn=clock,
+    )
+    asyncio.run(mon.evaluate_once())
+    assert mon.alerts()[0]["state"] == "CROSSED"
+    assert len(rec.events) == 1
+    assert order_spy == []
+
+
+def test_tick_slightly_newer_than_clock_is_fresh():
+    rec = _Recorder()
+    q = wra.ComboQuote(mid=Decimal("1.00"), as_of=NOW + timedelta(seconds=1))
+    mon = _monitor([_session()], {"s1": q}, recorder=rec)
+    asyncio.run(mon.evaluate_once())
+    assert len(rec.events) == 1
+
+
+class _LiveStampIB:
+    """get_quote stamps ticker.time with the real clock DURING the call, like
+    ib_async does at receive time."""
+
+    def __init__(self, prices):
+        self.prices = prices
+
+    def get_quote(self, contract, snapshot=False, generic_ticks=""):
+        import time as _time
+
+        _time.sleep(0.01)
+        bid, ask = self.prices[contract.conId]
+        t = _Tick(bid, ask, 0)
+        t.time = datetime.now(timezone.utc)
+        return t
+
+
+def test_pool_quote_stamped_during_get_quote_crosses_end_to_end(order_spy):
+    sid = _seed_legs("s-live")
+    ib = _LiveStampIB({1: (5.0, 5.2), 2: (2.0, 2.2)})
+
+    async def quote_fn(session):
+        return wra._combo_quote_with_client(ib, session["session_id"])
+
+    rec = _Recorder()
+    mon = wra.RiskAlertMonitor(
+        list_sessions_fn=lambda: [_session(sid, "SPY", "3.50")],
+        quote_fn=quote_fn,
+        record_event_fn=rec,
+        read_only_fn=lambda: False,
+    )
+    asyncio.run(mon.evaluate_once())
+    (alert,) = mon.alerts()
+    assert alert["state"] == "CROSSED"
+    assert Decimal(alert["quote"]) == Decimal("3.0")
+    assert [(s, k) for s, k, _ in rec.events] == [(sid, "RISK_ALERT_CROSSED")]
+    assert order_spy == []
+
+
+def test_builder_rechecks_oldest_leg_against_completion_time():
+    """Leg 1 is fresh when fetched, but later acquisition pushes completion
+    past 120 s after leg 1's tick → no quote."""
+    from xenon.execution.combo_wizard.combo_quote_source import build_default_quote_fn
+
+    sid = _seed_legs("s-age")
+    clock = _Clock(NOW)
+
+    class _SlowIB:
+        def get_quote(self, contract, snapshot=False, generic_ticks=""):
+            t = _Tick(5.0, 5.2, 0)
+            t.time = clock.t
+            clock.t = clock.t + timedelta(seconds=61)
+            return t
+
+    assert build_default_quote_fn(lambda: _SlowIB(), ttl_s=120, now_fn=clock)(sid) is None
+
+    clock.t = NOW
+
+    class _FastIB(_SlowIB):
+        def get_quote(self, contract, snapshot=False, generic_ticks=""):
+            t = _Tick(5.0, 5.2, 0)
+            clock.t = clock.t + timedelta(seconds=2)
+            t.time = clock.t
+            return t
+
+    assert build_default_quote_fn(lambda: _FastIB(), ttl_s=120, now_fn=clock)(sid) is not None

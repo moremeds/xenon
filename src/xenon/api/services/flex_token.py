@@ -23,23 +23,23 @@ CONFIG_PATH = Path(__file__).resolve().parents[4] / "data" / "flex_token_config.
 
 def flex_token_status(path: Path | None = None, *, now: datetime | None = None) -> dict[str, Any]:
     cfg_path = path or CONFIG_PATH
+    current = now or datetime.now(timezone.utc)
     try:
         config = json.loads(cfg_path.read_text())
         expires_str = config["expires_at"]
         expires_at = datetime.fromisoformat(expires_str)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        days_remaining = (expires_at.astimezone(timezone.utc) - current).days
+        reminder_days = sorted(
+            (int(d) for d in config.get("reminder_days") or DEFAULT_REMINDER_DAYS),
+            reverse=True,
+        )
     except FileNotFoundError:
         return {"configured": False}
-    except Exception:  # noqa: BLE001 — bad config must not break /health
+    except Exception:  # noqa: BLE001 — a bad config must never break /health
         logger.warning("[health] invalid flex token config at %s", cfg_path, exc_info=True)
         return {"configured": False, "error": "invalid flex_token_config"}
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    current = now or datetime.now(timezone.utc)
-    days_remaining = (expires_at.astimezone(timezone.utc) - current).days
-    reminder_days = sorted(
-        (int(d) for d in config.get("reminder_days") or DEFAULT_REMINDER_DAYS),
-        reverse=True,
-    )
     active = next((d for d in reversed(reminder_days) if days_remaining <= d), None)
     return {
         "configured": True,

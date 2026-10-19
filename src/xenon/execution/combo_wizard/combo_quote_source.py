@@ -196,7 +196,7 @@ def build_default_quote_fn(
 
         leg_specs: list[ComboLegSpec] = []
         leg_quotes: dict[str, ComboLegQuote] = {}
-        now = _now()
+        fetched: list[tuple[Any, dict, Any]] = []
 
         for leg in legs:
             con_id = leg.get("conId") or leg.get("con_id")
@@ -229,7 +229,15 @@ def build_default_quote_fn(
             except Exception as exc:  # noqa: BLE001
                 logger.warning("get_quote failed for leg %s of %s: %s", con_id, session_id, exc)
                 return None
+            fetched.append((con_id, leg, ticker))
 
+        # Read the clock AFTER every leg is acquired: a snapshot get_quote
+        # pumps IB for ~2 s and ib_async stamps ticker.time at receive time,
+        # so a clock read before acquisition makes every fresh tick look
+        # future-dated (negative age). The oldest leg is also re-checked
+        # against completion time, not against its own fetch time.
+        now = _now()
+        for con_id, leg, ticker in fetched:
             if not _ticker_is_fresh(ticker, now=now, ttl_s=effective_ttl):
                 logger.debug(
                     "quote_fn: freshness gate failed for session=%s leg=%s",

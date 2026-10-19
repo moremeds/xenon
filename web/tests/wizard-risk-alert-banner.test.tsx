@@ -40,7 +40,8 @@ describe("WizardRiskAlertBanner", () => {
     expect(crossed.textContent).toContain("Assisted Exit");
     const noQuote = screen.getByTestId("wizard-risk-alert-s2");
     expect(noQuote.className).toContain("wizard-risk-alert--no-quote");
-    expect(noQuote.textContent).toContain("no fresh quote");
+    expect(noQuote.textContent).toContain("SPY no fresh quote. Alert line 1.20 not evaluated.");
+    expect(noQuote.textContent).not.toContain("2 min");
     expect(screen.getByRole("alert")).toBeTruthy();
   });
 
