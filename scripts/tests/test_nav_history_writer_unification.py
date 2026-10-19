@@ -1,10 +1,9 @@
 """Task 0 — nav_history writer unification (Pass-2 E1-a + writer migration).
 
-All four legacy writers
+All legacy writers
   - upsert_nav_sync (the unified surface)
   - ib_sync._append_nav_snapshot
   - persist_futu_nav
-  - db.queries.portfolio.upsert_nav
 funnel through ``xenon.utils.portfolio_loader._build_upsert_stmt``. The CI
 guard in ``scripts/checks/no_pg_insert_nav_history.py`` enforces this at
 import-graph level; these tests pin the behavior at runtime.

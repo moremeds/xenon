@@ -1,9 +1,4 @@
-"""Signature checks for get_account_snapshots_history (async) +
-load_account_snapshots_history_sync, plus a sync PG integration test.
-
-Async behavior is covered in src/xenon/db/tests/test_account_snapshots_history.py
-where the async `conn` fixture is available.
-"""
+"""Signature check for load_account_snapshots_history_sync, plus a sync PG integration test."""
 
 from __future__ import annotations
 
@@ -12,22 +7,8 @@ from decimal import Decimal
 
 from sqlalchemy import insert, text
 
-from xenon.db.queries.portfolio import get_account_snapshots_history
 from xenon.db.schema import account_snapshots
 from xenon.utils.portfolio_loader import load_account_snapshots_history_sync
-
-
-def test_async_query_signature_accepts_scope_and_limit():
-    import inspect
-
-    sig = inspect.signature(get_account_snapshots_history)
-    params = sig.parameters
-    assert "conn" in params
-    assert "broker" in params
-    assert "account_env" in params
-    assert "broker_account" in params
-    assert "limit" in params
-    assert params["limit"].default == 5
 
 
 def test_sync_helper_signature_accepts_scope_and_limit():

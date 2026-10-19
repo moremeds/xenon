@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import inspect
 
-from xenon.db.queries.portfolio import upsert_nav
 from xenon.db.schema import nav_history
 from xenon.utils.portfolio_loader import load_nav_history_sync
 
@@ -32,14 +31,6 @@ def test_nav_history_breakdown_columns_are_nullable():
     for name in ("total", "cash", "stock_value", "options_value"):
         col = nav_history.c[name]
         assert col.nullable, f"nav_history.{name} must be nullable"
-
-
-def test_upsert_nav_signature_accepts_breakdown_kwargs():
-    sig = inspect.signature(upsert_nav)
-    params = sig.parameters
-    for name in ("total", "cash", "stock_value", "options_value"):
-        assert name in params, f"upsert_nav missing kwarg {name!r}"
-        assert params[name].default is None, f"upsert_nav.{name} must default to None"
 
 
 def test_load_nav_history_sync_signature():
