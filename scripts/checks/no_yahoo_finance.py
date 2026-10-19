@@ -58,7 +58,6 @@ BASELINE_COUNTS: dict[Path, int] = {
     REPO_ROOT / "web/app/api/ticker/news/route.ts": 2,
     REPO_ROOT / "web/app/api/ticker/info/route.ts": 1,
     REPO_ROOT / "web/app/api/previous-close/route.ts": 1,
-    REPO_ROOT / "src/xenon/reports/portfolio_performance.py": 1,
     REPO_ROOT / "scripts/research/spx_short_put_backtest.py": 3,
 }
 
