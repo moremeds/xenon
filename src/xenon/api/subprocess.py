@@ -49,6 +49,9 @@ class ScriptResult:
     data: Optional[dict] = None
     error: Optional[str] = None
     exit_code: Optional[int] = None
+    # False only when the caller refused BEFORE starting the subprocess
+    # (cooldown, gateway down, send window closed): nothing reached IB.
+    spawned: bool = True
 
 
 async def run_entry_point(

@@ -12,9 +12,12 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import sys
+import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Literal, NoReturn, Optional
 
@@ -83,6 +86,30 @@ def _is_clientid_in_use(exc: BaseException) -> bool:
     return bool(_CLIENTID_IN_USE_RE.search(msg)) and "client id" in msg
 
 
+# Disposition of an amend, stamped on every modify error reply as
+# ``amend_outcome`` (PR-03b round 3). ``not_sent``: failed before
+# placeOrder; ``rejected``: IB explicitly rejected the amend (103/201/202);
+# ``unconfirmed``: placeOrder was sent but no refreshed state proved either
+# outcome. Only the first two prove the amend did not apply — the route
+# keeps the max(old,new) reservation for anything else.
+_amend_stage: dict = {"value": None}
+_FATAL_MODIFY_CODES = (103, 201, 202)
+
+# Hard wall-clock bound for one modify process (PR-03b round 4). The route
+# SIGKILLs the subprocess at 15 s; this watchdog also ends an orphan whose
+# API parent died. Backstop only since round 5: Gate 4's expiry deadline is
+# --send-by + IB grace, enforced by the check before placeOrder.
+MODIFY_WALL_CLOCK_S = 20.0
+
+
+def _arm_sender_watchdog(seconds: float = MODIFY_WALL_CLOCK_S) -> threading.Timer:
+    """Exit the process (no reply) once `seconds` have passed."""
+    timer = threading.Timer(seconds, os._exit, args=(3,))
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 def output(status: str, message: str, **extra) -> NoReturn:
     """Print JSON result and exit.
 
@@ -90,6 +117,8 @@ def output(status: str, message: str, **extra) -> NoReturn:
     ``connection`` | ``ownership`` | ``ib_reject`` — consumed by the
     FastAPI route to map to HTTP 503 / 409 / 4xx (F5.4).
     """
+    if status != "ok" and _amend_stage["value"] is not None:
+        extra.setdefault("amend_outcome", _amend_stage["value"])
     print(json.dumps({"status": status, "message": message, **extra}))
     sys.exit(0 if status == "ok" else 1)
 
@@ -369,6 +398,7 @@ def cancel_order(
     ``account``/``client_id`` assert the rest of the identity tuple
     (spec §2.4): scope account and recorded placing clientId.
     """
+    _amend_stage["value"] = "not_sent"
     trade = find_trade(client, order_id, perm_id, account=account, client_id=client_id)
     if trade is None:
         output(
@@ -489,6 +519,8 @@ def modify_order(
     new_quantity: Optional[int] = None,
     account: Optional[str] = None,
     client_id: Optional[int] = None,
+    non_guaranteed: Optional[int] = None,
+    send_by: Optional[datetime] = None,
 ):
     """Modify an open order.
 
@@ -500,6 +532,7 @@ def modify_order(
     ``account``/``client_id`` assert the rest of the identity tuple
     (spec §2.4): scope account and recorded placing clientId.
     """
+    _amend_stage["value"] = "not_sent"
     trade = find_trade(client, order_id, perm_id, account=account, client_id=client_id)
     if trade is None:
         output(
@@ -611,11 +644,31 @@ def modify_order(
     # Ensure NonGuaranteed is set for combo/BAG orders.
     # IB's open order snapshot may strip smartComboRoutingParams;
     # re-submitting without it causes "Missing or invalid NonGuaranteed value".
+    # The mode is always sent explicitly from the API route's persisted
+    # value (--non-guaranteed); the "1" fallback only covers direct CLI use
+    # without the flag — never a silent mode change.
     if trade.contract.secType == "BAG":
         from ib_async import TagValue
 
-        trade.order.smartComboRoutingParams = [TagValue("NonGuaranteed", "1")]
+        trade.order.smartComboRoutingParams = [
+            TagValue("NonGuaranteed", str(non_guaranteed) if non_guaranteed is not None else "1")
+        ]
 
+    # Send-by fence (round 5, item 2): Gate 4 expires the amend at
+    # send_by + IB grace, so nothing may be transmitted after send_by —
+    # checked immediately before the (only) placeOrder, after any reconnect.
+    if send_by is not None and datetime.now(timezone.utc) >= send_by:
+        client.ib.errorEvent -= on_error
+        output(
+            "error",
+            f"Modify send window closed at {send_by.isoformat()}; nothing was sent",
+            classification="send_window_closed",
+            **_identity_notes(trade, account),
+        )
+
+    # From here on the amend may have reached IB: any failure without an
+    # explicit rejection is "unconfirmed", never proof it did not apply.
+    _amend_stage["value"] = "unconfirmed"
     client.place_order(trade.contract, trade.order)
 
     # Wait for refreshed IB state to reflect the requested modify.
@@ -628,7 +681,7 @@ def modify_order(
             confirmed_trade = refreshed_trade
             break
         # Check for fatal errors (103=duplicate id, 201=rejected, 202=cancelled)
-        fatal = [e for e in error_msgs if e[0] in (103, 201, 202)]
+        fatal = [e for e in error_msgs if e[0] in _FATAL_MODIFY_CODES]
         if fatal:
             client.ib.errorEvent -= on_error
             output(
@@ -636,12 +689,23 @@ def modify_order(
                 f"IB rejected modify: {fatal[0][1]}",
                 classification=classify_failure(fatal[0][0]),
                 upstream={"code": fatal[0][0], "message": fatal[0][1]},
+                amend_outcome="rejected",
                 **_identity_notes(refreshed_trade, account),
             )
 
     client.ib.errorEvent -= on_error
 
     if confirmed_trade is None:
+        fatal = [e for e in error_msgs if e[0] in _FATAL_MODIFY_CODES]
+        if fatal:
+            output(
+                "error",
+                f"IB rejected modify: {fatal[0][1]}",
+                classification=classify_failure(fatal[0][0]),
+                upstream={"code": fatal[0][0], "message": fatal[0][1]},
+                amend_outcome="rejected",
+                **_identity_notes(latest_trade or trade, account),
+            )
         latest_status = latest_trade.orderStatus.status if latest_trade is not None else "Unknown"
         latest_price = latest_trade.order.lmtPrice if latest_trade is not None else None
         latest_quantity = json_number(latest_trade.order.totalQuantity) if latest_trade is not None else None
@@ -688,6 +752,13 @@ def modify_order(
     )
 
 
+def _parse_send_by(value: str) -> datetime:
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        raise argparse.ArgumentTypeError("--send-by needs a timezone-aware ISO-8601 instant")
+    return dt
+
+
 def main():
     parser = argparse.ArgumentParser(description="Cancel or modify IB orders")
     sub = parser.add_subparsers(dest="action", required=True)
@@ -708,6 +779,13 @@ def main():
     modify_p.add_argument("--new-price", type=float)
     modify_p.add_argument("--new-quantity", type=int)
     modify_p.add_argument(
+        "--non-guaranteed",
+        type=int,
+        choices=[0, 1],
+        default=None,
+        help="Explicit NonGuaranteed mode for BAG modifies (0=guaranteed, 1=non-guaranteed)",
+    )
+    modify_p.add_argument(
         "--outside-rth", action="store_true", default=None, help="Allow order to fill outside regular trading hours"
     )
     modify_p.add_argument(
@@ -716,11 +794,27 @@ def main():
         action="store_false",
         help="Restrict order to regular trading hours only",
     )
+    modify_p.add_argument(
+        "--send-by",
+        type=_parse_send_by,
+        default=None,
+        help="ISO-8601 instant after which no placeOrder may be sent (Gate-4 amend fence)",
+    )
     modify_p.add_argument("--host", default=DEFAULT_HOST)
     modify_p.add_argument("--port", type=int, default=DEFAULT_PORT)
 
     args = parser.parse_args()
+    watchdog = _arm_sender_watchdog() if args.action == "modify" else None
+    try:
+        _run(args)
+    finally:
+        # Normal exits (including output()'s SystemExit) disarm it; only a
+        # modify still running at the bound is killed.
+        if watchdog is not None:
+            watchdog.cancel()
 
+
+def _run(args) -> None:
     if args.order_id == 0 and args.perm_id == 0:
         output("error", "Must provide --order-id or --perm-id", classification="ib_reject")
 
@@ -757,6 +851,8 @@ def main():
                 new_quantity=args.new_quantity,
                 account=args.account,
                 client_id=args.client_id,
+                non_guaranteed=args.non_guaranteed,
+                send_by=args.send_by,
             )
     except IBConnectionError as exc:
         # Connection dropped mid-operation (stale socket, gateway restart) —

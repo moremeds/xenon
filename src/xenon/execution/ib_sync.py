@@ -533,6 +533,9 @@ def collapse_positions(positions: list) -> list:
                     "type": "Call" if leg.get("right") == "C" else ("Put" if leg.get("right") == "P" else "Stock"),
                     "strike": leg.get("strike"),
                     "conId": leg.get("conId"),
+                    # Raw IB account of the position (PR-03b round 3): Gate 4
+                    # credits cover only to legs that name the scope account.
+                    "account": leg.get("account"),
                     "entry_cost": leg["entry_cost"],
                     "avg_cost": leg["avgCost"],
                     "market_price": leg.get("marketPrice"),
@@ -619,13 +622,15 @@ def _resolve_market_price(
     return None, False
 
 
-def fetch_positions(client: IBClient, account: str | None = None) -> list:
+def fetch_positions(client: IBClient, account: str | None = None, *, rows: list | None = None) -> list:
     """Fetch positions from IB; with ``account``, only that account's rows.
 
     ib.positions() spans every managed account. Rows naming another account
     (or no account) are dropped so they never blend into the scope snapshot.
+    ``rows`` passes an already-made ``client.get_positions()`` read (the sync
+    pass reads once and also attests account provenance on it).
     """
-    positions = client.get_positions()
+    positions = client.get_positions() if rows is None else list(rows)
     if account is not None:
         positions = [p for p in positions if getattr(p, "account", None) == account]
 
@@ -657,6 +662,7 @@ def fetch_positions(client: IBClient, account: str | None = None) -> list:
                 "right": getattr(contract, "right", None),
                 "structure": format_option_structure(contract, position_size),
                 "conId": contract.conId,  # Needed for reqPnLSingle
+                "account": getattr(pos, "account", None) or None,
                 "contract": contract,  # Keep for market data requests
             }
         )
@@ -902,17 +908,26 @@ def build_account_summary(account: dict, pnl_data: dict) -> dict:
     }
 
 
-def build_fill_dates(client) -> dict:
+def build_fill_dates(client, *, status: dict | None = None, fills: list | None = None) -> dict:
     """Extract earliest execution date per contract from IB session fills.
 
     Returns dict keyed by "TICKER|EXPIRY|RIGHT|STRIKE" → "YYYY-MM-DD".
     Covers same-session trades that haven't appeared in Flex Query (blotter) yet.
+
+    `status` (optional) receives ``executions=True/False`` — the sync pass's
+    observation stamp attests this read's success, so a failed fills read
+    must degrade the snapshot to complete=False instead of passing silently.
     """
     fill_dates: dict[str, str] = {}
-    try:
-        fills = client.get_fills()
-    except Exception:
-        return fill_dates
+    if fills is None:
+        try:
+            fills = client.get_fills()
+        except Exception:
+            if status is not None:
+                status["executions"] = False
+            return fill_dates
+        if status is not None:
+            status["executions"] = True
 
     for fill in fills:
         contract = fill.contract
@@ -1088,14 +1103,15 @@ def _scope_from_env() -> tuple[str, str, str]:
     )
 
 
-def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
+def _append_nav_snapshot(net_liq: float, daily_pnl=None, *, conn=None) -> None:
     """Upsert today's intraday NAV via the unified writer.
 
     Pass-2 (writer unification): delegates to
     ``xenon.utils.portfolio_loader.upsert_nav_sync``. The cross-env guard
     (Decisions §13) and race-safe IntegrityError catch live inside the
     shared helper now — guard is default-on; do NOT pass
-    ``enforce_account_env_guard=False`` here.
+    ``enforce_account_env_guard=False`` here. ``conn``: the snapshot
+    publish transaction (see `_save_portfolio_to_postgres`).
     """
     if os.environ.get("XENON_READ_ONLY") == "1":
         print(f"⏭  XENON_READ_ONLY=1 — skipping NAV snapshot write (net_liq=${net_liq:,.2f})")
@@ -1120,12 +1136,13 @@ def _append_nav_snapshot(net_liq: float, daily_pnl=None) -> None:
         nav=nav_val,
         daily_pnl=pnl_val,
         source="intraday",
+        conn=conn,
     )
 
     print(f"✓ NAV snapshot: {today} → ${net_liq:,.2f}")
 
 
-def _save_portfolio_to_postgres(portfolio: dict) -> None:
+def _save_portfolio_to_postgres(portfolio: dict) -> bool:
     """Write positions + account snapshot to Postgres.
 
     The full structured `portfolio` dict is also stamped into
@@ -1138,9 +1155,9 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
     if os.environ.get("XENON_READ_ONLY") == "1":
         n = len(portfolio.get("positions") or [])
         print(f"⏭  XENON_READ_ONLY=1 — skipping portfolio→PG write ({n} positions, snapshot not persisted)")
-        return
+        return False
 
-    from sqlalchemy import delete, insert, text
+    from sqlalchemy import delete, func, insert, text
 
     from xenon.db.schema import account_snapshots, positions
 
@@ -1149,6 +1166,21 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
     engine = get_sync_engine()
     with engine.begin() as conn:
         conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('portfolio_sync'))"))
+        observation = portfolio.get("observation")
+        if isinstance(observation, dict):
+            from xenon.execution import gate4
+
+            # A pass that did not start after the newest published pass must
+            # not replace its holdings (overlapping passes).
+            if gate4.is_stale_publication(
+                conn,
+                {"broker": broker, "account_env": account_env, "broker_account": broker_account},
+                observation,
+            ):
+                print(
+                    f"⏭  Stale sync pass (pass_seq {observation.get('pass_seq')}) — newer snapshot kept, not published"
+                )
+                return False
         conn.execute(
             delete(positions).where(
                 positions.c.broker == broker,
@@ -1205,46 +1237,45 @@ def _save_portfolio_to_postgres(portfolio: dict) -> None:
                 broker=broker,
                 account_env=account_env,
                 broker_account=broker_account,
+                # Taken after the locks (now() is txn start): publication
+                # order by snapshot_at matches the lock order.
+                snapshot_at=func.clock_timestamp(),
             )
         )
+        # NAV commits with the snapshot under the same locks, so overlapping
+        # passes cannot interleave NAV writes (an older pass's NAV can never
+        # land after a newer published pass).
+        net_liq = acct.get("net_liquidation") or portfolio.get("bankroll")
+        if net_liq:
+            try:
+                _append_nav_snapshot(float(net_liq), acct.get("daily_pnl"), conn=conn)
+            except Exception as exc:  # noqa: BLE001 — savepoint rolled back; snapshot still commits
+                print(f"  Warning: NAV snapshot failed: {exc}")
+    return True
 
 
 def save_portfolio(portfolio: dict):
     """Save portfolio to Postgres."""
+    # The intraday NAV row is written inside the publish transaction; a
+    # read-only, stale or failed publish writes no NAV.
     try:
-        _save_portfolio_to_postgres(portfolio)
-        print("✓ Saved portfolio to Postgres")
+        if _save_portfolio_to_postgres(portfolio):
+            print("✓ Saved portfolio to Postgres")
     except Exception as exc:
         print(f"  Warning: Postgres write failed: {exc}")
 
-    # Track daily NAV for performance history
-    acct = portfolio.get("account_summary", {})
-    net_liq = acct.get("net_liquidation") or portfolio.get("bankroll")
-    if net_liq:
-        try:
-            _append_nav_snapshot(float(net_liq), acct.get("daily_pnl"))
-        except Exception as exc:
-            print(f"  Warning: NAV snapshot failed: {exc}")
 
-
-def _open_orders_for_audit(client, account: str) -> list[dict]:
-    """Pull the scope account's open orders from IB, shaped for naked_short_audit.
+def _audit_orders_from_trades(trades: list, account: str) -> list[dict]:
+    """Shape live ib_async Trade objects for naked_short_audit, scope account only.
 
     reqAllOpenOrders spans every managed account. Only trades whose
     ``order.account`` is ``account`` are kept (other / empty dropped): the
-    audit judges them against this account's positions only.
-
-    Replaces the old `data/orders.json` read. The audit's pure function
-    (`find_naked_short_violations`) expects a list of dicts shaped like the
-    web app's open_orders payload — this adapter mirrors that shape from
-    live ib_async Trade objects so we don't depend on a separate process
-    having written to disk first.
+    audit judges them against this account's positions only (#198).
+    The audit's pure function (`find_naked_short_violations`) expects a list
+    of dicts shaped like the web app's open_orders payload — this adapter
+    mirrors that shape so we don't depend on a separate process having
+    written to disk first.
     """
-    try:
-        trades = client.get_open_orders()
-    except Exception as exc:
-        logging.getLogger("ib_sync.audit").warning("could not fetch open orders for audit (%s); skipping", exc)
-        return []
     out: list[dict] = []
     for trade in trades:
         order = getattr(trade, "order", None)
@@ -1262,6 +1293,9 @@ def _open_orders_for_audit(client, account: str) -> list[dict]:
                 "orderId": getattr(order, "orderId", None),
                 "permId": getattr(order, "permId", None),
                 "orderRef": getattr(order, "orderRef", "") or "",
+                # Account provenance — reqAllOpenOrders spans every account the
+                # connection can see; the consumer must verify scope before use.
+                "account": getattr(order, "account", None) or None,
                 "contract": {
                     "secType": getattr(contract, "secType", "") or "",
                     "symbol": getattr(contract, "symbol", "") or "",
@@ -1272,6 +1306,136 @@ def _open_orders_for_audit(client, account: str) -> list[dict]:
             }
         )
     return out
+
+
+def _open_orders_for_audit(client, account: str) -> list[dict]:
+    """Read the open orders from IB and shape the scope account's for the audit.
+
+    The sync pass itself reuses its single open-order read
+    (`_audit_orders_from_trades(activity["trades"], account)`); this wrapper
+    serves standalone callers.
+    """
+    try:
+        trades = client.get_open_orders()
+    except Exception as exc:
+        logging.getLogger("ib_sync.audit").warning("could not fetch open orders for audit (%s); skipping", exc)
+        return []
+    return _audit_orders_from_trades(trades, account)
+
+
+def _stamp_option_metadata(client, collapsed: list) -> None:
+    """Stamp IB-qualified tradingClass / multiplier / underlying sec type on
+    every option leg (contract details by conId). A failed lookup leaves the
+    fields None — Gate 4 then fails that symbol closed; nothing is guessed."""
+    from xenon.execution import contract_meta
+
+    con_ids = [
+        leg.get("conId")
+        for pos in collapsed
+        for leg in pos.get("legs") or []
+        if leg.get("type") in ("Call", "Put") and leg.get("conId")
+    ]
+    meta = contract_meta.fetch_meta_by_con_ids(client, con_ids) if con_ids else {}
+    for pos in collapsed:
+        for leg in pos.get("legs") or []:
+            if leg.get("type") not in ("Call", "Put"):
+                continue
+            m = meta.get(leg.get("conId"))
+            leg["tc"] = m["tc"] if m else None
+            leg["mult"] = m["mult"] if m else None
+            leg["und_sec"] = m["und_sec"] if m else None
+
+
+def _read_pass_activity(client) -> dict:
+    """Open orders, then executions, for this sync pass (after positions).
+
+    Read order: positions -> open orders -> executions (PR-03b round 4).
+    The snapshot's `as_of` is the pass start and gate 4 counts every fill
+    at/after `as_of`, so:
+
+    - an order working at the open-order read is persisted as demand;
+    - an order placed AND filled anywhere before the executions read
+      (between any two reads) shows up as a fill after `as_of`;
+    - an order working at the open-order read that fills later is both.
+
+    Not visible to this pass (accepted after-pass limitation): an order
+    placed after the open-order read that is still unfilled at the
+    executions read, and anything after the executions read. Any sequence
+    of discrete reads has such a tail — whatever the last read is, one
+    event kind can land just before it unseen; ending on executions means
+    the unseen kind is a still-working order, never a completed short.
+    The next pass sees it.
+
+    `executions_client_id` records which IB clientId issued reqExecutions
+    (cross-client execution visibility is verified on live IB separately).
+    """
+    log = logging.getLogger("ib_sync.pass")
+    out = {"trades": [], "fills": [], "open_orders_ok": False, "executions_ok": False}
+    try:
+        out["executions_client_id"] = getattr(getattr(client.ib, "client", None), "clientId", None)
+    except Exception:  # noqa: BLE001 — diagnostics only
+        out["executions_client_id"] = None
+    try:
+        out["trades"] = list(client.get_open_orders())
+        out["open_orders_ok"] = True
+    except Exception as exc:
+        log.warning("open-order read failed (%s)", exc)
+        return out
+    try:
+        out["fills"] = list(client.get_executions())
+        out["executions_ok"] = True
+    except Exception as exc:
+        log.warning("executions read failed (%s)", exc)
+    log.info("pass reads: reqExecutions on clientId=%s", out["executions_client_id"])
+    return out
+
+
+def _persist_pass_activity(open_orders: list[dict], executions: list[dict], *, observed_at=None) -> bool:
+    """Persist this pass's scoped open orders + executions to Postgres.
+
+    Runs BEFORE the snapshot is published: a snapshot may claim
+    `complete=true` only if every order and fill it observed is already in
+    `order_submissions` / `order_fills` (the rows Gate 4 reads). Foreign-
+    account rows are dropped by the writers. Any failure → False.
+    """
+    if os.environ.get("XENON_READ_ONLY") == "1":
+        return False
+    try:
+        from xenon.execution.account_scope import resolve_from_env
+        from xenon.execution.ib_orders import sync_open_orders_to_postgres
+        from xenon.execution.ib_reconcile import record_external_fills
+
+        scope = resolve_from_env()
+        result = sync_open_orders_to_postgres(open_orders, scope=scope, observed_at=observed_at)
+        record_external_fills(executions, scope=scope)
+        if (result or {}).get("unidentified"):
+            # An open order without permId/orderId could not be keyed, so
+            # its demand is not in Postgres — the pass is not complete.
+            logging.getLogger("ib_sync.pass").warning(
+                "%d open order(s) without permId/orderId — pass incomplete", result["unidentified"]
+            )
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001 — any failure degrades the stamp
+        logging.getLogger("ib_sync.pass").warning("pass activity persist failed (%s)", exc, exc_info=True)
+        return False
+
+
+def _observation_stamp(pass_started: datetime, reads: dict, ib_account: str | None) -> dict:
+    """PR-03b observation boundary stamped onto the portfolio snapshot.
+
+    `as_of` is the instant BEFORE the first read — a fill landing anywhere
+    inside the pass (between positions/open-orders/executions reads) still
+    post-dates this boundary and gate4 counts it via order_fills demand.
+    `complete` requires every read to have succeeded and the account to be
+    known; anything less fails the next SELL closed at gate4.view_incomplete.
+    """
+    return {
+        "as_of": pass_started.isoformat(),
+        "complete": all(reads.values()) and bool(ib_account),
+        "account": ib_account or "",
+        "reads": dict(reads),
+    }
 
 
 def main():
@@ -1286,6 +1450,22 @@ def main():
     parser.add_argument("--skip-audit", action="store_true", help="Skip naked short audit after sync")
 
     args = parser.parse_args()
+
+    # Observation boundary for this pass (PR-03b): the snapshot's holdings
+    # are "as of" pass start — fills landing after this instant are demand
+    # the snapshot cannot show and gate4 counts them via order_fills.
+    pass_started = datetime.now(timezone.utc)
+    reads = {"positions": False, "open_orders": False, "executions": False}
+    # Ordering key for this pass (xid8, no wall clock). Taken before any IB
+    # read; without it the pass cannot be published (gate4.is_stale_publication).
+    pass_seq = pass_cluster = None
+    if os.environ.get("XENON_READ_ONLY") != "1":
+        try:
+            from xenon.execution import gate4
+
+            pass_seq, pass_cluster = gate4.next_pass_seq()
+        except Exception as exc:  # noqa: BLE001 — degrade: snapshot is not published
+            logging.getLogger("ib_sync.pass").warning("pass_seq unavailable (%s)", exc)
 
     # Connect
     client = connect_ib(args.host, args.port, args.client_id or "auto")
@@ -1320,8 +1500,14 @@ def main():
 
         pnl_obj = client.ib.reqPnL(ib_account)
 
-        # Fetch positions while PnL streams
-        positions = fetch_positions(client, ib_account)
+        # Fetch positions while PnL streams: ONE read. fetch_positions keeps
+        # only the scope account's rows (#198: other / empty account dropped
+        # before classification). An accountless row also leaves the read
+        # unattested (PR-03b): a short position IB did not attribute could
+        # still need cover in this account.
+        raw_positions = client.get_positions()
+        reads["positions"] = all(getattr(p, "account", "") for p in raw_positions)
+        positions = fetch_positions(client, ib_account, rows=raw_positions)
 
         if not args.no_prices and positions:
             # ── Phase 3: Set exchange + request ALL data at once ──
@@ -1446,10 +1632,45 @@ def main():
 
         # Sync if requested
         if args.sync:
-            fill_dates = build_fill_dates(client)
+            from xenon.execution.ib_orders import open_orders_from_trades
+            from xenon.execution.ib_reconcile import executions_from_fills
+
+            # One coherent pass (PR-03b round 3): open orders + executions are
+            # read here, persisted to Postgres, and only then is the snapshot
+            # published. The open-order read is part of the attestation even
+            # when --skip-audit is set.
+            orders_read_at = datetime.now(timezone.utc)
+            activity = _read_pass_activity(client)
+            reads["open_orders"] = activity["open_orders_ok"]
+            reads["executions"] = activity["executions_ok"]
+            open_orders = open_orders_from_trades(client, activity["trades"]) if activity["trades"] else []
+            executions = executions_from_fills(activity["fills"])
+            # An open order without account provenance makes the view
+            # incomplete (adv-14): the #198 filter does not persist it, so the
+            # pass cannot claim it saw a whole, scoped picture. Orders of a
+            # NAMED other account are excluded and do not affect completeness.
+            reads["order_accounts"] = all(o.get("account") for o in open_orders)
+            # Same rule for fills: the writers drop an accountless execution
+            # (#198 filter), so the pass cannot claim it saw all of them.
+            reads["fill_accounts"] = all(e.get("account") for e in executions)
+            reads["persisted"] = (
+                reads["open_orders"]
+                and reads["executions"]
+                and _persist_pass_activity(open_orders, executions, observed_at=orders_read_at)
+            )
+            orders_for_audit = _audit_orders_from_trades(activity["trades"], ib_account)
+            fill_dates = build_fill_dates(client, fills=activity["fills"])
+            _stamp_option_metadata(client, collapsed)
             portfolio = convert_to_portfolio_format(
                 account, collapsed, pnl_data, fill_dates=fill_dates, fx_rates=fx_rates
             )
+            # PR-03b observation stamp: gate4 rejects new risk unless every
+            # read succeeded, every row named an account, and the observed
+            # orders/fills were persisted before this snapshot.
+            portfolio["observation"] = _observation_stamp(pass_started, reads, ib_account)
+            portfolio["observation"]["pass_seq"] = str(pass_seq) if pass_seq is not None else None
+            portfolio["observation"]["pass_cluster"] = pass_cluster
+            portfolio["observation"]["executions_client_id"] = activity.get("executions_client_id")
             save_portfolio(portfolio)
 
             # ── Naked Short Audit (post-sync) ──
@@ -1463,7 +1684,9 @@ def main():
                     # data/orders.json (which is written by the web app and can
                     # lag actual IB state). Adapter shapes Trade objects into
                     # the dict shape `find_naked_short_violations` expects.
-                    orders = _open_orders_for_audit(client, ib_account)
+                    # Same single open-order read as the pass, already
+                    # scoped to ib_account by _audit_orders_from_trades.
+                    orders = orders_for_audit
 
                     violations = find_naked_short_violations(orders, portfolio["positions"])
                     if violations:

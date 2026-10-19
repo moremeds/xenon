@@ -297,6 +297,29 @@ def get_session_engine() -> Engine:
     return _SESSION_ENGINE
 
 
+_SEQ_ENGINE: Engine | None = None
+
+
+def committed_pass_stamp() -> dict[str, str]:
+    """Gate-4 `pass_seq` + `pass_cluster` from their own committed transaction.
+
+    Same values ib_sync stamps via `gate4.next_pass_seq`. A dedicated
+    NullPool connection keeps the xid out of the test's open outer
+    transaction (seeds then order like real, committed passes) and never
+    takes a session-pool slot.
+    """
+    global _SEQ_ENGINE
+    if _SEQ_ENGINE is None:
+        from sqlalchemy.pool import NullPool
+
+        _SEQ_ENGINE = create_engine(sync_test_db_url(), poolclass=NullPool)
+    with _SEQ_ENGINE.begin() as conn:
+        seq, cluster = conn.execute(
+            text("SELECT pg_current_xact_id()::text, (SELECT system_identifier FROM pg_control_system())::text")
+        ).one()
+    return {"pass_seq": seq, "pass_cluster": cluster}
+
+
 def is_pg_reachable() -> bool:
     """Probe PG with a real `SELECT 1`; cache the result for the session.
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
 from xenon.db.service_health import record_service_health
@@ -86,13 +87,14 @@ def reconcile_fills_on_boot(
 
 def _safe_open_orders_tick(client: Any, *, scope: AccountScope) -> dict:
     """Best-effort: fetch + sync open orders. Catches & returns instead of raising."""
+    observed_at = datetime.now(timezone.utc)
     try:
         open_orders = _fetch_open_orders(client)
     except Exception as exc:  # noqa: BLE001
         logger.warning("ib_activity_mirror tick: fetch_open_orders failed: %s", exc)
         return {"error": str(exc)}
     try:
-        return _sync_open_orders_to_postgres(open_orders, scope=scope)
+        return _sync_open_orders_to_postgres(open_orders, scope=scope, observed_at=observed_at)
     except Exception as exc:  # noqa: BLE001
         logger.warning("ib_activity_mirror tick: sync_open_orders_to_postgres failed: %s", exc)
         return {"error": str(exc)}
@@ -315,6 +317,9 @@ def run_activity_poll_tick(
             "fills": {"skipped": True, "reason": str(exc)},
         }
 
+    # Read-start watermark: the mirror may release reservation state only
+    # for rows last written before this instant (PR-03b round 4).
+    observed_at = datetime.now(timezone.utc)
     try:
         open_orders = _fetch_open_orders(client)
     except Exception as exc:  # noqa: BLE001
@@ -325,7 +330,7 @@ def run_activity_poll_tick(
         oo_result: dict = {"error": "fetch_open_orders failed"}
     else:
         try:
-            oo_result = _sync_open_orders_to_postgres(open_orders, scope=scope)
+            oo_result = _sync_open_orders_to_postgres(open_orders, scope=scope, observed_at=observed_at)
         except Exception as exc:  # noqa: BLE001
             logger.warning("ib_activity_mirror tick: sync_open_orders_to_postgres failed: %s", exc)
             oo_result = {"error": str(exc)}

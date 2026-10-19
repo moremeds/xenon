@@ -9,6 +9,8 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
+from xenon._test_db import committed_pass_stamp
 # Phase 2 carve-out: this module's tests open their own SQLAlchemy engine
 # (helpers calling sqlalchemy.create_engine directly, or subprocess CLIs)
 # and therefore can't share the test's BEGIN/ROLLBACK transaction. They
@@ -22,7 +24,30 @@ from sqlalchemy import create_engine, text
 
 
 def _insert_portfolio_snapshot(payload: dict, *, snapshot_at: datetime | None = None) -> None:
+    """Seed a snapshot the way `ib_sync` writes it since PR-03b: the pass
+    stamps `observation` attesting positions+orders+executions completeness.
+    Gate 4 fails closed without it.
+    """
     import os
+
+    at = snapshot_at or datetime.now(timezone.utc)
+    payload = dict(payload)
+    # ib_sync (round 3) stamps the raw IB account on every position leg.
+    payload["positions"] = [
+        {**pos, "legs": [{"account": "DU0000000", **leg} for leg in pos.get("legs") or []]}
+        for pos in payload.get("positions") or []
+    ]
+    payload.setdefault(
+        "observation",
+        {
+            "as_of": at.isoformat(),
+            "complete": True,
+            "account": "DU0000000",
+            "reads": {"positions": True, "open_orders": True, "executions": True},
+            # xid8 ordering key + cluster id from a committed txn, as ib_sync stamps them.
+            **committed_pass_stamp(),
+        },
+    )
 
     engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
     try:
@@ -39,7 +64,7 @@ def _insert_portfolio_snapshot(payload: dict, *, snapshot_at: datetime | None = 
                 {
                     "account": "DU0000000",
                     "payload": json.dumps(payload),
-                    "snapshot_at": snapshot_at or datetime.now(timezone.utc),
+                    "snapshot_at": at,
                 },
             )
     finally:
@@ -49,6 +74,19 @@ def _insert_portfolio_snapshot(payload: dict, *, snapshot_at: datetime | None = 
 @pytest.fixture(autouse=True)
 def _test_mode(monkeypatch, tmp_path):
     monkeypatch.setenv("XENON_API_TEST_MODE", "1")
+    from xenon.api import server
+
+    async def _ib_qualified(body):
+        # Stand-in for reqContractDetails on standard equity options: IB
+        # reports tradingClass=symbol, multiplier 100, underlying STK — the
+        # body's own `multiplier` is never consulted.
+        sym = str(body.get("symbol", "")).upper()
+        return [
+            {"con_id": 7000 + i, "tc": sym, "mult": 100, "und_sec": "STK"}
+            for i, _ in enumerate(server._gate4_leg_specs(body))
+        ]
+
+    monkeypatch.setattr(server, "_resolve_gate4_leg_meta", _ib_qualified)
     # Point data dir at an empty portfolio
     portfolio = {"positions": []}
     pf_file = tmp_path / "portfolio.json"
@@ -139,7 +177,7 @@ def test_spy_buy_passes_preflight(client):
 def test_spoofed_multiplier_cannot_bypass_gate(client, monkeypatch, tmp_path):
     """Codex pass-3 P2: attacker posts multiplier=1 to turn 100 SPY shares into
     100 cover units, bypassing Gate 4 on a SELL call. The server must derive
-    multiplier from universe.py, not the request body.
+    multiplier from IB contract qualification, not the request body.
     """
     # Portfolio with 100 SPY shares → 1 contract of cover at multiplier=100
     portfolio = {
@@ -169,6 +207,7 @@ def test_spoofed_multiplier_cannot_bypass_gate(client, monkeypatch, tmp_path):
             "strike": 500.0,
             "multiplier": 1,  # malicious value
             "limitPrice": 5.0,
+            "client_attempt_id": "spoofed-mult-1",
         },
     )
     assert resp.status_code == 400, f"spoofed multiplier=1 must not bypass Gate 4; got {resp.status_code} {resp.json()}"
@@ -195,6 +234,7 @@ def test_missing_portfolio_snapshot_blocks_sell(monkeypatch, tmp_path):
             "action": "SELL",
             "quantity": 100,
             "limitPrice": 500.0,
+            "client_attempt_id": "missing-snap-1",
         },
     )
     assert resp.status_code == 400
@@ -249,7 +289,10 @@ def test_preflight_uses_postgres_snapshot_not_portfolio_json(client, monkeypatch
 
 def test_stale_portfolio_snapshot_blocks_sell(client, monkeypatch):
     """SELL exposure must not be approved from a stale PG portfolio snapshot."""
+    # Both thresholds: the run's market-open state is environment-dependent,
+    # and gate4 applies the open/closed variant independently of the route.
     monkeypatch.setenv("XENON_PORTFOLIO_SNAPSHOT_STALE_S", "300")
+    monkeypatch.setenv("XENON_PORTFOLIO_SNAPSHOT_STALE_CLOSED_S", "300")
     _insert_portfolio_snapshot(
         {
             "positions": [

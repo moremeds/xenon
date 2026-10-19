@@ -96,8 +96,14 @@ def test_ib_sync_inline_audit_other_account_covered_sell_no_violation(monkeypatc
     monkeypatch.setattr(ib_sync, "connect_ib", lambda *a, **k: client)
     monkeypatch.setattr(ib_sync, "get_account_summary", lambda _c, _a: {})
     monkeypatch.setattr(ib_sync, "get_fx_rates", lambda _c, _a: {"USD": 1.0})
-    monkeypatch.setattr(ib_sync, "fetch_positions", lambda _c, _a=None: [])
-    monkeypatch.setattr(ib_sync, "build_fill_dates", lambda _c: {})
+    monkeypatch.setattr(ib_sync, "fetch_positions", lambda _c, _a=None, **_k: [])
+    monkeypatch.setattr(ib_sync, "build_fill_dates", lambda _c, **_k: {})
+    # PR-03b sync pass: the same open-order read also feeds the PG mirror;
+    # that path is covered by test_gate4_sync_pass — stub it here.
+    from xenon.execution import ib_orders
+
+    monkeypatch.setattr(ib_orders, "open_orders_from_trades", lambda _c, _t: [])
+    monkeypatch.setattr(ib_sync, "_persist_pass_activity", lambda *_a, **_k: True)
     monkeypatch.setattr(ib_sync, "convert_to_portfolio_format", lambda *a, **k: {"positions": SCOPE_POSITIONS})
     monkeypatch.setattr(ib_sync, "save_portfolio", lambda _p: None)
     # ib_sync imports the audit by bare module name; provide it.

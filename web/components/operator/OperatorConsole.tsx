@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { isWriterStale } from "@/lib/serviceHealthWindows";
+import { isWriterStale, NON_WRITER_SERVICES } from "@/lib/serviceHealthWindows";
 import type { OperatorData } from "@/lib/operatorTypes";
 import { useMarketHours } from "@/lib/useMarketHours";
 
@@ -67,10 +67,13 @@ export default function OperatorConsole() {
     : null;
   // Fresh = recent AND not erroring; a writer that errors every minute is
   // recent but not healthy.
-  const freshCount = data.writers.filter(
+  const writers = data.writers.filter(
+    (w) => !NON_WRITER_SERVICES.has(w.service),
+  );
+  const freshCount = writers.filter(
     (w) => w.state === "ok" && !isWriterStale(w.service, w.age_secs, market),
   ).length;
-  const writerSummary = `${freshCount}/${data.writers.length} healthy`;
+  const writerSummary = `${freshCount}/${writers.length} healthy`;
 
   const snapTone =
     data.snapshotter.stale_seconds != null &&
@@ -128,7 +131,7 @@ export default function OperatorConsole() {
             manual). Replaces the uw_api_stats "no data" tile. */}
         <UwQuotaTile market={market} />
       </div>
-      <WriterFreshnessTable writers={data.writers} market={market} />
+      <WriterFreshnessTable writers={writers} market={market} />
     </div>
   );
 }

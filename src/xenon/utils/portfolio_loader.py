@@ -191,8 +191,13 @@ def upsert_nav_sync(
     options_value: _Decimal | float | int | None = None,
     source: str | None = None,
     enforce_account_env_guard: bool = True,
+    conn: sa.engine.Connection | None = None,
 ) -> None:
     """Unified sync nav_history writer.
+
+    ``conn``: write inside the caller's transaction (ib_sync publishes the
+    snapshot and its NAV together under its locks). A savepoint keeps a NAV
+    failure from aborting the caller's transaction; the error propagates.
 
     NULL-safe on every nullable column (None → preserve existing value on
     conflict). ``source`` distinguishes post-close from intraday rows; after
@@ -214,21 +219,32 @@ def upsert_nav_sync(
     # Lazy import to avoid circular dependency with futu_nav_persistence.
     from xenon.api.services.futu_nav_persistence import NavAccountEnvConflict
 
+    def _existing_env(c):
+        return c.execute(
+            sa.select(nav_history.c.account_env).where(
+                (nav_history.c.broker == scope.broker)
+                & (nav_history.c.broker_account == scope.broker_account)
+                & (nav_history.c.date == day)
+            )
+        ).first()
+
+    stmt = _build_upsert_stmt(scope, day, nav, daily_pnl, total, cash, stock_value, options_value, source)
+    if conn is not None:
+        with conn.begin_nested():
+            existing = _existing_env(conn) if enforce_account_env_guard else None
+            if existing is not None and existing.account_env != scope.account_env:
+                raise NavAccountEnvConflict(scope, existing.account_env, day)
+            conn.execute(stmt)
+        return
+
     engine = get_sync_engine()
 
     if enforce_account_env_guard:
-        with engine.begin() as conn:
-            existing = conn.execute(
-                sa.select(nav_history.c.account_env).where(
-                    (nav_history.c.broker == scope.broker)
-                    & (nav_history.c.broker_account == scope.broker_account)
-                    & (nav_history.c.date == day)
-                )
-            ).first()
+        with engine.begin() as c:
+            existing = _existing_env(c)
         if existing is not None and existing.account_env != scope.account_env:
             raise NavAccountEnvConflict(scope, existing.account_env, day)
 
-    stmt = _build_upsert_stmt(scope, day, nav, daily_pnl, total, cash, stock_value, options_value, source)
     try:
         with engine.begin() as conn:
             conn.execute(stmt)
@@ -239,13 +255,7 @@ def upsert_nav_sync(
         # the winner had a different account_env. Otherwise re-raise the
         # original IntegrityError (some other constraint fired).
         with engine.begin() as conn2:
-            winner = conn2.execute(
-                sa.select(nav_history.c.account_env).where(
-                    (nav_history.c.broker == scope.broker)
-                    & (nav_history.c.broker_account == scope.broker_account)
-                    & (nav_history.c.date == day)
-                )
-            ).first()
+            winner = _existing_env(conn2)
         if winner is not None and winner.account_env != scope.account_env:
             raise NavAccountEnvConflict(scope, winner.account_env, day)
         raise

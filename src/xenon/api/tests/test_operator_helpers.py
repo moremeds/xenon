@@ -151,3 +151,15 @@ def test_service_health_rows_surfaces_futu_history_cross_scope(pg_session):
     by_name = {r["service"]: r for r in _service_health_rows()}
     assert by_name["futu_history"]["state"] == "ok"
     assert isinstance(by_name["futu_history"]["age_secs"], int)
+
+
+def test_service_health_rows_excludes_gate4_watermark(pg_session):
+    # The Gate-4 invalidation watermark shares the table but is not a
+    # background writer; it must never count as an unhealthy writer.
+    from xenon.execution.gate4 import VIEW_WATERMARK_SERVICE
+
+    record_service_health("ib_activity_poller", "ok")
+    record_service_health(VIEW_WATERMARK_SERVICE, "invalidated")
+    names = [r["service"] for r in _service_health_rows()]
+    assert "ib_activity_poller" in names
+    assert VIEW_WATERMARK_SERVICE not in names

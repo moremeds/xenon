@@ -12,12 +12,12 @@ import json
 import os
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field
-from sqlalchemy import Text, cast, func, insert, literal, select, update
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import Text, cast, func, insert, literal, select, text, update
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -45,9 +45,7 @@ def ensure_writable() -> None:
     and in-process callers alike fail closed instead of silently persisting.
     """
     if os.environ.get("XENON_READ_ONLY") == "1":
-        raise ReadOnlyWriteError(
-            "XENON_READ_ONLY=1 — orders_store writes disabled (dev.sh live session)"
-        )
+        raise ReadOnlyWriteError("XENON_READ_ONLY=1 — orders_store writes disabled (dev.sh live session)")
 
 
 # ── Schema init ──
@@ -75,6 +73,14 @@ class RequestRow(BaseModel):
     multiplier: int
     con_id: int | None = None
     limit_price: Decimal
+    # Time in force, part of the request identity (round 6, item 2).
+    # Normalized like the place CLI (`params.get("tif", "DAY").upper()`).
+    tif: str = "DAY"
+
+    @field_validator("tif", mode="before")
+    @classmethod
+    def _norm_tif(cls, v):
+        return str(v or "DAY").strip().upper()
 
 
 @dataclass
@@ -89,6 +95,288 @@ class ReservationOutcome:
 _TERMINAL_STATES = {"REJECTED", "CANCELLED", "FAILED"}
 
 ATTEMPT_BODY_MISMATCH = "ATTEMPT_BODY_MISMATCH"
+
+# Sentinel for optional JSONB write-through params (register_from_snapshot):
+# "not provided" must not overwrite a stored value the caller never computed.
+_UNSET = object()
+
+
+def gate4_lock_key(broker, account_env, broker_account) -> str:
+    """Gate-4 account-scope advisory-lock key (PG `hashtext` of this string).
+
+    Every writer of reservation state — place, modify begin/settle, and the
+    snapshot mirror's legs/pending writes — serializes on this key."""
+    return f"gate4:{broker or ''}:{account_env or ''}:{broker_account or ''}"
+
+
+def _lock_gate4_scope(conn, broker, account_env, broker_account) -> None:
+    conn.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+        {"k": gate4_lock_key(broker, account_env, broker_account)},
+    )
+
+
+def monotone_updated_at(now: datetime):
+    """SQL value for an `order_submissions.updated_at` write (round 5, item 1).
+
+    The freshness watermark must never move backwards: the write is
+    max(now, previous updated_at + 1 µs). Reservation writers take `now`
+    AFTER the account-scope lock is held, so a write that waited on the lock
+    can never stamp a time earlier than a write that committed before it.
+    """
+    return func.greatest(now, order_submissions.c.updated_at + timedelta(microseconds=1))
+
+
+_PENDING_KEYS = ("pending_amend_qty", "pending_amend_id")
+
+
+def normalize_legs_payload(raw) -> dict:
+    """Stored `legs` column → dict shape {legs, guaranteed, pending_amend_qty,
+    pending_amend_id[, account]}. Handles the PR-03b dict, the legacy bare
+    leg list and NULL. `account` is present only when the payload recorded
+    provenance."""
+    if isinstance(raw, dict):
+        out = dict(raw)
+        out.setdefault("legs", None)
+        out.setdefault("guaranteed", None)
+        for k in _PENDING_KEYS:
+            out.setdefault(k, None)
+        return out
+    if isinstance(raw, list):
+        guaranteed = None
+        if raw and all(isinstance(x, dict) for x in raw):
+            vals = {x.get("guaranteed") for x in raw}
+            vals.discard(None)
+            guaranteed = vals.pop() if len(vals) == 1 else None
+        return {"legs": list(raw), "guaranteed": guaranteed, "pending_amend_qty": None, "pending_amend_id": None}
+    return {"legs": None, "guaranteed": None, "pending_amend_qty": None, "pending_amend_id": None}
+
+
+def merge_observed_legs(stored_raw, observed) -> dict:
+    """Merge a fresh IB observation into stored reservation state (item 6).
+
+    Observation owns the leg list (when it resolved one) and the account
+    provenance. Reservation state is never cleared by drift: pending amend
+    fields always survive, and a known guarantee mode survives an
+    observation whose routing tags are absent (guaranteed=None)."""
+    obs = normalize_legs_payload(observed)
+    if stored_raw is None:
+        return obs
+    merged = normalize_legs_payload(stored_raw)
+    if obs["legs"] is not None:
+        merged["legs"] = obs["legs"]
+    if obs["guaranteed"] is not None:
+        merged["guaranteed"] = obs["guaranteed"]
+    if isinstance(observed, dict) and "account" in observed:
+        merged["account"] = observed["account"]
+    return merged
+
+
+def _as_aware(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def is_fresh_observation(observed_at, row_updated_at) -> bool:
+    """True when the IB read began after the row's last local write.
+
+    Only a fresh observation may release reservation state. A read that
+    began before a local write (amend opened, settle, cancel) may show the
+    broker state from before that write.
+    """
+    obs = _as_aware(observed_at)
+    upd = _as_aware(row_updated_at)
+    return obs is not None and (upd is None or obs > upd)
+
+
+def _clear_pending(payload: dict) -> dict:
+    out = dict(payload)
+    out["pending_amend_qty"] = None
+    out["pending_amend_id"] = None
+    for k in ("pending_amend_deadline", "pending_amend_opened_at", "pending_amend_send_by"):
+        out.pop(k, None)
+    return out
+
+
+def _reconcile_pending(
+    payload: dict, observed_qty: int, *, observed_at=None, fresh: bool = False
+) -> tuple[dict, str | None]:
+    """Resolve an open amend generation against one IB observation.
+
+    Returns (payload, outcome) with outcome None (unchanged), "confirmed"
+    (IB reports exactly the pending quantity) or "expired".
+
+    Every outcome needs a FRESH observation (read began after the amend
+    token was written — round 4 item 1), so a delayed read can never confirm
+    a newer generation. "expired" additionally needs the read to begin after
+    `pending_amend_deadline` = send_by + IB grace: no sender transmits after
+    send_by (route and CLI fence, round 5), so this also covers an API
+    restart. The broker order is then observed as it really is, so the
+    token is released and demand follows the durable/observed quantity
+    again (item 4).
+    A pending amend without a deadline never expires.
+
+    Round 5: the read must also have begun after the amend was opened
+    (`pending_amend_opened_at`), independent of the row watermark.
+    """
+    if payload.get("pending_amend_id") is None and payload.get("pending_amend_qty") is None:
+        return payload, None
+    if not fresh:
+        return payload, None
+    obs = _as_aware(observed_at)
+    opened = _as_aware(payload.get("pending_amend_opened_at"))
+    if opened is not None and (obs is None or obs <= opened):
+        return payload, None
+    pending = payload.get("pending_amend_qty")
+    if pending is not None and int(pending) == int(observed_qty):
+        return _clear_pending(payload), "confirmed"
+    deadline = _as_aware(payload.get("pending_amend_deadline"))
+    if deadline is not None and obs is not None and obs > deadline:
+        return _clear_pending(payload), "expired"
+    return payload, None
+
+
+def _identity_compatible(row_action, row_legs, obs_action, obs_legs) -> bool:
+    """Same envelope action and the same legs (as a multiset).
+
+    Legs match on action + ratio, and on con_id when both sides carry one,
+    else on sym/sec/right/exp/strike. A side without a resolved leg list is
+    never compatible (round 6, item 1)."""
+    if str(row_action or "").upper() != str(obs_action or "").upper():
+        return False
+    a = normalize_legs_payload(row_legs).get("legs")
+    b = normalize_legs_payload(obs_legs).get("legs") if obs_legs is not None else None
+    if not a or not b or len(a) != len(b):
+        return False
+
+    def _same(x: dict, y: dict) -> bool:
+        if str(x.get("action") or "").upper() != str(y.get("action") or "").upper():
+            return False
+        if int(x.get("ratio") or 1) != int(y.get("ratio") or 1):
+            return False
+        if x.get("con_id") is not None and y.get("con_id") is not None:
+            return int(x["con_id"]) == int(y["con_id"])
+
+        if str(x.get("sym") or "").upper() != str(y.get("sym") or "").upper() or x.get("sec") != y.get("sec"):
+            return False
+        # Stock & other non-option legs: the place leg carries None while the
+        # IB snapshot carries strike 0.0 / right "" (ib_async Stock), so
+        # None, 0 and "" compare equal there (round 7, item 1).
+        blank = (lambda v: None if v in (None, "", 0) else v) if x.get("sec") != "OPT" else (lambda v: v)
+
+        def _f(v):
+            v = blank(v)
+            return None if v is None else float(v)
+
+        def _e(v):
+            v = blank(v)
+            return None if v is None else str(v).replace("-", "")
+
+        return (
+            (blank(x.get("right")) or None) == (blank(y.get("right")) or None)
+            and _e(x.get("exp")) == _e(y.get("exp"))
+            and _f(x.get("strike")) == _f(y.get("strike"))
+        )
+
+    unused = list(b)
+    for leg in a:
+        hit = next(
+            (i for i, o in enumerate(unused) if isinstance(leg, dict) and isinstance(o, dict) and _same(leg, o)), None
+        )
+        if hit is None:
+            return False
+        unused.pop(hit)
+    return True
+
+
+def _mirror_uuid_row(
+    conn,
+    submission_id: str,
+    *,
+    existing_state: str,
+    existing_quantity: int,
+    existing_legs,
+    observed_qty: int,
+    observed_legs,
+    observed_at,
+    fresh: bool,
+    now: datetime,
+) -> dict:
+    """Mirror one observation onto a Xenon-authored (UUID) row.
+
+    Request identity (quantity column, modify_sequence, attempt keys) stays
+    owned by the place/modify path. The mirror writes only reservation
+    state in the `legs` payload (PR-03b round 4, item 2):
+
+    - qualified leg metadata from the adapter (re-stamps legacy rows whose
+      legs are NULL or unqualified);
+    - `observed_qty`: the broker's quantity when it differs from the
+      durable one (TWS-side edit). Coverage reserves max(durable, observed)
+      so the pass persists conservative demand instead of skipping it. A
+      stale read can only raise it;
+    - pending-amend confirmation / expiry (fresh reads only).
+
+    A terminal row the broker still reports open is resurrected only by a
+    fresh read (a read that began before the cancel proves nothing). The
+    resurrection writes the same observed-qty + metadata merge in the same
+    single UPDATE (round 5, item 3), so the revived row reserves what IB
+    reports.
+    """
+    terminal = existing_state in _TERMINAL_STATES | {"FILLED"}
+    if terminal and not fresh:
+        return {"action": "SKIPPED_UUID", "drift": None}
+
+    stored = normalize_legs_payload(existing_legs)
+    payload = merge_observed_legs(existing_legs, observed_legs) if observed_legs is not _UNSET else dict(stored)
+    payload, outcome = _reconcile_pending(payload, observed_qty, observed_at=observed_at, fresh=fresh)
+    values: dict = {}
+    if terminal:
+        values.update(state="WORKING", reason_code=None)
+    if outcome == "confirmed":
+        values["quantity"] = observed_qty
+    durable = values.get("quantity", existing_quantity)
+    prev_obs = payload.get("observed_qty")
+    if fresh:
+        target = observed_qty if observed_qty != durable else None
+    else:
+        raised = [v for v in (prev_obs, observed_qty if observed_qty > durable else None) if v is not None]
+        target = max(raised) if raised else None
+    if target is None:
+        payload.pop("observed_qty", None)
+    else:
+        payload["observed_qty"] = int(target)
+
+    if payload == stored and not values:
+        return {"action": "SKIPPED_UUID", "drift": None}
+    conn.execute(
+        update(order_submissions)
+        .where(order_submissions.c.submission_id == submission_id)
+        .values(legs=payload, updated_at=monotone_updated_at(now), **values)
+    )
+    if terminal:
+        kind = "IB_MIRROR_RESURRECT"
+        detail = {"from_state": existing_state, "to_state": "WORKING", "reason": "ib_still_reports_open"}
+    else:
+        kind = {"confirmed": "AMEND_RECONCILED", "expired": "AMEND_EXPIRED"}.get(outcome, "IB_MIRROR_OBSERVED")
+        detail = {}
+    detail.update(quantity=observed_qty, observed_qty=payload.get("observed_qty"))
+    conn.execute(insert(order_events).values(submission_id=submission_id, kind=kind, detail=detail, at=now))
+    if terminal:
+        return {"action": "RESURRECTED", "drift": None}
+    out = {"action": "SKIPPED_UUID", "drift": None}
+    if outcome == "confirmed":
+        out["reconciled"] = True
+    elif outcome == "expired":
+        out["expired"] = True
+    else:
+        out["observed"] = True
+    return out
 
 
 def _canon_json(value):
@@ -144,6 +432,13 @@ def _request_body_matches(row, request: RequestRow, legs) -> bool:
         and (None if row.con_id is None else int(row.con_id))
         == (None if request.con_id is None else int(request.con_id))
         and _num(row.limit_price) == _num(request.limit_price)
+        # Rows written before round 6 never stored the request TIF: the old
+        # place path forwarded the body TIF to the CLI but never wrote the
+        # column, so every legacy row holds the server default 'DAY' — also
+        # a legacy GTC order. A legacy GTC replay therefore returns
+        # body_mismatch (409), the safe direction: never a duplicate of a
+        # different instruction, never a second order.
+        and str(row.tif or "DAY").upper() == request.tif
         and _canon_json(row.legs) == _canon_json(legs)
     )
 
@@ -219,6 +514,7 @@ def reserve_attempt(
             multiplier=request.multiplier,
             con_id=request.con_id,
             limit_price=request.limit_price,
+            tif=request.tif,
             state="PENDING",
             submitted_at=now,
             updated_at=now,
@@ -349,7 +645,7 @@ def apply_modify(
             )
             .values(
                 modify_sequence=sequence,
-                updated_at=datetime.now(timezone.utc),
+                updated_at=monotone_updated_at(datetime.now(timezone.utc)),
             )
             .returning(order_submissions.c.modify_sequence)
         )
@@ -387,6 +683,9 @@ def register_from_snapshot(
     expiry: str | None = None,
     con_id: int | None = None,
     tif: str = "DAY",
+    legs=_UNSET,
+    observed_at: datetime | None = None,
+    client_id: int | None = None,
 ) -> dict:
     """Mirror an IB-side open order into `xenon.order_submissions`.
 
@@ -406,26 +705,76 @@ def register_from_snapshot(
     Branch (2) closes the bug where TWS price/qty edits never reached our
     DB: the previous insert-only behavior left snapshot rows frozen at
     their first-seen values.
+
+    `observed_at` is the instant the caller STARTED the IB read that produced
+    this observation (PR-03b round 4). An observation is *fresh* only when
+    it began after the row's last local write (`updated_at`). Freshness is
+    required to release reservation state (confirm or expire a pending
+    amend). A stale observation applies only conservative changes (it can
+    raise demand, never lower or release it). `observed_at=None` (legacy
+    callers) keeps the old drift behavior but never touches a pending amend.
+
+    `client_id` is the IB clientId that placed the order (from the
+    observation). When no row carries this permId, a Xenon (UUID) row whose
+    perm_id was never stamped (permId=0 race at placement) is matched by
+    (ib_order_id, placing_client_id); the permId is stamped on it and the
+    observation mirrors onto it instead of inserting a snapshot row.
     """
     ensure_writable()
     submission_id = f"snapshot-{perm_id}"
     client_attempt_id = f"snapshot-{perm_id}"
-    now = datetime.now(timezone.utc)
     engine = get_sync_engine()
     with engine.begin() as conn:
-        existing = conn.execute(
-            select(
-                order_submissions.c.submission_id,
-                order_submissions.c.limit_price,
-                order_submissions.c.quantity,
-                order_submissions.c.state,
-            ).where(
-                order_submissions.c.perm_id == str(perm_id),
-                order_submissions.c.broker == broker,
-                order_submissions.c.account_env == account_env,
-                order_submissions.c.broker_account == broker_account,
-            )
-        ).first()
+        # Reservation state (legs / pending amend / quantity) is written
+        # under the same account-scope lock as the gate's check+insert.
+        _lock_gate4_scope(conn, broker, account_env, broker_account)
+        # Taken AFTER the lock (round 5, item 1): see monotone_updated_at.
+        now = datetime.now(timezone.utc)
+        scope_conds = (
+            order_submissions.c.broker == broker,
+            order_submissions.c.account_env == account_env,
+            order_submissions.c.broker_account == broker_account,
+        )
+        cols = (
+            order_submissions.c.submission_id,
+            order_submissions.c.limit_price,
+            order_submissions.c.quantity,
+            order_submissions.c.state,
+            order_submissions.c.legs,
+            order_submissions.c.updated_at,
+        )
+        existing = conn.execute(select(*cols).where(order_submissions.c.perm_id == str(perm_id), *scope_conds)).first()
+        if existing is None and client_id is not None and ib_order_id not in (None, "", "0"):
+            # Round 6, item 1: (clientId, orderId) is reusable, so it only
+            # narrows candidates. A row is adopted only when it is live (not
+            # terminal, no fills recorded), unstamped, in scope, and its
+            # envelope + legs match the observation. Anything else falls
+            # through to a snapshot row: double reservation is acceptable,
+            # dropping demand is not.
+            unstamped = conn.execute(
+                select(*cols, order_submissions.c.action).where(
+                    func.coalesce(order_submissions.c.perm_id, "").in_(("", "0")),
+                    order_submissions.c.ib_order_id == str(ib_order_id),
+                    order_submissions.c.placing_client_id == int(client_id),
+                    ~order_submissions.c.submission_id.startswith("snapshot-"),
+                    order_submissions.c.state.notin_(sorted(_TERMINAL_STATES | {"FILLED", "UNKNOWN"})),
+                    func.coalesce(order_submissions.c.filled_qty, 0) == 0,
+                    ~select(order_fills.c.exec_id)
+                    .where(order_fills.c.submission_id == order_submissions.c.submission_id)
+                    .exists(),
+                    *scope_conds,
+                )
+            ).all()
+            compatible = [
+                r for r in unstamped if _identity_compatible(r.action, r.legs, action, None if legs is _UNSET else legs)
+            ]
+            if len(compatible) == 1:  # none or ambiguous → snapshot row (over-reserves)
+                existing = compatible[0]
+                conn.execute(
+                    update(order_submissions)
+                    .where(order_submissions.c.submission_id == existing[0])
+                    .values(perm_id=str(perm_id))
+                )
 
         # Pull existing tif separately so we don't break the positional unpack
         # of older callers if this query expands further.
@@ -441,28 +790,49 @@ def register_from_snapshot(
             existing_limit_price = float(existing[1]) if existing[1] is not None else None
             existing_quantity = int(existing[2]) if existing[2] is not None else None
             existing_state = str(existing[3]) if existing[3] is not None else ""
+            existing_legs = existing[4]
+            fresh = is_fresh_observation(observed_at, existing[5])
+            # Legacy callers (observed_at=None) keep the pre-round-4 drift
+            # semantics for price/qty/tif; a read that provably began before
+            # the row's last local write applies only conservative changes.
+            drift_ok = fresh or observed_at is None
+            observed_qty = int(quantity)
 
-            # UUID-authored rows are off-limits: their modify_sequence is
-            # the source of truth. TWS-side modifies on those need a
-            # separate, conscious policy decision.
             if not existing_submission_id.startswith("snapshot-"):
-                return {"action": "SKIPPED_UUID", "drift": None}
+                return _mirror_uuid_row(
+                    conn,
+                    existing_submission_id,
+                    existing_state=existing_state,
+                    existing_quantity=existing_quantity or 0,
+                    existing_legs=existing_legs,
+                    observed_qty=observed_qty,
+                    observed_legs=legs,
+                    observed_at=observed_at,
+                    fresh=fresh,
+                    now=now,
+                )
 
             # IB still reports this order as open while we have it in a
             # terminal state — restore it. Operator error, race in the
-            # cancel route, or out-of-band TWS action can drive this.
+            # cancel route, or out-of-band TWS action can drive this. A read
+            # that began before the terminal write proves nothing.
             if existing_state in {"CANCELLED", "FILLED", "REJECTED", "FAILED", "UNKNOWN"}:
+                if not drift_ok:
+                    return {"action": "NOOP", "drift": None, "stale": True}
+                resurrect_values = dict(
+                    state="WORKING",
+                    reason_code=None,
+                    limit_price=float(limit_price),
+                    quantity=int(quantity),
+                    tif=tif,
+                    updated_at=monotone_updated_at(now),
+                )
+                if legs is not _UNSET:
+                    resurrect_values["legs"] = merge_observed_legs(existing_legs, legs)
                 conn.execute(
                     update(order_submissions)
                     .where(order_submissions.c.submission_id == existing_submission_id)
-                    .values(
-                        state="WORKING",
-                        reason_code=None,
-                        limit_price=float(limit_price),
-                        quantity=int(quantity),
-                        tif=tif,
-                        updated_at=now,
-                    )
+                    .values(**resurrect_values)
                 )
                 conn.execute(
                     insert(order_events).values(
@@ -484,28 +854,49 @@ def register_from_snapshot(
             # spuriously detect drift and emit a redundant IB_MIRROR_UPDATE event.
             new_price = round(float(limit_price), 4)
             stored_price = round(existing_limit_price, 4) if existing_limit_price is not None else None
+            new_quantity = observed_qty if drift_ok else max(existing_quantity or 0, observed_qty)
             drift: dict = {}
-            if stored_price != new_price:
+            if drift_ok and stored_price != new_price:
                 drift["limit_price"] = {"from": stored_price, "to": new_price}
-            if existing_quantity != int(quantity):
+            if existing_quantity != new_quantity:
                 drift["quantity"] = {
                     "from": existing_quantity,
-                    "to": int(quantity),
+                    "to": new_quantity,
                 }
-            if existing_tif is not None and existing_tif != tif:
+            if drift_ok and existing_tif is not None and existing_tif != tif:
                 drift["tif"] = {"from": existing_tif, "to": tif}
+            merged_legs = _UNSET
+            if legs is not _UNSET or existing_legs is not None:
+                merged_legs = (
+                    merge_observed_legs(existing_legs, legs)
+                    if legs is not _UNSET
+                    else normalize_legs_payload(existing_legs)
+                )
+                merged_legs, outcome = _reconcile_pending(
+                    merged_legs, observed_qty, observed_at=observed_at, fresh=fresh
+                )
+                if outcome is not None:
+                    drift["pending_amend_qty"] = {outcome: observed_qty}
+                if existing_legs is None or merged_legs != normalize_legs_payload(existing_legs):
+                    drift.setdefault("legs", "updated")
+                elif legs is _UNSET:
+                    merged_legs = _UNSET
             if not drift:
                 return {"action": "NOOP", "drift": None}
 
+            drift_values = dict(
+                quantity=new_quantity,
+                updated_at=monotone_updated_at(now),
+            )
+            if drift_ok:
+                drift_values["limit_price"] = float(limit_price)
+                drift_values["tif"] = tif
+            if merged_legs is not _UNSET:
+                drift_values["legs"] = merged_legs
             conn.execute(
                 update(order_submissions)
                 .where(order_submissions.c.submission_id == existing_submission_id)
-                .values(
-                    limit_price=float(limit_price),
-                    quantity=int(quantity),
-                    tif=tif,
-                    updated_at=now,
-                )
+                .values(**drift_values)
             )
             conn.execute(
                 insert(order_events).values(
@@ -543,6 +934,7 @@ def register_from_snapshot(
                 expiry=expiry,
                 con_id=con_id,
                 tif=tif,
+                legs=None if legs is _UNSET else legs,
             )
             # client_attempt_id is non-null here (snapshot-<perm_id>), so a
             # racing sibling conflicts on the attempt keys too — a PK-only
@@ -597,7 +989,7 @@ def apply_modify_by_perm_id(
                 order_submissions.c.modify_sequence < sequence,
                 *scope_conds,
             )
-            .values(modify_sequence=sequence, updated_at=datetime.now(timezone.utc))
+            .values(modify_sequence=sequence, updated_at=monotone_updated_at(datetime.now(timezone.utc)))
             .returning(order_submissions.c.modify_sequence)
         )
         updated = result.first()
@@ -645,7 +1037,7 @@ def mark_submitted(
                 perm_id=str(perm_id) if perm_id is not None else None,
                 placing_client_id=placing_client_id,
                 state="WORKING",
-                updated_at=now,
+                updated_at=monotone_updated_at(now),
             )
         )
         conn.execute(
@@ -663,7 +1055,7 @@ def mark_terminal(
     submission_id: str,
     state: Literal["FILLED", "REJECTED", "CANCELLED", "FAILED", "PARTIALLY_FILLED", "UNKNOWN"],
     reason_code: str | None,
-    filled_qty: int,
+    filled_qty: int | None,
     avg_fill_price: Decimal | None,
     expected_states: tuple[str, ...] | None = None,
 ) -> int:
@@ -682,16 +1074,13 @@ def mark_terminal(
     stmt = update(order_submissions).where(order_submissions.c.submission_id == submission_id)
     if expected_states is not None:
         stmt = stmt.where(order_submissions.c.state.in_(expected_states))
+    values = dict(state=state, reason_code=reason_code, updated_at=monotone_updated_at(now))
+    if filled_qty is not None:
+        # filled_qty=None keeps the stored fill state: a cancel releases only
+        # the unfilled remainder and must never erase executed quantity.
+        values.update(filled_qty=filled_qty, avg_fill_price=avg_fill_price)
     with engine.begin() as conn:
-        result = conn.execute(
-            stmt.values(
-                state=state,
-                reason_code=reason_code,
-                filled_qty=filled_qty,
-                avg_fill_price=avg_fill_price,
-                updated_at=now,
-            )
-        )
+        result = conn.execute(stmt.values(**values))
     return result.rowcount
 
 

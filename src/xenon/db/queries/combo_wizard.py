@@ -260,11 +260,13 @@ def list_unresolved_orders(
 
 def update_order_state(conn: Connection, submission_id: str, state: str) -> None:
     from xenon.db.schema import order_submissions
+    from xenon.execution.orders_store import monotone_updated_at
 
+    # Gate-4 freshness watermark: updated_at never moves backwards.
     conn.execute(
         update(order_submissions)
         .where(order_submissions.c.submission_id == submission_id)
-        .values(state=state, updated_at=datetime.now(timezone.utc))
+        .values(state=state, updated_at=monotone_updated_at(datetime.now(timezone.utc)))
     )
 
 

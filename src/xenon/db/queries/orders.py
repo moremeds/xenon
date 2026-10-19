@@ -8,6 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from xenon.db.schema import order_events, order_submissions
 
+# NOTE (PR-03b): these async writers have no runtime caller. They still write
+# plain now() into order_submissions.updated_at. Before any reuse they must
+# adopt the Gate-4 watermark invariant (xenon.execution.orders_store.
+# monotone_updated_at: GREATEST(now, updated_at + 1 µs), taken after the
+# account-scope lock), or a stale IB read can count as fresh.
+
 
 async def get_by_submission_id(conn: AsyncConnection, submission_id: str) -> dict | None:
     stmt = select(order_submissions).where(order_submissions.c.submission_id == submission_id)

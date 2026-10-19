@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from xenon._test_db import committed_pass_stamp
+
 # Phase 3: opt out of Phase 2 BoundEngine binding — this file owns its
 # own TRUNCATE-based teardown that needs committed cross-test state.
 pytestmark = pytest.mark.committed_db
@@ -30,6 +32,49 @@ def _cleanup(engine):
         conn.execute(text("TRUNCATE xenon.wizard_events CASCADE"))
         conn.execute(text("TRUNCATE xenon.wizard_combo_attempts CASCADE"))
         conn.execute(text("TRUNCATE xenon.wizard_sessions CASCADE"))
+        conn.execute(text("TRUNCATE xenon.account_snapshots CASCADE"))
+
+
+def _seed_gate4_snapshot(engine):
+    """`submit_combo` drives the real /orders/place Gate-4 path — seed the
+    observation-stamped snapshot (100 SPY shares covers the spread's SELL
+    leg) that ib_sync would have written for the harness scope."""
+    import json as _json
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    payload = {
+        "positions": [
+            {
+                "ticker": "SPY",
+                "structure_type": "Stock",
+                "direction": "LONG",
+                "contracts": 100,
+                "expiry": None,
+                "legs": [{"direction": "LONG", "type": "Stock", "contracts": 100, "strike": 0.0, "account": "DU0000000"}],
+            }
+        ],
+        "available_funds": 0,
+        "observation": {
+            "as_of": now.isoformat(),
+            "complete": True,
+            "account": "DU0000000",
+            "reads": {"positions": True, "open_orders": True, "executions": True},
+            # xid8 ordering key + cluster id from a committed txn, as ib_sync stamps them.
+            **committed_pass_stamp(),
+        },
+    }
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO xenon.account_snapshots
+                  (account, bankroll, payload, snapshot_at, broker, account_env, broker_account)
+                VALUES ('DU0000000', 0, CAST(:p AS jsonb), :at, 'IB', 'paper', 'DU0000000')
+                """
+            ),
+            {"p": _json.dumps(payload), "at": now},
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -42,6 +87,7 @@ def _setup_pg(monkeypatch):
 
     engine = _pg_engine()
     _cleanup(engine)
+    _seed_gate4_snapshot(engine)
     engine.dispose()
     yield
     engine = _pg_engine()
@@ -52,6 +98,16 @@ def _setup_pg(monkeypatch):
 @pytest.fixture(autouse=True)
 def _force_test_mode_on(monkeypatch):
     monkeypatch.setenv("XENON_API_TEST_MODE", "1")
+    from xenon.api import server
+
+    async def _ib_qualified(body):
+        # Stand-in for reqContractDetails (standard SPY options).
+        return [
+            {"con_id": 7000 + i, "tc": "SPY", "mult": 100, "und_sec": "STK"}
+            for i, _ in enumerate(server._gate4_leg_specs(body))
+        ]
+
+    monkeypatch.setattr(server, "_resolve_gate4_leg_meta", _ib_qualified)
     yield
 
 

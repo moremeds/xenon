@@ -16,7 +16,7 @@ import pytest
 
 from xenon.api import server as server_mod
 from xenon.api.subprocess import ScriptResult
-from xenon.execution import orders_store
+from xenon.execution import gate4, orders_store
 from xenon.execution.preflight import Verdict
 
 pytestmark = pytest.mark.asyncio
@@ -49,12 +49,16 @@ def harness(monkeypatch):
     monkeypatch.setattr(server_mod.app.state, "broker", "IB", raising=False)
 
     calls: dict = {"terminal": [], "events": [], "runner": [], "submitted": []}
+    # PR-03b: the place route reserves through Gate 4 (coverage + reservation
+    # in one locked txn); stub that seam and the IB leg-meta lookup.
+    async def _no_meta(_body):
+        return None
+
+    monkeypatch.setattr(server_mod, "_resolve_gate4_leg_meta", _no_meta)
     monkeypatch.setattr(
-        orders_store,
-        "reserve_attempt",
-        lambda *_a, **_k: orders_store.ReservationOutcome(
-            status="winner", submission_id="sub-1", state=None, duplicate_of=None, reason_code=None
-        ),
+        gate4,
+        "reserve_with_coverage",
+        lambda *_a, **_k: gate4.Gate4Outcome(status="winner", submission_id="sub-1"),
     )
     monkeypatch.setattr(orders_store, "mark_terminal", lambda **kw: calls["terminal"].append(kw))
     monkeypatch.setattr(orders_store, "record_event", lambda *a, **_k: calls["events"].append(a))

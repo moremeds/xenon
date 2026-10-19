@@ -1,47 +1,30 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import { ORDER_REASON_CODES, getReasonToast } from "../lib/orderReasonCodes";
 
-// Source of truth: Python `ReasonCode` StrEnum in src/xenon/execution/preflight.py.
-// Keep this list in lockstep with the enum. A future F6 follow-up may replace
-// this hardcoded list with a build-time generator (option (b) in the plan).
-const PYTHON_REASON_CODES = [
-  // F2 — preflight
-  "UNIVERSE_UNKNOWN",
-  "INDEX_HAS_NO_STOCK",
-  "INSUFFICIENT_SHARES",
-  "INSUFFICIENT_CASH",
-  "INDEX_CALL_UNCOVERED",
-  "ETF_CALL_UNCOVERED",
-  "INVALID_ORDER_BODY",
-  // F3 — quote gate
-  "STALE_QUOTE",
-  "OPTION_MARKET_CLOSED",
-  "QUOTE_CONTRACT_MISMATCH",
-  "QUOTE_UNAVAILABLE",
-  "LIMIT_OUT_OF_BAND",
-  "LIMIT_OFF_TICK",
-  // F4 — idempotency
-  "ATTEMPT_ID_TERMINAL",
-  // F5 — cancel/modify failure classification
-  "IB_CONNECTION",
-  "OWNERSHIP",
-  "IB_REJECT",
-  "MODIFY_STALE",
-  "MODIFY_SEQUENCE_REQUIRED",
-  "ORDER_NOT_FOUND",
-  "ORDER_IDENTIFIER_REQUIRED",
-  "PORTFOLIO_SNAPSHOT_REQUIRED",
-  "READ_ONLY_BROKER",
-  // F7 — pending timeout
-  "PENDING_TIMEOUT",
-  // B5 — place subprocess hard failure
-  "SUBPROCESS_ERROR",
-  // IB account scope
-  "ACCOUNT_UNRESOLVED",
-  "ACCOUNT_NOT_MANAGED",
-  // Place subprocess gave no result — IB may hold the order
-  "PLACE_OUTCOME_UNKNOWN",
-];
+// Source of truth: the Python `ReasonCode` StrEnum in
+// src/xenon/execution/preflight.py — read directly so a new enum member
+// fails this test until matching TS copy exists (no codegen, no drift).
+const PREFLIGHT_PY = fileURLToPath(
+  new URL("../../src/xenon/execution/preflight.py", import.meta.url),
+);
+
+function pythonReasonCodes(): string[] {
+  const src = readFileSync(PREFLIGHT_PY, "utf8");
+  const body = src.match(/class ReasonCode\(StrEnum\):([\s\S]*?)(?=\nclass )/m);
+  if (!body) throw new Error("ReasonCode class not found in preflight.py");
+  const codes: string[] = [];
+  for (const m of body[1].matchAll(/^\s+([A-Z][A-Z0-9_]*)\s*=\s*"([A-Z0-9_]+)"\s*$/gm)) {
+    if (m[1] !== m[2]) {
+      throw new Error(`ReasonCode member ${m[1]} does not equal its value ${m[2]}`);
+    }
+    codes.push(m[1]);
+  }
+  return codes;
+}
+
+const PYTHON_REASON_CODES = pythonReasonCodes();
 
 describe("orderReasonCodes parity", () => {
   it("test_every_python_code_has_ts_copy", () => {
@@ -80,5 +63,15 @@ describe("getReasonToast fallback", () => {
     expect(toast.copy).toBe(
       "Order submission timed out before IB acknowledged.",
     );
+  });
+
+  it("MODIFY_PENDING says what the user can do (retry later or cancel)", () => {
+    const toast = getReasonToast("MODIFY_PENDING");
+    expect(toast.severity).toBe("warn");
+    expect(toast.copy).toContain("not confirmed by IB yet");
+    expect(toast.copy).toContain("Retry in about two minutes");
+    expect(toast.copy).toContain("cancel the order");
+    // Recovery needs IB to report the order again, not just any sync.
+    expect(toast.copy).not.toMatch(/wait for the order to sync/i);
   });
 });

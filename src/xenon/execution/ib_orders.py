@@ -17,11 +17,11 @@ import argparse
 import math
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
-from xenon.execution import orders_store
+from xenon.execution import gate4, orders_store
 from xenon.execution.account_scope import (
     AccountScope,
     IBAccountSelectionError,
@@ -69,13 +69,24 @@ def format_contract(contract) -> str:
         return f"{symbol} ({sec_type})"
 
 
-def serialize_contract(contract, resolved_legs: dict = None) -> dict:
+def _meta_fields(meta: dict | None) -> dict:
+    """Qualified option metadata (contract_meta) in the adapter's key names."""
+    if not meta:
+        return {}
+    return {"tradingClass": meta.get("tc"), "multiplier": meta.get("mult"), "underSecType": meta.get("und_sec")}
+
+
+def serialize_contract(contract, resolved_legs: dict = None, meta: dict | None = None) -> dict:
     """Serialize contract fields for JSON.
 
     Args:
         contract: IB contract object.
         resolved_legs: Optional dict mapping conId -> qualified Contract for BAG legs.
+        meta: Optional dict mapping conId -> contract_meta dict. OPT contracts
+            and BAG option legs gain tradingClass / multiplier / underSecType
+            ONLY from it (Gate 4 never infers them).
     """
+    meta = meta or {}
     expiry = getattr(contract, "lastTradeDateOrContractMonth", "")
     if len(expiry) == 8:
         expiry = f"{expiry[:4]}-{expiry[4:6]}-{expiry[6:8]}"
@@ -88,6 +99,8 @@ def serialize_contract(contract, resolved_legs: dict = None) -> dict:
         "right": getattr(contract, "right", None),
         "expiry": expiry or None,
     }
+    if contract.secType == "OPT":
+        result.update(_meta_fields(meta.get(getattr(contract, "conId", None))))
 
     # Include resolved combo leg details for BAG orders
     combo_legs = getattr(contract, "comboLegs", None)
@@ -108,10 +121,27 @@ def serialize_contract(contract, resolved_legs: dict = None) -> dict:
                 leg_data["strike"] = getattr(resolved, "strike", None)
                 leg_data["right"] = getattr(resolved, "right", None)
                 leg_data["expiry"] = leg_expiry or None
+                # Coverage legs need the leg's own sec type (a BAG can carry
+                # a stock leg next to option legs).
+                leg_data["secType"] = getattr(resolved, "secType", None)
+                if leg_data["secType"] == "OPT":
+                    leg_data.update(_meta_fields(meta.get(cl.conId)))
             legs.append(leg_data)
         result["comboLegs"] = legs
 
     return result
+
+
+class _ResolvedLeg:
+    """Contract-like view of a contract_meta dict for serialize_contract."""
+
+    def __init__(self, meta: dict):
+        exp = meta.get("exp") or ""
+        self.symbol = meta.get("sym")
+        self.strike = meta.get("strike")
+        self.right = meta.get("right")
+        self.lastTradeDateOrContractMonth = exp
+        self.secType = meta.get("sec")
 
 
 def safe_float(value) -> Optional[float]:
@@ -127,37 +157,61 @@ def safe_float(value) -> Optional[float]:
         return None
 
 
+def _non_guaranteed_mode(order) -> int | None:
+    """Parse the NonGuaranteed tag from order.smartComboRoutingParams.
+
+    Returns 0 (guaranteed), 1 (non-guaranteed), or None when the order
+    carries no tag / an unparseable value. None means "unknown" — callers
+    must not assume a default when persisting reservation state.
+    """
+    for tag in getattr(order, "smartComboRoutingParams", None) or []:
+        if getattr(tag, "tag", None) == "NonGuaranteed":
+            try:
+                value = int(str(tag.value))
+            except (TypeError, ValueError):
+                return None
+            return value if value in (0, 1) else None
+    return None
+
+
 def fetch_open_orders(client: IBClient) -> list:
-    """Fetch open orders from all clients.
+    """Fetch open orders from all clients (one ``reqAllOpenOrders`` read)."""
+    return open_orders_from_trades(client, client.get_open_orders())
+
+
+def open_orders_from_trades(client: IBClient, trades: list) -> list:
+    """Shape IB open-order trades for display and the Postgres mirror.
 
     For BAG orders, resolves combo leg conIds to full contract details
     (symbol, strike, right, expiry) so the frontend can subscribe to
     real-time prices and compute BID/MID/ASK for spread modification.
+    Every option contract (single-leg or combo leg) also gets its
+    IB-qualified tradingClass / multiplier / underSecType via
+    ``contract_meta`` — Gate 4 reads them from the mirrored row and fails
+    closed when a lookup failed.
     """
-    trades = client.get_open_orders()
+    from xenon.execution import contract_meta
 
     # Collect all unique combo leg conIds that need resolving
     combo_con_ids: set = set()
+    opt_con_ids: set = set()
     for trade in trades:
         contract = trade.contract
         combo_legs = getattr(contract, "comboLegs", None)
         if contract.secType == "BAG" and combo_legs:
             for cl in combo_legs:
                 combo_con_ids.add(cl.conId)
+        elif contract.secType == "OPT" and getattr(contract, "conId", None):
+            opt_con_ids.add(contract.conId)
 
-    # Batch-resolve combo leg contracts
+    # One reqContractDetails per distinct conId: the qualified contract for
+    # combo legs plus the option metadata for every option contract.
+    details = contract_meta.fetch_meta_by_con_ids(client, sorted(combo_con_ids | opt_con_ids))
     resolved_legs: dict = {}
-    if combo_con_ids:
-        from ib_async import Contract as IBContract
-
-        for con_id in combo_con_ids:
-            try:
-                c = IBContract(conId=con_id)
-                qualified = client.qualify_contracts(c)
-                if qualified:
-                    resolved_legs[con_id] = qualified[0]
-            except Exception:
-                pass  # Skip unresolvable legs — frontend falls back to portfolio
+    for con_id in combo_con_ids:
+        m = details.get(con_id)
+        if m is not None:
+            resolved_legs[con_id] = _ResolvedLeg(m)
 
     orders = []
     for trade in trades:
@@ -169,14 +223,20 @@ def fetch_open_orders(client: IBClient) -> list:
             {
                 "orderId": order.orderId,
                 "permId": order.permId,
+                # Placing API clientId (IB reports it on every openOrder) —
+                # matches a Xenon row whose permId was not known at placement.
+                "clientId": getattr(order, "clientId", None),
                 "symbol": format_contract(contract),
-                "contract": serialize_contract(contract, resolved_legs),
+                "contract": serialize_contract(contract, resolved_legs, details),
                 "action": order.action,  # BUY or SELL
                 "orderType": order.orderType,  # LMT, MKT, STP, etc.
                 "totalQuantity": float(order.totalQuantity),
                 "limitPrice": safe_float(order.lmtPrice),
                 "auxPrice": safe_float(order.auxPrice),  # stop price
                 "status": status.status,  # Submitted, PreSubmitted, etc.
+                # BAG guarantee mode from smartComboRoutingParams — persisted
+                # on the reservation row so modify can never silently change it.
+                "nonGuaranteed": _non_guaranteed_mode(order),
                 "filled": float(status.filled),
                 "remaining": float(status.remaining),
                 "avgFillPrice": safe_float(status.avgFillPrice),
@@ -237,13 +297,26 @@ def build_orders_data(open_orders: list, executed_orders: list) -> dict:
     }
 
 
-def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | AccountScope | None = None) -> dict:
+def sync_open_orders_to_postgres(
+    open_orders: list[dict],
+    *,
+    scope: dict | AccountScope | None = None,
+    observed_at: datetime | None = None,
+) -> dict:
     """Register IB open-order snapshots in xenon.order_submissions.
 
     Returns counts per branch so a periodic poller can publish drift metrics:
       - registered: new rows INSERTed
       - updated:    snapshot-* rows UPDATEd because TWS values drifted
       - skipped:    UUID-authored rows left untouched (existing dedupe)
+      - unidentified: open orders without a permId (0 or missing, even
+        when orderId is set) — they cannot be keyed, so their demand is NOT
+        persisted; a sync pass must not attest completeness while this is
+        non-zero
+
+    `observed_at` is when the caller started the IB open-order read; it
+    gates which reservation changes the mirror may apply (see
+    orders_store.register_from_snapshot).
     """
     if scope is None:
         resolved = resolve_from_env().as_dict()
@@ -256,21 +329,34 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
     updated = 0
     skipped = 0
     resurrected = 0
+    foreign = 0
+    unprovenanced = 0
+    unidentified = 0
     for order in open_orders:
-        # Another (or an empty) account's order must not be stamped with
-        # this scope (Fable P2, PR #198).
+        # One account filter (#198): another (or an empty) account's order is
+        # never stamped with this scope. Both are counted: the sync pass
+        # attests completeness separately (an accountless order makes it
+        # incomplete; a foreign one does not).
         if not row_in_account(order, resolved["broker_account"], "account"):
+            if order.get("account"):
+                foreign += 1
+            else:
+                unprovenanced += 1
             continue
         contract = order.get("contract") or {}
         sec_type = str(contract.get("secType") or "STK")
         multiplier = 100 if sec_type in {"OPT", "BAG"} else 1
-        # IB returns BAG combos with orderId=0 when fetched from a non-originating
-        # clientId. perm_id is the cross-client stable identifier — that alone is
-        # enough to register the snapshot. ib_order_id falls back to "0".
-        perm_id = str(order.get("permId") or order.get("orderId") or "")
+        # permId is the only account-wide order key. orderId is unique only
+        # per clientId (two clients can both have orderId 7), so an order
+        # without a permId (the permId=0 race) is unidentified: not written,
+        # and the pass is incomplete (round 5, item 4). ib_order_id falls
+        # back to "0" (IB reports BAGs from another client with orderId=0).
+        perm_id = str(order.get("permId") or "")
         ib_order_id = str(order.get("orderId") or "0")
-        if not perm_id:
+        if not perm_id or perm_id == "0":
+            unidentified += 1
             continue
+        raw_client_id = order.get("clientId")
         strike_val = contract.get("strike")
         con_id_val = contract.get("conId")
         result = orders_store.register_from_snapshot(
@@ -287,6 +373,9 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
             expiry=contract.get("expiry") or None,
             con_id=int(con_id_val) if con_id_val else None,
             tif=str(order.get("tif") or "DAY"),
+            legs=gate4.legs_payload_from_snapshot_order(order),
+            observed_at=observed_at,
+            client_id=int(raw_client_id) if raw_client_id is not None else None,
             **resolved,
         )
         action = result.get("action") if isinstance(result, dict) else None
@@ -298,11 +387,18 @@ def sync_open_orders_to_postgres(open_orders: list[dict], *, scope: dict | Accou
             resurrected += 1
         elif action == "SKIPPED_UUID":
             skipped += 1
+    if unprovenanced:
+        # The dropped accountless order's demand is not in Postgres: stop the
+        # scope's snapshot from proving cover until a later pass clears it.
+        gate4.invalidate_view(resolved, "unprovenanced_open_orders")
     return {
         "registered": registered,
         "updated": updated,
         "resurrected": resurrected,
         "skipped": skipped,
+        "skipped_foreign": foreign,
+        "skipped_unprovenanced": unprovenanced,
+        "unidentified": unidentified,
         "open_count": len(open_orders),
     }
 
@@ -348,6 +444,7 @@ def main():
 
     try:
         print("Fetching open orders...")
+        observed_at = datetime.now(timezone.utc)
         open_orders = fetch_open_orders(client)
 
         print("Fetching executed fills...")
@@ -364,7 +461,7 @@ def main():
             except IBAccountSelectionError as exc:
                 print(f"✗ Not syncing open orders: {exc}")
                 sys.exit(1)
-            result = sync_open_orders_to_postgres(open_orders)
+            result = sync_open_orders_to_postgres(open_orders, observed_at=observed_at)
             print(f"Registered {result['registered']} open-order snapshots in Postgres")
         else:
             print("\nRun with --sync to register open-order snapshots in Postgres")

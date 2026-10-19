@@ -153,7 +153,7 @@ def _ib_orders_main(monkeypatch, managed, env):
     monkeypatch.setattr(ib_orders, "fetch_executed_orders", lambda _c: [])
     synced = []
 
-    def _sync(orders):
+    def _sync(orders, **_k):
         import os
 
         synced.append(os.environ.get("XENON_BROKER_ACCOUNT"))
@@ -201,7 +201,7 @@ def _ib_sync_main(monkeypatch, managed, env):
     monkeypatch.setattr(ib_sync, "get_account_summary", lambda _c, _acct: {})
     monkeypatch.setattr(ib_sync, "get_fx_rates", lambda _c, _acct: {"USD": 1.0})
 
-    def _stop(_c, _acct=None):
+    def _stop(_c, _acct=None, **_k):
         raise _StopAfterScope
 
     monkeypatch.setattr(ib_sync, "fetch_positions", _stop)
@@ -321,7 +321,7 @@ def test_ib_sync_main_reads_summary_and_positions_for_scope_account(monkeypatch)
     monkeypatch.setattr(ib_sync, "get_account_summary", lambda _c, acct: seen.setdefault("summary", acct) and {})
     monkeypatch.setattr(ib_sync, "get_fx_rates", lambda _c, acct: seen.setdefault("fx", acct) and {"USD": 1.0})
 
-    def _positions(_c, acct):
+    def _positions(_c, acct, **_k):
         seen["positions"] = acct
         raise _StopAfterScope
 

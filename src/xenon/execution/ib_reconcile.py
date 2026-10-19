@@ -104,9 +104,12 @@ def get_trade_log_trades(trade_log: dict) -> set:
 
 def fetch_ib_executions(client: IBClient, lookback_days: int = 7) -> list:
     """Fetch executions from IB for the last N days."""
-    executions = []
-    fills = client.get_fills()
+    return executions_from_fills(client.get_fills())
 
+
+def executions_from_fills(fills: list) -> list:
+    """Shape ib_async Fill objects into record_external_fills dicts."""
+    executions = []
     for fill in fills:
         e = fill.execution
         c = fill.contract
@@ -296,13 +299,20 @@ def record_external_fills(
     inserted = 0
     updated = 0
     replayed = 0
+    skipped_foreign = 0
+    skipped_unprovenanced = 0
     affected_legacy_ids: set[str] = set()
     affected_submission_ids: set[str] = set()
 
     for execution in executions:
-        # Another (or an empty) account's fill must not be stamped with this
-        # scope (Fable P2, PR #198).
+        # One account filter (#198): another (or an empty) account's fill is
+        # never stamped with this scope. The sync pass attests separately
+        # that every fill it read named an account.
         if not row_in_account(execution, resolved.broker_account, "account", "acctNumber"):
+            if _field(execution, "account", "acctNumber"):
+                skipped_foreign += 1
+            else:
+                skipped_unprovenanced += 1
             continue
         perm_id = str(_field(execution, "perm_id", "permId") or "") or None
         submission_id = _resolve_submission_id_by_perm_id(perm_id, scope=resolved)
@@ -357,6 +367,13 @@ def record_external_fills(
                 else:
                     affected_legacy_ids.add(legacy_id)
 
+    if skipped_unprovenanced:
+        # Same rule as the open-order writer: a dropped accountless fill's
+        # demand is not in Postgres, so the scope's view is not provable.
+        from xenon.execution import gate4
+
+        gate4.invalidate_view(resolved.as_dict(), "unprovenanced_fills")
+
     ordered_submission_ids = sorted(affected_submission_ids)
     for sid in ordered_submission_ids:
         aggregate_trade_from_fills(submission_id=sid)
@@ -369,6 +386,8 @@ def record_external_fills(
         "inserted": inserted,
         "updated": updated,
         "replayed": replayed,
+        "skipped_foreign": skipped_foreign,
+        "skipped_unprovenanced": skipped_unprovenanced,
         "affected_legacy_ids": ordered_legacy_ids,
         "affected_submission_ids": ordered_submission_ids,
     }
