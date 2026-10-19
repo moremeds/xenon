@@ -164,7 +164,7 @@ Brand spec: `brand/CLAUDE.md` + `docs/reference/brand-identity.md`. Non-negotiab
 
 ## ⛔ Naked-Short Guard — Mandatory, No Exceptions
 
-The system must never allow naked short exposure. Every short call must be covered by long shares (1 contract = 100 shares) or by long calls at the same expiry. Cash-secured puts are allowed. Combos that net to uncovered short calls are blocked at three layers: UI pre-submission (`web/lib/nakedShortGuard.ts`), API gate (`/api/orders/place` returns 403), and post-sync audit (`naked_short_audit.py` cancels violators after every `ib_sync`).
+The system must never allow naked short exposure. Every short call must be covered by long shares (1 contract = 100 shares) or by long calls at the same expiry. Cash-secured puts are allowed. Combos that net to uncovered short calls are blocked at two layers: UI pre-submission (`web/lib/nakedShortGuard.ts`) and API gate (`/api/orders/place` returns 403). A third layer, the post-sync audit (`naked_short_audit.py`, **shadow mode**), only observes: after every `ib_sync` it logs violations and records `service_health`; it blocks and cancels nothing until enforce mode ships behind `XENON_AUDIT_CANCEL`.
 
 Full enforcement matrix and combo logic: `src/xenon/CLAUDE.md` § Naked Short Protection.
 

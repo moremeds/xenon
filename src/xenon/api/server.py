@@ -24,7 +24,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -1567,10 +1567,13 @@ async def portfolio_sync(scope=Depends(get_account_scope)):
     Scripts auto-allocate client IDs from subprocess range (20-49).
     Auto-restarts IB Gateway on ECONNREFUSED and retries once. Reads the
     just-written snapshot from Postgres (no longer hits data/portfolio.json).
+
+    Single-flight: if a sync is already running (background or foreground),
+    this request waits for it and returns its result instead of starting a
+    second pass. `shield` keeps a client disconnect from cancelling the
+    shared sync.
     """
-    result = await _run_ib_script_with_recovery(
-        "xenon-ib-sync", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
-    )
+    result = await asyncio.shield(_start_or_join_sync())
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
     payload = await _read_portfolio_payload(scope)
@@ -1595,22 +1598,48 @@ async def portfolio_sync(scope=Depends(get_account_scope)):
     return payload
 
 
+# Single-flight slot for every `xenon-ib-sync --sync` spawn in this process
+# (`/portfolio/sync` and `/portfolio/background-sync`): at most one sync pass
+# (and its post-sync audit) runs at a time. Also keeps a strong reference so
+# the task is not garbage-collected mid-run. Syncs started outside the API
+# process (reports, CLI, cron) do not share it.
+_sync_task: asyncio.Task | None = None
+
+
+def _start_or_join_sync() -> asyncio.Task:
+    """Return the running sync task, or start one. No await between the
+    check and the assignment, so it is atomic on the event loop."""
+    global _sync_task
+    if _sync_task is None or _sync_task.done():
+        _sync_task = asyncio.create_task(_sync_via_subprocess())
+    return _sync_task
+
+
 @app.post("/portfolio/background-sync", status_code=202)
-async def portfolio_background_sync(bg: BackgroundTasks):
-    """Fire-and-forget portfolio sync."""
-    bg.add_task(_bg_sync_via_subprocess)
+async def portfolio_background_sync():
+    """Fire-and-forget portfolio sync. Single-flight: while a sync runs, a new
+    trigger returns `in_progress` and spawns nothing."""
+    if _sync_task is not None and not _sync_task.done():
+        return {"status": "in_progress"}
+    _start_or_join_sync()
     return {"status": "accepted"}
 
 
-async def _bg_sync_via_subprocess():
-    """Background task: run ib_sync.py as subprocess with auto-recovery."""
-    result = await _run_ib_script_with_recovery(
-        "xenon-ib-sync", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
-    )
+async def _sync_via_subprocess() -> ScriptResult:
+    """Run ib_sync.py as a subprocess with auto-recovery. Never raises: the
+    shared task may have no awaiter (background trigger)."""
+    try:
+        result = await _run_ib_script_with_recovery(
+            "xenon-ib-sync", ["--sync", "--port", str(DEFAULT_GATEWAY_PORT)], timeout=30
+        )
+    except Exception as exc:  # noqa: BLE001 — a detached task must log, not raise into the void
+        logger.exception("Portfolio sync failed")
+        return ScriptResult(ok=False, error=f"portfolio sync failed: {exc}")
     if result.ok:
-        logger.info("Background portfolio sync complete")
+        logger.info("Portfolio sync complete")
     else:
-        logger.error("Background portfolio sync failed: %s", result.error)
+        logger.error("Portfolio sync failed: %s", result.error)
+    return result
 
 
 async def _futu_refresh_db_first(scope) -> None:
