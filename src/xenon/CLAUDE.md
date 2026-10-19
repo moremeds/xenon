@@ -142,6 +142,7 @@ Postgres is primary for portfolio, orders, NAV, trades, and journal entries. Fil
 
 | Command                   | Action                                                                |
 | ------------------------- | --------------------------------------------------------------------- |
+| `xenon-api`               | Dev launcher: FastAPI on 127.0.0.1:8321 with reload (prod uses uvicorn in the api image) |
 | `xenon-ib-sync`           | Pull live portfolio + open orders from IB into Postgres               |
 | `xenon-ib-place-order`    | Subprocess placeholder for the place-order path                       |
 | `xenon-ib-order-manage`   | Subprocess for cancel/modify (uses original clientId)                 |

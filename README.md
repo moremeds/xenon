@@ -88,7 +88,7 @@ IB_FLEX_QUERY_ID=...
 
 ```bash
 ANTHROPIC_API_KEY=...                     # portfolio Q&A chat
-UW_TOKEN=...                              # portfolio-perf / portfolio-report CLIs only
+UW_TOKEN=...                              # portfolio-report CLI only
 EXA_API_KEY=...                           # optional ticker-page enrichment
 NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_...
 CLERK_SECRET_KEY=sk_...
@@ -124,10 +124,10 @@ All entry points are installed by `uv sync` and invoked as `uv run <name> [args]
 | **Orders**           | `xenon-ib-place-order` · `xenon-ib-order-manage` · `xenon-ib-orders` · `xenon-ib-option-chain` |
 | **Sync / reconcile** | `xenon-ib-sync` · `xenon-ib-reconcile` · `xenon-futu-sync`                                                          |
 | **Risk / audit**     | `xenon-naked-short-audit`                                                                                           |
-| **Reports**          | `xenon-portfolio-report` · `xenon-portfolio-perf` · `xenon-portfolio-attrib` · `xenon-perf-explainer`               |
+| **Reports**          | `xenon-portfolio-report` · `xenon-portfolio-attrib`                                                                  |
 | **Trade log**        | `xenon-blotter` · `xenon-blotter-history`                                                                           |
 | **Daemons**          | `xenon-monitor-daemon` · `xenon-preset-rebalance`                                                                   |
-| **Utilities**        | `xenon-market-hours` · `xenon-presets`                                                                              |
+| **Utilities**        | `xenon-market-hours`                                                                                                 |
 
 Full descriptions: [`src/xenon/CLAUDE.md`](src/xenon/CLAUDE.md).
 
@@ -170,7 +170,7 @@ Deeper reading:
 | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | **[Interactive Brokers](https://ibkr.com/referral/joseph5632)**                               | Real-time quotes, chains, portfolio, execution, fills (primary — never bypassed)                   |
 | **Futu OpenD**                                                                                | Read-only positions snapshot for the Futu account tab                                              |
-| **[Unusual Whales](https://unusualwhales.com/referral#39985a64-656c-4642-a051-db89f6324d64)** | Historic OHLC + option contract history for `xenon-portfolio-perf` / `xenon-portfolio-report` only |
+| **[Unusual Whales](https://unusualwhales.com/referral#39985a64-656c-4642-a051-db89f6324d64)** | Historic OHLC + option contract history for `xenon-portfolio-report` only                         |
 | **IB Flex Query**                                                                             | Optional historical fills audit overlay (`xenon-blotter-history`)                                  |
 
 **Never Yahoo Finance.**

@@ -1,4 +1,4 @@
-"""Every ``[project.scripts]`` entry point must answer ``--help`` with exit 0 and no side effects.
+"""Every ``[project.scripts]`` entry point must answer ``--help`` with exit 0 and usage text.
 
 Each CLI runs in a subprocess with a broker-deny environment: Python sockets
 refuse to connect, the database URLs point at a closed port, Flex credentials
@@ -20,10 +20,16 @@ ROOT = Path(__file__).resolve().parents[2]
 ENTRY_POINTS = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["scripts"]
 
 _RUNNER = """
-import importlib, socket, sys
+import atexit, importlib, os, socket, sys
+
+_attempts = []
 
 def _deny(*args, **kwargs):
+    _attempts.append(args)
     raise OSError("network denied: --help must not touch a broker or database")
+
+# A CLI may catch the OSError; any attempt still fails the run (exit 97).
+atexit.register(lambda: _attempts and (sys.stderr.write("socket attempt during --help\\n"), sys.stderr.flush(), os._exit(97)))
 
 socket.socket.connect = _deny
 socket.socket.connect_ex = _deny
