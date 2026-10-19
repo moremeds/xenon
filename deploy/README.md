@@ -35,7 +35,7 @@ B. Rollback
 
 C. Post-up checks
 - `docker-compose ps`: api, web, realtime `healthy`/`Up`, watchtower `Up`.
-- `curl -fsS http://127.0.0.1:8321/health` and `curl -fsSI http://127.0.0.1:3000/sign-in | head -1`.
+- `curl -fsS http://127.0.0.1:8321/health` and `curl -fsSI http://127.0.0.1:3000/ | head -1`.
 - Watchtower: `docker logs xenon-watchtower-1 --tail 20` shows no auth or webhook error. Confirm the ntfy topic receives a notification on the next real update (the template is silent on no-op cycles); one way: after the next release, check the topic.
 
 D. Migrator/schema gate (every release that carries a migration)

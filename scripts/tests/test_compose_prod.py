@@ -118,6 +118,16 @@ def test_only_opted_in_services_carry_watchtower_label() -> None:
     assert 'profiles: ["migrate"]' in text
 
 
+def test_realtime_binds_wildcard_and_web_healthcheck_hits_a_live_route() -> None:
+    """v0.9.0 shipped without these: the relay defaults WS_HOST to 127.0.0.1, so the
+    published port refused every client, and web probed the deleted /sign-in page."""
+    text = _text()
+    realtime = text.split("\n  realtime:\n", 1)[1].split("\n  watchtower:\n", 1)[0]
+    assert re.search(r'^      WS_HOST: "?0\.0\.0\.0"?\s*$', realtime, re.MULTILINE)
+    probe = re.search(r'"wget", "--spider", "-q", "http://127\.0\.0\.1:3000(/[^"]*)"', text)
+    assert probe and probe.group(1) == "/", probe and probe.group(1)
+
+
 def test_dev_compose_header_points_to_prod_truth() -> None:
     head = "\n".join(DEV_COMPOSE.read_text().splitlines()[:6])
     assert "deploy/compose.prod.yml" in head

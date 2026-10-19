@@ -199,7 +199,7 @@ follows the convention above.
    ssh moremeds@100.66.147.98 'PATH=/opt/homebrew/bin:$PATH; \
      docker-compose -f /opt/xenon/compose.yml ps && \
      curl -s http://localhost:8321/health && \
-     curl -sI http://localhost:3000/sign-in | head -1'
+     curl -sI http://localhost:3000/ | head -1'
    ```
 
    Expected:
@@ -207,7 +207,7 @@ follows the convention above.
    - `/health` → 200 with valid JSON.
      - `ib_gateway.port_listening: true` only when the configured Gateway
        (`IB_GATEWAY_HOST` plus the port derived from `XENON_TRADING_MODE`) is reachable.
-   - `/sign-in` → 200.
+   - `/` → 200.
 
 ## Auto-start on mini boot
 
@@ -409,7 +409,7 @@ services:
     extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on: { api: { condition: service_healthy } }
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/sign-in"]
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -94,7 +94,7 @@ services:
       api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/sign-in"]
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -107,6 +107,10 @@ services:
     image: ghcr.io/moremeds/xenon-realtime:latest
     env_file:
       - ./.env
+    environment:
+      # The relay defaults to 127.0.0.1; inside the container that refuses the
+      # published port. The 127.0.0.1:8765 host mapping keeps it off the LAN.
+      WS_HOST: "0.0.0.0"
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
