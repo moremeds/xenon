@@ -2,7 +2,7 @@
 
 Two resolution paths:
 1. FastAPI: `resolve_from_app_state(app_state)` reads `app.state.{trading_mode, account}`.
-2. Sync callers (ib_sync, ib_execute, rehydrate): `resolve_from_env()` reads
+2. Sync callers (ib_sync, rehydrate): `resolve_from_env()` reads
    `XENON_BROKER`, `XENON_TRADING_MODE` + `XENON_BROKER_ACCOUNT` env vars. The IB sync path
    exports `XENON_BROKER_ACCOUNT` from `select_ib_account()` at connect time — never
    from `managedAccounts()[0]`.

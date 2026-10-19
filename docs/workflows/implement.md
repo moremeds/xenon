@@ -195,14 +195,10 @@ If a script fails:
 
 ### Order Execution Commands
 
-**⚠️ ALWAYS use `ib_execute.py` — it monitors and logs automatically.**
+**⚠️ The `xenon-ib-execute` CLI was removed (it bypassed the preflight, naked-short, quote and idempotency gates). Place orders in the Xenon terminal, which calls `POST /orders/place`.**
 
 | Action                          | Command                                                                                                                   |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| **Sell stock**                  | `xenon-ib-execute --type stock --symbol X --qty N --side SELL --limit N --yes`                                            |
-| **Buy stock**                   | `xenon-ib-execute --type stock --symbol X --qty N --side BUY --limit N --yes`                                             |
-| **Buy option**                  | `xenon-ib-execute --type option --symbol X --expiry YYYYMMDD --strike N --right C/P --qty N --side BUY --limit MID --yes` |
-| **Sell option**                 | `xenon-ib-execute --type option --symbol X --expiry YYYYMMDD --strike N --right C/P --qty N --side SELL --limit N --yes`  |
 | Monitor daemon status           | `xenon-monitor-daemon --status`                                                                                           |
 | Run monitor daemon once         | `xenon-monitor-daemon --once`                                                                                             |
 | Monitor daemon handlers         | `xenon-monitor-daemon --list-handlers`                                                                                    |
@@ -310,7 +306,7 @@ reports/{ticker}-evaluation-{date}.html
 1. Complete evaluation milestones 1-6
 2. Generate HTML report using template
 3. Present to user for confirmation
-4. On "execute" → use `ib_execute.py` (auto-monitors and logs)
+4. On "execute" → place the order in the Xenon terminal (`POST /orders/place`)
 5. Place exit orders (stop loss + target)
 
 **Reference:** `reports/goog-evaluation-2026-03-04.html`
@@ -360,33 +356,9 @@ xenon-scenario-report
 
 ## Order Execution Workflow
 
-**⚠️ ALWAYS use `ib_execute.py` for all orders. It automatically:**
-
-- Places the order
-- Monitors for fills (real-time updates)
-- Logs filled trades to `trade_log.json`
+**⚠️ Place all orders through the Xenon terminal (`POST /orders/place`).** The `xenon-ib-execute` CLI was removed.
 
 ### Single-Leg Orders
-
-**Stock:**
-
-```bash
-# Sell stock at bid
-xenon-ib-execute --type stock --symbol NFLX --qty 4500 --side SELL --limit BID --yes
-
-# Buy stock at limit
-xenon-ib-execute --type stock --symbol AAPL --qty 100 --side BUY --limit 175.50 --yes
-```
-
-**Option:**
-
-```bash
-# Buy call at mid
-xenon-ib-execute --type option --symbol GOOG --expiry 20260417 --strike 315 --right C --qty 44 --side BUY --limit MID --yes
-
-# Sell put at limit
-xenon-ib-execute --type option --symbol GOOG --expiry 20260417 --strike 290 --right P --qty 10 --side SELL --limit 3.50 --yes
-```
 
 **Multi-leg spread:** Use inline Python with `ib_async` (see `ib-order-execution` skill)
 

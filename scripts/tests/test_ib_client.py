@@ -196,7 +196,6 @@ class TestConstants:
         assert isinstance(CLIENT_IDS, dict)
         assert "ib_sync" in CLIENT_IDS
         assert "ib_order" in CLIENT_IDS
-        assert "ib_execute" in CLIENT_IDS
         assert "ib_order_manage" in CLIENT_IDS
 
     def test_default_ports(self):

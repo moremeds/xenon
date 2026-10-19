@@ -121,7 +121,7 @@ All entry points are installed by `uv sync` and invoked as `uv run <name> [args]
 | Group                | Commands                                                                                                            |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | **Server**           | `xenon-api` (FastAPI bridge)                                                                                        |
-| **Orders**           | `xenon-ib-place-order` · `xenon-ib-order-manage` · `xenon-ib-orders` · `xenon-ib-execute` · `xenon-ib-option-chain` |
+| **Orders**           | `xenon-ib-place-order` · `xenon-ib-order-manage` · `xenon-ib-orders` · `xenon-ib-option-chain` |
 | **Sync / reconcile** | `xenon-ib-sync` · `xenon-ib-reconcile` · `xenon-futu-sync`                                                          |
 | **Risk / audit**     | `xenon-naked-short-audit`                                                                                           |
 | **Reports**          | `xenon-portfolio-report` · `xenon-portfolio-perf` · `xenon-portfolio-attrib` · `xenon-perf-explainer`               |

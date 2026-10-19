@@ -68,7 +68,6 @@ CLIENT_IDS = {
     "ib_sync": 0,
     "ib_order": 2,
     "ib_orders": 11,
-    "ib_execute": 25,
     "ib_fill_monitor": 52,
     "exit_order_service": 60,
     "ib_reconcile": 0,

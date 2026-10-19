@@ -160,7 +160,6 @@ class TestClientIds:
             "ib_sync",
             "ib_order",
             "ib_orders",
-            "ib_execute",
             "ib_fill_monitor",
             "exit_order_service",
             "ib_reconcile",
@@ -196,7 +195,6 @@ class TestClientIds:
         # Dedicated IDs for concurrent connections
         assert CLIENT_IDS["ib_orders"] == 11
         assert CLIENT_IDS["ib_order"] == 2
-        assert CLIENT_IDS["ib_execute"] == 25
         assert CLIENT_IDS["ib_fill_monitor"] == 52
         assert CLIENT_IDS["exit_order_service"] == 60
         assert CLIENT_IDS["fetch_analyst_ratings"] == 99

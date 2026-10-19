@@ -111,7 +111,6 @@ CLIENT_IDS: dict = {
     "ib_orders": 4,  # pool role
     "ib_reconcile": 21,  # subprocess range
     "ib_order": 22,  # subprocess range
-    "ib_execute": 23,  # subprocess range
     "ib_fill_monitor": 70,  # daemon range
     "exit_order_service": 71,  # daemon range
     "fetch_analyst_ratings": 90,  # standalone CLI range

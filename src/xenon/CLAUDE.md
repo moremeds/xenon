@@ -38,7 +38,7 @@ uv run alembic revision --autogenerate -m "description"
 uv run alembic upgrade head
 ```
 
-Add or update the matching `src/xenon/db/queries/` module in the same change. Use `get_engine()` in async FastAPI contexts after `init_engine()` has run. Use `get_sync_engine()` for subprocess/synchronous callers such as `ib_sync`, `ib_execute`, `orders_store`, and combo wizard code.
+Add or update the matching `src/xenon/db/queries/` module in the same change. Use `get_engine()` in async FastAPI contexts after `init_engine()` has run. Use `get_sync_engine()` for subprocess/synchronous callers such as `ib_sync`, `orders_store`, and combo wizard code.
 
 Database events use `events.py` plus the Postgres outbox trigger. Emit durable events by writing outbox rows; subscribe with the LISTEN/NOTIFY helpers for reactive services.
 
@@ -153,7 +153,6 @@ Postgres is primary for portfolio, orders, NAV, trades, UW stats, and journal en
 | `xenon-ib-market-depth`   | L2 order-book snapshot for a contract (used by `/market-depth`)       |
 | `xenon-ib-option-greeks`  | Broker modelGreeks snapshot for an option (used by `/options/greeks`) |
 | `xenon-ib-reconcile`      | Reconcile IB vs Postgres orders + fills                               |
-| `xenon-ib-execute`        | Direct execution helper                                               |
 | `xenon-futu-sync`         | Pull read-only positions from local Futu OpenD                        |
 | `xenon-naked-short-audit` | Offline shadow audit over a saved payload + orders file; never cancels |
 | `xenon-blotter`           | Today's fills + P&L                                                   |

@@ -265,17 +265,3 @@ def test_combo_wizard_adapter_stamps_account(monkeypatch):
 
     _, order = ib.place_order.call_args.args
     assert order.account == "U2222222"
-
-
-def test_ib_execute_stamps_env_scope_account(monkeypatch):
-    from xenon.execution import ib_execute
-
-    monkeypatch.setenv("XENON_TRADING_MODE", "paper")
-    monkeypatch.setenv("XENON_BROKER_ACCOUNT", "DU0000000")
-    executor = ib_execute.OrderExecutor("127.0.0.1", 4002, 1)
-    executor.client = MagicMock()
-
-    executor.place_order(MagicMock(), "BUY", 1, 1.0)
-
-    _, order = executor.client.place_order.call_args.args
-    assert order.account == "DU0000000"
