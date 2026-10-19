@@ -49,16 +49,19 @@ All notable changes to Xenon are documented here. Format loosely based on
   **Operator, BEFORE running the migrator**, dump exactly these tables (schema + data, custom format) and keep the file:
 
   ```bash
-  pg_dump -Fc "$DATABASE_URL" \
+  # libpq does not accept the app's driver schemes (postgresql+asyncpg:// / +psycopg://); strip them.
+  PGURL="$(printf '%s' "$DATABASE_URL" | sed -E 's#^postgresql\+(asyncpg|psycopg)://#postgresql://#')"
+  BACKUP="/path/to/backup/xenon-dropped-signal-tables-$(date +%Y%m%d).dump"
+  # Use a pg_dump whose major version matches the server (prod is PostgreSQL 17).
+  pg_dump -Fc "$PGURL" \
     -t xenon.scan_results -t xenon.cri_series -t xenon.vcg_series -t xenon.gex_snapshots \
     -t xenon.uw_analyze_snapshots -t xenon.uw_analyze_flow_alerts -t xenon.uw_analyze_gex_strikes \
     -t xenon.uw_analyze_short_volume_trend -t xenon.uw_flow_events -t xenon.uw_flow_event_ticks \
     -t xenon.ticker_cache -t xenon.uw_api_stats \
-    -f /path/to/backup/xenon-dropped-signal-tables-<YYYYMMDD>.dump
-  pg_restore --list /path/to/backup/xenon-dropped-signal-tables-<YYYYMMDD>.dump | head   # sanity-check the dump
+    -f "$BACKUP" && pg_restore --list "$BACKUP" | grep -c 'TABLE DATA'   # expect 12
   ```
 
-  `DATABASE_URL` is the prod (`core_dev`) connection string from the operator's own environment; do not paste it into tickets or logs. The `-t` patterns also dump the sequences owned by those tables.
+  Run the migrator only after the dump succeeds and lists 12 `TABLE DATA` entries. `DATABASE_URL` is the prod (`core_dev`) connection string from the operator's own environment; never echo it or paste it into tickets or logs. The `-t` patterns also dump the sequences owned by those tables.
 
 ## [0.9.0] — 2026-10-19
 
