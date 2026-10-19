@@ -101,7 +101,7 @@ if [[ "$MODE" == "live" ]]; then
   # Live dev sessions debug against the live IB Gateway but must never
   # write prod (core_dev). Substitute DATABASE_URL_TEST (core_test) so the
   # read-side hits the dev mirror; XENON_READ_ONLY=1 below blocks writes
-  # anyway. Without this, the guard at line ~106 kills dev.sh live every
+  # anyway. Without this, the core_dev guard below kills dev.sh live every
   # time because .env's DATABASE_URL targets core_dev.
   #
   # Only substitute when DATABASE_URL actually points at core_dev. If the
@@ -141,7 +141,7 @@ fi
 # exists. Detect-and-refuse, never auto-kill — the holder could be the
 # operator's own session or an unrelated service (cleanup is the manual
 # Task-1 step: verify cwd is a dead worktree, then kill). XENON_API_PORT
-# is a test seam; the dev stack uses 8421 (production launchd stays 8321).
+# is a test seam; the dev stack uses 8421 (production keeps 8321).
 API_PORT="${XENON_API_PORT:-8421}"
 if lsof -nP -iTCP:"$API_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   log_err "FATAL: port $API_PORT already has a listener — a previous xenon-api is still running."
@@ -254,7 +254,7 @@ log_info "Broker account: $XENON_BROKER_ACCOUNT (overridden by ib_sync after IB 
 
 # 5. Delegate to web/package.json's `dev` script, which already orchestrates
 # `next dev`, the IB realtime relay, AND uvicorn via concurrently. Running a
-# separate uvicorn here would race for 127.0.0.1:8321. The npm script inherits
+# separate uvicorn here would race for 127.0.0.1:8421. The npm script inherits
 # our exported XENON_TRADING_MODE.
 log_info "Starting next dev + ib realtime + uvicorn (via npm run dev)…"
 cd "$REPO_ROOT/web"

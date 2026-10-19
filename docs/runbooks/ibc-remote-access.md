@@ -16,7 +16,7 @@ The canonical IBC service commands are the secure machine-local wrappers in `/Us
 
 The repo helper is optional convenience only:
 
-- [`scripts/ibc_remote_control.sh`](../scripts/ibc_remote_control.sh)
+- [`scripts/infra/ibc_remote_control.sh`](../../scripts/infra/ibc_remote_control.sh)
 
 ## Current approach
 
@@ -43,7 +43,7 @@ Optional:
 
 ## What the repo helper does
 
-`scripts/ibc_remote_control.sh` provides:
+`scripts/infra/ibc_remote_control.sh` provides:
 
 - `check`
   - Shows Tailscale install/login state, SSH readiness, SSH auth readiness, and IBC service state
@@ -78,13 +78,13 @@ The following path was validated successfully:
 Current readiness:
 
 ```bash
-./scripts/ibc_remote_control.sh check
+./scripts/infra/ibc_remote_control.sh check
 ```
 
 Current secure IBC service state:
 
 ```bash
-./scripts/ibc_remote_control.sh ibc-status
+./scripts/infra/ibc_remote_control.sh ibc-status
 ```
 
 Direct secure service status:
@@ -118,10 +118,10 @@ ssh joemccann@macbook-pro '~/ibc/bin/restart-secure-ibc-service.sh'
 Repo convenience wrapper:
 
 ```bash
-ssh joemccann@macbook-pro 'cd /Users/joemccann/dev/apps/finance/convex-scavenger && ./scripts/ibc_remote_control.sh ibc-status'
-ssh joemccann@macbook-pro 'cd /Users/joemccann/dev/apps/finance/convex-scavenger && ./scripts/ibc_remote_control.sh ibc-start'
-ssh joemccann@macbook-pro 'cd /Users/joemccann/dev/apps/finance/convex-scavenger && ./scripts/ibc_remote_control.sh ibc-stop'
-ssh joemccann@macbook-pro 'cd /Users/joemccann/dev/apps/finance/convex-scavenger && ./scripts/ibc_remote_control.sh ibc-restart'
+ssh joemccann@macbook-pro 'cd /Users/joemccann/dev/apps/finance/convex-scavenger && ./scripts/infra/ibc_remote_control.sh ibc-status'
+ssh joemccann@macbook-pro 'cd /Users/joemccann/dev/apps/finance/convex-scavenger && ./scripts/infra/ibc_remote_control.sh ibc-start'
+ssh joemccann@macbook-pro 'cd /Users/joemccann/dev/apps/finance/convex-scavenger && ./scripts/infra/ibc_remote_control.sh ibc-stop'
+ssh joemccann@macbook-pro 'cd /Users/joemccann/dev/apps/finance/convex-scavenger && ./scripts/infra/ibc_remote_control.sh ibc-restart'
 ```
 
 Current Tailscale IP fallback:

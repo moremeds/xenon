@@ -14,7 +14,7 @@ mini-side automation (Stage C).
 > `PATH` by default — every remote command prefixes `PATH=/opt/homebrew/bin:$PATH`
 > (or `export PATH=…`) so `docker`/`docker-compose`/`colima` resolve.
 
-**Supersedes** `docs/runbooks/mac-mini.md` (launchd-based; pre-containers).
+**Supersedes** the former launchd-based mac-mini runbook and its `scripts/deploy/` helpers (pre-containers; removed, see git history).
 The old launchd path is no longer the deploy mechanism.
 
 ## Topology

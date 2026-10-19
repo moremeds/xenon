@@ -2,7 +2,7 @@
 # refresh-core-test.sh — Nightly mirror core_dev → core_test.
 #
 # Runs on the macmini at 04:00 ET (08:00 UTC) via the LaunchAgent at
-# scripts/infra/launchd/com.xenon.refresh-core-test.plist.
+# deploy/jobs/com.xenon.refresh-core-test.plist.
 #
 # Why this exists: dev MacBooks write core_test; prod (Docker) writes
 # core_dev. To give dev sessions realistic data without bidirectional

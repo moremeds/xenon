@@ -72,9 +72,9 @@ curl http://localhost:8321/health
 
 Three modes controlled by `IB_GATEWAY_MODE` env var (default: `docker`):
 
-### Cloud Mode (Tailscale) — Default for Development
+### Cloud Mode (Tailscale) — remote Gateway, no restart
 
-Gateway runs on a Hetzner VM accessible via Tailscale MagicDNS at `ib-gateway:4001`. Set `IB_GATEWAY_HOST=ib-gateway` and `IB_GATEWAY_MODE=cloud` in root `.env`. Both Python (`ib_client.py` loads dotenv at import) and Node (`ib_realtime_server.js` loads dotenv at startup) read this automatically. All scripts import `DEFAULT_HOST` from `ib_client` — no hardcoded `127.0.0.1` in IB connection code.
+Gateway runs on a remote host accessible via Tailscale MagicDNS at `ib-gateway:4001` (legacy; the former Hetzner VPS and its `scripts/infra/docker/{cloud,local}.sh` switchers are removed). Set `IB_GATEWAY_HOST=ib-gateway` and `IB_GATEWAY_MODE=cloud` in root `.env`. Both Python (`ib_client.py` loads dotenv at import) and Node (`ib_realtime_server.js` loads dotenv at startup) read this automatically. All scripts import `DEFAULT_HOST` from `ib_client` — no hardcoded `127.0.0.1` in IB connection code.
 
 **VPS port mapping:** `0.0.0.0:4001 → container:4003` (socat). The gnzsnz image runs Java Gateway on localhost:4001 inside the container, with socat on 4003 forwarding to it. External connections (Tailscale) go through socat.
 
@@ -101,10 +101,10 @@ Image: `ghcr.io/gnzsnz/ib-gateway` (pinned to digest). Config: `docker/ib-gatewa
 
 | Command                                | Action                                                |
 | -------------------------------------- | ----------------------------------------------------- |
-| `scripts/docker_ib_gateway.sh start`   | Start (validates secrets, checks launchd not running) |
-| `scripts/docker_ib_gateway.sh stop`    | Stop                                                  |
-| `scripts/docker_ib_gateway.sh restart` | Restart                                               |
-| `scripts/docker_ib_gateway.sh status`  | Status                                                |
+| `scripts/infra/docker_ib_gateway.sh start`   | Start (validates secrets, checks launchd not running) |
+| `scripts/infra/docker_ib_gateway.sh stop`    | Stop                                                  |
+| `scripts/infra/docker_ib_gateway.sh restart` | Restart                                               |
+| `scripts/infra/docker_ib_gateway.sh status`  | Status                                                |
 | `npm run ib:start` (from web/)         | Convenience alias                                     |
 
 Docker handles reliability via `restart: unless-stopped` + healthcheck. `READ_ONLY_API=no` (Xenon places orders). Password via Docker secrets (`docker/ib-gateway/secrets/ib_password.txt`, chmod 600).
@@ -177,15 +177,13 @@ snapshot via the `xenon-ib-market-depth` subprocess), the read-only `/historical
 `/contract/qualify` POSTs, and `POST /ws-ticket`. The key never reaches a write/sync path.
 Full consumer reference with verified examples: `docs/reference/readonly-query-api.md`.
 
-## Cloud Deployment Notes
+## Deployment Notes
 
-When deployed on the Hetzner VPS via xenon-cloud:
+Production is the Docker stack on the macmini (`deploy/README.md`, `docs/runbooks/remote-deploy.md`). Notes that apply to any deployment:
 
-- **FastAPI auth**: Clerk JWT validated on all external requests. Localhost requests (Next.js → FastAPI on 127.0.0.1:8321) bypass auth — port is never public.
-- **Clerk middleware**: API routes (`/api/*`) are excluded from Next.js Clerk middleware `protect()`. Server-side fetches from pages don't carry session cookies, so middleware must not block them. Auth is handled by FastAPI for external API access.
+- **FastAPI auth**: credential-only and fail-closed (`src/xenon/api/auth.py`). A request passes only with a valid `X-Internal-Token` (`XENON_INTERNAL_API_TOKEN`, used by Next server-side calls) or a scoped API key (`XENON_QUERY_API_KEY`, `MDW_API_KEY`). The client address is never consulted, so localhost gets no bypass. Details: `src/xenon/api/CLAUDE.md`, `docs/reference/readonly-query-api.md`.
+- **Next.js `/api/**`**: `web/middleware.ts` is a browser Host/Origin guard (`XENON_ALLOWED_HOSTS`), not user auth. Prod is tailnet-only; server-to-server callers hit FastAPI directly with a credential.
 - **`NEXT_PUBLIC_*` env vars**: Baked at build time. After changing `.env`, rebuild Next.js: `cd web && npm run build`
 - **Root `node_modules`**: The root `package.json` has shared deps (`@sinclair/typebox`) used by `lib/tools/`. Must be installed before `web/` build.
 - **Python deps**: Managed by `uv` — `pyproject.toml` is the source of truth, `uv.lock` is the pinned graph. Includes `cryptography` (PyJWT RS256), `fastapi`, `uvicorn`, `httpx`, `python-dotenv`, `numpy`, `pytz`, `playwright`. Install via `uv sync --frozen --extra test`.
 - **`@sinclair/typebox`**: Pinned to exact `0.34.48` in both root and web `package.json` to prevent version mismatch build failures.
-- **Production Clerk**: Uses different user IDs than dev. `ALLOWED_USER_IDS` must be updated.
-- **CI/CD**: Push to `main` triggers GitHub Actions → SSH → `deploy.sh` on VPS. IB Gateway is not restarted. Auto-rollback on health check failure.
