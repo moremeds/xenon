@@ -181,10 +181,9 @@ Full consumer reference with verified examples: `docs/reference/readonly-query-a
 
 Production is the Docker stack on the macmini (`deploy/README.md`, `docs/runbooks/remote-deploy.md`). Notes that apply to any deployment:
 
-- **FastAPI auth**: Clerk JWT validated on all external requests. Localhost requests (Next.js → FastAPI on 127.0.0.1:8321) bypass auth — port is never public.
-- **Clerk middleware**: API routes (`/api/*`) are excluded from Next.js Clerk middleware `protect()`. Server-side fetches from pages don't carry session cookies, so middleware must not block them. Auth is handled by FastAPI for external API access.
+- **FastAPI auth**: credential-only and fail-closed (`src/xenon/api/auth.py`). A request passes only with a valid `X-Internal-Token` (`XENON_INTERNAL_API_TOKEN`, used by Next server-side calls) or a scoped API key (`XENON_QUERY_API_KEY`, `MDW_API_KEY`). The client address is never consulted, so localhost gets no bypass. Details: `src/xenon/api/CLAUDE.md`, `docs/reference/readonly-query-api.md`.
+- **Next.js `/api/**`**: `web/middleware.ts` is a browser Host/Origin guard (`XENON_ALLOWED_HOSTS`), not user auth. Prod is tailnet-only; server-to-server callers hit FastAPI directly with a credential.
 - **`NEXT_PUBLIC_*` env vars**: Baked at build time. After changing `.env`, rebuild Next.js: `cd web && npm run build`
 - **Root `node_modules`**: The root `package.json` has shared deps (`@sinclair/typebox`) used by `lib/tools/`. Must be installed before `web/` build.
 - **Python deps**: Managed by `uv` — `pyproject.toml` is the source of truth, `uv.lock` is the pinned graph. Includes `cryptography` (PyJWT RS256), `fastapi`, `uvicorn`, `httpx`, `python-dotenv`, `numpy`, `pytz`, `playwright`. Install via `uv sync --frozen --extra test`.
 - **`@sinclair/typebox`**: Pinned to exact `0.34.48` in both root and web `package.json` to prevent version mismatch build failures.
-- **Production Clerk**: Uses different user IDs than dev. `ALLOWED_USER_IDS` must be updated.

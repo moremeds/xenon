@@ -39,18 +39,17 @@ psql -h 100.66.147.98 -U xenon_prod core_dev -c "
 
 The scheduled entry lives in `deploy/jobs/com.xenon.nav-flex-refresh.plist` (launchd) or `deploy/jobs/crontab.example`. Follow `deploy/README.md` (Jobs table and operator rollout checklist). It runs `xenon-nav-flex-refresh` inside the api image through `docker-compose run --rm`.
 
-## Smoke test (immediate trigger)
+## Smoke test (manual run and evidence)
+
+`launchctl kickstart` is only a schedule-path check, NOT a job test: outside 17:00-17:59 America/New_York the plist guard exits 0 before Docker starts and nothing runs. Do not use it as evidence that the job works.
+
+To run the job now (REAL WRITES), use the canonical unguarded command from `deploy/README.md` section F, on the macmini with `export PATH=/opt/homebrew/bin:$PATH`. Read section E first. The fixed container name is the overlap guard, so keep `--name`. `docker rm` has no `-f`, so a running job is never touched and still blocks a second run:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.xenon.nav-flex-refresh
-tail -f /var/log/xenon/nav-flex-refresh.stdout.log
+cd /opt/xenon && docker rm xenon-job-nav-flex-refresh 2>/dev/null; docker-compose -f /opt/xenon/compose.yml run --rm -T --no-deps --name xenon-job-nav-flex-refresh --label com.centurylinklabs.watchtower.enable=false api xenon-nav-flex-refresh
 ```
 
-Or run the job directly (no launchd), from `/opt/xenon` on the macmini with `export PATH=/opt/homebrew/bin:$PATH`. Read `deploy/README.md` section E first:
-
-```bash
-docker-compose -f /opt/xenon/compose.yml run --rm -T --no-deps --label com.centurylinklabs.watchtower.enable=false api xenon-nav-flex-refresh
-```
+Evidence: output lines `xenon-nav-flex-refresh: mode=live account=...` and `fetched N NAV rows`, exit code 0, and no `PG persist failed` line. The CLI prints "fetched N NAV rows" even when the DB write failed, so also check the persisted rows (see "Cross-check the PG side" below and `deploy/README.md` section F). An empty result for the scope is a failure even if the CLI exited 0. If the name conflict error appears, follow `deploy/README.md` section I.
 
 ## Diagnostics
 
