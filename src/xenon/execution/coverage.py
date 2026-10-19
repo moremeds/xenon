@@ -501,16 +501,19 @@ def uncovered(
     orders: list[Order] | tuple[Order, ...],
     candidate: Order | Modify | None = None,
     *,
+    scope_account: str,
     netting_enabled: bool = False,
 ) -> dict[Key, int]:
     """Uncovered short-call contracts per key for the naked-short audit.
 
+    Only `scope_account`'s holdings supply cover and only its orders add
+    demand: another account's shares never cover this account's short.
     Lenient: orders it cannot classify are skipped (the audit logs and
     skips per spec §2.4). Pass live orders only; no post-as_of overlap
     demand is added here.
     """
     unc, _ss, _problems = _project(
-        holdings, orders, candidate, None, strict=False, netting_enabled=netting_enabled
+        holdings, orders, candidate, _require_scope(scope_account), strict=False, netting_enabled=netting_enabled
     )
     return unc
 
@@ -520,10 +523,34 @@ def short_stock(
     orders: list[Order] | tuple[Order, ...],
     candidate: Order | Modify | None = None,
     *,
+    scope_account: str,
     netting_enabled: bool = False,
 ) -> dict[str, int]:
-    """Projected short stock per symbol for the naked-short audit."""
+    """Projected short stock per symbol for `scope_account` (naked-short audit)."""
     _unc, ss, _problems = _project(
-        holdings, orders, candidate, None, strict=False, netting_enabled=netting_enabled
+        holdings, orders, candidate, _require_scope(scope_account), strict=False, netting_enabled=netting_enabled
     )
     return ss
+
+
+# Placeholder account values used in this repo for "account not known":
+# `legacy_unknown` (scope column server default / pre-scope rows) and
+# `unknown` (service_health scope fallback). Neither names a real account.
+UNKNOWN_ACCOUNT_SENTINELS = frozenset({"legacy_unknown", "unknown"})
+
+
+def is_real_account(account: object) -> bool:
+    """True when `account` names a real broker account (not blank, not a
+    whitespace-only string, not an unknown-account sentinel)."""
+    if not isinstance(account, str) or not account.strip():
+        return False
+    return account.strip().lower() not in UNKNOWN_ACCOUNT_SENTINELS
+
+
+def _require_scope(scope_account: str) -> str:
+    # `_project` treats None as "every account"; the audit helpers must never
+    # pool holdings across accounts, and a placeholder scope would pool every
+    # unknown-account row as one account — both are caller bugs.
+    if not is_real_account(scope_account):
+        raise ValueError(f"scope_account must name a real account, got {scope_account!r}")
+    return scope_account

@@ -19,10 +19,23 @@
 #   ./scripts/infra/refresh-core-test.sh          # restore
 #   ./scripts/infra/refresh-core-test.sh --dry    # dump only, no restore
 #
+# Safety (checked before any PG call):
+#   - SRC and DST must differ.
+#   - DST must contain "test" and must not be core_dev. A reversed or
+#     mistyped XENON_REFRESH_DST can never wipe prod.
+#   - One run at a time: an atomic mkdir lock (XENON_REFRESH_LOCK_DIR) covers
+#     every entry path (launchd, cron, manual). A second run exits 3 and
+#     calls no PG command. A stale lock (crashed run, SIGKILL) is NOT
+#     reclaimed automatically: the log line says how to remove it by hand.
+#
+# Test hook: XENON_REFRESH_PG_BIN (a directory) is put first on PATH after the
+# Homebrew probe, so tests can supply stub pg_dump / pg_restore / psql.
+#
 # Exit codes:
 #   0 — success
 #   1 — dump or restore failed
-#   2 — invalid arguments / missing required env
+#   2 — invalid arguments / missing required env / refused destination
+#   3 — another refresh holds the lock (nothing was run)
 
 set -euo pipefail
 
@@ -49,6 +62,9 @@ for _pg_major in 18 17 16 15; do
   fi
 done
 unset _pg_major _pg_bin
+if [[ -n "${XENON_REFRESH_PG_BIN:-}" ]]; then
+  PATH="$XENON_REFRESH_PG_BIN:$PATH"
+fi
 
 DRY=0
 for arg in "$@"; do
@@ -78,6 +94,32 @@ if [[ "$SRC_DB" == "$DST_DB" ]]; then
   log "FATAL: src and dst databases are identical ($SRC_DB) — aborting."
   exit 2
 fi
+
+# Destination guard: never write to prod. DST must look like a test DB.
+if [[ "$DST_DB" == "core_dev" || "$DST_DB" != *test* ]]; then
+  log "FATAL: refusing destination '$DST_DB' (must contain 'test' and not be core_dev) — aborting."
+  exit 2
+fi
+
+# Single-run lock. mkdir is atomic. There is NO automatic stale-lock reclaim:
+# two racing reclaimers could both enter PG. If the lock exists, exit 3 and let
+# the operator recover by hand. The EXIT trap is installed only after we own
+# the lock, and it removes the lock only while its pid file still holds our PID,
+# so it can never delete a successor's lock.
+LOCK_DIR="${XENON_REFRESH_LOCK_DIR:-/tmp/xenon-refresh-core-test.lock.d}"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  _holder="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  log "another refresh holds $LOCK_DIR (pid ${_holder:-unknown}) — exiting without running."
+  log "If you believe it is stale: check that pid (ps -p ${_holder:-<pid>}) and that no refresh-core-test.sh is running; only then remove it by hand: rm -rf $LOCK_DIR"
+  exit 3
+fi
+echo "$$" > "$LOCK_DIR/pid"
+_release_lock() {
+  if [[ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" == "$$" ]]; then
+    rm -rf "$LOCK_DIR"
+  fi
+}
+trap _release_lock EXIT
 
 # The PG client tools (pg_dump, pg_restore) consume PGPASSWORD or a
 # PGPASSFILE. Prefer PGPASSFILE so the password never lands in process

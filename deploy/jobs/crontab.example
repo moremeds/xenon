@@ -1,0 +1,41 @@
+# crontab.example -- cron alternative to the launchd plists in this directory.
+# Use ONE scheduler per job, not both.
+#
+# Install on the Mac mini:  crontab -e   (as the user that runs the docker stack)
+# TZ: cron fires in the SYSTEM time zone. The Mac mini zone is Asia/Hong_Kong
+# (HKT, no DST) and must not be changed (shared host). Each job is scheduled at
+# BOTH candidate HKT times (EDT and EST) and a guard runs it only when the New
+# York hour matches, so one of the two firings does the work:
+#   nav-flex 17:30 ET = 05:30 HKT (EDT) / 06:30 HKT (EST)
+#   refresh  04:00 ET = 16:00 HKT (EDT) / 17:00 HKT (EST)
+# In a crontab a percent sign must be escaped as \%.
+# Lock: nav-flex-refresh uses a fixed --name, so Docker refuses a duplicate.
+#       The cron line first removes a NOT RUNNING container of that name (docker rm,
+#       no force flag), so a failed start cannot block later runs.
+#       refresh-core-test.sh takes its own mkdir lock; no outer lockf is needed.
+# Creds: nav-flex-refresh reads /opt/xenon/.env via the api service env_file.
+#        refresh-core-test reads PGPASSFILE=/opt/xenon/.pgpass-refresh (chmod 600).
+# Logs:  /var/log/xenon/*.cron.log (directory must exist, writable by this user).
+
+PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+
+# 17:30 ET daily -- IB Flex NAV refresh, from the deployed api image.
+30 5,6 * * * [ "$(TZ=America/New_York date +\%H)" = 17 ] && cd /opt/xenon && { docker rm xenon-job-nav-flex-refresh >/dev/null 2>&1; docker-compose -f /opt/xenon/compose.yml run --rm -T --no-deps --name xenon-job-nav-flex-refresh --label com.centurylinklabs.watchtower.enable=false api xenon-nav-flex-refresh; } >> /var/log/xenon/nav-flex-refresh.cron.log 2>&1
+
+# 04:00 ET daily -- core_dev -> core_test mirror (host-native, needs pg_dump).
+0 16,17 * * * [ "$(TZ=America/New_York date +\%H)" = 04 ] && PGHOST=localhost PGPORT=5432 PGUSER=xenon_migrator PGPASSFILE=/opt/xenon/.pgpass-refresh XENON_REFRESH_SRC=core_dev XENON_REFRESH_DST=core_test /opt/xenon/bin/refresh-core-test.sh >> /var/log/xenon/refresh-core-test.cron.log 2>&1
+
+# ---- Manual runs (NOT scheduled; paste in a shell on the mini) ----
+# These skip the ET-hour guard. They do REAL WRITES. Read the container settings
+# first (see the PR notes checklist). Evidence the job ran: the log lines named below.
+#
+# nav-flex-refresh: calls the live IB Flex web service; UPSERTs xenon.nav_history
+# (source close) and ib_cash_flow in the database from the container environment.
+# Evidence: output "xenon-nav-flex-refresh: mode=live account=...", "fetched N NAV rows",
+# exit code 0, no "PG persist failed" line, plus a read-only psql check of nav_history.
+#   cd /opt/xenon && docker rm xenon-job-nav-flex-refresh 2>/dev/null; docker-compose -f /opt/xenon/compose.yml run --rm -T --no-deps --name xenon-job-nav-flex-refresh --label com.centurylinklabs.watchtower.enable=false api xenon-nav-flex-refresh
+#
+# refresh-core-test: DROPs the xenon and events schemas in core_test and restores
+# core_dev into it. Add --dry to only dump core_dev to /dev/null.
+# Evidence: "=== refresh ok: core_dev -> core_test ===" in /var/log/xenon/refresh-core-test.log, exit 0.
+#   PGHOST=localhost PGPORT=5432 PGUSER=xenon_migrator PGPASSFILE=/opt/xenon/.pgpass-refresh /opt/xenon/bin/refresh-core-test.sh
