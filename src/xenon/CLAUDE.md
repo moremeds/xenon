@@ -161,5 +161,4 @@ Postgres is primary for portfolio, orders, NAV, trades, and journal entries. Fil
 | `xenon-nav-reconcile`     | Read-only NAV reconciliation report                                   |
 | `xenon-futu-history-sync` | Futu trades / cash flows / orders history into Postgres               |
 | `xenon-futu-statement-sync` | Futu daily statements from Outlook into Postgres (READ_ONLY-guarded) |
-| `xenon-position-rules`    | Position-close rule CLI                                               |
 | `xenon-market-hours`      | Market-hours helper                                                   |
