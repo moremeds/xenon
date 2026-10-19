@@ -259,7 +259,7 @@ def build_default_quote_fn(
             logger.warning("compute_combo_quote failed for %s: %s", session_id, exc)
             return None
 
-        # Return SIGNED mid — callers (wizard_stop_monitor._crossed) operate
+        # Return SIGNED mid — callers (api/services/wizard_risk_alert.crossed) operate
         # in signed space per combo_quotes.signed_mid. No abs().
         return combo_quote.signed_mid
 
