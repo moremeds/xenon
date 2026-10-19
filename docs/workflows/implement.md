@@ -199,11 +199,6 @@ If a script fails:
 
 | Action                          | Command                                                                                                                   |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| Monitor daemon status           | `xenon-monitor-daemon --status`                                                                                           |
-| Run monitor daemon once         | `xenon-monitor-daemon --once`                                                                                             |
-| Monitor daemon handlers         | `xenon-monitor-daemon --list-handlers`                                                                                    |
-| Install monitor daemon          | `./scripts/services/setup_monitor_daemon.sh install`                                                                      |
-| Monitor daemon status (launchd) | `./scripts/services/setup_monitor_daemon.sh status`                                                                       |
 | **IBC Gateway status**          | `~/ibc/bin/status-secure-ibc-service.sh`                                                                                  |
 | **IBC Gateway start**           | `~/ibc/bin/start-secure-ibc-service.sh`                                                                                   |
 | **IBC Gateway stop**            | `~/ibc/bin/stop-secure-ibc-service.sh`                                                                                    |
@@ -369,26 +364,13 @@ After entry fill, place exit orders:
 1. **Stop Loss** — Stop-limit order at stop price
 2. **Target Profit** — Limit sell order at target
 
-**Note:** IB rejects limit orders >40% from current price. Use the monitor daemon's `exit_orders` handler for automated placement once the order becomes valid.
+**Note:** IB rejects limit orders >40% from current price. Place the order manually once it becomes valid.
 
 ---
 
-## Monitor Daemon
+## Background Tasks
 
-The monitor daemon is the active background service for post-entry workflows.
-
-Installed behavior:
-
-- launchd runs `python -m monitor_daemon.run --once` every 60 seconds
-- `fill_monitor` and `exit_orders` enforce market hours
-- `preset_rebalance` and `flex_token_check` are allowed to run off-hours
-
-**Status:**
-
-```bash
-python3.13 -m monitor_daemon.run --status
-./scripts/setup_monitor_daemon.sh status
-```
+The monitor daemon was removed (PR-17). Fills are mirrored by the FastAPI IB activity poller; the Wizard Risk Alert runs as a FastAPI lifespan task; Flex token expiry is a `flex_token` field on `GET /health` and an Operator console tile.
 
 **Run once manually:**
 

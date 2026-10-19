@@ -32,6 +32,18 @@ export type FlexDivergenceInfo = {
   total_compared?: number | null;
 };
 
+// IB Flex Web Service token expiry (GET /health + /admin/operator `flex_token`).
+export type FlexTokenInfo = {
+  configured: boolean;
+  expires_at?: string;
+  days_remaining?: number;
+  reminder_days?: number[];
+  active_threshold?: number | null;
+  should_warn?: boolean;
+  expired?: boolean;
+  error?: string;
+};
+
 export type RealtimeSubscribersInfo = {
   reachable: boolean;
   ib_connected?: boolean | null;
@@ -82,6 +94,7 @@ export type OperatorData = {
   snapshotter: SnapshotterInfo;
   order_submissions: OrderSubmissionsInfo;
   flex_divergence: FlexDivergenceInfo;
+  flex_token?: FlexTokenInfo;
   realtime_subscribers: RealtimeSubscribersInfo;
   futu: FutuInfo;
   writers: WriterRow[];

@@ -5,8 +5,14 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+### Added
+
+- Wizard Risk Alert runs inside FastAPI as a lifespan task (`api/services/wizard_risk_alert.py`). Every 30 s it checks PROTECTED wizard sessions with an enabled alert against the signed combo net mid (ib_pool `data` role, snapshot quotes). It uses the old daemon rule (`net mid <= threshold`). A quote older than 2 min is a "no quote" state and never a trigger. The first crossing records `RISK_ALERT_CROSSED` in `xenon.wizard_events` (no write under `XENON_READ_ONLY=1`). The task never places, cancels or modifies an order. `GET /wizard/alerts` → `/api/wizard/alerts` feeds a new risk-alert banner in the workspace. Set `XENON_WIZARD_RISK_ALERT=0` to disable it.
+- `flex_token` field on `GET /health` and `/admin/operator` (IB Flex token expiry, same `data/flex_token_config.json` source and 30/14/7/1-day thresholds as the old daemon handler) and a Flex Token tile in the Operator console.
+
 ### Removed
 
+- The monitor daemon (`src/xenon/monitor_daemon/`, `xenon-monitor-daemon`, `xenon-preset-rebalance`, `config/com.xenon.monitor-daemon.plist`). Its `fill_monitor` and `preset_rebalance` handlers are dropped (the IB activity poller already mirrors fills). In the daemon, `wizard_stop_monitor` was registered without a quote source, so it never fired an alert.
 - `POST /ib/restart`, `POST /performance` and `POST /performance/background` (no caller in `web/` or `scripts/`; `GET /performance` and `GET /attribution` stay) and the FastAPI CORS middleware (the browser never calls FastAPI; Next.js proxies server-side).
 - `xenon-ib-execute` (`execution/ib_execute.py`), a parallel place-and-monitor path with no preflight, naked-short, quote, idempotency or read-only guard, and no in-repo caller. Place orders through `POST /orders/place`.
 - `execution/contract_normalize.py` (tests were its only importer) and `quote_guard.check()` (the server calls `check_market_hours` and `check_payload`).
