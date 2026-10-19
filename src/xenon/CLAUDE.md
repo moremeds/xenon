@@ -118,7 +118,7 @@ Key rules:
 - `orders_store.py` — Postgres-backed public facade for `order_submissions` and `order_events`; preserve its function signatures
 - `single_leg_rehydrate.py` — three-source reconcile (orders DB, IB open orders, position monitor). Invoked in FastAPI lifespan on boot; exposed for testing via `POST /dev/rehydrate/synthetic`.
 - `naked_short_audit.py` — post-sync audit (shadow mode: log + service_health, no cancels)
-- `quote_guard.py`, `contract_normalize.py`, `preflight.py` — order-path safety layers
+- `quote_guard.py`, `preflight.py` — order-path safety layers
 - `combo_wizard/` — combo order entry flow (plan/submit/reprice/abort/protect)
 - `futu_sync.py` — read-only Futu positions sync
 
