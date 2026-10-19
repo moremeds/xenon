@@ -12,10 +12,18 @@ All notable changes to Xenon are documented here. Format loosely based on
 - `execution/contract_normalize.py` (tests were its only importer) and `quote_guard.check()` (the server calls `check_market_hours` and `check_payload`).
 - Twelve `IBClient` methods with no prod caller: `reconnect`, `clear_subscriptions`, `get_portfolio`, `get_account_summary`, `get_pnl_single`, `place_bracket_order`, `modify_order`, `get_open_trades`, `get_trades`, `get_order_status`, `get_option_price`, `wait_for_fill`.
 - Dead `server.py` helpers: the internals-skew expiry cluster (it called three undefined functions), `_SCAN_TYPE_MAP`, `_coerce_float`, `_series_span_days`, `_empty_discover_payload`, `_empty_cri_payload`, the route-level `app.state.broker` branches on `/orders/place` and `/orders/replace` (`ensure_order_allowed` stays the single broker guard), unused imports, and `perf_cache.warm`.
+- The dormant launchd deploy mechanism: `scripts/deploy/macmini-{bootstrap,prod,data-promote}.sh`, `config/templates/*.plist.template`, `docs/runbooks/mac-mini.md`, and the superseded `scripts/infra/nav-flex-refresh.sh` + `scripts/infra/launchd/` plists (`deploy/` is the deploy truth).
+- Legacy gateway/daemon installers that could not run since the 2026-04-18 path move: `scripts/infra/docker/{cloud,local}.sh` (Hetzner VPS switchers), `scripts/infra/setup_ibc.sh`, `config/com.xenon.ibc-gateway.plist`, `scripts/services/{setup,run}_monitor_daemon.sh`, `config/com.xenon.monitor-daemon.plist`, `scripts/infra/cleanup-dead-code.sh`.
+- The `UserPromptSubmit` dead-code audit hook (`.claude/hooks/audit-dead-code.sh`); it only reported `__pycache__` noise.
+- Spent one-shot scripts: `scripts/spike/`, tracked `scripts/research/*` (Futu statement fetch/inspect/validate, SPX short-put backtest), and `scripts/migrations/` DuckDB/trade_log/Postgres-cutover one-shots with their tests. Kept: `_2026_06_02_backfill_nav_from_ib_flex.py`, `_2026_06_13_repair_zero_qty_fills.py`, the apex schema SQL and `option_chain/`.
+- Stale `HANDOVER.md` (performance rebuild, shipped in #109) and the dead `XENON_ORDERS_DB_PATH` entry in `.env.example`.
 
 ### Changed
 
 - One shared `connect_ib` (`execution/ib_connect.py`) replaces the three copies in `ib_sync`, `ib_orders` and `ib_reconcile`. `ib_orders` now prints the `ib_sync` success and troubleshooting text.
+- `scripts/infra/docker_ib_gateway.sh` and `scripts/infra/ibc_remote_control.sh` resolve the repo root with the right depth after the 2026-04-18 move; runbook paths follow. `install-pre-commit.sh` already runs all six guards.
+- `scripts/release/cut.sh` runs its stdlib Python through `uv run --no-sync` instead of bare `python3.13`.
+- `.env.example`: accurate `IB_GATEWAY_MODE` note, `IB_FLEX_*` placeholders; `nav-flex-refresh` and `dev-prod-db-cutover` runbooks point at `deploy/` instead of a mini-side checkout; stale plan citations in the order-path hook and guards now cite `docs/reference/order-path-incident-history.md`; two dead `no_ib_insync` allowlist entries and the `spx_short_put_backtest.py` Yahoo baseline dropped.
 
 ### Fixed
 
