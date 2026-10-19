@@ -30,6 +30,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from xenon.api.guards import is_read_only
 from xenon.api.services.futu_statement_sync import sync_statements
 from xenon.execution.account_scope import AccountScope
 
@@ -64,6 +65,11 @@ def _resolve_scope() -> AccountScope:
 
 
 async def _run(args: argparse.Namespace) -> int:
+    # The sync UPSERTs futu_daily_statement / futu_statement_inbox. Refuse under
+    # XENON_READ_ONLY=1 so a `dev.sh live` session never writes statements.
+    if is_read_only():
+        print("READ_ONLY: XENON_READ_ONLY=1 — refusing to ingest Futu statements.", file=sys.stderr)
+        return 3
     scope = _resolve_scope()
     since = date.fromisoformat(args.since) if args.since else None
     until = date.fromisoformat(args.until) if args.until else None

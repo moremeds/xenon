@@ -1,6 +1,6 @@
 """
 Test suite for Trade Blotter / Reconciliation Service.
-Run with: python -m pytest src/xenon/trade_blotter/test_blotter.py -v
+Run with: uv run pytest scripts/tests/test_trade_blotter_core.py -v
 """
 
 from datetime import datetime
@@ -1008,3 +1008,30 @@ class TestFlexQueryFetcher:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestIBFetcherConnectionDefaults:
+    """On-demand IB CLIs use the configured gateway port and an auto-allocated client id."""
+
+    def test_defaults_use_gateway_port_and_auto_client_id(self):
+        from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
+        from xenon.trade_blotter.blotter_service import IBFetcher
+
+        fetcher = IBFetcher()
+        assert fetcher.port == DEFAULT_GATEWAY_PORT
+        assert fetcher.client_id == "auto"
+
+    def test_cli_default_client_id_is_auto(self, monkeypatch):
+        from xenon.trade_blotter import cli
+
+        seen = {}
+
+        def _fake_create(**kwargs):
+            seen.update(kwargs)
+            raise SystemExit(0)
+
+        monkeypatch.setattr(cli, "create_blotter_service", _fake_create)
+        monkeypatch.setattr("sys.argv", ["xenon-blotter"])
+        with pytest.raises(SystemExit):
+            cli.main()
+        assert seen["client_id"] == "auto"
