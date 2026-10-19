@@ -8699,3 +8699,38 @@ tr {
   font-size: 11px;
   color: var(--negative);
 }
+
+/* Wizard Risk Alert banner (FastAPI lifespan task, GET /wizard/alerts). */
+.wizard-risk-alert-banner {
+  border-bottom: 1px solid var(--line-grid);
+}
+
+.wizard-risk-alert {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  border-left: 3px solid var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
+
+.wizard-risk-alert--crossed {
+  border-left-color: var(--negative);
+  background: color-mix(in srgb, var(--negative) 10%, transparent);
+}
+
+.wizard-risk-alert__label {
+  font-weight: 700;
+  color: var(--warning);
+}
+
+.wizard-risk-alert--crossed .wizard-risk-alert__label {
+  color: var(--negative);
+}
+
+.wizard-risk-alert__text {
+  color: var(--text-secondary);
+}

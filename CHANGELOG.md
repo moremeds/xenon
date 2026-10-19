@@ -5,12 +5,18 @@ All notable changes to Xenon are documented here. Format loosely based on
 
 ## [Unreleased]
 
+### Added
+
+- Wizard Risk Alert runs inside FastAPI as a lifespan task (`api/services/wizard_risk_alert.py`). Every 30 s it checks PROTECTED wizard sessions with an enabled alert against the signed combo net mid (ib_pool `data` role, snapshot quotes). It uses the old daemon rule (`net mid <= threshold`). A quote older than 2 min is a "no quote" state and never a trigger. The first crossing records `RISK_ALERT_CROSSED` in `xenon.wizard_events` (no write under `XENON_READ_ONLY=1`). The task never places, cancels or modifies an order. `GET /wizard/alerts` → `/api/wizard/alerts` feeds a new risk-alert banner in the workspace. Set `XENON_WIZARD_RISK_ALERT=0` to disable it.
+- `flex_token` field on `GET /health` and `/admin/operator` (IB Flex token expiry, same `data/flex_token_config.json` source and 30/14/7/1-day thresholds as the old daemon handler) and a Flex Token tile in the Operator console.
+
 ### Removed
 
 - Dead data-layer code (PR-14a): `db/queries/{orders,trades,wizard,regime_overrides,scans,uw,cache}.py`, the unused `portfolio` and `events` query functions and their tests (the test-only `futu_history` readers stay). Tables stay; a separate migration drops the signal tables.
 - `reports/portfolio_performance.py`, `reports/performance_explainer_report.py`, the `reports/blotter.py` shim and `utils/price_cache.py`, with the `xenon-portfolio-perf`, `xenon-perf-explainer` and `xenon-presets` entry points. `fetch_ib_nav_series` and its Flex CSV/cash-flow helpers moved to `xenon.jobs.ib_nav_flex` (used by `xenon-nav-flex-refresh`). `xenon-portfolio-attrib` stays because `GET /attribution` has a web caller.
 - Dead utils: `env_loader`, `launchd_calendar`, `launchd_schedule`, `vectorized_greeks`, `presets`, and the write-only UW call-stats collector `uw_api_stats` (removed from `UWClient._get`). `utils/ib_connection.py` stays because `IBClient` imports `assert_broker_endpoint_allowed`.
 - `trade_blotter/test_integration.py`, the live-IB connection and P&L probes (`live_ib`-marked; this removes that live integration coverage). Unit tests moved to `scripts/tests/test_trade_blotter_core.py`; `run_pytest_affected.py` no longer special-cases `src/xenon/trade_blotter`.
+- The monitor daemon (`src/xenon/monitor_daemon/`, `xenon-monitor-daemon`, `xenon-preset-rebalance`, `config/com.xenon.monitor-daemon.plist`). Its `fill_monitor` and `preset_rebalance` handlers are dropped (the IB activity poller already mirrors fills). In the daemon, `wizard_stop_monitor` was registered without a quote source, so it never fired an alert.
 - `POST /ib/restart`, `POST /performance` and `POST /performance/background` (no caller in `web/` or `scripts/`; `GET /performance` and `GET /attribution` stay) and the FastAPI CORS middleware (the browser never calls FastAPI; Next.js proxies server-side).
 - `xenon-ib-execute` (`execution/ib_execute.py`), a parallel place-and-monitor path with no preflight, naked-short, quote, idempotency or read-only guard, and no in-repo caller. Place orders through `POST /orders/place`.
 - `execution/contract_normalize.py` (tests were its only importer) and `quote_guard.check()` (the server calls `check_market_hours` and `check_payload`).

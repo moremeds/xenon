@@ -60,6 +60,7 @@ from xenon.api.routes.performance import router as performance_router
 from xenon.api.routes.trades import router as trades_router
 from xenon.api.routes.watchlist import router as watchlist_router
 from xenon.api.routes.wizard import router as wizard_router
+from xenon.api.services.flex_token import flex_token_status
 from xenon.api.subprocess import ScriptResult, run_entry_point, run_module
 from xenon.api.ws_ticket import create_ticket, validate_ticket
 from xenon.clients.ib_client import DEFAULT_GATEWAY_PORT
@@ -370,6 +371,65 @@ def _maybe_start_activity_poller() -> None:
     logger.info("ib activity poller started: interval=%ss", interval_s)
 
 
+def _maybe_start_wizard_risk_alert(*, interval_s: float | None = None) -> None:
+    """Start the Wizard Risk Alert task (spec §2.9; replaces the monitor
+    daemon's wizard_stop_monitor handler).
+
+    Evaluates PROTECTED wizard sessions and NEVER places, cancels or modifies
+    an order. Runs under XENON_READ_ONLY=1 too — the monitor then evaluates
+    but never writes. Skipped in test mode (tests opt in by patching
+    ``_is_test_mode``), when XENON_WIZARD_RISK_ALERT=0, when the IB pool is
+    absent, or when the account scope is unresolved / unverified (same gate as
+    ``_maybe_start_activity_poller``). Cadence env: XENON_WIZARD_RISK_ALERT_S.
+    """
+    from xenon.api.services import wizard_risk_alert as wra
+
+    if _is_test_mode():
+        logger.info("test_mode: skipping wizard risk alert")
+        return
+    flag = os.environ.get("XENON_WIZARD_RISK_ALERT", "").strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        logger.info("wizard risk alert disabled (XENON_WIZARD_RISK_ALERT=%s)", flag)
+        return
+    if ib_pool is None:
+        logger.info("wizard risk alert skipped: ib_pool not initialized")
+        return
+    account_env = getattr(app.state, "trading_mode", None)
+    account = getattr(app.state, "account", None)
+    if not account_env or not account:
+        logger.info("wizard risk alert skipped: scope not resolved")
+        return
+    if getattr(app.state, "mode_verified", False) is not True:
+        logger.error("wizard risk alert skipped: trading mode not verified for account %r", account)
+        return
+    scope = {"broker": "IB", "account_env": account_env, "broker_account": account}
+    if interval_s is None:
+        try:
+            interval_s = float(os.environ.get("XENON_WIZARD_RISK_ALERT_S", wra.DEFAULT_INTERVAL_S))
+        except ValueError:
+            interval_s = wra.DEFAULT_INTERVAL_S
+    monitor = wra.RiskAlertMonitor(
+        list_sessions_fn=lambda: wra.list_alert_sessions(scope),
+        quote_fn=wra.build_pool_quote_fn(ib_pool),
+    )
+    app.state.wizard_risk_alert = monitor
+    app.state.wizard_risk_alert_task = asyncio.create_task(wra.risk_alert_loop(monitor, interval_s=interval_s))
+    logger.info("wizard risk alert started: interval=%ss read_only=%s", interval_s, is_read_only())
+
+
+async def _stop_wizard_risk_alert() -> None:
+    task = getattr(app.state, "wizard_risk_alert_task", None)
+    app.state.wizard_risk_alert_task = None
+    app.state.wizard_risk_alert = None
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+
+
 def _maybe_start_futu_history_loop() -> None:
     """Start the nightly Futu trades + cashflows + NAV walk loop.
 
@@ -643,6 +703,10 @@ async def lifespan(app: FastAPI):
     # set XENON_FUTU_HISTORY_LOOP=0 to suppress.
     _maybe_start_futu_history_loop()
 
+    # Wizard Risk Alert (spec §2.9). Starts in read-only sessions too: it
+    # evaluates there but never writes.
+    _maybe_start_wizard_risk_alert()
+
     # W4.7 — PG-event-driven journal auto-import listener.
     # Replaces the legacy periodic /journal/sync flow. Failures must not
     # block boot.
@@ -672,6 +736,7 @@ async def lifespan(app: FastAPI):
                 await ib_activity_task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
+        await _stop_wizard_risk_alert()
         futu_loop_task = getattr(app.state, "futu_history_loop_task", None)
         if futu_loop_task is not None:
             futu_loop_task.cancel()
@@ -1154,6 +1219,7 @@ async def health():
         "snapshotter": _snapshotter_health(),
         "order_submissions": _order_submissions_health(),
         "flex_divergence": _flex_divergence_health(),
+        "flex_token": flex_token_status(),
         "realtime_subscribers": await asyncio.to_thread(_realtime_subscribers_health),
     }
 
@@ -1179,6 +1245,7 @@ async def admin_operator():
         "snapshotter": _snapshotter_health(scope),
         "order_submissions": _order_submissions_health(scope),
         "flex_divergence": _flex_divergence_health(),
+        "flex_token": flex_token_status(),
         "realtime_subscribers": await asyncio.to_thread(_realtime_subscribers_health),
         "futu": _compute_futu_health(),
         "writers": _service_health_rows(),

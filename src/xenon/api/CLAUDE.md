@@ -49,6 +49,9 @@ Next.js routes call FastAPI (`localhost:8321`) via `xenonFetch()` (`web/lib/xeno
 
   **TWS cancel mirroring (`sweep_disappeared_orders`).** Each poll tick, after the open-order sync and fills tick both succeed, the poller sweeps `WORKING`/`PARTIALLY_FILLED` rows that vanished from `get_open_orders()` (the fresh `reqAllOpenOrders()` response — never ib_async's `openTrades()` cache, which on the long-lived pool keeps other clients' cancelled orders as `Submitted` forever and made the mirror resurrect them; incident #35) and transitions them to `FILLED` (when `order_fills` for the same `(perm_id, scope)` cover the order quantity) or `CANCELLED` (`reason_code=TWS_CANCEL_MIRROR`, after the row is missing two consecutive sweeps — a one-tick grace, held in the module-level `_SWEEP_GRACE` set, so an order that fills mid-tick isn't misclassified). Safety guards: an **empty** snapshot while WORKING rows exist skips the whole sweep (a post-reconnect stale read must never mass-cancel); presence is matched on perm_id **OR** ib_order_id (the permId=0 race); a BAG with leg fills but no envelope row stays WORKING (ambiguous); a `fill_qty>0` guard stops a quantity-0 working row being marked FILLED on zero fills. The sweep runs only when both feeds succeeded that tick — a failed open-order fetch would otherwise mass-cancel. Implementation: `services/ib_activity_mirror.py::sweep_disappeared_orders`; tests: `scripts/tests/test_tws_cancel_sweep.py`.
 
+- **Wizard Risk Alert** — `services/wizard_risk_alert.py`, started by `_maybe_start_wizard_risk_alert()` (replaces the deleted monitor daemon's `wizard_stop_monitor`). Every 30s (`XENON_WIZARD_RISK_ALERT_S`; `XENON_WIZARD_RISK_ALERT=0` disables) it lists PROTECTED sessions in the verified account scope whose protection has `alert_enabled`, quotes each combo through the ib_pool `data` role (`snapshot=True` per leg via `combo_quote_source`, run on the role thread with `pool.run_sync`), and applies the daemon rule `net_mid <= threshold`. A quote older than 2 min is `NO_QUOTE`, never a trigger. First crossing per lifecycle records `RISK_ALERT_CROSSED` in `xenon.wizard_events`. It **never places, cancels or modifies an order**. It runs under `XENON_READ_ONLY=1` but does not write. Skipped in test mode; `app.state.wizard_risk_alert_task` is cancelled + awaited on shutdown. Read via `GET /wizard/alerts` (live states + persisted events) → Next `/api/wizard/alerts` → `WizardRiskAlertBanner`.
+- **Flex token expiry** — `services/flex_token.py`; `flex_token` field on `GET /health` and `/admin/operator` (Operator console tile). Same source and thresholds as the deleted daemon handler (`data/flex_token_config.json`, `reminder_days` 30/14/7/1); read-only.
+
 ## Read-Only Mode (`XENON_READ_ONLY=1`)
 
 Set automatically by `scripts/infra/dev.sh live` so dev sessions can read live IB data without polluting `core_test` with live fills. Real live trading goes through the macmini Docker stack against `core_dev`. Full policy: root `CLAUDE.md` § Dev/Prod DB Split.
@@ -61,7 +64,7 @@ Helpers live in `xenon.api.guards`:
 Surfaces that gate on the flag:
 
 - **FastAPI write routes** — return 403 early: `POST /orders/place`, `POST /orders/cancel`, `POST /orders/modify` (`server.py`), `POST /journal` (`routes/journal.py`). `GET` siblings stay open.
-- **Lifespan tasks** — `_run_rehydrate_on_boot`, `_run_fills_replay_on_boot`, and `_maybe_start_activity_poller` are skipped with a warning log when the flag is set. The poller task handle on `app.state.ib_activity_poller_task` is `None` in that case; shutdown logic already tolerates `None`.
+- **Lifespan tasks** — `_run_rehydrate_on_boot`, `_run_fills_replay_on_boot`, and `_maybe_start_activity_poller` are skipped with a warning log when the flag is set. The Wizard Risk Alert still evaluates but records no event. The poller task handle on `app.state.ib_activity_poller_task` is `None` in that case; shutdown logic already tolerates `None`.
 - **Writer modules** — `xenon.execution.ib_sync._save_portfolio_to_postgres` and `_append_nav_snapshot` are no-ops. Any new persistence helper called from this package or from a subprocess CLI invoked by the lifespan must short-circuit on the flag, not silently write.
 - **Writer CLIs** — `xenon-nav-flex-refresh`, `xenon-futu-statement-sync` and `flex_divergence_check --apply` exit 3 with a `READ_ONLY:` message before any DB or broker work.
 
@@ -145,5 +148,6 @@ The script is **not idempotent** — it writes a sentinel `orders_events` row (`
 ```bash
 curl http://localhost:8321/health
 # Returns: ib_gateway, ib_pool (sync/orders/data), uw, futu, trading_mode,
-# account, mode_verified, snapshotter, order_submissions, flex_divergence
+# account, mode_verified, snapshotter, order_submissions, flex_divergence,
+# flex_token, realtime_subscribers
 ```

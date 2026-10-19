@@ -7,7 +7,7 @@ For V1 defined-risk spreads, after a combo FILLED we:
 
 Retries TP attach with exponential backoff. On terminal failure we leave the
 session in PROTECTION_PENDING and emit a session event; the monitor daemon
-(rehydrate + wizard_stop_monitor) will re-drive.
+(rehydrate + the Wizard Risk Alert task) will re-drive.
 
 Gate-4 guard: if the proposed TP would short an uncovered leg we refuse the
 TP attach and route to Risk Alert only.

@@ -55,6 +55,55 @@ async def wizard_plan(request: Request, body: PlanRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.get("/wizard/alerts")
+async def wizard_alerts(request: Request) -> dict[str, Any]:
+    """Risk Alert states from the lifespan monitor + persisted crossings.
+
+    ``alerts``: current non-OK states (CROSSED / NO_QUOTE) from the last
+    evaluation. ``events``: the 50 newest ``RISK_ALERT_CROSSED`` rows in
+    ``xenon.wizard_events`` for the active account scope. Read-only.
+    """
+    from sqlalchemy import select
+
+    from xenon.api import server as server_mod
+    from xenon.api.services.wizard_risk_alert import EVENT_KIND
+    from xenon.db.engine import get_sync_engine
+    from xenon.db.schema import wizard_events, wizard_sessions
+
+    monitor = getattr(request.app.state, "wizard_risk_alert", None)
+    scope = server_mod._resolve_scope_kwargs()
+    stmt = (
+        select(
+            wizard_events.c.session_id,
+            wizard_events.c.kind,
+            wizard_events.c.detail,
+            wizard_events.c.at,
+            wizard_sessions.c.ticker,
+            wizard_sessions.c.state.label("session_state"),
+        )
+        .join(wizard_sessions, wizard_sessions.c.session_id == wizard_events.c.session_id)
+        .where(
+            wizard_events.c.kind == EVENT_KIND,
+            wizard_sessions.c.broker == scope["broker"],
+            wizard_sessions.c.account_env == scope["account_env"],
+            wizard_sessions.c.broker_account == scope["broker_account"],
+        )
+        .order_by(wizard_events.c.at.desc(), wizard_events.c.event_id.desc())
+        .limit(50)
+    )
+    with get_sync_engine().connect() as conn:
+        rows = conn.execute(stmt).mappings().all()
+    events = [{**dict(r), "at": r["at"].isoformat() if r["at"] else None} for r in rows]
+    return {
+        "alerts": monitor.alerts() if monitor is not None else [],
+        "events": events,
+        "monitor": {
+            "running": monitor is not None,
+            "last_run_at": getattr(monitor, "last_run_at", None),
+        },
+    }
+
+
 @router.get("/wizard/sessions")
 async def wizard_sessions() -> dict[str, Any]:
     return {"sessions": combo_session.list_sessions()}

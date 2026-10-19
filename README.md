@@ -126,7 +126,6 @@ All entry points are installed by `uv sync` and invoked as `uv run <name> [args]
 | **Risk / audit**     | `xenon-naked-short-audit`                                                                                           |
 | **Reports**          | `xenon-portfolio-report` · `xenon-portfolio-attrib`                                                                  |
 | **Trade log**        | `xenon-blotter` · `xenon-blotter-history`                                                                           |
-| **Daemons**          | `xenon-monitor-daemon` · `xenon-preset-rebalance`                                                                   |
 | **Utilities**        | `xenon-market-hours`                                                                                                 |
 
 Full descriptions: [`src/xenon/CLAUDE.md`](src/xenon/CLAUDE.md).
@@ -148,7 +147,7 @@ Futu OpenD  ─┘   (xenon.api.server)   (snapshots,        (web/)             
                                       audit, log rotation)
 ```
 
-- `src/xenon/` — Python services (FastAPI, IB / Futu clients, execution, reports, monitor daemon)
+- `src/xenon/` — Python services (FastAPI, IB / Futu clients, execution, reports)
 - `web/` — Next.js terminal (portfolio, orders, AI chat)
 - `brand/` — design system and tokens
 - `data/` — runtime artifacts (gitignored)
@@ -177,7 +176,7 @@ Deeper reading:
 
 ## Testing
 
-- **Python** — `pytest` (execution, reports, adapters, monitor daemon, FastAPI routes)
+- **Python** — `pytest` (execution, reports, adapters, FastAPI routes)
 - **Frontend** — Vitest (web logic, order-path harness)
 - **E2E** — Playwright (browser workflows)
 
@@ -196,7 +195,7 @@ Order-route integration tests use `web/tests/fastapiHarness.ts` with `XENON_API_
 | Service                                 | Purpose                                                                              |
 | --------------------------------------- | ------------------------------------------------------------------------------------ |
 | IB Gateway (cloud / Docker / launchd)   | Broker session for quotes, execution, reports                                        |
-| Monitor daemon (`xenon-monitor-daemon`) | Fills mirror, exit orders, naked-short audit, Flex token checks (10 MB log rotation) |
+| FastAPI lifespan tasks                  | IB activity mirror, Wizard Risk Alert; Flex token expiry on `GET /health`            |
 
 Ops runbooks: [`ib-connection-troubleshooting`](docs/runbooks/ib-connection-troubleshooting.md) · [`ib-gateway-docker`](docs/runbooks/ib-gateway-docker.md) · [`mac-mini`](docs/runbooks/mac-mini.md) · [`ops`](docs/runbooks/ops.md) · [`release`](docs/runbooks/release.md).
 
