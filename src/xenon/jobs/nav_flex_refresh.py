@@ -44,7 +44,7 @@ def _ensure_broker_account_env() -> None:
 
 
 # Re-export so tests can monkeypatch via the local module namespace.
-from xenon.reports.portfolio_performance import fetch_ib_nav_series  # noqa: E402
+from xenon.jobs.ib_nav_flex import fetch_ib_nav_series  # noqa: E402
 
 
 def main() -> int:

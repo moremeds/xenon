@@ -1,7 +1,7 @@
 """Verify nav_history schema extension + sync loader.
 
 Prerequisite for deleting data/nav_history.jsonl and data/nav_history_ib.json.
-The IB Flex NAV importer (`fetch_ib_nav_series` in portfolio_performance.py)
+The IB Flex NAV importer (`fetch_ib_nav_series` in jobs/ib_nav_flex.py)
 returns `{date, total, cash, stock, options}`; PG must persist all four.
 """
 
