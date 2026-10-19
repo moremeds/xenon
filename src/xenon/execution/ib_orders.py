@@ -22,6 +22,7 @@ from typing import Optional
 
 from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HOST, IBClient
 from xenon.execution import gate4, orders_store
+from xenon.execution.ib_connect import connect_ib
 from xenon.execution.account_scope import (
     AccountScope,
     IBAccountSelectionError,
@@ -35,18 +36,6 @@ DEFAULT_CLIENT_ID = CLIENT_IDS["ib_orders"]
 
 # IB uses this sentinel for "no value" on realizedPNL
 IB_SENTINEL = 1.7976931348623157e308
-
-
-def connect_ib(host: str, port: int, client_id="auto") -> IBClient:
-    """Connect to TWS/IB Gateway, return an IBClient."""
-    client = IBClient()
-    try:
-        client.connect(host=host, port=port, client_id=client_id)
-        print(f"Connected to IB on {host}:{port}")
-        return client
-    except Exception as e:
-        print(f"Connection failed: {e}")
-        sys.exit(1)
 
 
 def format_contract(contract) -> str:

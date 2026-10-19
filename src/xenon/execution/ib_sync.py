@@ -34,6 +34,7 @@ from xenon.clients.ib_client import CLIENT_IDS, DEFAULT_GATEWAY_PORT, DEFAULT_HO
 from xenon.db.engine import get_sync_engine
 from xenon.execution import naked_short_audit
 from xenon.execution.account_scope import IBAccountSelectionError, select_ib_account
+from xenon.execution.ib_connect import connect_ib
 
 # Default connection settings
 DEFAULT_PORT = DEFAULT_GATEWAY_PORT
@@ -43,23 +44,6 @@ DEFAULT_CLIENT_ID = CLIENT_IDS["ib_sync"]
 # here). Replaces the old PORTFOLIO_PATH constant — the portfolio itself now
 # lives in xenon.account_snapshots, but a few legacy disk readers remain.
 DATA_DIR = Path(__file__).resolve().parents[3] / "data"
-
-
-def connect_ib(host: str, port: int, client_id="auto") -> IBClient:
-    """Connect to TWS/IB Gateway, return an IBClient."""
-    client = IBClient()
-    try:
-        client.connect(host=host, port=port, client_id=client_id)
-        print(f"✓ Connected to IB on {host}:{port}")
-        return client
-    except Exception as e:
-        print(f"✗ Connection failed: {e}")
-        print("\nTroubleshooting:")
-        print("  1. Ensure TWS or IB Gateway is running")
-        print("  2. Enable API connections in TWS: Configure > API > Settings")
-        print("  3. Check 'Enable ActiveX and Socket Clients'")
-        print("  4. Verify port matches (TWS Paper=7497, TWS Live=7496, Gateway=4001)")
-        sys.exit(1)
 
 
 ACCOUNT_TAGS = [
