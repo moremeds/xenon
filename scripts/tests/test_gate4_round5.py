@@ -557,7 +557,9 @@ def test_same_attempt_day_then_gtc_is_body_mismatch(client, broker_calls, fresh_
     assert _submission_rows()[0]._mapping["tif"] == "DAY"
 
     gtc = client.post("/orders/place", json={**body, "tif": "GTC"})
-    assert gtc.status_code == 409 and gtc.json()["reason_code"] == "ATTEMPT_BODY_MISMATCH", gtc.text
+    # Different TIF on a live attempt id: refused, nothing placed. PR-08 names
+    # it ATTEMPT_ALREADY_PLACED because the first attempt is at IB.
+    assert gtc.status_code == 409 and gtc.json()["reason_code"] == "ATTEMPT_ALREADY_PLACED", gtc.text
     # Omitted / lower-case TIF normalizes like the place CLI (DAY default).
     no_tif = {k: v for k, v in body.items() if k != "tif"}
     assert client.post("/orders/place", json=no_tif).status_code == 200
@@ -610,7 +612,7 @@ def test_rehydrate_state_writer_never_moves_watermark_back():
     later = _now() + timedelta(seconds=5)
     _committed_sql("UPDATE xenon.order_submissions SET updated_at=:t WHERE submission_id=:s", t=later, s=sub_id)
     with get_sync_engine().begin() as conn:
-        combo_wizard.update_order_state(conn, sub_id, "WORKING")
+        combo_wizard.update_order_state(conn, sub_id, "WORKING", expected_states=("WORKING",))
     engine = _pg_engine()
     with engine.connect() as conn:
         stamp = conn.execute(
@@ -649,6 +651,25 @@ def test_unstamped_stock_row_is_adopted(monkeypatch, client, broker_calls, fresh
 
     assert not _has_snapshot_row(990340)
     assert _row(sub_id)["perm_id"] == "990340"
+
+
+def test_client_id_zero_row_is_adopted_and_perm_id_backfilled(monkeypatch, client, broker_calls, fresh_quote):
+    """PR-08 §2.6: (scope, ib_order_id, placing_client_id) matching treats
+    clientId 0 as a real client — the UUID row gets the permId, no
+    snapshot row is inserted."""
+    sub_id = _unstamped_uuid_row(990341, placing_client_id=0)
+    _sync_one_sell_call(monkeypatch, 990341, client_id=0)
+
+    assert not _has_snapshot_row(990341)
+    assert _row(sub_id)["perm_id"] == "990341"
+
+
+def test_client_id_zero_does_not_adopt_another_clients_row(monkeypatch, client, broker_calls, fresh_quote):
+    sub_id = _unstamped_uuid_row(990342, placing_client_id=26)
+    _sync_one_sell_call(monkeypatch, 990342, client_id=0)
+
+    assert _has_snapshot_row(990342)
+    assert _row(sub_id)["perm_id"] is None
 
 
 # ---------------------------------------------------------------------------

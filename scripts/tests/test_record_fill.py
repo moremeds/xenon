@@ -136,6 +136,7 @@ def test_mark_terminal_expected_states_guards_concurrent_transition():
             reason_code=None,
             filled_qty=100,
             avg_fill_price=Decimal("190.00"),
+            expected_states=("WORKING",),
         )
         == 1
     )

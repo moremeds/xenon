@@ -397,7 +397,13 @@ _ORDERS_STORE_WRITERS = [
     ("apply_modify_by_perm_id", {"perm_id": "1", "sequence": 1}),
     (
         "mark_submitted",
-        {"submission_id": "s", "ib_order_id": "1", "perm_id": "1", "placing_client_id": 26},
+        {
+            "submission_id": "s",
+            "ib_order_id": "1",
+            "perm_id": "1",
+            "placing_client_id": 26,
+            "expected_states": ("PENDING",),
+        },
     ),
     (
         "mark_terminal",
@@ -407,6 +413,7 @@ _ORDERS_STORE_WRITERS = [
             "reason_code": "USER_CANCEL",
             "filled_qty": 0,
             "avg_fill_price": None,
+            "expected_states": ("WORKING",),
         },
     ),
     (

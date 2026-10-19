@@ -950,15 +950,28 @@ def _legs_for_body_match(legs_payload):
 _REQUEST_LEG_KEYS = ("action", "sym", "sec", "ratio", "right", "exp", "strike")
 
 
+ATTEMPT_ALREADY_PLACED = "ATTEMPT_ALREADY_PLACED"
+
+
+def _may_be_at_ib(m) -> bool:
+    """The existing attempt may hold a live (or once-live) IB order: it has
+    broker ids, or its state is not a proven not-placed outcome."""
+    ids = [str(m["ib_order_id"] or ""), str(m["perm_id"] or "")]
+    return any(v not in ("", "0") for v in ids) or m["state"] not in ("FAILED", "REJECTED")
+
+
 def _classify_existing(row, request: RequestRow, legs_payload) -> Gate4Outcome:
     m = row._mapping if hasattr(row, "_mapping") else row
     body_legs = _legs_for_body_match(m["legs"])
     if not _request_body_matches(_RowView(m, legs=body_legs), request, _legs_for_body_match(legs_payload)):
+        # Same attempt id, different body. If that attempt may be at IB, the
+        # client must not be told to rebuild and resubmit: the id belongs to
+        # an existing order and the new terms were never placed (PR-08).
         return Gate4Outcome(
             status="body_mismatch",
             submission_id=row.submission_id,
             state=row.state,
-            reason_code=ATTEMPT_BODY_MISMATCH,
+            reason_code=ATTEMPT_ALREADY_PLACED if _may_be_at_ib(m) else ATTEMPT_BODY_MISMATCH,
         )
     if row.state in {"REJECTED", "CANCELLED", "FAILED"}:
         return Gate4Outcome(
@@ -1397,12 +1410,23 @@ def begin_modify(submission_id: str, new_qty: int | None, scope: dict) -> Modify
         return ModifyReservationOutcome(accept=True, submission_id=submission_id, amend_id=amend_id, send_by=send_by)
 
 
+def _finite_decimal(value) -> Decimal | None:
+    """Decimal for a finite number, else None (the broker already accepted
+    the amend; an unparsable echo must never fail the settle)."""
+    try:
+        out = Decimal(str(value))
+    except (ArithmeticError, ValueError):
+        return None
+    return out if out.is_finite() else None
+
+
 def settle_modify(
     submission_id: str,
     amend_id: str | None,
     outcome: Literal["confirmed", "rejected", "uncertain"],
     scope: dict,
     new_qty: int | None = None,
+    new_limit_price: Decimal | float | str | None = None,
 ) -> bool:
     """Resolve one amend generation against the broker reply.
 
@@ -1411,7 +1435,8 @@ def settle_modify(
     `amend_id` — a delayed reply from an older amend never touches a newer
     one, and a reply after mirror reconciliation never rewrites quantity.
 
-    confirmed → quantity becomes new_qty (quantity amends), amend clears.
+    confirmed → quantity becomes new_qty (quantity amends) and limit_price
+                becomes new_limit_price (when given), amend clears.
     rejected  → the broker provably did not apply the amend, amend clears.
     uncertain → a quantity amend keeps pending_amend_qty + token so coverage
                 keeps reserving max(old,new); a price-only amend clears its
@@ -1432,6 +1457,10 @@ def settle_modify(
         values = {}
         if outcome == "confirmed" and qty_amend and new_qty is not None:
             values["quantity"] = int(new_qty)
+        if outcome == "confirmed" and new_limit_price is not None:
+            price = _finite_decimal(new_limit_price)
+            if price is not None:
+                values["limit_price"] = price
         _write_payload(conn, submission_id, orders_store._clear_pending(payload), **values)
         return True
 
