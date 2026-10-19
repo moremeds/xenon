@@ -137,7 +137,7 @@ class IBPool:
         """Idempotently (re)create the per-role executors.
 
         Called from ``__init__`` for first start, and from ``connect_all`` so
-        the operator-facing ``/ib/restart`` recovery flow (which calls
+        the auto-restart recovery flow (which calls
         ``disconnect_all → connect_all`` on the same pool instance) keeps
         working after ``disconnect_all`` has shut its executors down. Without
         this, ``connect_all`` would hit ``RuntimeError: cannot schedule new
@@ -158,7 +158,7 @@ class IBPool:
         Non-blocking: if IB Gateway is down, roles start disconnected.
         IB-dependent endpoints will return 503; UW-only endpoints still work.
         """
-        # Defensive: /ib/restart and the auto-restart wrapper call this on
+        # Defensive: the auto-restart wrapper calls this on
         # the same pool instance after disconnect_all has shut executors down.
         self._ensure_role_executors()
 

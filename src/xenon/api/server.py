@@ -11,21 +11,18 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import hashlib
 import json
 import logging
 import os
-import sys
 import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from sqlalchemy import func, select
@@ -41,7 +38,6 @@ from xenon.api import trading_mode
 from xenon.api.auth import (
     classify_auth,
     validate_auth_config,
-    verify_api_key,
 )
 from xenon.api.guards import (
     ReadOnlyDenied,
@@ -55,7 +51,7 @@ from xenon.api.guards import (
 )
 from xenon.api.ib_gateway import check_ib_gateway, ensure_ib_gateway, is_cloud_mode, is_docker_mode, restart_ib_gateway
 from xenon.api.ib_pool import IBPool
-from xenon.api.pool_order_manage import pool_cancel_order, pool_modify_order
+from xenon.api.pool_order_manage import pool_cancel_order, pool_modify_order  # noqa: F401  (PR-10 decides)
 from xenon.api.routes.historical import router as historical_router
 from xenon.api.routes.journal import router as journal_router
 from xenon.api.routes.orders import orders_payload_for_scope
@@ -99,7 +95,7 @@ logging.getLogger("ib_async.wrapper").setLevel(logging.WARNING)
 logging.getLogger("ib_async.client").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
-from ib_async import Contract, Index, Option, Stock
+from ib_async import Contract, Option, Stock
 
 from xenon.clients.futu_client import FutuClient
 from xenon.clients.futu_exceptions import FutuConnectionError, FutuError
@@ -400,7 +396,6 @@ def _maybe_start_futu_history_loop() -> None:
         logger.info("futu history loop skipped: DATABASE_URL not set")
         return
 
-    from datetime import date as _date
 
     from sqlalchemy.ext.asyncio import create_async_engine as _create_engine
 
@@ -714,13 +709,6 @@ app.include_router(trades_router)
 app.include_router(watchlist_router)
 app.include_router(wizard_router)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r"http://localhost:3000|http://127\.0\.0\.1:3000",
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Read-only write guard — must stay INNER relative to auth_middleware (defined
 # below) so unauthenticated requests still get 401 first. Under
 # XENON_READ_ONLY=1 it refuses order/journal/wizard writes before FastAPI
@@ -824,15 +812,6 @@ def _write_cache(path: Path, data: dict) -> None:
             pass
 
 
-_SCAN_TYPE_MAP = {
-    "scanner.json": "watchlist",
-    "discover.json": "discover",
-    "gex.json": "gex",
-    "vcg.json": "vcg",
-    "cri.json": "cri",
-}
-
-
 def _atomic_save(path: str, data: dict) -> str:
     """Use the project's atomic_save for portfolio/orders files."""
     from xenon.utils.atomic_io import atomic_save
@@ -840,142 +819,12 @@ def _atomic_save(path: str, data: dict) -> str:
     return atomic_save(path, data)
 
 
-def _coerce_float(value: object) -> Optional[float]:
-    """Parse an arbitrary value into a finite float."""
-    if isinstance(value, (int, float)):
-        return float(value) if value == value and value != float("inf") and value != float("-inf") else None
-    if isinstance(value, str):
-        try:
-            parsed = float(value)
-        except ValueError:
-            return None
-        return parsed if parsed == parsed and parsed not in (float("inf"), float("-inf")) else None
-    return None
-
-
-def _coerce_date(value: object) -> Optional[datetime]:
-    if not isinstance(value, str):
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        try:
-            return datetime.strptime(value, "%Y-%m-%d")
-        except ValueError:
-            return None
-
-
-def _pick_preferred_expiry(raw: object, now: Optional[datetime] = None) -> Optional[str]:
-    """Choose the nearest expiry that is today or newer, else the most recent expiry."""
-    candidates = _extract_expiry_candidates(raw)
-    if not candidates:
-        return None
-
-    parsed: List[Tuple[str, datetime]] = []
-    for expiry in candidates:
-        parsed_date = _coerce_date(expiry)
-        if parsed_date is None:
-            continue
-        parsed.append((expiry, parsed_date))
-
-    if not parsed:
-        return candidates[0]
-
-    current = now or datetime.now(timezone.utc)
-    future_candidates = [
-        (expiry, expiry_date) for expiry, expiry_date in parsed if expiry_date.date() >= current.date()
-    ]
-    if future_candidates:
-        return min(future_candidates, key=lambda item: item[1])[0]
-    return max(parsed, key=lambda item: item[1])[0]
-
-
-def _extract_ib_expiry_candidates(raw: object) -> List[str]:
-    rows: Iterable[object] = raw if isinstance(raw, list) else []
-    candidates: List[str] = []
-    for row in rows:
-        expirations = getattr(row, "expirations", None)
-        if not expirations:
-            continue
-        for expiry in expirations:
-            normalized = _normalize_expiry_string(expiry)
-            if normalized and normalized not in candidates:
-                candidates.append(normalized)
-    return candidates
-
-
-async def _fetch_ib_expiry_candidates(ticker: str) -> List[str]:
-    normalized_ticker = ticker.upper()
-    if ib_pool is None:
-        return []
-
-    attempts = [
-        ("NASDAQ", "IND"),
-        ("CBOE", "IND"),
-        ("SMART", "IND"),
-        ("", "IND"),
-    ]
-    for exchange, sec_type in attempts:
-        try:
-            async with ib_pool.acquire("data") as client:
-                chains = await ib_pool.run_sync(
-                    "data",
-                    _fetch_ib_index_option_chain,
-                    client,
-                    normalized_ticker,
-                    exchange,
-                    sec_type,
-                )
-            candidates = _sort_expiry_candidates(_extract_ib_expiry_candidates(chains))
-            if candidates:
-                logger.info(
-                    "Internals skew: IB expiries for %s resolved via %s/%s (%d candidates)",
-                    normalized_ticker,
-                    exchange or "default",
-                    sec_type,
-                    len(candidates),
-                )
-                return candidates
-        except Exception as exc:
-            logger.warning(
-                "Internals skew: IB expiry lookup failed for %s via %s/%s: %s",
-                normalized_ticker,
-                exchange or "default",
-                sec_type,
-                exc,
-            )
-    return []
-
-
-def _preferred_index_exchange(ticker: str) -> str:
-    return "NASDAQ" if ticker.upper() == "NDX" else "CBOE"
-
-
-def _fetch_ib_index_option_chain(client: Any, ticker: str, exchange: str, sec_type: str) -> object:
-    if sec_type != "IND":
-        return client.get_option_chain(ticker, exchange, sec_type)
-
-    contract = Index(symbol=ticker, exchange=exchange or _preferred_index_exchange(ticker))
-    qualified = client.qualify_contract(contract)
-    return client.ib.reqSecDefOptParams(ticker, exchange, sec_type, qualified.conId)
-
-
-def _series_span_days(rows: List[dict]) -> int:
-    if len(rows) < 2:
-        return 0
-    start = _coerce_date(rows[0].get("date"))
-    end = _coerce_date(rows[-1].get("date"))
-    if start is None or end is None:
-        return 0
-    return (end.date() - start.date()).days
-
-
 # ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 
 
-def _compute_futu_health() -> Dict[str, Any]:
+def _compute_futu_health() -> dict[str, Any]:
     """Derive the Futu health block from the singleton + cached file.
 
     Never probes OpenD (tribunal T11) — reachability comes from the last
@@ -1466,49 +1315,7 @@ async def validate_ws_ticket(request: Request):
     return {"user_id": user_id}
 
 
-@app.post("/ib/restart")
-async def ib_restart():
-    """Restart IB Gateway via IBC service, then reconnect pool."""
-    result = await restart_ib_gateway()
-    if not result["restarted"]:
-        raise HTTPException(status_code=503, detail=result.get("error", "Restart failed"))
 
-    # Reconnect pool after Gateway restart
-    if ib_pool:
-        await ib_pool.disconnect_all()
-        pool_status = await ib_pool.connect_all()
-        result["pool"] = pool_status
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Phase 1: Stateless UW-only endpoints (subprocess-based)
-# ---------------------------------------------------------------------------
-def _empty_discover_payload() -> dict:
-    return {
-        "discovery_time": "",
-        "alerts_analyzed": 0,
-        "candidates_found": 0,
-        "candidates": [],
-    }
-
-
-def _empty_cri_payload() -> dict:
-    return {
-        "scan_time": "",
-        "date": "",
-        "market_open": _is_market_open_now(),
-        "vix": None,
-        "vvix": None,
-        "spy": None,
-        "cri": {"score": 0, "level": "LOW", "components": {}},
-        "cta": {},
-        "menthorq_cta": None,
-        "crash_trigger": {"triggered": False, "conditions": {}, "values": {}},
-        "history": [],
-        "spy_closes": [],
-    }
 
 
 @app.get("/attribution")
@@ -2443,9 +2250,6 @@ async def orders_place(request: Request):
     """Place an order via IB (on-demand connection, client_id=26)."""
     if is_read_only():
         return read_only_403()
-    broker = str(getattr(request.app.state, "broker", "IB") or "IB").upper()
-    if broker == "IB":
-        require_mode_verified(request)
     body = await request.json()
     return await _orders_place_from_body(body)
 
@@ -3198,9 +3002,6 @@ async def orders_replace(request: Request):
     a second replacement of the same target is refused before any cancel."""
     if is_read_only():
         return read_only_403()
-    broker = str(getattr(request.app.state, "broker", "IB") or "IB").upper()
-    if broker == "IB":
-        require_mode_verified(request)
     body = await request.json()
     return await _orders_replace_from_body(body)
 
@@ -3996,46 +3797,6 @@ async def blotter_get(scope=Depends(get_broker_scope)):
         if scope.broker == "FUTU":
             return fetch_futu_blotter(conn, scope=scope, days=30)
         return fetch_blotter_pg(conn, scope=scope, days=30)
-
-
-# ---------------------------------------------------------------------------
-# Performance — task registry for deduplication (single-worker assumed)
-# ---------------------------------------------------------------------------
-_running_build: Optional[asyncio.Task] = None
-
-
-async def _do_performance_rebuild() -> dict:
-    """Run portfolio_performance.py and cache result."""
-    result = await run_entry_point("xenon-portfolio-perf", ["--json"], timeout=180)
-    if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
-    return result.data
-
-
-@app.post("/performance")
-async def performance_sync():
-    """Run portfolio performance metrics. 180s timeout.
-
-    If a build is already in-flight, piggybacks on it (returns same result).
-    """
-    global _running_build
-    if _running_build is not None and not _running_build.done():
-        return await _running_build
-    _running_build = asyncio.create_task(_do_performance_rebuild())
-    return await _running_build
-
-
-@app.post("/performance/background", status_code=202)
-async def performance_background():
-    """Fire-and-forget performance rebuild. Returns 202 immediately.
-
-    If a build is already in-flight, returns already_running (no duplicate).
-    """
-    global _running_build
-    if _running_build is not None and not _running_build.done():
-        return {"status": "already_running"}
-    _running_build = asyncio.create_task(_do_performance_rebuild())
-    return {"status": "accepted"}
 
 
 @app.get("/options/chain")

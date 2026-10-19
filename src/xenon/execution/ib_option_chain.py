@@ -16,7 +16,6 @@ from ib_async import Index, Stock
 from xenon.clients.ib_client import IBClient
 
 # CBOE is the home exchange for SPX/RUT index options; NDX lives on NASDAQ.
-# Mirrors _preferred_index_exchange in src/xenon/api/server.py.
 _PREFERRED_INDEX_EXCHANGE = {"NDX": "NASDAQ"}
 
 

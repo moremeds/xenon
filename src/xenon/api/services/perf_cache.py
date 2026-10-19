@@ -67,18 +67,3 @@ async def cached_compute(engine, scope: AccountScope, *, ib_pool=None, period: s
     result = await _inner(engine, scope, ib_pool=ib_pool, period=period)
     _cache[k] = (result, now)
     return result
-
-
-def warm(engine, scope: AccountScope, *, ib_pool=None, period: str = "YTD") -> None:
-    """Fire-and-forget warmup. Used by deprecated POST /performance/background.
-
-    Returns immediately; the compute happens on the event loop in the background.
-    """
-    import asyncio
-
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        # No running loop — caller must arrange one (test scaffolding).
-        return
-    loop.create_task(cached_compute(engine, scope, ib_pool=ib_pool, period=period))
