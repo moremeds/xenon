@@ -10,6 +10,7 @@ Usage:
     from xenon.utils.market_hours import is_market_open, get_market_status
 """
 
+import argparse
 from datetime import datetime, time
 from typing import Tuple
 
@@ -158,8 +159,11 @@ def get_last_market_close(dt: datetime = None) -> datetime:
     return EASTERN.localize(datetime.combine(close_date, MARKET_CLOSE))
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """CLI entry point: print current market status."""
+    argparse.ArgumentParser(prog="xenon-market-hours", description="Print the current US market status.").parse_args(
+        argv
+    )
     is_open, status = get_market_status()
     eastern_now = get_eastern_now()
 

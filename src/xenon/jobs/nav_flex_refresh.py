@@ -18,6 +18,7 @@ reconciliation path, not a historical backfill.
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import sys
@@ -47,7 +48,13 @@ def _ensure_broker_account_env() -> None:
 from xenon.jobs.ib_nav_flex import fetch_ib_nav_series  # noqa: E402
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    # Parse first so --help prints usage and exits before any env loading or Flex call.
+    argparse.ArgumentParser(
+        prog="xenon-nav-flex-refresh",
+        description="Poll the IB Flex Web Service and upsert close NAV rows into xenon.nav_history. "
+        "Needs IB_FLEX_TOKEN and IB_FLEX_NAV_QUERY_ID; honours XENON_READ_ONLY=1.",
+    ).parse_args(argv)
     _load_env()
 
     # Surface xenon.* INFO logs (e.g. "ingested N IB CashTransactions row(s)")

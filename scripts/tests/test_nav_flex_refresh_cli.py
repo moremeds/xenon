@@ -23,7 +23,7 @@ def test_main_exits_2_when_token_missing(monkeypatch, capsys):
     monkeypatch.setenv("IB_FLEX_NAV_QUERY_ID", "")
     monkeypatch.delenv("XENON_READ_ONLY", raising=False)
     m = _reimport_module()
-    rc = m.main()
+    rc = m.main([])
     assert rc == 2
     err = capsys.readouterr().err
     assert "FLEX_NOT_CONFIGURED" in err
@@ -37,7 +37,7 @@ def test_main_exits_3_when_read_only(monkeypatch, capsys):
     monkeypatch.setenv("IB_FLEX_TOKEN", "x" * 24)
     monkeypatch.setenv("IB_FLEX_NAV_QUERY_ID", "1234567")
     m = _reimport_module()
-    rc = m.main()
+    rc = m.main([])
     assert rc == 3
     err = capsys.readouterr().err
     assert "READ_ONLY" in err
@@ -51,7 +51,7 @@ def test_main_exits_1_when_fetch_returns_none(monkeypatch):
     monkeypatch.setenv("XENON_LIVE_ACCOUNT", "U18007831")
     m = _reimport_module()
     with patch.object(m, "fetch_ib_nav_series", return_value=None):
-        rc = m.main()
+        rc = m.main([])
     assert rc == 1
 
 
@@ -62,7 +62,7 @@ def test_main_exits_1_when_fetch_returns_empty(monkeypatch):
     monkeypatch.setenv("XENON_BROKER_ACCOUNT", "U18007831")
     m = _reimport_module()
     with patch.object(m, "fetch_ib_nav_series", return_value=[]):
-        rc = m.main()
+        rc = m.main([])
     assert rc == 1
 
 
@@ -75,7 +75,7 @@ def test_main_derives_broker_account_from_live(monkeypatch, capsys):
     m = _reimport_module()
     sample = [{"date": "2026-06-01", "total": 100.0, "cash": 50.0, "stock": 40.0, "options": 10.0}]
     with patch.object(m, "fetch_ib_nav_series", return_value=sample):
-        rc = m.main()
+        rc = m.main([])
     assert rc == 0
     assert os.environ["XENON_BROKER_ACCOUNT"] == "U18007831"
     out = capsys.readouterr().out
@@ -90,6 +90,6 @@ def test_main_derives_broker_account_from_paper(monkeypatch):
     monkeypatch.delenv("XENON_BROKER_ACCOUNT", raising=False)
     m = _reimport_module()
     with patch.object(m, "fetch_ib_nav_series", return_value=[{"date": "2026-06-01"}]):
-        rc = m.main()
+        rc = m.main([])
     assert rc == 0
     assert os.environ["XENON_BROKER_ACCOUNT"] == "DUQ378889"

@@ -42,11 +42,9 @@ dependencies = [
 ]
 
 [project.scripts]
-xenon-api                = "xenon.api.server:main"
 xenon-blotter            = "xenon.trade_blotter.cli:main"
 xenon-blotter-history    = "xenon.trade_blotter.flex_query:main"
 xenon-market-hours       = "xenon.utils.market_hours:main"
-xenon-presets            = "xenon.utils.presets:main"
 xenon-monitor-daemon     = "xenon.monitor_daemon.run:main"
 xenon-preset-rebalance   = "xenon.monitor_daemon.handlers.preset_rebalance:main"
 xenon-ib-place-order     = "xenon.execution.ib_place_order:main"

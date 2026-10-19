@@ -18,7 +18,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import create_async_engine
 
 import xenon.db.engine as engine_mod
-import xenon.utils.uw_api_stats  # noqa: F401 — import-time singleton calls get_sync_engine()
+
+# Simulate an import-time singleton: it calls get_sync_engine() during collection
+# and caches the engine for the life of the process.
+engine_mod.get_sync_engine()
 
 # Engine the import-time singleton cached during collection.
 _IMPORT_TIME_DB = engine_mod._sync_engine.url.database if engine_mod._sync_engine is not None else None
