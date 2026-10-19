@@ -197,7 +197,7 @@ Order-route integration tests use `web/tests/fastapiHarness.ts` with `XENON_API_
 | IB Gateway (cloud / Docker / launchd)   | Broker session for quotes, execution, reports                                        |
 | FastAPI lifespan tasks                  | IB activity mirror, Wizard Risk Alert; Flex token expiry on `GET /health`            |
 
-Ops runbooks: [`ib-connection-troubleshooting`](docs/runbooks/ib-connection-troubleshooting.md) · [`ib-gateway-docker`](docs/runbooks/ib-gateway-docker.md) · [`mac-mini`](docs/runbooks/mac-mini.md) · [`ops`](docs/runbooks/ops.md) · [`release`](docs/runbooks/release.md).
+Ops runbooks: [`ib-connection-troubleshooting`](docs/runbooks/ib-connection-troubleshooting.md) · [`ib-gateway-docker`](docs/runbooks/ib-gateway-docker.md) · [`remote-deploy`](docs/runbooks/remote-deploy.md) · [`ops`](docs/runbooks/ops.md) · [`release`](docs/runbooks/release.md).
 
 ## Release
 

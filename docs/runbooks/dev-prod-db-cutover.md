@@ -182,33 +182,23 @@ file doesn't already split this — see
 
 ## Step 6 — Install the nightly refresh LaunchAgent
 
+The macmini has no source checkout. Install the job from `deploy/jobs/com.xenon.refresh-core-test.plist` and copy `scripts/infra/refresh-core-test.sh` to `/opt/xenon/bin/`. Follow the `refresh-core-test` row and the operator rollout checklist in `deploy/README.md`.
+
 ```bash
 # On the macmini
 sudo mkdir -p /var/log/xenon
 sudo chown $(whoami) /var/log/xenon
-
-cp ~/projects/xenon/scripts/infra/launchd/com.xenon.refresh-core-test.plist \
-   ~/Library/LaunchAgents/
-
-# Edit the plist — replace the three __PLACEHOLDER__ tokens with real paths.
-$EDITOR ~/Library/LaunchAgents/com.xenon.refresh-core-test.plist
-#   __XENON_ROOT__   = /Users/<you>/projects/xenon
-#   __HOMEBREW_PATH__ = /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
-#   __PGPASSFILE__   = /Users/<you>/.pgpass  (chmod 600, contains migrator creds)
-
-launchctl load ~/Library/LaunchAgents/com.xenon.refresh-core-test.plist
-launchctl list | grep com.xenon.refresh-core-test
 ```
 
-Smoke-test the refresh (dry-run first, then real):
+Smoke-test the refresh (dry-run first, then real). Env and `PGPASSFILE` as in `deploy/README.md`:
 
 ```bash
 # Dry: dump only
-~/projects/xenon/scripts/infra/refresh-core-test.sh --dry
+/opt/xenon/bin/refresh-core-test.sh --dry
 tail -n 20 /var/log/xenon/refresh-core-test.log
 
 # Real
-~/projects/xenon/scripts/infra/refresh-core-test.sh
+/opt/xenon/bin/refresh-core-test.sh
 ```
 
 The first real refresh wipes the freshly-migrated `core_test` and

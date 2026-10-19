@@ -22,7 +22,7 @@ Forbidden references:
 - The string `xenon-ib-place-order` (the console script name) outside
   of declaration/documentation files.
 
-Reference: docs/plans/2026-04-28-order-path-regression-prevention.md §Layer 2.
+Reference: docs/reference/order-path-incident-history.md (Layer 2 guards).
 """
 
 from __future__ import annotations

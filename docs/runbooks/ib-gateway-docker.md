@@ -8,7 +8,7 @@ cp .env.example .env        # Edit TWS_USERID
 mkdir -p secrets
 echo "YOUR_IB_PASSWORD" > secrets/ib_password.txt
 chmod 600 secrets/ib_password.txt
-scripts/docker_ib_gateway.sh start
+scripts/infra/docker_ib_gateway.sh start
 ```
 
 Approve 2FA on IBKR Mobile when prompted. Docker's `restart: unless-stopped` handles reliability.
@@ -17,11 +17,11 @@ Approve 2FA on IBKR Mobile when prompted. Docker's `restart: unless-stopped` han
 
 | Command | Action |
 |---------|--------|
-| `scripts/docker_ib_gateway.sh start` | Start (validates secrets, checks launchd not running) |
-| `scripts/docker_ib_gateway.sh stop` | Stop and remove container |
-| `scripts/docker_ib_gateway.sh restart` | Restart container |
-| `scripts/docker_ib_gateway.sh status` | Show container status and healthcheck |
-| `scripts/docker_ib_gateway.sh logs` | Tail container logs |
+| `scripts/infra/docker_ib_gateway.sh start` | Start (validates secrets, checks launchd not running) |
+| `scripts/infra/docker_ib_gateway.sh stop` | Stop and remove container |
+| `scripts/infra/docker_ib_gateway.sh restart` | Restart container |
+| `scripts/infra/docker_ib_gateway.sh status` | Show container status and healthcheck |
+| `scripts/infra/docker_ib_gateway.sh logs` | Tail container logs |
 
 ## VNC Access (Gateway GUI)
 
@@ -44,8 +44,8 @@ VNC allows you to access the IB Gateway GUI inside the Docker container for conf
 
 3. Recreate the container (restart alone won't pick up new ports):
    ```bash
-   scripts/docker_ib_gateway.sh stop
-   scripts/docker_ib_gateway.sh start
+   scripts/infra/docker_ib_gateway.sh stop
+   scripts/infra/docker_ib_gateway.sh start
    ```
 
 4. Connect with TigerVNC:
@@ -94,7 +94,7 @@ If you prefer to keep precautions active instead of bypassing, increase the limi
 - **First start**: Approve 2FA on IBKR Mobile app
 - **Daily restart** (23:58 ET): Auto-restarts via `AUTO_RESTART_TIME`, no 2FA needed
 - **2FA timeout**: Container auto-restarts and re-sends 2FA notification (`TWOFA_TIMEOUT_ACTION: restart`)
-- **Manual restart**: `scripts/docker_ib_gateway.sh restart` triggers new 2FA
+- **Manual restart**: `scripts/infra/docker_ib_gateway.sh restart` triggers new 2FA
 
 ## Healthcheck
 
@@ -109,7 +109,7 @@ bash -c 'echo > /dev/tcp/localhost/4001'
 - **unhealthy**: API not responding (2FA pending, login failed, or Gateway crashed)
 - **starting**: Within 120s startup grace period
 
-Check via: `scripts/docker_ib_gateway.sh status` or `curl localhost:8321/health`
+Check via: `scripts/infra/docker_ib_gateway.sh status` or `curl localhost:8321/health`
 
 ## Autoheal (Automatic Unhealthy Restart)
 
@@ -140,7 +140,7 @@ docker logs ib-gateway-autoheal-1
 
 ### Container starts but API connections time out
 - Check IBKR Mobile for 2FA approval
-- View logs: `scripts/docker_ib_gateway.sh logs`
+- View logs: `scripts/infra/docker_ib_gateway.sh logs`
 - Check launcher log: `docker exec ib-gateway-ib-gateway-1 cat /home/ibgateway/Jts/launcher.log | tail -20`
 
 ### "DISCONNECT_AUTHORIZATION_FAILED" in logs
@@ -159,7 +159,7 @@ docker logs ib-gateway-autoheal-1
 
 ### Switching back to launchd (rollback)
 ```bash
-scripts/docker_ib_gateway.sh stop
+scripts/infra/docker_ib_gateway.sh stop
 export IB_GATEWAY_MODE=launchd
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.ibc-gateway.plist
 ~/ibc/bin/start-secure-ibc-service.sh

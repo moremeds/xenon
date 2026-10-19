@@ -3,7 +3,7 @@
 ## Prerequisites (laptop)
 
 - `git` and `gh` (GitHub CLI) installed. Authenticate `gh` once: `gh auth login`.
-- `python3.13` on PATH (used by `cut.sh` to rewrite `package.json` and `CHANGELOG.md`).
+- `uv` on PATH (`cut.sh` runs stdlib Python through `uv run` to rewrite `package.json` and `CHANGELOG.md`).
 - Clean working tree on `master`, synced with `origin/master`.
 
 `cut.sh` will abort with a clear message if any of these are missing.

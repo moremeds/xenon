@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TAILSCALE_DEFAULT_APP="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 TAILSCALE_ALT_APP="$HOME/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 IBC_BIN_DIR="${IBC_BIN_DIR:-$HOME/ibc/bin}"
@@ -15,14 +15,14 @@ print_usage() {
 IBC remote control helper
 
 Usage:
-  ./scripts/ibc_remote_control.sh check
-  ./scripts/ibc_remote_control.sh tailscale-status
-  ./scripts/ibc_remote_control.sh tailscale-login [--open]
-  ./scripts/ibc_remote_control.sh ibc-status
-  ./scripts/ibc_remote_control.sh ibc-start
-  ./scripts/ibc_remote_control.sh ibc-stop
-  ./scripts/ibc_remote_control.sh ibc-restart
-  ./scripts/ibc_remote_control.sh remote-help
+  ./scripts/infra/ibc_remote_control.sh check
+  ./scripts/infra/ibc_remote_control.sh tailscale-status
+  ./scripts/infra/ibc_remote_control.sh tailscale-login [--open]
+  ./scripts/infra/ibc_remote_control.sh ibc-status
+  ./scripts/infra/ibc_remote_control.sh ibc-start
+  ./scripts/infra/ibc_remote_control.sh ibc-stop
+  ./scripts/infra/ibc_remote_control.sh ibc-restart
+  ./scripts/infra/ibc_remote_control.sh remote-help
 
 Notes:
   - This helper uses the installed Tailscale.app bundle directly.
@@ -219,7 +219,7 @@ show_check() {
       echo "  1. Tailscale appears available."
       ;;
     logged_out|stopped)
-      echo "  1. Run ./scripts/ibc_remote_control.sh tailscale-login --open and complete Tailscale auth."
+      echo "  1. Run ./scripts/infra/ibc_remote_control.sh tailscale-login --open and complete Tailscale auth."
       ;;
     *)
       echo "  1. Confirm the Tailscale app is connected; CLI status was unavailable from this shell."
@@ -239,7 +239,7 @@ show_check() {
   fi
 
   echo "  4. From iPhone, SSH to this Mac over its Tailscale hostname/IP and run:"
-  echo "     cd $PROJECT_DIR && ./scripts/ibc_remote_control.sh ibc-status"
+  echo "     cd $PROJECT_DIR && ./scripts/infra/ibc_remote_control.sh ibc-status"
 }
 
 show_tailscale_status() {
@@ -292,10 +292,10 @@ Once Tailscale is connected and macOS Remote Login is enabled:
 
 Repo convenience wrapper:
 
-  ssh ${USER}@<tailscale-host-or-ip> 'cd $PROJECT_DIR && ./scripts/ibc_remote_control.sh ibc-status'
-  ssh ${USER}@<tailscale-host-or-ip> 'cd $PROJECT_DIR && ./scripts/ibc_remote_control.sh ibc-start'
-  ssh ${USER}@<tailscale-host-or-ip> 'cd $PROJECT_DIR && ./scripts/ibc_remote_control.sh ibc-stop'
-  ssh ${USER}@<tailscale-host-or-ip> 'cd $PROJECT_DIR && ./scripts/ibc_remote_control.sh ibc-restart'
+  ssh ${USER}@<tailscale-host-or-ip> 'cd $PROJECT_DIR && ./scripts/infra/ibc_remote_control.sh ibc-status'
+  ssh ${USER}@<tailscale-host-or-ip> 'cd $PROJECT_DIR && ./scripts/infra/ibc_remote_control.sh ibc-start'
+  ssh ${USER}@<tailscale-host-or-ip> 'cd $PROJECT_DIR && ./scripts/infra/ibc_remote_control.sh ibc-stop'
+  ssh ${USER}@<tailscale-host-or-ip> 'cd $PROJECT_DIR && ./scripts/infra/ibc_remote_control.sh ibc-restart'
 EOF
 }
 
