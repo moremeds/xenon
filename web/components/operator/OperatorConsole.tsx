@@ -3,16 +3,35 @@
 import { useEffect, useRef, useState } from "react";
 
 import { isWriterStale, NON_WRITER_SERVICES } from "@/lib/serviceHealthWindows";
-import type { OperatorData } from "@/lib/operatorTypes";
+import type { FlexTokenInfo, OperatorData } from "@/lib/operatorTypes";
 import { useMarketHours } from "@/lib/useMarketHours";
 
 import { BrokersCard } from "./BrokersCard";
 import { ReliabilityRollupHeader } from "./ReliabilityRollupHeader";
-import { SignalTile } from "./SignalTile";
+import { SignalTile, type SignalTone } from "./SignalTile";
 import { UwQuotaTile } from "./UwQuotaTile";
 import { WriterFreshnessTable } from "./WriterFreshnessTable";
 
 const POLL_MS = 8_000;
+
+function flexTokenTile(ft: FlexTokenInfo | undefined): {
+  value: string | number;
+  sub: string;
+  tone: SignalTone;
+} {
+  if (!ft || !ft.configured || ft.days_remaining == null) {
+    return { value: "---", sub: "no flex_token_config.json", tone: "neutral" };
+  }
+  const sub = ft.expires_at ? `expires ${ft.expires_at.slice(0, 10)}` : "";
+  if (ft.expired) return { value: "expired", sub, tone: "fault" };
+  const tone: SignalTone =
+    ft.active_threshold != null && ft.active_threshold <= 7
+      ? "fault"
+      : ft.should_warn
+        ? "warn"
+        : "core";
+  return { value: `${ft.days_remaining}d`, sub, tone };
+}
 
 export default function OperatorConsole() {
   const market = useMarketHours();
@@ -81,6 +100,7 @@ export default function OperatorConsole() {
       ? "fault"
       : "core";
   const orderTone = data.order_submissions.alarm ? "fault" : "neutral";
+  const flexToken = flexTokenTile(data.flex_token);
   const flexTone =
     (data.flex_divergence.divergence_count ?? 0) > 0 ? "warn" : "neutral";
 
@@ -114,6 +134,12 @@ export default function OperatorConsole() {
           value={data.flex_divergence.divergence_count ?? "---"}
           sub={`of ${data.flex_divergence.total_compared ?? "---"}`}
           tone={flexTone}
+        />
+        <SignalTile
+          label="Flex Token"
+          value={flexToken.value}
+          sub={flexToken.sub}
+          tone={flexToken.tone}
         />
         <SignalTile
           label="Realtime"

@@ -129,4 +129,26 @@ describe("wizard api routes", () => {
       }),
     );
   });
+
+  it("proxies GET /api/wizard/alerts to FastAPI /wizard/alerts via xenonFetch", async () => {
+    const body = {
+      alerts: [{ session_id: "s1", ticker: "AAPL", state: "CROSSED" }],
+      events: [],
+      monitor: { running: true, last_run_at: null },
+    };
+    mockXenonFetch.mockResolvedValueOnce(body);
+    const { GET } = await import("../app/api/wizard/alerts/route");
+    const response = await GET();
+    expect(mockXenonFetch).toHaveBeenCalledWith("/wizard/alerts");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(body);
+  });
+
+  it("passes a FastAPI /wizard/alerts error through", async () => {
+    const { XenonApiError } = await import("@/lib/xenonApi");
+    mockXenonFetch.mockRejectedValueOnce(new XenonApiError(503, "db down"));
+    const { GET } = await import("../app/api/wizard/alerts/route");
+    const response = await GET();
+    expect(response.status).toBe(503);
+  });
 });

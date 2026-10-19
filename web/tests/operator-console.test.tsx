@@ -89,6 +89,78 @@ describe("OperatorConsole", () => {
     );
     expect(screen.getByText("IB Gateway")).toBeTruthy();
   });
+  it.each([
+    [undefined, "---", "neutral"],
+    [{ configured: false }, "---", "neutral"],
+    [
+      {
+        configured: true,
+        expires_at: "2027-03-01T00:00:00+00:00",
+        days_remaining: 132,
+        active_threshold: null,
+        should_warn: false,
+        expired: false,
+      },
+      "132d",
+      "core",
+    ],
+    [
+      {
+        configured: true,
+        expires_at: "2026-11-10T00:00:00+00:00",
+        days_remaining: 20,
+        active_threshold: 30,
+        should_warn: true,
+        expired: false,
+      },
+      "20d",
+      "warn",
+    ],
+    [
+      {
+        configured: true,
+        expires_at: "2026-10-25T00:00:00+00:00",
+        days_remaining: 5,
+        active_threshold: 7,
+        should_warn: true,
+        expired: false,
+      },
+      "5d",
+      "fault",
+    ],
+    [
+      {
+        configured: true,
+        expires_at: "2026-10-01T00:00:00+00:00",
+        days_remaining: -19,
+        active_threshold: 1,
+        should_warn: true,
+        expired: true,
+      },
+      "expired",
+      "fault",
+    ],
+  ])("renders the Flex Token tile (%#)", async (flexToken, value, tone) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) =>
+        Promise.resolve({
+          ok: true,
+          json: async () =>
+            String(url).includes("/uw-quota")
+              ? { configured: false }
+              : { ...DATA, flex_token: flexToken },
+        }),
+      ),
+    );
+    render(<OperatorConsole />);
+    const label = await screen.findByText("Flex Token");
+    const tile = label.closest(".operator-tile") as HTMLElement;
+    const valueEl = tile.querySelector(".operator-tile__value") as HTMLElement;
+    expect(valueEl.textContent).toBe(value);
+    expect(valueEl.className).toContain(`operator-tile__value--${tone}`);
+  });
+
   it("does not count the gate4 watermark sentinel as a writer", async () => {
     const withSentinel: OperatorData = {
       ...DATA,
