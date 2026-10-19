@@ -88,6 +88,22 @@ def test_unresolved_account_fails_closed(MockIB, account):
     mock_ib.placeOrder.assert_not_called()
 
 
+@patch("xenon.clients.ib_client.IB")
+def test_modify_keeps_existing_order_account(MockIB):
+    """Modify re-submits IB's own order object (orderId set) — leave it alone."""
+    client, mock_ib = _connected_client(MockIB, ["U1111111", "U2222222"])
+    order = _new_order("U2222222")
+    order.orderId = 42
+
+    # ib_order_manage's modify path calls place_order directly with trade.order.
+    client.place_order(MagicMock(), order)
+
+    mock_ib.placeOrder.assert_called_once()
+    sent = mock_ib.placeOrder.call_args.args[1]
+    assert sent.account == "U2222222"
+    assert sent.orderId == 42
+
+
 # ---------------------------------------------------------------------------
 # xenon-ib-place-order CLI
 # ---------------------------------------------------------------------------
